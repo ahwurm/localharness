@@ -21,8 +21,9 @@ launch a second server onto an accelerator that is already full.
 **And the safety voice never follows it either.** A workspace takes its memory with it. It does not
 take `GUARDRAILS.md` or `DIVISION.md` — those are read from the global directory in every session,
 so a project cannot rewrite the org's safety instructions, and it cannot blank them by simply not
-having the file. That one is proven here at the LIVE store, mid-session, with a decoy file planted
-in the workspace.
+having the file. That one is proven here mid-session, with decoy files planted in the workspace:
+`DIVISION.md` at the LIVE store, and `GUARDRAILS.md` at the live session's agent loop, which is
+where core reads it since SAFE-04 (v0.16) took that reader away from memory.
 
 Everything below drives the REAL `_start_async` offline from inside a project, reusing the harness
 `tests/unit/test_workspace_state_landing.py` built (imported, never re-copied, so the two files
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 import linecache
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -125,6 +127,25 @@ def _record_store_instances(monkeypatch) -> list:
 
     monkeypatch.setattr("localharness.memory.sqlite.MemoryStore.__init__", _rec_init)
     return stores
+
+
+def _record_agent_loops(monkeypatch) -> list[tuple]:
+    """Stash every `(AgentLoop instance, ctor kwargs)` the drive builds.
+
+    Both halves, because SAFE-04's claim has two: WHICH path `start` handed the loop (the kwargs),
+    and what the RUNNING loop then reads from it (the instance's own reader, called mid-session).
+    """
+    import localharness.agent.loop as _loop_mod
+
+    real_init = _loop_mod.AgentLoop.__init__
+    loops: list[tuple] = []
+
+    def _rec_init(self, *args, **kwargs):
+        loops.append((self, kwargs))
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop.__init__", _rec_init)
+    return loops
 
 
 def _only(items: list, what: str):
@@ -283,6 +304,10 @@ async def test_the_machine_wide_files_stay_in_the_global_dir_during_a_workspace_
 
     These three are what the published table's right-hand column claims beyond the kill switch, the
     GPU daemon and the safety context, so they are asserted rather than assumed.
+
+    Plugins are recorded at `localharness.plugins.discovery.discover(<dir>)`, the one function that
+    reads `<dir>/plugins` (44-14): the session's plugin resolution and its config loader both call
+    it, and every call must name the global dir.
     """
     _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
 
@@ -296,24 +321,21 @@ async def test_the_machine_wide_files_stay_in_the_global_dir_during_a_workspace_
         lambda d: agent_yaml_dirs.append(d),
     )
 
-    import localharness.plugins.loader as _plugins
+    discovered_from: list[Path] = []
 
-    real_plugin_init = _plugins.PluginLoader.__init__
-    plugin_kwargs: list = []
+    def _rec_discover(global_config_dir):
+        discovered_from.append(Path(global_config_dir))
+        return []
 
-    def _rec_plugin_init(self, *args, **kwargs):
-        plugin_kwargs.append(dict(kwargs))
-        return real_plugin_init(self, *args, **kwargs)
-
-    monkeypatch.setattr("localharness.plugins.loader.PluginLoader.__init__", _rec_plugin_init)
+    monkeypatch.setattr("localharness.plugins.discovery.discover", _rec_discover)
 
     await _drive()
 
     assert _only(tools_dirs, "the packaged-tools install") == global_dir
     assert _only(agent_yaml_dirs, "the root-agent yaml migration") == global_dir / "agents"
-    plugins_dir = _only(plugin_kwargs, "the plugin loader")["plugins_dir"]
-    assert plugins_dir == global_dir / "plugins", f"plugins were loaded from {plugins_dir}"
-    for path in (_only(tools_dirs, "x"), _only(agent_yaml_dirs, "x"), plugins_dir):
+    assert discovered_from, "plugin discovery was never recorded — the patch did not bite"
+    assert set(discovered_from) == {global_dir}, f"plugins were discovered from {discovered_from}"
+    for path in (_only(tools_dirs, "x"), _only(agent_yaml_dirs, "x"), *discovered_from):
         assert ws not in path.parents and path != ws, f"{path} followed the workspace"
 
 
@@ -405,19 +427,22 @@ async def test_a_fresh_workspace_starts_with_a_memory_of_its_own(tmp_path, monke
 # ------------------------------------------------- the safety split, at the live store
 
 
-async def test_the_running_store_reads_its_guardrails_from_the_global_dir(tmp_path, monkeypatch, fake_home):
+async def test_the_running_session_reads_its_guardrails_from_the_global_dir(tmp_path, monkeypatch, fake_home):
     """The live proof of amendment #4: memory follows the work, the safety voice never does.
 
-    A decoy `GUARDRAILS.md` and `DIVISION.md` are planted INSIDE the workspace. If the store's
-    safety-context directory ever followed the state directory, the session would read the decoys —
+    A decoy `GUARDRAILS.md` and `DIVISION.md` are planted INSIDE the workspace. If either safety
+    reader's directory ever followed the state directory, the session would read the decoys —
     which is exactly how a project would silence the org's instructions.
 
-    The read is real and it happens mid-session: the stubbed REPL loop calls the live store's
-    `load_context()` while the database is still open, which is the same call the agent loop makes
-    to build a system prompt. A path assertion alone would only show where the store is pointed.
+    The reads are real and they happen mid-session: the stubbed REPL loop calls the live agent
+    loop's own guardrails reader (SAFE-04: core reads GUARDRAILS.md, every turn) and the live
+    store's `load_context()` (which still supplies DIVISION.md) while the database is open — the
+    same two reads a real turn makes to build its system prompt. A path assertion alone would only
+    show where a reader is pointed.
     """
     _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     stores = _record_store_instances(monkeypatch)
+    loops = _record_agent_loops(monkeypatch)
 
     (global_dir / "orgs" / "default").mkdir(parents=True)
     (global_dir / "orgs" / "default" / "GUARDRAILS.md").write_text("GLOBAL-GUARDRAILS-MARKER\n")
@@ -433,8 +458,10 @@ async def test_the_running_store_reads_its_guardrails_from_the_global_dir(tmp_pa
 
     async def _read_the_safety_context(self):
         # Runs INSIDE the live session, in place of the interactive loop, so the store is open and
-        # this is the same code path a real turn takes. `self._store` is the MemoryStore `start`
-        # built and handed to the REPL.
+        # these are the same reads a real turn takes. `self._agent` is the AgentLoop `start` built
+        # and `self._store` the MemoryStore it handed to the REPL.
+        seen["agent"] = self._agent
+        seen["guardrails"] = self._agent._read_guardrails()
         seen["ctx"] = await self._store.load_context()
         return None
 
@@ -443,25 +470,35 @@ async def test_the_running_store_reads_its_guardrails_from_the_global_dir(tmp_pa
     await _drive()
 
     # The CONTENT the live session actually read comes first, and the paths it read from come
-    # second. Measured: with the path assertions on top, a store whose safety directory followed
+    # second. Measured: with the path assertions on top, a reader whose safety directory followed
     # the workspace reddens THOSE, and the decoy assertions below could never fire — the strongest
     # claim in this file would have been decorative. This order makes the failure say what actually
     # went wrong: the session read the project's own guardrails.
-    ctx = seen.get("ctx")
-    assert ctx is not None, "the live load_context() never ran — the stubbed loop did not fire"
-    assert "WORKSPACE-DECOY-MARKER" not in ctx.guardrails_md, (
+    guardrails = seen.get("guardrails")
+    assert guardrails is not None, "the live guardrails read never ran — the stubbed loop did not fire"
+    assert "WORKSPACE-DECOY-MARKER" not in guardrails, (
         "the live session read the workspace's decoy GUARDRAILS.md — a project can silence the "
         "org's safety instructions by planting its own file"
     )
-    assert "GLOBAL-GUARDRAILS-MARKER" in ctx.guardrails_md, (
-        f"the live session's guardrails came from somewhere else: {ctx.guardrails_md!r}"
+    assert "GLOBAL-GUARDRAILS-MARKER" in guardrails, (
+        f"the live session's guardrails came from somewhere else: {guardrails!r}"
     )
+    ctx = seen["ctx"]
+    assert not hasattr(ctx, "guardrails_md"), "memory reads GUARDRAILS.md again — two readers"
     assert "WORKSPACE-DECOY-MARKER" not in ctx.division_md, (
         "the live session read the workspace's decoy DIVISION.md"
     )
     assert "GLOBAL-DIVISION-MARKER" in ctx.division_md, (
         f"the live session's division context came from somewhere else: {ctx.division_md!r}"
     )
+
+    loop, loop_kwargs = _only(loops, "the session's AgentLoop")
+    assert seen["agent"] is loop, "the REPL ran a different loop from the one start built"
+    guardrails_path = loop_kwargs.get("guardrails_path")
+    assert guardrails_path == global_dir / "orgs" / "default" / "GUARDRAILS.md", (
+        f"start handed the session's loop guardrails from {guardrails_path}"
+    )
+    assert ws not in guardrails_path.parents, "the guardrails file followed the workspace"
 
     # v0.13 MEMS-02 (42-03): a workspace session now builds TWO stores — the session's own, and
     # the CONSTRUCTED-NOT-OPENED global twin the recall router opens only if `recall_scope` asks
@@ -476,10 +513,7 @@ async def test_the_running_store_reads_its_guardrails_from_the_global_dir(tmp_pa
     assert store._db_path == ws / "agents" / AGENT / "memory.db", (
         f"the running store's database is at {store._db_path}, not in the workspace"
     )
-    assert store._guardrails_path == global_dir / "orgs" / "default" / "GUARDRAILS.md", (
-        f"the running store reads guardrails from {store._guardrails_path}"
-    )
     assert store._division_md_path == global_dir / "divisions" / "default" / "DIVISION.md", (
         f"the running store reads division context from {store._division_md_path}"
     )
-    assert ws not in store._guardrails_path.parents, "the guardrails file followed the workspace"
+    assert ws not in store._division_md_path.parents, "the division file followed the workspace"

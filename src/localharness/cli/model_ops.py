@@ -21,6 +21,7 @@ from localharness.config.overlay import (
     load_overlay,
 )
 from localharness.config.paths import global_config_dir, resolve_runtime_path
+from localharness.config.plugin_sections import core_harness_view
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
 from localharness.registry import set_value_in_dict
@@ -143,7 +144,8 @@ async def persist_default_model(
     # agent-scope `agent:` section (not a HarnessConfig field — mirrors components_cmd and
     # load_harness's overlay handling). Raises ValidationError if the result is invalid.
     harness_overlay = {k: v for k, v in new_overlay.items() if k != _AGENT_KEY}
-    HarnessConfig.model_validate(deep_merge(harness.model_dump(mode="python"), harness_overlay))
+    # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+    HarnessConfig.model_validate(core_harness_view(deep_merge(harness.model_dump(mode="python"), harness_overlay)))
 
     atomic_write_overlay(overlay_path, new_overlay)
 
@@ -230,7 +232,8 @@ async def persist_active_endpoint(
     # Validate the SAME cascade the next `start` sees (current config ⊕ new overlay), excluding the
     # agent-scope slice — mirrors persist_default_model. Raises ValidationError on a bad result.
     harness_overlay = {k: v for k, v in new_overlay.items() if k != _AGENT_KEY}
-    HarnessConfig.model_validate(deep_merge(harness.model_dump(mode="python"), harness_overlay))
+    # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+    HarnessConfig.model_validate(core_harness_view(deep_merge(harness.model_dump(mode="python"), harness_overlay)))
 
     atomic_write_overlay(overlay_path, new_overlay)
 

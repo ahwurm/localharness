@@ -186,7 +186,7 @@ async def test_cruncher_routed_and_granted_via_run_agent(monkeypatch):
     parent = ContentStore()
     h = parent.put("the granted over-window doc")
     runner = subagent.make_explore_agent_runner(
-        llm=object(), bus=object(), base_registry=object(), permission_evaluator=object(),
+        llm=object(), bus=object(), base_registry=ToolRegistry(), permission_evaluator=object(),
         get_parent_session_id=lambda: "sid", parent_store=parent,
     )
     out = await runner("cruncher", "distill it", grant_handles=[h])

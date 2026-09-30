@@ -30,7 +30,7 @@ def test_six_distinct_surface_types(components_home):
       3. org.context.compaction_threshold_pct
       4. agent.stuck_detector.window_size
       5. agent.recovery_injection.message
-      6. hooks.*.config / org.hooks
+      6. org.hooks (the dead hooks.<name>.config source is gone — 44-13)
     """
     from localharness.registry.catalogue import build_catalogue, SURFACE_FAMILIES
 
@@ -43,16 +43,7 @@ def test_six_distinct_surface_types(components_home):
     class _ToolRegistry:
         _schemas = {"demo": _Schema()}
 
-    # Synthetic HookSystem with one plugin so hooks.*.config surfaces
-    class _HookSystem:
-        loaded_plugin_names = ["demo_hook"]
-
-    entries = build_catalogue(
-        cfg,
-        overlays={},
-        tool_registry=_ToolRegistry(),
-        hook_system=_HookSystem(),
-    )
+    entries = build_catalogue(cfg, overlays={}, tool_registry=_ToolRegistry())
 
     # Each family must have at least one match
     matched_families = set()
@@ -162,18 +153,19 @@ def test_catalogue_tool_registry_descriptions(components_home):
     assert entries["tools.bash_exec.description"].current_value == "exec command"
 
 
-def test_catalogue_hook_configs(components_home):
-    """hooks.<name>.config path appears for every loaded hook plugin."""
-    from localharness.registry.catalogue import build_catalogue
+def test_the_dead_hooks_source_is_gone(components_home):
+    """`hooks.<name>.config` rows came from HookSystem's list of loaded hook plugins, whose only
+    writer had no real caller (44-13; the list itself went in 44-14). No such row appears;
+    `org.hooks` still covers the hook_config family."""
+    import inspect
 
-    cfg = _make_minimal_harness_cfg()
+    from localharness.registry.catalogue import SURFACE_FAMILIES, build_catalogue
 
-    class _HookSystem:
-        loaded_plugin_names = ["audit_logger", "pev_check"]
-
-    entries = build_catalogue(cfg, overlays={}, hook_system=_HookSystem())
-    assert "hooks.audit_logger.config" in entries
-    assert "hooks.pev_check.config" in entries
+    assert "hook_system" not in inspect.signature(build_catalogue).parameters
+    entries = build_catalogue(_make_minimal_harness_cfg(), overlays={})
+    assert [p for p in entries if p.startswith("hooks.")] == []
+    assert "org.hooks" in entries
+    assert SURFACE_FAMILIES["hook_config"] == (r"^org\.hooks$",)
 
 
 def test_agent_cfg_drives_agent_star_current_value(components_home):

@@ -36,6 +36,7 @@ class _EchoTool(Tool):
                 },
                 "required": ["message"],
             },
+            ingest="none", host="safe",  # undeclared, a tool co-resides with itself (fails closed)
         )
 
     async def _execute(self, message: str, count: int = 1) -> ToolResult:
@@ -1448,7 +1449,7 @@ async def test_write_tool_overwrite_that_replaces_most_of_a_file_has_no_edit_hin
 class _DelegateTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(name="agent", group="delegate", description="Delegate a task.",
-                          parameters={"type": "object", "properties": {}})
+                          parameters={"type": "object", "properties": {}}, ingest="none", host="safe")
 
     async def _execute(self) -> ToolResult:
         return self.ok("delegated")

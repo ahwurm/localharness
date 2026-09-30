@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
@@ -27,15 +28,18 @@ from localharness.config.overlay import (
     load_overlay,
 )
 from localharness.config.paths import resolve_config_dir, resolve_runtime_path
+from localharness.config.plugin_sections import core_agent_view, core_harness_view
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
 from localharness.registry import (
     LAYER_WORKSPACE_CONFIG,
     LAYER_WORKSPACE_OVERRIDES,
     SURFACE_FAMILIES,
+    ComponentEntry,
     coerce_value,
     set_value_in_dict,
 )
+from localharness.registry.catalogue import PluginRows, plugin_catalogue_rows
 from localharness.registry.provenance import display_note, layered_catalogue
 
 components_app = typer.Typer(
@@ -122,8 +126,10 @@ _AGENT_PREFIX = _AGENT_KEY + "."
 _AGENT_VALIDATE_BASE = {"name": "components-validate", "role": "components-validate"}
 
 
-def _validate_overlay(loader: ConfigLoader, path: str, new_overlay: dict) -> None:
-    """Validate `new_overlay` against the model that OWNS `path`; raise ValidationError on failure.
+def _validate_overlay(loader: ConfigLoader, path: str, new_overlay: dict, *,
+                      plugins: Sequence[PluginRows] = ()) -> None:
+    """Validate `new_overlay` against the model that OWNS `path`; raise ValueError (a pydantic
+    ValidationError is one) on failure.
 
     agent.* → AgentConfig (the merged `agent:` subtree); every other path → the merged
     HarnessConfig with the agent-scope `agent:` section EXCLUDED (it is not a HarnessConfig
@@ -131,13 +137,38 @@ def _validate_overlay(loader: ConfigLoader, path: str, new_overlay: dict) -> Non
     'Extra inputs are not permitted'; and once the overlay carries an `agent:` section, a later
     harness-path set would inherit that same failure unless `agent:` is excluded here too
     (mirrors load_harness's overlay handling).
+
+    A plugin's setting is then checked by that plugin's own model (ENAB-01), from the same rows the
+    catalogue listed: `<name>.*` — the global config.yaml's `<name>:` merged with the new overlay's,
+    minus `enabled` — against its ConfigModel; `agent.<name>.*` — the new overlay's
+    `agent.<name>` — against its AgentConfigModel.
     """
-    if path.startswith(_AGENT_PREFIX):
+    agent = path.startswith(_AGENT_PREFIX)
+    if agent:
         merged_agent = deep_merge(dict(_AGENT_VALIDATE_BASE), new_overlay.get(_AGENT_KEY, {}))
-        AgentConfig.model_validate(merged_agent)
+        # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+        AgentConfig.model_validate(core_agent_view(merged_agent))
     else:
         harness_overlay = {k: v for k, v in new_overlay.items() if k != _AGENT_KEY}
-        HarnessConfig.model_validate(deep_merge(loader.raw_harness_dict(), harness_overlay))
+        # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+        HarnessConfig.model_validate(core_harness_view(deep_merge(loader.raw_harness_dict(), harness_overlay)))
+    name = path.split(".")[1 if agent else 0]
+    rows = next((p for p in plugins if p.name == name), None)
+    if rows is None:
+        return
+    if agent:
+        model, section = rows.agent_config_model, (new_overlay.get(_AGENT_KEY) or {}).get(name) or {}
+    else:
+        merged = deep_merge(loader.raw_harness_dict().get(name) or {}, new_overlay.get(name) or {})
+        model, section = rows.config_model, {k: v for k, v in merged.items() if k != "enabled"}
+    if model is None:
+        return
+    try:
+        model.model_validate(section)
+    except ValidationError:
+        raise
+    except (Exception, SystemExit) as exc:  # the plugin's own validator: contained, nothing written
+        raise ValueError(f"plugin {name}'s settings check raised {type(exc).__name__}: {exc}") from exc
 
 
 def _build_tool_registry() -> Any:
@@ -187,6 +218,11 @@ def _err_config(json_output: bool, exc: Exception) -> None:
     step doctor gives — otherwise a user who ran `components list` first never learns `init`."""
     hint = " Run 'localharness init' to create it." if isinstance(exc, ConfigNotFoundError) else ""
     _err(json_output, f"Failed to load config: {exc}{hint}", exit_code=2)
+
+
+def _layer_cell(e: ComponentEntry) -> str:
+    """The layer a human reads; a plugin's setting also names its plugin (ENAB-04)."""
+    return e.winning_layer + (f" (plugin: {e.plugin})" if e.plugin else "")
 
 
 def _serialize_value(value: Any) -> Any:
@@ -246,6 +282,7 @@ def components_list(
                 "type": e.type_name,
                 "current_value": _serialize_value(e.current_value),
                 "layer": e.winning_layer,
+                "plugin": e.plugin,
             }
             for e in entries
         ]
@@ -259,7 +296,7 @@ def components_list(
     table.add_column("layer", style="green")
     for e in entries:
         # display_note: an empty deny list on screen is not an empty deny list at runtime.
-        table.add_row(e.path, e.type_name, repr(e.current_value) + display_note(e.path, e.current_value), e.winning_layer)
+        table.add_row(e.path, e.type_name, repr(e.current_value) + display_note(e.path, e.current_value), _layer_cell(e))
     console.print(table)
 
 
@@ -312,6 +349,7 @@ def components_get(
             "type": entry.type_name,
             "layer": entry.winning_layer,
             "default": _serialize_value(entry.default_value),
+            "plugin": entry.plugin,
         }
         typer.echo(_json.dumps(payload))
         return
@@ -324,7 +362,7 @@ def components_get(
         soft_wrap=True,
     )
     console.print(escape(f"  type:    {entry.type_name}"), soft_wrap=True)
-    console.print(escape(f"  layer:   {entry.winning_layer}"), soft_wrap=True)
+    console.print(escape(f"  layer:   {_layer_cell(entry)}"), soft_wrap=True)
     console.print(escape(f"  default: {entry.default_value!r}"), soft_wrap=True)
 
 
@@ -378,9 +416,15 @@ def components_set(
 
     # 2. Build catalogue, resolve entry. Workspace-aware so the reported `was:` is the value the
     #    user can actually see — and so a workspace-owned path can be named as such below.
+    #    The plugins are resolved ONCE: their rows build the catalogue and their models check the
+    #    value below. Lazy import: resolving imports every enabled plugin, never paid at CLI start.
     tool_registry = _build_tool_registry()
+    from localharness.plugins.resolve import resolve
+
+    plugins = plugin_catalogue_rows(resolve(loader))
     catalogue, _overlays = layered_catalogue(
-        resolve_config_dir(config_dir), workspace, tool_registry=tool_registry
+        resolve_config_dir(config_dir), workspace, tool_registry=tool_registry, loader=loader,
+        plugins=plugins,
     )
     entry = catalogue.get(path)
     if entry is None:
@@ -408,8 +452,8 @@ def components_set(
     new_overlay = set_value_in_dict(dict(existing_overlay), path, typed_value)
 
     try:
-        _validate_overlay(loader, path, new_overlay)
-    except ValidationError as exc:
+        _validate_overlay(loader, path, new_overlay, plugins=plugins)
+    except ValueError as exc:  # a pydantic ValidationError, or a plugin's contained validator failure
         _err(
             json_output,
             f"Validation failed for {path}={typed_value!r}: {exc}",

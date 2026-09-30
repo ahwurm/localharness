@@ -4,6 +4,188 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [Unreleased]
+
+This release adds a plugin system: one API, one loader and one trust model, for
+plugins you install and for plugins that ship with LocalHarness. No built-in
+feature has become a plugin yet; memory, the web channel, Discord and
+autoresearch are still part of core. The plugin API that 0.15.0 documented is
+removed, so a plugin written for 0.15 no longer loads: see Removed and
+Migration.
+
+### Added
+- **`localharness plugins`.** `list` shows every plugin with its state and the
+  command that turns on one that is off, and names a removed plugin's settings
+  still in a `config.yaml` or `overrides.yaml`; `info NAME` shows one plugin and
+  the settings it owns.
+  `enable NAME [--set KEY=VALUE ...]` and `disable NAME` write an
+  `overrides.yaml`, never your `config.yaml`, and take effect at the next
+  `localharness start`. `--workspace` writes a project's `overrides.yaml`
+  instead; it is only for plugins that ship with LocalHarness, and none does
+  yet.
+- **Plugins you install.** LocalHarness finds a plugin in two places, both on
+  your machine and never in a project: an installed package that declares a
+  `localharness.plugins` entry point, in the same Python environment as
+  LocalHarness, and a folder `~/.localharness/plugins/<name>/` whose
+  `__init__.py` binds `plugin = <the class>`. Finding one reads package
+  metadata and folder names only, and nothing of it is imported until you
+  enable it. Enabling a plugin you installed is a machine-level setting and
+  your trust grant, which a project cannot make for you (SECURITY.md,
+  "Plugins").
+- `localharness doctor` has a Plugins section: an enabled plugin's own checks,
+  every other plugin's state, and the command that turns an available one on.
+- **Plugin settings** live under `<name>:` and, for an agent, `agent.<name>`,
+  and the plugin's own models check them. `components list` shows an enabled
+  plugin's settings marked `(plugin: <name>)`, and `components get` and
+  `components set` work on them. A plugin can mark a setting machine-level
+  only (an endpoint, a credential, an access list); a project's value for it
+  is then dropped with a warning.
+- **Plugin commands.** An enabled plugin's commands are listed in
+  `localharness --help`, and a command's module is imported only when it runs.
+  They work on typer 0.25 and on 0.26 and later, which bundle their own copy of
+  Click. A plugin's slash commands join core's in the one slash table: the REPL
+  runs them, and `/help`, the input completer and the web channel's
+  `/api/protocol` list them while the session that runs the plugin is live.
+- **Artifacts.** A plugin can save PNG, JPEG or WebP images into a folder
+  LocalHarness assigns it, under an id LocalHarness mints. The web channel
+  serves them to a signed-in client at `GET /api/artifacts/{plugin}/{id}`, for
+  a plugin that is on in the running session, cached as immutable.
+- **The memory slot.** One plugin of kind `memory` can add a section to every
+  turn's prompt, right after the guardrails. Nothing fills it unless you
+  install and enable a memory plugin yourself.
+- `localharness init` writes a `plugins/README.md` into your config directory
+  that says how to install, enable and write a plugin; `init --workspace`
+  writes one into the project saying plugins are never loaded from there.
+- **An example plugin to copy**, `examples/plugin-template/`: one tool, one
+  command, one slash command, one `doctor` check and two settings. Its README
+  says how to install it with `uv tool` or into a virtual environment, and how
+  to remove it.
+- **A notice for plugins written for 0.15.** `plugins list`, `doctor` and the
+  start banner name each one: it "was built for the 0.15 plugin API and is no
+  longer loaded", with a link to how to port it. Nothing of it is imported.
+- **`localharness init` asks two questions** when run at a terminal: may the
+  agent change this machine (write and edit files, run shell commands), and
+  should memory be on. "No" writes `org.permissions.mode: read-only` or the
+  new `org.memory_enabled: false`. With memory off, no memory store is opened
+  and no memory tool is registered; memory files already on disk stay. A
+  project's own `.localharness/config.yaml` can set either key for that
+  project. A scripted `init` asks nothing and keeps the defaults.
+
+### Changed
+- **`GUARDRAILS.md` reaches the model with memory on or off.** Core reads
+  `orgs/default/GUARDRAILS.md` from your global config directory on every turn
+  of the agent you talk to. Before, only memory read it, so a session without
+  memory never showed it to the model. The agents it delegates to are still
+  not given the file.
+- **Every tool declares four safety facts**, `ingest`, `host`, `result_origin`
+  and `gate_family`, and each default assumes the worst. The capability floor
+  and the store that holds tool results read a tool's declarations instead of
+  its name, and the permission gate reads `gate_family` for every tool it does
+  not recognise by name. For built-in and MCP tools, the gate and the floor
+  decide as before. A plugin tool whose declarations let it bring in outside
+  content, including one that declares nothing, is kept from the root agent,
+  and the start banner names it.
+- A tool from a plugin you installed cannot declare its way past a question: a
+  `gate_family` that would be asked about less often than a tool with no family
+  (`allow`, `network`, `shell` or `write`) counts as no family, and the start
+  banner says so.
+- A large tool result that is moved out of the prompt is stored as outside
+  content unless its tool declares that it wrote the text itself. MCP tool
+  results and `web_page_query` results are now stored that way, like web
+  pages: the agent can read them back, but the cruncher does not take them as
+  input.
+- The newest large tool results are no longer protected from eviction by count
+  alone. Together they may hold a quarter of the context window; past that,
+  the oldest of them are evicted too. The newest one always stays.
+- An unknown top-level config key (a typo, or the settings of a plugin you have
+  since removed) is still refused, and the error now says why and what to do:
+  ``not a LocalHarness setting, and no installed plugin is named `<key>` — if a
+  plugin you removed used it, reinstall that plugin or delete this section``,
+  under the file and line that hold it. `validate` names `overrides.yaml` and
+  the line for an unknown key under its `agent:` section, where it used to
+  blame the agent's own file.
+
+### Removed
+- **0.15.0's plugin API.** LocalHarness no longer loads `localharness.tools`
+  or `localharness.hooks` entry points, or `plugins/<dir>/manifest.yaml`
+  folders; 0.15.0's `start` loaded all of them in every session, with nothing
+  to turn them on. The `on_agent_start`, `on_agent_end` and `on_event` hooks
+  are gone (nothing in 0.15.0 called them), and so are `HookSystem`'s
+  `register_impl`, `call_agent_start`, `call_agent_end` and `call_on_event`
+  methods and its `loaded_plugin_names` property. The `pre_tool` and
+  `post_tool` hooks remain.
+- `components list` no longer has a `hooks.<name>.config` row for each loaded
+  hook plugin. The `org.hooks` setting is still accepted.
+
+### Fixed
+- Autoresearch could not adopt a harness-level (`org.*`) change once it had
+  adopted any agent-level (`agent.*`) one: every later `org.*` adoption was
+  refused and its proposal marked `adoption_rejected`.
+- The web history drawer listed every subagent's own session log, as rows
+  titled with raw ids. They are hidden now, from search too; the logs stay on
+  disk.
+- Right after a machine booted, the terminal could count you as present before
+  your first keystroke, so the pending-decision bell rang when it should have
+  stayed quiet (contributed by @mjdufresne, #164).
+- Waiting for web push notifications still being sent could spin at 100% CPU
+  forever if one finished just as the wait began. Only a wait with no time
+  limit could, and only the test suite waited that way: `localharness web`
+  waits with a limit when it shuts down and was not affected.
+- `start` ran the root agent on a bare default config when its agent file
+  would not load, without a word: the file's permission mode, deny patterns,
+  `workspace_root`, budget, MCP servers, memory and context settings were all
+  dropped, so a `read-only` agent ran in `auto`. It now refuses with the
+  loader's error, naming the file and line, and exits 1; `doctor` reports the
+  same error instead of "Config valid". The commonest cause is a removed
+  plugin's `agent.<name>` entry left in `overrides.yaml`. An agent file that
+  still carries a key an earlier release removed (such as
+  `memory.predictive_gate`) now gets that named error where it used to get a
+  silent session.
+- `org.permissions.mode` never reached a session: sessions ran in the agent
+  file's mode, or `auto`, whatever the org said, so `init`'s "No" printed
+  "Read-only sessions" and sessions still ran in `auto`. A session now runs in
+  the agent's own `permissions.mode` when the agent file (or `agent:` in
+  `overrides.yaml`) sets one, else in `org.permissions.mode`, else in `auto`.
+  The workspace trust question, `/mode` and Zed's mode picker all show that
+  mode. When an agent sets a looser mode than the org, it keeps its own and
+  `start` prints one line naming both.
+- A misspelled core key, such as `provder:` for `provider:`, was reported as a
+  removed plugin's leftover section. It now gets "did you mean `provider`?".
+
+### Migration
+- A plugin written for 0.15 no longer loads, and nothing migrates it for you.
+  LocalHarness names it in `localharness plugins list`, `localharness doctor`
+  and the start banner. Port it to a `localharness.plugins` entry point:
+  [spec 09, "Plugins written for 0.15"](docs/specs/09-hooks-plugins.md#plugins-written-for-015)
+  says how.
+- When you uninstall a plugin, delete its `<name>:` section and its
+  `agent.<name>` entry from `overrides.yaml` and `config.yaml`. A leftover
+  `<name>:` section is refused like a misspelled key, and
+  `localharness plugins list` and `localharness validate` say where each
+  leftover is.
+- If you set `org.permissions.mode`, it now applies to every session whose
+  agent file sets no mode. If it is `unattended`, sessions will stop asking:
+  check it before upgrading. A workspace's org mode may only tighten the
+  global one.
+
+### Known limitations (named, not hidden)
+- No feature ships as a plugin yet: memory, the web channel, Discord and
+  autoresearch are still part of core, and the memory slot is empty.
+- `pre_tool` and `post_tool` do not fire for a subagent's tool calls, and a
+  hook written as `async def` never runs.
+- `plugins enable` and `plugins disable` write no audit event;
+  `components set` does.
+- `localharness --help` imports each enabled plugin's package and plugin class
+  to read the commands it declares.
+- Neither the terminal nor the reference phone page displays an artifact yet.
+  The example plugin's tool names the file it saved, so the agent can tell you
+  where it is.
+- `localharness validate` does not check an enabled plugin's own settings: a
+  misspelled key in its section passes `validate`, while `plugins list` and
+  `doctor` report the plugin as failed.
+- `localharness doctor` does not show which plugin tools the capability floor
+  keeps from the root agent; the start banner names them.
+
 ## [0.15.0] — 2026-09-19
 
 The memory system was rebuilt from the ground up: the model itself is now the

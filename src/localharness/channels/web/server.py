@@ -42,6 +42,7 @@ from starlette.responses import StreamingResponse
 from starlette.routing import Route
 
 from localharness.config import session_presence
+from localharness.core.events import ARTIFACT_ID_RE, ARTIFACT_MIMES
 
 from . import auth, push
 from .channel import WebChannel
@@ -236,6 +237,23 @@ def _unauthorized() -> JSONResponse:
     return _json({"error": auth.UNAUTHENTICATED_ERROR}, status=401)
 
 
+_SUFFIX_MIMES: dict[str, str] = {s: m for m, s in ARTIFACT_MIMES.items()} | {".jpeg": "image/jpeg"}
+"""The artifact route's suffix -> media type: core's allowlist read backwards (PAPI-10)."""
+
+
+def _find_artifact(root: Path, artifact_id: str) -> tuple[Path, str | None] | None:
+    """The ONE file `<artifact_id>.<suffix>` directly under `root`, realpath-confined, with the media
+    type its suffix names (None if off the allowlist). None when there is no such file, or more than
+    one (an ambiguous id is not served)."""
+    if not root.is_dir():
+        return None
+    names = [entry.name for entry in root.iterdir() if entry.stem == artifact_id]
+    path = auth.confine(root, names[0]) if len(names) == 1 else None
+    if path is None or not path.is_file():
+        return None
+    return path, _SUFFIX_MIMES.get(path.suffix)
+
+
 class WebServer:
     """Routes, auth and the SSE loop for one `localharness web` process."""
 
@@ -333,7 +351,7 @@ class WebServer:
             # caller gets a `start_url` that pairs the installed app (see `manifest`).
             Route("/manifest.webmanifest", self.manifest, methods=["GET"]),
             Route("/api/tool-results/{eviction_id}", self.tool_result, methods=["GET"]),
-            Route("/api/images/{image_id}", self.image, methods=["GET"]),
+            Route("/api/artifacts/{plugin}/{artifact_id}", self.artifact, methods=["GET"]),
             Route("/api/sessions", self.sessions, methods=["GET"]),
             Route("/api/sessions/new", self.new_session, methods=["POST"]),
             Route("/api/sessions/{session_id}/events", self.events, methods=["GET"]),
@@ -655,16 +673,16 @@ class WebServer:
     async def protocol(self, request: Request) -> Response:
         """The contract, served from the same places the code reads it from.
 
-        `commands[]` comes from the REPL's own table and `modes[]` from the gate's own mode list
-        rather than being hardcoded here: a one-thumb mode chip or command menu that duplicates
-        those lists client-side is exactly the drift the generated event schema exists to
-        prevent.
+        `commands[]` comes from the REPL's own slash table, read live (plugin rows included), and
+        `modes[]` from the gate's own mode list, rather than being hardcoded here: a one-thumb mode
+        chip or command menu that duplicates those lists client-side is exactly the drift the
+        generated event schema exists to prevent.
         """
         refusal = self._authed(request, post=False)
         if refusal is not None:
             return refusal
         from localharness.agent.gate import MODE_STRICTNESS
-        from localharness.cli.slash_commands import SLASH_COMMANDS
+        from localharness.cli.slash_commands import all_rows
 
         return _json({
             "protocol_version": PROTOCOL_VERSION,
@@ -676,7 +694,7 @@ class WebServer:
             "verbs": [
                 {"method": m, "path": p, "note": n} for m, p, n in _VERBS
             ],
-            "commands": [{"name": n, "description": d} for n, d in SLASH_COMMANDS],
+            "commands": [{"name": n, "description": d} for n, d in all_rows()],
             "modes": sorted(MODE_STRICTNESS, key=lambda m: MODE_STRICTNESS[m]),
             "intents": sorted(INTENTS),
             "default_mid_turn_intent": DEFAULT_MID_TURN_INTENT,
@@ -798,35 +816,26 @@ class WebServer:
             }, status=404)
         return _json({"eviction_id": eviction_id, "body": body})
 
-    async def image(self, request: Request) -> Response:
-        """Serve ONE generated image by its harness-minted id (the Observation.image_id field).
-
-        Same WEBCH-40 posture as every file this server touches, doubled: the id must
-        fullmatch the minting shape (so a path or `..` never even reaches the filesystem),
-        AND the resolved file is realpath-confined to the artifacts root. That root comes
-        from the REGISTERED generate_image instance itself — the same object that wrote the
-        file — so the writer and the server cannot drift onto different directories. No
-        session/tool yet (or module off) is a 404, not a fallback root.
-
-        Cookie-authed like every other GET, which is what lets a same-origin `<img>` load
-        with no token in any URL (§7.3 stays intact)."""
+    async def artifact(self, request: Request) -> Response:
+        """One file a plugin produced (PAPI-10). Authenticated like every GET (the cookie lets a
+        same-origin <img> load with no token in any URL); only for a plugin that is ON this session
+        and whose root core computed and accepted — anything else 404s before any filesystem access;
+        only a core-minted id; only the core media-type allowlist (else 415); realpath-confined; an
+        id names one immutable file, so it is cached as immutable."""
         refusal = self._authed(request, post=False)
         if refusal is not None:
             return refusal
-        from localharness.core.events import IMAGE_ID_RE
-        from localharness.tools.builtin.generate_image_tool import image_artifacts_dir
-
-        image_id = request.path_params.get("image_id") or ""
-        registry = getattr(self.channel, "_tool_registry", None)
-        tool = registry._find_tool_by_name("generate_image") if registry is not None else None
-        if tool is None or not IMAGE_ID_RE.fullmatch(image_id):
+        root = self.channel.artifact_root(request.path_params.get("plugin") or "")
+        artifact_id = request.path_params.get("artifact_id") or ""
+        if root is None or not ARTIFACT_ID_RE.fullmatch(artifact_id):
             return PlainTextResponse("not found", status_code=404)
-        target = auth.confine(image_artifacts_dir(tool.workspace_root), f"{image_id}.png")
-        if target is None or not target.is_file():
+        found = _find_artifact(root, artifact_id)
+        if found is None:
             return PlainTextResponse("not found", status_code=404)
-        # An id is minted once per generation and never reused, so immutable caching is safe
-        # and spares the phone re-downloading on every history replay.
-        return FileResponse(target, media_type="image/png",
+        path, mime = found
+        if mime not in ARTIFACT_MIMES:
+            return PlainTextResponse("unsupported media type", status_code=415)
+        return FileResponse(path, media_type=mime,
                             headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
     async def sessions(self, request: Request) -> Response:
@@ -1388,6 +1397,8 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/health", "model reachability and session state"),
     ("GET", "/api/grants", "the permanent grants in force (read-only)"),
     ("GET", "/api/tool-results/{eviction_id}", "a ContentStore-evicted body, live session only"),
+    ("GET", "/api/artifacts/{plugin}/{id}",
+     "one file a plugin produced; core-computed root, image/png|jpeg|webp only, immutable"),
     ("GET", "/api/schema", "JSON Schema for every event and frame"),
     ("GET", "/api/protocol", "this document, as data"),
 )

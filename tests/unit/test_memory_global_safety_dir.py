@@ -8,11 +8,17 @@ would have taken the org's safety instructions with it — and a workspace could
 simply not having the file. These tests prove the two directories are genuinely independent in BOTH
 directions, and that omitting the new parameter is a no-op (bench/runner.py relies on that).
 
+SAFE-04 (v0.16) moved the GUARDRAILS.md reader out of memory and into core prompt assembly
+(`AgentLoop(guardrails_path=...)`), so turning memory off can no longer turn the safety rules off.
+The invariant pinned here did not move with it: the store's context now has NO guardrails field
+(exactly one reader), and the guardrails claims are made on the SYSTEM PROMPT a real loop builds
+over the split store with core's reader pointed at the global file.
+
 Every assertion here reads as "which of the two dirs did this come from": `ws` is the workspace
-state dir, `gl` is the global one. Tests 2 and 3 assert on the CONTEXT RETURNED by `load_context()`
-rather than on `store._guardrails_path`, because a path assertion cannot tell you the reader ever
-used it, and the workspace payload is asserted ABSENT — "the right one is present" passes when both
-are (40-02 / 40-05's lesson).
+state dir, `gl` is the global one. Tests 2 and 3 assert on what was READ — the context returned by
+`load_context()` and the prompt the loop built — rather than on a stored path, because a path
+assertion cannot tell you the reader ever used it, and the workspace payload is asserted ABSENT —
+"the right one is present" passes when both are (40-02 / 40-05's lesson).
 """
 from __future__ import annotations
 
@@ -21,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from localharness.memory.sqlite import MemoryStore
+from tests.unit.test_agent_loop import _make_memory_agent_loop, _record_system_prompts
 
 GLOBAL_GUARDRAILS = "# Org guardrails\nGLOBAL-GUARDRAILS-SENTINEL\n"
 WORKSPACE_GUARDRAILS = "# Org guardrails\nWORKSPACE-GUARDRAILS-SENTINEL\n"
@@ -56,6 +63,15 @@ def _split_store(ws: Path, gl: Path) -> MemoryStore:
     )
 
 
+async def _prompt(store: MemoryStore, guardrails_path: Path | None) -> str:
+    """The system prompt a real AgentLoop builds over the OPEN `store`, with core's guardrails
+    reader pointed at `guardrails_path` — what the model is handed, not what a reader returned."""
+    loop, llm = _make_memory_agent_loop(memory_loader=store, guardrails_path=guardrails_path)
+    prompts = _record_system_prompts(llm)
+    await loop.run_turn("hello")
+    return prompts[0]
+
+
 @pytest.mark.asyncio
 async def test_agent_state_is_written_under_the_workspace_dir_only(tmp_path):
     """State follows the workspace: memory.db / history.jsonl / MEMORY.md land under `ws`, and
@@ -83,8 +99,9 @@ async def test_agent_state_is_written_under_the_workspace_dir_only(tmp_path):
 
 @pytest.mark.asyncio
 async def test_safety_context_is_read_from_the_global_dir(tmp_path):
-    """With DIVISION.md and GUARDRAILS.md present ONLY under `gl`, the injected context carries
-    both — the workspace state dir holds neither file."""
+    """With DIVISION.md and GUARDRAILS.md present ONLY under `gl`, the prompt carries both —
+    DIVISION.md through the store's context, GUARDRAILS.md through core's reader — and the
+    workspace state dir holds neither file."""
     ws, gl = _layers(tmp_path)
     _write(gl / "orgs" / ORG_ID / "GUARDRAILS.md", GLOBAL_GUARDRAILS)
     _write(gl / "divisions" / DIVISION_ID / "DIVISION.md", GLOBAL_DIVISION)
@@ -93,10 +110,12 @@ async def test_safety_context_is_read_from_the_global_dir(tmp_path):
     await store.open()
     try:
         ctx = await store.load_context()
+        prompt = await _prompt(store, gl / "orgs" / ORG_ID / "GUARDRAILS.md")
     finally:
         await store.close()
 
-    assert "GLOBAL-GUARDRAILS-SENTINEL" in ctx.guardrails_md
+    assert not hasattr(ctx, "guardrails_md"), "memory reads GUARDRAILS.md again — two readers"
+    assert "GLOBAL-GUARDRAILS-SENTINEL" in prompt
     assert "GLOBAL-DIVISION-SENTINEL" in ctx.division_md
 
 
@@ -114,11 +133,13 @@ async def test_workspace_cannot_silence_or_replace_the_global_safety_voice(tmp_p
     await store.open()
     try:
         ctx = await store.load_context()
+        prompt = await _prompt(store, gl / "orgs" / ORG_ID / "GUARDRAILS.md")
     finally:
         await store.close()
 
-    assert "GLOBAL-GUARDRAILS-SENTINEL" in ctx.guardrails_md
-    assert "WORKSPACE-GUARDRAILS-SENTINEL" not in ctx.guardrails_md
+    assert not hasattr(ctx, "guardrails_md"), "memory reads GUARDRAILS.md again — two readers"
+    assert "GLOBAL-GUARDRAILS-SENTINEL" in prompt
+    assert "WORKSPACE-GUARDRAILS-SENTINEL" not in prompt
     assert "GLOBAL-DIVISION-SENTINEL" in ctx.division_md
     assert "WORKSPACE-DIVISION-SENTINEL" not in ctx.division_md
 
@@ -126,8 +147,12 @@ async def test_workspace_cannot_silence_or_replace_the_global_safety_voice(tmp_p
 @pytest.mark.asyncio
 async def test_omitting_global_base_dir_is_a_no_op(tmp_path):
     """The default-preserving half: constructed WITHOUT the new parameter, a store rooted at one
-    dir reads that dir's own GUARDRAILS.md/DIVISION.md exactly as it always has. bench/runner.py
-    and every pre-existing caller depend on this staying byte-identical."""
+    dir reads that dir's own DIVISION.md exactly as it always has. bench/runner.py and every
+    pre-existing caller depend on this staying byte-identical.
+
+    GUARDRAILS.md sits in the same root, and since SAFE-04 the store never reads it: a loop built
+    the way bench builds one — this store, no `guardrails_path` — gets no guardrails section. (Bench's
+    temp root has never held a GUARDRAILS.md, so no bench prompt changed.)"""
     root = tmp_path / "only"
     root.mkdir()
     _write(root / "orgs" / ORG_ID / "GUARDRAILS.md", GLOBAL_GUARDRAILS)
@@ -142,9 +167,11 @@ async def test_omitting_global_base_dir_is_a_no_op(tmp_path):
     await store.open()
     try:
         ctx = await store.load_context()
+        prompt = await _prompt(store, None)
     finally:
         await store.close()
 
-    assert "GLOBAL-GUARDRAILS-SENTINEL" in ctx.guardrails_md
+    assert not hasattr(ctx, "guardrails_md"), "memory reads GUARDRAILS.md again — two readers"
+    assert "GLOBAL-GUARDRAILS-SENTINEL" not in prompt and "## Guardrails" not in prompt
     assert "GLOBAL-DIVISION-SENTINEL" in ctx.division_md
     assert (root / "agents" / AGENT_ID / "memory.db").exists()

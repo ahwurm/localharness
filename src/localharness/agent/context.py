@@ -7,6 +7,7 @@ import logging
 import math
 import re
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -133,12 +134,17 @@ _STUB_HINT_CHARS: int = 80
 _OUT_OF_VIEW_PREFIX = "[out of view:"
 _LEDGER_WINDOW_FRACTION: float = 0.01
 _LEDGER_TOKENS_PER_ENTRY: int = 40
-# #140: recall output enters the store with UNTRUSTED origin. Memory can hold material that
-# originally arrived from untrusted channels (remembered web content), and facts carry no
-# per-item provenance — so the floor assumes the worst: an evicted recall body is data the
-# verbs may read but never exec-bindable. Provenance-tracked inheritance would refine this;
-# until it exists, untrusted-by-default is the only sound default.
-_MEMORY_TOOLS = frozenset({"memory_search", "memory_get"})
+
+
+def _fail_closed_origin(_name: str) -> Origin:
+    """No origin lookup wired: every evicted body is untrusted (restorable and verb-readable, never
+    exec-bindable). #140's reason still holds — recall can carry remembered web content, and facts
+    carry no per-item provenance — and it is now DECLARED by memory_search/memory_get
+    (result_origin: untrusted) rather than listed here. The lookup that reads declarations is
+    ToolRegistry.result_origin, wired by start and bench."""
+    return "untrusted"
+
+
 # #134 RESTORE PIN: restoring a body re-inflates usage, which re-arms this very pass, which
 # evicts the just-restored body under the SAME handle — measured live as a 24-minute turn of
 # restore/evict/restore. A body pulled back by these tools is therefore PINNED against the
@@ -370,6 +376,7 @@ def _evict_large_tool_results(
     keep_last: int = TOOL_EVICT_KEEP_LAST,
     protect_budget_chars: int | None = None,
     pinned_call_ids: frozenset[str] = frozenset(),
+    result_origin: Callable[[str], Origin] = _fail_closed_origin,
 ) -> tuple[list[Message], int]:
     """Replace the bodies of bulky NON-web tool results with a restorable stub keyed by a
     deterministic content hash; the full body is stashed in `store` for tool_result_get.
@@ -384,12 +391,13 @@ def _evict_large_tool_results(
     eviction and never pushes another body into protection (non-pinned bodies evict first).
     Returns (new list, evicted count); input messages are never mutated. Deterministic:
     same input -> same stubs (same id), so the prompt stays prefix-cache stable.
-    Memory-recall results (#140) evict like any other bulky body but enter the store with
-    untrusted origin — restorable and verb-readable, never exec-bindable."""
+    Each body enters the store with the origin its producing tool DECLARES, read through
+    `result_origin` (SAFE-03): memory recall (#140) declares untrusted — restorable and
+    verb-readable, never exec-bindable. A body no tool vouches for (no lookup wired, or its
+    assistant call compacted away) is untrusted."""
     # tool_call_ids that resolve to web tools — those go through the web path, skip here.
     meta = _call_meta(messages)
     web_ids = {i for i, (n, _) in meta.items() if n in _WEB_TOOLS}
-    memory_ids = {i for i, (n, _) in meta.items() if n in _MEMORY_TOOLS}
     evictable = [
         i for i, m in enumerate(messages)
         if m.get("role") == "tool"
@@ -416,10 +424,10 @@ def _evict_large_tool_results(
     for i in stale:
         m = out[i]
         body = m.get("content") or ""
-        origin: Origin = "untrusted" if m.get("tool_call_id") in memory_ids else "trusted"
+        name, hint = meta.get(m.get("tool_call_id") or "", ("", ""))
+        origin: Origin = result_origin(name) if name else "untrusted"
         rid = store.put(body, origin=origin)
         approx_tokens = len(body) // APPROX_CHARS_PER_TOKEN
-        name, hint = meta.get(m.get("tool_call_id") or "", ("", ""))
         what = " ".join(s for s in (name, hint) if s)
         out[i] = {**m, "content": (
             f"{_TOOL_STUB_PREFIX} — {what + ' — ' if what else ''}~{approx_tokens} tokens — "
@@ -1612,6 +1620,7 @@ class ContextManager:
         token_counter: "TokenCounter | None" = None,
         compaction_trigger_fraction: float = DEFAULT_COMPACTION_TRIGGER_FRACTION,
         max_response_tokens: int | None = None,
+        result_origin: Callable[[str], Origin] | None = None,
     ) -> None:
         self.max_context_tokens = max_context_tokens
         # The configured per-reply output cap; sizes the shared reply reserve (response_reserve).
@@ -1635,6 +1644,9 @@ class ContextManager:
         )
         self._tool_evict_threshold_chars = tool_evict_threshold_chars
         self._tool_evict_enabled = tool_evict_enabled
+        # How an evicted body's origin is read: the producing tool's declared result_origin
+        # (ToolRegistry.result_origin, wired by start and bench); unwired, every body is untrusted.
+        self._result_origin = result_origin or _fail_closed_origin
         self._token_counter = token_counter or TokenCounter()
         self._bus = bus
         self._agent_id = agent_id
@@ -1771,6 +1783,7 @@ class ContextManager:
                     self.max_context_tokens * TOOL_EVICT_PROTECT_BUDGET_FRACTION
                 ) * APPROX_CHARS_PER_TOKEN,
                 pinned_call_ids=restore_pins,
+                result_origin=self._result_origin,
             )
             if t_evicted:
                 log.info(

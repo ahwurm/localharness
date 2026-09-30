@@ -81,7 +81,6 @@ class FactQuery:
 class MemoryContext:
     agent_memory_md: str
     division_md: str
-    guardrails_md: str
     fact_count: int
     token_estimate: int
     # The atom ids rendered into the ambient shelf this load (schema chapters + persistent
@@ -767,9 +766,10 @@ class MemoryStore:
     Three-tier persistent memory for a single agent.
 
     Owns the agent's memory.db, history.jsonl, and MEMORY.md under `base_dir`.
-    Reads (but never writes) division and org memory for context injection — from
+    Reads (but never writes) division memory (DIVISION.md) for context injection — from
     `global_base_dir`, which defaults to `base_dir`, so per-agent state may follow a
-    workspace layer while org/division safety context stays on the global one.
+    workspace layer while division safety context stays on the global one. The org's
+    GUARDRAILS.md is not memory's: core prompt assembly reads it (SAFE-04).
     Optionally subscribes to an EventBus for auto-diary recording.
     """
 
@@ -791,7 +791,8 @@ class MemoryStore:
         # v0.13 MEMS-01 / ROADMAP critique amendment #4 (owner-ruled): per-agent STATE may follow a
         # workspace layer, but org/division SAFETY CONTEXT never does. A workspace can ADD context in
         # a later milestone; it can never silence the global voice by not having the file. Defaults
-        # to base_dir, so omitting it is a no-op (bench/runner.py relies on that).
+        # to base_dir, so omitting it is a no-op (bench/runner.py relies on that). Since SAFE-04 this
+        # input serves DIVISION.md only; GUARDRAILS.md is read by core prompt assembly.
         self._global_base_dir = (
             Path(global_base_dir).expanduser() if global_base_dir else self._base_dir
         )
@@ -802,11 +803,9 @@ class MemoryStore:
         self._history_path = self._agent_dir / "history.jsonl"
         self._notes_path = self._agent_dir / "MEMORY.md"
 
-        # Division / org paths (read-only) — GLOBAL layer, always (amendment #4)
+        # Division path (read-only) — GLOBAL layer, always (amendment #4)
         self._division_dir = self._global_base_dir / "divisions" / division_id
         self._division_md_path = self._division_dir / "DIVISION.md"
-        self._org_dir = self._global_base_dir / "orgs" / org_id
-        self._guardrails_path = self._org_dir / "GUARDRAILS.md"
 
         self._history_writer = HistoryWriter(self._history_path)
         self._markdown_memory = MarkdownMemory(self._notes_path)
@@ -1982,21 +1981,16 @@ class MemoryStore:
         if self._division_md_path.exists():
             division_md = self._division_md_path.read_text(encoding="utf-8")
 
-        guardrails_md = ""
-        if self._guardrails_path.exists():
-            guardrails_md = self._guardrails_path.read_text(encoding="utf-8")
-
         async with self._db.execute(
             "SELECT COUNT(*) FROM facts WHERE agent_id = ?", (self._agent_id,)
         ) as cur:
             row = await cur.fetchone()
         fact_count = row[0] if row else 0
 
-        token_estimate = len(agent_md + division_md + guardrails_md) // 4
+        token_estimate = len(agent_md + division_md) // 4
         return MemoryContext(
             agent_memory_md=agent_md,
             division_md=division_md,
-            guardrails_md=guardrails_md,
             fact_count=fact_count,
             token_estimate=token_estimate,
             injected_fact_ids=injected_fact_ids,

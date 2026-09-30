@@ -42,6 +42,7 @@ from typing import Any
 
 from localharness.config.models import AgentConfig, HarnessConfig
 from localharness.config.overlay import atomic_write_overlay, deep_merge, load_overlay, _resolve_user_overlay_path
+from localharness.config.plugin_sections import core_agent_view, core_harness_view
 from localharness.registry import (
     LAYER_GLOBAL_OVERRIDES,
     build_catalogue,
@@ -125,11 +126,13 @@ def _validate_merged(cfg, component: str, new_overlay: dict) -> None:
         if component.startswith(_AGENT_PREFIX):
             agent_overlay = new_overlay.get("agent", {})
             merged_agent = deep_merge(dict(_AGENT_VALIDATE_BASE), agent_overlay)
-            AgentConfig.model_validate(merged_agent)
+            # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+            AgentConfig.model_validate(core_agent_view(merged_agent))
         else:
             project_dict = cfg.model_dump(mode="python") if hasattr(cfg, "model_dump") else {}
             merged = deep_merge(project_dict, new_overlay)
-            HarnessConfig.model_validate(merged)
+            # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
+            HarnessConfig.model_validate(core_harness_view(merged))
     except Exception as exc:  # pydantic ValidationError or any validate failure
         raise AdoptionRefused(
             f"adopting {component!r} produces an invalid config: {exc}"

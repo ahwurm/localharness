@@ -1,6 +1,7 @@
-"""HookSystem: pluggy-based hook dispatch wired to ToolRegistry."""
+"""HookSystem: pluggy dispatch of the two tool hooks (pre_tool / post_tool), wired to ToolRegistry."""
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 import pluggy
@@ -13,11 +14,16 @@ if TYPE_CHECKING:
 HARNESS_HOOKSPEC = pluggy.HookspecMarker("localharness")
 HARNESS_HOOKIMPL = pluggy.HookimplMarker("localharness")
 
+_log = logging.getLogger(__name__)
+
 
 class HarnesHookSpec:
-    """Pluggy hook specifications for LocalHarness.
+    """The two tool hooks — the only pluggy hooks LocalHarness keeps (PRD decision 6). A plugin's
+    lifecycle (configure / tools / start / stop) comes from plugins/api.Plugin, not from pluggy.
 
-    All hooks are optional. Plugin implementations may implement any subset.
+    Implementations are plain functions, each called on its own and synchronously: an exception is
+    caught and logged under the implementing plugin's name (PAPI-11). pluggy wrapper
+    implementations are not supported and are skipped with a warning.
     """
 
     @HARNESS_HOOKSPEC
@@ -30,8 +36,8 @@ class HarnesHookSpec:
     ) -> None:
         """Called before a tool's run() method is invoked.
 
-        Implementations MAY raise ToolVetoed to prevent execution.
-        Any other exception is swallowed (plugins must not crash the harness).
+        Implementations MAY raise ToolVetoed to prevent execution. Any other exception is caught,
+        logged with the plugin's name, and the call goes on.
         """
 
     @HARNESS_HOOKSPEC
@@ -45,64 +51,50 @@ class HarnesHookSpec:
     ) -> None:
         """Called after a tool's run() method returns. Observability only.
 
-        Exceptions raised here are caught and ignored.
+        An exception here (ToolVetoed included) is caught and logged with the plugin's name; the
+        tool's result is unchanged.
         """
-
-    @HARNESS_HOOKSPEC
-    def on_agent_start(
-        self,
-        agent_id: str,
-        division_id: str,
-        task: str,
-        iteration_budget: int,
-    ) -> None:
-        """Called once when an agent loop starts a new turn."""
-
-    @HARNESS_HOOKSPEC
-    def on_agent_end(
-        self,
-        agent_id: str,
-        division_id: str,
-        summary: str,
-        iterations_used: int,
-        success: bool,
-        error: str | None,
-    ) -> None:
-        """Called once when an agent loop ends (success or failure)."""
-
-    @HARNESS_HOOKSPEC
-    def on_event(
-        self,
-        event_type: str,
-        event_data: dict[str, Any],
-        agent_id: str | None,
-    ) -> None:
-        """Called for every event emitted on the event bus."""
 
 
 class HookSystem:
-    """Manages plugin discovery, registration, and hook dispatch.
+    """Registers pre_tool / post_tool implementations and calls them from ToolRegistry.dispatch.
 
-    Instantiated once at harness startup. Wire to a ToolRegistry via
-    wire_to_registry() after all plugins are registered.
+    pluggy is kept ONLY for these two tool hooks (PRD decision 6); plugins get their lifecycle
+    through plugins/api.Plugin. Instantiated once at harness startup; wire_to_registry() connects
+    it to a ToolRegistry, and implementations registered afterwards are called too.
     """
 
     def __init__(self) -> None:
         self.pm = pluggy.PluginManager("localharness")
         self.pm.add_hookspecs(HarnesHookSpec)
-        self._loaded_plugins: list[str] = []
 
-    def register_plugin(self, plugin: object) -> None:
-        """Register a hook implementation instance (dedup-safe)."""
+    def register_plugin(self, plugin: object, name: str | None = None) -> None:
+        """Register a hook implementation object (dedup-safe). Pass `name` — a plugin passes its own
+        plugin name — so a hook that raises is reported under it rather than an object id."""
         if not self.pm.is_registered(plugin):
-            self.pm.register(plugin)
+            self.pm.register(plugin, name=name)
 
-    def register_impl(self, instance: object, name: str) -> None:
-        """Register a hook implementation by name (used by PluginLoader)."""
-        if self.pm.is_registered(instance):
-            return
-        self.pm.register(instance, name=name)
-        self._loaded_plugins.append(name)
+    def _call_each(self, hook_name: str, *, veto: bool, **kwargs: Any) -> None:
+        """Call every implementation of `hook_name` separately (PAPI-11): an exception is caught and
+        attributed — by pluggy plugin name and the implementation's module — instead of being
+        swallowed whole, as the single pm.hook.<name>(...) call did. ToolVetoed propagates from
+        pre_tool only. Order matches pluggy's own call order (last registered first)."""
+        for impl in reversed(getattr(self.pm.hook, hook_name).get_hookimpls()):
+            where = getattr(impl.function, "__module__", "?")
+            if impl.wrapper or impl.hookwrapper:
+                _log.warning("%s hook from plugin %r (%s) is a pluggy wrapper — not supported, skipped",
+                             hook_name, impl.plugin_name, where)
+                continue
+            try:
+                impl.function(**{a: kwargs[a] for a in impl.argnames if a in kwargs})
+            except ToolVetoed:
+                if veto:
+                    raise
+                _log.warning("%s hook from plugin %r (%s) raised ToolVetoed — only pre_tool can veto",
+                             hook_name, impl.plugin_name, where)
+            except Exception:
+                _log.warning("%s hook from plugin %r (%s) raised — ignored, the tool call goes on",
+                             hook_name, impl.plugin_name, where, exc_info=True)
 
     def wire_to_registry(self, registry: "ToolRegistry") -> None:
         """Connect pluggy hook dispatch to ToolRegistry pre/post hook lists."""
@@ -110,83 +102,18 @@ class HookSystem:
         async def pre_hook_caller(
             name: str, arguments: dict, agent_id: str, **kwargs: Any
         ) -> None:
-            division_id = kwargs.get("division_id", "default")
-            try:
-                self.pm.hook.pre_tool(
-                    name=name,
-                    arguments=arguments,
-                    agent_id=agent_id,
-                    division_id=division_id,
-                )
-            except ToolVetoed:
-                raise
-            except Exception:
-                pass
+            self._call_each(
+                "pre_tool", veto=True, name=name, arguments=arguments, agent_id=agent_id,
+                division_id=kwargs.get("division_id", "default"),
+            )
 
         async def post_hook_caller(
             name: str, arguments: dict, result: Any, agent_id: str, **kwargs: Any
         ) -> None:
-            division_id = kwargs.get("division_id", "default")
-            try:
-                self.pm.hook.post_tool(
-                    name=name,
-                    arguments=arguments,
-                    result=result,
-                    agent_id=agent_id,
-                    division_id=division_id,
-                )
-            except Exception:
-                pass
+            self._call_each(
+                "post_tool", veto=False, name=name, arguments=arguments, result=result,
+                agent_id=agent_id, division_id=kwargs.get("division_id", "default"),
+            )
 
         registry.register_pre_hook(pre_hook_caller)
         registry.register_post_hook(post_hook_caller)
-
-    def call_agent_start(
-        self, agent_id: str, division_id: str, task: str, iteration_budget: int
-    ) -> None:
-        try:
-            self.pm.hook.on_agent_start(
-                agent_id=agent_id,
-                division_id=division_id,
-                task=task,
-                iteration_budget=iteration_budget,
-            )
-        except Exception:
-            pass
-
-    def call_agent_end(
-        self,
-        agent_id: str,
-        division_id: str,
-        summary: str,
-        iterations_used: int,
-        success: bool,
-        error: str | None,
-    ) -> None:
-        try:
-            self.pm.hook.on_agent_end(
-                agent_id=agent_id,
-                division_id=division_id,
-                summary=summary,
-                iterations_used=iterations_used,
-                success=success,
-                error=error,
-            )
-        except Exception:
-            pass
-
-    def call_on_event(
-        self, event_type: str, event_data: dict, agent_id: str | None
-    ) -> None:
-        try:
-            self.pm.hook.on_event(
-                event_type=event_type,
-                event_data=event_data,
-                agent_id=agent_id,
-            )
-        except Exception:
-            pass
-
-    @property
-    def loaded_plugin_names(self) -> list[str]:
-        return list(self._loaded_plugins)

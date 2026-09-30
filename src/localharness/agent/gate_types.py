@@ -1,10 +1,11 @@
 """Shared vocabulary for the permission gate.
 
 Implements the data half of PRD §3 (``.planning/2026-09-11-zed-acp-and-permission-spine-prd.md``).
-Pure data: no I/O and no imports from the loop, tools, or channels, so the shell classifier
-(``agent/shell_classify``), the verdict (``agent/verdict``), the grant store (``config/grants``),
-the effectful gate (``agent/gate``) and every channel renderer share one vocabulary without
-import cycles.
+Pure data: no I/O and no imports from the loop, the tool registry, or channels, so the shell
+classifier (``agent/shell_classify``), the verdict (``agent/verdict``), the grant store
+(``config/grants``), the effectful gate (``agent/gate``) and every channel renderer share one
+vocabulary without import cycles. The one import from ``tools`` is ``GateFamily``, which lives
+beside ``ToolSchema`` in ``tools/base.py`` — a module that never imports the agent package.
 
 Every default rule set below is a named value with its source. None of them is a bare
 constant: the sets are the enumerated policy the PRD ratified, and each is overridable from
@@ -17,6 +18,8 @@ import itertools
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Literal
+
+from localharness.tools.base import GateFamily
 
 # --------------------------------------------------------------------------- modes
 
@@ -292,6 +295,10 @@ class ToolMeta:
     group: str = "other"
     is_mcp: bool = False
     mcp_server: str | None = None
+    gate_family: GateFamily | None = None
+    """The tool's own declared gate family (``ToolSchema.gate_family``, SAFE-01) — what the verdict
+    classifies a tool by when it does not know it by name. ``group`` is not a gate input; it is
+    read only for the ``mcp/`` marker. None means undeclared: the ``tool-unfamiliar`` ask."""
 
 
 # --------------------------------------------------------------------------- shell

@@ -46,6 +46,7 @@ from localharness.agent.gate_types import (
 from localharness.agent.permissions import PermissionResult
 from localharness.agent.verdict import DenyFn, GateContext, derive_boundary, evaluate
 from localharness.config.grants import GrantStore, new_grant, new_refusal
+from localharness.tools.base import GATE_FAMILIES
 
 log = logging.getLogger(__name__)
 
@@ -309,13 +310,17 @@ def deny_fn_from(evaluator: Any, permissions: Any) -> DenyFn:
 
 
 def tool_meta_from_schema(schema: Any, *, mcp_server: Optional[str] = None) -> ToolMeta:
-    """The verdict's view of a tool, read off its ``ToolSchema`` (A3's taxonomy, PRD §6).
+    """The verdict's view of a tool, read off its ``ToolSchema`` (SAFE-01, PRD §6).
 
-    ``destructive`` and ``group`` come straight from the schema. MCP-ness is derived from the
-    group prefix (:data:`MCP_GROUP_PREFIX`); ``mcp_server`` overrides it for a caller that
-    already holds the server name.
+    ``destructive`` comes straight from the schema, and ``gate_family`` is the tool's own family
+    declaration — the only thing the verdict classifies an unknown-by-name tool by. A value outside
+    :data:`~localharness.tools.base.GATE_FAMILIES` (a duck-typed schema bypasses ToolSchema's
+    validator) is dropped to None, which asks. ``group`` is read only for the ``mcp/`` marker:
+    MCP-ness is derived from the group prefix (:data:`MCP_GROUP_PREFIX`); ``mcp_server``
+    overrides it for a caller that already holds the server name.
     """
     group = getattr(schema, "group", None) or "other"
+    family = getattr(schema, "gate_family", None)
     server = mcp_server
     is_mcp = bool(server) or group.startswith(MCP_GROUP_PREFIX)
     if is_mcp and not server:
@@ -325,6 +330,7 @@ def tool_meta_from_schema(schema: Any, *, mcp_server: Optional[str] = None) -> T
         group=group,
         is_mcp=is_mcp,
         mcp_server=server,
+        gate_family=family if isinstance(family, str) and family in GATE_FAMILIES else None,
     )
 
 

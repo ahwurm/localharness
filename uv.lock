@@ -1185,7 +1185,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/c1/2f/46487e949da42b318
 
 [[package]]
 name = "localharness"
-version = "0.14.1"
+version = "0.15.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -1238,6 +1238,11 @@ web = [
     { name = "uvicorn" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "localharness-plugin-example" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "agent-client-protocol", specifier = ">=0.12,<0.13" },
@@ -1276,6 +1281,26 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.30,<1" },
 ]
 provides-extras = ["dispatch", "embeddings", "exact-tokenizer", "json-repair", "web", "dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "localharness-plugin-example", editable = "examples/plugin-template" }]
+
+[[package]]
+name = "localharness-plugin-example"
+version = "0.1.0"
+source = { editable = "examples/plugin-template" }
+dependencies = [
+    { name = "localharness" },
+    { name = "pydantic" },
+    { name = "typer" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "localharness", specifier = ">=0.15,<1" },
+    { name = "pydantic", specifier = ">=2.13,<3" },
+    { name = "typer", specifier = ">=0.25,<1" },
+]
 
 [[package]]
 name = "lxml"

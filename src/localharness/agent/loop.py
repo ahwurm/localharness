@@ -27,6 +27,7 @@ from localharness.agent.gate import (
 )
 from localharness.agent.gate_types import GateOutcome, ToolMeta
 from localharness.core.types import Message
+from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
 
 log = logging.getLogger("localharness.agent.loop")
@@ -34,7 +35,7 @@ log = logging.getLogger("localharness.agent.loop")
 UNKNOWN_TOOL_META = ToolMeta(group="other", destructive=True)
 """What the gate is told about a tool whose schema could not be read (`_tool_facts`).
 
-Fail closed: `group="other"` is no known family, so `verdict.evaluate` raises a grantable
+Fail closed: it has no declared gate family, so `verdict.evaluate` raises a grantable
 `tool-unfamiliar` ask keyed on the tool name, and `destructive=True` keeps it out of read-only
 mode. The previous neutral `ToolMeta()` landed such a call in the ALLOW tier — the one place an
 unreadable schema must never put it."""
@@ -928,6 +929,8 @@ class AgentLoop:
         session_id: str | None = None,
         config_dir: Path | None = None,
         gate: Any = None,  # PermissionGate
+        guardrails_path: Path | None = None,
+        memory_slot: Any = None,  # plugins.slot.MemorySlot
     ) -> None:
         self._config = config
         self._llm = llm
@@ -968,6 +971,15 @@ class AgentLoop:
             permissions=getattr(config, "permissions", None), deny=self._deny_fn, bus=bus
         )
         self._memory = memory_loader
+        # The org's safety voice (SAFE-04). Read by CORE every turn from the GLOBAL config dir —
+        # never the workspace, never the agent state dir — and injected whether or not memory is
+        # on. start_cmd passes it; subagents and bench pass nothing and get none, exactly as before.
+        self._guardrails_path = guardrails_path
+        self._guardrails_warned = False
+        # PAPI-04's consumer seam: the memory slot, asked for its per-turn section right after the
+        # guardrails. None or an empty slot adds no section. The legacy memory block below stays
+        # until memory converts into the slot's occupant.
+        self._memory_slot = memory_slot
         # v0.13 MEMS-02: scope-aware READ handle (memory/router.py). `self._memory` stays the
         # session's own store and keeps every write and trace below; only the ambient-context
         # READ goes through the router. None = no router (bench, subagents, tests) -> today's path.
@@ -1009,6 +1021,24 @@ class AgentLoop:
         self._sitting_session_id = session_id
         self._current_session_id: str | None = session_id
         self._conversation: list[Message] = []
+
+    def _read_guardrails(self) -> str:
+        """GUARDRAILS.md's text for this turn, or "" when there is none (SAFE-04). Re-read every
+        turn, so an edit reaches the next one. No file is the common case and stays silent; a
+        file that exists but cannot be read is named once, and never takes the turn down."""
+        path = self._guardrails_path
+        if path is None:
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return ""
+        except (OSError, UnicodeError) as exc:
+            if not self._guardrails_warned:
+                self._guardrails_warned = True
+                log.warning("GUARDRAILS.md at %s could not be read (%r) — no guardrails while it "
+                            "stays unreadable", path, exc)
+            return ""
 
     def _resolve_compact_md_path(self) -> Path | None:
         """This loop's compact.md, or None when it has none.
@@ -1307,7 +1337,7 @@ class AgentLoop:
             context_overflow_limit,
             is_context_overflow,
         )
-        from localharness.core.events import Action, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered, IMAGE_ID_RE
+        from localharness.core.events import Action, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
         self._presence_penalty_next = None  # a degenerate retry's penalty lasts one turn
 
         budget = BudgetTracker(
@@ -1355,6 +1385,22 @@ class AgentLoop:
                 "\n\nWhen you have finished using tools, respond directly to the user. "
                 "Be concise — give the answer, not your reasoning process."
             )
+        # SAFE-04: OUTSIDE the memory block, so memory off — or a memory failure — can never turn
+        # the safety rules off with it. Same place and separator the memory block's join used, so
+        # with memory on the prompt is byte-identical to before.
+        guardrails = self._read_guardrails()
+        if guardrails:
+            system_prompt += "\n\n## Guardrails\n" + guardrails
+        slot = self._memory_slot
+        if slot is not None and slot.occupied:
+            _slot_cfg = getattr(self._config, "memory", None)
+            contribution = await slot.context(task, ContextBudget(
+                max_chars=getattr(_slot_cfg, "max_notes_chars", 16_000),
+                max_session_history=getattr(_slot_cfg, "max_session_history_entries", 8),
+            ))
+            for heading, body in contribution.sections:
+                if body:
+                    system_prompt += f"\n\n## {heading}\n{body}"
         if self._memory is not None:
             try:
                 # Default provenance for this session's writes (WRITE-04).
@@ -1373,8 +1419,6 @@ class AgentLoop:
                     max_chars=getattr(_mem_cfg, "max_notes_chars", 16_000),
                 )
                 parts = [system_prompt]
-                if ctx.guardrails_md:
-                    parts.append("## Guardrails\n" + ctx.guardrails_md)
                 if ctx.division_md:
                     parts.append("## Division Context\n" + ctx.division_md)
                 if ctx.agent_memory_md:
@@ -2072,7 +2116,6 @@ class AgentLoop:
                 is_error = False
                 result_truncated = False
                 original_length: int | None = None
-                image_id: str | None = None
                 if self._tools is not None:
                     try:
                         result = await self._tools.dispatch(
@@ -2094,13 +2137,6 @@ class AgentLoop:
                         if result.success and result.truncated:
                             result_truncated = True
                             original_length = result.original_length
-                        # Image artifacts cross the wire ONLY as a shape-checked id in this
-                        # typed field (clients build the /api/images URL from it, never from
-                        # result text). The fullmatch drops anything a tool's metadata tries
-                        # to smuggle — a path, markup, someone else's filename.
-                        candidate = result.metadata.get("image_id") if result.success else None
-                        if isinstance(candidate, str) and IMAGE_ID_RE.fullmatch(candidate):
-                            image_id = candidate
                     except Exception as exc:
                         result_content = f"Error: {exc}"
                         is_error = True
@@ -2128,7 +2164,6 @@ class AgentLoop:
                     truncated=result_truncated,
                     original_length=original_length if result_truncated else len(result_content),
                     error=result_content if is_error else None,
-                    image_id=image_id,
                 ))
 
                 stuck_detector.record(tool_call.name, tool_call.arguments)

@@ -209,12 +209,33 @@ Tools run where the harness runs, and `bash_exec` always launches a real bash �
 | `config migrate` | Fold new shipped security defaults into an existing config — also auto-applied on the first `start` after an upgrade (revision-stamped, additive, backed up) |
 | `validate` | Validate agent/org YAML |
 | `model` | List served/downloaded models, switch the persisted default, or `--download <repo_id>` (optionally `--file <name>`) a model from Hugging Face |
+| `update` | Upgrade LocalHarness to the latest release on PyPI (`--check` only reports whether one is available) |
 | `agent …` | Manage agent definitions |
+| `memory …` | Browse and edit the agent's persistent memory (list / show / edit / rm / archive / restore) |
 | `bench …` | Run the scenario benchmark |
 | `components …` | Autoresearch component registry |
+| `plugins …` | See, enable and disable plugins (`list`, `info`, `enable`, `disable`) — see [Plugins](#plugins) |
 | `autoresearch …` | Run the self-improvement loop |
 | `experiment …` | Gated experiment runs |
 | `propose` | Propose a harness mutation |
+
+## Plugins
+
+A plugin adds tools, commands, slash commands and `doctor` checks. No built-in feature ships as a
+plugin yet. LocalHarness finds plugins in two places on your machine: installed packages that
+declare a `localharness.plugins` entry point, and folders `~/.localharness/plugins/<name>/`. It
+loads a plugin's code only once you turn that plugin on. Install a plugin package into the same
+Python environment as LocalHarness:
+
+- if you installed LocalHarness with `uv tool`: `uv tool install --with <package> localharness`.
+  Each run replaces the install's plugins and extras with the ones it names, so name your extras
+  too (`'localharness[web]'`) and add a `--with` for every plugin you keep.
+- in a virtual environment: activate it and run `uv pip install <package>`.
+
+`localharness plugins list` shows what was found; `localharness plugins enable <name>` turns one on.
+Enabling a plugin you installed is a machine-level setting, and it is you vouching for what its
+tools say they do ([SECURITY.md](https://github.com/ahwurm/localharness/blob/main/SECURITY.md#plugins)).
+To write one, copy [the example plugin](https://github.com/ahwurm/localharness/tree/main/examples/plugin-template).
 
 ## Testing
 

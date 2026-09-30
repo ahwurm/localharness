@@ -21,16 +21,16 @@ Three properties this file is responsible for, each closing a critic finding fro
 ``read-only`` mode is decided ONCE, before the branches (:func:`_read_only_denies`), over the
 kinds PRD §3.4 enumerates (write-shaped, non-read-only shell, code, delegate) plus anything a
 tool schema marks ``destructive``. Known gap, named rather than hidden: a tool that mutates
-without setting that flag — an MCP tool, a plugin's — is gated only by its once-per-tool ask,
-not by read-only mode. The flag is the only thing a tool says about itself, so a tool that
-misdescribes itself is believed.
+without setting that flag — an MCP tool, a plugin's — is gated only by the branch its declared
+``gate_family`` selects (undeclared: a once-per-tool ask), not by read-only mode. The flag and the
+family are what a tool says about itself, so a tool that misdescribes itself is believed.
 """
 from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 from urllib.parse import urlparse
 
 from localharness.agent.gate_types import (
@@ -49,6 +49,7 @@ from localharness.agent.gate_types import (
 )
 from localharness.agent.permissions import PermissionResult
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir
+from localharness.tools.base import GateFamily
 
 GrantLookup = Callable[[Path, str, str], Optional[Grant]]
 """``(workspace, klass, key) -> Grant | None`` — ``config.grants.GrantStore.lookup`` in
@@ -111,10 +112,11 @@ WRITE_TOOL_PATH_PARAMS: dict[str, str] = {"write": "path", "edit": "path"}
 ``tools/builtin/write_tool.py:44`` and ``edit_tool.py:48``. Not guessed — the exact keys."""
 
 WRITE_PATH_PARAM_CANDIDATES: tuple[str, ...] = ("path", "file_path")
-"""Fallback order for a NON-builtin tool that declares ``group="fs.write"`` (A3's taxonomy):
+"""Fallback order for a NON-builtin tool that declares ``gate_family="write"`` (SAFE-01):
 ``path`` is this project's convention, ``file_path`` the common one elsewhere. A plugin whose
-write tool names its target anything else is classified by its group but has no resolvable
-target, which lands it in the unresolvable branch — treated as outside (PRD §3.2 step 8)."""
+write tool names its target anything else is classified by its declared family but has no
+resolvable target, which lands it in the unresolvable branch — treated as outside (PRD §3.2
+step 8)."""
 
 SHELL_COMMAND_PARAMS: dict[str, str] = {"bash_exec": "command"}
 """``tools/builtin/bash_tool.py:218`` — the one opaque string PRD §3.2 parses."""
@@ -142,33 +144,26 @@ DELEGATE_TOOLS: frozenset[str] = frozenset({"agent"})
 """PRD §3.1 ``delegate`` class (``tools/builtin/agent_tool.py:36``). A subagent's own calls pass
 this same gate, so the dispatch asks once and the child's boundary crossings still surface."""
 
-KIND_BY_GROUP: dict[str, str] = {
-    "fs.write": "write",
-    "shell": "shell",
-    "code": "code",
-    "delegate": "delegate",
-    "web": "network",
-    "fs.read": "allow",
-    "memory": "allow",
-}
-"""Fallback classification by ``ToolSchema.group`` (A3, PRD §6) for tools this module does not
-know by name — a plugin's or a future builtin's. Names win when known, because a name pins the
-exact parameter to read; groups are the open extension point.
-
-The map is CLOSED: the read tiers (``fs.read``, ``memory``) are listed explicitly, so a group
-that is not here — ``other``, the ``ToolSchema.group`` default, or anything a plugin invents — is
-a family the gate has no rules for and lands in :data:`UNFAMILIAR_TOOL_KIND` rather than in ALLOW.
-The old ``.get(group, "allow")`` default meant every plugin tool, and every tool whose schema
-lookup failed, ran unasked even with ``destructive=True`` on its schema."""
+NAME_CLASSIFIED_TOOLS: frozenset[str] = frozenset({
+    *WRITE_TOOL_PATH_PARAMS, *SHELL_COMMAND_PARAMS, *CODE_EXEC_TOOLS, *DELEGATE_TOOLS,
+    *NETWORK_URL_PARAMS,
+})
+"""Tools :func:`_kind` classifies by NAME before reading any declaration. A plugin may not
+contribute a tool with one of these names: the name would decide its class instead of its
+declaration (CORE-04), and ``agent`` is registered after plugins load, so a plugin holding that
+name would break startup."""
 
 MCP_GROUP_PREFIX = "mcp/"
 """``tools/mcp.py:81`` names every MCP tool's group ``mcp/<server>``. A call that carries one is
 judged on the MCP path even if ``ToolMeta.is_mcp`` did not survive the trip."""
 
 UNFAMILIAR_TOOL_KIND = "tool-unfamiliar"
-"""The branch for a tool in no known family: a grantable ask keyed on the tool NAME, so it is
-answered once per workspace and then remembered — the same shape as ``code-exec`` and
-``delegate``, which are also keyed by name."""
+"""The branch for a tool the gate does not know by name that declares no ``gate_family`` (None
+is the fail-closed default, and an unrecognised value is coerced to it): a grantable ask keyed on
+the tool NAME, so it is answered once per workspace and then remembered — the same shape as
+``code-exec`` and ``delegate``, which are also keyed by name. Undeclared never means the read
+tier — a declared ``allow`` is the only way in; what the ask then does is the mode's business
+(``guarded`` asks, ``auto`` runs anything off its blacklist)."""
 
 UNFAMILIAR_TOOL_REASON = "tool not in a known family; asks once per workspace"
 """What the human reads. It says what the gate knows (nothing about this tool) rather than
@@ -205,9 +200,9 @@ UNRESOLVABLE_TARGET_CHARS: tuple[str, ...] = ("$", "*", "?", "`")
 resolved at classification time, and "unresolvable targets are treated as outside"."""
 
 READ_ONLY_DENIED_KINDS: frozenset[str] = frozenset({"write", "code", "delegate"})
-"""PRD §3.4's read-only list, as branches of :func:`_kind`: write/edit (and anything in the
-``fs.write`` group), ``python_exec``/``cruncher_exec`` (and the ``code`` group), and subagent
-dispatch (the ``delegate`` group). Shell is judged per segment, not by kind
+"""PRD §3.4's read-only list, as branches of :func:`_kind`: write/edit (and any tool declaring
+the ``write`` family), ``python_exec``/``cruncher_exec`` (and the ``code`` family), and subagent
+dispatch (the ``delegate`` family). Shell is judged per segment, not by kind
 (:func:`_read_only_denies`), because most shell calls are reads."""
 
 READ_ONLY_DENY_REASON = "not permitted in read-only mode"
@@ -374,8 +369,15 @@ class GateContext:
 
 # ------------------------------------------------------------------- internals
 
-def _kind(tool_name: str, meta: ToolMeta) -> str:
-    """Which branch of PRD §3.1's tables this call belongs to."""
+def _kind(tool_name: str, meta: ToolMeta) -> GateFamily | Literal["mcp", "tool-unfamiliar"]:
+    """Which branch of PRD §3.1's tables this call belongs to.
+
+    MCP first; then the builtin NAME tables (they bind the exact parameter each rule reads —
+    bash_exec→command, web_fetch→url — and a test pins that each table's branch equals that
+    builtin's declared gate_family, so no table can contradict a declaration); then the tool's own
+    declared `gate_family`. An undeclared family is `tool-unfamiliar`: asked once per workspace in
+    `guarded`. `ToolSchema.group` is NOT a gate input — it is the exposure taxonomy, the ACP kind
+    and the `mcp/` marker only."""
     if meta.is_mcp:
         return "mcp"
     if tool_name in WRITE_TOOL_PATH_PARAMS:
@@ -388,10 +390,9 @@ def _kind(tool_name: str, meta: ToolMeta) -> str:
         return "delegate"
     if tool_name in NETWORK_URL_PARAMS:
         return "network"
-    group = meta.group or ""
-    if group.startswith(MCP_GROUP_PREFIX):
+    if (meta.group or "").startswith(MCP_GROUP_PREFIX):
         return "mcp"
-    return KIND_BY_GROUP.get(group, UNFAMILIAR_TOOL_KIND)
+    return meta.gate_family or UNFAMILIAR_TOOL_KIND
 
 
 def _write_target(tool_name: str, params: dict) -> Optional[str]:
@@ -879,7 +880,7 @@ def _target_asks(
 def _evaluate_write(
     tool_name: str, params: dict, ctx: GateContext, settings: GateSettings
 ) -> VerdictResult:
-    """``write`` / ``edit`` and any tool in the ``fs.write`` group (PRD §3.1).
+    """``write`` / ``edit`` and any tool declaring the ``write`` gate family (PRD §3.1).
 
     Read-only mode is handled up front in :func:`evaluate`, not here."""
     param = WRITE_TOOL_PATH_PARAMS.get(tool_name)
@@ -1114,9 +1115,9 @@ def _read_only_denies(
     refused when
 
     * its branch is one of :data:`READ_ONLY_DENIED_KINDS` — write, code, delegate — which covers
-      both the builtins by name and any tool declaring those groups; or
+      both the builtins by name and any tool declaring those families; or
     * the tool's own schema says ``destructive``. That flag is the only thing a tool can tell the
-      gate about itself, and read-only is where it has to count: ``remember`` mutates the memory
+      gate about whether it MUTATES, and read-only is where it has to count: ``remember`` mutates the memory
       store, so it carries the flag and is refused here.
 
     This used to be re-checked by hand inside each branch, and the branches disagreed: the
