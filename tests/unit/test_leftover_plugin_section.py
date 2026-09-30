@@ -13,15 +13,18 @@ nothing is bundled, so `example` belongs to no plugin.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 from typer.testing import CliRunner
 
 from localharness.cli.app import app
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.plugins import builtin, discovery
 from localharness.plugins.api import Plugin, PluginManifest
+from localharness.plugins.discovery import DiscoveredPlugin
 
 runner = CliRunner()
 _REAL_DISCOVER = discovery.discover
@@ -40,12 +43,23 @@ _HINT = f"not a LocalHarness setting, and no installed plugin is named `example`
 _AGENT_FILE_HINT = f"not an agent setting, and no installed plugin is named `example` — {_TAIL} this section"
 _OVERRIDES_AGENT_HINT = (f"not an agent setting, and no installed plugin is named `example` — {_TAIL} "
                          "`example:` under `agent:`")
+_FLOW_G = _LEFTOVER + "agent:\n  example:\n    size: 16\n"  # example: line 1, agent.example: line 5
+
+
+class ExampleConfig(BaseModel):
+    color: str = "#4a90d9"
+
+
+class ExampleAgentConfig(BaseModel):
+    size: int = 8
 
 
 class Example(Plugin):
     """the example plugin, installed again"""
 
     manifest = PluginManifest(name="example", version="0.1.0", kind="tools")
+    ConfigModel = ExampleConfig
+    AgentConfigModel = ExampleAgentConfig
 
 
 @pytest.fixture(autouse=True)
@@ -62,6 +76,19 @@ def g(tmp_path: Path) -> Path:
     g.mkdir()
     (g / "config.yaml").write_text(_CONFIG, encoding="utf-8")
     return g
+
+
+@pytest.fixture
+def old_g(tmp_path: Path) -> Path:
+    """Named `[old] g` so every path the plugins commands print is a markup guard."""
+    g = tmp_path / "[old] g"
+    g.mkdir()
+    (g / "config.yaml").write_text(_CONFIG, encoding="utf-8")
+    return g
+
+
+def _plugins(g: Path, *args: str):
+    return runner.invoke(app, ["plugins", *args, "--config-dir", str(g)])
 
 
 def _agent_file(g: Path, extra: str = "") -> Path:
@@ -197,3 +224,72 @@ def test_validate_names_overrides_for_an_agent_leftover(g) -> None:
     row = _squash(result.stdout[result.stdout.index("helper.yaml"):])
     assert f"in {g / 'overrides.yaml'}" in row, row
     assert f"Line 3: agent.example: {_OVERRIDES_AGENT_HINT}" in row, row
+
+
+# --------------------------------------------------------------------------- plugins list / info / disable
+
+
+@pytest.mark.parametrize("json_flag", [[], ["--json"]])
+def test_plugins_list_names_each_leftover_on_stderr(old_g, json_flag) -> None:
+    overrides = old_g / "overrides.yaml"
+    overrides.write_text(_FLOW_G, encoding="utf-8")
+
+    result = _plugins(old_g, "list", *json_flag)
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines() == [
+        f"⚠ `example:` in {overrides} (line 1): {_HINT}",
+        f"⚠ `agent.example` in {overrides} (line 5): {_OVERRIDES_AGENT_HINT}",
+    ]
+    if json_flag:
+        assert json.loads(result.stdout) == []
+    else:
+        assert result.stdout.startswith("No plugins"), result.stdout
+        assert "⚠" not in result.stdout and "no installed plugin" not in result.stdout
+
+
+def test_an_installed_plugins_sections_and_core_keys_are_never_leftovers(old_g, monkeypatch) -> None:
+    """Control: a bundled plugin's and an installed one's sections, at both levels, and core's own
+    keys are never named."""
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Example,))
+    monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [
+        DiscoveredPlugin("foo", "entry_point", "foo_pkg:P", "foo", "1")])
+    (old_g / "config.yaml").write_text(_CONFIG + "org:\n  log_level: info\nfoo:\n  color: red\n",
+                                       encoding="utf-8")
+    (old_g / "overrides.yaml").write_text(_FLOW_G + "  temperature: 0.5\n  foo:\n    size: 2\n",
+                                          encoding="utf-8")
+
+    result = _plugins(old_g, "list")
+
+    assert result.exit_code == 0, result.output
+    assert "no installed plugin" not in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("verb", ["disable", "info", "enable"])
+def test_a_removed_plugins_name_says_where_its_settings_are_and_the_fix(old_g, verb) -> None:
+    overrides = old_g / "overrides.yaml"
+    overrides.write_text(_FLOW_G, encoding="utf-8")
+
+    result = _plugins(old_g, verb, "example")
+
+    assert result.exit_code == 2, result.output
+    assert result.stderr.splitlines() == [
+        "Error: Unknown plugin: 'example' — no installed plugin has that name, but its settings are "
+        "still here:",
+        f"  `example:` in {overrides} (line 1)",
+        f"  `agent.example` in {overrides} (line 5)",
+        "Delete them, or reinstall the plugin. Run `localharness plugins list` to see the plugins "
+        "installed here.",
+    ]
+    assert overrides.read_text(encoding="utf-8") == _FLOW_G
+
+
+def test_an_unknown_name_with_no_leftover_keeps_the_plain_message(old_g) -> None:
+    """Pin: another plugin's leftovers are not this name's."""
+    (old_g / "overrides.yaml").write_text(_FLOW_G, encoding="utf-8")
+
+    result = _plugins(old_g, "disable", "nope")
+
+    assert result.exit_code == 2, result.output
+    assert result.stderr.strip() == ("Error: Unknown plugin: 'nope'. Run `localharness plugins list` "
+                                     "to see the plugins installed here.")

@@ -127,13 +127,44 @@ def _cells(line: str) -> list[str]:
 
 
 def test_list_with_nothing_installed(g, monkeypatch) -> None:
+    """QA-13: a PyPI install has no examples/ folder, so the hint says where it looked and gives the
+    example's URL."""
     monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", ())
 
     human, machine = _plugins(g, "list"), _plugins(g, "list", "--json")
 
     assert human.exit_code == 0, human.output
-    assert human.stdout.strip() == "No plugins installed — to write one, copy examples/plugin-template/."
+    assert human.stdout.strip() == (
+        f"No plugins found in this Python environment ({sys.prefix}) or in {g / 'plugins'}/. "
+        "To write one, copy the example plugin: "
+        "https://github.com/ahwurm/localharness/tree/main/examples/plugin-template")
     assert machine.exit_code == 0 and json.loads(machine.stdout) == []
+
+
+def test_plugins_help_shows_each_summary_as_one_whole_sentence(monkeypatch) -> None:
+    """QA-15: typer keeps a docstring's line break inside a command's summary row, so a summary that
+    wrapped in the source broke mid-sentence in `plugins --help`. The details are kept, in each
+    command's own help."""
+    monkeypatch.setenv("COLUMNS", "200")
+
+    lines = _cli("plugins", "--help").stdout.splitlines()
+    top = next(i for i, line in enumerate(lines) if "Commands" in line)
+    panel = lines[top + 1:next(i for i in range(top, len(lines)) if lines[i].startswith("╰"))]
+
+    assert [_cells(line.strip("│ ")) for line in panel] == [
+        ["list", "Every plugin: what it does, whether it is on (and how to turn it on), and where it "
+                 "is from."],
+        ["info", "One plugin: its state, what it adds, and every setting it owns."],
+        ["enable", "Turn a plugin on."],
+        ["disable", "Turn a plugin off."],
+    ]
+    for command, fact in (
+            ("info", "The settings are the rows `components list` marks `(plugin: NAME)`."),
+            ("enable", "Writes an overrides.yaml, never your config.yaml; takes effect on the next "
+                       "`localharness start`."),
+            ("disable", "Writes an overrides.yaml, never your config.yaml; takes effect on the next "
+                        "`localharness start`.")):
+        assert fact in " ".join(_cli("plugins", command, "--help").stdout.split()), command
 
 
 def test_list_shows_name_what_it_does_state_and_from(g, sentinels) -> None:
