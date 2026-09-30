@@ -17,6 +17,7 @@ from localharness.cli.experiment_cmd import experiment_app
 from localharness.cli.init_cmd import init_app
 from localharness.cli.memory_cli import memory_app
 from localharness.cli.model_cmd import model
+from localharness.cli.plugin_mount import PluginCommandGroup
 from localharness.cli.plugins_cmd import plugins_app
 from localharness.cli.propose_cmd import propose
 # report_cmd registers `report`/`sentinel` on autoresearch_app at import time (sibling commands).
@@ -33,6 +34,8 @@ app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
     context_settings={"help_option_names": ["-h", "--help"]},
+    # PAPI-06: an ON plugin's commands are listed from its manifest and imported only when run.
+    cls=PluginCommandGroup,
 )
 
 app.command("init")(init_app)
