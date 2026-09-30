@@ -9,16 +9,20 @@ real `localharness start` does with a plugin, not what a helper would do if some
 """
 from __future__ import annotations
 
+import re
+import sys
 from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
 from localharness.cli.slash_commands import all_rows, find_row, set_plugin_rows
+from localharness.cli.theme import entity
 from localharness.plugins.api import Plugin, PluginManifest, PluginPaths, SlashDescriptor
+from localharness.plugins.discovery import DiscoveredPlugin
 from localharness.plugins.slot import MemorySlot
 from localharness.tools.base import Tool, ToolResult, ToolSchema
-from localharness.tools.hooks import HARNESS_HOOKIMPL
+from localharness.tools.hooks import HARNESS_HOOKIMPL, HookSystem
 from tests.unit.test_start_cmd import _capture_start_console, _read_sessions, _stub_start_boundaries
 
 EVENTS: list[str] = []
@@ -91,6 +95,26 @@ class _Ingests(Plugin):
 
     async def tools(self, ctx: Any) -> list:
         return [_UndeclaredTool()]
+
+
+class _ReaderTool(Tool):
+    """Declares ingest untrusted (it reads outside content) and host safe."""
+
+    def info(self) -> ToolSchema:
+        return ToolSchema(name="probe_read", description="Read.", parameters={},
+                          ingest="untrusted", host="safe", result_origin="untrusted")
+
+    async def _execute(self, **_: Any) -> ToolResult:
+        return self.ok("")
+
+
+class _Reads(Plugin):
+    """a bundled test plugin whose one tool declares ingest: untrusted"""
+
+    manifest = PluginManifest(name="reads", version="1", kind="tools")
+
+    async def tools(self, ctx: Any) -> list:
+        return [_ReaderTool()]
 
 
 class _Size(BaseModel):
@@ -329,3 +353,102 @@ def test_the_start_stub_turns_discovery_off_unless_real_plugins(tmp_path):
     with pytest.MonkeyPatch.context() as mp:
         _stub_start_boundaries(tmp_path, mp, real_plugins=True)
         assert discovery.discover is real
+
+
+# ------------------------------------------------------------------ Task 2: what the operator sees
+
+
+def _discovers(monkeypatch, *names: str) -> None:
+    """Third-party plugins installed but not enabled: metadata only, each naming a module that does
+    not exist, so any attempt to import one fails loudly."""
+    found = [DiscoveredPlugin(n, "entry_point", f"{n.replace('-', '_')}:Plugin", n, "0.3.1") for n in names]
+    monkeypatch.setattr("localharness.plugins.discovery.discover", lambda global_config_dir: found)
+
+
+async def test_the_banner_names_the_loaded_plugins_right_after_the_summary(tmp_path, monkeypatch):
+    """ENAB-04: one line naming what loaded, directly under the startup summary line."""
+    from localharness.cli.start_cmd import _start_async
+
+    printed = _capture_start_console(monkeypatch)
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _bundle(monkeypatch, _Probe, _Settled)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    i = printed.index(_summary(printed))
+    assert printed[i + 1] == "  " + entity("tool", "Plugins: probe, settled")
+
+
+async def test_one_available_plugin_gets_the_exact_enable_command(tmp_path, monkeypatch):
+    """ENAB-04 / PRD §4: an installed plugin that is not enabled is named once, with the command that
+    turns it on, and is never imported."""
+    from localharness.cli.start_cmd import _start_async
+
+    printed = _capture_start_console(monkeypatch)
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _discovers(monkeypatch, "lh-exa")
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert ("i 1 plugin available, not enabled: lh-exa — run `localharness plugins enable lh-exa` "
+            "to turn it on") in printed
+    assert "lh_exa" not in _summary(printed) and "lh-exa" not in _summary(printed), \
+        "nothing may have tried to import it"
+    assert "lh_exa" not in sys.modules
+    rows = _read_sessions(tmp_path)
+    assert len(rows) == 1 and rows[0][3] == "complete"
+
+
+async def test_several_available_plugins_share_one_line(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+
+    printed = _capture_start_console(monkeypatch)
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _discovers(monkeypatch, "a", "b")
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert ("i 2 plugins available, not enabled: a, b — run `localharness plugins enable <name>` "
+            "to turn one on") in printed
+
+
+async def test_a_plugin_tool_the_floor_keeps_from_the_root_is_named(tmp_path, monkeypatch):
+    """A plugin tool the root capability floor strips is named in a startup warning, with its plugin
+    and why, instead of silently missing. The web verbs (core's) are stripped as always, unnamed."""
+    from localharness.cli.start_cmd import _start_async
+
+    printed = _capture_start_console(monkeypatch)
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _bundle(monkeypatch, _Ingests, _Reads)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    summary = _summary(printed)
+    assert ("capability floor: the root agent does not hold probe_fetch (plugin ingests) — it "
+            "declares no ingest, which counts as ingest: untrusted") in summary
+    assert ("capability floor: the root agent does not hold probe_read (plugin reads) — it declares "
+            "ingest: untrusted") in summary
+    assert summary.count("capability floor:") == 2
+
+
+async def test_with_no_plugins_the_banner_is_what_it_was(tmp_path, monkeypatch):
+    """Criterion 1's other half: nothing bundled and nothing installed prints no plugins line, no hint
+    and an unchanged counts segment, and nothing after the summary line."""
+    from localharness.cli.start_cmd import _start_async
+
+    printed = _capture_start_console(monkeypatch)
+    _stub_start_boundaries(tmp_path, monkeypatch)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    i = printed.index(_summary(printed))
+    assert re.fullmatch(r"\[dim\]\(\d+\.\ds startup\)\[/dim\] -- " + re.escape(entity("agent", "1 agent")),
+                        printed[i])
+    assert printed[i + 1:] == []
+
+
+def test_the_hook_system_keeps_no_plugin_bookkeeping():
+    """The legacy loader's name list and its registration verb are gone with it: HookSystem's public
+    surface is registering a hook object and wiring to a registry, and an instance holds only pluggy."""
+    assert {n for n in vars(HookSystem) if not n.startswith("_")} == {"register_plugin", "wire_to_registry"}
+    assert set(vars(HookSystem())) == {"pm"}
