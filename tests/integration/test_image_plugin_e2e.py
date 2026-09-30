@@ -246,3 +246,72 @@ def test_a_project_cannot_set_the_comfyui_address(tmp_path, monkeypatch, fake_ho
     assert info.exit_code == 0, info.output
     settings = {s["path"]: s for s in json.loads(info.stdout)["settings"]}
     assert settings["image.comfyui_url"]["current_value"] == "http://global.test", settings
+
+
+# --- criterion 3 (the rig side; the phone itself is the owner's checkpoint) ----------------------
+
+
+def test_image_on_end_to_end(tmp_path, monkeypatch, fake_home):
+    global_dir, _ = _machine(tmp_path, monkeypatch, fake_home)
+    enabled = _invoke("plugins", "enable", "image", "--set", "comfyui_url=http://comfy.test")
+    assert enabled.exit_code == 0, enabled.output
+    seen = _fake_comfy(monkeypatch)
+    s = _session(monkeypatch, turn="Draw a red square.",
+                 tool_args={"prompt": "a red square", "width": 512, "height": 512, "steps": 4, "seed": 7})
+    assert "generate_image" in s["tools"] and "generate_image" in s["calls"][0]
+    assert len(s["calls"]) == 2 and s["answer"] == "Done."
+    assert seen[0] == "POST /prompt" and "GET /view" in seen
+    # a. exactly one Observation for the tool, carrying a core-minted image artifact
+    (obs,) = [o for o in s["observations"] if o.get("tool_name") == "generate_image"]
+    art = obs["artifact"]
+    assert (art["plugin"], art["kind"], art["mime"]) == ("image", "image", "image/png"), art
+    assert ARTIFACT_ID_RE.fullmatch(art["id"]), art
+    assert f"artifact {art['id']}" in obs["output"], obs["output"]
+    # b. the file is in the core-computed root under the session's state dir (the global dir here)
+    png = global_dir / "artifacts" / "image" / f"{art['id']}.png"
+    assert png.read_bytes() == PNG, f"no PNG at {png}"
+    # c. the generic route serves exactly those bytes, immutable
+    got = s["get"]
+    assert got.status_code == 200, got.status_code
+    assert (got.content, got.headers["cache-control"]) == (PNG, IMMUTABLE)
+    # d. the page, fed the frame the channel queued for the phone, draws one img from that route
+    if shutil.which("node") is None:
+        pytest.skip("no JS engine on this box: the page half of this test cannot run")
+    drawn = _drive(PAGE.read_text(encoding="utf-8"),
+                   HELLO + f"onEvent(\"Observation\", {json.dumps(obs)});" + FIND_IMAGES, tmp_path)
+    assert [(d["cls"], d["src"]) for d in drawn] == [("genimg", f"/api/artifacts/image/{art['id']}")], drawn
+    # e. offline: _session asserted every dial went to the discard port; ComfyUI was MockTransport
+
+
+def test_generate_image_command_writes_a_png(tmp_path, monkeypatch, fake_home):
+    _machine(tmp_path, monkeypatch, fake_home)
+    assert _invoke("plugins", "enable", "image", "--set", "comfyui_url=http://comfy.test").exit_code == 0
+    seen = _fake_comfy(monkeypatch)
+    out = tmp_path / "sq.png"
+    ran = _invoke("generate-image", "a red square", "--out", str(out))
+    assert ran.exit_code == 0, ran.output
+    assert out.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert "POST /prompt" in seen
+
+
+def test_doctor_reports_reachable_and_unreachable(tmp_path, monkeypatch, fake_home):
+    from localharness.cli import doctor_cmd
+
+    _machine(tmp_path, monkeypatch, fake_home)
+    assert _invoke("plugins", "enable", "image", "--set", "comfyui_url=http://comfy.test").exit_code == 0
+    recorded: list[str] = []
+    real = doctor_cmd._summarize_and_exit
+
+    def spy(failures: list[str]) -> None:
+        recorded[:] = failures
+        real(failures)
+
+    monkeypatch.setattr(doctor_cmd, "_summarize_and_exit", spy)
+    _fake_comfy(monkeypatch)
+    up = _invoke("doctor").output
+    assert "✓ image: ComfyUI reachable at http://comfy.test (template: qwen-image-2.1)" in up, up
+    assert "plugin-image" not in recorded, recorded
+    _fake_comfy(monkeypatch, down=True)
+    down = _invoke("doctor").output
+    assert "image: ComfyUI unreachable at http://comfy.test" in down, down
+    assert "plugin-image" in recorded, recorded
