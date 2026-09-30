@@ -7,25 +7,39 @@ pays nothing for this. An off plugin contributes nothing; a core command always 
 Resolving reads the default config layers (the root has no --config-dir) and never asks about a
 workspace. Like every resolve, it imports an enabled plugin you installed — its manifest is in its
 code — never one that is not enabled, and never the module a command runs until it runs.
+
+Every Click class here is read off typer's own classes, so it is the copy of click that typer runs,
+whichever that is.
 """
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
 
-import click
 import typer
 from rich.markup import escape
-from typer.core import TyperGroup
+from typer.core import TyperCommand, TyperGroup
 
 if TYPE_CHECKING:
+    import click  # annotations only: never evaluated (`from __future__ import annotations`)
+
     from localharness.plugins.api import CliDescriptor
 
 log = logging.getLogger(__name__)
 _CACHE = "localharness.plugin_commands"  # key in the root context's meta: one resolve per invocation
 
+# typer < 0.26 builds on the `click` package; typer >= 0.26 vendors its own copy (typer._click), and a
+# class from one copy is not the other's. On a fresh PyPI install `import click` named the copy typer
+# does not run, and every plugin command failed while the locked suite passed (QA-01). So the Click
+# classes the mount checks and lets through are typer's own.
+_COMMAND: type[Any] = TyperCommand.__bases__[0]  # click.core.Command, or typer._click.core.Command
+_PASS_THROUGH: tuple[type[BaseException], ...] = (
+    typer.Exit, typer.Abort,  # Click's control flow: the root handles it, as for a core command
+    next(c for c in typer.BadParameter.__mro__ if c.__name__ == "ClickException"),  # usage errors
+)
 
-class LazyPluginCommand(click.Command):
+
+class LazyPluginCommand(TyperCommand):
     """One plugin command, known by its descriptor alone until it runs."""
 
     def __init__(self, plugin: str, desc: CliDescriptor) -> None:
@@ -45,7 +59,7 @@ class LazyPluginCommand(click.Command):
         try:
             target = import_target(self.target)
             command = typer.main.get_command(target) if isinstance(target, typer.Typer) else target
-            if not isinstance(command, click.Command):
+            if not isinstance(command, _COMMAND):
                 raise TypeError(f"{self.target} is not a Typer app or a click command")
             failed = "raised"
             # Run as a child of the root context, as a core command runs: its usage line reads
@@ -54,7 +68,7 @@ class LazyPluginCommand(click.Command):
             # return value, and the process would exit 0.)
             with command.make_context(ctx.info_name, list(ctx.args), parent=ctx.parent) as sub:
                 return command.invoke(sub)
-        except (click.exceptions.Exit, click.exceptions.Abort, click.ClickException):
+        except _PASS_THROUGH:
             raise
         except Exception as exc:  # noqa: BLE001 — a plugin's command is named, never a traceback
             log.debug("plugin %s: command %s %s", self.plugin, self.name, failed, exc_info=True)
