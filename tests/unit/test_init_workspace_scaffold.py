@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -132,7 +134,8 @@ def test_scaffold_creates_agents_but_no_overrides_and_no_state_dirs(project):
     assert runner.invoke(app, ["init", "--workspace"]).exit_code == 0
 
     workspace = project / WORKSPACE_DIR_NAME
-    assert _listing(workspace) == ["agents", "config.yaml", "plugins", "plugins/README.md"]
+    assert _listing(workspace) == [".gitignore", "agents", "config.yaml", "plugins",
+                                   "plugins/README.md"]
 
 
 def test_scaffold_does_not_prompt_with_stdin_closed(project):
@@ -171,6 +174,59 @@ def test_a_failed_plugins_readme_write_leaves_no_partial_workspace(project, monk
 
     _no_traceback(result)
     assert not (project / WORKSPACE_DIR_NAME).exists(), "a failed scaffold left a partial workspace"
+
+
+# --------------------------------------------------------------------------- .gitignore
+
+_STATE = [
+    "agents/orchestrator/memory.db", "agents/orchestrator/memory.db-wal",
+    "agents/orchestrator/memory.log", "agents/orchestrator/sessions/s.jsonl",
+    "artifacts/image/art-20260930-120000-abcdef.png", "audit.jsonl", ".repl_history", "archive.db",
+    "autoresearch/runs/r.jsonl",
+]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git on PATH")
+def test_git_ignores_the_workspace_state_and_keeps_its_config(project):
+    """Real git, not a pattern reading: what `git status` offers to commit after a session's worth
+    of state lands is exactly the files a team shares."""
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    assert runner.invoke(app, ["init", "--workspace"]).exit_code == 0
+    workspace = project / WORKSPACE_DIR_NAME
+    for rel in _STATE:
+        (workspace / rel).parent.mkdir(parents=True, exist_ok=True)
+        (workspace / rel).write_text("state\n", encoding="utf-8")
+    (workspace / "agents" / "helper.yaml").write_text("name: helper\n", encoding="utf-8")
+
+    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=project,
+                            check=True, capture_output=True, text=True).stdout
+    listed = sorted(line[3:] for line in status.splitlines())
+    assert listed == sorted(f"{WORKSPACE_DIR_NAME}/{rel}" for rel in (
+        ".gitignore", "config.yaml", "plugins/README.md", "agents/helper.yaml")), status
+
+
+def test_a_failed_gitignore_write_leaves_no_partial_workspace(project, monkeypatch):
+    real_write_text = Path.write_text
+
+    def _fail_gitignore(self, *args, **kwargs):
+        if self.name == ".gitignore":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _fail_gitignore)
+    result = runner.invoke(app, ["init", "--workspace"])
+
+    _no_traceback(result)
+    assert not (project / WORKSPACE_DIR_NAME).exists(), "a failed scaffold left a partial workspace"
+
+
+def test_starts_workspace_offer_writes_the_same_gitignore(project):
+    """start's offer calls the same scaffold (cli/workspace.py), with next_steps off."""
+    from localharness.cli.init_cmd import WORKSPACE_GITIGNORE, _scaffold_workspace
+
+    _scaffold_workspace(endpoint=None, model=None, config_dir=None, next_steps=False)
+    gitignore = project / WORKSPACE_DIR_NAME / ".gitignore"
+    assert gitignore.read_text(encoding="utf-8") == WORKSPACE_GITIGNORE
 
 
 # --------------------------------------------------------------------------- refusal
