@@ -798,29 +798,27 @@ async def test_start_roots_plugins_at_the_session_config_dir(tmp_path, monkeypat
     """ROADMAP Phase 38 criterion 3: `start --config-dir <D>` loads <D>/plugins.
 
     Before this, a --config-dir session silently loaded the REAL user's ~/.localharness/plugins —
-    plan 38-03 fixed the loader's default (env-based selection); this covers the flag.
+    plan 38-03 fixed the loader's default (env-based selection); this covers the flag. Since 44-14
+    folder plugins are found by `discovery.discover(<global config dir>)` (it reads
+    `<dir>/plugins`), called by the session's plugin resolution and its config loader alike: every
+    call this session makes must name <D>. The module attribute is what both callers read.
     """
     from localharness.cli.start_cmd import _start_async
     _stub_start_boundaries(tmp_path, monkeypatch)
     _write_agent(tmp_path / "agents", "solo")
 
-    recorded: list[dict] = []
+    recorded: list[Path] = []
 
-    class _RecordingPluginLoader:
-        # start_cmd imports PluginLoader inside _start_async, so patching the MODULE attribute
-        # is what takes effect.
-        def __init__(self, registry, hook_system, plugins_dir=None):
-            recorded.append({"plugins_dir": plugins_dir})
+    def _recording_discover(global_config_dir):
+        recorded.append(Path(global_config_dir))
+        return []
 
-        async def discover_all(self):
-            return []
-
-    monkeypatch.setattr("localharness.plugins.loader.PluginLoader", _RecordingPluginLoader)
+    monkeypatch.setattr("localharness.plugins.discovery.discover", _recording_discover)
 
     await _start_async(None, False, False, str(tmp_path))
 
-    assert recorded, "PluginLoader was never constructed — the patch did not bite"
-    assert recorded[0]["plugins_dir"] == tmp_path / "plugins"
+    assert recorded, "discovery was never called — the patch did not bite"
+    assert set(recorded) == {tmp_path}, f"plugins were discovered from {sorted(set(recorded))}"
 
 
 async def test_start_roots_subagents_at_the_session_config_dir(tmp_path, monkeypatch):
@@ -1019,10 +1017,17 @@ def test_deploy_config_default_path(tmp_path, monkeypatch, fake_home):
 # which is the wiring under test. repl.run is a no-op, so the sitting has zero turns.
 # ---------------------------------------------------------------------------
 
-def _stub_start_boundaries(tmp_path, monkeypatch, *, capture_session_id=None, repl_run=None):
+def _stub_start_boundaries(tmp_path, monkeypatch, *, capture_session_id=None, repl_run=None,
+                           real_plugins=False):
     """Write a minimal (known-good) config and stub every external boundary so the
     real _start_async runs offline. `repl_run` overrides the no-op REPL loop to drive
-    live bus traffic through the running harness."""
+    live bus traffic through the running harness.
+
+    Plugin discovery (`localharness.plugins.discovery.discover`: installed entry points and the
+    global `plugins/` folder) is stubbed to find nothing, so no drive depends on what happens to
+    be installed in this venv (the example plugin is). `real_plugins=True` leaves discovery real,
+    for a test about the installed plugins themselves. Bundled plugins are never stubbed here: a
+    test bundles its own by patching `localharness.plugins.builtin.BUILTIN_PLUGINS`."""
     (tmp_path / "config.yaml").write_text(
         "version: '1'\n"
         "provider:\n"
@@ -1058,9 +1063,8 @@ def _stub_start_boundaries(tmp_path, monkeypatch, *, capture_session_id=None, re
         "localharness.cli.repl.OrchestratorREPL.run", repl_run or default_repl_run
     )
 
-    async def fake_discover(self):
-        return []  # keep the test off the real home plugin dir
-    monkeypatch.setattr("localharness.plugins.loader.PluginLoader.discover_all", fake_discover)
+    if not real_plugins:
+        monkeypatch.setattr("localharness.plugins.discovery.discover", lambda global_config_dir: [])
 
     if capture_session_id is not None:
         import localharness.agent.loop as _loop_mod
@@ -2188,9 +2192,7 @@ def _stub_start_realprobe(tmp_path, monkeypatch, *, probe_error, available_model
         return None
     monkeypatch.setattr("localharness.cli.repl.OrchestratorREPL.run", default_repl_run)
 
-    async def fake_discover(self):
-        return []
-    monkeypatch.setattr("localharness.plugins.loader.PluginLoader.discover_all", fake_discover)
+    monkeypatch.setattr("localharness.plugins.discovery.discover", lambda global_config_dir: [])
 
 
 def _spy_store_open(monkeypatch):
