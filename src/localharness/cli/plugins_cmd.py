@@ -1,7 +1,8 @@
 """`localharness plugins` — see plugins, and turn them on and off (ENAB-03, PRD §4).
 
 - `list`: every plugin — NAME / WHAT IT DOES / STATE / FROM — with the exact command that turns an
-  off or available one on.
+  off or available one on; on stderr, each section no installed plugin owns (most often a removed
+  plugin's settings), with its file, line and fix (QA-06).
 - `info NAME`: one plugin, what it adds, and every setting it owns: the dot-paths `components list`
   marks `(plugin: NAME)`, read through the same catalogue.
 - `enable NAME [--set k=v …]` and `disable NAME` write `NAME.enabled` (and the settings) into ONE
@@ -19,6 +20,8 @@ Unlike `components set`, these commands emit no ComponentMutated audit event.
 from __future__ import annotations
 
 import json as _json
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, NoReturn, Optional
 
 import typer
@@ -32,6 +35,7 @@ from localharness.cli.components_cmd import (
     _build_layered_loader, _err, _err_config, _serialize_value,
 )
 from localharness.config.overlay import atomic_write_overlay, load_overlay
+from localharness.config.plugin_sections import unowned_hint
 from localharness.registry import (
     LAYER_DEFAULT, LAYER_GLOBAL_CONFIG, LAYER_GLOBAL_OVERRIDES, LAYER_WORKSPACE_CONFIG,
     LAYER_WORKSPACE_OVERRIDES, coerce_value, set_value_in_dict, walk_model_fields,
@@ -58,6 +62,8 @@ Workspace = Annotated[bool, typer.Option(
     "--workspace", help="Write this project's overrides.yaml instead of the machine's. Plugins that "
                         "ship with LocalHarness only: a plugin you installed is switched machine-wide.")]
 _BANDS = (LAYER_GLOBAL_CONFIG, LAYER_GLOBAL_OVERRIDES, LAYER_WORKSPACE_CONFIG, LAYER_WORKSPACE_OVERRIDES)
+# The same literal init's scaffolded plugins/README.md links to (a PyPI install has no examples/).
+_TEMPLATE_URL = "https://github.com/ahwurm/localharness/tree/main/examples/plugin-template"
 
 
 def _fail(message: str, json_output: bool = False) -> NoReturn:
@@ -79,9 +85,22 @@ def _resolve(config_dir: Optional[str], *, json_output: bool
         raise  # unreachable: _err_config exits
 
 
-def _entry(resolution: Resolution, name: str, json_output: bool) -> PlanEntry:
+def _where(dotpath: str, file: Path, line: Optional[int]) -> str:
+    """`example:` in <file> (line 1), `agent.example` in <file> (line 5)."""
+    key = dotpath if dotpath.startswith("agent.") else f"{dotpath}:"
+    return f"`{key}` in {file}" + (f" (line {line})" if line else "")
+
+
+def _entry(resolution: Resolution, loader: ConfigLoader, name: str, json_output: bool) -> PlanEntry:
     entry = resolution.plan.entry(name)
     if entry is None:
+        # QA-06: uninstalling leaves the plugin's settings behind; say where, and what to do.
+        left = [s for s in loader.unowned_sections() if s[0] in (name, f"agent.{name}")]
+        if left:
+            _fail(f"Unknown plugin: {name!r} — no installed plugin has that name, but its settings "
+                  "are still here:\n" + "".join(f"  {_where(*s)}\n" for s in left)
+                  + "Delete them, or reinstall the plugin. Run `localharness plugins list` to see "
+                  "the plugins installed here.", json_output)
         _fail(f"Unknown plugin: {name!r}. Run `localharness plugins list` to see the plugins "
               "installed here.", json_output)
     return entry
@@ -96,8 +115,12 @@ def _warn(resolution: Resolution) -> None:
 @plugins_app.command("list")
 def plugins_list(json_output: Json = False, config_dir: ConfigDir = None) -> None:
     """Every plugin: what it does, whether it is on (and how to turn it on), and where it is from."""
-    resolution, _, _ = _resolve(config_dir, json_output=json_output)
+    resolution, loader, _ = _resolve(config_dir, json_output=json_output)
     _warn(resolution)
+    for dotpath, file, line in loader.unowned_sections():  # QA-06: never silent about a leftover
+        hint = unowned_hint(dotpath.removeprefix("agent."), under_agent=dotpath.startswith("agent."))
+        err_console.print("[yellow]⚠[/yellow] " + escape(f"{_where(dotpath, file, line)}: {hint}"),
+                          soft_wrap=True)
     entries = resolution.plan.entries
     if json_output:
         typer.echo(_json.dumps([{"name": e.name, "what_it_does": e.summary, "state": e.display,
@@ -105,7 +128,10 @@ def plugins_list(json_output: Json = False, config_dir: ConfigDir = None) -> Non
                                  "enable_command": e.enable_command} for e in entries], indent=2))
         return
     if not entries:
-        console.print("No plugins installed — to write one, copy examples/plugin-template/.")
+        console.print(escape(  # QA-13: where it looked, and a URL a PyPI install can reach
+            f"No plugins found in this Python environment ({sys.prefix}) or in "
+            f"{loader.global_config_dir / 'plugins'}/. To write one, copy the example plugin: "
+            f"{_TEMPLATE_URL}"), soft_wrap=True)
         return
     table = Table(box=None, header_style="bold", pad_edge=False)
     # A narrow terminal wraps cells, never cuts them (measured at 80 columns: a whole STATE column
@@ -127,10 +153,12 @@ def _switch_layer(loader: ConfigLoader, name: str, bundled: bool) -> str:
 
 @plugins_app.command("info")
 def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = None) -> None:
-    """One plugin: its state, what it adds, and every setting it owns — the rows `components list`
-    marks `(plugin: NAME)`."""
+    """One plugin: its state, what it adds, and every setting it owns.
+
+    The settings are the rows `components list` marks `(plugin: NAME)`.
+    """
     resolution, loader, workspace = _resolve(config_dir, json_output=json_output)
-    entry = _entry(resolution, name, json_output)
+    entry = _entry(resolution, loader, name, json_output)
     _warn(resolution)
     rows = plugin_catalogue_rows(resolution)
     try:
@@ -233,7 +261,7 @@ def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pai
 def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_dir: Optional[str]) -> None:
     """Write `<name>.enabled: <on>`, and any --set values, into one layer's overrides.yaml."""
     resolution, loader, workspace = _resolve(config_dir, json_output=False)
-    entry = _entry(resolution, name, False)
+    entry = _entry(resolution, loader, name, False)
     word, verb = ("on", "enable") if on else ("off", "disable")
     if name not in resolution.enabled:  # a refused NAME (invalid, a core key, taken): its key is
         _fail(f"{name} cannot be turned {word}: {entry.reason}")  # not this plugin's to write
@@ -272,13 +300,17 @@ def plugins_enable(
     workspace: Workspace = False,
     config_dir: ConfigDir = None,
 ) -> None:
-    """Turn a plugin on. Writes an overrides.yaml, never your config.yaml; takes effect on the next
-    `localharness start`."""
+    """Turn a plugin on.
+
+    Writes an overrides.yaml, never your config.yaml; takes effect on the next `localharness start`.
+    """
     _switch(name, True, settings or [], workspace, config_dir)
 
 
 @plugins_app.command("disable")
 def plugins_disable(name: Name, workspace: Workspace = False, config_dir: ConfigDir = None) -> None:
-    """Turn a plugin off. Writes an overrides.yaml, never your config.yaml; takes effect on the next
-    `localharness start`."""
+    """Turn a plugin off.
+
+    Writes an overrides.yaml, never your config.yaml; takes effect on the next `localharness start`.
+    """
     _switch(name, False, [], workspace, config_dir)
