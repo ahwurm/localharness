@@ -12,8 +12,10 @@ import asyncio
 import base64
 import contextlib
 import json
+import signal
 
 import httpx
+import pytest
 
 from localharness.channels.web import auth, push
 from localharness.channels.web.channel import WebChannel
@@ -631,6 +633,48 @@ async def test_shutdown_does_not_wait_out_every_push_timeout(tmp_path):
     # wait_for, not a bare await: a regression here HANGS, and a hanging test is one whose
     # result nobody ever reads.
     await asyncio.wait_for(channel.stop(), timeout=push.SHUTDOWN_FLUSH_S + 2.0)
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM (POSIX)")
+async def test_a_push_that_finished_just_before_the_flush_does_not_spin_it_forever():
+    """A finished push leaves `_push_tasks` only through a done-callback that asyncio queues for
+    the NEXT loop pass, and `gather` over tasks that are all finished completes without ever
+    suspending. So a flush that waited for the set to empty, entered in the same pass a push
+    finished in, re-gathered that task forever: 100% CPU, and the queued callback that would
+    have ended it never ran. `test_answering_in_another_surface_clears_the_badge_here` hit that
+    by timing, about once in 200 runs; this lines it up every time.
+
+    SIGALRM, not `wait_for`: a livelock never yields, so no asyncio timer can fire. A signal
+    handler runs between bytecodes, which turns a regression into a red test, not a hung suite."""
+    delivered = []
+
+    class _Instant:
+        policy = None
+
+        async def deliver(self, message):   # never suspends: finishes in the pass it starts in
+            delivered.append(message)
+            return 1
+
+    channel = WebChannel(bus=EventBus(), config={})
+    channel.set_push(_Instant())
+    message = push.Push(title="x", body="y", tag="t", badge=1, data={}, alert=True)
+    channel._push_fire(message)
+    (task,) = channel._push_tasks
+    await asyncio.sleep(0)   # one pass: the push runs to completion in it, just before this step
+    assert task.done() and task in channel._push_tasks, "precondition: finished, not yet discarded"
+
+    def _spinning(signum, frame):
+        raise TimeoutError("flush_push spun on a push that had already finished")
+
+    previous = signal.signal(signal.SIGALRM, _spinning)
+    signal.setitimer(signal.ITIMER_REAL, 5.0)
+    try:
+        await channel.flush_push()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+    assert delivered == [message]
 
 
 async def test_one_fan_out_opens_one_client_not_one_per_device(tmp_path):
