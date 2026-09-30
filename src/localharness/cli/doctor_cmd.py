@@ -138,8 +138,8 @@ def _print_overridden_keys(cfg_path: Path, workspace: Path, loader) -> None:
         # would otherwise parse as a style tag and fail on, and a config VALUE can be any string
         # a user typed. (41-06's `[old] proj` lesson, applied to values as well as paths.)
         console.print(
-            escape(f"         {path} = {entry.current_value!r}  [{entry.winning_layer}]"
-                   f"  (global: {before!r})"),
+            escape(f"         {path} = {entry.current_value!r}  [{entry.winning_layer}"
+                   f"{f' (plugin: {entry.plugin})' if entry.plugin else ''}]  (global: {before!r})"),
             # soft_wrap so a long value is handed to the TERMINAL whole instead of arriving with
             # a newline folded into it — it still looks wrapped on screen, and it is one line in
             # the data. 43-04's measured lesson from the real binary, same wave, same class.
@@ -219,6 +219,72 @@ def _print_web_listener(config_dir: Path) -> None:
             f"drive your agent."
         )
     console.print(escape(f"       Token file: {path}"), soft_wrap=True)
+
+
+_CHECK_GLYPH = {"pass": _PASS + " ", "fail": _FAIL + " ", "skip": _INFO + "  "}
+# A plugin that is not on: off and available are a choice, not a fault; skipped, needs-extra and
+# unconfigured cannot run as things stand; anything else (failed, refused) is a fault.
+_ROW_GLYPH = {"off": _INFO + "  ", "available": _INFO + "  ", "skipped": _WARN + " ",
+              "needs-extra": _WARN + " ", "unconfigured": _WARN + " "}
+
+
+def _print_plugins(cfg_path: Path, workspace: Path | None, loader: ConfigLoader,
+                   failures: list[str]) -> None:
+    """PAPI-08: core checks first, then each plugin; off is off, not failed.
+
+    `✓ Plugins: <on names>` (or `i  Plugins: none on`), the resolver's warnings, then per plugin:
+    an on plugin's own checks (a failing one is a failure, its hint on the next line); an off or
+    available plugin with the exact command that turns it on; a skipped, needs-extra or
+    unconfigured one as a warning; a failed or refused one named with its reason, a failure.
+
+    The rows come from the lifecycle (plugins/lifecycle.doctor_rows), which creates and configures
+    each on plugin against a throwaway context and contains every call into plugin code; resolving
+    is contained here, so doctor never crashes on a plugin. Doctor has no JSON output today and this
+    adds none.
+    """
+    import asyncio  # lazy, like the imports below: `localharness --help` never pays for them
+
+    from localharness.plugins.api import PluginPaths
+    from localharness.plugins.lifecycle import doctor_rows
+    from localharness.plugins.resolve import resolve
+
+    try:
+        resolution = resolve(loader)
+        # One asyncio.run and no fallback loop: doctor is a synchronous CLI command, and the one
+        # case asyncio.run refuses (a loop already running) fails a fresh loop too (measured).
+        rows = asyncio.run(doctor_rows(resolution, paths=PluginPaths(
+            global_config_dir=cfg_path, workspace=workspace,
+            state_dir=workspace if workspace is not None else cfg_path)))
+    except Exception as exc:  # noqa: BLE001 — the command people run when things are already wrong
+        if "config-invalid" in failures:
+            # An unreadable config fails the resolver too, and it is already reported above in
+            # full: counting it again is doctor telling you two things are wrong when one is (D1).
+            console.print(f"{_INFO}  Plugins: not checked — the config above could not be read")
+            return
+        reason = f"{type(exc).__name__}: {exc}".splitlines()[0].rstrip(": ")  # one line, as above
+        console.print(_FAIL + " " + escape(f"Plugins: could not be resolved — {reason}"),
+                      soft_wrap=True)
+        failures.append("plugins-unresolved")
+        return
+    on = [row.name for row in rows if row.state == "on"]
+    console.print(_PASS + " " + escape("Plugins: " + ", ".join(on)) if on
+                  else f"{_INFO}  Plugins: none on", soft_wrap=True)
+    for warning in resolution.warnings:
+        console.print(_WARN + " " + escape(warning), soft_wrap=True)
+    for row in rows:
+        for check in row.checks:
+            console.print(_CHECK_GLYPH[check.status] + escape(
+                check.name + (f": {check.detail}" if check.detail else "")), soft_wrap=True)
+            if check.hint:
+                console.print(escape(f"       {check.hint}"), soft_wrap=True)
+            if check.status == "fail":
+                failures.append(f"plugin-{row.name}")
+        if row.state == "on":
+            continue
+        console.print(_ROW_GLYPH.get(row.state, _FAIL + " ") + escape(f"{row.name}: {row.detail}"),
+                      soft_wrap=True)
+        if row.state not in _ROW_GLYPH:
+            failures.append(f"plugin-{row.name}")
 
 
 def doctor(
@@ -739,6 +805,7 @@ def doctor(
         console.print(f"       Run 'uv sync' to install it.")
         failures.append("ddgs-missing")
 
+    _print_plugins(cfg_path, workspace, loader, failures)
     _summarize_and_exit(failures)
 
 
