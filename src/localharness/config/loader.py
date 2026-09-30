@@ -174,6 +174,14 @@ def _build_line_map(yaml_text: str) -> dict[str, int]:
     return line_map
 
 
+def _file_line_map(path: Path) -> dict[str, int]:
+    """_build_line_map of a file's text; {} when it cannot be read."""
+    try:
+        return _build_line_map(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+
+
 def _dotpath_in(raw: object, dotpath: str) -> bool:
     """True iff `raw` is a nested dict carrying this dot-path as a key chain."""
     cur: Any = raw
@@ -703,6 +711,27 @@ class ConfigLoader:
         sets none."""
         return dict(self._agent_plugin_sections.get(agent_name, {}))
 
+    def unowned_sections(self) -> list[tuple[str, Path, Optional[int]]]:
+        """(dot-path, file, line) for each key load_harness / load_agent refuse as unowned (QA-06),
+        most often a removed plugin's settings — what `plugins list` names: each top-level key of
+        the four config sources that is neither core nor a known plugin, and `agent.<key>` for such
+        a key in the GLOBAL overrides' `agent:` section (the one agents read). Nothing is validated
+        or imported. Keys inside agent yaml files are not listed: `validate` and `start` report
+        them against their own file."""
+        known = self.plugin_names()
+        overlay = _resolve_user_overlay_path(self._config_dir)
+        ws = self._local_dir
+        files = (self._config_dir / "config.yaml", overlay,
+                 ws / "config.yaml" if ws is not None else None,
+                 ws / "overrides.yaml" if ws is not None else None)
+        found = [(str(key), f) for f, source in zip(files, self._raw_config_sources())
+                 if f is not None for key in source if key not in CORE_HARNESS_KEYS | known]
+        agent = load_overlay(overlay).get("agent")
+        found += [(f"agent.{key}", overlay) for key in (agent if isinstance(agent, dict) else {})
+                  if key not in CORE_AGENT_KEYS | known]
+        maps = {f: _file_line_map(f) for _, f in found}
+        return [(dotpath, f, maps[f].get(dotpath)) for dotpath, f in found]
+
     def load_org(self) -> OrgConfig:
         if self._org_cache is not None:
             return self._org_cache
@@ -1035,12 +1064,8 @@ class ConfigLoader:
                     under = err["loc"][0] not in raw and err["loc"][0] in overlay_agent
                     message = unowned_hint(loc, agent=True, under_agent=under)
                     if under:
-                        try:
-                            lines = _build_line_map(overlay_path.read_text(encoding="utf-8"))
-                        except OSError:
-                            lines = {}
                         owner, field = overlay_path, f"agent.{loc}"
-                        line = lines.get(field)
+                        line = _file_line_map(overlay_path).get(field)
                 owners.append(owner)
                 errors.append(ConfigFieldError(field, err.get("input"), message, line))
             # load_harness's rule: one owner heads the report; mixed owners keep the agent file and
