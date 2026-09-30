@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from localharness.plugins.api import (
-    GLOBAL_ONLY, Availability, CliDescriptor, Plugin, PluginContext, PluginManifest,
+    GLOBAL_ONLY, Availability, Check, CliDescriptor, Plugin, PluginContext, PluginManifest,
 )
 
 if TYPE_CHECKING:
@@ -62,3 +62,9 @@ class ImagePlugin(Plugin):
         from localharness.tools.builtin.generate_image_tool import GenerateImageTool
 
         return [GenerateImageTool(ctx)]
+
+    def doctor(self, ctx: PluginContext) -> list[Check]:
+        """Runs only when image is on and configured (the lifecycle checks configure() first)."""
+        from localharness.tools.builtin.generate_image_tool import probe
+
+        return probe(ctx.config.comfyui_url, ctx.config.workflow)

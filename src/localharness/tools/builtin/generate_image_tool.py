@@ -29,7 +29,7 @@ import httpx
 
 from localharness.core.artifacts import write_artifact
 from localharness.core.events import ARTIFACT_MIMES
-from localharness.plugins.api import PluginContext
+from localharness.plugins.api import Check, PluginContext
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 _POLL_S = 2.0  # /history poll cadence (patched down in tests)
@@ -56,6 +56,88 @@ def load_template(workflow: str = "") -> tuple[dict[str, Any], str]:
     if not graph:
         raise ValueError(f"workflow template '{name}' contains no ComfyUI nodes")
     return graph, name
+
+
+_MODEL_FOLDERS = {"UNETLoader": "models/diffusion_models/", "CLIPLoader": "models/text_encoders/",
+                  "VAELoader": "models/vae/"}  # for the human hint only; the check itself is generic
+_MODEL_SUFFIXES = (".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".sft")
+
+
+def _combo_options(spec: Any) -> list[str] | None:
+    """The choices of a combo input, in either ComfyUI form; None for any other input type."""
+    if isinstance(spec, list) and spec and isinstance(spec[0], list):
+        return spec[0]
+    if isinstance(spec, list) and len(spec) > 1 and spec[0] == "COMBO" and isinstance(spec[1], dict):
+        return spec[1].get("options")
+    return None
+
+
+def probe(url: str, workflow: str) -> list[Check]:
+    """doctor's image check, also run once by `plugins enable image`: can the template load, does
+    ComfyUI answer, and does it offer every literal value the template's nodes use (model files
+    first). Sync, 3-second requests, one GET per distinct node class — never the full /object_info."""
+    try:
+        graph, name = load_template(workflow)
+    except (ValueError, OSError) as exc:
+        return [Check(name="image", status="fail", detail=f"workflow template unusable: {exc}",
+                      hint="fix image.workflow in your machine-level settings, or clear it to use "
+                           "the shipped template")]
+    missing_nodes: list[str] = []
+    missing_files: list[tuple[str, str]] = []
+    rejected: list[str] = []
+    could_not_ask: list[str] = []
+    with httpx.Client(transport=_TRANSPORT, timeout=3.0) as client:
+        try:
+            client.get(f"{url}/system_stats").raise_for_status()
+        except httpx.HTTPError:
+            return [Check(name="image", status="fail", detail=f"ComfyUI unreachable at {url}",
+                          hint="start ComfyUI, then check again — run `localharness plugins enable "
+                               "image` on a terminal for the steps")]
+        for cls in sorted({n["class_type"] for n in graph.values()}):
+            try:
+                body = client.get(f"{url}/object_info/{cls}").json()
+            except (httpx.HTTPError, ValueError):
+                body = None
+            if not isinstance(body, dict):
+                could_not_ask.append(cls)
+                continue
+            if cls not in body:
+                missing_nodes.append(cls)
+                continue
+            spec_in = body[cls].get("input", {}) if isinstance(body[cls], dict) else {}
+            specs = {**(spec_in.get("required") or {}), **(spec_in.get("optional") or {})}
+            for node in (n for n in graph.values() if n["class_type"] == cls):
+                for key, value in (node.get("inputs") or {}).items():
+                    if not isinstance(value, str) or value.startswith("__LH_"):
+                        continue
+                    options = _combo_options(specs.get(key))
+                    if options is None or value in options:
+                        continue
+                    if value.endswith(_MODEL_SUFFIXES):
+                        missing_files.append((cls, value))
+                    else:
+                        rejected.append(f"{cls}.{key}={value}")
+    checks = [Check(name="image", status="pass", detail=f"ComfyUI reachable at {url} (template: {name})")]
+    if missing_nodes:
+        checks.append(Check(name="image", status="fail",
+                            detail=f"ComfyUI has no {', '.join(missing_nodes)} node",
+                            hint="update ComfyUI, or set image.workflow to a template made for your "
+                                 "version"))
+    if missing_files:
+        checks.append(Check(
+            name="image", status="fail",
+            detail="missing in ComfyUI: " + ", ".join(v for _, v in missing_files),
+            hint="put " + "; ".join(f"{v} in {_MODEL_FOLDERS.get(c, 'the ComfyUI models folder')}"
+                                    for c, v in missing_files) + " — then restart ComfyUI"))
+    if rejected:
+        checks.append(Check(name="image", status="fail",
+                            detail="ComfyUI does not accept " + ", ".join(rejected),
+                            hint="edit the template to a value ComfyUI lists for that input"))
+    if could_not_ask:
+        checks.append(Check(name="image", status="fail",
+                            detail="could not ask ComfyUI about " + ", ".join(could_not_ask),
+                            hint="check that ComfyUI is up to date"))
+    return checks
 
 
 def _fill(node: Any, values: dict[str, Any], hits: set[str]) -> Any:
