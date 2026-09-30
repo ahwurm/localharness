@@ -381,6 +381,13 @@ def _org_deny_patterns(raw: object) -> list[str]:
     return [p for p in patterns if isinstance(p, str)]
 
 
+def _org_mode(raw: object) -> Optional[str]:
+    """The `org.permissions.mode` ONE raw config source declares, normalized, or None."""
+    org = raw.get("org") if isinstance(raw, dict) else None
+    perms = org.get("permissions") if isinstance(org, dict) else None
+    return _normalize_mode(perms.get("mode")) if isinstance(perms, dict) else None
+
+
 # ------------------------------------------------------------------ #
 # ConfigLoader
 # ------------------------------------------------------------------ #
@@ -416,6 +423,7 @@ class ConfigLoader:
         self._org_cache: Optional[OrgConfig] = None
         self._raw_harness_dict: Optional[dict] = None
         self._raw_sources_cache: Optional[tuple[dict, dict, dict, dict]] = None
+        self._org_mode_cache: Optional[tuple[Optional[str]]] = None  # (mode,) once org_mode() ran
         # ENAB-01: the names that own a plugin settings section (discovered once per loader), and
         # the `agent.<name>` sections each agent load split off, by agent name.
         self._plugin_names: Optional[frozenset[str]] = None
@@ -531,6 +539,28 @@ class ConfigLoader:
             if isinstance(section, dict):
                 out = deep_merge(out, section)
         return out
+
+    def org_mode(self) -> Optional[str]:
+        """`org.permissions.mode` as it reaches a session, or None when no layer sets one (QA-18).
+
+        Each layer's overrides.yaml beats its config.yaml, as in the merge. The one exception is
+        the one `permissions.mode` gets everywhere (PRD §3.3): the workspace layer may TIGHTEN the
+        global value (or the default, when the global layer is silent), never loosen it. A looser
+        workspace value is dropped with a warning, once per loader. `load_agent_file` hands this
+        to every agent that sets no mode of its own.
+        """
+        if self._org_mode_cache is None:
+            g_cfg, g_over, ws_cfg, ws_over = self._raw_config_sources()
+            glob, ws = _org_mode(g_over) or _org_mode(g_cfg), _org_mode(ws_over) or _org_mode(ws_cfg)
+            floor = glob or DEFAULT_MODE
+            if ws is not None and MODE_STRICTNESS[ws] < MODE_STRICTNESS[floor]:
+                log.warning(
+                    "ignoring workspace org.permissions.mode %r: a project layer may only tighten "
+                    "the session mode, and the global layer asks for %r", ws, floor,
+                )
+                ws = None
+            self._org_mode_cache = (ws or glob,)
+        return self._org_mode_cache[0]
 
     def load_harness(self) -> HarnessConfig:
         if self._harness_cache is not None:
@@ -667,6 +697,7 @@ class ConfigLoader:
         self._harness_cache = None
         self._raw_harness_dict = None
         self._raw_sources_cache = None
+        self._org_mode_cache = None
         self._plugin_names = None
 
     @property
@@ -1043,6 +1074,16 @@ class ConfigLoader:
         # it down.
         if self._local_dir is not None:
             self._narrow_project_layer_permissions(merged, path.stem, div_name)
+
+        # 5d. QA-18: an agent that sets no `permissions.mode` (in its file, or under `agent:` in
+        #     overrides.yaml) runs in the org's, the mode `init`'s posture question writes. Key
+        #     presence, never a comparison with the default: an explicit `mode: auto` is the
+        #     agent's choice. Resolved here, where all agent inheritance is, so the gate, the trust
+        #     question, `/mode` and a gate-less loop read one value. After 5c, which judges only
+        #     what a project layer wrote.
+        perms = merged.get("permissions")
+        if isinstance(perms, dict) and "mode" not in perms and self.org_mode() is not None:
+            perms["mode"] = self.org_mode()
 
         # 6. Validate merged dict
         line_map = _build_line_map(text)
@@ -1577,6 +1618,7 @@ class ConfigLoader:
         self._harness_cache = None
         self._org_cache = None
         self._raw_sources_cache = None
+        self._org_mode_cache = None
         self._plugin_names = None
 
     def validate_all(self) -> list[tuple[str, Optional[ConfigError]]]:
