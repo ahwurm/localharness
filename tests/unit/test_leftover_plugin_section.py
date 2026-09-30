@@ -320,3 +320,35 @@ def test_an_unknown_name_with_no_leftover_keeps_the_plain_message(old_g) -> None
     assert result.exit_code == 2, result.output
     assert result.stderr.strip() == ("Error: Unknown plugin: 'nope'. Run `localharness plugins list` "
                                      "to see the plugins installed here.")
+
+
+# --------------------------------------------------------------------------- QA-17: a near miss
+
+
+@pytest.mark.parametrize("config_tail, agent_extra, typo, near", [
+    pytest.param("provder:\n  base_url: http://x\n", "", "provder", "provider", id="harness"),
+    pytest.param("", "permisions:\n  mode: read-only\n", "permisions", "permissions",
+                 id="agent-file"),
+])
+def test_validate_calls_a_near_miss_of_a_core_key_a_typo(g, config_tail, agent_extra, typo,
+                                                           near) -> None:
+    """QA-17's repro: `provder:` meant `provider:`. A near miss of a core key gets "did you mean",
+    not the removed-plugin advice to delete the section."""
+    (g / "config.yaml").write_text(_CONFIG + config_tail, encoding="utf-8")
+    _agent_file(g, agent_extra)
+
+    result = runner.invoke(app, ["validate", "--config-dir", str(g)])
+
+    out = _squash(result.stdout)
+    assert f"{typo}: not " in out and f"did you mean `{near}`?" in out, out
+    assert _TAIL not in out, out
+
+
+@pytest.mark.parametrize("name", ["example", "image"])
+def test_a_plugin_name_is_not_taken_for_a_typo(name) -> None:
+    """`image` is a near miss of `agent` at difflib's default cutoff; a removed plugin's name keeps
+    the leftover wording."""
+    from localharness.config.plugin_sections import unowned_hint
+
+    hint = unowned_hint(name)
+    assert _TAIL in hint and "did you mean" not in hint, hint
