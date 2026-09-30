@@ -364,6 +364,24 @@ async def test_the_gate_mode_is_announced_when_the_session_comes_up(
     assert announced == ["read-only"], session.client.updates
 
 
+async def test_a_mode_picked_before_the_first_prompt_is_the_one_announced(
+    tmp_path, monkeypatch, keep_cwd
+):
+    """The announcement follows the picked mode being applied, or the picker would flip back to
+    the configured mode while the gate ran the picked one."""
+    from acp.schema import CurrentModeUpdate
+
+    session = await _start(
+        tmp_path, monkeypatch, responses=[FakeLLMResponse(content="hi")], mode="read-only"
+    )
+    await session.conn.set_session_mode(session_id=session.session_id, mode_id="trusted")
+    await session.conn.prompt(session_id=session.session_id, prompt=[text_block("hello")])
+    announced = [u.current_mode_id for u in session.client.updates
+                 if isinstance(u, CurrentModeUpdate)]
+    assert session.gate.mode == "trusted"
+    assert announced[-1] == "trusted", announced
+
+
 # ------------------------------------------------------------------ one thread per process
 
 
