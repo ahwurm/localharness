@@ -6,6 +6,10 @@ plugin reads names and versions and nothing else — no import, no entry point i
 module-level code runs. `load_plugin_class()` is the import step; core calls it only for a plugin
 already enabled. The incident record for auto-loaded plugins (the ClawHub campaign, Open WebUI
 CVE-2025-64496) is why.
+
+0.15.0's plugin API (`localharness.tools` / `localharness.hooks` entry points, `plugins/<dir>/
+manifest.yaml` folders) is not a source. `legacy_notices()` names what still uses it, from metadata
+and file names only, so an upgrade never drops a plugin in silence; nothing loads it.
 """
 from __future__ import annotations
 
@@ -24,6 +28,12 @@ PLUGIN_ENTRY_POINT_GROUP = "localharness.plugins"
 PLUGINS_DIR_NAME = "plugins"
 FOLDER_PLUGIN_ATTR = "plugin"   # a folder plugin's __init__.py binds `plugin = <its Plugin class>`
 _FOLDER_PACKAGE = "localharness_folder_plugins"  # the synthetic parent a folder plugin imports under
+LEGACY_ENTRY_POINT_GROUPS = ("localharness.tools", "localharness.hooks")
+"""0.15.0's documented plugin API. Nothing loads either group since 0.16; legacy_notices() names them."""
+LEGACY_API_DOC = ("https://github.com/ahwurm/localharness/blob/main/docs/specs/"
+                  "09-hooks-plugins.md#plugins-written-for-015")
+_LEGACY_MANIFEST = "manifest.yaml"  # a 0.15.0 folder plugin's declaration, beside no __init__.py
+_NOT_LOADED = f"was built for the 0.15 plugin API and is no longer loaded — see {LEGACY_API_DOC}"
 
 
 @dataclass(frozen=True)
@@ -58,6 +68,31 @@ def discover(global_config_dir: Path) -> list[DiscoveredPlugin]:
         found += [DiscoveredPlugin(d.name, "folder", str(d.absolute()))
                   for d in sorted(folder.iterdir()) if (d / "__init__.py").is_file()]
     return found
+
+
+def legacy_notices(global_config_dir: Path) -> list[str]:
+    """One line per plugin written for 0.15.0's plugin API: an installed distribution with a
+    `localharness.tools` / `localharness.hooks` entry point (unless it also declares a
+    `localharness.plugins` one), and a GLOBAL `plugins/<dir>/` holding `manifest.yaml` and no
+    `__init__.py`. Names only: one metadata scan, nothing imported, no plugin file opened — and
+    none of them is ever loaded."""
+    legacy: dict[str, list[str]] = {}
+    ported: set[str] = set()
+    for ep in importlib.metadata.entry_points():  # ONE scan of every group, filtered here
+        if ep.group not in (*LEGACY_ENTRY_POINT_GROUPS, PLUGIN_ENTRY_POINT_GROUP):
+            continue
+        dist = f"{ep.dist.name} {ep.dist.version}" if ep.dist else ep.value
+        if ep.group == PLUGIN_ENTRY_POINT_GROUP:
+            ported.add(dist)  # it supports today's API too: that entry point is what loads
+        else:
+            legacy.setdefault(dist, []).append(f"`{ep.group}` entry point `{ep.name}`")
+    lines = [f"{dist} ({', '.join(eps)}) {_NOT_LOADED}"
+             for dist, eps in legacy.items() if dist not in ported]
+    folder = Path(global_config_dir) / PLUGINS_DIR_NAME
+    if folder.is_dir():
+        lines += [f"{d.absolute() / _LEGACY_MANIFEST} {_NOT_LOADED}" for d in sorted(folder.iterdir())
+                  if (d / _LEGACY_MANIFEST).is_file() and not (d / "__init__.py").is_file()]
+    return lines
 
 
 def load_plugin_class(found: DiscoveredPlugin) -> type[Plugin]:
