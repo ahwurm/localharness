@@ -794,57 +794,24 @@ stdio MCP server processes in v1 run as the same user as the harness. A compromi
 
 ## Startup Integration
 
+`localharness start` (`cli/start_cmd.py`) brings the tool system up in this order: the built-in
+tools, the hook system (wired to the registry), the memory tools when memory is on, the plugins
+(resolved, then run through their lifecycle; spec 09), the root agent's capability floor, and
+last the MCP servers named in the root agent's config. At shutdown the MCP servers close first,
+then the plugins stop in reverse start order. The MCP step, as the code does it:
+
 ```python
-# src/localharness/tools/__init__.py (additions for MCP)
-
-async def build_tool_system(
-    harness_config: "HarnessConfig",
-    agent_configs: list["AgentConfig"],
-) -> tuple["ToolRegistry", "HookSystem", "PluginLoader", "MCPClientManager"]:
-    """Construct and wire the full tool system including MCP. Called once at startup."""
-    from localharness.tools.registry import ToolRegistry
-    from localharness.tools.hooks import HookSystem
-    from localharness.plugins.loader import PluginLoader
-    from localharness.tools.builtin import register_builtin_tools
-    from localharness.tools.mcp import MCPClientManager
-
-    registry = ToolRegistry(
-        default_timeout_s=harness_config.tools.default_timeout_s,
-        result_size_cap_chars=harness_config.tools.result_size_cap_chars,
-    )
-    hook_system = HookSystem()
-    loader = PluginLoader(registry, hook_system)
-
-    # 1. Built-ins
-    await register_builtin_tools(registry)
-
-    # 2. Plugins
-    await loader.discover_all()
-
-    # 3. MCP — collect all unique server configs across agents + divisions
-    all_server_configs = _collect_mcp_configs(agent_configs)
-    mcp_manager = MCPClientManager(registry)
-    if all_server_configs:
-        await mcp_manager.startup(all_server_configs)
-
-    # 4. Wire hooks
-    hook_system.wire_to_registry(registry)
-
-    return registry, hook_system, loader, mcp_manager
-
-
-def _collect_mcp_configs(
-    agent_configs: list["AgentConfig"],
-) -> list[MCPServerConfig]:
-    """Deduplicate MCP server configs across agents. Two configs are the same
-    if they share the same server name. Agent-level configs take precedence
-    over division-level configs with the same name."""
-    seen: dict[str, MCPServerConfig] = {}
-    for agent in agent_configs:
-        for server_cfg in agent.mcp_servers:
-            if server_cfg.name not in seen:
-                seen[server_cfg.name] = server_cfg
-    return list(seen.values())
+# cli/start_cmd.py, `_start_async` (the MCP step; simplified)
+mcp_manager: MCPClientManager | None = None
+try:
+    mcp_configs = agent_config.tools.mcp_servers
+    if mcp_configs:
+        mcp_manager = MCPClientManager(tool_registry)
+        results = await mcp_manager.startup(mcp_configs)  # {server name: tools registered}
+        mcp_connected = sum(1 for v in results.values() if v > 0)
+        mcp_failed = sum(1 for v in results.values() if v == 0)
+except Exception as exc:
+    warnings.append(f"mcp: {exc}")  # soft: a failed MCP step never stops the session
 ```
 
 ### Graceful shutdown
