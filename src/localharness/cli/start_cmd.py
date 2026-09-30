@@ -67,6 +67,13 @@ def _available_hint(names: list[str]) -> str:
             f"`localharness plugins enable <name>` to turn one on")
 
 
+def default_root_agent(agents: list[dict[str, Any]]) -> dict[str, Any]:
+    """The discovered agent `start` opens without --agent/--subagents: 'default', else
+    'orchestrator', else the first. Shared with `doctor`, so it checks the agent `start` runs."""
+    return next((a for a in agents if a.get("name") == "default"),
+                next((a for a in agents if a.get("name") == "orchestrator"), agents[0]))
+
+
 def _agent_roster_table(agents: list[dict[str, Any]]) -> Table:
     """The --subagents picker roster, with each agent NAME in the agent entity color.
 
@@ -504,7 +511,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.cli.init_cmd import init_app
     from localharness.cli.slash_commands import set_plugin_rows
     from localharness.config.loader import ConfigLoader
-    from localharness.config.models import AgentConfig
     from localharness.config.paths import global_config_dir, resolve_config_dir, resolve_runtime_path
     from localharness.core.bus import EventBus
     from localharness.memory.sqlite import MemoryStore, _migrate_legacy_root_agent_dir
@@ -688,10 +694,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # agent), and the un-migrated legacy root must keep winning selection or the
         # user lands in a different agent and loses their memory continuity. Normal
         # installs have no default.yaml after migration, so 'orchestrator' wins.
-        selected_data = next(
-            (a for a in agents if a.get("name") == "default"),
-            next((a for a in agents if a.get("name") == "orchestrator"), agents[0]),
-        )
+        selected_data = default_root_agent(agents)
     else:
         # --subagents + multiple agents: show picker
         console.print(_agent_roster_table(agents))
@@ -699,17 +702,23 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         idx = max(1, min(choice, len(agents))) - 1
         selected_data = agents[idx]
 
-    # Load full AgentConfig (uses ConfigLoader for inheritance)
+    # Load full AgentConfig (uses ConfigLoader for inheritance). QA-16: a load error REFUSES the
+    # session, exactly like a bad config.yaml above. It used to fall back to a bare
+    # AgentConfig(name, role, model) without a word, which ran the agent without its mode (a
+    # read-only agent ran auto), deny patterns, workspace_root, budget, MCP servers, memory and
+    # context settings. No fallback is kept, because no legitimate path reaches this line without
+    # a file: every agent here was read from one (discovered, or minted just above), and
+    # `--agent <name>` with no file already stopped at "not found". A not-found error here means a
+    # file whose `name:` is not its file name — still that file's settings, still refused.
     agent_name_str: str = selected_data.get("name", "orchestrator")
     try:
         agent_config = loader.load_agent(agent_name_str)
-    except Exception:
-        # Fall back to building from raw data
-        agent_config = AgentConfig(
-            name=agent_name_str,
-            role=selected_data.get("role", "General-purpose assistant"),
-            model=selected_data.get("model", "inherit"),
+    except Exception as exc:
+        err_console.print(
+            "[bold red]Error:[/bold red] " + escape(f"Cannot load agent '{agent_name_str}': {exc}"),
+            soft_wrap=True,
         )
+        raise typer.Exit(1)
 
     # --- Capability floor (P-A): sync the module flag from config. The ROOT agent's strip reads
     # tool declarations, so it runs after every global tool is registered (after step 5's plugins).

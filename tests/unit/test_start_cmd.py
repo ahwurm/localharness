@@ -1955,30 +1955,11 @@ def test_migrate_legacy_root_yaml_ignores_non_root_default_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Phase 34-06 (COLL-01/02/04): the collect-only predictive gate wired into the REAL
-# _start_async. PredictiveGate + UserSignalDetector open beside WriteGate at startup
-# (config-gated on agent.memory.predictive_gate.enabled, soft-degrading independently)
-# and close in ordered shutdown. These drives prove the composed spine end-to-end — a
-# live tool-call pair lands surprise rows and a correction-worded user turn lands a
-# labeled signal — the production wiring, not the unit islands 34-03/34-04 already proved.
+# The collect-only predictive gate (phase 34) left with the resonance rebuild (d72d667), and
+# `agent.memory.predictive_gate` with it. The drive that tested its off-switch outlived both and
+# stayed green only because `start` ran a root agent it could not load on a bare config (QA-16).
+# The same agent file is now that fix's upgrade case: a key an earlier release removed.
 # ---------------------------------------------------------------------------
-
-def _read_predictive_counts(tmp_path, agent="orchestrator"):
-    """(tool_observations, surprise_scores, correction-labeled user_signals) counts from
-    the real memory.db the drive wrote — the three Phase-34 collect-only tables."""
-    import sqlite3
-    db_path = tmp_path / "agents" / agent / "memory.db"
-    assert db_path.exists(), f"memory.db not created at {db_path}"
-    con = sqlite3.connect(str(db_path))
-    try:
-        obs = con.execute("SELECT COUNT(*) FROM tool_observations").fetchone()[0]
-        scores = con.execute("SELECT COUNT(*) FROM surprise_scores").fetchone()[0]
-        corrections = con.execute(
-            "SELECT COUNT(*) FROM user_signals WHERE signal_type = 'correction'"
-        ).fetchone()[0]
-        return obs, scores, corrections
-    finally:
-        con.close()
 
 
 def _capture_start_console(monkeypatch):
@@ -1992,35 +1973,10 @@ def _capture_start_console(monkeypatch):
     return printed
 
 
-async def _drive_one_tool_call_and_correction(self):
-    """A scripted turn on the LIVE bus: one tool call (Action + matching tool_result
-    Observation) then the correction-worded user message. agent_id is the running root so
-    the collectors' agent filter passes; publish() awaits handlers inline, so every row is
-    written before the drive returns and shutdown closes the store."""
-    from localharness.core.events import Action, Observation, UserMessage
-    sid = self._agent.current_session_id
-    await self._bus.publish(Action(
-        agent_id="orchestrator", session_id=sid, action_type="tool_call",
-        tool_call_id="tc-1", tool_name="bash_exec",
-    ))
-    await self._bus.publish(Observation(
-        agent_id="orchestrator", session_id=sid, observation_type="tool_result",
-        tool_call_id="tc-1", tool_name="bash_exec", output="ok",
-    ))
-    await self._bus.publish(UserMessage(
-        agent_id="orchestrator", session_id=sid,
-        content="no, i meant the other file", channel="terminal",
-    ))
-
-
-
-
-
-async def test_predictive_gate_config_off(tmp_path, monkeypatch):
-    """The off-switch silences everything: with agent.memory.predictive_gate.enabled=False,
-    the same drive lands ZERO rows in all three tables, startup emits no predictive-gate /
-    user-signals warning (the block is skipped, never caught), and the sitting still closes
-    one clean sessions row — REPL behavior identical."""
+async def test_an_agent_file_with_a_removed_key_refuses_start(tmp_path, monkeypatch, capsys):
+    """An agent yaml still carrying `memory.predictive_gate` stops `start` with its file and line,
+    before any session store opens. It used to start with none of that file's settings."""
+    import typer
     from localharness.cli.agent_cmd import _build_agent_yaml
     from localharness.cli.start_cmd import _start_async
 
@@ -2031,24 +1987,16 @@ async def test_predictive_gate_config_off(tmp_path, monkeypatch):
     (agents_dir / "orchestrator.yaml").write_text(
         yaml.dump(data, default_flow_style=False), encoding="utf-8"
     )
+    _stub_start_boundaries(tmp_path, monkeypatch)
 
-    printed = _capture_start_console(monkeypatch)
-    _stub_start_boundaries(
-        tmp_path, monkeypatch, repl_run=_drive_one_tool_call_and_correction
-    )
+    with pytest.raises(typer.Exit) as exc:
+        await _start_async(None, False, False, str(tmp_path))
 
-    await _start_async(None, False, False, str(tmp_path))
-
-    obs, scores, corrections = _read_predictive_counts(tmp_path)
-    assert (obs, scores, corrections) == (0, 0, 0), "the off-switch must silence all collection"
-
-    out = "\n".join(printed)
-    assert "predictive-gate" not in out and "user-signals" not in out, \
-        "a disabled gate must emit no soft-degrade warning (the block is skipped, not caught)"
-
-    # REPL behavior identical: the sitting still opens + closes one clean sessions row.
-    rows = _read_sessions(tmp_path)
-    assert len(rows) == 1 and rows[0][3] == "complete"
+    assert exc.value.exit_code == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert str(agents_dir / "orchestrator.yaml") in err, err
+    assert "memory.predictive_gate (line" in err, err
+    assert not (tmp_path / "agents" / "orchestrator" / "memory.db").exists()
 
 
 

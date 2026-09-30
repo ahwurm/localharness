@@ -166,3 +166,18 @@ def test_doctor_reports_the_root_agent_start_would_refuse(tmp_path, monkeypatch,
     assert "Config valid" not in out, out
     assert "Config invalid" in out and "agent.example" in out and "(line 2)" in out, out
     assert result.exit_code != 0
+
+
+def test_doctor_checks_the_agent_start_would_run(tmp_path, monkeypatch, fake_home):
+    """The guard against a false alarm: doctor loads the agent `start` opens, not a fixed name. A
+    valid machine whose only agent is `helper` stays `Config valid`."""
+    global_dir = session_home(tmp_path, monkeypatch, fake_home, agent=None)
+    (global_dir / "agents").mkdir()
+    (global_dir / "agents" / "helper.yaml").write_text(
+        "name: helper\nrole: r\nmodel: inherit\n", encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(app, ["doctor", "--config-dir", str(global_dir)])
+
+    assert "Config valid" in result.output, result.output
+    assert "Config invalid" not in result.output, result.output
