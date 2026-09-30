@@ -267,6 +267,27 @@ def test_init_scaffolds_a_plugins_folder_with_a_readme(mock_client_cls, mock_det
         assert phrase in text, phrase
 
 
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_the_plugins_readme_names_both_install_forms(mock_client_cls, mock_detect, tmp_path):
+    """QA-04: a `uv tool` install has no virtual environment, so `uv pip install <package>` fails
+    there ("No virtual environment found"). Measured: `uv tool install --with <package>` adds a
+    plugin to an existing install too, and each run replaces the install's plugins and extras with
+    the ones it names (a re-run without `[web]` uninstalled the web extra's packages; one without a
+    `--with` uninstalled that plugin) — so the README says to name them all again."""
+    mock_detect.return_value = _make_detector_result()
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
+    assert result.exit_code == 0, result.output
+    text = (tmp_path / "plugins" / "README.md").read_text(encoding="utf-8")
+    for phrase in ("`uv tool install --with <package> localharness`", "`uv pip install <package>`",
+                   "`'localharness[web]'`", "every plugin you keep"):
+        assert phrase in text, phrase
+
+
 @pytest.mark.parametrize("flags, answer", [(["--force"], None), ([], "y\n")],
                          ids=["force", "confirmed"])
 @patch("localharness.cli.init_cmd.detect_provider")
