@@ -6,7 +6,11 @@ in the machine's config dir. After the upgrade `plugins list` printed `[]` and `
 checks passed." — the user was never told a plugin they rely on had stopped loading.
 
 This file proves that such a plugin is NAMED (which one, that it was written for the 0.15 plugin API,
-that it is no longer loaded, where the migration note is) and that nothing of it is ever loaded.
+that it is no longer loaded, where the migration note is) and that nothing of it is ever loaded —
+first at resolve(), then on the three surfaces that print its warnings: `plugins list` (stderr),
+`doctor` (a warning line, never a failure) and the `start` banner (a real `_start_async` drive with
+discovery real and the model stubbed). The surface tests were written after the wiring: they are
+graded by mutating it (drop the notices from resolve() and all four redden), not relabelled RED.
 
 The distributions here are REAL metadata: a `*.dist-info` on sys.path, read by the unmocked
 importlib.metadata, exactly as pip leaves an installed package. Every legacy module writes a
@@ -14,17 +18,27 @@ sentinel file when it is imported, so "never loaded" is observed, not inferred.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
+import json
+import re
 import sys
 from pathlib import Path
 
 import pytest
 import yaml
+from typer.testing import CliRunner
 
+from localharness.cli import doctor_cmd
+from localharness.cli.app import app
 from localharness.config.loader import ConfigLoader
 from localharness.plugins import discovery
 from localharness.plugins.resolve import resolve
+from tests.integration.test_workspace_cli_surface_e2e import _offline_provider
+from tests.unit.test_doctor_plugins import _doctor, _section
 from tests.unit.test_plugin_resolve import write_folder_plugin
+from tests.unit.test_start_cmd import _capture_start_console, _read_sessions, _stub_start_boundaries
+from tests.unit.test_workspace_state_landing import _boom, _drive, _hermetic
 
 _CONFIG = {  # the provider is the discard port: nothing here can reach a model
     "version": "1",
@@ -133,6 +147,11 @@ def test_a_015_manifest_folder_is_named_and_never_loaded(tmp_path) -> None:
     g = _global(tmp_path)
     sentinel = tmp_path / "oldstyle-imported"
     manifest = legacy_folder(g, "oldstyle", sentinel)
+    # Not plugins at all, and never named: the README.md `init` writes into every machine's
+    # plugins/, and a folder with neither manifest.yaml nor __init__.py.
+    (g / "plugins" / "README.md").write_text("# Plugins\n", encoding="utf-8")
+    (g / "plugins" / "notes").mkdir()
+    (g / "plugins" / "notes" / "todo.txt").write_text("port oldstyle\n", encoding="utf-8")
 
     resolution = resolve(ConfigLoader(config_dir=g))
 
@@ -208,3 +227,115 @@ def test_the_check_is_one_metadata_scan(tmp_path, monkeypatch, legacy_dist) -> N
 
     assert calls == [((), {})], f"expected ONE unfiltered entry-point scan, got {calls}"
     assert len(found) == 1 and "lh-oldtool 0.1.0" in found[0], found
+
+
+# --------------------------------------------------------------------------- the three surfaces
+
+runner = CliRunner()
+
+
+@pytest.fixture
+def legacy_machine(tmp_path: Path, legacy_dist, monkeypatch) -> tuple[Path, list[str], list[Path]]:
+    """A machine with both kinds of 0.15 plugin: lh-oldtool installed, and `oldstyle` in its
+    config dir — named `[old] g`, so every printed path is a markup guard (unescaped, rich deletes
+    `[old]`). Returns (config dir, the two notices as legacy_notices words them, the sentinels)."""
+    monkeypatch.setenv("COLUMNS", "400")
+    g = _global(tmp_path, "[old] g")
+    folder_sentinel = tmp_path / "oldstyle-imported"
+    legacy_folder(g, "oldstyle", folder_sentinel)
+    expected = discovery.legacy_notices(g)
+    assert len(expected) == 2, f"premise: one distribution and one folder, got {expected}"
+    return g, expected, [legacy_dist, folder_sentinel]
+
+
+def _never_loaded(sentinels: list[Path]) -> None:
+    assert not [s for s in sentinels if s.exists()], "a 0.15 plugin's module was imported"
+    assert "lh_oldtool" not in sys.modules
+
+
+def test_plugins_list_names_both_on_stderr(legacy_machine) -> None:
+    g, expected, sentinels = legacy_machine
+
+    result = runner.invoke(app, ["plugins", "list", "--config-dir", str(g)])
+
+    assert result.exit_code == 0, result.output
+    assert notices(result.stderr.splitlines()) == [f"⚠ {line}" for line in expected], result.stderr
+    assert "0.15 plugin API" not in result.stdout, "a notice was printed inside the table"
+    _never_loaded(sentinels)
+
+
+def test_plugins_list_json_stays_valid_json_without_them(legacy_machine) -> None:
+    g, expected, sentinels = legacy_machine
+
+    result = runner.invoke(app, ["plugins", "list", "--json", "--config-dir", str(g)])
+
+    assert result.exit_code == 0, result.output
+    names = {row["name"] for row in json.loads(result.stdout)}
+    assert not names & {"oldtool", "oldhooks", "lh-oldtool", "oldstyle"}, names
+    assert "0.15 plugin API" not in result.stdout
+    assert notices(result.stderr.splitlines()) == [f"⚠ {line}" for line in expected], result.stderr
+    _never_loaded(sentinels)
+
+
+def _issues(out: str) -> str:
+    """Doctor's verdict line: `N issue(s) found.` or `All checks passed.`"""
+    found = re.search(r"\d+ issue\(s\) found\.|All checks passed\.", out)
+    assert found, f"no verdict in doctor's output:\n{out}"
+    return found.group()
+
+
+def test_doctor_warns_about_both_and_counts_no_failure(tmp_path, monkeypatch) -> None:
+    recorded: list[str] = []  # the failure tokens doctor hands its summary: they decide its exit code
+    summarize = doctor_cmd._summarize_and_exit
+
+    def spy(failures: list[str]) -> None:
+        recorded[:] = failures
+        summarize(failures)
+
+    monkeypatch.setattr(doctor_cmd, "_summarize_and_exit", spy)
+    monkeypatch.setenv("COLUMNS", "400")
+    g = _global(tmp_path, "[old] g")
+    (g / "agents").mkdir()
+    baseline = _doctor(g)  # the same config, before either 0.15 plugin exists
+    failures = list(recorded)
+    assert failures, "premise: the spy saw doctor's core failure (its provider is the discard port)"
+    sentinels = [tmp_path / "lh_oldtool-imported", tmp_path / "oldstyle-imported"]
+    legacy_folder(g, "oldstyle", sentinels[1])
+    install_legacy_dist(tmp_path / "site", sentinels[0], monkeypatch)
+    try:
+        expected = discovery.legacy_notices(g)
+        out = _doctor(g)
+    finally:
+        sys.modules.pop("lh_oldtool", None)
+
+    assert len(expected) == 2, expected
+    assert notices(_section(out)) == [f"⚠ {line}" for line in expected], _section(out)
+    assert recorded == failures, "a 0.15 plugin's notice changed what doctor counts as a failure"
+    assert _issues(out) == _issues(baseline)
+    _never_loaded(sentinels)
+
+
+def test_the_start_banner_names_both_and_the_session_completes(tmp_path, monkeypatch, fake_home,
+                                                               legacy_dist) -> None:
+    home = tmp_path / "home"
+    global_dir = _hermetic(monkeypatch, fake_home, home)
+    _stub_start_boundaries(global_dir, monkeypatch, real_plugins=True)  # discovery stays REAL
+    _offline_provider(global_dir)
+    folder_sentinel = tmp_path / "oldstyle-imported"
+    legacy_folder(global_dir, "oldstyle", folder_sentinel)
+    expected = discovery.legacy_notices(global_dir)
+    assert len(expected) == 2, expected
+    proj = home / "proj"
+    (proj / ".git").mkdir(parents=True)
+    monkeypatch.chdir(proj)
+    monkeypatch.setattr("rich.prompt.Confirm.ask", _boom)  # an in-project workspace never asks
+    printed = _capture_start_console(monkeypatch)
+
+    asyncio.run(_drive())  # a real session: _start_async(None, False, False, None), zero turns
+
+    summary = next(line for line in printed if "startup)" in line)
+    for line in expected:
+        assert line in summary, f"the start banner does not carry {line!r}: {summary}"
+    rows = _read_sessions(global_dir)
+    assert len(rows) == 1 and rows[0][3] == "complete", rows
+    _never_loaded([legacy_dist, folder_sentinel])
