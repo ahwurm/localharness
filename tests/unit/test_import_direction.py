@@ -27,7 +27,7 @@ CORE_DIRS = ("core/", "config/", "provider/", "agent/", "orchestrator/", "regist
 # module, or a plugin file turned into a package, never becomes core by default.
 PLUGIN_FILES = frozenset({
     "channels/discord.py",
-    "tools/builtin/memory_tools.py", "tools/builtin/generate_image_tool.py",
+    "tools/builtin/memory_tools.py", "tools/builtin/generate_image_tool.py", "tools/builtin/image_plugin.py",
     "cli/memory_cmd.py", "cli/memory_cli.py", "cli/web_cmd.py", "cli/generate_image_cmd.py",
     "cli/autoresearch_cmd.py", "cli/experiment_cmd.py", "cli/propose_cmd.py", "cli/report_cmd.py",
 })
