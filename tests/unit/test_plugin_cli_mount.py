@@ -12,6 +12,7 @@ the last two pin that the mount takes its Click classes from typer (QA-01).
 from __future__ import annotations
 
 import ast
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -133,7 +134,9 @@ def test_its_own_help_usage_and_exit_code_are_its_own() -> None:
     assert helped.exit_code == 0 and "Usage: localharness swatchcmd [OPTIONS]" in helped.output
     assert "A flag for the thing." in helped.output
     assert failed.exit_code == 3, failed.output
-    assert usage.exit_code == 2 and "No such option '--nope'" in usage.output  # Click 8.4's words
+    # A usage error, rendered by the root as a core command's is; the words are the click copy's:
+    # "No such option '--nope'." (click 8.4) or "No such option: --nope" (typer 0.26+'s own click).
+    assert usage.exit_code == 2 and re.search(r"No such option:? '?--nope\b", usage.output)
     assert usage.output.startswith("Usage: localharness swatchcmd [OPTIONS]")
 
 
