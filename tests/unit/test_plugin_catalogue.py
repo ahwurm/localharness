@@ -317,3 +317,25 @@ def test_a_plugin_validator_that_exits_is_contained_and_nothing_is_written(compo
     assert result.exit_code == 2, result.output
     assert "Validation failed" in result.output and "SystemExit" in result.output
     assert not (components_home / "overrides.yaml").exists()
+
+
+def test_set_checks_the_new_value_together_with_the_global_config_section(components_home,
+                                                                           monkeypatch) -> None:
+    """`host` is required and set only in config.yaml: judged alone, `r: {color: ...}` would fail."""
+    class RConfig(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        host: str
+        color: str = Field("#4a90d9", pattern=r"^#[0-9a-f]{6}$")
+
+    class R(Plugin):
+        manifest = PluginManifest(name="r", version="0.1.0", kind="tools")
+        ConfigModel = RConfig
+
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (R,))
+    config = yaml.safe_load((components_home / "config.yaml").read_text())
+    _dump(components_home / "config.yaml", {**config, "r": {"enabled": True, "host": "h"}})
+
+    result = _cli("set", "r.color", "#00ff00")
+
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load((components_home / "overrides.yaml").read_text()) == {"r": {"color": "#00ff00"}}
