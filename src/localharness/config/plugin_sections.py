@@ -10,6 +10,7 @@ applied generically: a workspace-layer value is dropped with a warning and the g
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from difflib import get_close_matches
 from types import UnionType
 from typing import Any, Union, get_args, get_origin
 
@@ -45,8 +46,12 @@ def unowned_hint(key: str, *, agent: bool = False, under_agent: bool = False) ->
     """Why a top-level key was refused, and the fix. The key is neither a core setting nor any
     installed plugin's — most often the settings of a plugin since uninstalled, sometimes a typo.
     `under_agent`: the key sits under `agent:` in overrides.yaml. No square brackets: start prints
-    this through rich markup."""
+    this through rich markup. A near miss of a core key is called a typo (QA-17); the 0.8 cutoff
+    keeps plugin names out of it (`image` matches `agent` at difflib's default 0.6)."""
     what = "an agent" if agent or under_agent else "a LocalHarness"
+    core = CORE_AGENT_KEYS if agent or under_agent else CORE_HARNESS_KEYS
+    if near := get_close_matches(key, core, n=1, cutoff=0.8):
+        return f"not {what} setting — did you mean `{near[0]}`?"
     section = f"`{key}:` under `agent:`" if under_agent else "this section"
     return (f"not {what} setting, and no installed plugin is named `{key}` — if a plugin you "
             f"removed used it, reinstall that plugin or delete {section}")
