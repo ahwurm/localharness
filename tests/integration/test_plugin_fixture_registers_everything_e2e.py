@@ -37,9 +37,10 @@ init's provider detection, for the global `init` only; and the model's two repli
 loopback discard port and every address the session dials is recorded and asserted, so nothing can
 reach a model: offline by construction, and checked.
 
-NOT proven here: the phone RENDERING the artifact (`Observation.artifact` does not exist until the
-image conversion, Phase 45 — the route serves the PNG, the page does not yet ask for it); a turn on a
-real model; the terminal channel's own rendering of these lines.
+The swatch's artifact also reaches Observation.artifact through the loop, the same contract the
+image plugin uses; the page rendering it is proven for the image plugin in test_image_plugin_e2e.py.
+
+NOT proven here: a turn on a real model; the terminal channel's own rendering of these lines.
 """
 from __future__ import annotations
 
@@ -68,6 +69,8 @@ from localharness.cli.app import app
 from localharness.cli.slash_commands import find_row, set_plugin_rows
 from localharness.cli.theme import entity
 from localharness.core.bus import EventBus
+from localharness.core.events import ARTIFACT_ID_RE
+from localharness.core.events import Observation as ObservationEvent
 from tests.conftest import FakeLLMResponse, FakeToolCall
 from tests.integration.test_guardrails_from_global_dir_e2e import _let_the_stub_tokenizer_run_a_turn
 from tests.integration.test_workspace_cli_surface_e2e import _DISCARD_URL, _offline_provider
@@ -214,9 +217,15 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
             seen["slash_module_before"] = f"{PKG}.slash" in sys.modules
             row = find_row("/example")
             seen["row_plugin"] = row.plugin if row is not None else None
+            phone_stream = self._channel.attach_client()  # the frames a phone would receive
             # Bounded: in `auto` the gate runs an undeclared-family tool unasked; if that ever
             # changes, the turn would wait on a phone that never answers instead of failing.
             seen["answer"] = await asyncio.wait_for(await self._dispatch_input("Render a swatch."), 30)
+            frames = []
+            while not phone_stream.queue.empty():
+                frames.append(phone_stream.queue.get_nowait())
+            self._channel.detach_client(phone_stream)
+            seen["observations"] = [json.loads(p) for t, _, p in frames if t == "Observation"]
             replies: list[str] = []
             real_send = self._channel.send_message
 
@@ -275,6 +284,11 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
     # root that lost its plugin segment cannot pass by being computed the same wrong way here.
     png = ws / "artifacts" / "example" / f"{seen['art_id']}.png"
     assert png.is_file() and png.read_bytes().startswith(PNG_SIGNATURE), f"no PNG at {png}"
+    # The same artifact rides the Observation the phone receives (the image plugin's contract).
+    (obs,) = [ObservationEvent.model_validate(o) for o in seen["observations"]
+              if o.get("tool_name") == "example_swatch"]
+    assert obs.artifact is not None and obs.artifact.plugin == "example" and ARTIFACT_ID_RE.fullmatch(obs.artifact.id)
+    assert obs.artifact.id == seen["art_id"], (obs.artifact, seen["art_id"])
     # The result the model's second request carried names that very file, so the model can tell the
     # user where the swatch is (QA-05). Compared resolved: `ws` is, the session's state dir need not be.
     saved = re.search(r"saved to (\S+\.png)", seen["tool_text"])
