@@ -303,6 +303,23 @@ def test_the_installed_example_plugin_available_then_on(cfg, tmp_path, monkeypat
     assert sentinel.exists()
 
 
+def test_a_plugins_paths_in_doctor_are_the_sessions(tmp_path, monkeypatch, fake_home) -> None:
+    """In a project, a session's state lives in the workspace layer, so the artifact root doctor
+    checks does too; outside one, the global dir (the same split start makes, 41-05)."""
+    class Where(P):
+        wants_artifacts = True
+
+        def doctor(self, ctx):
+            return [Check(name="where", status="pass",
+                          detail=f"{ctx.paths.workspace} | {ctx.paths.artifact_dir}")]
+
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Where,))
+    layout = _layout(tmp_path, monkeypatch, fake_home)
+
+    assert _squash(f"✓ where: {layout.ws_dir} | {layout.ws_dir / 'artifacts' / 'p'}") \
+        in _squash(_run_doctor())
+
+
 # --------------------------------------------------------------------------- 44-13's suffix
 
 
