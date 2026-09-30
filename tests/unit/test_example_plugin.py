@@ -149,11 +149,37 @@ async def test_the_tool_writes_one_png_into_the_core_computed_root(plugin_cls, t
     assert result.success, result.error
     ref = ArtifactRef.model_validate(result.metadata["artifact"])
     assert (ref.plugin, ref.kind, ref.mime) == ("example", "image", "image/png")
-    assert result.output == f"Rendered a 4x4 #4a90d9 swatch: artifact {ref.id}"
-    assert [p.name for p in root.iterdir()] == [f"{ref.id}.png"]
-    ihdr, pixels = _png((root / f"{ref.id}.png").read_bytes())
+    # QA-05: the result names the file it saved, so the model can tell the user where the swatch is.
+    path = root / f"{ref.id}.png"
+    assert result.output == f"Rendered a 4x4 #4a90d9 swatch: artifact {ref.id}, saved to {path}"
+    assert list(root.iterdir()) == [path]
+    ihdr, pixels = _png(path.read_bytes())
     assert ihdr == (4, 4, 8, 2, 0, 0, 0)  # 4x4, 8-bit truecolor, no interlace
     assert pixels == (b"\x00" + bytes.fromhex("4a90d9") * 4) * 4
+
+
+async def test_the_saved_path_is_absolute_even_from_a_relative_root(plugin_cls, tmp_path, monkeypatch):
+    """A relative config dir (`--config-dir x`, LOCALHARNESS_DIR=x) gives the plugin a relative root;
+    the path the model repeats to the user must still open from any directory."""
+    monkeypatch.chdir(tmp_path)
+    root = Path("state") / "artifacts" / "example"
+    (tool,) = await plugin_cls().tools(_ctx(plugin_cls, tmp_path, root))
+    result = await tool.run()
+    assert result.success, result.error
+    ref = ArtifactRef.model_validate(result.metadata["artifact"])
+    saved = Path(result.output.split(", saved to ", 1)[-1])
+    assert saved.is_absolute(), result.output
+    assert saved.resolve() == (tmp_path / root / f"{ref.id}.png").resolve() and saved.is_file()
+
+
+async def test_the_tool_says_it_takes_no_arguments_and_where_its_settings_live(plugin_cls, tmp_path):
+    """QA-05: asked for another color, a model offered to "render that instead" — but the tool takes
+    no arguments. Its description says so and names the two settings that decide what it draws."""
+    (tool,) = await plugin_cls().tools(_ctx(plugin_cls, tmp_path, _root(tmp_path)))
+    schema = tool.info()
+    assert schema.parameters == {"type": "object", "properties": {}, "required": []}
+    for phrase in ("takes no arguments", "example.color", "agent.example.size"):
+        assert phrase in schema.description, phrase
 
 
 async def test_the_tool_refuses_without_an_artifact_root(plugin_cls, tmp_path):
