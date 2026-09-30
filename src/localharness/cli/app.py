@@ -17,6 +17,7 @@ from localharness.cli.experiment_cmd import experiment_app
 from localharness.cli.init_cmd import init_app
 from localharness.cli.memory_cli import memory_app
 from localharness.cli.model_cmd import model
+from localharness.cli.plugins_cmd import plugins_app
 from localharness.cli.propose_cmd import propose
 # report_cmd registers `report`/`sentinel` on autoresearch_app at import time (sibling commands).
 from localharness.cli import report_cmd as _report_cmd  # noqa: F401
@@ -53,6 +54,7 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(bench_app, name="bench")
 app.add_typer(components_app, name="components")
 app.add_typer(config_app, name="config")
+app.add_typer(plugins_app, name="plugins")
 app.add_typer(memory_app, name="memory")
 app.add_typer(autoresearch_app, name="autoresearch")
 app.add_typer(experiment_app, name="experiment")
