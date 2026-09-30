@@ -44,6 +44,7 @@ from localharness.agent.gate import tool_meta_from_schema
 from localharness.agent.gate_types import GateSettings, Verdict
 from localharness.agent.verdict import UNFAMILIAR_TOOL_KIND, GateContext, _kind, evaluate
 from localharness.config.models import ToolConfig
+from localharness.plugins.api import Plugin, PluginManifest
 from localharness.tools.base import ToolSchema
 from localharness.tools.builtin import register_builtin_tools
 from localharness.tools.builtin.agent_tool import AgentTool
@@ -184,7 +185,7 @@ async def test_start_reads_declarations_after_every_global_tool_is_registered(
     tmp_path, monkeypatch, fake_home
 ):
     """The real `start`, zero turns: a tool that declares nothing, registered by the step-5 plugin
-    loader, is denied to the root — possible only if the floor runs AFTER registration — the root
+    lifecycle, is denied to the root — possible only if the floor runs AFTER registration — the root
     resolves its toolset exactly as the loop does without raising, and the root's context store
     reads origins from the root's own registry."""
     from tests.unit.test_workspace_state_landing import (
@@ -196,18 +197,22 @@ async def test_start_reads_declarations_after_every_global_tool_is_registered(
 
     _global_only_start(tmp_path, monkeypatch, fake_home)
 
-    async def _plugin_registers_an_undeclared_tool(self):
-        await self._registry.register(_Bare("plugin_probe"), scope="global")
-        return ["probe"]
+    class _Probe(Plugin):
+        """a bundled plugin whose one tool declares nothing"""
 
-    monkeypatch.setattr("localharness.plugins.loader.PluginLoader.discover_all",
-                        _plugin_registers_an_undeclared_tool)
+        manifest = PluginManifest(name="probe", version="1", kind="tools")
+
+        async def tools(self, ctx):
+            return [_Bare("plugin_probe")]
+
+    # Step 5 is the plugin lifecycle (44-14); a bundled plugin reaches it through BUILTIN_PLUGINS.
+    monkeypatch.setattr("localharness.plugins.builtin.BUILTIN_PLUGINS", (_Probe,))
     rec = _install_recorders(monkeypatch)
     await _drive()
 
     root = next(kw for kw in rec["loop"] if kw["config"].name == AGENT)
     reg, cfg, ctx = root["tool_registry"], root["config"], root["context_manager"]
-    assert reg.schema_of("plugin_probe") is not None, "premise: the plugin loader registered it"
+    assert reg.schema_of("plugin_probe") is not None, "premise: the plugin lifecycle registered it"
     assert {"plugin_probe", *WEB} <= set(cfg.tools.deny)
     resolved = reg.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools)  # the loop's call
     assert not set(resolved) & {"plugin_probe", *WEB}

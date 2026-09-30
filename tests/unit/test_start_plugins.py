@@ -9,18 +9,20 @@ real `localharness start` does with a plugin, not what a helper would do if some
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from localharness.cli.slash_commands import all_rows, find_row, set_plugin_rows
-from localharness.plugins.api import Plugin, PluginManifest, SlashDescriptor
+from localharness.plugins.api import Plugin, PluginManifest, PluginPaths, SlashDescriptor
 from localharness.plugins.slot import MemorySlot
 from localharness.tools.base import Tool, ToolResult, ToolSchema
+from localharness.tools.hooks import HARNESS_HOOKIMPL
 from tests.unit.test_start_cmd import _capture_start_console, _read_sessions, _stub_start_boundaries
 
 EVENTS: list[str] = []
+CONTEXTS: list[Any] = []
 
 
 class _EchoTool(Tool):
@@ -49,6 +51,12 @@ async def _probe_slash(ctx: Any, args: str) -> str:
     return f"probe says {args or 'hi'}"
 
 
+class _ProbeHooks:
+    @HARNESS_HOOKIMPL
+    def pre_tool(self, name: str, arguments: dict, agent_id: str, division_id: str) -> None:
+        EVENTS.append(f"pre_tool {name}")
+
+
 class _Probe(Plugin):
     """a bundled test plugin: one declared tool, one slash row, an artifact root"""
 
@@ -60,6 +68,7 @@ class _Probe(Plugin):
         return [_EchoTool()]
 
     async def start(self, ctx: Any) -> None:
+        ctx.hooks.register_plugin(_ProbeHooks(), name="probe")  # the session's own hook system
         EVENTS.append("start")
 
     async def stop(self, ctx: Any) -> None:
@@ -84,9 +93,25 @@ class _Ingests(Plugin):
         return [_UndeclaredTool()]
 
 
+class _Size(BaseModel):
+    size: int = 8
+
+
+class _Settled(Plugin):
+    """a bundled test plugin that keeps the context core built for it"""
+
+    manifest = PluginManifest(name="settled", version="1", kind="tools")
+    AgentConfigModel = _Size
+    wants_artifacts = True
+
+    async def start(self, ctx: Any) -> None:
+        CONTEXTS.append(ctx)
+
+
 @pytest.fixture(autouse=True)
 def _clean_rows_and_events():
     EVENTS.clear()
+    CONTEXTS.clear()
     yield
     set_plugin_rows(())  # a test that fails mid-drive must not leave rows for the next one
 
@@ -118,18 +143,23 @@ def _summary(printed: list[str]) -> str:
 
 
 async def test_start_runs_a_bundled_plugin_through_the_lifecycle(tmp_path, monkeypatch):
-    """PAPI-02/PAPI-07: the plugin's tool is registered bare with source_plugin set, its slash row is
-    in the one table while the session runs (and answers, importing its target on first use) and is
-    gone afterwards, start() runs before the REPL and stop() after it, the loop holds the (empty)
-    memory slot, and the session closes as it always did."""
+    """PAPI-02/PAPI-07: the plugin's tool is registered bare with source_plugin set and dispatches
+    through the session's registry, firing the hook the plugin put on the session's hook system;
+    its slash row is in the one table while the session runs (and answers, importing its target on
+    first use) and is gone afterwards; start() runs before the REPL and stop() after it; the loop
+    holds the (empty) memory slot; and the session closes as it always did."""
     from localharness.cli.start_cmd import _start_async
 
     during: list[Any] = []
 
     async def _repl(self):
         EVENTS.append("repl")
+        (loop,) = loops  # a zero-turn drive builds exactly the root's loop
+        cfg = loop["config"]
+        result = await loop["tool_registry"].dispatch("probe_echo", {}, cfg.name, cfg.division or "",
+                                                      cfg.tools)
         row = find_row("/probe")
-        during.extend([row, await row.handler("there") if row is not None else None])
+        during.extend([result.output, row, await row.handler("there") if row is not None else None])
 
     _stub_start_boundaries(tmp_path, monkeypatch, repl_run=_repl)
     _bundle(monkeypatch, _Probe)
@@ -137,16 +167,17 @@ async def test_start_runs_a_bundled_plugin_through_the_lifecycle(tmp_path, monke
 
     await _start_async(None, False, False, str(tmp_path))
 
-    (loop,) = loops  # a zero-turn drive builds exactly the root's loop
+    (loop,) = loops
     registry = loop["tool_registry"]
     assert "probe_echo" in {s.name for s in registry.global_schemas()}, "bare name, global scope"
     assert registry.schema_of("probe_echo").source_plugin == "probe"
-    row, reply = during
+    output, row, reply = during
+    assert output == "echo"
     assert row is not None and row.plugin == "probe", "the row was not in the table during the session"
     assert reply == "probe says there"
     assert find_row("/probe") is None and [r for r in all_rows() if r.plugin] == [], \
         "the plugin's rows must leave the table when the session ends"
-    assert EVENTS == ["start", "repl", "stop"]
+    assert EVENTS == ["start", "repl", "pre_tool probe_echo", "stop"]
     slot = loop["memory_slot"]
     assert isinstance(slot, MemorySlot) and not slot.occupied
     rows = _read_sessions(tmp_path)
@@ -191,7 +222,7 @@ async def test_a_plugin_whose_start_raises_is_named_and_the_session_goes_on(tmp_
     await _start_async(None, False, False, str(tmp_path))
 
     assert "plugin crashes: start() raised RuntimeError: boom" in _summary(printed)
-    assert EVENTS == ["start", "stop"]
+    assert EVENTS == ["start", "stop"]  # the other plugin; a failed start() is not stopped (44-12)
     rows = _read_sessions(tmp_path)
     assert len(rows) == 1 and rows[0][3] == "complete"
 
@@ -211,9 +242,43 @@ async def test_the_root_floor_runs_after_plugin_tools_register(tmp_path, monkeyp
     (loop,) = loops
     registry, cfg = loop["tool_registry"], loop["config"]
     assert registry.schema_of("probe_fetch").source_plugin == "ingests", "premise: it registered"
-    assert "probe_fetch" in cfg.tools.deny
     resolved = registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools)  # the loop's call
     assert "probe_fetch" not in resolved and "bash_exec" in resolved
+    assert "probe_fetch" in cfg.tools.deny
+
+
+async def test_the_root_agents_plugin_settings_reach_the_plugin(tmp_path, monkeypatch):
+    """44-09: resolve() runs on the session's own loader AFTER it loaded the root agent, so the
+    `settled:` section of the root agent's file is the plugin's agent-level settings."""
+    from localharness.cli.start_cmd import _start_async
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    _bundle(monkeypatch, _Settled)
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "orchestrator.yaml").write_text(
+        "name: orchestrator\nrole: General-purpose assistant\nmodel: inherit\nsettled:\n  size: 3\n")
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    (ctx,) = CONTEXTS
+    assert ctx.agent_config.size == 3
+
+
+async def test_a_plugins_paths_are_the_ones_core_computed_for_the_session(tmp_path, monkeypatch,
+                                                                         fake_home):
+    """PAPI-03/PAPI-10 in a workspace session: the machine's config dir, the project's workspace,
+    the state dir the work lands in (the workspace), and the artifact root under that state dir."""
+    from tests.unit.test_workspace_state_landing import _drive, _workspace_start
+
+    _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
+    _bundle(monkeypatch, _Settled)
+
+    await _drive()
+
+    (ctx,) = CONTEXTS
+    ws = ws.resolve()
+    assert ctx.paths == PluginPaths(global_config_dir=global_dir, workspace=ws, state_dir=ws,
+                                    artifact_dir=ws / "artifacts" / "settled")
 
 
 async def test_start_config_dir_discovers_folder_plugins_under_it(tmp_path, monkeypatch):

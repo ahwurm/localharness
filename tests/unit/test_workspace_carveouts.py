@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import linecache
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -303,6 +304,10 @@ async def test_the_machine_wide_files_stay_in_the_global_dir_during_a_workspace_
 
     These three are what the published table's right-hand column claims beyond the kill switch, the
     GPU daemon and the safety context, so they are asserted rather than assumed.
+
+    Plugins are recorded at `localharness.plugins.discovery.discover(<dir>)`, the one function that
+    reads `<dir>/plugins` (44-14): the session's plugin resolution and its config loader both call
+    it, and every call must name the global dir.
     """
     _home, global_dir, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
 
@@ -316,24 +321,21 @@ async def test_the_machine_wide_files_stay_in_the_global_dir_during_a_workspace_
         lambda d: agent_yaml_dirs.append(d),
     )
 
-    import localharness.plugins.loader as _plugins
+    discovered_from: list[Path] = []
 
-    real_plugin_init = _plugins.PluginLoader.__init__
-    plugin_kwargs: list = []
+    def _rec_discover(global_config_dir):
+        discovered_from.append(Path(global_config_dir))
+        return []
 
-    def _rec_plugin_init(self, *args, **kwargs):
-        plugin_kwargs.append(dict(kwargs))
-        return real_plugin_init(self, *args, **kwargs)
-
-    monkeypatch.setattr("localharness.plugins.loader.PluginLoader.__init__", _rec_plugin_init)
+    monkeypatch.setattr("localharness.plugins.discovery.discover", _rec_discover)
 
     await _drive()
 
     assert _only(tools_dirs, "the packaged-tools install") == global_dir
     assert _only(agent_yaml_dirs, "the root-agent yaml migration") == global_dir / "agents"
-    plugins_dir = _only(plugin_kwargs, "the plugin loader")["plugins_dir"]
-    assert plugins_dir == global_dir / "plugins", f"plugins were loaded from {plugins_dir}"
-    for path in (_only(tools_dirs, "x"), _only(agent_yaml_dirs, "x"), plugins_dir):
+    assert discovered_from, "plugin discovery was never recorded — the patch did not bite"
+    assert set(discovered_from) == {global_dir}, f"plugins were discovered from {discovered_from}"
+    for path in (_only(tools_dirs, "x"), _only(agent_yaml_dirs, "x"), *discovered_from):
         assert ws not in path.parents and path != ws, f"{path} followed the workspace"
 
 
