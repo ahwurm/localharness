@@ -719,6 +719,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             soft_wrap=True,
         )
         raise typer.Exit(1)
+    # QA-18: an agent's own mode stands even when it is looser than the org's (no "most restrictive
+    # wins"; that is the owner's call), and the session says so once, naming both.
+    from localharness.agent.gate_types import MODE_STRICTNESS
+    _own, _org = agent_config.permissions.mode, loader.org_mode()
+    if _org is not None and MODE_STRICTNESS[_own] < MODE_STRICTNESS[_org]:
+        console.print(
+            f"⚠ The {agent_name_str} agent sets permissions.mode: {_own}, looser than "
+            f"org.permissions.mode: {_org}. This session runs in {_own}; remove the agent's mode "
+            "to use the org's.", style="yellow", markup=False, soft_wrap=True,
+        )
 
     # --- Capability floor (P-A): sync the module flag from config. The ROOT agent's strip reads
     # tool declarations, so it runs after every global tool is registered (after step 5's plugins).

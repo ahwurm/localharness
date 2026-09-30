@@ -1263,7 +1263,7 @@ list — every field is declared there with its own description.
 | `tools.add` | list[string] | `[]` | registered tool names | Tools to add |
 | `tools.deny` | list[string] | `[]` | tool names or globs | Tools to deny |
 | `tools.mcp_servers` | list | `[]` | — | MCP server configs |
-| `permissions.mode` | string | `"auto"` | auto, guarded, trusted, read-only, unattended | Session permission mode. A project layer may only RAISE strictness (`unattended` < `auto` < `trusted` < `guarded` < `read-only`) |
+| `permissions.mode` | string | `"auto"` | auto, guarded, trusted, read-only, unattended | Session permission mode. An agent that sets none runs in `org.permissions.mode` (section 5.1). A project layer may only RAISE strictness (`unattended` < `auto` < `trusted` < `guarded` < `read-only`) |
 | `permissions.ask.network_hosts` | bool | `false` | — | Ask before a network tool reaches a host with no grant |
 | `permissions.ask.timeout_s` | float or null | null | 0+ | How long a channel that cannot hold its dialog open (Discord) waits for an answer; null derives it from the tool timeout. Channels that hold the dialog — the terminal, Zed — never time out |
 | `permissions.ask.mcp_trusted_servers` | list[string] | `[]` | server names | MCP servers whose tools skip the once-per-tool ask |
@@ -1489,6 +1489,12 @@ resolve(agent_name: str) → AgentConfig:
            An agent cannot remove a pattern inherited from division or org.
        - PermissionConfig.budget:
            Agent values WIN. If agent sets max_actions: 50, the resolved value is 50 regardless of division/org.
+       - PermissionConfig.mode:
+           The agent's own mode when it sets one (its file, or the overlay's `agent:` section),
+           else `org.permissions.mode` from config.yaml, else `auto`. Key presence decides, so an
+           explicit `mode: auto` beats an org `read-only`; `start` then prints one line naming
+           both. A layer's overrides.yaml beats its config.yaml, and a workspace org value may
+           only tighten the global one. A division's mode does not set the session's.
        - MemoryConfig:
            Agent values win for all fields.
        - ContextConfig:
