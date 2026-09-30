@@ -11,7 +11,6 @@ import logging
 import sys
 import uuid
 from dataclasses import fields
-from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
@@ -221,11 +220,11 @@ _REASONS = {
     "configure": "configure() raised RuntimeError: bad cfg",
     "configure-returns-none": "configure() returned None",
     "tools": "tools() raised RuntimeError: no tools",
-    "tools-returns-none": "tools() returned NoneType",
+    "tools-returns-none": "tools() returned NoneType, not a list of tools",
     "not-a-tool": "tools() returned 42, which is not a tool",
-    "builtin-name": "'read'",
-    "name-classified": "'agent'",
-    "repeated-name": "two tools named 'bad_tool'",
+    "builtin-name": "its tool 'read' has the name of a tool already registered",
+    "name-classified": "its tool 'agent' has a name the permission gate classifies by name",
+    "repeated-name": "it contributes two tools named 'bad_tool'",
     "start": "start() raised RuntimeError: no start",
     "start-exits": "start() raised SystemExit: 3",
 }
@@ -306,25 +305,36 @@ async def test_a_stop_that_raises_is_logged_and_the_next_plugin_still_stops(path
     assert [r for r in caplog.records if "second" in r.getMessage() and "stop" in r.getMessage()]
 
 
+class _Veto:
+    @HARNESS_HOOKIMPL
+    def pre_tool(self, name, arguments, agent_id, division_id):
+        raise AssertionError("a disabled plugin's hook ran")
+
+
+async def _hook_then_fail(self, ctx):
+    ctx.hooks.register_plugin(_Veto(), name="hooky")
+    raise RuntimeError("after hooking")
+
+
+async def _hook_then_unconfigured(self, ctx):
+    ctx.hooks.register_plugin(_Veto(), name="hooky")
+    return ("unconfigured", "hooky.url")
+
+
 @pytest.mark.asyncio
-async def test_a_failed_plugins_hooks_are_unregistered(paths):
-    """A hook object registered on ctx.hooks by a plugin that then fails is taken out with it —
-    'disabled for the session' covers its pre_tool hooks (which could veto) too."""
-    class Veto:
-        @HARNESS_HOOKIMPL
-        def pre_tool(self, name, arguments, agent_id, division_id):
-            raise AssertionError("a failed plugin's hook ran")
-
-    async def start(self, ctx):
-        ctx.hooks.register_plugin(Veto(), name="hooky")
-        raise RuntimeError("after hooking")
-
+@pytest.mark.parametrize("methods", [{"start": _hook_then_fail},
+                                     {"configure": _hook_then_unconfigured}])
+async def test_a_disabled_plugins_hooks_are_unregistered(paths, methods):
+    """A hook object a plugin put on ctx.hooks goes with it when it fails or turns out unconfigured
+    — 'disabled for the session' covers its pre_tool hooks (which could veto) too."""
     hooks = HookSystem()
-    result, _ = await _start(_resolution(bundled=(_plugin("hooky", start=start),)), paths,
+    kept = _Veto()
+    hooks.register_plugin(kept, name="core")  # registered before any plugin ran: never touched
+    result, _ = await _start(_resolution(bundled=(_plugin("hooky", **methods),)), paths,
                              hooks=hooks)
 
-    assert "hooky" in result.failed
-    assert hooks.pm.get_plugins() == set(), "the failed plugin's hook object is unregistered"
+    assert "hooky" in result.failed or "hooky" in result.unconfigured
+    assert hooks.pm.get_plugins() == {kept}, "only the disabled plugin's hook object is gone"
 
 
 # --- PAPI-11: the requires cascade ---------------------------------------------------------------------
@@ -410,6 +420,18 @@ async def test_a_plugin_that_names_its_own_artifact_root_gets_no_artifact_servin
     assert result.loaded_names == ["rogue", "art"], "only its artifact serving is disabled"
     assert [w for w in result.warnings
             if w.startswith("plugin rogue:") and str(elsewhere) in w and str(expected) in w]
+
+
+@pytest.mark.asyncio
+async def test_an_artifact_root_that_raises_costs_only_artifact_serving(paths):
+    resolution = _resolution(bundled=(
+        _plugin("art", wants_artifacts=True, artifact_root=lambda self, ctx: 1 / 0),))
+
+    result, _ = await _start(resolution, paths)
+
+    assert result.artifact_roots == {} and result.loaded_names == ["art"]
+    assert result.warnings == ["plugin art: artifact serving disabled this session — its "
+                               "artifact_root() raised ZeroDivisionError: division by zero"]
 
 
 @pytest.mark.asyncio
