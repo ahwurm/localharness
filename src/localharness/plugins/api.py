@@ -239,9 +239,25 @@ class PluginPaths:
     artifact_dir: Path | None = None
 
 
+@dataclass
+class SessionInfo:
+    """Who this session is, for a plugin that keeps per-session state (the memory plugin's store and
+    session row). Set by core once per `start`; None outside a session (doctor, CLI commands). Not
+    frozen: core sets `exit_reason` just before stop_plugins, and the plugin reads it in stop()."""
+
+    agent_id: str
+    division_id: str
+    sitting_id: str
+    model: str
+    context_tokens: int
+    budget: dict[str, Any]
+    exit_reason: str = "complete"
+
+
 @dataclass(frozen=True)
 class PluginContext:
-    """Everything a plugin receives — exactly these fields (PAPI-03). A plugin reaches the session
+    """Everything a plugin receives — the v1 fields (PAPI-03) plus two additive optional fields,
+    idle_llm and session. A plugin reaches the session
     only through this object: it never imports cli/start_cmd.py or another plugin.
 
     - `bus`: the session's EventBus.
@@ -252,7 +268,11 @@ class PluginContext:
     - `config` / `agent_config`: this plugin's validated ConfigModel (harness `<name>:`) and
       AgentConfigModel (`agent.<name>`) instances; None when the plugin declares no such model.
     - `paths`: PluginPaths.
-    - `llm`: the session's LLM client; None outside a session (doctor, CLI commands)."""
+    - `llm`: the session's LLM client; None outside a session (doctor, CLI commands).
+    - `idle_llm`: an LLMTextAdapter over `llm` for cancellable background completions; None when
+      `llm` is None (additive, not a v1 field — PAPI-03).
+    - `session`: SessionInfo for the running session; None outside a session (additive; disclosed
+      beside idle_llm)."""
 
     bus: EventBus
     tools: ToolRegistry
@@ -261,6 +281,8 @@ class PluginContext:
     agent_config: BaseModel | None
     paths: PluginPaths
     llm: LLMClient | None
+    idle_llm: Any = None
+    session: SessionInfo | None = None
 
 
 class Plugin:
