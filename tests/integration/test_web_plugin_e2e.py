@@ -259,8 +259,10 @@ def test_the_page_shows_the_buttons_the_real_protocol_answer_names(tmp_path, mon
             out["protocol"] = (await c.get("/api/protocol", headers=BEARER)).json()
 
         bodies[memory_on] = _web_session(monkeypatch, work)["protocol"]
-    assert bodies[True]["screens"] == {"memory": True, "pictures": False}, bodies[True]["screens"]
-    assert bodies[False]["screens"] == {"memory": False, "pictures": False}, bodies[False]["screens"]
+    got = bodies[True]["screens"]
+    assert got == {"memory": True, "pictures": False, "pictures_store": None}, got
+    got = bodies[False]["screens"]
+    assert got == {"memory": False, "pictures": False, "pictures_store": None}, got
     for memory_on, body in bodies.items():
         got = _page(_serve({"/api/protocol": body}) + f"""
 const out = [];

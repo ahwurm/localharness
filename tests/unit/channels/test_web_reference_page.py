@@ -543,6 +543,33 @@ console.log(JSON.stringify([before, btns()]));
     assert got == [{"mem": True, "pic": True}, {"mem": False, "pic": False}]
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_the_picture_cache_switch_shows_posts_and_applies_screens(page, tmp_path):
+    """The drawer switch: hidden with nothing to decide, labelled from screens.pictures_store, and a
+    tap posts the flip and applies the screens it gets back — no second /api/protocol read."""
+    got = _js(page, tmp_path, """
+const sw = () => [$("picStoreBtn").hidden, $("picStoreBtn").textContent];
+const out = [];
+applyScreens({memory: false, pictures: false, pictures_store: null}); out.push(sw());
+applyScreens({memory: false, pictures: false}); out.push(sw());   // a server without the key
+applyScreens({memory: false, pictures: false, pictures_store: false}); out.push(sw());
+applyScreens({memory: false, pictures: true, pictures_store: true}); out.push(sw(), btns());
+const asked = [];
+globalThis.fetch = async (path, opts) => { asked.push([path, opts && opts.body]); return {json: async () =>
+  path === "/api/pictures/store"
+    ? {store: false, screens: {memory: false, pictures: false, pictures_store: false}} : {}}; };
+await $("picStoreBtn").onclick();
+out.push(sw(), btns(), asked);
+console.log(JSON.stringify(out));
+""")
+    assert got == [[True, got[0][1]], [True, got[1][1]],
+                   [False, "Pictures on this phone: not cached"],
+                   [False, "Pictures on this phone: cached"], {"mem": True, "pic": False},
+                   [False, "Pictures on this phone: not cached"], {"mem": True, "pic": True},
+                   [["/api/pictures/store", '{"store":false}']]]
+    assert 'id="picStoreBtn" hidden' in page
+
+
 GALLERY_FETCH = """
 const A = (n) => ({plugin: "image", id: "art-20260930-1425" + String(n).padStart(2, "0") + "-abcdef",
                    mime: "image/png", bytes: 1});
