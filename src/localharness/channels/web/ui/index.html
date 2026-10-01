@@ -328,6 +328,7 @@
   <h3>housekeeping</h3>
   <button class="small" id="memBtn" hidden>memory</button>
   <button class="small" id="picBtn" hidden>pictures</button>
+  <button class="small" id="picStoreBtn" hidden></button>
   <button class="small" id="pushBtn" hidden>notifications</button>
   <button class="small" id="recheck" title="re-run the model-server probe">re-check the model server</button>
   <button class="small" id="grantsBtn">grants</button>
@@ -1402,6 +1403,16 @@ $("memclose").onclick = () => $("mem").close();
 const applyScreens = (s) => {
   $("memBtn").hidden = !(s && s.memory);
   $("picBtn").hidden = !(s && s.pictures);
+  const st = s ? s.pictures_store : null;   // null/absent: no picture root, nothing to decide
+  $("picStoreBtn").hidden = typeof st !== "boolean";
+  $("picStoreBtn").textContent = "Pictures on this phone: " + (st ? "cached" : "not cached");
+  $("picStoreBtn").dataset.store = String(!!st);
+};
+// the cache switch: turning it off also purges this origin's HTTP cache (Clear-Site-Data)
+$("picStoreBtn").onclick = async () => {
+  const r = await post("/api/pictures/store", { store: $("picStoreBtn").dataset.store !== "true" });
+  if (r.screens) applyScreens(r.screens);
+  else add(el("div", "row err", "picture caching not changed: " + (r.error || JSON.stringify(r))));
 };
 const refreshScreens = async () => {
   try { applyScreens((await get("/api/protocol")).screens); } catch (e) { /* keep the last answer */ }

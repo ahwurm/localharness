@@ -23,7 +23,7 @@ from localharness.channels.web.channel import WebChannel
 from localharness.channels.web.protocol import PROTOCOL_VERSION
 from localharness.core.artifacts import artifact_root, mint_artifact_id, write_artifact
 from localharness.core.bus import EventBus
-from tests.unit.channels.test_web_server import BEARER, TOKEN, _stack
+from tests.unit.channels.test_web_server import BEARER, JSON, TOKEN, _stack
 
 pytestmark = pytest.mark.asyncio
 
@@ -270,10 +270,41 @@ async def test_no_store_flips_the_cache_header_and_hides_the_listing(tmp_path):
 
 
 async def test_one_decision_point_reads_the_cache_header_and_the_flag():
+    import ast
     source = Path(server_mod.__file__).read_text(encoding="utf-8")
     assert source.count("ARTIFACT_CACHE_CONTROL") == 2  # its definition + _artifact_policy
-    assert source.count("self.no_store") == 2  # its assignment + _artifact_policy
+    reads = [n.lineno for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Attribute)
+             and n.attr == "no_store" and isinstance(n.ctx, ast.Load)
+             and isinstance(n.value, ast.Name) and n.value.id == "self"]
+    assert len(reads) == 1, f"self.no_store must be read once (_artifact_policy); reads at lines {reads}"
     assert "channel.artifact_root(" not in source
+
+
+async def test_the_drawer_switch_flips_the_policy_and_purges_on_off(tmp_path):
+    roots, server, client = await _two_roots(tmp_path)
+    name = _put(roots["image"], "art-20260930-120000-aaaaaa.png")
+    pic = f"/api/artifacts/image/{name[:-4]}"
+    off = await client.post("/api/pictures/store", json={"store": False}, headers=JSON)
+    assert off.status_code == 200 and off.headers["clear-site-data"] == '"cache"'
+    assert off.json()["store"] is False
+    assert off.json()["screens"]["pictures"] is False and off.json()["screens"]["pictures_store"] is False
+    assert (await client.get("/api/artifacts", headers=BEARER)).status_code == 404
+    assert (await client.get(pic, headers=BEARER)).headers["cache-control"] == "no-store"
+    on = await client.post("/api/pictures/store", json={"store": True}, headers=JSON)
+    assert on.status_code == 200 and "clear-site-data" not in on.headers
+    assert on.json() == {"store": True, "screens": {"memory": False, "pictures": True,
+                                                    "pictures_store": True}}
+    assert (await client.get("/api/artifacts", headers=BEARER)).status_code == 200
+    assert (await client.get(pic, headers=BEARER)).headers["cache-control"] == IMMUTABLE
+
+
+async def test_the_switch_has_nothing_to_decide_with_no_root_and_refuses_a_bad_body(tmp_path):
+    _, server, _, client = await _stack(tmp_path)
+    got = await client.post("/api/pictures/store", json={"store": True}, headers=JSON)
+    assert got.json()["screens"] == {"memory": False, "pictures": False, "pictures_store": None}
+    for body in ({"store": "yes"}, {}):
+        bad = await client.post("/api/pictures/store", json=body, headers=JSON)
+        assert bad.status_code == 400 and "error" in bad.json(), body
 
 
 def _invoke_web(tmp_path, monkeypatch, *args):
@@ -343,10 +374,12 @@ async def test_screens_follow_the_slot_and_the_policy(tmp_path):
         return (await client.get("/api/protocol", headers=BEARER)).json()["screens"]
 
     root = {"image": artifact_root(tmp_path / "state", "image")}
-    assert await screens() == {"memory": False, "pictures": False}
+    assert await screens() == {"memory": False, "pictures": False, "pictures_store": None}
     on = {"memory_slot": _fake_slot(), "artifact_roots": root}
-    assert await screens(runtime=dict(on)) == {"memory": True, "pictures": True}
-    assert await screens(runtime=dict(on), no_store=True) == {"memory": True, "pictures": False}
+    assert await screens(runtime=dict(on)) == {"memory": True, "pictures": True,
+                                               "pictures_store": True}
+    assert await screens(runtime=dict(on), no_store=True) == {"memory": True, "pictures": False,
+                                                              "pictures_store": False}
 
 
 async def test_the_memory_button_means_a_browse_api_exists(tmp_path):
