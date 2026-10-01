@@ -519,11 +519,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.channels.terminal import TerminalChannel
     from localharness.cli.agent_cmd import _build_agent_yaml
     from localharness.cli.init_cmd import init_app
-    from localharness.cli.slash_commands import set_plugin_rows
+    from localharness.cli.slash_commands import set_memory_available, set_plugin_rows
     from localharness.config.loader import ConfigLoader
     from localharness.config.paths import global_config_dir, resolve_config_dir, resolve_runtime_path
     from localharness.core.bus import EventBus
-    from localharness.memory.sqlite import MemoryStore, _migrate_legacy_root_agent_dir
+    from localharness.core.agent_dir import _migrate_legacy_root_agent_dir
+    from localharness.memory.sqlite import MemoryStore
     from localharness.plugins.api import PluginPaths
     from localharness.plugins.lifecycle import start_plugins, stop_plugins
     from localharness.plugins.slot import MemorySlot
@@ -1272,6 +1273,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 memory_store, recall_router,
                 workspace_identity=str(workspace.resolve().parent) if workspace is not None else ""),
                 name="memory")
+        # G5: an empty slot drops /memory from every surface; read AFTER the shim seats, so a
+        # memory-on session keeps it.
+        set_memory_available(memory_slot.occupied)
 
         # --- Capability floor (P-A) for the ROOT agent, read off DECLARATIONS (SAFE-02) ---
         # Strips every GLOBAL tool that declares — or, undeclared, defaults to — ingest: untrusted:
@@ -1783,6 +1787,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             except Exception as exc:  # noqa: BLE001
                 log.debug("plugin shutdown failed: %s", exc)
             set_plugin_rows(())  # the rows are process-wide: they leave with the session
+        set_memory_available(True)  # process-wide too: the next session decides afresh
         if consolidation_scheduler:
             try:
                 await consolidation_scheduler.stop()

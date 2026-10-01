@@ -159,9 +159,10 @@ def _install_recorders(monkeypatch) -> dict[str, list]:
     import localharness.agent.subagent as _sub
     import localharness.channels.terminal as _term
     import localharness.cli.repl as _repl_mod
+    import localharness.core.agent_dir as _agent_dir
     import localharness.memory.sqlite as _sqlite
 
-    real_migrate = _sqlite._migrate_legacy_root_agent_dir
+    real_migrate = _agent_dir._migrate_legacy_root_agent_dir
 
     def _rec_migrate(state_dir, agent_id, *args, **kwargs):
         # Pitfall 4: this is the DATA-tree rename, and its global-only lookalike
@@ -170,7 +171,7 @@ def _install_recorders(monkeypatch) -> dict[str, list]:
         rec["migrate"].append(Path(state_dir))
         return real_migrate(state_dir, agent_id, *args, **kwargs)
 
-    monkeypatch.setattr("localharness.memory.sqlite._migrate_legacy_root_agent_dir", _rec_migrate)
+    monkeypatch.setattr("localharness.core.agent_dir._migrate_legacy_root_agent_dir", _rec_migrate)
 
     real_store_init = _sqlite.MemoryStore.__init__
 

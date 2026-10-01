@@ -531,3 +531,27 @@ async def test_a_failure_at_every_stage_is_named_and_the_session_goes_on(tmp_pat
     assert EVENTS == ["start", "stop"]
     rows = _read_sessions(tmp_path)
     assert len(rows) == 1 and rows[0][3] == "complete"
+
+
+@pytest.mark.parametrize("memory_on", [True, False])
+async def test_memory_row_follows_the_memory_slot_in_a_real_start(tmp_path, monkeypatch, memory_on):
+    """G5 (47-03), composed: a memory-off session (empty slot) has no /memory on any surface while
+    it runs; a memory-on session keeps it; either way it is back in the table once the session ends."""
+    from localharness.cli.start_cmd import _start_async
+
+    during: list[Any] = []
+
+    async def _repl(self):
+        during.append(find_row("/memory"))
+
+    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=_repl)
+    if not memory_on:
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(cfg.read_text() + "org:\n  memory_enabled: false\n")
+    _bundle(monkeypatch)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    (row,) = during
+    assert (row is not None) is memory_on
+    assert find_row("/memory") is not None, "the next session decides afresh"

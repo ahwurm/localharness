@@ -7,7 +7,7 @@ via `find_row`), `/help` (`help_text`), the input completion menu
 Order here is the display order in all of them; plugin rows follow the core rows.
 
 Plugins append rows through the session lifecycle (`set_plugin_rows`) — never by editing this file.
-`/memory` is a core row until memory's command surfaces are converted.
+`/memory` is a core row until memory's command surfaces are converted; it is hidden while the memory slot is empty.
 """
 from __future__ import annotations
 
@@ -53,6 +53,15 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/exit", "Exit LocalHarness", "_slash_quit"),
 )
 _plugin_rows: tuple[SlashCommand, ...] = ()
+_memory_available = True
+
+
+def set_memory_available(available: bool) -> None:
+    """Whether the core `/memory` row is offered (G5): False when the memory slot is empty, so the
+    REPL, /help, the completer and the phone's commands[] all drop it together. `/memory` stays a
+    core row until memory's command surfaces become the plugin's."""
+    global _memory_available
+    _memory_available = bool(available)
 
 
 def set_plugin_rows(rows: Iterable[SlashCommand]) -> list[str]:
@@ -75,7 +84,7 @@ def set_plugin_rows(rows: Iterable[SlashCommand]) -> list[str]:
 
 def all_rows() -> tuple[SlashCommand, ...]:
     """Core rows, then plugin rows — what every consumer reads, at the moment it reads."""
-    return SLASH_COMMANDS + _plugin_rows
+    return tuple(r for r in SLASH_COMMANDS if _memory_available or r.name != "/memory") + _plugin_rows
 
 
 def find_row(lowered: str) -> SlashCommand | None:
