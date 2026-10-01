@@ -21,7 +21,7 @@ console = Console()
 err_console = Console(stderr=True)
 log = logging.getLogger(__name__)
 
-KNOWN_CHANNEL_MODES: frozenset[str] = frozenset({"terminal", "discord", "web"})
+KNOWN_CHANNEL_MODES: frozenset[str] = frozenset({"terminal", "discord", "web", "acp"})
 """Every value `--channel` / `channel_mode` accepts.
 
 It exists because the selection below was a bare if/elif with no validation, so an unknown
