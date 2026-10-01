@@ -520,6 +520,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.memory.sqlite import MemoryStore, _migrate_legacy_root_agent_dir
     from localharness.plugins.api import PluginPaths
     from localharness.plugins.lifecycle import start_plugins, stop_plugins
+    from localharness.plugins.slot import MemorySlot
     from localharness.plugins.resolve import resolve
     from localharness.provider.client import LLMClient, LLMConfig
     from localharness.tools.hooks import HookSystem
@@ -1254,6 +1255,18 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         except Exception as exc:  # noqa: BLE001 — the substrate itself failing is still not fatal
             warnings.append(f"plugins: {exc}")
 
+        # D3 — the transitional memory slot occupant (Phase 47 deletes this block): the legacy store
+        # is browsed through the slot so the phone never holds a store; context()/bind_subagent()
+        # stay the occupant's empty defaults, so the prompt and the cruncher are unchanged. A real
+        # memory plugin already in the slot wins. One slot object reaches the loop AND the channel.
+        memory_slot = plugin_result.slot if plugin_result is not None else MemorySlot()
+        if memory_store is not None and not memory_slot.occupied:
+            from localharness.memory.browse import StoreBrowse
+            memory_slot.seat(StoreBrowse(
+                memory_store, recall_router,
+                workspace_identity=str(workspace.resolve().parent) if workspace is not None else ""),
+                name="memory")
+
         # --- Capability floor (P-A) for the ROOT agent, read off DECLARATIONS (SAFE-02) ---
         # Strips every GLOBAL tool that declares — or, undeclared, defaults to — ingest: untrusted:
         # the web verbs today, any plugin tool that ingests, any tool that declares nothing. It runs
@@ -1518,9 +1531,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # "default" is the org id the store is built with. A workspace can neither rewrite nor
             # blank the org's safety voice.
             guardrails_path=cfg_path / "orgs" / "default" / "GUARDRAILS.md",
-            # PAPI-04: the memory slot the lifecycle seated — empty in every session until memory
-            # converts (the legacy store above still feeds the prompt); None if plugins never ran.
-            memory_slot=plugin_result.slot if plugin_result is not None else None,
+            # PAPI-04: the memory slot — the lifecycle's, with the transitional browse occupant
+            # seated above (D3); the legacy store above still feeds the prompt.
+            memory_slot=memory_slot,
         )
         if acp_channel is not None:
             # Built at the ACP handshake (it had to answer `initialize` before any of this
@@ -1696,9 +1709,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # event subscriptions point at a bus nothing writes to, and live events
                 # never reach a phone (2026-09-15 — the foundational webchat bug).
                 bus=bus,
-                # The memory page (GET/POST /api/memory*) speaks to the SESSION's store —
-                # same object the memory tools write through, never a second connection.
-                memory_store=memory_store,
+                # The memory page reaches memory only through the slot's browse API (WEBP-03) —
+                # the SESSION's store behind it, never a second connection.
+                memory_slot=memory_slot,
                 # PAPI-10: the only roots /api/artifacts/{plugin}/{id} serves — the ones core
                 # computed for this session's running plugins and accepted back from them.
                 artifact_roots=plugin_result.artifact_roots if plugin_result is not None else {},
