@@ -446,7 +446,7 @@ class ConsolidationPass:
         """Binding observations become named groups. The model names them (one
         budget-capped, cancellable look per new group); an unnamed group waits for a
         later pass — labels are legibility, never mechanism, so nothing blocks on them."""
-        from localharness.memory.idle_llm import complete_cancellable
+        from localharness.provider.idle_llm import complete_cancellable
 
         for members in bindings:
             if self.cancelled:

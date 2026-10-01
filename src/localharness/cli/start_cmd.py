@@ -1175,7 +1175,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if memory_store is not None and _cons_cfg is not None and _cons_cfg.enabled:
             try:
                 from localharness.memory.consolidation import ConsolidationScheduler
-                from localharness.memory.idle_llm import LLMTextAdapter
+                from localharness.provider.idle_llm import LLMTextAdapter
                 consolidation_scheduler = ConsolidationScheduler(
                     memory_store, bus, agent_name_str, _cons_cfg,
                     # The model as the similarity engine: dreaming digests the event
@@ -1202,7 +1202,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # inject_into_context flag gates INJECTION, not tool availability —
                 # otherwise injection-off produces write-only memory (remember succeeds,
                 # nothing can ever read it back).
-                from localharness.memory.idle_llm import LLMTextAdapter
+                from localharness.provider.idle_llm import LLMTextAdapter
                 from localharness.tools.builtin.memory_tools import (
                     MemoryGetTool,
                     MemoryRememberTool,

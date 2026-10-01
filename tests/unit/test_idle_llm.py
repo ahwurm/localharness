@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from localharness.memory.idle_llm import (
+from localharness.provider.idle_llm import (
     LLMTextAdapter,
     complete_cancellable,
 )
@@ -159,7 +159,7 @@ async def test_run_cancellable_cancel_returns_none_sentinel():
     """Regression lock (idle behavior byte-compatible): a SET cancel event truly cancels
     the in-flight generation (CancelledError raised inside it) and run_cancellable returns
     its None sentinel without hanging."""
-    from localharness.memory.idle_llm import run_cancellable
+    from localharness.provider.idle_llm import run_cancellable
 
     cancelled = {"v": False}
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from localharness.agent.context import make_compaction_summarize_fn
-from localharness.memory.idle_llm import LLMTextAdapter
+from localharness.provider.idle_llm import LLMTextAdapter
 from localharness.provider.client import LLMClient, LLMConfig
 
 _DISABLE = {"chat_template_kwargs": {"enable_thinking": False}}
