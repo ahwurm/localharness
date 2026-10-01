@@ -56,3 +56,40 @@ def test_cli_without_the_web_stack_still_helps_and_hints(tmp_path) -> None:
     assert "HELP 0" in out and " web " in out, out
     assert "WEB 1" in out, out
     assert "the web channel needs its optional extra" in out, out
+
+
+def _ctx(config_dir):
+    """doctor reads only ctx.paths.global_config_dir; doctor runs with no session (llm None)."""
+    from types import SimpleNamespace
+    return SimpleNamespace(paths=SimpleNamespace(global_config_dir=config_dir), llm=None)
+
+
+def test_web_doctor_not_enrolled(tmp_path) -> None:
+    from localharness.cli.web_plugin import WebPlugin
+    from localharness.plugins.api import Check
+
+    assert WebPlugin().doctor(_ctx(tmp_path)) == [
+        Check(name="web", status="skip", detail="not enrolled yet",
+              hint="`localharness web` generates its app token on first run")]
+
+
+def test_web_doctor_enrolled_and_token_mode(tmp_path) -> None:
+    """The bind the server enforces and the token file's mode — never the token itself (doctor
+    output ends up in bug reports)."""
+    from localharness.channels.web.auth import rotate_token, token_path
+    from localharness.cli.web_plugin import WebPlugin
+
+    rotate_token(tmp_path)
+    secret = token_path(tmp_path).read_text().strip()
+    web, tok = WebPlugin().doctor(_ctx(tmp_path))
+    assert web.name == "web" and web.status == "pass"
+    for part in ("binds 127.0.0.1:8765", "loopback only unless --allow-unsafe-bind",
+                 "A token is required on every request", f"Token file: {token_path(tmp_path)}"):
+        assert part in web.detail, web.detail
+    assert (tok.name, tok.status, tok.detail) == ("web-token", "pass", "token file is mode 600")
+    assert not any(secret in c.detail + c.hint for c in (web, tok))
+
+    os.chmod(token_path(tmp_path), 0o644)
+    _, tok = WebPlugin().doctor(_ctx(tmp_path))
+    assert tok.status == "fail" and "mode 644, expected 600" in tok.detail
+    assert tok.hint == f"chmod 600 {token_path(tmp_path)}"
