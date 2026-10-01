@@ -197,11 +197,19 @@ class BrowseQuery(BaseModel):
 @runtime_checkable
 class MemoryBrowse(Protocol):
     """The memory slot's browse API (PAPI-04) — every verb the phone's memory screen and /memory use.
-    Record shapes are dicts in v1; they are pinned when the web phase maps its five routes."""
+
+    Record shapes (pinned by the web phase, 46): a fact row is the dict
+    {name, value, status, confidence, source, node_kind, tags, updated_at, provenance} with the full value
+    (a caller clips for display). search -> [row]; get -> {"fact": row | None, "history": [row]}, or None
+    when the name has neither; edit -> {"status": "edited" | "unchanged" | "missing", "name"} — written
+    with source "user_edit" and provenance "user_edit@<epoch>" + ";<origin>" when origin is given;
+    forget -> True when retired (recoverable, never deleted), False when there was no active fact;
+    promote -> {"promoted": bool, "message": str}. `origin` is an additive optional argument: no
+    PLUGIN_API_VERSION bump (runtime checks test attribute presence only — the 45 `setup` precedent)."""
 
     async def search(self, query: BrowseQuery) -> list[dict[str, Any]]: ...
     async def get(self, name: str) -> dict[str, Any] | None: ...          # the fact + "history"
-    async def edit(self, name: str, content: str) -> dict[str, Any]: ...  # user-edit provenance
+    async def edit(self, name: str, content: str, origin: str = "") -> dict[str, Any]: ...  # user-edit provenance; origin marks the surface (e.g. "web")
     async def forget(self, name: str) -> bool: ...
     async def promote(self, name: str) -> dict[str, Any]: ...
 
