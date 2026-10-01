@@ -726,6 +726,13 @@ class ConfigLoader:
         return {n: (g_cfg.get(n), g_over.get(n), ws_cfg.get(n), ws_over.get(n))
                 for n in sorted(self.plugin_names() - CORE_HARNESS_KEYS)}
 
+    def legacy_org_flags(self) -> tuple[Any, Any, Any, Any]:
+        """The raw `org.memory_enabled` of each ruled source (global config, global overrides,
+        workspace config, workspace overrides), None where a source does not set it — read so the
+        memory plugin's `memory.enabled` can honour the deprecated key at every layer (MEMP-06)."""
+        return tuple((s.get("org") or {}).get("memory_enabled") if isinstance(s.get("org"), dict)
+                     else None for s in self._raw_config_sources())
+
     def plugin_layer_files(self) -> tuple[str, str, str, str]:
         """The four files plugin_layers() reads, in the same order ("" for the workspace pair when
         no workspace applies)."""
