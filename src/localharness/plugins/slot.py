@@ -22,6 +22,12 @@ class MemorySlot:
                  name: str | None = None) -> None:
         self._occupant, self._ctx, self._name = occupant, ctx, name
 
+    def seat(self, occupant: MemorySlotPlugin, ctx: PluginContext | None = None,
+             name: str | None = None) -> None:
+        """Seat an occupant on THIS slot, in place, so every holder of the slot sees it. For the
+        transitional occupant start_cmd seats after the lifecycle ran (ROADMAP D3; 47 deletes that)."""
+        self._occupant, self._ctx, self._name = occupant, ctx, name
+
     @property
     def occupied(self) -> bool:
         return self._occupant is not None

@@ -91,3 +91,47 @@ async def test_forget_retires_and_keeps_history(store):
     got = await b.get("proj/db")
     assert got["fact"] is None and got["history"]
     assert await b.forget("missing") is False
+
+
+# --------------------------------------------------------------------------- promote (no phone route)
+
+
+async def test_the_occupant_satisfies_memory_browse(store):
+    from localharness.plugins.api import MemoryBrowse
+
+    b = StoreBrowse(store)
+    assert isinstance(b, MemoryBrowse) and b.browse() is b
+
+
+async def test_promote_with_a_project_layer_copies_into_the_global_store(tmp_path):
+    from localharness.cli.memory_cmd import PROMOTE_PROVENANCE_PREFIX
+    from localharness.memory.router import RecallRouter
+
+    ws = make_store(tmp_path / "proj")
+    await ws.open()
+    gl = make_store(tmp_path / "home")  # constructed, NOT opened — the router opens it once
+    router = RecallRouter(ws, gl)
+    try:
+        await ws.store_fact(key="notes/x", value="measure before claiming", tags=["lesson"],
+                            confidence=0.9, source="user", provenance="seed")
+        got = await StoreBrowse(ws, router, workspace_identity="/proj").promote("notes/x")
+        assert got["promoted"] is True and got["message"].startswith("Promoted."), got
+        copy = await gl.get_fact("notes/x")
+        assert copy is not None and copy.status == "active"
+        assert copy.provenance.startswith(PROMOTE_PROVENANCE_PREFIX) and "/proj" in copy.provenance
+        assert (await ws.get_fact("notes/x")).value == "measure before claiming"  # original stays
+    finally:
+        await router.close()
+        await ws.close()
+
+
+async def test_promote_without_a_project_layer_is_refused(store):
+    await _seed(store)
+    got = await StoreBrowse(store, None).promote("proj/db")
+    assert got["promoted"] is False
+    assert got["message"].startswith("Promotion needs a project layer"), got
+
+
+async def test_promote_missing_names_it(store):
+    assert await StoreBrowse(store).promote("nope") == \
+        {"promoted": False, "message": "No memory named 'nope' — nothing to promote."}

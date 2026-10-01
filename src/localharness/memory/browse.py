@@ -66,3 +66,16 @@ class StoreBrowse(MemorySlotPlugin):
         live turn superseded it first."""
         current = await self._store.get_fact(name)
         return current is not None and await self._store.forget_fact(current.id)
+
+    async def promote(self, name: str) -> dict[str, Any]:
+        """Copy one active fact to the machine-global store — /memory promote's rules, reused, not
+        copied (supersede and refusal live in one place)."""
+        fact = await self._store.get_fact(name)
+        if fact is None:
+            return {"promoted": False, "message": f"No memory named '{name}' — nothing to promote."}
+        from localharness.cli.memory_cmd import render_promote  # memory plugin file -> memory plugin file
+        message = await render_promote(
+            self._store, f"{fact.id} confirm",
+            promote_target=self._router.ensure_global if self._router is not None else None,
+            workspace_identity=self._identity)
+        return {"promoted": message.startswith("Promoted"), "message": message}
