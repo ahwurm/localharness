@@ -162,14 +162,14 @@ async def test_the_session_owns_the_roots(tmp_path):
     root = artifact_root(tmp_path / "state", "example")
     roots = {"example": root}
     channel = WebChannel(bus=EventBus(persist_path=tmp_path / "bus.jsonl"), config={})
-    assert channel.artifact_root("example") is None
+    assert channel.artifact_roots() == {}
     channel.bind_runtime(session_id="s1", agent_id="orchestrator", artifact_roots=roots)
     roots["image"] = root
-    assert channel.artifact_root("example") == root and channel.artifact_root("image") is None
+    assert channel.artifact_roots() == {"example": root}
     channel.reset_session()
-    assert channel.artifact_root("example") is None
+    assert channel.artifact_roots() == {}
     channel.bind_runtime(session_id="s2", agent_id="orchestrator")
-    assert channel.artifact_root("example") is None
+    assert channel.artifact_roots() == {}
 
 
 async def test_a_reset_session_stops_serving(tmp_path):
