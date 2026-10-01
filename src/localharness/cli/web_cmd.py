@@ -158,11 +158,11 @@ def web_cmd(
         "--rotate-token",
         help="Mint a new app token, invalidating every enrolled client, and exit.",
     )] = False,
-    no_store: Annotated[bool, typer.Option(
-        "--no-store",
-        help="Tell the phone not to cache pictures (Cache-Control: no-store) and hide its picture "
-             "gallery. Only the PHONE stops keeping copies: memory, sessions and picture files on "
-             "this machine still persist.",
+    incognito: Annotated[bool, typer.Option(
+        "--incognito",
+        help="Start in incognito: pictures are not kept on the phone (served Cache-Control: "
+             "no-store) and the gallery is off. Memory, sessions and files on this box still "
+             "persist. Toggle it from the app's drawer.",
     )] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Detailed session view.")] = False,
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Start a specific agent.")] = None,
@@ -202,7 +202,7 @@ def web_cmd(
         asyncio.run(_serve(
             config_dir=config_dir, host=host, port=port, token=token, ui_dir=ui_dir,
             replay=replay, fixtures=fixtures, speed=speed, verbose=verbose, agent=agent,
-            public_url=public_url, no_store=no_store,
+            public_url=public_url, incognito=incognito,
         ))
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
@@ -297,7 +297,7 @@ async def _serve(
     verbose: bool,
     agent: Optional[str],
     public_url: Optional[str] = None,
-    no_store: bool = False,
+    incognito: bool = False,
 ) -> None:
     import uvicorn
 
@@ -344,7 +344,7 @@ async def _serve(
         await register_builtin_tools(registry)
         channel._tool_registry = registry
         server = WebServer(channel, token=token, ui_dir=resolved_ui, replay=driver,
-                           config_dir=config_dir, no_store=no_store)
+                           config_dir=config_dir, incognito=incognito)
         console.print(escape(REPLAY_BANNER.format(
             host=host, port=port, log=log_path, speed=speed,
             fixtures=f"   fixtures  {fixtures}" if fixtures else "",
@@ -386,7 +386,7 @@ async def _serve(
 
         server = WebServer(
             channel, token=token, ui_dir=resolved_ui, on_first_message=_begin_session,
-            on_new_session=_new_session, config_dir=config_dir, no_store=no_store,
+            on_new_session=_new_session, config_dir=config_dir, incognito=incognito,
         )
         # Web Push, on the live path only. A `--replay` run must never buzz a phone about a
         # session that finished last week.

@@ -125,7 +125,7 @@ async def test_every_api_route_refuses_an_unauthenticated_caller(tmp_path):
                  "/api/sessions/s1/mode", "/api/sessions/s1/command",
                  "/api/sessions/s1/delete", "/api/memory/edit", "/api/memory/forget",
                  "/api/permissions/x/answer", "/api/pending/1/approve", "/api/bringup/abort",
-                 "/api/pictures/store"):
+                 "/api/incognito"):
         got = await client.post(path, json={})
         assert got.status_code == 401, path
     assert (await client.get("/api/health", headers=BEARER)).status_code == 200

@@ -43,7 +43,7 @@ shows an image artifact from /api/artifacts/<plugin>/<id>. It replaces v2's fiel
 is a separate change and is untouched.
 v5: /api/protocol gained "screens" ({memory, pictures}): the page shows the Memory and Pictures
 buttons only when the session has them (memory: the slot's occupant offers a browse API; pictures:
-an artifact root is bound and --no-store is off), and GET /api/artifacts lists the gallery. No event
+an artifact root is bound and --incognito is off), and GET /api/artifacts lists the gallery. No event
 or frame schema moved.
 
 Enforced rather than remembered: `tests/unit/channels/test_web_protocol.py` snapshots every

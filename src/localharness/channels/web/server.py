@@ -242,7 +242,7 @@ def _unauthorized() -> JSONResponse:
 
 _SUFFIX_MIMES: dict[str, str] = {s: m for m, s in ARTIFACT_MIMES.items()} | {".jpeg": "image/jpeg"}
 """The artifact route's suffix -> media type: core's allowlist read backwards (PAPI-10)."""
-# Chosen only by WebServer._artifact_policy — the one decision point `--no-store` flips.
+# Chosen only by WebServer._artifact_policy — the one decision point `--incognito` flips.
 ARTIFACT_CACHE_CONTROL = "private, max-age=31536000, immutable"
 ARTIFACT_NO_STORE = "no-store"
 ARTIFACT_PAGE = 60
@@ -292,7 +292,7 @@ class WebServer:
         on_new_session: Optional[Any] = None,
         replay: Any = None,
         config_dir: Optional[str | Path] = None,
-        no_store: bool = False,
+        incognito: bool = False,
     ) -> None:
         self.channel = channel
         self.token = token
@@ -301,7 +301,7 @@ class WebServer:
         self.on_new_session = on_new_session
         self.replay = replay
         self.config_dir = config_dir
-        self.no_store = no_store
+        self.incognito = incognito
         self._bringup_started = False
         self.app = self._build()
 
@@ -380,7 +380,7 @@ class WebServer:
             Route("/api/tool-results/{eviction_id}", self.tool_result, methods=["GET"]),
             Route("/api/artifacts", self.artifact_list, methods=["GET"]),
             Route("/api/artifacts/{plugin}/{artifact_id}", self.artifact, methods=["GET"]),
-            Route("/api/pictures/store", self.pictures_store, methods=["POST"]),
+            Route("/api/incognito", self.set_incognito, methods=["POST"]),
             Route("/api/sessions", self.sessions, methods=["GET"]),
             Route("/api/sessions/new", self.new_session, methods=["POST"]),
             Route("/api/sessions/{session_id}/events", self.events, methods=["GET"]),
@@ -849,22 +849,22 @@ class WebServer:
     def _artifact_policy(self) -> tuple[dict[str, Path], str, bool]:
         """THE one decision point for privacy-relevant artifact serving (45/46; the private-mode hook):
         the roots served (only those bound this session), the Cache-Control the artifact route sends,
-        and whether the gallery listing (and screens.pictures) exists. `--no-store` flips the last two;
+        and whether the gallery listing (and screens.pictures) exists. `--incognito` flips the last two;
         inline pictures still load, fetched fresh each time."""
-        roots, private = self.channel.artifact_roots(), self.no_store
+        roots, private = self.channel.artifact_roots(), self.incognito
         return (roots, ARTIFACT_NO_STORE if private else ARTIFACT_CACHE_CONTROL,
                 bool(roots) and not private)
 
     def _screens(self) -> dict[str, Any]:
-        """The drawer's screens. `pictures_store` is the cache switch: None when no root is bound
-        (nothing to decide), else whether pictures are cached on the phone."""
-        roots, cache_control, pictures = self._artifact_policy()
+        """The drawer's screens. `incognito` is the session-wide switch, always a bool (read off
+        the policy's Cache-Control, so the flag keeps its one reader)."""
+        _, cache_control, pictures = self._artifact_policy()
         return {"memory": self._browse() is not None, "pictures": pictures,
-                "pictures_store": (cache_control != ARTIFACT_NO_STORE) if roots else None}
+                "incognito": cache_control == ARTIFACT_NO_STORE}
 
-    async def pictures_store(self, request: Request) -> Response:
-        """The drawer switch: flip picture caching for this server process (a WRITER of the flag;
-        `_artifact_policy` stays its only reader). Turning it off also tells the browser to drop
+    async def set_incognito(self, request: Request) -> Response:
+        """The drawer's Incognito switch, for this server process (a WRITER of the flag;
+        `_artifact_policy` stays its only reader). Turning it on also tells the browser to drop
         this origin's HTTP cache, so pictures already on the phone go too."""
         refusal = self._authed(request, post=True)
         if refusal is not None:
@@ -873,12 +873,12 @@ class WebServer:
             body = await self._body(request)
         except (ValueError, json.JSONDecodeError) as exc:
             return _json({"error": str(exc)}, status=400)
-        store = body.get("store")
-        if not isinstance(store, bool):
-            return _json({"error": "body needs {store: true|false}"}, status=400)
-        self.no_store = not store
-        got = _json({"store": store, "screens": self._screens()})
-        if not store:
+        on = body.get("on")
+        if not isinstance(on, bool):
+            return _json({"error": "body needs {on: true|false}"}, status=400)
+        self.incognito = on
+        got = _json({"on": on, "screens": self._screens()})
+        if on:
             got.headers["Clear-Site-Data"] = '"cache"'
         return got
 
@@ -1466,8 +1466,8 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("POST", "/api/memory/edit",
      "supersede a fact's content — history kept, owner-attributed; body {name, content}"),
     ("POST", "/api/memory/forget", "retire a fact (recoverable, never deleted); body {name}"),
-    ("POST", "/api/pictures/store",
-     "picture caching for this process; body {store}; false also sends Clear-Site-Data: \"cache\""),
+    ("POST", "/api/incognito",
+     "incognito for this process; body {on}; true also sends Clear-Site-Data: \"cache\""),
     ("POST", "/api/permissions/{request_id}/answer",
      "answer a blocking ask; idempotent; the _always kinds need a second POST with confirm_token"),
     ("POST", "/api/pending/{pending_id}/{approve|deny}", "answer a parked call"),

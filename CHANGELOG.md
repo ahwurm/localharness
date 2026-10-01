@@ -47,19 +47,20 @@ Migration.
   extra is missing, and a start without the extra no longer warns about it.
 - **Web protocol 5: `screens`.** `/api/protocol` says which screens this
   session has — `memory` (the memory slot is occupied) and `pictures` (a
-  picture folder is bound and `--no-store` is off). The phone page shows the
+  picture folder is bound and incognito is off). The phone page shows the
   Memory and Pictures buttons only when they are on. No event or frame changed.
 - **A picture gallery on the phone** (drawer → Pictures): newest first, 60 at
   a time, from this session's plugins only. `GET /api/artifacts` lists ids,
   type and size — no file paths, no prompts. Tapping a picture opens it full
   screen with only its time (UTC) under it.
-- **`localharness web --no-store`**: the phone stops caching pictures and the
-  gallery is hidden. It does not make the machine forget anything — memory,
-  sessions and picture files still persist. Pictures the phone cached before
-  stay until the browser evicts them or its site data is cleared.
-- **A picture-caching switch in the phone drawer** ("Pictures on this phone"):
-  flips picture caching for this server process, and turning it off also
-  purges the phone's cache; `--no-store` sets the starting value.
+- **`localharness web --incognito`**: starts in incognito. Today that covers
+  pictures on the phone only — they are not kept there and the gallery is
+  hidden. Memory, sessions and files on the box persist. Pictures the phone
+  cached before stay until the browser evicts them or its site data is cleared.
+- **An Incognito switch in the phone drawer** ("Incognito: on / off", with a
+  one-line note of its scope): flips incognito for this server process, and
+  turning it on also purges the phone's cache; `--incognito` sets the starting
+  value.
 - **Setup questions for plugins.** A plugin's manifest can list `setup` fields
   (`SetupField(key, prompt, default)`) and a short `setup_help` text.
   `plugins enable NAME` asks them on a terminal when no `--set` is given,
@@ -240,8 +241,8 @@ Migration.
   `localharness memory` do not go through the slot.
 - The phone's memory screen lists, searches, shows a fact's history, edits
   and forgets; it has no promote button.
-- `--no-store` is not a private mode: memory, sessions and pictures are still
-  written to disk.
+- Incognito does not yet make the box forget: memory, sessions and pictures
+  are still written to disk. Today it only keeps pictures off the phone.
 - Reopening Pictures while an older page is still loading can put that page
   into the fresh grid.
 - LocalHarness does not start ComfyUI or download its model files;

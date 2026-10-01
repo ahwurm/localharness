@@ -182,9 +182,9 @@ single request can never write one. `GET /api/grants` lists what you have allowe
 when memory is on: list and search facts, open one with its history, edit it, forget it (two
 taps). There is no promote button. The Pictures button shows when a plugin that saves pictures is
 on: a grid of this session's pictures, newest first, 60 at a time, and a full-screen viewer that
-shows only the picture's time (UTC). `localharness web --no-store` hides Pictures and stops the
-phone caching any picture; it does not make the machine forget anything — memory, sessions and
-picture files still persist.
+shows only the picture's time (UTC). `localharness web --incognito` (or the drawer's Incognito
+switch) hides Pictures and stops the phone keeping any picture; it does not make the machine
+forget anything — memory, sessions and files on the box still persist.
 
 **Stop has an undo window.** Cancel sits next to the composer where a distracted thumb lands, and
 the GPU is the scarce resource here.

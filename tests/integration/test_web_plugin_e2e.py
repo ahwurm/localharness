@@ -67,7 +67,7 @@ def test_web_is_a_plugin_command_on_by_default_and_gone_when_disabled(tmp_path, 
     assert "web" in _help_rows(_invoke("--help").output)
     helped = _invoke("web", "--help")
     assert helped.exit_code == 0, helped.output
-    assert "--no-store" in helped.output and "--rotate-token" in helped.output, helped.output
+    assert "--incognito" in helped.output and "--rotate-token" in helped.output, helped.output
     listed = _invoke("plugins", "list").output
     assert any(line.split()[:1] == ["web"] for line in listed.splitlines()), listed
 
@@ -126,7 +126,7 @@ def test_a_channel_typo_is_refused_before_any_plugin_loads(tmp_path, monkeypatch
 # --- criteria 3-4 over a real web session: the memory screen behind the slot, the gallery ---------
 
 
-def _web_session(monkeypatch, work, *, no_store: bool = False) -> dict:
+def _web_session(monkeypatch, work, *, incognito: bool = False) -> dict:
     """One web-mode session through `_start_async`; `work(channel, client, out)` runs while it is
     live, against a WebServer over ASGI. Returns `out`; an error inside `work` fails the test."""
     out: dict = {"printed": _capture_start_console(monkeypatch)}
@@ -134,7 +134,7 @@ def _web_session(monkeypatch, work, *, no_store: bool = False) -> dict:
     async def drive(self):  # stands in for OrchestratorREPL.run
         await self._channel.start()
         try:
-            server = WebServer(self._channel, token=TOKEN, no_store=no_store)
+            server = WebServer(self._channel, token=TOKEN, incognito=incognito)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),
                                          base_url="http://web.test") as client:
                 await work(self._channel, client, out)
@@ -260,9 +260,9 @@ def test_the_page_shows_the_buttons_the_real_protocol_answer_names(tmp_path, mon
 
         bodies[memory_on] = _web_session(monkeypatch, work)["protocol"]
     got = bodies[True]["screens"]
-    assert got == {"memory": True, "pictures": False, "pictures_store": None}, got
+    assert got == {"memory": True, "pictures": False, "incognito": False}, got
     got = bodies[False]["screens"]
-    assert got == {"memory": False, "pictures": False, "pictures_store": None}, got
+    assert got == {"memory": False, "pictures": False, "incognito": False}, got
     for memory_on, body in bodies.items():
         got = _page(_serve({"/api/protocol": body}) + f"""
 const out = [];
@@ -303,7 +303,7 @@ async def _write(ch, count: int) -> list[str]:
     return [write_artifact(root, "image", PNG, "image/png").id for _ in range(count)]
 
 
-def test_the_gallery_lists_the_sessions_pictures_and_no_store_turns_it_off(
+def test_the_gallery_lists_the_sessions_pictures_and_incognito_turns_it_off(
         tmp_path, monkeypatch, fake_home):
     global_dir = _image_on(tmp_path, monkeypatch, fake_home)
 
@@ -332,12 +332,12 @@ def test_the_gallery_lists_the_sessions_pictures_and_no_store_turns_it_off(
         out["list"] = await c.get("/api/artifacts", headers=BEARER)
         out["item"] = await c.get(f"/api/artifacts/image/{out['ids'][0]}", headers=BEARER)
 
-    p = _web_session(monkeypatch, private, no_store=True)
+    p = _web_session(monkeypatch, private, incognito=True)
     assert p["list"].status_code == 404
     assert p["protocol"]["screens"]["pictures"] is False, p["protocol"]["screens"]
     assert p["item"].status_code == 200 and p["item"].content == PNG  # inline pictures still load…
     assert p["item"].headers["cache-control"] == "no-store"          # …fetched fresh each time
-    # the page fed that --no-store protocol answer hides the Pictures button
+    # the page fed that --incognito protocol answer hides the Pictures button
     got = _page(f"applyScreens({json.dumps(p['protocol'])}.screens); console.log(JSON.stringify(btns()));",
                 tmp_path)
     assert got["pic"] is True, got
