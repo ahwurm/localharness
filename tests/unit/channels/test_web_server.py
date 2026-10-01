@@ -118,7 +118,8 @@ async def test_every_api_route_refuses_an_unauthenticated_caller(tmp_path):
     _, _, _, client = await _stack(tmp_path)
     for path in ("/api/stream", "/api/health", "/api/protocol", "/api/schema", "/api/tools",
                  "/api/grants", "/api/permissions", "/api/sessions",
-                 "/api/sessions/s1/events", "/api/memory", "/api/memory/fact"):
+                 "/api/sessions/s1/events", "/api/memory", "/api/memory/fact",
+                 "/api/artifacts"):
         assert (await client.get(path)).status_code == 401, path
     for path in ("/api/sessions/s1/message", "/api/sessions/s1/cancel",
                  "/api/sessions/s1/mode", "/api/sessions/s1/command",

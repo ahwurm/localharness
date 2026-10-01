@@ -239,8 +239,10 @@ def _unauthorized() -> JSONResponse:
 
 _SUFFIX_MIMES: dict[str, str] = {s: m for m, s in ARTIFACT_MIMES.items()} | {".jpeg": "image/jpeg"}
 """The artifact route's suffix -> media type: core's allowlist read backwards (PAPI-10)."""
-# The one place the artifact route's caching is decided (a later private mode switches it to no-store).
+# Read only by WebServer._artifact_policy — the one decision point `--no-store` flips.
 ARTIFACT_CACHE_CONTROL = "private, max-age=31536000, immutable"
+ARTIFACT_NO_STORE = "no-store"
+ARTIFACT_PAGE = 60
 
 
 def _find_artifact(root: Path, artifact_id: str) -> tuple[Path, str | None] | None:
@@ -269,6 +271,7 @@ class WebServer:
         on_new_session: Optional[Any] = None,
         replay: Any = None,
         config_dir: Optional[str | Path] = None,
+        no_store: bool = False,
     ) -> None:
         self.channel = channel
         self.token = token
@@ -277,6 +280,7 @@ class WebServer:
         self.on_new_session = on_new_session
         self.replay = replay
         self.config_dir = config_dir
+        self.no_store = no_store
         self._bringup_started = False
         self.app = self._build()
 
@@ -353,6 +357,7 @@ class WebServer:
             # caller gets a `start_url` that pairs the installed app (see `manifest`).
             Route("/manifest.webmanifest", self.manifest, methods=["GET"]),
             Route("/api/tool-results/{eviction_id}", self.tool_result, methods=["GET"]),
+            Route("/api/artifacts", self.artifact_list, methods=["GET"]),
             Route("/api/artifacts/{plugin}/{artifact_id}", self.artifact, methods=["GET"]),
             Route("/api/sessions", self.sessions, methods=["GET"]),
             Route("/api/sessions/new", self.new_session, methods=["POST"]),
@@ -818,6 +823,15 @@ class WebServer:
             }, status=404)
         return _json({"eviction_id": eviction_id, "body": body})
 
+    def _artifact_policy(self) -> tuple[dict[str, Path], str, bool]:
+        """THE one decision point for privacy-relevant artifact serving (45/46; the private-mode hook):
+        the roots served (only those bound this session), the Cache-Control the artifact route sends,
+        and whether the gallery listing (and screens.pictures) exists. `--no-store` flips the last two;
+        inline pictures still load, fetched fresh each time."""
+        roots, private = self.channel.artifact_roots(), self.no_store
+        return (roots, ARTIFACT_NO_STORE if private else ARTIFACT_CACHE_CONTROL,
+                bool(roots) and not private)
+
     async def artifact(self, request: Request) -> Response:
         """One file a plugin produced (PAPI-10). Authenticated like every GET (the cookie lets a
         same-origin <img> load with no token in any URL); only for a plugin that is ON this session
@@ -827,7 +841,8 @@ class WebServer:
         refusal = self._authed(request, post=False)
         if refusal is not None:
             return refusal
-        root = self.channel.artifact_root(request.path_params.get("plugin") or "")
+        roots, cache_control, _ = self._artifact_policy()
+        root = roots.get(request.path_params.get("plugin") or "")
         artifact_id = request.path_params.get("artifact_id") or ""
         if root is None or not ARTIFACT_ID_RE.fullmatch(artifact_id):
             return PlainTextResponse("not found", status_code=404)
@@ -837,8 +852,51 @@ class WebServer:
         path, mime = found
         if mime not in ARTIFACT_MIMES:
             return PlainTextResponse("unsupported media type", status_code=415)
-        return FileResponse(path, media_type=mime,
-                            headers={"Cache-Control": ARTIFACT_CACHE_CONTROL})
+        return FileResponse(path, media_type=mime, headers={"Cache-Control": cache_control})
+
+    async def artifact_list(self, request: Request) -> Response:
+        """The gallery: artifact ids across this session's bound roots, newest first, ARTIFACT_PAGE per
+        page (`?before=<id>` for older). Files directly under each root only; core-minted stem, an
+        allowlisted suffix; symlinks never followed; an ambiguous stem is skipped (as the artifact
+        route refuses it). Answers plugin, id, mime, bytes — never a path. One listing per request,
+        nothing on the chat path."""
+        refusal = self._authed(request, post=False)
+        if refusal is not None:
+            return refusal
+        roots, _, listing = self._artifact_policy()
+        if not listing:
+            return PlainTextResponse("not found", status_code=404)
+        before = request.query_params.get("before") or ""
+        if before and not ARTIFACT_ID_RE.fullmatch(before):
+            return _json({"error": "before must be an artifact id"}, status=400)
+        found: list[tuple[str, str, Path, str]] = []
+        for plugin, root in roots.items():
+            try:
+                entries = list(root.iterdir()) if root.is_dir() else []
+            except OSError:  # an unreadable root lists nothing, the others still answer
+                continue
+            by_stem: dict[str, list[tuple[Path, str]]] = {}
+            for entry in entries:
+                try:
+                    if entry.is_symlink() or not entry.is_file():
+                        continue
+                    mime = _SUFFIX_MIMES.get(entry.suffix)
+                    if ARTIFACT_ID_RE.fullmatch(entry.stem) and mime in ARTIFACT_MIMES:
+                        by_stem.setdefault(entry.stem, []).append((entry, mime))
+                except OSError:
+                    continue
+            found += [(stem, plugin, *hits[0]) for stem, hits in by_stem.items() if len(hits) == 1]
+        found.sort(key=lambda f: (f[0], f[1]), reverse=True)
+        if before:
+            found = [f for f in found if f[0] < before]
+        items = []
+        for artifact_id, plugin, entry, mime in found[:ARTIFACT_PAGE]:
+            try:
+                size = entry.stat().st_size
+            except OSError:
+                continue
+            items.append({"plugin": plugin, "id": artifact_id, "mime": mime, "bytes": size})
+        return _json({"items": items, "truncated": len(found) > ARTIFACT_PAGE})
 
     async def sessions(self, request: Request) -> Response:
         """The history list: every top-level session log on disk, newest first (the drawer behind ☰).
@@ -1394,6 +1452,9 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
      "worker (subagent) logs are hidden; "
      "?q= full-text filters on what was said, rows gain a `match` snippet"),
     ("GET", "/api/sessions/{id}/events", "replay off disk as NDJSON; ?from={seq}"),
+    ("GET", "/api/artifacts",
+     "the picture gallery: newest artifact ids across this session's plugins, 60 a page; "
+     "?before=<id> for older; {items: [{plugin, id, mime, bytes}], truncated}"),
     ("GET", "/api/permissions", "everything awaiting a human: {blocking, parked}"),
     ("GET", "/api/tools", "the live registry: name -> group, destructive"),
     ("GET", "/api/health", "model reachability and session state"),

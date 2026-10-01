@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -186,3 +187,88 @@ async def test_the_wire_protocol_did_not_move(tmp_path):
     assert body["protocol_version"] == PROTOCOL_VERSION
     verb = next(v for v in body["verbs"] if v["path"] == "/api/artifacts/{plugin}/{id}")
     assert verb["method"] == "GET"
+
+
+# ------------------------------------------------------------------ the gallery listing (46-05)
+
+def _put(root, name, data=PNG):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / name).write_bytes(data)
+    return name
+
+
+async def _two_roots(tmp_path, **kw):
+    roots = {p: artifact_root(tmp_path / "state", p) for p in ("example", "image")}
+    _, channel, server, client = await _stack(tmp_path, runtime={"artifact_roots": roots}, **kw)
+    return roots, server, client
+
+
+async def test_the_listing_merges_every_bound_root_newest_first(tmp_path):
+    roots, _, client = await _two_roots(tmp_path)
+    _put(roots["example"], "art-20260930-120000-aaaaaa.png")
+    _put(roots["image"], "art-20260930-130000-aaaaaa.webp", PNG[:10])
+    _put(roots["example"], "art-20260930-140000-aaaaaa.jpg")
+    got = await client.get("/api/artifacts", headers=BEARER)
+    assert got.status_code == 200
+    body = got.json()
+    assert body["truncated"] is False
+    assert body["items"] == [
+        {"plugin": "example", "id": "art-20260930-140000-aaaaaa", "mime": "image/jpeg", "bytes": len(PNG)},
+        {"plugin": "image", "id": "art-20260930-130000-aaaaaa", "mime": "image/webp", "bytes": 10},
+        {"plugin": "example", "id": "art-20260930-120000-aaaaaa", "mime": "image/png", "bytes": len(PNG)},
+    ]
+    assert str(tmp_path) not in got.text  # ids, never a path
+
+
+async def test_the_listing_pages_sixty_at_a_time(tmp_path):
+    roots, _, client = await _two_roots(tmp_path)
+    ids = [f"art-20260930-120000-{i:06x}" for i in range(61)]
+    for artifact_id in ids:
+        _put(roots["example"], f"{artifact_id}.png", b"x")
+    first = (await client.get("/api/artifacts", headers=BEARER)).json()
+    assert [i["id"] for i in first["items"]] == ids[:0:-1] and first["truncated"] is True
+    older = (await client.get(f"/api/artifacts?before={ids[1]}", headers=BEARER)).json()
+    assert [i["id"] for i in older["items"]] == [ids[0]] and older["truncated"] is False
+    assert (await client.get("/api/artifacts?before=not-an-id", headers=BEARER)).status_code == 400
+
+
+async def test_the_listing_skips_everything_the_artifact_route_would_not_serve(tmp_path):
+    roots, _, client = await _two_roots(tmp_path)
+    root = roots["example"]
+    keep = _put(root, "art-20260930-120000-000000.png")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(PNG)
+    (root / "art-20260930-120001-000000.png").symlink_to(outside)
+    (root / "art-20260930-120002-000000.png").symlink_to(tmp_path / "gone.png")  # dangling
+    _put(root / "art-20260930-120003-000000", "art-20260930-120003-000001.png")  # a subfolder
+    _put(root, "art-20260930-120004-bbbbbb.gif", GIF)
+    _put(root, "art-20260930-120005-cccccc.PNG")
+    _put(root, "notes.png")
+    _put(root, "art-20260930-120006-dddddd.png")
+    _put(root, "art-20260930-120006-dddddd.webp")  # an ambiguous stem
+    items = (await client.get("/api/artifacts", headers=BEARER)).json()["items"]
+    assert [i["id"] for i in items] == [keep.removesuffix(".png")]
+
+
+async def test_the_listing_is_authed_and_404s_with_no_root_bound(tmp_path):
+    _, _, client = await _two_roots(tmp_path)
+    assert (await client.get("/api/artifacts")).status_code == 401
+    _, _, _, bare = await _stack(tmp_path)
+    assert (await bare.get("/api/artifacts", headers=BEARER)).status_code == 404
+
+
+async def test_no_store_flips_the_cache_header_and_hides_the_listing(tmp_path):
+    roots, server, client = await _two_roots(tmp_path, no_store=True)
+    name = _put(roots["image"], "art-20260930-120000-aaaaaa.png")
+    pic = await client.get(f"/api/artifacts/image/{name[:-4]}", headers=BEARER)
+    assert pic.status_code == 200 and pic.content == PNG  # inline pictures still load
+    assert pic.headers["cache-control"] == "no-store"
+    assert (await client.get("/api/artifacts", headers=BEARER)).status_code == 404
+    assert server._artifact_policy()[1:] == ("no-store", False)
+
+
+async def test_one_decision_point_reads_the_cache_header_and_the_flag():
+    source = Path(server_mod.__file__).read_text(encoding="utf-8")
+    assert source.count("ARTIFACT_CACHE_CONTROL") == 2  # its definition + _artifact_policy
+    assert source.count("self.no_store") == 2  # its assignment + _artifact_policy
+    assert "channel.artifact_root(" not in source
