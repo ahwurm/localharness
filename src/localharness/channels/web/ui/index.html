@@ -176,6 +176,9 @@
           font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
   .row.tool, .row.sys, .row.narr { margin:8px 0; }   /* machine rows sit tighter than prose */
   .row.tool img.genimg { display:block; max-width:100%; border-radius:8px; margin-top:6px; }
+  #picgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; }
+  #picgrid img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+  #picview img { width: 100%; height: auto; }
 
   /* the markdown subset (answers + narration): quiet structure, phone-first */
   .mdh { font-weight:650; margin:12px 0 4px; line-height:1.35; }
@@ -323,7 +326,8 @@
   <input id="sessq" type="search" placeholder="search chats" autocomplete="off">
   <div id="sessions"><div class="meta">open the drawer to read the list…</div></div>
   <h3>housekeeping</h3>
-  <button class="small" id="memBtn">memory</button>
+  <button class="small" id="memBtn" hidden>memory</button>
+  <button class="small" id="picBtn" hidden>pictures</button>
   <button class="small" id="pushBtn" hidden>notifications</button>
   <button class="small" id="recheck" title="re-run the model-server probe">re-check the model server</button>
   <button class="small" id="grantsBtn">grants</button>
@@ -345,6 +349,19 @@
     <button class="small" id="memback">back to list</button>
   </div>
   <button class="small" id="memclose">close</button>
+</dialog>
+
+<dialog id="pics">
+  <h3>pictures</h3>
+  <div id="picgrid"></div>
+  <button class="small" id="picmore" hidden>show older</button>
+  <div class="meta" id="picnote"></div>
+  <button class="small" id="picclose">close</button>
+</dialog>
+<dialog id="picview">
+  <img id="picfull" alt="">
+  <div class="meta" id="pictime"></div>
+  <button class="small" id="picviewclose">close</button>
 </dialog>
 
 <dialog id="cfg">
@@ -900,6 +917,7 @@ function onFrame(name, d) {
       if (d.stage === "ready" || d.stage === "ended") {
         if (S.bring) { S.bring.remove(); S.bring = null; }
         $("state").textContent = d.stage === "ready" ? "harness" : "chat ended";
+        if (d.stage === "ready") refreshScreens();   // a cold load may have read screens too early
         break;
       }
       if (!S.bring) {
@@ -1294,7 +1312,7 @@ function closeHistory() {
   log.hidden = false; $("composer").hidden = false;
   window.scrollTo(0, document.body.scrollHeight);
 }
-$("menuBtn").onclick = () => { $("drawer").showModal(); loadSessions($("sessq").value.trim()); };
+$("menuBtn").onclick = () => { $("drawer").showModal(); loadSessions($("sessq").value.trim()); refreshScreens(); };
 $("drawerClose").onclick = () => $("drawer").close();
 let sessqTimer = null;
 $("sessq").oninput = () => {          // debounced so a fast thumb costs one request, not eight
@@ -1376,6 +1394,43 @@ $("memforget").onclick = async () => {
 $("memback").onclick = () => loadMemory($("memq").value.trim());
 $("memBtn").onclick = () => { $("drawer").close(); $("mem").showModal(); loadMemory($("memq").value.trim()); };
 $("memclose").onclick = () => $("mem").close();
+
+// ---------------------------------------------------------------- screens + the picture gallery
+// (v5). The session says which screens it has; absent (an older server) = none. The gallery is
+// the originals, newest first, 60 a page; a tap opens the one picture captioned only with its
+// time. No copy/share buttons (the OS long-press is the user's own); textContent only.
+const applyScreens = (s) => {
+  $("memBtn").hidden = !(s && s.memory);
+  $("picBtn").hidden = !(s && s.pictures);
+};
+const refreshScreens = async () => {
+  try { applyScreens((await get("/api/protocol")).screens); } catch (e) { /* keep the last answer */ }
+};
+const P = { items: [], before: null };
+const artUrl = (it) => "/api/artifacts/" + encodeURIComponent(it.plugin) + "/" + encodeURIComponent(it.id);
+const idTime = (id) => {
+  const m = /^art-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-/.exec(id);
+  return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]} UTC` : "";
+};
+const openViewer = (it) => { $("picfull").src = artUrl(it); $("pictime").textContent = idTime(it.id); $("picview").showModal(); };
+const loadPictures = async (older) => {
+  if (!older) { P.items = []; P.before = null; $("picgrid").textContent = ""; }
+  let d;
+  try { d = await get("/api/artifacts" + (older && P.before ? "?before=" + encodeURIComponent(P.before) : "")); }
+  catch (e) { $("picmore").hidden = true; $("picnote").textContent = "could not read the pictures"; return; }
+  if (d.error) { $("picmore").hidden = true; $("picnote").textContent = d.error; return; }
+  for (const it of d.items || []) {
+    const img = el("img");
+    img.loading = "lazy"; img.alt = ""; img.src = artUrl(it); img.onclick = () => openViewer(it);
+    $("picgrid").appendChild(img); P.items.push(it); P.before = it.id;
+  }
+  $("picmore").hidden = !d.truncated;
+  $("picnote").textContent = P.items.length ? "" : "no pictures yet";
+};
+$("picBtn").onclick = () => { $("drawer").close(); $("pics").showModal(); loadPictures(false); };
+$("picmore").onclick = () => loadPictures(true);
+$("picclose").onclick = () => $("pics").close();
+$("picviewclose").onclick = () => $("picview").close();
 let memqTimer = null;
 $("memq").oninput = () => {
   clearTimeout(memqTimer);
@@ -1440,7 +1495,7 @@ $("verboseBtn").onclick = () => {
 };
 $("cfgClose").onclick = () => $("cfg").close();
 // a tap on the dim backdrop closes a sheet, exactly as a thumb expects
-for (const dlgId of ["drawer", "cfg", "mem"]) {
+for (const dlgId of ["drawer", "cfg", "mem", "pics", "picview"]) {
   $(dlgId).onclick = (ev) => { if (ev.target === $(dlgId)) $(dlgId).close(); };
 }
 
@@ -1567,6 +1622,7 @@ $("recheck").onclick = async () => {
       get("/api/protocol"), get("/api/tools"), get("/api/health"),
     ]);
     S.collapsible = proto.collapsible_groups || S.collapsible;
+    applyScreens(proto.screens);
     S.modes = proto.modes || [];        // the settings pill's mode buttons, from the gate's own list
     for (const t of tools.tools) S.tools[t.name] = t;
     S.session = health.session_id || S.session;

@@ -479,3 +479,91 @@ def test_the_page_mirrors_the_core_artifact_regexes(page):
 
     assert "/^" + ARTIFACT_ID_RE.pattern.replace("\\d", "[0-9]") + "$/" in page
     assert "/^" + PLUGIN_NAME_RE.pattern + "$/" in page
+
+
+# --- v5: screens gate the drawer buttons; the Pictures gallery (46-07) -------------------------
+# Every phone claim here is node-harness proof only: candidate, unverified on device.
+
+BUTTONS = '\nconst btns = () => ({mem: $("memBtn").hidden, pic: $("picBtn").hidden});\n'
+
+
+def _js(page, tmp_path, script):
+    return _drive(page, BUTTONS + script, tmp_path)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_screens_hide_and_show_the_drawer_buttons(page, tmp_path):
+    got = _js(page, tmp_path, """
+const out = [];
+applyScreens({memory: false, pictures: false}); out.push(btns());
+applyScreens({memory: true, pictures: true}); out.push(btns());
+applyScreens(undefined); out.push(btns());   // a v4 server: no screens at all
+console.log(JSON.stringify(out));
+""")
+    assert got == [{"mem": True, "pic": True}, {"mem": False, "pic": False},
+                   {"mem": True, "pic": True}]
+    # hidden in the markup too, so a memory-off session never flashes the buttons
+    assert 'id="memBtn" hidden' in page and 'id="picBtn" hidden' in page
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_ready_rereads_screens(page, tmp_path):
+    """A cold first load can read /api/protocol before the slot is seated; bring-up `ready`
+    re-reads it so the buttons do not stay stale."""
+    got = _js(page, tmp_path, """
+globalThis.fetch = async (path) => ({json: async () =>
+  path === "/api/protocol" ? {screens: {memory: true, pictures: true}} : {}});
+applyScreens({memory: false, pictures: false});
+const before = btns();
+onFrame("BringUpStage", {stage: "ready"});   // an SSE-only frame: onFrame, not onEvent
+await new Promise((r) => setTimeout(r, 0));
+console.log(JSON.stringify([before, btns()]));
+""")
+    assert got == [{"mem": True, "pic": True}, {"mem": False, "pic": False}]
+
+
+GALLERY_FETCH = """
+const A = (n) => ({plugin: "image", id: "art-20260930-1425" + String(n).padStart(2, "0") + "-abcdef",
+                   mime: "image/png", bytes: 1});
+const asked = [];
+globalThis.fetch = async (path) => { asked.push(path); return {json: async () =>
+  path === "/api/artifacts" ? {items: [A(3), A(2)], truncated: true}
+  : path === "/api/artifacts?before=" + A(2).id ? {items: [A(1)], truncated: false} : {}}; };
+const imgs = () => $("picgrid").children.map((e) => ({tag: e.tagName, src: e.src, loading: e.loading}));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_the_gallery_renders_newest_first_and_pages(page, tmp_path):
+    got = _js(page, tmp_path, GALLERY_FETCH + """
+await loadPictures(false);
+const first = {imgs: imgs(), more: $("picmore").hidden};
+await loadPictures(true);
+console.log(JSON.stringify({first, second: {imgs: imgs(), more: $("picmore").hidden}, asked}));
+""")
+    url = "/api/artifacts/image/art-20260930-1425{:02d}-abcdef"
+    tile = lambda n: {"tag": "img", "src": url.format(n), "loading": "lazy"}  # noqa: E731
+    assert got["first"] == {"imgs": [tile(3), tile(2)], "more": False}
+    assert got["second"] == {"imgs": [tile(3), tile(2), tile(1)], "more": True}
+    assert got["asked"] == ["/api/artifacts", "/api/artifacts?before=art-20260930-142502-abcdef"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_the_viewer_caption_is_only_the_time(page, tmp_path):
+    got = _js(page, tmp_path, """
+openViewer({plugin: "image", id: "art-20260930-142501-abcdef", mime: "image/png", bytes: 1});
+console.log(JSON.stringify({src: $("picfull").src, caption: $("pictime").textContent}));
+""")
+    assert got == {"src": "/api/artifacts/image/art-20260930-142501-abcdef",
+                   "caption": "2026-09-30 14:25:01 UTC"}
+    dialogs = re.findall(r'<dialog id="(?:pics|picview)">.*?</dialog>', page, re.S)
+    assert len(dialogs) == 2
+    assert not re.search(r"copy|share|download", "".join(dialogs), re.I), "no harness copy/share"
+    assert "grid-template-columns: repeat(3, 1fr)" in page and "object-fit: cover" in page
+    assert '"/api/artifacts"' in page  # the listing route, beside the per-file one
+
+
+def test_inline_pictures_still_have_no_tap_action(page):
+    """45's privacy ruling: the inline chat picture opens nothing (only gallery tiles do)."""
+    inline = page.split('const img = el("img", "genimg");')[1].split("target.appendChild(img);")[0]
+    assert "onclick" not in inline and "addEventListener" not in inline
