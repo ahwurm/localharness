@@ -8,9 +8,9 @@ All notable changes to LocalHarness are documented here. The format follows
 
 This release adds a plugin system: one API, one loader and one trust model, for
 plugins you install and for plugins that ship with LocalHarness. The first
-feature to ship as a plugin is image generation, new in this release and off
-until you turn it on; memory, the web channel, Discord and autoresearch are
-still part of core. The plugin API that 0.15.0 documented is
+features to ship as plugins are image generation, new in this release and
+off until you turn it on, and the phone app (`localharness web`), on by
+default; memory, Discord and autoresearch are still part of core. The plugin API that 0.15.0 documented is
 removed, so a plugin written for 0.15 no longer loads: see Removed and
 Migration.
 
@@ -41,10 +41,22 @@ Migration.
   phone page shows an image artifact from `GET /api/artifacts/{plugin}/{id}`.
   Version 2 was never released. The page and the server ship together; a page
   written for another version says so in red.
+- **The phone app (`localharness web`) is now the bundled `web` plugin, on by
+  default.** `localharness plugins disable web` removes the command;
+  `plugins list` shows `on (install \`localharness[web]\` to use it)` when the
+  extra is missing, and a start without the extra no longer warns about it.
 - **Web protocol 5: `screens`.** `/api/protocol` says which screens this
   session has — `memory` (the memory slot is occupied) and `pictures` (a
   picture folder is bound and `--no-store` is off). The phone page shows the
   Memory and Pictures buttons only when they are on. No event or frame changed.
+- **A picture gallery on the phone** (drawer → Pictures): newest first, 60 at
+  a time, from this session's plugins only. `GET /api/artifacts` lists ids,
+  type and size — no file paths, no prompts. Tapping a picture opens it full
+  screen with only its time (UTC) under it.
+- **`localharness web --no-store`**: the phone stops caching pictures and the
+  gallery is hidden. It does not make the machine forget anything — memory,
+  sessions and picture files still persist. Pictures the phone cached before
+  stay until the browser evicts them or its site data is cleared.
 - **Setup questions for plugins.** A plugin's manifest can list `setup` fields
   (`SetupField(key, prompt, default)`) and a short `setup_help` text.
   `plugins enable NAME` asks them on a terminal when no `--set` is given,
@@ -86,7 +98,9 @@ Migration.
   a plugin that is on in the running session, cached as immutable.
 - **The memory slot.** One plugin of kind `memory` can add a section to every
   turn's prompt, right after the guardrails. Nothing fills it unless you
-  install and enable a memory plugin yourself.
+  install and enable a memory plugin yourself. With memory on, a stand-in sits
+  in the slot so the phone's memory screen reads memory through it; it adds
+  nothing to the prompt.
 - `localharness init` writes a `plugins/README.md` into your config directory
   that says how to install, enable and write a plugin; `init --workspace`
   writes one into the project saying plugins are never loaded from there.
@@ -106,7 +120,18 @@ Migration.
   project. A scripted `init` asks nothing and keeps the defaults.
 
 ### Changed
-- **`GUARDRAILS.md` reaches the model with memory on or off.** Core reads
+- With memory off, the phone's memory routes answer 404 (they answered 409
+  before a session bound). With memory on, they read memory only through the
+  memory slot.
+- `doctor`'s web lines now come from the web plugin's check. A web token file
+  that is not mode 600 is now a counted failure (`doctor` exits 1); before, it
+  was only a red line. Without the `web` extra, `doctor` shows only the
+  plugin's needs-extra row.
+- `start --channel` names come from the core channels and the bundled channel
+  plugins (`acp`, `discord`, `terminal`, `web`); an installed plugin cannot add
+  one. `--channel web` and `--channel acp` point you at `localharness web` /
+  `localharness acp`.
+ the model with memory on or off.** Core reads
   `orgs/default/GUARDRAILS.md` from your global config directory on every turn
   of the agent you talk to. Before, only memory read it, so a session without
   memory never showed it to the model. The agents it delegates to are still
@@ -152,6 +177,8 @@ Migration.
   hook plugin. The `org.hooks` setting is still accepted.
 
 ### Fixed
+- `localharness web` without the `web` extra prints its install hint again (it
+  crashed with a starlette import error before).
 - Autoresearch could not adopt a harness-level (`org.*`) change once it had
   adopted any agent-level (`agent.*`) one: every later `org.*` adoption was
   refused and its proposal marked `adoption_rejected`.
@@ -203,9 +230,17 @@ Migration.
   global one.
 
 ### Known limitations (named, not hidden)
-- Image generation is the only feature that ships as a plugin: memory, the
-  web channel, Discord and autoresearch are still part of core, and the memory
-  slot is empty.
+- Image generation and the phone app are the only features that ship as
+  plugins: memory, Discord and autoresearch are still part of core. The memory
+  slot's stand-in serves the phone's memory screen only; the prompt and the
+  memory tools still read core memory directly, and `/memory` and
+  `localharness memory` do not go through the slot.
+- The phone's memory screen lists, searches, shows a fact's history, edits
+  and forgets; it has no promote button.
+- `--no-store` is not a private mode: memory, sessions and pictures are still
+  written to disk.
+- Reopening Pictures while an older page is still loading can put that page
+  into the fresh grid.
 - LocalHarness does not start ComfyUI or download its model files;
   `plugins enable image` and the reference doc say what to run.
 - `pre_tool` and `post_tool` do not fire for a subagent's tool calls, and a

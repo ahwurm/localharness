@@ -178,6 +178,14 @@ documented consequence, not a defect — `auto` exists so this is not the daily 
 grant is global, keyed by your project's real path, never expires, and has no revoke command, so a
 single request can never write one. `GET /api/grants` lists what you have allowed forever.
 
+**Memory and Pictures appear only when the session has them.** The drawer's Memory button shows
+when memory is on: list and search facts, open one with its history, edit it, forget it (two
+taps). There is no promote button. The Pictures button shows when a plugin that saves pictures is
+on: a grid of this session's pictures, newest first, 60 at a time, and a full-screen viewer that
+shows only the picture's time (UTC). `localharness web --no-store` hides Pictures and stops the
+phone caching any picture; it does not make the machine forget anything — memory, sessions and
+picture files still persist.
+
 **Stop has an undo window.** Cancel sits next to the composer where a distracted thumb lands, and
 the GPU is the scarce resource here.
 
@@ -257,8 +265,8 @@ the same round trip a real one does.
 - **No image or file upload.** The attachment field exists in the event schema and nothing has
   ever produced or consumed it.
 - **No diff review.** In-project edits therefore ask once per workspace rather than never.
-- **The memory view is worse than the terminal's.** `/memory` gives you the terminal's tree
-  flattened into preformatted text. A real memory endpoint is the first thing after the chat list.
+- **The memory view is worse than the terminal's.** The Memory screen is a flat list with no
+  promote, and `/memory` gives you the terminal's tree flattened into preformatted text.
 - **No per-device revoke.** `--rotate-token` is all or nothing; every other device re-enrols.
 - **No grant revocation.** You can see what you have permanently allowed; removing one means
   editing `~/.localharness/grants.yaml` by hand.
