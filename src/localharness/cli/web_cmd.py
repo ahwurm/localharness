@@ -167,6 +167,15 @@ def web_cmd(
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Start a specific agent.")] = None,
 ) -> None:
     """Serve the phone UI and its event API (see docs/web.md)."""
+    # FIRST: channels.web's package init imports starlette, so the hint must precede any channels.web
+    # import (without the extra, that import raised before the hint could print).
+    try:
+        import starlette  # noqa: F401
+        import uvicorn  # noqa: F401
+    except ImportError as exc:
+        console.print(f"[red]{escape(MISSING_DEPENDENCY)}[/red]", soft_wrap=True)
+        raise typer.Exit(1) from exc
+
     from localharness.channels.web import auth as web_auth
 
     if rotate_token:
@@ -182,13 +191,6 @@ def web_cmd(
     except ValueError as exc:
         console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(2) from exc
-
-    try:
-        import starlette  # noqa: F401
-        import uvicorn  # noqa: F401
-    except ImportError as exc:
-        console.print(f"[red]{escape(MISSING_DEPENDENCY)}[/red]", soft_wrap=True)
-        raise typer.Exit(1) from exc
 
     token, created = web_auth.load_or_create_token(config_dir)
     if created:
@@ -468,3 +470,7 @@ async def _bring_up(
         # A clean return means the session is OVER (the task runs its whole life). "ready" is
         # published where readiness actually begins — bind_runtime — not here.
         channel.set_bringup("ended", elapsed=time.monotonic() - started)
+
+
+app = typer.Typer(help="Serve the phone UI and its event API (see docs/web.md).")
+app.command()(web_cmd)  # the plugin's CliDescriptor targets this; web_cmd stays a plain function for tests
