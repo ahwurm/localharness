@@ -140,3 +140,12 @@ def test_the_start_filter_reads_entries_never_rendered_text():
                      classes={}, settings={}, enabled={}, warnings=())
     assert _start_problems(res) == ["plugin twin: install it"]
     assert 'f"plugin {' not in inspect.getsource(_start_problems)
+
+
+def test_start_and_the_resolver_name_the_same_own_command_channels():
+    """start's one own-command table and the resolver's OWN_COMMAND cannot drift: a name in one but
+    not the other would be a KeyError at `--channel <name>`."""
+    from localharness.cli.start_cmd import _own_command
+    from localharness.plugins.channels import OWN_COMMAND
+
+    assert set(_own_command(web_channel=None, acp_channel=None)) == OWN_COMMAND

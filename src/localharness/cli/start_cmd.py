@@ -16,7 +16,7 @@ from rich.text import Text
 
 from localharness.cli.theme import entity, entity_text
 from localharness.cli.workspace import NO_INPUT_HELP
-from localharness.plugins.channels import OWN_COMMAND, channel_names, plugin_channel_names
+from localharness.plugins.channels import channel_names, plugin_channel_names
 
 console = Console()
 err_console = Console(stderr=True)
@@ -26,9 +26,16 @@ UNKNOWN_CHANNEL_ERROR = "unknown channel {given!r}; choose one of: {known}"
 
 OWN_COMMAND_ERROR = ("the {name} channel is served by its own command, because {why}. "
                      "Run `localharness {name}` instead of `localharness start --channel {name}`.")
-_OWN_COMMAND_WHY = {"web": "the HTTP server has to be reachable before a session exists",
-                    "acp": "the editor's handshake has to be answered before a session exists"}
-WEB_NEEDS_ITS_OWN_COMMAND = OWN_COMMAND_ERROR.format(name="web", why=_OWN_COMMAND_WHY["web"])
+
+
+def _own_command(web_channel: Any, acp_channel: Any) -> dict[str, tuple[str, Any]]:
+    """The ONE own-command table: name -> (why it has its own command, the channel it handed in).
+    Its keys must equal plugins.channels.OWN_COMMAND (pinned by a test)."""
+    return {"web": ("the HTTP server has to be reachable before a session exists", web_channel),
+            "acp": ("the editor's handshake has to be answered before a session exists", acp_channel)}
+
+
+WEB_NEEDS_ITS_OWN_COMMAND = OWN_COMMAND_ERROR.format(name="web", why=_own_command(None, None)["web"][0])
 """Shown verbatim. A refusal naming the alternatives is the difference between a typo costing a
 second and a typo costing a session."""
 
@@ -491,13 +498,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         raise typer.BadParameter(
             UNKNOWN_CHANNEL_ERROR.format(given=channel_mode, known=", ".join(sorted(known))),
             param_hint="--channel")
-    if channel_mode in OWN_COMMAND and {"web": web_channel, "acp": acp_channel}[channel_mode] is None:
+    own = _own_command(web_channel, acp_channel)
+    if channel_mode in own and own[channel_mode][1] is None:
         # web and acp name channels this function cannot BUILD: the HTTP server / the editor's
         # handshake has to be up and answering before a session exists, so the channel is
         # constructed by `localharness web` / `localharness acp` and handed in. Without that, the
         # branch below would fall through to the terminal — precisely the silent fallback the check
         # above exists to end, reintroduced by the same commit that ended it.
-        msg = OWN_COMMAND_ERROR.format(name=channel_mode, why=_OWN_COMMAND_WHY[channel_mode])
+        msg = OWN_COMMAND_ERROR.format(name=channel_mode, why=own[channel_mode][0])
         if channel_mode in plugin_channel_names():
             msg += f" (if that command is missing, run `localharness plugins enable {channel_mode}`)"
         raise typer.BadParameter(msg, param_hint="--channel")
