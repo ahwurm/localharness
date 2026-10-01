@@ -273,3 +273,23 @@ async def test_a_memory_plugin_that_fails_to_start_leaves_the_slot_empty(tmp_pat
     result = await _start(_resolution(_memory_plugin("recall", start=start)), tmp_path)
 
     assert "recall" in result.failed and result.slot.occupied is False
+
+
+@pytest.mark.asyncio
+async def test_seat_puts_an_occupant_on_this_slot_in_place(tmp_path):
+    """46-03: start_cmd seats the transitional occupant (ROADMAP D3) on the slot object every holder
+    already has — so seating mutates, never replaces."""
+    from localharness.memory.browse import StoreBrowse
+    from localharness.memory.sqlite import MemoryStore
+
+    store = MemoryStore(agent_id="a", division_id="d", org_id="default", base_dir=str(tmp_path))
+    await store.open()
+    try:
+        slot, occupant = MemorySlot(), StoreBrowse(store)
+        slot.seat(occupant, name="memory")
+        assert slot.occupied and slot.occupant_name == "memory"
+        assert slot.browse() is occupant
+        assert await slot.context("t", ContextBudget(max_chars=10, max_session_history=1)) == \
+            ContextContribution()
+    finally:
+        await store.close()
