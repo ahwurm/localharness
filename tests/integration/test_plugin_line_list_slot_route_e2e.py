@@ -186,7 +186,8 @@ def test_the_line_the_one_list_the_empty_slot_the_route(tmp_path, monkeypatch, f
     assert violations(injected) == {("agent/loop.py", "memory/__init__.py")}
     assert classify("tools/builtin/generate_image_tool.py") == "plugin"
     assert classify("tools/builtin/memory_tools.py") == "plugin"
-    owners = {"memory": ("memory",), "web": ("web",), "dispatch": ("discord",),
+    # web left this map in 46-04: its last burn-down entries (doctor's listener lines) are gone.
+    owners = {"memory": ("memory",), "dispatch": ("discord",),
               "autoresearch": ("autoresearch_cmd", "experiment_cmd", "propose_cmd", "report_cmd")}
     named = {plugin: {pair for pair in BURN_DOWN if any(w in pair[1] for w in words)}
              for plugin, words in owners.items()}

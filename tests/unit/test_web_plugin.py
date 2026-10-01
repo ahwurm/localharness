@@ -64,6 +64,13 @@ def _ctx(config_dir):
     return SimpleNamespace(paths=SimpleNamespace(global_config_dir=config_dir), llm=None)
 
 
+def test_the_doctor_port_is_the_port_the_server_binds() -> None:
+    from localharness.cli.web_cmd import DEFAULT_PORT
+    from localharness.cli.web_plugin import WEB_DEFAULT_PORT
+
+    assert WEB_DEFAULT_PORT == DEFAULT_PORT
+
+
 def test_web_doctor_not_enrolled(tmp_path) -> None:
     from localharness.cli.web_plugin import WebPlugin
     from localharness.plugins.api import Check
