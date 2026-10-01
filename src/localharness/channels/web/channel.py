@@ -423,6 +423,10 @@ class WebChannel(ChannelAdapter):
         answers 404 without touching any filesystem."""
         return self._artifact_roots.get(plugin)
 
+    def artifact_roots(self) -> dict[str, Path]:
+        """Every root bound this session (a copy)."""
+        return dict(self._artifact_roots)
+
     async def start(self) -> None:
         """Subscribe to the bus. Idempotent — the REPL starts the channel that already exists.
 
