@@ -246,8 +246,10 @@ async def test_the_web_channel_gets_the_artifact_roots_core_accepted(tmp_path, m
     from localharness.cli.start_cmd import _start_async
     from localharness.core.bus import EventBus
 
+    from localharness.cli.web_plugin import WebPlugin
+
     _stub_start_boundaries(tmp_path, monkeypatch)
-    _bundle(monkeypatch, _Probe)
+    _bundle(monkeypatch, _Probe, WebPlugin)  # `web` is a --channel name only while bundled (46-04)
     channel = WebChannel(bus=EventBus(), config={})
     bound: list[dict] = []
     real_bind = channel.bind_runtime

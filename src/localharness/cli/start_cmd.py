@@ -43,6 +43,16 @@ discover it one prompt at a time. It names the fix, because "ask every time" wit
 explanation is the prompt fatigue the ask-rate SLO exists to prevent."""
 
 
+def _start_problems(plugin_resolution: Any) -> list[str]:
+    """The plan's problem lines the START summary shows. A BUNDLED plugin waiting for its install
+    extra is not a startup problem (a terminal-only install never asked for the phone); `plugins
+    list` and doctor still show it. An installed plugin's missing extra still warns: the user opted
+    in. (46, ruling 5)"""
+    waiting = {f"plugin {e.name}: {e.reason}" for e in plugin_resolution.plan.entries
+               if e.state == "needs-extra" and e.bundled}
+    return [p for p in plugin_resolution.problems() if p not in waiting]
+
+
 def _first_prompt_hint(is_returning: bool) -> str:
     """The guidance shown in the first interactive input bubble (#49). First-run gets the
     full 'describe a task' hint; a returning session still gets a short '/help' reminder
@@ -1232,7 +1242,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         try:
             plugin_resolution = resolve(loader, agent_name=agent_config.name)
             warnings.extend(plugin_resolution.warnings)
-            warnings.extend(plugin_resolution.problems())
+            warnings.extend(_start_problems(plugin_resolution))
             plugin_result = await start_plugins(
                 plugin_resolution, bus=bus, registry=tool_registry, hooks=hook_system, llm=llm,
                 paths=PluginPaths(global_config_dir=cfg_path, workspace=workspace,
