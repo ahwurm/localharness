@@ -4,7 +4,7 @@ driven over the real ASGI wire: real routes, real auth, real files on disk.
 Posture, the same the image-only route on the image branch had, now for any plugin: authenticated
 like every GET; served only for a plugin whose root core computed and handed this session — any
 other name 404s before a single filesystem call; only a core-minted id; only the core media-type
-allowlist (else 415); realpath-confined, so a symlink out of the root is not served; an id names
+allowlist (else 415); a symlink is never served, so nothing leaves the root; an id names
 one immutable file, so it is cached as immutable.
 """
 from __future__ import annotations
@@ -338,3 +338,20 @@ async def test_the_memory_button_means_a_browse_api_exists(tmp_path):
     _, _, _, client = await _stack(tmp_path, runtime={"memory_slot": _fake_slot()})
     assert (await client.get("/api/protocol", headers=BEARER)).json()["screens"]["memory"] is True
     assert (await client.get("/api/memory", headers=BEARER)).status_code == 200
+
+
+async def test_the_listing_and_the_route_share_one_ambiguity_rule(tmp_path):
+    """An id the listing shows is an id the route serves, and vice versa: a stem that names an
+    off-allowlist twin or a subfolder is ambiguous for both."""
+    roots, _, client = await _two_roots(tmp_path)
+    root = roots["example"]
+    lone = "art-20260930-120000-aaaaaa"
+    txt_twin, dir_twin = "art-20260930-120001-aaaaaa", "art-20260930-120002-aaaaaa"
+    for artifact_id in (lone, txt_twin, dir_twin):
+        _put(root, f"{artifact_id}.png")
+    _put(root, f"{txt_twin}.txt", b"notes")
+    (root / dir_twin).mkdir()
+    listed = [i["id"] for i in (await client.get("/api/artifacts", headers=BEARER)).json()["items"]]
+    served = [a for a in (lone, txt_twin, dir_twin)
+              if (await client.get(f"/api/artifacts/example/{a}", headers=BEARER)).status_code == 200]
+    assert listed == served == [lone]
