@@ -2,8 +2,8 @@
 
 Pure algorithm, no I/O: greedy char-budget batching + level-by-level partial combines
 until the items fit the budget. The cruncher composes it with its LLM combine turn
-(`agent/subagent.py`); the memory hierarchy (HIER-02, `memory/hierarchy.py`) persists
-the returned trace as a durable gist tree. Behavior is byte-identical to the while-loop
+(`agent/subagent.py`) and hands the returned trace to a memory slot occupant's write
+handle (MemoryWriteHandle.persist_reduce_trace), which may persist it as a gist tree. Behavior is byte-identical to the while-loop
 it replaced (same batching, same sequential combines, same termination conditions) —
 the factor-out exists so the intermediate gists stop being throwaway Python strings.
 """

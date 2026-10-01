@@ -426,3 +426,81 @@ def test_cruncher_chunk_chars_knee():
     assert f(1_000_000) <= 32_000, "never exceed the 32k knee — the recall cliff above is sharp"
 
 
+
+
+# --- MEMP-09 / PAPI-04: the reduce trace reaches memory only through the slot's per-delegation handle ---
+
+class _RecordingHandle:
+    def __init__(self, exc: Exception | None = None):
+        self.calls: list[tuple[str, list]] = []
+        self.exc = exc
+
+    async def persist_reduce_trace(self, question, trace):
+        self.calls.append((question, list(trace)))
+        if self.exc is not None:
+            raise self.exc
+
+
+async def _broad_crunch(mock_llm_client, bus, **kw):
+    """The broad-query (hierarchical-reduce) case, parameterized by the memory_handle getter."""
+    Response, ToolCall = mock_llm_client.Response, mock_llm_client.ToolCall
+    marker = "NEEDLE-7Q"
+    filler = "alpha beta gamma delta epsilon. " * 1400
+    parent = ContentStore()
+    h = parent.put(filler[:21000] + f" {marker} " + filler[21000:], origin="trusted")
+    ctx = ContextManager(content_store=ContentStore(parent=parent, granted=frozenset({h})),
+                         max_context_tokens=4_000)
+    base = ToolRegistry()
+    await register_builtin_tools(base, eviction_store=ContentStore())
+    return await subagent.dispatch_cruncher_subagent(
+        "Summarize every point in the document.", grant_handles=[h],
+        llm=_extract_all_llm(Response, ToolCall, marker), bus=bus, base_registry=base,
+        parent_session_id="run", permission_evaluator=PermissionEvaluator(), context_manager=ctx,
+        max_subagent_depth=2, **kw,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cruncher_hands_its_reduce_trace_to_the_bound_handle(mock_llm_client, bus):
+    from localharness.core.reduce import ReduceLevel
+    baseline = await _broad_crunch(mock_llm_client, bus)
+    fake = _RecordingHandle()
+    res = await _broad_crunch(mock_llm_client, bus, memory_handle=lambda: fake)
+    assert res == baseline
+    assert len(fake.calls) == 1
+    question, trace = fake.calls[0]
+    assert question == "Summarize every point in the document."
+    assert trace and all(isinstance(lv, ReduceLevel) for lv in trace)
+
+
+@pytest.mark.asyncio
+async def test_no_getter_or_none_handle_calls_nothing(mock_llm_client, bus):
+    baseline = await _broad_crunch(mock_llm_client, bus, memory_handle=None)
+    calls = []
+    def getter():
+        calls.append(1)
+        return None
+    assert await _broad_crunch(mock_llm_client, bus, memory_handle=getter) == baseline
+    assert calls == [1]  # asked once, answered None -> nothing persisted, nothing raised
+
+
+@pytest.mark.asyncio
+async def test_a_raising_handle_never_changes_the_answer(mock_llm_client, bus, caplog):
+    import logging
+    baseline = await _broad_crunch(mock_llm_client, bus)
+    fake = _RecordingHandle(exc=RuntimeError("store down"))
+    with caplog.at_level(logging.WARNING, logger="localharness.agent.subagent"):
+        res = await _broad_crunch(mock_llm_client, bus, memory_handle=lambda: fake)
+    assert res == baseline and len(fake.calls) == 1
+    assert any("gist hand-off to memory failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_getter_is_called_per_delegation(mock_llm_client, bus):
+    count = []
+    def getter():
+        count.append(1)
+        return _RecordingHandle()
+    await _broad_crunch(mock_llm_client, bus, memory_handle=getter)
+    await _broad_crunch(mock_llm_client, bus, memory_handle=getter)
+    assert len(count) == 2
