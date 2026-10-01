@@ -62,6 +62,12 @@ def test_schema_cannot_move_without_a_protocol_version_bump():
     )
 
 
+def test_the_snapshot_is_recorded_at_the_current_version():
+    """The schema test above SKIPS on a version mismatch, so a bump with no re-record would go
+    green silently. This one never skips."""
+    assert json.loads(SNAPSHOT.read_text(encoding="utf-8"))["protocol_version"] == PROTOCOL_VERSION
+
+
 def test_the_reference_page_is_written_against_the_current_version():
     """The page pins the version it renders (its Hello check). A server bump that forgets the
     page ships a red 'written against N' banner to every phone — 2026-09-28's live failure:

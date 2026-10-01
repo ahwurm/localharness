@@ -41,6 +41,10 @@ Migration.
   phone page shows an image artifact from `GET /api/artifacts/{plugin}/{id}`.
   Version 2 was never released. The page and the server ship together; a page
   written for another version says so in red.
+- **Web protocol 5: `screens`.** `/api/protocol` says which screens this
+  session has — `memory` (the memory slot is occupied) and `pictures` (a
+  picture folder is bound and `--no-store` is off). The phone page shows the
+  Memory and Pictures buttons only when they are on. No event or frame changed.
 - **Setup questions for plugins.** A plugin's manifest can list `setup` fields
   (`SetupField(key, prompt, default)`) and a short `setup_help` text.
   `plugins enable NAME` asks them on a terminal when no `--set` is given,
