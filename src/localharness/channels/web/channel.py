@@ -36,6 +36,7 @@ import structlog
 from localharness.channels.base import ChannelAdapter, sanitize_for_display
 from localharness.channels.errors import NotInteractiveError
 from localharness.core.bus import EventBus
+from localharness.plugins.slot import MemorySlot
 # Only the four types this channel REACTS to beyond forwarding. Everything else reaches the
 # client through `EVENT_TYPE_MAP` in `start()`, which is the point: nothing here is a list of
 # what the wire carries.
@@ -308,7 +309,7 @@ class WebChannel(ChannelAdapter):
         # session log can serve, so a swallowed persist failure surfaces as a gap (§4.2.3).
         self._forwarded_max: dict[str, int] = {}
         self._session_dir: Optional[Path] = None
-        self._memory_store: Any = None
+        self._memory_slot = MemorySlot()
         self._artifact_roots: dict[str, Path] = {}
 
         # Web Push, when a phone has enrolled. Optional on purpose: `--replay` sets none, and a
@@ -365,7 +366,7 @@ class WebChannel(ChannelAdapter):
         agent_loop: Any = None,
         session_dir: Optional[Path] = None,
         bus: Any = None,
-        memory_store: Any = None,
+        memory_slot: MemorySlot | None = None,
         artifact_roots: Optional[Mapping[str, Path]] = None,
     ) -> None:
         """Hand the channel the session objects the HTTP surface has to answer questions about.
@@ -386,7 +387,7 @@ class WebChannel(ChannelAdapter):
         self._llm = llm
         self._agent_loop = agent_loop
         self._session_dir = session_dir
-        self._memory_store = memory_store
+        self._memory_slot = memory_slot if memory_slot is not None else MemorySlot()
         self._artifact_roots = dict(artifact_roots or {})
         # The session exists from this line on, with two client-visible consequences. First,
         # "ready" is published HERE — the bring-up task only returns when the whole session
@@ -411,11 +412,15 @@ class WebChannel(ChannelAdapter):
         self._gate = None
         self._llm = None
         self._agent_loop = None
-        self._memory_store = None  # closes with the session — a dead store must not answer
+        self._memory_slot = MemorySlot()  # closes with the session — a dead store must not answer
         self._artifact_roots = {}  # the next session's plugins decide what is served
         self._turn_running = False
         self._open_asks.clear()
         self.set_bringup_abort(None)
+
+    def memory_slot(self) -> MemorySlot:
+        """This session's memory slot — the phone's only path to memory (WEBP-03); empty when unbound."""
+        return self._memory_slot
 
     def artifact_root(self, plugin: str) -> Optional[Path]:
         """Where `plugin`'s artifacts live this session — core computed it — or None: the plugin is

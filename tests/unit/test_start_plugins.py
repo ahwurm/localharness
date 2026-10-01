@@ -202,7 +202,7 @@ async def test_start_runs_a_bundled_plugin_through_the_lifecycle(tmp_path, monke
     through the session's registry, firing the hook the plugin put on the session's hook system;
     its slash row is in the one table while the session runs (and answers, importing its target on
     first use) and is gone afterwards; start() runs before the REPL and stop() after it; the loop
-    holds the (empty) memory slot; and the session closes as it always did."""
+    holds the memory slot (the transitional occupant, 46-06); and the session closes as it always did."""
     from localharness.cli.start_cmd import _start_async
 
     during: list[Any] = []
@@ -234,7 +234,8 @@ async def test_start_runs_a_bundled_plugin_through_the_lifecycle(tmp_path, monke
         "the plugin's rows must leave the table when the session ends"
     assert EVENTS == ["start", "repl", "pre_tool probe_echo", "stop"]
     slot = loop["memory_slot"]
-    assert isinstance(slot, MemorySlot) and not slot.occupied
+    # 46-06 (D3): memory is on, so the slot holds the transitional browse occupant, not a plugin
+    assert isinstance(slot, MemorySlot) and slot.occupant_name == "memory"
     rows = _read_sessions(tmp_path)
     assert len(rows) == 1 and rows[0][3] == "complete"
 

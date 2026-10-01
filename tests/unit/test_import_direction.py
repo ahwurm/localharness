@@ -51,6 +51,7 @@ ALLOWED_PLUGIN_IMPORTERS = frozenset({"plugins/builtin.py"})
 BURN_DOWN: frozenset[tuple[str, str]] = frozenset({
     # memory plugin
     ("cli/start_cmd.py", "memory/sqlite.py"),
+    ("cli/start_cmd.py", "memory/browse.py"),  # 47 deletes (transitional occupant, D3)
     ("cli/start_cmd.py", "memory/router.py"),
     ("cli/start_cmd.py", "memory/resonance.py"),
     ("cli/start_cmd.py", "memory/consolidation.py"),

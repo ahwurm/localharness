@@ -293,3 +293,24 @@ async def test_seat_puts_an_occupant_on_this_slot_in_place(tmp_path):
             ContextContribution()
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_is_identical_with_the_occupant_seated(tmp_path):
+    """46-06 (D3): the transitional occupant only browses — its context() is the inherited empty one,
+    so seating it over a real store changes nothing the model sees."""
+    from localharness.memory.browse import StoreBrowse
+    from localharness.memory.sqlite import MemoryStore
+
+    store = MemoryStore(agent_id="a", division_id="d", org_id="default", base_dir=str(tmp_path / "s"))
+    await store.open()
+    try:
+        seated = MemorySlot()
+        seated.seat(StoreBrowse(store), name="memory")
+        loop, prompts = _loop(tmp_path / "seated", memory_slot=seated)
+        empty, empty_prompts = _loop(tmp_path / "empty", memory_slot=MemorySlot())
+        await loop.run_turn("hello")
+        await empty.run_turn("hello")
+        assert seated.occupied and prompts[0] == empty_prompts[0]
+    finally:
+        await store.close()
