@@ -7,6 +7,7 @@ classes, plus `classes` and `settings` — and runs the real lifecycle against a
 installed came from an entry point (its plan entry is not bundled)."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 import uuid
@@ -559,3 +560,79 @@ async def test_doctor_ctx_has_no_idle_llm_or_session(paths):
     seen: dict = {}
     await doctor_rows(_resolution(bundled=(_recorder("p", seen, stage="doctor"),)), paths=paths)
     assert seen["p"].idle_llm is None and seen["p"].session is None
+
+
+# --- startup_warnings channel + interrupt-safe start (47-02, gaps P1/P3) --------------------------
+
+
+def _warns(name: str, warnings, *, then: BaseException | None = None, log: list | None = None):
+    """A plugin that sets `startup_warnings` in __init__ and appends to it during start()."""
+    def __init__(self):
+        self.startup_warnings = [] if isinstance(warnings, list) else warnings
+
+    async def start(self, ctx):
+        if isinstance(self.startup_warnings, list):
+            self.startup_warnings.extend(warnings)
+        if then is not None:
+            raise then
+    return _plugin(name, log=log, __init__=__init__, start=start)
+
+
+@pytest.mark.asyncio
+async def test_startup_warnings_reach_the_result_verbatim(paths):
+    result, _ = await _start(_resolution(bundled=(_warns("mem", ["session-start: boom"]),
+                                                  _plugin("plain"))), paths)
+    assert result.warnings == ["session-start: boom"]
+    assert set(result.loaded_names) == {"mem", "plain"}  # "plain" has no attribute: contributes nothing
+
+
+@pytest.mark.asyncio
+async def test_startup_warnings_of_a_failed_start_are_still_reported(paths):
+    result, _ = await _start(
+        _resolution(bundled=(_warns("mem", ["session-start: boom"], then=RuntimeError("x")),)), paths)
+    assert "session-start: boom" in result.warnings
+    assert "mem" in result.failed
+
+
+@pytest.mark.asyncio
+async def test_a_non_list_startup_warnings_is_ignored(paths):
+    result, _ = await _start(_resolution(bundled=(_warns("s", "oops"),)), paths)
+    assert result.warnings == []  # a str is not iterated character by character
+
+    def __init__(self):
+        self.startup_warnings = []
+
+    async def start(self, ctx):
+        self.startup_warnings.extend(["kept", 7, None, "also kept"])
+    result, _ = await _start(_resolution(bundled=(_plugin("m", __init__=__init__, start=start),)),
+                             paths)
+    assert result.warnings == ["kept", "also kept"]
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), asyncio.CancelledError()],
+                         ids=["keyboard_interrupt", "cancelled_error"])
+@pytest.mark.asyncio
+async def test_keyboard_interrupt_in_a_start_stops_the_running_plugins_then_reraises(paths, interrupt):
+    """A then B in plan order; B.start is interrupted -> A (already running) is stopped once, B
+    (not running) is not stopped — it cleans up its own half-open state — and the interrupt
+    propagates."""
+    log: list = []
+    a = _plugin("a", log=log)
+    b = _plugin("b", log=log, requires=("a",), start=_raises(interrupt))
+    resolution = _resolution(bundled=(a, b))
+    assert resolution.plan.order == ("a", "b")
+    with pytest.raises(type(interrupt)):
+        await _start(resolution, paths)
+    assert log.count(("stop", "a")) == 1
+    assert ("stop", "b") not in log
+
+
+@pytest.mark.asyncio
+async def test_cancelled_error_in_a_start_is_handled_the_same(paths):
+    log: list = []
+    resolution = _resolution(bundled=(_plugin("a", log=log),
+                                      _plugin("b", log=log, requires=("a",),
+                                              start=_raises(asyncio.CancelledError()))))
+    with pytest.raises(asyncio.CancelledError):
+        await _start(resolution, paths)
+    assert log.count(("stop", "a")) == 1 and ("stop", "b") not in log
