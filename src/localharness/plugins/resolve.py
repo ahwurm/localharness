@@ -97,13 +97,19 @@ def resolve(loader: ConfigLoader, *, agent_name: str | None = None, version: str
     bundled = bundled_plugins()
     found = discovery.discover(loader.global_config_dir)
     layers, files = loader.plugin_layers(), loader.plugin_layer_files()
+    warnings_pre: list[str] = []
+    if "memory" in layers:  # MEMP-06: the deprecated org.memory_enabled, folded per layer — one place
+        legacy = loader.legacy_org_flags()
+        if (line := legacy_memory_warning(layers["memory"], legacy, files)) is not None:
+            warnings_pre = [line]
+        layers = {**layers, "memory": fold_legacy_memory_flag(layers["memory"], legacy)}
     core_keys = CORE_HARNESS_KEYS | CORE_AGENT_KEYS
     refusals = plan.name_refusals(
         [(c.manifest.name, "built in") for c in bundled] + [(d.name, d.from_label) for d in found],
         core_keys)
     admitted_bundled = [c for c, why in zip(bundled, refusals) if why is None]
     admitted_found = [d for d, why in zip(found, refusals[len(bundled):]) if why is None]
-    warnings: list[str] = discovery.legacy_notices(loader.global_config_dir)
+    warnings: list[str] = discovery.legacy_notices(loader.global_config_dir) + warnings_pre
 
     def merged(name: str, global_only: frozenset[str]) -> dict[str, Any]:
         section, dropped = merge_plugin_layers(name, layers.get(name, (None,) * 4),
@@ -171,6 +177,39 @@ def resolve(loader: ConfigLoader, *, agent_name: str | None = None, version: str
     said = set(_problems(load_plan))
     return Resolution(load_plan, {n: c for n, c, _ in in_hand}, settings, enabled,
                       tuple(w for w in dict.fromkeys(warnings) if w not in said))
+
+
+def fold_legacy_memory_flag(memory_layers: tuple[Any, ...], legacy: tuple[Any, ...]) -> tuple[Any, ...]:
+    """The four `memory:` layers with the deprecated `org.memory_enabled` folded in (MEMP-06): in
+    each layer, `memory.enabled` wins; else that layer's `org.memory_enabled` (a bool) IS its
+    `memory.enabled`. Layers stay separate, so the highest layer that says anything still wins. A
+    layer that is not a mapping is returned unchanged — flag() reports it."""
+    def one(layer: Any, old: Any) -> Any:
+        if isinstance(old, bool) and (layer is None or (isinstance(layer, dict) and "enabled" not in layer)):
+            return {**(layer or {}), "enabled": old}
+        return layer
+    return tuple(one(layer, old) for layer, old in zip(memory_layers, legacy))
+
+
+def legacy_memory_warning(memory_layers: tuple[Any, ...], legacy: tuple[Any, ...],
+                          files: tuple[str, ...]) -> str | None:
+    """ONE deprecation line naming every file whose `org.memory_enabled` decides, or would decide,
+    `memory.enabled` — or None. A layer's legacy key counts only where that layer has no
+    `memory.enabled` of its own; it is named when it is false, or when it is true over a lower
+    false. A bare `true` that overrides nothing is silent: older `init` wrote
+    `org.memory_enabled: true` into every config.yaml it created, so warning on it would fire on
+    every fresh install with advice `init` itself caused (RESEARCH P6)."""
+    named: list[str] = []
+    seen_false = False
+    for layer, old, path in zip(memory_layers, legacy, files):
+        has_own = isinstance(layer, dict) and "enabled" in layer
+        effective = isinstance(old, bool) and not has_own
+        if effective and (old is False or seen_false):
+            named.append(path)
+        seen_false |= (layer["enabled"] if has_own else old if effective else None) is False
+    if not named:
+        return None
+    return f"org.memory_enabled is deprecated — use memory.enabled (read from {', '.join(named)})"
 
 
 def _machine_only(model: type[BaseModel] | None, bundled: bool) -> frozenset[str]:
