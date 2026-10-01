@@ -55,7 +55,6 @@ BURN_DOWN: frozenset[tuple[str, str]] = frozenset({
     ("cli/start_cmd.py", "memory/router.py"),
     ("cli/start_cmd.py", "memory/resonance.py"),
     ("cli/start_cmd.py", "memory/consolidation.py"),
-    ("cli/start_cmd.py", "memory/idle_llm.py"),
     ("cli/start_cmd.py", "tools/builtin/memory_tools.py"),
     ("tools/builtin/__init__.py", "tools/builtin/memory_tools.py"),
     ("cli/app.py", "cli/memory_cli.py"),
