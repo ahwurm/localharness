@@ -608,8 +608,9 @@ One more, added with plugins:
   `<state dir>/artifacts/<plugin>/`; a plugin that reports any other folder gets no artifact
   serving for the session, and a request naming any other plugin is a 404 before the filesystem is
   touched. The id must have the one shape the harness mints (`art-`, a timestamp and six hex
-  digits, ASCII only), exactly one file may match it, and that file's real path must stay inside
-  the folder, so a symlink out of it is refused. The media type comes from the file actually
+  digits, ASCII only), exactly one entry may bear it, that entry must be a regular file (a symlink
+  is refused even when it points inside the folder, the same rule the gallery listing applies),
+  and its real path must stay inside the folder. The media type comes from the file actually
   served, and only `image/png`, `image/jpeg` and `image/webp` are served; anything else is refused
   with 415. Responses are cached as immutable, because an id never names a different file.
   **What this does NOT cover:** the folder itself is resolved before that check, so if
