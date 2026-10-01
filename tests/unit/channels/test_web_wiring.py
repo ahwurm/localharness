@@ -44,7 +44,7 @@ async def test_an_unknown_channel_is_refused_instead_of_silently_becoming_the_te
     with nothing anywhere saying the flag had been ignored."""
     from localharness.cli.start_cmd import KNOWN_CHANNEL_MODES, _start_async
 
-    assert KNOWN_CHANNEL_MODES == {"terminal", "discord", "web"}
+    assert KNOWN_CHANNEL_MODES == {"terminal", "discord", "web", "acp"}
     with pytest.raises(typer.BadParameter) as exc:
         await _start_async(None, False, False, str(tmp_path), channel_mode="discrod")
     assert "discrod" in str(exc.value)
