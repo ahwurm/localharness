@@ -19,9 +19,12 @@ import os
 import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig, ToolConfig
+
+if TYPE_CHECKING:
+    from localharness.plugins.api import MemoryWriteHandle
 
 log = logging.getLogger("localharness.agent.subagent")
 
@@ -1080,7 +1083,7 @@ async def dispatch_cruncher_subagent(
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
     cruncher_config: Any = None,
-    memory_store: Any = None,
+    memory_handle: Callable[[], MemoryWriteHandle | None] | None = None,
     config_dir: Any = None,
     state_dir: Any = None,
 ) -> str:
@@ -1170,8 +1173,8 @@ async def dispatch_cruncher_subagent(
     # a BROAD query (many sections) reduces in levels. This keeps the reduce bounded for ANY query
     # (the single-pass combine could overflow on broad queries — seen in the live injection dogfood).
     # HIER-01: the reduce loop is the factored, reusable core/reduce.hierarchical_reduce —
-    # byte-identical batching/combining/termination; the returned trace is what HIER-02
-    # persists as the durable gist tree (the intermediate gists stop being throwaway strings).
+    # byte-identical batching/combining/termination; the returned trace is handed to the memory
+    # slot's write handle below (persisted only if the occupant binds one).
     from localharness.core.reduce import hierarchical_reduce
 
     items = extracts or ["(no document section contained anything relevant to the question)"]
@@ -1191,6 +1194,15 @@ async def dispatch_cruncher_subagent(
             "cruncher reduce L%d: %d items -> %d batches (budget %d chars)",
             lvl, n_items, n_batches, budget),
     )
+    # PAPI-04 / MEMP-09: the gist goes to memory through the slot's per-subagent handle, never a raw
+    # store. The bundled memory plugin binds no handle today (no gist persistence since v0.15.0) —
+    # the seam is wired so a handle that persists can be added without touching this file.
+    handle = memory_handle() if memory_handle is not None else None
+    if handle is not None and reduce_trace:
+        try:
+            await handle.persist_reduce_trace(question, reduce_trace)
+        except Exception:  # never fails the answer
+            log.warning("cruncher gist hand-off to memory failed", exc_info=True)
 
     answer = await _cruncher_combine_turn(
         question, items, partial=False, llm=llm, child_bus=child_bus, base_registry=base_registry,
@@ -1231,7 +1243,7 @@ def make_explore_agent_runner(
     available_agents: list[str] | None = None,
     parent_store: Any = None,
     cruncher_config: Any = None,
-    memory_store: Any = None,
+    memory_handle: Callable[[], MemoryWriteHandle | None] | None = None,
     config_dir: Any = None,
     state_dir: Any = None,
 ) -> Callable[..., Awaitable[str]]:
@@ -1314,11 +1326,11 @@ def make_explore_agent_runner(
             available_agents=available_agents,
             # Whole-milestone critic M3: available_agents is advisory (AgentTool takes a
             # free-form agent_id), so a nested agent CAN reach the cruncher — thread
-            # cruncher_config + memory_store so a grandchild cruncher run behaves and
-            # persists identically to a root-dispatched one. (parent_store stays dropped
+            # cruncher_config + memory_handle so a grandchild cruncher run behaves and
+            # hands off to memory identically to a root-dispatched one. (parent_store stays dropped
             # deliberately: model-driven granting is a root-only capability by design.)
             cruncher_config=cruncher_config,
-            memory_store=memory_store,
+            memory_handle=memory_handle,
             config_dir=config_dir,
             state_dir=state_dir,
         )
@@ -1350,7 +1362,7 @@ def make_explore_agent_runner(
                 task, grant_handles=grant_handles, llm=llm, bus=bus, base_registry=base_registry,
                 parent_session_id=get_parent_session_id(), permission_evaluator=permission_evaluator, gate=gate,
                 context_manager=child_ctx, depth=depth, max_subagent_depth=max_subagent_depth,
-                cruncher_config=cruncher_config, memory_store=memory_store, config_dir=config_dir,
+                cruncher_config=cruncher_config, memory_handle=memory_handle, config_dir=config_dir,
                 state_dir=state_dir,
             )
         if name == "explore":
