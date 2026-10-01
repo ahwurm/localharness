@@ -109,7 +109,9 @@ def _resolve_commands() -> dict[str, click.Command]:
         log.debug("plugin commands unavailable", exc_info=True)
         return {}
     commands: dict[str, click.Command] = {}
-    for name in plan.order:
+    # needs-extra plugins mount too: the command's own guard prints the install hint (WEBP-01);
+    # a disabled plugin is in neither list, so its command is absent (PAPI-06).
+    for name in [*plan.order, *(e.name for e in plan.entries if e.state == "needs-extra")]:
         entry = plan.entry(name)
         for desc in entry.manifest.cli if entry is not None and entry.manifest is not None else ():
             commands.setdefault(desc.name, LazyPluginCommand(name, desc))  # first in start order wins

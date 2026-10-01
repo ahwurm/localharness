@@ -343,3 +343,37 @@ def test_the_mount_lets_through_exactly_what_typers_main_loop_handles() -> None:
     assert set(plugin_mount._PASS_THROUGH) == {typer.Exit, typer.Abort, click_exception}
     assert plugin_mount._COMMAND in TyperCommand.__mro__ and plugin_mount._COMMAND.__name__ == "Command"
     assert issubclass(TyperGroup, plugin_mount._COMMAND)
+
+
+# --------------------------------------------------------------------------- the bundled web plugin
+
+
+def test_a_needs_extra_plugins_command_still_mounts_and_prints_its_hint(monkeypatch) -> None:
+    """Without the web extra the command is still there, and running it prints the install hint
+    (WEBP-01) instead of "No such command"."""
+    from localharness.cli.web_plugin import WebPlugin
+    from localharness.plugins import resolve
+
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (WebPlugin,))
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: False)
+    monkeypatch.setitem(sys.modules, "starlette", None)
+    monkeypatch.setitem(sys.modules, "uvicorn", None)
+
+    helped, ran = _run("--help"), _run("web")
+
+    assert "web" in _help_rows(helped.output), helped.output
+    assert ran.exit_code == 1, ran.output
+    assert "the web channel needs its optional extra" in ran.output
+
+
+def test_a_disabled_web_plugin_has_no_command(mounted, monkeypatch) -> None:
+    """`plugins disable web` writes web.enabled: false to overrides.yaml; the command is gone."""
+    from localharness.cli.web_plugin import WebPlugin
+
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (WebPlugin,))
+    (mounted / "overrides.yaml").write_text("web: {enabled: false}\n", encoding="utf-8")
+
+    helped, ran = _run("--help"), _run("web")
+
+    assert "web" not in _help_rows(helped.output)
+    assert ran.exit_code == 2 and "No such command 'web'" in ran.output

@@ -21,14 +21,23 @@ pytestmark = pytest.mark.asyncio
 
 # ------------------------------------------------------------------ the CLI surface
 
-async def test_the_web_command_is_registered_and_visible():
-    """A channel that exists only in the docs is a channel nobody finds."""
+async def test_the_web_command_mounts_through_the_plugin_descriptor(monkeypatch):
+    """A channel that exists only in the docs is a channel nobody finds. `web` is the web plugin's
+    command: not registered eagerly in cli/app.py, listed in --help from the manifest, and RUN through
+    the lazy descriptor (its own --help is the real command's). Config comes from conftest's autouse
+    hermetic LOCALHARNESS_HOME, never the real ~/.localharness."""
+    from typer.testing import CliRunner
+
     from localharness.cli.app import app
 
-    names = {c.name for c in app.registered_commands}
-    assert "web" in names
-    web = next(c for c in app.registered_commands if c.name == "web")
-    assert web.hidden is not True
+    monkeypatch.setenv("COLUMNS", "400")
+    assert "web" not in {c.name for c in app.registered_commands}
+    helped = CliRunner().invoke(app, ["--help"])
+    assert helped.exit_code == 0 and any(
+        line.strip("│ ").split(None, 1)[:1] == ["web"] for line in helped.output.splitlines()), helped.output
+    ran = CliRunner().invoke(app, ["web", "--help"])
+    assert ran.exit_code == 0, ran.output
+    assert "--rotate-token" in ran.output and "--port" in ran.output
 
 
 async def test_start_async_takes_a_prebuilt_web_channel():
