@@ -42,7 +42,9 @@ from localharness.agent.verdict import NAME_CLASSIFIED_TOOLS
 from localharness.cli.slash_commands import SlashCommand
 from localharness.core.artifacts import artifact_root
 from localharness.core.bus import EventBus
-from localharness.plugins.api import Check, MemorySlotPlugin, Plugin, PluginContext, PluginPaths
+from localharness.plugins.api import (
+    Check, MemorySlotPlugin, Plugin, PluginContext, PluginPaths, SessionInfo,
+)
 from localharness.plugins.discovery import import_target
 from localharness.plugins.slot import MemorySlot
 from localharness.plugins.trust import third_party_overrides
@@ -140,22 +142,26 @@ def _checked(tools: Any, registry: ToolRegistry) -> list[tuple[ToolProtocol, Too
 
 def plugin_context(resolution: Resolution, name: str, *, bus: EventBus, registry: ToolRegistry,
                    hooks: HookSystem | None, llm: LLMClient | None,
-                   paths: PluginPaths) -> PluginContext:
+                   paths: PluginPaths, session: SessionInfo | None = None) -> PluginContext:
     """`name`'s context (PAPI-03): the session's bus, tool registry, hooks and LLM client, its own
     validated settings, and the session's `paths` with the artifact root core computes —
     `<state_dir>/artifacts/<name>/` — iff the plugin wants artifacts (PAPI-10), else None."""
     settings = resolution.settings[name]
     wants = resolution.classes[name].wants_artifacts
+    idle = None
+    if llm is not None:  # lazy: provider/__init__ eagerly imports the httpx client
+        from localharness.provider.idle_llm import LLMTextAdapter
+        idle = LLMTextAdapter(llm)
     return PluginContext(
         bus=bus, tools=registry, hooks=hooks, config=settings.config,
         agent_config=settings.agent_config,
         paths=replace(paths, artifact_dir=artifact_root(paths.state_dir, name) if wants else None),
-        llm=llm)
+        llm=llm, idle_llm=idle, session=session)
 
 
 async def start_plugins(resolution: Resolution, *, bus: EventBus, registry: ToolRegistry,
                         hooks: HookSystem | None, llm: LLMClient | None,
-                        paths: PluginPaths) -> LifecycleResult:
+                        paths: PluginPaths, session: SessionInfo | None = None) -> LifecycleResult:
     """Run the ON plugins through create → configure → tools → start, each stage over the plan's
     order, and return what happened; never raises because of a plugin. `paths` is the SESSION's
     (artifact_dir None) — each plugin's is derived from it."""
@@ -200,7 +206,7 @@ async def start_plugins(resolution: Resolution, *, bus: EventBus, registry: Tool
         ok, plugin = await contained(name, "__init__", resolution.classes[name])
         if ok:
             ctx = plugin_context(resolution, name, bus=bus, registry=registry, hooks=hooks,
-                                 llm=llm, paths=paths)
+                                 llm=llm, paths=paths, session=session)
             live[name] = RunningPlugin(name, plugin, ctx, resolution.plan.entry(name).bundled)
 
     async def configure(name: str) -> None:
