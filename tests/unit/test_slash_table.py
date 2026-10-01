@@ -310,3 +310,21 @@ async def test_setting_rows_replaces_them_and_empty_rows_remove_them_all(rows):
     repl, _, _ = _build_repl(channel)
     assert await repl._handle_slash("/other") is True  # an unknown word again
     assert channel.sent == [("Unknown command: /other — /help lists commands.", ERROR)]
+
+
+# ------------------------------------------------------------ G5: /memory follows the memory slot
+
+def test_memory_row_hidden_when_unavailable(rows):
+    from localharness.cli.slash_commands import set_memory_available
+    core_memory = next(r for r in SLASH_COMMANDS if r.name == "/memory")
+    rows([_example()])
+    try:
+        set_memory_available(False)
+        assert "/memory" not in [r.name for r in all_rows()]
+        assert find_row("/memory") is None and "/memory" not in help_text()
+        assert "/example" in [r.name for r in all_rows()]
+        set_memory_available(True)
+        assert next(r for r in all_rows() if r.name == "/memory") is core_memory
+        assert "/example" in [r.name for r in all_rows()]
+    finally:
+        set_memory_available(True)
