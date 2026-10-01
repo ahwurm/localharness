@@ -16,6 +16,10 @@ from localharness.plugins.api import Check, CliDescriptor, Plugin, PluginContext
 if TYPE_CHECKING:
     from localharness.channels.base import ChannelAdapter
 
+WEB_DEFAULT_PORT = 8765
+"""cli/web_cmd.DEFAULT_PORT, restated: importing web_cmd here would put cli/start_cmd.py on the
+plugin's import chain (PAPI-03); test_web_plugin pins the two equal."""
+
 
 class WebPlugin(Plugin):
     """the phone app: `localharness web` serves the web UI and its event API"""
@@ -34,16 +38,15 @@ class WebPlugin(Plugin):
     def doctor(self, ctx: PluginContext) -> list[Check]:
         """Enrolment, the bind the server enforces, and the token file's mode — never the token, and
         no live-port probe (the server is a separate command and may be down on purpose). The address
-        comes from the constants the server enforces, so the two cannot disagree (WEBCH-13)."""
+        comes from the constants the server enforces (the port pinned equal by a test) (WEBCH-13)."""
         from localharness.channels.web.auth import LOOPBACK_HOSTS, token_path
-        from localharness.cli.web_cmd import DEFAULT_PORT
 
         path = token_path(ctx.paths.global_config_dir)
         if not path.exists():
             return [Check(name="web", status="skip", detail="not enrolled yet",
                           hint="`localharness web` generates its app token on first run")]
         rows = [Check(name="web", status="pass",
-                      detail=f"enrolled; binds {sorted(LOOPBACK_HOSTS)[0]}:{DEFAULT_PORT} (loopback only "
+                      detail=f"enrolled; binds {sorted(LOOPBACK_HOSTS)[0]}:{WEB_DEFAULT_PORT} (loopback only "
                              f"unless --allow-unsafe-bind). A token is required on every request. "
                              f"Token file: {path}")]
         mode = path.stat().st_mode & 0o777
