@@ -917,7 +917,7 @@ function onFrame(name, d) {
       if (d.stage === "ready" || d.stage === "ended") {
         if (S.bring) { S.bring.remove(); S.bring = null; }
         $("state").textContent = d.stage === "ready" ? "harness" : "chat ended";
-        if (d.stage === "ready") refreshScreens();   // a cold load may have read screens too early
+        if (d.stage === "ready") refreshScreens();
         break;
       }
       if (!S.bring) {
