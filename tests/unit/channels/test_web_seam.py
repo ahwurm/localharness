@@ -10,7 +10,7 @@ import pytest
 
 from tests.unit.test_import_direction import SRC, _imported_modules, module_file
 
-WEB_FILES = [f"channels/web/{n}.py" for n in ("server", "channel", "push", "replay", "protocol")]
+WEB_FILES = sorted(p.relative_to(SRC).as_posix() for p in (SRC / "channels/web").glob("*.py"))
 FORBIDDEN = ("memory/", "tools/builtin/image_plugin.py", "tools/builtin/generate_image_tool.py",
              "cli/generate_image_cmd.py", "tools/builtin/workflows/")
 
