@@ -30,7 +30,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 """Bumped on any breaking change to the wire.
 
 v2: Observation gained an optional generated-image id field (never released; replaced by v4's artifact).
@@ -41,6 +41,9 @@ v4: Observation gained the optional `artifact` field — an ArtifactRef (plugin,
 that a plugin tool returns through ToolResult.metadata["artifact"], validated by the loop. The page
 shows an image artifact from /api/artifacts/<plugin>/<id>. It replaces v2's field; v3's tool_names
 is a separate change and is untouched.
+v5: /api/protocol gained "screens" ({memory, pictures}): the page shows the Memory and Pictures
+buttons only when the session has them (memory: the slot is occupied; pictures: an artifact root is
+bound and --no-store is off), and GET /api/artifacts lists the gallery. No event or frame schema moved.
 
 Enforced rather than remembered: `tests/unit/channels/test_web_protocol.py` snapshots every
 event and frame schema into a checked-in fixture and fails if a schema moves without this

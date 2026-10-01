@@ -694,8 +694,10 @@ class WebServer:
         from localharness.agent.gate import MODE_STRICTNESS
         from localharness.cli.slash_commands import all_rows
 
+        _, _, pictures = self._artifact_policy()
         return _json({
             "protocol_version": PROTOCOL_VERSION,
+            "screens": {"memory": self.channel.memory_slot().occupied, "pictures": pictures},
             "events": [
                 {"name": name, "never_fires": name in NEVER_FIRED_EVENTS}
                 for name in sorted(event_schemas())

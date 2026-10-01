@@ -305,3 +305,19 @@ async def test_no_store_help_names_its_limit(tmp_path, monkeypatch):
     result, _ = await asyncio.to_thread(_invoke_web, tmp_path, monkeypatch, "--help")
     flat = re.sub(r"[\s│]+", " ", result.output)
     assert "--no-store" in flat and "still persist" in flat
+
+
+# ------------------------------------------------------------------ screens presence (46-07, v5)
+
+async def test_screens_follow_the_slot_and_the_policy(tmp_path):
+    from tests.unit.channels.test_web_server import _fake_slot
+
+    async def screens(**kw):
+        _, _, _, client = await _stack(tmp_path, **kw)
+        return (await client.get("/api/protocol", headers=BEARER)).json()["screens"]
+
+    root = {"image": artifact_root(tmp_path / "state", "image")}
+    assert await screens() == {"memory": False, "pictures": False}
+    on = {"memory_slot": _fake_slot(), "artifact_roots": root}
+    assert await screens(runtime=dict(on)) == {"memory": True, "pictures": True}
+    assert await screens(runtime=dict(on), no_store=True) == {"memory": True, "pictures": False}
