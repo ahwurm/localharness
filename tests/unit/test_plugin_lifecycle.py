@@ -171,7 +171,8 @@ async def test_each_plugin_gets_exactly_the_v1_context(paths):
     ctx = {r.name: r.ctx for r in result.running}
     for name in ("art", "plain"):
         assert [f.name for f in fields(ctx[name])] == [
-            "bus", "tools", "hooks", "config", "agent_config", "paths", "llm"]
+            "bus", "tools", "hooks", "config", "agent_config", "paths", "llm", "idle_llm",
+            "session"]
         assert (ctx[name].bus, ctx[name].tools, ctx[name].hooks, ctx[name].llm) == (
             bus, registry, hooks, llm)
         assert ctx[name].config is settings[name].config
@@ -518,3 +519,43 @@ async def test_doctor_rows_cover_every_plugin_state_without_a_session(paths):
     assert rows["waiting"] == DoctorRow("waiting", "unconfigured", "unconfigured — set waiting.url")
     assert rows["broken"] == DoctorRow("broken", "failed", "failed — configure() raised SystemExit: 2")
     assert list(rows) == [e.name for e in resolution.plan.entries]
+
+
+# --- ctx.idle_llm / ctx.session (47-02, MEMP-07 / G4) ------------------------------------------
+
+
+def _recorder(name: str, seen: dict, stage: str = "start"):
+    """A plugin class whose `stage` method records the ctx it was handed."""
+    async def record(self, ctx):
+        seen[name] = ctx
+        return [] if stage == "doctor" else None
+    return _plugin(name, **{stage: record})
+
+
+@pytest.mark.asyncio
+async def test_a_started_plugin_gets_idle_llm_and_session(paths):
+    from localharness.plugins.api import SessionInfo
+    from localharness.provider.idle_llm import LLMTextAdapter
+    seen: dict = {}
+    client = object()
+    info = SessionInfo("agent", "div", "sit", "model", 4096, {"max_turns": 3})
+    result = await start_plugins(_resolution(bundled=(_recorder("p", seen),)), bus=EventBus(),
+                                 registry=ToolRegistry(), hooks=None, llm=client, paths=paths,
+                                 session=info)
+    assert result.loaded_names == ["p"]
+    assert isinstance(seen["p"].idle_llm, LLMTextAdapter) and seen["p"].idle_llm._client is client
+    assert seen["p"].session is info
+
+
+@pytest.mark.asyncio
+async def test_no_llm_means_no_idle_llm_and_no_session_by_default(paths):
+    seen: dict = {}
+    await _start(_resolution(bundled=(_recorder("p", seen),)), paths)
+    assert seen["p"].idle_llm is None and seen["p"].session is None
+
+
+@pytest.mark.asyncio
+async def test_doctor_ctx_has_no_idle_llm_or_session(paths):
+    seen: dict = {}
+    await doctor_rows(_resolution(bundled=(_recorder("p", seen, stage="doctor"),)), paths=paths)
+    assert seen["p"].idle_llm is None and seen["p"].session is None

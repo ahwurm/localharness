@@ -177,7 +177,7 @@ def test_context_fields_are_exactly_the_papi03_set_in_order(tmp_path):
     """Order is pinned, not just the set: config and agent_config share a type, so a positional
     swap would type-check and hand a plugin the wrong settings."""
     assert [f.name for f in dataclasses.fields(PluginContext)] == [
-        "bus", "tools", "hooks", "config", "agent_config", "paths", "llm",
+        "bus", "tools", "hooks", "config", "agent_config", "paths", "llm", "idle_llm", "session",
     ]
     assert [f.name for f in dataclasses.fields(PluginPaths)] == [
         "global_config_dir", "workspace", "state_dir", "artifact_dir",
@@ -297,3 +297,22 @@ def test_importing_the_api_imports_no_plugin():
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]", out.stdout
+
+
+def test_session_info_fields_in_order_and_exit_reason_is_assignable():
+    """SessionInfo is the session identity a per-session plugin (memory) needs. It is NOT frozen:
+    core sets exit_reason just before stop_plugins and the plugin reads it in stop()."""
+    from localharness.plugins.api import SessionInfo
+    assert [f.name for f in dataclasses.fields(SessionInfo)] == [
+        "agent_id", "division_id", "sitting_id", "model", "context_tokens", "budget", "exit_reason",
+    ]
+    info = SessionInfo("a", "d", "s", "m", 1000, {})
+    assert info.exit_reason == "complete"
+    info.exit_reason = "interrupted"
+    assert info.exit_reason == "interrupted"
+
+
+def test_plugin_api_version_is_unchanged_by_the_additive_fields():
+    """idle_llm and session are defaulted, optional additions — no version bump."""
+    from localharness.plugins.api import PLUGIN_API_VERSION
+    assert PLUGIN_API_VERSION == "1"
