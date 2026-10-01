@@ -219,6 +219,12 @@ Migration.
 - `localharness doctor` does not show which plugin tools the capability floor
   keeps from the root agent; the start banner names them.
 
+## [0.15.1] — 2026-10-01
+
+### Fixed
+
+- `localharness acp` (Zed and other Agent Client Protocol editors) brings up a session again. In 0.15.0 the new `--channel` check inside session start did not list `acp`, so every editor session failed at bring-up with "unknown channel 'acp'". ([#165](https://github.com/ahwurm/localharness/issues/165))
+
 ## [0.15.0] — 2026-09-19
 
 The memory system was rebuilt from the ground up: the model itself is now the
