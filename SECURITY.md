@@ -632,15 +632,16 @@ Added with the web plugin:
   project, that project's own), and in them only files directly under the folder whose name is a
   core-minted id with an allowed suffix: no subfolders, no symlinks. Each entry is plugin, id, media
   type and size, never a path or a prompt. The one new fact a viewer learns is WHEN pictures were
-  made, because the id embeds a UTC timestamp. With no folder bound, or under `--no-store`, it
+  made, because the id embeds a UTC timestamp. With no folder bound, or in incognito, it
   answers 404.
-- **`--no-store` keeps pictures out of the phone's cache, and nothing more.** Pictures are then
-  served `Cache-Control: no-store` and the gallery is off. Pictures the phone already cached
-  stay until the browser evicts them or its site data is cleared. Nothing on the machine is
-  removed: memory, sessions and picture files still persist. It is not a private mode.
-  The drawer switch (`POST /api/pictures/store`) flips the same setting for this server process
-  only; the flag sets the starting value, and memory, sessions and picture files on this box
-  still persist either way. Turning it off sends one authenticated response carrying
+- **Incognito (`--incognito`) keeps pictures out of the phone's cache, and nothing more today.**
+  Pictures are then served `Cache-Control: no-store` and the gallery is off. Pictures the phone
+  already cached stay until the browser evicts them or its site data is cleared. Nothing on the
+  machine is
+  removed: memory, sessions and files on this box still persist. It is not yet a private mode.
+  The drawer's Incognito switch (`POST /api/incognito`) flips the same setting for this server
+  process only; the flag sets the starting value, and memory, sessions and files on this box
+  still persist either way. Turning it on sends one authenticated response carrying
   `Clear-Site-Data: "cache"`, which Safari/iOS 17+ and Chrome honor by dropping this origin's
   cached pictures; a browser that ignores the header keeps what it had.
 - **The phone reaches memory only through the memory slot's browse API.** The four
