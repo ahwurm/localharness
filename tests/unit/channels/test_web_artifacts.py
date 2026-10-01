@@ -9,7 +9,9 @@ one immutable file, so it is cached as immutable.
 """
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -272,3 +274,34 @@ async def test_one_decision_point_reads_the_cache_header_and_the_flag():
     assert source.count("ARTIFACT_CACHE_CONTROL") == 2  # its definition + _artifact_policy
     assert source.count("self.no_store") == 2  # its assignment + _artifact_policy
     assert "channel.artifact_root(" not in source
+
+
+def _invoke_web(tmp_path, monkeypatch, *args):
+    """`web` with _serve faked; sync because web_cmd runs its own asyncio.run (call via a thread)."""
+    from typer.testing import CliRunner
+
+    from localharness.cli import web_cmd
+
+    seen: dict = {}
+
+    async def fake_serve(**kw):
+        seen.update(kw)
+
+    monkeypatch.setattr(web_cmd, "_serve", fake_serve)
+    result = CliRunner().invoke(web_cmd.app, ["--config-dir", str(tmp_path), *args],
+                                env={"COLUMNS": "200"})
+    return result, seen
+
+
+async def test_no_store_flag_reaches_the_server(tmp_path, monkeypatch):
+    result, seen = await asyncio.to_thread(_invoke_web, tmp_path, monkeypatch, "--no-store")
+    assert result.exit_code == 0, result.output
+    assert seen["no_store"] is True
+    result, seen = await asyncio.to_thread(_invoke_web, tmp_path, monkeypatch)
+    assert result.exit_code == 0 and seen["no_store"] is False
+
+
+async def test_no_store_help_names_its_limit(tmp_path, monkeypatch):
+    result, _ = await asyncio.to_thread(_invoke_web, tmp_path, monkeypatch, "--help")
+    flat = re.sub(r"[\s│]+", " ", result.output)
+    assert "--no-store" in flat and "still persist" in flat
