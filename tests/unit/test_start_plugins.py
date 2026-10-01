@@ -265,7 +265,7 @@ async def test_the_web_channel_gets_the_artifact_roots_core_accepted(tmp_path, m
 
     root = tmp_path / "artifacts" / "probe"
     assert [b["artifact_roots"] for b in bound] == [{"probe": root}]
-    assert channel.artifact_root("probe") == root
+    assert channel.artifact_roots() == {"probe": root}
 
 
 async def test_a_plugin_whose_start_raises_is_named_and_the_session_goes_on(tmp_path, monkeypatch):

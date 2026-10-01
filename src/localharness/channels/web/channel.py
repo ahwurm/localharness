@@ -422,12 +422,6 @@ class WebChannel(ChannelAdapter):
         """This session's memory slot — the phone's only path to memory (WEBP-03); empty when unbound."""
         return self._memory_slot
 
-    def artifact_root(self, plugin: str) -> Optional[Path]:
-        """Where `plugin`'s artifacts live this session — core computed it — or None: the plugin is
-        off, did not ask for artifacts, or returned a root core refused. None means the route
-        answers 404 without touching any filesystem."""
-        return self._artifact_roots.get(plugin)
-
     def artifact_roots(self) -> dict[str, Path]:
         """Every root bound this session (a copy)."""
         return dict(self._artifact_roots)
