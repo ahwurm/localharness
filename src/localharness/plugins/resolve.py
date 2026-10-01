@@ -51,15 +51,17 @@ class Resolution:
     enabled: Mapping[str, bool]          # the resolved `<name>.enabled` flag of every known plugin
     warnings: tuple[str, ...]
 
-    def problems(self) -> list[str]:
+    def problems(self, *, include: Callable[[plan.PlanEntry], bool] | None = None) -> list[str]:
         """One line per plugin the plan failed, refused, skipped or holds for an install extra:
-        "plugin <name>: <reason>"."""
-        return _problems(self.plan)
+        "plugin <name>: <reason>". `include`, when given, keeps only the entries it accepts."""
+        return _problems(self.plan, include)
 
 
-def _problems(load_plan: plan.LoadPlan) -> list[str]:
+def _problems(load_plan: plan.LoadPlan,
+              include: Callable[[plan.PlanEntry], bool] | None = None) -> list[str]:
     return [f"plugin {e.name}: {e.reason}" for e in load_plan.entries
-            if e.state in ("failed", "refused", "skipped", "needs-extra")]
+            if e.state in ("failed", "refused", "skipped", "needs-extra")
+            and (include is None or include(e))]
 
 
 class _Unusable(Exception):
