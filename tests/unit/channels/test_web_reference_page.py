@@ -221,7 +221,10 @@ def test_a_repeated_tool_call_id_cannot_orphan_a_row(page):
 # deletes it in another, and only driving the real frame order shows which one wins.
 DOM_SHIM = """
 const mk = (tag) => ({
-  tagName: tag, className: "", textContent: "", style: {}, dataset: {}, children: [], parent: null,
+  tagName: tag, className: "", style: {}, dataset: {}, children: [], parent: null, _text: "",
+  // as in a real DOM, setting textContent replaces the children (the gallery reopen relies on it)
+  get textContent() { return this._text; },
+  set textContent(v) { this._text = v; this.children = []; },
   disabled: false, open: false, onclick: null,
   appendChild(n) { n.parent = this; this.children.push(n); return n; },
   remove() {
@@ -580,3 +583,27 @@ def test_inline_pictures_still_have_no_tap_action(page):
     """45's privacy ruling: the inline chat picture opens nothing (only gallery tiles do)."""
     inline = page.split('const img = el("img", "genimg");')[1].split("target.appendChild(img);")[0]
     assert "onclick" not in inline and "addEventListener" not in inline
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_stale_show_older_page_never_lands_in_a_reopened_grid(page, tmp_path):
+    """Close the gallery mid "show older" and reopen it: the superseded older page must not be
+    appended after the fresh page 1, nor move the cursor."""
+    got = _js(page, tmp_path, GALLERY_FETCH + """
+const waiting = [];
+globalThis.fetch = (path) => new Promise((res) => waiting.push({path, res}));
+const answer = (i, body) => waiting[i].res({json: async () => body});
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const opened = loadPictures(false); await tick(); answer(0, {items: [A(3), A(2)], truncated: true});
+await opened;
+const older = loadPictures(true); await tick();      // "show older" in flight...
+const reopened = loadPictures(false); await tick();  // ...when the gallery is reopened
+answer(1, {items: [A(1)], truncated: false}); await older;           // the stale page lands first
+answer(2, {items: [A(3), A(2)], truncated: true}); await reopened;
+console.log(JSON.stringify({imgs: imgs().map((i) => i.src), before: P.before,
+                            more: $("picmore").hidden, asked: waiting.map((w) => w.path)}));
+""")
+    assert got["imgs"] == [f"/api/artifacts/image/art-20260930-1425{n:02d}-abcdef" for n in (3, 2)]
+    assert got["before"] == "art-20260930-142502-abcdef" and got["more"] is False
+    assert got["asked"] == ["/api/artifacts", "/api/artifacts?before=art-20260930-142502-abcdef",
+                            "/api/artifacts"]

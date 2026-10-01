@@ -1414,17 +1414,20 @@ const idTime = (id) => {
 };
 const openViewer = (it) => { $("picfull").src = artUrl(it); $("pictime").textContent = idTime(it.id); $("picview").showModal(); };
 // One "show older" at a time: a second tap before the page lands reads the same `before` and
-// would append that page twice.
+// would append that page twice. Every load takes a generation; a response whose load was
+// superseded (the gallery reopened meanwhile) is dropped before it touches the grid or the cursor.
 const loadPictures = async (older) => {
   if (older && P.busy) return;
+  const gen = P.gen = (P.gen || 0) + 1;
   P.busy = true;
-  try { await loadPage(older); } finally { P.busy = false; }
+  try { await loadPage(older, gen); } finally { if (gen === P.gen) P.busy = false; }
 };
-const loadPage = async (older) => {
+const loadPage = async (older, gen) => {
   if (!older) { P.items = []; P.before = null; $("picgrid").textContent = ""; }
   let d;
   try { d = await get("/api/artifacts" + (older && P.before ? "?before=" + encodeURIComponent(P.before) : "")); }
-  catch (e) { $("picmore").hidden = true; $("picnote").textContent = "could not read the pictures"; return; }
+  catch (e) { if (gen === P.gen) { $("picmore").hidden = true; $("picnote").textContent = "could not read the pictures"; } return; }
+  if (gen !== P.gen) return;
   if (d.error) { $("picmore").hidden = true; $("picnote").textContent = d.error; return; }
   for (const it of d.items || []) {
     const img = el("img");
