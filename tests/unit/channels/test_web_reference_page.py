@@ -227,6 +227,7 @@ const mk = (tag) => ({
   set textContent(v) { this._text = v; this.children = []; },
   disabled: false, open: false, onclick: null,
   appendChild(n) { n.parent = this; this.children.push(n); return n; },
+  replaceChildren(...ns) { this.children = []; ns.forEach((n) => this.appendChild(n)); },
   remove() {
     const p = this.parent;
     if (p) p.children.splice(p.children.indexOf(this), 1);
@@ -519,6 +520,23 @@ globalThis.fetch = async (path) => ({json: async () =>
 applyScreens({memory: false, pictures: false});
 const before = btns();
 onFrame("BringUpStage", {stage: "ready"});   // an SSE-only frame: onFrame, not onEvent
+await new Promise((r) => setTimeout(r, 0));
+console.log(JSON.stringify([before, btns()]));
+""")
+    assert got == [{"mem": True, "pic": True}, {"mem": False, "pic": False}]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_opening_the_drawer_rereads_screens(page, tmp_path):
+    """The memory/pictures answer can change mid-session (a plugin enabled, a slot seated): the ☰
+    tap re-reads /api/protocol so the drawer never shows a stale pair of buttons."""
+    got = _js(page, tmp_path, """
+globalThis.fetch = async (path) => ({json: async () =>
+  path === "/api/protocol" ? {screens: {memory: true, pictures: true}} : {sessions: []}});
+applyScreens({memory: false, pictures: false});
+const before = btns();
+$("sessq").value = "";
+$("menuBtn").onclick();
 await new Promise((r) => setTimeout(r, 0));
 console.log(JSON.stringify([before, btns()]));
 """)
