@@ -164,7 +164,9 @@ async def start_plugins(resolution: Resolution, *, bus: EventBus, registry: Tool
                         paths: PluginPaths, session: SessionInfo | None = None) -> LifecycleResult:
     """Run the ON plugins through create → configure → tools → start, each stage over the plan's
     order, and return what happened; never raises because of a plugin. `paths` is the SESSION's
-    (artifact_dir None) — each plugin's is derived from it."""
+    (artifact_dir None) — each plugin's is derived from it. Lines a plugin leaves on an optional
+    `startup_warnings` list attribute during start() are added to the result's warnings verbatim.
+    An interrupt or cancellation stops every plugin already running, then propagates."""
     result = LifecycleResult()
     live: dict[str, RunningPlugin] = {}     # created, and neither failed nor unconfigured (yet)
     hooked: dict[str, set[object]] = {}     # the hook objects each plugin put on ctx.hooks
@@ -238,6 +240,9 @@ async def start_plugins(resolution: Resolution, *, bus: EventBus, registry: Tool
     async def start(name: str) -> None:
         rp = live[name]
         ok, _ = await contained(name, "start", rp.plugin.start, rp.ctx)
+        lines = getattr(rp.plugin, "startup_warnings", ())  # read once, whichever way start() ended
+        if isinstance(lines, (list, tuple)):
+            result.warnings.extend(line for line in lines if isinstance(line, str))
         if ok:
             result.running.append(rp)
 
@@ -248,37 +253,45 @@ async def start_plugins(resolution: Resolution, *, bus: EventBus, registry: Tool
             return None
         return f"requires {dep}, which {'failed' if dep in result.failed else 'is unconfigured'} this session"
 
-    for stage in (create, configure, contribute, start):
-        for name in resolution.plan.order:
-            if name in result.failed or name in result.unconfigured:
+    try:
+        for stage in (create, configure, contribute, start):
+            for name in resolution.plan.order:
+                if name in result.failed or name in result.unconfigured:
+                    continue
+                if (why := unmet(name)) is not None:
+                    await fail(name, why)
+                else:
+                    await stage(name)
+
+        for rp in result.running:  # PAPI-10: only the root core computed is ever served
+            expected = rp.ctx.paths.artifact_dir
+            if expected is None:
                 continue
-            if (why := unmet(name)) is not None:
-                await fail(name, why)
-            else:
-                await stage(name)
+            try:
+                returned = rp.plugin.artifact_root(rp.ctx)
+                if returned is not None and Path(returned).resolve() == expected.resolve():
+                    result.artifact_roots[rp.name] = expected
+                    continue
+                why = f"it returned {returned}, the harness computes {expected}"
+            except (Exception, SystemExit) as exc:  # noqa: BLE001 — PAPI-11: never fatal
+                why = f"its artifact_root() raised {_what(exc)}"
+            result.warnings.append(f"plugin {rp.name}: artifact serving disabled this session — {why}")
 
-    for rp in result.running:  # PAPI-10: only the root core computed is ever served
-        expected = rp.ctx.paths.artifact_dir
-        if expected is None:
-            continue
-        try:
-            returned = rp.plugin.artifact_root(rp.ctx)
-            if returned is not None and Path(returned).resolve() == expected.resolve():
-                result.artifact_roots[rp.name] = expected
-                continue
-            why = f"it returned {returned}, the harness computes {expected}"
-        except (Exception, SystemExit) as exc:  # noqa: BLE001 — PAPI-11: never fatal
-            why = f"its artifact_root() raised {_what(exc)}"
-        result.warnings.append(f"plugin {rp.name}: artifact serving disabled this session — {why}")
+        occupant = next((rp for rp in result.running if rp.name == resolution.plan.memory_occupant), None)
+        if occupant is not None and isinstance(occupant.plugin, MemorySlotPlugin):
+            result.slot = MemorySlot(occupant.plugin, occupant.ctx, occupant.name)
 
-    occupant = next((rp for rp in result.running if rp.name == resolution.plan.memory_occupant), None)
-    if occupant is not None and isinstance(occupant.plugin, MemorySlotPlugin):
-        result.slot = MemorySlot(occupant.plugin, occupant.ctx, occupant.name)
-
-    result.slash_rows = tuple(
-        SlashCommand(desc.name, desc.help, _slash_handler(desc.target, rp.ctx), takes_args=True,
-                     plugin=rp.name)
-        for rp in result.running for desc in resolution.plan.entry(rp.name).manifest.slash)
+        result.slash_rows = tuple(
+            SlashCommand(desc.name, desc.help, _slash_handler(desc.target, rp.ctx), takes_args=True,
+                         plugin=rp.name)
+            for rp in result.running for desc in resolution.plan.entry(rp.name).manifest.slash)
+    except BaseException:
+        # An interrupt or cancellation (which contained() deliberately does not catch) must not
+        # leave started plugins open — their stop() closes what they hold (an aiosqlite thread
+        # would otherwise hang interpreter exit, #43). The plugin whose start() was interrupted
+        # is not in `running`; it cleans up its own half-open state.
+        await stop_plugins(result)
+        raise
     return result
 
 
