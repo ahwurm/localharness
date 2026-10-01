@@ -233,9 +233,10 @@ def test_api_version_constant():
 
 
 def test_the_one_list_holds_the_image_plugin_and_is_read_at_call_time(monkeypatch):
+    from localharness.cli.web_plugin import WebPlugin
     from localharness.tools.builtin.image_plugin import ImagePlugin
 
-    assert bundled_plugins() == (ImagePlugin,) and builtin.BUILTIN_PLUGINS == (ImagePlugin,)
+    assert bundled_plugins() == (ImagePlugin, WebPlugin) and builtin.BUILTIN_PLUGINS == (ImagePlugin, WebPlugin)  # web is bundled and on by default (46-02)
     monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", ())
     assert bundled_plugins() == ()
     monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (_Bare,))

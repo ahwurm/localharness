@@ -485,6 +485,7 @@ async def test_with_no_plugins_the_banner_is_what_it_was(tmp_path, monkeypatch):
 
     printed = _capture_start_console(monkeypatch)
     _stub_start_boundaries(tmp_path, monkeypatch)
+    monkeypatch.setattr("localharness.plugins.builtin.BUILTIN_PLUGINS", ())  # web is bundled and on by default (46-02)
 
     await _start_async(None, False, False, str(tmp_path))
 
