@@ -57,6 +57,9 @@ Migration.
   gallery is hidden. It does not make the machine forget anything — memory,
   sessions and picture files still persist. Pictures the phone cached before
   stay until the browser evicts them or its site data is cleared.
+- **A picture-caching switch in the phone drawer** ("Pictures on this phone"):
+  flips picture caching for this server process, and turning it off also
+  purges the phone's cache; `--no-store` sets the starting value.
 - **Setup questions for plugins.** A plugin's manifest can list `setup` fields
   (`SetupField(key, prompt, default)`) and a short `setup_help` text.
   `plugins enable NAME` asks them on a terminal when no `--set` is given,
