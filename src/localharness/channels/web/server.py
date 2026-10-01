@@ -248,17 +248,35 @@ ARTIFACT_NO_STORE = "no-store"
 ARTIFACT_PAGE = 60
 
 
-def _find_artifact(root: Path, artifact_id: str) -> tuple[Path, str | None] | None:
-    """The ONE file `<artifact_id>.<suffix>` directly under `root`, realpath-confined, with the media
-    type its suffix names (None if off the allowlist). None when there is no such file, or more than
-    one (an ambiguous id is not served)."""
-    if not root.is_dir():
+def _stem_candidates(root: Path) -> dict[str, list[Path]]:
+    """Every entry directly under `root` — any suffix, folders and symlinks included — by stem."""
+    groups: dict[str, list[Path]] = {}
+    for entry in root.iterdir():
+        groups.setdefault(entry.stem, []).append(entry)
+    return groups
+
+
+def _sole_file(entries: list[Path]) -> tuple[Path, str | None] | None:
+    """The ONE ambiguity rule, shared by the artifact route and the gallery listing: a stem names an
+    artifact only when it names exactly one entry and that entry is a regular file, never a symlink
+    (so it cannot leave the root). Answers it with the media type its suffix names (None if off the
+    allowlist)."""
+    if len(entries) != 1:
         return None
-    names = [entry.name for entry in root.iterdir() if entry.stem == artifact_id]
-    path = auth.confine(root, names[0]) if len(names) == 1 else None
-    if path is None or not path.is_file():
+    path = entries[0]
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+    except OSError:
         return None
     return path, _SUFFIX_MIMES.get(path.suffix)
+
+
+def _find_artifact(root: Path, artifact_id: str) -> tuple[Path, str | None] | None:
+    """The file `<artifact_id>.<suffix>` directly under `root`, by the one ambiguity rule."""
+    if not root.is_dir():
+        return None
+    return _sole_file(_stem_candidates(root).get(artifact_id, []))
 
 
 class WebServer:
@@ -862,8 +880,7 @@ class WebServer:
     async def artifact_list(self, request: Request) -> Response:
         """The gallery: artifact ids across this session's bound roots, newest first, ARTIFACT_PAGE per
         page (`?before=<id>` for older). Files directly under each root only; core-minted stem, an
-        allowlisted suffix; symlinks never followed; an ambiguous stem is skipped (as the artifact
-        route refuses it). Answers plugin, id, mime, bytes — never a path. One listing per request,
+        allowlisted suffix; listed exactly when the artifact route would serve it (`_sole_file`). Answers plugin, id, mime, bytes — never a path. One listing per request,
         nothing on the chat path."""
         refusal = self._authed(request, post=False)
         if refusal is not None:
@@ -877,20 +894,13 @@ class WebServer:
         found: list[tuple[str, str, Path, str]] = []
         for plugin, root in roots.items():
             try:
-                entries = list(root.iterdir()) if root.is_dir() else []
+                groups = _stem_candidates(root) if root.is_dir() else {}
             except OSError:  # an unreadable root lists nothing, the others still answer
                 continue
-            by_stem: dict[str, list[tuple[Path, str]]] = {}
-            for entry in entries:
-                try:
-                    if entry.is_symlink() or not entry.is_file():
-                        continue
-                    mime = _SUFFIX_MIMES.get(entry.suffix)
-                    if ARTIFACT_ID_RE.fullmatch(entry.stem) and mime in ARTIFACT_MIMES:
-                        by_stem.setdefault(entry.stem, []).append((entry, mime))
-                except OSError:
-                    continue
-            found += [(stem, plugin, *hits[0]) for stem, hits in by_stem.items() if len(hits) == 1]
+            for stem, entries in groups.items():
+                hit = _sole_file(entries) if ARTIFACT_ID_RE.fullmatch(stem) else None
+                if hit is not None and hit[1] in ARTIFACT_MIMES:
+                    found.append((stem, plugin, *hit))
         found.sort(key=lambda f: (f[0], f[1]), reverse=True)
         if before:
             found = [f for f in found if f[0] < before]
