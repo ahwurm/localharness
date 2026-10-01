@@ -190,7 +190,7 @@ class HookSystem:
 
 This section outlines the implemented API. `src/localharness/plugins/api.py` defines every type a plugin touches, once each and with docstrings, and `examples/plugin-template/` is a complete working plugin that the development install includes and the test suite exercises; start there. SECURITY.md ("Plugins") states the trust model. The example imports three LocalHarness modules: `localharness.plugins.api`, `localharness.tools.base` and `localharness.core.artifacts`.
 
-A plugin that ships with LocalHarness (listed in `BUILTIN_PLUGINS`, `plugins/builtin.py`) and a plugin you install yourself use the same API and go through the same code; where they differ, it is said below. `BUILTIN_PLUGINS` holds one plugin today, `image` (off by default); the other bundled features have not converted yet.
+A plugin that ships with LocalHarness (listed in `BUILTIN_PLUGINS`, `plugins/builtin.py`) and a plugin you install yourself use the same API and go through the same code; where they differ, it is said below. `BUILTIN_PLUGINS` holds two plugins today: `image` (off by default) and `web` (the phone app, on by default; needs the `web` install extra); the other bundled features have not converted yet.
 
 ### Discovery and enabling
 
@@ -264,7 +264,7 @@ A plugin is a subclass of `Plugin` whose class attribute `manifest` is a frozen,
 - `tools(ctx)` returns the tools the plugin contributes.
 - `start(ctx)` and `stop(ctx)` acquire and release what runs during the session.
 - `doctor(ctx)` returns a list of `Check(name, status, detail, hint)`, with `status` one of `"pass"`, `"fail"`, `"skip"`.
-- `channels()` returns channel classes by name. Nothing reads it yet: `start --channel` accepts core's channels only.
+- `channels()` returns channel classes by name. Nothing calls it yet. `start --channel` accepts core's channels (`terminal`, `acp`), the manifest name of every bundled plugin of kind `channel` (today `web`) and the legacy `discord` (until Phase 49), read from class-level manifests before any plugin loads (`plugins/channels.py`). A plugin you install cannot add a channel (SECURITY.md, "`localharness web`").
 - `artifact_root(ctx)` returns the root the plugin writes to (default: `ctx.paths.artifact_dir`).
 
 `MemorySlotPlugin`, for kind `"memory"`, adds `context(ctx, turn, budget)`, `browse()` and `bind_subagent(ctx)`. `configure`, `tools`, `start`, `stop` and `doctor` may be `def` or `async def`: the lifecycle awaits a result when it is awaitable. `context()` must be `async def`, and `artifact_root()`, `browse()` and `bind_subagent()` must be plain `def`; the wrong kind counts as a failed call.
@@ -299,7 +299,7 @@ A plugin sets `wants_artifacts = True`. Core then computes its root, `<state_dir
 
 ### The memory slot
 
-`MemorySlot` (`plugins/slot.py`) holds at most one running `MemorySlotPlugin`, or nobody. When it is occupied, the agent loop asks `context(turn, budget)` on every turn, right after the guardrails, and adds each non-empty section as `## <heading>`. Every call into the occupant is contained. `browse()` and `bind_subagent()` exist, but nothing calls them yet. Memory is still part of core and no bundled plugin occupies the slot, so it is empty unless you install and enable a memory plugin yourself; if you do, its section is added alongside core's memory block, and both render. Core does not enforce the budget; the occupant is trusted to keep to it.
+`MemorySlot` (`plugins/slot.py`) holds at most one running `MemorySlotPlugin`, or nobody. When it is occupied, the agent loop asks `context(turn, budget)` on every turn, right after the guardrails, and adds each non-empty section as `## <heading>`. Every call into the occupant is contained. `bind_subagent()` exists, but nothing calls it yet. Memory is still part of core. When memory is on and no memory plugin holds the slot, `start` seats a transitional occupant, `StoreBrowse` (`memory/browse.py`), over the legacy store; the phone's memory screen calls its `browse()`, and that is all that flows through it (Phase 47 replaces it with the memory plugin). Its `context()` adds nothing, so the prompt is unchanged, and the prompt and the memory tools still read core memory directly. With memory off the slot is empty unless you install and enable a memory plugin yourself; with a memory plugin, its section is added alongside core's memory block, and both render. Core does not enforce the budget; the occupant is trusted to keep to it.
 
 ### Commands, slash commands and doctor
 

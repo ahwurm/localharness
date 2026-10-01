@@ -91,9 +91,9 @@ deny patterns remain the mechanism that stops specific actions.
 
 A plugin is code that adds tools, commands, checks or settings to the harness. One trust model
 covers every plugin; where a plugin that ships with LocalHarness and one you install yourself are
-treated differently, it says so below. (Image generation is the one feature that ships as a
-plugin, off until you turn it on; everything else that comes with LocalHarness is still built
-into its core.)
+treated differently, it says so below. (Two features ship as plugins: image generation, off until you
+turn it on, and the phone app `web`, on by default; everything else that comes with LocalHarness
+is still built into its core.)
 
 - **Found is not on.** A plugin is found from package metadata and folder names alone, and one you
   installed stays off, with none of its code imported, until you turn it on. `localharness start`,
@@ -623,6 +623,27 @@ One more, added with plugins:
   event, never by reading paths out of tool output. The ComfyUI address and workflow template are
   machine-level settings a project folder cannot set; a project can at most turn image on against
   the server the machine already points at.
+
+Added with the web plugin:
+
+- **`GET /api/artifacts` lists pictures, and says little about them.** It takes the same
+  credential as every other `/api` route. It lists only the folders bound in this session (in a
+  project, that project's own), and in them only files directly under the folder whose name is a
+  core-minted id with an allowed suffix: no subfolders, no symlinks. Each entry is plugin, id, media
+  type and size, never a path or a prompt. The one new fact a viewer learns is WHEN pictures were
+  made, because the id embeds a UTC timestamp. With no folder bound, or under `--no-store`, it
+  answers 404.
+- **`--no-store` keeps pictures out of the phone's cache, and nothing more.** Pictures are then
+  served `Cache-Control: no-store` and the gallery is off. Pictures the phone already cached
+  stay until the browser evicts them or its site data is cleared. Nothing on the machine is
+  removed: memory, sessions and picture files still persist. It is not a private mode.
+- **The phone reaches memory only through the memory slot's browse API.** The four
+  `/api/memory` routes call the slot's occupant; with memory off the slot is empty and they
+  answer 404. A test pins that the web channel's server, channel, push, replay and protocol
+  modules import nothing from `memory/` or the image plugin.
+- **`start --channel` accepts core channels and bundled channel plugins only**; an installed
+  third-party plugin cannot add a channel in v0.16 — a channel sees every event, tool results
+  included, and can inject user messages.
 
 **Two live sessions on one agent are warned about, not prevented.** `history.jsonl` and
 `compact.md` take unlocked appends, so a terminal session and a web session on the same
