@@ -62,7 +62,6 @@ BURN_DOWN: frozenset[tuple[str, str]] = frozenset({
     ("bench/runner.py", "memory/sqlite.py"),
     ("bench/runner.py", "tools/builtin/memory_tools.py"),
     # web plugin
-    ("cli/app.py", "cli/web_cmd.py"),
     ("cli/doctor_cmd.py", "cli/web_cmd.py"),
     ("cli/doctor_cmd.py", "channels/web/auth.py"),
     # dispatch plugin
