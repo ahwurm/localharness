@@ -1097,6 +1097,24 @@ class ConfigLoader:
         # ENAB-01, agent level: `agent.<name>` sections leave before AgentConfig (extra="forbid")
         # validates, and reach the plugin through agent_plugin_sections(). Unknown keys still fail.
         merged, agent_sections = split_plugin_keys(merged, self.plugin_names(), CORE_AGENT_KEYS)
+        # ENAB-01 / MEMP-06: a bundled plugin's agent section fails here exactly as a core agent key
+        # does — once memory's settings left AgentConfig, a bad `memory:` would otherwise become a
+        # soft plugin failure (`validate` never resolves plugins). Bundled only: a plugin you
+        # installed is never imported before it is enabled (ENAB-06). The RAW section is still what
+        # agent_plugin_sections() returns; resolve() re-validates and builds the instance.
+        from localharness.plugins.builtin import bundled_plugins
+        plugin_errors: list[ConfigFieldError] = []
+        for cls in bundled_plugins():
+            name = cls.manifest.name
+            if cls.AgentConfigModel is None or name not in agent_sections:
+                continue
+            try:
+                cls.AgentConfigModel.model_validate(agent_sections[name])
+            except ValidationError as exc:
+                for err in exc.errors():
+                    loc = ".".join([name, *map(str, err["loc"])])
+                    plugin_errors.append(
+                        ConfigFieldError(loc, err.get("input"), err["msg"], line_map.get(loc)))
         try:
             result = AgentConfig.model_validate(merged)
         except ValidationError as exc:
@@ -1122,7 +1140,12 @@ class ConfigLoader:
             for field_err, owner in zip(errors, owners):
                 if owner != header:
                     field_err.source_path = str(owner)
-            raise ConfigValidationError(str(header), errors) from exc
+            for field_err in plugin_errors:
+                if header != path:
+                    field_err.source_path = str(path)
+            raise ConfigValidationError(str(header), errors + plugin_errors) from exc
+        if plugin_errors:
+            raise ConfigValidationError(str(path), plugin_errors)
 
         self._agent_plugin_sections[result.name] = agent_sections
         return result
