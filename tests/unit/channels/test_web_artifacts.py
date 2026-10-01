@@ -301,6 +301,32 @@ async def test_no_store_flag_reaches_the_server(tmp_path, monkeypatch):
     assert result.exit_code == 0 and seen["no_store"] is False
 
 
+async def test_the_real_serve_hands_no_store_to_the_server_it_builds(tmp_path, monkeypatch):
+    """The real `_serve` (live path), only uvicorn's listen faked: the WebServer it builds carries
+    the flag. The CLI test above stops at `_serve`'s kwargs; this one starts there."""
+    import uvicorn
+
+    from localharness.cli import web_cmd
+
+    built: list = []
+
+    class _Spy(server_mod.WebServer):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            built.append(self)
+
+    async def no_listen(self, *a, **kw):
+        return None
+
+    monkeypatch.setattr(server_mod, "WebServer", _Spy)
+    monkeypatch.setattr(uvicorn.Server, "serve", no_listen)
+    for flag in (True, False):
+        await web_cmd._serve(config_dir=str(tmp_path), host="127.0.0.1", port=0, token=TOKEN,
+                             ui_dir=None, replay=None, fixtures=None, speed=1.0, verbose=False,
+                             agent=None, no_store=flag)
+    assert [s.no_store for s in built] == [True, False]
+
+
 async def test_no_store_help_names_its_limit(tmp_path, monkeypatch):
     result, _ = await asyncio.to_thread(_invoke_web, tmp_path, monkeypatch, "--help")
     flat = re.sub(r"[\s│]+", " ", result.output)
