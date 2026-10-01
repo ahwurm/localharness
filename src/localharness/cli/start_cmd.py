@@ -16,26 +16,19 @@ from rich.text import Text
 
 from localharness.cli.theme import entity, entity_text
 from localharness.cli.workspace import NO_INPUT_HELP
+from localharness.plugins.channels import OWN_COMMAND, channel_names, plugin_channel_names
 
 console = Console()
 err_console = Console(stderr=True)
 log = logging.getLogger(__name__)
 
-KNOWN_CHANNEL_MODES: frozenset[str] = frozenset({"terminal", "discord", "web", "acp"})
-"""Every value `--channel` / `channel_mode` accepts.
-
-It exists because the selection below was a bare if/elif with no validation, so an unknown
-channel silently became the terminal — `--channel discrod` started an ordinary session and
-nothing said the flag had been ignored. (`AgentConfig.channel` is a separate decoy: it is parsed,
-stored, and read by nothing at all.) One frozenset so the CLI's help text, the refusal message
-and the branch cannot drift apart."""
-
 UNKNOWN_CHANNEL_ERROR = "unknown channel {given!r}; choose one of: {known}"
 
-WEB_NEEDS_ITS_OWN_COMMAND = (
-    "the web channel is served by its own command, because the HTTP server has to be reachable "
-    "before a session exists. Run `localharness web` instead of `localharness start --channel web`."
-)
+OWN_COMMAND_ERROR = ("the {name} channel is served by its own command, because {why}. "
+                     "Run `localharness {name}` instead of `localharness start --channel {name}`.")
+_OWN_COMMAND_WHY = {"web": "the HTTP server has to be reachable before a session exists",
+                    "acp": "the editor's handshake has to be answered before a session exists"}
+WEB_NEEDS_ITS_OWN_COMMAND = OWN_COMMAND_ERROR.format(name="web", why=_OWN_COMMAND_WHY["web"])
 """Shown verbatim. A refusal naming the alternatives is the difference between a typo costing a
 second and a typo costing a session."""
 
@@ -485,20 +478,21 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # so every caller of this function gets the same answer, and before the config lookup so the
     # refusal does not depend on what happens to be on disk: a typo in the channel is a typo
     # whether or not the box has been `init`ed yet.
-    if channel_mode not in KNOWN_CHANNEL_MODES:
+    known = channel_names()  # static manifests: no plugin is resolved, imported or loaded here
+    if channel_mode not in known:
         raise typer.BadParameter(
-            UNKNOWN_CHANNEL_ERROR.format(
-                given=channel_mode, known=", ".join(sorted(KNOWN_CHANNEL_MODES))
-            ),
-            param_hint="--channel",
-        )
-    if channel_mode == "web" and web_channel is None:
-        # `web` names a channel this function cannot BUILD: the HTTP server has to be up and
-        # serving before a session exists, so the channel is constructed by `localharness web` and
-        # handed in. Without that, the branch below would fall through to the terminal — which is
-        # precisely the silent fallback the check above exists to end, reintroduced by the same
-        # commit that ended it.
-        raise typer.BadParameter(WEB_NEEDS_ITS_OWN_COMMAND, param_hint="--channel")
+            UNKNOWN_CHANNEL_ERROR.format(given=channel_mode, known=", ".join(sorted(known))),
+            param_hint="--channel")
+    if channel_mode in OWN_COMMAND and {"web": web_channel, "acp": acp_channel}[channel_mode] is None:
+        # web and acp name channels this function cannot BUILD: the HTTP server / the editor's
+        # handshake has to be up and answering before a session exists, so the channel is
+        # constructed by `localharness web` / `localharness acp` and handed in. Without that, the
+        # branch below would fall through to the terminal — precisely the silent fallback the check
+        # above exists to end, reintroduced by the same commit that ended it.
+        msg = OWN_COMMAND_ERROR.format(name=channel_mode, why=_OWN_COMMAND_WHY[channel_mode])
+        if channel_mode in plugin_channel_names():
+            msg += f" (if that command is missing, run `localharness plugins enable {channel_mode}`)"
+        raise typer.BadParameter(msg, param_hint="--channel")
 
     import time as _time
     import uuid
@@ -1810,6 +1804,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         await llm.aclose()
 
 
+_CHANNEL_HELP = ("Input channel: " + ", ".join(sorted(channel_names())) + " (default terminal). An "
+                 "unknown name is refused, not silently treated as terminal. web and acp are served "
+                 "by their own commands: `localharness web`, `localharness acp`.")
+
+
 def start_app(
     agent: Annotated[str | None, typer.Option("--agent", "-a", help="Start specific agent")] = None,
     verbose: Annotated[bool, typer.Option(
@@ -1830,9 +1829,7 @@ def start_app(
     ] = None,
     channel: Annotated[str, typer.Option(
         "--channel", "-c",
-        help="Input channel: terminal (default), discord, or web. An unknown name is refused, "
-             "not silently treated as terminal. `localharness web` is the friendlier way in to "
-             "the last of those — it starts the HTTP server first.",
+        help=_CHANNEL_HELP,
     )] = "terminal",
     subagents: Annotated[bool, typer.Option("--subagents", help="Show the agent picker on startup when multiple agents are configured")] = False,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Use this model for THIS session only (never persisted). Must already be served — a harness-managed single-model server (llama.cpp/vLLM) cannot be hot-switched this way; use `localharness model <name>` or the REPL `/model` command instead.")] = None,

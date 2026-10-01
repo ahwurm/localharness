@@ -51,9 +51,10 @@ async def test_start_async_takes_a_prebuilt_web_channel():
 async def test_an_unknown_channel_is_refused_instead_of_silently_becoming_the_terminal(tmp_path):
     """WEBCH-01's second half. `--channel discrod` used to start an ordinary terminal session
     with nothing anywhere saying the flag had been ignored."""
-    from localharness.cli.start_cmd import KNOWN_CHANNEL_MODES, _start_async
+    from localharness.cli.start_cmd import _start_async
+    from localharness.plugins.channels import channel_names
 
-    assert KNOWN_CHANNEL_MODES == {"terminal", "discord", "web", "acp"}
+    assert channel_names() == {"terminal", "acp", "discord", "web"}
     with pytest.raises(typer.BadParameter) as exc:
         await _start_async(None, False, False, str(tmp_path), channel_mode="discrod")
     assert "discrod" in str(exc.value)
