@@ -697,7 +697,7 @@ class WebServer:
         _, _, pictures = self._artifact_policy()
         return _json({
             "protocol_version": PROTOCOL_VERSION,
-            "screens": {"memory": self.channel.memory_slot().occupied, "pictures": pictures},
+            "screens": {"memory": self._browse() is not None, "pictures": pictures},
             "events": [
                 {"name": name, "never_fires": name in NEVER_FIRED_EVENTS}
                 for name in sorted(event_schemas())

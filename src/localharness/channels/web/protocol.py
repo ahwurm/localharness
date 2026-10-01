@@ -42,8 +42,9 @@ that a plugin tool returns through ToolResult.metadata["artifact"], validated by
 shows an image artifact from /api/artifacts/<plugin>/<id>. It replaces v2's field; v3's tool_names
 is a separate change and is untouched.
 v5: /api/protocol gained "screens" ({memory, pictures}): the page shows the Memory and Pictures
-buttons only when the session has them (memory: the slot is occupied; pictures: an artifact root is
-bound and --no-store is off), and GET /api/artifacts lists the gallery. No event or frame schema moved.
+buttons only when the session has them (memory: the slot's occupant offers a browse API; pictures:
+an artifact root is bound and --no-store is off), and GET /api/artifacts lists the gallery. No event
+or frame schema moved.
 
 Enforced rather than remembered: `tests/unit/channels/test_web_protocol.py` snapshots every
 event and frame schema into a checked-in fixture and fails if a schema moves without this

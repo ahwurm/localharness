@@ -321,3 +321,20 @@ async def test_screens_follow_the_slot_and_the_policy(tmp_path):
     on = {"memory_slot": _fake_slot(), "artifact_roots": root}
     assert await screens(runtime=dict(on)) == {"memory": True, "pictures": True}
     assert await screens(runtime=dict(on), no_store=True) == {"memory": True, "pictures": False}
+
+
+async def test_the_memory_button_means_a_browse_api_exists(tmp_path):
+    """screens.memory and the memory routes read one fact: an occupant with no browse API shows no
+    button, rather than a button whose every tap 404s."""
+    from localharness.plugins.api import MemorySlotPlugin
+    from localharness.plugins.slot import MemorySlot
+    from tests.unit.channels.test_web_server import _fake_slot
+
+    slot = MemorySlot()
+    slot.seat(MemorySlotPlugin(), name="no-browse")  # the base browse() answers None
+    _, _, _, client = await _stack(tmp_path, runtime={"memory_slot": slot})
+    assert (await client.get("/api/protocol", headers=BEARER)).json()["screens"]["memory"] is False
+    assert (await client.get("/api/memory", headers=BEARER)).status_code == 404
+    _, _, _, client = await _stack(tmp_path, runtime={"memory_slot": _fake_slot()})
+    assert (await client.get("/api/protocol", headers=BEARER)).json()["screens"]["memory"] is True
+    assert (await client.get("/api/memory", headers=BEARER)).status_code == 200
