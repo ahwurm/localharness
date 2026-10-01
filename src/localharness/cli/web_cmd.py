@@ -28,15 +28,10 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 
+from localharness.cli.web_plugin import WEB_DEFAULT_PORT as DEFAULT_PORT  # the one literal lives there
+
 log = logging.getLogger(__name__)
 console = Console()
-
-DEFAULT_PORT = 8765
-"""An unassigned port in the registered range, above every service this box is known to run.
-
-Named rather than sprinkled: `--port` overrides it, `doctor` reports the effective bind, and the
-docs quote this one constant.
-"""
 
 MISSING_DEPENDENCY = (
     "the web channel needs its optional extra — install it with:\n"

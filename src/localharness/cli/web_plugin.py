@@ -17,8 +17,10 @@ if TYPE_CHECKING:
     from localharness.channels.base import ChannelAdapter
 
 WEB_DEFAULT_PORT = 8765
-"""cli/web_cmd.DEFAULT_PORT, restated: importing web_cmd here would put cli/start_cmd.py on the
-plugin's import chain (PAPI-03); test_web_plugin pins the two equal."""
+"""An unassigned port in the registered range, above every service this box is known to run.
+The one literal: cli/web_cmd imports it as DEFAULT_PORT (`--port` overrides it) and doctor reports
+it. It lives here, not in web_cmd, because importing web_cmd from the plugin would put
+cli/start_cmd.py on the plugin's import chain (PAPI-03)."""
 
 
 class WebPlugin(Plugin):
