@@ -268,27 +268,45 @@ async def test_bringup_stages_are_named_and_abortable():
 
 # ------------------------------------------------------------------ doctor (WEBCH-13)
 
-async def test_doctor_reports_the_effective_bind_and_flags_a_loose_token(tmp_path, capsys):
-    """A security posture nobody can check is a security posture nobody trusts."""
+async def test_doctor_prints_the_web_plugin_check(tmp_path, monkeypatch):
+    """A security posture nobody can check is a security posture nobody trusts. The real
+    `localharness doctor` prints the web plugin's Check rows (print_plugin_row), never the token."""
     import os
 
+    import yaml
+    from typer.testing import CliRunner
+
     from localharness.channels.web.auth import rotate_token, token_path
-    from localharness.cli.doctor_cmd import _print_web_listener
+    from localharness.cli.app import app
 
-    _print_web_listener(tmp_path)
-    assert "not enrolled yet" in capsys.readouterr().out
+    monkeypatch.setenv("COLUMNS", "400")
+    monkeypatch.setattr("localharness.plugins.discovery.discover", lambda global_config_dir: [])
+    cfg = tmp_path / "cfg"
+    (cfg / "agents").mkdir(parents=True)
+    (cfg / "config.yaml").write_text(yaml.safe_dump({"version": "1", "provider": {
+        "provider_type": "vllm", "base_url": "http://127.0.0.1:9/v1",  # discard port: fails fast
+        "default_model": "test-model", "available_models": ["test-model"]}}))
 
-    rotate_token(tmp_path)
-    _print_web_listener(tmp_path)
-    out = capsys.readouterr().out
-    assert "loopback only" in out and "--allow-unsafe-bind" in out
-    assert "A token is required on every request" in out
+    def _doctor() -> str:
+        r = CliRunner().invoke(app, ["doctor", "--config-dir", str(cfg)])
+        assert r.exception is None or isinstance(r.exception, SystemExit), r.output
+        return r.output
+
+    async def doctor() -> str:  # doctor calls asyncio.run: off this test's running loop
+        return await asyncio.to_thread(_doctor)
+
+    assert "web: not enrolled yet" in await doctor()
+    rotate_token(cfg)
+    out = await doctor()
+    assert "web: enrolled; binds 127.0.0.1:8765 (loopback only unless --allow-unsafe-bind)" in out
+    assert "A token is required on every request" in out and "web-token: token file is mode 600" in out
     # ...and it never prints the secret itself: doctor output ends up in bug reports.
-    assert token_path(tmp_path).read_text().strip() not in out
+    assert token_path(cfg).read_text().strip() not in out
 
-    os.chmod(token_path(tmp_path), 0o644)
-    _print_web_listener(tmp_path)
-    assert "expected 600" in capsys.readouterr().out
+    os.chmod(token_path(cfg), 0o644)
+    out = await doctor()
+    assert "web-token: Web app token is mode 644, expected 600" in out
+    assert f"chmod 600 {token_path(cfg)}" in out
 
 
 async def test_start_channel_web_without_a_server_is_refused_not_silently_a_terminal(tmp_path):
