@@ -554,7 +554,10 @@ async def test_memory_list_edit_history_and_forget_roundtrip(tmp_path):
     """The memory page's whole contract against a REAL store: list shows the fact, an edit
     supersedes (history kept, user_edit@…;web stamped, tags carried), forget retires without
     destroying — and the history endpoint still serves the retired row."""
+    from localharness.channels.web.server import MEMORY_SNIPPET_CHARS
+    from localharness.memory.browse import StoreBrowse
     from localharness.memory.sqlite import MemoryStore, USER_EDIT_PROVENANCE_PREFIX
+    from localharness.plugins.slot import MemorySlot
 
     store = MemoryStore(agent_id="orchestrator", division_id="default", org_id="default",
                         base_dir=str(tmp_path / "mem"))
@@ -562,11 +565,16 @@ async def test_memory_list_edit_history_and_forget_roundtrip(tmp_path):
     try:
         await store.store_fact(key="notes/searxng", value="original content",
                                tags=["workaround"], source="remember")
-        bus, channel, server, client = await _stack(
-            tmp_path, runtime={"memory_store": store})
+        await store.store_fact(key="notes/long", value="x" * 300, source="remember")
+        slot = MemorySlot()
+        slot.seat(StoreBrowse(store), name="memory")
+        bus, channel, server, client = await _stack(tmp_path, runtime={"memory_slot": slot})
 
         rows = (await client.get("/api/memory", headers=BEARER)).json()["facts"]
         assert any(r["name"] == "notes/searxng" for r in rows)
+        assert next(r for r in rows if r["name"] == "notes/long")["value"] == "x" * MEMORY_SNIPPET_CHARS
+        full = (await client.get("/api/memory/fact?name=notes/long", headers=BEARER)).json()
+        assert full["fact"]["value"] == "x" * 300                    # the detail view is unclipped
 
         got = await client.post("/api/memory/edit",
                                 json={"name": "notes/searxng", "content": "edited content"},
@@ -577,6 +585,7 @@ async def test_memory_list_edit_history_and_forget_roundtrip(tmp_path):
                                    headers=BEARER)).json()
         assert detail["fact"]["value"] == "edited content"
         assert detail["fact"]["provenance"].startswith(USER_EDIT_PROVENANCE_PREFIX)
+        assert detail["fact"]["provenance"].endswith(";web")
         assert "workaround" in detail["fact"]["tags"]          # tags carried, not dropped
         assert len(detail["history"]) == 2                     # original kept, superseded
         assert any(f["value"] == "original content" and f["status"] == "superseded"
@@ -605,12 +614,55 @@ async def test_memory_list_edit_history_and_forget_roundtrip(tmp_path):
         await store.close()
 
 
-async def test_memory_endpoints_answer_409_before_a_session_binds(tmp_path):
-    _, _, _, client = await _stack(tmp_path)   # no memory_store in the runtime
-    assert (await client.get("/api/memory", headers=BEARER)).status_code == 409
-    got = await client.post("/api/memory/edit", json={"name": "a", "content": "b"},
-                            headers=JSON)
-    assert got.status_code == 409
+async def test_memory_endpoints_answer_404_when_the_slot_is_empty(tmp_path):
+    """WEBP-03: memory off (or no session bound) means an empty slot — every memory route 404s."""
+    _, _, _, client = await _stack(tmp_path)   # no memory_slot in the runtime
+    for got in (await client.get("/api/memory", headers=BEARER),
+                await client.get("/api/memory/fact?name=a", headers=BEARER),
+                await client.post("/api/memory/edit", json={"name": "a", "content": "b"}, headers=JSON),
+                await client.post("/api/memory/forget", json={"name": "a"}, headers=JSON)):
+        assert got.status_code == 404 and "error" in got.json()
+
+
+def _fake_slot(**verbs):
+    """A slot occupied by a browse whose verbs are the given coroutines."""
+    from localharness.plugins.api import MemorySlotPlugin
+    from localharness.plugins.slot import MemorySlot
+
+    class _Browse:
+        async def search(self, query): return []
+        async def get(self, name): return None
+        async def edit(self, name, content, origin=""): return {"status": "missing", "name": name}
+        async def forget(self, name): return False
+        async def promote(self, name): return {}
+
+    for k, v in verbs.items():
+        setattr(_Browse, k, v)
+
+    class _Occupant(MemorySlotPlugin):
+        def browse(self): return _Browse()
+
+    slot = MemorySlot()
+    slot.seat(_Occupant(), name="fake")
+    return slot
+
+
+async def test_memory_list_failure_is_a_500(tmp_path):
+    async def search(self, query):
+        raise RuntimeError("db gone")
+
+    _, _, _, client = await _stack(tmp_path, runtime={"memory_slot": _fake_slot(search=search)})
+    got = await client.get("/api/memory", headers=BEARER)
+    assert got.status_code == 500 and got.json()["error"].startswith("memory query failed")
+
+
+async def test_forget_superseded_first_is_409(tmp_path):
+    async def get(self, name):
+        return {"fact": {"name": name}, "history": []}
+
+    _, _, _, client = await _stack(tmp_path, runtime={"memory_slot": _fake_slot(get=get)})
+    got = await client.post("/api/memory/forget", json={"name": "a"}, headers=JSON)
+    assert got.status_code == 409 and "superseded" in got.json()["error"]
 
 
 # ------------------------------------------------------------------ the verbs
