@@ -1124,3 +1124,35 @@ async def test_every_response_refuses_to_be_framed(tmp_path):
         assert "frame-ancestors 'none'" in got.headers["content-security-policy"], path
         assert got.headers["x-content-type-options"] == "nosniff", path
         assert got.headers["referrer-policy"] == "no-referrer", path
+
+
+async def test_every_memory_verb_failure_is_a_json_500(tmp_path):
+    """Each memory route contains its verb call the way the list does: an occupant that raises (or
+    predates `origin=`) answers {"error"} 500, never a traceback."""
+    async def get(self, name):
+        raise RuntimeError("db gone")
+
+    async def edit(self, name, content):  # a pre-`origin` browse: the call itself is a TypeError
+        return {"status": "edited", "name": name}
+
+    _, _, _, client = await _stack(tmp_path, runtime={"memory_slot": _fake_slot(get=get, edit=edit)})
+    for got, verb in ((await client.get("/api/memory/fact?name=a", headers=BEARER), "get"),
+                      (await client.post("/api/memory/edit", json={"name": "a", "content": "b"},
+                                         headers=JSON), "edit"),
+                      (await client.post("/api/memory/forget", json={"name": "a"}, headers=JSON),
+                       "get")):
+        assert got.status_code == 500
+        assert got.json()["error"].startswith(f"memory {verb} failed")
+
+
+async def test_a_memory_forget_failure_is_a_json_500(tmp_path):
+    async def get(self, name):
+        return {"fact": {"name": name}, "history": []}
+
+    async def forget(self, name):
+        raise RuntimeError("db gone")
+
+    _, _, _, client = await _stack(tmp_path,
+                                   runtime={"memory_slot": _fake_slot(get=get, forget=forget)})
+    got = await client.post("/api/memory/forget", json={"name": "a"}, headers=JSON)
+    assert got.status_code == 500 and got.json()["error"].startswith("memory forget failed")
