@@ -549,6 +549,19 @@ console.log(JSON.stringify({first, second: {imgs: imgs(), more: $("picmore").hid
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_second_show_older_tap_while_one_is_loading_adds_nothing(page, tmp_path):
+    """Two taps before the first page lands both read the same `before`: the older page must be
+    appended once, not twice (46-08's composed probe found the duplicate)."""
+    got = _js(page, tmp_path, GALLERY_FETCH + """
+await loadPictures(false);
+await Promise.all([loadPictures(true), loadPictures(true)]);
+console.log(JSON.stringify({imgs: imgs().map((i) => i.src), asked}));
+""")
+    assert got["imgs"] == [f"/api/artifacts/image/art-20260930-1425{n:02d}-abcdef" for n in (3, 2, 1)]
+    assert got["asked"] == ["/api/artifacts", "/api/artifacts?before=art-20260930-142502-abcdef"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
 def test_the_viewer_caption_is_only_the_time(page, tmp_path):
     got = _js(page, tmp_path, """
 openViewer({plugin: "image", id: "art-20260930-142501-abcdef", mime: "image/png", bytes: 1});

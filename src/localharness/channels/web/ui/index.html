@@ -1406,14 +1406,21 @@ const applyScreens = (s) => {
 const refreshScreens = async () => {
   try { applyScreens((await get("/api/protocol")).screens); } catch (e) { /* keep the last answer */ }
 };
-const P = { items: [], before: null };
+const P = { items: [], before: null, busy: false };
 const artUrl = (it) => "/api/artifacts/" + encodeURIComponent(it.plugin) + "/" + encodeURIComponent(it.id);
 const idTime = (id) => {
   const m = /^art-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-/.exec(id);
   return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]} UTC` : "";
 };
 const openViewer = (it) => { $("picfull").src = artUrl(it); $("pictime").textContent = idTime(it.id); $("picview").showModal(); };
+// One "show older" at a time: a second tap before the page lands reads the same `before` and
+// would append that page twice.
 const loadPictures = async (older) => {
+  if (older && P.busy) return;
+  P.busy = true;
+  try { await loadPage(older); } finally { P.busy = false; }
+};
+const loadPage = async (older) => {
   if (!older) { P.items = []; P.before = null; $("picgrid").textContent = ""; }
   let d;
   try { d = await get("/api/artifacts" + (older && P.before ? "?before=" + encodeURIComponent(P.before) : "")); }
