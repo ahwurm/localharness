@@ -1105,7 +1105,10 @@ class WebServer:
         name = (request.query_params.get("name") or "").strip()
         if not name:
             return _json({"error": "pass ?name="}, status=400)
-        got = await b.get(name)
+        try:
+            got = await b.get(name)
+        except Exception as exc:
+            return _json({"error": f"memory get failed: {exc}"}, status=500)
         if got is None:
             return _json({"error": "no fact with that name"}, status=404)
         return _json({"name": name, "fact": got["fact"],
@@ -1132,7 +1135,10 @@ class WebServer:
         content = str(body.get("content") or "").strip()
         if not name or not content:
             return _json({"error": "body needs {name, content}"}, status=400)
-        res = await b.edit(name, content, origin="web")
+        try:
+            res = await b.edit(name, content, origin="web")
+        except Exception as exc:
+            return _json({"error": f"memory edit failed: {exc}"}, status=500)
         if res["status"] == "missing":
             return _json({"error": "no active fact with that name — edits change an existing "
                                    "fact"}, status=404)
@@ -1156,10 +1162,17 @@ class WebServer:
         name = str(body.get("name") or "").strip()
         if not name:
             return _json({"error": "body needs {name}"}, status=400)
-        got = await b.get(name)
+        try:
+            got = await b.get(name)
+        except Exception as exc:
+            return _json({"error": f"memory get failed: {exc}"}, status=500)
         if got is None or got["fact"] is None:
             return _json({"error": "no active fact with that name"}, status=404)
-        if not await b.forget(name):
+        try:
+            forgot = await b.forget(name)
+        except Exception as exc:
+            return _json({"error": f"memory forget failed: {exc}"}, status=500)
+        if not forgot:
             return _json({"error": "a live turn superseded that fact first — reload"}, status=409)
         return _json({"status": "forgotten", "name": name,
                       "note": "retired, not destroyed — the row stays in history"})
