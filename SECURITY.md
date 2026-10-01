@@ -638,6 +638,11 @@ Added with the web plugin:
   served `Cache-Control: no-store` and the gallery is off. Pictures the phone already cached
   stay until the browser evicts them or its site data is cleared. Nothing on the machine is
   removed: memory, sessions and picture files still persist. It is not a private mode.
+  The drawer switch (`POST /api/pictures/store`) flips the same setting for this server process
+  only; the flag sets the starting value, and memory, sessions and picture files on this box
+  still persist either way. Turning it off sends one authenticated response carrying
+  `Clear-Site-Data: "cache"`, which Safari/iOS 17+ and Chrome honor by dropping this origin's
+  cached pictures; a browser that ignores the header keeps what it had.
 - **The phone reaches memory only through the memory slot's browse API.** The four
   `/api/memory` routes call the slot's occupant; with memory off the slot is empty and they
   answer 404. A test pins that the web channel's server, channel, push, replay and protocol
