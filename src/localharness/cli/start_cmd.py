@@ -48,9 +48,7 @@ def _start_problems(plugin_resolution: Any) -> list[str]:
     extra is not a startup problem (a terminal-only install never asked for the phone); `plugins
     list` and doctor still show it. An installed plugin's missing extra still warns: the user opted
     in. (46, ruling 5)"""
-    waiting = {f"plugin {e.name}: {e.reason}" for e in plugin_resolution.plan.entries
-               if e.state == "needs-extra" and e.bundled}
-    return [p for p in plugin_resolution.problems() if p not in waiting]
+    return plugin_resolution.problems(include=lambda e: not (e.state == "needs-extra" and e.bundled))
 
 
 def _first_prompt_hint(is_returning: bool) -> str:

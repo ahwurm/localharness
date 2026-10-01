@@ -123,3 +123,20 @@ def test_an_installed_plugins_needs_extra_still_warns_at_start():
                      classes={}, settings={}, enabled={}, warnings=())
     assert _start_problems(res) == ["plugin thirdparty: install `thirdparty[x]` to use it",
                                     "plugin broken: boom"]
+
+
+def test_the_start_filter_reads_entries_never_rendered_text():
+    """Two entries that render to the same line differ only in `bundled`: the filter must keep the
+    installed one, which a set-difference over rendered strings cannot do."""
+    import inspect
+
+    from localharness.cli.start_cmd import _start_problems
+    from localharness.plugins.plan import LoadPlan, PlanEntry
+    from localharness.plugins.resolve import Resolution
+
+    entries = (PlanEntry("twin", True, "needs-extra", "built in", "", "install it"),
+               PlanEntry("twin", False, "needs-extra", "entry point", "", "install it"))
+    res = Resolution(plan=LoadPlan(entries=entries, order=(), memory_occupant=None),
+                     classes={}, settings={}, enabled={}, warnings=())
+    assert _start_problems(res) == ["plugin twin: install it"]
+    assert 'f"plugin {' not in inspect.getsource(_start_problems)
