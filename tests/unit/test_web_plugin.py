@@ -65,10 +65,14 @@ def _ctx(config_dir):
 
 
 def test_the_doctor_port_is_the_port_the_server_binds() -> None:
-    from localharness.cli.web_cmd import DEFAULT_PORT
+    """One literal: web_cmd binds the plugin's number, it does not restate it."""
+    import inspect
+
+    from localharness.cli import web_cmd
     from localharness.cli.web_plugin import WEB_DEFAULT_PORT
 
-    assert WEB_DEFAULT_PORT == DEFAULT_PORT
+    assert web_cmd.DEFAULT_PORT == WEB_DEFAULT_PORT
+    assert str(WEB_DEFAULT_PORT) not in inspect.getsource(web_cmd)
 
 
 def test_web_doctor_not_enrolled(tmp_path) -> None:
