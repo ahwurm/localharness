@@ -154,4 +154,9 @@ def test_components_rows(components_home):
         ours = [{**r, "plugin": None} for r in ours]  # the golden is the pre-move truth
     else:
         assert not any(r["path"].startswith("autoresearch.") for r in rows)
+    # G2 (50-04): proposer.api_key is a SecretStr — masked, typed SecretStr. The golden is the
+    # pre-G2 truth (`str`, the configured "none"); this is the disclosed delta, written as code.
+    key = next(r for r in ours if r["path"] == "proposer.api_key")
+    assert (key["type"], key["current_value"]) == ("SecretStr", "**********"), key
+    ours = [{**r, "type": "str", "current_value": "none"} if r is key else r for r in ours]
     _check("components_rows", ours)

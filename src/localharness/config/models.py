@@ -11,6 +11,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    SecretStr,
     field_validator,
     model_validator,
 )
@@ -1615,7 +1616,8 @@ class ProposerConfig(BaseModel):
     model_config = ConfigDict(frozen=False, extra="forbid")
     base_url: str = Field(description="OpenAI-compatible base URL for the proposer model.")
     model: str = Field(description="Proposer model id — MUST differ from provider.default_model.")
-    api_key: str = Field(default="none", description="API key ('none' for local).")
+    # SecretStr (G2): masked wherever it is shown; proposer.py reads .get_secret_value().
+    api_key: SecretStr = Field(default=SecretStr("none"), description="API key ('none' for local).")
     is_local: bool = Field(default=False, description="True for local 120B+; requires timeout>=300s.")
     timeout_seconds: float = Field(default=120.0, ge=1.0, le=3600.0)
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)
