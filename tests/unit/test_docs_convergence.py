@@ -459,7 +459,6 @@ def check_machine_only_list(security_text: str, code_set: frozenset[str] | None 
             + [f"listed in SECURITY.md, not machine-level only in code: {p}" for p in sorted(doc - code)])
 
 
-@xfail_until("51-04")
 def test_machine_only_list_live():
     """SECURITY.md names every setting a project cannot set, exactly the code's set."""
     assert check_machine_only_list(_read("SECURITY.md")) == []
@@ -519,7 +518,6 @@ def check_three_readers(security_text: str, defaults: dict[str, str] | None = No
     return out
 
 
-@xfail_until("51-04")
 def test_three_readers_live():
     """SECURITY.md names the floor, the gate and the context store by file, with the real defaults."""
     assert check_three_readers(_read("SECURITY.md")) == []
