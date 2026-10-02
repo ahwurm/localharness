@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+pytestmark = pytest.mark.plugin("autoresearch")
+
 try:
     from localharness.cli.app import app
     from localharness.autoresearch.archive import ArchiveStore, ArchiveEntry  # noqa: F401

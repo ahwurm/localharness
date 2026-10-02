@@ -10,6 +10,7 @@ import json
 import re as _re
 from pathlib import Path
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -275,6 +276,7 @@ def test_audit_log_append_only(components_home):
 from localharness.config.models import ProposerConfig  # noqa: F401
 
 
+@pytest.mark.plugin("autoresearch")
 def test_proposer_paths_enumerated(components_home):
     """PROP-02: with a proposer block attached, `components list` surfaces `proposer.*` paths.
 

@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from tests.conftest import _MINIMAL_CONFIG_YAML
+from tests.conftest import _minimal_config
 from localharness.config import paths as _paths
 from localharness.cli.app import app
 
@@ -102,7 +102,7 @@ def _run(name, tmp_path, resolved, explicit=None) -> list[Path]:
     if needs_seed:
         landing = Path(explicit) if explicit else _REAL_RESOLVE(None)
         landing.mkdir(parents=True, exist_ok=True)
-        (landing / "config.yaml").write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+        (landing / "config.yaml").write_text(_minimal_config(), encoding="utf-8")
     seen = resolved(target)
     runner.invoke(app, argv(explicit))
     assert seen, f"{name} never called resolve_config_dir() — not routed through the chokepoint"

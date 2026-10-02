@@ -17,6 +17,9 @@ import yaml
 from typer.testing import CliRunner
 
 from localharness.cli.app import app
+import pytest
+
+pytestmark = pytest.mark.plugin("autoresearch")
 
 runner = CliRunner()
 
