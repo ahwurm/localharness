@@ -103,13 +103,25 @@ def bus_with_persistence(tmp_path: Path) -> EventBus:
     return EventBus(persist_path=tmp_path / "events.jsonl")
 
 
-_MINIMAL_CONFIG_YAML = (
-    "version: '1'\n"
-    "provider:\n"
-    "  provider_type: vllm\n"
-    "  base_url: http://localhost:8000/v1\n"
-    "  default_model: test-model\n"
-)
+_PLUGINS_OFF_ENV = "LOCALHARNESS_TEST_PLUGINS_OFF"
+
+
+def _plugins_off() -> list[str]:
+    """Plugin names in the comma-separated LOCALHARNESS_TEST_PLUGINS_OFF switch (unset -> [])."""
+    return [n.strip() for n in os.environ.get(_PLUGINS_OFF_ENV, "").split(",") if n.strip()]
+
+
+def _minimal_config() -> str:
+    """The config.yaml BOTH home fixtures seed (`_isolate_localharness_home`, `components_home`):
+    a vllm provider, plus `<name>: {enabled: false}` for every plugin the switch names — so
+    `LOCALHARNESS_TEST_PLUGINS_OFF=autoresearch pytest tests/` runs the suite with it off. Tests that
+    write their own whole config are not covered (a documented limit of the switch)."""
+    return ("version: '1'\n"
+            "provider:\n"
+            "  provider_type: vllm\n"
+            "  base_url: http://localhost:8000/v1\n"
+            "  default_model: test-model\n"
+            + "".join(f"{name}:\n  enabled: false\n" for name in _plugins_off()))
 
 
 # The home the developer actually has, captured at import time — before any fixture repoints the
@@ -246,7 +258,7 @@ def _isolate_localharness_home(tmp_path_factory, monkeypatch):
     """
     home = tmp_path_factory.mktemp("lh_home") / ".localharness"
     home.mkdir(parents=True, exist_ok=True)
-    (home / "config.yaml").write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+    (home / "config.yaml").write_text(_minimal_config(), encoding="utf-8")
     monkeypatch.setenv("LOCALHARNESS_HOME", str(home))
     return home
 
@@ -260,7 +272,7 @@ def components_home(tmp_path, monkeypatch):
     """
     home = tmp_path / ".localharness"
     home.mkdir(parents=True, exist_ok=True)
-    (home / "config.yaml").write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+    (home / "config.yaml").write_text(_minimal_config(), encoding="utf-8")
     monkeypatch.setenv("LOCALHARNESS_HOME", str(home))
     return home
 
@@ -964,6 +976,27 @@ def pytest_configure(config):
         "behaviour under test), so it escapes the session-wide fake home; the tripwire fingerprints "
         "the real ~/.localharness around it instead. Never add this to silence the tripwire",
     )
+    config.addinivalue_line(
+        "markers",
+        "plugin(name): the test drives that plugin's surface; skipped when "
+        "LOCALHARNESS_TEST_PLUGINS_OFF names the plugin",
+    )
+
+
+def plugin_off_reason(node) -> str | None:
+    """The skip reason for a test marked `plugin(name)` whose plugin the switch turns off."""
+    off = set(_plugins_off())
+    for mark in node.iter_markers("plugin"):
+        if mark.args and mark.args[0] in off:
+            return f"plugin {mark.args[0]} is off ({_PLUGINS_OFF_ENV})"
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _skip_off_plugin(request):
+    reason = plugin_off_reason(request.node)
+    if reason:
+        pytest.skip(reason)
 
 
 @pytest.fixture(autouse=True)

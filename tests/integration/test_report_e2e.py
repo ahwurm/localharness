@@ -16,6 +16,8 @@ from typer.testing import CliRunner
 from localharness.cli.app import app
 from localharness.autoresearch.archive import ArchiveStore, ArchiveEntry
 
+pytestmark = pytest.mark.plugin("autoresearch")
+
 runner = CliRunner()
 
 
