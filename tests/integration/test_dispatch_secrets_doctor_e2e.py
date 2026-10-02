@@ -214,3 +214,18 @@ def test_doctor_extra_absent_names_the_install_line_and_runs_no_checks(g, caplog
     assert "Discord configured" not in flat and "Discord not configured" not in flat, r.output
     # RESEARCH open question 2: the deprecation rows appear once the extra is installed.
     assert "LOCALHARNESS_DISCORD_" not in flat, r.output
+
+
+def test_components_set_receipt_and_json_receipt(g, caplog, monkeypatch) -> None:
+    _present(monkeypatch)
+    for extra in ((), ("--json",)):
+        r = _run(g, caplog, "components", "set", "dispatch.discord.token", SENTINEL, *extra)
+        assert r.exit_code == 0, r.output
+    assert (g / "audit.jsonl").exists(), "no ComponentMutated audit event was written to check"
+
+
+def test_a_refused_enable_keeps_the_token_out_of_its_error(g, caplog, monkeypatch) -> None:
+    _present(monkeypatch)
+    r = _run(g, caplog, "plugins", "enable", "dispatch", "--set", f"discord.token={SENTINEL}",
+             "--set", "discord.allow=not-an-id")
+    assert r.exit_code != 0 and "not a Discord id" in _flat(r.output), r.output
