@@ -185,6 +185,8 @@ def test_doctor_env_only_warns_per_variable_without_changing_the_exit_code(g, ca
         assert (f"dispatch: LOCALHARNESS_DISCORD_{var} is deprecated and stops working in 0.17.0 — set "
                 f"dispatch.discord.{field}") in flat, env.output
     assert flat.count("dispatch: LOCALHARNESS_DISCORD_") == 4, env.output
+    assert "⚠ dispatch: LOCALHARNESS_DISCORD_TOKEN is deprecated" in flat, env.output
+    assert "dispatch: dispatch:" not in flat, env.output  # the row name is printed once
     assert (env.exit_code, _issues(env.output)) == (bare.exit_code, _issues(bare.output)), (
         bare.output, env.output)
 
