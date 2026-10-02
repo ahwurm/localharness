@@ -2,7 +2,8 @@
 (G3) — never Click's "No such command" exit 2, which a script reading `experiment run`'s `$?` takes
 for the reject-holdout verdict. The stub is never listed in `--help`, is built from the manifest
 alone (no command module imported), and covers bundled-off only: an unknown name, or an installed
-plugin that is not enabled, still gets Click's exit 2; a needs-extra plugin keeps its own guard."""
+plugin that is not enabled, still gets Click's exit 2; a needs-extra plugin keeps its own guard.
+The last tests run the real `localharness` entry point, so the code is the shell's `$?`."""
 from __future__ import annotations
 
 import os
@@ -106,3 +107,25 @@ def test_the_stub_imports_no_command_module(tmp_path) -> None:
                          cwd=tmp_path)
     assert out.stdout.split("\n")[:4] == ["4", "4", "4", "[]"], (out.stdout, out.stderr)
 
+
+LOCALHARNESS = Path(sys.executable).parent / "localharness"
+
+
+@pytest.mark.skipif(not LOCALHARNESS.exists(), reason="no installed `localharness` entry point")
+def test_the_shell_sees_exit_4_for_an_off_plugin_and_2_for_an_unknown_name(tmp_path) -> None:
+    env = _env(tmp_path, "web: {enabled: false}\n")
+
+    def sh(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(LOCALHARNESS), *args], capture_output=True, text=True, timeout=60,
+                              env=env, cwd=tmp_path)
+
+    off, bogus = sh("web"), sh("bogus")
+    assert off.returncode == 4 and _hint("web", "web") in off.stderr, (off.returncode, off.stderr)
+    assert bogus.returncode == 2 and "No such command 'bogus'" in bogus.stderr, bogus.stderr
+
+
+@pytest.mark.skipif(not LOCALHARNESS.exists(), reason="no installed `localharness` entry point")
+def test_with_web_on_the_shell_never_meets_the_stub(tmp_path) -> None:
+    on = subprocess.run([str(LOCALHARNESS), "web", "--help"], capture_output=True, text=True,
+                        timeout=60, env=_env(tmp_path, ""), cwd=tmp_path)
+    assert on.returncode == 0 and "is provided by" not in on.stderr, (on.returncode, on.stderr)
