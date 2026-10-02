@@ -31,6 +31,7 @@ from tests.integration.test_memory_compat_baseline_e2e import (
 GOLDEN = Path(__file__).resolve().parents[1] / "fixtures" / "dispatch_plugin" / "terminal_banner.txt"
 CASES = ("absent", "present")
 DISPATCH_APPEND = {"absent": "", "present": ", dispatch"}  # dispatch (49) is bundled and on by default
+AUTORESEARCH_APPEND = ", autoresearch"  # autoresearch (50) is bundled and on by default, no extra
 
 
 def _plugins_text(printed: list[str]) -> str:
@@ -74,7 +75,7 @@ async def test_terminal_banner_prompt_and_tools(extra, tmp_path, monkeypatch):
     line = f"Plugins: {plugins}\twarnings={json.dumps(warnings, ensure_ascii=False)}"
     rows = _golden_lines(extra, line)
     want_plugins, want_warnings = rows[extra].split("\t")
-    assert f"Plugins: {plugins}" == want_plugins + DISPATCH_APPEND[extra], "the Plugins: line drifted"
+    assert f"Plugins: {plugins}" == want_plugins + DISPATCH_APPEND[extra] + AUTORESEARCH_APPEND, "the Plugins: line drifted"
     assert f"warnings={json.dumps(warnings, ensure_ascii=False)}" == want_warnings, "startup warnings drifted"
 
     first = out["calls"][0]

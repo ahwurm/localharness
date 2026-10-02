@@ -74,8 +74,8 @@ def test_channels_reads_the_adapter_registry_at_call_time(monkeypatch):
 def test_registered_fourth_and_once():
     from localharness.plugins.builtin import BUILTIN_PLUGINS
 
-    # dispatch (49) is bundled and on by default (49-06 registered it)
-    assert BUILTIN_PLUGINS[-1] is DispatchPlugin and BUILTIN_PLUGINS.count(DispatchPlugin) == 1
+    # dispatch (49) is bundled and on by default (49-06 registered it); autoresearch (50) follows it
+    assert BUILTIN_PLUGINS[3] is DispatchPlugin and BUILTIN_PLUGINS.count(DispatchPlugin) == 1
 
 
 # --- configure / start ----------------------------------------------------------------------------

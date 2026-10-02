@@ -34,7 +34,7 @@ pytestmark = pytest.mark.plugin("autoresearch")
 
 # 50-05 flips this when the commands move behind the plugin; the expected deltas below are the
 # G6 / AUTO-01 disclosed changes, written as code.
-AUTORESEARCH_IS_A_PLUGIN = False
+AUTORESEARCH_IS_A_PLUGIN = True
 MOVED = ("autoresearch", "experiment", "propose")
 
 GOLDEN = Path(__file__).resolve().parents[1] / "fixtures" / "autoresearch_surfaces" / "cli_golden.json"
@@ -117,7 +117,7 @@ def _expected_post_order(pre: list[str]) -> list[str]:
     (the names bundled manifests contribute, plus the three)."""
     block = [n for n in pre if n in _plugin_command_names()]
     core = [n for n in pre if n not in block and n not in MOVED]
-    return core + sorted([*block, *MOVED])
+    return core + sorted({*block, *MOVED})
 
 
 def test_root_help_rows():

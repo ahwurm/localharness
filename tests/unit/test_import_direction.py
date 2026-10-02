@@ -47,13 +47,7 @@ CORE_FILES = frozenset({"__init__.py",
 # "Only the bundled-plugin list and config routing may reference plugins" (CORE-02).
 ALLOWED_PLUGIN_IMPORTERS = frozenset({"plugins/builtin.py"})
 
-BURN_DOWN: frozenset[tuple[str, str]] = frozenset({
-    # autoresearch plugin
-    ("cli/app.py", "cli/autoresearch_cmd.py"),
-    ("cli/app.py", "cli/experiment_cmd.py"),
-    ("cli/app.py", "cli/propose_cmd.py"),
-    ("cli/app.py", "cli/report_cmd.py"),
-})
+BURN_DOWN: frozenset[tuple[str, str]] = frozenset()
 
 _DYNAMIC_IMPORTS = frozenset({"import_module", "__import__"})
 
@@ -162,18 +156,13 @@ def test_the_burn_down_list_only_shrinks():
 
 
 def test_the_burn_down_residue_is_exactly_the_remaining_conversions():
-    """`/memory` is the memory plugin's own slash row and `localharness memory` its manifest's
-    CliDescriptor, so cli/repl.py -> memory_cmd and cli/app.py -> memory_cli are gone for good.
-    The bench builds memory through the plugin lifecycle, so bench/runner.py -> memory/* and
-    -> memory_tools are gone for good, as are start_cmd -> memory/* and tools/builtin/__init__ ->
-    memory_tools. Memory is fully converted, and so is dispatch: Discord is the dispatch plugin's
-    first adapter, start builds it through the generic channel branch, and channels/discord.py is
-    gone. The list is exactly the autoresearch conversion still to come."""
-    assert len(BURN_DOWN) == 4
-    assert BURN_DOWN == frozenset({
-        ("cli/app.py", "cli/autoresearch_cmd.py"), ("cli/app.py", "cli/experiment_cmd.py"),
-        ("cli/app.py", "cli/propose_cmd.py"), ("cli/app.py", "cli/report_cmd.py"),
-    })
+    """Every legacy core->plugin edge is converted; a new edge fails the ratchet test. Memory,
+    dispatch and autoresearch all come in through plugins/builtin.py; cli/app.py mounts the
+    autoresearch, experiment and propose commands lazily from the plugin's manifest."""
+    assert BURN_DOWN == frozenset()
+    # The bundled-plugin list is the one core module that names the autoresearch plugin.
+    assert {a for a, b in scan() if b == "autoresearch/plugin.py"} == {"plugins/builtin.py"}
+    assert not {e for e in scan() if e[0] == "cli/app.py" and e[1] in _AUTORESEARCH_CLI}
     # The bundled-plugin list is the one core module that names the dispatch plugin.
     assert {a for a, b in scan() if b.startswith("dispatch/")} == {"plugins/builtin.py"}
 

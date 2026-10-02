@@ -48,7 +48,7 @@ def test_plugin_api_version_stays_1():
 def test_only_the_dispatch_manifest_declares_channels():
     # dispatch (49) is bundled and on by default; every other bundled manifest declares none
     assert {c.manifest.name: c.manifest.channels for c in builtin.BUILTIN_PLUGINS} == {
-        "image": (), "web": (), "memory": (), "dispatch": ("discord",)}
+        "image": (), "web": (), "memory": (), "dispatch": ("discord",), "autoresearch": ()}
 
 
 def test_manifest_channels_replace_the_plugin_name(multichat):

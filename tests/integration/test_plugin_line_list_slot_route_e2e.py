@@ -191,11 +191,11 @@ def test_the_line_the_one_list_the_empty_slot_the_route(tmp_path, monkeypatch, f
     # dispatch left it in 49-06: Discord is the dispatch plugin's adapter, built by the generic branch.
     assert not any("memory" in pair[1] for pair in BURN_DOWN)
     assert not any("discord" in pair[1] or "dispatch" in pair[1] for pair in BURN_DOWN)
-    owners = {"autoresearch": ("autoresearch_cmd", "experiment_cmd", "propose_cmd", "report_cmd")}
-    named = {plugin: {pair for pair in BURN_DOWN if any(w in pair[1] for w in words)}
-             for plugin, words in owners.items()}
-    assert all(named.values()), f"a plugin still wired the old way has no burn-down entry: {named}"
-    assert set().union(*named.values()) == BURN_DOWN, "a burn-down entry names no plugin"
+    # autoresearch left it in 50-05: its three commands mount lazily from the plugin's manifest.
+    # The map is empty: every bundled feature is a plugin, and any new core->plugin edge is a violation.
+    assert BURN_DOWN == frozenset(), "a legacy core->plugin edge is back on the burn-down list"
+    for words in ("autoresearch_cmd", "experiment_cmd", "propose_cmd", "report_cmd"):
+        assert not [e for e in scan() if e[0] == "cli/app.py" and words in e[1]], words
 
     # --- 2. the one list: assigned once, read once, and every reader follows it ---------------------
     touches = []

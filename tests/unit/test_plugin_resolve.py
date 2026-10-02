@@ -243,8 +243,9 @@ def test_invalid_settings_fail_the_plugin_not_the_harness(layers) -> None:
 
     entry = r.plan.entry("foo")
     assert entry.state == "failed" and entry.reason.startswith("invalid settings — foo.color: ")
-    # web (46-02) and memory (47) are bundled and on by default; dispatch (49) is bundled and on by default
-    assert "foo" not in r.settings and r.plan.order == ("web", "memory", "dispatch")
+    # web (46-02) and memory (47) are bundled and on by default; dispatch (49) is bundled and on by default;
+    # autoresearch (50) is bundled and on by default
+    assert "foo" not in r.settings and r.plan.order == ("web", "memory", "dispatch", "autoresearch")
     assert r.problems() == [f"plugin foo: {entry.reason}"]
     assert not [w for w in r.warnings if "foo.color" in w]  # reported once, by problems()
     assert loader.load_harness().provider.default_model == "global-model"
