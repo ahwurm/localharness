@@ -106,12 +106,16 @@ class SetupField(BaseModel):
     """One question `plugins enable NAME` asks on a terminal: `key` is a leaf of the plugin's
     ConfigModel, `prompt` the words shown, `default` the answer offered. Data, not a callback:
     the harness asks, checks and writes; the plugin does no I/O (a later setup wizard walks the
-    same list across plugins)."""
+    same list across plugins).
+
+    `secret` (additive, optional, PLUGIN_API_VERSION unchanged): the answer is not echoed while
+    typed and is printed masked."""
 
     model_config = ConfigDict(frozen=True)
     key: str
     prompt: str
     default: str = ""
+    secret: bool = False
 
 
 class PluginManifest(BaseModel):
@@ -133,6 +137,8 @@ class PluginManifest(BaseModel):
     - `setup`: what `plugins enable` asks on a terminal when no --set is given (see SetupField).
     - `setup_help`: a few plain lines printed after that enable when the plugin's check does not
       pass: what to start, what files it needs, and optionally a prompt to paste into a coding agent.
+    - `channels`: for kind "channel", the names `start --channel` accepts from this plugin; empty
+      means the plugin's own name. Additive, optional; PLUGIN_API_VERSION unchanged.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -148,6 +154,7 @@ class PluginManifest(BaseModel):
     slash: tuple[SlashDescriptor, ...] = ()
     setup: tuple[SetupField, ...] = ()
     setup_help: str = ""
+    channels: tuple[str, ...] = ()
 
 
 Availability = Literal["ready"] | tuple[Literal["unconfigured"], str]
@@ -155,12 +162,13 @@ AVAILABILITY_DOC = """What configure() reports: "ready", or ("unconfigured", "<t
 
 
 class Check(BaseModel):
-    """One `doctor` result from a plugin (PAPI-08): `name`, `status` pass / fail / skip, `detail`
-    (what was found) and `hint` (what to do about it)."""
+    """One `doctor` result from a plugin (PAPI-08): `name`, `status` pass / fail / skip / warn,
+    `detail` (what was found) and `hint` (what to do about it). warn: shown, never counted as a
+    failure — e.g. a deprecation (additive; PLUGIN_API_VERSION unchanged)."""
 
     model_config = ConfigDict(frozen=True)
     name: str
-    status: Literal["pass", "fail", "skip"]
+    status: Literal["pass", "fail", "skip", "warn"]
     detail: str = ""
     hint: str = ""
 

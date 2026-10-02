@@ -149,3 +149,26 @@ def test_start_and_the_resolver_name_the_same_own_command_channels():
     from localharness.plugins.channels import OWN_COMMAND
 
     assert set(_own_command(web_channel=None, acp_channel=None)) == OWN_COMMAND
+
+
+def test_a_channel_plugin_turned_off_is_not_accepted(tmp_path, monkeypatch):
+    """49-02: enablement decides the accepted set — channel_names() still lists it (for --help)."""
+    import yaml
+
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins import discovery
+    from localharness.plugins.channels import accepted_channels
+    from localharness.plugins.resolve import resolve
+
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (_FakeChannel,))
+    monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [])
+    g = tmp_path / "g"
+    g.mkdir()
+    base = {"version": "1", "provider": {"provider_type": "vllm",
+            "base_url": "http://localhost:8000/v1", "default_model": "m"}}
+    (g / "config.yaml").write_text(yaml.safe_dump(base), encoding="utf-8")
+    assert "fakechan" in accepted_channels(resolve(ConfigLoader(config_dir=g)))
+    (g / "config.yaml").write_text(yaml.safe_dump({**base, "fakechan": {"enabled": False}}),
+                                   encoding="utf-8")
+    assert accepted_channels(resolve(ConfigLoader(config_dir=g))) == {"terminal", "acp"}
+    assert "fakechan" in channel_names()
