@@ -25,9 +25,10 @@ The CLI does not contain business logic. It parses arguments, sets up the event 
 
 ## App Structure
 
-`src/localharness/cli/app.py` builds one Typer app and registers fourteen visible top-level
-commands — eight flat commands and six subcommand groups. `localharness --help` prints exactly
-this list. A fifteenth, `ask-rate`, is registered `hidden=True` and does not appear in it; it
+`src/localharness/cli/app.py` builds one Typer app and registers fifteen visible top-level
+commands — eight flat commands and seven subcommand groups. `localharness --help` prints this
+list, then the commands of each plugin that is on, read from its manifest (the bundled ones are
+`generate-image`, `memory` and `web`; see spec 09, "Commands, slash commands and doctor"). A sixteenth, `ask-rate`, is registered `hidden=True` and does not appear in it; it
 reports permission prompts per session over a trace corpus and is documented by its own `--help`.
 
 | Command | What it does |
@@ -44,6 +45,7 @@ reports permission prompts per session over a trace corpus and is documented by 
 | `bench` *(group)* | Run scenario benchmarks; compare runs for regressions. Matrix is opt-in (`--matrix`). Subcommands: `compare`, `pack`. |
 | `components` *(group)* | List, inspect, and mutate harness components (registry) — `list`, `get`, `set`. |
 | `config` *(group)* | Inspect and maintain your LocalHarness configuration — `show`, `migrate`. |
+| `plugins` *(group)* | See, enable and disable plugins — `list`, `info`, `enable`, `disable`. |
 | `autoresearch` *(group)* | Autoresearch loop tools. |
 | `experiment` *(group)* | Run a proposal through the promotion gate (train Welch → holdout Bonferroni). |
 
@@ -74,6 +76,7 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(bench_app, name="bench")
 app.add_typer(components_app, name="components")
 app.add_typer(config_app, name="config")
+app.add_typer(plugins_app, name="plugins")
 app.add_typer(autoresearch_app, name="autoresearch")
 app.add_typer(experiment_app, name="experiment")
 

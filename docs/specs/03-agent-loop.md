@@ -242,7 +242,7 @@ class AgentLoop:
         context_manager: ContextManager,
         tool_registry: "ToolRegistry",
         permission_evaluator: "PermissionEvaluator",
-        memory_loader: "MemoryLoader",
+        memory_slot: "MemorySlot | None" = None,
         kill_file_path: Path | None = None,
     ) -> None:
         """
@@ -253,7 +253,8 @@ class AgentLoop:
             context_manager: ContextManager for this agent's token budget and compaction.
             tool_registry: Scoped tool registry for this agent (global + division + agent tools).
             permission_evaluator: Evaluates deny patterns against tool calls.
-            memory_loader: Loads MEMORY.md + SQLite facts for system prompt injection.
+            memory_slot: The memory slot (plugins/slot.py). The loop's only memory path: when it is
+                occupied, each turn asks it for context. None or empty means no memory section.
             kill_file_path: Override KILL file path. Default: Path.cwd() / 'KILL'.
         """
         self._config = config
@@ -262,7 +263,7 @@ class AgentLoop:
         self._ctx = context_manager
         self._tools = tool_registry
         self._permissions = permission_evaluator
-        self._memory = memory_loader
+        self._memory_slot = memory_slot
         self._kill = KillWatcher(kill_file_path or Path.cwd() / "KILL")
 
     async def run_turn(
@@ -426,9 +427,14 @@ _execute_loop(session, task, on_token):
 
     # Load system prompt + memory
     system_prompt = _build_system_prompt(config)
-    memory_context = await memory_loader.load(config)  # returns str
-    if memory_context:
-        system_prompt += "\n\n## Agent Memory\n" + memory_context
+    system_prompt += "\n\n## Guardrails\n" + guardrails  # if any; outside the slot
+    if memory_slot is not None and memory_slot.occupied:
+        # slot_budget is core's ceiling, from the usable context window (window minus the
+        # reply reserve), not a share; the occupant renders within min(own settings, ceiling)
+        slot_budget = ContextBudget(max_chars=usable_window_chars, max_session_history=200)
+        for heading, body in (await memory_slot.context(task, slot_budget)).sections:
+            if body:
+                system_prompt += f"\n\n## {heading}\n{body}"
 
     # Initialize session messages
     session.push({"role": "system", "content": system_prompt})
