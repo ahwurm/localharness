@@ -925,8 +925,6 @@ class AgentLoop:
         context_manager: Any,  # ContextManager
         tool_registry: Any,  # ToolRegistry
         permission_evaluator: Any,  # PermissionEvaluator
-        memory_loader: Any = None,
-        recall_router: Any = None,
         kill_file_path: Path | None = None,
         compact_md_path: Path | Any | None = None,  # Path | COMPACT_DISABLED | None
         session_id: str | None = None,
@@ -973,20 +971,15 @@ class AgentLoop:
         self._gate = gate if gate is not None else fail_closed_gate(
             permissions=getattr(config, "permissions", None), deny=self._deny_fn, bus=bus
         )
-        self._memory = memory_loader
         # The org's safety voice (SAFE-04). Read by CORE every turn from the GLOBAL config dir —
         # never the workspace, never the agent state dir — and injected whether or not memory is
         # on. start_cmd passes it; subagents and bench pass nothing and get none, exactly as before.
         self._guardrails_path = guardrails_path
         self._guardrails_warned = False
         # PAPI-04's consumer seam: the memory slot, asked for its per-turn section right after the
-        # guardrails. None or an empty slot adds no section. The legacy memory block below stays
-        # until memory converts into the slot's occupant.
+        # guardrails. It is the loop's ONLY memory path — the loop never holds a store; recall
+        # scope, writes and traces are the occupant's. None or an empty slot adds no section.
         self._memory_slot = memory_slot
-        # v0.13 MEMS-02: scope-aware READ handle (memory/router.py). `self._memory` stays the
-        # session's own store and keeps every write and trace below; only the ambient-context
-        # READ goes through the router. None = no router (bench, subagents, tests) -> today's path.
-        self._recall_router = recall_router
         # `compact_md_path` takes three values, and they mean three different things: a Path (use
         # it), COMPACT_DISABLED (this session has none — see _resolve_compact_md_path), or None
         # (nothing was configured; derive one under the config dir). `config_dir` is what that
@@ -1389,9 +1382,9 @@ class AgentLoop:
                 "\n\nWhen you have finished using tools, respond directly to the user. "
                 "Be concise — give the answer, not your reasoning process."
             )
-        # SAFE-04: OUTSIDE the memory block, so memory off — or a memory failure — can never turn
-        # the safety rules off with it. Same place and separator the memory block's join used, so
-        # with memory on the prompt is byte-identical to before.
+        # SAFE-04: OUTSIDE the memory slot, so memory off — or a memory failure — can never turn
+        # the safety rules off with it. Same place and separator the old memory block's join used,
+        # so with memory on the prompt is byte-identical to before.
         guardrails = self._read_guardrails()
         if guardrails:
             system_prompt += "\n\n## Guardrails\n" + guardrails
@@ -1411,54 +1404,6 @@ class AgentLoop:
             for heading, body in contribution.sections:
                 if body:
                     system_prompt += f"\n\n## {heading}\n{body}"
-        # Legacy memory path — the bench's only (bench/runner.py passes memory_loader=). Production start
-        # passes only memory_slot=. Deleted when the bench builds memory through the plugin lifecycle.
-        if self._memory is not None:
-            try:
-                # Default provenance for this session's writes (WRITE-04).
-                _set_sess = getattr(self._memory, "set_current_session", None)
-                if _set_sess is not None:
-                    _set_sess(session.session_id)
-                _mem_cfg = getattr(self._config, "memory", None)
-                # The knob (agent.memory.recall_scope) is applied by the router, not here: the
-                # loop asks ONE object for context and stays ignorant of how many stores answered.
-                _recall = self._recall_router if self._recall_router is not None else self._memory
-                ctx = await _recall.load_context(
-                    index_mode=getattr(_mem_cfg, "index_mode", True),
-                    max_session_history=getattr(_mem_cfg, "max_session_history_entries", 8),
-                    # The loading budget IS the whole gate (memory spec): facts admit
-                    # by salience until this many chars are spent.
-                    max_chars=getattr(_mem_cfg, "max_notes_chars", 16_000),
-                )
-                parts = [system_prompt]
-                if ctx.division_md:
-                    parts.append("## Division Context\n" + ctx.division_md)
-                if ctx.agent_memory_md:
-                    parts.append("## Agent Memory\n" + ctx.agent_memory_md)
-                system_prompt = "\n\n".join(parts)
-                # Ambient-injection activation trace (owner reversal 2026-07-17): the every-turn
-                # shelf is a co-firing event too — record it source-tagged + per-turn-deduped so
-                # it is distinguishable from model-initiated retrieval (discounted downstream).
-                # Own try/except: best-effort, and a trace failure must not be mislabeled as a
-                # memory-injection failure (memory WAS injected). Kill-switch default on ->
-                # OFF = today's behavior (no injection rows). #96: an EMPTY shelf still records a
-                # row (empty injected set) so per-turn coverage accounting counts the turn — the
-                # empty-fired row is zero-signal downstream (the co-fire reader yields no pairs),
-                # never a missing row. Gate on `is not None` (the row exists) not truthiness.
-                _inj_ids = getattr(ctx, "injected_fact_ids", None)
-                _rec = getattr(self._memory, "record_injection_trace", None)
-                if getattr(_mem_cfg, "trace_ambient_injection", True) and _inj_ids is not None and _rec is not None:
-                    try:
-                        await _rec(stimulus=task, injected_ids=_inj_ids,
-                                   session_id=session.session_id)
-                    except Exception:
-                        log.warning("activation-trace write failed (ambient injection)",
-                                    exc_info=True)
-            except Exception:
-                # Non-fatal by design, but never silent (live test 2026-07-03: a
-                # swallowed failure here means the agent runs amnesiac all session
-                # and nothing anywhere says so).
-                log.warning("memory context load failed — no memory injected this turn", exc_info=True)
 
         # Get tool schemas
         tool_schemas: list = []

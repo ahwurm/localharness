@@ -321,7 +321,7 @@ from localharness.core.events import TurnStarted, TurnCompleted, TurnFailed, Act
 
 
 def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_registry=None,
-                     session_id=None, memory_loader=None, context_manager=None):
+                     session_id=None, context_manager=None):
     """Helper to construct an AgentLoop with mock dependencies."""
     from localharness.config.models import AgentConfig
     # Unattended by default: these tests drive fake registries that expose no tool schema, so
@@ -343,7 +343,6 @@ def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_
         context_manager=ctx,
         tool_registry=tool_registry,
         permission_evaluator=perm,
-        memory_loader=memory_loader,
         **extra,
     )
 
@@ -1120,6 +1119,20 @@ async def _record_turn(loop, llm, task="hello") -> list[str]:
     return prompts
 
 
+def test_the_slot_is_the_loops_only_memory_parameter():
+    """48-06: the legacy store-in-hand path is gone. The loop's constructor takes exactly one
+    memory-ish parameter — the slot — and the two deleted ones are rejected, not ignored."""
+    import inspect
+    params = inspect.signature(AgentLoop.__init__).parameters
+    assert [n for n in params if "memory" in n or "recall" in n] == ["memory_slot"]
+    for legacy in ("memory_loader", "recall_router"):
+        with pytest.raises(TypeError, match=legacy):
+            AgentLoop(
+                config=None, llm=None, bus=None, context_manager=ContextManager(),
+                tool_registry=None, permission_evaluator=PermissionEvaluator(),
+                **{legacy: object()})
+
+
 # ---------------------------------------------------------------------------
 # SAFE-04: the org guardrails come from CORE prompt assembly, never from memory. Before this,
 # the splice sat inside `if self._memory is not None:`, so turning memory off — or any memory
@@ -1743,7 +1756,7 @@ async def test_loop_appends_budget_note_to_tool_result(faithful_fake_llm, bus, t
     loop = AgentLoop(
         config=cfg, llm=faithful_fake_llm(tool_plan=[("glob", {"pattern": "*.py"})]),
         bus=bus, context_manager=ContextManager(), tool_registry=reg,
-        permission_evaluator=PermissionEvaluator(), memory_loader=None,
+        permission_evaluator=PermissionEvaluator(),
     )
     session = Session(agent_id="budget-note-agent", session_id="s-note", messages=[])
     await loop._execute_loop(session, "list python files", None)
@@ -1779,7 +1792,7 @@ def _budget_loop(faithful_fake_llm, bus, tmp_path, tool_plan, max_actions):
         return AgentLoop(
             config=cfg, llm=faithful_fake_llm(tool_plan=tool_plan),
             bus=bus, context_manager=ContextManager(), tool_registry=reg,
-            permission_evaluator=PermissionEvaluator(), memory_loader=None,
+            permission_evaluator=PermissionEvaluator(),
         )
     return _make
 
@@ -1847,7 +1860,7 @@ async def test_failed_tool_error_text_reaches_model(faithful_fake_llm, bus, tmp_
     loop = AgentLoop(
         config=cfg, llm=faithful_fake_llm(tool_plan=[("web_fetch", {"url": "notaurl"})]),
         bus=bus, context_manager=ContextManager(), tool_registry=reg,
-        permission_evaluator=PermissionEvaluator(), memory_loader=None,
+        permission_evaluator=PermissionEvaluator(),
     )
     session = Session(agent_id="err-fwd-agent", session_id="s-errfwd", messages=[])
     await loop._execute_loop(session, "fetch something", None)
@@ -1915,8 +1928,7 @@ async def test_act_guard_nudges_announce_then_halt(bus, tmp_path):
     })
     llm = _AnnounceThenActLLM()
     loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
-                     tool_registry=reg, permission_evaluator=PermissionEvaluator(),
-                     memory_loader=None)
+                     tool_registry=reg, permission_evaluator=PermissionEvaluator())
     session = Session(agent_id="act-guard-agent", session_id="s-ag", messages=[])
     await loop._execute_loop(session, "list the python files", None)
 
@@ -1968,8 +1980,7 @@ async def test_act_guard_confirmed_surfaces_prior_reply(bus, tmp_path):
     })
     llm = _ConfirmOnNudgeLLM()
     loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
-                     tool_registry=reg, permission_evaluator=PermissionEvaluator(),
-                     memory_loader=None)
+                     tool_registry=reg, permission_evaluator=PermissionEvaluator())
     session = Session(agent_id="act-guard-agent", session_id="s-ag-confirmed", messages=[])
     await loop._execute_loop(session, "thanks!", None)
 
@@ -2021,8 +2032,7 @@ async def test_act_guard_echoed_confirmed_surfaces_prior_reply(bus, tmp_path):
     })
     llm = _EchoConfirmOnNudgeLLM()
     loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
-                     tool_registry=reg, permission_evaluator=PermissionEvaluator(),
-                     memory_loader=None)
+                     tool_registry=reg, permission_evaluator=PermissionEvaluator())
     session = Session(agent_id="act-guard-agent", session_id="s-ag-echo", messages=[])
     await loop._execute_loop(session, "thanks!", None)
 
@@ -2080,8 +2090,7 @@ async def _run_reasoning_parser_double(bus, tmp_path, llm):
         "self_check": {"enabled": False},
     })
     loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
-                     tool_registry=reg, permission_evaluator=PermissionEvaluator(),
-                     memory_loader=None)
+                     tool_registry=reg, permission_evaluator=PermissionEvaluator())
     session = Session(agent_id="none-content-agent", session_id="s-none", messages=[])
     await loop._execute_loop(session, "list the python files", None)
     return session
@@ -2151,8 +2160,7 @@ async def test_act_guard_nudge_text_offers_sentinel(bus, tmp_path):
     })
     llm = _ConfirmOnNudgeLLM()
     loop = AgentLoop(config=cfg, llm=llm, bus=bus, context_manager=ContextManager(),
-                     tool_registry=reg, permission_evaluator=PermissionEvaluator(),
-                     memory_loader=None)
+                     tool_registry=reg, permission_evaluator=PermissionEvaluator())
     session = Session(agent_id="act-guard-agent", session_id="s-ag-nudgetext", messages=[])
     await loop._execute_loop(session, "thanks!", None)
 
@@ -2191,7 +2199,7 @@ async def test_act_guard_omits_the_hatch_when_tools_required(bus, tmp_path):
     })
     loop = AgentLoop(config=cfg, llm=_ConfirmOnNudgeLLM(), bus=bus,
                      context_manager=ContextManager(), tool_registry=reg,
-                     permission_evaluator=PermissionEvaluator(), memory_loader=None)
+                     permission_evaluator=PermissionEvaluator())
     session = Session(agent_id="needs-tools", session_id="s-ag-required", messages=[])
     await loop._execute_loop(session, "find the current python version", None)
 
@@ -2247,12 +2255,12 @@ def _big_msgs(rounds: int = 6):
 
 @pytest.mark.asyncio
 async def test_no_memory_no_crash(mock_llm_client, bus):
-    """The scan is guarded by `self._memory is not None`: a compacting turn on a loop with
-    no memory_loader completes normally, writing no gist and raising nothing."""
+    """A compacting turn on a loop with no memory slot completes normally, writing no gist and
+    raising nothing."""
     Response = mock_llm_client.Response
     loop = _make_agent_loop(
         mock_llm_client, [Response(content="all done")], bus,
-        session_id="sit-1", context_manager=_compacting_ctx(),  # memory_loader stays None
+        session_id="sit-1", context_manager=_compacting_ctx(),  # no memory slot
     )
     summary = await loop.run_turn("first", initial_messages=_big_msgs())
     assert "all done" in summary  # reached natural completion, no exception path

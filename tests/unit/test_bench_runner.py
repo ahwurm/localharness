@@ -515,7 +515,8 @@ async def test_bench_memory_tools_parity_when_seeded(monkeypatch):
     try:
         assert captured["memory_slot"] is not None and captured["memory_slot"].occupied, (
             "seeded scenario must get an occupied memory slot")
-        assert "memory_loader" not in captured, "the legacy memory_loader= path is gone"
+        assert [k for k in captured if "memory" in k or "recall" in k] == ["memory_slot"], (
+            "the slot is the only memory kwarg the bench hands the loop")
         tools = captured["tool_registry"]._tools["global"]
         # the write verb registers as "remember" (not "memory_remember"), same as production
         for name in ("memory_search", "memory_get", "remember"):
@@ -676,7 +677,7 @@ async def test_memory_hydration_injects_starfruit(tmp_path):
     try:
         slot = loop._memory_slot
         assert slot is not None and slot.occupied, "memory_recall got no memory"
-        assert loop._memory is None, "the legacy memory_loader= path must stay unused"
+        assert "_memory" not in vars(loop), "the loop holds no store — the slot is its only memory path"
         assert loop._config.name == "bench-memory-recall"
         assert slot.browse()._store._agent_id == loop._config.name
         assert "STARFRUIT_42" in await _memory_md(slot)
@@ -734,7 +735,7 @@ async def test_non_memory_scenario_has_no_store(tmp_path, monkeypatch):
         category="tool_basics",
     )
     loop = await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
-    assert loop._memory_slot is None and loop._memory is None
+    assert loop._memory_slot is None and "_memory" not in vars(loop)
     assert not list(tmp_path.glob("bench-mem-*")) and not list(tmp_path.rglob("agents"))
 
 

@@ -79,7 +79,6 @@ def _make_loop(llm, bus) -> AgentLoop:
         context_manager=ContextManager(),
         tool_registry=None,
         permission_evaluator=PermissionEvaluator(),
-        memory_loader=None,  # no memory block fires
     )
     return loop
 
@@ -89,7 +88,7 @@ async def test_loop_system_prompt_unchanged_for_default_sections(faithful_fake_l
     """Test D: a default-sections AgentLoop run yields messages[0]['content'] == cfg.role plus
     exactly the always-on deterministic-fact injections (date, working directory, narration nudge).
 
-    Native tool_call_mode (no non-native suffix) + memory_loader=None (no Phase-24 block) means the
+    Native tool_call_mode (no non-native suffix) + no memory slot (no memory section) means the
     only contributions to the system message are the assembled role (byte-identical to cfg.role —
     the role_sections inertness invariant) and the always-on injections. Asserting the full string
     still catches any other perturbation of the baseline prompt.
