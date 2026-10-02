@@ -136,16 +136,20 @@ gate-family rule above and stays registered if the plugin later fails.
 
 ### Machine-level-only settings
 
-Some settings say where the harness connects, which credential it uses or who may talk to it. A
-repository you cloned must not be able to point those somewhere else, so only your machine-level
-(global) config may set them. A project's value for one of them is ignored, the harness prints a
-warning naming the key and the file, and your global value stands. These are all of them:
+Some settings say where the harness connects, which credential it uses or who may talk to it, and
+one says whether the separation described under
+[Threat model: prompt injection](#threat-model-prompt-injection) is enforced at all. A repository you
+cloned must not be able to point those somewhere else or switch that separation off, so only your
+machine-level (global) config may set them. A project's value for one of them is ignored, the
+harness prints a warning naming the key and the file, and your global value stands. These are all
+of them:
 
 - `image.comfyui_url`
 - `image.workflow`
 - `dispatch.discord.token`
 - `dispatch.discord.allow`
 - `dispatch.discord.channels`
+- `org.enforce_capability_floor`
 - `permissions.ask.read_only_signatures`
 - `permissions.ask.dropped_commands`
 - `permissions.ask.wrapper_commands`
@@ -527,6 +531,10 @@ toolset combined with untrusted ingestion is rejected, and the check **fails clo
 (deny on doubt). Untrusted content moves between agents only as opaque handles
 carrying a sticky "untrusted" tag; its raw bytes resolve only inside an agent that
 holds no host-mutating tools.
+
+The separation is on by default. Only your machine-level config can turn it off
+(`org.enforce_capability_floor: false`); a project's value for that setting is ignored, with a
+startup warning naming the file (see [Machine-level-only settings](#machine-level-only-settings)).
 
 Which tools count as ingesting and which as host-mutating is read from each tool's own declaration,
 never from its name or from the plugin it came from. Every tool declares four things: what it

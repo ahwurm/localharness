@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 from localharness.agent.loop import AgentLoop
-from localharness.config.loader import ASK_GLOBAL_ONLY_FIELDS
+from localharness.config.loader import ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS
 from localharness.config.plugin_sections import global_only_paths
 from localharness.dispatch.config import DiscordSettings, env_fallback
 from localharness.plugins import api
@@ -432,12 +432,13 @@ _FILE_SUFFIXES = (".yaml", ".yml", ".md", ".py", ".json", ".env", ".toml", ".txt
 
 def machine_only_code_set(plugins: Iterable[type[Plugin]] | None = None) -> frozenset[str]:
     """Every setting only the machine-level (global) config may set, computed from code: each
-    bundled plugin's GLOBAL_ONLY fields, the `permissions.ask` keys a project may not set, and
+    bundled plugin's GLOBAL_ONLY fields, the `permissions.ask` keys a project may not set, the core
+    harness keys in HARNESS_GLOBAL_ONLY_FIELDS, and
     `<name>.enabled` for a plugin you install. (An AgentConfigModel may not mark GLOBAL_ONLY at all
     — the loader refuses such a plugin — so no `agent.` path can be machine-level only.)"""
     plugins = BUILTIN_PLUGINS if plugins is None else tuple(plugins)
     paths = {f"{P.manifest.name}.{p}" for P in plugins for p in global_only_paths(P.ConfigModel)}
-    paths |= {f"permissions.ask.{f}" for f in ASK_GLOBAL_ONLY_FIELDS}
+    paths |= {f"permissions.ask.{f}" for f in ASK_GLOBAL_ONLY_FIELDS} | HARNESS_GLOBAL_ONLY_FIELDS
     return frozenset(paths | {"<name>.enabled"})
 
 

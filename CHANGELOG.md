@@ -328,6 +328,12 @@ Migration.
   `start` prints one line naming both.
 - A misspelled core key, such as `provder:` for `provider:`, was reported as a
   removed plugin's leftover section. It now gets "did you mean `provider`?".
+- A project's own config could switch the capability floor off: a
+  `.localharness/config.yaml` (or `overrides.yaml`) in a repository setting
+  `org.enforce_capability_floor: false` turned off, for every session started
+  inside it, the rule that keeps a web-reading tool and a host-changing tool
+  out of one agent. Only your global config can set it now; a project's value
+  is ignored and `start` prints a warning naming the file.
 - `start --channel discord` waited forever when the Discord login failed (a
   token Discord rejects, the Message Content intent turned off, no gateway). It
   now exits with `Discord login failed — <reason>`, without the token. Tested
