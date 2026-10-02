@@ -2,7 +2,7 @@
 
 **Component:** `src/localharness/channels/`
 **Requirements:** CHAN-01, CHAN-02, CHAN-03
-**Status:** v1 (TerminalChannel only; Discord/Slack/webhook deferred to v2)
+**Status:** TerminalChannel and ACP in core; the phone app (`web` plugin) and Discord (`dispatch` plugin) ship as bundled channel plugins; Slack/webhook not built
 
 ---
 
@@ -10,7 +10,7 @@
 
 The channel system is LocalHarness's output and input delivery layer. It decouples how agent actions and observations are presented to the user from the agent loop itself.
 
-In v1, the only channel is `TerminalChannel` — Rich-formatted stdout with streaming token output and prompt_toolkit input. The channel is designed from day one for future adapters: the `ChannelAdapter` abstract base class defines the contract that Discord, Slack, webhook, and file adapters will implement without modifying the agent loop or orchestrator.
+The default channel is `TerminalChannel` — Rich-formatted stdout with streaming token output and prompt_toolkit input. The `ChannelAdapter` abstract base class is the contract every channel implements without modifying the agent loop or orchestrator: Discord does so through the bundled `dispatch` plugin (see "The dispatch plugin" below), the phone app through the bundled `web` plugin.
 
 Channels subscribe to events from the event bus. They never call agent loops or orchestrator methods directly.
 
@@ -654,29 +654,33 @@ async def submit_input(self, text: str) -> None:
 
 ---
 
-## Future Adapter Interface
+## The dispatch plugin (chat platforms; Discord today)
 
-The v2 Discord adapter will implement `ChannelAdapter` with:
+Discord is the first adapter of the bundled `dispatch` channel plugin (`src/localharness/dispatch/`; on by default; needs the `dispatch` install extra, `uv sync --extra dispatch`). `localharness start --channel discord` builds it through the plugin's `make_channel`; core names no chat platform.
 
-- `send_message`: `discord.WebhookClient.send()` to the agent's assigned subchannel
-- `send_streaming`: Buffered — Discord does not support streaming natively. Buffer tokens for 1s or 2000 chars, then send as a single edit to a "thinking..." placeholder message.
-- `send_tool_call` / `send_tool_result`: Formatted as Discord code blocks or embeds.
-- `read_input`: `discord.Client.on_message` filtered to the agent's subchannel, awaited via `asyncio.Event`.
-- `channel_id = "discord"`
+- **`DispatchChannel`** (`dispatch/channel.py`) is the platform-neutral core: the inbound queue that turns pushed messages into `read_input` results (each becomes a `UserMessage` with `channel="discord"`), the allow-list gate (user ids, and optionally conversation ids; the same user set gates reactions), the ack reaction when a message is taken off the queue, reply routing to the conversation being answered, chunking to the adapter's `message_limit` (2000 for Discord), the permission ask by reaction and the pending-decision notices, silence on tool calls and results, `send_error`, and stop.
+- **`ChatAdapter`** is the protocol a platform implements, and nothing more: `connect(on_message, on_reaction)`, `close()`, `send`, `edit`, `reply`, `react`, `send_file`, plus `platform`, `title` and `message_limit`. Inbound messages arrive normalised as `InboundMessage`.
+- **`DiscordAdapter`** (`dispatch/adapters/discord.py`) is the only module that imports `discord`. Adapters are listed by import string in `dispatch/adapters/__init__.py`; a second platform is one adapter file there, one line in that table and one name in the manifest's `channels`, with no edit outside `dispatch/` (a test drives a fixture platform through the real `start` this way).
 
-The Discord adapter will require its own config block:
+**Settings** (`dispatch/config.py`; listed by `components list` as `(plugin: dispatch)`):
 
 ```yaml
-# In org config, under channels.discord:
-channels:
+# global config.yaml or overrides.yaml only, except ack
+dispatch:
   discord:
-    bot_token: "${DISCORD_BOT_TOKEN}"   # from env var; never hardcoded
-    guild_id: "123456789"
-    category_id: "987654321"           # channel category for agent subchannels
-    orchestrator_channel_id: "111"     # where users talk to orchestrator
+    token: "…"            # machine-level only; never printed (shown as **********)
+    allow: ["123456789"]  # machine-level only; user ids allowed to talk to and answer the bot
+    channels: []          # machine-level only; conversation ids; empty = any the bot can see
+    ack: "✅"             # any layer; "" sends no ack
 ```
 
-The adapter architecture ensures no changes to the agent loop, orchestrator, or event bus are needed when Discord is added.
+`localharness plugins enable dispatch --set discord.token=… --set discord.allow=<your user id>` (or `components set dispatch.discord.<key> …`) writes them to the global `overrides.yaml`. A project's `dispatch.discord.token`, `dispatch.discord.allow` or `dispatch.discord.channels` is dropped with a warning and the global value stands, so a repository cannot point the bot at someone else or widen who may drive it. Ids must be digit strings. Start refuses to listen with no token or with an empty allow-list.
+
+**The env fallback (deprecated, removed in 0.17.0).** A field left at its default is filled from the old sources, per field, so the setting always wins: `LOCALHARNESS_DISCORD_TOKEN`, then `DISCORD_BOT_TOKEN`, then a `DISCORD_BOT_TOKEN=` line in `~/.claude/channels/discord/.env` for `token`; `LOCALHARNESS_DISCORD_ALLOW`, `LOCALHARNESS_DISCORD_CHANNELS` and `LOCALHARNESS_DISCORD_ACK` for the others. Each source that decides a field prints one deprecation line in the start banner and one `warn` row in `doctor` (not a failure) naming the setting to use instead. A test fails once the version reaches 0.17.0 while any of this code remains.
+
+**Attachments.** A typed artifact on a tool result (an image from the `image` plugin) is posted as a file to the conversation being answered. The file is read only from core's artifact folder for that plugin, and only if it is one regular, non-symlink file with an allowed image type. Files that users upload are kept as metadata (name, size, type) and are not passed to the model.
+
+**Not yet verified on a live server.** The test suite drives the channel against a fake `discord` module and never logs in to Discord. One settings section (`dispatch.discord.*`) feeds every adapter today; a second real platform needs its own section.
 
 A Slack adapter, webhook adapter (POST to URL on TaskComplete), and file adapter (write results to disk) follow the same pattern.
 

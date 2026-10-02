@@ -644,7 +644,7 @@ cli/validate_cmd.py    — imports config/loader.py
 | Tool execution | Sequential in loop | Parallel tool execution within one turn |
 | Audit logging | structlog JSONL | Rust PyO3 SHA-256 hash chain |
 | LLM abstraction | Thin openai client | LiteLLM if multi-provider routing needed |
-| Channel adapters | Terminal only | Discord + Slack via ChannelAdapter protocol |
+| Channel adapters | Terminal and ACP in core; the phone (`web` plugin) and Discord (`dispatch` plugin, the first adapter of its `DispatchChannel`) as bundled plugins | Slack and other chat platforms as further `dispatch` adapters |
 | Permissions | Deny patterns (auto mode) | bubblewrap sandbox + guardian subagent |
 
 ---

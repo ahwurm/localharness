@@ -10,7 +10,7 @@ This release adds a plugin system: one API, one loader and one trust model, for
 plugins you install and for plugins that ship with LocalHarness. The first
 features to ship as plugins are image generation, new in this release and
 off until you turn it on, and the phone app (`localharness web`), on by
-default. Memory now ships as a plugin too, on by default; Discord and autoresearch are still part of core. The plugin API that 0.15.0 documented is
+default. Memory and Discord now ship as plugins too, both on by default; autoresearch is still part of core. The plugin API that 0.15.0 documented is
 removed, so a plugin written for 0.15 no longer loads: see Removed and
 Migration.
 
@@ -22,8 +22,8 @@ Migration.
   `enable NAME [--set KEY=VALUE ...]` and `disable NAME` write an
   `overrides.yaml`, never your `config.yaml`, and take effect at the next
   `localharness start`. `--workspace` writes a project's `overrides.yaml`
-  instead; it is only for plugins that ship with LocalHarness (today: image, web
-  and memory).
+  instead; it is only for plugins that ship with LocalHarness (today: image, web,
+  memory and dispatch).
 - **Image generation, as a plugin (off by default).** The `image` plugin adds
   a `generate_image` tool, a `localharness generate-image` command and a
   `doctor` check for a ComfyUI server you run on your own machine. Turn it on
@@ -131,6 +131,31 @@ Migration.
   `doctor` checks each memory database (read-only) and that the embedding
   model is in the local cache, without loading it or using the network.
 
+- **Discord is the bundled `dispatch` plugin, on by default** (needs the
+  `dispatch` extra, `uv sync --extra dispatch`). `localharness start --channel
+  discord` behaves as before for the same messages: same reactions, same
+  2000-character replies, same permission prompts. It is built so another chat
+  platform can be added inside the plugin without changing the rest of
+  LocalHarness.
+- **Discord settings:** `dispatch.discord.token`, `dispatch.discord.allow` (the
+  user ids that may talk to the bot), `dispatch.discord.channels` (empty = any
+  channel the bot can see) and `dispatch.discord.ack` (the reaction added to a
+  message when the agent takes it, default ✅). Set them with
+  `localharness plugins enable dispatch --set discord.token=… --set
+  discord.allow=<your user id>` or `localharness components set
+  dispatch.discord.<key> …`. The token, the allow list and the channels are
+  machine-level only: a project's value is dropped with a warning. The ack may
+  be set per project. `components list` shows them as `(plugin: dispatch)`, and
+  `doctor` says whether Discord is configured.
+- **Pictures go to Discord.** When a tool produces an image (the `image`
+  plugin), the bot posts it as a file in the conversation it is answering.
+- **Plugin API additions** (all optional; `PLUGIN_API_VERSION` stays "1"):
+  `PluginManifest.channels` (the `--channel` names a channel plugin provides),
+  `SetupField.secret` (the setup answer is not echoed), a `"warn"` doctor
+  status (shown, never counted as a failure), the channel attributes
+  `bare_mode_command` and `start_banner`, and an optional `make_channel(name,
+  bus)` plugin method. See spec 09.
+
 ### Changed
 - `init` writes `memory: {enabled: false}` when you decline memory. `/memory`
   is hidden while memory is off. While memory is on, `doctor` reports a
@@ -194,10 +219,34 @@ Migration.
   the line for an unknown key under its `agent:` section, where it used to
   blame the agent's own file.
 
+- `start --channel discord` refuses, before the session starts, when the
+  dispatch plugin is off (``run `localharness plugins enable dispatch` ``) or
+  its extra is missing (naming `localharness[dispatch]`); before, a missing
+  extra failed only once the channel started. `plugins disable dispatch` is how
+  you turn Discord off. It never falls back to the terminal.
+- Discord's refusal texts name the settings keys first: `Discord bot token
+  missing — set dispatch.discord.token …` and `Discord allowlist empty — set
+  dispatch.discord.allow …`.
+- A Discord user id or channel id must be digits. A non-digit id in
+  `LOCALHARNESS_DISCORD_ALLOW` or `LOCALHARNESS_DISCORD_CHANNELS` is now refused
+  by name; before, it was accepted and never matched anyone.
+- Secret settings are never printed. `plugins enable --set`, `components set`
+  (its receipt, `--json` and audit event), `components list`/`get`, `plugins
+  info`, `doctor`, error messages and the setup prompt show `**********`.
+- `plugins enable NAME --set …` now says when the plugin's install extra is
+  missing, instead of only "takes effect on the next start".
+
 ### Deprecated
 - `org.memory_enabled` — use `memory.enabled`. Still honoured at every config
   layer until 1.0 (a layer's own `memory.enabled` wins), with one startup
   warning naming the files that set it.
+- The Discord environment variables `LOCALHARNESS_DISCORD_TOKEN`,
+  `LOCALHARNESS_DISCORD_ALLOW`, `LOCALHARNESS_DISCORD_CHANNELS` and
+  `LOCALHARNESS_DISCORD_ACK`, plus `DISCORD_BOT_TOKEN` and the file
+  `~/.claude/channels/discord/.env` — use the `dispatch.discord.*` settings.
+  Each still fills a setting you have not set, one setting at a time, so you
+  can move one key at a time. Each one used prints a warning at start and in
+  `doctor` (not a failure). They stop working in 0.17.0.
 
 ### Removed
 - **0.15.0's plugin API.** LocalHarness no longer loads `localharness.tools`
@@ -210,6 +259,10 @@ Migration.
   `post_tool` hooks remain.
 - `components list` no longer has a `hooks.<name>.config` row for each loaded
   hook plugin. The `org.hooks` setting is still accepted.
+- The Python import paths `localharness.channels.DiscordChannel` and
+  `localharness.channels.discord_config_from_env` (and the module
+  `localharness.channels.discord`) are gone, with no alias. The channel now
+  lives in the dispatch plugin; settings and behaviour are unchanged.
 
 ### Fixed
 - `localharness web` without the `web` extra prints its install hint again (it
@@ -263,10 +316,15 @@ Migration.
   agent file sets no mode. If it is `unattended`, sessions will stop asking:
   check it before upgrading. A workspace's org mode may only tighten the
   global one.
+- If you start Discord from the `LOCALHARNESS_DISCORD_*` variables, move them
+  to settings before 0.17.0: `localharness components set
+  dispatch.discord.token <token>`, then the same for `allow`, `channels` and
+  `ack` if you set them, then unset the variables. `localharness doctor` lists
+  each variable still in use.
 
 ### Known limitations (named, not hidden)
-- Image generation, the phone app and memory ship as plugins; Discord and
-  autoresearch are still part of core. `/memory` and `localharness memory`
+- Image generation, the phone app, memory and Discord ship as plugins;
+  autoresearch is still part of core. `/memory` and `localharness memory`
   are the memory plugin's own commands now; with memory off neither exists.
   The bench builds memory through the plugin.
 - A subagent's cruncher run asks the memory plugin for a write handle, and
@@ -293,6 +351,19 @@ Migration.
   `doctor` report the plugin as failed.
 - `localharness doctor` does not show which plugin tools the capability floor
   keeps from the root agent; the start banner names them.
+
+- The Discord plugin is tested offline against a stand-in for the Discord
+  library. It has not yet been run against a live Discord server: logging in,
+  the reactions and a real file upload are unverified.
+- Files that people upload to the Discord bot are not passed to the model; the
+  turn sees the message text only.
+- The dispatch plugin has one settings section, `dispatch.discord.*`. A second
+  chat platform added to it today would share Discord's token, allow list and
+  channels.
+- `localharness start --help` still lists `discord` when the dispatch plugin is
+  off; `start --channel discord` then refuses and says how to turn it on.
+- The Discord token is stored as plain text in the global `overrides.yaml`
+  (mode 600 when LocalHarness writes it).
 
 ## [0.15.1] — 2026-10-01
 

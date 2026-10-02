@@ -28,7 +28,7 @@ The CLI does not contain business logic. It parses arguments, sets up the event 
 `src/localharness/cli/app.py` builds one Typer app and registers fifteen visible top-level
 commands — eight flat commands and seven subcommand groups. `localharness --help` prints this
 list, then the commands of each plugin that is on, read from its manifest (the bundled ones are
-`generate-image`, `memory` and `web`; see spec 09, "Commands, slash commands and doctor"). A sixteenth, `ask-rate`, is registered `hidden=True` and does not appear in it; it
+`generate-image`, `memory` and `web`; the bundled `dispatch` plugin adds no command, since Discord is a mode of `start --channel discord`; see spec 09, "Commands, slash commands and doctor"). A sixteenth, `ask-rate`, is registered `hidden=True` and does not appear in it; it
 reports permission prompts per session over a trace corpus and is documented by its own `--help`.
 
 | Command | What it does |
@@ -870,6 +870,10 @@ set org.log_level = 'debug' (was: 'info')
   note: this is a MACHINE-WIDE setting. It applies in every project, including this one.
         A per-project value goes in /home/you/proj/.localharness/config.yaml.
 ```
+
+A secret setting (a `SecretStr` such as `dispatch.discord.token`) is shown as `**********` in the
+`set` receipt and its `--json`, in `list` and `get`, in error messages and in the `ComponentMutated`
+audit event; the file holds the real value.
 
 All three subcommands take `--config-dir`, which — as everywhere else — replaces the config
 directory outright and switches workspace discovery off with it.

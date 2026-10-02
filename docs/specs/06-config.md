@@ -353,7 +353,9 @@ where the table says — the setting moves reads only. `05-memory.md` §11 cover
 
 ### Environment variables
 
-**There is no environment override for config values.** Nothing in `config/` reads the environment
+**There is no environment override for config values.** (One deprecated exception, outside `config/`:
+the `dispatch` plugin still fills its Discord settings from the old `LOCALHARNESS_DISCORD_*`
+variables until 0.17.0; see the dispatch plugin fields below.) Nothing in `config/` reads the environment
 except `config/paths.py`, and what it reads is where the configuration lives, not what is in it. Two
 variables do that:
 
@@ -1312,6 +1314,21 @@ list — every field is declared there with its own description.
 store derives all three paths from the agent's own directory (`memory.db`, `history.jsonl`,
 `MEMORY.md` under `<config-dir>/agents/<name>/`, or under the workspace when one applies). Setting
 them moves nothing. They are declarative leftovers, kept only so an older config still loads.
+
+#### dispatch plugin fields (global `config.yaml` / `overrides.yaml`)
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `dispatch.enabled` | bool | `true` | — | The bundled `dispatch` plugin (chat platforms; Discord today). False makes `start --channel discord` refuse, naming the fix |
+| `dispatch.discord.token` | secret string | `""` | machine-level only | Discord bot token. Shown as `**********` everywhere; a project's value is dropped with a warning |
+| `dispatch.discord.allow` | list[string] | `[]` | machine-level only; digit ids | User ids that may talk to the bot and answer its prompts. Empty = start refuses to listen |
+| `dispatch.discord.channels` | list[string] | `[]` | machine-level only; digit ids | Channel ids the bot listens in; empty = any channel the bot can see |
+| `dispatch.discord.ack` | string | `"✅"` | — | Reaction added to a message when the agent takes it; `""` adds none. Any layer may set it |
+
+Until 0.17.0, a `dispatch.discord.*` field left at its default is filled from the deprecated
+`LOCALHARNESS_DISCORD_*` variables (and, for the token, `DISCORD_BOT_TOKEN` or
+`~/.claude/channels/discord/.env`), with one warning per variable used; see spec 11, "The dispatch
+plugin".
 
 **The permission gate keys.** `permissions.mode` picks one of five modes (PRD §3.4). `auto`, the
 default since v0.14.1, asks once whether you trust this workspace — only for a folder this machine

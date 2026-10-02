@@ -656,6 +656,22 @@ Added with the web plugin:
 - **`start --channel` accepts core channels and bundled channel plugins only**; an installed
   third-party plugin cannot add a channel in v0.16 — a channel sees every event, tool results
   included, and can inject user messages.
+- **Discord is the bundled `dispatch` plugin, and who may drive it is a machine-level decision.**
+  `dispatch.discord.token`, `dispatch.discord.allow` (the user ids that may send turns and answer
+  permission prompts) and `dispatch.discord.channels` are read from the global config layers only;
+  a project's value is dropped with a warning, so a cloned repository cannot point the bot at a
+  different token or widen who may drive the agent. An empty allow-list refuses to start rather
+  than listen to everyone. The token is stored as plain text in the global `overrides.yaml`
+  (written mode 600 by `plugins enable` and `components set`; a hand-written `config.yaml` keeps
+  whatever mode you give it). It is never printed: `plugins enable`, `components set`/`list`/`get`,
+  `plugins info`, `doctor`, the start banner, the setup prompt, error messages and the
+  `components set` audit event show `**********`. Until 0.17.0 the old `LOCALHARNESS_DISCORD_*`
+  variables, `DISCORD_BOT_TOKEN` and `~/.claude/channels/discord/.env` still fill an unset field,
+  with a deprecation warning. Files that users upload are kept as metadata only and are not passed
+  to the model; outbound files are read only from core's artifact folder. Limits: one settings
+  section, `dispatch.discord.*`, feeds every dispatch adapter today (a second platform would share
+  Discord's token and allow-list until it gets its own section), and this plugin build has not yet
+  been verified against a live Discord server.
 
 **Two live sessions on one agent are warned about, not prevented.** `history.jsonl` and
 `compact.md` take unlocked appends, so a terminal session and a web session on the same
