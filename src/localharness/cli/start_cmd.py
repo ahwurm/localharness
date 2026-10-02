@@ -524,8 +524,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.config.paths import global_config_dir, resolve_config_dir, resolve_runtime_path
     from localharness.core.bus import EventBus
     from localharness.core.agent_dir import _migrate_legacy_root_agent_dir
-    from localharness.memory.sqlite import MemoryStore
-    from localharness.plugins.api import PluginPaths
+    from localharness.plugins.api import PluginPaths, SessionInfo
     from localharness.plugins.lifecycle import start_plugins, stop_plugins
     from localharness.plugins.slot import MemorySlot
     from localharness.plugins.resolve import resolve
@@ -1053,180 +1052,24 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         warnings.append(f"hooks: {exc}")
         hook_system = None
 
-    # --- 4. Memory store (soft -- degrade to None) ---
-    # org.memory_enabled=False (#151) is an explicit OFF, not a degradation: None rides the
-    # exact paths a failed open does — no tools register, no memory context injects, no
-    # consolidation, and every subagent inherits the None. The org guardrails are core's, not
-    # memory's (SAFE-04): they still reach the prompt — see AgentLoop's guardrails_path below.
-    memory_store: MemoryStore | None = None
-    if not harness.org.memory_enabled:
-        logging.getLogger(__name__).info(
-            "memory disabled by config (org.memory_enabled: false) — no store, no memory tools"
-        )
-    else:
-        try:
-            memory_store = MemoryStore(
-                agent_id=agent_name_str,
-                division_id=agent_config.division or "default",
-                org_id="default",
-                # Agent state (memory.db / MEMORY.md / history.jsonl) follows the work; DIVISION.md
-                # never does — the safety voice is the org's, and a workspace must not be able to
-                # rewrite or blank it. That invariant is why these are two separate inputs: the
-                # safety context always reads from the global layer, whatever state_dir points at.
-                # (GUARDRAILS.md is read by core, not here — see AgentLoop's guardrails_path below.)
-                base_dir=str(state_dir),
-                global_base_dir=str(cfg_path),
-                bus=bus,
-            )
-            await memory_store.open()
-        except Exception as exc:
-            warnings.append(f"memory: {exc} (in-memory mode)")
-            memory_store = None
-
-    # v0.13 MEMS-02: scope-aware recall. The router owns the READ side; every write path below
-    # keeps `memory_store` itself, so `recall_scope` can never redirect a write (that is what
-    # `/memory promote` is for). Bound BEFORE the resource-owning window so its `finally` can
-    # always close what this opened.
-    recall_router = None
-    if memory_store is not None:
-        from localharness.memory.router import RecallRouter
-        _global_twin = None
-        if workspace is not None:
-            # CONSTRUCTED, NOT OPENED — MemoryStore.__init__ only derives paths; open() creates
-            # and migrates a database, and a default-scope session must not create anything under
-            # the global agents tree (MEMS-03). The router opens this lazily, only if the knob
-            # asks, and then as a NON-OWNER (`owner_init=False`: no legacy adoption, no tag
-            # seeding) whose staged counters and activation traces it never writes (v0.13 B1).
-            # No `bus=`: a bus subscription would let auto-diary WRITE into the global store.
-            # Gated on `workspace is not None`, NOT on recall_scope's value: with no workspace,
-            # `state_dir == cfg_path` and a second handle would be a second aiosqlite connection
-            # to the SAME file.
-            _global_twin = MemoryStore(
-                agent_id=agent_name_str,
-                division_id=agent_config.division or "default",
-                org_id="default",
-                base_dir=str(cfg_path),
-                global_base_dir=str(cfg_path),
-            )
-        recall_router = RecallRouter(
-            memory_store,
-            _global_twin,
-            scope=getattr(agent_config.memory, "recall_scope", "workspace"),
-        )
-
-    # The model as the similarity engine (memory spec role 2): ONE lazy-loading engine
-    # shared by the memory tools and the dreaming pass. Construction is free (the model
-    # loads on first use); an unusable engine fails LOUDLY at the call site — there is
-    # deliberately no fallback ranking behind it.
-    resonance_engine = None
-    if memory_store is not None:
-        from localharness.memory.resonance import ResonanceEngine
-        resonance_engine = ResonanceEngine(
-            getattr(agent_config.memory, "embedding_model", "Qwen/Qwen3-Embedding-0.6B")
-        )
-
     # --- Resource-owning window (#43) ---
-    # Everything constructed AFTER the store opens must be torn down by the finally below. A hard
-    # failure in this window (e.g. the TokenCounter fail-loud) otherwise skips cleanup and leaks
-    # aiosqlite's NON-DAEMON worker thread — hanging interpreter shutdown forever. Pre-bind every
-    # component the finally inspects so an early failure can't UnboundLocalError past the close.
-    session_acc = None
-    consolidation_scheduler = None
+    # Everything constructed from here on must be torn down by the finally below. A hard failure in
+    # this window (e.g. the TokenCounter fail-loud) otherwise skips cleanup — and a plugin left
+    # running (memory's aiosqlite NON-DAEMON worker thread) hangs interpreter shutdown forever.
+    # Pre-bind every component the finally inspects so an early failure can't UnboundLocalError
+    # past the close.
     mcp_manager = None
     plugin_resolution = None
     plugin_result = None
-    _session_started = False
+    session_info = None
     _exit_reason = "complete"
     try:
-        # SESS-02: open the sessions row for this sitting (soft — a session-row failure must
-        # not cost the whole memory subsystem). All three args are already-resolved locals.
-        _session_started = False
-        if memory_store is not None:
-            try:
-                await memory_store.create_session(
-                    sitting_id,
-                    budget=agent_config.permissions.budget.model_dump(),
-                    model=resolved_model,
-                    context_tokens_available=_cfg_window,
-                )
-                _session_started = True
-            except Exception as exc:
-                warnings.append(f"session-start: {exc}")
-
-        # SESS-02/05: sitting-scoped counters feeding the payload-first close-out summary
-        # (zero model calls — derived from bus signals the gate already composes payload-first).
-        # Same agent_id-filtered bus seam as the write gate; closed before the summary reads.
-        session_acc = None
-        if memory_store is not None:
-            try:
-                from localharness.cli.session_accumulator import SessionAccumulator
-                session_acc = SessionAccumulator(bus, agent_name_str)
-                await session_acc.open()
-            except Exception as exc:
-                warnings.append(f"session-accumulator: {exc}")
-
-        # Idle-time dreaming: session-start staleness check + in-session idle timer,
-        # cooperatively cancelled by any user turn. The pass digests the event streams
-        # through the resonance engine, binds/names groups via the bridged LLM (the
-        # SINGLE cancellable + char-bounded idle path), settles the bet ledger, and —
-        # behind its own default-OFF gate — archives what no longer resonates. The
-        # try/except soft-degrades a wiring fault to no background memory work.
-        consolidation_scheduler = None
-        _cons_cfg = getattr(agent_config.memory, "consolidation", None)
-        if memory_store is not None and _cons_cfg is not None and _cons_cfg.enabled:
-            try:
-                from localharness.memory.consolidation import ConsolidationScheduler
-                from localharness.provider.idle_llm import LLMTextAdapter
-                consolidation_scheduler = ConsolidationScheduler(
-                    memory_store, bus, agent_name_str, _cons_cfg,
-                    # The model as the similarity engine: dreaming digests the event
-                    # streams through the resonance engine's space; the bridged LLM
-                    # names the groups it binds (both budget-capped + cancellable).
-                    engine=resonance_engine, llm=LLMTextAdapter(llm),
-                    # The forgetting half rides the same idle pass, behind its own
-                    # default-OFF gate (agent.memory.archival.enabled).
-                    archival=getattr(agent_config.memory, "archival", None),
-                )
-                await consolidation_scheduler.start()
-            except Exception as exc:
-                warnings.append(f"memory consolidation: {exc}")
-                consolidation_scheduler = None
-
-        # Queryable-handle tools: memory_search/memory_get (full fact bodies on demand) and
-        # tool_result_get (restore evicted tool-result bodies). The ContentStore is shared with
-        # the ContextManager below so eviction-writes and restore-reads hit the same map.
+        # Queryable-handle tool: tool_result_get (restore evicted tool-result bodies). The
+        # ContentStore is shared with the ContextManager below so eviction-writes and restore-reads
+        # hit the same map. The memory tools are the memory plugin's (step 5).
         from localharness.agent.context import ContentStore
         eviction_store = ContentStore()
         try:
-            if memory_store is not None:
-                # ALL memory tools register whenever a store exists (critic M5): the
-                # inject_into_context flag gates INJECTION, not tool availability —
-                # otherwise injection-off produces write-only memory (remember succeeds,
-                # nothing can ever read it back).
-                from localharness.provider.idle_llm import LLMTextAdapter
-                from localharness.tools.builtin.memory_tools import (
-                    MemoryGetTool,
-                    MemoryRememberTool,
-                    MemorySearchTool,
-                )
-                # Both READ tools take the router, so the scope knob applies to on-demand recall
-                # exactly as it applies to injection (criterion 4 — one object, not per-tool
-                # checks).
-                await tool_registry.register(
-                    MemorySearchTool(recall_router, engine=resonance_engine), scope="global"
-                )
-                await tool_registry.register(MemoryGetTool(recall_router), scope="global")
-                # remember() WRITES — it keeps the session's own store whatever recall_scope says.
-                # The engine embeds the fact at write time; the bridged LLM performs the
-                # same-claim re-sighting look (cancellable, budget-capped).
-                await tool_registry.register(
-                    MemoryRememberTool(
-                        memory_store,
-                        llm=LLMTextAdapter(llm) if llm is not None else None,
-                        engine=resonance_engine,
-                    ),
-                    scope="global",
-                )
             if agent_config.context.tool_result_eviction:
                 from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
                 await tool_registry.register(ToolResultGetTool(eviction_store), scope="global")
@@ -1242,8 +1085,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # --- 5. Plugins: build the plan, run the lifecycle (soft: never stops the harness) ---
         # The plan is pure (BUILTIN_PLUGINS + discovered METADATA + this config); only ENABLED
         # third-party plugins are imported. Each stage is contained per plugin (PAPI-11): a failure
-        # is named in the summary line's warnings and the session goes on. Memory is still wired by
-        # step 4 above this phase; the slot is empty in every session until memory converts.
+        # is named in the summary line's warnings and the session goes on. Plugins, memory included
+        # (it opens its store, session row, accumulator and dreaming in its start() — each soft piece
+        # fails alone; a store that will not open leaves the slot empty).
         # #150 phase 38 criterion 3: plugins follow the SESSION's config dir — resolve() discovers
         # from `loader.global_config_dir` (cfg_path, never the workspace), after the same loader
         # loaded this agent (its `agent.<name>` plugin sections are keyed on the declared name).
@@ -1251,10 +1095,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             plugin_resolution = resolve(loader, agent_name=agent_config.name)
             warnings.extend(plugin_resolution.warnings)
             warnings.extend(_start_problems(plugin_resolution))
+            session_info = SessionInfo(
+                agent_id=agent_name_str, division_id=agent_config.division or "default",
+                sitting_id=sitting_id, model=resolved_model, context_tokens=_cfg_window,
+                budget=agent_config.permissions.budget.model_dump(),
+            )
             plugin_result = await start_plugins(
                 plugin_resolution, bus=bus, registry=tool_registry, hooks=hook_system, llm=llm,
                 paths=PluginPaths(global_config_dir=cfg_path, workspace=workspace,
                                   state_dir=state_dir),
+                session=session_info,
             )
             warnings.extend(plugin_result.warnings)
             warnings.extend(set_plugin_rows(plugin_result.slash_rows))
@@ -1262,19 +1112,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         except Exception as exc:  # noqa: BLE001 — the substrate itself failing is still not fatal
             warnings.append(f"plugins: {exc}")
 
-        # D3 — the transitional memory slot occupant (Phase 47 deletes this block): the legacy store
-        # is browsed through the slot so the phone never holds a store; context()/bind_subagent()
-        # stay the occupant's empty defaults, so the prompt and the cruncher are unchanged. A real
-        # memory plugin already in the slot wins. One slot object reaches the loop AND the channel.
+        # One slot object reaches the loop AND the channel; the memory plugin occupies it when it
+        # started, and it is empty with memory off or when memory failed to start.
         memory_slot = plugin_result.slot if plugin_result is not None else MemorySlot()
-        if memory_store is not None and not memory_slot.occupied:
-            from localharness.memory.browse import StoreBrowse
-            memory_slot.seat(StoreBrowse(
-                memory_store, recall_router,
-                workspace_identity=str(workspace.resolve().parent) if workspace is not None else ""),
-                name="memory")
-        # G5: an empty slot drops /memory from every surface; read AFTER the shim seats, so a
-        # memory-on session keeps it.
+        # G5: an empty slot drops /memory from every surface; a memory-on session keeps it.
         set_memory_available(memory_slot.occupied)
 
         # --- Capability floor (P-A) for the ROOT agent, read off DECLARATIONS (SAFE-02) ---
@@ -1529,8 +1370,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             tool_registry=tool_registry,
             permission_evaluator=perm_eval,
             gate=gate,
-            memory_loader=memory_store,
-            recall_router=recall_router,
             kill_file_path=kill_file_path,
             compact_md_path=compact_md_path,
             session_id=sitting_id,  # SESS-01: the whole sitting shares this id
@@ -1540,8 +1379,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # "default" is the org id the store is built with. A workspace can neither rewrite nor
             # blank the org's safety voice.
             guardrails_path=cfg_path / "orgs" / "default" / "GUARDRAILS.md",
-            # PAPI-04: the memory slot — the lifecycle's, with the transitional browse occupant
-            # seated above (D3); the legacy store above still feeds the prompt.
+            # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
+            # prompt's memory section.
             memory_slot=memory_slot,
         )
         if acp_channel is not None:
@@ -1652,7 +1491,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                     console.print("  " + entity("tool", f"MCP: {srv}"), soft_wrap=True)
             tool_count = len(tool_registry._tools["global"]) + len(tool_registry._tools["mcp"])
             console.print("  " + entity("tool", f"Tools: {tool_count} total"))
-            if memory_store:
+            if memory_slot.occupied:
                 # escape(): the agent's state dir is derived from the config dir, which is a path
                 # the user chose. Unescaped it crashed the banner AFTER the session was wired.
                 console.print("  " + entity("memory", f"Memory: {agent_dir / 'memory.db'} (WAL)"), soft_wrap=True)
@@ -1745,6 +1584,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             )
             return
 
+        _mem_store, _mem_router = memory_slot.legacy_handles()  # transitional: /memory reaches the store until it becomes the memory plugin's own command
         repl = OrchestratorREPL(
             orchestrator=orchestrator,
             agent_loop=agent_loop,
@@ -1757,10 +1597,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             harness_config=harness,
             on_agent_deployed=_register_deployed_agent,
             gate=gate,  # what /mode switches; the same object the loop and subagents hold
-            memory_store=memory_store,
-            # 42-04: `/memory promote` borrows the router's global handle. The SAME router the
-            # loop and the read tools got — one owner, one connection, closed by the finally below.
-            recall_router=recall_router,
+            # 42-04: `/memory promote` borrows the router's global handle — the SAME router the
+            # plugin's read tools got; the plugin owns and closes both.
+            memory_store=_mem_store,
+            recall_router=_mem_router,
         )
 
         await repl.run()
@@ -1771,8 +1611,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _exit_reason = "error"
         raise  # finally still records the session; behavior for callers unchanged
     finally:
-        # --- Ordered shutdown: MCP -> plugins (reverse) -> Dreaming -> end_session -> MemoryStore
-        # -> LLMClient --- (EventBus handles its own file closing on GC/process exit)
+        # --- Ordered shutdown: MCP -> plugins (reverse start order; memory's stop() runs dreaming ->
+        # accumulator -> end_session -> router -> store) -> LLMClient LAST (#154) --- (EventBus
+        # handles its own file closing on GC/process exit)
         if mcp_manager:
             try:
                 await mcp_manager.shutdown()
@@ -1780,6 +1621,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # Swallow — a teardown failure must not replace the real exit reason — but never
                 # silently: an MCP server that refuses to die is a diagnosable thing.
                 log.debug("MCP shutdown failed: %s", exc)
+        if session_info is not None:
+            session_info.exit_reason = _exit_reason  # memory's stop() records it on the session row
         if plugin_result is not None:
             try:
                 await stop_plugins(plugin_result)  # reverse start order, each stop contained
@@ -1787,48 +1630,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 log.debug("plugin shutdown failed: %s", exc)
             set_plugin_rows(())  # the rows are process-wide: they leave with the session
         set_memory_available(True)  # process-wide too: the next session decides afresh
-        if consolidation_scheduler:
-            try:
-                await consolidation_scheduler.stop()
-            except Exception:
-                pass
-        # end_session needs the store OPEN (it writes) and dreaming STOPPED (no in-flight
-        # pass mutating facts mid-read) — hence here, before the store closes.
-        if session_acc is not None:
-            try:
-                await session_acc.close()  # stop counting before the summary reads
-            except Exception:
-                pass
-        if memory_store is not None and _session_started:
-            try:
-                from localharness.cli.session_accumulator import derive_session_summary
-                await memory_store.end_session(
-                    sitting_id,
-                    exit_reason=_exit_reason,
-                    summary=derive_session_summary(session_acc),
-                    turn_count=session_acc.turn_count if session_acc else 0,
-                    action_count=session_acc.action_count if session_acc else 0,
-                    tokens_in=session_acc.tokens_in if session_acc else 0,
-                    tokens_out=session_acc.tokens_out if session_acc else 0,
-                )
-            except Exception as exc:
-                # Never silent (2026-07-03 live-test rule): a skipped close-out is the
-                # amnesia class. Match the surrounding swallow but leave a one-line trace.
-                err_console.print(f"[yellow]⚠ session close-out skipped: {exc}[/yellow]")
-        # The router's global handle (workspace sessions that opted into global/both recall) —
-        # closed before the primary, same reason every close above is ordered: aiosqlite's worker
-        # thread is NON-DAEMON and a leaked handle hangs interpreter shutdown (#43). Closes ONLY
-        # what the router itself opened; the primary belongs to this function.
-        if recall_router is not None:
-            try:
-                await recall_router.close()
-            except Exception:
-                pass
-        if memory_store:
-            try:
-                await memory_store.close()
-            except Exception:
-                pass
         # LAST (#154): the LLM client's httpx pool outlives every consumer that could still issue
         # a request through it — the REPL and its agents (repl.run() has returned), consolidation,
         # the gates — and the close-out summary above is pure. Closing it earlier would risk

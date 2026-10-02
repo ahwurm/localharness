@@ -21,7 +21,7 @@ import yaml
 from pydantic import ValidationError
 
 from localharness.config.loader import ConfigLoader
-from localharness.config.models import AgentConfig, MemoryConfig
+from localharness.memory.config import MemoryConfig
 from localharness.registry.catalogue import build_catalogue
 from localharness.registry.paths import walk_model_fields
 
@@ -45,8 +45,10 @@ def config_dir(tmp_path: Path) -> Path:
 # ------------------------------------------------------------------ #
 def test_recall_scope_defaults_to_workspace() -> None:
     assert MemoryConfig().recall_scope == "workspace"
-    # ...and through the agent object the loop actually reads (`_mem_cfg`).
-    assert AgentConfig(name="a", role="r").memory.recall_scope == "workspace"
+    # ...and through the settings object the memory plugin is actually handed (its AgentConfigModel,
+    # validated empty when an agent sets no `memory:` section).
+    from localharness.memory.plugin import MemoryPlugin
+    assert MemoryPlugin.AgentConfigModel.model_validate({}).recall_scope == "workspace"
 
 
 # ------------------------------------------------------------------ #
@@ -105,12 +107,17 @@ def test_agent_yaml_without_memory_block_recalls_workspace(config_dir: Path) -> 
 #    is cheaper than discovering later that the leaf was skipped.
 # ------------------------------------------------------------------ #
 def test_recall_scope_enumerates_as_a_components_axis() -> None:
-    paths = {path for path, _ann in walk_model_fields(AgentConfig, prefix="agent")}
+    # agent.memory.* is the memory plugin's AgentConfigModel now, enumerated under its name.
+    from localharness.memory.plugin import MemoryPlugin
+    from localharness.registry.catalogue import PluginRows
+    paths = {path for path, _ann in walk_model_fields(MemoryPlugin.AgentConfigModel,
+                                                      prefix="agent.memory")}
     assert "agent.memory.recall_scope" in paths
 
-    # ...and it reaches the catalogue `components set` actually reads, with its
-    # default carried (cfg=None still enumerates the agent surfaces — REG-04).
-    entries = build_catalogue(None, overlays={})
+    # ...and it reaches the catalogue `components set` actually reads (with the plugin's rows, as
+    # `components list` builds it), its default carried.
+    rows = PluginRows("memory", True, True, None, None, MemoryConfig, MemoryConfig())
+    entries = build_catalogue(None, overlays={}, plugins=(rows,))
     entry = entries["agent.memory.recall_scope"]
     assert entry.default_value == "workspace"
 

@@ -168,6 +168,15 @@ def test_the_dead_hooks_source_is_gone(components_home):
     assert SURFACE_FAMILIES["hook_config"] == (r"^org\.hooks$",)
 
 
+def _memory_plugin_rows():
+    """The memory plugin's catalogue rows, as `components list` gets them from the resolver: its
+    `memory.enabled` switch and the `agent.memory.*` leaves of its AgentConfigModel."""
+    from localharness.memory.config import MemoryConfig
+    from localharness.registry.catalogue import PluginRows
+
+    return PluginRows("memory", True, True, None, None, MemoryConfig, MemoryConfig())
+
+
 def test_agent_cfg_drives_agent_star_current_value(components_home):
     """WARNING-2: agent.* current_value must reflect the LIVE AgentConfig, not field defaults.
 
@@ -210,7 +219,8 @@ def test_self_check_leaves_enumerate(components_home):
     from localharness.registry.catalogue import build_catalogue
 
     cfg = _make_minimal_harness_cfg()
-    entries = build_catalogue(cfg, overlays={}, agent_cfg=AgentConfig(name="x", role="y"))
+    entries = build_catalogue(cfg, overlays={}, agent_cfg=AgentConfig(name="x", role="y"),
+                              plugins=(_memory_plugin_rows(),))
 
     assert "agent.self_check.enabled" in entries
     assert "agent.self_check.max_passes" in entries
@@ -271,14 +281,16 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 179, (
-        "catalogue should be 179 entries: the 223-entry v0.14 ledger minus the resonance "
+    assert len(entries) == 180, (
+        "catalogue should be 180 entries: the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
         "knobs — chapters/mining/tags/micro-pass/decay/cap machinery deleted with their "
         "mechanisms) plus agent.memory.embedding_model x1 "
         "(the subject-family resonance space is owner-addressable) "
-        "plus org.memory_enabled x1 (#151: the memory master switch is owner-addressable). "
+        "plus org.memory_enabled x1 (#151: the memory master switch is owner-addressable) "
+        "plus memory.enabled x1 (the memory plugin's own switch; the agent.memory.* rows are "
+        "the plugin's now, so this catalogue is built with its rows). "
         f"got {len(entries)}"
     )
 
@@ -331,7 +343,8 @@ def test_role_sections_leaves_enumerate(components_home):
     from localharness.registry.catalogue import build_catalogue
 
     cfg = _make_minimal_harness_cfg()
-    entries = build_catalogue(cfg, overlays={}, agent_cfg=AgentConfig(name="x", role="y"))
+    entries = build_catalogue(cfg, overlays={}, agent_cfg=AgentConfig(name="x", role="y"),
+                              plugins=(_memory_plugin_rows(),))
 
     leaves = [f"agent.role_sections.{s}" for s in ("identity", "tool_use", "stopping", "output")]
     missing = [leaf for leaf in leaves if leaf not in entries]
@@ -360,14 +373,16 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 179, (
-        "catalogue should be 179 entries: the 223-entry v0.14 ledger minus the resonance "
+    assert len(entries) == 180, (
+        "catalogue should be 180 entries: the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
         "knobs — chapters/mining/tags/micro-pass/decay/cap machinery deleted with their "
         "mechanisms) plus agent.memory.embedding_model x1 "
         "(the subject-family resonance space is owner-addressable) "
-        "plus org.memory_enabled x1 (#151: the memory master switch is owner-addressable). "
+        "plus org.memory_enabled x1 (#151: the memory master switch is owner-addressable) "
+        "plus memory.enabled x1 (the memory plugin's own switch; the agent.memory.* rows are "
+        "the plugin's now, so this catalogue is built with its rows). "
         f"got {len(entries)}"
     )
 

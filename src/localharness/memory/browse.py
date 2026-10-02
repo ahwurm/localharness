@@ -1,16 +1,14 @@
-"""The memory slot's transitional occupant (ROADMAP D3): browse() over this session's MemoryStore.
+"""StoreBrowse — the memory plugin's browse API over its store (MemoryBrowse).
 
-Phase 46 seats it from start_cmd's legacy memory block so the phone's memory screen reaches memory
-only through the slot; context() and bind_subagent() stay the inherited empty ones (the legacy
-memory path still feeds the prompt and the cruncher). Phase 47's memory plugin replaces it and
-deletes the seating line. It is a plain object, not a bundled plugin: no manifest, never loaded."""
+MemoryPlugin.browse() returns one, built over the session's MemoryStore and RecallRouter; the phone's
+memory screen and /memory reach it only through core's memory slot. A plain object, not a plugin."""
 from __future__ import annotations
 
 import time
 from typing import Any
 
 from localharness.memory.sqlite import USER_EDIT_PROVENANCE_PREFIX, FactQuery
-from localharness.plugins.api import BrowseQuery, MemorySlotPlugin
+from localharness.plugins.api import BrowseQuery
 
 
 def fact_row(f: Any) -> dict[str, Any]:
@@ -20,15 +18,12 @@ def fact_row(f: Any) -> dict[str, Any]:
             "tags": list(f.tags or []), "updated_at": f.updated_at, "provenance": f.provenance}
 
 
-class StoreBrowse(MemorySlotPlugin):
-    """the transitional memory slot occupant: browse() over the session's MemoryStore"""
+class StoreBrowse:
+    """the memory plugin's browse API over its store (MemoryBrowse)"""
 
     def __init__(self, store: Any, router: Any = None, *, workspace_identity: str = "") -> None:
         # promote's global target is the router's one global handle — exactly what the REPL passes
         self._store, self._router, self._identity = store, router, workspace_identity
-
-    def browse(self) -> StoreBrowse:
-        return self
 
     async def search(self, query: BrowseQuery) -> list[dict[str, Any]]:
         facts = await self._store.query_facts(FactQuery(

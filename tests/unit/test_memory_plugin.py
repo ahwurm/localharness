@@ -8,7 +8,7 @@ import logging
 import pytest
 
 from localharness.cli.session_accumulator import SessionAccumulator
-from localharness.config.models import MemoryConfig
+from localharness.memory.config import MemoryConfig
 from localharness.core.bus import EventBus
 from localharness.memory.browse import StoreBrowse
 from localharness.memory.consolidation import ConsolidationScheduler

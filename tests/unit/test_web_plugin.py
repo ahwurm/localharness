@@ -15,6 +15,7 @@ def _run(code: str, tmp_path) -> subprocess.CompletedProcess:
 
 def test_web_plugin_manifest() -> None:
     from localharness.cli.web_plugin import WebPlugin
+    from localharness.memory.plugin import MemoryPlugin
     from localharness.plugins.builtin import bundled_plugins
     from localharness.tools.builtin.image_plugin import ImagePlugin
 
@@ -22,7 +23,7 @@ def test_web_plugin_manifest() -> None:
     assert (m.name, m.kind, m.requires_extra, m.enabled_by_default) == ("web", "channel", "web", True)
     assert m.cli[0].name == "web" and m.cli[0].target == "localharness.cli.web_cmd:app"
     assert WebPlugin.ConfigModel is None
-    assert bundled_plugins() == (ImagePlugin, WebPlugin)
+    assert bundled_plugins() == (ImagePlugin, WebPlugin, MemoryPlugin)
 
 
 def test_web_plugin_channels_names_the_web_channel() -> None:

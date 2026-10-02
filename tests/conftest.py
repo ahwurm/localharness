@@ -33,6 +33,24 @@ def _isolate_memory_logger():
 
 
 @pytest.fixture(autouse=True)
+def _embedding_model_cached(request, monkeypatch):
+    """47-06: memory is a bundled plugin, so every `doctor` run now carries its `memory-embedding`
+    row — and under the suite's fake HOME the Hugging Face cache is empty, so a doctor test that
+    pins a healthy install would read a failure that is about the sandbox, not the code. Treat the
+    model as cached suite-wide; the check's own behaviour (missing package, missing model, present)
+    is tested against a real cache lookup in test_memory_plugin_doctor.py, which opts out here."""
+    if request.module.__name__.endswith("test_memory_plugin_doctor"):
+        yield
+        return
+    from localharness.memory import plugin as _mem_plugin
+    from localharness.plugins.api import Check
+
+    monkeypatch.setattr(_mem_plugin, "_embedding_check", lambda model: Check(
+        name="memory-embedding", status="pass", detail=f"embedding model {model} is in the local cache"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _pin_terminal_color_env(monkeypatch):
     """#131: color-rendering tests build consoles with force_terminal=True but never pin
     color_system, so Rich still consults the AMBIENT environment for whether color is allowed.

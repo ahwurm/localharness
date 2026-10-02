@@ -265,8 +265,8 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
 
     # The banner: one plugin, named on its own line under the summary; nothing to warn about it.
     i = next(n for n, line in enumerate(printed) if "startup)" in line)
-    assert entity("tool", "2 plugins") in printed[i]  # web is bundled and on by default (46-02)
-    assert printed[i + 1] == "  " + entity("tool", "Plugins: web, example"), printed[i:i + 2]  # web is bundled and on by default (46-02)
+    assert entity("tool", "3 plugins") in printed[i]  # web (46-02) and memory (47) are bundled and on by default
+    assert printed[i + 1] == "  " + entity("tool", "Plugins: web, memory, example"), printed[i:i + 2]  # web (46-02) and memory (47) are bundled and on by default
     assert "plugin example" not in printed[i], f"a startup warning about the example: {printed[i]}"
     assert not any("available, not enabled" in line for line in printed), "an enabled plugin was hinted"
     assert sentinel.exists() and PKG in sys.modules, "an enabled plugin was not imported by start"
@@ -325,7 +325,7 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
 
     # --- doctor: its check, in the plugins section, where the session put its artifacts ----------
     doctor = _invoke("doctor").output
-    assert "✓ Plugins: web, example" in doctor, doctor  # web is bundled and on by default (46-02)
+    assert "✓ Plugins: web, memory, example" in doctor, doctor  # web (46-02) and memory (47) are bundled and on by default
     assert (f"✓ example: swatches render in #4a90d9; artifacts go to {ws / 'artifacts' / 'example'}"
             in doctor), doctor
     assert not [line for line in doctor.splitlines() if line.startswith("✗") and "example" in line]

@@ -315,7 +315,12 @@ async def _declared_origin():
     from localharness.tools.registry import ToolRegistry
 
     reg = ToolRegistry()
-    await register_builtin_tools(reg, memory_store=object(), eviction_store=ContentStore())
+    await register_builtin_tools(reg, eviction_store=ContentStore())
+    # the memory verbs reach a real root from the memory plugin; registered directly here
+    from localharness.tools.builtin.memory_tools import MemoryGetTool, MemoryRememberTool, MemorySearchTool
+    _mem = object()
+    for _mt in (MemorySearchTool(_mem), MemoryGetTool(_mem), MemoryRememberTool(_mem)):
+        await reg.register(_mt, scope="global")
     return reg.result_origin
 
 
@@ -649,7 +654,12 @@ async def test_bench_evicts_through_the_scenario_registrys_declarations():
     from localharness.tools.registry import ToolRegistry
 
     base = ToolRegistry()
-    await register_builtin_tools(base, memory_store=object(), eviction_store=ContentStore())
+    await register_builtin_tools(base, eviction_store=ContentStore())
+    # the memory verbs reach a real root from the memory plugin; registered directly here
+    from localharness.tools.builtin.memory_tools import MemoryGetTool, MemoryRememberTool, MemorySearchTool
+    _mem = object()
+    for _mt in (MemorySearchTool(_mem), MemoryGetTool(_mem), MemoryRememberTool(_mem)):
+        await base.register(_mt, scope="global")
     scen = ScenarioSpec(
         name="origin-wiring", prompt="x", success_criteria=SuccessCriteria(rubric=["contains:X"]),
         budget=BudgetSpec(), limits=LimitsSpec(), tools_allowed=["bash_exec", "tool_result_get"],

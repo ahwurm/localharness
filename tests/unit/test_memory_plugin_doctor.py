@@ -9,7 +9,7 @@ import sqlite3
 import huggingface_hub
 import pytest
 
-from localharness.config.models import MemoryConfig
+from localharness.memory.config import MemoryConfig
 from localharness.core.bus import EventBus
 from localharness.memory.plugin import MemoryPlugin
 from localharness.memory.sqlite import CURRENT_SCHEMA_VERSION, MemoryStore

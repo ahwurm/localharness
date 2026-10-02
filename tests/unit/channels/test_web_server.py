@@ -567,8 +567,14 @@ async def test_memory_list_edit_history_and_forget_roundtrip(tmp_path):
         await store.store_fact(key="notes/searxng", value="original content",
                                tags=["workaround"], source="remember")
         await store.store_fact(key="notes/long", value="x" * 300, source="remember")
+        from localharness.plugins.api import MemorySlotPlugin
+
+        class _Occupant(MemorySlotPlugin):  # what the memory plugin's browse() hands the slot
+            def browse(self):
+                return StoreBrowse(store)
+
         slot = MemorySlot()
-        slot.seat(StoreBrowse(store), name="memory")
+        slot.seat(_Occupant(), name="memory")
         bus, channel, server, client = await _stack(tmp_path, runtime={"memory_slot": slot})
 
         rows = (await client.get("/api/memory", headers=BEARER)).json()["facts"]
