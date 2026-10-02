@@ -602,45 +602,24 @@ _execute_loop(session, task, on_token):
                 session.push(tool_result)
                 continue
 
-            # 9c. Pre-execution hook
-            hook_system.run_pre_hooks(tool_call, config)
-            # Pre-hooks may raise HookVeto — caught below
+            # 9c. Announce the call (terminal display, audit trail)
+            await bus.publish(Action(action_type="tool_call", tool_call_id=tool_call.id,
+                                     tool_name=tool_call.name, tool_params=tool_call.arguments, ...))
 
-            # 9d. Execute via event bus
-            #     Publish Action to bus; tool system subscriber executes and
-            #     publishes Observation back; we await the matching observation.
-            action_event = ActionEvent(
-                agent_id=session.agent_id,
-                session_id=session.session_id,
-                iteration=session.iteration,
-                tool_name=tool_call.name,
-                tool_call_id=tool_call.id,
-                tool_args=tool_call.arguments,
-            )
-            await bus.emit(action_event)
-            observation = await _await_observation(bus, tool_call.id, timeout=config.tool_timeout_seconds)
+            # 9d. Execute: the loop calls the injected registry directly.
+            #     ToolRegistry.dispatch runs the pre_tool hooks (a veto returns a
+            #     permission_denied result), the tool, the size cap, then the post_tool hooks.
+            result = await tools.dispatch(tool_call.name, tool_call.arguments,
+                                          config.name, config.division or "", config.tools)
+            content = result.output if result.success else f"[tool error] {result.error}"
 
-            # 9e. Post-execution hook (lint/typecheck gates fire here)
-            hook_system.run_post_hooks(tool_call, observation, config)
+            # 9e. Push tool result to session, then publish the full result
+            session.push({"role": "tool", "tool_call_id": tool_call.id, "content": content})
+            await bus.publish(Observation(observation_type="tool_result", tool_call_id=tool_call.id,
+                                          tool_name=tool_call.name, output=content,
+                                          error=content if not result.success else None, ...))
 
-            # 9f. Push tool result to session
-            tool_result_message = _make_tool_result(
-                tool_call_id=tool_call.id,
-                content=observation.result,
-                is_error=observation.is_error,
-            )
-            session.push(tool_result_message)
-
-            await bus.emit(ObservationEvent(
-                agent_id=session.agent_id,
-                session_id=session.session_id,
-                tool_call_id=tool_call.id,
-                tool_name=tool_call.name,
-                result_preview=observation.result[:200],
-                is_error=observation.is_error,
-            ))
-
-            # 9g. Record to stuck detector
+            # 9f. Record to stuck detector
             stuck_detector.record(tool_call.name, tool_call.arguments)
 
         # ── Stuck Detection (after batch) ─────────────────────────────────────
@@ -996,31 +975,14 @@ class KillEvent:
     session_id: str
 ```
 
-### Awaiting Observations
+### Tool results come back from the registry, not the bus
 
-When the loop publishes an `ActionEvent` for a tool call, it waits for the corresponding `ObservationEvent` via a `Future`-based matching mechanism:
-
-```python
-async def _await_observation(
-    bus: EventBus,
-    tool_call_id: str,
-    timeout: float,
-) -> ObservationRaw:
-    """Wait for ObservationEvent with matching tool_call_id.
-
-    Implementation:
-    - Create asyncio.Future before publishing ActionEvent
-    - Register a one-shot subscriber on the bus that resolves the Future
-      when ObservationEvent.tool_call_id matches
-    - await asyncio.wait_for(future, timeout=timeout)
-    - Deregister subscriber on completion or timeout
-
-    Timeout:
-        Uses config.tool_timeout_seconds (default 120s, separate from LLM timeout).
-        Tool operations (bash, file I/O) should complete in well under this.
-        On timeout: return ObservationRaw(is_error=True, result="Tool execution timed out.")
-    """
-```
+The loop does not wait on the bus for a tool's result. It calls `ToolRegistry.dispatch` on the
+registry it was given and gets the `ToolResult` back as the return value; the `pre_tool` and
+`post_tool` hooks run inside that call (see [spec 09](09-hooks-plugins.md#hook-calling-convention)).
+The `Action` published before the call and the `Observation` published after it are a record for
+the terminal, the bus log and other subscribers. Nothing executes a tool because an `Action` was
+published.
 
 ---
 
@@ -1028,13 +990,13 @@ async def _await_observation(
 
 | Component | Interface | Direction |
 |-----------|-----------|-----------|
-| Event bus | `bus.emit()`, `bus.subscribe()` | Loop → Bus, Bus → Loop (observations) |
+| Event bus | `bus.publish()` (actions, observations, state) | Loop → Bus |
 | LLM provider | `llm.stream_complete()` | Loop → LLM |
 | Context manager | `ctx.build_messages()` | Loop → Context |
-| Tool registry | `tools.get(name)`, `tools.get_tools_for_agent()` | Loop → Tools |
+| Tool registry | `tools.get(name)`, `tools.get_tools_for_agent()`, `tools.dispatch(...)` | Loop → Tools |
 | Permission evaluator | `permissions.evaluate(call, config)` | Loop → Permissions |
-| Memory loader | `memory.load(config)` | Loop → Memory (at startup only) |
-| Hook system | `hooks.run_pre_hooks()`, `hooks.run_post_hooks()` | Loop → Hooks |
+| Memory slot | `memory_slot.context(...)` when the slot is occupied | Loop → Memory plugin (each turn) |
+| Tool hooks | `pre_tool` / `post_tool`, run inside `ToolRegistry.dispatch` — the loop never calls them; see [spec 09](09-hooks-plugins.md#hook-calling-convention) | Registry → Hooks |
 
 ---
 

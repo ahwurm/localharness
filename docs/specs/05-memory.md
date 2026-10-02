@@ -50,9 +50,13 @@ top of it. The scope machinery is legacy substrate; the predictive gate is the w
 
 ## 2. Module map & honest status
 
-Every module below is a bus subscriber wired beside `MemoryStore` at startup
-(`cli/start_cmd.py`). Each swallows its own exceptions and is logged, never re-raised — a
-memory fault can never break the agent loop or the user's turn.
+Every module below was a bus subscriber wired beside `MemoryStore` at startup. Today the
+bundled `memory` plugin does that wiring, not `cli/start_cmd.py` (which opens no store): its
+`tools()` constructs the store (`memory/plugin.py`), and its `start()` opens it, records the
+session row and wires the session accumulator and the consolidation scheduler. The gate,
+predictive-gate, user-signal, predictive-write-gate and hierarchy modules in this table were
+deleted in the resonance rebuild (see the banner). Each module catches and logs its own
+exceptions, never re-raising them — a memory fault can never break the agent loop or the user's turn.
 
 | Module | Role | Status |
 |--------|------|--------|
@@ -65,7 +69,7 @@ memory fault can never break the agent loop or the user's turn.
 | `memory/hierarchy.py` | Persists the cruncher's gist/schema tree into the memory graph; routes structure-aware search | **live, default-on** |
 | `memory/markdown.py` `MarkdownMemory` | `MEMORY.md` regeneration (facts + session shelf), preserving hand-written sections | **live, default-on** |
 | `cli/session_accumulator.py` `SessionAccumulator` | Bus-subscribed sitting counters → the payload-first one-line session summary | **live, default-on** |
-| L3 model-stated `expect:` slot; L2 logprob surprisal; idle deep correction/surprise reconciliation | The next rungs of the mechanisms ladder | **future phase (36/37)** |
+| L3 model-stated `expect:` slot; L2 logprob surprisal; idle deep correction/surprise reconciliation | The next rungs of the mechanisms ladder | **planned for a later release; never built** |
 
 "Collect-only" is a hard contract: those modules write **only** the v4 telemetry tables
 and never touch `facts` / `sessions` / `edges`. "Capture-only" means a module *does* write
@@ -346,8 +350,8 @@ no model at all:
    (above the line), composed only of verbatim candidate bodies, linked `derived_from` its
    sources. Novelty carries none of these warrants and never promotes.
    **`tier:correction_pending` rows are excluded from promotion** — a disputed supersede or a
-   quarantine fact must not graduate into the injected block until the Phase-36 model look
-   reconciles it. This exclusion is a live predicate, not a convention.
+   quarantine fact must not graduate into the injected block until a later model review (planned,
+   never built) reconciles it. This exclusion is a live predicate, not a convention.
 3. **Replay (LLM seam).** The rationalization engine: extract durable claims from recent
    history via a cancellable, guarded LLM call (iteration cap, dedup-before-generate,
    verify-against-leaf: a majority of a claim's long tokens must appear verbatim in the

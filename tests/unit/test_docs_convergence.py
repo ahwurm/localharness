@@ -892,13 +892,7 @@ def check_denylist(rel: str, text: str) -> list[str]:
     return out
 
 
-_DENYLIST_RED = {"docs/specs/03-agent-loop.md": "51-06", "docs/specs/05-memory.md": "51-06",
-                 "docs/specs/12-audit.md": "51-06"}
-
-
-@pytest.mark.parametrize("rel", [
-    pytest.param(rel, marks=xfail_until(_DENYLIST_RED[rel])) if rel in _DENYLIST_RED else rel
-    for rel in public_docs()])
+@pytest.mark.parametrize("rel", public_docs())
 def test_denylist_live(rel):
     """No public doc carries stale wiring names or internal phase/plan/requirement ids."""
     assert check_denylist(rel, _read(rel)) == []

@@ -795,10 +795,10 @@ stdio MCP server processes in v1 run as the same user as the harness. A compromi
 ## Startup Integration
 
 `localharness start` (`cli/start_cmd.py`) brings the tool system up in this order: the built-in
-tools, the hook system (wired to the registry), the memory tools when memory is on, the plugins
-(resolved, then run through their lifecycle; spec 09), the root agent's capability floor, and
-last the MCP servers named in the root agent's config. At shutdown the MCP servers close first,
-then the plugins stop in reverse start order. The MCP step, as the code does it:
+tools, the hook system (wired to the registry), the plugins (resolved, then run through their
+lifecycle; spec 09; the memory tools come from the memory plugin's `tools()` in this step), the
+root agent's capability floor, and last the MCP servers named in the root agent's config. At
+shutdown the MCP servers close first, then the plugins stop in reverse start order. The MCP step, as the code does it:
 
 ```python
 # cli/start_cmd.py, `_start_async` (the MCP step; simplified)
@@ -816,15 +816,20 @@ except Exception as exc:
 
 ### Graceful shutdown
 
+There is no separate shutdown function. The session's `finally` block in `cli/start_cmd.py` runs
+the teardown in this order; the MCP and plugin steps are each contained, so a teardown failure
+never replaces the real exit reason:
+
 ```python
-# In the harness main shutdown sequence:
-async def shutdown(
-    mcp_manager: MCPClientManager,
-    hook_system: HookSystem,
-) -> None:
-    """Shutdown order: MCP (closes external processes first), then hooks."""
-    await mcp_manager.shutdown()
-    # Hook system has no async cleanup in v1 (pluggy is sync)
+# cli/start_cmd.py, the session's `finally` (simplified)
+if mcp_manager:
+    await mcp_manager.shutdown()            # MCP first: closes the external processes
+if session_info is not None:
+    session_info.exit_reason = _exit_reason  # the memory plugin's stop() records it
+if plugin_result is not None:
+    await stop_plugins(plugin_result)        # reverse start order, each stop() contained
+    set_plugin_rows(())                      # plugin rows leave with the session
+await llm.aclose()                           # the LLM client last
 ```
 
 ---

@@ -1,8 +1,23 @@
 # Spec 12: Audit & Observability
 
-**Component:** `src/localharness/audit/`
+**Component:** none yet — there is no `src/localharness/audit/` package
 **Requirements:** v1 (structlog JSONL), v2 (hash-chained audit, GUARDRAILS.md)
-**Status:** v1 core + v2 design spec
+**Status:** design, not built — except the two pieces under "What is built today" below
+
+## What is built today
+
+- **The event log.** Each session's event bus persists its own events to
+  `agents/<name>/bus-events.jsonl` under the session's state directory (`EventBus(persist_path=...)`
+  in `cli/start_cmd.py`). Commands that change settings (`localharness components set` and others)
+  write their change records to the file named by `org.audit_log_path` (default `audit.jsonl`,
+  under the config directory). There is no `AuditLogger`, no `audit/logger.py` and no hash chain.
+- **GUARDRAILS.md is read, not written.** The agent loop reads `orgs/default/GUARDRAILS.md` from
+  the global config directory on every turn of the session agent (the agent you talk to) and
+  appends it to that turn's system prompt, whether or not memory is on. Subagents never receive
+  the file; that is a known limitation. Nothing appends to the file automatically: the
+  `GuardrailTracker` below is design, not built, so the file holds what you write in it.
+
+Every section after this one, unless it says otherwise, is the design, not built.
 
 ---
 
@@ -12,11 +27,11 @@ The audit system provides tamper-evident, complete observability for every agent
 
 In v1, audit logs are structlog-powered JSONL files — one per agent, plus an org-level aggregate. In v2, logs are SHA-256 hash-chained (tamper-evident) with a Rust PyO3 hot-path writer.
 
-The `GUARDRAILS.md` file is a persistent failure memory: when an agent fails the same pattern 3+ times, a guardrail is automatically appended. It is read into agent context at session start, making the harness self-improving.
+The `GUARDRAILS.md` file is designed as a persistent failure memory: when an agent fails the same pattern 3+ times, a guardrail would be appended automatically (design, not built). Today the file is read into the session agent's system prompt on every turn and holds only what you write in it.
 
 ---
 
-## AuditLogger Class
+## AuditLogger Class (design, not built)
 
 ```python
 # src/localharness/audit/logger.py
@@ -652,7 +667,7 @@ The Python `_write_record` passes the serialized record JSON and the current `se
 
 ### Purpose
 
-GUARDRAILS.md is the org-level persistent failure memory. When an agent repeatedly fails the same pattern, the harness automatically appends a guardrail. The guardrail is read into every agent's system prompt at session start, preventing the same failures from recurring.
+GUARDRAILS.md is the org-level safety and failure memory. Built: the file is read into the session agent's system prompt on every turn (subagents never receive it, a known limitation). Design, not built: when an agent repeatedly fails the same pattern, the harness would append a guardrail automatically (the `GuardrailTracker` below); today nothing writes to the file but you.
 
 ### Format
 
@@ -686,7 +701,7 @@ Confirm the path is correct with the user before writing.
 **Provenance:** guardrail_evt_02xyz
 ```
 
-### GuardrailTracker
+### GuardrailTracker (design, not built)
 
 ```python
 # src/localharness/audit/guardrails.py
@@ -922,7 +937,7 @@ The distinct `AuditDiskFullError` subclass allows the agent loop to surface a us
 
 ---
 
-## Implementation Notes
+## Implementation Notes (design, not built)
 
 - The `AuditLogger` subscribes to the event bus as a passive observer. It receives the same events as the terminal channel and the memory system but never modifies them.
 - structlog bound context (`agent_id`, `division_id`, `org_id`) is set once at `open()` and attached to every log call automatically. No field duplication in call sites.
