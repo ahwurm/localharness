@@ -332,6 +332,7 @@ inside that project instead of in your global directory.
 | `compact.md` and the memory log | `vllm/server.pid`, `serve.log`, `venv/` (one accelerator, one daemon) |
 | `.repl_history` | `plugins/`, packaged `tools/`, the root agent's own file |
 | `audit.jsonl` | `overrides.yaml` — a model swap always edits the global file |
+| `artifacts/<plugin>/` (files a plugin makes, such as the image plugin's pictures; under the session's `state_dir`) | |
 
 The rule behind the table: **what you did in a project stays with that project; what governs the
 machine stays with the machine.** Your notes, your history and your audit trail are about the work,
@@ -1314,6 +1315,34 @@ list — every field is declared there with its own description.
 store derives all three paths from the agent's own directory (`memory.db`, `history.jsonl`,
 `MEMORY.md` under `<config-dir>/agents/<name>/`, or under the workspace when one applies). Setting
 them moves nothing. They are declarative leftovers, kept only so an older config still loads.
+
+#### Plugin-owned settings
+
+Every plugin, bundled or installed, has a `<name>.enabled` switch (`web.enabled`, `memory.enabled`,
+`dispatch.enabled`, `autoresearch.enabled`, `image.enabled`, and the same for a plugin you install).
+A bundled plugin's switch defaults to its manifest's on/off and can be set at any layer. A plugin
+you installed is off until enabled, and its switch is read from the global config only. The rest of
+a plugin's settings live under `<name>:` and are validated by the plugin itself; spec 09 covers the
+model, and `components list` shows each row with `(plugin: <name>)`.
+
+`proposer:` and `sentinel:` keep their old top-level names but belong to the bundled `autoresearch`
+plugin, which claims them through its manifest's `sections`. While `autoresearch` is on,
+`components list` shows their rows tagged `(plugin: autoresearch)`; while it is off, those rows
+leave the list, the `autoresearch.enabled` row stays, and the config loader still validates the
+sections.
+
+#### image plugin fields (global `config.yaml` / `overrides.yaml`)
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `image.enabled` | bool | `false` | — | The bundled `image` plugin; `localharness plugins enable image --set comfyui_url=<url>` turns it on |
+| `image.comfyui_url` | string | `""` | machine-level only; `http://` or `https://` | Address of your ComfyUI server, e.g. `http://127.0.0.1:8188` |
+| `image.workflow` | string | `""` | machine-level only | Path to your own ComfyUI workflow template; empty uses the shipped one |
+| `image.timeout_s` | float | `570.0` | > 0 | Seconds to wait for one picture (the first one also loads the model) |
+
+A project's value for a machine-level-only field is dropped with a warning; see
+[SECURITY.md, "Machine-level-only settings"](../../SECURITY.md#machine-level-only-settings).
+Pictures are written to `artifacts/image/` under the session's state directory.
 
 #### dispatch plugin fields (global `config.yaml` / `overrides.yaml`)
 

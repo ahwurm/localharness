@@ -9,8 +9,8 @@ it describes, and every source of truth is imported, never typed out: `BUILTIN_P
 a "bites" test that feeds it one deliberate break and asserts a non-empty violation list, so no
 check is vacuous.
 
-A live test marked `xfail(strict=True)` is a doc still known to be false; its reason names the work
-that fixes it, and an early green is an XPASS failure, so the marker must be removed with the fix.
+Every live test is green: a doc found false later fails here, and the fix is to the doc (or the
+code), never to the check.
 
 These tests never invoke the CLI (Typer caches the terminal width at first import) and read plugins
 from `BUILTIN_PLUGINS` only, never discovery (a dev venv may have other plugins installed).
@@ -48,10 +48,6 @@ SRC = _REPO / "src" / "localharness"
 _TREE = _BLOB.replace("/blob/", "/tree/")
 SPEC00 = "docs/specs/00-architecture-overview.md"
 SPEC09 = "docs/specs/09-hooks-plugins.md"
-
-
-def xfail_until(plan: str) -> pytest.MarkDecorator:
-    return pytest.mark.xfail(strict=True, reason=f"docs not yet converged — turned green by {plan}")
 
 
 # ---------------------------------------------------------------- helpers: read docs as structure
@@ -598,7 +594,6 @@ def test_plugins_table_readme_live():
     assert check_plugins_table(_read("README.md")) == []
 
 
-@xfail_until("51-06")
 def test_index_md_lists_the_bundled_plugins():
     """INDEX.md (internal, git-ignored) carries the same plugins table under its source section."""
     if not (_REPO / "INDEX.md").is_file():

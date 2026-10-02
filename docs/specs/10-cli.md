@@ -289,6 +289,26 @@ def start_app(
     asyncio.run(_start_async(config_dir, agent, debug))
 ```
 
+The excerpt shows three options; the real command has more (`--verbose`, `--model`,
+`--list-models`, `--show-reasoning` and others; `localharness start --help` lists them all).
+
+**`--channel` (`-c`) picks the input channel.** Core's are `terminal` (the default) and `acp`; a
+bundled plugin of kind `channel` adds its own names, today `web` (the `web` plugin) and `discord`
+(the `dispatch` plugin). `start --help` lists every bundled channel name, including one whose
+plugin is off. `web` and `acp` are served by their own commands, `localharness web` and
+`localharness acp`. `start` never falls back to the terminal; each refusal is a usage error
+(exit 2) and names the fix:
+
+- an unknown name, before any config is read: `unknown channel 'discrod'; choose one of: acp, discord, terminal, web`
+- `web` or `acp`: ``the web channel is served by its own command, because the HTTP server has to be reachable before a session exists. Run `localharness web` instead of `localharness start --channel web`.`` (for `web`, followed by ``(if that command is missing, run `localharness plugins enable web`)``)
+- a plugin channel whose plugin is off, missing its install extra, or not loaded:
+  ``channel 'discord' is provided by the dispatch plugin, which is off — run `localharness plugins enable dispatch` ``
+  (for a missing extra, ``which is missing its install extra — install `localharness[dispatch]` to use it``)
+- a plugin channel whose plugin resolved on but did not start:
+  `channel 'discord' is provided by the dispatch plugin, which did not start — <reason>`
+
+Spec 11 covers the channels themselves; spec 09 covers how a plugin provides one.
+
 **REPL Architecture:**
 
 The REPL is a prompt_toolkit `PromptSession` inside an asyncio event loop. Input is read on one coroutine; event bus output is written on another. They share the terminal through Rich's `Live` context manager (not directly — see threading note below).
@@ -856,6 +876,12 @@ plus `default`:
 
 `--json` emits the same rows with the field names `path` / `type` / `current_value` / `layer`.
 
+A plugin's settings are rows like any other. While a plugin is on, its rows (`<name>.*`, and for
+`autoresearch` the `proposer.*` and `sentinel.*` rows it owns) carry `(plugin: <name>)` after the
+layer. While a plugin is off its other rows leave the list, but its `<name>.enabled` row stays, so
+`autoresearch.enabled` is still visible when autoresearch is off. `components set` records each
+change as a `ComponentMutated` audit event; `localharness plugins enable` and `disable` do not.
+
 #### `localharness components get <path>`
 
 Prints one path's value, its type, the layer that won it, and its compiled-in default:
@@ -900,6 +926,31 @@ is staged, committed, or written into your project. Two consequences worth knowi
 the loop: the change is **machine-wide**, applying in every project on the box; and undoing one is
 `localharness components set <path> <old value>` (the archive keeps the previous value on the
 adoption record), or editing `overrides.yaml` directly.
+
+### `localharness plugins`
+
+See the plugins and turn them on and off. Spec 09 ("Discovery and enabling") covers the model;
+this section covers the commands.
+
+- `plugins list [--json]` prints every plugin, one row each: NAME, WHAT IT DOES, STATE and FROM
+  (`built in`, or the installed package). An off or available plugin's state names the command that
+  turns it on (`off — turn on: localharness plugins enable image`); a plugin that needs an install
+  extra says so (``on (install `localharness[dispatch]` to use it)``). On stderr it names any
+  settings section in your config that no installed plugin owns, with its file, line and fix.
+- `plugins info NAME [--json]` prints one plugin: its state, what it adds (tools, commands, slash
+  commands, channels) and every setting it owns, the same rows `components list` tags
+  `(plugin: NAME)`.
+- `plugins enable NAME [--set KEY=VALUE ...] [--workspace] [--no-input]` writes `NAME.enabled: true`,
+  and each `--set` value after checking it against the plugin's settings, into one `overrides.yaml`:
+  the machine's, or with `--workspace` the project's. It never writes a `config.yaml`. It prints
+  ``✓ image enabled in <file> — takes effect on the next `localharness start` `` and one
+  `set NAME.KEY = …` line per value. On a terminal with no `--set`, it asks the plugin's setup
+  questions, writes the answers the same way and runs the plugin's doctor check once.
+- `plugins disable NAME [--workspace]` writes `NAME.enabled: false` the same way.
+
+`--workspace` is refused for a plugin you installed and for a machine-level-only setting. These
+commands write no audit event (`components set` does). Exit codes: 0 done; 2 any error (an unknown
+plugin name, a value that fails the plugin's settings check, a refused `--workspace`).
 
 ---
 
@@ -950,7 +1001,10 @@ def build_session() -> PromptSession:
 ### Slash commands
 
 A line starting with `/` is a REPL command, not a task. The list is defined once, in
-`cli/slash_commands.py`, and `/help` renders it from there.
+`cli/slash_commands.py`, and `/help` renders it from there. A running plugin's slash commands
+(today `/memory`, from the `memory` plugin) join that table when the session starts and leave it
+when the session ends, after core's rows; spec 09 ("Commands, slash commands and doctor") covers
+how a plugin declares one.
 
 **`/mode <name>` switches the session's permission mode.** `/mode auto`, `/mode guarded`,
 `/mode trusted` or `/mode read-only` changes it for this session only — nothing is persisted, and
@@ -1036,6 +1090,7 @@ the exit code as *structured output* rather than as a pass/fail flag.
 | `config show` / `config migrate` | 0 done; 1 failure; 2 usage error |
 | `model`, `propose` | 0 done; 2 any error |
 | `components` | 0 done; 2 any error |
+| `plugins` | 0 done; 2 any error |
 | `bench` | 0 success; 2 infrastructure failure (config missing, empty corpus, no runs) |
 | `bench compare` | 0 stable; 1 regressed; 2 infrastructure failure; 3 unstable |
 | `bench pack` | 0 built; 1 the pack failed to build |

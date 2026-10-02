@@ -18,8 +18,20 @@ Channels subscribe to events from the event bus. They never call agent loops or 
 
 ## ChannelAdapter Abstract Base Class
 
+The excerpt below is abridged and older than the class: `channels/base.py` is the source of truth.
+Besides `channel_id`, the class declares these capability attributes, each with a safe default a
+channel overrides:
+
+- `can_ask` (False): the channel can put a permission question to a person; a channel that cannot fails its asks closed.
+- `ask_holds_dialog` (False): the question stays open until a person answers it (terminal, Zed); False gives the question a deadline (`permissions.ask.timeout_s`), as on Discord.
+- `bare_mode_command` (False): a plain `mode <name>` message is the `/mode` command (Discord sets it; the terminal does not).
+- `start_banner` (`""`): one line `localharness start` prints, dimmed, after building the channel; empty prints nothing.
+- `has_review_surface`, `streams_tokens`, `has_display_toggles` (all False): an in-project edit lands where a person sees it, the channel wants the answer as it is generated, and `/reasoning` and `/verbose` mean something on the channel.
+
+Spec 09 ("Manifest and methods") covers how a plugin provides a channel.
+
 ```python
-# src/localharness/channels/base.py
+# src/localharness/channels/base.py (abridged)
 
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
