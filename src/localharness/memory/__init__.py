@@ -1,14 +1,23 @@
 """Memory persistence primitives for LocalHarness agents."""
-from .sqlite import MemoryStore, Fact, FactQuery, MemoryContext
-from .history import HistoryWriter
-from .markdown import MarkdownMemory, VALID_WRITABLE_SECTIONS
-from .errors import (
-    MemoryError,
-    MemoryWriteError,
-    MemoryReadError,
-    MemoryCorruptionError,
-    DiskFullError,
-)
+
+_LAZY = {
+    "MemoryStore": ".sqlite", "Fact": ".sqlite", "FactQuery": ".sqlite", "MemoryContext": ".sqlite",
+    "HistoryWriter": ".history", "MarkdownMemory": ".markdown", "VALID_WRITABLE_SECTIONS": ".markdown",
+    "MemoryError": ".errors", "MemoryWriteError": ".errors", "MemoryReadError": ".errors",
+    "MemoryCorruptionError": ".errors", "DiskFullError": ".errors",
+}
+
+
+def __getattr__(name: str):
+    """Import on first use, so importing a light submodule (memory.plugin, memory.config) does not
+    pull aiosqlite into every --help (the plugin-module import rule)."""
+    if name in _LAZY:
+        from importlib import import_module
+        value = getattr(import_module(_LAZY[name], __name__), name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "MemoryStore",
