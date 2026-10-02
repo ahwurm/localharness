@@ -22,8 +22,11 @@ wrapped): each drive makes exactly two connects, both start-up probes aimed at t
 (`list_live_models` -> GET /models, `probe_served_window` -> GET /api/ps) and both refused at once;
 the turn itself opens none. Every helper is imported, never copied (41-06's rule).
 
-**Standing invariant.** This must stay green at the end of every later phase. The memory phase
-re-runs it with the memory plugin as the slot occupant.
+**Standing invariant.** This must stay green at the end of every later phase. Phase 47 re-runs it
+with the memory plugin as the slot occupant: the memory-on drive asserts the slot's occupant IS
+`memory` (the plugin, not an absent store, is in play), and memory is turned off two ways — the
+deprecated `org.memory_enabled: false` and the canonical `memory.enabled: false` — each asserting
+the slot is empty (the lifecycle's result, recorded by a call-through wrapper on `start_plugins`).
 
 **What it does NOT prove.** A turn with tool calls: the scripted turn answers at once, so only the
 first request's system prompt is graded. And subagents: no subagent construction passes a guardrails
@@ -67,9 +70,12 @@ def _let_the_stub_tokenizer_run_a_turn(monkeypatch) -> None:
     monkeypatch.setattr("localharness.agent.context.TokenCounter", _TurnCapableCounter)
 
 
-async def _first_system_prompt(root: Path, monkeypatch, fake_home, *, memory_enabled: bool) -> str:
+async def _first_system_prompt(root: Path, monkeypatch, fake_home, *, memory_enabled: bool,
+                               off_by: str = "org", slots: list | None = None) -> str:
     """Drive one real turn of a real workspace session under `root`; return the system prompt of
-    the first request that reached the model boundary."""
+    the first request that reached the model boundary. Memory off is `org.memory_enabled: false`
+    (`off_by="org"`) or `memory.enabled: false` (`off_by="key"`); `slots`, when given, receives the
+    session's memory slot as the lifecycle returned it."""
     _home, global_dir, ws = _workspace_start(root, monkeypatch, fake_home)
     _offline_provider(global_dir)
     _let_the_stub_tokenizer_run_a_turn(monkeypatch)
@@ -79,7 +85,11 @@ async def _first_system_prompt(root: Path, monkeypatch, fake_home, *, memory_ena
     _write(global_dir / "divisions" / "default" / "DIVISION.md", GLOBAL_DIVISION)
     if not memory_enabled:
         with (global_dir / "config.yaml").open("a", encoding="utf-8") as f:
-            f.write("org:\n  memory_enabled: false\n")
+            f.write("org:\n  memory_enabled: false\n" if off_by == "org" else "memory:\n  enabled: false\n")
+    if slots is not None:
+        from tests.integration.test_all_plugins_off_e2e import _record  # lazy: it imports this file
+        lifecycles: list = []
+        _record(monkeypatch, "localharness.plugins.lifecycle.start_plugins", lifecycles, is_async=True)
 
     captured: list[dict] = []
 
@@ -96,6 +106,9 @@ async def _first_system_prompt(root: Path, monkeypatch, fake_home, *, memory_ena
     monkeypatch.setattr("localharness.cli.repl.OrchestratorREPL.run", one_turn)
 
     await _drive()
+    if slots is not None:
+        assert len(lifecycles) == 1, "start_plugins did not run exactly once"
+        slots.append(lifecycles[0][1].slot)
 
     assert captured, "no request reached the model boundary — the turn never ran"
     assert captured[0]["role"] == "system", captured[0]
@@ -105,12 +118,16 @@ async def _first_system_prompt(root: Path, monkeypatch, fake_home, *, memory_ena
 async def test_guardrails_come_from_the_global_dir_with_memory_on_and_off(
     tmp_path, monkeypatch, fake_home
 ):
+    slots: list = []
     on = await _first_system_prompt(
-        tmp_path / "memory-on", monkeypatch, fake_home, memory_enabled=True
+        tmp_path / "memory-on", monkeypatch, fake_home, memory_enabled=True, slots=slots
     )
     off = await _first_system_prompt(
-        tmp_path / "memory-off", monkeypatch, fake_home, memory_enabled=False
+        tmp_path / "memory-off", monkeypatch, fake_home, memory_enabled=False, slots=slots
     )
+    # The plugin is the occupant with memory on; the deprecated key empties the slot.
+    assert slots[0].occupied and slots[0].occupant_name == "memory", slots[0].occupant_name
+    assert slots[1].occupied is False, slots[1].occupant_name
 
     # The workspace check comes FIRST: under a reader that followed the workspace the global text
     # is also missing, and a presence check on top would fire instead and hide what went wrong.
@@ -135,3 +152,21 @@ async def test_guardrails_come_from_the_global_dir_with_memory_on_and_off(
     # Memory really was off: nothing memory supplies is in the prompt.
     assert "## Division Context" not in off, "memory-off drive still ran memory"
     assert "## Agent Memory" not in off, "memory-off drive still ran memory"
+
+
+async def test_guardrails_come_from_the_global_dir_with_memory_off_by_its_own_key(
+    tmp_path, monkeypatch, fake_home
+):
+    """The third drive (Phase 47): memory off by the canonical `memory.enabled: false` — the key
+    that turns the plugin off, not the deprecated org flag. Only the global text, once; no memory."""
+    slots: list = []
+    off = await _first_system_prompt(
+        tmp_path / "memory-key-off", monkeypatch, fake_home, memory_enabled=False, off_by="key",
+        slots=slots,
+    )
+    assert "WORKSPACE-GUARDRAILS-SENTINEL" not in off, "the project's own GUARDRAILS.md reached the model"
+    assert off.count("GLOBAL-GUARDRAILS-SENTINEL") == 1, "the global guardrails missing or doubled"
+    assert off.count("## Guardrails\n") == 1, "guardrails injected twice"
+    assert "## Agent Memory" not in off and "## Division Context" not in off, "memory still ran"
+    (slot,) = slots
+    assert slot.occupied is False, slot.occupant_name
