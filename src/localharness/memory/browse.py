@@ -74,3 +74,53 @@ class StoreBrowse:
             promote_target=self._router.ensure_global if self._router is not None else None,
             workspace_identity=self._identity)
         return {"promoted": message.startswith("Promoted"), "message": message}
+
+    # plugin-internal — /memory, `localharness memory` and the bench; NOT MemoryBrowse protocol verbs
+    # (PAPI-04 stays five). Thin delegates with the store's own semantics: their value is the access
+    # boundary (the surfaces reach the store only through the plugin's own class), not new behaviour.
+
+    async def list_groups(self, *, limit: int | None = None, named_only: bool = False) -> list[dict[str, Any]]:
+        return await self._store.list_groups(limit=limit, named_only=named_only)
+
+    async def recent_facts(self, limit: int = 10) -> list[Any]:
+        return await self._store.recent_facts(limit)
+
+    async def get_fact(self, key: str) -> Any:
+        return await self._store.get_fact(key)
+
+    async def get_fact_by_id(self, fact_id: int) -> Any:
+        return await self._store.get_fact_by_id(fact_id)
+
+    async def get_fact_history(self, key: str) -> list[Any]:
+        return await self._store.get_fact_history(key)
+
+    async def query_facts(self, query: FactQuery) -> list[Any]:
+        return await self._store.query_facts(query)
+
+    async def forget_fact(self, fact_id: int) -> bool:
+        """Retire exactly this id (M4): False when a live turn superseded it first — never the
+        newer version in its place."""
+        return await self._store.forget_fact(fact_id)
+
+    async def list_archived(self, limit: int = 50, *, key: str | None = None) -> list[Any]:
+        return await self._store.list_archived(limit, key=key)
+
+    async def count_archived(self) -> int:
+        return await self._store.count_archived()
+
+    async def restore_fact(self, fact_id: int) -> bool:
+        return await self._store.restore_fact(fact_id)
+
+    async def archive_dormant(self, **kw: Any) -> Any:
+        from localharness.memory.consolidation import archive_dormant_facts
+        return await archive_dormant_facts(self._store, **kw)
+
+    async def archive_listed(self, **kw: Any) -> Any:
+        from localharness.memory.consolidation import archive_listed_facts
+        return await archive_listed_facts(self._store, **kw)
+
+    async def store(self, name: str, content: str, *, confidence: float = 1.0) -> None:
+        """Seed one fact exactly as `store_fact(name, content, confidence=...)` — no embedding, no LLM.
+        Optional, additive, on the bundled class only (NOT on the MemoryBrowse Protocol: it is
+        runtime_checkable, so a sixth member would make every five-verb browse fail isinstance)."""
+        await self._store.store_fact(name, content, confidence=confidence)

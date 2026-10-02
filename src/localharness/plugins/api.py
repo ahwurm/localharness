@@ -208,7 +208,11 @@ class MemoryBrowse(Protocol):
     with source "user_edit" and provenance "user_edit@<epoch>" + ";<origin>" when origin is given;
     forget -> True when retired (recoverable, never deleted), False when there was no active fact;
     promote -> {"promoted": bool, "message": str}. `origin` is an additive optional argument: no
-    PLUGIN_API_VERSION bump (runtime checks test attribute presence only — the 45 `setup` precedent)."""
+    PLUGIN_API_VERSION bump (runtime checks test attribute presence only — the 45 `setup` precedent).
+
+    The bundled StoreBrowse also offers `store(name, content, *, confidence=1.0)` (seeding, used by the
+    bench) and plugin-internal id-keyed reads used by the memory plugin's own commands. Neither is part
+    of this Protocol; callers probe with getattr."""
 
     async def search(self, query: BrowseQuery) -> list[dict[str, Any]]: ...
     async def get(self, name: str) -> dict[str, Any] | None: ...          # the fact + "history"
