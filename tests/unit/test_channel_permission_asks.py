@@ -419,6 +419,7 @@ async def test_slash_mode_rejects_an_unknown_name(tmp_path):
 async def test_discord_uses_the_bare_word(tmp_path):
     channel, gate = _RecordingChannel(), _gate(tmp_path)
     channel.channel_id = "discord"
+    channel.bare_mode_command = True  # 49-02: the channel class's attribute, not its name, decides
     repl = _repl(channel, gate)
 
     assert await repl._dispatch_input("mode trusted") is None

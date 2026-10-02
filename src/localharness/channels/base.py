@@ -140,6 +140,18 @@ class ChannelAdapter(ABC):
     `reject_once`. False is the safe default: a new channel that says nothing gets the deadline.
     """
 
+    bare_mode_command: bool = False
+    """Is `mode <name>` as the first word the mode command here? (PRD §3.4.)
+
+    A chat platform with no slash convention treats `mode <name>` as the first word as the
+    command. Set by the channel class, so a new platform needs no REPL edit. False (the default)
+    for the terminal, which has `/mode`: "mode" is an ordinary English word, so a line starting
+    with it stays a message.
+    """
+
+    start_banner: str = ""
+    """One line `start` prints, dimmed, after building this channel; empty prints nothing."""
+
     has_review_surface: bool = False
     """Does an in-workspace edit land somewhere a human will see it? (PRD §3.1 choice 2.)
 
