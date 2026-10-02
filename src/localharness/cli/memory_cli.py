@@ -24,6 +24,9 @@ memory_app = typer.Typer(
     help="Browse and edit the agent's persistent memory "
          "(list / show / edit / rm / archive / restore).",
     no_args_is_help=True,
+    # Mounted standalone by the memory plugin's CliDescriptor: no completion options of its own
+    # (as a core add_typer it had none — the root owns completion).
+    add_completion=False,
 )
 
 _AGENT_OPT = typer.Option("orchestrator", "--agent", "-a", help="Agent whose store to open.")
