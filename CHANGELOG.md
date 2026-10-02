@@ -10,9 +10,9 @@ This release adds a plugin system: one API, one loader and one trust model, for
 plugins you install and for plugins that ship with LocalHarness. The first
 features to ship as plugins are image generation, new in this release and
 off until you turn it on, and the phone app (`localharness web`), on by
-default. Memory, Discord and autoresearch now ship as plugins too, all on by default. The plugin API that 0.15.0 documented is
-removed, so a plugin written for 0.15 no longer loads: see Removed and
-Migration.
+default. Memory, Discord and autoresearch now ship as plugins too, all on by
+default. The plugin API that 0.15.0 documented is removed, so a plugin written
+for 0.15 no longer loads: see Removed and Migration.
 
 ### Added
 - **`localharness plugins`.** `list` shows every plugin with its state and the
@@ -438,6 +438,10 @@ Migration.
   not as proof that nothing changed.
 - This release's startup time was measured with four of the five bundled
   plugins loaded (the `dispatch` extra was not installed), not with all five.
+- Apart from the capability floor and the permission settings that SECURITY.md
+  names, a project's `org` settings (such as `org.audit_log_path`) still merge
+  over your global ones. They have not yet been checked one by one for whether
+  a project value can loosen a protection.
 
 ## [0.15.1] — 2026-10-01
 
