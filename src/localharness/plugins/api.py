@@ -89,7 +89,10 @@ class SlashDescriptor(BaseModel):
 
     `name` is "/example" (lower case — the REPL matches lower-cased input); `help` is its one line;
     `target` is "package.module:function" for `async def function(ctx: PluginContext, args: str) ->
-    str | None`, imported on first use — the returned text is shown to the user."""
+    str | None`, imported on first use — the returned text is shown to the user. `target` may also
+    be "package.module:Class.method" naming a method of the plugin's own class: it is called on the
+    running instance with (ctx, args). A handler may return text, None, or a rich renderable (shown
+    via the channel's renderable path). Both additive; PLUGIN_API_VERSION unchanged."""
 
     model_config = ConfigDict(frozen=True)
     name: Annotated[str, _fullmatch(
