@@ -116,3 +116,41 @@ def test_every_declared_section_is_a_real_core_setting(cls) -> None:
 @pytest.mark.parametrize("name", ["image", "web", "memory", "dispatch"])
 def test_the_existing_bundled_manifests_claim_nothing(name) -> None:
     assert next(c for c in _REAL_BUILTINS if c.manifest.name == name).manifest.sections == ()
+
+
+# --------------------------------------------------------------------------- plugins info
+
+
+def _info(g: Path, name: str, *flags: str):
+    result = runner.invoke(app, ["plugins", "info", name, *flags, "--config-dir", str(g)])
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
+def test_info_lists_the_claimed_rows_and_discloses_their_names(tmp_path) -> None:
+    g = _home(tmp_path)
+    out = _info(g, "sectp")
+    assert "proposer.model" in out and "sentinel.saturation_k" in out
+    assert out.count("proposer: and sentinel: keep their pre-plugin names") == 1
+    got = json.loads(_info(g, "sectp", "--json"))
+    assert got["sections"] == ["proposer", "sentinel"]
+    assert {s["path"] for s in got["settings"]} >= {"sectp.enabled", "proposer.model", "sentinel.saturation_k"}
+
+
+def test_one_claimed_section_reads_singular_even_while_off(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Onep, *_REAL_BUILTINS))
+    out = _info(_home(tmp_path), "onep")
+    assert "  sentinel: keeps its pre-plugin name" in out
+    assert "sentinel.saturation_k" not in out  # off: the claimed rows are not its listed settings
+
+
+_INFO_KEYS = {"name", "state", "state_kind", "what_it_does", "from", "enable_command", "version", "kind",
+              "requires", "uses", "cli", "slash", "settings", "setup_command", "note"}
+
+
+@pytest.mark.parametrize("name", ["web", "memory"])
+def test_a_plugin_that_claims_nothing_gains_only_an_empty_sections_key(tmp_path, name) -> None:
+    g = _home(tmp_path)
+    assert "pre-plugin name" not in _info(g, name)
+    got = json.loads(_info(g, name, "--json"))
+    assert set(got) == _INFO_KEYS | {"sections"} and got["sections"] == []
