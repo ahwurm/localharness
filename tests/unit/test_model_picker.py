@@ -101,8 +101,18 @@ async def test_picker_arrow_navigates_then_single_enter_submits():
 
 async def test_command_menu_enter_stays_accept_only():
     """The one-Enter rule is MODEL completions only — command completions keep the
-    accept-then-second-Enter contract (Claude Code feel)."""
-    subs = await _drive("/mem\t\r\r\x04", model_names_fn=lambda: ["qwen-a"])
+    accept-then-second-Enter contract (Claude Code feel). /memory is the memory plugin's row, so
+    it is installed here the way a memory-on session's lifecycle installs it."""
+    from unittest.mock import AsyncMock
+
+    from localharness.cli.slash_commands import SlashCommand, set_plugin_rows
+    from localharness.memory.plugin import MemoryPlugin
+    (d,) = MemoryPlugin.manifest.slash
+    set_plugin_rows([SlashCommand(d.name, d.help, AsyncMock(), takes_args=True, plugin="memory")])
+    try:
+        subs = await _drive("/mem\t\r\r\x04", model_names_fn=lambda: ["qwen-a"])
+    finally:
+        set_plugin_rows(())
     assert subs == ["/memory"]
 
 

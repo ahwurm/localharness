@@ -87,25 +87,29 @@ async def _seed_global_memory(global_dir: Path) -> None:
 def _install_a_full_session(monkeypatch) -> dict:
     """Run a REAL session body in place of the interactive loop, and report that it fired.
 
-    Every write goes through `self._store` — the `MemoryStore` `start` opened and handed the REPL —
-    not a store this test constructed. The returned dict is the did-it-bite guard: a monkeypatch
+    Every write goes through the running memory plugin's store — the `MemoryStore` `start` opened
+    (recorded as the plugin started; the REPL no longer holds one) — not a store this test constructed. The returned dict is the did-it-bite guard: a monkeypatch
     that missed its target leaves an empty dict, and without checking it a byte-proof over a session
     that never ran reads as a green test.
     """
+    from tests.unit.test_recall_scope_wiring import _record_memory_plugins, _the_memory_plugin
     seen: dict = {}
+    mem = _record_memory_plugins(monkeypatch)
 
     async def _a_full_session(self):
         from localharness.memory.config import MemoryConsolidationConfig
         from localharness.memory.consolidation import ConsolidationPass
 
-        await self._store.store_fact(key="ws-lesson", value=WORKSPACE_MARKER, confidence=0.9)
-        await self._store.store_fact(key="ws-second", value="another project note", confidence=0.9)
+        store = _the_memory_plugin(mem).store
+
+        await store.store_fact(key="ws-lesson", value=WORKSPACE_MARKER, confidence=0.9)
+        await store.store_fact(key="ws-second", value="another project note", confidence=0.9)
         # `llm=None` on purpose (the established idiom — test_memory_consolidation.py:67): the
         # deterministic core runs and writes, the five LLM-gated steps early-return. The pass is
         # called DIRECTLY because the scheduler's idle timer never fires in a stubbed session
         # (41-05's finding) — waiting for it would prove nothing but patience.
-        seen["report"] = await ConsolidationPass(self._store, MemoryConsolidationConfig()).run()
-        await self._store.flush_memory_md()
+        seen["report"] = await ConsolidationPass(store, MemoryConsolidationConfig()).run()
+        await store.flush_memory_md()
         seen["ran"] = True
         return None
 

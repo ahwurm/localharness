@@ -37,6 +37,31 @@ from tests.unit.test_workspace_state_landing import (
 )
 
 
+def _record_memory_plugins(monkeypatch) -> list:
+    """Wrap (never replace) MemoryPlugin.start and record each plugin that got through it, with
+    the router and store it holds at that moment (stop() drops both, so they are read here). The
+    running plugin's router is what `/memory promote` borrows (its slash row is bound to this very
+    instance) and what the slot reads ambient context through — the session's one router."""
+    from types import SimpleNamespace
+
+    from localharness.memory.plugin import MemoryPlugin
+    started: list = []
+    real_start = MemoryPlugin.start
+
+    async def _rec_start(self, ctx):
+        await real_start(self, ctx)
+        started.append(SimpleNamespace(plugin=self, router=self._router, store=self._store))
+
+    monkeypatch.setattr("localharness.memory.plugin.MemoryPlugin.start", _rec_start)
+    return started
+
+
+def _the_memory_plugin(started: list):
+    """The single started memory plugin, with the did-it-bite guard."""
+    assert len(started) == 1, f"expected one started memory plugin; got {len(started)} — did the patch bite?"
+    return started[0]
+
+
 # ---------------------------------------------------------------------------
 # Task 1 — the loop reads ambient context through the router
 # ---------------------------------------------------------------------------
@@ -277,19 +302,19 @@ async def _seed_global_decoy(global_dir: Path) -> None:
     await store.close()
 
 
-def _live_read(monkeypatch, rec: dict, seen: dict) -> None:
+def _live_read(monkeypatch, mem: list, seen: dict) -> None:
     """Replace the interactive loop with one that writes a workspace fact and then reads ambient
     context back THROUGH THE SESSION'S OWN ROUTER, mid-session, with both databases open.
 
-    The router is reached through the RECORDED `OrchestratorREPL` kwarg (the memory plugin's router,
-    handed over by the slot's legacy_handles()), never through a private attribute: the kwarg IS
-    the wiring claim, so a read through anything else would grade an
+    The router is the RUNNING memory plugin's (recorded as it started — the one the `/memory` row
+    and the slot use), never a router rebuilt here: a read through anything else would grade an
     object the session might not actually be using.
     """
     async def _read_through_the_router(self):
-        await self._store.store_fact("ws-marker", f"{WS_MARKER} this project's recollection",
-                                     confidence=0.9)
-        router = _one(rec, "repl")["recall_router"]
+        running = _the_memory_plugin(mem)
+        await running.store.store_fact("ws-marker", f"{WS_MARKER} this project's recollection",
+                                       confidence=0.9)
+        router = running.router
         seen["router"] = router
         seen["ctx"] = await router.load_context()
         return None
@@ -351,11 +376,12 @@ async def test_each_read_tool_receives_the_very_router_the_loop_got(tool, tmp_pa
     """
     _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
+    mem = _record_memory_plugins(monkeypatch)
     seen = _record_wiring(monkeypatch)
 
     await _drive()
 
-    router = _one(rec, "repl")["recall_router"]
+    router = _the_memory_plugin(mem).router
     assert router is not None, "the session handed out no router"
     assert seen[tool], f"the {tool} tool was never constructed — the patch did not bite"
     assert seen[tool][0] is router, (
@@ -371,11 +397,12 @@ async def test_the_remember_tool_keeps_the_raw_store(tmp_path, monkeypatch, fake
     something. This asserts it before a user finds it."""
     _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
+    mem = _record_memory_plugins(monkeypatch)
     seen = _record_wiring(monkeypatch)
 
     await _drive()
 
-    router = _one(rec, "repl")["recall_router"]
+    router = _the_memory_plugin(mem).router
     assert seen["remember"], "MemoryRememberTool was never constructed — the patch did not bite"
     assert seen["remember"][0] is seen["instances"][0], "remember() lost the session's own store"
     assert seen["remember"][0] is not router, "remember() writes through the recall router"
@@ -388,8 +415,9 @@ async def test_a_default_scope_session_reads_only_the_workspace(tmp_path, monkey
     _home, global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     await _seed_global_decoy(global_dir)
     rec = _install_recorders(monkeypatch)
+    mem = _record_memory_plugins(monkeypatch)
     seen: dict = {}
-    _live_read(monkeypatch, rec, seen)
+    _live_read(monkeypatch, mem, seen)
 
     await _drive()
 
@@ -409,8 +437,9 @@ async def test_a_both_scope_session_reads_both_stores_with_origin_tokens(tmp_pat
     _write_scoped_agent(ws / "agents", "both")
     await _seed_global_decoy(global_dir)
     rec = _install_recorders(monkeypatch)
+    mem = _record_memory_plugins(monkeypatch)
     seen: dict = {}
-    _live_read(monkeypatch, rec, seen)
+    _live_read(monkeypatch, mem, seen)
 
     await _drive()
 
@@ -434,13 +463,14 @@ async def test_a_session_without_a_workspace_builds_one_store_and_collapses_the_
     _home, global_dir, _proj = _global_only_start(tmp_path, monkeypatch, fake_home)
     _write_scoped_agent(global_dir / "agents", "both")
     rec = _install_recorders(monkeypatch)
+    mem = _record_memory_plugins(monkeypatch)
 
     await _drive()
 
     assert len(rec["store"]) == 1, (
         f"a workspace-less session must build exactly one store; got {len(rec['store'])}"
     )
-    router = _one(rec, "repl")["recall_router"]
+    router = _the_memory_plugin(mem).router
     assert router is not None, "the workspace-less session got no router"
     assert router.scope == "workspace", "the scope did not collapse without a second store"
     assert router.configured_scope == "both", (
@@ -457,8 +487,9 @@ async def test_the_opened_global_handle_is_closed_at_shutdown(tmp_path, monkeypa
     _write_scoped_agent(ws / "agents", "both")
     await _seed_global_decoy(global_dir)
     rec = _install_recorders(monkeypatch)
+    mem = _record_memory_plugins(monkeypatch)
     seen = _record_wiring(monkeypatch)
-    _live_read(monkeypatch, rec, seen)
+    _live_read(monkeypatch, mem, seen)
 
     await _drive()
 

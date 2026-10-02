@@ -534,10 +534,12 @@ async def test_a_failure_at_every_stage_is_named_and_the_session_goes_on(tmp_pat
     assert len(rows) == 1 and rows[0][3] == "complete"
 
 
-@pytest.mark.parametrize("memory_on", [True, False])
-async def test_memory_row_follows_the_memory_slot_in_a_real_start(tmp_path, monkeypatch, memory_on):
-    """G5 (47-03), composed: a memory-off session (empty slot) has no /memory on any surface while
-    it runs; a memory-on session keeps it; either way it is back in the table once the session ends."""
+@pytest.mark.parametrize("state", ["on", "off", "failed"])
+async def test_memory_row_exists_only_while_the_memory_plugin_runs_in_a_real_start(
+        tmp_path, monkeypatch, state):
+    """G5 (47-03) made structural: /memory is the memory plugin's own slash row, so a memory-off
+    session or one whose memory plugin failed to start has no /memory on any surface while it runs;
+    a memory-on session has it, owned by the memory plugin; either way it leaves with the session."""
     from localharness.cli.start_cmd import _start_async
 
     during: list[Any] = []
@@ -546,13 +548,19 @@ async def test_memory_row_follows_the_memory_slot_in_a_real_start(tmp_path, monk
         during.append(find_row("/memory"))
 
     _stub_start_boundaries(tmp_path, monkeypatch, repl_run=_repl)
-    if not memory_on:
+    if state == "off":
         cfg = tmp_path / "config.yaml"
         cfg.write_text(cfg.read_text() + "org:\n  memory_enabled: false\n")
+    if state == "failed":
+        async def _boom(self, ctx): raise RuntimeError("memory start failed")
+        monkeypatch.setattr(MemoryPlugin, "start", _boom)
     _bundle(monkeypatch, MemoryPlugin)
 
     await _start_async(None, False, False, str(tmp_path))
 
     (row,) = during
-    assert (row is not None) is memory_on
-    assert find_row("/memory") is not None, "the next session decides afresh"
+    if state == "on":
+        assert row is not None and row.plugin == "memory" and callable(row.handler)
+    else:
+        assert row is None
+    assert find_row("/memory") is None, "plugin rows leave with the session"

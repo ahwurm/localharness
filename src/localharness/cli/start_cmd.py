@@ -519,7 +519,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.channels.terminal import TerminalChannel
     from localharness.cli.agent_cmd import _build_agent_yaml
     from localharness.cli.init_cmd import init_app
-    from localharness.cli.slash_commands import set_memory_available, set_plugin_rows
+    from localharness.cli.slash_commands import set_plugin_rows
     from localharness.config.loader import ConfigLoader
     from localharness.config.paths import global_config_dir, resolve_config_dir, resolve_runtime_path
     from localharness.core.bus import EventBus
@@ -1115,8 +1115,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # One slot object reaches the loop AND the channel; the memory plugin occupies it when it
         # started, and it is empty with memory off or when memory failed to start.
         memory_slot = plugin_result.slot if plugin_result is not None else MemorySlot()
-        # G5: an empty slot drops /memory from every surface; a memory-on session keeps it.
-        set_memory_available(memory_slot.occupied)
 
         # --- Capability floor (P-A) for the ROOT agent, read off DECLARATIONS (SAFE-02) ---
         # Strips every GLOBAL tool that declares — or, undeclared, defaults to — ingest: untrusted:
@@ -1584,7 +1582,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             )
             return
 
-        _mem_store, _mem_router = memory_slot.legacy_handles()  # transitional: /memory reaches the store until it becomes the memory plugin's own command
         repl = OrchestratorREPL(
             orchestrator=orchestrator,
             agent_loop=agent_loop,
@@ -1597,10 +1594,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             harness_config=harness,
             on_agent_deployed=_register_deployed_agent,
             gate=gate,  # what /mode switches; the same object the loop and subagents hold
-            # 42-04: `/memory promote` borrows the router's global handle — the SAME router the
-            # plugin's read tools got; the plugin owns and closes both.
-            memory_store=_mem_store,
-            recall_router=_mem_router,
         )
 
         await repl.run()
@@ -1629,7 +1622,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             except Exception as exc:  # noqa: BLE001
                 log.debug("plugin shutdown failed: %s", exc)
             set_plugin_rows(())  # the rows are process-wide: they leave with the session
-        set_memory_available(True)  # process-wide too: the next session decides afresh
         # LAST (#154): the LLM client's httpx pool outlives every consumer that could still issue
         # a request through it — the REPL and its agents (repl.run() has returned), consolidation,
         # the gates — and the close-out summary above is pure. Closing it earlier would risk

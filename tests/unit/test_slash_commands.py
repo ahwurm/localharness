@@ -44,10 +44,11 @@ async def test_slash_help_renders_the_live_table():
 def test_table_matches_the_dispatcher_command_set():
     # The dispatcher looks every command up in the table: each row resolves to itself and each
     # core row names a real coroutine on the REPL, so the table and the dispatcher cannot drift.
-    dispatched = {"/help", "/agents", "/model", "/reasoning", "/verbose", "/mode", "/memory",
+    # /memory is the memory plugin's row, not core's (it reaches the table only via set_plugin_rows).
+    dispatched = {"/help", "/agents", "/model", "/reasoning", "/verbose", "/mode",
                   "/pending", "/approve", "/deny", "/quit", "/exit"}
     table = {name for name, _ in SLASH_COMMANDS}
-    assert table == dispatched
+    assert table == dispatched and "/memory" not in table
     for row in SLASH_COMMANDS:
         assert find_row(row.name) is row
         assert inspect.iscoroutinefunction(getattr(repl.OrchestratorREPL, row.handler)), row.name

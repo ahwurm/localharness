@@ -455,14 +455,16 @@ async def test_the_running_session_reads_its_guardrails_from_the_global_dir(tmp_
     (ws / "divisions" / "default" / "DIVISION.md").write_text("WORKSPACE-DECOY-MARKER\n")
 
     seen: dict = {}
+    from tests.unit.test_recall_scope_wiring import _record_memory_plugins, _the_memory_plugin
+    mem = _record_memory_plugins(monkeypatch)
 
     async def _read_the_safety_context(self):
         # Runs INSIDE the live session, in place of the interactive loop, so the store is open and
         # these are the same reads a real turn takes. `self._agent` is the AgentLoop `start` built
-        # and `self._store` the MemoryStore it handed to the REPL.
+        # and the store is the MemoryStore the running memory plugin opened (the REPL holds none).
         seen["agent"] = self._agent
         seen["guardrails"] = self._agent._read_guardrails()
-        seen["ctx"] = await self._store.load_context()
+        seen["ctx"] = await _the_memory_plugin(mem).store.load_context()
         return None
 
     monkeypatch.setattr("localharness.cli.repl.OrchestratorREPL.run", _read_the_safety_context)
