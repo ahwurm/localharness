@@ -974,34 +974,53 @@ async def test_tool_call_action_published_before_observation(mock_llm_client, bu
 # Task 2: Memory loader tiered prompt tests
 # ---------------------------------------------------------------------------
 
-from unittest.mock import AsyncMock as _AsyncMock, MagicMock as _MagicMock
-from dataclasses import dataclass as _dataclass
+from contextlib import asynccontextmanager as _asynccontextmanager
 
 
-@_dataclass(frozen=True)
-class _MockMemoryContext:
-    agent_memory_md: str
-    division_md: str
-    fact_count: int
-    token_estimate: int
+@_asynccontextmanager
+async def _occupied_slot(tmp_path, *, facts=(), division_md=None, agent_id="test-agent",
+                         division_id=None, state_dir=None, global_dir=None, **mem):
+    """A MemorySlot occupied by the REAL MemoryPlugin over a tmp store (tools() + start(),
+    consolidation off), seeded with `facts` and an optional global DIVISION.md; the plugin is
+    stopped on exit. Yields (slot, plugin) — the loop's only memory path since 48-06."""
+    from localharness.memory.config import MemoryConfig
+    from localharness.memory.plugin import MemoryPlugin
+    from localharness.plugins.api import PluginContext, PluginPaths, SessionInfo
+    from localharness.plugins.slot import MemorySlot
+    from localharness.provider.idle_llm import LLMTextAdapter
+    from localharness.tools.registry import ToolRegistry
+    from tests.conftest import MockLLMClient
+
+    g = global_dir or tmp_path / "mem-global"
+    s = state_dir or tmp_path / "mem-state"
+    g.mkdir(parents=True, exist_ok=True)
+    s.mkdir(parents=True, exist_ok=True)
+    if division_md is not None:
+        div = g / "divisions" / (division_id or "default") / "DIVISION.md"
+        div.parent.mkdir(parents=True, exist_ok=True)
+        div.write_text(division_md, encoding="utf-8")
+    mem.setdefault("consolidation", {"enabled": False})
+    llm = MockLLMClient([])
+    ctx = PluginContext(
+        bus=EventBus(), tools=ToolRegistry(), hooks=None, config=None,
+        agent_config=MemoryConfig(**mem),
+        paths=PluginPaths(global_config_dir=g, workspace=None, state_dir=s),
+        llm=llm, idle_llm=LLMTextAdapter(llm),
+        session=SessionInfo(agent_id=agent_id, division_id=division_id, sitting_id="sit-mem",
+                            model="m", context_tokens=131072, budget={"max_tokens": 1}))
+    plugin = MemoryPlugin()
+    await plugin.tools(ctx)
+    await plugin.start(ctx)
+    try:
+        for name, value in facts:
+            await plugin._store.store_fact(name, value, confidence=0.9)
+        yield MemorySlot(plugin, ctx, "memory"), plugin
+    finally:
+        if plugin._store is not None:
+            await plugin.stop(ctx)
 
 
-def _mock_memory_loader(**load_context_kwargs):
-    """A memory-loader double shaped like the REAL MemoryStore: an async ``load_context`` on an
-    otherwise SYNCHRONOUS object.
-
-    Deliberately NOT a bare AsyncMock. On one of those every attribute is async, including
-    ``set_current_session`` — which MemoryStore defines as a plain ``def`` and loop.py therefore
-    calls without awaiting. The bare mock turned that call into an orphaned coroutine (a
-    'never awaited' RuntimeWarning), and worse, it made the mock incapable of catching the
-    inverse bug: production switching a sync memory call to async would still pass here.
-    """
-    loader = _MagicMock()
-    loader.load_context = _AsyncMock(**load_context_kwargs)
-    return loader
-
-
-def _make_memory_agent_loop(memory_loader=None, guardrails_path=None):
+def _make_memory_agent_loop(memory_slot=None, guardrails_path=None):
     """Create an AgentLoop with mocked dependencies for memory testing."""
     from localharness.config.models import AgentConfig
     from tests.conftest import MockLLMClient, FakeLLMResponse
@@ -1019,9 +1038,23 @@ def _make_memory_agent_loop(memory_loader=None, guardrails_path=None):
         context_manager=ctx,
         tool_registry=None,
         permission_evaluator=perm,
-        memory_loader=memory_loader,
+        memory_slot=memory_slot,
         guardrails_path=guardrails_path,
     ), llm
+
+
+def _fail_memory_reads(monkeypatch) -> list:
+    """Make every ambient memory read raise (the router's — the plugin's read path); returns the
+    list of calls so a test can prove the failure really happened on its turn."""
+    from localharness.memory.router import RecallRouter
+    calls: list = []
+
+    async def boom(self, **kw):
+        calls.append(kw)
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(RecallRouter, "load_context", boom)
+    return calls
 
 
 def _guardrails_file(tmp_path, text="safety rules"):
@@ -1033,38 +1066,20 @@ def _guardrails_file(tmp_path, text="safety rules"):
 
 
 @pytest.mark.asyncio
-async def test_memory_loader_tiered_prompt(tmp_path):
+async def test_memory_slot_tiered_prompt(tmp_path):
     """MEM-03: the tiered system prompt carries all 3 sections, guardrails first. Since SAFE-04
-    the guardrails tier is read by core from `guardrails_path`, not by the memory loader."""
-    memory = _mock_memory_loader(return_value=_MockMemoryContext(
-        agent_memory_md="my notes",
-        division_md="div context",
-        fact_count=5,
-        token_estimate=100,
-    ))
+    the guardrails tier is read by core from `guardrails_path`; since 48-06 the division and
+    agent tiers come only through the memory slot's occupant."""
+    async with _occupied_slot(tmp_path, facts=[("note", "my notes live here")],
+                              division_md="div context") as (slot, _plugin):
+        loop, llm = _make_memory_agent_loop(
+            memory_slot=slot, guardrails_path=_guardrails_file(tmp_path)
+        )
+        sys_content = (await _record_turn(loop, llm))[0]
 
-    loop, llm = _make_memory_agent_loop(
-        memory_loader=memory, guardrails_path=_guardrails_file(tmp_path)
-    )
-
-    # Capture messages sent to LLM
-    captured_messages = []
-    original_stream = llm.stream_complete
-
-    async def capturing_stream(messages=None, tools=None, on_token=None):
-        captured_messages.extend(messages or [])
-        return await original_stream(messages=messages, tools=tools, on_token=on_token)
-
-    llm.stream_complete = capturing_stream
-    await loop.run_turn("hello")
-
-    memory.load_context.assert_awaited_once()
-    sys_msgs = [m for m in captured_messages if m.get("role") == "system"]
-    assert len(sys_msgs) >= 1
-    sys_content = sys_msgs[0]["content"]
     assert "## Guardrails\nsafety rules" in sys_content
     assert "## Division Context\ndiv context" in sys_content
-    assert "## Agent Memory\nmy notes" in sys_content
+    assert "## Agent Memory\n" in sys_content and "my notes live here" in sys_content
     # Verify order: guardrails before division before agent memory
     g_idx = sys_content.index("## Guardrails")
     d_idx = sys_content.index("## Division Context")
@@ -1073,60 +1088,36 @@ async def test_memory_loader_tiered_prompt(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_memory_loader_empty_tiers_omitted():
+async def test_memory_slot_empty_tiers_omitted(tmp_path):
     """MEM-03: Empty tiers silently omitted -- no empty ## headings."""
-    memory = _mock_memory_loader(return_value=_MockMemoryContext(
-        agent_memory_md="notes only",
-        division_md="",
-        fact_count=0,
-        token_estimate=10,
-    ))
+    async with _occupied_slot(tmp_path, facts=[("note", "notes only")]) as (slot, _plugin):
+        loop, llm = _make_memory_agent_loop(memory_slot=slot)
+        sys_content = (await _record_turn(loop, llm))[0]
 
-    loop, llm = _make_memory_agent_loop(memory_loader=memory)
-
-    captured_messages = []
-    original_stream = llm.stream_complete
-
-    async def capturing_stream(messages=None, tools=None, on_token=None):
-        captured_messages.extend(messages or [])
-        return await original_stream(messages=messages, tools=tools, on_token=on_token)
-
-    llm.stream_complete = capturing_stream
-    await loop.run_turn("hello")
-
-    sys_msgs = [m for m in captured_messages if m.get("role") == "system"]
-    assert len(sys_msgs) >= 1
-    sys_content = sys_msgs[0]["content"]
-    assert "## Agent Memory\nnotes only" in sys_content
+    assert "## Agent Memory\n" in sys_content and "notes only" in sys_content
     assert "## Guardrails" not in sys_content
     assert "## Division Context" not in sys_content
 
 
 @pytest.mark.asyncio
-async def test_memory_loader_failure_nonfatal():
+async def test_memory_slot_failure_nonfatal(tmp_path, monkeypatch):
     """MEM-03: Memory load failure is non-fatal -- agent runs with base role only."""
-    memory = _mock_memory_loader(side_effect=RuntimeError("db gone"))
+    async with _occupied_slot(tmp_path, facts=[("note", "never shown")]) as (slot, _plugin):
+        calls = _fail_memory_reads(monkeypatch)
+        loop, llm = _make_memory_agent_loop(memory_slot=slot)
+        prompts = _record_system_prompts(llm)
+        result = await loop.run_turn("hello")  # Should not raise
 
-    loop, llm = _make_memory_agent_loop(memory_loader=memory)
-
-    captured_messages = []
-    original_stream = llm.stream_complete
-
-    async def capturing_stream(messages=None, tools=None, on_token=None):
-        captured_messages.extend(messages or [])
-        return await original_stream(messages=messages, tools=tools, on_token=on_token)
-
-    llm.stream_complete = capturing_stream
-
-    # Should not raise
-    result = await loop.run_turn("hello")
     assert isinstance(result, str)
+    assert calls, "the failing read never ran on this turn"
+    assert "You are a test assistant." in prompts[0]
+    assert "## Agent Memory" not in prompts[0]
 
-    sys_msgs = [m for m in captured_messages if m.get("role") == "system"]
-    if sys_msgs:
-        sys_content = sys_msgs[0]["content"]
-        assert "You are a test assistant." in sys_content
-        assert "## Agent Memory" not in sys_content
+
+async def _record_turn(loop, llm, task="hello") -> list[str]:
+    prompts = _record_system_prompts(llm)
+    await loop.run_turn(task)
+    return prompts
 
 
 # ---------------------------------------------------------------------------
@@ -1161,40 +1152,49 @@ async def test_guardrails_reach_the_prompt_with_memory_off(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_guardrails_survive_a_failing_memory_load(tmp_path):
-    """The memory block runs and raises; the safety rules are not collateral damage."""
-    memory = _mock_memory_loader(side_effect=RuntimeError("db gone"))
-    loop, llm = _make_memory_agent_loop(
-        memory_loader=memory, guardrails_path=_guardrails_file(tmp_path, "RULES-X")
-    )
-    prompts = _record_system_prompts(llm)
+async def test_guardrails_survive_a_failing_memory_load(tmp_path, monkeypatch):
+    """The memory read runs and raises; the safety rules are not collateral damage."""
+    async with _occupied_slot(tmp_path, facts=[("note", "never shown")]) as (slot, _plugin):
+        calls = _fail_memory_reads(monkeypatch)
+        loop, llm = _make_memory_agent_loop(
+            memory_slot=slot, guardrails_path=_guardrails_file(tmp_path, "RULES-X")
+        )
+        prompts = await _record_turn(loop, llm)
 
-    await loop.run_turn("hello")
-
-    memory.load_context.assert_awaited_once()  # the failure really happened on this turn
+    assert len(calls) == 1  # the failure really happened on this turn
     assert "\n\n## Guardrails\nRULES-X" in prompts[0]
     assert "## Agent Memory" not in prompts[0]
 
 
 @pytest.mark.asyncio
-async def test_guardrails_splice_is_byte_identical_to_the_old_memory_join(tmp_path):
+async def test_guardrails_splice_is_byte_identical_to_the_old_memory_join(tmp_path, monkeypatch):
     """With memory on, moving the reader changed no byte: the prompt equals the pre-SAFE-04 join
-    `"\\n\\n".join([prompt, guardrails, division, memory])` over the same bare prompt."""
-    memory = _mock_memory_loader(return_value=_MockMemoryContext(
-        agent_memory_md="MEM", division_md="DIV", fact_count=1, token_estimate=1,
-    ))
-    loop, llm = _make_memory_agent_loop(
-        memory_loader=memory, guardrails_path=_guardrails_file(tmp_path, "RULES-X")
-    )
-    prompts = _record_system_prompts(llm)
+    `"\\n\\n".join([prompt, guardrails, division, memory])` over the same bare prompt, where
+    division/memory are exactly the sections the slot's occupant answered on that turn."""
+    from localharness.memory.plugin import MemoryPlugin
+    answered: list = []
+    original = MemoryPlugin.context
+
+    async def recording(self, ctx, turn, budget):
+        got = await original(self, ctx, turn, budget)
+        answered.append(got)
+        return got
+
+    monkeypatch.setattr(MemoryPlugin, "context", recording)
+    async with _occupied_slot(tmp_path, facts=[("m", "MEM")], division_md="DIV") as (slot, _p):
+        loop, llm = _make_memory_agent_loop(
+            memory_slot=slot, guardrails_path=_guardrails_file(tmp_path, "RULES-X")
+        )
+        prompts = await _record_turn(loop, llm)
     bare_loop, bare_llm = _make_memory_agent_loop()
-    bare = _record_system_prompts(bare_llm)
+    bare = await _record_turn(bare_loop, bare_llm)
 
-    await loop.run_turn("hello")
-    await bare_loop.run_turn("hello")
-
+    (contribution,) = answered
+    sections = dict(contribution.sections)
+    assert list(sections) == ["Division Context", "Agent Memory"] and "MEM" in sections["Agent Memory"]
     assert prompts[0] == "\n\n".join([
-        bare[0], "## Guardrails\nRULES-X", "## Division Context\nDIV", "## Agent Memory\nMEM",
+        bare[0], "## Guardrails\nRULES-X", "## Division Context\nDIV",
+        "## Agent Memory\n" + sections["Agent Memory"],
     ])
 
 
@@ -1250,93 +1250,65 @@ async def test_guardrails_are_reread_every_turn(tmp_path):
 # ---------------------------------------------------------------------------
 # Ambient-injection activation trace (owner reversal 2026-07-17): the every-turn
 # memory shelf is a co-firing event and is recorded at the injection seam. These
-# drive a REAL MemoryStore through run_turn — proving the hook is wired, not a
-# green test on code nothing calls.
+# drive a REAL MemoryPlugin over a real store through the slot and run_turn —
+# proving the hook is wired, not a green test on code nothing calls.
 # ---------------------------------------------------------------------------
 
-
-async def _memory_store(tmp_path):
-    from localharness.memory.sqlite import MemoryStore
-
-    store = MemoryStore(agent_id="test-agent", division_id="", org_id="default",
-                        base_dir=str(tmp_path))
-    await store.open()
-    await store.store_fact("deploy_note", "deploy requires the vpn", confidence=0.9)
-    await store.store_fact("api_key_loc", "api keys live in the vault", confidence=0.9)
-    return store
-
-
-def _memory_loop_with_cfg(memory_loader, *, trace_ambient_injection=True):
-    from localharness.config.models import AgentConfig
-    from tests.conftest import FakeLLMResponse, MockLLMClient
-
-    from localharness.memory.config import MemoryConfig
-    cfg = AgentConfig(name="test-agent", role="You are a test assistant.")
-    # agent.memory is the memory plugin's now; the loader attaches it like this, and the legacy
-    # (bench) loop block reads it through getattr(config, "memory")
-    cfg._plugin_settings = {"memory": MemoryConfig(trace_ambient_injection=trace_ambient_injection)}
-    llm = MockLLMClient([FakeLLMResponse(content="Done.")])
-    return AgentLoop(
-        config=cfg, llm=llm, bus=EventBus(), context_manager=ContextManager(),
-        tool_registry=None, permission_evaluator=PermissionEvaluator(),
-        memory_loader=memory_loader,
-    )
+_TRACE_FACTS = [("deploy_note", "deploy requires the vpn"),
+                ("api_key_loc", "api keys live in the vault")]
 
 
 @pytest.mark.asyncio
 async def test_ambient_injection_records_trace_on_turn(tmp_path):
     """End-to-end: a turn whose ambient shelf renders facts records exactly ONE injection-source
     trace whose injected_ids are those facts' ids and whose stimulus is the user message."""
-    store = await _memory_store(tmp_path)
-    try:
+    async with _occupied_slot(tmp_path, facts=_TRACE_FACTS) as (slot, plugin):
+        store = plugin._store
         ids = {(await store.get_fact("deploy_note")).id, (await store.get_fact("api_key_loc")).id}
-        loop = _memory_loop_with_cfg(store)
+        loop, _llm = _make_memory_agent_loop(memory_slot=slot)
         await loop.run_turn("where do api keys live?")
 
         injection = [t for t in await store.recent_activation_traces() if t.source == "injection"]
-        assert len(injection) == 1
-        t = injection[0]
-        assert set(t.injected_ids) == ids
-        assert t.fired_ids == t.injected_ids           # shelf renders exactly what it selects
-        assert t.stimulus_text == "where do api keys live?"
-    finally:
-        await store.close()
+    assert len(injection) == 1
+    t = injection[0]
+    assert set(t.injected_ids) == ids
+    assert t.fired_ids == t.injected_ids           # shelf renders exactly what it selects
+    assert t.stimulus_text == "where do api keys live?"
 
 
 @pytest.mark.asyncio
 async def test_ambient_injection_kill_switch_off_records_no_trace(tmp_path):
     """trace_ambient_injection=False restores the pre-reversal behavior: the shelf still injects
     (## Agent Memory present) but NO injection-trace row is written."""
-    store = await _memory_store(tmp_path)
-    try:
-        loop = _memory_loop_with_cfg(store, trace_ambient_injection=False)
-        await loop.run_turn("where do api keys live?")
+    async with _occupied_slot(tmp_path, facts=_TRACE_FACTS,
+                              trace_ambient_injection=False) as (slot, plugin):
+        loop, llm = _make_memory_agent_loop(memory_slot=slot)
+        prompts = await _record_turn(loop, llm, "where do api keys live?")
 
-        injection = [t for t in await store.recent_activation_traces() if t.source == "injection"]
-        assert injection == []  # kill-switch off -> no injection trace
-    finally:
-        await store.close()
+        injection = [t for t in await plugin._store.recent_activation_traces()
+                     if t.source == "injection"]
+    assert "## Agent Memory" in prompts[0]
+    assert injection == []  # kill-switch off -> no injection trace
 
 
 @pytest.mark.asyncio
 async def test_ambient_injection_trace_failure_does_not_break_turn(tmp_path, monkeypatch):
     """A trace-write failure at the injection seam never disturbs the turn: run_turn completes
-    and the answer is returned (best-effort, wrapped + warned)."""
-    store = await _memory_store(tmp_path)
-    try:
+    and the answer is returned (best-effort, wrapped + warned) — memory WAS still injected."""
+    async with _occupied_slot(tmp_path, facts=_TRACE_FACTS) as (slot, plugin):
         called = {"n": 0}
 
         async def boom(**kwargs):
             called["n"] += 1
             raise RuntimeError("trace store down")
 
-        monkeypatch.setattr(store, "record_injection_trace", boom)
-        loop = _memory_loop_with_cfg(store)
+        monkeypatch.setattr(plugin._store, "record_injection_trace", boom)
+        loop, llm = _make_memory_agent_loop(memory_slot=slot)
+        prompts = _record_system_prompts(llm)
         result = await loop.run_turn("hi")
-        assert isinstance(result, str)     # the turn survived the trace failure
-        assert called["n"] == 1            # the hook fired (its failure was swallowed)
-    finally:
-        await store.close()
+    assert isinstance(result, str)     # the turn survived the trace failure
+    assert called["n"] == 1            # the hook fired (its failure was swallowed)
+    assert "## Agent Memory" in prompts[0]
 
 
 # ---------------------------------------------------------------------------
@@ -2406,21 +2378,16 @@ async def test_ambient_injection_records_trace_on_empty_shelf(tmp_path):
     an empty injected set. The write gate previously skipped empty shelves (`... and _inj_ids and ...`),
     so those turns left NO row and per-turn coverage accounting undercounted. An empty-fired row is
     zero-signal downstream (the co-fire reader yields no pairs) but must still exist."""
-    from localharness.memory.sqlite import MemoryStore
-
-    store = MemoryStore(agent_id="test-agent", division_id="", org_id="default", base_dir=str(tmp_path))
-    await store.open()
-    try:
-        loop = _memory_loop_with_cfg(store)                       # empty store -> empty shelf
+    async with _occupied_slot(tmp_path) as (slot, plugin):     # empty store -> empty shelf
+        loop, _llm = _make_memory_agent_loop(memory_slot=slot)
         await loop.run_turn("a question with no memory to inject")
 
-        injection = [t for t in await store.recent_activation_traces() if t.source == "injection"]
-        assert len(injection) == 1                                # the empty turn IS recorded
-        assert injection[0].injected_ids == []
-        assert injection[0].fired_ids == []
-        assert injection[0].stimulus_text == "a question with no memory to inject"
-    finally:
-        await store.close()
+        injection = [t for t in await plugin._store.recent_activation_traces()
+                     if t.source == "injection"]
+    assert len(injection) == 1                                    # the empty turn IS recorded
+    assert injection[0].injected_ids == []
+    assert injection[0].fired_ids == []
+    assert injection[0].stimulus_text == "a question with no memory to inject"
 
 
 @pytest.mark.asyncio

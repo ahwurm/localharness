@@ -2,8 +2,9 @@
 
 Two layers of proof, deliberately different in kind:
 
-* Task 1 grades the LOOP — a real offline ``run_turn`` with mocked memory objects, asserting
-  which object the ambient-context read went to and which objects still take the writes.
+* Task 1 grades the LOOP — a real offline ``run_turn`` through the memory slot's real
+  MemoryPlugin, its read gate mocked and its store's verbs spied, asserting which object the
+  ambient-context read went to and which objects still take the writes.
 * Task 2 grades the SESSION — a real ``_start_async`` drive from a workspace, asserting on the
   recorded constructor kwargs (the wiring claim IS the kwarg) and on live reads performed
   mid-session with the stores open.
@@ -12,8 +13,10 @@ The discriminating pair throughout is "the router was read AND the store was not
 only the first passes an implementation that reads both, which is precisely the bug
 ``recall_scope`` exists to prevent.
 """
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,6 +26,7 @@ from localharness.agent.loop import AgentLoop
 from localharness.agent.context import ContextManager
 from localharness.agent.permissions import PermissionEvaluator
 from localharness.core.bus import EventBus
+from tests.unit.test_agent_loop import _occupied_slot
 
 # Phase 41's drive harness, imported rather than copied — those files stay byte-untouched, and a
 # drift between "how phase 41 drives a workspace session" and "how phase 42 does" would make the
@@ -68,7 +72,7 @@ def _the_memory_plugin(started: list):
 
 @dataclass(frozen=True)
 class _Ctx:
-    """Shaped like MemoryContext for the fields loop.py touches."""
+    """Shaped like MemoryContext for the fields the memory plugin's context() touches."""
     agent_memory_md: str = "INJECTED-MEMORY"
     division_md: str = ""
     fact_count: int = 1
@@ -76,56 +80,47 @@ class _Ctx:
     injected_fact_ids: tuple = (7,)
 
 
-_UNSET = object()
-
-
-def _mock_store(**load_context_kwargs):
-    """A memory-store double shaped like the REAL MemoryStore: async ``load_context`` and async
-    ``record_injection_trace`` on an otherwise SYNCHRONOUS object.
-
-    Deliberately not a bare AsyncMock — ``set_current_session`` is a plain ``def`` on MemoryStore
-    and loop.py calls it without awaiting, so a bare AsyncMock would both emit a 'never awaited'
-    warning and be structurally incapable of catching production making that call async
-    (test_agent_loop.py::_mock_memory_loader's reasoning, which applies unchanged here).
-    """
-    store = MagicMock()
-    store.load_context = AsyncMock(**load_context_kwargs)
-    store.record_injection_trace = AsyncMock()
-    return store
-
-
 def _mock_router(**load_context_kwargs):
-    """The read gate. Same shape as the store for the ONE method the loop calls on it — and
+    """The read gate. Same shape as the store for the ONE method the plugin calls on it — and
     deliberately WITHOUT ``set_current_session``/``record_injection_trace`` as AsyncMocks, so a
-    loop that tried to route a write through the router would be visible here."""
+    plugin that tried to route a write through the router would be visible here."""
     router = MagicMock()
     router.load_context = AsyncMock(**load_context_kwargs)
     return router
 
 
-def _make_loop(memory_loader=None, recall_router=_UNSET):
-    """An AgentLoop with mocked dependencies, modelled on test_agent_loop.py's
-    ``_make_memory_agent_loop`` (copied rather than imported so that pre-existing file stays
-    byte-untouched). ``recall_router`` unset means the kwarg is NOT passed at all — the control
-    that grades today's default path."""
+_UNSET = object()
+
+
+@asynccontextmanager
+async def _session(tmp_path, monkeypatch, *, router=_UNSET, store_ctx=None):
+    """A REAL MemoryPlugin started over a tmp store in the loop's memory slot (the loop's only
+    memory path since 48-06), with the plugin's read gate swapped for `router` (None = no router,
+    the plugin's own fallback when RecallRouter construction fails) and the session store's own
+    `load_context` / write verbs spied. The real router is put back before stop() closes it.
+    Yields (loop, llm, store_spies)."""
     from localharness.config.models import AgentConfig
     from tests.conftest import FakeLLMResponse, MockLLMClient
 
-    cfg = AgentConfig(name="test-agent", role="You are a test assistant.")
-    llm = MockLLMClient([FakeLLMResponse(content="Done.")])
-    kwargs = {}
-    if recall_router is not _UNSET:
-        kwargs["recall_router"] = recall_router
-    return AgentLoop(
-        config=cfg,
-        llm=llm,
-        bus=EventBus(),
-        context_manager=ContextManager(),
-        tool_registry=None,
-        permission_evaluator=PermissionEvaluator(),
-        memory_loader=memory_loader,
-        **kwargs,
-    ), llm
+    async with _occupied_slot(tmp_path) as (slot, plugin):
+        store, real_router = plugin._store, plugin._router
+        spies = SimpleNamespace(
+            load_context=AsyncMock(return_value=store_ctx or _Ctx(agent_memory_md="STORE-CONTEXT")),
+            set_current_session=MagicMock(wraps=store.set_current_session),
+            record_injection_trace=AsyncMock())
+        for name in ("load_context", "set_current_session", "record_injection_trace"):
+            monkeypatch.setattr(store, name, getattr(spies, name))
+        if router is not _UNSET:
+            plugin._router = router
+        cfg = AgentConfig(name="test-agent", role="You are a test assistant.")
+        llm = MockLLMClient([FakeLLMResponse(content="Done.")])
+        loop = AgentLoop(config=cfg, llm=llm, bus=EventBus(), context_manager=ContextManager(),
+                         tool_registry=None, permission_evaluator=PermissionEvaluator(),
+                         memory_slot=slot)
+        try:
+            yield loop, llm, spies, plugin
+        finally:
+            plugin._router = real_router
 
 
 async def _capture_turn(loop, llm, task="hello"):
@@ -133,9 +128,9 @@ async def _capture_turn(loop, llm, task="hello"):
     captured: list = []
     original = llm.stream_complete
 
-    async def capturing_stream(messages=None, tools=None, on_token=None):
+    async def capturing_stream(messages=None, tools=None, on_token=None, **kw):
         captured.extend(messages or [])
-        return await original(messages=messages, tools=tools, on_token=on_token)
+        return await original(messages=messages, tools=tools, on_token=on_token, **kw)
 
     llm.stream_complete = capturing_stream
     await loop.run_turn(task)
@@ -143,14 +138,12 @@ async def _capture_turn(loop, llm, task="hello"):
 
 
 @pytest.mark.asyncio
-async def test_the_turn_reads_ambient_context_through_the_router():
+async def test_the_turn_reads_ambient_context_through_the_router(tmp_path, monkeypatch):
     """The discriminating pair: the router WAS read and the store was NOT. Either assertion
     alone is satisfied by an implementation that reads both stores every turn."""
-    store = _mock_store(return_value=_Ctx(agent_memory_md="STORE-CONTEXT"))
     router = _mock_router(return_value=_Ctx(agent_memory_md="ROUTER-CONTEXT"))
-
-    loop, llm = _make_loop(memory_loader=store, recall_router=router)
-    sys_msgs = await _capture_turn(loop, llm)
+    async with _session(tmp_path, monkeypatch, router=router) as (loop, llm, store, _p):
+        sys_msgs = await _capture_turn(loop, llm)
 
     router.load_context.assert_awaited_once()
     store.load_context.assert_not_awaited()
@@ -160,12 +153,12 @@ async def test_the_turn_reads_ambient_context_through_the_router():
 
 
 @pytest.mark.asyncio
-async def test_the_router_carries_the_loops_memory_config():
+async def test_the_router_carries_the_loops_memory_config(tmp_path, monkeypatch):
     """The call site moved receivers, not arguments — index_mode and the shelf size still come
     from agent.memory and still reach whoever answers."""
     router = _mock_router(return_value=_Ctx())
-    loop, llm = _make_loop(memory_loader=_mock_store(return_value=_Ctx()), recall_router=router)
-    await _capture_turn(loop, llm)
+    async with _session(tmp_path, monkeypatch, router=router) as (loop, llm, _store, _p):
+        await _capture_turn(loop, llm)
 
     kwargs = router.load_context.await_args.kwargs
     assert kwargs["index_mode"] is True
@@ -173,43 +166,44 @@ async def test_the_router_carries_the_loops_memory_config():
 
 
 @pytest.mark.asyncio
-async def test_writes_and_traces_still_go_to_the_session_store():
+async def test_writes_and_traces_still_go_to_the_session_store(tmp_path, monkeypatch):
     """recall_scope must never redirect a write. The same turn that read through the router
     stamps its provenance and its activation trace on the STORE."""
-    store = _mock_store(return_value=_Ctx())
     router = _mock_router(return_value=_Ctx(injected_fact_ids=(7,)))
-
-    loop, llm = _make_loop(memory_loader=store, recall_router=router)
-    await _capture_turn(loop, llm)
+    async with _session(tmp_path, monkeypatch, router=router) as (loop, llm, store, _p):
+        await _capture_turn(loop, llm)
 
     store.set_current_session.assert_called_once()
     store.record_injection_trace.assert_awaited_once()
     # The trace carries the ids the router handed back (primary-owned by 42-02's contract).
     assert list(store.record_injection_trace.await_args.kwargs["injected_ids"]) == [7]
-    # The router took NO write: the only name touched on it is the one read verb.
-    touched = {name.split(".")[0] for name, _a, _k in router.mock_calls}
+    # The router took NO write: the only name touched on it is the one read verb (the plugin's
+    # `self._router or self._store` truth-test shows up as `__bool__`, which is no verb).
+    touched = {name.split(".")[0] for name, _a, _k in router.mock_calls} - {"__bool__"}
     assert touched == {"load_context"}
 
 
 @pytest.mark.asyncio
-async def test_without_a_router_the_store_answers_exactly_as_before():
-    """Control: the kwarg is not passed at all. Bench, subagents and every pre-existing caller
-    take this path, and it must be the path they took before this phase."""
-    store = _mock_store(return_value=_Ctx(agent_memory_md="STORE-CONTEXT"))
-    loop, llm = _make_loop(memory_loader=store)
-    sys_msgs = await _capture_turn(loop, llm)
+async def test_without_a_router_the_store_answers_exactly_as_before(tmp_path, monkeypatch):
+    """Control: no router (the plugin's fallback when RecallRouter cannot be built) — the
+    session's own store answers the ambient read."""
+    async with _session(tmp_path, monkeypatch, router=None) as (loop, llm, store, _p):
+        sys_msgs = await _capture_turn(loop, llm)
 
     store.load_context.assert_awaited_once()
     assert "STORE-CONTEXT" in sys_msgs[0]["content"]
 
 
 @pytest.mark.asyncio
-async def test_a_router_without_a_store_stays_memory_free():
-    """The outer `if self._memory is not None` gate is NOT widened: a session with no store
-    injects nothing, even if a router were somehow supplied."""
+async def test_a_router_without_a_store_stays_memory_free(tmp_path, monkeypatch):
+    """The `self._store is None` gate is NOT widened: an occupant with no store (stopped) injects
+    nothing, even if a router were somehow still held."""
     router = _mock_router(return_value=_Ctx(agent_memory_md="ROUTER-CONTEXT"))
-    loop, llm = _make_loop(memory_loader=None, recall_router=router)
-    sys_msgs = await _capture_turn(loop, llm)
+    async with _session(tmp_path, monkeypatch, router=router) as (loop, llm, _store, plugin):
+        plugin._router = None  # stop() must not close the mock; the occupant is now storeless
+        await plugin.stop(loop._memory_slot._ctx)
+        plugin._router = router
+        sys_msgs = await _capture_turn(loop, llm)
 
     router.load_context.assert_not_awaited()
     assert "ROUTER-CONTEXT" not in sys_msgs[0]["content"]
