@@ -6,6 +6,8 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-10-02
+
 This release adds a plugin system: one API, one loader and one trust model, for
 plugins you install and for plugins that ship with LocalHarness. The first
 features to ship as plugins are image generation, new in this release and
@@ -293,6 +295,7 @@ for 0.15 no longer loads: see Removed and Migration.
   lives in the dispatch plugin; settings and behaviour are unchanged.
 
 ### Fixed
+- `localharness acp` (Zed and other Agent Client Protocol editors) brings up a session again. In 0.15.0 the new `--channel` check inside session start did not list `acp`, so every editor session failed at bring-up with "unknown channel 'acp'". ([#165](https://github.com/ahwurm/localharness/issues/165))
 - `localharness web` without the `web` extra prints its install hint again (it
   crashed with a starlette import error before).
 - Autoresearch could not adopt a harness-level (`org.*`) change once it had
@@ -442,12 +445,6 @@ for 0.15 no longer loads: see Removed and Migration.
   names, a project's `org` settings (such as `org.audit_log_path`) still merge
   over your global ones. They have not yet been checked one by one for whether
   a project value can loosen a protection.
-
-## [0.15.1] — 2026-10-01
-
-### Fixed
-
-- `localharness acp` (Zed and other Agent Client Protocol editors) brings up a session again. In 0.15.0 the new `--channel` check inside session start did not list `acp`, so every editor session failed at bring-up with "unknown channel 'acp'". ([#165](https://github.com/ahwurm/localharness/issues/165))
 
 ## [0.15.0] — 2026-09-19
 
