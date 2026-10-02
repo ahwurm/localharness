@@ -215,3 +215,39 @@ def test_only_core_to_plugin_is_the_rule():
     assert violations(allowed) == set()
     elsewhere_in_core = {("plugins/api.py", "memory/__init__.py")}
     assert violations(elsewhere_in_core) == elsewhere_in_core
+
+
+_AUTORESEARCH_CLI = frozenset({"cli/autoresearch_cmd.py", "cli/experiment_cmd.py", "cli/propose_cmd.py",
+                               "cli/report_cmd.py"})
+
+
+def autoresearch_edges(rel: str, text: str) -> set[tuple[str, str]]:
+    """Every (rel, file) edge from one file's source into autoresearch/ or its four CLI modules."""
+    files = {module_file(m)
+             for node in ast.walk(ast.parse(text, rel)) for m in _imported_modules(rel, node)}
+    return {(rel, f) for f in files
+            if f and (f.startswith("autoresearch/") or f in _AUTORESEARCH_CLI)}
+
+
+def _bench_sources() -> list[tuple[str, Path]]:
+    found = [(rel, p) for rel, p in _sources() if rel.startswith("bench/") or rel == "cli/bench_cmd.py"]
+    assert len(found) >= 5, f"only {len(found)} bench files found — the root is wrong"
+    return found
+
+
+def test_bench_imports_nothing_from_autoresearch():
+    """AUTO-03: the bench is core tooling the plugin calls, never the reverse. No module under
+    bench/ (nor `localharness bench`'s CLI) imports autoresearch/ or an autoresearch CLI module —
+    so the bench runs with the autoresearch plugin off."""
+    edges = {e for rel, p in _bench_sources() for e in autoresearch_edges(rel, p.read_text(encoding="utf-8"))}
+    assert not edges, "the bench may not import autoresearch:" + _pairs(edges)
+
+
+def test_an_injected_autoresearch_import_in_bench_is_reported():
+    rel, path = next((r, p) for r, p in _bench_sources() if r == "bench/orchestrator.py")
+    text = path.read_text(encoding="utf-8")
+    assert autoresearch_edges(rel, text) == set()
+    injected = autoresearch_edges(rel, text + "\nfrom localharness.autoresearch import archive\n")
+    assert (rel, "autoresearch/archive.py") in injected
+    lazy = autoresearch_edges("cli/bench_cmd.py", "def f():\n    from localharness.cli import experiment_cmd\n")
+    assert lazy == {("cli/bench_cmd.py", "cli/experiment_cmd.py")}
