@@ -168,11 +168,12 @@ _WORKSPACE_CONFIG_TEMPLATE = """\
 #
 # org:
 #   log_level: debug
-#   memory_enabled: false     # memory off for THIS project only: no store, no memory tools
 #   permissions:
 #     mode: read-only         # this project's sessions never write, edit, or run shell
 #   context:
 #     compaction_threshold_pct: 85.0
+# memory:
+#   enabled: false            # memory off for THIS project only: no store, no memory tools
 #
 # Per-agent settings live in .localharness/agents/<name>.yaml, not here. The one people
 # look for first:
@@ -612,8 +613,9 @@ def init_app(
 
     # #151: the two most-asked posture choices, one question each. TTY-gated exactly like
     # _guided_setup — a scripted init is never blocked on a prompt and gets today's defaults
-    # (host tools on, memory on). Both keys are ordinary org keys, so a project can flip
-    # either per-workspace in .localharness/config.yaml (the scaffold template shows both).
+    # (host tools on, memory on). Both are ordinary layered keys (org.permissions.mode,
+    # memory.enabled), so a project can flip either per-workspace in .localharness/config.yaml
+    # (the scaffold template shows both).
     host_tools_on = True
     memory_on = True
     if sys.stdin.isatty():
@@ -633,7 +635,7 @@ def init_app(
             )
         if not memory_on:
             console.print(
-                "  [green]✓[/green] Memory off (org.memory_enabled: false — existing memory "
+                "  [green]✓[/green] Memory off (memory.enabled: false — existing memory "
                 "files stay on disk, untouched)"
             )
 
@@ -654,8 +656,6 @@ def init_app(
             **({} if host_tools_on else {"mode": "read-only"}),
         ),
     }
-    if not memory_on:
-        org_kwargs["memory_enabled"] = False
     if result.provider_type == "llamacpp":
         max_len = _detect_llamacpp_nctx(result.base_url)
     elif result.provider_type == "lmstudio":
@@ -704,7 +704,10 @@ def init_app(
         org=OrgConfig(**org_kwargs),
         server=server_config,
     )
-    config_file.write_text(to_yaml_str(harness), encoding="utf-8")
+    # memory.enabled is the memory plugin's key (MEMP-06); the deprecated org.memory_enabled is
+    # never written, so a fresh install has nothing to warn about. On is the default: no key.
+    text = to_yaml_str(harness, exclude={"org": {"memory_enabled"}})
+    config_file.write_text(text + ("" if memory_on else "memory:\n  enabled: false\n"), encoding="utf-8")
     # Owner-only: this file carries `provider.api_key` and the deny/ask policy every session on
     # this machine is gated by. `write_text` lands it at 0664 under the usual 022 umask.
     restrict_config_file(config_file)
