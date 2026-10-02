@@ -96,10 +96,15 @@ def test_enable_set_extra_present(g, caplog, monkeypatch) -> None:
     _present(monkeypatch)
     r = _enable(g, caplog)
     assert "**********" in r.output, r.output
+    assert "install extra" not in r.output, r.output
 
 
 def test_enable_set_extra_absent(g, caplog) -> None:
-    _enable(g, caplog)
+    """Enable writes, then says the extra is missing — "takes effect on the next start" alone is
+    not true without discord.py."""
+    r = _enable(g, caplog)
+    assert "note: dispatch is missing its install extra — install `localharness[dispatch]` to use it" \
+        in _flat(r.output), r.output
 
 
 def test_components_list_table(configured, caplog) -> None:
