@@ -593,7 +593,6 @@ def check_plugins_table(md_text: str, heading: str = "## Plugins",
     return out
 
 
-@xfail_until("51-05")
 def test_plugins_table_readme_live():
     """README's plugins table is the bundled plugin list, as `plugins list` shows it."""
     assert check_plugins_table(_read("README.md")) == []
@@ -788,7 +787,6 @@ def test_changelog_items_live():
     assert check_changelog_items(_read("CHANGELOG.md")) == []
 
 
-@xfail_until("51-05")
 def test_changelog_structure_live():
     """No CHANGELOG bullet has lost its head (the GUARDRAILS.md item renders as a bullet)."""
     assert check_changelog_structure(_read("CHANGELOG.md")) == []

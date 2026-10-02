@@ -218,15 +218,31 @@ Tools run where the harness runs, and `bash_exec` always launches a real bash �
 | `autoresearch …` | Run the self-improvement loop (autoresearch plugin; absent when it is off) |
 | `experiment …` | Gated experiment runs (autoresearch plugin) |
 | `propose` | Propose a harness mutation (autoresearch plugin) |
+| `generate-image` | Make a picture with ComfyUI (image plugin; absent until you enable it) |
 
 A command of a bundled plugin that is off is not listed in `--help`; running it says which plugin
 provides it and how to turn that plugin on, and exits 4.
 
 ## Plugins
 
-A plugin adds tools, commands, slash commands and `doctor` checks. Image generation ships as a
-plugin, off until you turn it on (`localharness plugins enable image`), and so does the phone app
-(`web`, on by default), and so does memory (`memory`, on by default; `localharness plugins disable memory` turns it off). Discord is the dispatch plugin (`dispatch`, on by default; needs the `dispatch` extra). Autoresearch is a bundled plugin (on by default; `localharness plugins disable autoresearch` sets it aside, nothing is deleted). Its settings keep their names, `proposer:` and `sentinel:`; the bench stays core. LocalHarness finds plugins in two places on your machine: installed packages that
+A plugin adds tools, commands, slash commands and `doctor` checks. Five ship with LocalHarness:
+
+| Name | What it does | Default | How to switch |
+|------|--------------|---------|---------------|
+| `image` | makes pictures with ComfyUI | off | `localharness plugins enable image --set comfyui_url=<url>` |
+| `web` | the phone app: `localharness web` serves the web UI and its event API | on; needs `localharness[web]` | `localharness plugins disable web` |
+| `memory` | persistent memory: facts recalled into each turn, memory tools, background consolidation | on | `localharness plugins disable memory` |
+| `dispatch` | chat: Discord | on; needs `localharness[dispatch]` | `localharness plugins disable dispatch` |
+| `autoresearch` | experiment loop | on | `localharness plugins disable autoresearch` |
+
+Plugins you install are found but stay off until you enable them, and only your global config can
+enable them, never a project's ([SECURITY.md](https://github.com/ahwurm/localharness/blob/main/SECURITY.md#plugins)).
+The plugin API is [spec 09](docs/specs/09-hooks-plugins.md).
+
+Turning autoresearch off sets it aside and deletes nothing; its settings keep their names,
+`proposer:` and `sentinel:`, and the bench stays core.
+
+LocalHarness finds plugins in two places on your machine: installed packages that
 declare a `localharness.plugins` entry point, and folders `~/.localharness/plugins/<name>/`. It
 loads a plugin's code only once you turn that plugin on. Install a plugin package into the same
 Python environment as LocalHarness:

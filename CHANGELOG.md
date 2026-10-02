@@ -201,7 +201,7 @@ Migration.
   plugins (`acp`, `discord`, `terminal`, `web`); an installed plugin cannot add
   one. `--channel web` and `--channel acp` point you at `localharness web` /
   `localharness acp`.
- the model with memory on or off.** Core reads
+- **`GUARDRAILS.md` reaches the model with memory on or off.** Core reads
   `orgs/default/GUARDRAILS.md` from your global config directory on every turn
   of the agent you talk to. Before, only memory read it, so a session without
   memory never showed it to the model. The agents it delegates to are still
@@ -406,6 +406,32 @@ Migration.
   `autoresearch.enabled` row, like every other plugin that is off.
 - Only plugins that ship with LocalHarness may own core settings under their
   old names (`PluginManifest.sections`); a plugin you install cannot.
+- What the `remember` tool returns is treated as trusted text, while what
+  `memory_search` and `memory_get` return is treated as untrusted: a fact
+  recalled by search is fenced as untrusted, the confirmation of a write is not.
+- The phone's memory screen now reads memory through the memory plugin. This is
+  tested on the server only; it has not yet been checked on a phone.
+- Five memory event types (`MemoryGateFired`, `ExpectationAttached`,
+  `OutcomeObserved`, `SurpriseScored` and `TurnEndMicroPassCompleted`) are still
+  defined, but nothing sends them: a listener waiting for one never hears it.
+- The `agent.memory.inject_into_context` setting is accepted but does nothing;
+  no code reads it.
+- While memory is on, `doctor` counts a missing embeddings extra or a missing
+  embedding model as a failure, so an install without them now fails `doctor`.
+- Until 0.17.0 the Discord token can also come from `DISCORD_BOT_TOKEN` or from
+  the file `~/.claude/channels/discord/.env`, not only from
+  `LOCALHARNESS_DISCORD_TOKEN`: either is used when `dispatch.discord.token` is
+  not set.
+- The bench turns memory on only for the scenarios that seed it (the same on
+  both sides of a comparison), with background consolidation off; the seeds are
+  written through the memory plugin's own store.
+- The before-and-after benchmark under Changed is weak evidence: `bench
+  compare` itself reports that run as unstable, the comparison has limited
+  statistical power, and one memory scenario's success rate dropped, though
+  not by enough to be significant. Read it as "no large regression found",
+  not as proof that nothing changed.
+- This release's startup time was measured with four of the five bundled
+  plugins loaded (the `dispatch` extra was not installed), not with all five.
 
 ## [0.15.1] — 2026-10-01
 
