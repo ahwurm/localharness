@@ -178,3 +178,12 @@ def install_fake_discord(monkeypatch) -> FakeDiscord:
     fake = FakeDiscord()
     monkeypatch.setitem(sys.modules, "discord", fake.module)
     return fake
+
+
+def build_dispatch_discord(bus, *, allow, channels, ack):
+    """DispatchChannel over the real DiscordAdapter (token "t"), on the same fake `discord`."""
+    from localharness.dispatch.adapters.discord import DiscordAdapter
+    from localharness.dispatch.channel import DispatchChannel
+
+    return DispatchChannel(bus, {"adapter": DiscordAdapter(token="t"), "allow": set(allow),
+                                 "channels": set(channels), "ack": ack, "state_dir": None})

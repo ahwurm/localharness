@@ -30,7 +30,9 @@ import pytest
 
 from localharness.agent.gate_types import PendingCall, PermissionRequest
 from localharness.core.bus import EventBus
-from tests.dispatch_support import BOT_USER_ID, install_fake_discord, isolate_discord_env
+from tests.dispatch_support import (
+    BOT_USER_ID, build_dispatch_discord, install_fake_discord, isolate_discord_env,
+)
 
 GOLDEN = Path(__file__).resolve().parents[1] / "fixtures" / "dispatch_plugin" / "discord_script.json"
 REGEN = __import__("os").environ.get("LOCALHARNESS_REGEN_GOLDEN") == "1"
@@ -46,7 +48,7 @@ def _build_legacy(bus, *, allow, channels, ack):
                                 "allow_channels": list(channels), "ack_emoji": ack})
 
 
-BUILDERS = {"legacy": _build_legacy}
+BUILDERS = {"legacy": _build_legacy, "dispatch": build_dispatch_discord}
 
 
 @pytest.fixture(autouse=True)
@@ -211,3 +213,42 @@ async def test_legacy_start_refusal_texts(fake, monkeypatch):
     assert str(e.value) == ("discord.py not installed — run: uv pip install 'discord.py>=2.3' "
                             "(or install the 'dispatch' extra)")
     assert fake.log == [], "a refused start reached the client"
+
+
+async def test_dispatch_start_refusal_texts(fake, monkeypatch):
+    """The new refusals name the settings key first (the deliberate wording change); none carries
+    the token, and a refused start never reaches the client."""
+    from localharness.channels.errors import ChannelStartError
+    from localharness.dispatch.adapters import ADAPTERS
+    from localharness.dispatch.adapters.discord import DiscordAdapter
+    from localharness.dispatch.channel import DispatchChannel
+
+    assert ADAPTERS == {"discord": "localharness.dispatch.adapters.discord:DiscordAdapter"}
+    assert (DiscordAdapter.platform, DiscordAdapter.title, DiscordAdapter.message_limit) == (
+        "discord", "Discord", 2000)
+
+    def build(token="sekrit-token", allow=("42",)):
+        return DispatchChannel(EventBus(), {"adapter": DiscordAdapter(token=token), "allow": set(allow),
+                                            "channels": set(), "ack": "✅", "state_dir": None})
+
+    ch = build()
+    assert ch.channel_id == "discord"
+    assert ch.start_banner == "Dispatch mode: Discord — listening for allowlisted messages."
+    for ch, expected in (
+        (build(token=""), "Discord bot token missing — set dispatch.discord.token "
+                          "(LOCALHARNESS_DISCORD_TOKEN / DISCORD_BOT_TOKEN still work until 0.17.0)"),
+        (build(allow=()), "Discord allowlist empty — set dispatch.discord.allow to your user id(s) "
+                          "(LOCALHARNESS_DISCORD_ALLOW still works until 0.17.0); "
+                          "refusing to listen to everyone"),
+    ):
+        with pytest.raises(ChannelStartError) as e:
+            await ch.start()
+        assert str(e.value) == expected
+
+    monkeypatch.setitem(sys.modules, "discord", None)
+    with pytest.raises(ChannelStartError) as e:
+        await build().start()
+    assert str(e.value) == ("discord.py not installed — install the dispatch extra: uv sync --extra "
+                            "dispatch (or pip install 'localharness[dispatch]')")
+    assert "sekrit" not in str(e.value)
+    assert fake.log == [] and fake.client is None, "a refused start reached the client"
