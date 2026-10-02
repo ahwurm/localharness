@@ -1,0 +1,9 @@
+[cmd|None] /memory
+---
+[msg|system.error] Unknown command: /memory — /help lists commands.
+---
+[handled|None] True
+---
+[cmd|None] /memory show 1
+---
+[handled|None] False
