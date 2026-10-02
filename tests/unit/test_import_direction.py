@@ -170,6 +170,20 @@ def test_the_burn_down_list_only_shrinks():
     assert not stale, "no longer imported; remove it — the list only shrinks:" + _pairs(stale)
 
 
+def test_the_burn_down_residue_is_exactly_the_remaining_conversions():
+    """After the memory plugin, the list is exactly the three conversions still to come. Who empties
+    each group: the memory surfaces (`/memory`, `localharness memory`) and the bench move onto the
+    plugin in the next memory phase; dispatch, when Discord becomes a plugin; autoresearch, when it
+    does. A start_cmd -> memory/* edge or tools/builtin/__init__ -> memory_tools edge is gone for good."""
+    assert BURN_DOWN == frozenset({
+        ("cli/app.py", "cli/memory_cli.py"), ("cli/repl.py", "cli/memory_cmd.py"),
+        ("bench/runner.py", "memory/sqlite.py"), ("bench/runner.py", "tools/builtin/memory_tools.py"),
+        ("cli/start_cmd.py", "channels/discord.py"), ("channels/__init__.py", "channels/discord.py"),
+        ("cli/app.py", "cli/autoresearch_cmd.py"), ("cli/app.py", "cli/experiment_cmd.py"),
+        ("cli/app.py", "cli/propose_cmd.py"), ("cli/app.py", "cli/report_cmd.py"),
+    })
+
+
 def test_an_injected_plugin_import_in_agent_loop_is_reported():
     """Criterion 5: agent/loop.py contributes no edge today; one `from localharness.memory import`
     line added to it is a violation."""
