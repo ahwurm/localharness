@@ -159,6 +159,19 @@ async def test_plugin_failing_in_start_is_refused_and_the_others_are_stopped(tmp
 
 
 @pytest.mark.asyncio
+async def test_an_unconfigured_plugin_is_refused_naming_the_setting(tmp_path, monkeypatch):
+    class _Unset(_ChatPlugin):
+        async def configure(self, ctx):
+            return ("unconfigured", "chatp.token")
+    _bundle(monkeypatch, _Unset)
+    with pytest.raises(typer.BadParameter) as exc:
+        await _start(tmp_path, monkeypatch)
+    assert str(exc.value) == ("channel 'testchat' is provided by the chatp plugin, which did not "
+                              "start — unconfigured — set chatp.token")
+    assert built == []
+
+
+@pytest.mark.asyncio
 async def test_substrate_failure_is_refused_with_its_text(tmp_path, monkeypatch):
     _bundle(monkeypatch, _ChatPlugin)
 
