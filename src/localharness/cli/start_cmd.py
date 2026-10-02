@@ -1023,7 +1023,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     start_time = _time.monotonic()
 
     # --- Startup state tracker ---
-    warnings: list[str] = []
+    warnings: list[str] = list(loader.harness_warnings)  # machine-level keys a workspace set
     plugins_loaded = 0
     mcp_connected = 0
     mcp_failed = 0
