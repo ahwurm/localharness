@@ -381,7 +381,6 @@ def check_spec09_covers_code(text: str, names: dict[str, tuple[str, ...]] | None
             for owner, members in names.items() for n in members if n not in shown]
 
 
-@xfail_until("51-03")
 def test_spec09_covers_code_live():
     """Nothing the plugin API defines is missing from spec 09."""
     assert check_spec09_covers_code(_read(SPEC09)) == []
@@ -415,7 +414,6 @@ def check_spec09_status(text: str, version: str = api.PLUGIN_API_VERSION) -> lis
     return out
 
 
-@xfail_until("51-03")
 def test_spec09_status_live():
     """Spec 09 states the API version the code carries, and no longer calls it unstable."""
     assert check_spec09_status(_read(SPEC09)) == []
@@ -899,7 +897,7 @@ def check_denylist(rel: str, text: str) -> list[str]:
 
 
 _DENYLIST_RED = {"docs/specs/03-agent-loop.md": "51-06", "docs/specs/05-memory.md": "51-06",
-                 SPEC09: "51-03", "docs/specs/12-audit.md": "51-06"}
+                 "docs/specs/12-audit.md": "51-06"}
 
 
 @pytest.mark.parametrize("rel", [
