@@ -253,3 +253,9 @@ def propose(
     else:
         _render_diff(proposal.diff)
         console.print(f"[bold]rationale[/bold]\n{proposal.rationale}")
+
+
+# The autoresearch plugin's CliDescriptor needs a Typer: a single command and no callback collapses
+# to that command, so the usage line stays `localharness propose [OPTIONS]`.
+propose_app = typer.Typer(add_completion=False)
+propose_app.command()(propose)

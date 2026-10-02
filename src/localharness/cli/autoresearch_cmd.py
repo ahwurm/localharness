@@ -31,6 +31,9 @@ autoresearch_app = typer.Typer(
     name="autoresearch",
     help="Autoresearch loop tools.",
     no_args_is_help=True,
+    # Mounted standalone by the autoresearch plugin's CliDescriptor: no completion options of its
+    # own (as a core add_typer it had none — the root owns completion).
+    add_completion=False,
 )
 archive_app = typer.Typer(
     name="archive",

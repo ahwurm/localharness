@@ -89,6 +89,9 @@ experiment_app = typer.Typer(
     name="experiment",
     help="Run a proposal through the promotion gate (train Welch -> holdout Bonferroni).",
     no_args_is_help=True,
+    # Mounted standalone by the autoresearch plugin's CliDescriptor: no completion options of its
+    # own (as a core add_typer it had none — the root owns completion).
+    add_completion=False,
 )
 
 
