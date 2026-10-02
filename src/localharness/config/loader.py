@@ -350,6 +350,57 @@ means; a name in `mcp_trusted_servers` is a grant the operator writes themselves
 the global layer's, with a warning naming the key.
 """
 
+HARNESS_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({"org.enforce_capability_floor"})
+"""The core harness keys only the global config (config.yaml or overrides.yaml) may set.
+
+`org.enforce_capability_floor` is the capability floor's off switch. No direction of it belongs
+to a repository: a cloned repo must not be able to switch the floor off for the sessions started
+inside it, and switching it back on over the machine owner's off is the owner's call too. So, as
+for `ASK_GLOBAL_ONLY_FIELDS`, a workspace value that differs from the global one (or from the
+field's default, when the global layer is silent) is dropped with one warning naming the key and
+the file; a workspace value equal to it is the operator's own and is no warning.
+"""
+
+_UNSET = object()
+
+
+def _dig(data: Any, parts: list[str]) -> Any:
+    for part in parts:
+        if not isinstance(data, dict) or part not in data:
+            return _UNSET
+        data = data[part]
+    return data
+
+
+def _nested(parts: list[str], value: Any) -> dict:
+    return {parts[0]: value if len(parts) == 1 else _nested(parts[1:], value)}
+
+
+def _model_default(model: Any, parts: list[str]) -> Any:
+    field = model.model_fields[parts[0]]
+    if len(parts) > 1:
+        return _model_default(field.annotation, parts[1:])
+    return field.get_default(call_default_factory=True)
+
+
+def _narrow_harness_global_only(merged: dict, sources: tuple[dict, ...],
+                                ws_files: tuple[str, str]) -> tuple[dict, list[str]]:
+    """Put the global value back at every HARNESS_GLOBAL_ONLY_FIELDS path a workspace source
+    (config.yaml, overrides.yaml) set differently; one warning per such file. Never mutates."""
+    global_view = deep_merge(sources[0], sources[1])
+    warnings: list[str] = []
+    for path in sorted(HARNESS_GLOBAL_ONLY_FIELDS):
+        parts = path.split(".")
+        value = _dig(global_view, parts)
+        value = _model_default(HarnessConfig, parts) if value is _UNSET else value
+        dropped = [f"ignoring {path} in {file}: only the global config may set it"
+                   for source, file in zip(sources[2:], ws_files)
+                   if _dig(source, parts) not in (_UNSET, value)]
+        if dropped:
+            merged = deep_merge(merged, _nested(parts, value))
+            warnings += dropped
+    return merged, warnings
+
 
 def _gate_default(ask_field: str) -> Any:
     """The shipped `GateSettings` default behind one `AskConfig` field, or None.
@@ -420,6 +471,8 @@ class ConfigLoader:
         self._agent_cache: dict[str, AgentConfig] = {}
         self._division_cache: dict[str, DivisionConfig] = {}
         self._harness_cache: Optional[HarnessConfig] = None
+        # Workspace values load_harness() dropped at HARNESS_GLOBAL_ONLY_FIELDS paths (start's summary).
+        self.harness_warnings: list[str] = []
         self._org_cache: Optional[OrgConfig] = None
         self._raw_harness_dict: Optional[dict] = None
         self._raw_sources_cache: Optional[tuple[dict, dict, dict, dict]] = None
@@ -583,6 +636,10 @@ class ConfigLoader:
         merged: dict = {}
         for source in sources:
             merged = deep_merge(merged, source)
+        # Returned, not logged, as merge_plugin_layers does: start prints them in its summary line,
+        # and a log record would reach the terminal a second time through logging.lastResort.
+        merged, self.harness_warnings = _narrow_harness_global_only(
+            merged, sources, self.plugin_layer_files()[2:])
 
         # deny_patterns carve-out (MERG-02): see _layered_org_deny. Spliced with deep_merge rather
         # than assigned in place for the same non-aliasing reason. Guarded on non-empty so a config
