@@ -142,3 +142,65 @@ def test_the_row_reaches_localharness_doctor_when_bundled(tmp_path, monkeypatch)
     out = runner.invoke(app, ["doctor", "--config-dir", str(g)]).output
     assert "proposer: p-model at http://127.0.0.1:9/v1" in out, out
     assert "sk-SENTINEL" not in out
+
+
+# --------------------------------------------------------------------------- mounted help == golden
+
+from tests.unit.test_autoresearch_cli_golden import CASES, ENV, _golden, _norm_paths, _norm_stamps  # noqa: E402
+
+HELP_CASES = [c for c in CASES if c.endswith("_help")]
+
+
+def _test_root():
+    """A root built with the real root's settings and NO core autoresearch commands: everything
+    under autoresearch / experiment / propose comes through the plugin's lazy descriptors."""
+    import typer
+
+    from localharness.cli.plugin_mount import PluginCommandGroup
+    root = typer.Typer(name="localharness", help="Model-agnostic hierarchical agent harness for local LLMs.",
+                       add_completion=True, no_args_is_help=True, rich_markup_mode="rich",
+                       context_settings={"help_option_names": ["-h", "--help"]}, cls=PluginCommandGroup)
+
+    @root.callback()
+    def _root() -> None:
+        """Model-agnostic hierarchical agent harness for local LLMs."""
+    return root
+
+
+@pytest.fixture
+def bundled(monkeypatch):
+    """REPLACE autoresearch into the bundled set (never append: after the cut it is already there)."""
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (
+        *(p for p in builtin.BUILTIN_PLUGINS if p.manifest.name != "autoresearch"), AutoresearchPlugin))
+    assert sum(p is AutoresearchPlugin for p in builtin.bundled_plugins()) == 1
+
+
+@pytest.mark.plugin("autoresearch")
+@pytest.mark.parametrize("case", HELP_CASES)
+def test_mounted_help_equals_the_golden(case, tmp_path, bundled):
+    root = _test_root()
+    assert CASES[case][0] not in typer_commands(root)  # no core twin: only the lazy mount serves it
+    result = runner.invoke(root, CASES[case], env=ENV)
+    got = {"exit": result.exit_code, "output": _norm_stamps(_norm_paths(result.output, tmp_path))}
+    assert got == _golden()[case], f"mounted {case!r} differs from the 50-01 golden"
+    assert "--install-completion" not in result.output
+
+
+def typer_commands(root) -> set[str]:
+    import typer
+    return set(typer.main.get_command(root).commands)
+
+
+def test_there_are_thirteen_help_cases():
+    assert len(HELP_CASES) == 13
+
+
+def test_propose_app_is_a_single_command():
+    import typer
+
+    from localharness.cli.propose_cmd import propose_app
+    from localharness.cli.autoresearch_cmd import autoresearch_app
+    from localharness.cli.experiment_cmd import experiment_app
+    assert not isinstance(typer.main.get_command(propose_app), typer.core.TyperGroup)
+    assert propose_app._add_completion is False
+    assert autoresearch_app._add_completion is False and experiment_app._add_completion is False
