@@ -18,7 +18,6 @@ from localharness.cli import plugin_mount
 from localharness.cli.app import app
 from localharness.plugins.api import CliDescriptor, PluginManifest
 from localharness.plugins.plan import LoadPlan, PlanEntry
-from tests.unit.test_plugin_cli_mount import _help_rows
 
 runner = CliRunner()
 CMD_MODULES = ("localharness.cli.web_cmd", "localharness.cli.memory_cli", "localharness.cli.generate_image_cmd")
@@ -56,9 +55,12 @@ def test_every_bundled_off_plugin_gets_its_own_hint(components_home) -> None:
 
 
 def test_the_stub_is_not_listed_and_an_unknown_name_is_still_clicks_exit_2(components_home) -> None:
-    _off(components_home, "web", "memory")
-    rows = _help_rows(_run("--help").output)
-    assert not {"web", "memory", "generate-image"} & set(rows), rows
+    _off(components_home, "web", "memory", "autoresearch")
+    out = _run("--help").output
+    # first cell of EVERY panel row: a stub has no help text, so a two-cell row parser would miss it
+    listed = {line.strip("│ ").split()[0] for line in out.splitlines() if line.startswith("│") and line.strip("│ ")}
+    assert "start" in listed, out
+    assert not {"web", "memory", "generate-image", "autoresearch", "experiment", "propose"} & listed, out
     bogus = _run("bogus")
     assert bogus.exit_code == 2 and "No such command 'bogus'" in bogus.output, bogus.output
 
