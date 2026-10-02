@@ -19,6 +19,12 @@ from localharness.dispatch.channel import InboundMessage, OnMessage, OnReaction
 log = structlog.get_logger(__name__)
 
 
+def _attachment_meta(msg: Any) -> tuple:
+    """`(filename, size, content_type)` per uploaded file — metadata only, never the bytes."""
+    return tuple((str(getattr(a, "filename", "")), int(getattr(a, "size", 0) or 0),
+                  getattr(a, "content_type", None)) for a in (getattr(msg, "attachments", ()) or ()))
+
+
 class DiscordAdapter:
     platform = "discord"
     title = "Discord"
@@ -64,7 +70,7 @@ class DiscordAdapter:
             await deliver(InboundMessage(
                 author_id=str(msg.author.id), conversation_id=str(msg.channel.id),
                 text=msg.content or "", is_bot=bool(msg.author.bot), handle=msg,
-                conversation=msg.channel, attachments=tuple(getattr(msg, "attachments", ()) or ()),
+                conversation=msg.channel, attachments=_attachment_meta(msg),
             ))
 
         @client.event
