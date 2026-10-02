@@ -17,8 +17,8 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from localharness.plugins.api import (
-    Availability, Check, ContextBudget, ContextContribution, MemorySlotPlugin, PluginContext,
-    PluginManifest, SlashDescriptor,
+    Availability, Check, CliDescriptor, ContextBudget, ContextContribution, MemorySlotPlugin,
+    PluginContext, PluginManifest, SlashDescriptor,
 )
 from localharness.memory.config import MemoryConfig
 
@@ -35,7 +35,11 @@ class MemoryPlugin(MemorySlotPlugin):
         name="memory", version="0.1.0", kind="memory", enabled_by_default=True,
         slash=(SlashDescriptor(name="/memory",
                                help="Browse the agent's memory by tag; show/forget/search a memory",
-                               target="localharness.memory.plugin:MemoryPlugin.slash_memory"),))
+                               target="localharness.memory.plugin:MemoryPlugin.slash_memory"),),
+        cli=(CliDescriptor(name="memory",
+                           help="Browse and edit the agent's persistent memory "
+                                "(list / show / edit / rm / archive / restore).",
+                           target="localharness.cli.memory_cli:memory_app"),))
     ConfigModel = None  # resolve() strips enabled; nothing else is harness-level
     AgentConfigModel = MemoryConfig
     wants_artifacts = False
