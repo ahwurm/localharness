@@ -187,7 +187,9 @@ def test_the_line_the_one_list_the_empty_slot_the_route(tmp_path, monkeypatch, f
     assert classify("tools/builtin/generate_image_tool.py") == "plugin"
     assert classify("tools/builtin/memory_tools.py") == "plugin"
     # web left this map in 46-04: its last burn-down entries (doctor's listener lines) are gone.
-    owners = {"memory": ("memory",), "dispatch": ("discord",),
+    # memory left it in 48-05: the bench builds memory through the plugin lifecycle.
+    assert not any("memory" in pair[1] for pair in BURN_DOWN)
+    owners = {"dispatch": ("discord",),
               "autoresearch": ("autoresearch_cmd", "experiment_cmd", "propose_cmd", "report_cmd")}
     named = {plugin: {pair for pair in BURN_DOWN if any(w in pair[1] for w in words)}
              for plugin, words in owners.items()}
