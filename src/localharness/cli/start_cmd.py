@@ -1442,7 +1442,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             running = plugin_result.running if plugin_result is not None else []
             owner = next((r for r in running if r.name == owner_name), None)
             if owner is None:  # tier 3: it resolved on, it is not running; the finally stops the rest
+                unset = plugin_result.unconfigured.get(owner_name) if plugin_result is not None else None
                 reason = ((plugin_result.failed.get(owner_name) if plugin_result is not None else None)
+                          or (f"unconfigured — set {unset}" if unset else None)
                           or plugin_error or "see the warnings above")
                 raise typer.BadParameter(CHANNEL_PLUGIN_NOT_RUNNING.format(
                     name=channel_mode, plugin=owner_name, reason=reason), param_hint="--channel")
