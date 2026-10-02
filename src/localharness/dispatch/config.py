@@ -18,7 +18,7 @@ from localharness.plugins.api import GLOBAL_ONLY
 
 DEFAULT_ACK = "✅"
 ENV_FILE_RELATIVE = ".claude/channels/discord/.env"
-"""The OpenClaw bot-token file, joined onto the home dir passed to env_fallback (deleted at 0.17.0)."""
+"""The legacy Claude Code Discord bot-token file, joined onto the home dir passed to env_fallback (deleted at 0.17.0)."""
 
 
 def _ids(value: Any) -> list[str]:
@@ -71,7 +71,7 @@ def _deprecated(source: str, field: str) -> str:
 
 
 def _file_token(path: Path) -> str:
-    """The `DISCORD_BOT_TOKEN=` line of the OpenClaw .env; a missing or unreadable file is no token."""
+    """The `DISCORD_BOT_TOKEN=` line of the legacy Discord .env; a missing or unreadable file is no token."""
     try:
         lines = path.read_text().splitlines()
     except (OSError, UnicodeDecodeError):
