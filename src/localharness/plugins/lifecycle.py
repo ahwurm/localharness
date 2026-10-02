@@ -282,7 +282,7 @@ async def start_plugins(resolution: Resolution, *, bus: EventBus, registry: Tool
             result.slot = MemorySlot(occupant.plugin, occupant.ctx, occupant.name)
 
         result.slash_rows = tuple(
-            SlashCommand(desc.name, desc.help, _slash_handler(desc.target, rp.ctx), takes_args=True,
+            SlashCommand(desc.name, desc.help, _slash_handler(desc.target, rp), takes_args=True,
                          plugin=rp.name)
             for rp in result.running for desc in resolution.plan.entry(rp.name).manifest.slash)
     except BaseException:
@@ -295,11 +295,20 @@ async def start_plugins(resolution: Resolution, *, bus: EventBus, registry: Tool
     return result
 
 
-def _slash_handler(target: str, ctx: PluginContext) -> Callable[[str], Awaitable[str | None]]:
-    """A slash row's handler: imports `target` when the command first runs, then awaits it with
-    (ctx, args). The REPL contains and names its failures (cli/repl.py _run_plugin_slash)."""
-    async def handler(args: str) -> str | None:
-        return await import_target(target)(ctx, args)
+def _slash_handler(target: str, rp: RunningPlugin) -> Callable[[str], Awaitable[Any]]:
+    """A slash row's handler: imports `target` when the command first runs. A target naming a method
+    of the running plugin's own class ("pkg.mod:Class.method") is called on THAT instance with
+    (ctx, args) — the only way a handler reaches its plugin's live state; any other target is
+    imported and awaited with (ctx, args) as before. Additive (no PLUGIN_API_VERSION bump). The REPL
+    contains and names its failures (cli/repl.py _run_plugin_slash)."""
+    async def handler(args: str) -> Any:
+        module, _, attr = target.partition(":")
+        owner, dot, method = attr.rpartition(".")
+        if dot:
+            cls = import_target(f"{module}:{owner}")
+            if isinstance(cls, type) and isinstance(rp.plugin, cls):
+                return await getattr(rp.plugin, method)(rp.ctx, args)
+        return await import_target(target)(rp.ctx, args)
     return handler
 
 

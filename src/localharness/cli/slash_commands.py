@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -21,12 +22,13 @@ class SlashCommand:
     of the old two-tuple list reads, so /help, the completer and the phone read rows unchanged.
 
     `handler` is an OrchestratorREPL method name for a core row, and a bound async callable for a
-    plugin row (called with the text after the name; the text it returns is shown to the user).
+    plugin row (called with the text after the name; the text — or rich renderable — it returns is
+    shown to the user).
     `takes_args` rows claim "name ..." as well as "name"."""
 
     name: str
     description: str
-    handler: str | Callable[[str], Awaitable[str | None]]
+    handler: str | Callable[[str], Awaitable[Any]]
     takes_args: bool = False
     plugin: str | None = None
 

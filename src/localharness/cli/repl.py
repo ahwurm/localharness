@@ -10,6 +10,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
+from rich.protocol import is_renderable
+
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.slash_commands import SlashCommand, find_row, help_text
@@ -1123,12 +1125,13 @@ class OrchestratorREPL:
 
     async def _run_plugin_slash(self, row: SlashCommand, args: str) -> None:
         """A plugin's slash row (PAPI-11). Its failure — an exception, a sys.exit(), or a reply
-        that is not text — is logged and shown naming the plugin, and the session goes on. The
-        text it returns is shown as info."""
+        that is neither text nor a rich renderable — is logged and shown naming the plugin, and the
+        session goes on. Text it returns is shown as info; a renderable goes to the channel's
+        renderable path (as the core /memory row's trees always did); None or "" shows nothing."""
         try:
-            text = await row.handler(args)
-            if text is not None and not isinstance(text, str):
-                raise TypeError(f"returned {type(text).__name__}, not text")
+            reply = await row.handler(args)
+            if reply is not None and not isinstance(reply, str) and not is_renderable(reply):
+                raise TypeError(f"returned {type(reply).__name__}, not text or a renderable")
         except (Exception, SystemExit) as exc:  # noqa: BLE001 — a plugin never ends the session
             log.warning("slash command %s from plugin %r failed", row.name, row.plugin, exc_info=True)
             await self._channel.send_message(
@@ -1136,8 +1139,13 @@ class OrchestratorREPL:
                 metadata={"style": "system.error"},
             )
             return
-        if text:
-            await self._channel.send_message(text, metadata={"style": "system.info"})
+        if reply is None:
+            return
+        if isinstance(reply, str):
+            if reply:
+                await self._channel.send_message(reply, metadata={"style": "system.info"})
+            return
+        await self._channel.send_renderable(reply)
 
     # One adapter per core row of the slash table (named by its `handler`): `args` is the text
     # after the command name as typed, `args_lower` the same text lower-cased.

@@ -636,3 +636,73 @@ async def test_cancelled_error_in_a_start_is_handled_the_same(paths):
     with pytest.raises(asyncio.CancelledError):
         await _start(resolution, paths)
     assert log.count(("stop", "a")) == 1 and ("stop", "b") not in log
+
+
+# --- 48 M2: a "Class.method" target is called on the running instance ------------------------------------
+
+
+@pytest.fixture
+def bound_module(tmp_path, monkeypatch):
+    """A throwaway module holding a plugin class with a slash method, another class with one, and a
+    plain function — each says which it was, so a test sees which one the handler reached."""
+    module = f"lh_slash_bound_{uuid.uuid4().hex}"
+    (tmp_path / f"{module}.py").write_text(
+        "class P:\n"
+        "    def __init__(self, marker):\n"
+        "        self.marker = marker\n"
+        "    async def slash(self, ctx, args):\n"
+        "        return ('bound', self.marker, ctx, args)\n"
+        "class Other:\n"
+        "    @staticmethod\n"
+        "    async def slash(ctx, args):\n"
+        "        return ('other', ctx, args)\n"
+        "async def fn(ctx, args):\n"
+        "    return ('fn', ctx, args)\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    yield module
+    sys.modules.pop(module, None)
+
+
+def _rp(plugin, ctx):
+    from localharness.plugins.lifecycle import RunningPlugin
+    return RunningPlugin(name="p", plugin=plugin, ctx=ctx, bundled=True)
+
+
+@pytest.mark.asyncio
+async def test_a_method_of_the_running_plugins_class_is_called_on_that_instance(bound_module):
+    from localharness.plugins.lifecycle import _slash_handler
+    import importlib
+    live = importlib.import_module(bound_module).P("live-state")
+    ctx = object()
+    handler = _slash_handler(f"{bound_module}:P.slash", _rp(live, ctx))
+    assert await handler("a b") == ("bound", "live-state", ctx, "a b")
+
+
+@pytest.mark.asyncio
+async def test_a_plain_function_target_is_unchanged(bound_module):
+    from localharness.plugins.lifecycle import _slash_handler
+    import importlib
+    ctx = object()
+    handler = _slash_handler(f"{bound_module}:fn", _rp(importlib.import_module(bound_module).P("x"), ctx))
+    assert await handler("hi") == ("fn", ctx, "hi")
+
+
+@pytest.mark.asyncio
+async def test_a_method_of_some_other_class_is_imported_and_called_as_before(bound_module):
+    from localharness.plugins.lifecycle import _slash_handler
+    import importlib
+    ctx = object()
+    handler = _slash_handler(f"{bound_module}:Other.slash",
+                             _rp(importlib.import_module(bound_module).P("x"), ctx))
+    assert await handler("hi") == ("other", ctx, "hi")
+
+
+@pytest.mark.asyncio
+async def test_a_non_class_owner_falls_back_to_the_plain_import(bound_module):
+    from localharness.plugins.lifecycle import _slash_handler
+    import importlib
+    ctx = object()
+    # "fn.__call__" — owner "fn" is a function, not a class: no binding attempted, plain import.
+    handler = _slash_handler(f"{bound_module}:fn.__call__",
+                             _rp(importlib.import_module(bound_module).P("x"), ctx))
+    assert await handler("hi") == ("fn", ctx, "hi")

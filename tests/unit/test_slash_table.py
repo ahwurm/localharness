@@ -269,12 +269,45 @@ async def test_a_plugin_handler_cannot_end_the_session(rows, outcome, shown):
     assert channel.sent == [(f"/example (plugin example) failed: {shown}", ERROR)]
 
 
-async def test_a_plugin_handler_that_returns_something_other_than_text_is_named(rows):
-    rows([_example(AsyncMock(return_value=42))])
-    channel = RecordingChannel([])
+class _RenderChannel(RecordingChannel):
+    """RecordingChannel that also records rich renderables (the core /memory path's send_renderable)."""
+
+    def __init__(self, inputs: list) -> None:
+        super().__init__(inputs)
+        self.rendered: list = []
+
+    async def send_renderable(self, renderable) -> None:
+        self.rendered.append(renderable)
+
+
+@pytest.mark.parametrize("bad", [42, object()])
+async def test_a_plugin_handler_that_returns_neither_text_nor_a_renderable_is_named(rows, bad):
+    rows([_example(AsyncMock(return_value=bad))])
+    channel = _RenderChannel([])
     repl, _, _ = _build_repl(channel)
     assert await repl._handle_slash("/example") is True
-    assert channel.sent == [("/example (plugin example) failed: TypeError: returned int, not text", ERROR)]
+    assert channel.sent == [(f"/example (plugin example) failed: TypeError: returned "
+                             f"{type(bad).__name__}, not text or a renderable", ERROR)]
+    assert channel.rendered == []
+
+
+async def test_a_plugin_handler_may_return_a_rich_renderable(rows):
+    from rich.text import Text
+    reply = Text("x")
+    rows([_example(AsyncMock(return_value=reply))])
+    channel = _RenderChannel([])
+    repl, _, _ = _build_repl(channel)
+    assert await repl._handle_slash("/example") is True
+    assert channel.rendered == [reply] and channel.sent == []
+
+
+@pytest.mark.parametrize(("reply", "sent"), [(None, []), ("", []), ("hi", [("hi", INFO)])])
+async def test_a_plugin_handlers_text_or_silence_is_unchanged(rows, reply, sent):
+    rows([_example(AsyncMock(return_value=reply))])
+    channel = _RenderChannel([])
+    repl, _, _ = _build_repl(channel)
+    assert await repl._handle_slash("/example") is True
+    assert channel.sent == sent and channel.rendered == []
 
 
 async def test_a_plugin_row_cannot_take_a_name_already_in_the_table(rows):
