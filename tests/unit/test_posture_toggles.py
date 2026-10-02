@@ -1,8 +1,9 @@
 """#151: the two init posture questions — host tools and memory — and per-workspace persistence.
 
 Global `init` asks each question once (TTY only; a scripted init is never prompted and keeps
-today's defaults). A "no" writes ordinary org keys — `org.permissions.mode: read-only` /
-`org.memory_enabled: false` — so a project can flip either one in its own
+today's defaults). A "no" writes ordinary layered keys — `org.permissions.mode: read-only` /
+`memory.enabled: false` (47-08: the memory plugin's key; the deprecated `org.memory_enabled` is
+never written) — so a project can flip either one in its own
 `.localharness/config.yaml` and the existing deep-merge layering persists the posture per
 workspace: no new machinery, workspace wins per key, deny union untouched (MERG-02).
 """
@@ -66,14 +67,14 @@ def test_scripted_init_asks_nothing_and_keeps_defaults(mock_client_cls, mock_det
     """No TTY (CliRunner's stdin): zero posture prompts, today's defaults written."""
     cfg = _run_init(tmp_path, mock_client_cls, mock_detect)
     org = cfg["org"]
-    assert org.get("memory_enabled", True) is True
+    assert "memory_enabled" not in org and "memory" not in cfg  # memory on is the default: no key
     assert org["permissions"].get("mode") != "read-only"
 
 
 @patch("localharness.cli.init_cmd.detect_provider")
 @patch("localharness.cli.init_cmd.LLMClient")
 def test_no_answers_write_read_only_and_memory_off(mock_client_cls, mock_detect, tmp_path, monkeypatch):
-    """'n' to both questions -> org.permissions.mode: read-only + org.memory_enabled: false,
+    """'n' to both questions -> org.permissions.mode: read-only + memory.enabled: false,
     with the shipped deny defaults still stamped (the mode key never touches MERG-02)."""
     import localharness.cli.init_cmd as init_cmd
     fake_sys = MagicMock()
@@ -86,7 +87,8 @@ def test_no_answers_write_read_only_and_memory_off(mock_client_cls, mock_detect,
     cfg = _run_init(tmp_path, mock_client_cls, mock_detect)
     org = cfg["org"]
     assert org["permissions"]["mode"] == "read-only"
-    assert org["memory_enabled"] is False
+    assert cfg["memory"] == {"enabled": False}
+    assert "memory_enabled" not in org
     assert fake_confirm.ask.call_count == 2
     assert any("sudo" in p for p in org["permissions"]["deny_patterns"])
 
@@ -104,7 +106,7 @@ def test_yes_answers_keep_defaults(mock_client_cls, mock_detect, tmp_path, monke
 
     cfg = _run_init(tmp_path, mock_client_cls, mock_detect)
     org = cfg["org"]
-    assert org.get("memory_enabled", True) is True
+    assert "memory_enabled" not in org and "memory" not in cfg
     assert org["permissions"].get("mode") != "read-only"
 
 
