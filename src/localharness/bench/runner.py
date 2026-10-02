@@ -61,34 +61,63 @@ _MEMORY_SEEDS: dict[str, list[tuple[str, str]]] = {
 }
 
 
-async def _seed_memory_store(agent_id: str, seeds: list[tuple[str, str]]) -> Any:
-    """Build a seeded, flushed v1.0 MemoryStore under a per-call tmp base_dir.
-
-    Constructed under the SAME agent_id as the loop's AgentConfig.name so
-    load_context() resolves the facts (building fresh — rather than copying
-    tests/fixtures/bench/memory_seed.db — resolves BOTH the underscore/hyphen
-    agent_id mismatch AND the flat-file vs agents/{id}/memory.db layout
-    mismatch in one stroke).
-
-    flush_memory_md() covers the LEGACY index_mode=False path only: with index_mode=True
-    (the default) load_context() renders the injected index directly from the facts table
-    (_render_memory_index), so store_fact() alone already injects. The flush is kept so
-    legacy-mode scenarios read the same truth (v2.0 audit: the previous version of this
-    comment claimed MEMORY.md was the injection source — false, and it misdirected a live
-    debugging session 2026-07-03).
-    """
+async def _start_bench_memory(agent_config: Any, scenario: ScenarioSpec, seeds: list[tuple[str, str]], *,
+                              bus: EventBus, llm_client: Any, tool_registry: Any,
+                              session_id: str, context_tokens: int) -> tuple[Any, Path]:
+    """Memory for a seeded scenario through the plan builder + lifecycle (memory on, everything
+    else off), over a throwaway config+state dir the operator's ~/.localharness never touches.
+    Seeds go through the occupied slot's browse().store() — exactly today's store_fact, no
+    embedding, no LLM. Consolidation is off: the bench's one deliberate memory setting. Tool
+    gating (FIX 4): a memory tool the scenario does not allow is unregistered — [] means pure-LLM,
+    and the seeded facts still reach the system prompt through the slot. Returns
+    (LifecycleResult, tmp_dir); the caller stops the plugins and removes the dir."""
+    import shutil
     import tempfile
-    from localharness.memory.sqlite import MemoryStore
 
-    store = MemoryStore(
-        agent_id=agent_id, division_id="", org_id="",
-        base_dir=tempfile.mkdtemp(prefix="bench-mem-"),
-    )
-    await store.open()
-    for key, value in seeds:
-        await store.store_fact(key, value, confidence=1.0)  # >=0.7 so flush includes it
-    await store.flush_memory_md()  # legacy index_mode=False only; index_mode=True renders from facts
-    return store
+    import yaml
+
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.api import PluginPaths, SessionInfo
+    from localharness.plugins.lifecycle import start_plugins, stop_plugins
+    from localharness.plugins.resolve import resolve
+
+    d = Path(tempfile.mkdtemp(prefix="bench-mem-"))
+    result = None
+    try:
+        (d / "config.yaml").write_text(yaml.safe_dump(
+            {"version": "1", "memory": {"enabled": True}, "web": {"enabled": False},
+             "image": {"enabled": False}}))
+        (d / "agents").mkdir()
+        (d / "agents" / f"{agent_config.name}.yaml").write_text(yaml.safe_dump(
+            {"name": agent_config.name, "role": agent_config.role or "bench",
+             "memory": {"consolidation": {"enabled": False}}}))
+        res = resolve(ConfigLoader(config_dir=d), agent_name=agent_config.name)
+        result = await start_plugins(
+            res, bus=bus, registry=tool_registry, hooks=None, llm=llm_client,
+            paths=PluginPaths(global_config_dir=d, workspace=None, state_dir=d),
+            session=SessionInfo(
+                agent_id=agent_config.name, division_id="default", sitting_id=session_id,
+                model=getattr(getattr(llm_client, "config", None), "model", "") or "",
+                context_tokens=context_tokens,
+                budget=agent_config.permissions.budget.model_dump()))
+        for w in result.warnings:
+            log.warning("bench memory: %s: %s", scenario.name, w)
+        store = getattr(result.slot.browse(), "store", None) if result.slot.occupied else None
+        if store is None:
+            raise RuntimeError(
+                f"bench memory: plugin did not start for {scenario.name}: {result.warnings}")
+        for key, value in seeds:  # order kept: overwrite_recall's second write wins
+            await store(key, value)
+        allowed = scenario.tools_allowed or []
+        for name in ("memory_search", "memory_get", "remember"):
+            if name not in allowed:  # unregister of an absent name is a no-op
+                await tool_registry.unregister(name, scope="global")
+    except BaseException:
+        if result is not None:
+            await stop_plugins(result)
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    return result, d
 
 
 # -------------------------------------------------------------------------
@@ -247,6 +276,7 @@ async def execute_one_run(
         if ttft is None:
             ttft = time.monotonic() - t_start
 
+    loop: Any = None
     try:
         base_registry = await _get_base_registry()
         loop = await _build_agent_loop(bus=bus, llm_client=llm_client, scenario=scen, session_id=session_id, agent_config=agent_config, base_registry=base_registry)
@@ -262,6 +292,10 @@ async def execute_one_run(
     except Exception as e:  # noqa: BLE001 — scenario failure is data, not a crash
         log.exception("scenario_error scenario=%s model=%s", scen.name, model)
         acc.final_message = f"[scenario_error: {e!r}]"
+    finally:
+        # vars(), not getattr: a test's stub loop (MagicMock) would answer any getattr with a mock.
+        _own = getattr(loop, "__dict__", {})
+        await _stop_bench_memory(_own.get("_plugin_result"), _own.get("_plugin_tmp"))
 
     latency_total = (scen.limits.max_latency_s if timed_out else time.monotonic() - t_start)
     counts = {
@@ -330,10 +364,13 @@ async def _get_base_registry() -> Any:
 async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSpec, session_id: str = "", agent_config: Any = None, base_registry: Any = None) -> Any:
     """Construct an AgentLoop instance for the given scenario.
 
-    Async because EVAL-01 hydration seeds a MemoryStore (async open/store/flush)
-    for the stateful_behavior scenarios; awaited from execute_one_run, which is
-    already async — so both the seed and the loop's later load_context() run on
-    the same event loop (no cross-loop aiosqlite hazard).
+    Async because EVAL-01 memory (MEMP-05) starts the memory plugin through the plan builder +
+    lifecycle (resolve -> start_plugins over a throwaway config dir) and seeds it through the
+    occupied slot's browse().store() for the three _MEMORY_SEEDS scenarios; awaited from
+    execute_one_run, which is already async — so the seed and the loop's later slot.context() run
+    on the same event loop (no cross-loop aiosqlite hazard). The LifecycleResult and the tmp dir
+    ride on the returned loop (`_plugin_result` / `_plugin_tmp`); execute_one_run's finally stops
+    the plugins and removes the dir on every path, including a timeout.
 
     AgentLoop signature (verified from src/localharness/agent/loop.py, lines 271-285):
         AgentLoop(
@@ -343,7 +380,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             context_manager,       # ContextManager
             tool_registry,         # ToolRegistry
             permission_evaluator,  # PermissionEvaluator
-            memory_loader=None,
+            memory_slot=None,
             kill_file_path=None,
             compact_md_path=COMPACT_DISABLED,
         )
@@ -562,37 +599,20 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             agent_runner=_agent_runner, available_agents=_bench_agents)
         tool_registry._schemas["agent"] = tool_registry._tools["global"]["agent"].info()
 
-    # EVAL-01: hydrate a seeded MemoryStore ONLY for the stateful_behavior
-    # scenarios, keyed by scenario.name, under the loop's own agent_id
-    # (agent_config.name) so load_context() resolves the seeded facts. Stays
-    # None for every other scenario — no /agents dir is created for them.
-    memory_loader = None
+    # EVAL-01 / MEMP-05 (B1): memory ONLY for the seeded scenarios, keyed by scenario.name, built
+    # through the plan builder + plugin lifecycle under the loop's own agent_id (agent_config.name)
+    # so the slot's context resolves the seeded facts. Every other scenario: no plugin machinery,
+    # no memory, no agents/ dir.
+    plugin_result = plugin_tmp = None
     seeds = _MEMORY_SEEDS.get(scenario.name)
     if seeds is not None:
-        memory_loader = await _seed_memory_store(agent_config.name, seeds)
-
-    if memory_loader is not None:
-        # SESS-06 parity (v2.0 audit): production registers all three memory tools whenever a
-        # store exists (start_cmd critic M5). FIX 4: registration used to ride with the store
-        # alone (AFTER from_allowed), deliberately bypassing scenario.tools_allowed — but []
-        # means "pure-LLM, no tools" (bench/schema.py ScenarioSpec.tools_allowed docstring),
-        # and memory_recall/stateful_behavior_* declare exactly that to test PURE
-        # system-prompt recall, yet got live tools anyway. Gate each tool on its OWN name
-        # being explicitly allowed; the seeded store itself (above) is untouched — load_context()
-        # still injects the seeded facts into the system prompt regardless of tool registration.
-        from localharness.tools.builtin.memory_tools import (
-            MemoryGetTool, MemoryRememberTool, MemorySearchTool,
-        )
-        allowed = scenario.tools_allowed or []
-        if "memory_search" in allowed:
-            await tool_registry.register(MemorySearchTool(memory_loader), scope="global")
-        if "memory_get" in allowed:
-            await tool_registry.register(MemoryGetTool(memory_loader), scope="global")
-        if "remember" in allowed:
-            await tool_registry.register(MemoryRememberTool(memory_loader), scope="global")
+        plugin_result, plugin_tmp = await _start_bench_memory(
+            agent_config, scenario, seeds, bus=bus, llm_client=llm_client,
+            tool_registry=tool_registry, session_id=session_id,
+            context_tokens=effective_max_context_tokens)
 
     try:
-        return AgentLoop(
+        loop = AgentLoop(
             config=agent_config,
             llm=llm_client,
             bus=bus,
@@ -600,11 +620,14 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             tool_registry=tool_registry,
             permission_evaluator=perm_evaluator,
             gate=bench_gate,
-            memory_loader=memory_loader,
+            memory_slot=plugin_result.slot if plugin_result is not None else None,
             kill_file_path=None,
             compact_md_path=COMPACT_DISABLED,  # no prior-session context; see the pipeline above
         )
-    except TypeError as e:
+    except BaseException as e:
+        await _stop_bench_memory(plugin_result, plugin_tmp)
+        if not isinstance(e, TypeError):
+            raise
         raise RuntimeError(
             f"AgentLoop construction failed in bench runner. "
             f"The current AgentLoop signature in src/localharness/agent/loop.py has changed — "
@@ -612,6 +635,19 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             f"(config, llm, bus, context_manager, tool_registry, permission_evaluator). "
             f"Original error: {e!r}"
         ) from e
+    if plugin_result is not None:  # execute_one_run's finally stops these (#43: no hung aiosqlite)
+        loop._plugin_result, loop._plugin_tmp = plugin_result, plugin_tmp
+    return loop
+
+
+async def _stop_bench_memory(result: Any, tmp: Any) -> None:
+    """Stop the bench's plugins and remove its throwaway dir; both no-ops when unset."""
+    if result is not None:
+        from localharness.plugins.lifecycle import stop_plugins
+        await stop_plugins(result)
+    if tmp is not None:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _render_prompt(prompt: str) -> str:
