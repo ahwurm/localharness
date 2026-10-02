@@ -256,6 +256,9 @@ class DiscordChannel(ChannelAdapter):
     resolves as `reject_once`. Stated explicitly rather than inherited: this is the one channel
     the timeout is FOR."""
 
+    bare_mode_command = True
+    """PRD §3.4: no slash convention here, so a bare `mode <name>` is the mode command."""
+
     def __init__(self, bus: EventBus, config: dict[str, Any]) -> None:
         super().__init__(bus, config)
         self._token: str = config.get("token") or ""

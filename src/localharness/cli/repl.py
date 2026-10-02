@@ -86,9 +86,7 @@ the human. The box cannot answer the gate itself; the REPL owns it, and one seri
 answering it is what keeps the queue race-free."""
 
 BARE_MODE_COMMAND = "mode"
-BARE_MODE_COMMAND_CHANNELS: frozenset[str] = frozenset({"discord"})
-"""Channels where `mode <name>` as the first word IS the command (PRD §3.4). Discord has no
-slash convention of its own; the terminal does, so there the bare word stays a message."""
+"""On a channel whose class sets `bare_mode_command` (PRD §3.4), this first word IS the command."""
 
 
 # #129: a /model swap that writes a new default to the user overlay must SAY so — the write
@@ -456,11 +454,11 @@ class OrchestratorREPL:
                 follow, self._slash_followup = self._slash_followup, None
                 return None if follow is None else await self._start_user_turn(follow)
 
-        # PRD §3.4: Discord has no slash convention of its own, so `mode <name>` as the first
-        # word is the same command there. Terminal users type `/mode`; a terminal line starting
-        # with the bare word stays a message, because "mode" is an ordinary English word and the
-        # terminal already has an unambiguous spelling for the command.
-        if getattr(self._channel, "channel_id", "") in BARE_MODE_COMMAND_CHANNELS:
+        # PRD §3.4: a chat platform with no slash convention of its own sets `bare_mode_command`,
+        # so `mode <name>` as the first word is the same command there. Terminal users type
+        # `/mode`; a terminal line starting with the bare word stays a message, because "mode" is
+        # an ordinary English word and the terminal already has an unambiguous spelling for it.
+        if getattr(self._channel, "bare_mode_command", False):
             head, _, rest = user_input.strip().partition(" ")
             if head.lower() == BARE_MODE_COMMAND:
                 await self._handle_mode_cmd(rest.strip())
@@ -496,7 +494,7 @@ class OrchestratorREPL:
         session by exactly the path every other typed line does (memory pipeline included), not
         by a private shortcut into `run_turn`."""
         # Publish user message for memory pipeline. channel_id is the adapter's class
-        # attribute ("terminal", "discord", ...) — history rows carry the REAL channel.
+        # attribute ("terminal", a chat platform's id, ...) — history rows carry the REAL channel.
         ch_id = getattr(self._channel, "channel_id", None)
         await self._bus.publish(
             UserMessage(
