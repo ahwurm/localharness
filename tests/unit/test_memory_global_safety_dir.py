@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from localharness.memory.sqlite import MemoryStore
-from tests.unit.test_agent_loop import _make_memory_agent_loop, _record_system_prompts
+from tests.unit.test_agent_loop import _make_memory_agent_loop, _occupied_slot, _record_system_prompts
 
 GLOBAL_GUARDRAILS = "# Org guardrails\nGLOBAL-GUARDRAILS-SENTINEL\n"
 WORKSPACE_GUARDRAILS = "# Org guardrails\nWORKSPACE-GUARDRAILS-SENTINEL\n"
@@ -63,12 +63,15 @@ def _split_store(ws: Path, gl: Path) -> MemoryStore:
     )
 
 
-async def _prompt(store: MemoryStore, guardrails_path: Path | None) -> str:
-    """The system prompt a real AgentLoop builds over the OPEN `store`, with core's guardrails
-    reader pointed at `guardrails_path` — what the model is handed, not what a reader returned."""
-    loop, llm = _make_memory_agent_loop(memory_loader=store, guardrails_path=guardrails_path)
-    prompts = _record_system_prompts(llm)
-    await loop.run_turn("hello")
+async def _prompt(state_dir: Path, global_dir: Path, guardrails_path: Path | None) -> str:
+    """The system prompt a real AgentLoop builds with the memory plugin's store split over
+    (`state_dir`, `global_dir`) in its slot and core's guardrails reader pointed at
+    `guardrails_path` — what the model is handed, not what a reader returned."""
+    async with _occupied_slot(state_dir, agent_id=AGENT_ID, division_id=DIVISION_ID,
+                              state_dir=state_dir, global_dir=global_dir) as (slot, _plugin):
+        loop, llm = _make_memory_agent_loop(memory_slot=slot, guardrails_path=guardrails_path)
+        prompts = _record_system_prompts(llm)
+        await loop.run_turn("hello")
     return prompts[0]
 
 
@@ -110,9 +113,9 @@ async def test_safety_context_is_read_from_the_global_dir(tmp_path):
     await store.open()
     try:
         ctx = await store.load_context()
-        prompt = await _prompt(store, gl / "orgs" / ORG_ID / "GUARDRAILS.md")
     finally:
         await store.close()
+    prompt = await _prompt(ws, gl, gl / "orgs" / ORG_ID / "GUARDRAILS.md")
 
     assert not hasattr(ctx, "guardrails_md"), "memory reads GUARDRAILS.md again — two readers"
     assert "GLOBAL-GUARDRAILS-SENTINEL" in prompt
@@ -133,15 +136,17 @@ async def test_workspace_cannot_silence_or_replace_the_global_safety_voice(tmp_p
     await store.open()
     try:
         ctx = await store.load_context()
-        prompt = await _prompt(store, gl / "orgs" / ORG_ID / "GUARDRAILS.md")
     finally:
         await store.close()
+    prompt = await _prompt(ws, gl, gl / "orgs" / ORG_ID / "GUARDRAILS.md")
 
     assert not hasattr(ctx, "guardrails_md"), "memory reads GUARDRAILS.md again — two readers"
     assert "GLOBAL-GUARDRAILS-SENTINEL" in prompt
     assert "WORKSPACE-GUARDRAILS-SENTINEL" not in prompt
     assert "GLOBAL-DIVISION-SENTINEL" in ctx.division_md
     assert "WORKSPACE-DIVISION-SENTINEL" not in ctx.division_md
+    assert "GLOBAL-DIVISION-SENTINEL" in prompt  # and the slot's reader agrees
+    assert "WORKSPACE-DIVISION-SENTINEL" not in prompt
 
 
 @pytest.mark.asyncio
@@ -167,9 +172,9 @@ async def test_omitting_global_base_dir_is_a_no_op(tmp_path):
     await store.open()
     try:
         ctx = await store.load_context()
-        prompt = await _prompt(store, None)
     finally:
         await store.close()
+    prompt = await _prompt(root, root, None)
 
     assert not hasattr(ctx, "guardrails_md"), "memory reads GUARDRAILS.md again — two readers"
     assert "GLOBAL-GUARDRAILS-SENTINEL" not in prompt and "## Guardrails" not in prompt
