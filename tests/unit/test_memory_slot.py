@@ -76,7 +76,8 @@ def _loop(tmp_path, **kwargs) -> tuple[AgentLoop, list[str]]:
         return await original(messages=messages, tools=tools, on_token=on_token, **kw)
 
     llm.stream_complete = recording
-    loop = AgentLoop(config=cfg, llm=llm, bus=EventBus(), context_manager=ContextManager(),
+    cm = kwargs.pop("context_manager", None) or ContextManager()
+    loop = AgentLoop(config=kwargs.pop("config", cfg), llm=llm, bus=EventBus(), context_manager=cm,
                      tool_registry=None, permission_evaluator=PermissionEvaluator(),
                      guardrails_path=guardrails, **kwargs)
     return loop, prompts
@@ -161,7 +162,8 @@ async def test_an_occupied_slot_adds_its_sections_after_the_guardrails(tmp_path)
 
     assert "\n\n## Guardrails\nRULES-G\n\n## Division Context\nD\n\n## Agent Memory\nM" in prompts[0]
     assert prompts[0].count("## Guardrails") == 1
-    assert seen == [(ctx, "hello slot", ContextBudget(max_chars=1234, max_session_history=3))]
+    # G3: the budget is core's ceiling from the window, not agent.memory's 1234 / 3.
+    assert seen == [(ctx, "hello slot", _ceiling(ContextManager()))]
 
 
 @pytest.mark.asyncio
@@ -314,3 +316,62 @@ async def test_the_prompt_is_identical_with_the_occupant_seated(tmp_path):
         assert seated.occupied and prompts[0] == empty_prompts[0]
     finally:
         await store.close()
+
+
+# --- G3: the per-turn budget is core's ceiling from the context window -------------------------------
+
+
+def _ceiling(cm: ContextManager) -> ContextBudget:
+    from localharness.agent.context import APPROX_CHARS_PER_TOKEN, response_reserve
+    w = cm.max_context_tokens
+    return ContextBudget(max_chars=(w - response_reserve(w, cm.max_response_tokens)) * APPROX_CHARS_PER_TOKEN,
+                         max_session_history=200)
+
+
+async def _budget_seen(tmp_path, **kwargs) -> ContextBudget:
+    seen: list = []
+    loop, _ = _loop(tmp_path, memory_slot=MemorySlot(_memory_plugin(seen=seen)(), _ctx(tmp_path), "recall"),
+                    **kwargs)
+    await loop.run_turn("t")
+    assert len(seen) == 1
+    return seen[0][2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window,reply", [(131_072, None), (32_768, 8_000)])
+async def test_slot_budget_is_the_usable_window_in_chars(tmp_path, window, reply):
+    cm = ContextManager(max_context_tokens=window, max_response_tokens=reply)
+    assert await _budget_seen(tmp_path, context_manager=cm) == _ceiling(cm)
+
+
+@pytest.mark.asyncio
+async def test_default_window_ceiling_exceeds_todays_defaults(tmp_path):
+    cm = ContextManager()
+    assert cm.max_context_tokens == 131_072
+    b = await _budget_seen(tmp_path, context_manager=cm)
+    # >= MemoryConfig.max_notes_chars' upper bound (200_000), so no accepted value is cut at defaults
+    assert b.max_chars >= 200_000 and b.max_chars >= 16_000 and b.max_session_history >= 8
+
+
+@pytest.mark.asyncio
+async def test_small_window_ceiling_bites(tmp_path):
+    from localharness.agent.context import response_reserve
+    cm = ContextManager(max_context_tokens=8_192)
+    b = await _budget_seen(tmp_path, context_manager=cm)
+    assert b.max_chars == (8_192 - response_reserve(8_192, cm.max_response_tokens)) * 4
+    assert b.max_chars < 200_000
+
+
+@pytest.mark.asyncio
+async def test_budget_does_not_read_agent_memory(tmp_path):
+    cfg = AgentConfig(name="slot-agent", role="You are a test assistant.")
+
+    class _NoMemory:
+        """The agent config with no `memory` section at all (it leaves core in 47-06)."""
+        def __getattr__(self, name):
+            if name == "memory":
+                raise AttributeError("memory")
+            return getattr(cfg, name)
+
+    b = await _budget_seen(tmp_path, config=_NoMemory())
+    assert b == _ceiling(ContextManager())

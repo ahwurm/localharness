@@ -27,6 +27,7 @@ from localharness.agent.gate import (
 )
 from localharness.agent.gate_types import GateOutcome, ToolMeta
 from localharness.core.types import Message
+from localharness.agent.context import APPROX_CHARS_PER_TOKEN, response_reserve
 from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
 
@@ -364,6 +365,8 @@ def _format_completion_summary(session: Session, content: str | None) -> str:
 # alone also deleted the human's own task whenever the model opened a turn with a spontaneous
 # CONFIRMED (documented small-local-model behaviour, #91) — the harness's own scolding then
 # became the only user turn for the rest of the sitting.
+_SLOT_MAX_SESSION_HISTORY = 200  # MemoryConfig.max_session_history_entries' upper bound; the store hard-caps injected history at 8 anyway
+
 _ACT_GUARD_NUDGE = (
     "You ended your reply with stated intentions but took no action. "
     "Execute your plan NOW: make the tool call in this response. "
@@ -1394,11 +1397,17 @@ class AgentLoop:
             system_prompt += "\n\n## Guardrails\n" + guardrails
         slot = self._memory_slot
         if slot is not None and slot.occupied:
-            _slot_cfg = getattr(self._config, "memory", None)
-            contribution = await slot.context(task, ContextBudget(
-                max_chars=getattr(_slot_cfg, "max_notes_chars", 16_000),
-                max_session_history=getattr(_slot_cfg, "max_session_history_entries", 8),
-            ))
+            # G3: the budget is core's — a CEILING from the usable context window, not a share and
+            # not the plugin's own settings (the occupant applies min(own config, ceiling)). At the
+            # default window it is far above every value agent.memory accepts, so the prompt is
+            # unchanged; on a small window it stops the memory section from outgrowing the context.
+            window = self._ctx.max_context_tokens
+            slot_budget = ContextBudget(
+                max_chars=max(0, window - response_reserve(window, self._ctx.max_response_tokens))
+                * APPROX_CHARS_PER_TOKEN,
+                max_session_history=_SLOT_MAX_SESSION_HISTORY,
+            )
+            contribution = await slot.context(task, slot_budget)
             for heading, body in contribution.sections:
                 if body:
                     system_prompt += f"\n\n## {heading}\n{body}"
