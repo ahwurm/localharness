@@ -111,17 +111,19 @@ def _plugins_off() -> list[str]:
     return [n.strip() for n in os.environ.get(_PLUGINS_OFF_ENV, "").split(",") if n.strip()]
 
 
-def _minimal_config() -> str:
+def _minimal_config(off: list[str] | None = None) -> str:
     """The config.yaml BOTH home fixtures seed (`_isolate_localharness_home`, `components_home`):
     a vllm provider, plus `<name>: {enabled: false}` for every plugin the switch names — so
     `LOCALHARNESS_TEST_PLUGINS_OFF=autoresearch pytest tests/` runs the suite with it off. Tests that
-    write their own whole config are not covered (a documented limit of the switch)."""
+    write their own whole config are not covered (a documented limit of the switch). `off=[]` seeds
+    no switch: for a module that swaps BUILTIN_PLUGINS for fakes, where the real plugins' sections
+    are unknown names the loader refuses."""
     return ("version: '1'\n"
             "provider:\n"
             "  provider_type: vllm\n"
             "  base_url: http://localhost:8000/v1\n"
             "  default_model: test-model\n"
-            + "".join(f"{name}:\n  enabled: false\n" for name in _plugins_off()))
+            + "".join(f"{name}:\n  enabled: false\n" for name in (_plugins_off() if off is None else off)))
 
 
 # The home the developer actually has, captured at import time — before any fixture repoints the
