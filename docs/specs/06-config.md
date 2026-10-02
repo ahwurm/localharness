@@ -226,6 +226,15 @@ the global list rather than adding to it. There is exactly one exception:
 `org.permissions.deny_patterns` accumulates across the layers. Every layer's org-level deny rules
 are unioned, so a workspace can add deny rules there and can never remove one the global layer set.
 
+**One org key is machine-level only.** `org.enforce_capability_floor` (bool, default `true`)
+switches the capability floor: when it is on, no agent's tools may combine a tool that declares
+`ingest: untrusted` with one that declares `host: dangerous`, and the root agent is not given the
+untrusted-ingest tools. Only the global `config.yaml` or `overrides.yaml` may set it. A workspace
+value that differs from the global one (or from the default, when the global layer is silent) is
+ignored, and `start` names the key and the file in its startup warnings; a workspace value equal to
+it is treated as yours. The other machine-level-only settings, and why, are listed in
+[SECURITY.md](../../SECURITY.md#machine-level-only-settings).
+
 Read that guarantee at exactly its own size: it is about the **org-level** list. Deny patterns
 written inside an individual agent file travel with that file, and a workspace agent file replaces
 the global one of the same name whole — its `permissions.deny_patterns` along with everything else
@@ -1190,6 +1199,14 @@ class OrgConfig(BaseModel):
     log_level: Literal["debug", "info", "warning", "error"] = Field(
         default="info",
         description="Structlog log level for the harness process.",
+    )
+
+    enforce_capability_floor: bool = Field(
+        default=True,
+        description=(
+            "Capability floor: no agent may hold a tool that declares untrusted ingest together "
+            "with one that declares a host-dangerous action. Machine-level only."
+        ),
     )
 
     audit_log_path: Optional[str] = Field(

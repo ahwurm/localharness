@@ -1437,12 +1437,13 @@ class OrgConfig(BaseModel):
     enforce_capability_floor: bool = Field(
         default=True,
         description=(
-            "Capability floor (P-A security spine). When True (default): no single agent's "
-            "resolved toolset may combine an untrusted-ingest tool (web_*) with a host-dangerous "
-            "one (bash_exec/write/edit/python_exec), enforced at both toolset-resolution "
-            "chokepoints; and the root agent has web ingestion stripped (it delegates ingestion "
-            "to the web-researcher subagent). When False: floor checks + the root web-strip are "
-            "skipped (loud warning) — migration escape hatch only."
+            "Capability floor. When True (default): no agent's resolved toolset may combine a "
+            "tool that declares untrusted ingest with one that declares a host-dangerous action "
+            "(read from each tool's own `ingest` and `host` declarations, never its name), "
+            "enforced where toolsets are resolved, and the root agent is not given the "
+            "untrusted-ingest tools. When False: those checks are skipped, with a startup "
+            "warning. Machine-level only: only the global config.yaml or overrides.yaml may set "
+            "it; a workspace value that differs is ignored with a startup warning."
         ),
     )
 
