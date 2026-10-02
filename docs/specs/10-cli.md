@@ -25,10 +25,10 @@ The CLI does not contain business logic. It parses arguments, sets up the event 
 
 ## App Structure
 
-`src/localharness/cli/app.py` builds one Typer app and registers fifteen visible top-level
-commands — eight flat commands and seven subcommand groups. `localharness --help` prints this
+`src/localharness/cli/app.py` builds one Typer app and registers twelve visible top-level
+commands — seven flat commands and five subcommand groups. `localharness --help` prints this
 list, then the commands of each plugin that is on, read from its manifest (the bundled ones are
-`generate-image`, `memory` and `web`; the bundled `dispatch` plugin adds no command, since Discord is a mode of `start --channel discord`; see spec 09, "Commands, slash commands and doctor"). A sixteenth, `ask-rate`, is registered `hidden=True` and does not appear in it; it
+`autoresearch`, `experiment` and `propose` from the `autoresearch` plugin, `generate-image`, `memory` and `web`; the bundled `dispatch` plugin adds no command, since Discord is a mode of `start --channel discord`; see spec 09, "Commands, slash commands and doctor"). A thirteenth, `ask-rate`, is registered `hidden=True` and does not appear in it; it
 reports permission prompts per session over a trace corpus and is documented by its own `--help`.
 
 | Command | What it does |
@@ -38,7 +38,6 @@ reports permission prompts per session over a trace corpus and is documented by 
 | `doctor` | Run prerequisite checks and report system health. |
 | `validate` | Validate agent YAML configuration files. |
 | `model` | List available models, or switch the persisted default with `localharness model <name>`. |
-| `propose` | Generate ONE typed mutation `{diff, rationale}` for ONE component from failed TRAIN traces. |
 | `update` | Upgrade LocalHarness to the latest release on PyPI. |
 | `acp` | Serve the editor protocol Zed speaks; see [docs/zed.md](../zed.md). |
 | `agent` *(group)* | Manage LocalHarness agents — `create`, `list`. |
@@ -46,8 +45,22 @@ reports permission prompts per session over a trace corpus and is documented by 
 | `components` *(group)* | List, inspect, and mutate harness components (registry) — `list`, `get`, `set`. |
 | `config` *(group)* | Inspect and maintain your LocalHarness configuration — `show`, `migrate`. |
 | `plugins` *(group)* | See, enable and disable plugins — `list`, `info`, `enable`, `disable`. |
+
+The bundled `autoresearch` plugin (on by default) adds three more, listed among the plugin commands:
+
+| Command | What it does |
+|---|---|
 | `autoresearch` *(group)* | Autoresearch loop tools. |
 | `experiment` *(group)* | Run a proposal through the promotion gate (train Welch → holdout Bonferroni). |
+| `propose` | Generate ONE typed mutation `{diff, rationale}` for ONE component from failed TRAIN traces. |
+
+When a bundled plugin is off, its command names are not listed in `--help`, and running one prints
+`command '<name>' is provided by the <plugin> plugin, which is off — run `localharness plugins enable <plugin>``
+to stderr and exits 4 (exit 2 is `experiment`'s reject-holdout verdict, so Click's usual
+`No such command` exit 2 would be misread). Two cases still fall outside that rule: if the config
+cannot be read, an off plugin's command gets Click's `No such command` and exit 2; and an on
+plugin's command whose module fails to import exits 1. A plugin you installed but have not enabled
+gets Click's `No such command` (exit 2).
 
 Sections below document `init`, `start`, `agent`, `doctor`, `validate`, `config` and `components`
 in detail. `bench`, `autoresearch`, `experiment`, `propose`, `model`, `update` and `acp` are
@@ -63,6 +76,7 @@ app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
     context_settings={"help_option_names": ["-h", "--help"]},
+    cls=PluginCommandGroup,  # lists an on plugin's commands from its manifest; imports one only when it runs
 )
 
 app.command("init")(init_app)
@@ -70,15 +84,16 @@ app.command("start")(start_app)
 app.command("doctor")(doctor)
 app.command("validate")(validate)
 app.command("model")(model)
-app.command("propose")(propose)
 app.command("update")(update)
+app.command("acp")(acp_cmd)
+app.command("ask-rate", hidden=True)(ask_rate)
 app.add_typer(agent_app, name="agent")
 app.add_typer(bench_app, name="bench")
 app.add_typer(components_app, name="components")
 app.add_typer(config_app, name="config")
 app.add_typer(plugins_app, name="plugins")
-app.add_typer(autoresearch_app, name="autoresearch")
-app.add_typer(experiment_app, name="experiment")
+# No plugin module is imported here: `autoresearch`, `experiment`, `propose`, `generate-image`,
+# `memory` and `web` reach the app through PluginCommandGroup.
 
 def main() -> None:
     """Entry point registered in pyproject.toml."""
@@ -871,7 +886,7 @@ set org.log_level = 'debug' (was: 'info')
         A per-project value goes in /home/you/proj/.localharness/config.yaml.
 ```
 
-A secret setting (a `SecretStr` such as `dispatch.discord.token`) is shown as `**********` in the
+A secret setting (a `SecretStr` such as `dispatch.discord.token` or `proposer.api_key`) is shown as `**********` in the
 `set` receipt and its `--json`, in `list` and `get`, in error messages and in the `ComponentMutated`
 audit event; the file holds the real value.
 
@@ -1025,6 +1040,7 @@ the exit code as *structured output* rather than as a pass/fail flag.
 | `bench compare` | 0 stable; 1 regressed; 2 infrastructure failure; 3 unstable |
 | `bench pack` | 0 built; 1 the pack failed to build |
 | `experiment` | **the code is the gate verdict** — 0 promote, 1 reject-train, 2 reject-holdout, 3 inconclusive; ≥4 a structural refusal (the experiment did not run) |
+| any command of a bundled plugin that is off | 4, with the enable hint on stderr (see [App Structure](#app-structure) for the two cases that still exit 2 or 1) |
 | `autoresearch` | 0 done; 2 any error |
 | `update` | 1 if PyPI is unreachable or `uv` is missing from PATH; otherwise the exit code of the upgrade subprocess it runs |
 

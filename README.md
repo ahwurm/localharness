@@ -53,7 +53,7 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 - **MCP support** — connect Model Context Protocol servers and expose their tools to agents
 - **Built-in tools** — read, write, edit, glob, grep, bash, python, web search/fetch, and subagent delegation
 - **Benchmark suite** — scenario corpus in `bench/` for measuring harness changes against your own model
-- **Autoresearch loop** — propose → gate → promote mutation archive for harness self-improvement experiments
+- **Autoresearch loop** — propose → gate → promote mutation archive for harness self-improvement experiments (the bundled `autoresearch` plugin, on by default)
 - **Pluggable channels** — terminal by default, or `localharness start --channel discord` to drive a session from Discord (the `dispatch` plugin, on by default; needs the `dispatch` extra, `uv sync --extra dispatch`, then `localharness plugins enable dispatch --set discord.token=… --set discord.allow=<your user id>`, or `localharness components set dispatch.discord.token …`; the token is never printed. The old `LOCALHARNESS_DISCORD_*` variables still work, with a warning, until 0.17.0. This plugin build of the bot is tested offline and not yet verified on a live Discord server), or `localharness web` to drive one from a phone on your own private network — home-screen install, a pairing QR so you never type the token, and a lock-screen notification when a long turn finishes or the permission gate needs you (needs the `web` extra; ships a bare reference page, **not** a finished chat app — see [docs/web.md](docs/web.md))
 
 **Answering a permission prompt in Discord.** When the gate needs a human, the bot posts a
@@ -215,15 +215,18 @@ Tools run where the harness runs, and `bash_exec` always launches a real bash �
 | `bench …` | Run the scenario benchmark |
 | `components …` | Autoresearch component registry |
 | `plugins …` | See, enable and disable plugins (`list`, `info`, `enable`, `disable`) — see [Plugins](#plugins) |
-| `autoresearch …` | Run the self-improvement loop |
-| `experiment …` | Gated experiment runs |
-| `propose` | Propose a harness mutation |
+| `autoresearch …` | Run the self-improvement loop (autoresearch plugin; absent when it is off) |
+| `experiment …` | Gated experiment runs (autoresearch plugin) |
+| `propose` | Propose a harness mutation (autoresearch plugin) |
+
+A command of a bundled plugin that is off is not listed in `--help`; running it says which plugin
+provides it and how to turn that plugin on, and exits 4.
 
 ## Plugins
 
 A plugin adds tools, commands, slash commands and `doctor` checks. Image generation ships as a
 plugin, off until you turn it on (`localharness plugins enable image`), and so does the phone app
-(`web`, on by default), and so does memory (`memory`, on by default; `localharness plugins disable memory` turns it off). Discord is the dispatch plugin (`dispatch`, on by default; needs the `dispatch` extra). Autoresearch is still part of core. LocalHarness finds plugins in two places on your machine: installed packages that
+(`web`, on by default), and so does memory (`memory`, on by default; `localharness plugins disable memory` turns it off). Discord is the dispatch plugin (`dispatch`, on by default; needs the `dispatch` extra). Autoresearch is a bundled plugin (on by default; `localharness plugins disable autoresearch` sets it aside, nothing is deleted). Its settings keep their names, `proposer:` and `sentinel:`; the bench stays core. LocalHarness finds plugins in two places on your machine: installed packages that
 declare a `localharness.plugins` entry point, and folders `~/.localharness/plugins/<name>/`. It
 loads a plugin's code only once you turn that plugin on. Install a plugin package into the same
 Python environment as LocalHarness:

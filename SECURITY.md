@@ -91,9 +91,13 @@ deny patterns remain the mechanism that stops specific actions.
 
 A plugin is code that adds tools, commands, checks or settings to the harness. One trust model
 covers every plugin; where a plugin that ships with LocalHarness and one you install yourself are
-treated differently, it says so below. (Two features ship as plugins: image generation, off until you
-turn it on, and the phone app `web`, on by default; everything else that comes with LocalHarness
-is still built into its core.)
+treated differently, it says so below. (Five features ship as plugins: image generation, off until you
+turn it on, and the phone app `web`, memory, Discord (`dispatch`) and autoresearch, each on by
+default; everything else that comes with LocalHarness is built into its core, including the bench
+and its sealed holdout.) A plugin that ships with LocalHarness may own core settings under their old
+names (`autoresearch` owns `proposer:` and `sentinel:`); a plugin you install that tries to is
+refused at load. `proposer.api_key` is shown as `**********` wherever a command displays it; like
+the Discord token, the file `components set` writes holds the real value as plain text.
 
 - **Found is not on.** A plugin is found from package metadata and folder names alone, and one you
   installed stays off, with none of its code imported, until you turn it on. `localharness start`,
