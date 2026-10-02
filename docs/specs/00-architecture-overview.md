@@ -2,16 +2,16 @@
 
 **Project:** LocalHarness  
 **Version:** v1  
-**Status:** Authoritative — implement against this document  
-**Last updated:** 2026-05-23
+**Status:** The code is authoritative. This document states the architecture rules; its wiring section is checked against the code by `tests/unit/test_docs_convergence.py`.  
+**Last updated:** 2026-10-02
 
 ---
 
 ## 1. Purpose
 
-This document is the definitive architectural reference for LocalHarness. It describes the system's dependency layers, component responsibilities, communication rules, data flows, project structure, technology stack, design principles, and build order.
+This document is the architectural map of LocalHarness. It describes the system's dependency layers, component responsibilities, communication rules, data flows, project structure, technology stack, design principles, and the order the first version was built in.
 
-Every other spec document is a deep dive into a specific component. This document is the map; other specs are the territory.
+Every other spec document is a deep dive into a specific component. This document is the map; other specs are the territory. Where a map and the source disagree, the source wins and the map is the bug.
 
 ---
 
@@ -20,79 +20,100 @@ Every other spec document is a deep dive into a specific component. This documen
 LocalHarness is a model-agnostic hierarchical agent harness for local LLMs. It provides:
 
 - A typed event bus that connects all components through a single ordered stream
-- A ReAct while-loop agent runtime with tool execution, context management, and memory
+- A ReAct while-loop agent runtime with tool execution and context management
 - A thin orchestrator that routes tasks and manages agent creation conversationally
 - A YAML configuration system that lets users define agents without writing code
 - A CLI entry point with auto-detection of local LLM backends
+- A plugin system: the bundled features (`image`, `web`, `memory`, `dispatch`, `autoresearch`) are plugins that can be switched on or off, and core never imports them
 
 The harness is the product. The LLM is interchangeable.
 
 ---
 
-## 3. Five Dependency Layers
+## 3. Five Dependency Layers, Plus Plugins
 
-Components are organized into five layers. A component in layer N depends only on components in layers 1 through N-1. No upward dependencies.
+Core components are organized into five layers. The intent is that a component in layer N depends only on layers 1 through N-1. That intent is a guide, not a test. The one dependency rule a test enforces is the line between core and plugins (section 5, Enforcement): core never imports a plugin module.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 5: User Interface                                        │
 │                                                                 │
-│  cli/app.py      cli/init.py     cli/start.py    cli/agent.py  │
-│  channels/terminal.py                                           │
+│  cli/app.py       cli/init_cmd.py   cli/start_cmd.py            │
+│  cli/agent_cmd.py cli/repl.py       cli/*_cmd.py                │
+│  channels/terminal.py               channels/acp.py             │
+│  bench/                                                         │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 4: Orchestration                                         │
 │                                                                 │
-│  orchestrator/router.py          orchestrator/workflow.py       │
+│  orchestrator/router.py  orchestrator/workflow.py               │
+│  orchestrator/cards.py                                          │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 3: Agent Runtime                                         │
 │                                                                 │
-│  agent/loop.py   agent/context.py   agent/permissions.py       │
-│  audit/logger.py                                                │
+│  agent/loop.py   agent/context.py   agent/permissions.py        │
+│  agent/gate.py   agent/verdict.py   agent/subagent.py           │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 2: Infrastructure                                        │
 │                                                                 │
-│  tools/base.py       tools/registry.py    tools/hooks.py       │
-│  tools/mcp.py        tools/builtin/       provider/client.py   │
-│  provider/fn_call.py provider/detector.py                      │
-│  memory/sqlite.py    memory/history.py    memory/markdown.py   │
-│  config/loader.py    config/defaults.py                        │
+│  tools/base.py       tools/registry.py   tools/hooks.py         │
+│  tools/mcp.py        tools/capabilities.py  tools/builtin/      │
+│  provider/client.py  provider/fn_call.py provider/detector.py   │
+│  provider/idle_llm.py                                           │
+│  config/loader.py    config/defaults.py  config/paths.py        │
+│  plugins/            registry/                                  │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 1: Foundation                                            │
 │                                                                 │
-│  core/events.py    core/bus.py    core/types.py                │
+│  core/events.py    core/bus.py    core/types.py                 │
 │  config/models.py                                               │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Plugins (beside the layers; reach core only through ctx)       │
+│                                                                 │
+│  image         tools/builtin/image_plugin.py (+ generate_image) │
+│  web           cli/web_plugin.py, channels/web/                 │
+│  memory        memory/                                          │
+│  dispatch      dispatch/ (Discord adapter in dispatch/adapters/)│
+│  autoresearch  autoresearch/                                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Layer 1: Foundation
 
-The event type definitions, the event bus itself, shared primitive types, and the Pydantic config models. Nothing else in the system can exist without these. They have zero imports from other localharness modules.
+The event type definitions, the event bus itself, shared primitive types, and the Pydantic config models. Nothing else in the system can exist without these.
 
 **Files:** `core/events.py`, `core/bus.py`, `core/types.py`, `config/models.py`
 
 ### Layer 2: Infrastructure
 
-The machinery that the agent runtime depends on: tool interface and registry, LLM provider abstraction, persistence (SQLite + JSONL + markdown), config loading, plugin discovery, MCP client. These modules import from Layer 1 but not from each other unless the dependency is explicitly documented.
+The machinery that the agent runtime depends on: tool interface and registry, the capability floor, LLM provider abstraction, config loading, the plugin system, the component catalogue, MCP client.
 
-**Files:** `tools/base.py`, `tools/registry.py`, `tools/hooks.py`, `tools/mcp.py`, `tools/builtin/`, `provider/detector.py`, `provider/client.py`, `provider/fn_call.py`, `memory/sqlite.py`, `memory/history.py`, `memory/markdown.py`, `config/loader.py`, `config/defaults.py`
+**Files:** `tools/base.py`, `tools/registry.py`, `tools/hooks.py`, `tools/mcp.py`, `tools/capabilities.py`, `tools/builtin/`, `provider/detector.py`, `provider/client.py`, `provider/fn_call.py`, `provider/idle_llm.py`, `config/loader.py`, `config/defaults.py`, `config/paths.py`, `plugins/`, `registry/`
 
 ### Layer 3: Agent Runtime
 
-The agent execution loop and its direct dependencies: context manager, permission evaluator, and audit logger. These modules orchestrate Layer 2 components through the event bus.
+The agent execution loop and its direct collaborators: context manager, permission evaluator, the permission gate, and subagent dispatch. The loop receives each collaborator as a constructor parameter (section 5).
 
-**Files:** `agent/loop.py`, `agent/context.py`, `agent/permissions.py`, `audit/logger.py`
+**Files:** `agent/loop.py`, `agent/context.py`, `agent/permissions.py`, `agent/gate.py`, `agent/verdict.py`, `agent/subagent.py`
 
 ### Layer 4: Orchestration
 
-The thin orchestrator that routes tasks, runs the agent creation workflow, and synthesizes multi-agent results. Depends on the agent runtime (Layer 3) and all infrastructure (Layer 2).
+The thin orchestrator that routes tasks, runs the agent creation workflow, and synthesizes multi-agent results.
 
-**Files:** `orchestrator/router.py`, `orchestrator/workflow.py`
+**Files:** `orchestrator/router.py`, `orchestrator/workflow.py`, `orchestrator/cards.py`
 
 ### Layer 5: User Interface
 
-The CLI entry point and channel adapters. These are the only components that interact with the user directly. They consume the orchestrator (Layer 4) and publish events to the bus.
+The CLI entry point and the core channel adapters. These are the components that interact with the user directly. `cli/start_cmd.py` is also where a session is wired: it builds the bus, the registry, the loop and the plugins, and hands each its collaborators.
 
-**Files:** `cli/app.py`, `cli/init.py`, `cli/start.py`, `cli/agent.py`, `channels/terminal.py`
+**Files:** `cli/app.py`, `cli/init_cmd.py`, `cli/start_cmd.py`, `cli/agent_cmd.py`, `cli/repl.py`, the other `cli/*_cmd.py` command modules, `channels/terminal.py`, `channels/acp.py`, `bench/`
+
+### Plugins
+
+A plugin is a feature that ships with LocalHarness but sits outside core: it can be switched on or off, and core does not import it. `BUILTIN_PLUGINS` in `plugins/builtin.py` is the only list of what ships, and that module is the only core module allowed to import a plugin. A plugin reaches the session only through the `PluginContext` it is given (section 5). The plugin API is spec 09.
+
+**Files:** `tools/builtin/image_plugin.py` and `tools/builtin/generate_image_tool.py` (`image`); `cli/web_plugin.py` and `channels/web/` (`web`); `memory/` (`memory`); `dispatch/` (`dispatch`); `autoresearch/` (`autoresearch`)
 
 ---
 
@@ -103,7 +124,7 @@ The CLI entry point and channel adapters. These are the only components that int
 | Component | Layer | Responsibility |
 |-----------|-------|----------------|
 | `core/events.py` | 1 | All Pydantic event type definitions |
-| `core/bus.py` | 1 | EventBus: publish, subscribe, replay, persist |
+| `core/bus.py` | 1 | EventBus: publish, subscribe, replay, persist (a session's events go to `agents/<name>/bus-events.jsonl`) |
 | `core/types.py` | 1 | Shared primitives: AgentID, SessionID, EventSeq |
 | `config/models.py` | 1 | Pydantic config models: AgentConfig, DivisionConfig, etc. |
 | `config/loader.py` | 2 | YAML parse + validate + inheritance resolution |
@@ -111,25 +132,32 @@ The CLI entry point and channel adapters. These are the only components that int
 | `provider/detector.py` | 2 | Port probe: Ollama/vLLM/llama.cpp/LM Studio |
 | `provider/client.py` | 2 | Thin OpenAI-compat async HTTP client |
 | `provider/fn_call.py` | 2 | XML tool call fallback converter |
+| `provider/idle_llm.py` | 2 | The one path for background (idle-time) LLM work |
 | `tools/base.py` | 2 | Tool protocol, ToolSchema, ToolResult |
-| `tools/registry.py` | 2 | Tool registry + scope resolution |
+| `tools/registry.py` | 2 | Tool registry + scope resolution; `dispatch` runs pre/post hooks around each tool |
 | `tools/hooks.py` | 2 | Pre/post hook system (pluggy) |
 | `tools/mcp.py` | 2 | MCP discovery: stdio + streamable-HTTP |
-| `tools/builtin/` | 2 | Built-in tools: glob, grep, read, write, bash |
-| `memory/sqlite.py` | 2 | SQLite facts store (async WAL) |
-| `memory/history.py` | 2 | JSONL chat history (append-only session log) |
-| `memory/markdown.py` | 2 | MEMORY.md persistent notes |
+| `tools/capabilities.py` | 2 | Capability floor: no agent holds untrusted-ingest and host-dangerous tools together |
+| `tools/builtin/` | 2 | Built-in tools: read, write, edit, glob, grep, bash, python, web, load_document, chunk, tool_result_get, agent (subagent), cruncher |
+| `plugins/` | 2 | Plugin API (`api.py`), the bundled list (`builtin.py`), discovery, plan, lifecycle, the memory slot |
+| `registry/` | 2 | Component catalogue behind `localharness components` |
 | `agent/loop.py` | 3 | ReAct while-loop: reason → act → observe |
 | `agent/context.py` | 3 | Context window tracking + compaction |
 | `agent/permissions.py` | 3 | Deny-pattern evaluator + budget enforcer |
-| `audit/logger.py` | 3 | Structured JSONL audit writer (structlog) |
+| `agent/gate.py` | 3 | Permission gate: ask a human, remember the answer |
+| `agent/subagent.py` | 3 | Bounded child agents (explore, cruncher) on the same bus |
 | `orchestrator/router.py` | 4 | Agent Card routing + task dispatch |
 | `orchestrator/workflow.py` | 4 | Discuss→configure→deploy agent creation flow |
 | `cli/app.py` | 5 | Top-level Typer app with subcommand registration |
-| `cli/init.py` | 5 | `localharness init` implementation |
-| `cli/start.py` | 5 | `localharness start` implementation |
-| `cli/agent.py` | 5 | `localharness agent` subcommands |
+| `cli/init_cmd.py` | 5 | `localharness init` implementation |
+| `cli/start_cmd.py` | 5 | `localharness start` implementation and session wiring |
+| `cli/agent_cmd.py` | 5 | `localharness agent` subcommands |
 | `channels/terminal.py` | 5 | stdout channel adapter (Rich streaming) |
+| `channels/acp.py` | 5 | Agent Client Protocol adapter (Zed) |
+| `memory/` | plugin | Facts store, history, MEMORY.md notes, recall and consolidation (the `memory` plugin) |
+| `channels/web/` | plugin | The phone app's server and event API (the `web` plugin) |
+| `dispatch/` | plugin | Chat channels; Discord is the first adapter (the `dispatch` plugin) |
+| `autoresearch/` | plugin | Experiment loop (the `autoresearch` plugin) |
 
 ### What Talks to What
 
@@ -142,36 +170,51 @@ The CLI entry point and channel adapters. These are the only components that int
 | Event Bus | All components (publish) | All subscribers (async delivery) |
 | Config Loader | CLI, Agent loop (at startup) | Agent loop constructor (injected) |
 | Agent Loop | Event bus (TaskRequest) | Event bus (Action, Observation, TaskComplete) |
-| Tool System | Agent loop (via event bus) | Event bus (ToolResult observation) |
-| Hook System | Tool system (pre/post) | Tool system (gate pass/fail) |
+| Tool System | Agent loop (direct call on its injected `tool_registry`) | Agent loop (ToolResult; the loop publishes the Observation) |
+| Hook System | Tool registry (pre/post, inside `dispatch`) | Tool registry (gate pass/fail) |
 | Permission Evaluator | Agent loop (before tool execute) | Agent loop (allow / deny decision) |
-| Memory | Agent loop (read), Event bus (write events) | Agent loop (context injection) |
+| Memory plugin | Agent loop (through its injected `memory_slot`), Event bus | Agent loop (context contribution each turn) |
 | Context Manager | Agent loop | Agent loop (pruned message list) |
 | Orchestrator | Event bus (UserMessage, TaskComplete) | Event bus (TaskRequest delegation) |
-| Audit Logger | Event bus (all events) | Disk (per-agent events.jsonl) |
+| Event log | Event bus (all events) | Disk (`agents/<name>/bus-events.jsonl`; component changes also go to `audit.jsonl`, set by `org.audit_log_path`) |
 
 ---
 
 ## 5. Communication Rule
 
-**All inter-component communication goes through the event bus. No component holds a direct reference to another.**
+**Facts travel on the event bus, the event/data plane: no component holds a reference to another in order to tell it what happened.** Every fact a session produces (a user message, a model reply, a tool call and its result, a turn's end) is published as a typed event on the one ordered bus, so the log is the session (P1, P2).
 
-This is the single most important structural rule. It enables:
+This is the most important structural rule. It enables:
 - Replay: reconstruct any session from its event log
 - Testing: inject test events without starting real components
 - Debugging: inspect the complete event sequence for any failure
 - Future parallelism: move components to separate processes/threads without changing interfaces
 
-**The only exception:** Config Loader is a synchronous dependency injected at construction time. It is not a subscriber. It loads config once per agent instantiation and passes it to the agent loop constructor.
+The rule governs facts, not capabilities. A component that needs to *do* something through another component (call the model, run a tool, ask the permission gate) holds that collaborator as a constructor parameter. That is the second plane, service wiring, and the list below is all of it.
+
+**Config Loader:** a synchronous dependency injected at construction time. It is not a subscriber. It loads config once per agent instantiation and passes it to the agent loop constructor (the `config` parameter below).
+
+### Constructor wiring (the sanctioned exceptions)
+
+A component that needs a capability receives it as a constructor parameter, supplied by the start-up wiring (`cli/start_cmd.py` for a session, `agent/subagent.py` for a child loop, `plugins/lifecycle.py` for a plugin's context). It never discovers one by importing a module or looking it up. These are the exceptions, by name, and a test holds this list equal to the code:
+
+- `AgentLoop.__init__`: `config`, `llm`, `bus`, `context_manager`, `tool_registry`, `permission_evaluator`, `kill_file_path`, `compact_md_path`, `session_id`, `config_dir`, `gate`, `guardrails_path`, `memory_slot`
+- `PluginContext`: `bus`, `tools`, `hooks`, `config`, `agent_config`, `paths`, `llm`, `idle_llm`, `session` (the last two are additive fields; the first seven are the original plugin API)
+
+What the loop does with them: it publishes facts on `bus`, calls the model through `llm`, runs tools through `tool_registry.dispatch`, asks `gate` and `permission_evaluator` before a tool runs, and asks `memory_slot` for the recalled context it adds to the turn's system prompt. The results it gets back become events again, so the replay log stays complete.
+
+#### Design notes
+
+Two planes exist because they carry different things. Events carry facts, and a fact must be recorded in order so a session can be replayed. A collaborator is a capability, and a capability must be handed to a component by whoever builds it rather than found by the component itself. Martin Fowler's article gave this second idea its common name, dependency injection, with constructor injection as one of its three forms, and framed it as "separating configuration from use" ([Fowler, 2004](https://martinfowler.com/articles/injection.html)); in LocalHarness, `cli/start_cmd.py` is the configuration and `AgentLoop` is the use. Channels and the memory slot follow the ports-and-adapters idea from Alistair Cockburn ([Cockburn, 2005](https://alistair.cockburn.us/hexagonal-architecture/)): the core defines the port (a channel adapter, the memory slot's interface), and a technology-specific adapter (Discord, the phone app, the memory plugin) plugs into it, so the core stays ignorant of which one is there. The import-direction test is what keeps the wiring plane pointing one way: core never imports a plugin, so a plugin can only receive capabilities, never be reached into.
 
 ### Enforcement
 
 When writing a new component:
-1. It receives state by subscribing to event types
-2. It changes state by publishing events
-3. It does not import other component modules
-4. It does not call other components' methods directly
-5. It receives the event bus via constructor injection (`__init__(self, bus: EventBus)`)
+1. It publishes the facts it produces as events, and reads other components' facts by subscribing
+2. It receives every collaborator it calls as a constructor parameter, and nothing else is wired; adding one means adding it to the list above
+3. It does not reach into another component's internals (private attributes, module globals)
+4. A core module never imports a plugin module; a plugin reaches core only through `ctx` (its `PluginContext`). `plugins/builtin.py` is the one core module allowed to import plugins. `tests/unit/test_import_direction.py` scans every import (including lazy and type-checking imports) and fails on a new edge
+5. Its wiring section here stays equal to the code: `tests/unit/test_docs_convergence.py` fails if a constructor parameter or `PluginContext` field is added or removed without this list changing
 
 ---
 
@@ -183,7 +226,7 @@ When writing a new component:
 User runs: localharness init
       │
       ▼
-CLI (cli/init.py)
+CLI (cli/init_cmd.py)
       │
       ├── Calls Auto-detector (provider/detector.py)
       │       │
@@ -201,11 +244,10 @@ CLI (cli/init.py)
 User runs: localharness start
       │
       ▼
-CLI (cli/start.py)
+CLI (cli/start_cmd.py)
       │
-      ├── Constructs EventBus (core/bus.py)
-      ├── Constructs AuditLogger (audit/logger.py) → subscribes to bus
-      ├── Constructs TerminalChannel (channels/terminal.py) → subscribes to bus
+      ├── Constructs EventBus (core/bus.py), persisting every event to bus-events.jsonl
+            ├── Constructs TerminalChannel (channels/terminal.py) → subscribes to bus
       ├── Constructs Orchestrator (orchestrator/router.py) → subscribes to bus
       │
       ├── Orchestrator publishes: SystemReady(timestamp=...)
@@ -268,7 +310,7 @@ Orchestrator (router.py) receives TaskRequest
 Agent Loop (agent/loop.py) receives TaskRequest
       │
       ├── 1. Config Loader hydrates AgentConfig from YAML
-      ├── 2. Memory loads MEMORY.md + SQLite facts into system context
+      ├── 2. Memory slot (when the memory plugin is on) adds recalled context
       ├── 3. Context Manager checks window headroom
       │
       └── WHILE LOOP:
@@ -287,14 +329,14 @@ Agent Loop (agent/loop.py) receives TaskRequest
                   │
                   ├── Hook System: run pre_tool hooks (pluggy)
                   │
-                  ├── Tool System: execute tool via tool.run(**params)
+                  ├── Tool registry (injected): dispatch → tool.run(**params)
                   │       └── Publish: Action(type="tool_call", tool=name, params=...)
                   │
                   ├── Hook System: run post_tool hooks
                   │
                   ├── Publish: Observation(type="tool_result", output=..., tool_call_id=...)
                   │
-                  └── Audit Logger: writes hash of (prev_hash + event JSON) to events.jsonl
+                  └── Event bus persists each event to the session's JSONL log
 
       │
       ├── Context Manager: stuck detection (action signature hash sliding window)
@@ -311,111 +353,50 @@ Agent Loop (agent/loop.py) receives TaskRequest
 
 ## 7. Project Structure
 
-Every file in the `src/localharness/` package. This is the complete layout — no file exists outside this structure without explicit rationale.
+The package by directory, with the files the layers above name. It is a map, not a manifest: the source tree is the authority, and small helper modules are left out.
 
 ```
 localharness/
-├── pyproject.toml                    # uv workspace root; entry point: localharness = localharness.cli.app:app
-├── uv.lock                           # single lockfile for entire project
-├── maturin.toml                      # PyO3 build (empty config until Rust layer added)
-├── Cargo.toml                        # Rust workspace root (empty members until Rust layer added)
-├── LICENSE                           # MIT
-├── README.md
+├── pyproject.toml                    # entry point: localharness = localharness.cli.app:app
+├── uv.lock
+├── README.md, SECURITY.md, CHANGELOG.md, LICENSE
+├── docs/specs/                       # these specs
+├── examples/
+│   ├── agents/                       # example agent YAML configs
+│   └── plugin-template/              # a starting point for a third-party plugin
 │
 ├── src/
 │   └── localharness/
-│       ├── __init__.py               # package version, __all__
-│       │
-│       ├── core/                     # Layer 1: Foundation
-│       │   ├── __init__.py
-│       │   ├── events.py             # All Pydantic event models (UserMessage, Action, etc.)
-│       │   ├── bus.py                # EventBus: publish/subscribe/replay, bubus integration
-│       │   └── types.py              # AgentID, SessionID, EventSeq, ToolCallID type aliases
-│       │
-│       ├── config/                   # Layer 1 (models) + Layer 2 (loader)
-│       │   ├── __init__.py
-│       │   ├── models.py             # AgentConfig, DivisionConfig, OrgConfig, ToolConfig,
-│       │   │                         #   PermissionConfig, MemoryConfig, ScheduleConfig,
-│       │   │                         #   ContextConfig, ProviderConfig (all Pydantic)
-│       │   ├── loader.py             # ConfigLoader: YAML parse, validate, inheritance resolve
-│       │   └── defaults.py           # DEFAULT_ORG_CONFIG, DEFAULT_DIVISION_CONFIG, etc.
-│       │
-│       ├── provider/                 # Layer 2: LLM provider abstraction
-│       │   ├── __init__.py
-│       │   ├── detector.py           # AutoDetector: port probe → ProviderConfig
-│       │   ├── client.py             # LLMClient: thin openai.AsyncOpenAI wrapper
-│       │   └── fn_call.py            # FnCallConverter: XML parse + inject tool schema in prompt
-│       │
-│       ├── tools/                    # Layer 2: Tool system
-│       │   ├── __init__.py
-│       │   ├── base.py               # Tool protocol, ToolSchema, ToolResult, ToolCall
-│       │   ├── registry.py           # ToolRegistry: scope resolution (global→division→agent→MCP)
-│       │   ├── hooks.py              # HookSystem: pluggy hookspec + hookimpl for pre/post tool
-│       │   ├── mcp.py                # MCPClient: stdio + streamable-HTTP discovery + wrapping
-│       │   └── builtin/
-│       │       ├── __init__.py       # registers all builtins
-│       │       ├── glob_tool.py      # GlobTool
-│       │       ├── grep_tool.py      # GrepTool
-│       │       ├── read_tool.py      # ReadTool
-│       │       ├── write_tool.py     # WriteTool
-│       │       └── bash_tool.py      # BashTool
-│       │
-│       ├── memory/                   # Layer 2: Persistence
-│       │   ├── __init__.py
-│       │   ├── sqlite.py             # FactsStore: aiosqlite WAL, schema migrations
-│       │   ├── history.py            # ChatHistory: JSONL append-only session log
-│       │   └── markdown.py           # MarkdownNotes: MEMORY.md read/append
-│       │
-│       ├── agent/                    # Layer 3: Agent runtime
-│       │   ├── __init__.py
-│       │   ├── loop.py               # AgentLoop: ReAct while-loop, session management
-│       │   ├── context.py            # ContextManager: token tracking, compaction, boundary guard
-│       │   └── permissions.py        # PermissionEvaluator: deny-pattern match, budget check
-│       │
-│       ├── audit/                    # Layer 3: Audit logging
-│       │   ├── __init__.py
-│       │   └── logger.py             # AuditLogger: structlog JSONL writer, event bus subscriber
-│       │
-│       ├── orchestrator/             # Layer 4: Orchestration
-│       │   ├── __init__.py
-│       │   ├── router.py             # Orchestrator: Agent Card routing, task dispatch
-│       │   └── workflow.py           # AgentCreationWorkflow: discuss→configure→deploy
-│       │
-│       ├── channels/                 # Layer 5: Output adapters
-│       │   ├── __init__.py
-│       │   ├── base.py               # ChannelAdapter protocol (interface for future adapters)
-│       │   └── terminal.py           # TerminalChannel: Rich streaming to stdout
-│       │
-│       └── cli/                      # Layer 5: CLI entry point
-│           ├── __init__.py
-│           ├── app.py                # Typer app + subcommand registration
-│           ├── init.py               # `localharness init` command
-│           ├── start.py              # `localharness start` command
-│           ├── doctor.py             # `localharness doctor` command
-│           ├── validate.py           # `localharness validate` command
-│           └── agent.py              # `localharness agent create|list|delete` subcommands
+│       ├── core/                     # Layer 1: events.py, bus.py, types.py,
+│       │                             #   artifacts.py, agent_dir.py, reduce.py
+│       ├── config/                   # Layer 1 (models.py) + Layer 2: loader.py, defaults.py,
+│       │                             #   paths.py, plugin_sections.py, overlay.py, trust.py, ...
+│       ├── provider/                 # Layer 2: client.py, fn_call.py, detector.py, idle_llm.py,
+│       │                             #   lifecycle.py, server.py, refarch.py, speed_stats.py
+│       ├── tools/                    # Layer 2: base.py, registry.py, hooks.py, mcp.py,
+│       │   │                         #   capabilities.py
+│       │   └── builtin/              # core built-in tools (read, write, edit, glob, grep, bash,
+│       │                             #   python, web, ...) plus the image plugin's files
+│       ├── plugins/                  # Layer 2: api.py (the plugin API), builtin.py
+│       │                             #   (BUILTIN_PLUGINS), discovery.py, plan.py, resolve.py,
+│       │                             #   lifecycle.py, slot.py, channels.py, trust.py
+│       ├── registry/                 # Layer 2: component catalogue
+│       ├── agent/                    # Layer 3: loop.py, context.py, permissions.py, gate.py,
+│       │                             #   verdict.py, subagent.py, ...
+│       ├── orchestrator/             # Layer 4: router.py, workflow.py, cards.py
+│       ├── channels/                 # Layer 5: base.py (ChannelAdapter), terminal.py, acp.py
+│       │   └── web/                  # plugin: the phone app (web)
+│       ├── cli/                      # Layer 5: app.py, init_cmd.py, start_cmd.py, agent_cmd.py,
+│       │                             #   repl.py and the other *_cmd.py modules; web_plugin.py
+│       │                             #   and the plugin command modules belong to their plugins
+│       ├── bench/                    # Layer 5: the benchmark runner behind `localharness bench`
+│       ├── memory/                   # plugin: memory
+│       ├── dispatch/                 # plugin: dispatch (adapters/discord.py)
+│       └── autoresearch/             # plugin: autoresearch
 │
-├── tests/
-│   ├── conftest.py                   # Shared fixtures: in-memory EventBus, mock LLMClient
-│   ├── unit/
-│   │   ├── test_events.py
-│   │   ├── test_bus.py
-│   │   ├── test_config_loader.py
-│   │   ├── test_fn_call.py
-│   │   ├── test_permissions.py
-│   │   ├── test_context.py
-│   │   └── test_tools.py
-│   └── integration/
-│       ├── test_agent_loop.py        # Full loop with mock LLM + real tools
-│       └── test_orchestrator.py      # Orchestrator routes + agent creation
-│
-├── agents/                           # Bundled example YAML configs (no personal data)
-│   ├── example-researcher.yaml
-│   └── example-coder.yaml
-│
-└── rust/                             # Rust layer (empty until a bottleneck is measured)
-    └── src/
-        └── lib.rs                    # #[pymodule] stub
+└── tests/
+    ├── unit/
+    └── integration/
 ```
 
 ---
@@ -502,13 +483,13 @@ All core functionality runs on local hardware. No telemetry, no external API cal
 
 ## 10. Anti-Patterns
 
-### AP1: Direct Component References
+### AP1: Reaching Past the Wiring
 
-**Violation:** `from localharness.tools.registry import ToolRegistry` inside `agent/loop.py`, then calling `registry.execute(call)` directly.
+**Violation:** a core module importing a plugin (for example `from localharness.memory.sqlite import ...` inside `agent/loop.py`), or any component reaching into another's internals (its private attributes or module globals) instead of using what it was handed.
 
-**Why wrong:** Prevents replay, tight coupling, untestable in isolation.
+**Why wrong:** The import makes the plugin impossible to switch off, because core now needs it to load. Reaching into internals couples two components to each other's implementation, so neither can change or be tested alone. Either way, the dependency appears nowhere in the wiring list, so nobody reviewing the constructor can see it.
 
-**Correct:** Agent loop publishes `Action` event → Tool System subscribes and executes → publishes `Observation` back → loop receives it.
+**Correct:** Receive the collaborator as a constructor parameter and call it there. The loop's `tool_registry` parameter is the sanctioned form: `agent/loop.py` runs every tool through `self._tools.dispatch(...)` on the registry it was given, then publishes the result as an `Observation` event. Memory reaches the loop the same way, through the `memory_slot` parameter, never by import.
 
 ### AP2: Graph-Based Agent Execution
 
@@ -560,9 +541,9 @@ All core functionality runs on local hardware. No telemetry, no external API cal
 
 ---
 
-## 11. Dependency Wave Build Order
+## 11. Dependency Wave Build Order (historical)
 
-A component cannot be usefully built before all components in prior waves are complete. This is the implementation order.
+Historical: the initial build order, the order the first version was built in. It is kept as a record, not as the current module graph. Several files named in the early waves were later renamed, moved into a plugin (the `memory/` files), or never became separate modules (`audit/logger.py`: the bus persists its own events instead; see spec 12). The wave-4 entry for `agent/loop.py` is corrected below because it was false, not merely old.
 
 ### Wave 1 — No dependencies
 
@@ -605,10 +586,13 @@ agent/context.py       — imports provider/client.py (tokenizer), core/types.py
 ### Wave 4 — Depends on Wave 3
 
 ```
-agent/loop.py          — imports: core/bus.py, core/events.py, tools/registry.py,
-                          tools/hooks.py, agent/permissions.py, agent/context.py,
-                          provider/client.py, memory/sqlite.py, memory/history.py,
-                          memory/markdown.py, config/models.py
+agent/loop.py          — imports: core/types.py, core/events.py, agent/gate.py,
+                          agent/gate_types.py, agent/context.py, provider/client.py,
+                          provider/fn_call.py, config/paths.py, plugins/api.py
+                          (ContextBudget), tools/capabilities.py (CoResidenceError).
+                          Nothing from memory/. The bus, the tool registry, the
+                          permission evaluator and the memory slot arrive as
+                          constructor parameters (section 5), not imports.
 channels/terminal.py   — imports core/bus.py, core/events.py
 ```
 
@@ -653,13 +637,17 @@ cli/validate_cmd.py    — imports config/loader.py
 
 | Topic | Spec Document |
 |-------|---------------|
-| Event type definitions, EventBus API | `01-event-bus.md` |
-| Config YAML schema, config models | `06-config.md` |
-| Tool interface, registry, MCP | *(planned: 02-tool-system.md)* |
-| Agent loop, context manager | *(planned: 03-agent-loop.md)* |
-| Permission evaluator | *(planned: 04-permissions.md)* |
-| Orchestrator, agent creation workflow | *(planned: 05-orchestrator.md)* |
-| CLI commands | *(planned: 07-cli.md)* |
-| Memory: SQLite, JSONL, markdown | *(planned: 08-memory.md)* |
-| Provider detection, LLM client | *(planned: 09-provider.md)* |
-| Audit logger | *(planned: 10-audit.md)* |
+| Event type definitions, EventBus API | [01-event-bus.md](01-event-bus.md) |
+| Provider detection, LLM client | [02-provider.md](02-provider.md) |
+| Agent loop, permission evaluator | [03-agent-loop.md](03-agent-loop.md); the trust model is [SECURITY.md](../../SECURITY.md) |
+| Tool interface, registry | [04-tool-system.md](04-tool-system.md) |
+| MCP | [04b-mcp-integration.md](04b-mcp-integration.md) |
+| Memory | [05-memory.md](05-memory.md) |
+| Config YAML schema, config models | [06-config.md](06-config.md) |
+| Orchestrator, agent creation workflow | [07-orchestrator.md](07-orchestrator.md) |
+| Context manager | [08-context-management.md](08-context-management.md) |
+| Hooks and the plugin API | [09-hooks-plugins.md](09-hooks-plugins.md) |
+| CLI commands | [10-cli.md](10-cli.md) |
+| Channels | [11-channels.md](11-channels.md) |
+| Audit and observability | [12-audit.md](12-audit.md) |
+| Provider support and lifecycle | [13-provider-support.md](13-provider-support.md) |
