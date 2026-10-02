@@ -1,25 +1,25 @@
 """Discord's rendering of an ASK, and the `/mode` command on both channels (PRD §3.4, §3.5).
 
-The Discord half uses the suite's existing fake-`discord`-module pattern (a `types.ModuleType`
-installed into `sys.modules` before `start()` runs its own `import discord`), so the real
+The Discord half uses the shared fake `discord` module (`tests.dispatch_support`, installed into
+`sys.modules` before the adapter's `connect()` runs its own `import discord`), so the real
 adapter code executes unmodified against a fake gateway — the reaction listener under test is
 the one the production `start()` registers, not a stand-in.
 """
 from __future__ import annotations
 
 import asyncio
-import sys
 import types
 
 import pytest
 
 from localharness.agent.gate import PermissionGate
 from localharness.agent.gate_types import PermissionRequest
-from localharness.channels.discord import (
+from localharness.dispatch.channel import (
     PERMISSION_REACTIONS,
     PERMISSION_REACTIONS_UNGRANTABLE,
-    DiscordChannel,
+    DispatchChannel,
 )
+from tests.dispatch_support import build_dispatch_discord, discord_events, install_fake_discord
 from localharness.agent.gate_types import ToolMeta
 from localharness.cli.repl import (
     MODE_EFFECTS,
@@ -85,16 +85,17 @@ class _Channel:
 class _InboundMessage:
     def __init__(self, *, can_edit: bool = True) -> None:
         self.channel = _Channel(can_edit=can_edit)
+        self.conversation = self.channel  # what DispatchChannel sends to
 
 
-def _discord_channel(*, can_edit: bool = True) -> DiscordChannel:
-    ch = DiscordChannel(EventBus(), {"token": "t", "allow_users": ["42"]})
-    ch._client = object()  # ask_permission only checks it is not None
+def _discord_channel(*, can_edit: bool = True) -> DispatchChannel:
+    ch = build_dispatch_discord(EventBus(), allow=("42",), channels=(), ack="✅")
+    ch._ready.set()  # ask_permission only checks the channel started
     ch._current_msg = _InboundMessage(can_edit=can_edit)
     return ch
 
 
-def _react(ch: DiscordChannel, message_id: int, emoji: str) -> None:
+def _react(ch: DispatchChannel, message_id: int, emoji: str) -> None:
     ch._reaction_waiters[message_id].put_nowait(emoji)
 
 
@@ -178,7 +179,7 @@ async def test_the_gate_times_the_wait_out_and_denies(tmp_path):
     assert ch._reaction_waiters == {}, "the waiter leaked after the timeout"
 
 
-async def _expire(ch: DiscordChannel, seconds: float = 0.05) -> None:
+async def _expire(ch: DispatchChannel, seconds: float = 0.05) -> None:
     """Put the question through the gate's own deadline — the only thing that expires it."""
     task = asyncio.ensure_future(ch.ask_permission(_request()))
     with pytest.raises(asyncio.TimeoutError):
@@ -190,7 +191,7 @@ async def test_an_expired_question_says_so_on_the_message():
     """D7: the 🛑 message used to stand unchanged forever after the gate had already denied the
     call. Three reactions, no answer, no sign it had stopped mattering — and a tap on ✅ an hour
     later was a silent no-op, because the waiter it would have reached was gone."""
-    from localharness.channels.discord import PERMISSION_TIMEOUT_LINE
+    from localharness.dispatch.channel import PERMISSION_TIMEOUT_LINE
 
     ch = _discord_channel()
     await _expire(ch)
@@ -204,7 +205,7 @@ async def test_an_expired_question_says_so_on_the_message():
 
 @pytest.mark.asyncio
 async def test_an_answered_question_is_never_annotated():
-    from localharness.channels.discord import PERMISSION_TIMEOUT_LINE
+    from localharness.dispatch.channel import PERMISSION_TIMEOUT_LINE
 
     ch = _discord_channel()
     task = asyncio.ensure_future(ch.ask_permission(_request()))
@@ -243,7 +244,7 @@ async def test_a_broken_gateway_costs_the_note_and_nothing_else():
     posted.edit = _never  # type: ignore[method-assign]
     posted.reply = _never  # type: ignore[method-assign]
 
-    from localharness.channels import discord as discord_module
+    from localharness.dispatch import channel as discord_module
 
     # The wait is bounded by a named constant; shortened here so the test does not sit for it.
     original = discord_module.PERMISSION_TIMEOUT_POST_TIMEOUT_S
@@ -258,53 +259,25 @@ async def test_a_broken_gateway_costs_the_note_and_nothing_else():
 
 @pytest.mark.asyncio
 async def test_with_nowhere_to_post_it_fails_closed():
-    ch = DiscordChannel(EventBus(), {"token": "t", "allow_users": ["42"]})
+    ch = build_dispatch_discord(EventBus(), allow=("42",), channels=(), ack="✅")
     assert (await ch.ask_permission(_request())).kind == "reject_once"
 
 
 def test_discord_declares_it_can_ask_and_has_no_review_surface():
-    assert DiscordChannel.can_ask is True
-    assert DiscordChannel.has_review_surface is False
+    assert DispatchChannel.can_ask is True
+    assert DispatchChannel.has_review_surface is False
 
 
 @pytest.mark.asyncio
 async def test_only_allowlisted_reactions_reach_the_waiter(monkeypatch):
     """The reaction listener the production `start()` registers, driven for real."""
-    stub = types.ModuleType("discord")
-
-    class _Intents:
-        message_content = False
-
-        @staticmethod
-        def default():
-            return _Intents()
-
-    class _Client:
-        def __init__(self, **kw):
-            self.user = None
-            self.events: dict = {}
-
-        def event(self, fn):
-            self.events[fn.__name__] = fn
-            return fn
-
-        async def start(self, token):
-            await asyncio.sleep(3600)
-
-        async def close(self):
-            pass
-
-    stub.Intents = _Intents
-    stub.Client = _Client
-    monkeypatch.setitem(sys.modules, "discord", stub)
-
-    ch = DiscordChannel(EventBus(), {"token": "t", "allow_users": ["42"]})
-    ch._ready.set()
+    install_fake_discord(monkeypatch)
+    ch = build_dispatch_discord(EventBus(), allow=("42",), channels=(), ack="✅")
     await ch.start()
     try:
         waiter: asyncio.Queue = asyncio.Queue()
         ch._reaction_waiters[7] = waiter
-        handler = ch._client.events["on_raw_reaction_add"]
+        handler = discord_events(ch)["on_raw_reaction_add"]
 
         await handler(types.SimpleNamespace(user_id=99, message_id=7, emoji="✅"))
         assert waiter.empty(), "a reaction from outside the allowlist was accepted"
@@ -312,8 +285,6 @@ async def test_only_allowlisted_reactions_reach_the_waiter(monkeypatch):
         await handler(types.SimpleNamespace(user_id=42, message_id=7, emoji="✅"))
         assert waiter.get_nowait() == "✅"
     finally:
-        if ch._client_task:
-            ch._client_task.cancel()
         await ch.stop()
 
 
@@ -692,7 +663,7 @@ async def test_a_channel_resolver_takes_the_hotkey_path_for_a_named_id(tmp_path)
     """A Discord reaction names the notice's id; the REPL installs itself as that channel's
     `_pending_resolver` and answers through the same path ctrl+y takes."""
     channel, gate = _BoxChannel(), _gate(tmp_path)
-    channel._pending_resolver = None  # the shape DiscordChannel ships with
+    channel._pending_resolver = None  # the shape DispatchChannel ships with
     agent = _RecordingAgent()
     repl = _repl(channel, gate)
     repl._agent = agent

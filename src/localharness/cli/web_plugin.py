@@ -4,9 +4,9 @@ On by default; needs the `web` install extra (starlette, uvicorn, ...). plugins/
 module for every `--help`, `doctor` and `plugins list`, so it imports only the plugin API at module
 level; the channel, the server and the token helpers are imported when a caller asks for them.
 It lives in cli/, not channels/web/: importing anything under localharness.channels runs
-channels/__init__.py (discord, prompt_toolkit) and channels/web/__init__.py (starlette), which would
-cost every --help ~0.12 s and break the whole CLI without the extra. Phase 49 may move it once
-channels/__init__.py is lazy. The server's life belongs to `localharness web`; start/stop are no-ops."""
+channels/__init__.py (prompt_toolkit, through the terminal channel) and channels/web/__init__.py
+(starlette), which would cost every --help ~0.12 s and break the whole CLI without the extra; moving
+this file is deferred. The server's life belongs to `localharness web`; start/stop are no-ops."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

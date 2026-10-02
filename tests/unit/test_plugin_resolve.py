@@ -239,11 +239,12 @@ def test_invalid_settings_fail_the_plugin_not_the_harness(layers) -> None:
     _write_yaml(g / "config.yaml", {**_MINIMAL, "foo": {"enabled": True, "color": "red"}})
     loader = ConfigLoader(config_dir=g, local_config_dir=ws)
 
-    r = resolve(loader)
+    r = resolve(loader, extra_installed=lambda extra: True)  # independent of what is installed
 
     entry = r.plan.entry("foo")
     assert entry.state == "failed" and entry.reason.startswith("invalid settings — foo.color: ")
-    assert "foo" not in r.settings and r.plan.order == ("web", "memory")  # web (46-02) and memory (47) are bundled and on by default
+    # web (46-02) and memory (47) are bundled and on by default; dispatch (49) is bundled and on by default
+    assert "foo" not in r.settings and r.plan.order == ("web", "memory", "dispatch")
     assert r.problems() == [f"plugin foo: {entry.reason}"]
     assert not [w for w in r.warnings if "foo.color" in w]  # reported once, by problems()
     assert loader.load_harness().provider.default_model == "global-model"
@@ -388,7 +389,7 @@ def test_a_projects_broken_section_cannot_decide_what_the_machine_turned_on(laye
     _write_yaml(g / "overrides.yaml", {"foo": {"enabled": True}})
     _write_yaml(ws / "config.yaml", {"foo": 1})
 
-    r = resolved(g, ws)
+    r = resolved(g, ws, extra_installed=lambda extra: True)  # no bundled needs-extra line either way
 
     entry = r.plan.entry("foo")
     assert r.enabled["foo"] is True and (sentinels / "foo").exists()

@@ -1,5 +1,5 @@
 """The names `start --channel` accepts (PAPI-09), resolved from STATIC manifests before any plugin
-loads: core channels, every bundled manifest of kind "channel", and the legacy entry. A channel
+loads: core channels and every bundled manifest of kind "channel" (names come only from manifests). A channel
 manifest names its channels in `manifest.channels`; empty means the plugin's own name. Third-party
 channel kinds are not accepted in v0.16 (bundled only): a channel sees every event, tool results
 included, and can inject user messages — a larger trust grant than a tool.
@@ -9,7 +9,6 @@ plugins the resolved plan has on."""
 from __future__ import annotations
 
 CORE_CHANNELS = frozenset({"terminal", "acp"})
-LEGACY_CHANNELS = frozenset({"discord"})  # Phase 49 deletes (dispatch converts)
 OWN_COMMAND = frozenset({"web", "acp"})   # served by their own command, never built by start
 
 
@@ -24,7 +23,7 @@ def plugin_channel_names() -> frozenset[str]:
 
 
 def channel_names() -> frozenset[str]:
-    return CORE_CHANNELS | LEGACY_CHANNELS | plugin_channel_names()
+    return CORE_CHANNELS | plugin_channel_names()
 
 
 def accepted_channels(resolution) -> frozenset[str]:

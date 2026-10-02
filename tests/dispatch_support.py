@@ -1,7 +1,7 @@
 """Shared support for every dispatch test (Phase 49): env isolation + a recording fake `discord`.
 
 SAFETY: this box's `~/.claude/channels/discord/.env` holds a live bot token that drives the
-owner's dispatch fleet, and today's `discord_config_from_env` falls back to reading it. Every
+owner's dispatch fleet, and the dispatch plugin's env fallback reads it. Every
 dispatch test calls `isolate_discord_env` FIRST, so `Path.home()` is a tmp dir and the five env
 token/allow sources are gone — no test can ever see, print or log in with the real token.
 
@@ -187,3 +187,8 @@ def build_dispatch_discord(bus, *, allow, channels, ack):
 
     return DispatchChannel(bus, {"adapter": DiscordAdapter(token="t"), "allow": set(allow),
                                  "channels": set(channels), "ack": ack, "state_dir": None})
+
+
+def discord_events(ch) -> dict[str, Any]:
+    """The handlers the Discord adapter registered on its (fake) client, by event name."""
+    return ch._adapter._client.events

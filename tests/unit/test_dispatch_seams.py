@@ -45,9 +45,10 @@ def test_plugin_api_version_stays_1():
     assert PLUGIN_API_VERSION == "1"
 
 
-def test_every_bundled_manifest_declares_no_channels():
-    for cls in builtin.BUILTIN_PLUGINS:
-        assert cls.manifest.channels == (), cls.manifest.name
+def test_only_the_dispatch_manifest_declares_channels():
+    # dispatch (49) is bundled and on by default; every other bundled manifest declares none
+    assert {c.manifest.name: c.manifest.channels for c in builtin.BUILTIN_PLUGINS} == {
+        "image": (), "web": (), "memory": (), "dispatch": ("discord",)}
 
 
 def test_manifest_channels_replace_the_plugin_name(multichat):
@@ -97,12 +98,12 @@ def test_setup_field_secret_is_optional():
 
 def test_bare_mode_command_is_set_by_the_channel_class():
     from localharness.channels.base import ChannelAdapter
-    from localharness.channels.discord import DiscordChannel
+    from localharness.dispatch.channel import DispatchChannel
     from localharness.channels.terminal import TerminalChannel
 
     assert ChannelAdapter.bare_mode_command is False
     assert ChannelAdapter.start_banner == ""
-    assert DiscordChannel.bare_mode_command is True
+    assert DispatchChannel.bare_mode_command is True
     assert TerminalChannel.bare_mode_command is False
 
 

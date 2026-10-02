@@ -71,10 +71,11 @@ def test_channels_reads_the_adapter_registry_at_call_time(monkeypatch):
     assert set(DispatchPlugin().channels()) == {"discord", "fixturechat"}
 
 
-def test_not_registered_yet():
+def test_registered_fourth_and_once():
     from localharness.plugins.builtin import BUILTIN_PLUGINS
 
-    assert DispatchPlugin not in BUILTIN_PLUGINS
+    # dispatch (49) is bundled and on by default (49-06 registered it)
+    assert BUILTIN_PLUGINS[-1] is DispatchPlugin and BUILTIN_PLUGINS.count(DispatchPlugin) == 1
 
 
 # --- configure / start ----------------------------------------------------------------------------

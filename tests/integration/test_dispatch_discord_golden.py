@@ -4,7 +4,7 @@ Captured from the pre-move tree. After the move the SAME golden must hold with o
 changed; a diff is a finding, never a regenerate.
 
 The pin sits at the discord.py API (`tests.dispatch_support.FakeDiscord`), not at
-`DiscordChannel`'s API, so the class can disappear and the golden still means something. The
+the old channel class's API, so the class could disappear and the golden still means something. The
 script is driven through public channel methods and the handlers the channel registers on the
 fake client (`on_message`, `on_raw_reaction_add`). The ONLY private attributes touched — each
 must exist on DispatchChannel after the move:
@@ -41,14 +41,7 @@ ALLOW = ("42", str(BOT_USER_ID))  # the bot's own id is allowlisted so the SELF 
 CHANNELS = ("7", "8")
 
 
-def _build_legacy(bus, *, allow, channels, ack):
-    from localharness.channels.discord import DiscordChannel
-
-    return DiscordChannel(bus, {"token": "t", "allow_users": list(allow),
-                                "allow_channels": list(channels), "ack_emoji": ack})
-
-
-BUILDERS = {"legacy": _build_legacy, "dispatch": build_dispatch_discord}
+BUILDERS = {"dispatch": build_dispatch_discord}  # 49-06: the legacy channel class is gone
 
 
 @pytest.fixture(autouse=True)
@@ -188,31 +181,6 @@ async def test_discord_script_matches_the_golden(builder, fake):
     records = await _script(ch, fake)
     text = json.dumps(records, indent=1, ensure_ascii=False) + "\n"
     assert json.loads(_golden(GOLDEN, text)) == records, "Discord behaviour drifted from the golden"
-
-
-async def test_legacy_start_refusal_texts(fake, monkeypatch):
-    """Today's three start() refusals, literal. 49-06 deletes this as a recorded deliberate delta."""
-    from localharness.channels.discord import DiscordChannel
-    from localharness.channels.errors import ChannelStartError
-
-    def build(token="t", allow=("42",)):
-        return DiscordChannel(EventBus(), {"token": token, "allow_users": list(allow)})
-
-    for ch, expected in (
-        (build(token=""), "Discord bot token missing — set LOCALHARNESS_DISCORD_TOKEN or DISCORD_BOT_TOKEN"),
-        (build(allow=()), "Discord allowlist empty — set LOCALHARNESS_DISCORD_ALLOW to your user id(s); "
-                          "refusing to listen to everyone"),
-    ):
-        with pytest.raises(ChannelStartError) as e:
-            await ch.start()
-        assert str(e.value) == expected
-
-    monkeypatch.setitem(sys.modules, "discord", None)
-    with pytest.raises(ChannelStartError) as e:
-        await build().start()
-    assert str(e.value) == ("discord.py not installed — run: uv pip install 'discord.py>=2.3' "
-                            "(or install the 'dispatch' extra)")
-    assert fake.log == [], "a refused start reached the client"
 
 
 async def test_dispatch_start_refusal_texts(fake, monkeypatch):
