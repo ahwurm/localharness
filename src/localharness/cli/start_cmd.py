@@ -16,7 +16,8 @@ from rich.text import Text
 
 from localharness.cli.theme import entity, entity_text
 from localharness.cli.workspace import NO_INPUT_HELP
-from localharness.plugins.channels import channel_names, plugin_channel_names
+from localharness.plugins.channels import (OWN_COMMAND, accepted_channels, channel_names,
+                                           plugin_channel_names)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -33,6 +34,35 @@ def _own_command(web_channel: Any, acp_channel: Any) -> dict[str, tuple[str, Any
     Its keys must equal plugins.channels.OWN_COMMAND (pinned by a test)."""
     return {"web": ("the HTTP server has to be reachable before a session exists", web_channel),
             "acp": ("the editor's handshake has to be answered before a session exists", acp_channel)}
+
+
+CHANNEL_PLUGIN_NOT_ON = "channel '{name}' is provided by the {plugin} plugin, which is {state} — {fix}"
+CHANNEL_PLUGIN_NOT_RUNNING = "channel '{name}' is provided by the {plugin} plugin, which did not start — {reason}"
+"""Tier 2 (the plugin resolved off / needs-extra / failed) and tier 3 (it resolved on but is not
+running after start_plugins). Both refuse: asking for a channel and getting the terminal is the
+silent fallback the tier-1 check exists to end."""
+
+
+def _channel_plugin(channel_mode: str) -> str | None:
+    """The bundled channel plugin whose static manifest names `channel_mode`."""
+    from localharness.plugins.builtin import bundled_plugins
+    return next((c.manifest.name for c in bundled_plugins() if c.manifest.kind == "channel"
+                 and channel_mode in (c.manifest.channels or (c.manifest.name,))), None)
+
+
+def _channel_refusal(channel_mode: str, resolution: Any) -> str | None:
+    """Tier 2, read off the resolved plan: None when the channel is not a plugin channel or its
+    plugin is on; otherwise the refusal, naming the plugin and the fix."""
+    if channel_mode not in plugin_channel_names() - OWN_COMMAND or channel_mode in accepted_channels(resolution):
+        return None
+    plugin = _channel_plugin(channel_mode)
+    entry = next((e for e in resolution.plan.entries if e.name == plugin), None)
+    if entry is None:
+        return CHANNEL_PLUGIN_NOT_ON.format(name=channel_mode, plugin=plugin, state="not loaded",
+                                            fix="see `localharness plugins list`")
+    fix = f"run `{entry.enable_command}`" if entry.enable_command else entry.reason
+    state = "missing its install extra" if entry.state == "needs-extra" else entry.state
+    return CHANNEL_PLUGIN_NOT_ON.format(name=channel_mode, plugin=entry.name, state=state, fix=fix)
 
 
 WEB_NEEDS_ITS_OWN_COMMAND = OWN_COMMAND_ERROR.format(name="web", why=_own_command(None, None)["web"][0])
@@ -1091,26 +1121,37 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # #150 phase 38 criterion 3: plugins follow the SESSION's config dir — resolve() discovers
         # from `loader.global_config_dir` (cfg_path, never the workspace), after the same loader
         # loaded this agent (its `agent.<name>` plugin sections are keyed on the declared name).
+        channel_refusal = None
+        plugin_error = None
         try:
             plugin_resolution = resolve(loader, agent_name=agent_config.name)
             warnings.extend(plugin_resolution.warnings)
             warnings.extend(_start_problems(plugin_resolution))
-            session_info = SessionInfo(
-                agent_id=agent_name_str, division_id=agent_config.division or "default",
-                sitting_id=sitting_id, model=resolved_model, context_tokens=_cfg_window,
-                budget=agent_config.permissions.budget.model_dump(),
-            )
-            plugin_result = await start_plugins(
-                plugin_resolution, bus=bus, registry=tool_registry, hooks=hook_system, llm=llm,
-                paths=PluginPaths(global_config_dir=cfg_path, workspace=workspace,
-                                  state_dir=state_dir),
-                session=session_info,
-            )
-            warnings.extend(plugin_result.warnings)
-            warnings.extend(set_plugin_rows(plugin_result.slash_rows))
-            plugins_loaded = len(plugin_result.running)
+            # Tier 2: computed here, RAISED below the except — inside it the refusal would be
+            # swallowed as a plugin warning and the session would fall through to the terminal.
+            channel_refusal = _channel_refusal(channel_mode, plugin_resolution)
+            if channel_refusal is None:
+                session_info = SessionInfo(
+                    agent_id=agent_name_str, division_id=agent_config.division or "default",
+                    sitting_id=sitting_id, model=resolved_model, context_tokens=_cfg_window,
+                    budget=agent_config.permissions.budget.model_dump(),
+                )
+                plugin_result = await start_plugins(
+                    plugin_resolution, bus=bus, registry=tool_registry, hooks=hook_system, llm=llm,
+                    paths=PluginPaths(global_config_dir=cfg_path, workspace=workspace,
+                                      state_dir=state_dir),
+                    session=session_info,
+                )
+                warnings.extend(plugin_result.warnings)
+                warnings.extend(set_plugin_rows(plugin_result.slash_rows))
+                plugins_loaded = len(plugin_result.running)
         except Exception as exc:  # noqa: BLE001 — the substrate itself failing is still not fatal
-            warnings.append(f"plugins: {exc}")
+            plugin_error = f"plugins: {exc}"
+            warnings.append(plugin_error)
+        if channel_refusal is not None:
+            # Nothing has started (start_plugins was skipped, MCP is step 6); the finally below
+            # still closes the LLM client.
+            raise typer.BadParameter(channel_refusal, param_hint="--channel")
 
         # One slot object reaches the loop AND the channel; the memory plugin occupies it when it
         # started, and it is empty with memory off or when memory failed to start.
@@ -1394,6 +1435,21 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             from localharness.channels.discord import DiscordChannel, discord_config_from_env
             channel = DiscordChannel(bus=bus, config=discord_config_from_env())
             console.print("[dim]Dispatch mode: Discord — listening for allowlisted messages.[/dim]")
+        elif channel_mode in plugin_channel_names() - OWN_COMMAND:
+            # Any bundled channel plugin, built without core naming it: the running plugin's own
+            # make_channel (it hands the channel its validated settings), else its channels() class.
+            owner_name = _channel_plugin(channel_mode)
+            running = plugin_result.running if plugin_result is not None else []
+            owner = next((r for r in running if r.name == owner_name), None)
+            if owner is None:  # tier 3: it resolved on, it is not running; the finally stops the rest
+                reason = ((plugin_result.failed.get(owner_name) if plugin_result is not None else None)
+                          or plugin_error or "see the warnings above")
+                raise typer.BadParameter(CHANNEL_PLUGIN_NOT_RUNNING.format(
+                    name=channel_mode, plugin=owner_name, reason=reason), param_hint="--channel")
+            make = getattr(owner.plugin, "make_channel", None)
+            channel = make(channel_mode, bus) if make else owner.plugin.channels()[channel_mode](bus=bus, config={})
+            if channel.start_banner:
+                console.print(f"[dim]{channel.start_banner}[/dim]")
         else:
             # #35: REPL history resolves under this session's state dir (default
             # ~/.localharness/.repl_history). The transcript records what you typed while working in
