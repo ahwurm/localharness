@@ -81,8 +81,16 @@ class DiscordAdapter:
                               int(getattr(payload, "message_id", 0) or 0),
                               str(getattr(payload, "emoji", "")))
 
-        self._client_task = asyncio.create_task(client.start(self._token))
-        await ready.wait()
+        task = self._client_task = asyncio.create_task(client.start(self._token))
+        waiter = asyncio.create_task(ready.wait())
+        try:  # a login that fails never fires on_ready: wait for whichever comes first
+            await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+        if not ready.is_set():
+            err = None if task.cancelled() else task.exception()
+            why = f"{type(err).__name__}: {err}" if err else "the client stopped before it was ready"
+            raise ChannelStartError(f"Discord login failed — {why.replace(self._token, '**********')}") from None
 
     async def close(self) -> None:
         if self._client is not None:
