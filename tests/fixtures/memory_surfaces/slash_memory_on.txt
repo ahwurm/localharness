@@ -1,0 +1,144 @@
+[cmd|None] /memory
+---
+[msg|system.info] Recent memories (3):
+  #4  prod box  conf 0.50 · 0m
+  #2  The project is Python 3.12 on uv.  conf 0.50 · 0m
+  #1  The user edits in Neovim with a tiling WM.  conf 0.50 · 0m
+detail: /memory show <id>   find: /memory search <words>
+---
+[handled|None] True
+---
+[cmd|None] /memory show 1
+---
+[renderable|None] Memory #1
+  value:       The user edits in Neovim with a tiling WM.
+  key:         user-editor
+  tags:        prefs
+  confidence:  0.50
+  status:      active
+  source:      baseline
+  created:     <STAMP>
+  updated:     <STAMP>
+  provenance:  (none)
+  ambient: competes by salience (standing 0.00, confidence 0.50, stakes 0.00) — facts fill the 
+injection budget in salience order; no floor, no cap
+
+supersede chain
+└── #1  The user edits in Neovim with a tiling WM.   ← current
+    └── original — nothing replaced it, nothing it replaced
+
+---
+[handled|None] True
+---
+[cmd|None] /memory show 4
+---
+[renderable|None] Memory #4
+  value:       prod box
+  key:         deploy-target
+  tags:        (none)
+  confidence:  0.50
+  status:      active
+  source:      baseline
+  created:     <STAMP>
+  updated:     <STAMP>
+  provenance:  (none)
+  ambient: competes by salience (standing 0.00, confidence 0.50, stakes 0.00) — facts fill the 
+injection budget in salience order; no floor, no cap
+
+supersede chain
+└── #3  staging box
+    └── #4  prod box   ← current
+
+---
+[handled|None] True
+---
+[cmd|None] /memory show banana
+---
+[msg|system.info] Usage: /memory show <id>  (an id number, e.g. /memory show 12). Got 'banana'.
+---
+[handled|None] True
+---
+[cmd|None] /memory show 9999
+---
+[msg|system.info] No memory with id 9999. Browse with /memory or find one with /memory search <words>.
+---
+[handled|None] True
+---
+[cmd|None] /memory search neovim
+---
+[msg|system.info] Search 'neovim' — top 1:
+  #1  The user edits in Neovim with a tiling WM.  conf 0.50
+Detail: /memory show <id>   retire: /memory forget <id>
+---
+[handled|None] True
+---
+[cmd|None] /memory search zzzznomatch
+---
+[msg|system.info] No memories matched 'zzzznomatch'. (/memory shows recent; /memory forget <id> retires one.)
+---
+[handled|None] True
+---
+[cmd|None] /memory forget 2
+---
+[msg|system.info] About to forget memory #2:
+  The project is Python 3.12 on uv.  conf 0.50
+This retires it — removed from the model's memory shelf and from search, but kept in history (never hard-deleted).
+Confirm with:  /memory forget 2 confirm
+---
+[handled|None] True
+---
+[cmd|None] /memory forget 2 confirm
+---
+[msg|system.info] Forgotten. Memory #2 retired — it no longer injects into prompts or shows in listings/search. History kept: /memory show 2.
+---
+[handled|None] True
+---
+[cmd|None] /memory forget 2 confirm
+---
+[msg|system.info] Memory #2 is already retired (status: superseded) — nothing to forget. /memory show 2 shows its history.
+---
+[handled|None] True
+---
+[cmd|None] /memory promote 1
+---
+[msg|system.info] About to promote memory #1 to your machine-global memory:
+  The user edits in Neovim with a tiling WM.  conf 0.50
+From: this session
+The copy is a separate memory in the global store — this project's copy stays exactly as it is, and future sessions in OTHER projects can recall the copy.
+Confirm with:  /memory promote 1 confirm
+---
+[handled|None] True
+---
+[cmd|None] /memory promote 1 confirm
+---
+[msg|system.info] Promotion needs a project layer: with no .localharness/ workspace this session's memory IS the machine-global memory, so there is nowhere to promote it to.
+---
+[handled|None] True
+---
+[cmd|None] /memory bogus
+---
+[msg|system.info] Unknown /memory subcommand. Use /memory (overview), /memory show <id>, /memory search <words>, /memory forget <id>, or /memory promote <id>.
+---
+[handled|None] True
+---
+[cmd|None] /memory SHOW 1
+---
+[renderable|None] Memory #1
+  value:       The user edits in Neovim with a tiling WM.
+  key:         user-editor
+  tags:        prefs
+  confidence:  0.50
+  status:      active
+  source:      baseline
+  created:     <STAMP>
+  updated:     <STAMP>
+  provenance:  (none)
+  ambient: competes by salience (standing 0.00, confidence 0.50, stakes 0.00) — facts fill the 
+injection budget in salience order; no floor, no cap
+
+supersede chain
+└── #1  The user edits in Neovim with a tiling WM.   ← current
+    └── original — nothing replaced it, nothing it replaced
+
+---
+[handled|None] True
