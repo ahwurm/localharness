@@ -102,10 +102,9 @@ Migration.
   serves them to a signed-in client at `GET /api/artifacts/{plugin}/{id}`, for
   a plugin that is on in the running session, cached as immutable.
 - **The memory slot.** One plugin of kind `memory` can add a section to every
-  turn's prompt, right after the guardrails. Nothing fills it unless you
-  install and enable a memory plugin yourself. With memory on, a stand-in sits
-  in the slot so the phone's memory screen reads memory through it; it adds
-  nothing to the prompt.
+  turn's prompt, right after the guardrails. With memory on, the bundled
+  memory plugin fills it; with memory off it is empty unless you install and
+  enable another memory plugin.
 - `localharness init` writes a `plugins/README.md` into your config directory
   that says how to install, enable and write a plugin; `init --workspace`
   writes one into the project saying plugins are never loaded from there.
@@ -136,6 +135,17 @@ Migration.
 - `init` writes `memory: {enabled: false}` when you decline memory. `/memory`
   is hidden while memory is off. While memory is on, `doctor` reports a
   missing embedding model, or a missing embeddings extra, as a failure.
+- `/memory` is listed after `/quit` and `/exit` in `/help`, the input
+  completer and the web channel's command list (`commands[]` in
+  `/api/protocol`), and `memory` moved among the plugin commands in
+  `localharness --help`: plugin commands follow core ones. Output
+  of every `/memory` and `localharness memory` subcommand is unchanged.
+- The train benchmark was run on a live 27B model before and after the bench
+  moved onto the memory plugin, one run after the other, and no scenario's
+  success rate dropped significantly; with at most 20 runs per scenario only a
+  large drop would show, and the two runs' prompts were not identical (the
+  earlier one ran from a longer directory path, which the system prompt names,
+  so each of its prompts was 54 tokens longer).
 - If the memory database cannot open, memory is off for that session: the
   startup summary names the error, and no memory section, memory tool or
   phone memory screen exists. Before, start carried on without a store and
@@ -257,8 +267,8 @@ Migration.
 ### Known limitations (named, not hidden)
 - Image generation, the phone app and memory ship as plugins; Discord and
   autoresearch are still part of core. `/memory` and `localharness memory`
-  still reach the memory store directly rather than through the plugin, and
-  the bench drives the agent loop's older built-in memory path.
+  are the memory plugin's own commands now; with memory off neither exists.
+  The bench builds memory through the plugin.
 - A subagent's cruncher run asks the memory plugin for a write handle, and
   the plugin gives none: cruncher gists are not stored (as in 0.15).
 - The phone's memory screen lists, searches, shows a fact's history, edits

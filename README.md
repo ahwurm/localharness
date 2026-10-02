@@ -211,7 +211,7 @@ Tools run where the harness runs, and `bash_exec` always launches a real bash �
 | `model` | List served/downloaded models, switch the persisted default, or `--download <repo_id>` (optionally `--file <name>`) a model from Hugging Face |
 | `update` | Upgrade LocalHarness to the latest release on PyPI (`--check` only reports whether one is available) |
 | `agent …` | Manage agent definitions |
-| `memory …` | Browse and edit the agent's persistent memory (list / show / edit / rm / archive / restore) |
+| `memory …` | Browse and edit the agent's persistent memory (list / show / edit / rm / archive / restore) (memory plugin; absent when memory is off) |
 | `bench …` | Run the scenario benchmark |
 | `components …` | Autoresearch component registry |
 | `plugins …` | See, enable and disable plugins (`list`, `info`, `enable`, `disable`) — see [Plugins](#plugins) |
