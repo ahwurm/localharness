@@ -134,6 +134,37 @@ stalls. And anything a plugin registers directly on the tool registry, a tool or
 hook, instead of handing it over through its `tools()` method or the hook system, skips the
 gate-family rule above and stays registered if the plugin later fails.
 
+### Machine-level-only settings
+
+Some settings say where the harness connects, which credential it uses or who may talk to it. A
+repository you cloned must not be able to point those somewhere else, so only your machine-level
+(global) config may set them. A project's value for one of them is ignored, the harness prints a
+warning naming the key and the file, and your global value stands. These are all of them:
+
+- `image.comfyui_url`
+- `image.workflow`
+- `dispatch.discord.token`
+- `dispatch.discord.allow`
+- `dispatch.discord.channels`
+- `permissions.ask.read_only_signatures`
+- `permissions.ask.dropped_commands`
+- `permissions.ask.wrapper_commands`
+- `permissions.ask.subcommand_tools`
+- `permissions.ask.mcp_trusted_servers`
+- `permissions.ask.timeout_s`
+- `<name>.enabled`, for a plugin you installed (a plugin that ships with LocalHarness can be
+  switched per project)
+
+A few other permission settings are narrowed instead of ignored: a project may add deny patterns
+and add commands to the gate's lists of dangerous calls but never remove any, may switch the
+network-host question on but not off, may not pick a looser `permissions.mode`, and may not move
+`permissions.workspace_root` outward.
+
+**What this does NOT cover.** Your global config is trusted as it is: a value already in your
+global files is never checked, whoever put it there. A project value equal to your global value is
+treated as yours and left alone. A plugin you install decides for itself which of its settings are
+machine-level only; this list covers the plugins that ship with LocalHarness.
+
 ## Human approval gate
 
 From v0.14 every tool call of every agent — subagents included — passes one decision function
@@ -498,17 +529,27 @@ carrying a sticky "untrusted" tag; its raw bytes resolve only inside an agent th
 holds no host-mutating tools.
 
 Which tools count as ingesting and which as host-mutating is read from each tool's own declaration,
-never from its name or from the plugin it came from. Every tool declares what it ingests
-(`ingest`), whether it can change the host (`host`) and whether its results are trusted
-(`result_origin`), and a tool that declares nothing is treated as the worst case on all three. So a
-plugin tool that declares nothing counts as both ingesting and host-mutating, and no agent may hold
-it: the root agent is not given it (`localharness start` prints a warning naming the tool and its
-plugin), and any other agent configured with it is refused. The same declarations are read by the
-separation check, by the rule that a handle to untrusted content may be granted only to an agent
-with no host-mutating tools, by the rule that an agent without the web tools may not fetch through
-an exec tool such as `bash_exec`, and by the context store when it marks a stored tool result
-untrusted. Built-in tools, MCP tools (their wrapper declares them untrusted) and plugin tools are
-judged the same way, whatever scope they arrive in.
+never from its name or from the plugin it came from. Every tool declares four things: what it
+ingests (`ingest`), whether it can change the host (`host`), whether its results are trusted
+(`result_origin`), and which family the approval gate files it under (`gate_family`). A tool that
+declares nothing gets the most restrictive value of each: `ingest: untrusted`,
+`host: dangerous`, `result_origin: untrusted` and `gate_family: none` (asked about). Three places
+read these declarations, all under `src/localharness/`: the separation check in
+`tools/capabilities.py` reads `ingest` and `host`; the approval gate in `agent/gate.py` reads
+`gate_family`; and the context store in `agent/context.py` reads `result_origin` when it marks a
+stored tool result untrusted. So a plugin tool that declares nothing counts as both ingesting and
+host-mutating, and no agent may hold it: the root agent is not given it (`localharness start`
+prints a warning naming the tool and its plugin), and any other agent configured with it is
+refused. The same declarations are read by the rule that a handle to untrusted content may be
+granted only to an agent with no host-mutating tools, and by the rule that an agent without the web
+tools may not fetch through an exec tool such as `bash_exec`. Built-in tools, MCP tools (their
+wrapper declares them untrusted) and plugin tools are judged the same way, whatever scope they
+arrive in.
+
+**A residual that is now closed.** Tool classification used to read tool names. A plugin tool that
+reached an agent through the inherited global scope therefore needed a separate per-tool tag before
+the checks knew what it was. Now every tool carries its own declarations, the three readers above
+read the same ones, and a tool that declares nothing gets the most restrictive values.
 
 **What this does NOT cover.** A declaration is believed. A tool that declares `ingest: none` while
 it actually fetches attacker-controlled text is treated as it says, and turning on a plugin you
@@ -517,6 +558,13 @@ at start is the only place a stripped plugin tool is named; `localharness doctor
 And a plugin tool that ingests is kept apart from the host tools, but it is not marked as untrusted
 where you read its output: the terminal's "web results — UNTRUSTED, treated as data only" note and
 the phone's untrusted label cover the three built-in web tools only.
+
+Memory is split the same way, and one part of it is trusted. What `memory_search` and `memory_get`
+return is marked untrusted, like web content: a recalled fact is fenced as data. What the
+`remember` tool returns is marked trusted, because it is the harness's own confirmation that a
+fact was saved, not the fact read back. The bench turns memory on only for the three scenarios
+that seed it, with the same setting on both sides of a comparison and background consolidation
+off, so a bench result says nothing about how memory behaves in any other scenario.
 
 **Not yet built: sandboxing.** Host-mutating tools currently run with the machine's
 full trust; there is no OS-level sandbox (e.g. bubblewrap) around them yet. That is on
