@@ -680,7 +680,6 @@ def check_spec00_wiring(text: str, code: dict[str, frozenset[str]] | None = None
     return out
 
 
-@xfail_until("51-02")
 def test_spec00_wiring_live():
     """Spec 00 section 5 names the constructor-wired collaborators exactly as the code has them."""
     assert check_spec00_wiring(_read(SPEC00)) == []
