@@ -1,7 +1,7 @@
-"""Shared support for every dispatch test (Phase 49): env isolation + a recording fake `discord`.
+"""Shared support for every dispatch test : env isolation + a recording fake `discord`.
 
-SAFETY: this box's `~/.claude/channels/discord/.env` holds a live bot token that drives the
-owner's dispatch fleet, and the dispatch plugin's env fallback reads it. Every
+SAFETY: a developer's `~/.claude/channels/discord/.env` may hold a live bot token, and the
+dispatch plugin's env fallback reads it. Every
 dispatch test calls `isolate_discord_env` FIRST, so `Path.home()` is a tmp dir and the five env
 token/allow sources are gone — no test can ever see, print or log in with the real token.
 
