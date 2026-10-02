@@ -1,5 +1,8 @@
 """SCEN-02: bench runner accumulates standardized metrics from event subscriptions."""
 from __future__ import annotations
+
+import asyncio
+
 import pytest
 
 
@@ -469,17 +472,22 @@ async def test_build_agent_loop_routes_cruncher_and_resolves_grant(monkeypatch, 
     assert calls["cruncher"].get("grant_handles") == [handle]
 
 
-@pytest.mark.asyncio
-async def test_bench_memory_tools_parity_when_seeded(monkeypatch):
-    """SESS-06 parity: a seeded bench scenario registers the SAME three memory tools
-    production registers whenever a store exists (start_cmd critic M5), PROVIDED the
-    scenario's tools_allowed explicitly names them (FIX 4 — registration is gated on
-    tools_allowed, not just on the store existing; see
-    test_bench_memory_tools_withheld_when_tools_allowed_empty for the [] case).
-    """
-    from localharness.bench import runner as bench_runner
+def _seeded_scen(tools_allowed):
     from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
     from localharness.core.events import BudgetSpec
+    return ScenarioSpec(
+        name="memory_recall", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:OK"]),
+        budget=BudgetSpec(), limits=LimitsSpec(),
+        tools_allowed=tools_allowed, slice="train", category="tool_basics",
+    )
+
+
+async def _build_captured(monkeypatch, scen):
+    """The REAL _build_agent_loop over a FakeAgentLoop that records its kwargs; a real EventBus,
+    because the memory plugin's session accumulator subscribes to it. Returns (captured, loop)."""
+    from localharness.bench import runner as bench_runner
+    from localharness.core.bus import EventBus
 
     captured: dict = {}
 
@@ -488,106 +496,87 @@ async def test_bench_memory_tools_parity_when_seeded(monkeypatch):
             captured.update(kwargs)
 
     monkeypatch.setattr("localharness.agent.loop.AgentLoop", FakeAgentLoop)
+    loop = await bench_runner._build_agent_loop(bus=EventBus(), llm_client=None, scenario=scen)
+    return captured, loop
 
-    # "memory_recall" is a _MEMORY_SEEDS key -> _seed_memory_store runs -> memory_loader set.
-    scen = ScenarioSpec(
-        name="memory_recall", prompt="x",
-        success_criteria=SuccessCriteria(rubric=["contains:OK"]),
-        budget=BudgetSpec(), limits=LimitsSpec(),
-        tools_allowed=["memory_search", "memory_get", "remember"],
-        slice="train", category="tool_basics",
-    )
-    await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
-    assert captured["memory_loader"] is not None, "seeded scenario must hydrate a MemoryStore"
-    tools = captured["tool_registry"]._tools["global"]
-    # the write verb registers as "remember" (not "memory_remember"), same as production
-    for name in ("memory_search", "memory_get", "remember"):
-        assert name in tools, f"seeded bench agent missing {name} (production registers all three)"
+
+async def _teardown(loop):
+    from localharness.bench import runner as bench_runner
+    await bench_runner._stop_bench_memory(vars(loop).get("_plugin_result"), vars(loop).get("_plugin_tmp"))
+
+
+@pytest.mark.asyncio
+async def test_bench_memory_tools_parity_when_seeded(monkeypatch):
+    """SESS-06 parity: a seeded bench scenario gets the SAME three memory tools production gets —
+    the memory plugin's own — PROVIDED the scenario's tools_allowed explicitly names them (FIX 4 —
+    see test_bench_memory_tools_withheld_when_tools_allowed_empty for the [] case)."""
+    captured, loop = await _build_captured(
+        monkeypatch, _seeded_scen(["memory_search", "memory_get", "remember"]))
+    try:
+        assert captured["memory_slot"] is not None and captured["memory_slot"].occupied, (
+            "seeded scenario must get an occupied memory slot")
+        assert "memory_loader" not in captured, "the legacy memory_loader= path is gone"
+        tools = captured["tool_registry"]._tools["global"]
+        # the write verb registers as "remember" (not "memory_remember"), same as production
+        for name in ("memory_search", "memory_get", "remember"):
+            assert name in tools, f"seeded bench agent missing {name} (production registers all three)"
+    finally:
+        await _teardown(loop)
 
 
 @pytest.mark.asyncio
 async def test_bench_memory_tools_withheld_when_tools_allowed_empty(monkeypatch):
     """FIX 4: tools_allowed=[] means pure-LLM/no-tools (bench/schema.py ScenarioSpec.tools_allowed
     docstring). memory_recall/stateful_behavior_* declare exactly that to test PURE
-    system-prompt recall — they must NOT get live memory tools just because a seeded store
-    exists. The seed itself must still be effective: memory_loader stays non-None and its
-    load_context() still carries the seeded fact, so system-prompt injection is unaffected.
-    """
-    from localharness.bench import runner as bench_runner
-    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
-    from localharness.core.events import BudgetSpec
+    system-prompt recall — they must NOT get live memory tools just because memory is on. The seed
+    itself must still be effective: the slot stays occupied, carries the seeded fact, and its
+    context (the system-prompt section) carries it too."""
+    from localharness.plugins.api import ContextBudget
 
-    captured: dict = {}
-
-    class FakeAgentLoop:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr("localharness.agent.loop.AgentLoop", FakeAgentLoop)
-
-    scen = ScenarioSpec(
-        name="memory_recall", prompt="x",
-        success_criteria=SuccessCriteria(rubric=["contains:OK"]),
-        budget=BudgetSpec(), limits=LimitsSpec(),
-        tools_allowed=[], slice="train", category="tool_basics",
-    )
-    await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
-    store = captured["memory_loader"]
-    assert store is not None, "seed must still hydrate — tools_allowed governs TOOLS, not the seed"
-    ctx = await store.load_context()
-    assert "STARFRUIT_42" in ctx.agent_memory_md, "seeded fact must still reach system-prompt injection"
-    await store.close()
-
-    tools = captured["tool_registry"]._tools["global"]
-    for name in ("memory_search", "memory_get", "remember"):
-        assert name not in tools, f"tools_allowed=[] must withhold {name} (pure-LLM scenario)"
+    captured, loop = await _build_captured(monkeypatch, _seeded_scen([]))
+    try:
+        slot = captured["memory_slot"]
+        assert slot is not None and slot.occupied, "tools_allowed governs TOOLS, not the seed"
+        row = await slot.browse().get("codename")
+        assert row is not None and "STARFRUIT_42" in row["fact"]["value"]
+        contribution = await slot.context("x", ContextBudget(max_chars=64_000, max_session_history=8))
+        assert any("STARFRUIT_42" in body for _h, body in contribution.sections), (
+            "seeded fact must still reach system-prompt injection")
+        tools = captured["tool_registry"]._tools["global"]
+        for name in ("memory_search", "memory_get", "remember"):
+            assert name not in tools, f"tools_allowed=[] must withhold {name} (pure-LLM scenario)"
+    finally:
+        await _teardown(loop)
 
 
 @pytest.mark.asyncio
 async def test_bench_memory_tools_partial_allowlist_registers_only_named(monkeypatch):
     """FIX 4: 'register only those named' — a scenario allowing just memory_get must NOT also
-    get memory_search/remember, even though the store exists and would previously register
-    all three unconditionally."""
-    from localharness.bench import runner as bench_runner
-    from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
-    from localharness.core.events import BudgetSpec
-
-    captured: dict = {}
-
-    class FakeAgentLoop:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr("localharness.agent.loop.AgentLoop", FakeAgentLoop)
-
-    scen = ScenarioSpec(
-        name="memory_recall", prompt="x",
-        success_criteria=SuccessCriteria(rubric=["contains:OK"]),
-        budget=BudgetSpec(), limits=LimitsSpec(),
-        tools_allowed=["memory_get"], slice="train", category="tool_basics",
-    )
-    await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
-    tools = captured["tool_registry"]._tools["global"]
-    assert "memory_get" in tools
-    assert "memory_search" not in tools
-    assert "remember" not in tools
+    get memory_search/remember, even though the plugin contributes all three."""
+    captured, loop = await _build_captured(monkeypatch, _seeded_scen(["memory_get"]))
+    try:
+        tools = captured["tool_registry"]._tools["global"]
+        assert "memory_get" in tools
+        assert "memory_search" not in tools
+        assert "remember" not in tools
+    finally:
+        await _teardown(loop)
 
 
 @pytest.mark.asyncio
 async def test_bench_no_memory_tools_without_seeds(monkeypatch):
-    """No phantom store: a non-seeded scenario has memory_loader=None and registers NONE of the
-    three memory tools — the tools ride with the store, exactly like production."""
-    from localharness.bench import runner as bench_runner
+    """No phantom store (B1): a non-seeded scenario runs no plugin machinery at all — no resolve(),
+    no start_plugins() — gets memory_slot=None and none of the three memory tools."""
     from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
     from localharness.core.events import BudgetSpec
 
-    captured: dict = {}
-
-    class FakeAgentLoop:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr("localharness.agent.loop.AgentLoop", FakeAgentLoop)
+    calls: list = []
+    import localharness.plugins.resolve as _res
+    import localharness.plugins.lifecycle as _lc
+    monkeypatch.setattr(_res, "resolve", lambda *a, **k: calls.append("resolve"))
+    async def _spy_start(*a, **k):
+        calls.append("start_plugins")
+    monkeypatch.setattr(_lc, "start_plugins", _spy_start)
 
     scen = ScenarioSpec(
         name="unseeded_scenario", prompt="x",
@@ -595,8 +584,10 @@ async def test_bench_no_memory_tools_without_seeds(monkeypatch):
         budget=BudgetSpec(), limits=LimitsSpec(),
         tools_allowed=[], slice="train", category="tool_basics",
     )
-    await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
-    assert captured["memory_loader"] is None, "unseeded scenario must NOT hydrate a store"
+    captured, loop = await _build_captured(monkeypatch, scen)
+    assert captured["memory_slot"] is None, "unseeded scenario must NOT get memory"
+    assert calls == [], f"unseeded scenario ran plugin machinery: {calls}"
+    assert "_plugin_result" not in vars(loop)
     tools = captured["tool_registry"]._tools["global"]
     for name in ("memory_search", "memory_get", "remember"):
         assert name not in tools, f"unseeded bench agent wrongly has {name} (phantom store)"
@@ -639,13 +630,12 @@ async def test_base_registry_has_cruncher_leaf_tools():
 
 
 # ---------------------------------------------------------------------------
-# Phase 24 EVAL-01: MemoryStore hydration in _build_agent_loop for the
-# stateful_behavior scenarios. The REAL _build_agent_loop is awaited; we then
-# introspect the constructed AgentLoop's seeded memory store (loop._memory)
-# and assert load_context().agent_memory_md (the text injected into the system
-# prompt at agent/loop.py:464-465) carries the scenario anchor tokens. The
-# store's agent_id MUST equal the loop's AgentConfig.name or load_context
-# would resolve to an empty fact set.
+# Phase 24 EVAL-01 / 48-05 MEMP-05: memory for the stateful_behavior scenarios
+# through the plugin lifecycle. The REAL _build_agent_loop is awaited; we then
+# introspect the constructed AgentLoop's memory slot and assert the slot's
+# context (the text injected into the system prompt) carries the scenario
+# anchor tokens. The store's agent_id MUST equal the loop's AgentConfig.name or
+# the context would resolve to an empty fact set.
 # ---------------------------------------------------------------------------
 
 import re as _re
@@ -666,71 +656,73 @@ def _mem_scen(name: str):
     )
 
 
+async def _memory_md(slot) -> str:
+    from localharness.plugins.api import ContextBudget
+    c = await slot.context("x", ContextBudget(max_chars=64_000, max_session_history=8))
+    return "\n".join(body for heading, body in c.sections if heading == "Agent Memory")
+
+
+async def _real_loop(name: str):
+    from localharness.bench import runner as bench_runner
+    from localharness.core.bus import EventBus
+    return await bench_runner._build_agent_loop(bus=EventBus(), llm_client=None, scenario=_mem_scen(name))
+
+
 @pytest.mark.asyncio
 async def test_memory_hydration_injects_starfruit(tmp_path):
-    """Test A — memory_recall: the seeded store injects STARFRUIT_42, and its
-    agent_id equals the loop's AgentConfig.name so load_context resolves."""
-    from localharness.bench import runner as bench_runner
-
-    loop = await bench_runner._build_agent_loop(
-        bus=None, llm_client=None, scenario=_mem_scen("memory_recall")
-    )
-    store = loop._memory
-    assert store is not None, "memory_loader was not seeded for memory_recall"
-    # agent_id of the store must match the loop's config name (underscore→hyphen)
-    assert store._agent_id == loop._config.name == "bench-memory-recall"
-    ctx = await store.load_context()
-    assert "STARFRUIT_42" in ctx.agent_memory_md
-    await store.close()
+    """Test A — memory_recall: the slot injects STARFRUIT_42, and the plugin's store agent_id
+    equals the loop's AgentConfig.name so the context resolves."""
+    loop = await _real_loop("memory_recall")
+    try:
+        slot = loop._memory_slot
+        assert slot is not None and slot.occupied, "memory_recall got no memory"
+        assert loop._memory is None, "the legacy memory_loader= path must stay unused"
+        assert loop._config.name == "bench-memory-recall"
+        assert slot.browse()._store._agent_id == loop._config.name
+        assert "STARFRUIT_42" in await _memory_md(slot)
+    finally:
+        await _teardown(loop)
 
 
 @pytest.mark.asyncio
 async def test_memory_hydration_two_facts(tmp_path):
-    """Test B — stateful_behavior_two_facts: both STARFRUIT_42 and MOONFRUIT_88
-    land in the injected MEMORY.md text."""
-    from localharness.bench import runner as bench_runner
-
-    loop = await bench_runner._build_agent_loop(
-        bus=None, llm_client=None, scenario=_mem_scen("stateful_behavior_two_facts")
-    )
-    store = loop._memory
-    assert store is not None
-    ctx = await store.load_context()
-    assert "STARFRUIT_42" in ctx.agent_memory_md
-    assert "MOONFRUIT_88" in ctx.agent_memory_md
-    await store.close()
+    """Test B — stateful_behavior_two_facts: both STARFRUIT_42 and MOONFRUIT_88 land in the
+    injected memory section."""
+    loop = await _real_loop("stateful_behavior_two_facts")
+    try:
+        md = await _memory_md(loop._memory_slot)
+        assert "STARFRUIT_42" in md
+        assert "MOONFRUIT_88" in md
+    finally:
+        await _teardown(loop)
 
 
 @pytest.mark.asyncio
 async def test_memory_hydration_overwrite_latest_wins(tmp_path):
-    """Test C — stateful_behavior_overwrite_recall: favorite_color seeded blue
-    THEN amber; latest-write-wins via MemoryStore upsert, so the injected text
-    matches (?i)\\bamber\\b and carries no standalone 'blue' fact line."""
-    from localharness.bench import runner as bench_runner
-
-    loop = await bench_runner._build_agent_loop(
-        bus=None, llm_client=None, scenario=_mem_scen("stateful_behavior_overwrite_recall")
-    )
-    store = loop._memory
-    assert store is not None
-    ctx = await store.load_context()
-    md = ctx.agent_memory_md
-    assert _re.search(r"(?i)\bamber\b", md), f"amber not in injected memory: {md!r}"
-    # latest-write-wins: the overwritten 'blue' fact must not survive as its own line
-    fact_lines = [ln for ln in md.splitlines() if ln.lstrip().startswith("- favorite_color")]
-    assert len(fact_lines) == 1, f"expected one favorite_color line, got {fact_lines!r}"
-    assert _re.search(r"(?i)\bblue\b", fact_lines[0]) is None
-    await store.close()
+    """Test C — stateful_behavior_overwrite_recall: favorite_color seeded blue THEN amber through
+    slot.browse().store(); latest-write-wins via the store's upsert, so the injected text matches
+    (?i)\\bamber\\b and carries no standalone 'blue' fact line."""
+    loop = await _real_loop("stateful_behavior_overwrite_recall")
+    try:
+        md = await _memory_md(loop._memory_slot)
+        assert _re.search(r"(?i)\bamber\b", md), f"amber not in injected memory: {md!r}"
+        fact_lines = [ln for ln in md.splitlines() if ln.lstrip().startswith("- favorite_color")]
+        assert len(fact_lines) == 1, f"expected one favorite_color line, got {fact_lines!r}"
+        assert _re.search(r"(?i)\bblue\b", fact_lines[0]) is None
+    finally:
+        await _teardown(loop)
 
 
 @pytest.mark.asyncio
-async def test_non_memory_scenario_has_no_store(tmp_path):
-    """Test D — pure_qa (tool_basics): memory_loader stays None and no /agents
-    directory is created under any bench tmp base_dir for this scenario."""
+async def test_non_memory_scenario_has_no_store(tmp_path, monkeypatch):
+    """Test D — pure_qa (tool_basics): no memory slot, and no bench-mem-* dir (so no agents/ dir)
+    is created under the temp root for this scenario."""
+    import tempfile
     from localharness.bench import runner as bench_runner
     from localharness.bench.schema import ScenarioSpec, SuccessCriteria, LimitsSpec
     from localharness.core.events import BudgetSpec
 
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     scen = ScenarioSpec(
         name="pure_qa",
         prompt="x",
@@ -742,7 +734,96 @@ async def test_non_memory_scenario_has_no_store(tmp_path):
         category="tool_basics",
     )
     loop = await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
-    assert loop._memory is None
+    assert loop._memory_slot is None and loop._memory is None
+    assert not list(tmp_path.glob("bench-mem-*")) and not list(tmp_path.rglob("agents"))
+
+
+async def _seeded_run(monkeypatch, tmp_path, run_loop):
+    """execute_one_run over the REAL _build_agent_loop for memory_recall with a stop_plugins spy;
+    the per-run tmp root is tmp_path so the bench-mem-* dir can be checked afterwards."""
+    import tempfile
+    import localharness.plugins.lifecycle as _lc
+    from localharness.bench import runner as bench_runner
+
+    stops: list = []
+    real_stop = _lc.stop_plugins
+    async def _spy(result):
+        stops.append(result)
+        await real_stop(result)
+    monkeypatch.setattr(_lc, "stop_plugins", _spy)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(bench_runner, "_run_loop", run_loop)
+    base = _mem_scen("memory_recall")
+    scen = base.model_copy(update={"limits": base.limits.model_copy(update={"max_latency_s": 0.2})})
+    completed = await bench_runner.execute_one_run(scen, "m", tmp_path / "r.jsonl", llm_client=None)
+    return completed, stops
+
+
+@pytest.mark.asyncio
+async def test_seeded_run_stops_plugins_on_timeout(monkeypatch, tmp_path):
+    """#43: a seeded run that times out still stops its plugins exactly once and removes its dir."""
+    async def _hang(loop, prompt, on_token):
+        await asyncio.sleep(30)
+    completed, stops = await _seeded_run(monkeypatch, tmp_path, _hang)
+    assert completed.success is False
+    assert len(stops) == 1
+    assert not list(tmp_path.glob("bench-mem-*"))
+
+
+@pytest.mark.asyncio
+async def test_seeded_run_stops_plugins_when_the_loop_raises(monkeypatch, tmp_path):
+    async def _boom(loop, prompt, on_token):
+        raise RuntimeError("loop exploded")
+    # the error is contained as data (scenario_error); the plugins still stop
+    _completed, stops = await _seeded_run(monkeypatch, tmp_path, _boom)
+    assert len(stops) == 1
+    assert not list(tmp_path.glob("bench-mem-*"))
+
+
+@pytest.mark.asyncio
+async def test_seeded_build_stops_plugins_when_loop_construction_fails(monkeypatch, tmp_path):
+    """AgentLoop(...) raising after the plugins started: they are stopped and the dir removed
+    before the error propagates (execute_one_run then records a scenario_error)."""
+    import tempfile
+    import localharness.plugins.lifecycle as _lc
+    from localharness.bench import runner as bench_runner
+    from localharness.core.bus import EventBus
+
+    stops: list = []
+    real_stop = _lc.stop_plugins
+    async def _spy(result):
+        stops.append(result)
+        await real_stop(result)
+    monkeypatch.setattr(_lc, "stop_plugins", _spy)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+    class _Broken:
+        def __init__(self, **kw):
+            raise ValueError("construction failed")
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", _Broken)
+    with pytest.raises(ValueError, match="construction failed"):
+        await bench_runner._build_agent_loop(bus=EventBus(), llm_client=None,
+                                             scenario=_mem_scen("memory_recall"))
+    assert len(stops) == 1
+    assert not list(tmp_path.glob("bench-mem-*"))
+
+
+@pytest.mark.asyncio
+async def test_seeded_build_fails_loudly_when_memory_cannot_seed(monkeypatch, tmp_path):
+    """A browse without store() (or a plugin that did not start) is a RuntimeError('bench memory:
+    ...') — never a silent unseeded run; the plugins are stopped and the dir removed."""
+    import tempfile
+    from localharness.bench import runner as bench_runner
+    from localharness.core.bus import EventBus
+    from localharness.memory.browse import StoreBrowse
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.delattr(StoreBrowse, "store")
+    with pytest.raises(RuntimeError, match="bench memory: plugin did not start for memory_recall"):
+        await bench_runner._build_agent_loop(bus=EventBus(), llm_client=None,
+                                             scenario=_mem_scen("memory_recall"))
+    assert not list(tmp_path.glob("bench-mem-*"))
+
 
 @pytest.mark.asyncio
 async def test_counts_dict_passed_to_evaluate(monkeypatch, tmp_path):
