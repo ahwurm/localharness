@@ -471,8 +471,10 @@ than deriving it from the state directory, so a project can add its own memory b
 reads it from the global directory on every turn and puts it in the system prompt whether or not
 memory is on (SECURITY.md, "Trust boundaries").
 
-All under an agent's `memory:` key (see `config/models.py`; every field auto-enumerates as a
-`agent.memory.*` component-registry axis, tunable with no code edit):
+Memory ships as the bundled `memory` plugin; `memory.enabled: false` turns it off. Its settings
+are all under an agent's `memory:` key (see `memory/config.py`, the plugin's settings model; every
+field is listed by `components list` as an `agent.memory.*` row marked `(plugin: memory)`, and set
+with `components set`, with no code edit):
 
 ```yaml
 memory:

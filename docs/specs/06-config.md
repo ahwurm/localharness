@@ -689,7 +689,19 @@ class BudgetConfig(BaseModel):
     )
 ```
 
-### 3.5 MemoryConfig
+### 3.5 MemoryConfig (the memory plugin's settings)
+
+Memory ships as the bundled `memory` plugin, so these models live in `memory/config.py`, not in
+`config/models.py`, and `MemoryConfig` is the plugin's `AgentConfigModel`. The keys are unchanged:
+an agent's `memory:` section is still `agent.memory.*` (with `recall_scope` spelled as before), and
+`components list` shows each row with the suffix `(plugin: memory)`. The switch is the plugin's
+`memory.enabled` (default true). The older `org.memory_enabled` is deprecated but still read at
+every layer: for each layer, `memory.enabled` wins if the layer sets it, else that layer's
+`org.memory_enabled` stands in for it, and then the highest layer wins as for any setting. Start
+prints one deprecation line naming every file whose counted `org.memory_enabled` is `false`, or is
+`true` over a lower `false`; a bare `true` that overrides nothing is silent, because older `init`
+versions wrote it into every config they created. No file is rewritten. An invalid
+`agent.memory.*` value is still a load error.
 
 ```python
 class MemoryConfig(BaseModel):
@@ -1010,10 +1022,8 @@ class AgentConfig(BaseModel):
         description="Permission policy.",
     )
 
-    memory: MemoryConfig = Field(
-        default_factory=MemoryConfig,
-        description="Memory backend configuration.",
-    )
+    # No `memory` field: an agent's `memory:` section belongs to the memory plugin (§3.5) and is
+    # validated by its MemoryConfig.
 
     context: ContextConfig = Field(
         default_factory=ContextConfig,
@@ -1496,7 +1506,7 @@ resolve(agent_name: str) → AgentConfig:
            explicit `mode: auto` beats an org `read-only`; `start` then prints one line naming
            both. A layer's overrides.yaml beats its config.yaml, and a workspace org value may
            only tighten the global one. A division's mode does not set the session's.
-       - MemoryConfig:
+       - MemoryConfig (the memory plugin's agent section, §3.5):
            Agent values win for all fields.
        - ContextConfig:
            Agent values win for all fields.
