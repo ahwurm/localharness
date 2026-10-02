@@ -300,6 +300,10 @@ Migration.
   `start` prints one line naming both.
 - A misspelled core key, such as `provder:` for `provider:`, was reported as a
   removed plugin's leftover section. It now gets "did you mean `provider`?".
+- `start --channel discord` waited forever when the Discord login failed (a
+  token Discord rejects, the Message Content intent turned off, no gateway). It
+  now exits with `Discord login failed — <reason>`, without the token. Tested
+  against a stand-in for the Discord library, not a live login.
 
 ### Migration
 - A plugin written for 0.15 no longer loads, and nothing migrates it for you.
