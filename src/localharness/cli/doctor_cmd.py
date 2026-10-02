@@ -187,7 +187,7 @@ def _print_migration_state(cfg_path: Path, harness: HarnessConfig) -> None:
     console.print(escape(f"       Last migrated {when}; backup at {latest}"), soft_wrap=True)
 
 
-_CHECK_GLYPH = {"pass": _PASS + " ", "fail": _FAIL + " ", "skip": _INFO + "  "}
+_CHECK_GLYPH = {"pass": _PASS + " ", "fail": _FAIL + " ", "skip": _INFO + "  ", "warn": _WARN + " "}
 # A plugin that is not on: off and available are a choice, not a fault; skipped, needs-extra and
 # unconfigured cannot run as things stand; anything else (failed, refused) is a fault.
 _ROW_GLYPH = {"off": _INFO + "  ", "available": _INFO + "  ", "skipped": _WARN + " ",
