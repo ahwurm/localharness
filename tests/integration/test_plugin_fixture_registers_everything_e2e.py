@@ -71,6 +71,7 @@ from localharness.cli.theme import entity
 from localharness.core.bus import EventBus
 from localharness.core.events import ARTIFACT_ID_RE
 from localharness.core.events import Observation as ObservationEvent
+from tests.dispatch_support import isolate_discord_env
 from tests.conftest import FakeLLMResponse, FakeToolCall
 from tests.integration.test_guardrails_from_global_dir_e2e import _let_the_stub_tokenizer_run_a_turn
 from tests.integration.test_workspace_cli_surface_e2e import _DISCARD_URL, _offline_provider
@@ -138,6 +139,10 @@ def _record_dials(monkeypatch) -> list:
 def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
     home = tmp_path / "home"
     global_dir = _hermetic(monkeypatch, fake_home, home)
+    isolate_discord_env(monkeypatch, tmp_path)  # no Discord env or token file reaches the dispatch plugin
+    # Every extra "installed", so the Plugins: lines below hold whether or not discord.py is.
+    from localharness.plugins import resolve as _resolve
+    monkeypatch.setitem(_resolve.resolve.__kwdefaults__, "extra_installed", lambda e: True)
     _stub_start_boundaries(global_dir, monkeypatch, real_plugins=True)  # discovery stays REAL
     _offline_provider(global_dir)
     _let_the_stub_tokenizer_run_a_turn(monkeypatch)
@@ -265,8 +270,8 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
 
     # The banner: one plugin, named on its own line under the summary; nothing to warn about it.
     i = next(n for n, line in enumerate(printed) if "startup)" in line)
-    assert entity("tool", "3 plugins") in printed[i]  # web (46-02) and memory (47) are bundled and on by default
-    assert printed[i + 1] == "  " + entity("tool", "Plugins: web, memory, example"), printed[i:i + 2]  # web (46-02) and memory (47) are bundled and on by default
+    assert entity("tool", "4 plugins") in printed[i]  # web (46-02) and memory (47) are bundled and on by default; dispatch (49) is bundled and on by default
+    assert printed[i + 1] == "  " + entity("tool", "Plugins: web, memory, dispatch, example"), printed[i:i + 2]  # web (46-02) and memory (47) are bundled and on by default; dispatch (49) is bundled and on by default
     assert "plugin example" not in printed[i], f"a startup warning about the example: {printed[i]}"
     assert not any("available, not enabled" in line for line in printed), "an enabled plugin was hinted"
     assert sentinel.exists() and PKG in sys.modules, "an enabled plugin was not imported by start"
@@ -325,7 +330,7 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
 
     # --- doctor: its check, in the plugins section, where the session put its artifacts ----------
     doctor = _invoke("doctor").output
-    assert "✓ Plugins: web, memory, example" in doctor, doctor  # web (46-02) and memory (47) are bundled and on by default
+    assert "✓ Plugins: web, memory, dispatch, example" in doctor, doctor  # web (46-02) and memory (47) are bundled and on by default; dispatch (49) is bundled and on by default
     assert (f"✓ example: swatches render in #4a90d9; artifacts go to {ws / 'artifacts' / 'example'}"
             in doctor), doctor
     assert not [line for line in doctor.splitlines() if line.startswith("✗") and "example" in line]

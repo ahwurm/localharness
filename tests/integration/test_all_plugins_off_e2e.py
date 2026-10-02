@@ -31,7 +31,8 @@ from tests.unit.test_start_cmd import _stub_start_boundaries
 
 GUARDRAILS = "# Org guardrails\nCORE-ONLY-GUARDRAILS-SENTINEL\n"
 MEMORY_TOOLS = {"memory_search", "memory_get", "remember"}
-ALL_OFF = "memory:\n  enabled: false\nweb:\n  enabled: false\n"
+# dispatch (49) is bundled and on by default, so "every plugin off" turns it off too
+ALL_OFF = "memory:\n  enabled: false\nweb:\n  enabled: false\ndispatch:\n  enabled: false\n"
 
 
 def _record(monkeypatch, target: str, sink: list, *, is_async: bool) -> None:
@@ -111,8 +112,11 @@ async def test_core_boots_and_works_with_every_plugin_off(tmp_path, monkeypatch)
     resolution, result = out["resolution"], out["lifecycle"]
 
     # Discovery really ran: the installed example plugin is known, and everything is off.
-    assert set(resolution.enabled) == {"image", "web", "memory", "example"}, dict(resolution.enabled)
+    assert set(resolution.enabled) == {"image", "web", "memory", "dispatch", "example"}, dict(resolution.enabled)
     assert not any(resolution.enabled.values()), dict(resolution.enabled)
+    from localharness.plugins.channels import accepted_channels
+    assert {e.name: e.state for e in resolution.plan.entries}["dispatch"] == "off"
+    assert "discord" not in accepted_channels(resolution)
     # The lifecycle really ran and started nothing; the slot is empty during the session.
     assert result.running == [], result.loaded_names
     assert result.failed == {} and out["slot_occupied"] is False

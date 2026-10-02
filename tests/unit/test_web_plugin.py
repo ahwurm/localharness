@@ -23,7 +23,10 @@ def test_web_plugin_manifest() -> None:
     assert (m.name, m.kind, m.requires_extra, m.enabled_by_default) == ("web", "channel", "web", True)
     assert m.cli[0].name == "web" and m.cli[0].target == "localharness.cli.web_cmd:app"
     assert WebPlugin.ConfigModel is None
-    assert bundled_plugins() == (ImagePlugin, WebPlugin, MemoryPlugin)
+    from localharness.dispatch.plugin import DispatchPlugin
+
+    # dispatch (49) is bundled and on by default
+    assert bundled_plugins() == (ImagePlugin, WebPlugin, MemoryPlugin, DispatchPlugin)
 
 
 def test_web_plugin_channels_names_the_web_channel() -> None:

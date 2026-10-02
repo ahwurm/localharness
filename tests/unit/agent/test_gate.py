@@ -438,9 +438,9 @@ async def test_a_channel_that_holds_the_dialog_is_never_timed_out(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_channel_that_cannot_hold_the_dialog_still_times_out(tmp_path):
-    from localharness.channels.discord import DiscordChannel
+    from localharness.dispatch.channel import DispatchChannel
 
-    assert DiscordChannel.ask_holds_dialog is False
+    assert DispatchChannel.ask_holds_dialog is False
 
     async def _never(request):
         await asyncio.sleep(10)

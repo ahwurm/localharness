@@ -26,7 +26,6 @@ CORE_DIRS = ("core/", "config/", "provider/", "agent/", "orchestrator/", "regist
 # nobody's until someone decides which side of the line it is on — plugin code moved into a new
 # module, or a plugin file turned into a package, never becomes core by default.
 PLUGIN_FILES = frozenset({
-    "channels/discord.py",
     "tools/builtin/memory_tools.py", "tools/builtin/generate_image_tool.py", "tools/builtin/image_plugin.py",
     "cli/memory_cmd.py", "cli/memory_cli.py", "cli/web_cmd.py", "cli/web_plugin.py", "cli/generate_image_cmd.py",
     "cli/autoresearch_cmd.py", "cli/experiment_cmd.py", "cli/propose_cmd.py", "cli/report_cmd.py",
@@ -49,9 +48,6 @@ CORE_FILES = frozenset({"__init__.py",
 ALLOWED_PLUGIN_IMPORTERS = frozenset({"plugins/builtin.py"})
 
 BURN_DOWN: frozenset[tuple[str, str]] = frozenset({
-    # dispatch plugin
-    ("cli/start_cmd.py", "channels/discord.py"),
-    ("channels/__init__.py", "channels/discord.py"),
     # autoresearch plugin
     ("cli/app.py", "cli/autoresearch_cmd.py"),
     ("cli/app.py", "cli/experiment_cmd.py"),
@@ -170,14 +166,16 @@ def test_the_burn_down_residue_is_exactly_the_remaining_conversions():
     CliDescriptor, so cli/repl.py -> memory_cmd and cli/app.py -> memory_cli are gone for good.
     The bench builds memory through the plugin lifecycle, so bench/runner.py -> memory/* and
     -> memory_tools are gone for good, as are start_cmd -> memory/* and tools/builtin/__init__ ->
-    memory_tools. Memory is fully converted; the list is exactly the dispatch and autoresearch
-    conversions still to come."""
-    assert len(BURN_DOWN) == 6
+    memory_tools. Memory is fully converted, and so is dispatch: Discord is the dispatch plugin's
+    first adapter, start builds it through the generic channel branch, and channels/discord.py is
+    gone. The list is exactly the autoresearch conversion still to come."""
+    assert len(BURN_DOWN) == 4
     assert BURN_DOWN == frozenset({
-        ("cli/start_cmd.py", "channels/discord.py"), ("channels/__init__.py", "channels/discord.py"),
         ("cli/app.py", "cli/autoresearch_cmd.py"), ("cli/app.py", "cli/experiment_cmd.py"),
         ("cli/app.py", "cli/propose_cmd.py"), ("cli/app.py", "cli/report_cmd.py"),
     })
+    # The bundled-plugin list is the one core module that names the dispatch plugin.
+    assert {a for a, b in scan() if b.startswith("dispatch/")} == {"plugins/builtin.py"}
 
 
 def test_an_injected_plugin_import_in_agent_loop_is_reported():
@@ -196,8 +194,8 @@ def test_an_injected_plugin_import_in_agent_loop_is_reported():
     ("agent/loop.py", "if TYPE_CHECKING:\n    from localharness.channels import web\n",
      "channels/web/__init__.py"),
     ("agent/loop.py", "import localharness.autoresearch.loop as ar\n", "autoresearch/loop.py"),
-    ("agent/loop.py", "importlib.import_module('localharness.channels.discord')\n",
-     "channels/discord.py"),
+    ("agent/loop.py", "importlib.import_module('localharness.dispatch.plugin')\n",
+     "dispatch/plugin.py"),
     ("cli/app.py", "from . import memory_cmd\n", "cli/memory_cmd.py"),
     ("cli/app.py", "from .. import memory\n", "memory/__init__.py"),
     ("tools/builtin/__init__.py", "from .memory_tools import MemorySearchTool\n",

@@ -1,5 +1,6 @@
 """PAPI-09: the names `start --channel` accepts come from static manifests — core channels, every
-bundled manifest of kind "channel", and the legacy discord entry — resolved before any plugin loads."""
+bundled manifest of kind "channel" (discord is the bundled dispatch plugin's) — resolved before any
+plugin loads."""
 from __future__ import annotations
 
 import pytest
@@ -26,12 +27,17 @@ class _Exploding(Plugin):
         raise AssertionError("the resolver must never instantiate a plugin")
 
 
-def test_channel_names_are_core_legacy_and_bundled_channel_manifests(monkeypatch):
+def test_channel_names_are_core_and_bundled_channel_manifests(monkeypatch):
+    from localharness.dispatch.plugin import DispatchPlugin
+
     assert channel_names() == {"terminal", "acp", "discord", "web"}
+    # discord comes only from the bundled dispatch plugin's manifest: without it, no discord
     monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (ImagePlugin,))
+    assert channel_names() == {"terminal", "acp"}
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (ImagePlugin, DispatchPlugin))
     assert channel_names() == {"terminal", "acp", "discord"}
     monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (ImagePlugin, _FakeChannel, _FakeTools))
-    assert channel_names() == {"terminal", "acp", "discord", "fakechan"}
+    assert channel_names() == {"terminal", "acp", "fakechan"}
 
 
 def test_resolver_never_instantiates(monkeypatch):
@@ -172,3 +178,29 @@ def test_a_channel_plugin_turned_off_is_not_accepted(tmp_path, monkeypatch):
                                    encoding="utf-8")
     assert accepted_channels(resolve(ConfigLoader(config_dir=g))) == {"terminal", "acp"}
     assert "fakechan" in channel_names()
+
+
+def test_disabling_dispatch_removes_discord(tmp_path, monkeypatch):
+    """The real bundled dispatch plugin, turned off in the global config: `discord` leaves the
+    accepted set while channel_names() (the --help menu) still lists it."""
+    import yaml
+
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins import discovery, resolve as resolve_mod
+    from localharness.plugins.channels import accepted_channels
+    from localharness.plugins.resolve import resolve
+
+    monkeypatch.setitem(resolve_mod.resolve.__kwdefaults__, "extra_installed", lambda e: True)
+    monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [])
+    g = tmp_path / "g"
+    g.mkdir()
+    base = {"version": "1", "provider": {"provider_type": "vllm",
+            "base_url": "http://localhost:8000/v1", "default_model": "m"}}
+    (g / "config.yaml").write_text(yaml.safe_dump(base), encoding="utf-8")
+    assert "discord" in accepted_channels(resolve(ConfigLoader(config_dir=g)))
+    (g / "config.yaml").write_text(yaml.safe_dump({**base, "dispatch": {"enabled": False}}),
+                                   encoding="utf-8")
+    res = resolve(ConfigLoader(config_dir=g))
+    assert {e.name: e.state for e in res.plan.entries}["dispatch"] == "off"
+    assert "discord" not in accepted_channels(res)
+    assert "discord" in channel_names()

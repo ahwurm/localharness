@@ -390,7 +390,7 @@ class TestDreamingIndicator:
         # Terminal wires the dreaming dot through its bus subscription in start(); a
         # representative non-interactive channel (Discord) has no such surface at all —
         # the dot is REPL-terminal-only (the 33.3 thinking-spinner precedent).
-        from localharness.channels.discord import DiscordChannel
+        from localharness.dispatch.channel import DispatchChannel
         ch = self._channel()
         ch._history_file = str(tmp_path / ".repl_history")
         await ch.start()
@@ -399,8 +399,8 @@ class TestDreamingIndicator:
             assert ch._dreaming is not None  # delivered via the real bus subscription
         finally:
             await ch.stop()
-        assert not hasattr(DiscordChannel, "on_consolidation_started")
-        assert not hasattr(DiscordChannel, "on_consolidation_finished")
+        assert not hasattr(DispatchChannel, "on_consolidation_started")
+        assert not hasattr(DispatchChannel, "on_consolidation_finished")
 
 
 class TestContextMeter:
@@ -1023,10 +1023,10 @@ class TestTurnNarration:
 async def test_discord_renders_nothing_for_narration():
     """Non-terminal channels stay silent on interstitial narration: Discord inherits the
     base on_action (tool_call only) — an llm_response reaches NO send path there."""
-    from localharness.channels.discord import DiscordChannel
     from localharness.core.bus import EventBus
+    from tests.dispatch_support import build_dispatch_discord
 
-    ch = DiscordChannel(EventBus(), {})
+    ch = build_dispatch_discord(EventBus(), allow=(), channels=(), ack="✅")
     calls: list = []
 
     async def _spy(*a, **k):
@@ -1101,33 +1101,15 @@ async def test_discord_subscribes_parse_failed(monkeypatch):
     """WIRING for the Discord half — a dispatch run has nobody at a terminal, so if this
     subscription is dropped the failure goes silent exactly the way it did on 2026-08-05.
 
-    Drives the real DiscordChannel.start() against a stubbed discord module so the assertion
+    Drives the real DispatchChannel.start() against the shared fake discord module so the assertion
     is about the SUBSCRIPTION LIST, not the handler. An earlier version of this test called
     on_parse_failed() directly: it passed with the subscribe line deleted, which is the same
     green-test-nothing-wired failure this whole change exists to stop."""
-    import asyncio as _asyncio
-    import sys
-    import types
-    from localharness.channels.discord import DiscordChannel
     from localharness.core.events import ParseFailed
     from localharness.core.bus import EventBus
+    from tests.dispatch_support import build_dispatch_discord, install_fake_discord
 
-    stub = types.ModuleType("discord")
-
-    class _Intents:
-        message_content = False
-        @staticmethod
-        def default(): return _Intents()
-
-    class _Client:
-        def __init__(self, **kw): self.user = None
-        def event(self, fn): return fn
-        async def start(self, token): await _asyncio.sleep(3600)
-        async def close(self): pass
-
-    stub.Intents = _Intents
-    stub.Client = _Client
-    monkeypatch.setitem(sys.modules, "discord", stub)
+    install_fake_discord(monkeypatch)
 
     bus = EventBus()
     subscribed: list = []
@@ -1137,14 +1119,11 @@ async def test_discord_subscribes_parse_failed(monkeypatch):
         return real_subscribe(event_type, handler, **kw)
     monkeypatch.setattr(bus, "subscribe", _spy)
 
-    ch = DiscordChannel(bus, {"token": "t", "allow_users": ["1"]})
-    ch._ready.set()          # skip the on_ready handshake; we only care about the wiring
+    ch = build_dispatch_discord(bus, allow=("1",), channels=(), ack="✅")
     await ch.start()
     try:
         assert ParseFailed in subscribed, subscribed
     finally:
-        if ch._client_task:
-            ch._client_task.cancel()
         await ch.stop()
 
 

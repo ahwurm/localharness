@@ -1431,10 +1431,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # answers, serves history and holds the pending queue with the model server cold.
             # Unlike ACP it does NOT take a `serve()` branch below — the REPL drives it.
             channel = web_channel
-        elif channel_mode == "discord":
-            from localharness.channels.discord import DiscordChannel, discord_config_from_env
-            channel = DiscordChannel(bus=bus, config=discord_config_from_env())
-            console.print("[dim]Dispatch mode: Discord — listening for allowlisted messages.[/dim]")
         elif channel_mode in plugin_channel_names() - OWN_COMMAND:
             # Any bundled channel plugin, built without core naming it: the running plugin's own
             # make_channel (it hands the channel its validated settings), else its channels() class.

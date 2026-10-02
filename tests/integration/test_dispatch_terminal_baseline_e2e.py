@@ -9,7 +9,7 @@ Pinned per case in `tests/fixtures/dispatch_plugin/terminal_banner.txt`: the `Pl
 and the startup-warnings list. And in BOTH cases the first system prompt and the root tool names
 must still equal the Phase 47 memory goldens (read, never written here).
 
-The ONE allowed delta after the move: `DISPATCH_APPEND["present"]` becomes `", dispatch"` (49-06).
+The ONE allowed delta after the move: `DISPATCH_APPEND["present"]` is `", dispatch"` (49-06).
 Anything else that moves is a finding, never a regenerate.
 """
 from __future__ import annotations
@@ -30,7 +30,7 @@ from tests.integration.test_memory_compat_baseline_e2e import (
 
 GOLDEN = Path(__file__).resolve().parents[1] / "fixtures" / "dispatch_plugin" / "terminal_banner.txt"
 CASES = ("absent", "present")
-DISPATCH_APPEND = {"absent": "", "present": ""}
+DISPATCH_APPEND = {"absent": "", "present": ", dispatch"}  # dispatch (49) is bundled and on by default
 
 
 def _plugins_text(printed: list[str]) -> str:

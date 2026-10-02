@@ -194,7 +194,8 @@ async def test_a_typo_is_still_refused_before_any_plugin_code(tmp_path, monkeypa
     monkeypatch.setattr("localharness.plugins.resolve.resolve", boom)
     with pytest.raises(typer.BadParameter) as exc:
         await _start_async(None, False, False, str(tmp_path), channel_mode="testchta")
-    assert "unknown channel 'testchta'; choose one of: acp, discord, terminal, testchat" in str(exc.value)
+    # the bundle here is the test plugin alone, so discord (the dispatch plugin's) is not offered
+    assert "unknown channel 'testchta'; choose one of: acp, terminal, testchat" in str(exc.value)
 
 
 @pytest.mark.asyncio

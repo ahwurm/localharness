@@ -97,3 +97,53 @@ async def test_env_only_discord_start_turns_one_message_into_one_reply(tmp_path,
     assert fake.log.index(ack) < fake.log.index(("send", "c7", REPLY)), fake.log
     assert [r for r in fake.log if r[0] == "send" and r[2] == REPLY] == [("send", "c7", REPLY)]
     assert any(BANNER in p for p in printed), printed
+
+
+async def test_env_only_start_warns_once_per_variable(tmp_path, monkeypatch):
+    """All four LOCALHARNESS_DISCORD_* variables decide a field, so the start summary carries
+    exactly four deprecation lines, one per variable, and never the token itself."""
+    isolate_discord_env(monkeypatch, tmp_path)
+    token = "tkn-NEVER-PRINTED-49"
+    env = {"LOCALHARNESS_DISCORD_TOKEN": token, "LOCALHARNESS_DISCORD_ALLOW": "42",
+           "LOCALHARNESS_DISCORD_CHANNELS": "7", "LOCALHARNESS_DISCORD_ACK": "👀"}
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    fake = install_fake_discord(monkeypatch)
+
+    from localharness.cli.repl import OrchestratorREPL
+    from localharness.plugins import resolve
+
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: True)
+    real_run = OrchestratorREPL.run
+
+    async def feeder():
+        await _wait_for(lambda: fake.client is not None and "on_message" in fake.client.events,
+                        "the channel to register its gateway handlers")
+        await fake.deliver(fake.message(42, 7, "/quit"))
+
+    async def run(self):
+        feed = asyncio.ensure_future(feeder())
+        try:
+            await real_run(self)
+        finally:
+            feed.cancel()
+
+    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=run)
+    _offline_provider(tmp_path)
+    printed = _capture_start_console(monkeypatch)
+
+    from localharness.cli.start_cmd import _start_async
+    await asyncio.wait_for(
+        _start_async(None, False, False, str(tmp_path), channel_mode="discord"), 60
+    )
+
+    want = [f"dispatch: LOCALHARNESS_DISCORD_{var} is deprecated and stops working in 0.17.0 — set "
+            f"dispatch.discord.{field} (localharness components set dispatch.discord.{field} …)"
+            for var, field in (("TOKEN", "token"), ("ALLOW", "allow"), ("CHANNELS", "channels"),
+                               ("ACK", "ack"))]
+    summary = next(p for p in printed if "startup)" in p)  # warnings ride the summary line, `; `-joined
+    assert summary.count("dispatch: LOCALHARNESS_DISCORD_") == 4, summary
+    assert all(f"{w};" in summary or f"{w}]" in summary for w in want), summary
+    assert any(BANNER in p for p in printed), printed
+    assert any(r[0] == "react" and r[2] == "👀" for r in fake.log), fake.log  # the env ack decided
+    assert not any(token in str(p) for p in printed), "the token reached the console"

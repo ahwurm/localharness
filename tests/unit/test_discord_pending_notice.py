@@ -12,19 +12,16 @@ meaning.
 from __future__ import annotations
 
 import asyncio
-import sys
 import types
 
 import pytest
 
 from localharness.agent.gate_types import PendingCall, PermissionRequest
-from localharness.channels.discord import (
-    PENDING_REACTIONS,
-    DiscordChannel,
-    pending_notice_body,
-)
 from localharness.core.bus import EventBus
 from localharness.core.events import PermissionResolved, PermissionStaged
+from localharness.dispatch.adapters.discord import DiscordAdapter
+from localharness.dispatch.channel import PENDING_REACTIONS, DispatchChannel, pending_notice_body
+from tests.dispatch_support import build_dispatch_discord, discord_events, install_fake_discord
 
 SESSION = "sess-1"
 
@@ -67,16 +64,17 @@ class _Channel:
 class _InboundMessage:
     def __init__(self, *, can_edit: bool = True) -> None:
         self.channel = _Channel(can_edit=can_edit)
+        self.conversation = self.channel  # what DispatchChannel sends to
 
 
-def _discord_channel(*, can_edit: bool = True) -> DiscordChannel:
-    ch = DiscordChannel(EventBus(), {"token": "t", "allow_users": ["42"]})
-    ch._client = object()  # the notice path only checks it is not None
+def _discord_channel(*, can_edit: bool = True) -> DispatchChannel:
+    ch = build_dispatch_discord(EventBus(), allow=("42",), channels=(), ack="✅")
+    ch._ready.set()  # the notice path only checks the channel started
     ch._current_msg = _InboundMessage(can_edit=can_edit)
     return ch
 
 
-def _react(ch: DiscordChannel, message_id: int, emoji: str) -> None:
+def _react(ch: DispatchChannel, message_id: int, emoji: str) -> None:
     ch._reaction_waiters[message_id].put_nowait(emoji)
 
 
@@ -122,7 +120,7 @@ class _Resolver:
         self.calls.append((action, pending_id))
 
 
-async def _close(ch: DiscordChannel) -> None:
+async def _close(ch: DispatchChannel) -> None:
     """Shut down the notice waiters without `stop()`: these channels hold a placeholder client."""
     for notice in list(ch._pending_notices.values()):
         if notice.task is not None:
@@ -130,7 +128,7 @@ async def _close(ch: DiscordChannel) -> None:
     ch._pending_notices.clear()
 
 
-async def _settle(ch: DiscordChannel) -> None:
+async def _settle(ch: DispatchChannel) -> None:
     """Let the detached waiter task run to its next await."""
     for _ in range(4):
         await asyncio.sleep(0)
@@ -193,36 +191,8 @@ async def test_a_reaction_resolves_the_call_and_closes_the_message(emoji, action
 async def test_a_reaction_from_outside_the_allowlist_never_reaches_the_notice(monkeypatch):
     """Driven through the listener `start()` registers, so the gate on WHO may answer is the
     production one — the same allowlist that gates inbound messages."""
-    stub = types.ModuleType("discord")
-
-    class _Intents:
-        message_content = False
-
-        @staticmethod
-        def default():
-            return _Intents()
-
-    class _Client:
-        def __init__(self, **kw):
-            self.user = None
-            self.events: dict = {}
-
-        def event(self, fn):
-            self.events[fn.__name__] = fn
-            return fn
-
-        async def start(self, token):
-            await asyncio.sleep(3600)
-
-        async def close(self):
-            pass
-
-    stub.Intents = _Intents
-    stub.Client = _Client
-    monkeypatch.setitem(sys.modules, "discord", stub)
-
-    ch = DiscordChannel(EventBus(), {"token": "t", "allow_users": ["42"]})
-    ch._ready.set()
+    install_fake_discord(monkeypatch)
+    ch = build_dispatch_discord(EventBus(), allow=("42",), channels=(), ack="✅")
     await ch.start()
     try:
         ch._current_msg = _InboundMessage()
@@ -230,7 +200,7 @@ async def test_a_reaction_from_outside_the_allowlist_never_reaches_the_notice(mo
         ch._pending_resolver = resolver
         await ch.send_pending_notice(_pending(), 1)
         sent = ch._current_msg.channel.messages[0]
-        handler = ch._client.events["on_raw_reaction_add"]
+        handler = discord_events(ch)["on_raw_reaction_add"]
 
         await handler(types.SimpleNamespace(user_id=99, message_id=sent.id, emoji="✅"))
         await _settle(ch)
@@ -240,8 +210,6 @@ async def test_a_reaction_from_outside_the_allowlist_never_reaches_the_notice(mo
         await _settle(ch)
         assert resolver.calls == [("approve", 3)]
     finally:
-        if ch._client_task:
-            ch._client_task.cancel()
         await ch.stop()
 
 
@@ -319,10 +287,11 @@ async def test_without_a_resolver_the_tap_is_logged_and_said_out_loud(capsys):
 def test_a_long_command_is_truncated_into_one_message():
     """One message, never a chunked notice: the reactions have to stay on the line that shows
     the command they answer."""
-    from localharness.channels.discord import _DISCORD_LIMIT, PENDING_TRUNCATION_SUFFIX
+    from localharness.dispatch.channel import PENDING_TRUNCATION_SUFFIX
 
-    body = pending_notice_body(_pending(rendering="bash_exec: " + "x" * (_DISCORD_LIMIT * 2)), 1)
-    assert len(body) <= _DISCORD_LIMIT
+    limit = DiscordAdapter.message_limit
+    body = pending_notice_body(_pending(rendering="bash_exec: " + "x" * (limit * 2)), 1, limit)
+    assert len(body) <= limit
     assert body.endswith(PENDING_TRUNCATION_SUFFIX) or PENDING_TRUNCATION_SUFFIX in body
 
 
