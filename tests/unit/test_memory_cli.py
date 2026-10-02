@@ -91,3 +91,56 @@ def test_rm_retires_recoverably(tmp_path):
     fact, history = _fact(tmp_path, "notes/searxng")
     assert fact is None                               # off the hot path…
     assert history and history[0].status == "superseded"   # …but never destroyed
+
+
+def test_rm_retires_only_the_version_it_previewed(tmp_path, monkeypatch):
+    """M4: a live turn superseding the fact between preview and confirm wins — rm retires the id
+    it showed, never the newer version in its place."""
+    import threading
+
+    _seed(tmp_path)
+
+    def confirm_after_a_live_turn(*_a, **_k):
+        t = threading.Thread(target=_seed, args=(tmp_path,), kwargs={"value": "newer"})
+        t.start()
+        t.join()
+        return True
+
+    monkeypatch.setattr("typer.confirm", confirm_after_a_live_turn)
+    out = runner.invoke(app, ["memory", "rm", "notes/searxng", "--config-dir", str(tmp_path)])
+    assert out.exit_code == 0, out.output
+    assert "a live turn superseded it first; nothing changed." in out.output
+    fact, _ = _fact(tmp_path, "notes/searxng")
+    assert fact is not None and fact.value == "newer"
+
+
+def test_every_verb_reaches_the_store_through_store_browse(tmp_path, monkeypatch):
+    """MEMP-03: the CLI's verbs go through the memory plugin's StoreBrowse, not the raw store."""
+    from localharness.memory.browse import StoreBrowse
+
+    calls: list[str] = []
+    for verb in ("search", "get", "edit", "get_fact", "get_fact_by_id", "forget_fact",
+                 "list_archived", "count_archived", "restore_fact", "archive_dormant",
+                 "archive_listed"):
+        real = getattr(StoreBrowse, verb)
+
+        async def spy(self, *a, _real=real, _verb=verb, **k):
+            calls.append(_verb)
+            return await _real(self, *a, **k)
+        monkeypatch.setattr(StoreBrowse, verb, spy)
+
+    _seed(tmp_path)
+    _seed(tmp_path, key="other", value="other fact")
+    listing = tmp_path / "ids.txt"
+    listing.write_text("999\n", encoding="utf-8")
+    monkeypatch.setattr(click, "edit", lambda text, require_save=True: text + " edited")
+    cfg = ["--config-dir", str(tmp_path)]
+    for argv, want in ((["list"], "search"), (["list", "--archived"], "list_archived"),
+                       (["show", "notes/searxng"], "get"), (["edit", "notes/searxng"], "edit"),
+                       (["rm", "other", "--yes"], "forget_fact"), (["restore", "999"], "restore_fact"),
+                       (["archive", "--dry-run"], "archive_dormant"),
+                       (["archive", "--from-list", str(listing), "--dry-run"], "archive_listed")):
+        calls.clear()
+        out = runner.invoke(app, ["memory", *argv, *cfg])
+        assert out.exception is None or isinstance(out.exception, SystemExit), out.output
+        assert want in calls, (argv, calls, out.output)
