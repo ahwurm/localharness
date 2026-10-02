@@ -10,7 +10,7 @@ This release adds a plugin system: one API, one loader and one trust model, for
 plugins you install and for plugins that ship with LocalHarness. The first
 features to ship as plugins are image generation, new in this release and
 off until you turn it on, and the phone app (`localharness web`), on by
-default. Memory and Discord now ship as plugins too, both on by default; autoresearch is still part of core. The plugin API that 0.15.0 documented is
+default. Memory, Discord and autoresearch now ship as plugins too, all on by default. The plugin API that 0.15.0 documented is
 removed, so a plugin written for 0.15 no longer loads: see Removed and
 Migration.
 
@@ -23,7 +23,7 @@ Migration.
   `overrides.yaml`, never your `config.yaml`, and take effect at the next
   `localharness start`. `--workspace` writes a project's `overrides.yaml`
   instead; it is only for plugins that ship with LocalHarness (today: image, web,
-  memory and dispatch).
+  memory, dispatch and autoresearch).
 - **Image generation, as a plugin (off by default).** The `image` plugin adds
   a `generate_image` tool, a `localharness generate-image` command and a
   `doctor` check for a ComfyUI server you run on your own machine. Turn it on
@@ -155,6 +155,21 @@ Migration.
   status (shown, never counted as a failure), the channel attributes
   `bare_mode_command` and `start_banner`, and an optional `make_channel(name,
   bus)` plugin method. See spec 09.
+- **Autoresearch is the bundled `autoresearch` plugin, on by default.**
+  `localharness plugins disable autoresearch` sets it aside: `autoresearch`,
+  `experiment` and `propose` leave `localharness --help`, the `proposer.*` and
+  `sentinel.*` rows leave `components list`, and nothing on disk is deleted
+  (the experiment archive and your settings stay). `plugins enable
+  autoresearch` brings them back. Its settings keep their names, `proposer:`
+  and `sentinel:`. The bench and its holdout rule are unchanged and do not
+  depend on the plugin. `doctor` shows which proposer model and address are
+  configured, without the key and without contacting it.
+- `plugins info NAME` names the core settings a bundled plugin keeps under
+  their old names (for autoresearch: `proposer:` and `sentinel:`), and its
+  `--json` has a `sections` key (`[]` for every other plugin).
+- **Plugin API addition:** `PluginManifest.sections`, for plugins that ship
+  with LocalHarness only; a plugin you install that declares it is refused at
+  load. `PLUGIN_API_VERSION` stays "1".
 
 ### Changed
 - `init` writes `memory: {enabled: false}` when you decline memory. `/memory`
@@ -235,6 +250,19 @@ Migration.
   info`, `doctor`, error messages and the setup prompt show `**********`.
 - `plugins enable NAME --set …` now says when the plugin's install extra is
   missing, instead of only "takes effect on the next start".
+- `autoresearch`, `experiment` and `propose` are listed among the plugin
+  commands in `localharness --help`, so the order of that list changed. Each
+  command's own `--help` is unchanged.
+- Running a command of a bundled plugin that is off (for example `experiment`
+  with autoresearch off, or `web` with web off) now prints ``command
+  'experiment' is provided by the autoresearch plugin, which is off — run
+  `localharness plugins enable autoresearch` `` and exits 4. Before, it said
+  `No such command` and exited 2, which a script reading `experiment run`'s
+  exit code would take for the reject-holdout verdict.
+- `proposer.api_key` is shown as `**********` wherever it is displayed
+  (`components list`/`get`/`set`, `plugins info`, `doctor`).
+- `localharness` no longer imports the experiment loop at startup; its code
+  loads only when one of its commands runs.
 
 ### Deprecated
 - `org.memory_enabled` — use `memory.enabled`. Still honoured at every config
@@ -327,8 +355,8 @@ Migration.
   each variable still in use.
 
 ### Known limitations (named, not hidden)
-- Image generation, the phone app, memory and Discord ship as plugins;
-  autoresearch is still part of core. `/memory` and `localharness memory`
+- Image generation, the phone app, memory, Discord and autoresearch ship as
+  plugins. `/memory` and `localharness memory`
   are the memory plugin's own commands now; with memory off neither exists.
   The bench builds memory through the plugin.
 - A subagent's cruncher run asks the memory plugin for a write handle, and
@@ -368,6 +396,16 @@ Migration.
   off; `start --channel discord` then refuses and says how to turn it on.
 - The Discord token is stored as plain text in the global `overrides.yaml`
   (mode 600 when LocalHarness writes it).
+- `components set proposer.api_key …` writes the key as plain text to the
+  global `overrides.yaml`; no command prints it back.
+- Two cases still give a script an exit code that `experiment run` also uses
+  for a verdict: when the config cannot be read, an off plugin's command gets
+  `No such command` and exit 2 (reject-holdout); and when an on plugin's
+  command fails to import, it exits 1 (reject-train).
+- With autoresearch off, `components list` still shows its
+  `autoresearch.enabled` row, like every other plugin that is off.
+- Only plugins that ship with LocalHarness may own core settings under their
+  old names (`PluginManifest.sections`); a plugin you install cannot.
 
 ## [0.15.1] — 2026-10-01
 
