@@ -135,3 +135,118 @@ async def test_promote_without_a_project_layer_is_refused(store):
 async def test_promote_missing_names_it(store):
     assert await StoreBrowse(store).promote("nope") == \
         {"promoted": False, "message": "No memory named 'nope' — nothing to promote."}
+
+
+# ------------------------------------------- 48-02: plugin-internal delegates (NOT MemoryBrowse verbs)
+# The value of these methods is the access boundary — /memory, `localharness memory` and the bench
+# reach the store only through the plugin's own browse class — not new behaviour: each returns
+# exactly what the store returns.
+
+
+def _same(a, b):
+    """Two store results equal field for field (Fact dataclasses, dicts, lists, scalars)."""
+    return repr(a) == repr(b)
+
+
+async def test_every_delegate_returns_exactly_what_the_store_returns(store):
+    await _seed(store)
+    b = StoreBrowse(store)
+    fid = (await store.get_fact("proj/db")).id
+    from localharness.memory.sqlite import FactQuery
+    q = FactQuery(text=None, min_confidence=0.0)
+    pairs = [
+        (await b.list_groups(), await store.list_groups()),
+        (await b.list_groups(limit=1, named_only=True), await store.list_groups(limit=1, named_only=True)),
+        (await b.recent_facts(5), await store.recent_facts(5)),
+        (await b.get_fact("proj/db"), await store.get_fact("proj/db")),
+        (await b.get_fact_by_id(fid), await store.get_fact_by_id(fid)),
+        (await b.get_fact_history("proj/db"), await store.get_fact_history("proj/db")),
+        (await b.query_facts(q), await store.query_facts(q)),
+        (await b.list_archived(), await store.list_archived()),
+        (await b.list_archived(10, key="proj/db"), await store.list_archived(10, key="proj/db")),
+        (await b.count_archived(), await store.count_archived()),
+        (await b.restore_fact(999999), await store.restore_fact(999999)),
+    ]
+    for got, want in pairs:
+        assert _same(got, want)
+    assert await b.get_fact_by_id(fid) is not None
+
+
+async def test_archive_delegates_return_what_consolidation_returns(store):
+    from localharness.memory.consolidation import archive_dormant_facts, archive_listed_facts
+    await _seed(store)
+    b = StoreBrowse(store)
+    fid = (await store.get_fact("proj/db")).id
+    now = 2_000_000_000
+    assert _same(await b.archive_dormant(dry_run=True, now=now),
+                 await archive_dormant_facts(store, dry_run=True, now=now))
+    assert _same(await b.archive_listed(ids=[fid], dry_run=True, now=now),
+                 await archive_listed_facts(store, [fid], dry_run=True, now=now))
+
+
+async def test_forget_fact_retires_only_the_id_previewed(store):
+    """M4: a version a live turn superseded is never retired in its place."""
+    b = StoreBrowse(store)
+    old = await store.store_fact("proj/db", "postgres")
+    await store.store_fact("proj/db", "sqlite")  # a live turn supersedes the previewed version
+    assert await b.forget_fact(old.id) is False
+    assert (await store.get_fact("proj/db")).value == "sqlite"
+
+
+async def test_store_seeds_one_fact_exactly_as_store_fact(store):
+    """Today's bench seed is `store_fact(key, value, confidence=1.0)`; the seed verb writes the
+    same row (the store's own clamp and empty provenance included), with no embedding."""
+    b = StoreBrowse(store)
+    assert await b.store("k", "v") is None
+    await store.store_fact("direct", "v", confidence=1.0)
+    row = lambda f: (f.value, f.confidence, f.source, f.provenance, f.node_kind, f.tags, f.status)
+    seeded, direct = await store.get_fact("k"), await store.get_fact("direct")
+    assert row(seeded) == row(direct) and seeded.value == "v" and seeded.source == ""
+    assert getattr(seeded, "embedding", None) is None  # no embedder ran
+    await b.store("k2", "v2", confidence=0.5)
+    await store.store_fact("direct2", "v2", confidence=0.5)
+    assert (await store.get_fact("k2")).confidence == (await store.get_fact("direct2")).confidence
+
+
+async def _render(reply) -> str:
+    if isinstance(reply, str):
+        return reply
+    from rich.console import Console
+    console = Console(record=True, width=100, force_terminal=False, color_system=None)
+    console.print(reply)
+    return console.export_text()
+
+
+async def test_memory_dispatch_answers_the_same_over_the_browse_class(tmp_path):
+    from localharness.cli.memory_cmd import dispatch
+    a, c = make_store(tmp_path / "a"), make_store(tmp_path / "c")
+    await a.open(), await c.open()
+    try:
+        for s in (a, c):
+            await _seed(s)
+        fid = (await a.get_fact("proj/db")).id
+        assert fid == (await c.get_fact("proj/db")).id
+        for arg in ("", f"show {fid}", "search zebra", f"forget {fid}", f"forget {fid} confirm",
+                    f"show {fid}", "show nope", "bogus"):
+            assert await _render(await dispatch(StoreBrowse(a), arg)) == await _render(await dispatch(c, arg)), arg
+    finally:
+        await a.close(), await c.close()
+
+
+async def test_the_protocol_stays_five_verbs_and_a_five_verb_fake_still_passes(store):
+    import typing
+    from localharness.plugins.api import MemoryBrowse
+
+    members = (typing.get_protocol_members(MemoryBrowse) if hasattr(typing, "get_protocol_members")
+               else MemoryBrowse.__protocol_attrs__)
+    assert sorted(members) == ["edit", "forget", "get", "promote", "search"]
+
+    class Five:
+        async def search(self, query): ...
+        async def get(self, name): ...
+        async def edit(self, name, content, origin=""): ...
+        async def forget(self, name): ...
+        async def promote(self, name): ...
+
+    assert isinstance(Five(), MemoryBrowse)
+    assert isinstance(StoreBrowse(store), MemoryBrowse)
