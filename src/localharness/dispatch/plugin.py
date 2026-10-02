@@ -101,4 +101,6 @@ class DispatchPlugin(Plugin):
             detail = "Discord not configured" + ("" if len(missing) == 2 else
                                                  f" — dispatch.discord.{missing[0]} is empty")
             rows = [Check(name="dispatch", status="skip", detail=detail, hint=NOT_CONFIGURED_HINT)]
-        return rows + [Check(name="dispatch", status="warn", detail=line) for line in lines]
+        # doctor prints "<name>: <detail>", so the line's own "dispatch: " prefix would double
+        return rows + [Check(name="dispatch", status="warn", detail=line.removeprefix("dispatch: "))
+                       for line in lines]
