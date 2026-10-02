@@ -123,7 +123,7 @@ def test_org_config_valid():
 
 
 def test_memory_config_defaults():
-    from localharness.config.models import MemoryConfig
+    from localharness.memory.config import MemoryConfig
     cfg = MemoryConfig()
     assert cfg.max_notes_chars == 16_000
     assert cfg.inject_into_context is True
@@ -133,7 +133,7 @@ def test_trace_ambient_injection_default_on():
     """Owner reversal 2026-07-17: the every-turn ambient shelf IS an activation event and is
     traced (source='injection') by default. The kill-switch defaults ON; setting it False
     restores the pre-reversal behavior (no injection-trace rows, today's exact bytes)."""
-    from localharness.config.models import MemoryConfig
+    from localharness.memory.config import MemoryConfig
     cfg = MemoryConfig()
     assert cfg.trace_ambient_injection is True
 
@@ -296,7 +296,7 @@ def test_proposer_config_optional():
 
 def test_predictive_gate_extra_forbid():
     """extra='forbid' — an unknown predictive_gate key is rejected, not silently kept."""
-    from localharness.config.models import MemoryConfig
+    from localharness.memory.config import MemoryConfig
     with pytest.raises(ValidationError):
         MemoryConfig(predictive_gate={"nope": 1})
 

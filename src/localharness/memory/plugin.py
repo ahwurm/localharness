@@ -20,6 +20,7 @@ from localharness.plugins.api import (
     Availability, Check, ContextBudget, ContextContribution, MemorySlotPlugin, PluginContext,
     PluginManifest,
 )
+from localharness.memory.config import MemoryConfig
 
 if TYPE_CHECKING:
     from localharness.tools.base import ToolProtocol
@@ -32,7 +33,7 @@ class MemoryPlugin(MemorySlotPlugin):
 
     manifest = PluginManifest(name="memory", version="0.1.0", kind="memory", enabled_by_default=True)
     ConfigModel = None  # resolve() strips enabled; nothing else is harness-level
-    AgentConfigModel = None  # set to MemoryConfig when the model moves here (same commit as the registration)
+    AgentConfigModel = MemoryConfig
     wants_artifacts = False
 
     def __init__(self) -> None:

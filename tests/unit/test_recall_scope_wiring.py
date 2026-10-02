@@ -281,14 +281,15 @@ def _live_read(monkeypatch, rec: dict, seen: dict) -> None:
     """Replace the interactive loop with one that writes a workspace fact and then reads ambient
     context back THROUGH THE SESSION'S OWN ROUTER, mid-session, with both databases open.
 
-    The router is reached through the RECORDED `AgentLoop` kwarg, never through a private
-    attribute: the kwarg IS the wiring claim, so a read through anything else would grade an
+    The router is reached through the RECORDED `OrchestratorREPL` kwarg (the memory plugin's router,
+    handed over by the slot's legacy_handles()), never through a private attribute: the kwarg IS
+    the wiring claim, so a read through anything else would grade an
     object the session might not actually be using.
     """
     async def _read_through_the_router(self):
         await self._store.store_fact("ws-marker", f"{WS_MARKER} this project's recollection",
                                      confidence=0.9)
-        router = _one(rec, "loop")["recall_router"]
+        router = _one(rec, "repl")["recall_router"]
         seen["router"] = router
         seen["ctx"] = await router.load_context()
         return None
@@ -354,8 +355,8 @@ async def test_each_read_tool_receives_the_very_router_the_loop_got(tool, tmp_pa
 
     await _drive()
 
-    router = _one(rec, "loop")["recall_router"]
-    assert router is not None, "the loop got no router"
+    router = _one(rec, "repl")["recall_router"]
+    assert router is not None, "the session handed out no router"
     assert seen[tool], f"the {tool} tool was never constructed — the patch did not bite"
     assert seen[tool][0] is router, (
         f"memory_{tool} reads a different object than ambient injection does"
@@ -374,7 +375,7 @@ async def test_the_remember_tool_keeps_the_raw_store(tmp_path, monkeypatch, fake
 
     await _drive()
 
-    router = _one(rec, "loop")["recall_router"]
+    router = _one(rec, "repl")["recall_router"]
     assert seen["remember"], "MemoryRememberTool was never constructed — the patch did not bite"
     assert seen["remember"][0] is seen["instances"][0], "remember() lost the session's own store"
     assert seen["remember"][0] is not router, "remember() writes through the recall router"
@@ -439,7 +440,7 @@ async def test_a_session_without_a_workspace_builds_one_store_and_collapses_the_
     assert len(rec["store"]) == 1, (
         f"a workspace-less session must build exactly one store; got {len(rec['store'])}"
     )
-    router = _one(rec, "loop")["recall_router"]
+    router = _one(rec, "repl")["recall_router"]
     assert router is not None, "the workspace-less session got no router"
     assert router.scope == "workspace", "the scope did not collapse without a second store"
     assert router.configured_scope == "both", (

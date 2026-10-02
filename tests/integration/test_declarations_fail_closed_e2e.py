@@ -128,7 +128,12 @@ async def test_declarations_fail_closed_one_declaration_three_readers(tmp_path):
         return ""
 
     root = ToolRegistry()
-    await register_builtin_tools(root, memory_store=object(), eviction_store=ContentStore())
+    await register_builtin_tools(root, eviction_store=ContentStore())
+    # the memory verbs reach a real root from the memory plugin; registered directly here
+    from localharness.tools.builtin.memory_tools import MemoryGetTool, MemoryRememberTool, MemorySearchTool
+    _mem = object()
+    for _mt in (MemorySearchTool(_mem), MemoryGetTool(_mem), MemoryRememberTool(_mem)):
+        await root.register(_mt, scope="global")
     await root.register(AgentTool(agent_runner=_runner), scope="global")
     await root.register(mcp_tool, scope="mcp")
     registered = {**root._tools["global"], **root._tools["mcp"]}
@@ -206,7 +211,9 @@ async def test_start_reads_declarations_after_every_global_tool_is_registered(
             return [_Bare("plugin_probe")]
 
     # Step 5 is the plugin lifecycle (44-14); a bundled plugin reaches it through BUILTIN_PLUGINS.
-    monkeypatch.setattr("localharness.plugins.builtin.BUILTIN_PLUGINS", (_Probe,))
+    # The memory verbs are the memory plugin's, so it stays on the list beside the probe.
+    from localharness.memory.plugin import MemoryPlugin
+    monkeypatch.setattr("localharness.plugins.builtin.BUILTIN_PLUGINS", (_Probe, MemoryPlugin))
     rec = _install_recorders(monkeypatch)
     await _drive()
 

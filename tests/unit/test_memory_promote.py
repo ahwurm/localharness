@@ -480,13 +480,24 @@ async def test_the_repl_receives_the_very_router_the_loop_got(tmp_path, monkeypa
     """
     _home, _global_dir, _ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     rec = _install_recorders(monkeypatch)
+    # The memory plugin builds the session's one router (the loop no longer takes one): record
+    # every RecallRouter the session constructs, so "the very router" stays an identity check.
+    import localharness.memory.router as _router_mod
+    built: list = []
+    real_init = _router_mod.RecallRouter.__init__
+
+    def _rec_router(self, *args, **kwargs):
+        built.append(self)
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr("localharness.memory.router.RecallRouter.__init__", _rec_router)
 
     await _drive()
 
     router = _one(rec, "repl").get("recall_router")
     assert router is not None, "the REPL was constructed without the session's recall router"
-    assert router is _one(rec, "loop")["recall_router"], \
-        "the REPL got a DIFFERENT router than the loop — two handles on one database"
+    assert built == [router], \
+        "the REPL got a DIFFERENT router than the session built — two handles on one database"
 
 
 async def test_a_promoted_memory_is_actually_recalled_by_the_store_it_landed_in(two):

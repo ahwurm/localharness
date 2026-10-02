@@ -48,7 +48,12 @@ async def _registered_builtins() -> dict[str, object]:
     from localharness.tools.builtin import register_builtin_tools
 
     registry = ToolRegistry()
-    await register_builtin_tools(registry, memory_store=_Store(), eviction_store=_Store())
+    await register_builtin_tools(registry, eviction_store=_Store())
+    # the memory verbs reach a real root from the memory plugin; registered directly here
+    from localharness.tools.builtin.memory_tools import MemoryGetTool, MemoryRememberTool, MemorySearchTool
+    _mem = _Store()
+    for _mt in (MemorySearchTool(_mem), MemoryGetTool(_mem), MemoryRememberTool(_mem)):
+        await registry.register(_mt, scope="global")
     return {name: tool.info() for name, tool in registry._tools["global"].items()}
 
 

@@ -1411,6 +1411,8 @@ class AgentLoop:
             for heading, body in contribution.sections:
                 if body:
                     system_prompt += f"\n\n## {heading}\n{body}"
+        # Legacy memory path — the bench's only (bench/runner.py passes memory_loader=). Production start
+        # passes only memory_slot=. Deleted when the bench builds memory through the plugin lifecycle.
         if self._memory is not None:
             try:
                 # Default provenance for this session's writes (WRITE-04).

@@ -1270,8 +1270,11 @@ def _memory_loop_with_cfg(memory_loader, *, trace_ambient_injection=True):
     from localharness.config.models import AgentConfig
     from tests.conftest import FakeLLMResponse, MockLLMClient
 
-    cfg = AgentConfig(name="test-agent", role="You are a test assistant.",
-                      memory={"trace_ambient_injection": trace_ambient_injection})
+    from localharness.memory.config import MemoryConfig
+    cfg = AgentConfig(name="test-agent", role="You are a test assistant.")
+    # agent.memory is the memory plugin's now; the loader attaches it like this, and the legacy
+    # (bench) loop block reads it through getattr(config, "memory")
+    cfg._plugin_settings = {"memory": MemoryConfig(trace_ambient_injection=trace_ambient_injection)}
     llm = MockLLMClient([FakeLLMResponse(content="Done.")])
     return AgentLoop(
         config=cfg, llm=llm, bus=EventBus(), context_manager=ContextManager(),

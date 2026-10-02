@@ -37,6 +37,16 @@ class _Browse:
     async def promote(self, name: str): return {}
 
 
+class _BrowseOccupant(MemorySlotPlugin):
+    """A memory occupant offering a StoreBrowse — what the memory plugin's browse() returns."""
+
+    def __init__(self, browse) -> None:
+        self._b = browse
+
+    def browse(self):
+        return self._b
+
+
 class _Handle:
     async def persist_reduce_trace(self, question, trace): return None
 
@@ -65,8 +75,10 @@ def _loop(tmp_path, **kwargs) -> tuple[AgentLoop, list[str]]:
     guardrails = tmp_path / "orgs" / "default" / "GUARDRAILS.md"
     guardrails.parent.mkdir(parents=True, exist_ok=True)
     guardrails.write_text("RULES-G", encoding="utf-8")
-    cfg = AgentConfig(name="slot-agent", role="You are a test assistant.",
-                      memory={"max_notes_chars": 1234, "max_session_history_entries": 3})
+    from localharness.memory.config import MemoryConfig
+    cfg = AgentConfig(name="slot-agent", role="You are a test assistant.")
+    # agent.memory is the memory plugin's now; the loader attaches it exactly like this
+    cfg._plugin_settings = {"memory": MemoryConfig(max_notes_chars=1234, max_session_history_entries=3)}
     llm = MockLLMClient([FakeLLMResponse(content="Done.")])
     prompts: list[str] = []
     original = llm.stream_complete
@@ -279,18 +291,18 @@ async def test_a_memory_plugin_that_fails_to_start_leaves_the_slot_empty(tmp_pat
 
 @pytest.mark.asyncio
 async def test_seat_puts_an_occupant_on_this_slot_in_place(tmp_path):
-    """46-03: start_cmd seats the transitional occupant (ROADMAP D3) on the slot object every holder
-    already has — so seating mutates, never replaces."""
+    """seat() puts an occupant on the slot object every holder already has — it mutates, never
+    replaces."""
     from localharness.memory.browse import StoreBrowse
     from localharness.memory.sqlite import MemoryStore
 
     store = MemoryStore(agent_id="a", division_id="d", org_id="default", base_dir=str(tmp_path))
     await store.open()
     try:
-        slot, occupant = MemorySlot(), StoreBrowse(store)
-        slot.seat(occupant, name="memory")
+        slot, browse = MemorySlot(), StoreBrowse(store)
+        slot.seat(_BrowseOccupant(browse), name="memory")
         assert slot.occupied and slot.occupant_name == "memory"
-        assert slot.browse() is occupant
+        assert slot.browse() is browse
         assert await slot.context("t", ContextBudget(max_chars=10, max_session_history=1)) == \
             ContextContribution()
     finally:
@@ -299,8 +311,8 @@ async def test_seat_puts_an_occupant_on_this_slot_in_place(tmp_path):
 
 @pytest.mark.asyncio
 async def test_the_prompt_is_identical_with_the_occupant_seated(tmp_path):
-    """46-06 (D3): the transitional occupant only browses — its context() is the inherited empty one,
-    so seating it over a real store changes nothing the model sees."""
+    """An occupant that only browses (its context() the inherited empty one) over a real store
+    changes nothing the model sees."""
     from localharness.memory.browse import StoreBrowse
     from localharness.memory.sqlite import MemoryStore
 
@@ -308,7 +320,7 @@ async def test_the_prompt_is_identical_with_the_occupant_seated(tmp_path):
     await store.open()
     try:
         seated = MemorySlot()
-        seated.seat(StoreBrowse(store), name="memory")
+        seated.seat(_BrowseOccupant(StoreBrowse(store)), name="memory")
         loop, prompts = _loop(tmp_path / "seated", memory_slot=seated)
         empty, empty_prompts = _loop(tmp_path / "empty", memory_slot=MemorySlot())
         await loop.run_turn("hello")

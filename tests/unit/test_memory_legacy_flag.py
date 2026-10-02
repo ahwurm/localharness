@@ -74,9 +74,10 @@ def test_loader_reads_the_four_raw_legacy_values(tmp_path: Path):
         False, None, None, None)
 
 
-def test_resolve_says_nothing_while_memory_is_not_yet_a_plugin(tmp_path: Path, monkeypatch):
-    """Pre-cut: `memory` is a core agent key, so no `memory` layer exists and the fold is inert.
-    The composed proof (a real bundled `memory` plugin turned off by the legacy key) is 47-08's."""
+def test_resolve_folds_the_legacy_flag_now_memory_is_a_plugin(tmp_path: Path, monkeypatch):
+    """Post-cut (47-06): `memory` is a bundled plugin, so its layer exists and the fold is live —
+    the legacy key turns the real plugin off, with the deprecation line exactly once. (Pre-cut this
+    asserted the fold was inert.) The composed session proof is 47-08's."""
     monkeypatch.setattr("localharness.plugins.discovery.discover", lambda _d: [])
     g = tmp_path / "g"
     g.mkdir()
@@ -84,7 +85,8 @@ def test_resolve_says_nothing_while_memory_is_not_yet_a_plugin(tmp_path: Path, m
         "version: '1'\nprovider:\n  provider_type: ollama\n  base_url: http://localhost:11434/v1\n"
         "  default_model: m\n  api_key: none\norg:\n  memory_enabled: false\n")
     result = resolve(ConfigLoader(config_dir=g))
-    assert not [w for w in result.warnings if "org.memory_enabled" in w]
+    assert len([w for w in result.warnings if "org.memory_enabled" in w]) == 1
+    assert result.enabled["memory"] is False
 
 
 def test_resolve_wires_the_fold_and_the_line_once_a_memory_layer_exists(tmp_path: Path, monkeypatch):

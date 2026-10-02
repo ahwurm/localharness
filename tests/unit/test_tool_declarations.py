@@ -71,7 +71,12 @@ async def _builtin_schemas() -> dict[str, ToolSchema]:
         return ""
 
     registry = ToolRegistry()
-    await register_builtin_tools(registry, memory_store=object(), eviction_store=ContentStore())
+    await register_builtin_tools(registry, eviction_store=ContentStore())
+    # the memory verbs reach a real root from the memory plugin; registered directly here
+    from localharness.tools.builtin.memory_tools import MemoryGetTool, MemoryRememberTool, MemorySearchTool
+    _mem = object()
+    for _mt in (MemorySearchTool(_mem), MemoryGetTool(_mem), MemoryRememberTool(_mem)):
+        await registry.register(_mt, scope="global")
     tools = [*registry._tools["global"].values(),
              PythonExecTool(), CruncherExecTool(seed={}), AgentTool(agent_runner=_runner)]
     schemas = {tool.info().name: tool.info() for tool in tools}

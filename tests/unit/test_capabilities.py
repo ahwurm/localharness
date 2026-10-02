@@ -47,7 +47,12 @@ def _decl(name: str, *, ingest: str = "none", host: str = "safe") -> ToolSchema:
 async def _production_registry() -> ToolRegistry:
     """The root's global tools as start registers them: builtins, the memory verbs, tool_result_get."""
     reg = ToolRegistry()
-    await register_builtin_tools(reg, memory_store=object(), eviction_store=ContentStore())
+    await register_builtin_tools(reg, eviction_store=ContentStore())
+    # the memory verbs reach a real root from the memory plugin; registered directly here
+    from localharness.tools.builtin.memory_tools import MemoryGetTool, MemoryRememberTool, MemorySearchTool
+    _mem = object()
+    for _mt in (MemorySearchTool(_mem), MemoryGetTool(_mem), MemoryRememberTool(_mem)):
+        await reg.register(_mt, scope="global")
     return reg
 
 

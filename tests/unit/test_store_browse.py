@@ -1,4 +1,4 @@
-"""46-03 (WEBP-03): StoreBrowse — the memory slot's transitional occupant (ROADMAP D3) — answers the
+"""46-03 (WEBP-03): StoreBrowse — the memory plugin's browse API (its browse() returns one) — answers the
 five MemoryBrowse verbs over a REAL MemoryStore with today's phone record shape and provenance, so
 the phone's memory routes can read through the slot without changing what the phone gets."""
 from __future__ import annotations
@@ -96,11 +96,11 @@ async def test_forget_retires_and_keeps_history(store):
 # --------------------------------------------------------------------------- promote (no phone route)
 
 
-async def test_the_occupant_satisfies_memory_browse(store):
+async def test_the_browse_object_satisfies_memory_browse(store):
     from localharness.plugins.api import MemoryBrowse
 
     b = StoreBrowse(store)
-    assert isinstance(b, MemoryBrowse) and b.browse() is b
+    assert isinstance(b, MemoryBrowse)  # a plain browse object now; the memory plugin's browse() returns it
 
 
 async def test_promote_with_a_project_layer_copies_into_the_global_store(tmp_path):

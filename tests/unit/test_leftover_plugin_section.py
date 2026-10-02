@@ -185,12 +185,13 @@ def test_a_leftover_under_agent_in_overrides_is_attributed_to_overrides(g) -> No
 
 def test_an_unknown_key_inside_an_agent_section_keeps_pydantics_message(g) -> None:
     """Boundary pin, agent level: only a top-level key is a leftover."""
-    agent = _agent_file(g, "memory:\n  bogus: 1\n")
+    # `context:` — a core agent section (memory's left core in 47-06; nothing is bundled here)
+    agent = _agent_file(g, "context:\n  bogus: 1\n")
 
     with pytest.raises(ConfigValidationError) as exc:
         ConfigLoader(config_dir=g).load_agent_file(agent)
 
-    assert "memory.bogus (line 4): Extra inputs are not permitted" in str(exc.value), str(exc.value)
+    assert "context.bogus (line 4): Extra inputs are not permitted" in str(exc.value), str(exc.value)
     assert "no installed plugin" not in str(exc.value)
 
 

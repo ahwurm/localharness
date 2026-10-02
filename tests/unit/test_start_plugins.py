@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from localharness.cli.slash_commands import all_rows, find_row, set_plugin_rows
 from localharness.cli.theme import entity
+from localharness.memory.plugin import MemoryPlugin
 from localharness.plugins.api import Plugin, PluginManifest, PluginPaths, SlashDescriptor
 from localharness.plugins.discovery import DiscoveredPlugin
 from localharness.plugins.slot import MemorySlot
@@ -217,7 +218,7 @@ async def test_start_runs_a_bundled_plugin_through_the_lifecycle(tmp_path, monke
         during.extend([result.output, row, await row.handler("there") if row is not None else None])
 
     _stub_start_boundaries(tmp_path, monkeypatch, repl_run=_repl)
-    _bundle(monkeypatch, _Probe)
+    _bundle(monkeypatch, _Probe, MemoryPlugin)  # memory is a bundled plugin: it writes the session row
     loops = _record_loop(monkeypatch)
 
     await _start_async(None, False, False, str(tmp_path))
@@ -234,7 +235,7 @@ async def test_start_runs_a_bundled_plugin_through_the_lifecycle(tmp_path, monke
         "the plugin's rows must leave the table when the session ends"
     assert EVENTS == ["start", "repl", "pre_tool probe_echo", "stop"]
     slot = loop["memory_slot"]
-    # 46-06 (D3): memory is on, so the slot holds the transitional browse occupant, not a plugin
+    # memory is on, so the memory plugin occupies the slot
     assert isinstance(slot, MemorySlot) and slot.occupant_name == "memory"
     rows = _read_sessions(tmp_path)
     assert len(rows) == 1 and rows[0][3] == "complete"
@@ -275,7 +276,7 @@ async def test_a_plugin_whose_start_raises_is_named_and_the_session_goes_on(tmp_
 
     printed = _capture_start_console(monkeypatch)
     _stub_start_boundaries(tmp_path, monkeypatch)
-    _bundle(monkeypatch, _Crashes, _Probe)
+    _bundle(monkeypatch, _Crashes, _Probe, MemoryPlugin)
 
     await _start_async(None, False, False, str(tmp_path))
 
@@ -514,7 +515,7 @@ async def test_a_failure_at_every_stage_is_named_and_the_session_goes_on(tmp_pat
 
     printed = _capture_start_console(monkeypatch)
     _stub_start_boundaries(tmp_path, monkeypatch)
-    _bundle(monkeypatch, _BadConfigure, _BadTools, _Strict, _Probe)
+    _bundle(monkeypatch, _BadConfigure, _BadTools, _Strict, _Probe, MemoryPlugin)
     _discovers(monkeypatch, "lh-broken")
     with (tmp_path / "config.yaml").open("a") as f:
         f.write("lh-broken:\n  enabled: true\nstrict:\n  color: red\nbadtools:\n  enabled: 'yes'\n")
@@ -548,7 +549,7 @@ async def test_memory_row_follows_the_memory_slot_in_a_real_start(tmp_path, monk
     if not memory_on:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(cfg.read_text() + "org:\n  memory_enabled: false\n")
-    _bundle(monkeypatch)
+    _bundle(monkeypatch, MemoryPlugin)
 
     await _start_async(None, False, False, str(tmp_path))
 

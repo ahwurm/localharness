@@ -6,17 +6,14 @@ from localharness.tools.registry import ToolRegistry
 
 async def register_builtin_tools(
     registry: ToolRegistry,
-    memory_store=None,
     eviction_store=None,
     workspace_root: str | None = None,
 ) -> None:
     """Register all built-in tools at global scope. Call once at harness startup.
 
-    `memory_store`: if provided, registers memory_search / memory_get (queryable-memory
-    handle — the system prompt inlines only a fact index, full bodies served on demand).
     `eviction_store`: if provided, registers tool_result_get (restores tool-result bodies
-    evicted to stubs by the ContextManager). Both are wired only when their backing store
-    exists so the bench/test paths that pass neither keep the original builtin set.
+    evicted to stubs by the ContextManager); wired only when the store exists so the bench/test
+    paths that pass none keep the original builtin set. The memory tools are the memory plugin's.
     `workspace_root`: opt-in confinement (issue #15). When set, write/edit targets and
     bash_exec working_dir must resolve inside it; None (default) = unconfined."""
     from localharness.tools.builtin.bash_tool import BashExecTool
@@ -34,16 +31,6 @@ async def register_builtin_tools(
                  BashExecTool(workspace_root=workspace_root),
                  WebSearchTool(), WebFetchTool(), WebPageQueryTool(), ChunkTool(), LoadDocumentTool()]:
         await registry.register(tool, scope="global")
-
-    if memory_store is not None:
-        from localharness.tools.builtin.memory_tools import (
-            MemoryGetTool,
-            MemoryRememberTool,
-            MemorySearchTool,
-        )
-        await registry.register(MemorySearchTool(memory_store), scope="global")
-        await registry.register(MemoryGetTool(memory_store), scope="global")
-        await registry.register(MemoryRememberTool(memory_store), scope="global")
 
     if eviction_store is not None:
         from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool

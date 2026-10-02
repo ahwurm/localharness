@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from localharness.config.models import MemoryArchivalConfig, MemoryConsolidationConfig
+from localharness.memory.config import MemoryArchivalConfig, MemoryConsolidationConfig
 from localharness.core.bus import EventBus
 from localharness.memory import resonance as res
 from localharness.memory.consolidation import (

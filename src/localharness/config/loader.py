@@ -1104,12 +1104,14 @@ class ConfigLoader:
         # agent_plugin_sections() returns; resolve() re-validates and builds the instance.
         from localharness.plugins.builtin import bundled_plugins
         plugin_errors: list[ConfigFieldError] = []
+        plugin_settings: dict[str, Any] = {}
         for cls in bundled_plugins():
             name = cls.manifest.name
-            if cls.AgentConfigModel is None or name not in agent_sections:
+            if cls.AgentConfigModel is None:
                 continue
             try:
-                cls.AgentConfigModel.model_validate(agent_sections[name])
+                plugin_settings[name] = cls.AgentConfigModel.model_validate(
+                    agent_sections.get(name, {}))
             except ValidationError as exc:
                 for err in exc.errors():
                     loc = ".".join([name, *map(str, err["loc"])])
@@ -1148,6 +1150,7 @@ class ConfigLoader:
             raise ConfigValidationError(str(path), plugin_errors)
 
         self._agent_plugin_sections[result.name] = agent_sections
+        result._plugin_settings = plugin_settings  # read as attributes: result.memory.recall_scope
         return result
 
     def _global_layer_kill_file(

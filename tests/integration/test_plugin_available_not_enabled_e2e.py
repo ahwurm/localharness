@@ -178,7 +178,7 @@ def test_available_is_not_enabled(tmp_path, monkeypatch, fake_home):
     # --- start: the one-line hint, and still nothing imported ------------------------------------
     out, _ = start()
     assert HINT in out, f"no exact hint line in {out}"
-    assert [line.split("Plugins: ")[1].split("[/]")[0] for line in out if "Plugins:" in line] == ["web"]  # web is bundled and on by default (46-02)
+    assert [line.split("Plugins: ")[1].split("[/]")[0] for line in out if "Plugins:" in line] == ["web, memory"]  # web (46-02) and memory (47) are bundled and on by default
     assert not sentinel.exists() and not example_modules(), "start imported an available plugin"
     rows = _read_sessions(global_dir)
     assert len(rows) == 1 and rows[0][3] == "complete"
@@ -197,7 +197,7 @@ def test_available_is_not_enabled(tmp_path, monkeypatch, fake_home):
         f"from pathlib import Path\nPath({str(sneaky_marker)!r}).write_text('imported')\n")
     forget_example(sentinel)
     out, summary = start()
-    assert [line.split("Plugins: ")[1].split("[/]")[0] for line in out if "Plugins:" in line] == ["web"] and HINT in out, out  # web is bundled and on by default (46-02)
+    assert [line.split("Plugins: ")[1].split("[/]")[0] for line in out if "Plugins:" in line] == ["web, memory"] and HINT in out, out  # web (46-02) and memory (47) are bundled and on by default
     assert f"ignoring example.enabled in {ws / 'config.yaml'}: only the global config may set it" in summary
     assert not sentinel.exists() and not example_modules(), "a project's `enabled` loaded the plugin"
     assert "sneaky" not in {r["name"] for r in json.loads(_invoke("plugins", "list", "--json").stdout)}
@@ -234,7 +234,7 @@ def test_available_is_not_enabled(tmp_path, monkeypatch, fake_home):
     assert not sneaky_marker.exists(), "plugin code was loaded from a project folder"
     loaded = next(line for line in out if "Plugins: " in line)
     assert set(loaded.split("Plugins: ")[1].split("[/]")[0].split(", ")) == {
-        "web", "example", "bare", "readonlyfam", "allowfam"}, loaded  # web is bundled and on by default (46-02)
+        "web", "memory", "example", "bare", "readonlyfam", "allowfam"}, loaded  # web (46-02) and memory (47) are bundled and on by default
     registry, cfg = loops[-1]["tool_registry"], loops[-1]["config"]
     guarded = GateContext(boundary=ws, workspace=ws, grants=lambda *_: None, mode="guarded")
     for name in ("bare_tool", "readonlyfam_tool", "allowfam_tool"):

@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
-    from localharness.config.models import MemoryArchivalConfig, MemoryConsolidationConfig
+    from localharness.memory.config import MemoryArchivalConfig, MemoryConsolidationConfig
     from localharness.core.bus import EventBus, SubscriptionHandle
     from localharness.memory.resonance import ResonanceEngine
     from localharness.memory.salience import Salience

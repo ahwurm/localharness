@@ -95,7 +95,7 @@ def _install_a_full_session(monkeypatch) -> dict:
     seen: dict = {}
 
     async def _a_full_session(self):
-        from localharness.config.models import MemoryConsolidationConfig
+        from localharness.memory.config import MemoryConsolidationConfig
         from localharness.memory.consolidation import ConsolidationPass
 
         await self._store.store_fact(key="ws-lesson", value=WORKSPACE_MARKER, confidence=0.9)
@@ -214,7 +214,7 @@ async def test_the_offline_consolidation_pass_really_writes(tmp_path):
     That is a real row update in `facts`, which is exactly the kind of write the headline test
     asserts never reaches the global database.
     """
-    from localharness.config.models import MemoryConsolidationConfig
+    from localharness.memory.config import MemoryConsolidationConfig
     from localharness.memory.consolidation import ConsolidationPass
 
     store = MemoryStore(

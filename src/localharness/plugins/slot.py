@@ -1,10 +1,12 @@
 """Core's memory slot (PAPI-04, ROADMAP D1): at most one occupant of kind "memory", and it may be
 empty. Prompt assembly asks it for the per-turn section; the browse API and a subagent's write handle
 go through it. Every call into the occupant is contained — a failing memory plugin costs that turn
-its memory section, never the turn. Empty in every real session until memory converts."""
+its memory section, never the turn. The bundled memory plugin occupies it by default; it is empty with
+memory off or when the memory plugin failed to start."""
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from localharness.plugins.api import (
     ContextBudget, ContextContribution, MemoryBrowse, MemorySlotPlugin, MemoryWriteHandle,
@@ -24,8 +26,7 @@ class MemorySlot:
 
     def seat(self, occupant: MemorySlotPlugin, ctx: PluginContext | None = None,
              name: str | None = None) -> None:
-        """Seat an occupant on THIS slot, in place, so every holder of the slot sees it. For the
-        transitional occupant start_cmd seats after the lifecycle ran (ROADMAP D3; 47 deletes that)."""
+        """Seat an occupant on THIS slot, in place, so every holder of the slot sees it."""
         self._occupant, self._ctx, self._name = occupant, ctx, name
 
     @property
@@ -62,6 +63,17 @@ class MemorySlot:
         """A write handle for one subagent from the occupant; None — that subagent then persists
         nothing — with no occupant, none offered, or a failure (named)."""
         return self._ask("bind_subagent", MemoryWriteHandle, self._ctx)
+
+    def legacy_handles(self) -> tuple[Any, Any]:
+        """Transitional, duck-typed (deleted when /memory becomes the memory plugin's own command):
+        the occupant's (store, router) for the REPL's /memory, or (None, None) when the slot is
+        empty or the occupant offers none. Imports nothing."""
+        get = getattr(self._occupant, "legacy_handles", None)
+        try:
+            return tuple(get()) if get is not None else (None, None)
+        except Exception:  # noqa: BLE001 — a broken bridge is an absent /memory store, never a crash
+            log.warning("memory slot: legacy_handles() failed", exc_info=True)
+            return (None, None)
 
     def _ask(self, verb: str, kind: type, *args: object) -> object | None:
         if self._occupant is None:

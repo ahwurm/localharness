@@ -26,10 +26,10 @@ from localharness.config.loader import ConfigLoader
 from localharness.config.migrate import plan
 from localharness.config.models import (
     HarnessConfig,
-    MemoryConsolidationConfig,
     PermissionConfig,
 )
 from localharness.config.overlay import load_overlay
+from localharness.memory.config import MemoryConsolidationConfig
 
 runner = CliRunner()
 
