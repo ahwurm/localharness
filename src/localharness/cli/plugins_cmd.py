@@ -313,6 +313,15 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
         f"{name} {verb}d in {target} — takes effect on the next `localharness start`"), soft_wrap=True)
     for key, value in values.items():
         console.print(escape(f"  set {name}.{key} = {value}"), soft_wrap=True)
+    if on and not ask and entry.manifest is not None and entry.manifest.requires_extra:
+        # "takes effect on the next start" is not true while its install extra is missing; the
+        # interactive path says so through _probe's row, this one re-reads the plan it just wrote
+        from localharness.config.loader import ConfigLoader as _Loader
+        from localharness.plugins.resolve import resolve
+        after = resolve(_Loader(config_dir=loader.global_config_dir, local_config_dir=workspace)).plan.entry(name)
+        if after is not None and after.state == "needs-extra":
+            console.print("  [yellow]note:[/yellow] " + escape(
+                f"{name} is missing its install extra — {after.reason}"), soft_wrap=True)
     project = [s["enabled"] for s in loader.plugin_layers().get(name, (None,) * 4)[2:]
                if isinstance(s, dict) and isinstance(s.get("enabled"), bool)]
     if not to_workspace and entry.bundled and project and project[-1] is not on:
