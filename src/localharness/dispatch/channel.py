@@ -26,8 +26,10 @@ import structlog
 
 from localharness.channels.base import ChannelAdapter, sanitize_for_display
 from localharness.channels.errors import ChannelStartError
+from localharness.core.artifacts import artifact_root
 from localharness.core.bus import EventBus
 from localharness.core.events import (
+    ARTIFACT_MIMES,
     Action,
     Escalation,
     Heartbeat,
@@ -572,3 +574,28 @@ class DispatchChannel(ChannelAdapter):
     async def on_heartbeat(self, event: Heartbeat) -> None:
         # No spinner in chat. Typing indicators can come in a later iteration.
         pass
+
+    async def on_observation(self, event: Observation) -> None:
+        """Today's tool-result handling, then a typed artifact (G3) posted as a file reply to the
+        conversation being answered. The file is resolved only as `<id><suffix>` under core's
+        `artifact_root(state_dir, ref.plugin)` and must be one regular, non-symlink file with an
+        allowlisted mime; anything else is logged and nothing is sent."""
+        await super().on_observation(event)
+        ref, msg = event.artifact, self._current_msg
+        if ref is None or msg is None:
+            return
+        suffix = ARTIFACT_MIMES.get(ref.mime)
+        path = (artifact_root(self._state_dir, ref.plugin) / f"{ref.id}{suffix}"
+                if self._state_dir is not None and suffix else None)
+        try:
+            ok = path is not None and not path.is_symlink() and path.is_file()
+        except OSError:
+            ok = False
+        if not ok:
+            log.warning(f"{self.channel_id}_artifact_skipped", artifact=ref.id, mime=ref.mime,
+                        state_dir=self._state_dir is not None)
+            return
+        try:
+            await self._adapter.send_file(msg.conversation, path, ref.mime)
+        except Exception as e:  # noqa: BLE001 — a failed upload must never end the turn
+            log.error(f"{self.channel_id}_send_file_failed", error=str(e))

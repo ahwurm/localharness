@@ -180,13 +180,14 @@ def install_fake_discord(monkeypatch) -> FakeDiscord:
     return fake
 
 
-def build_dispatch_discord(bus, *, allow, channels, ack):
-    """DispatchChannel over the real DiscordAdapter (token "t"), on the same fake `discord`."""
+def build_dispatch_discord(bus, *, allow, channels, ack, state_dir=None):
+    """DispatchChannel over the real DiscordAdapter (token "t"), on the same fake `discord`.
+    `state_dir` (49-08) is where the outbound artifact path looks; None = no artifacts."""
     from localharness.dispatch.adapters.discord import DiscordAdapter
     from localharness.dispatch.channel import DispatchChannel
 
     return DispatchChannel(bus, {"adapter": DiscordAdapter(token="t"), "allow": set(allow),
-                                 "channels": set(channels), "ack": ack, "state_dir": None})
+                                 "channels": set(channels), "ack": ack, "state_dir": state_dir})
 
 
 def discord_events(ch) -> dict[str, Any]:
