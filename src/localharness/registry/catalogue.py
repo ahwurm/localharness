@@ -43,7 +43,8 @@ class ComponentEntry:
 @dataclass(frozen=True)
 class PluginRows:
     """What the catalogue lists for one plugin (ENAB-04): its enable switch, and — once loaded — every
-    leaf of its ConfigModel (`<name>.*`) and AgentConfigModel (`agent.<name>.*`)."""
+    leaf of its ConfigModel (`<name>.*`) and AgentConfigModel (`agent.<name>.*`). `sections`: the
+    top-level core settings a bundled plugin owns (its manifest's `sections`; empty otherwise)."""
     name: str
     enabled: bool
     enabled_default: bool
@@ -52,6 +53,7 @@ class PluginRows:
     agent_config_model: type[BaseModel] | None = None
     agent_config: BaseModel | None = None
     global_only: frozenset[str] = frozenset()   # paths relative to `<name>.` (incl. "enabled" for a plugin you installed)
+    sections: frozenset[str] = frozenset()
 
 
 def plugin_catalogue_rows(resolution: Resolution) -> tuple[PluginRows, ...]:
@@ -70,7 +72,8 @@ def plugin_catalogue_rows(resolution: Resolution) -> tuple[PluginRows, ...]:
         out.append(PluginRows(
             name, resolution.enabled[name], bundled and cls.manifest.enabled_by_default,
             cls.ConfigModel, settings.config, cls.AgentConfigModel, settings.agent_config,
-            _machine_only(cls.ConfigModel, bundled)))
+            _machine_only(cls.ConfigModel, bundled),
+            frozenset(cls.manifest.sections) if bundled else frozenset()))
     return tuple(out)
 
 
@@ -204,9 +207,15 @@ def build_catalogue(
     overlays = overlays or {}
     entries: dict[str, ComponentEntry] = {}
 
-    # 1. Static harness-level paths (provider.*, org.*, version)
+    # 1. Static harness-level paths (provider.*, org.*, version). A top-level section a bundled
+    #    plugin claims (PluginRows.sections) is tagged as that plugin's while it is on, and left
+    #    out while it is off; the config loader validates it the same either way.
+    owned = {s: p.name for p in plugins if p.enabled for s in p.sections}
+    hidden = {s for p in plugins if not p.enabled for s in p.sections} - owned.keys()
     if cfg is not None:
         for path, ann in walk_model_fields(HarnessConfig):
+            if path.split(".")[0] in hidden:
+                continue
             try:
                 current = get_value(cfg, path)
             except AttributeError:
@@ -218,6 +227,7 @@ def build_catalogue(
                 current_value=current,
                 default_value=_get_default(HarnessConfig, path),
                 winning_layer=_detect_layer(path, overlays),
+                plugin=owned.get(path.split(".")[0]),
             )
 
     # 2. Static agent-level paths (agent.role, agent.stuck_detector.*, agent.recovery_injection.*, etc.)

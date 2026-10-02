@@ -41,7 +41,8 @@ PlanState = Literal["on", "off", "available", "failed", "skipped", "refused", "n
 - skipped: enabled, but its `requires_localharness` excludes this version (or is not a range).
 - refused: it breaks a rule of the plan — its name is invalid, a core settings key or taken; its
   class names another plugin; it is kind "memory" without being a MemorySlotPlugin; it claims the
-  memory slot along with another plugin; or it is in a dependency cycle.
+  memory slot along with another plugin; it is a plugin you installed that declares `sections`; or
+  it is in a dependency cycle.
 - needs-extra: enabled, but the `localharness[<extra>]` install extra it needs is missing. Shown
   as "on (install … to use it)"; it does not load.
 """
@@ -196,6 +197,9 @@ def _check(name: str, source: str, bundled_cls: type[Plugin] | None, refusal: st
     manifest = cls.manifest
     if manifest.kind == "memory" and not issubclass(cls, MemorySlotPlugin):
         return entry("refused", 'its kind is "memory" but it is not a MemorySlotPlugin', cls)
+    if manifest.sections and not bundled:
+        return entry("refused", "declares sections (claiming core settings), which only bundled "
+                                "plugins may do", cls)
     spec = manifest.requires_localharness
     try:
         specifier = SpecifierSet(spec)

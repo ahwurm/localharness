@@ -139,6 +139,10 @@ class PluginManifest(BaseModel):
       pass: what to start, what files it needs, and optionally a prompt to paste into a coding agent.
     - `channels`: for kind "channel", the names `start --channel` accepts from this plugin; empty
       means the plugin's own name. Additive, optional; PLUGIN_API_VERSION unchanged.
+    - `sections`: BUNDLED plugins only — top-level core settings this plugin owns as a disclosed
+      exception (they keep their pre-plugin names). Tagged as the plugin's rows when it is on,
+      omitted from the catalogue when it is off; validation is unchanged in both states. Refused for
+      plugins you install. Additive, optional; PLUGIN_API_VERSION unchanged.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -155,6 +159,7 @@ class PluginManifest(BaseModel):
     setup: tuple[SetupField, ...] = ()
     setup_help: str = ""
     channels: tuple[str, ...] = ()
+    sections: tuple[str, ...] = ()
 
 
 Availability = Literal["ready"] | tuple[Literal["unconfigured"], str]
