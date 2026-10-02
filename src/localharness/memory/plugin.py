@@ -5,7 +5,12 @@ On by default. plugins/builtin.py imports this module for every `--help`, `docto
 so it imports only the plugin API at module level; the store (aiosqlite), the router, the resonance
 engine (numpy), consolidation, the tools and rich are imported inside the methods that use them.
 It lives in memory/ because memory/__init__.py re-exports lazily (PEP 562): importing this module
-runs the package __init__, which imports nothing. It never imports cli/start_cmd.py (PAPI-03)."""
+runs the package __init__, which imports nothing. It never imports cli/start_cmd.py (PAPI-03).
+
+doctor() is fast and offline: each memory.db opened read-only, the embedding model looked up in the
+local Hugging Face cache, the sentence_transformers package found — nothing loaded or downloaded.
+Behaviour change (locked "missing -> fail"): on an install without the `embeddings` extra, or
+without the model in the local cache, doctor now reports a failing `memory-embedding` row."""
 from __future__ import annotations
 
 import logging
@@ -193,6 +198,42 @@ class MemoryPlugin(MemorySlotPlugin):
             log.warning("memory context load failed — no memory injected this turn", exc_info=True)
             return ContextContribution()
 
+    def doctor(self, ctx: PluginContext) -> list[Check]:
+        """`memory-db` per `<state_dir>/agents/*/memory.db` (read-only: schema version + quick_check;
+        MemoryStore.open() would create and migrate) and one `memory-embedding` row."""
+        import sqlite3
+
+        from localharness.memory.sqlite import CURRENT_SCHEMA_VERSION
+        rows: list[Check] = []
+        for path in sorted((ctx.paths.state_dir / "agents").glob("*/memory.db")):
+            try:
+                conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+                try:
+                    version = conn.execute("PRAGMA user_version").fetchone()[0]
+                    check = conn.execute("PRAGMA quick_check").fetchone()[0]
+                finally:
+                    conn.close()
+            except sqlite3.DatabaseError as exc:
+                rows.append(Check(name="memory-db", status="fail",
+                                  detail=f"{path} is not a readable memory database ({exc})",
+                                  hint="move it aside; a fresh one is created on the next start"))
+                continue
+            if version > CURRENT_SCHEMA_VERSION:
+                rows.append(Check(name="memory-db", status="fail",
+                                  detail=f"{path}: schema {version}, this localharness reads up to "
+                                         f"{CURRENT_SCHEMA_VERSION}",
+                                  hint="a newer localharness wrote it — upgrade localharness"))
+            elif check != "ok":
+                rows.append(Check(name="memory-db", status="fail", detail=f"{path}: integrity check: {check}",
+                                  hint="restore it from a backup, or move it aside to start fresh"))
+            else:
+                rows.append(Check(name="memory-db", status="pass", detail=f"{path} (schema {version})"))
+        if not rows:
+            rows.append(Check(name="memory-db", status="skip",
+                              detail="no memory database yet — created on first start"))
+        return rows + [_embedding_check(getattr(ctx.agent_config, "embedding_model", None)
+                                        or "Qwen/Qwen3-Embedding-0.6B")]
+
     def browse(self) -> Any:
         return self._browse
 
@@ -204,3 +245,27 @@ class MemoryPlugin(MemorySlotPlugin):
     def legacy_handles(self) -> tuple[Any, Any]:
         """Transitional (deleted when /memory becomes the plugin's): the store and router for the REPL's /memory."""
         return (self._store, self._router)
+
+
+def _embedding_check(model: str) -> Check:
+    """Package importable and the model's config.json + modules.json in the local HF cache. Presence
+    of those files, not a verified complete weights download; never loads or downloads anything."""
+    import importlib.util
+
+    if importlib.util.find_spec("sentence_transformers") is None:
+        return Check(name="memory-embedding", status="fail",
+                     detail="the sentence_transformers package is not installed — memory search and "
+                            "consolidation cannot embed",
+                     hint="uv sync --extra embeddings")
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        present = all(isinstance(try_to_load_from_cache(model, f), str)
+                      for f in ("config.json", "modules.json"))
+    except ImportError:
+        present = False
+    if not present:
+        return Check(name="memory-embedding", status="fail",
+                     detail=f"embedding model {model} is not in the local Hugging Face cache",
+                     hint=f"download it now: `hf download {model}` — "
+                          "the first memory search would otherwise download it")
+    return Check(name="memory-embedding", status="pass", detail=f"embedding model {model} is in the local cache")
