@@ -46,6 +46,9 @@ def test_scanner_catches_each_marker(tmp_path, marker):
 def test_fallback_present_before_expiry():
     found = residue(SRC)
     assert "dispatch/config.py: def env_fallback" in found, found
+    # Every marker must match live code today, so a marker that has drifted (a typo, a renamed
+    # path) cannot leave a legacy source the 0.17.0 scan would no longer see.
+    assert {m for m in MARKERS if any(f.endswith(f": {m}") for f in found)} == set(MARKERS), found
     assert callable(getattr(dispatch_config, "env_fallback", None))
 
 
