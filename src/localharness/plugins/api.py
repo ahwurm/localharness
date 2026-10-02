@@ -344,7 +344,11 @@ class Plugin:
         return []
 
     def channels(self) -> dict[str, type[ChannelAdapter]]:
-        """The channel kinds this plugin provides, by the name `start --channel` accepts."""
+        """The channel kinds this plugin provides, by the name `start --channel` accepts.
+
+        A channel plugin may also define `make_channel(name, bus) -> ChannelAdapter`; start calls it
+        (after start()) instead of `channels()[name](bus=bus, config={})`, so the plugin hands its
+        own validated settings to the channel. Additive, presence-checked."""
         return {}
 
     def artifact_root(self, ctx: PluginContext) -> Path | None:
