@@ -81,6 +81,16 @@ def sentinels(tmp_path: Path, monkeypatch):
 
 
 @pytest.fixture
+def components_home(components_home: Path) -> Path:
+    """The shared home, reseeded without the LOCALHARNESS_TEST_PLUGINS_OFF sections: this module
+    bundles only its fakes, so a real plugin's `<name>: {enabled: false}` would be an unknown section
+    here (refused at load, by design) — the switch has nothing to turn off in this world."""
+    from tests.conftest import _minimal_config
+    (components_home / "config.yaml").write_text(_minimal_config(off=[]), encoding="utf-8")
+    return components_home
+
+
+@pytest.fixture
 def layers(tmp_path: Path) -> tuple[Path, Path]:
     """A global dir holding a minimal valid config.yaml, and an empty workspace `.localharness/`."""
     g, ws = tmp_path / "global", tmp_path / "proj" / ".localharness"
