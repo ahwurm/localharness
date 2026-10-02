@@ -167,7 +167,10 @@ network-host question on but not off, may not pick a looser `permissions.mode`, 
 **What this does NOT cover.** Your global config is trusted as it is: a value already in your
 global files is never checked, whoever put it there. A project value equal to your global value is
 treated as yours and left alone. A plugin you install decides for itself which of its settings are
-machine-level only; this list covers the plugins that ship with LocalHarness.
+machine-level only; this list covers the plugins that ship with LocalHarness. Apart from the
+settings above, a project's `org` settings (such as `org.audit_log_path`) still merge over your
+global ones; they have not yet been checked one by one for whether a project value can loosen a
+protection.
 
 ## Human approval gate
 
