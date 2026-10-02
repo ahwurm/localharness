@@ -2,7 +2,9 @@
 as registered, plus each ON plugin's CliDescriptors — from the manifest, without importing the
 command's module; the module is imported only when the command runs. Plugins are resolved only when
 Click asks for the command LIST (`--help`) or for a name no core command has, so `localharness start`
-pays nothing for this. An off plugin contributes nothing; a core command always wins a name clash.
+pays nothing for this. A core command always wins a name clash. An off plugin lists nothing; a BUNDLED
+off plugin's command, run by name, prints an enable hint and exits 4 — not Click's "No such command"
+exit 2, which a script reading `experiment run`'s `$?` would take for its reject-holdout verdict.
 
 Resolving reads the default config layers (the root has no --config-dir) and never asks about a
 workspace. Like every resolve, it imports an enabled plugin you installed — its manifest is in its
@@ -77,6 +79,27 @@ class LazyPluginCommand(TyperCommand):
             raise typer.Exit(1) from exc
 
 
+OFF_PLUGIN_HINT = "command '{name}' is provided by the {plugin} plugin, which is off — run `{fix}`"
+"""The tier-2 refusal wording of `start --channel` (start_cmd.CHANNEL_PLUGIN_NOT_ON), for a command."""
+
+
+class OffPluginCommand(TyperCommand):
+    """A bundled off plugin's command name: refused with the enable hint, exit 4 (outside every
+    command's verdict band). Known from the manifest alone — nothing of the plugin's is imported."""
+
+    def __init__(self, plugin: str, name: str, fix: str) -> None:
+        super().__init__(name, add_help_option=False)
+        self.plugin, self.fix = plugin, fix
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        ctx.args = list(args)  # `--help` and subcommands included: all of it gets the hint
+        return ctx.args
+
+    def invoke(self, ctx: click.Context) -> Any:
+        typer.echo(OFF_PLUGIN_HINT.format(name=self.name, plugin=self.plugin, fix=self.fix), err=True)
+        raise typer.Exit(4)
+
+
 class PluginCommandGroup(TyperGroup):
     """The root group: the core commands as registered, then the ON plugins' commands."""
 
@@ -86,18 +109,26 @@ class PluginCommandGroup(TyperGroup):
 
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         command = super().get_command(ctx, cmd_name)  # a core command first: it wins, and is free
-        return command if command is not None else _plugin_commands(ctx).get(cmd_name)
+        if command is not None:
+            return command
+        on, off = _mounted(ctx)
+        return on.get(cmd_name) or off.get(cmd_name)  # None: Click's "No such command", exit 2
 
 
 def _plugin_commands(ctx: click.Context) -> dict[str, click.Command]:
-    """{name: LazyPluginCommand} for the ON plugins, resolved once per invocation."""
+    """{name: LazyPluginCommand} for the ON plugins — what `--help` lists."""
+    return _mounted(ctx)[0]
+
+
+def _mounted(ctx: click.Context) -> tuple[dict[str, click.Command], dict[str, click.Command]]:
+    """(ON commands, bundled-off stubs), resolved once per invocation."""
     meta = ctx.find_root().meta
     if _CACHE not in meta:
         meta[_CACHE] = _resolve_commands()
     return meta[_CACHE]
 
 
-def _resolve_commands() -> dict[str, click.Command]:
+def _resolve_commands() -> tuple[dict[str, click.Command], dict[str, click.Command]]:
     from localharness.cli.workspace import resolve_workspace_layer
     from localharness.config.loader import ConfigLoader
     from localharness.plugins.resolve import resolve
@@ -107,7 +138,7 @@ def _resolve_commands() -> dict[str, click.Command]:
             None, interactive=False))).plan
     except Exception:  # noqa: BLE001 — never breaks the CLI: no plugin commands, core as before
         log.debug("plugin commands unavailable", exc_info=True)
-        return {}
+        return {}, {}
     commands: dict[str, click.Command] = {}
     # needs-extra plugins mount too: the command's own guard prints the install hint (WEBP-01);
     # a disabled plugin is in neither list, so its command is absent (PAPI-06).
@@ -115,4 +146,9 @@ def _resolve_commands() -> dict[str, click.Command]:
         entry = plan.entry(name)
         for desc in entry.manifest.cli if entry is not None and entry.manifest is not None else ():
             commands.setdefault(desc.name, LazyPluginCommand(name, desc))  # first in start order wins
-    return commands
+    # A bundled plugin that resolved off: its names get the hint. An installed plugin that is not
+    # enabled ("available") is not ours to name — Click's "No such command".
+    off = {desc.name: OffPluginCommand(e.name, desc.name, e.enable_command)
+           for e in plan.entries if e.bundled and e.state == "off" and e.manifest is not None
+           and e.enable_command for desc in e.manifest.cli if desc.name not in commands}
+    return commands, off

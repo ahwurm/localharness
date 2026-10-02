@@ -120,7 +120,9 @@ def test_with_image_off_there_is_no_command():
     help_ = runner.invoke(app, ["--help"], env={"COLUMNS": "400"})
     assert help_.exit_code == 0, help_.output
     assert "generate-image" not in help_.output
-    assert runner.invoke(app, ["generate-image", "x"]).exit_code == 2
+    # off bundled plugin: hint + exit 4, not Click's exit 2 (exit 2 is experiment run's reject-holdout verdict)
+    ran = runner.invoke(app, ["generate-image", "x"])
+    assert ran.exit_code == 4 and "is provided by the image plugin, which is off" in ran.stderr, ran.output
 
 
 def test_help_does_not_import_the_command_module(home, tmp_path):

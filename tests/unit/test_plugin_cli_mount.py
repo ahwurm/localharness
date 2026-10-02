@@ -146,7 +146,8 @@ def test_an_off_plugins_command_is_absent(mounted) -> None:
     helped, ran = _run("--help"), _run("swatchcmd")
 
     assert "swatchcmd" not in _help_rows(helped.output)
-    assert ran.exit_code == 2 and "No such command 'swatchcmd'" in ran.output
+    # off bundled plugin: hint + exit 4, not Click's exit 2 (exit 2 is experiment run's reject-holdout verdict)
+    assert ran.exit_code == 4 and "is provided by the swatch plugin, which is off" in ran.stderr, ran.output
     assert _MOD not in sys.modules
 
 
@@ -376,4 +377,5 @@ def test_a_disabled_web_plugin_has_no_command(mounted, monkeypatch) -> None:
     helped, ran = _run("--help"), _run("web")
 
     assert "web" not in _help_rows(helped.output)
-    assert ran.exit_code == 2 and "No such command 'web'" in ran.output
+    # off bundled plugin: hint + exit 4, not Click's exit 2 (exit 2 is experiment run's reject-holdout verdict)
+    assert ran.exit_code == 4 and "is provided by the web plugin, which is off" in ran.stderr, ran.output
