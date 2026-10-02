@@ -19,7 +19,7 @@ import pytest
 SRC = Path(__file__).resolve().parents[2] / "src" / "localharness"
 
 # Directories that are wholly one kind: the directory entry IS the explicit list.
-PLUGIN_DIRS = ("memory/", "channels/web/", "autoresearch/", "tools/builtin/workflows/")
+PLUGIN_DIRS = ("memory/", "dispatch/", "channels/web/", "autoresearch/", "tools/builtin/workflows/")
 CORE_DIRS = ("core/", "config/", "provider/", "agent/", "orchestrator/", "registry/", "plugins/",
              "bench/")
 # cli/, channels/ and tools/ hold both kinds, so every file in them is named. A new file there is
