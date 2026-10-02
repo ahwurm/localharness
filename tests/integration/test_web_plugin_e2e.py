@@ -75,7 +75,8 @@ def test_web_is_a_plugin_command_on_by_default_and_gone_when_disabled(tmp_path, 
     assert disabled.exit_code == 0, disabled.output
     assert "web" not in _help_rows(_invoke("--help").output)
     gone = _invoke("web")
-    assert gone.exit_code == 2 and "No such command 'web'" in gone.output, gone.output
+    # off bundled plugin: hint + exit 4, not Click's exit 2 (exit 2 is experiment run's reject-holdout verdict)
+    assert gone.exit_code == 4 and "is provided by the web plugin, which is off" in gone.stderr, gone.output
 
     # the terminal is unaffected: a terminal session still boots with web off
     printed = _capture_start_console(monkeypatch)

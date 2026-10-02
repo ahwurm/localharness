@@ -44,7 +44,8 @@ def test_memory_command_absent_with_memory_off(tmp_path, monkeypatch, fake_home)
         f.write("memory:\n  enabled: false\n")
     assert "memory" not in _help_rows(_invoke("--help").output)
     gone = _invoke("memory", "list")
-    assert gone.exit_code == 2 and "No such command 'memory'" in gone.output, gone.output
+    # off bundled plugin: hint + exit 4, not Click's exit 2 (exit 2 is experiment run's reject-holdout verdict)
+    assert gone.exit_code == 4 and "is provided by the memory plugin, which is off" in gone.stderr, gone.output
 
 
 def test_memory_help_usage_names_localharness_memory(tmp_path, monkeypatch, fake_home):
