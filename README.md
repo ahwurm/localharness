@@ -54,7 +54,7 @@ A frontier agent like Claude Code is still the easy way to set the harness up an
 - **Built-in tools** — read, write, edit, glob, grep, bash, python, web search/fetch, and subagent delegation
 - **Benchmark suite** — scenario corpus in `bench/` for measuring harness changes against your own model
 - **Autoresearch loop** — propose → gate → promote mutation archive for harness self-improvement experiments
-- **Pluggable channels** — terminal by default, or `localharness start --channel discord` to drive a session from Discord (needs the `dispatch` extra, `uv sync --extra dispatch`, plus `LOCALHARNESS_DISCORD_TOKEN` and `LOCALHARNESS_DISCORD_ALLOW`), or `localharness web` to drive one from a phone on your own private network — home-screen install, a pairing QR so you never type the token, and a lock-screen notification when a long turn finishes or the permission gate needs you (needs the `web` extra; ships a bare reference page, **not** a finished chat app — see [docs/web.md](docs/web.md))
+- **Pluggable channels** — terminal by default, or `localharness start --channel discord` to drive a session from Discord (the `dispatch` plugin, on by default; needs the `dispatch` extra, `uv sync --extra dispatch`, then `localharness plugins enable dispatch --set discord.token=… --set discord.allow=<your user id>`, or `localharness components set dispatch.discord.token …`; the token is never printed. The old `LOCALHARNESS_DISCORD_*` variables still work, with a warning, until 0.17.0. This plugin build of the bot is tested offline and not yet verified on a live Discord server), or `localharness web` to drive one from a phone on your own private network — home-screen install, a pairing QR so you never type the token, and a lock-screen notification when a long turn finishes or the permission gate needs you (needs the `web` extra; ships a bare reference page, **not** a finished chat app — see [docs/web.md](docs/web.md))
 
 **Answering a permission prompt in Discord.** When the gate needs a human, the bot posts a
 🛑 **Permission needed** message and reacts to it with your options: **✅ allow once**,
@@ -63,7 +63,7 @@ the terminal and Zed too), and **❌ no, this once**. In the default `auto` mode
 question that blocks is the workspace trust question, the first time you use a folder. A blacklisted call is
 posted as a pending decision instead, with ✅ (run it), ❌ (skip it) and the `/approve N` spelling in the text;
 answering it resolves the call and holds nothing up, and it does not expire. `♾️` appears in `guarded` and
-`trusted`, where answers are remembered. Only a user on `LOCALHARNESS_DISCORD_ALLOW` can answer. A blocking
+`trusted`, where answers are remembered. Only a user on `dispatch.discord.allow` can answer. A blocking
 question in those two modes does expire: if nobody reacts before `permissions.ask.timeout_s`, the call is denied
 and the message is edited to say so. React after that and nothing happens; ask again instead.
 
@@ -223,7 +223,7 @@ Tools run where the harness runs, and `bash_exec` always launches a real bash �
 
 A plugin adds tools, commands, slash commands and `doctor` checks. Image generation ships as a
 plugin, off until you turn it on (`localharness plugins enable image`), and so does the phone app
-(`web`, on by default), and so does memory (`memory`, on by default; `localharness plugins disable memory` turns it off); Discord and autoresearch are still part of core. LocalHarness finds plugins in two places on your machine: installed packages that
+(`web`, on by default), and so does memory (`memory`, on by default; `localharness plugins disable memory` turns it off). Discord is the dispatch plugin (`dispatch`, on by default; needs the `dispatch` extra). Autoresearch is still part of core. LocalHarness finds plugins in two places on your machine: installed packages that
 declare a `localharness.plugins` entry point, and folders `~/.localharness/plugins/<name>/`. It
 loads a plugin's code only once you turn that plugin on. Install a plugin package into the same
 Python environment as LocalHarness:
