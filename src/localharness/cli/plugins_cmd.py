@@ -34,7 +34,7 @@ from rich.padding import Padding
 from rich.table import Table
 
 from localharness.cli.components_cmd import (
-    _build_layered_loader, _err, _err_config, _serialize_value,
+    _build_layered_loader, _err, _err_config, _serialize_value, is_secret, scrub, shown,
 )
 from localharness.cli.workspace import _stdin_is_a_terminal
 from localharness.config.overlay import atomic_write_overlay, load_overlay
@@ -217,7 +217,8 @@ def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = 
 def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pairs: list[str],
              to_workspace: bool, overlay: dict[str, Any]) -> dict[str, Any]:
     """Put each --set KEY=VALUE under `<name>.` in `overlay`, after checking the section the next
-    start will read with the plugin's own ConfigModel; exit 2, writing nothing, on any refusal."""
+    start will read with the plugin's own ConfigModel; exit 2, writing nothing, on any refusal.
+    Returns each key's value as it may be SHOWN (a secret leaf masked)."""
     from localharness.config.plugin_sections import merge_plugin_layers
     from localharness.plugins import discovery
     from localharness.plugins.resolve import _machine_only
@@ -248,7 +249,8 @@ def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pai
         try:
             values[key] = coerce_value(raw, leaves[key])
         except ValueError as exc:
-            _fail(f"Cannot coerce {raw!r} for {name}.{key}: {exc}")
+            _fail(scrub(f"Cannot coerce {shown(raw, leaves[key])} for {name}.{key}: {exc}",
+                        [raw] if is_secret(leaves[key]) else []))
         set_value_in_dict(overlay, f"{name}.{key}", values[key])
     layers = list(loader.plugin_layers().get(name, (None,) * 4))
     # The written layer as it will read; a machine value holds in every project, so it is checked
@@ -260,8 +262,19 @@ def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pai
         model.model_validate({k: v for k, v in section.items() if k != "enabled"})
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — the plugin's own validator: contained
         why = exc if isinstance(exc, ValidationError) else f"{type(exc).__name__}: {exc}"
-        _fail(f"Validation failed for {name}: {why}")
-    return values
+        _fail(scrub(f"Validation failed for {name}: {why}",
+                    [v for _, v in walk_secret_values(leaves, overlay[name])]))
+    return {key: shown(value, leaves[key]) for key, value in values.items()}
+
+
+def walk_secret_values(leaves: dict[str, Any], section: dict[str, Any]):
+    """(key, raw value) for every secret leaf `section` holds — scrubbed from error texts."""
+    for key, ann in leaves.items():
+        if is_secret(ann):
+            node: Any = section
+            for part in key.split("."):
+                node = node.get(part) if isinstance(node, dict) else None
+            yield key, node
 
 
 def _set_spelling(name: str, setup) -> str:
@@ -290,7 +303,8 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     target = workspace / "overrides.yaml" if to_workspace else loader.user_overlay_path
     setup = entry.manifest.setup if (on and entry.manifest is not None) else ()
     if ask and setup:  # the answers go through the one checked write path, as --set values
-        pairs = [f"{f.key}={typer.prompt(f.prompt, default=f.default)}" for f in setup]
+        pairs = [f"{f.key}={typer.prompt(f.prompt, default=f.default, hide_input=f.secret)}"
+                 for f in setup]
     overlay = load_overlay(target)
     set_value_in_dict(overlay, f"{name}.enabled", on)
     values = _checked(resolution, loader, entry, pairs, to_workspace, overlay) if pairs else {}
@@ -298,7 +312,7 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     console.print("[green]✓[/green] " + escape(
         f"{name} {verb}d in {target} — takes effect on the next `localharness start`"), soft_wrap=True)
     for key, value in values.items():
-        console.print(escape(f"  set {name}.{key} = {value!r}"), soft_wrap=True)
+        console.print(escape(f"  set {name}.{key} = {value}"), soft_wrap=True)
     project = [s["enabled"] for s in loader.plugin_layers().get(name, (None,) * 4)[2:]
                if isinstance(s, dict) and isinstance(s.get("enabled"), bool)]
     if not to_workspace and entry.bundled and project and project[-1] is not on:

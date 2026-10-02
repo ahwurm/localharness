@@ -225,8 +225,47 @@ def _layer_cell(e: ComponentEntry) -> str:
     return e.winning_layer + (f" (plugin: {e.plugin})" if e.plugin else "")
 
 
-def _serialize_value(value: Any) -> Any:
-    """Render value for JSON output. Primitives passthrough; complex types -> repr."""
+SECRET_MASK = "**********"
+
+
+def is_secret(annotation: Any) -> bool:
+    """A SecretStr leaf (Optional included): its value is never printed, only SECRET_MASK."""
+    from pydantic import SecretStr
+    return annotation is SecretStr or SecretStr in getattr(annotation, "__args__", ())
+
+
+def shown(value: Any, annotation: Any = None) -> str:
+    """repr() for a human, masked for a secret leaf or a SecretStr value."""
+    from pydantic import SecretStr
+    return repr(SECRET_MASK) if is_secret(annotation) or isinstance(value, SecretStr) else repr(value)
+
+
+def scrub(text: str, secrets: Any) -> str:
+    """Replace every non-empty secret string in `text` with SECRET_MASK (error texts may echo input)."""
+    for secret in secrets:
+        if isinstance(secret, str) and secret:
+            text = text.replace(secret, SECRET_MASK)
+    return text
+
+
+def _overlay_secrets(catalogue: dict[str, ComponentEntry], overlay: dict) -> list[str]:
+    """The raw strings an overlay holds at secret leaves."""
+    out = []
+    for path, e in catalogue.items():
+        if is_secret(e.annotation):
+            node: Any = overlay
+            for part in path.split("."):
+                node = node.get(part) if isinstance(node, dict) else None
+            out.append(node)
+    return out
+
+
+def _serialize_value(value: Any, secret: bool = False) -> Any:
+    """Render value for JSON output. Primitives passthrough; complex types -> repr; a secret leaf
+    or SecretStr -> SECRET_MASK."""
+    from pydantic import SecretStr
+    if secret or isinstance(value, SecretStr):
+        return SECRET_MASK
     if value is None or isinstance(value, (bool, int, float, str, list, dict)):
         return value
     return repr(value)
@@ -437,12 +476,14 @@ def components_set(
     except ValueError as exc:
         _err(
             json_output,
-            f"Cannot coerce {value!r} to {entry.type_name}: {exc}",
+            scrub(f"Cannot coerce {shown(value, entry.annotation)} to {entry.type_name}: {exc}",
+                  [value] if is_secret(entry.annotation) else []),
             exit_code=2,
         )
         return
 
     before = entry.current_value
+    secret = is_secret(entry.annotation)
 
     # 4. Load existing overlay, deep-set new value, validate against the model that OWNS the path.
     #    agent.* validates against AgentConfig; everything else against the merged HarnessConfig
@@ -456,7 +497,8 @@ def components_set(
     except ValueError as exc:  # a pydantic ValidationError, or a plugin's contained validator failure
         _err(
             json_output,
-            f"Validation failed for {path}={typed_value!r}: {exc}",
+            scrub(f"Validation failed for {path}={shown(typed_value, entry.annotation)}: {exc}",
+                  _overlay_secrets(catalogue, new_overlay)),
             exit_code=2,
         )
         return
@@ -485,8 +527,8 @@ def components_set(
     bus = EventBus(persist_path=audit_path_resolved)
     event = ComponentMutated(
         path=path,
-        before_value=_serialize_value(before),
-        after_value=_serialize_value(typed_value),
+        before_value=_serialize_value(before, secret),
+        after_value=_serialize_value(typed_value, secret),
         layer="user",
         actor="cli",
     )
@@ -508,8 +550,8 @@ def components_set(
             _json.dumps(
                 {
                     "path": path,
-                    "before": _serialize_value(before),
-                    "after": _serialize_value(typed_value),
+                    "before": _serialize_value(before, secret),
+                    "after": _serialize_value(typed_value, secret),
                     # `layer` is the ComponentMutated audit event's own, older vocabulary and is
                     # NOT the registry band — renaming it would change a persisted log's schema.
                     # `target` is the honest addition: the file that was actually written.
@@ -527,7 +569,8 @@ def components_set(
         # like `[dim]` renders as nothing at all — this receipt would confirm setting a key to an
         # empty string. Same lesson as the path lines, applied to values (41-06 / doctor's rows).
         console.print(
-            "[green]set[/green] " + escape(f"{path} = {typed_value!r} (was: {before!r})"),
+            "[green]set[/green] " + escape(f"{path} = {shown(typed_value, entry.annotation)} "
+                                          f"(was: {shown(before, entry.annotation)})"),
             soft_wrap=True,
         )
         # escape(): a path is data, not markup — a folder named `[old] proj` must not be parsed
