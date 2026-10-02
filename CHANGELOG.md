@@ -10,7 +10,7 @@ This release adds a plugin system: one API, one loader and one trust model, for
 plugins you install and for plugins that ship with LocalHarness. The first
 features to ship as plugins are image generation, new in this release and
 off until you turn it on, and the phone app (`localharness web`), on by
-default; memory, Discord and autoresearch are still part of core. The plugin API that 0.15.0 documented is
+default. Memory now ships as a plugin too, on by default; Discord and autoresearch are still part of core. The plugin API that 0.15.0 documented is
 removed, so a plugin written for 0.15 no longer loads: see Removed and
 Migration.
 
@@ -22,7 +22,8 @@ Migration.
   `enable NAME [--set KEY=VALUE ...]` and `disable NAME` write an
   `overrides.yaml`, never your `config.yaml`, and take effect at the next
   `localharness start`. `--workspace` writes a project's `overrides.yaml`
-  instead; it is only for plugins that ship with LocalHarness (today: image).
+  instead; it is only for plugins that ship with LocalHarness (today: image, web
+  and memory).
 - **Image generation, as a plugin (off by default).** The `image` plugin adds
   a `generate_image` tool, a `localharness generate-image` command and a
   `doctor` check for a ComfyUI server you run on your own machine. Turn it on
@@ -117,13 +118,28 @@ Migration.
   longer loaded", with a link to how to port it. Nothing of it is imported.
 - **`localharness init` asks two questions** when run at a terminal: may the
   agent change this machine (write and edit files, run shell commands), and
-  should memory be on. "No" writes `org.permissions.mode: read-only` or the
-  new `org.memory_enabled: false`. With memory off, no memory store is opened
+  should memory be on. "No" writes `org.permissions.mode: read-only` or
+  `memory: {enabled: false}` (earlier development builds wrote
+  `org.memory_enabled: false`, now deprecated in favour of `memory.enabled`;
+  see Deprecated). With memory off, no memory store is opened
   and no memory tool is registered; memory files already on disk stay. A
   project's own `.localharness/config.yaml` can set either key for that
   project. A scripted `init` asks nothing and keeps the defaults.
+- **Memory is the bundled `memory` plugin, on by default.** `memory.enabled`
+  turns it off (`localharness plugins disable memory`, per project with
+  `--workspace`). Its tools, settings (`agent.memory.*`, listed by
+  `components list` as `(plugin: memory)`) and prompt section are unchanged.
+  `doctor` checks each memory database (read-only) and that the embedding
+  model is in the local cache, without loading it or using the network.
 
 ### Changed
+- `init` writes `memory: {enabled: false}` when you decline memory. `/memory`
+  is hidden while memory is off. While memory is on, `doctor` reports a
+  missing embedding model, or a missing embeddings extra, as a failure.
+- If the memory database cannot open, memory is off for that session: the
+  startup summary names the error, and no memory section, memory tool or
+  phone memory screen exists. Before, start carried on without a store and
+  said "in-memory mode".
 - With memory off, the phone's memory routes answer 404 (they answered 409
   before a session bound). With memory on, they read memory only through the
   memory slot.
@@ -167,6 +183,11 @@ Migration.
   under the file and line that hold it. `validate` names `overrides.yaml` and
   the line for an unknown key under its `agent:` section, where it used to
   blame the agent's own file.
+
+### Deprecated
+- `org.memory_enabled` — use `memory.enabled`. Still honoured at every config
+  layer until 1.0 (a layer's own `memory.enabled` wins), with one startup
+  warning naming the files that set it.
 
 ### Removed
 - **0.15.0's plugin API.** LocalHarness no longer loads `localharness.tools`
@@ -234,11 +255,12 @@ Migration.
   global one.
 
 ### Known limitations (named, not hidden)
-- Image generation and the phone app are the only features that ship as
-  plugins: memory, Discord and autoresearch are still part of core. The memory
-  slot's stand-in serves the phone's memory screen only; the prompt and the
-  memory tools still read core memory directly, and `/memory` and
-  `localharness memory` do not go through the slot.
+- Image generation, the phone app and memory ship as plugins; Discord and
+  autoresearch are still part of core. `/memory` and `localharness memory`
+  still reach the memory store directly rather than through the plugin, and
+  the bench drives the agent loop's older built-in memory path.
+- A subagent's cruncher run asks the memory plugin for a write handle, and
+  the plugin gives none: cruncher gists are not stored (as in 0.15).
 - The phone's memory screen lists, searches, shows a fact's history, edits
   and forgets; it has no promote button.
 - Incognito does not yet make the box forget: memory, sessions and pictures

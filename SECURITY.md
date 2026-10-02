@@ -648,6 +648,11 @@ Added with the web plugin:
   `/api/memory` routes call the slot's occupant; with memory off the slot is empty and they
   answer 404. A test pins that the web channel's server, channel, push, replay and protocol
   modules import nothing from `memory/` or the image plugin.
+- **Memory is the bundled `memory` plugin.** Its tools (`memory_search`, `memory_get`, `remember`)
+  carry the same safety declarations they always had, and as a bundled plugin it is exempt from
+  the third-party clamp. With memory off — `memory.enabled: false`, or the deprecated
+  `org.memory_enabled: false` at any layer — no memory tool is registered and the guardrails still
+  reach the prompt.
 - **`start --channel` accepts core channels and bundled channel plugins only**; an installed
   third-party plugin cannot add a channel in v0.16 — a channel sees every event, tool results
   included, and can inject user messages.
