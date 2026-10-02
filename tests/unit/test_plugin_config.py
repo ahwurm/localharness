@@ -380,3 +380,31 @@ def test_a_field_no_dot_path_can_fully_address_is_global_only_as_a_whole() -> No
     reference cannot be narrowed key by key, so the field that holds it is global-only entirely —
     and the recursion terminates."""
     assert global_only_paths(_Node) == {"secret", "child"}
+
+
+def test_dispatch_machine_keys_dropped_from_workspace(layers, known, monkeypatch) -> None:
+    """49-07 (ENAB-02 for dispatch): the REAL loader + resolve() over a workspace layer setting
+    dispatch.discord.token/allow/channels drops each with a warning naming the key and the file; the
+    global values stand; the layered `ack` is kept."""
+    from localharness.dispatch.plugin import DispatchPlugin
+    from localharness.plugins.resolve import resolve
+
+    known()
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (DispatchPlugin,))
+    g, ws = layers
+    _write_yaml(g / "config.yaml", {**_MINIMAL, "dispatch": {"discord": {
+        "token": "global-tok", "allow": ["42"], "channels": ["7"]}}})
+    _write_yaml(ws / "config.yaml", {"dispatch": {"discord": {
+        "token": "ws-tok", "allow": ["43"], "channels": ["8"], "ack": "👀"}}})
+    loader = ConfigLoader(config_dir=g, local_config_dir=ws)
+    loader.load_harness()
+
+    res = resolve(loader, extra_installed=lambda e: True)
+
+    s = res.settings["dispatch"].config.discord
+    assert (s.token.get_secret_value(), s.allow, s.channels, s.ack) == ("global-tok", ["42"], ["7"], "👀")
+    dropped = [w for w in res.warnings if w.startswith("ignoring dispatch.discord.")]
+    assert sorted(w.split()[1] for w in dropped) == [
+        "dispatch.discord.allow", "dispatch.discord.channels", "dispatch.discord.token"], res.warnings
+    assert all(str(ws / "config.yaml") in w for w in dropped), dropped
+    assert not any("ws-tok" in w or "global-tok" in w for w in res.warnings), res.warnings
