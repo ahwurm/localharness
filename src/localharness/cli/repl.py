@@ -204,8 +204,6 @@ class OrchestratorREPL:
         workspace: Path | None = None,
         harness_config: Any = None,
         on_agent_deployed: Any = None,
-        memory_store: Any = None,
-        recall_router: Any = None,
         gate: Any = None,
     ) -> None:
         self._orchestrator = orchestrator
@@ -224,14 +222,6 @@ class OrchestratorREPL:
         # discovers anything itself; the answer arrives here as an argument.
         self._workspace = workspace
         self._harness = harness_config  # HarnessConfig — needed by /model to persist swaps
-        # The agent's opened MemoryStore — the /memory window reads/retires through it. None in
-        # tests / in-memory sessions (no persistence) → /memory reports it's unavailable.
-        self._store = memory_store
-        # v0.13 MEMS-05: the session's recall router (memory/router.py). `/memory promote` borrows
-        # its global handle — ONE owner for that connection, opened lazily by the router and closed
-        # by `start`'s shutdown, so this never opens a second connection to the same database.
-        # None in tests / sessions without a store → promote explains itself and writes nothing.
-        self._recall_router = recall_router
         # #58: called with the deployed agent's name after a successful in-session creation,
         # to register it into the LIVE session (card registry + AgentTool advertisement) so
         # /agents lists it and the model can delegate to it without a restart. None in tests
@@ -299,13 +289,6 @@ class OrchestratorREPL:
         the same session and must stay textually distinct.
         """
         return self._workspace if self._workspace is not None else self._config_dir
-
-    @property
-    def _promote_identity(self) -> str:
-        """Which workspace a promoted fact came from: the PROJECT ROOT, realpath'd — the same
-        identity `permissions.workspace_root` uses (config/loader.py) and 1:1 with the trust
-        store's key. Empty when no workspace applies."""
-        return str(self._workspace.resolve().parent) if self._workspace is not None else ""
 
     async def run(self) -> None:
         """Entry point. Route to the persistent-input-box loop on a real interactive terminal
@@ -1189,11 +1172,6 @@ class OrchestratorREPL:
 
     async def _slash_deny(self, args: str, args_lower: str) -> None:
         await self._handle_pending_answer(args_lower, approve=False)
-
-    async def _slash_memory(self, args: str, args_lower: str) -> None:
-        # The ORIGINAL case — ids and search words are case-sensitive. A table row, so a bare
-        # "/memory" is claimed before the unknown-/word reject.
-        await self._handle_memory_cmd(args.strip())
 
     async def _slash_agents(self, args: str, args_lower: str) -> None:
         cards = self._orchestrator._card_registry.all_cards()
@@ -2101,36 +2079,6 @@ class OrchestratorREPL:
         if colorize:
             meta["colorize"] = "rates"  # terminal styles 'N t/s measured' notes by band
         await self._channel.send_message(text, metadata=meta)
-
-    # ------------------------------------------------------------------ #
-    # /memory — the tag-hierarchy window into persistent memory
-    # ------------------------------------------------------------------ #
-
-    async def _handle_memory_cmd(self, arg: str) -> None:
-        """`/memory` — browse/inspect/retire the agent's persistent memory, navigated by the tag
-        hierarchy (overview / list / show / forget / search). Model-free; delegates to
-        cli.memory_cmd.dispatch and prints its plain text. Works unchanged in classic + box mode:
-        a slash command queues mid-turn and runs between turns. Reads are WAL-safe under a live
-        turn's writes; a render slip is contained so it can never tear down the REPL."""
-        from localharness.cli import memory_cmd
-
-        router = self._recall_router
-        try:
-            result = await memory_cmd.dispatch(
-                self._store, arg,
-                # The BOUND METHOD, never its result: awaiting ensure_global here would open the
-                # machine-global database on every /memory keystroke, a bare overview included.
-                promote_target=router.ensure_global if router is not None else None,
-                workspace_identity=self._promote_identity,
-            )
-        except Exception as exc:  # noqa: BLE001 — a read/render slip must never kill the session
-            log.warning("/memory failed", exc_info=True)
-            result = f"/memory failed: {exc}"
-        # overview + show render as rich trees (renderables); listings/search/forget stay text.
-        if isinstance(result, str):
-            await self._send_info(result)
-        else:
-            await self._channel.send_renderable(result)
 
     def _detect_creation_intent(self, user_input: str) -> bool:
         """Check if user input signals agent creation intent."""

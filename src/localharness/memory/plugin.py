@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from localharness.plugins.api import (
     Availability, Check, ContextBudget, ContextContribution, MemorySlotPlugin, PluginContext,
-    PluginManifest,
+    PluginManifest, SlashDescriptor,
 )
 from localharness.memory.config import MemoryConfig
 
@@ -31,7 +31,11 @@ log = logging.getLogger(__name__)
 class MemoryPlugin(MemorySlotPlugin):
     """persistent memory: facts recalled into each turn, memory tools, background consolidation"""
 
-    manifest = PluginManifest(name="memory", version="0.1.0", kind="memory", enabled_by_default=True)
+    manifest = PluginManifest(
+        name="memory", version="0.1.0", kind="memory", enabled_by_default=True,
+        slash=(SlashDescriptor(name="/memory",
+                               help="Browse the agent's memory by tag; show/forget/search a memory",
+                               target="localharness.memory.plugin:MemoryPlugin.slash_memory"),))
     ConfigModel = None  # resolve() strips enabled; nothing else is harness-level
     AgentConfigModel = MemoryConfig
     wants_artifacts = False
@@ -243,9 +247,21 @@ class MemoryPlugin(MemorySlotPlugin):
         # (agent/subagent.py) and awaits the owner's ruling — persist gists here, or delete the verb.
         return None
 
-    def legacy_handles(self) -> tuple[Any, Any]:
-        """Transitional (deleted when /memory becomes the plugin's): the store and router for the REPL's /memory."""
-        return (self._store, self._router)
+    async def slash_memory(self, ctx: PluginContext, args: str) -> Any:
+        """`/memory` — the plugin's own row over its StoreBrowse: text, or a rich tree for overview/show.
+        A read/render slip is contained here with the text the REPL's core row used."""
+        from localharness.cli import memory_cmd  # memory plugin file -> memory plugin file
+        b, router = self._browse, self._router
+        try:
+            return await memory_cmd.dispatch(
+                b, args,
+                # The BOUND METHOD, never its result: awaiting ensure_global would open the
+                # machine-global database on every /memory, a bare overview included.
+                promote_target=router.ensure_global if router is not None else None,
+                workspace_identity=b._identity if b is not None else "")
+        except Exception as exc:  # noqa: BLE001 — a read/render slip must never kill the session
+            log.warning("/memory failed", exc_info=True)
+            return f"/memory failed: {exc}"
 
 
 def _embedding_check(model: str) -> Check:

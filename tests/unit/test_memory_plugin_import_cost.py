@@ -30,9 +30,13 @@ def test_package_names_still_resolve() -> None:
 
 def test_manifest() -> None:
     from localharness.memory.plugin import MemoryPlugin
-    from localharness.plugins.api import PluginManifest, plugin_summary
-    assert MemoryPlugin.manifest == PluginManifest(name="memory", version="0.1.0", kind="memory",
-                                                   enabled_by_default=True)
+    from localharness.plugins.api import PluginManifest, SlashDescriptor, plugin_summary
+    # 48: /memory is the plugin's own slash row (PAPI-07) — the one manifest field added.
+    assert MemoryPlugin.manifest == PluginManifest(
+        name="memory", version="0.1.0", kind="memory", enabled_by_default=True,
+        slash=(SlashDescriptor(name="/memory",
+                               help="Browse the agent's memory by tag; show/forget/search a memory",
+                               target="localharness.memory.plugin:MemoryPlugin.slash_memory"),))
     assert plugin_summary(MemoryPlugin) == (
         "persistent memory: facts recalled into each turn, memory tools, background consolidation")
     assert MemoryPlugin.wants_artifacts is False

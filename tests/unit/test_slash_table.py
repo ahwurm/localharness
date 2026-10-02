@@ -42,7 +42,6 @@ CORE = [
     ("/pending", "Tool calls parked for you to answer"),
     ("/approve", "Run a parked call; /approve [N] (default: the oldest)"),
     ("/deny", "Drop a parked call; /deny [N] (default: the oldest)"),
-    ("/memory", "Browse the agent's memory by tag; show/forget/search a memory"),
     ("/quit", "Exit LocalHarness"),
     ("/exit", "Exit LocalHarness"),
 ]
@@ -58,7 +57,6 @@ HELP_BEFORE = (
     "  /pending    Tool calls parked for you to answer\n"
     "  /approve    Run a parked call; /approve [N] (default: the oldest)\n"
     "  /deny       Drop a parked call; /deny [N] (default: the oldest)\n"
-    "  /memory     Browse the agent's memory by tag; show/forget/search a memory\n"
     "  /quit       Exit LocalHarness\n"
     "  /exit       Exit LocalHarness\n"
     "\n"
@@ -97,7 +95,7 @@ async def _phone_menu(tmp_path) -> list[dict]:
 
 # ------------------------------------------------------------ no plugin rows: nothing moved
 
-def test_the_core_table_is_todays_twelve_rows_in_order():
+def test_the_core_table_is_todays_eleven_rows_in_order():
     assert [tuple(row) for row in SLASH_COMMANDS] == CORE  # a row unpacks as (name, description)
     assert all_rows() == SLASH_COMMANDS
 
@@ -112,7 +110,7 @@ def test_the_completer_offers_the_same_menu():
     assert _completions("/M") == _completions("/m")
 
 
-async def test_the_phone_menu_is_the_same_twelve_rows_in_order(tmp_path):
+async def test_the_phone_menu_is_the_same_eleven_rows_in_order(tmp_path):
     assert await _phone_menu(tmp_path) == [{"name": n, "description": d} for n, d in CORE]
 
 
@@ -129,7 +127,6 @@ PARITY = [
     ("/approve 2", "_handle_pending_answer", (" 2",), {"approve": True}),   # lowered, NOT stripped
     ("/APPROVE  2 ", "_handle_pending_answer", ("  2",), {"approve": True}),
     ("/deny", "_handle_pending_answer", ("",), {"approve": False}),
-    ("/memory Show 12", "_handle_memory_cmd", ("Show 12",), {}),     # original case kept
     ("/pending", "_handle_pending_cmd", (), {}),
 ]
 
@@ -345,19 +342,36 @@ async def test_setting_rows_replaces_them_and_empty_rows_remove_them_all(rows):
     assert channel.sent == [("Unknown command: /other — /help lists commands.", ERROR)]
 
 
-# ------------------------------------------------------------ G5: /memory follows the memory slot
+# ------------------------------------------------------------ /memory is the memory plugin's row
 
-def test_memory_row_hidden_when_unavailable(rows):
-    from localharness.cli.slash_commands import set_memory_available
-    core_memory = next(r for r in SLASH_COMMANDS if r.name == "/memory")
-    rows([_example()])
-    try:
-        set_memory_available(False)
-        assert "/memory" not in [r.name for r in all_rows()]
-        assert find_row("/memory") is None and "/memory" not in help_text()
-        assert "/example" in [r.name for r in all_rows()]
-        set_memory_available(True)
-        assert next(r for r in all_rows() if r.name == "/memory") is core_memory
-        assert "/example" in [r.name for r in all_rows()]
-    finally:
-        set_memory_available(True)
+MEMORY_HELP = "Browse the agent's memory by tag; show/forget/search a memory"
+
+
+def _memory_row(handler) -> SlashCommand:
+    """The row the lifecycle builds from the memory manifest (plugins/lifecycle.py), handler spied."""
+    from localharness.memory.plugin import MemoryPlugin
+    (desc,) = MemoryPlugin.manifest.slash
+    assert (desc.name, desc.help, desc.target) == (
+        "/memory", MEMORY_HELP, "localharness.memory.plugin:MemoryPlugin.slash_memory")
+    return SlashCommand(desc.name, desc.help, handler, takes_args=True, plugin="memory")
+
+
+async def test_memory_is_no_core_row_and_follows_the_core_rows_as_the_memory_plugins(rows, tmp_path):
+    """G5 made structural: no core row, so no running memory plugin means no /memory anywhere. With
+    the plugin's row installed it reaches every surface — M3: plugin rows follow core rows, so
+    /memory now sits AFTER /quit and /exit (before 48 it sat before them)."""
+    assert "/memory" not in [r.name for r in SLASH_COMMANDS]
+    assert find_row("/memory") is None and "/memory" not in help_text()
+    assert [c for c, _ in _completions("/me")] == []
+    handler = AsyncMock(return_value="ok")
+    assert rows([_memory_row(handler)]) == []
+    names = [r.name for r in all_rows()]
+    assert names == [n for n, _ in CORE] + ["/memory"] and names.index("/memory") > names.index("/exit")
+    assert help_text() == HELP_BEFORE.replace("\n\nEverything", f"\n  /memory     {MEMORY_HELP}\n\nEverything")
+    assert _completions("/me") == [("/memory", MEMORY_HELP)]
+    assert (await _phone_menu(tmp_path))[-1] == {"name": "/memory", "description": MEMORY_HELP}
+    channel = RecordingChannel([])
+    repl, _, _ = _build_repl(channel)
+    assert await repl._handle_slash("/memory Show 12") is True
+    handler.assert_awaited_once_with("Show 12")  # original case kept, as the core row did
+    assert channel.sent == [("ok", INFO)]

@@ -355,24 +355,32 @@ async def test_a_retired_memory_cannot_be_promoted(two):
 
 
 def _in_session(monkeypatch, seen: dict, *commands: str) -> None:
-    """Seed one fact, run `/memory` commands through the REPL's real handler, capture the output.
+    """Seed one fact into the running memory plugin's store, type `/memory` commands into the
+    REPL's real dispatcher (the plugin's own slash row), capture the output.
 
-    `self._send_info` is replaced on the INSTANCE so the text the user would have seen is captured
-    without a channel double — `_handle_memory_cmd` swallows every exception, so a silent
-    `/memory failed: ...` would otherwise look exactly like a promote that never ran.
+    The channel is replaced on the INSTANCE so the text the user would have seen is captured — the
+    plugin's handler contains its own exceptions as `/memory failed: ...` (and the REPL names any
+    that escape), which would otherwise look exactly like a promote that never ran.
     """
+    from tests.unit.test_recall_scope_wiring import _record_memory_plugins, _the_memory_plugin
+    mem = _record_memory_plugins(monkeypatch)
+
     async def _run(self):
-        fact = await self._store.store_fact(key=KEY, value=VALUE, tags=["lesson"],
-                                            confidence=0.9, provenance=ORIG_PROV)
+        fact = await _the_memory_plugin(mem).store.store_fact(
+            key=KEY, value=VALUE, tags=["lesson"], confidence=0.9, provenance=ORIG_PROV)
         seen["fact"] = fact
         out: list[str] = []
 
-        async def _capture(text, colorize=False):
-            out.append(text)
+        class _Capture:
+            async def send_message(self, text, agent_id=None, metadata=None):
+                out.append(text)
 
-        self._send_info = _capture
+            async def send_renderable(self, renderable, agent_id=None, metadata=None):
+                out.append(repr(renderable))
+
+        self._channel = _Capture()
         for cmd in commands:
-            await self._handle_memory_cmd(cmd.format(id=fact.id))
+            assert await self._handle_slash("/memory " + cmd.format(id=fact.id)) is True
         seen["out"] = "\n".join(out)
         return None
 
@@ -468,10 +476,10 @@ async def test_a_session_without_a_workspace_says_why_it_cannot_promote(tmp_path
     assert len(history) == 1, f"promote forked the one store it had: {history}"
 
 
-async def test_the_repl_receives_the_very_router_the_loop_got(tmp_path, monkeypatch, fake_home):
+async def test_slash_memory_promote_borrows_the_very_router_the_session_built(tmp_path, monkeypatch, fake_home):
     """The discrimination the behavioral tests cannot make.
 
-    "start never passed the router to the REPL" and "the REPL never used it" both leave promote
+    "the /memory row never got the router" and "it never used it" both leave promote
     silently inert, and the mutation audit measured them as INDISTINGUISHABLE by red set — the two
     session tests above redden identically under either. So the construction is pinned separately,
     and pinned as IDENTITY rather than presence: a second `RecallRouter` over the same two
@@ -492,12 +500,32 @@ async def test_the_repl_receives_the_very_router_the_loop_got(tmp_path, monkeypa
 
     monkeypatch.setattr("localharness.memory.router.RecallRouter.__init__", _rec_router)
 
+    # `/memory promote` is the memory plugin's slash row: capture the promote_target its handler
+    # hands to dispatch, from a bare `/memory` typed into the real REPL mid-session.
+    targets: list = []
+    real_dispatch = memory_cmd.dispatch
+
+    async def _rec_dispatch(store, arg, **kwargs):
+        targets.append(kwargs.get("promote_target"))
+        return await real_dispatch(store, arg, **kwargs)
+
+    monkeypatch.setattr("localharness.cli.memory_cmd.dispatch", _rec_dispatch)
+
+    async def _run(self):
+        assert await self._handle_slash("/memory") is True
+
+    monkeypatch.setattr("localharness.cli.repl.OrchestratorREPL.run", _run)
+
     await _drive()
 
-    router = _one(rec, "repl").get("recall_router")
-    assert router is not None, "the REPL was constructed without the session's recall router"
-    assert built == [router], \
-        "the REPL got a DIFFERENT router than the session built — two handles on one database"
+    _one(rec, "repl")  # the did-it-bite guard: the REPL was built and run
+    assert len(targets) == 1, "the /memory row never reached dispatch"
+    target = targets[0]
+    assert target is not None, "the /memory row was wired without the session's recall router"
+    assert target.__func__ is _router_mod.RecallRouter.ensure_global, \
+        "promote's target is not the router's ensure_global (the bound method, never its result)"
+    assert built == [target.__self__], \
+        "/memory got a DIFFERENT router than the session built — two handles on one database"
 
 
 async def test_a_promoted_memory_is_actually_recalled_by_the_store_it_landed_in(two):

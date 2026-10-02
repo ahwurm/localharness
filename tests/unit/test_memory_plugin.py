@@ -306,7 +306,7 @@ async def test_context_failure_returns_empty(tmp_path, monkeypatch, caplog) -> N
 
 
 @pytest.mark.parametrize("workspace", [False, True])
-async def test_browse_and_legacy_handles(tmp_path, workspace) -> None:
+async def test_browse(tmp_path, workspace) -> None:
     ctx = _ctx(tmp_path, workspace=workspace)
     p = MemoryPlugin()
     assert p.browse() is None
@@ -315,7 +315,7 @@ async def test_browse_and_legacy_handles(tmp_path, workspace) -> None:
     assert isinstance(b, StoreBrowse)
     assert (b._store, b._router) == (p._store, p._router)
     assert b._identity == (str(ctx.paths.workspace.resolve().parent) if workspace else "")
-    assert p.legacy_handles() == (p._store, p._router)
+    assert not hasattr(p, "legacy_handles")  # the REPL bridge is gone: /memory is the plugin's row
     assert p.bind_subagent(ctx) is None
 
 

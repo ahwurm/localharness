@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 from localharness.cli.app import app
 from tests.unit.test_memory_config_surface import AGENT_MEMORY_PATHS
+from tests.unit.test_recall_scope_wiring import _record_memory_plugins
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
 from tests.unit.test_start_plugins import _record_loop
 from tests.unit.test_workspace_state_landing import _boom, _hermetic
@@ -62,6 +63,7 @@ def _start(monkeypatch) -> dict[str, Any]:
 
     printed = _capture_start_console(monkeypatch)
     loops = _record_loop(monkeypatch)
+    started = _record_memory_plugins(monkeypatch)
     seen: dict[str, Any] = {}
 
     async def _repl(self):
@@ -70,7 +72,11 @@ def _start(monkeypatch) -> dict[str, Any]:
         seen["occupied"] = slot.occupied
         seen["occupant"] = slot.occupant_name if slot.occupied else None
         seen["tools"] = set(root["tool_registry"]._tools["global"])
-        seen["router"] = slot.legacy_handles()[1] if slot.occupied else None
+        from localharness.cli.slash_commands import find_row
+        row = find_row("/memory")
+        seen["slash"] = row.plugin if row is not None else None
+        # The running memory plugin's router — what its /memory row and the slot read through.
+        seen["router"] = started[0].router if slot.occupied else None
 
     monkeypatch.setattr("localharness.cli.repl.OrchestratorREPL.run", _repl)
     asyncio.run(_start_async(None, False, False, None))
@@ -86,11 +92,13 @@ def _deprecation_files(printed: list[str]) -> str:
 
 def _assert_off(seen: dict) -> None:
     assert seen["occupied"] is False, "memory off, but the memory slot is occupied"
+    assert seen["slash"] is None, "memory off, but /memory is in the slash table"
     assert not (MEMORY_TOOLS & seen["tools"]), f"memory off, but the root holds {MEMORY_TOOLS & seen['tools']}"
 
 
 def _assert_on(seen: dict) -> None:
     assert seen["occupied"] is True and seen["occupant"] == "memory"
+    assert seen["slash"] == "memory", "memory on, but /memory is not the memory plugin's row"
     assert MEMORY_TOOLS <= seen["tools"]
 
 

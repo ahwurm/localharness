@@ -12,7 +12,20 @@ from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 from localharness.channels.terminal import SlashCommandCompleter, _build_persistent_input_app
-from localharness.cli.slash_commands import SLASH_COMMANDS
+from localharness.cli.slash_commands import SLASH_COMMANDS, SlashCommand, set_plugin_rows
+
+
+@pytest.fixture
+def memory_on():
+    """A memory-on session: /memory is the memory plugin's row (built from its manifest, as the
+    lifecycle does), not a core row. The rows are process-wide, so they are emptied afterwards."""
+    from unittest.mock import AsyncMock
+
+    from localharness.memory.plugin import MemoryPlugin
+    (d,) = MemoryPlugin.manifest.slash
+    set_plugin_rows([SlashCommand(d.name, d.help, AsyncMock(), takes_args=True, plugin="memory")])
+    yield
+    set_plugin_rows(())
 
 
 def _complete(text: str) -> list:
@@ -35,7 +48,11 @@ def test_completer_lists_all_commands_on_bare_slash():
     assert _texts("/") == {name for name, _ in SLASH_COMMANDS}
 
 
-def test_completer_prefix_filters():
+def test_memory_off_offers_no_memory_command():
+    assert _texts("/m") == {"/model", "/mode"} and _texts("/me") == set()
+
+
+def test_completer_prefix_filters(memory_on):
     assert _texts("/m") == {"/memory", "/model", "/mode"}   # every m-command
     assert _texts("/me") == {"/memory"}             # /model and /mode are /mo…, excluded
     assert _texts("/mo") == {"/model", "/mode"}
@@ -48,7 +65,7 @@ def test_completer_prefix_filters():
     assert _texts("/h") == {"/help"}
 
 
-def test_completer_is_case_insensitive():
+def test_completer_is_case_insensitive(memory_on):
     assert _texts("/ME") == {"/memory"}
 
 
@@ -96,7 +113,7 @@ class TestSlashMenuKeybindings:
         subs = await self._drive("/help\r\x04")
         assert subs == ["/help"]
 
-    async def test_tab_accepts_the_matching_command_then_enter_submits(self):
+    async def test_tab_accepts_the_matching_command_then_enter_submits(self, memory_on):
         # "/mem" -> sole match "/memory"; Tab accepts it into the line, Enter submits it.
         subs = await self._drive("/mem\t\r\r\x04")
         assert subs == ["/memory"]

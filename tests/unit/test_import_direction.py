@@ -51,7 +51,6 @@ ALLOWED_PLUGIN_IMPORTERS = frozenset({"plugins/builtin.py"})
 BURN_DOWN: frozenset[tuple[str, str]] = frozenset({
     # memory plugin
     ("cli/app.py", "cli/memory_cli.py"),
-    ("cli/repl.py", "cli/memory_cmd.py"),
     ("bench/runner.py", "memory/sqlite.py"),
     ("bench/runner.py", "tools/builtin/memory_tools.py"),
     # dispatch plugin
@@ -171,12 +170,12 @@ def test_the_burn_down_list_only_shrinks():
 
 
 def test_the_burn_down_residue_is_exactly_the_remaining_conversions():
-    """After the memory plugin, the list is exactly the three conversions still to come. Who empties
-    each group: the memory surfaces (`/memory`, `localharness memory`) and the bench move onto the
-    plugin in the next memory phase; dispatch, when Discord becomes a plugin; autoresearch, when it
-    does. A start_cmd -> memory/* edge or tools/builtin/__init__ -> memory_tools edge is gone for good."""
+    """`/memory` is the memory plugin's own slash row, so cli/repl.py -> memory_cmd is gone for good.
+    What remains: the `localharness memory` command and the bench remain for memory; dispatch;
+    autoresearch. A start_cmd -> memory/* edge or tools/builtin/__init__ -> memory_tools edge is gone
+    for good too."""
     assert BURN_DOWN == frozenset({
-        ("cli/app.py", "cli/memory_cli.py"), ("cli/repl.py", "cli/memory_cmd.py"),
+        ("cli/app.py", "cli/memory_cli.py"),
         ("bench/runner.py", "memory/sqlite.py"), ("bench/runner.py", "tools/builtin/memory_tools.py"),
         ("cli/start_cmd.py", "channels/discord.py"), ("channels/__init__.py", "channels/discord.py"),
         ("cli/app.py", "cli/autoresearch_cmd.py"), ("cli/app.py", "cli/experiment_cmd.py"),
