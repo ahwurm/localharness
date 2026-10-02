@@ -1,0 +1,78 @@
+{
+  "archive_dry_run": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nactive facts: 3  (anchors: 3 recalled-or-yours)\nline S=0.0000 \u2014 the lowest-scoring anchor\nwould archive: 0 fact(s)\ndry run \u2014 nothing moved.\n"
+  },
+  "archive_from_list": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nlist: <TMP>/list.txt \u2014 2 id(s), 1 unparseable row(s)\nactive facts: 3\narchived: 0 fact(s)\nSKIPPED (3):\n      1  no such fact in this store\n      1  unparseable row\n      1  your own hand (pinned)\n  line 3: 'not-an-id' \u2014 unparseable row\n  [1] user-editor \u2014 your own hand (pinned)\n  [9999] \u2014 no such fact in this store\nrestore any of them with `localharness memory restore <id>` (`localharness memory list --archived` lists ids).\n"
+  },
+  "archive_from_missing_list": {
+    "exit": 1,
+    "output": "cannot read <TMP>/missing.txt: [Errno 2] No such file or directory: '<TMP>/missing.txt'\n"
+  },
+  "edit": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nedited user-editor \u2014 the previous version stays in history (see `localharness memory show user-editor --history`).\n"
+  },
+  "edit_missing": {
+    "exit": 1,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nno active fact named 'nosuch' \u2014 edit changes an existing fact\n"
+  },
+  "edit_unchanged": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nunchanged.\n"
+  },
+  "help": {
+    "exit": 2,
+    "output": "                                                                                                    \n Usage: localharness memory [OPTIONS] COMMAND [ARGS]...                                             \n                                                                                                    \n Browse and edit the agent's persistent memory (list / show / edit / rm / archive / restore).       \n                                                                                                    \n\u256d\u2500 Options \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\n\u2502 --help  -h        Show this message and exit.                                                    \u2502\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\n\u256d\u2500 Commands \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\n\u2502 list     List facts, store-ranked (recency + activation), newest signal first.                   \u2502\n\u2502 archive  Archive dormant facts \u2014 off every hot path, restorable, never deleted.                  \u2502\n\u2502 restore  Bring an archived fact back, byte-identical, onto every hot path.                       \u2502\n\u2502 show     Print one fact in full.                                                                 \u2502\n\u2502 edit     Open the fact in $EDITOR; saving supersedes it \u2014 the old version stays in history.      \u2502\n\u2502 rm       Retire a fact off every hot path (recoverable \u2014 never a hard delete).                   \u2502\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\n"
+  },
+  "list": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\n  deploy-target  \u2014  prod box\n  project-lang  \u2014  The project is Python 3.12 on uv.\n  user-editor  \u2014  The user edits in Neovim with a tiling WM.\n"
+  },
+  "list_archived": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\narchived: 1 fact(s) \u2014 restore one with `localharness memory restore <id>`\n  [5] old-note  \u2014  An archived note.\n"
+  },
+  "list_query": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\n  user-editor  \u2014  The user edits in Neovim with a tiling WM.\n"
+  },
+  "list_query_nomatch": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nno facts match.\n"
+  },
+  "restore": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nrestored old-note \u2014 searchable again, exactly as it was archived.\n"
+  },
+  "restore_missing": {
+    "exit": 1,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nnothing restored: id 99999 is not in the archive, or a newer active fact already holds that name (the live one wins; the archived copy stays safe). `localharness memory list --archived` lists what is there.\n"
+  },
+  "rm_declined": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nretire 'user-editor' (The user edits in Neovim with a tiling WM.)? [y/N]: n\nkept.\n"
+  },
+  "rm_missing": {
+    "exit": 1,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nno active fact named 'nosuch'\n"
+  },
+  "rm_yes": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nretired project-lang \u2014 recoverable in history.\n"
+  },
+  "show": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\n\u2014 user-editor  [active]  source=remember  provenance=-\nThe user edits in Neovim with a tiling WM.\n\n"
+  },
+  "show_history": {
+    "exit": 0,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\n\u2014 deploy-target  [active]  source=remember  provenance=-\nprod box\n\n\u2014 deploy-target  [superseded]  source=remember  provenance=-\nstaging box\n\n"
+  },
+  "show_missing": {
+    "exit": 1,
+    "output": "store: <CFG>/agents/orchestrator/memory.db\nno fact named 'nosuch'\n"
+  }
+}
