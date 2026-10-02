@@ -190,7 +190,8 @@ def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = 
             "cli": [d.name for d in m.cli] if m else [], "slash": [d.name for d in m.slash] if m else [],
             "settings": [{"path": p, "type": t, "current_value": _serialize_value(v), "layer": layer,
                           "machine_level_only": only} for p, t, v, layer, only in settings],
-            "setup_command": setup_cmd, "note": note}, indent=2))
+            "setup_command": setup_cmd, "note": note,
+            "sections": list(m.sections) if m else []}, indent=2))
         return
     lines = [("state", entry.display), ("what it does", entry.summary), ("from", entry.source)]
     if m is not None:
@@ -212,6 +213,10 @@ def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = 
     console.print(Padding(table, (0, 0, 0, 2), expand=False))
     if note:
         console.print(f"  {note}")
+    if m is not None and m.sections:  # a bundled plugin's claimed core sections (PluginManifest.sections)
+        *rest, last = [f"{s}:" for s in m.sections]
+        console.print(escape(f"  {', '.join(rest)} and {last} keep their pre-plugin names" if rest
+                             else f"  {last} keeps its pre-plugin name"), soft_wrap=True)
 
 
 def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pairs: list[str],
