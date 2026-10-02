@@ -41,9 +41,10 @@ def test_the_manifest():
     assert AutoresearchPlugin.__doc__.splitlines()[0] == "experiment loop"
 
 
-def test_not_registered_until_the_cut():
-    """DELETED by 50-05 (the cut registers it)."""
-    assert AutoresearchPlugin not in builtin.BUILTIN_PLUGINS
+def test_registered_as_the_last_bundled_plugin():
+    """The cut appends exactly one class: autoresearch is the fifth and last entry."""
+    assert builtin.BUILTIN_PLUGINS[-1] is AutoresearchPlugin
+    assert builtin.BUILTIN_PLUGINS.count(AutoresearchPlugin) == 1 and len(builtin.BUILTIN_PLUGINS) == 5
 
 
 def test_configure_is_ready_and_start_stop_do_nothing():
@@ -66,6 +67,22 @@ _COST = (
 
 def test_importing_the_plugin_loads_no_archive_no_scipy_and_no_command_module():
     r = subprocess.run([sys.executable, "-c", _COST], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+
+
+_ROOT_COST = (
+    "import sys, localharness.cli.app\n"
+    "bad = [m for m in ('scipy', 'numpy', 'aiosqlite', 'localharness.autoresearch.archive',\n"
+    "                   'localharness.bench.aggregator', 'localharness.cli.autoresearch_cmd',\n"
+    "                   'localharness.cli.experiment_cmd', 'localharness.cli.propose_cmd',\n"
+    "                   'localharness.cli.report_cmd') if m in sys.modules]\n"
+    "assert not bad, bad\n"
+)
+
+
+def test_importing_the_cli_no_longer_loads_the_experiment_loop():
+    """After the cut the root app mounts autoresearch/experiment/propose lazily from the manifest."""
+    r = subprocess.run([sys.executable, "-c", _ROOT_COST], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
 
 

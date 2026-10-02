@@ -25,7 +25,9 @@ from tests.unit.test_plugin_plan import build, found, make
 from tests.unit.test_plugins_enable_setup import _CONFIG
 
 runner = CliRunner()
-_REAL_BUILTINS = builtin.BUILTIN_PLUGINS
+# Sectp stands in for the real owner of proposer:/sentinel: (autoresearch, 50), so it is left out
+# here: two bundled owners of one section is not what these tests are about.
+_REAL_BUILTINS = tuple(p for p in builtin.BUILTIN_PLUGINS if p.manifest.name != "autoresearch")
 _CLAIMED = ("proposer.", "sentinel.")
 _PROPOSER = {"base_url": "http://127.0.0.1:9/v1", "model": "fake-proposer"}
 
@@ -108,7 +110,7 @@ def test_a_plugin_you_installed_that_declares_sections_is_refused() -> None:
     assert build(bundled=(make("own", sections=("sentinel",)),), enabled={"own": True}).entry("own").state == "on"
 
 
-@pytest.mark.parametrize("cls", (*_REAL_BUILTINS, Sectp, Onep))
+@pytest.mark.parametrize("cls", (*builtin.BUILTIN_PLUGINS, Sectp, Onep))
 def test_every_declared_section_is_a_real_core_setting(cls) -> None:
     assert set(cls.manifest.sections) <= set(HarnessConfig.model_fields)
 
