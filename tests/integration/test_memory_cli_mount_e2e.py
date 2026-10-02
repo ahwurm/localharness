@@ -29,8 +29,11 @@ def test_memory_command_mounts_from_the_manifest(tmp_path, monkeypatch, fake_hom
     _machine(tmp_path, monkeypatch, fake_home)
     (desc,) = MemoryPlugin.manifest.cli
     assert (desc.name, desc.help, desc.target) == ("memory", HELP, "localharness.cli.memory_cli:memory_app")
-    rows = _help_rows(_invoke("--help").output)
-    assert rows.get("memory") == HELP, rows
+    # typer freezes TERMINAL_WIDTH at first import (rich_utils.MAX_WIDTH), so the row may wrap:
+    # compare the help text with the panel's borders and wrapping removed.
+    out = _invoke("--help").output
+    assert "memory" in _help_rows(out), out
+    assert HELP in " ".join(out.replace("│", " ").split()), out
     bare = _invoke("memory")  # no_args_is_help kept
     assert bare.exit_code == 2 and "list" in bare.output and "restore" in bare.output, bare.output
 

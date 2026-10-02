@@ -1,7 +1,8 @@
 """`localharness memory …` — browse and edit the agent's persistent memory, no session needed.
 
-Owner ask (2026-09-16): memory must be easy to edit from the CLI as well as the app. Every verb
-here speaks the SAME MemoryStore API the memory tools use — `store_fact` supersede (history
+Owner ask (2026-09-16): memory must be easy to edit from the CLI as well as the app. The memory
+plugin's CliDescriptor mounts this app (MEMP-03); every verb reaches the store it opens only through
+the plugin's StoreBrowse, over the SAME MemoryStore API the memory tools use — `store_fact` supersede (history
 kept, read-back verified) and `forget_fact` retire — never raw sqlite, never a hard delete.
 An edit is stamped `user_edit@<epoch>;cli`, the CLI sibling of the web page's `;web` stamp.
 
@@ -13,7 +14,6 @@ never lands somewhere the eye didn't see named.
 from __future__ import annotations
 
 import asyncio
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -86,13 +86,15 @@ def memory_list(
 ) -> None:
     """List facts, store-ranked (recency + activation), newest signal first."""
     async def go():
-        from localharness.memory.sqlite import FactQuery
+        from localharness.memory.browse import StoreBrowse
+        from localharness.plugins.api import BrowseQuery
 
         store, db = await _open_store(agent, config_dir)
+        browse = StoreBrowse(store)
         try:
             _header(db)
             if archived:
-                facts = await store.list_archived(limit=limit)
+                facts = await browse.list_archived(limit=limit)
                 if query:
                     needle = query.lower()
                     facts = [f for f in facts
@@ -100,20 +102,19 @@ def memory_list(
                 if not facts:
                     typer.echo("no archived facts match." if query else "the archive is empty.")
                     return
-                total = await store.count_archived()
+                total = await browse.count_archived()
                 typer.echo(f"archived: {total} fact(s) — restore one with "
                            f"`localharness memory restore <id>`")
             else:
-                facts = await store.query_facts(
-                    FactQuery(text=query or None, min_confidence=0.0, limit=limit)
-                )
-                if not facts:
+                rows = await browse.search(BrowseQuery(text=query or "", limit=limit))
+                if not rows:
                     typer.echo("no facts match." if query else "memory is empty.")
                     return
-            for f in facts:
-                first = (f.value or "").strip().splitlines()[0] if (f.value or "").strip() else ""
-                prefix = f"  [{f.id}] " if archived else "  "
-                typer.echo(f"{prefix}{f.key}  —  {first[:90]}")
+            listed = ([(f"  [{f.id}] ", f.key, f.value) for f in facts] if archived
+                      else [("  ", row["name"], row["value"]) for row in rows])
+            for prefix, key, value in listed:
+                first = (value or "").strip().splitlines()[0] if (value or "").strip() else ""
+                typer.echo(f"{prefix}{key}  —  {first[:90]}")
         finally:
             await store.close()
     _run(go())
@@ -187,7 +188,8 @@ def memory_archive(
     step (`agent.memory.archival.enabled`) is on. Read a --dry-run first.
     """
     async def go_list():
-        from localharness.memory.consolidation import archive_listed_facts, parse_archive_list
+        from localharness.memory.browse import StoreBrowse
+        from localharness.memory.consolidation import parse_archive_list
 
         path = Path(from_list).expanduser()
         try:
@@ -197,14 +199,14 @@ def memory_archive(
             raise typer.Exit(1)
         ids, unparseable = parse_archive_list(text)
         store, db = await _open_store(agent, config_dir)
+        browse = StoreBrowse(store)
         try:
             _header(db)
             typer.echo(f"list: {path} — {len(ids)} id(s), {len(unparseable)} unparseable row(s)")
             if not ids and not unparseable:
                 typer.echo("the list is empty. Nothing archived.")
                 return
-            run = await archive_listed_facts(store, ids, dry_run=dry_run,
-                                             unparseable=unparseable)
+            run = await browse.archive_listed(ids=ids, dry_run=dry_run, unparseable=unparseable)
             verb = "would archive" if dry_run else "archived"
             typer.echo(f"active facts: {run.active_before}")
             typer.echo(f"{verb}: {len(run.candidates) if dry_run else run.moved} fact(s)")
@@ -221,12 +223,13 @@ def memory_archive(
             await store.close()
 
     async def go():
-        from localharness.memory.consolidation import archive_dormant_facts
+        from localharness.memory.browse import StoreBrowse
 
         store, db = await _open_store(agent, config_dir)
+        browse = StoreBrowse(store)
         try:
             _header(db)
-            run = await archive_dormant_facts(store, dry_run=dry_run)
+            run = await browse.archive_dormant(dry_run=dry_run)
             if run.line is None:
                 typer.echo(
                     f"active facts: {run.active_before} — no line yet: nothing in this store "
@@ -267,12 +270,15 @@ def memory_restore(
 ) -> None:
     """Bring an archived fact back, byte-identical, onto every hot path."""
     async def go():
+        from localharness.memory.browse import StoreBrowse
+
         store, db = await _open_store(agent, config_dir)
+        browse = StoreBrowse(store)
         try:
             _header(db)
-            ok = await store.restore_fact(fact_id)
+            ok = await browse.restore_fact(fact_id)
             if ok:
-                fact = await store.get_fact_by_id(fact_id)
+                fact = await browse.get_fact_by_id(fact_id)
                 name = fact.key if fact is not None else str(fact_id)
                 typer.echo(f"restored {name} — searchable again, exactly as it was archived.")
                 return
@@ -297,18 +303,22 @@ def memory_show(
 ) -> None:
     """Print one fact in full."""
     async def go():
+        from localharness.memory.browse import StoreBrowse
+
         store, db = await _open_store(agent, config_dir)
+        browse = StoreBrowse(store)
         try:
             _header(db)
-            rows = await store.get_fact_history(name) if history else []
-            fact = await store.get_fact(name)
+            got = await browse.get(name) or {"fact": None, "history": []}
+            rows = got["history"] if history else []
+            fact = got["fact"]
             if fact is None and not rows:
                 typer.echo(f"no fact named {name!r}", err=True)
                 raise typer.Exit(1)
             for f in (rows or [fact]):
-                typer.echo(f"— {f.key}  [{f.status}]  source={f.source or '-'}  "
-                           f"provenance={f.provenance or '-'}")
-                typer.echo(f.value or "")
+                typer.echo(f"— {f['name']}  [{f['status']}]  source={f['source'] or '-'}  "
+                           f"provenance={f['provenance'] or '-'}")
+                typer.echo(f["value"])
                 typer.echo("")
         finally:
             await store.close()
@@ -324,26 +334,20 @@ def memory_edit(
     """Open the fact in $EDITOR; saving supersedes it — the old version stays in history."""
     import click
 
+    from localharness.memory.browse import StoreBrowse
+
     async def read_current():
         store, db = await _open_store(agent, config_dir)
         try:
-            return db, await store.get_fact(name)
+            return db, await StoreBrowse(store).get_fact(name)
         finally:
             await store.close()
 
-    async def write_back(content: str, current) -> None:
-        from localharness.memory.sqlite import USER_EDIT_PROVENANCE_PREFIX
-
+    async def write_back(content: str) -> str:
+        # StoreBrowse.edit: `user_edit@<epoch>;cli`, tags/confidence/node_kind carried, history kept
         store, _ = await _open_store(agent, config_dir)
         try:
-            await store.store_fact(
-                key=name, value=content,
-                tags=list(current.tags or []),          # carried, not dropped
-                confidence=current.confidence,
-                source="user_edit",
-                provenance=f"{USER_EDIT_PROVENANCE_PREFIX}{int(time.time())};cli",
-                node_kind=getattr(current, "node_kind", None) or "fact",
-            )
+            return (await StoreBrowse(store).edit(name, content, origin="cli"))["status"]
         finally:
             await store.close()
 
@@ -358,7 +362,13 @@ def memory_edit(
     if edited is None or edited.strip() == (current.value or "").strip():
         typer.echo("unchanged.")
         return
-    asyncio.run(write_back(edited.strip(), current))
+    status = asyncio.run(write_back(edited.strip()))
+    if status == "missing":  # retired by a live turn while $EDITOR was open: nothing written
+        typer.echo(f"no active fact named {name!r} — edit changes an existing fact", err=True)
+        raise typer.Exit(1)
+    if status == "unchanged":  # a live turn already wrote exactly this text
+        typer.echo("unchanged.")
+        return
     typer.echo(f"edited {name} — the previous version stays in history "
                f"(see `localharness memory show {name} --history`).")
 
@@ -372,10 +382,13 @@ def memory_rm(
 ) -> None:
     """Retire a fact off every hot path (recoverable — never a hard delete)."""
     async def go():
+        from localharness.memory.browse import StoreBrowse
+
         store, db = await _open_store(agent, config_dir)
+        browse = StoreBrowse(store)
         try:
             _header(db)
-            fact = await store.get_fact(name)
+            fact = await browse.get_fact(name)
             if fact is None:
                 typer.echo(f"no active fact named {name!r}", err=True)
                 raise typer.Exit(1)
@@ -383,7 +396,7 @@ def memory_rm(
             if not yes and not typer.confirm(f"retire {name!r} ({preview})?"):
                 typer.echo("kept.")
                 return
-            ok = await store.forget_fact(fact.id)
+            ok = await browse.forget_fact(fact.id)  # the id previewed (M4), never a newer version
             typer.echo(f"retired {name} — recoverable in history." if ok
                        else "a live turn superseded it first; nothing changed.")
         finally:
