@@ -128,3 +128,22 @@ def test_persisting_a_bad_active_endpoint_raises_without_the_input(tmp_path) -> 
         asyncio.run(model_ops.persist_active_endpoint(harness, peer, "m", config_dir=g))
     _clean(str(info.value), repr(info.value), repr(info.value.__cause__))
     assert "active_endpoint.base_url" in str(info.value)
+
+
+# --- autoresearch adoption -------------------------------------------------------------------------
+
+
+def test_a_refused_adoption_never_echoes_the_key(tmp_path) -> None:
+    """`autoresearch adopt` checks the adopted value against the merged config and prints the
+    refusal; a key stored raw in overrides.yaml rides in that merged config."""
+    from localharness.autoresearch.adoption import AdoptionRefused, _validate_merged
+    from localharness.config.loader import ConfigLoader
+
+    g = _model_home(tmp_path)
+    cfg = ConfigLoader(config_dir=g).load_harness()
+    new_overlay = {"proposer": {"api_key": KEY}, "provider": {"default_model": "p-model"}}
+    with pytest.raises(AdoptionRefused) as info:
+        _validate_merged(cfg, "provider.default_model", new_overlay)
+    _clean(str(info.value), repr(info.value), repr(info.value.__cause__))
+    assert "adopting 'provider.default_model' produces an invalid config" in str(info.value)
+    assert "proposer.model must differ" in str(info.value)
