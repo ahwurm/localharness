@@ -6,10 +6,10 @@ import re
 import reprlib as repr_lib
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, get_args
 
 import yaml
-from pydantic import ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 from pydantic_yaml import to_yaml_str
 
 from localharness.agent.gate_types import DEFAULT_MODE, MODE_STRICTNESS, GateSettings
@@ -413,7 +413,8 @@ means; a name in `mcp_trusted_servers` is a grant the operator writes themselves
 the global layer's, with a warning naming the key.
 """
 
-HARNESS_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({"org.enforce_capability_floor"})
+HARNESS_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({
+    "org.enforce_capability_floor", "proposer.base_url", "proposer.api_key"})
 """The core harness keys only the global config (config.yaml or overrides.yaml) may set.
 
 `org.enforce_capability_floor` is the capability floor's off switch. No direction of it belongs
@@ -422,6 +423,15 @@ inside it, and switching it back on over the machine owner's off is the owner's 
 for `ASK_GLOBAL_ONLY_FIELDS`, a workspace value that differs from the global one (or from the
 field's default, when the global layer is silent) is dropped with one warning naming the key and
 the file; a workspace value equal to it is the operator's own and is no warning.
+
+`proposer.base_url` and `proposer.api_key` are a network destination and the credential sent to it
+(`plugins enable autoresearch` checks the proposer with the key): a repository that could set the
+address would receive the key, and one that could set the key could have the proposer's traffic
+billed to and logged by an account of its own. They are the machine's, as every bundled plugin's
+endpoints and credentials are. `proposer.base_url` has no default, so when the global layers set no
+address the workspace's `proposer:` section cannot stand without one: it gives way whole to the
+global layers' section, or to none. `proposer.model` and the rest of the section stay project
+settings.
 """
 
 _UNSET = object()
@@ -440,28 +450,58 @@ def _nested(parts: list[str], value: Any) -> dict:
 
 
 def _model_default(model: Any, parts: list[str]) -> Any:
+    """The value a HarnessConfig path takes when no layer sets it, as config data (a SecretStr
+    default as its text), or _UNSET when the field has none (`proposer.base_url` is required). An
+    Optional section (`proposer`) is looked into."""
     field = model.model_fields[parts[0]]
     if len(parts) > 1:
-        return _model_default(field.annotation, parts[1:])
-    return field.get_default(call_default_factory=True)
+        inner = next((a for a in get_args(field.annotation)
+                      if isinstance(a, type) and issubclass(a, BaseModel)), field.annotation)
+        return _model_default(inner, parts[1:])
+    if field.is_required():
+        return _UNSET
+    value = field.get_default(call_default_factory=True)
+    return value.get_secret_value() if isinstance(value, SecretStr) else value
+
+
+def _put(data: dict, parts: list[str], value: Any) -> dict:
+    """`data` with `value` at `parts`, or without that key when `value` is _UNSET. Never mutates,
+    and never creates a section only to leave it empty."""
+    head, rest = parts[0], parts[1:]
+    if not rest:
+        return {k: v for k, v in data.items() if k != head} if value is _UNSET else {**data, head: value}
+    inner = data.get(head)
+    if isinstance(inner, dict):
+        return {**data, head: _put(inner, rest, value)}
+    return data if value is _UNSET else {**data, head: _nested(rest, value)}
 
 
 def _narrow_harness_global_only(merged: dict, sources: tuple[dict, ...],
                                 ws_files: tuple[str, str]) -> tuple[dict, list[str]]:
-    """Put the global value back at every HARNESS_GLOBAL_ONLY_FIELDS path a workspace source
-    (config.yaml, overrides.yaml) set differently; one warning per such file. Never mutates."""
+    """Undo every HARNESS_GLOBAL_ONLY_FIELDS value a workspace source (config.yaml, overrides.yaml)
+    set differently from the global layers (or from the field's default, when they are silent); one
+    warning per such path and file. The global value goes back; when there is none the key goes, so
+    the default applies; and when there is no default either, the workspace's whole section gives
+    way to the global layers' (or to none). Removing, never writing a default, keeps the result the
+    same in any order of paths. Never mutates."""
     global_view = deep_merge(sources[0], sources[1])
     warnings: list[str] = []
     for path in sorted(HARNESS_GLOBAL_ONLY_FIELDS):
         parts = path.split(".")
-        value = _dig(global_view, parts)
-        value = _model_default(HarnessConfig, parts) if value is _UNSET else value
+        machine = _dig(global_view, parts)
+        allowed = _model_default(HarnessConfig, parts) if machine is _UNSET else machine
         dropped = [f"ignoring {path} in {file}: only the global config may set it"
                    for source, file in zip(sources[2:], ws_files)
-                   if _dig(source, parts) not in (_UNSET, value)]
-        if dropped:
-            merged = deep_merge(merged, _nested(parts, value))
-            warnings += dropped
+                   if _dig(source, parts) not in (_UNSET, allowed)]
+        if not dropped:
+            continue
+        warnings += dropped
+        if machine is not _UNSET:
+            merged = _put(merged, parts, machine)
+        elif allowed is not _UNSET:
+            merged = _put(merged, parts, _UNSET)
+        else:
+            merged = _put(merged, parts[:-1], _dig(global_view, parts[:-1]))
     return merged, warnings
 
 

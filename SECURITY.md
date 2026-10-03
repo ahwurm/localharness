@@ -101,7 +101,13 @@ the Discord token, the file `components set` writes holds the real value as plai
 config that failed to load or validate could still print a stored secret, whole or by its last
 characters, in the error text of commands such as `doctor`, `start` and `components set`; this is
 fixed after 0.16.0, and error text now names only where the problem is and what is wrong, with
-every stored secret masked.
+every setting LocalHarness treats as a secret masked: `proposer.api_key` and the Discord token
+(`dispatch.discord.token`). Other credentials are plain-text settings, not treated as secrets yet,
+and nothing masks them: `provider.api_key`, `active_endpoint.api_key`, the `api_key` and
+`extra_headers` of each `extra_endpoints` entry, and an MCP server's `env` and `headers`.
+`components get`, `components list` and `config show` display the provider and endpoint ones,
+`components set` prints them and writes them to its audit log as they are, and the error text of a
+config that fails validation can show any of them.
 
 - **Found is not on.** A plugin is found from package metadata and folder names alone, and one you
   installed stays off, with none of its code imported, until you turn it on. `localharness start`,
@@ -144,9 +150,11 @@ Some settings say where the harness connects, which credential it uses or who ma
 one says whether the separation described under
 [Threat model: prompt injection](#threat-model-prompt-injection) is enforced at all. A repository you
 cloned must not be able to point those somewhere else or switch that separation off, so only your
-machine-level (global) config may set them. A project's value for one of them is ignored, the
-harness prints a warning naming the key and the file, and your global value stands. These are all
-of them:
+machine-level (global) config may set them. The autoresearch proposer's address and key are two of
+them, because `plugins enable autoresearch` sends the key to that address to check that the
+proposer answers; with no proposer address in your global config, a project's whole `proposer:`
+section is ignored. A project's value for one of them is ignored, the harness prints a warning
+naming the key and the file, and your global value stands. These are all of them:
 
 - `image.comfyui_url`
 - `image.workflow`
@@ -154,6 +162,8 @@ of them:
 - `dispatch.discord.allow`
 - `dispatch.discord.channels`
 - `web.public_url`
+- `proposer.base_url`
+- `proposer.api_key`
 - `org.enforce_capability_floor`
 - `permissions.ask.read_only_signatures`
 - `permissions.ask.dropped_commands`
