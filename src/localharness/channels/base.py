@@ -56,13 +56,14 @@ CONTROL_CHARS_RE = re.compile(
     "["
     + "".join(
         re.escape(chr(code))
-        for code in (*range(0x00, 0x20), 0x7F)
+        for code in (*range(0x00, 0x20), 0x7F, *range(0x80, 0xA0))
         if chr(code) not in KEPT_CONTROL_CHARS
     )
     + "]"
 )
-"""Every C0 control and DEL except :data:`KEPT_CONTROL_CHARS` — derived from that set rather
-than spelled out, so the two cannot drift apart."""
+"""Every C0 and C1 control and DEL except :data:`KEPT_CONTROL_CHARS` — derived from that set
+rather than spelled out, so the two cannot drift apart. C1 (U+0080–U+009F) because a terminal that
+honours 8-bit controls reads U+009B as CSI and U+009D as OSC: the same sequences without the ESC."""
 
 
 def sanitize_for_display(text: str) -> str:

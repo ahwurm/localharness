@@ -27,7 +27,7 @@ from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
-from rich.markup import escape
+from rich.markup import escape as _markup_escape
 from rich.panel import Panel
 from rich.status import Status
 from rich.text import Text
@@ -58,6 +58,20 @@ from localharness.core.events import (
 from localharness.tools.builtin.web_tool import WEB_INGEST_TOOLS
 
 log = structlog.get_logger(__name__)
+
+
+def escape(text: str) -> str:
+    """rich's markup escape, after :func:`sanitize_for_display`.
+
+    Every string this module interpolates into markup is somebody's text — the model's reasoning
+    and narration, a tool's output (a page the agent read), a server's error — and rich passes
+    terminal control sequences through its string path untouched on these consoles
+    (``highlight=False``: OSC 52 writes the clipboard, ``ESC[2J`` clears the screen, U+009B is an
+    8-bit CSI). Shadowing the import makes the one escape every such line already calls the place
+    they are stripped, so a line added later cannot forget it.
+    """
+    return _markup_escape(sanitize_for_display(text))
+
 
 # Tool call/result display characters (CONTEXT.md locked decisions)
 _DIAMOND = "\u25c6"   # ◆  tool call indicator
@@ -1132,7 +1146,10 @@ class TerminalChannel(ChannelAdapter):
         agent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Print a message to the terminal. Wraps in Panel if agent_id provided."""
+        """Print a message to the terminal. Wraps in Panel if agent_id provided. The text is
+        sanitized first: a Markdown panel would otherwise hand the model's escape sequences to
+        the terminal verbatim."""
+        content = sanitize_for_display(content)
         async with self._output_lock:
             self._stop_thinking()
             self._close_burst()
@@ -1166,14 +1183,23 @@ class TerminalChannel(ChannelAdapter):
             self._close_burst()
             self._ensure_idle()
             self._tool_result_since_narration = True
-            self._console.print(renderable)
+            self._console.print(self._sanitized(renderable))
+
+    def _sanitized(self, renderable: Any) -> Any:
+        """A plugin's renderable with every text segment passed through sanitize_for_display —
+        style kept, injected escapes gone (a /memory tree can hold model-written facts)."""
+        from rich.segment import Segment, Segments
+        lines = self._console.render(renderable, self._console.options)
+        return Segments([s if s.control else Segment(sanitize_for_display(s.text), s.style)
+                         for s in lines])
 
     async def send_streaming(
         self,
         token_stream: AsyncIterator[str],
         agent_id: str | None = None,
     ) -> str:
-        """Stream tokens to terminal using Rich Live. Returns full assembled text."""
+        """Stream tokens to terminal using Rich Live. Returns full assembled text — the raw
+        model text, for the caller to store; only what is drawn is sanitized."""
         full_text = ""
         async with self._output_lock:
             self._stop_thinking()
@@ -1187,7 +1213,7 @@ class TerminalChannel(ChannelAdapter):
                 async for token in token_stream:
                     full_text += token
                     live_panel = Panel(
-                        Text(full_text, style="agent.text"),
+                        Text(sanitize_for_display(full_text), style="agent.text"),
                         title=panel_title,
                         border_style="cyan",
                     )
@@ -1197,7 +1223,7 @@ class TerminalChannel(ChannelAdapter):
             # Final non-live panel with green border — render markdown (tables,
             # headers, bold) instead of raw text so the answer reads cleanly.
             self._console.print(Panel(
-                Markdown(full_text),
+                Markdown(sanitize_for_display(full_text)),
                 title=f"[agent.name]{escape(agent_id or 'agent')}[/agent.name]",
                 border_style="green",
             ))
