@@ -44,8 +44,17 @@ class DispatchPlugin(Plugin):
             "In the Discord Developer Portal, open your bot and turn on the Message Content intent.\n"
             "Invite the bot to your server (OAuth2 > URL Generator, scope 'bot').\n"
             "In Discord, turn on Developer Mode (Settings > Advanced), then right-click your name > "
-            "Copy User ID.\n"
-            "Then: localharness start --channel discord"),
+            "Copy User ID."),
+        next_steps="Then start the Discord session: localharness start --channel discord",
+        agent_prompt=(
+            "Set up the LocalHarness dispatch plugin on this machine. Install LocalHarness with its\n"
+            "dispatch extra, keeping the extras I already use. Walk me through the Discord side: in the\n"
+            "Discord Developer Portal, create a bot, turn on the Message Content intent and invite it to\n"
+            "my server (OAuth2 > URL Generator, scope bot); then have me turn on Developer Mode and copy\n"
+            "my user id. Then run `localharness plugins enable dispatch` and let me type the token at its\n"
+            "hidden prompt myself: never print the token, store it in a file, or paste it into this\n"
+            "chat. You are done when `localharness doctor` shows Discord configured and\n"
+            "`localharness start --channel discord` answers my message."),
     )
     ConfigModel = DispatchConfig
     AgentConfigModel = None
