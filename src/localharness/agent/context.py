@@ -942,7 +942,8 @@ class TokenCounter:
 
 
 def probe_served_window(
-    base_url: str | None, model: str | None, provider_type: str | None = None
+    base_url: str | None, model: str | None, provider_type: str | None = None, *,
+    api_key: str | None = None,
 ) -> int | None:
     """Served context window for `model`, or None when the runtime doesn't expose it (#31).
 
@@ -954,10 +955,13 @@ def probe_served_window(
     model (the served window, NOT /api/show's model ceiling, which over-reports). LM Studio: GET /api/v0/models loaded_context_length (the
     LOADED window, NOT max_context_length — over-reporting would let the start guard pass a config
     that then 400s). Where a runtime genuinely doesn't expose it (not-loaded / older builds) →
-    None (disclose, never fabricate a default). Never raises."""
+    None (disclose, never fabricate a default). Never raises. `api_key` (a launched vLLM set to
+    require its key) is sent on the /v1/models GET only — the one route here vLLM's key guards."""
     if not (base_url and model):
         return None
     import httpx
+
+    from localharness.provider.server import auth_headers
     root = base_url.rstrip("/")
     ptype = (provider_type or "").lower()
     if ptype == "llamacpp":
@@ -1000,8 +1004,9 @@ def probe_served_window(
         except Exception:
             return None
         return None
+    headers = auth_headers(api_key)
     try:
-        data = httpx.get(f"{root}/models", timeout=3.0).json()
+        data = httpx.get(f"{root}/models", timeout=3.0, **({"headers": headers} if headers else {})).json()
         for m in (data.get("data") or []):
             if m.get("id") == model:
                 val = m.get("max_model_len") or m.get("context_length")

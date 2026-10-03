@@ -52,8 +52,12 @@ class MalformedModelListError(Exception):
     wrong thing."""
 
 
-def list_live_models(base_url: str, timeout: float = 3.0) -> tuple[list[str], bool]:
+def list_live_models(base_url: str, timeout: float = 3.0, *,
+                     api_key: str | None = None) -> tuple[list[str], bool]:
     """Probe the OpenAI-compatible ``/models`` endpoint. Returns ``(model_ids, reachable)``.
+
+    ``api_key`` is the key of a launched server set to require one (callers pass it only through
+    ``provider.server.required_key_kwargs``); without it the probe sends no Authorization header.
 
     Three outcomes, three signals (#38 — previously one blanket ``except`` collapsed the last two
     into a bogus ``reachable=False``, so a live-but-wrong endpoint read as "is it running?"):
@@ -66,8 +70,10 @@ def list_live_models(base_url: str, timeout: float = 3.0) -> tuple[list[str], bo
     of scope here — same shape the REPL /model list uses (which now delegates here).
     """
     import httpx
+
+    from localharness.provider.server import auth_headers
     try:
-        resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout)
+        resp = httpx.get(f"{base_url.rstrip('/')}/models", timeout=timeout, headers=auth_headers(api_key))
     except (httpx.RequestError, httpx.InvalidURL):
         # #1: httpx.InvalidURL is a SIBLING of RequestError (both subclass Exception directly), so a
         # typo'd base_url (non-numeric port, stray ':') would otherwise propagate and crash the whole

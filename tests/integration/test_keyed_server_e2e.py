@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import typer
 import yaml
 from typer.testing import CliRunner
 
@@ -128,7 +129,8 @@ def _summary(printed: list[str]) -> str:
 
 
 async def _start(tmp_path, monkeypatch, *, key: str = KEY, require: bool | None, served_key: str | None,
-                 **start_kw) -> SimpleNamespace:
+                 loading: bool = False, **start_kw) -> SimpleNamespace:
+    """A real start whose config launches a binary vLLM; `loading`: its process is already up."""
     from localharness.cli.start_cmd import _start_async
 
     _stub_start_boundaries(tmp_path, monkeypatch)
@@ -136,7 +138,13 @@ async def _start(tmp_path, monkeypatch, *, key: str = KEY, require: bool | None,
     seen = SimpleNamespace(probes=_probe_fails_once(monkeypatch), launched=_record_launch(monkeypatch),
                            server=_serve(monkeypatch, served_key), dialed=_record_dials(monkeypatch),
                            printed=_capture_start_console(monkeypatch))
-    await asyncio.wait_for(_start_async(None, False, False, str(tmp_path), **start_kw), timeout=60)
+    if loading:
+        monkeypatch.setattr(server, "server_pid", lambda _d: 4242)
+    try:
+        await asyncio.wait_for(_start_async(None, False, False, str(tmp_path), **start_kw), timeout=60)
+        seen.exit_code = None
+    except typer.Exit as exc:  # `--list-models` lists and exits
+        seen.exit_code = exc.exit_code
     assert not [a for a in seen.dialed if isinstance(a, tuple)], f"a socket was opened: {seen.dialed}"
     return seen
 
@@ -147,7 +155,7 @@ async def _start(tmp_path, monkeypatch, *, key: str = KEY, require: bool | None,
 async def test_a_start_that_launches_a_server_requiring_its_key_reaches_the_banner(tmp_path, monkeypatch):
     seen = await _start(tmp_path, monkeypatch, require=True, served_key=KEY)
 
-    assert "startup)" in _summary(seen.printed)
+    assert seen.exit_code is None and "startup)" in _summary(seen.printed)
     (launch,) = seen.launched
     cmd = launch["cmd"]
     assert cmd[cmd.index("--host"):cmd.index("--host") + 2] == ["--host", "127.0.0.1"]
@@ -158,6 +166,14 @@ async def test_a_start_that_launches_a_server_requiring_its_key_reaches_the_bann
     assert {via for via, _path, _auth in seen.server.seen} == {"wait_ready", "get"}
     assert all(auth == f"Bearer {KEY}" for _via, _path, auth in seen.server.seen)
     assert KEY not in "\n".join(seen.printed)
+
+
+async def test_a_server_still_loading_is_waited_for_with_its_key(tmp_path, monkeypatch):
+    seen = await _start(tmp_path, monkeypatch, require=True, served_key=KEY, loading=True)
+
+    assert seen.exit_code is None and "startup)" in _summary(seen.printed)
+    assert seen.launched == [] and seen.server.refused == 0
+    assert ("wait_ready", "/v1/models", f"Bearer {KEY}") in seen.server.seen
 
 
 async def test_by_default_the_launch_and_every_probe_stay_keyless(tmp_path, monkeypatch):
@@ -182,8 +198,31 @@ async def test_a_required_key_that_is_none_launches_and_probes_keyless(tmp_path,
 async def test_list_models_on_a_server_requiring_its_key_lists_its_models(tmp_path, monkeypatch):
     seen = await _start(tmp_path, monkeypatch, require=True, served_key=KEY, list_models=True)
 
+    assert seen.exit_code == 0
     assert any("m  (serving)" in line for line in seen.printed), seen.printed
     assert seen.server.refused == 0 and seen.launched == []
+
+
+async def test_model_on_a_server_requiring_its_key_finds_the_served_model(tmp_path, monkeypatch):
+    seen = await _start(tmp_path, monkeypatch, require=True, served_key=KEY, model_override="m")
+
+    assert seen.exit_code is None and "startup)" in _summary(seen.printed)
+    assert seen.server.refused == 0
+    assert all(auth == f"Bearer {KEY}" for _via, _path, auth in seen.server.seen)
+
+
+@pytest.mark.parametrize("require", [True, False])
+def test_the_model_command_lists_a_launched_server_either_way(tmp_path, monkeypatch, require):
+    _config(tmp_path, require=require)
+    fake = _serve(monkeypatch, KEY if require else None)
+    monkeypatch.setattr(server, "list_cached_models", lambda: [])
+
+    result = runner.invoke(app, ["model", "--config-dir", str(tmp_path)])
+
+    assert result.exit_code == 0 and "m" in result.output, result.output
+    assert fake.refused == 0
+    assert [auth for _via, _path, auth in fake.seen] == [f"Bearer {KEY}" if require else None]
+    assert KEY not in result.output
 
 
 async def test_start_names_a_key_sent_over_plain_http(tmp_path, monkeypatch):

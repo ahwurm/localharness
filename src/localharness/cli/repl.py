@@ -138,6 +138,25 @@ def _framework_label(provider_type: str | None) -> str:
     return _FRAMEWORK_LABELS.get(provider_type or "", provider_type or "server")
 
 
+def _launch_key(harness: Any, base_url: str, spec: Any = None) -> dict[str, str]:
+    """What a launch of, or a probe to, the server at ``base_url`` sends as its key:
+    ``{"api_key": <raw>}`` only when the server the harness launches there is set to require one
+    (``spec``, else the primary's ``server`` or that peer's ``lifecycle``), with the primary
+    provider's key or that peer's own; else ``{}`` — the keyless call it always was. A URL that is
+    neither the primary nor a configured peer gets no key. A function of the harness, not a
+    method: the swap's helpers are also driven with a bare stand-in for the session."""
+    from localharness.provider.server import required_key_kwargs
+    provider = getattr(harness, "provider", None)
+    if provider is not None and base_url == provider.base_url:
+        return required_key_kwargs(getattr(harness, "server", None) if spec is None else spec,
+                                   provider.api_key)
+    ep = next((e for e in getattr(harness, "extra_endpoints", None) or [] if e.base_url == base_url), None)
+    if ep is None:
+        return {}
+    return required_key_kwargs(getattr(ep, "lifecycle", None) if spec is None else spec,
+                               getattr(ep, "api_key", None))
+
+
 def _endpoint_host(base_url: str) -> str:
     """host:port of a base_url for compact headers/meta (strip scheme + /v1 path). Best-effort:
     a display helper must never raise into the /model listing, so a parse slip falls back raw."""
@@ -1464,6 +1483,7 @@ class OrchestratorREPL:
             # the box is never left with two heavies or nothing serving. The lock governs servers the
             # harness LAUNCHED; it can't stop an unmanaged/attach-only one (see __init__ seeding note).
             from localharness.provider import lifecycle as _lifecycle
+            from localharness.provider.server import required_key_kwargs
             ep = cold_target[target]
             box_note = getattr(self._channel, "box_activity", None)
 
@@ -1492,8 +1512,10 @@ class OrchestratorREPL:
                 colorize=True,
             )
             try:
+                # the peer's own key, only when its lifecycle is set to require one (default off)
                 live_ep = await _lifecycle.strategy_for(ep.lifecycle).activate(
-                    ep.lifecycle, self._server_config_dir, ep.base_url, on_poll=_cold_progress
+                    ep.lifecycle, self._server_config_dir, ep.base_url, on_poll=_cold_progress,
+                    **required_key_kwargs(ep.lifecycle, ep.api_key),
                 )
             except (RuntimeError, TimeoutError) as exc:
                 # The peer half-started (a TimeoutError means its process is still ALIVE, per
@@ -1548,6 +1570,7 @@ class OrchestratorREPL:
             llm.rebind_endpoint(_prim.base_url, api_key=_prim.api_key, extra_headers={},
                                 provider_type=_prim.provider_type)
         from localharness.provider.lifecycle import free_accelerator, strategy_for
+        from localharness.provider.server import required_key_kwargs
         strategy = strategy_for(managed)
         await self._send_info(
             f"Restarting managed vLLM with {target} — model load can take several minutes..."
@@ -1584,8 +1607,10 @@ class OrchestratorREPL:
             # activate's serve_command reads spec.model to build the launch command.
             await strategy.stop(managed, self._server_config_dir)
             managed.model = target
+            # the provider's key, only when the managed server is set to require one (default off)
             ep = await strategy.activate(
-                managed, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress
+                managed, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress,
+                **required_key_kwargs(managed, getattr(_prim, "api_key", None)),
             )
             models = ep.served_models
         except (RuntimeError, TimeoutError) as exc:
@@ -1810,7 +1835,8 @@ class OrchestratorREPL:
         spec, base_url = stopped
         from localharness.provider import lifecycle as _lifecycle
         try:
-            await _lifecycle.strategy_for(spec).activate(spec, self._server_config_dir, base_url)
+            await _lifecycle.strategy_for(spec).activate(spec, self._server_config_dir, base_url,
+                                                         **_launch_key(self._harness, base_url, spec))
             self._active_heavy = (spec, base_url)
             return spec.model
         except Exception:  # noqa: BLE001 — restore is best-effort; the caller surfaces the failure
@@ -1932,7 +1958,8 @@ class OrchestratorREPL:
         elif getattr(ctx, "max_context_tokens", None):
             try:
                 window = await asyncio.to_thread(
-                    context_mod.probe_served_window, base_url, model, ptype
+                    context_mod.probe_served_window, base_url, model, ptype,
+                    **_launch_key(getattr(self, "_harness", None), base_url),
                 )
             except Exception:  # noqa: BLE001 — a probe error must never brick a done swap
                 window = None
@@ -1992,7 +2019,8 @@ class OrchestratorREPL:
         import asyncio
 
         from localharness.cli import model_ops
-        return await asyncio.to_thread(model_ops.list_live_models, base_url)
+        return await asyncio.to_thread(model_ops.list_live_models, base_url,
+                                       **_launch_key(getattr(self, "_harness", None), base_url))
 
     @staticmethod
     def _compose_model_menu(live: list, managed, current: str, peer_target: dict | None = None,

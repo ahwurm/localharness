@@ -721,6 +721,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     except Exception as exc:
         err_console.print(f"[bold red]Error:[/bold red] Cannot load config: {exc}")
         raise typer.Exit(1)
+    from localharness.provider.server import required_key_kwargs
+    # The key the launched server requires, or {} — server.require_api_key is opt-in (default off).
+    launch_key = required_key_kwargs(harness.server, harness.provider.api_key)
     from localharness.tools.builtin.netguard import set_private_allowlist
     # The machine's fetch allowlist (machine-level only); the web tools read it per call.
     set_private_allowlist(harness.org.web_fetch_allow_private)
@@ -732,7 +735,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         from localharness.cli import model_ops
         provider = harness.provider
         try:
-            live, reachable = model_ops.list_live_models(provider.base_url)
+            live, reachable = model_ops.list_live_models(provider.base_url, **launch_key)
         except model_ops.MalformedModelListError as exc:
             err_console.print(
                 f"[bold red]Error:[/bold red] the server at {provider.base_url} responded, but "
@@ -879,7 +882,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # any already-live model is fair game.
         from localharness.cli import model_ops
         try:
-            _live, _reachable = model_ops.list_live_models(provider.base_url)
+            _live, _reachable = model_ops.list_live_models(provider.base_url, **launch_key)
         except model_ops.MalformedModelListError as exc:
             err_console.print(
                 f"[bold red]Error:[/bold red] the server at {provider.base_url} responded, but "
@@ -909,7 +912,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # may legitimately not be up yet — its own launch path below covers that.
         from localharness.cli import model_ops as _mo
         try:
-            _live_now, _reachable_now = _mo.list_live_models(provider.base_url)
+            _live_now, _reachable_now = _mo.list_live_models(provider.base_url, **launch_key)
         except _mo.MalformedModelListError:
             _live_now, _reachable_now = [], False
         resolved_model, _notice = _reconcile_sole_served_model(
@@ -947,11 +950,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # activate = serve_command → start_server → wait_ready (launch + readiness) via the
                 # lifecycle strategy. Byte-equivalent to the old start_server+wait_ready pair; the
                 # off-loop verified-stop wrapper lives in the strategy, not this launch path.
-                await strategy.activate(harness.server, server_cfg_path, provider.base_url)
+                await strategy.activate(harness.server, server_cfg_path, provider.base_url, **launch_key)
             else:
                 console.print("Managed vLLM is still loading — waiting...")
                 # Already launched (a live pidfile / running container) — only wait for readiness.
-                await managed_server.wait_ready(provider.base_url, config_dir=server_cfg_path)
+                await managed_server.wait_ready(provider.base_url, config_dir=server_cfg_path, **launch_key)
             probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
         except (RuntimeError, TimeoutError, OSError) as exc:
             # OSError: server_pid()'s os.kill(pid, 0) liveness probe is POSIX-only semantics —
@@ -1021,7 +1024,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # every llama.cpp/Ollama/LM Studio/unknown start on a window no server ever served).
     _probe_window = served_window if served_window != _seed_window else None
     _served = await asyncio.to_thread(
-        probe_served_window, provider.base_url, resolved_model, provider.provider_type
+        probe_served_window, provider.base_url, resolved_model, provider.provider_type, **launch_key
     ) or _probe_window
     _bound = _effective_max_context(_served, _cfg_window)
     # #145: a served window that cannot hold a reply reserve cannot run AT ALL — history is
@@ -1111,6 +1114,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # --- Startup state tracker ---
     # machine-level keys a workspace set (its config files, then its agent files)
     warnings: list[str] = [*loader.harness_warnings, *loader.agent_warnings]
+    from localharness.config.cleartext import cleartext_warnings
+    # a key headed over plain http to another machine: named, never refused
+    warnings.extend(cleartext_warnings(harness))
     plugins_loaded = 0
     mcp_connected = 0
     mcp_failed = 0
