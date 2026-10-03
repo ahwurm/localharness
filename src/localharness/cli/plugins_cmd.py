@@ -11,7 +11,8 @@
   `enable NAME` followed by `components set NAME.k v`. On a terminal, with no --set, `enable` runs
   the plugin's setup step (`_switch`): its questions, the one write, its setup action, its doctor
   check and its next steps. `session_step` runs the same step for `/plugins enable|disable NAME`,
-  between the two halves of a terminal session's restart.
+  between the two halves of a terminal session's restart; `switch_decision` decides, before the
+  session tears down, whether that restart happens at all, and `plugins_overview` is bare `/plugins`.
 
 A plugin you installed is turned on and off only in machine-level settings: turning it on is your
 trust grant (SAFE-06), so --workspace is refused for it, as it is for a machine-level setting.
@@ -606,6 +607,55 @@ def session_step(action: tuple[str, str], config_dir: str | None) -> StepOutcome
         console.print(escape(f"{name}'s setup hit an error: {why}. Your conversation continues."),
                       soft_wrap=True)
         return StepOutcome(name, verb == "enable", stopped=True)
+
+
+
+async def switch_decision(name: str, on: bool, running: frozenset[str], global_config_dir: Path,
+                          workspace: Path | None) -> str | None:
+    """Should `/plugins enable|disable NAME` restart the running session? None: yes — end the REPL,
+    the step runs between the two halves. A line: no — show it and stay. A session restarts when
+    the set of running plugins would change, when the plugin's flag on disk would change, or when
+    its setup step still has work (its questions are asked on the plain terminal, never in the
+    input box). Reads a fresh plan over the session's own layers; asks and writes nothing."""
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+    loader = ConfigLoader(config_dir=global_config_dir, local_config_dir=workspace)
+    resolution = resolve(loader)
+    entry = resolution.plan.entry(name)
+    word, verb = ("on", "enable") if on else ("off", "disable")
+    if entry is None:
+        return f"Unknown plugin: {name}. /plugins lists them."
+    if name not in resolution.enabled:
+        return f"{name} cannot be turned {word}: {entry.reason}"
+    project = [s["enabled"] for s in loader.plugin_layers().get(name, (None,) * 4)[2:]
+               if isinstance(s, dict) and isinstance(s.get("enabled"), bool)]
+    if entry.bundled and project and project[-1] is not on:
+        return (f"this project turns {name} {'off' if on else 'on'} ({workspace}), and that still wins "
+                f"here — `localharness plugins {verb} {name} --workspace` changes it for this project")
+    flag = resolution.enabled[name]
+    if not on:  # on on disk, or still running here: the restart writes the flag and stops it
+        return None if flag or name in running else f"{name} is already off."
+    m = entry.manifest
+    if m is not None and _extra_missing(m):
+        return (f"{name} needs its install extra first: install `localharness[{m.requires_extra}]`, "
+                f"then /plugins enable {name} again")
+    if name in running and flag and not await step_pending(resolution, loader, entry,
+                                                            _paths(loader, workspace)):
+        return f"{name} is already on."
+    return None
+
+
+def plugins_overview(running: frozenset[str], global_config_dir: Path, workspace: Path | None) -> str:
+    """Bare `/plugins`: every plugin, whether it runs in this session (else the plan's own state
+    text), and how to switch one here."""
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+    entries = resolve(ConfigLoader(config_dir=global_config_dir, local_config_dir=workspace)).plan.entries
+    width = max((len(e.name) for e in entries), default=0)
+    lines = ["Plugins:"] + [f"  {e.name.ljust(width)}  "
+                            + ("running in this session" if e.name in running else e.display)
+                            for e in entries]
+    return "\n".join([*lines, "/plugins enable <name> turns one on here; /plugins disable <name> turns one off."])
 
 
 @plugins_app.command("enable")
