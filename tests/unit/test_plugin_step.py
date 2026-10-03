@@ -13,10 +13,12 @@ the step calls asyncio.run, and the suite's asyncio_mode would put an `async def
 running loop."""
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import click
 import pytest
 import yaml
 from pydantic import BaseModel, Field
@@ -33,7 +35,7 @@ from tests.unit.test_plugins_enable_setup import _CONFIG
 
 runner = CliRunner()
 CALLS: list[str] = []          # every setup action that ran, by plugin name
-ACT_PASSES = [True]            # act's doctor: pass or fail
+ACT_READY = [False]            # act's thing is already there, as if fetched before this run
 ACT_QUESTION = "Fetch the thing now (about 1 MB)?"
 
 
@@ -52,9 +54,9 @@ class Act(Plugin):
         CALLS.append("act")
         return [Check(name="act", status="pass", detail="fetched")]
 
-    def doctor(self, ctx):
-        return [Check(name="act", status="pass", detail="ready") if ACT_PASSES[0]
-                else Check(name="act", status="fail", detail="not ready")]
+    def doctor(self, ctx):  # passes once the thing is there: fetched now, or before this run
+        return [Check(name="act", status="pass", detail="ready") if ACT_READY[0] or "act" in CALLS
+                else Check(name="act", status="fail", detail="not fetched")]
 
 
 class Quiet(Plugin):
@@ -117,6 +119,24 @@ class Secty(Plugin):
         return [Check(name="secty", status="skip", detail="not checked")]
 
 
+class Kit(Plugin):
+    """asks an address, then warms up"""
+
+    manifest = PluginManifest(
+        name="kit", version="0.1.0", kind="tools", enabled_by_default=False,
+        setup=(SetupField(key="url", prompt="Kit address", default="http://127.0.0.1:3"),),
+        setup_action="Warm it up now?")
+    ConfigModel = UrlConfig
+
+    def setup_action(self, ctx):
+        CALLS.append("kit")
+        return [Check(name="kit", status="pass", detail="warm")]
+
+    def doctor(self, ctx):
+        return [Check(name="kit", status="pass" if ctx.config.url == "http://ok" else "fail",
+                      detail=f"at {ctx.config.url}")]
+
+
 class Plain(Plugin):
     """has nothing to set up"""
 
@@ -125,13 +145,13 @@ class Plain(Plugin):
 
 @pytest.fixture(autouse=True)
 def bundled(monkeypatch):
-    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Act, Quiet, Boom, Pro, Needx, Secty, Plain))
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Act, Quiet, Boom, Pro, Needx, Secty, Kit, Plain))
     monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [])
     monkeypatch.setenv("COLUMNS", "400")
     monkeypatch.setattr(plugins_cmd, "console", Console(width=400))
     monkeypatch.setattr(setup, "gpu_name", lambda: "NVIDIA GB10")
     CALLS.clear()
-    ACT_PASSES[0] = True
+    ACT_READY[0] = False
 
 
 @pytest.fixture
@@ -202,8 +222,8 @@ def test_no_to_its_question_skips_the_action_and_still_checks(g, term) -> None:
     result = _enable(g, "act")
 
     assert result.exit_code == 0, result.output
-    assert CALLS == [] and "fetched" not in result.output
-    _in_order(result.output, "Checking it now:", "✓ act: ready")
+    assert CALLS == [] and "✓ act: fetched" not in result.output
+    _in_order(result.output, "Checking it now:", "✗ act: not fetched")
 
 
 def test_an_action_without_a_question_runs_without_asking(g, term) -> None:
@@ -299,11 +319,10 @@ def test_a_prompt_without_machine_never_runs_gpu_name(g, term, monkeypatch) -> N
     assert info.exit_code == 0, info.output
     assert wanted in info.output
 
-    ACT_PASSES[0] = False
     term.yes[:] = [False]
     result = _enable(g, "act")
     assert result.exit_code == 0, result.output
-    _in_order(result.output, "✗ act: not ready", AGENT_PROMPT_LEAD, wanted)
+    _in_order(result.output, "✗ act: not fetched", AGENT_PROMPT_LEAD, wanted)
 
 
 # --- next steps, on every outcome --------------------------------------------------------------------
@@ -315,10 +334,9 @@ def test_next_steps_print_after_a_passing_check(g, term) -> None:
 
 
 def test_next_steps_print_after_a_failing_check(g, term) -> None:
-    ACT_PASSES[0] = False
-    term.yes[:] = [True]
+    term.yes[:] = [False]
     result = _enable(g, "act")
-    _in_order(result.output, "✗ act: not ready", "  Then: run the thing.")
+    _in_order(result.output, "✗ act: not fetched", "  Then: run the thing.")
 
 
 def test_next_steps_print_when_the_install_extra_is_missing(g, term) -> None:
@@ -354,3 +372,171 @@ def test_a_filled_value_keeps_its_own_spaces(tmp_path, no_term) -> None:
     g.mkdir()
     (g / "config.yaml").write_text(yaml.safe_dump(_CONFIG), encoding="utf-8")
     assert f"Set up the thing under {g}." in _info(g, "act").output
+
+
+# --- step_pending: does the step still have work? ---------------------------------------------------
+
+
+def _write(g: Path, overrides: dict) -> None:
+    (g / "overrides.yaml").write_text(yaml.safe_dump(overrides), encoding="utf-8")
+
+
+def _pending(g: Path, name: str) -> bool:
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+
+    loader = ConfigLoader(config_dir=g)
+    resolution = resolve(loader)
+    return asyncio.run(plugins_cmd.step_pending(resolution, loader, resolution.plan.entry(name),
+                                                plugins_cmd._paths(loader, None)))
+
+
+@pytest.mark.parametrize("name, overrides, ready, pending", [
+    ("plain", {}, False, False),                                   # declares no step
+    ("pro", {}, False, True),                                      # configure(): unconfigured
+    ("pro", {"pro": {"url": "http://bad"}}, False, True),          # a failing check
+    ("pro", {"pro": {"url": "http://ok"}}, False, False),          # a passing check
+    ("secty", {}, False, True),                                    # skipped, a question unanswered
+    ("secty", {"proposer": {"base_url": "http://p/v1", "model": "p-model"}}, False, False),  # all answered
+    ("act", {}, False, True),                                      # an action, its check failing
+    ("act", {}, True, False),                                      # an action, its check passing
+], ids=["no-step", "unconfigured", "failing", "passing", "skip-unanswered", "skip-answered",
+        "action-failing", "action-passing"])
+def test_step_pending(g, name, overrides, ready, pending) -> None:
+    _write(g, overrides)
+    ACT_READY[0] = ready
+    assert _pending(g, name) is pending
+
+
+def test_step_pending_for_settings_that_do_not_validate_is_true(g) -> None:
+    """Its settings are refused at load, so it has no settings to build a check from: not set up."""
+    _write(g, {"pro": {"url": 3}})
+    assert _pending(g, "pro") is True
+
+
+# --- in-session mode (the /plugins restart, 52-06) ---------------------------------------------------
+
+
+def _in_session(g: Path, name: str, on: bool = True):
+    return plugins_cmd._switch(name, on, [], False, str(g), ask=True, in_session=True)
+
+
+def test_in_session_a_configured_plugin_is_not_asked_again(g, term, capsys) -> None:
+    _write(g, {"pro": {"url": "http://ok"}})
+    outcome = _in_session(g, "pro")
+    out = capsys.readouterr().out
+
+    assert term.asked == [] and term.confirmed == []
+    assert yaml.safe_load((g / "overrides.yaml").read_text()) == {"pro": {"url": "http://ok", "enabled": True}}
+    assert f"✓ pro enabled in {g / 'overrides.yaml'}" in out.splitlines()
+    assert "takes effect on the next" not in out
+    _in_order(out, "Checking it now:", "✓ pro: answers at http://ok")
+    assert outcome == plugins_cmd.StepOutcome(name="pro", on=True, failed_check="", stopped=False)
+
+
+def test_in_session_an_unconfigured_plugin_is_asked_as_the_shell_asks(g, term, capsys) -> None:
+    term.answers[:] = ["http://ok"]
+    outcome = _in_session(g, "pro")
+
+    assert term.asked == [("Server address", "http://127.0.0.1:1")]
+    assert yaml.safe_load((g / "overrides.yaml").read_text()) == {"pro": {"enabled": True, "url": "http://ok"}}
+    assert outcome.failed_check == "" and not outcome.stopped
+
+
+def test_in_session_a_failing_check_is_returned(g, term, capsys) -> None:
+    term.answers[:] = ["http://bad"]
+    outcome = _in_session(g, "pro")
+
+    assert outcome == plugins_cmd.StepOutcome(name="pro", on=True, failed_check="no answer at http://bad")
+    assert AGENT_PROMPT_LEAD in capsys.readouterr().out
+
+
+def test_in_session_a_configured_action_is_not_asked_or_run(g, term, capsys) -> None:
+    ACT_READY[0] = True
+    outcome = _in_session(g, "act")
+
+    assert term.confirmed == [] and CALLS == []
+    assert outcome.failed_check == ""
+
+
+def test_the_shell_still_asks_every_question_with_the_stored_value(g, term) -> None:
+    _write(g, {"pro": {"url": "http://ok"}})
+    term.answers[:] = ["http://ok"]
+    result = _enable(g, "pro")
+
+    assert result.exit_code == 0, result.output
+    assert term.asked == [("Server address", "http://ok")]
+    assert "— takes effect on the next `localharness start`" in result.output
+
+
+def test_the_shell_runs_no_action_for_a_configured_plugin_with_nothing_typed(g, term) -> None:
+    ACT_READY[0] = True
+    result = _enable(g, "act")
+
+    assert result.exit_code == 0, result.output
+    assert term.confirmed == [] and CALLS == []
+    _in_order(result.output, "Checking it now:", "✓ act: ready")
+
+
+def test_answers_written_this_run_run_the_action_of_a_configured_plugin(g, term) -> None:
+    _write(g, {"kit": {"url": "http://ok"}})
+    term.answers[:] = ["http://ok"]
+    term.yes[:] = [True]
+    result = _enable(g, "kit")
+
+    assert result.exit_code == 0, result.output
+    assert term.confirmed == [("Warm it up now?", True)] and CALLS == ["kit"]
+
+
+def test_in_session_a_configured_plugin_with_questions_and_an_action_does_neither(g, term, capsys) -> None:
+    _write(g, {"kit": {"url": "http://ok"}})
+    outcome = _in_session(g, "kit")
+
+    assert term.asked == [] and term.confirmed == [] and CALLS == []
+    assert outcome.failed_check == ""
+
+
+# --- session_step: never raises out of the restart ---------------------------------------------------
+
+
+def test_session_step_ctrl_c_at_a_question_stops_the_step(g, monkeypatch, capsys) -> None:
+    def prompt(*a, **kw):
+        raise click.exceptions.Abort()
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    outcome = plugins_cmd.session_step(("enable", "pro"), str(g))
+
+    assert "Stopped. Your conversation continues." in capsys.readouterr().out
+    assert outcome == plugins_cmd.StepOutcome(name="pro", on=True, stopped=True)
+    assert not (g / "overrides.yaml").exists()
+
+
+def test_session_step_a_refusal_stops_the_step(g, term, capsys) -> None:
+    term.answers[:] = ["http://p/v1", ""]  # half a proposer: refused, exit 2
+    outcome = plugins_cmd.session_step(("enable", "secty"), str(g))
+
+    captured = capsys.readouterr()
+    assert "proposer.model: Field required" in " ".join(captured.err.split())
+    assert "Stopped. Your conversation continues." in captured.out
+    assert outcome == plugins_cmd.StepOutcome(name="secty", on=True, stopped=True)
+
+
+def test_session_step_an_error_after_the_teardown_is_one_line(g, term, monkeypatch, capsys) -> None:
+    _write(g, {"pro": {"url": "http://ok"}})
+
+    def disk_full(path, data):
+        raise OSError("disk full")
+    monkeypatch.setattr(plugins_cmd, "atomic_write_overlay", disk_full)
+    outcome = plugins_cmd.session_step(("enable", "pro"), str(g))
+
+    assert "pro's setup hit an error: OSError: disk full. Your conversation continues." in capsys.readouterr().out
+    assert outcome == plugins_cmd.StepOutcome(name="pro", on=True, stopped=True)
+
+
+def test_session_step_disable_writes_the_switch_off(g, term, capsys) -> None:
+    _write(g, {"pro": {"url": "http://ok", "enabled": True}})
+    outcome = plugins_cmd.session_step(("disable", "pro"), str(g))
+
+    assert yaml.safe_load((g / "overrides.yaml").read_text())["pro"]["enabled"] is False
+    assert outcome == plugins_cmd.StepOutcome(name="pro", on=False)
+    assert term.asked == [] and term.confirmed == []
