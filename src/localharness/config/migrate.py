@@ -51,6 +51,7 @@ from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.models import HarnessConfig, PermissionConfig
 from localharness.config.overlay import restrict_config_file
 from localharness.config.plugin_sections import core_harness_view
+from localharness.config.redact import secret_values, validation_text
 
 log = logging.getLogger(__name__)
 
@@ -256,7 +257,10 @@ def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> list[
             # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
             HarnessConfig.model_validate(core_harness_view(migration.updated))
         except Exception as exc:
-            raise MigrationError(f"migrated config fails validation: {exc}") from exc
+            # Location and message only, scrubbed: pydantic's own text carries the input, the whole
+            # config with any key in it (R16); `from None` keeps it out of a traceback too.
+            why = validation_text(exc, secret_values(HarnessConfig, migration.updated))
+            raise MigrationError(f"migrated config fails validation: {why}") from None
         backups.append(_write_with_backup(config_file, original, migration.updated))
     for sidecar in migration.sidecars:
         backups.append(
