@@ -392,13 +392,12 @@ def test_a_list_index_error_attributes_to_its_owning_block(tmp_path, monkeypatch
 
 
 def test_a_field_no_source_sets_falls_back_to_the_global_config(tmp_path, monkeypatch, fake_home):
-    """A cross-field validator's `loc` is EMPTY — no file "sets" it, because the error is about a
-    relationship between two values rather than about one line.
+    """A field no file sets has no line to point at: a required section that none of the files
+    has (`provider:` here), or a cross-field rule's EMPTY `loc`, which is about a relationship
+    between two values rather than about one line.
 
-    Those fall back to the global config.yaml exactly as they did before this plan. Stated as a
-    limit rather than hidden: the block that triggers it here lives in the WORKSPACE file, and the
-    report still names the global one. (The proposer's address is machine-level only, so the
-    global layer gives it; the workspace sets the clashing model.)
+    Those fall back to the global config.yaml exactly as they did before this plan, even with the
+    workspace layer present and setting other keys.
     """
     from localharness.config.loader import ConfigValidationError
 
@@ -406,13 +405,13 @@ def test_a_field_no_source_sets_falls_back_to_the_global_config(tmp_path, monkey
         tmp_path,
         monkeypatch,
         fake_home,
-        global_overlay="proposer:\n  base_url: http://127.0.0.1:9/v1\n  model: p-model\n",
-        ws_config='version: "1"\nproposer:\n  model: test-model\n',  # = the global provider.default_model
+        global_config='version: "1"\norg:\n  log_level: info\n',  # no provider: block anywhere
+        ws_config='version: "1"\norg:\n  log_level: debug\n',
     )
 
     with pytest.raises(ConfigValidationError) as exc:
         _loader_for(lay).load_harness()
 
     assert exc.value.path == str(lay.global_cfg)
-    assert exc.value.errors[0].source_path is None
-    assert "must differ from provider.default_model" in str(exc.value)
+    assert [(e.field_path, e.source_path) for e in exc.value.errors] == [("provider", None)]
+    assert "Field required" in str(exc.value)

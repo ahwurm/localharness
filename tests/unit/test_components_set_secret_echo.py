@@ -10,7 +10,9 @@ cannot catch. These tests store the key last, and check both the key and its tai
 
 A refusal now prints each error's location and message only, and scrubs every secret value of the
 merged settings, plugin sections included (a plugin validator's own message can quote its input).
-Every run passes an explicit --config-dir; nothing reads the real home."""
+The core rule that refused a complete stored proposer (its model equal to the main one) is gone, so
+a core refusal carries the key in a missing field's section: the key typed before the proposer's
+address and model. Every run passes an explicit --config-dir; nothing reads the real home."""
 from __future__ import annotations
 
 import sys
@@ -88,16 +90,15 @@ def _flat(result) -> str:
     return " ".join((result.stdout + result.stderr).split())
 
 
-PROPOSER = {"base_url": "http://p/v1", "model": "p-old", "api_key": KEY}
-
-
 @pytest.mark.parametrize("flags", [(), ("--json",)], ids=["text", "json"])
-def test_components_set_refusal_never_echoes_the_stored_proposer_key(tmp_path, flags) -> None:
-    g = _home(tmp_path, proposer=PROPOSER)
-    result = _run(g, "components", "set", "proposer.model", "test-model", *flags)
+def test_components_set_refusal_never_echoes_a_typed_proposer_key(tmp_path, flags) -> None:
+    """The key set before the proposer's address and model: pydantic's input for each missing field
+    is the section holding the typed key."""
+    g = _home(tmp_path)
+    result = _run(g, "components", "set", "proposer.api_key", KEY, *flags)
 
     assert result.exit_code == 2, result.output
-    assert "proposer.model" in _flat(result) and "must differ" in _flat(result)
+    assert "proposer.model: Field required" in _flat(result)
     assert not (g / "overrides.yaml").exists()
 
 
@@ -114,14 +115,16 @@ def test_components_set_refusal_scrubs_a_plugin_secret_stored_in_config_yaml(tmp
 
 
 def test_plugins_enable_core_keys_refusal_never_echoes_the_key_tail(tmp_path) -> None:
-    """The real autoresearch plugin's claimed `proposer` section through plugins enable --set: a
-    long key is shown only by its tail, which only the location-and-message text keeps out."""
-    g = _home(tmp_path, proposer=PROPOSER)
+    """The real autoresearch plugin's claimed `proposer` section through plugins enable --set, the
+    model left out: a long key is shown only by its tail, which only the location-and-message text
+    keeps out."""
+    g = _home(tmp_path)
     result = _run(g, "plugins", "enable", "autoresearch", "--set", "proposer.base_url=http://p/v1",
-                  "--set", "proposer.model=test-model")
+                  "--set", f"proposer.api_key={KEY}")
 
     assert result.exit_code == 2, result.output
-    assert "proposer.model must differ" in _flat(result)
+    assert "proposer.model: Field required" in _flat(result)
+    assert not (g / "overrides.yaml").exists()
 
 
 def test_plugins_enable_own_key_refusal_scrubs_a_plugin_secret_stored_in_config_yaml(tmp_path, monkeypatch) -> None:

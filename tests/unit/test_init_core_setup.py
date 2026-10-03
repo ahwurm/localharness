@@ -261,10 +261,12 @@ def test_no_to_keep_changes_the_server_through_overrides_and_leaves_config_yaml_
 
 
 def test_a_change_that_does_not_validate_writes_nothing(tmp_path, monkeypatch):
+    """The served window above ContextConfig's 2,000,000-token ceiling: the change would write it."""
     _detect(monkeypatch, "new-model")
     _terminal(monkeypatch)
     _answers(monkeypatch, False)
-    text = OLD_CONFIG + "proposer:\n  base_url: http://proposer/v1\n  model: new-model\n"
+    monkeypatch.setattr(init_cmd, "_served_window", lambda result: 4_000_000)
+    text = OLD_CONFIG
     cfg = _seed(tmp_path, text)
 
     result = _init(tmp_path)
@@ -272,6 +274,7 @@ def test_a_change_that_does_not_validate_writes_nothing(tmp_path, monkeypatch):
     _exited(result, 1)
     flat = _flat(result)
     assert "do not validate" in flat and "Nothing was written." in flat, flat
+    assert "org.context.max_context_tokens" in flat, flat
     assert not (tmp_path / "overrides.yaml").exists()
     assert cfg.read_text(encoding="utf-8") == text
 
@@ -690,15 +693,15 @@ def test_a_fresh_write_without_force_names_the_saved_choices_that_still_win(tmp_
 
 
 @pytest.mark.parametrize("overlay_text, said", [
-    ("provider:\n  default_model: other-model\nproposer:\n  base_url: http://proposer/v1\n"
-     "  model: test-model:7b\n", "do not validate"),
+    ("provider:\n  default_model: other-model\nproposer:\n  base_url: http://proposer/v1\n",
+     "do not validate"),
     ("provider: [\n", "cannot be read"),
 ], ids=["reset-does-not-validate", "unreadable"])
 def test_force_writes_nothing_when_the_reset_cannot_be_written(overlay_text, said, tmp_path,
                                                                monkeypatch):
-    """--force resets both files or neither: a reset whose merged config would not validate (here the
-    proposer would equal the new default model once the saved model is cleared), or an overrides.yaml
-    that cannot be read, exits 1 with config.yaml and overrides.yaml untouched."""
+    """--force resets both files or neither: a reset whose merged config would not validate (here a
+    proposer with no model, which --force keeps: it clears only the saved model and server choices),
+    or an overrides.yaml that cannot be read, exits 1 with config.yaml and overrides.yaml untouched."""
     _detect(monkeypatch)
     _silent(monkeypatch)
     cfg = _seed(tmp_path)

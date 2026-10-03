@@ -20,7 +20,7 @@ runner = CliRunner()
 KEY = "sk-SENTINEL-sites-52-0123456789abcdefXYZ"
 _PROVIDER = {"provider_type": "vllm", "base_url": "http://127.0.0.1:9/v1",
              "default_model": "test-model", "available_models": ["test-model"]}
-MUST_DIFFER = {"proposer": {"base_url": "http://p/v1", "model": "test-model", "api_key": KEY}}
+NO_MODEL = {"proposer": {"base_url": "http://p/v1", "api_key": KEY}}  # pydantic's input: the section, key and all
 MISSPELLED = {"proposer": {"base_url": "http://p/v1", "model": "p2", "api_kye": KEY}}
 
 
@@ -45,7 +45,7 @@ def test_config_migrate_refusal_never_echoes_the_key(tmp_path) -> None:
     """Rich used to swallow pydantic's `[type=…, input_value=…]` as a markup tag here, hiding the
     key by accident; the refusal is now each error's location and message, and says so."""
     for i, (sections, why) in enumerate((
-            (MUST_DIFFER, "migrated config fails validation: Value error, proposer.model must differ"),
+            (NO_MODEL, "migrated config fails validation: proposer.model: Field required"),
             (MISSPELLED, "migrated config fails validation: proposer.api_kye: Extra inputs are not permitted"))):
         g = _home(tmp_path / f"case{i}", sections)
         before = (g / "config.yaml").read_bytes()
@@ -141,12 +141,12 @@ def test_a_refused_adoption_never_echoes_the_key(tmp_path) -> None:
 
     g = _model_home(tmp_path)
     cfg = ConfigLoader(config_dir=g).load_harness()
-    new_overlay = {"proposer": {"api_key": KEY}, "provider": {"default_model": "p-model"}}
+    new_overlay = {"proposer": {"api_key": KEY}, "org": {"context": {"max_context_tokens": 500}}}
     with pytest.raises(AdoptionRefused) as info:
-        _validate_merged(cfg, "provider.default_model", new_overlay)
+        _validate_merged(cfg, "org.context.max_context_tokens", new_overlay)
     _clean(str(info.value), repr(info.value), repr(info.value.__cause__))
-    assert "adopting 'provider.default_model' produces an invalid config" in str(info.value)
-    assert "proposer.model must differ" in str(info.value)
+    assert "adopting 'org.context.max_context_tokens' produces an invalid config" in str(info.value)
+    assert "org.context.max_context_tokens: Input should be greater than or equal to 1000" in str(info.value)
 
 
 # --- a plugin's invalid settings (doctor, plugins list, the start warnings) ------------------------
@@ -187,8 +187,9 @@ def _init_errors(monkeypatch):
 
 
 def test_init_change_refusal_never_echoes_the_key(tmp_path, monkeypatch) -> None:
-    """A re-run that picks the proposer's model as the main one: the change is checked against
-    config.yaml merged with overrides.yaml, `org:` before `proposer:` (the key last in the tail)."""
+    """A re-run's change that does not validate (a served window above the 2,000,000-token
+    ceiling): it is checked against config.yaml merged with overrides.yaml, the stored key in it,
+    `org:` before `proposer:` (the key last in the tail)."""
     import click
     from types import SimpleNamespace
 
@@ -197,13 +198,14 @@ def test_init_change_refusal_never_echoes_the_key(tmp_path, monkeypatch) -> None
     g = _home(tmp_path, {"org": {"log_level": "info"},
                          "proposer": {"base_url": "http://p/v1", "model": "p-old", "api_key": KEY}})
     buf = _init_errors(monkeypatch)
-    monkeypatch.setattr(init_cmd, "_served_window", lambda result: None)
-    found = SimpleNamespace(provider_type="vllm", base_url="http://127.0.0.1:9/v1", models=["p-old"])
+    monkeypatch.setattr(init_cmd, "_served_window", lambda result: 4_000_000)
+    found = SimpleNamespace(provider_type="vllm", base_url="http://127.0.0.1:9/v1", models=["p-new"])
     with pytest.raises(click.exceptions.Exit):
-        init_cmd._write_change(g, found, "p-old", SimpleNamespace(tool_call_mode="native"))
+        init_cmd._write_change(g, found, "p-new", SimpleNamespace(tool_call_mode="native"))
     _clean(buf.getvalue())
     flat = " ".join(buf.getvalue().split())
-    assert "the new settings do not validate: Value error, proposer.model must differ" in flat, flat
+    assert ("the new settings do not validate: org.context.max_context_tokens: Input should be less "
+            "than or equal to 2000000") in flat, flat
     assert not (g / "overrides.yaml").exists()
 
 
@@ -215,12 +217,11 @@ def test_init_force_reset_refusal_never_echoes_the_key(tmp_path, monkeypatch) ->
     from localharness.config.models import HarnessConfig
 
     g = _home(tmp_path, {})
-    (g / "overrides.yaml").write_text(yaml.safe_dump({
-        "provider": {"default_model": "test-model"},
-        "proposer": {"base_url": "http://p/v1", "model": "test-model", "api_key": KEY}}), encoding="utf-8")
+    (g / "overrides.yaml").write_text(yaml.safe_dump({  # a proposer with no model: --force keeps it
+        "provider": {"default_model": "test-model"}, **NO_MODEL}), encoding="utf-8")
     buf = _init_errors(monkeypatch)
     harness = HarnessConfig.model_validate({"version": "1", "provider": _PROVIDER})
     with pytest.raises(click.exceptions.Exit):
         init_cmd._saved_choices_reset(g, harness)
     _clean(buf.getvalue())
-    assert "proposer.model must differ" in " ".join(buf.getvalue().split())
+    assert "the new settings do not validate: proposer.model: Field required" in " ".join(buf.getvalue().split())
