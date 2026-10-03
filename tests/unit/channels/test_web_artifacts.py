@@ -48,7 +48,8 @@ async def test_an_unauthenticated_get_is_refused_like_every_get(tmp_path):
     assert refused.status_code == 401
     assert refused.json() == (await client.get("/api/health")).json()  # the refusal every GET gives
     assert (await client.get(url, headers={"Authorization": "Bearer not-the-token"})).status_code == 401
-    client.cookies.set(auth.AUTH_COOKIE, TOKEN)  # the enrolment cookie: how a same-origin <img> loads
+    # the enrolment cookie, derived from the token: how a same-origin <img> loads
+    client.cookies.set(auth.AUTH_COOKIE, auth.get_cookie_value(TOKEN))
     got = await client.get(url)
     assert got.status_code == 200 and got.content == PNG
 
