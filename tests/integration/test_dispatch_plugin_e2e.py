@@ -12,7 +12,7 @@ Per test:
   - test_workspace_ack_applies                       criterion 1: ack IS layered
   - test_setting_wins_env_fills_the_rest             criterion 2: per-field precedence, one line each
   - test_disabled_dispatch_refuses_discord           criterion 3: tier 2, plugin off (real CLI)
-  - test_missing_extra_refuses_with_install_line     criterion 3: tier 2, extra absent (real check)
+  - test_missing_extra_refuses_with_install_line     criterion 3: tier 2, extra absent (pinned missing)
   - test_plugin_start_failure_never_falls_back       criterion 3: tier 3, start() raised
   - test_typo_is_still_tier_one                      criterion 3: tier 1, before any config is read
 
@@ -62,9 +62,11 @@ def printed(monkeypatch) -> list[str]:
 
 
 def _extra(monkeypatch, present: bool = True) -> None:
+    """Pin the dispatch extra installed or missing through resolve()'s `extra_installed` default (the
+    plan and plugins_cmd._extra_missing both ask it) — never this venv's answer: CI has discord.py."""
     from localharness.plugins import resolve
-    if present:
-        monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: True)
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed",
+                        lambda e: present or e != "dispatch")
 
 
 def _add_yaml(path, data: dict) -> None:
@@ -291,10 +293,8 @@ async def test_disabled_dispatch_refuses_discord(tmp_path, monkeypatch):
 
 
 async def test_missing_extra_refuses_with_install_line(tmp_path, monkeypatch):
-    import importlib.util
-
-    assert importlib.util.find_spec("discord") is None, "discord.py is installed; this case needs it absent"
-    fake = install_fake_discord(monkeypatch)  # in sys.modules only; extra_installed stays real
+    fake = install_fake_discord(monkeypatch)  # in sys.modules only; the seam says the extra is missing
+    _extra(monkeypatch, present=False)
     cfg = _global(tmp_path, monkeypatch, SETTINGS)
     starts = _record_plugin_start(monkeypatch)
     with pytest.raises(typer.BadParameter) as e:

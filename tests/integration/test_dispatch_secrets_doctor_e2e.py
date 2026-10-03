@@ -7,7 +7,8 @@ Every surface is the REAL Typer app (CliRunner) against a tmp GLOBAL dir passed 
 with the REAL bundled plugin list (dispatch is the fourth). Each surface is its own test so a leak
 names its surface; each asserts SENTINEL is absent from stdout, stderr, the captured logs and the
 audit file (`_run`). Discovery is stubbed to nothing installed; `extra_installed` is pinned True
-for "extra present" and left real (discord.py is not installed here) for "extra absent".
+for "extra present" and to report the dispatch extra missing for "extra absent" — never left to
+the venv, which may hold discord.py (CI installs it).
 """
 from __future__ import annotations
 
@@ -58,6 +59,11 @@ def _present(monkeypatch) -> None:
     monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: True)
 
 
+def _absent(monkeypatch) -> None:
+    from localharness.plugins import resolve
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: e != "dispatch")
+
+
 def _run(g: Path, caplog, *args: str):
     """One CLI run; the token must be in none of stdout, stderr, logs or the audit file."""
     result = runner.invoke(app, [*args, "--config-dir", str(g)])
@@ -99,9 +105,10 @@ def test_enable_set_extra_present(g, caplog, monkeypatch) -> None:
     assert "install extra" not in r.output, r.output
 
 
-def test_enable_set_extra_absent(g, caplog) -> None:
+def test_enable_set_extra_absent(g, caplog, monkeypatch) -> None:
     """Enable writes, then says the extra is missing — "takes effect on the next start" alone is
     not true without discord.py."""
+    _absent(monkeypatch)
     r = _enable(g, caplog)
     assert "note: dispatch is missing its install extra — install `localharness[dispatch]` to use it" \
         in _flat(r.output), r.output
@@ -206,6 +213,7 @@ def test_doctor_not_configured_skip_row(g, caplog, monkeypatch) -> None:
 
 
 def test_doctor_extra_absent_names_the_install_line_and_runs_no_checks(g, caplog, monkeypatch) -> None:
+    _absent(monkeypatch)
     for k, v in ENV.items():
         monkeypatch.setenv(k, v)
     r = _run(g, caplog, "doctor")
