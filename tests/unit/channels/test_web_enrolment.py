@@ -134,3 +134,42 @@ def test_rotating_the_token_reprints_a_qr(tmp_path, capsys, monkeypatch):
     assert "█" in out, "no QR was printed for the new token"
     assert after in out, "the QR and its URL must carry the NEW token"
     assert before not in out
+
+
+def _saved(tmp_path, url):
+    """A machine whose `plugins enable web` saved `url` as the phone address."""
+    import yaml
+
+    g = tmp_path / "g"
+    g.mkdir()
+    (g / "config.yaml").write_text(yaml.safe_dump({
+        "version": "1", "provider": {"provider_type": "vllm", "base_url": "http://127.0.0.1:9/v1",
+                                     "default_model": "test-model"}}), encoding="utf-8")
+    (g / "overrides.yaml").write_text(yaml.safe_dump({"web": {"public_url": url}}), encoding="utf-8")
+    return g
+
+
+def _enrolled_for(monkeypatch, g, **flags):
+    """The keyword arguments `localharness web --rotate-token` prints its enrolment with."""
+    import typer
+
+    pytest.importorskip("starlette")
+    pytest.importorskip("uvicorn")
+    got = []
+    monkeypatch.setattr(web_cmd, "print_enrolment", lambda token, **kw: got.append(kw))
+    with pytest.raises(typer.Exit) as exit_info:
+        web_cmd.web_cmd(config_dir=str(g), rotate_token=True, **flags)
+    assert exit_info.value.exit_code == 0
+    [kw] = got
+    return kw
+
+
+def test_a_saved_public_url_is_used_when_the_flag_is_omitted(tmp_path, monkeypatch):
+    kw = _enrolled_for(monkeypatch, _saved(tmp_path, "https://saved.example.ts.net"))
+    assert kw["public_url"] == "https://saved.example.ts.net"
+
+
+def test_the_flag_beats_the_saved_address(tmp_path, monkeypatch):
+    kw = _enrolled_for(monkeypatch, _saved(tmp_path, "https://saved.example.ts.net"),
+                       public_url="https://flag.example")
+    assert kw["public_url"] == "https://flag.example"
