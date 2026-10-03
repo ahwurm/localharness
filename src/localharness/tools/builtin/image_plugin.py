@@ -47,19 +47,22 @@ Image needs ComfyUI running on this machine, with three model files:
   models/text_encoders/qwen3vl_8b_int8_convrot.safetensors          (about 9.4 GB)
   models/vae/qwen_image_2.1_vae_bf16.safetensors                    (about 0.7 GB)
 Start it from your ComfyUI folder: venv/bin/python main.py --listen 127.0.0.1 --port 8188
-Then run `localharness doctor` to check.
+Then run `localharness doctor` to check."""
 
-Or paste this into your coding agent to set it up for your hardware:
-
-  Set up ComfyUI on this machine for LocalHarness image generation. Install ComfyUI and run it on
-  127.0.0.1, port 8188 (this machine only, not the network). Put these Qwen-Image-2.1 INT8 files in
-  its models folder: diffusion_models/qwen_image_2.1_int8_convrot.safetensors (about 7.3 GB),
-  text_encoders/qwen3vl_8b_int8_convrot.safetensors (about 9.4 GB) and
-  vae/qwen_image_2.1_vae_bf16.safetensors (about 0.7 GB). The weights are under the Qwen Research
-  License: personal, non-commercial use. Keep the UNETLoader weight_dtype at "default" (the fp8 fast
-  mode spoils the pictures). On an NVIDIA GB10 (DGX Spark) the INT8 kernels compile on first use and
-  need the Python headers: start ComfyUI with C_INCLUDE_PATH pointing at them. You are done when
-  http://127.0.0.1:8188/system_stats answers and `localharness doctor` shows image reachable."""
+# Printed after a check that does not pass, and by `plugins info image`, filled with the address
+# typed and the GPU the machine reports. The GB10 sentence stays: whoever follows the prompt compares
+# it with the {machine} sentence.
+IMAGE_AGENT_PROMPT = (
+    "Set up ComfyUI on this machine for LocalHarness image generation. Install ComfyUI and run it so\n"
+    "it answers at {comfyui_url}; keep it off the open internet. Put these Qwen-Image-2.1 INT8 files\n"
+    "in its models folder: diffusion_models/qwen_image_2.1_int8_convrot.safetensors (about 7.3 GB),\n"
+    "text_encoders/qwen3vl_8b_int8_convrot.safetensors (about 9.4 GB) and\n"
+    "vae/qwen_image_2.1_vae_bf16.safetensors (about 0.7 GB). The weights are under the Qwen Research\n"
+    "License: personal, non-commercial use. Keep the UNETLoader weight_dtype at \"default\" (the fp8\n"
+    "fast mode spoils the pictures). {machine} On an NVIDIA GB10 (DGX Spark) the INT8 kernels compile\n"
+    "on first use and need the Python headers: start ComfyUI with C_INCLUDE_PATH pointing at them.\n"
+    "You are done when {comfyui_url}/system_stats answers and `localharness doctor` shows image\n"
+    "reachable.")
 
 
 class ImagePlugin(Plugin):
@@ -73,7 +76,8 @@ class ImagePlugin(Plugin):
         cli=(CliDescriptor(name="generate-image", help="Make a picture with your local ComfyUI server.",
                            target="localharness.cli.generate_image_cmd:app"),),
         setup=(SetupField(key="comfyui_url", prompt="ComfyUI address", default="http://127.0.0.1:8188"),),
-        setup_help=IMAGE_SETUP_HELP,
+        setup_help=IMAGE_SETUP_HELP, agent_prompt=IMAGE_AGENT_PROMPT,
+        next_steps="Once ComfyUI answers, the agent can make pictures with generate_image.",
     )
     ConfigModel = ImageConfig
     wants_artifacts = True  # core computes <state dir>/artifacts/image/ -> ctx.paths.artifact_dir
