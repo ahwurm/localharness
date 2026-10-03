@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated, Any
@@ -569,8 +570,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                        model_override: str | None = None, list_models: bool = False,
                        no_input: bool = False, show_reasoning: bool = False,
                        acp_channel: Any = None, web_channel: Any = None,
-                       resume: Resume | None = None) -> Restart | None:
+                       resume: Resume | None = None, trust_project: bool = False) -> Restart | None:
     """Async entry point: discover agent, wire dependencies, run REPL.
+
+    `trust_project`: `--trust-project` — this run trusts the project it stands in, recording
+    nothing (the machine's own files are decided as always).
 
     Returns a `Restart` when the REPL ended for `/plugins enable|disable` (a terminal session):
     start_app runs the plugin's step, then calls this again with `resume` — the conversation, the
@@ -651,7 +655,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # dir. None whenever --config-dir/LOCALHARNESS_DIR/LOCALHARNESS_HOME was explicit, nothing was
     # found, or trust was withheld — in which case this is byte-identical to v0.12 (LAYR-03).
     # The RAW flag value, not cfg_path: "was this explicit" does not survive resolution.
-    from localharness.cli.workspace import resolve_workspace_layer, settle_startup_trust
+    from localharness.cli.workspace import (
+        MCP_NOT_STARTED_LINE, TRUST_PROJECT_ENV, MachineTrust, ProjectTrust, _stdin_is_a_terminal,
+        decide_machine_trust, decide_project_trust, resolve_workspace_layer, settle_startup_trust)
     interactive = False if no_input else None
     if web_channel is not None:
         # The web channel is already live and a client is already attached (its SSE connection is
@@ -677,10 +683,23 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # a layer that is active for THIS session. `cli/session_trust` reads the record it writes and
     # asks nothing; on a channel that cannot use stdin — Zed, Discord — this is silent and that
     # one asks instead.
-    settled = settle_startup_trust(config_dir, interactive=interactive)
+    trust_flag = trust_project or os.environ.get(TRUST_PROJECT_ENV) == "1"
+    settled = settle_startup_trust(config_dir, interactive=False if trust_flag else interactive)
     if workspace is None:
         workspace = settled
-    loader = ConfigLoader(config_dir=cfg_path, local_config_dir=workspace)
+    # What may start, load or loosen this run? Decided once, here, before anything is loaded:
+    # the project's own agent files (their MCP servers) and the machine's own (servers, embedding
+    # model, loosened permissions). Asked only on a terminal, and only about what changed.
+    # `--list-models` loads no agent and starts nothing, so it decides (and asks) nothing.
+    can_ask = channel_mode == "terminal" and not no_input and _stdin_is_a_terminal()
+    project_trust = ProjectTrust(True) if list_models else decide_project_trust(
+        workspace, ask=can_ask, trust_flag=trust_flag, channel_mode=channel_mode)
+    machine_trust = MachineTrust() if list_models else decide_machine_trust(cfg_path, ask=can_ask)
+    if machine_trust.line:
+        err_console.print(machine_trust.line, markup=False, soft_wrap=True)
+    loader = ConfigLoader(config_dir=cfg_path, local_config_dir=workspace,
+                          project_trusted=project_trust.executables,
+                          machine_withheld=machine_trust.withheld)
     if workspace is not None:
         # markup=False, like the model list above: a folder named `[old] proj` is legal
         # everywhere, and rich would either eat the bracket (naming a path that does not exist)
@@ -1246,6 +1265,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 warnings.append(f"capability floor: the root agent does not hold {_name} (plugin "
                                 f"{_plugin}) — {_why}; delegate to an agent without host tools")
 
+        if loader.project_mcp_skipped:
+            err_console.print(MCP_NOT_STARTED_LINE.format(
+                files=", ".join(loader.project_mcp_skipped), why=project_trust.why),
+                markup=False, soft_wrap=True)
         # --- 6. MCP client manager (soft) ---
         mcp_manager: MCPClientManager | None = None
         try:
@@ -1408,6 +1431,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             settings=settings_from(agent_config.permissions),
             bus=bus,
             remote_unattended=harness.channels.remote_unattended,
+            trusted_for_run=trust_flag,
         )
         if resume is not None and resume.gate_mode != gate.mode:
             gate.set_mode(resume.gate_mode)  # /mode as the person left it (and a declined trust's mode)
@@ -1842,6 +1866,12 @@ def start_app(
         help="Stream the model's reasoning (thinking) into the terminal as it generates "
              "(same as terminal.show_reasoning: true; /reasoning toggles it live)",
     )] = False,
+    trust_project: Annotated[bool, typer.Option(
+        "--trust-project",
+        help="Trust the project you are in for this run only, recording nothing: its agent files' "
+             "MCP servers start without the trust question and the session runs as trusted. For CI "
+             "and scripts; LOCALHARNESS_TRUST_PROJECT=1 does the same for any command.",
+    )] = False,
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
     from localharness.config.paths import resolve_config_dir
@@ -1867,7 +1897,7 @@ def start_app(
             restart = asyncio.run(_start_async(
                 resume.agent_name if resume is not None else agent, verbose, debug, config_dir,
                 channel, subagents and resume is None, model, list_models, no_input,
-                show_reasoning=show_reasoning, resume=resume))
+                show_reasoning=show_reasoning, resume=resume, trust_project=trust_project))
             if restart is None or channel != "terminal":
                 return
             # The REPL ended for /plugins and the session is fully torn down: run the plugin's

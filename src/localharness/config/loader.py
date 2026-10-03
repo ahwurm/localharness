@@ -1,12 +1,13 @@
 """ConfigLoader: YAML parse, validate, inheritance resolve, write."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 import reprlib as repr_lib
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
-from typing import Any, Callable, Optional, get_args
+from typing import Any, Callable, Collection, Mapping, Optional, get_args
 
 import yaml
 from pydantic import BaseModel, SecretStr, ValidationError
@@ -18,9 +19,11 @@ from .models import (
     ASK_TO_GATE_FIELD,
     LEGACY_MODE_ALIASES,
     AgentConfig,
+    BudgetConfig,
     DivisionConfig,
     HarnessConfig,
     OrgConfig,
+    PermissionConfig,
 )
 from localharness.config.overlay import (
     deep_merge,
@@ -413,6 +416,65 @@ means; a name in `mcp_trusted_servers` is a grant the operator writes themselves
 the global layer's, with a warning naming the key.
 """
 
+def _drops(value: Any, shipped: Any) -> list[str]:
+    """The shipped entries `value` leaves out, sorted (a shipped set's own order varies by run)."""
+    return sorted(str(d) for d in shipped or () if not isinstance(value, list) or d not in value)
+
+
+def permission_loosenings(perms: Any) -> list[tuple[str, str]]:
+    """The keys of one `permissions` mapping that are LOOSER than the shipped defaults, as sorted
+    (dotted key, shown value) pairs — what a machine agent, division or org file must have
+    confirmed before it applies (orchestrator ruling R12). Tightenings are never listed:
+    `mode` counts only when less strict than DEFAULT_MODE (MODE_STRICTNESS); `workspace_root`
+    counts whenever set (an explicit root can widen the leash); `ask.network_hosts` never (on is
+    tighter, off is the default); an `ask.<f>` in ASK_TIGHTEN_ONLY_FIELDS counts when it drops an
+    entry of the shipped GateSettings default (shown "drops a, b"); an `ask.<f>` in
+    ASK_GLOBAL_ONLY_FIELDS and `budget.kill_file` count whenever they differ from the shipped
+    default; `deny_patterns` never (the org rung's list is unioned into every agent at resolution,
+    `load_agent_file` step 5, so a shorter list in an agent or division file removes nothing — the
+    legacy org.yaml, which IS that rung, is `org_deny_loosenings`'s); budgets and
+    `defaults_revision` never. Values are shown as written (a list as compact JSON) — none of these
+    is a secret."""
+    if not isinstance(perms, dict):
+        return []
+
+    def shown(value: Any) -> str:
+        return value if isinstance(value, str) else json.dumps(value, separators=(",", ":"),
+                                                               default=str)
+
+    out: list[tuple[str, str]] = []
+    mode = _normalize_mode(perms.get("mode"))
+    if mode is not None and MODE_STRICTNESS[mode] < MODE_STRICTNESS[DEFAULT_MODE]:
+        out.append(("permissions.mode", shown(perms["mode"])))
+    if perms.get("workspace_root") is not None:
+        out.append(("permissions.workspace_root", shown(perms["workspace_root"])))
+    ask = perms.get("ask")
+    for field, value in ask.items() if isinstance(ask, dict) else ():
+        if value is None:
+            continue
+        shipped = _gate_default(field)
+        if field in ASK_TIGHTEN_ONLY_FIELDS and (dropped := _drops(value, shipped)):
+            out.append((f"permissions.ask.{field}", "drops " + ", ".join(dropped)))
+        elif field in ASK_GLOBAL_ONLY_FIELDS and not (
+                set(value) == set(shipped or ()) if isinstance(value, list) else value == shipped):
+            out.append((f"permissions.ask.{field}", shown(value)))
+    budget = perms.get("budget")
+    if isinstance(budget, dict) and "kill_file" in budget and (
+            budget["kill_file"] != BudgetConfig.model_fields["kill_file"].default):
+        out.append(("permissions.budget.kill_file", shown(budget["kill_file"])))
+    return sorted(out)
+
+
+def org_deny_loosenings(perms: Any) -> list[tuple[str, str]]:
+    """The legacy org.yaml's `deny_patterns` when it leaves out a shipped pattern. That file is the
+    base rung the deny union starts from (`load_org` → step 5), so unlike an agent or division
+    file a shorter list there does remove patterns — measured: `deny_patterns: []` dropped all of
+    them on a config.yaml carrying no deny list of its own."""
+    deny = perms.get("deny_patterns") if isinstance(perms, dict) else None
+    dropped = _drops(deny, PermissionConfig().deny_patterns) if deny is not None else []
+    return [("permissions.deny_patterns", "drops " + ", ".join(dropped))] if dropped else []
+
+
 HARNESS_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({
     "provider.base_url", "provider.api_key", "extra_endpoints", "active_endpoint", "server",
     "org.audit_log_path", "org.hooks", "org.enforce_capability_floor",
@@ -600,6 +662,8 @@ class ConfigLoader:
         *,
         config_dir: Optional[Path] = None,
         local_config_dir: Optional[Path] = None,
+        project_trusted: bool = True,
+        machine_withheld: Optional[Mapping[str, Collection[tuple[str, str]]]] = None,
     ) -> None:
         # #35: one precedence chain — explicit arg > LOCALHARNESS_DIR (what --config-dir binds)
         # > LOCALHARNESS_HOME (legacy) > ~/.localharness. The overlay + runtime paths resolve
@@ -610,6 +674,13 @@ class ConfigLoader:
         # replacement"; it wasn't). Callers now NAME their workspace layer — cli/workspace.py's
         # resolve_workspace_layer() is the only thing that computes one.
         self._local_dir = Path(local_config_dir) if local_config_dir is not None else None
+        # What start's trust decision withheld (cli/workspace.decide_project_trust and
+        # decide_machine_trust). The defaults load everything, as every command but `start` does:
+        # only `start` decides trust, and nothing else starts a server.
+        self._project_trusted = project_trusted
+        self._machine_withheld = {k: frozenset(v) for k, v in (machine_withheld or {}).items()}
+        # Workspace agent files whose MCP servers start's trust decision withheld (start's one stderr line).
+        self.project_mcp_skipped: dict[str, list[str]] = {}
         self._agent_cache: dict[str, AgentConfig] = {}
         self._division_cache: dict[str, DivisionConfig] = {}
         self._harness_cache: Optional[HarnessConfig] = None
@@ -998,7 +1069,7 @@ class ConfigLoader:
             self._org_cache = OrgConfig()
             return self._org_cache
         text = org_path.read_text(encoding="utf-8")
-        data = _load_yaml_file(org_path)
+        data = self._without_withheld(_load_yaml_file(org_path), org_path)
         result = self._validate_dict(OrgConfig, data, str(org_path), text)
         self._org_cache = result
         return result
@@ -1023,7 +1094,7 @@ class ConfigLoader:
         shadowed file at all.
         """
         text = path.read_text(encoding="utf-8")
-        data = _load_yaml_file(path)
+        data = self._without_withheld(_load_yaml_file(path), path)
         return self._validate_dict(DivisionConfig, data, str(path), text)
 
     def _raw_org_context(self) -> dict:
@@ -1040,7 +1111,7 @@ class ConfigLoader:
             return ctx
         org_path = self._config_dir / "org.yaml"
         if org_path.exists():
-            legacy = _load_yaml_file(org_path).get("context")
+            legacy = self._without_withheld(_load_yaml_file(org_path), org_path).get("context")
             return legacy if isinstance(legacy, dict) else {}
         return {}
 
@@ -1049,7 +1120,7 @@ class ConfigLoader:
         path = self._find_file("divisions", name)
         if path is None:
             return {}
-        ctx = _load_yaml_file(path).get("context")
+        ctx = self._without_withheld(_load_yaml_file(path), path).get("context")
         return ctx if isinstance(ctx, dict) else {}
 
     def load_agent(self, name: str, *, bypass_cache: bool = False) -> AgentConfig:
@@ -1073,7 +1144,9 @@ class ConfigLoader:
         as it would for a session, so a file that validates here is a file that loads.
         """
         text = path.read_text(encoding="utf-8")
-        raw = _load_yaml_file(path)
+        raw = self._without_withheld(_load_yaml_file(path), path)
+        if self._local_dir is not None and _is_under(path, self._local_dir):
+            raw = self._without_project_mcp(raw, path)
 
         # 2. Load org
         org = self.load_org()
@@ -1378,6 +1451,52 @@ class ConfigLoader:
         result._plugin_settings = plugin_settings  # read as attributes: result.memory.recall_scope
         return result
 
+    def _without_project_mcp(self, raw: dict, path: Path) -> dict:
+        """An untrusted project's agent-file `tools.mcp_servers` is removed before the merge, so no
+        AgentConfig built from that file names a server to start; the file and the server names are
+        recorded for start's one line. Never mutates `raw` (the YAML reader's object)."""
+        tools = raw.get("tools") if isinstance(raw, dict) else None
+        servers = tools.get("mcp_servers") if isinstance(tools, dict) else None
+        if self._project_trusted or not servers:
+            return raw
+        self.project_mcp_skipped[str(path)] = (
+            [str(s.get("name") or "?") if isinstance(s, dict) else "?" for s in servers]
+            if isinstance(servers, list) else ["?"])
+        return {**raw, "tools": {k: v for k, v in tools.items() if k != "mcp_servers"}}
+
+    def _machine_file(self, path: Path) -> Optional[str]:
+        """`path` relative to the machine's config dir, posix ("agents/orchestrator.yaml"), or None
+        for a file outside it. Lexical first, so a symlinked agent file keeps its own name; then
+        with the directories resolved, never the file itself."""
+        path = Path(path)
+        for root, candidate in ((self._config_dir, path),
+                                (self._config_dir.resolve(), path.parent.resolve() / path.name)):
+            try:
+                return candidate.relative_to(root).as_posix()
+            except ValueError:
+                continue
+        return None
+
+    def _without_withheld(self, raw: Any, path: Path) -> Any:
+        """What start withheld from a machine agent, division or org file — an MCP server by name
+        (every server of that name in the file: two may share one, and over-withholding is the safe
+        side), `memory.embedding_model`, a dotted `permissions.…` key — is absent from every read of
+        that file this run, baselines included. Never mutates `raw`."""
+        withheld = self._machine_withheld.get(self._machine_file(path) or "") if (
+            self._machine_withheld) else None
+        if not withheld or not isinstance(raw, dict):
+            return raw
+        servers = {name for kind, name in withheld if kind == "mcp_server"}
+        tools = raw.get("tools")
+        if servers and isinstance(tools, dict) and isinstance(tools.get("mcp_servers"), list):
+            raw = {**raw, "tools": {**tools, "mcp_servers": [
+                s for s in tools["mcp_servers"]
+                if not (isinstance(s, dict) and str(s.get("name") or "") in servers)]}}
+        for kind, name in sorted(withheld):
+            if kind in ("embedding_model", "permission"):
+                raw = _put(raw, name.split("."), _UNSET)
+        return raw
+
     def _narrow_agent_global_only(self, sections: dict, path: Path) -> dict:
         """A plugin-section key in AGENT_GLOBAL_ONLY_FIELDS that a WORKSPACE agent file sets: the
         global layer's value stands (its agents/<same name>.yaml, else the global overrides'
@@ -1419,7 +1538,8 @@ class ConfigLoader:
                 return _UNSET
 
         agent_file = self._config_dir / "agents" / f"{stem}.yaml"
-        found = read(lambda: _load_yaml_file(agent_file)) if agent_file.exists() else _UNSET
+        found = (read(lambda: self._without_withheld(_load_yaml_file(agent_file), agent_file))
+                 if agent_file.exists() else _UNSET)
         if found is _UNSET:
             found = read(lambda: load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent"))
         return found
@@ -1448,7 +1568,7 @@ class ConfigLoader:
             if not path.exists():
                 return None
             try:
-                raw = _load_yaml_file(path)
+                raw = self._without_withheld(_load_yaml_file(path), path)
             except ConfigError:
                 return None
             perms = raw.get("permissions") if isinstance(raw, dict) else None
@@ -1480,7 +1600,7 @@ class ConfigLoader:
             if not path.exists():
                 return None
             try:
-                return _declared(_load_yaml_file(path))
+                return _declared(self._without_withheld(_load_yaml_file(path), path))
             except ConfigError:
                 return None
 
@@ -1625,7 +1745,7 @@ class ConfigLoader:
             if not path.exists():
                 return {}
             try:
-                return _declared(_load_yaml_file(path))
+                return _declared(self._without_withheld(_load_yaml_file(path), path))
             except ConfigError:
                 return {}
 
@@ -1769,7 +1889,9 @@ class ConfigLoader:
         if path is None:
             return base
         text = path.read_text(encoding="utf-8")
-        raw = _load_yaml_file(path)  # raises ConfigParseError on malformed YAML
+        raw = self._without_withheld(_load_yaml_file(path), path)  # ConfigParseError if malformed
+        if self._local_dir is not None and path == self._local_dir / "agents" / f"{name}.yaml":
+            raw = self._without_project_mcp(raw, path)
         merged = deep_merge(base.model_dump(), raw)  # base = the defaults; yaml fields win
         if self._local_dir is not None and path == self._local_dir / "agents" / f"{name}.yaml":
             self._narrow_builtin_overlay(merged, base, name, raw)

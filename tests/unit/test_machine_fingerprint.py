@@ -30,8 +30,9 @@ from localharness.cli.workspace import (
 )
 from localharness.config import loader as loader_mod
 from localharness.config import trust
-from localharness.config.loader import ConfigLoader, permission_loosenings
-from localharness.config.models import BudgetConfig
+from localharness.config.loader import (ConfigLoader, org_deny_loosenings,
+                                        permission_loosenings)
+from localharness.config.models import BudgetConfig, PermissionConfig
 
 G1 = {"name": "g1", "transport": "stdio", "command": "/bin/echo", "args": ["hi"]}
 G2 = {"name": "g2", "transport": "stdio", "command": "/bin/sh", "args": ["-c", "id"]}
@@ -439,3 +440,24 @@ def test_the_withheld_division_permission_reaches_the_ask_cascade_stripped(g):
 
     assert stripped.permissions.ask.mcp_trusted_servers == []
     assert whole.permissions.ask.mcp_trusted_servers == ["g1"]
+
+
+def test_the_legacy_org_file_is_the_deny_base_so_a_shorter_list_there_waits(g, monkeypatch):
+    """Agent and division files only ADD to the deny union (`load_agent_file` step 5), but the
+    legacy org.yaml IS the base rung it starts from: on a config.yaml with no deny list of its own,
+    `deny_patterns: []` there dropped every shipped pattern (measured). In that file, and only
+    there, a dropped shipped pattern is a loosening like any other."""
+    _orchestrator(g, G1)
+    _adopted(g, monkeypatch)
+    _write(g / "org.yaml", {"name": "o", "permissions": {"deny_patterns": []}})
+    shipped = set(PermissionConfig().deny_patterns)
+
+    got = decide_machine_trust(g, ask=False)
+    held = ConfigLoader(config_dir=g, machine_withheld=got.withheld).load_agent("orchestrator")
+    loose = ConfigLoader(config_dir=g).load_agent("orchestrator")
+
+    assert got.withheld == {"org.yaml": frozenset({("permission", "permissions.deny_patterns")})}
+    assert not shipped <= set(loose.permissions.deny_patterns), "premise: the base rung is real"
+    assert shipped <= set(held.permissions.deny_patterns)
+    assert permission_loosenings({"deny_patterns": []}) == [], "an agent or division file only adds"
+    assert org_deny_loosenings({"deny_patterns": sorted(shipped) + ["extra(*)"]}) == []
