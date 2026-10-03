@@ -353,6 +353,7 @@ async def test_the_real_serve_hands_incognito_to_the_server_it_builds(tmp_path, 
 
     monkeypatch.setattr(server_mod, "WebServer", _Spy)
     monkeypatch.setattr(uvicorn.Server, "serve", no_listen)
+    monkeypatch.setattr(web_cmd, "_open_tty", lambda: None, raising=False)  # never the real /dev/tty
     for flag in (True, False):
         await web_cmd._serve(config_dir=str(tmp_path), host="127.0.0.1", port=0, token=TOKEN,
                              ui_dir=None, replay=None, fixtures=None, speed=1.0, verbose=False,

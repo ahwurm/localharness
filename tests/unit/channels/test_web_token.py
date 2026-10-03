@@ -10,6 +10,7 @@ the case under test.
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -31,15 +32,26 @@ TOKEN_LINE = "App token (required on every request, the stream included):"
 SHOW_TOKEN = "localharness web --show-token"
 
 
+class FakeTty(io.StringIO):
+    """A controlling terminal for these tests — never the real /dev/tty. What was drawn on it stays
+    readable after the code under test closes it."""
+
+    closed_by_caller = False
+
+    def close(self) -> None:
+        self.closed_by_caller = True
+
+
 @pytest.fixture
 def web(tmp_path, monkeypatch):
     """`localharness web <args>` through the real command and the real `_serve`. Faked: uvicorn's
     listen (it records that serving began), the QR renderer (it records the URL it was handed) and
-    the tailscale guess. `tty` patches the terminal check; None keeps the real one, which under
-    CliRunner reads a captured stream — never a terminal."""
+    the tailscale guess. `tty` patches the stdout check; None keeps the real one, which under
+    CliRunner reads a captured stream — never a terminal. `ctty` is what the controlling-terminal
+    opener hands back (a FakeTty), None for a process with none; every call is recorded."""
     import uvicorn
 
-    seen = SimpleNamespace(served=[], qr=[])
+    seen = SimpleNamespace(served=[], qr=[], opened=[])
 
     async def no_listen(self, *a, **kw):
         seen.served.append(self.config.port)
@@ -53,9 +65,11 @@ def web(tmp_path, monkeypatch):
     monkeypatch.setattr(web_cmd, "detect_public_url", lambda port, **kw: None)  # no `tailscale`
     real = getattr(web_cmd, "_stdout_is_a_terminal", None)
 
-    def invoke(*args, tty=None):
+    def invoke(*args, tty=None, ctty=None):
         monkeypatch.setattr(web_cmd, "_stdout_is_a_terminal",
                             real if tty is None else (lambda: tty), raising=False)
+        monkeypatch.setattr(web_cmd, "_open_tty", lambda: seen.opened.append(ctty) or ctty,
+                            raising=False)
         return CliRunner().invoke(
             web_cmd.app, ["--config-dir", str(tmp_path), "--public-url", PUBLIC, *args],
             env={"COLUMNS": "200"})
@@ -72,15 +86,73 @@ def _flat(text: str) -> str:
 # ---------------------------------------------------------------- when the token is printed
 
 def test_a_run_whose_stdout_is_not_a_terminal_prints_no_token_and_no_qr(web, tmp_path):
-    """The first run makes the token (0600) and still serves; it says how to pair instead."""
-    result = web.invoke()  # the REAL terminal check: CliRunner's stdout is not one
+    """No terminal anywhere (systemd, cron, a detached `setsid`): the first run makes the token
+    (0600) and still serves; one line says how to pair instead, and nothing carries the token."""
+    result = web.invoke()  # the REAL stdout check: CliRunner's stdout is not one
     assert result.exit_code == 0, result.output
     token = web.token()
     assert stat.S_IMODE(os.stat(tmp_path / "web" / "token").st_mode) == 0o600
+    assert web.opened == [None], "the controlling terminal was looked for, and there is none"
     assert token not in result.output
     assert web.qr == [] and FAKE_QR not in result.output, "the QR carries the token: no QR either"
-    assert SHOW_TOKEN in result.output
+    assert result.output.count(SHOW_TOKEN) == 1
     assert web.served, "a run off a terminal still serves"
+
+
+def test_a_piped_stdout_draws_the_pairing_block_on_the_controlling_terminal(web):
+    """The owner's own launcher: `localharness web | tee -a ~/lh-web.log` in a tmux window. The
+    pairing block — the QR every start, the token's text when it was just made — goes to the
+    controlling terminal, so the window shows it; the pipe, and so the log, carries no token."""
+    ctty = FakeTty()
+    first = web.invoke(ctty=ctty)  # the real stdout check: a captured stream, as a pipe is
+    assert first.exit_code == 0, first.output
+    token = web.token()
+    drawn = ctty.getvalue()
+    assert web.opened == [ctty] and ctty.closed_by_caller
+    assert web.qr == [f"{PUBLIC}/#t={token}"] and FAKE_QR in drawn
+    assert TOKEN_LINE in drawn and drawn.index(token) > drawn.index(TOKEN_LINE)
+    assert f"{PUBLIC}/" in drawn and "#t=" not in drawn
+    assert token not in first.output and FAKE_QR not in first.output and "#t=" not in first.output
+    assert "drawn on the terminal only" in _flat(first.output) and SHOW_TOKEN not in first.output
+    assert web.served
+
+    again = FakeTty()
+    second = web.invoke(ctty=again)
+    assert FAKE_QR in again.getvalue() and token not in again.getvalue(), "the text only when made"
+    assert token not in second.output and FAKE_QR not in second.output
+
+
+def test_a_rotation_through_a_pipe_shows_the_new_token_on_the_terminal_only(web, tmp_path):
+    from localharness.channels.web import auth
+
+    old, _ = auth.load_or_create_token(tmp_path)
+    ctty = FakeTty()
+    result = web.invoke("--rotate-token", ctty=ctty)
+    assert result.exit_code == 0, result.output
+    new = web.token()
+    assert new != old and new in ctty.getvalue() and FAKE_QR in ctty.getvalue()
+    assert new not in result.output and old not in result.output
+    assert "turn notifications on again" in _flat(result.output)
+
+
+def test_the_controlling_terminal_is_used_only_by_its_foreground_job(tmp_path, monkeypatch):
+    """`_open_tty` hands the terminal only to the job in its foreground. A background job
+    (`web > log &` from a shell) gets None: it must not draw over the shell, and with
+    `stty tostop` its write would stop the server before it serves. No terminal at all (systemd,
+    cron, setsid) is None, and so is a platform without process groups on terminals."""
+    fake = tmp_path / "tty"  # stands in for /dev/tty: the real one is never opened here
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.setattr(os, "getpgrp", lambda: 42)
+    monkeypatch.setattr(os, "tcgetpgrp", lambda fd: 42)  # this job is in the foreground
+    tty = web_cmd._open_tty(str(fake))
+    assert tty is not None
+    tty.close()
+    missing = tmp_path / "no-such-terminal"
+    assert web_cmd._open_tty(str(missing)) is None and not missing.exists(), "nothing is created"
+    monkeypatch.setattr(os, "tcgetpgrp", lambda fd: 7)  # another job is
+    assert web_cmd._open_tty(str(fake)) is None
+    monkeypatch.delattr(os, "tcgetpgrp")  # Windows
+    assert web_cmd._open_tty(str(fake)) is None
 
 
 def test_on_a_terminal_the_qr_is_drawn_every_start_and_the_token_text_only_when_made(web):
@@ -98,6 +170,7 @@ def test_on_a_terminal_the_qr_is_drawn_every_start_and_the_token_text_only_when_
     for out in (first.output, second.output):
         assert f"{PUBLIC}/" in out and "#t=" not in out, "the printed address carries no token"
     assert len(web.served) == 2
+    assert web.opened == [], "stdout is the terminal: no other one is looked for"
 
 
 def test_show_token_prints_and_exits_without_serving(web, tmp_path, monkeypatch):
@@ -127,6 +200,7 @@ def test_show_token_refuses_a_stdout_that_is_not_a_terminal(web, tmp_path):
     assert result.exit_code == 1
     assert "--show-token prints the token only to a terminal, and stdout is not one." in result.output
     assert token not in result.output and web.qr == [] and web.served == []
+    assert web.opened == [], "--show-token is unchanged: it refuses, it never draws elsewhere"
 
 
 # ---------------------------------------------------------------- rotation
