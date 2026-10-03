@@ -374,10 +374,12 @@ def test_sections_set_values_are_machine_level(tmp_path, monkeypatch, fake_home,
 
 def test_a_refused_sections_write_never_echoes_a_stored_secret(g, no_prompt) -> None:
     """pydantic's str(ValidationError) carries input_value — the whole merged config, the stored
-    proposer.api_key included — so a refusal must never print it."""
+    proposer.api_key included — so a refusal must never print it. pydantic shortens that repr to
+    its head and tail, so the key is written LAST, as a hand-written config.yaml has it: sorted
+    keys would hide it in the cut and this test could not see a leak."""
     secret = "SENTINEL-KEY-52"
     cfg = dict(_CONFIG, proposer={"base_url": "http://p/v1", "model": "p-old", "api_key": secret})
-    (g / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    (g / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     result = _enable(g, "secty", "--set", "proposer.base_url=http://p/v1",
                      "--set", "proposer.model=test-model")
 
@@ -385,4 +387,15 @@ def test_a_refused_sections_write_never_echoes_a_stored_secret(g, no_prompt) -> 
     assert "proposer.model must differ" in result.output
     for where in (result.stdout, result.stderr, repr(result.exception)):
         assert secret not in where, where
+    assert not (g / "overrides.yaml").exists()
+
+
+def test_a_sections_write_over_a_config_that_cannot_load_is_reported(g, no_prompt) -> None:
+    """As `components set` reports it (exit 2), never a traceback."""
+    (g / "config.yaml").write_text(yaml.safe_dump(dict(_CONFIG, org={"no_such_key": 1})),
+                                   encoding="utf-8")
+    result = _enable(g, "secty", "--set", "proposer.base_url=http://p/v1", "--set", "proposer.model=p-model")
+
+    assert result.exit_code == 2, result.output
+    assert "Failed to load config" in result.output
     assert not (g / "overrides.yaml").exists()

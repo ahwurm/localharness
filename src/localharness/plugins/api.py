@@ -109,9 +109,10 @@ class SlashDescriptor(BaseModel):
 
 class SetupField(BaseModel):
     """One question `plugins enable NAME` asks on a terminal: `key` is a leaf of the plugin's
-    ConfigModel, `prompt` the words shown, `default` the answer offered. Data, not a callback:
-    the harness asks, checks and writes; the plugin does no I/O (a later setup wizard walks the
-    same list across plugins).
+    ConfigModel — or, for a bundled plugin, a dotted path under one of its `sections`, written at
+    that path and checked against the core settings. `prompt` is the words shown, `default` the
+    answer offered. Data, not a callback: the harness asks, checks and writes; the plugin does no
+    I/O (a later setup wizard walks the same list across plugins).
 
     `secret` (additive, optional, PLUGIN_API_VERSION unchanged): the answer is not echoed while
     typed and is printed masked."""
