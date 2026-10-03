@@ -610,7 +610,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.agent.permissions import PermissionEvaluator
     from localharness.channels.terminal import TerminalChannel
     from localharness.cli.agent_cmd import _build_agent_yaml
-    from localharness.cli.init_cmd import init_app
     from localharness.cli.slash_commands import set_plugin_rows
     from localharness.config.loader import ConfigLoader
     from localharness.config.paths import global_config_dir, resolve_config_dir, resolve_runtime_path
