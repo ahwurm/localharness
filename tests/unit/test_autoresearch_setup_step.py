@@ -118,6 +118,17 @@ def test_no_answer_is_one_failing_row(tmp_path, server) -> None:
     assert "proposer.base_url" in row.hint
 
 
+def test_a_key_a_header_cannot_carry_fails_without_quoting_it(tmp_path, server) -> None:
+    """httpx refuses a header value that is not ASCII with a UnicodeEncodeError whose text quotes
+    the key's offending character and its position: the row names the setting, never that text."""
+    rows = _act(_ctx(tmp_path, {**_PROPOSER, "api_key": "sk-SENTINEL-\u00e9-tail"}))
+
+    assert rows == [Check(name="autoresearch-proposer", status="fail",
+                          detail="proposer.api_key holds a character an HTTP header cannot carry",
+                          hint="type the key again: `localharness plugins enable autoresearch`")]
+    assert server[0] == []  # nothing was sent
+
+
 def test_no_key_sends_no_authorization_header(tmp_path, server) -> None:
     seen, _ = server
     _act(_ctx(tmp_path, {"base_url": URL + "/", "model": "p-model"}))  # api_key defaults to "none"
