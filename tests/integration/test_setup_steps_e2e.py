@@ -1,0 +1,195 @@
+"""memory's, mobile's (web) and autoresearch's setup steps, each through the real
+`localharness plugins enable` command: the questions on a (fake) terminal, the one validated write,
+the setup action, the check doctor runs, the coding-agent prompt when it does not pass, and the next
+step. Nothing reaches a real endpoint: the embedding download is provider.server.download_model
+patched, the proposer answers through autoresearch's _TRANSPORT (an httpx.MockTransport), and the
+only address that could be dialled is the discard port 127.0.0.1:9.
+
+Plain `def` tests throughout: `plugins enable` calls asyncio.run itself (asyncio_mode is "auto").
+Every run passes an explicit --config-dir. Names start with the plugin, so `-k <plugin>` selects one
+plugin's tests."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import yaml
+from rich.console import Console
+from typer.testing import CliRunner
+
+from localharness.cli import plugins_cmd
+from localharness.cli.app import app
+from localharness.plugins import setup
+from localharness.plugins.api import Check
+from localharness.plugins.setup import AGENT_PROMPT_LEAD
+
+runner = CliRunner()
+_CONFIG = {  # port 9 (discard): nothing ever reaches a model
+    "version": "1",
+    "provider": {"provider_type": "vllm", "base_url": "http://127.0.0.1:9/v1",
+                 "default_model": "test-model", "available_models": ["test-model"]},
+}
+MODEL = "Qwen/Qwen3-Embedding-0.6B"
+DOWNLOAD_Q = "Download the embedding model now (about 1.2 GB)?"
+
+
+@pytest.fixture(autouse=True)
+def wide(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "400")
+    monkeypatch.setattr(plugins_cmd, "console", Console(width=400))
+    monkeypatch.setattr(setup, "gpu_name", lambda: "NVIDIA GB10")  # no test runs nvidia-smi
+
+
+@pytest.fixture
+def g(tmp_path: Path) -> Path:
+    g = tmp_path / "g"
+    g.mkdir()
+    (g / "config.yaml").write_text(yaml.safe_dump(_CONFIG), encoding="utf-8")
+    return g
+
+
+@pytest.fixture
+def terminal(monkeypatch):
+    """A terminal: the person types `answers` and answers yes/no with `confirms`, in order; every
+    question is recorded."""
+    asked: dict[str, list] = {"prompt": [], "confirm": []}
+    answers: list[str] = []
+    confirms: list[bool] = []
+
+    def prompt(text, default=None, **kw):
+        asked["prompt"].append((text, default))
+        return answers.pop(0)
+
+    def confirm(text, default=None, **kw):
+        asked["confirm"].append(text)
+        return confirms.pop(0)
+
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    monkeypatch.setattr(plugins_cmd.typer, "confirm", confirm)
+    return asked, answers, confirms
+
+
+@pytest.fixture
+def no_terminal(monkeypatch):
+    def never(*a, **kw):
+        raise AssertionError("asked off a terminal")
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: False)
+    monkeypatch.setattr(plugins_cmd.typer, "prompt", never)
+    monkeypatch.setattr(plugins_cmd.typer, "confirm", never)
+
+
+def _enable(g: Path, *args: str):
+    return runner.invoke(app, ["plugins", "enable", *args, "--config-dir", str(g)])
+
+
+def _overrides(g: Path):
+    return yaml.safe_load((g / "overrides.yaml").read_text(encoding="utf-8"))
+
+
+# --- memory: one action, no questions -------------------------------------------------------------
+
+@pytest.fixture
+def embed(monkeypatch):
+    """The embedding model is missing from the cache until the (fake) download puts it there; the
+    sentence_transformers package is installed unless a test says otherwise."""
+    from localharness.memory import plugin as memory_plugin
+    from localharness.provider import server
+    state: dict = {"downloads": [], "cached": False, "package": True}
+
+    def check(model):
+        if not state["package"]:
+            return Check(name="memory-embedding", status="fail",
+                         detail="the sentence_transformers package is not installed — memory search "
+                                "and consolidation cannot embed", hint="uv sync --extra embeddings")
+        if state["cached"]:
+            return Check(name="memory-embedding", status="pass",
+                         detail=f"embedding model {model} is in the local cache")
+        return Check(name="memory-embedding", status="fail",
+                     detail=f"embedding model {model} is not in the local Hugging Face cache")
+
+    def download(repo_id):
+        state["downloads"].append(repo_id)
+        state["cached"] = True
+        return f"/cache/{repo_id}"
+
+    monkeypatch.setattr(memory_plugin, "_embedding_check", check)
+    monkeypatch.setattr(memory_plugin, "_embedding_package_installed", lambda: state["package"])
+    monkeypatch.setattr(server, "download_model", download)
+    return state
+
+
+@pytest.mark.plugin("memory")
+def test_memory_yes_downloads_the_model_then_checks_it(g, terminal, embed) -> None:
+    asked, _, confirms = terminal
+    confirms.append(True)
+    result = _enable(g, "memory")
+    out = result.output
+
+    assert result.exit_code == 0, out
+    assert asked == {"prompt": [], "confirm": [DOWNLOAD_Q]}
+    assert embed["downloads"] == [MODEL]
+    assert _overrides(g) == {"memory": {"enabled": True}}
+    for text in (f"✓ memory-embedding: downloaded {MODEL}", "Checking it now:",
+                 f"✓ memory-embedding: embedding model {MODEL} is in the local cache",
+                 "In a session, /memory shows what it keeps."):
+        assert text in out, text
+    assert out.index("downloaded") < out.index("Checking it now:")
+    assert AGENT_PROMPT_LEAD not in out  # the check passes now
+
+
+@pytest.mark.plugin("memory")
+def test_memory_no_downloads_nothing_and_prints_the_prompt(g, terminal, embed) -> None:
+    asked, _, confirms = terminal
+    confirms.append(False)
+    result = _enable(g, "memory")
+    out = result.output
+
+    assert result.exit_code == 0, out
+    assert asked["confirm"] == [DOWNLOAD_Q] and embed["downloads"] == []
+    assert f"✗ memory-embedding: embedding model {MODEL} is not in the local Hugging Face cache" in out
+    assert AGENT_PROMPT_LEAD in out and "embeddings" in out[out.index(AGENT_PROMPT_LEAD):]
+    assert "In a session, /memory shows what it keeps." in out
+
+
+@pytest.mark.plugin("memory")
+def test_memory_with_the_model_cached_asks_nothing(g, terminal, embed) -> None:
+    embed["cached"] = True
+    asked, _, _ = terminal
+    result = _enable(g, "memory")
+    out = result.output
+
+    assert result.exit_code == 0, out
+    assert asked == {"prompt": [], "confirm": []}
+    assert embed["downloads"] == []
+    assert f"✓ memory-embedding: embedding model {MODEL} is in the local cache" in out
+    assert AGENT_PROMPT_LEAD not in out
+    assert "In a session, /memory shows what it keeps." in out
+
+
+@pytest.mark.plugin("memory")
+def test_memory_without_the_embeddings_package_names_the_install_line(g, terminal, embed) -> None:
+    embed["package"] = False
+    _, _, confirms = terminal
+    confirms.append(True)
+    result = _enable(g, "memory")
+    out = result.output
+
+    assert result.exit_code == 0, out
+    assert embed["downloads"] == []
+    assert "memory-embedding: nothing downloaded: the sentence_transformers package is not installed" in out
+    assert "uv tool install 'localharness[embeddings]'" in out
+    assert AGENT_PROMPT_LEAD in out
+
+
+@pytest.mark.plugin("memory")
+def test_memory_without_a_terminal_downloads_nothing_and_says_what_to_run(g, no_terminal, embed) -> None:
+    result = _enable(g, "memory")
+    out = result.output
+
+    assert result.exit_code == 0, out
+    assert embed["downloads"] == []
+    assert _overrides(g) == {"memory": {"enabled": True}}
+    assert ("next step — run `localharness plugins enable memory` on a terminal to answer: "
+            f"{DOWNLOAD_Q}") in out
+    assert "In a session, /memory shows what it keeps." in out

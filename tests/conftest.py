@@ -38,8 +38,9 @@ def _embedding_model_cached(request, monkeypatch):
     row — and under the suite's fake HOME the Hugging Face cache is empty, so a doctor test that
     pins a healthy install would read a failure that is about the sandbox, not the code. Treat the
     model as cached suite-wide; the check's own behaviour (missing package, missing model, present)
-    is tested against a real cache lookup in test_memory_plugin_doctor.py, which opts out here."""
-    if request.module.__name__.endswith("test_memory_plugin_doctor"):
+    is tested against a real cache lookup in test_memory_plugin_doctor.py and test_memory_setup_step.py,
+    which opt out here."""
+    if request.module.__name__.endswith(("test_memory_plugin_doctor", "test_memory_setup_step")):
         yield
         return
     from localharness.memory import plugin as _mem_plugin

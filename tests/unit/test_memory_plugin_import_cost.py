@@ -32,8 +32,10 @@ def test_manifest() -> None:
     from localharness.memory.plugin import MemoryPlugin
     from localharness.plugins.api import CliDescriptor, PluginManifest, SlashDescriptor, plugin_summary
     # 48: /memory is the plugin's own slash row (PAPI-07) and `localharness memory` its CLI command
-    # (PAPI-06) — the two manifest fields added.
-    assert MemoryPlugin.manifest == PluginManifest(
+    # (PAPI-06) — the two manifest fields added. Its setup step's three fields are pinned in
+    # test_memory_setup_step.py.
+    step = {"setup_action": "", "next_steps": "", "agent_prompt": ""}
+    assert MemoryPlugin.manifest.model_copy(update=step) == PluginManifest(
         name="memory", version="0.1.0", kind="memory", enabled_by_default=True,
         slash=(SlashDescriptor(name="/memory",
                                help="Browse the agent's memory by tag; show/forget/search a memory",
