@@ -56,10 +56,41 @@ test lands narrower or wider than you might guess. Know which before you rely on
   standing in it. Declining is a decision about loading a distant directory's config, not a way to
   disable a project's own config while you work in it.
 
+**What a project's own files may do, and what waits for your Yes.** An in-project `.localharness/`
+loads, but it may set only what changes the agent's behaviour inside that project: a setting that
+says where a request or a key goes, or what the harness launches or imports, belongs to your machine
+(see [Machine-level-only settings](#machine-level-only-settings)), and a project's permission
+settings only ever tighten, trusted or not. The programs a project's agent files name — MCP
+servers, which run with your environment or connect with the headers set there — start only in a
+project you trusted, and only the set you approved. The trust question `localharness start` asks in
+a project lists them when there are any (so does the question about a workspace outside your
+project), and a Yes records exactly what you were shown: each server's command, arguments,
+environment-variable names, URL and header names. No, or no terminal to ask, starts none of them:
+one line names the files and how to change that for the command you ran — `--trust-project` on
+`start`, `LOCALHARNESS_TRUST_PROJECT=1` for `localharness web` and `localharness acp`, a Yes to the
+trust question at a `localharness start` on a terminal, or the project's entry in
+`trusted_workspaces.yaml` — and in the default `auto` mode the session runs `guarded`. A Yes given
+where the list was not shown — the question a channel asks during a session, in Zed or Discord —
+approves no server; they are shown at the next `localharness start` on a terminal. When the set
+changes, that next start shows what changed and asks again; a No starts none and is asked again at
+the start after; a start with no terminal starts none and says so; a server that went away is
+recorded without a question. `--trust-project` or `LOCALHARNESS_TRUST_PROJECT=1` trusts the project
+for that one run, starts its servers and records nothing — for CI and scripts. Session files inside
+a repository never count as having worked there; only your machine's own store does (see the trust
+question under the approval gate). Your machine's own agent files are held to the same rule — see
+the paragraph on what the agent may change about its own setup, under the approval gate.
+
 **What this does NOT cover.** If you clone someone's repository and run the harness inside it, that
-repository's `.localharness/agents/` loads with no prompt, because you are inside that project.
-Agent files decide an agent's role, model and tool permissions, so read them in an unfamiliar
-repository before you run the harness there, the same way you would read its build scripts. Plugin
+repository's `.localharness/` config and agent files load with no prompt, because you are inside
+that project. They decide an agent's role, prompt, model and tools, so read them in an unfamiliar
+repository before you run the harness there, the same way you would read its build scripts. A trust
+Yes covers what you were shown and no more: the scripts and files an approved server's command runs
+from inside the repository are not fingerprinted (the same gap as a granted `python3 <script>`,
+under the approval gate's named gaps), so a change to them asks nothing; nor are the values of
+environment variables and headers, of which only the names are kept, because values are often
+secrets. The first start after upgrading to this release adopts, without asking, the servers that a
+project you had already trusted names at that moment, and your own agent files and tool scripts as
+they are; later changes are what it asks about. Plugin
 code and the org-level guardrails file are never taken from a workspace. Plugins are found only in
 Python packages installed alongside LocalHarness that declare a `localharness.plugins` entry point,
 and in the `plugins/` folder of your global (machine-level) config directory; nothing of a plugin
@@ -96,19 +127,28 @@ turn it on, and the phone app `web`, memory, Discord (`dispatch`) and autoresear
 default; everything else that comes with LocalHarness is built into its core, including the bench
 and its sealed holdout.) A plugin that ships with LocalHarness may own core settings under their old
 names (`autoresearch` owns `proposer:` and `sentinel:`); a plugin you install that tries to is
-refused at load. `proposer.api_key` is shown as `**********` wherever a command displays it; like
-the Discord token, the file `components set` or `plugins enable autoresearch` writes holds the real
-value as plain text. In 0.16.0 a
-config that failed to load or validate could still print a stored secret, whole or by its last
-characters, in the error text of commands such as `doctor`, `start` and `components set`; this is
-fixed after 0.16.0, and error text now names only where the problem is and what is wrong, with
-every setting LocalHarness treats as a secret masked: `proposer.api_key` and the Discord token
-(`dispatch.discord.token`). Other credentials are plain-text settings, not treated as secrets yet,
-and nothing masks them: `provider.api_key`, `active_endpoint.api_key`, the `api_key` and
-`extra_headers` of each `extra_endpoints` entry, and an MCP server's `env` and `headers`.
-`components get`, `components list` and `config show` display the provider and endpoint ones,
-`components set` prints them and writes them to its audit log as they are, and the error text of a
-config that fails validation can show any of them.
+refused at load.
+
+**Every stored credential is masked wherever it is shown.** The settings LocalHarness treats as
+secrets are `provider.api_key`, the `api_key` and `extra_headers` of each `extra_endpoints` entry,
+`active_endpoint.api_key`, an MCP server's `env` and `headers`, `proposer.api_key` and
+`dispatch.discord.token`. Each is shown as `**********` wherever a command displays it:
+`components get`, `components list` and `components set` (its receipt and its audit record),
+`config show` and its `--json`, `validate`, `doctor`, error text, and the message the phone shows
+when its session fails to start. Error text masks those values only, never the name or address of
+an endpoint around them, so it still says where the problem is. The harness sends the real value
+only where it belongs — the key to its server, an MCP server's `env` to that server's process —
+and the file it writes a secret to (`overrides.yaml`, or `config.yaml` from `init`) holds the real
+value, owner-only (0600); a file you write by hand keeps the mode you give it.
+`localharness components set <secret setting> -` reads the value with input hidden on a terminal,
+or one line from standard input, so a key never has to sit in your shell history or in `ps`. A
+setup question for a key that is already stored never shows it and says what Enter does: it keeps
+the stored key, and `none` clears it. In 0.16.0 a config that failed to load or validate could
+print a stored secret, whole or by its last characters, in the error text of commands such as
+`doctor`, `start` and `components set`, and `validate` could print an MCP server's `env` and
+`headers` values; both are fixed. **What this does NOT cover:** the phone's failed-start message
+masks the provider's, the endpoints' and the proposer's keys, so the Discord token or an MCP
+server's `env` or `headers` value quoted in that one error would reach the phone as it is.
 
 - **Found is not on.** A plugin is found from package metadata and folder names alone, and one you
   installed stays off, with none of its code imported, until you turn it on. `localharness start`,
@@ -117,7 +157,10 @@ config that fails validation can show any of them.
 - **Turning on a plugin you installed is a machine-level act, and it is your trust grant.**
   `localharness plugins enable <name>` writes your machine-level `overrides.yaml`. A project can
   never turn such a plugin on: its value for `<name>.enabled` is ignored with a warning, and
-  `plugins enable --workspace` refuses. A plugin that ships with LocalHarness can be switched on or
+  `plugins enable --workspace` refuses. In a session, `/plugins enable <name>` for a plugin you
+  installed first asks one yes/no question that says its code will run with your permissions in
+  every session; No leaves it off and the conversation goes on. A plugin that ships with
+  LocalHarness can be switched on or
   off per project, like any other setting. A project can also change a plugin's ordinary settings,
   but not one the plugin marks machine-level only (endpoints, credentials, access lists), so that
   protection is only as good as the plugin's marking.
@@ -224,23 +267,31 @@ and only the last one is a prompt (`cli/session_trust.py`):
 1. **A recorded decision.** `~/.localharness/trusted_workspaces.yaml` is consulted for this root
    and every directory above it, so a nested folder inherits its project's answer. A recorded
    "no" is honored too: the session runs `guarded`.
-2. **Evidence that you have already worked here.** Any `agents/*/sessions/*.jsonl` under the
-   workspace's own `.localharness/` — or under the global store, for a session rooted at `$HOME`
-   with no project — counts as prior use. A place you have worked in is not a place to be asked
-   about, so the harness records the trust, prints one line saying it recognized the workspace,
-   and moves on. (The global store only vouches for the home-rooted case; one old home session
-   can never vouch for a project directory nobody has opened.)
+2. **Evidence that you have already worked here — on this machine, never in the repository.** For
+   a session rooted at `$HOME` with no project, earlier sessions in your machine's own store
+   (`agents/*/sessions/*.jsonl` under your global config directory) count as prior use: a place
+   you have worked in is not a place to be asked about, so the harness records the trust, prints
+   one line saying it recognized the workspace, and moves on. A project's own
+   `.localharness/agents/*/sessions/` never counts — those files can be committed to a
+   repository, so a fresh clone would arrive looking worked-in — and a project with no record is
+   asked like any new one. One old home session can never vouch for a project directory nobody
+   has opened.
 3. **The question**, asked through whatever channel you are on: inline in the terminal, a dialog
    in Zed, a message in Discord. A "yes" writes the trust record and is never asked here again —
    one record, both halves: the project's `.localharness/` config loads, and its tool calls run
-   under `auto`. A "no" is recorded too, and the session runs `guarded`.
+   under `auto`. When `localharness start` asks it on a terminal, before the session opens, it
+   lists the MCP servers the project's agent files start and the yes approves that list; the same
+   question asked during a session (Zed, Discord, the phone) shows no list, so its yes — like a
+   recognized workspace's — approves no server, and they are asked about at the next
+   `localharness start` on a terminal. A "no" is recorded too, and the session runs `guarded`.
 
 **A session that cannot ask and has no record runs `guarded` and records nothing** — fail closed,
 and leave the question for the next interactive session in that directory rather than answering it
 on that person's behalf. **An explicitly configured `permissions.mode` skips all of this**:
 `guarded` and `read-only` already ask or refuse, and `trusted` and `unattended` are deliberate
 loosenings someone typed into a config, so confirming a decision you just made is exactly the
-fatigue this release removes.
+fatigue this release removes. It does not skip the decision about a project's MCP servers: those
+still start only in a project you trusted, with the set you approved, whatever the mode.
 
 In Zed the question is a permission dialog with two buttons — *Trust this workspace* and *Not
 now* — because its answer is permanent, unlike every other dialog the gate raises there.
@@ -301,7 +352,12 @@ read and argue with. Each step below says what it does in `auto`.
      next. Everything else under one (agents, divisions, tools, session state, memory, history, the
      audit log, the kill file) is the harness being *used* and is not protected; naming what is
      protected rather than what is exempt also means a new kind of runtime state added there is
-     allowed by default rather than becoming a prompt nobody wanted.
+     allowed by default rather than becoming a prompt nobody wanted. Two of those entries,
+     `config.yaml` and `overrides.yaml`, never reach this step from the agent's write and edit
+     tools or from a shell write the gate can read: those are refused outright, in every mode (see
+     the paragraph on what the agent may change about its own setup, below). An entry kept elsewhere through a
+     symlink, as a dotfiles setup does, is judged by where it points and is not protected there —
+     except those two, whose refusal also matches the entry by its name.
    - **A system directory.** `/etc`, `/usr`, `/bin`, `/sbin`, `/lib` (and `/lib64`), `/boot`,
      `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library` and
      `/Applications`, Windows `C:\Windows`, `C:\Program Files*` and `C:\ProgramData`.
@@ -388,9 +444,12 @@ exactly the things a boundary-less session is most likely to reach.
 **Two things deliberately never ask, and both are a judgment you should check against your own
 threat model.** Network reads (`web_fetch`, `web_search`, `web_page_query`) are silent: seven in ten
 real tool calls are web fetches, and a prompt per host would fire in a third of all sessions. Set
-`permissions.ask.network_hosts: true` for a per-host prompt. Exfiltration is handled structurally
-instead — an agent that ingests untrusted text holds no host-mutating tools (see the prompt-injection
-section below). Edits inside the project are silent when the channel shows you the change: in Zed
+`permissions.ask.network_hosts: true` for a per-host prompt. What keeps a silent fetch off your own
+network is a rule rather than a question: `web_fetch` reaches only public addresses (see
+[What a web fetch may reach](#what-a-web-fetch-may-reach)). Data carried out to a public host is
+handled structurally instead — the agents that ship with LocalHarness and read the web hold no tool
+that reads your files or changes your machine (see the prompt-injection section below). Edits
+inside the project are silent when the channel shows you the change: in Zed
 they land in the review pane with per-hunk accept/reject, in the terminal the diff is printed after
 the fact. A channel with no review surface asks once per workspace in `guarded`; in `auto` it does
 not ask at all.
@@ -405,17 +464,25 @@ key, and denies exactly that key — refusing the command `cp` does not touch `s
 cloned repository must not be able to pre-approve its own `curl … | sh` — and `permissions.mode` and
 `permissions.workspace_root` coming from a project layer may only make the policy stricter, never
 looser. `permissions.allow_patterns` is gone rather than repurposed; it was a loosening surface.
-What a repository *can* still add is deny patterns, MCP servers, and agents with more tools — and
-because every one of those tools passes this same gate, what it has added are things that **ask**,
-not things that run. Edit `grants.yaml` to change an answer; there is no CLI verb for it, the prompt
-is the interface and the file is the escape hatch.
+What a repository can still add is deny patterns, agents with more tools, and MCP servers. Every
+call those tools make passes this same gate: in a project you have not trusted, a session in the
+default mode runs `guarded`, so a new kind of call asks first, and in a project you trusted it runs
+as any call does in `auto`. And an MCP server's process starts only in a project you trusted, and
+only with the set you approved (see "What a project's own files may do", under trust boundaries).
+Edit `grants.yaml` to
+change an answer; there is no CLI verb for it, the prompt is the interface and the file is the
+escape hatch.
 
 **What the agent may change about its own setup.** The agent may extend itself — that is a feature,
 not a leak: it can write a new specialist into `~/.localharness/agents/` and drop a helper script into
-`~/.localharness/tools/`. It is told to compose specialists from the tools the harness already has and
+`~/.localharness/tools/`. (A config `init` wrote before this release lists the `write(*/agents/*.yaml)`
+deny pattern, which refuses the agent's `write` tool there and stays; delete it from
+`org.permissions.deny_patterns` if you want the agent to create specialists with it.) It is told to
+compose specialists from the tools the harness already has and
 never to write its own tool for something the harness already provides (web search, fetch, files,
 delegation). What it writes there is held back until you have seen it: an MCP server, an embedding
-model or a permission looser than the shipped default in one of your agent files takes effect only
+model or a permission looser than the shipped default in one of your agent files (or a looser
+permission in a division file or `org.yaml`) takes effect only
 after you confirm it once at the next `localharness start` on a terminal (a start without a terminal
 leaves it off and says so), and a script added to or changed in the tools folder since you last
 confirmed your scripts is treated as an unconfirmed shell command — it gets what any shell command
@@ -423,7 +490,7 @@ gets in the mode you are in: `guarded` asks before it runs (an earlier "always" 
 does not cover it, and an "always" you give it covers that exact content only), while `auto`,
 `trusted` and `unattended` run it as they run any command — and it is listed for you at that start
 (the scripts already there the first time you start this version are adopted without a question).
-The files that hold the harness's own settings are out of reach altogether: the agent's write and
+The files that hold the harness's own settings have a rule of their own: the agent's write and
 edit tools, and any shell command the gate can read as writing or deleting a file, cannot change
 `config.yaml` or `overrides.yaml` in your machine's config folder (`LOCALHARNESS_DIR`, else
 `~/.localharness`) or in any project's `.localharness/`, in any mode, `unattended` included; the model
@@ -440,8 +507,11 @@ named through a variable or a glob, relative to a `cd` earlier in the same comma
 (`cd ~/.localharness/tools && python3 x.py`), or written by the same command that runs it, is not
 recognised as one; files below a dependency or cache folder in the tools folder (`node_modules`,
 `.venv`, `venv`, `__pycache__`, `.git`, `site-packages`) are not tracked — that is where
-`npm install` and a virtual environment put thousands of files; and the scripts and files a confirmed
-command reads are not hashed. What runs is gated — that is the control, not a promise that the agent
+`npm install` and a virtual environment put thousands of files; the scripts and files a confirmed
+command reads are not hashed; and a session started with `--config-dir` pointing somewhere else is
+outside both rules — they read `LOCALHARNESS_DIR`, else `~/.localharness`, so that session's own
+tools folder is not gated and its `config.yaml` is caught only when its folder is named
+`.localharness`. What runs is gated — that is the control, not a promise that the agent
 cannot touch its own files.
 
 **Five modes, set in config or switched mid-session with `/mode`.** `auto` is the default: one
@@ -453,10 +523,13 @@ about each step-4 class and remembers your answer, and asks about every write wh
 boundary. `trusted` is `auto` plus one thing: a destructive file operation aimed **inside** the
 project asks too. `read-only` refuses writes, non-read-only shell, and code execution with a
 message the model can re-plan against. `unattended` turns every ask into allow, leaving only your
-deny patterns — **this is exactly how the harness behaved before v0.14**, named honestly. It is
+deny patterns and the settings-file rule above — **this is how the harness behaved before v0.14**,
+named honestly. It is
 never a default, and from v0.14.1 it is settable the same way the others are: `/mode unattended` in
 the terminal, `mode unattended` in Discord, the picker in Zed, or `permissions.mode: unattended` in
-the config file of a bench run or a scheduled job. A session that turns its own gate off is a
+the config file of a bench run or a scheduled job. From the phone and Discord it can be switched on
+only while `channels.remote_unattended` is `true`, the default (see
+[A paired phone or Discord account](#a-paired-phone-or-discord-account)). A session that turns its own gate off is a
 decision a person can make out loud; a config file is still the right place for a job nobody is
 watching. Ordered from most permissive to strictest —
 `unattended` < `auto` < `trusted` < `guarded` < `read-only` — because a project layer may only
@@ -473,13 +546,14 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   forever, is what stands between a project and an unasked tool call — and it is a question about
   the folder, not about the call. The blacklist is what limits the blast radius after it, so read
   it as the actual policy.
-- **Prior use is taken as consent.** A workspace with earlier LocalHarness sessions in its state
-  store is trusted without ever being asked about, and the trust is then recorded. That is the
-  behaviour the owner asked for — being re-asked about the project you live in is the fatigue this
-  release removes — but state it plainly: sessions that ran under an older version, or under
-  `guarded`, or that someone else's run left behind in a shared checkout, are what that evidence
-  is made of. Delete the entry in `trusted_workspaces.yaml` to be asked again, and remember that a
-  `.localharness/` you did not create is a reason to look before you run.
+- **Prior use is taken as consent, for a session in your home folder.** A home-rooted session
+  with earlier sessions in your machine's own store is trusted without being asked, and the trust
+  is then recorded. That is the behaviour the owner asked for — being re-asked about the place you
+  live in is the fatigue this release removes — but state it plainly: sessions that ran under an
+  older version, or under `guarded`, are what that evidence is made of. A project's own session
+  files are never evidence, so a repository cannot arrive looking familiar. Delete the entry in
+  `trusted_workspaces.yaml` to be asked again, and remember that a `.localharness/` you did not
+  create is a reason to look before you run.
 - **`auto` trusts the project directory.** A destructive command whose target resolves inside the
   project runs without asking: a `chmod -R` over the tree, a `find -delete`, a `truncate`, a
   `Remove-Item -Recurse` — and `rm -rf` too, for anyone who removed the shipped deny pattern that
@@ -556,8 +630,8 @@ treat that as a defect in the gate and report it, not as something to click thro
 
 ## What `localharness start` writes without asking
 
-Two things happen on a start that are worth knowing about, because both write into your config
-directory and neither stops to ask.
+Five things happen on a start that are worth knowing about, because each writes into your config
+directory and none stops to ask.
 
 **Your `config.yaml` gains any newly-shipped default deny patterns.** New releases add to the
 default deny list, but `localharness init` baked the list into your `config.yaml` when you first set
@@ -579,11 +653,106 @@ announcement has scrolled away. `localharness config migrate --dry-run` prints e
 would add and remove, and writes nothing. Whether this should stay automatic is an open question for the
 project owner; the behavior above is what ships today, not a settled ruling.
 
+**A config that launches a vLLM server keeps that server reachable from other machines.** A
+model server LocalHarness launches now listens on 127.0.0.1 only (see
+[A model server LocalHarness launches](#a-model-server-localharness-launches)). So that nothing
+that uses yours from another machine — a laptop, a second box on your tailnet — stops working at
+the upgrade, a start that finds a config written before `server.bind_all` existed, launching vLLM,
+writes `server.bind_all: true` into it (and into each `extra_endpoints` entry that launches one),
+with a timestamped backup and one line: `Config updated; kept the model server reachable from other
+machines (server.bind_all: true)`. `localharness doctor` then shows a row saying the server is
+reachable from other machines and how to keep it on this one, and `localharness config migrate
+--dry-run` lists the write. A `server:` section you write by hand without the setting is treated
+the same way — set `bind_all: false` in it if you want loopback. A new install's config says
+`bind_all: false`. This is not tied to the defaults revision, so it never re-adds a deny pattern
+you deleted. **What this does NOT cover:** only `config.yaml` is read, so a launched server's
+section that lives only in your global `overrides.yaml` is not migrated, and that server listens on
+127.0.0.1 after the upgrade until you set `server.bind_all: true`.
+
+**The config folder is made owner-only.** An install from before this release made
+`~/.localharness` at your umask, often readable by every account on the machine, and the folder
+holds your keys, the phone token, your grants and every session log. Each start makes the machine's
+config folder — the default one, or the one `--config-dir` or `LOCALHARNESS_DIR` names — owner-only
+(0700) if it is not, without a word on the terminal, and records the change in the audit log
+(`config_dir.mode`). A folder it cannot change — another account's, one on a read-only mount — is
+left as it is, the start goes on, and `localharness doctor` says why. Read the second part plainly:
+`--config-dir` or `LOCALHARNESS_DIR` pointed at a folder you share on purpose gets the same
+`chmod 700`.
+
+**The trust store records what you had already approved.** At the first start after the upgrade,
+`trusted_workspaces.yaml` records without asking the MCP servers of a project you had already
+trusted (its Yes predates the list) and the state of your own agent files, division files,
+`org.yaml` and tool scripts (you wrote them). Later changes are compared against these records,
+and those are what a start asks about. A start also records, without asking, a server or script
+that went away, a tightening, and a kind of entry the record did not know yet. A start with
+`--config-dir` writes that folder's record into the default trust store, under a key of its own.
+
 **`start` also seeds `<config-dir>/tools/design-screenshot.js`.** The frontend-designer builtin
 shells out to that script by path, so the package copies it into your config directory's `tools/`
-folder on first run. It is idempotent — present means untouched — it is written to your global
-config directory and never into a workspace, and a failure to copy it is a warning rather than a
-blocked start. It is the only file `start` installs from the package.
+folder on first run, owner-only and executable (0700). It is idempotent — present means untouched
+— it is written to your global config directory and never into a workspace, and a failure to copy
+it is a warning rather than a blocked start. It is the only file `start` installs from the
+package, and it is never listed as one of your tool scripts.
+
+## What `localharness start` contacts
+
+A local-first harness should reach nothing but your model server when it starts. A start, and the
+session it opens, reach the network for these and nothing else:
+
+- the model server in your config (and starts it first, when your config launches one);
+- `huggingface.co`, once, when memory's embedding model is not on this machine yet — the start
+  summary says so in one line, the banner does not wait for it, and the model downloads the first
+  time memory needs it (a memory search that comes first waits for that download);
+- the tiktoken vocabulary host, `openaipublic.blob.core.windows.net`, only on the first approximate
+  token count with no cached vocabulary — which a vLLM or llama.cpp setup never makes, because
+  those count tokens on the server. Offline, the estimate falls back to a byte count and says so
+  once.
+
+Beyond those, only what you turned on: the MCP servers your agent files name, and the Discord
+connection of the dispatch plugin. A stock start no longer imports the MCP client library at all.
+
+## Files the harness writes
+
+`init` creates the config folder (`~/.localharness`, or the folder `--config-dir` or
+`LOCALHARNESS_DIR` names) owner-only (0700), and a start makes an older one owner-only (see above).
+The files the harness creates there are owner-only (0600) from their first byte — created with
+that mode, never written first and changed after: `config.yaml` and its backups
+(`config.yaml.bak-<stamp>` from the security-defaults update, `config.yaml.before-init-<stamp>`
+from `init --force`), `overrides.yaml`, `grants.yaml`, `trusted_workspaces.yaml`, the phone token,
+the push key and the push subscriptions, `audit.jsonl`, each agent's `bus-events.jsonl`, session
+logs, `history.jsonl`, `memory.db` (and its `-wal` and `-shm` files), `MEMORY.md`, `compact.md` and
+`memory.log`, `.repl_history`, the speed ledger, the live-session files, `vllm/serve.log` and
+`vllm/server.pid`, agent files written by `agent create`, by a start (the root agent) or by the
+in-session creation workflow, autoresearch's archive, run journals and budget file, and
+`plugins/README.md`. The same writers make the same files owner-only in a project's
+`.localharness/` (its sessions, history and memory). The one script `start` installs,
+`tools/design-screenshot.js`, is owner-only and executable (0700). `init --force` saves the old
+`config.yaml` beside the new one before it writes, and says where.
+
+**What this does NOT cover.** Pictures the image plugin generates are written at your umask. In a
+session with no project they sit in the owner-only config folder, which keeps other accounts out,
+but in a project they sit in its `.localharness/`, and a copy taken anywhere keeps that mode. The
+files `init --workspace` writes inside a project (`.localharness/config.yaml`, its
+`plugins/README.md` and `.gitignore`) are meant for the repository and are not made private, and
+neither is a project's `.localharness/` folder itself. Files written outside the config folder — a
+report or a picture saved where you choose, the research reports written in the folder you work
+in — keep your umask. Folders inside the config folder are made at your umask too; the 0700 folder
+above them is what keeps other accounts out. Files an older release created keep their modes: the
+folder's 0700 closes them, `localharness doctor` counts the ones other accounts could read, and
+`chmod -R go-rwx` on the folder makes each private. A temporary file a crash left behind keeps
+its old mode.
+
+## What ends up in logs
+
+No setting LocalHarness treats as a secret is written to `.repl_history`, `bus-events.jsonl`,
+`audit.jsonl`, the session logs or the model's prompt: a secret changed with `components set` is
+recorded as changed, with `**********` for its old and new value. The phone token is printed to
+nothing but a terminal (see [`localharness web`](#localharness-web)). `vllm/serve.log` holds the
+launch command, which never contains a key, because a required key travels in the server's
+environment. **What this does NOT cover:** what reaches the conversation as ordinary text — a key
+you paste into a message, or a file the agent reads that holds one, your own `config.yaml`
+included — is written to the history and the session log like any other text. To keep a key out
+of your shell history, set it with `localharness components set <secret setting> -`.
 
 ## Threat model: prompt injection
 
@@ -644,6 +813,11 @@ fact was saved, not the fact read back. The bench turns memory on only for the t
 that seed it, with the same setting on both sides of a comparison and background consolidation
 off, so a bench result says nothing about how memory behaves in any other scenario.
 
+**What a page or a tool prints cannot drive your terminal.** Model text, reasoning, tool calls and
+their output, errors and plugin output reach the terminal with escape and control sequences
+removed — ESC, OSC, CSI and the C1 range — so text the model copied from a page cannot set your
+clipboard (OSC 52), clear the screen or redraw a permission question above the prompt.
+
 **Not yet built: sandboxing.** Host-mutating tools currently run with the machine's
 full trust; there is no OS-level sandbox (e.g. bubblewrap) around them yet. That is on
 the roadmap. The human approval gate above is not a substitute: it decides whether a call
@@ -663,6 +837,49 @@ it is exploitable on the target model.
 the queryable facts memory, and no code path promotes tool output into the facts an
 agent recalls. If that changes, this section changes with it.
 
+### What a web fetch may reach
+
+The URL `web_fetch` opens comes from the model, and the model may be reading a page written to
+steer it. So every address the URL's host resolves to — at the first request and at every
+redirect, which `web_fetch` follows itself, at most 5 — must be a public internet address.
+Loopback, private networks, link-local and cloud-metadata addresses (`169.254.169.254`), CGNAT and
+tailnet addresses (`100.64.0.0/10`), multicast, and the IPv6 forms of all of these are refused,
+however the address is spelled: `2130706433`, `0x7f000001`, `127.1`, `localhost` and
+`[::ffff:7f00:1]` are judged by what they resolve to. Only http and https are fetched, and a URL
+with a user name or password in it is refused. A refusal is one line to the model, naming the
+setting below; nobody is asked anything.
+
+Without a proxy, the request goes only to an address that was checked: the URL carries the checked
+IP, and the host name rides in the `Host` header and the TLS server name, so a DNS answer that
+changes between the check and the connection (DNS rebinding) cannot point it elsewhere. When a
+checked address refuses the connection, the next checked one is tried — never a fresh lookup.
+Behind an environment proxy (`HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY`, for a host `NO_PROXY`
+does not exempt), the name is checked here first and then the original URL goes to the proxy, so
+HTTPS through a corporate proxy keeps working. To fetch a private service on purpose, add its
+address, network or host name to `org.web_fetch_allow_private` in your machine-level config (a
+project cannot set it); multicast, unspecified and reserved addresses are never admitted.
+
+`web_page_query` searches the text of a page `web_fetch` already fetched, with a pattern the model
+chooses. A pattern longer than 128 characters is refused, and a pattern with regex syntax runs in a
+separate process that is stopped after 1 second, so a pattern written to make the regex engine
+spin costs one tool error, not a frozen session.
+
+**What this does NOT cover.** A GET to a public host can still carry data out in its URL —
+fetching public pages is the tool's purpose. The defence there is structural and only as wide as
+the agents: the agents that ship with LocalHarness never hold web ingestion together with tools
+that read your files or change your machine, and the capability floor keeps any agent from holding
+web ingestion with host-mutating tools, but an agent you define with both `web_fetch` and `read` can
+put what it read into a URL. `bash_exec` and `python_exec` reach any address — the guard is on
+`web_fetch` alone — and a fetcher script the agent writes for itself is gated as an unconfirmed
+shell command until you confirm it (see the approval gate, on what the agent may change about its
+own setup). The
+guard resolves names on this machine, so a setup where only a proxy can resolve names cannot fetch
+a named host (the model is told the name could not be resolved). Behind an environment proxy, the
+proxy resolves the name again: a DNS answer that changes between the two lookups, or a name the
+proxy resolves differently (split-horizon DNS), reaches whatever the proxy can reach. And a pattern
+with no regex syntax is searched inside the session itself, which on a hostile page holds it for
+up to about a second and a half (measured on a 4 MB page).
+
 ## Securing the endpoint
 
 Inference servers ship with no authentication. On a network with untrusted devices,
@@ -670,6 +887,38 @@ start the server with an API key and set `provider.api_key` to match; for access
 beyond your LAN use a private overlay network (Tailscale/WireGuard). Never port-forward
 a bare, unauthenticated endpoint to the internet. See "Running the harness on a
 different machine than the model" in the README.
+
+### A model server LocalHarness launches
+
+When your config has a `server:` section, `localharness start` (and `/model`) can launch vLLM for
+you. That server listens on 127.0.0.1 only — a docker launch publishes `-p 127.0.0.1:<port>:8000`,
+a binary launch gets `--host 127.0.0.1` — unless `server.bind_all: true`, which keeps the old
+behaviour of listening on every interface, for a LAN or tailnet you serve on purpose. A config from
+an earlier release that launches one has `bind_all: true` written for it at the first start (see
+"What `localharness start` writes without asking"), so nothing that used it from another machine
+breaks; a new install's config says `bind_all: false`. Launches of llama.cpp, Ollama and LM Studio
+were on 127.0.0.1 already. Both settings are machine-level only.
+
+With `server.require_api_key: true`, the server is launched requiring your `provider.api_key`. The
+key goes in the server's environment (`VLLM_API_KEY`; for docker, `-e VLLM_API_KEY`), never on its
+command line, so it is not in `ps` or in `vllm/serve.log`, and every request the harness makes to
+that server's `/v1/` routes — the readiness wait, model lists, the context-window probe, a `/model`
+switch, `localharness model` and `doctor` — sends it. **It is off by default.** A launched server
+without it answers any program
+that can reach its port: on this machine any process, including one the agent starts, and with
+`bind_all` any device on your network. `localharness doctor` shows a row when `provider.api_key` is
+set and the launched server does not require it, and a row while a launched server is reachable
+from other machines. An `extra_endpoints` entry whose `lifecycle` launches a server follows the same
+rules with its own `lifecycle.bind_all`, `lifecycle.require_api_key` and `api_key`.
+
+**What this does NOT cover.** As vLLM's source reads, its key guards the `/v1/` routes only, so
+its `/tokenize` answers without a key, and the harness's token counter and doctor's tokenizer
+probes call it that way. `localharness init` sends no key when it looks for a server, so a re-run of `init` does not find
+a server that requires its key. Doctor's network row reads `bind_all` only: a `--host` in
+`server.extra_args` that opens the server is not named. And these launch rules were checked against
+a stand-in that behaves the way vLLM's source says vLLM does, not against vLLM itself: that a binary
+launch listens on every interface without `--host`, that it reads `VLLM_API_KEY`, and which routes
+its key guards are vLLM's behaviour as read from its source, not measured here.
 
 ### `localharness web`
 
@@ -685,16 +934,33 @@ agent behind it does. Three things hold it, and each is there for a reason:
   your phone to: it never changes what the server binds, and `--allow-unsafe-bind` stays
   a flag you pass on each run, never a saved setting.
 - **An app token is required on every request**, the event stream included. It is
-  generated on first run and stored `0600` under the global config directory.
-  Binding loopback makes the boundary tighter in one sense and looser in another:
-  every local process on the machine can now reach that port, including one an agent
-  itself started. `localharness web --rotate-token` invalidates every enrolled client.
+  generated on first run and stored `0600` under the global config directory. Its text is
+  printed only to a terminal, and only when it is created, right after `--rotate-token`, or
+  when you ask with `localharness web --show-token` (which prints it with the pairing QR
+  and exits, so a server that is already running can be paired from another terminal).
+  On a terminal the pairing QR is drawn on every start: it carries the token, and
+  scanning it is pairing. When standard output is a pipe or a file — a `tee`, journald —
+  nothing that carries the token goes there: if the process is the foreground job of a
+  terminal, the pairing block is drawn on that terminal instead, and otherwise one line
+  names `--show-token`. Binding loopback makes the boundary tighter in one sense and
+  looser in another: every local process on the machine can now reach that port,
+  including one an agent itself started. `localharness web --rotate-token` makes every
+  enrolled client invalid and also clears the push subscriptions, so each phone turns
+  notifications on again after it pairs; a `localharness web` that is already running
+  keeps accepting the old token until it restarts.
   **Named gap:** there is no per-device revoke — rotation is all or nothing.
 - **The POST surface is CSRF-safe by construction.** Every write verb requires both a
   bearer header and `application/json`, and the three simple content types a
   cross-origin form can send without a preflight are refused outright. The event
-  stream uses a `Secure`/`HttpOnly`/`SameSite=Strict` cookie, because `EventSource`
-  cannot carry a header and a token in a URL lands in logs and referrers.
+  stream authenticates with a cookie instead, because `EventSource` cannot carry a
+  header and a token in a URL lands in logs and referrers. That cookie is not the
+  token: it is a value derived from it (an HMAC), `Secure`, `HttpOnly`,
+  `SameSite=Strict` and sent only to `/api`. Only GET routes accept it, and no route
+  hands the token back for it, so whoever holds the cookie can read what the GET routes
+  serve but cannot drive the session. The cookie an older release set, which was the
+  token itself, is cleared at the next enrolment and accepted nowhere; a phone paired
+  before the upgrade picks up the new one by itself. A credential that is not plain
+  text — a non-ASCII bearer or cookie — gets a 401, never a server error.
 
 Two further properties worth knowing about, both deliberate:
 
@@ -713,6 +979,20 @@ route refuses an unauthenticated caller, so reaching the port is still not a she
 The alternative — putting the token in the URL of the page that bootstraps enrolment —
 is the thing the cookie design exists to avoid.
 
+**What this does NOT cover.** `--allow-unsafe-bind` with plain HTTP sends the bearer token
+in cleartext to every hop between the phone and this machine. The token file is the one
+durable copy of the token, and owner-only stops other accounts, not the agent: while
+`localharness web` runs, an agent that can read files and run commands could read the token
+and call the server from this machine — and with `channels.remote_unattended` left at its
+default it could switch its own web session to `unattended` (setting it to `false` closes
+that path too; see [A paired phone or Discord account](#a-paired-phone-or-discord-account)).
+The QR drawn on a terminal carries the token into that terminal's scrollback (a tmux
+history, a `script` log). A token an older release printed — into a `localharness web | tee`
+log, or journald — is still in those logs; `--rotate-token` makes those copies useless.
+Cookies are scoped by host name, not by port, so another service published under the same
+host name receives the stream cookie and could read what the GET routes serve, though it
+could not drive the session.
+
 Three more, added with the installable app and notifications:
 
 - **The enrolment QR carries the token in the URL *fragment*** (`https://host/#t=…`),
@@ -721,17 +1001,21 @@ Three more, added with the installable app and notifications:
   URLs is actually protecting. The page reads it once and erases it from the address
   bar, so it does not survive into history or a screenshot either. The alternative is
   hand-typing a 256-bit secret on a phone keyboard, which is the setup step people skip.
+  The address printed beside the QR carries no token, and a token from a freshly scanned
+  QR wins over the one the page stored, so pairing again after a rotation just works.
 - **Registering for push takes the app token.** A push subscription is a standing channel
   into your lock screen, carrying deep links to the calls the harness wants approved, so
   `POST /api/push/subscribe` is gated exactly like every write verb. The VAPID private
   key is generated by the harness, stored `0600` beside the token, and never leaves the
   box; payloads are encrypted to each device's own key, so the push service that relays
   them cannot read them.
-- **The web app manifest is served with the token only to an authenticated caller.** An
-  installed iOS web app gets a different storage jar from Safari's, so the manifest's
-  `start_url` is what can pair it — and that variant is served `no-store`, only to a
-  request that already presents the credential. An anonymous fetch gets a manifest with
-  no token in it, which is the version anything reaching the port can see.
+- **The web app manifest carries the token only for a caller that presents the bearer
+  token.** An installed iOS web app gets a different storage jar from Safari's, so the
+  manifest's `start_url` is what could pair it — and that variant is served `no-store`,
+  only to a request carrying the bearer header, never to one with only the stream cookie
+  (or the cookie would trade for the token). A browser fetches the manifest without the
+  bearer, so a new home-screen install asks for the token once. Any other fetch gets a
+  manifest with no token in it, which is the version anything reaching the port can see.
 
 One more, added with plugins:
 
@@ -798,9 +1082,18 @@ Added with the web plugin:
   (written mode 600 by `plugins enable` and `components set`; a hand-written `config.yaml` keeps
   whatever mode you give it). It is never printed: `plugins enable`, `components set`/`list`/`get`,
   `plugins info`, `doctor`, the start banner, the setup prompt, error messages and the
-  `components set` audit event show `**********`. Until 0.17.0 the old `LOCALHARNESS_DISCORD_*`
-  variables, `DISCORD_BOT_TOKEN` and `~/.claude/channels/discord/.env` still fill an unset field,
-  with a deprecation warning. Files that users upload are kept as metadata only and are not passed
+  `components set` audit event show `**********`. The token comes only from
+  `dispatch.discord.token` or, until 0.17.0, the deprecated `LOCALHARNESS_DISCORD_TOKEN` and
+  `DISCORD_BOT_TOKEN` variables (the other `LOCALHARNESS_DISCORD_*` variables still fill their
+  unset fields until then too), each with a deprecation warning. Another program's token file,
+  `~/.claude/channels/discord/.env`, is no longer read; with no token anywhere the start refuses
+  with one line that says so and names `localharness plugins enable dispatch`. ♾️ — "always" —
+  takes a second tap, as on the phone: the bot posts a confirm message, and only ✅ on that message
+  records the grant (✅ on the question counts once). The bot ignores its own reactions, so it can
+  never answer its own question; what it sends pings nobody but the person it replies to (no
+  `@everyone`, role or user mention from model text); and a masked link (`[text](url)`) is sent as
+  its text followed by the plain address, so the address you would open is in view. Files that
+  users upload are kept as metadata only and are not passed
   to the model; outbound files are read only from core's artifact folder. Limits: one settings
   section, `dispatch.discord.*`, feeds every dispatch adapter today (a second platform would share
   Discord's token and allow-list until it gets its own section), and this plugin build has not yet
@@ -810,3 +1103,22 @@ Added with the web plugin:
 `compact.md` take unlocked appends, so a terminal session and a web session on the same
 agent can interleave their writes. Starting the second one names the first; neither is
 refused. Closing one is still your call to make.
+
+### A paired phone or Discord account
+
+**A paired phone or an allowlisted Discord account drives the agent as you would at the
+terminal.** It sends turns, answers the agent's permission questions, can switch the session to
+`unattended` and can answer "always", so it is as powerful as a shell on this machine: guard the
+phone's pairing and the Discord allow list the way you would guard a shell login. To keep the last
+two to this machine, set `channels.remote_unattended: false`
+in your machine-level config (a project cannot set it). `unattended` is then refused from the phone
+and Discord with one line naming the setting, and their permission questions are put without
+"always" — an "always" that comes back anyway counts once. The terminal and Zed are never limited
+by it. It is `true` by default, so nothing you do from the phone or Discord today stops working,
+and `localharness doctor` shows a row while the phone app or the Discord plugin is on and the lock
+is not set.
+
+**What this does NOT cover.** The lock refuses `unattended` and "always" only. The phone and
+Discord can still switch the session to `auto` or `trusted`, answer every question once, and answer
+the workspace trust question, whose Yes puts a new workspace in `auto` — so a paired phone or an
+allowlisted account can still run anything `auto` allows.
