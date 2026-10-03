@@ -25,15 +25,20 @@ from localharness.agent.subagent import (
 from localharness.tools.builtin import register_builtin_tools, web_tool
 from localharness.tools.builtin.web_tool import WebPageQueryTool
 from localharness.tools.registry import ToolRegistry
+from tests.unit.test_web_fetch_guard import public_web
 
 
 def _fake_httpx(monkeypatch, *, text, content_type="text/html"):
+    public_web(monkeypatch)  # every name resolves to a public address: web_fetch's guard lets it through
+
     class _Resp:
         def __init__(self):
             self.text = text
             self.headers = {"content-type": content_type}
             self.url = "https://news.test/article"
             self.encoding = "utf-8"
+            self.status_code = 200
+            self.is_redirect = False
         def raise_for_status(self): pass
         def json(self): return None
         async def aiter_bytes(self):

@@ -1181,14 +1181,20 @@ async def test_register_builtin_tools_registers_all():
 
 
 def _fake_httpx_client(monkeypatch, page_text: str):
-    """Patch web_tool's httpx.AsyncClient to return a fixed text/plain body."""
+    """Patch web_tool's httpx.AsyncClient to return a fixed text/plain body (every name resolves to
+    a public address, so web_fetch's guard lets it through)."""
     from localharness.tools.builtin import web_tool
+    from tests.unit.test_web_fetch_guard import public_web
+
+    public_web(monkeypatch)
 
     class _Resp:
         text = page_text
         headers = {"content-type": "text/plain"}
         url = "https://example.test/page"
         encoding = "utf-8"
+        status_code = 200
+        is_redirect = False
         def raise_for_status(self): pass
         async def aiter_bytes(self):
             yield page_text.encode("utf-8")
