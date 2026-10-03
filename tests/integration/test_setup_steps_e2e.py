@@ -276,3 +276,110 @@ def test_web_the_saved_address_reaches_the_pairing_qr(g, terminal, web_extra, mo
     token = web_auth.load_or_create_token(str(g))[0]
     assert f"https://spark.example.ts.net/#t={token}" in ran.output
     assert guessed == []
+
+
+# --- autoresearch: the proposer's address and model in one write, then one GET <address>/models ---
+
+P_URL = "http://p.test/v1"
+AR_NEXT = "Then: `localharness propose --help` shows how to write the first proposal."
+
+
+@pytest.fixture
+def proposer(monkeypatch):
+    """The proposer behind autoresearch's _TRANSPORT (every request recorded; `answer[0]` replies),
+    and a count of the overrides.yaml writes `plugins enable` makes."""
+    import httpx
+
+    from localharness.autoresearch import plugin as autoresearch_plugin
+    seen: list = []
+    answer = [lambda request: httpx.Response(200, json={"object": "list", "data": [{"id": "p-model"}]})]
+
+    def handler(request):
+        seen.append(request)
+        return answer[0](request)
+
+    writes: list[dict] = []
+    real_write = plugins_cmd.atomic_write_overlay
+
+    def counted(path, overlay):
+        writes.append(yaml.safe_load(yaml.safe_dump(overlay)))
+        return real_write(path, overlay)
+
+    monkeypatch.setattr(autoresearch_plugin, "_TRANSPORT", httpx.MockTransport(handler))
+    monkeypatch.setattr(plugins_cmd, "atomic_write_overlay", counted)
+    return seen, answer, writes
+
+
+@pytest.mark.plugin("autoresearch")
+def test_autoresearch_writes_the_proposer_in_one_write_then_checks_it_answers(g, terminal, proposer) -> None:
+    asked, answers, _ = terminal
+    seen, _, writes = proposer
+    answers.extend([P_URL, "p-model"])
+    result = _enable(g, "autoresearch")
+    out = result.output
+
+    assert result.exit_code == 0, out
+    assert [q for q, _ in asked["prompt"]] == ["Proposer address (an OpenAI-compatible base URL)",
+                                               "Proposer model id (not your main model)"]
+    assert asked["confirm"] == []  # the action has no question: it spends nothing
+    expected = {"autoresearch": {"enabled": True}, "proposer": {"base_url": P_URL, "model": "p-model"}}
+    assert writes == [expected] and _overrides(g) == expected
+    assert [(r.method, str(r.url)) for r in seen] == [("GET", f"{P_URL}/models")]
+    for text in (f"✓ autoresearch-proposer: the proposer answers at {P_URL} and serves p-model",
+                 "Checking it now:", f"✓ autoresearch: proposer: p-model at {P_URL}", AR_NEXT):
+        assert text in out, text
+    assert AGENT_PROMPT_LEAD not in out
+
+
+@pytest.mark.plugin("autoresearch")
+def test_autoresearch_refuses_the_main_model_and_never_shows_a_stored_key(g, terminal, proposer) -> None:
+    # A stored proposer written by hand: provider first, the key last, so a refusal that echoed
+    # the settings would show it.
+    (g / "config.yaml").write_text(yaml.safe_dump({**_CONFIG, "proposer": {
+        "base_url": "http://old.test/v1", "model": "p-old", "api_key": "SENTINEL-52-05"}},
+        sort_keys=False), encoding="utf-8")
+    _, answers, _ = terminal
+    seen, _, writes = proposer
+    answers.extend([P_URL, "test-model"])
+    result = _enable(g, "autoresearch")
+    flat = " ".join(result.output.split())
+
+    assert result.exit_code == 2, result.output
+    assert "proposer.model must differ" in flat
+    assert "SENTINEL-52-05" not in result.output
+    assert writes == [] and not (g / "overrides.yaml").exists() and seen == []
+
+
+@pytest.mark.plugin("autoresearch")
+def test_autoresearch_a_proposer_that_does_not_answer_is_named_and_the_answers_kept(g, terminal,
+                                                                                  proposer) -> None:
+    import httpx
+
+    def refuse(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    _, answers, _ = terminal
+    seen, answer, _ = proposer
+    answer[0] = refuse
+    answers.extend([P_URL, "p-model"])
+    result = _enable(g, "autoresearch")
+    out = result.output
+
+    assert result.exit_code == 0, out
+    assert len(seen) == 1
+    assert f"✗ autoresearch-proposer: no answer from {P_URL}/models (ConnectError)" in out
+    assert "start the proposer's server, or fix proposer.base_url" in out
+    assert _overrides(g)["proposer"] == {"base_url": P_URL, "model": "p-model"}
+    assert AR_NEXT in out
+
+
+@pytest.mark.plugin("autoresearch")
+def test_autoresearch_set_values_write_the_same_keys_and_run_no_check(g, no_terminal, proposer) -> None:
+    seen, _, writes = proposer
+    result = _enable(g, "autoresearch", "--set", f"proposer.base_url={P_URL}", "--set", "proposer.model=p-model")
+
+    assert result.exit_code == 0, result.output
+    expected = {"autoresearch": {"enabled": True}, "proposer": {"base_url": P_URL, "model": "p-model"}}
+    assert writes == [expected] and _overrides(g) == expected
+    assert seen == []
+    assert "Checking it now:" not in result.output
