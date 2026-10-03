@@ -147,3 +147,26 @@ def test_a_refused_adoption_never_echoes_the_key(tmp_path) -> None:
     _clean(str(info.value), repr(info.value), repr(info.value.__cause__))
     assert "adopting 'provider.default_model' produces an invalid config" in str(info.value)
     assert "proposer.model must differ" in str(info.value)
+
+
+# --- a plugin's invalid settings (doctor, plugins list, the start warnings) ------------------------
+
+
+def test_a_plugin_validator_quoting_its_section_never_reaches_doctor_or_plugins_list(tmp_path, monkeypatch) -> None:
+    """resolve() reports a plugin whose settings do not validate with its first error's location and
+    message; a plugin's own validator message can quote the section, token included."""
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins import builtin, discovery
+    from localharness.plugins.resolve import resolve
+    from tests.unit.test_components_set_secret_echo import Secq
+
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Secq,))
+    monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [])
+    g = _home(tmp_path, {"secq": {"n": 4, "tok": KEY}})
+
+    reason = resolve(ConfigLoader(config_dir=g)).plan.entry("secq").reason
+    _clean(reason)
+    assert "invalid settings — secq: Value error, bad section" in reason, reason
+    for args in (("doctor",), ("plugins", "list"), ("plugins", "info", "secq")):
+        result = runner.invoke(app, [*args, "--config-dir", str(g)])
+        _clean(result.stdout, result.stderr, repr(result.exception))

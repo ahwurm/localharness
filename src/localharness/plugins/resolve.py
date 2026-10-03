@@ -19,6 +19,7 @@ from localharness import resolved_version
 from localharness.config.plugin_sections import (
     CORE_AGENT_KEYS, CORE_HARNESS_KEYS, PluginSectionError, global_only_paths, merge_plugin_layers,
 )
+from localharness.config.redact import scrub, secret_values
 from localharness.plugins import discovery, plan
 from localharness.plugins.api import Plugin
 from localharness.plugins.builtin import bundled_plugins
@@ -235,5 +236,8 @@ def _validate(model: type[BaseModel] | None, section: Any, where: str) -> BaseMo
     except ValidationError as exc:
         first = exc.errors()[0]
         more = f" (and {exc.error_count() - 1} more)" if exc.error_count() > 1 else ""
+        # The message only, scrubbed of the section's secret values: a plugin's own validator can
+        # quote its input, token included (R16); not chained, so no traceback carries the input.
+        why = scrub(" ".join(first["msg"].split()), secret_values(model, section))
         raise _Unusable(f"invalid settings — {'.'.join([where, *map(str, first['loc'])])}: "
-                        f"{' '.join(first['msg'].split())}{more}") from exc
+                        f"{why}{more}") from None
