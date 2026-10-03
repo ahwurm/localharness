@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import httpx
 import pytest
+from starlette.routing import Route
 
 from localharness.channels.web import auth
 from localharness.channels.web.channel import WebChannel
@@ -114,20 +116,46 @@ async def _read_frames(server, n, *, path="/api/stream", headers=None):
 
 # ------------------------------------------------------------------ auth (WEBCH-13)
 
-async def test_every_api_route_refuses_an_unauthenticated_caller(tmp_path):
-    _, _, _, client = await _stack(tmp_path)
-    for path in ("/api/stream", "/api/health", "/api/protocol", "/api/schema", "/api/tools",
-                 "/api/grants", "/api/permissions", "/api/sessions",
-                 "/api/sessions/s1/events", "/api/memory", "/api/memory/fact",
-                 "/api/artifacts"):
-        assert (await client.get(path)).status_code == 401, path
-    for path in ("/api/sessions/s1/message", "/api/sessions/s1/cancel",
-                 "/api/sessions/s1/mode", "/api/sessions/s1/command",
-                 "/api/sessions/s1/delete", "/api/memory/edit", "/api/memory/forget",
-                 "/api/permissions/x/answer", "/api/pending/1/approve", "/api/bringup/abort",
-                 "/api/incognito"):
-        got = await client.post(path, json={})
-        assert got.status_code == 401, path
+OPEN_ROUTES = frozenset({"/{path:path}", "/manifest.webmanifest"})
+"""The only routes a caller with no credentials reaches: the static shell (inert without the token)
+and the manifest (generic without the bearer)."""
+
+PATH_PARAMS = {"session_id": "s1", "plugin": "example", "verb": "approve"}
+
+
+def _sweep(server) -> list[tuple[str, str]]:
+    """(method, concrete path) for every registered route/method pair but the two open routes,
+    HEAD excluded — read from the app's own route table, so a route added later is swept too."""
+    pairs = []
+    for route in server.app.routes:
+        assert isinstance(route, Route), route  # a Mount would hide its routes from this sweep
+        if route.path in OPEN_ROUTES:
+            continue
+        path = re.sub(r"\{(\w+)(?::\w+)?\}", lambda m: PATH_PARAMS.get(m.group(1), "x"), route.path)
+        pairs += [(method, path) for method in sorted(route.methods - {"HEAD"})]
+    return pairs
+
+
+def _no_credentials(method: str) -> dict:
+    """A request carrying nothing but what passes the content-type check (else 415 hides 401)."""
+    return {"content": b"{}", "headers": {"Content-Type": "application/json"}} if method == "POST" else {}
+
+
+async def test_every_registered_route_refuses_a_caller_with_no_credentials(tmp_path):
+    _, _, server, client = await _stack(tmp_path, config_dir=tmp_path)
+    assert OPEN_ROUTES <= {route.path for route in server.app.routes}
+    pairs = _sweep(server)
+    for method, path in pairs:
+        got = await client.request(method, path, **_no_credentials(method))
+        assert got.status_code == 401, (method, path, got.status_code)
+    assert len(pairs) >= 29, pairs
+    swept = {path for _, path in pairs}
+    for path in ("/api/auth/enroll", "/api/push/key", "/api/push/subscribe", "/api/tool-results/x",
+                 "/api/artifacts/example/x", "/api/sessions/new"):
+        assert path in swept, path
+    # The two open routes really are the open ones; the bearer opens the rest.
+    assert (await client.get("/")).status_code == 200
+    assert (await client.get("/manifest.webmanifest")).status_code == 200
     assert (await client.get("/api/health", headers=BEARER)).status_code == 200
 
 
@@ -151,20 +179,114 @@ async def test_post_refuses_the_csrf_friendly_content_types(tmp_path):
         assert "preflight" in got.json()["error"]
 
 
-async def test_enrolment_hands_back_a_samesite_strict_cookie(tmp_path):
-    """`EventSource` cannot send an Authorization header, and the token is never put in a URL."""
+async def test_enrolment_hands_back_a_derived_get_only_cookie_and_expires_the_old_one(tmp_path):
+    """`EventSource` cannot send an Authorization header, and the token is never put in a URL —
+    nor in a cookie: cookies ignore ports, so every service on the same host name would receive
+    it. The stream's cookie is an HMAC under the token, named lh_web_get, scoped to /api,
+    HttpOnly, SameSite=Strict and Secure. 0.16's cookie (the raw token, Path=/) is expired."""
     _, _, _, client = await _stack(tmp_path)
     got = await client.post("/api/auth/enroll", json={}, headers=JSON)
     assert got.status_code == 200
-    raw = got.headers["set-cookie"].lower()
-    assert auth.AUTH_COOKIE in raw and "httponly" in raw and "samesite=strict" in raw
+    sent = got.headers.get_list("set-cookie")
+    cookies = {line.split("=", 1)[0]: line for line in sent}
+    assert auth.AUTH_COOKIE == "lh_web_get" and auth.get_cookie_value(TOKEN) != TOKEN
+    assert cookies["lh_web_get"].startswith(f"lh_web_get={auth.get_cookie_value(TOKEN)};")
+    for attribute in ("httponly", "samesite=strict", "secure", "path=/api"):
+        assert attribute in cookies["lh_web_get"].lower(), attribute
+    old = cookies["lh_web"].lower()
+    assert "max-age=0" in old and re.search(r"path=/(;|$)", old), old
+    assert TOKEN not in " ".join(sent), "the raw token is never a cookie"
 
 
 async def test_the_stream_accepts_the_cookie_the_way_eventsource_would(tmp_path):
+    _, _, server, _ = await _stack(tmp_path)
+    frames = await _read_frames(
+        server, 1, headers={"cookie": f"{auth.AUTH_COOKIE}={auth.get_cookie_value(TOKEN)}"})
+    assert frames[0][0] == "Hello"
+
+
+async def test_get_routes_take_the_derived_cookie_and_nothing_else(tmp_path):
     _, _, _, client = await _stack(tmp_path)
-    client.cookies.set(auth.AUTH_COOKIE, TOKEN)
-    got = await client.get("/api/health")
-    assert got.status_code == 200
+
+    async def health(cookies: dict, headers: dict | None = None) -> int:
+        client.cookies.clear()
+        for name, value in cookies.items():
+            client.cookies.set(name, value)
+        return (await client.get("/api/health", headers=headers or {})).status_code
+
+    assert await health({auth.AUTH_COOKIE: auth.get_cookie_value(TOKEN)}) == 200
+    assert await health({auth.AUTH_COOKIE: TOKEN}) == 401, "the raw token is not the cookie"
+    assert await health({"lh_web": TOKEN}) == 401, "0.16's cookie is accepted nowhere"
+    assert await health({auth.AUTH_COOKIE: auth.get_cookie_value("another-token")}) == 401
+    assert await health({}, BEARER) == 200
+
+
+async def test_no_post_route_takes_a_cookie(tmp_path):
+    """The cookie authenticates GETs only. Every POST needs the bearer header, which with the JSON
+    content type forces a preflight no foreign origin passes."""
+    _, _, server, client = await _stack(tmp_path, config_dir=tmp_path)
+    client.cookies.set(auth.AUTH_COOKIE, auth.get_cookie_value(TOKEN))
+    client.cookies.set("lh_web", TOKEN)
+    posts = [path for method, path in _sweep(server) if method == "POST"]
+    for path in posts:
+        got = await client.post(path, content=b"{}", headers={"Content-Type": "application/json"})
+        assert got.status_code == 401, path
+    assert len(posts) >= 14 and "/api/sessions/s1/message" in posts
+    got = await client.post("/api/sessions/s1/message", json={"text": "hi"}, headers=JSON)
+    assert got.status_code != 401
+
+
+async def test_no_get_route_trades_the_cookie_for_the_token(tmp_path):
+    """The cookie is worth only what the GET routes give for it. The manifest pairs an installed
+    app by carrying the token in its start_url, so it does that for the bearer alone: a caller
+    holding only the cookie (a neighbouring service that was sent it) gets the generic one.
+    Swept over every GET route, so a route added later cannot become the trade either."""
+    _, _, server, _ = await _stack(tmp_path, config_dir=tmp_path)
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=server.app, raise_app_exceptions=False),
+        base_url="http://web.test")
+    client.cookies.set(auth.AUTH_COOKIE, auth.get_cookie_value(TOKEN))
+    gets = [path for method, path in _sweep(server) if method == "GET" and path != "/api/stream"]
+    for path in [*gets, "/manifest.webmanifest", "/"]:
+        got = await client.get(path)
+        assert TOKEN not in got.text, path
+    assert (await client.get("/api/health")).status_code == 200, "the cookie does open the GETs"
+    assert (await client.get("/manifest.webmanifest")).json()["start_url"] == "/"
+
+
+async def test_a_phone_paired_before_the_upgrade_gets_the_new_cookie_on_enrolment(tmp_path):
+    """A phone paired under 0.16 holds the old lh_web cookie (the raw token) and its stored
+    bearer. The upgraded server refuses that cookie; the page's enrolment — on every load, and
+    once when its stream is refused — trades the bearer for the new cookie. No tap, no re-scan."""
+    _, _, server, _ = await _stack(tmp_path)
+    phone = httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),
+                              base_url="https://web.test")  # https: the cookie is Secure
+    phone.cookies.set("lh_web", TOKEN)
+    assert (await phone.get("/api/health")).status_code == 401, "the old cookie no longer works"
+
+    enrolled = await phone.post("/api/auth/enroll", json={}, headers=JSON)
+    assert enrolled.status_code == 200
+    assert phone.cookies.get(auth.AUTH_COOKIE) == auth.get_cookie_value(TOKEN)
+    assert (await phone.get("/api/health")).status_code == 200  # the jar sends it to /api/*
+    frames = await _read_frames(
+        server, 1, headers={"cookie": f"{auth.AUTH_COOKIE}={phone.cookies.get(auth.AUTH_COOKIE)}"})
+    assert frames[0][0] == "Hello"
+
+
+async def test_a_non_ascii_bearer_or_cookie_is_refused_never_a_crash(tmp_path):
+    """Header bytes arrive as latin-1 text; comparing that with the token used to raise into a
+    500. Any credential that is not the right one is a 401, whatever its bytes."""
+    _, _, server, _ = await _stack(tmp_path)
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=server.app, raise_app_exceptions=False),
+        base_url="http://web.test")
+    for headers in ({"Authorization": b"Bearer \xe9\xe8\xff"},
+                    {"Cookie": b"lh_web_get=\xe9\xe8\xff"}):
+        got = await client.get("/api/health", headers=headers)
+        assert got.status_code == 401, headers
+    got = await client.post("/api/sessions/s1/message", content=b"{}", headers={
+        "Content-Type": "application/json", "Authorization": b"Bearer \xe9"})
+    assert got.status_code == 401
 
 
 # ------------------------------------------------------------------ the stream
