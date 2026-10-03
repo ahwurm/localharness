@@ -27,9 +27,9 @@ All notable changes to LocalHarness are documented here. The format follows
   `localharness web` then puts in the pairing QR. memory downloads the
   embedding model when it is missing, after asking. dispatch asks the bot token
   (not echoed) and who may talk to the bot. autoresearch asks the proposer's
-  address and model, saves them together, then asks the proposer for its model
-  list once. `localharness plugins info <name>` prints the coding-agent prompt
-  for your machine.
+  address, model and API key (not echoed; empty for a local server), saves them
+  together, then asks the proposer for its model list once. `localharness
+  plugins info <name>` prints the coding-agent prompt for your machine.
 - **`init --no-input`** asks nothing. `init` now ends with every bundled
   plugin and the command that sets it up.
 - **A first `localharness start` with no config sets up the core and goes on
@@ -53,9 +53,13 @@ All notable changes to LocalHarness are documented here. The format follows
 - `plugins enable` offers your saved values as defaults, never shows a saved
   secret, and no longer writes an empty answer. On a plugin missing its install
   extra it prints the install command and asks nothing.
-- The refusal of a proposer model equal to your main model now says why in
-  plain words, and `localharness propose` with no proposer says how to set one
-  up; neither prints an internal id any more.
+- The autoresearch proposer may now be your main model, served at the
+  proposer's own address (a second local instance, or the same local server):
+  a `proposer.model` equal to `provider.default_model` was refused before. So
+  the proposer is either your local model again or a cloud API, and the setup
+  step asks a cloud proposer's API key.
+- `localharness propose` with no proposer says how to set one up, without an
+  internal id.
 
 ### Fixed
 - `localharness plugins enable autoresearch` checks the proposer by sending
@@ -130,6 +134,10 @@ All notable changes to LocalHarness are documented here. The format follows
   `plugins enable`: the first one turns it on before its manifest is read.
 - During a `/plugins` restart, the closed input box's last frame stays in the
   scrollback above the setup questions.
+- Enter at autoresearch's API key question keeps a key stored before, so after
+  moving from a cloud API to a local server the old key is still sent to the
+  new address until `localharness components set proposer.api_key none`
+  clears it.
 
 ## [0.16.0] — 2026-10-02
 

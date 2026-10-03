@@ -11,7 +11,31 @@ localharness plugins enable autoresearch
 
 Turning it off removes its commands from `localharness --help` and its settings from `components list`, and deletes nothing: the experiment archive and your settings stay. The bench and its sealed holdout are part of core and work either way.
 
-`localharness plugins enable autoresearch` on a terminal, or `/plugins enable autoresearch` in a running session while no proposer is set up, asks the proposer's address and model id and writes both at once; a model equal to your main one is refused, and nothing is written. Then it asks the proposer for its model list once, to check that it answers and serves that model. It reads the address and key from your machine-level config only, as `propose` does, and prints the host before it sends the key; a different address in the project's own config is named and ignored. `doctor` still never contacts it.
+`localharness plugins enable autoresearch` on a terminal, or `/plugins enable autoresearch` in a running session while no proposer is set up, asks the proposer's address, its model id and an API key (nothing shows as you type it; leave it empty for a local server), and writes the answers at once; Enter on a question writes nothing, and answers that do not make a valid proposer together are refused with nothing written. Then it asks the proposer for its model list once, to check that it answers and serves that model. It reads the address and key from your machine-level config only, as `propose` does, and prints the host before it sends the key; a different address in the project's own config is named and ignored. `doctor` still never contacts it.
+
+## Two setups for the proposer
+
+The proposer is any model behind an OpenAI-compatible address. Two setups are typical:
+
+- **Your local model again.** Serve the model LocalHarness already runs a second time, at another local address, or point the proposer at the same local server. Its model id may be your main model's id. Leave the key empty.
+- **A cloud API.** The API's OpenAI-compatible base URL, its model id, and your API key for it, typed at the key question.
+
+The same settings, written by hand in your global `overrides.yaml`:
+
+```yaml
+proposer:                          # your local model again
+  base_url: http://127.0.0.1:8001/v1
+  model: <your main model's id>    # the same id as provider.default_model is fine
+```
+
+```yaml
+proposer:                          # a cloud API
+  base_url: <the API's OpenAI-compatible base URL>
+  model: <its model id>
+  api_key: <your key>
+```
+
+A slow local proposer may need `proposer.is_local: true` with `proposer.timeout_seconds: 600`: the default timeout is 120 seconds, and `is_local` needs one of at least 300.
 
 ## What it adds
 
@@ -29,8 +53,8 @@ It keeps the core settings it had before it became a plugin, under the same name
 | Setting | Meaning |
 |---|---|
 | `proposer.base_url` | OpenAI-compatible address of the proposer model. |
-| `proposer.model` | The proposer model; it must differ from `provider.default_model`. |
-| `proposer.api_key` | Shown as `**********` everywhere; `none` for a local model. |
+| `proposer.model` | The proposer's model id. Your main model's id is fine when it answers at `proposer.base_url`. |
+| `proposer.api_key` | Your key for a cloud API; `none`, the default, for a local server. Shown as `**********` everywhere. |
 | `proposer.is_local`, `proposer.timeout_seconds`, `proposer.temperature`, `proposer.max_tokens` | How the proposer is called. |
 | `sentinel.*` | Thresholds for the sentinel that watches the loop for overfitting, duplicate proposals and saturation. |
 
@@ -38,7 +62,8 @@ It keeps the core settings it had before it became a plugin, under the same name
 
 ## Not there yet
 
-- `components set proposer.api_key …` writes the key as plain text to your global `overrides.yaml`.
+- The key is stored as plain text in your global `overrides.yaml` (mode 600 when LocalHarness writes it), whether `plugins enable autoresearch` or `components set proposer.api_key …` wrote it.
+- Enter at the key question keeps a key stored before. Moving from a cloud API to a local server, clear it with `localharness components set proposer.api_key none`; until then the old key is sent to the new address, as the line before the check says.
 - Two cases give a script an exit code that `experiment run` also uses for a verdict: when the config cannot be read, an off plugin's command gets `No such command` and exit 2 (reject-holdout); when an on plugin's command fails to import, it exits 1 (reject-train).
 - With the plugin off, `components list` still shows its `autoresearch.enabled` row.
 
