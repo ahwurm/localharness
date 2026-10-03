@@ -2038,6 +2038,8 @@ class ConfigLoader:
             bak = dest.with_suffix(".yaml.bak")
             dest.rename(bak)
         yaml_text = to_yaml_str(config)
+        from localharness.core.private_files import touch_private
+        touch_private(dest)
         dest.write_text(yaml_text, encoding="utf-8")
         # Owner-only, like every other config file this package writes: an agent yaml carries the
         # deny list, the ask rule sets and the kill file — the policy the session is gated by.

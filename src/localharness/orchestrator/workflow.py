@@ -9,6 +9,7 @@ from typing import Any
 
 from localharness.config.paths import resolve_config_dir
 from localharness.config.redact import yaml_problem, yaml_where
+from localharness.core.private_files import touch_private
 
 
 # #59: deterministic, leading-anchored cancellation. The old escape was 4 undocumented
@@ -288,6 +289,7 @@ class AgentCreationWorkflow:
             )
         config_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = config_path.with_suffix(".yaml.tmp")
+        touch_private(tmp_path)  # the agent file keeps this one's mode
         tmp_path.write_text(validated_yaml)
         os.replace(str(tmp_path), str(config_path))
         self._agent_name = agent_name

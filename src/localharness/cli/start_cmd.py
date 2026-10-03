@@ -18,6 +18,7 @@ from rich.text import Text
 
 from localharness.cli.theme import entity, entity_text
 from localharness.cli.workspace import NO_INPUT_HELP
+from localharness.core.private_files import touch_private
 from localharness.plugins.channels import (OWN_COMMAND, accepted_channels, channel_names,
                                            plugin_channel_names)
 
@@ -240,6 +241,7 @@ def _route_memory_logs_to_file(agent_dir: Path) -> Path:
         for h in mem_log.handlers
     )
     if not already:
+        touch_private(log_path)
         handler = logging.FileHandler(log_path, encoding="utf-8")
         handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -392,8 +394,9 @@ def _ensure_packaged_tools(config_dir: Path) -> None:
         from importlib import resources
         src = resources.files("localharness").joinpath("assets", "design-screenshot.js")
         tools_dir.mkdir(parents=True, exist_ok=True)
+        touch_private(dest)
         dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-        dest.chmod(0o755)
+        dest.chmod(0o700)  # owner-only and executable
     except Exception as exc:  # noqa: BLE001
         err_console.print(f"[yellow]⚠ could not install design-screenshot.js: {exc}[/yellow]")
 
@@ -474,6 +477,7 @@ def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
                 "longer be delegated to (the root's name is guarded)."
             )
         return
+    touch_private(target)
     target.write_text(yaml.dump(data, default_flow_style=False), encoding="utf-8")
     legacy.unlink(missing_ok=True)  # two-process first-start race: the other may have unlinked
 
@@ -819,6 +823,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         agents_dir.mkdir(parents=True, exist_ok=True)
         root_data = _build_agent_yaml("orchestrator", "General-purpose assistant", None)
         import yaml as _yaml
+        touch_private(agents_dir / "orchestrator.yaml")
         (agents_dir / "orchestrator.yaml").write_text(
             _yaml.dump(root_data, default_flow_style=False), encoding="utf-8"
         )

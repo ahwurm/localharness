@@ -61,6 +61,7 @@ from localharness.config.models import HarnessConfig, PermissionConfig
 from localharness.config.overlay import restrict_config_file
 from localharness.config.plugin_sections import core_harness_view
 from localharness.config.redact import secret_values, validation_text, yaml_problem, yaml_where
+from localharness.core.private_files import touch_private
 
 log = logging.getLogger(__name__)
 
@@ -328,6 +329,7 @@ def _write_with_backup(path: Path, original: bytes, updated: dict) -> Path:
     """
     stamp = datetime.now().strftime(BACKUP_STAMP_FORMAT)
     backup = path.with_name(f"{path.name}{BACKUP_INFIX}{stamp}")
+    touch_private(backup)
     backup.write_bytes(original)
     restrict_config_file(backup)
     path.write_text(

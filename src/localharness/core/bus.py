@@ -25,6 +25,7 @@ import anyio
 import structlog
 
 from .events import AnyEvent, BaseEvent, deserialize_event
+from .private_files import private_opener
 from .types import AgentID, EventSeq, SessionID
 
 log = structlog.get_logger(__name__)
@@ -115,7 +116,8 @@ class EventBus:
     async def _append_jsonl(self, path: Path, event: BaseEvent) -> None:
         line = event.model_dump_json() + "\n"
         try:
-            async with await anyio.open_file(str(path), "a", encoding="utf-8") as f:
+            async with await anyio.open_file(str(path), "a", encoding="utf-8",
+                                             opener=private_opener) as f:
                 await f.write(line)
         except Exception as exc:
             log.error("persist_failed", event_id=event.id, seq=event.seq, path=str(path), error=str(exc))

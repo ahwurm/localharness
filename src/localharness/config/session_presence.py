@@ -31,6 +31,8 @@ from typing import Any, Optional
 
 import structlog
 
+from localharness.core.private_files import touch_private
+
 log = structlog.get_logger(__name__)
 
 PRESENCE_DIR_NAME = "live-sessions"
@@ -144,6 +146,7 @@ def register(
     directory = presence_dir(config_dir)
     try:
         directory.mkdir(parents=True, exist_ok=True)
+        touch_private(directory / f"{mine}.json")
         (directory / f"{mine}.json").write_text(json.dumps({
             "pid": mine,
             "agent": agent,

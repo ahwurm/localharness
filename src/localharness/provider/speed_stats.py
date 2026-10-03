@@ -24,6 +24,8 @@ from pathlib import Path
 from statistics import median
 from uuid import uuid4
 
+from localharness.core.private_files import touch_private
+
 SAMPLE_CAP = 10
 # #130: the ceiling above which a "measured" rate is a timing artifact, not a decode speed.
 # decode_tps divides an exact token count by the measured window, so a sub-millisecond window
@@ -125,6 +127,7 @@ def record_tps(path: Path, provider_type: str, model: str, tps: float) -> None:
     # consumed the file → FileNotFoundError). Unique name ⇒ genuine last-writer-wins.
     tmp = path.with_name(f"{path.name}.{os.getpid()}-{uuid4().hex[:8]}.tmp")
     try:
+        touch_private(tmp)  # the replaced ledger keeps this one's mode
         tmp.write_text(json.dumps(data))
         os.replace(tmp, path)
     finally:
@@ -153,6 +156,7 @@ def record_tokens_per_chunk(path: Path, provider_type: str, model: str, ratio: f
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}-{uuid4().hex[:8]}.tmp")
     try:
+        touch_private(tmp)  # the replaced ledger keeps this one's mode
         tmp.write_text(json.dumps(data))
         os.replace(tmp, path)
     finally:

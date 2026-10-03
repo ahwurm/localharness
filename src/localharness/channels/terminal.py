@@ -6,6 +6,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 import structlog
@@ -41,6 +42,7 @@ from localharness.channels.base import (
 from localharness.channels.errors import ChannelStartError
 from localharness.cli.theme import ENTITY_STYLES, SITE_INK
 from localharness.core.bus import EventBus
+from localharness.core.private_files import touch_private
 from localharness.channels.input_router import FORCE_PREFIX
 from localharness.core.events import (
     Action,
@@ -1088,6 +1090,7 @@ class TerminalChannel(ChannelAdapter):
             )
         history_path = os.path.expanduser(self._history_file)
         os.makedirs(os.path.dirname(history_path), exist_ok=True)
+        touch_private(Path(history_path))  # what the user types is theirs alone (SEC-11)
 
         self._history = FileHistory(history_path)
 

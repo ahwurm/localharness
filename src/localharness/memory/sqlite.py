@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import aiosqlite
 
+from localharness.core.private_files import touch_private
 from localharness.memory.errors import (
     MemoryCorruptionError,
     MemoryVerifyError,
@@ -818,6 +819,7 @@ class MemoryStore:
                 f"(the adoption is the store owner's to make), then this session can read it."
             )
         self._agent_dir.mkdir(parents=True, exist_ok=True)
+        touch_private(self._db_path)  # its -wal/-shm side files take this file's mode
         self._db = await aiosqlite.connect(str(self._db_path))
         try:
             await self._open_inner(owner_init=owner_init)

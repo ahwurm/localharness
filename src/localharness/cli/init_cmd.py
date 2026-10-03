@@ -5,6 +5,7 @@ import asyncio
 import shutil
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
 from urllib.parse import urlparse
@@ -18,9 +19,11 @@ from localharness.agent.context import response_reserve
 from localharness.cli.errors import _HANDLED, report_filesystem_error
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader, ConfigValidationError
-from localharness.config.overlay import atomic_write_overlay, load_overlay, restrict_config_file
+from localharness.config.migrate import BACKUP_STAMP_FORMAT
+from localharness.config.overlay import atomic_write_overlay, load_overlay
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir, resolve_config_dir
 from localharness.config.redact import reveal, secret_values, validation_text
+from localharness.core.private_files import ensure_private_dir, touch_private, write_private_bytes
 from localharness.config.models import (
     ContextConfig,
     HarnessConfig,
@@ -522,6 +525,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
     """
     config_path = resolve_config_dir(config_dir)
     config_path.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(config_path)  # keys, the phone token and every session log land here (SEC-11)
     config_file = config_path / "config.yaml"
 
     if config_file.exists() and not force:
@@ -942,15 +946,23 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
 
     reset = _saved_choices_reset(config_path, harness) if force else None
     config_file = config_path / "config.yaml"
+    if force and config_file.exists():
+        # --force starts over; the config it replaces stays beside it, owner-only, so it can be
+        # undone. A distinct infix: never counted or pruned as one of migrate's backups.
+        stamp = datetime.now().strftime(BACKUP_STAMP_FORMAT)
+        backup = config_path / f"config.yaml.before-init-{stamp}"
+        write_private_bytes(backup, config_file.read_bytes())
+        console.print("[green]✓[/green] " + escape(f"Saved your previous config to {backup}"),
+                      soft_wrap=True)
     # memory.enabled is the memory plugin's key (MEMP-06); the deprecated org.memory_enabled is
     # never written, so a fresh install has nothing to warn about. On is the default: no key.
     # Keys are written as typed (`reveal`): a JSON-mode dump would write the mask in their place.
     text = yaml.safe_dump(reveal(harness.model_dump(mode="python", exclude={"org": {"memory_enabled"}})),
                           default_flow_style=False, sort_keys=False, allow_unicode=True)
-    config_file.write_text(text + ("" if memory_on else "memory:\n  enabled: false\n"), encoding="utf-8")
-    # Owner-only: this file carries `provider.api_key` and the deny/ask policy every session on
-    # this machine is gated by. `write_text` lands it at 0664 under the usual 022 umask.
-    restrict_config_file(config_file)
+    # Owner-only from its first byte: this file carries `provider.api_key` and the deny/ask policy
+    # every session on this machine is gated by (a re-init over an older, wider file tightens it).
+    write_private_bytes(config_file,
+                        (text + ("" if memory_on else "memory:\n  enabled: false\n")).encode("utf-8"))
     # #53: create the agents directory alongside the config. doctor names `init` as the remedy
     # for a missing agents dir, so init must actually create it (previously only `start` and
     # `doctor --fix` did, which left that remedy non-functional).
@@ -960,6 +972,7 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
     plugins_readme = config_path / "plugins" / "README.md"
     plugins_readme.parent.mkdir(exist_ok=True)
     if not plugins_readme.exists():
+        touch_private(plugins_readme)  # nothing in the config folder is left for others to read
         plugins_readme.write_text(GLOBAL_PLUGINS_README, encoding="utf-8")
     if reset:
         overlay_path, overlay, cleared = reset

@@ -26,6 +26,7 @@ from pydantic import SecretStr
 from typing import Any, Callable
 
 from localharness.config.models import ManagedServerConfig
+from localharness.core.private_files import private_opener, touch_private
 
 DOCKER_CONTAINER_NAME = "localharness-vllm"
 
@@ -247,7 +248,7 @@ def start_server(config_dir: Path, cmd: list[str], *, api_key: str | None = None
     `api_key` (a server set to require one) goes into the child's environment as VLLM_API_KEY —
     never into `cmd`, so it is in neither the process list nor the launch line logged here."""
     server_dir(config_dir).mkdir(parents=True, exist_ok=True)
-    log = open(log_path(config_dir), "ab")
+    log = open(log_path(config_dir), "ab", opener=private_opener)
     log.write(f"\n=== launch: {' '.join(cmd)} ===\n".encode())
     log.flush()
     proc = subprocess.Popen(
@@ -258,6 +259,7 @@ def start_server(config_dir: Path, cmd: list[str], *, api_key: str | None = None
         start_new_session=True,
         env={**os.environ, "VLLM_API_KEY": api_key} if api_key else None,
     )
+    touch_private(pid_path(config_dir))
     pid_path(config_dir).write_text(str(proc.pid), encoding="utf-8")
     return proc.pid
 

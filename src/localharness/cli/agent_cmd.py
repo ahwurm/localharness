@@ -14,6 +14,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from localharness.cli.workspace import NO_INPUT_HELP
+from localharness.core.private_files import touch_private
 from localharness.config.paths import WORKSPACE_DIR_NAME, resolve_config_dir
 
 console = Console()
@@ -237,6 +238,7 @@ def agent_create(
     # something the user can fix once they are told which path is wrong.
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
+        touch_private(target_path)
         target_path.write_text(yaml_text, encoding="utf-8")
     except OSError as exc:
         err_console.print(
