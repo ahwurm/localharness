@@ -391,7 +391,9 @@ class Plugin:
         endpoint answers — as Check rows core prints the way doctor prints them. Sync or async.
         Core runs it only from `plugins enable` on a terminal, after asking manifest.setup_action
         when that question is set; never at `start` and never from doctor. It is contained like
-        doctor(): an exception becomes one failing row. ctx.llm is None."""
+        doctor(): an exception becomes one failing row. ctx.llm is None. A destination that receives a
+        credential is read from the machine-level config only (ctx.paths.global_config_dir, no
+        workspace layer): a project's .localharness/ loads without a prompt inside it."""
         return []
 
     def channels(self) -> dict[str, type[ChannelAdapter]]:
