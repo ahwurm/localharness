@@ -441,3 +441,101 @@ def test_no_skip_without_a_terminal_no_server_still_exits_1(tmp_path, monkeypatc
     _exited(result, 1)
     assert "No local LLM detected" in _flat(result)
     assert not (tmp_path / "config.yaml").exists()
+
+
+# ------------------------------------------------------------------ the plugin list init ends with
+
+HEADER = "Plugins — the command beside each one turns it on or sets it up:"
+PLUGINS = ["image", "web", "memory", "dispatch", "autoresearch"]  # BUILTIN_PLUGINS order
+
+
+def _plugin_block(result) -> list[str] | None:
+    """The rows of the plugin list — which must be the LAST block of the output, after one blank
+    line — or None when init printed no list."""
+    lines = (result.output or "").rstrip().splitlines()
+    if HEADER not in lines:
+        return None
+    at = lines.index(HEADER)
+    assert lines[at - 1] == "", "one blank line comes before the list"
+    return lines[at + 1:]
+
+
+def test_init_ends_with_every_bundled_plugin_and_its_command(tmp_path, monkeypatch):
+    from localharness.plugins import resolve as resolve_mod
+
+    monkeypatch.setitem(resolve_mod.resolve.__kwdefaults__, "extra_installed", lambda extra: False)
+    _detect(monkeypatch)
+    _terminal(monkeypatch)
+    _silent(monkeypatch)  # init asks nothing about plugins
+    zed = tmp_path / "plugins" / "zed"  # a plugin found in the plugins/ folder: never listed here
+    zed.mkdir(parents=True)
+    (zed / "__init__.py").write_text("", encoding="utf-8")
+
+    result = _init(tmp_path, "--no-input")
+
+    _exited(result, 0)
+    rows = _plugin_block(result)
+    assert rows is not None, result.output
+    assert [r.split()[0] for r in rows] == PLUGINS, rows
+    image, web, memory, dispatch, autoresearch = rows
+    assert image == "  image         off — turn on: localharness plugins enable image"
+    assert "on — set up: localharness plugins enable memory" in memory
+    assert "on — set up: localharness plugins enable autoresearch" in autoresearch
+    assert ("(install `localharness[dispatch]` to use it) — set up: localharness plugins enable "
+            "dispatch") in dispatch
+    assert "(install `localharness[web]` to use it) — set up: localharness plugins enable web" in web
+    out = result.output
+    assert out.index("LocalHarness configured at") < out.index("★") < out.index(HEADER)
+    assert init_cmd.PLUGINS_HEADER == HEADER
+
+
+def test_a_kept_config_still_lists_the_plugins(tmp_path, monkeypatch):
+    _detect(monkeypatch)
+    _silent(monkeypatch)
+    _seed(tmp_path)
+
+    result = _init(tmp_path)
+
+    _exited(result, 0)
+    rows = _plugin_block(result)
+    assert rows is not None and [r.split()[0] for r in rows] == PLUGINS, result.output
+    assert result.output.index("Kept") < result.output.index(HEADER)
+
+
+@pytest.mark.parametrize("outcome", ["changed", "skipped-with-a-model", "nothing-saved"])
+def test_the_plugin_list_ends_every_outcome_that_leaves_a_config(outcome, tmp_path, monkeypatch):
+    if outcome == "changed":
+        _detect(monkeypatch, "new-model")
+        _terminal(monkeypatch)
+        _answers(monkeypatch, False)
+        _seed(tmp_path)
+    else:
+        _no_server_on_a_terminal(
+            monkeypatch, "http://localhost:8081/v1", "my-model" if outcome == "skipped-with-a-model" else "")
+
+    result = _init(tmp_path)
+
+    _exited(result, 0)
+    rows = _plugin_block(result)
+    if outcome == "nothing-saved":
+        assert rows is None, result.output
+    else:
+        assert rows is not None and [r.split()[0] for r in rows] == PLUGINS, result.output
+
+
+def test_a_plugin_list_failure_never_fails_init(tmp_path, monkeypatch):
+    from localharness.plugins import resolve as resolve_mod
+
+    def _broken(*_a, **_k):
+        raise RuntimeError("a plugin problem")
+
+    monkeypatch.setattr(resolve_mod, "resolve", _broken)
+    _detect(monkeypatch)
+    _silent(monkeypatch)
+
+    result = _init(tmp_path)
+
+    _exited(result, 0)
+    assert (tmp_path / "config.yaml").exists()
+    assert result.output.rstrip().splitlines()[-1] == "Plugins: run `localharness plugins list` to see them."
+    assert HEADER not in result.output
