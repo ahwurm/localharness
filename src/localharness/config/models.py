@@ -1629,7 +1629,7 @@ class ProposerConfig(BaseModel):
     # SecretStr (G2): masked wherever it is shown; proposer.py reads .get_secret_value().
     api_key: SecretStr = Field(default=SecretStr("none"),
                                description="API key ('none' for local). Machine-level only, as base_url is.")
-    is_local: bool = Field(default=False, description="True for local 120B+; requires timeout>=300s.")
+    is_local: bool = Field(default=False, description="True for a slow local model; requires timeout_seconds >= 300.")
     timeout_seconds: float = Field(default=120.0, ge=1.0, le=3600.0)
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, ge=1)
