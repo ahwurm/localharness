@@ -52,7 +52,11 @@ varies with CWD).
 from __future__ import annotations
 
 import logging
+import re
+import shlex
 import sys
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Union
 
@@ -161,7 +165,10 @@ def resolve_workspace_layer(
         )
         return None
 
-    trusted = _ask(real, asker)
+    # Trust is for what you saw (R18): the question lists the MCP servers the workspace's agent
+    # files start, and a Yes approves exactly that list.
+    snap = trust.executables_snapshot(real)
+    trusted = _ask(TRUST_QUESTION.format(parent=real.parent) + _servers_suffix(snap), asker)
     # Recorded on the workspace ROOT, not on the `.localharness` directory inside it, so that
     # ONE answer settles both trust questions (owner ruling 2026-09-11). `session_trust` asks
     # about the root and looks it up with `is_trusted_tree`, which walks UPWARD — from
@@ -170,6 +177,7 @@ def resolve_workspace_layer(
     # then asked the session question all over again a second later.
     trust.record_trust(real.parent, trusted)
     if trusted:
+        trust.record_executables(real.parent, snap)
         log.info("workspace layer: %s (trusted just now)", found)
         return found
     _notice(f"Workspace {real} recorded as not trusted — its config layer is ignored.")
@@ -229,9 +237,12 @@ def settle_startup_trust(
     there was a directory to offer — keeps the create-offer's own "asked once, ever" memory in
     `declined_workspace_offers.yaml`.
 
-    It runs on the synchronous startup path, BEFORE any session store is opened. That order is
-    what makes the recognition check honest: the files it counts as "earlier sessions" cannot
-    include this one's, which is the bug that had a brand-new project trusting itself.
+    It runs on the synchronous startup path, BEFORE any session store is opened. Session files
+    inside the project are never evidence of anything: they can be committed to a repository, so
+    a fresh clone would arrive looking "worked in" (only the machine's own store counts as prior
+    use, in `cli/session_trust`). When the project's agent files start MCP servers, the question
+    lists them and a yes approves exactly that list (`cli/workspace.decide_project_trust` asks
+    again, at a later start, only when the list changes).
 
     Every guard below is a case where the question would be wrong, not merely unhelpful:
 
@@ -295,13 +306,6 @@ def settle_startup_trust(
     decided = trust.is_trusted_tree(root)
     if decided is not None:
         return None
-    if trust.prior_session_count(root / WORKSPACE_DIR_NAME) > 0:
-        # Recognized: work has happened here before this run started. Record it so the answer is
-        # explicit from now on, and say so — quietly, once (owner: "it should recognize I've been
-        # in this environment before, used X tools etc.").
-        trust.record_trust(root, True)
-        _notice(RECOGNIZED_NOTICE.format(root=root))
-        return None
     if not interactive:
         # Nobody to ask. Record nothing: an unasked question has not been answered, and the gate
         # falls back to `guarded` for this run (cli/session_trust).
@@ -309,7 +313,9 @@ def settle_startup_trust(
     if existing is None and trust.offer_was_declined(target):
         return None
 
-    answer = _ask_create(TRUST_ONLY_PROMPT if existing is not None else OFFER_PROMPT)
+    snap = trust.executables_snapshot(existing) if existing is not None else []
+    answer = _ask_create((TRUST_ONLY_PROMPT if existing is not None else OFFER_PROMPT)
+                         + _servers_suffix(snap))
     if answer is None:
         return None  # EOF is not an answer; nothing recorded, nothing created
     trust.record_trust(root, answer)
@@ -319,6 +325,7 @@ def settle_startup_trust(
             trust.record_offer_decline(target)
         _notice(DECLINED_NOTICE.format(root=root))
         return None
+    trust.record_executables(root, snap)  # the yes approved exactly the list it showed
     if existing is not None:
         return None
     try:
@@ -331,7 +338,6 @@ def settle_startup_trust(
     return target
 
 
-RECOGNIZED_NOTICE = "Recognized this workspace ({root}) — trusted."
 DECLINED_NOTICE = (
     "Workspace {root} is not trusted — this session asks before boundary-crossing and "
     "destructive calls."
@@ -388,10 +394,187 @@ def _confirm_on_a_tty(question: str) -> bool:
     return bool(Confirm.ask(Text(question), console=_notice_console, default=False))
 
 
-def _ask(found: Path, asker: Optional[TrustAsker] = None) -> bool:
-    """Put the trust question to whoever is listening.
+def _ask(question: str, asker: Optional[TrustAsker] = None) -> bool:
+    """Put the trust question to whoever is listening. The caller builds it from the RESOLVED
+    workspace, so a symlinked dotdir names the tree the files actually come from — "the workspace
+    at ./" is not a question anyone can answer."""
+    return bool((asker or _confirm_on_a_tty)(question))
 
-    Takes the RESOLVED workspace so a symlinked dotdir names the tree the files actually come
-    from — "the workspace at ./" is not a question anyone can answer.
-    """
-    return bool((asker or _confirm_on_a_tty)(TRUST_QUESTION.format(parent=found.parent)))
+
+# ------------------------------------------------------------------ what a project may start
+#
+# "No" means no, and trust is for what you saw (orchestrator rulings R5, R6, R18). A project's own
+# agent files can name MCP servers — programs started with your environment, or addresses
+# connected to with headers. They start only for a trusted project, and only the set you were
+# shown: the trust store keeps that set beside the Yes (config/trust.executables_snapshot), and a
+# start whose set differs asks once, on a terminal, before anything loads. Nothing here ever asks
+# mid-task; a run that cannot ask starts none of the new or changed set and says how to fix that.
+
+TRUST_PROJECT_ENV = "LOCALHARNESS_TRUST_PROJECT"
+"""`=1`: trust the project you are in for this run only (any command that starts a session —
+`web` and `acp` have no `--trust-project`). Nothing is recorded and nothing is asked."""
+
+SERVERS_SUFFIX = "\nIts agent files start these programs (MCP servers):\n{diff}"
+
+EXECUTABLES_CHANGED_QUESTION = (
+    "The MCP servers this project's agent files start have changed since you trusted it:\n"
+    "{diff}\nStart them?")
+
+NOT_STARTED_DECLINED = "you said No to them — start asks again next time"
+NOT_STARTED_DECLINED_EARLIER = (
+    "you said No to them earlier in this session — start asks again next time")
+NOT_STARTED_UNASKED = ("they changed since you trusted this project (or were never shown to you) — "
+                       "run `localharness start` on a terminal to review them, or {one_run}")
+MCP_NOT_STARTED_LINE = "Not starting the MCP servers in {files}: {why}"
+NEXT_START_REVIEW_NOTICE = ("Its MCP servers start after you review them at the next "
+                            "`localharness start` on a terminal.")
+
+_DECLINED: set[tuple[str, str]] = set()
+"""(scope key, fingerprint) pairs answered No in this process: the /plugins restart is a second
+_start_async in the same process and must not ask the same question again (orchestrator ruling R18)."""
+
+
+def _one_run(channel_mode: str) -> str:
+    """The one-run escape for the command that was run: `web` and `acp` have no --trust-project."""
+    return ("set LOCALHARNESS_TRUST_PROJECT=1 for one run" if channel_mode in ("web", "acp")
+            else "pass --trust-project for one run")
+
+
+def untrusted_remedy(channel_mode: str, root: Path, *, recorded_no: bool) -> str:
+    """Why an untrusted project's servers did not start, and every way to change that (R18)."""
+    from localharness.config import trust
+
+    store = trust.trust_store_path()
+    if recorded_no:
+        return (f"you said No to trusting this project — {_one_run(channel_mode)}, or change its "
+                f"entry in {store} to `trusted: true`")
+    return (f"this project is not trusted yet — answer Yes to the trust question at a `localharness "
+            f"start` on a terminal, {_one_run(channel_mode)}, or add `{root}: {{trusted: true}}` "
+            f"to {store}")
+
+
+@dataclass(frozen=True)
+class ProjectTrust:
+    """What start decided about the project's own executable content (its MCP servers)."""
+    executables: bool
+    why: str = ""
+
+
+def decide_project_trust(workspace: Optional[Path], *, ask: bool, trust_flag: bool,
+                         channel_mode: str = "terminal") -> ProjectTrust:
+    """Decided once at start (and again at the /plugins restart, which is a new _start_async in the
+    same process). Asks only when `ask` (the caller passes channel_mode == "terminal" and not
+    --no-input and a terminal on stdin) and only when the project's server set differs from the
+    one recorded at the last Yes."""
+    from localharness.config import trust
+
+    if workspace is None or trust_flag:
+        return ProjectTrust(True)
+    root = Path(workspace).resolve().parent
+    decision = trust.is_trusted_tree(workspace)
+    if decision is not True:
+        return ProjectTrust(False, untrusted_remedy(channel_mode, root, recorded_no=decision is False))
+    snap = trust.executables_snapshot(workspace)
+    stored = trust.recorded_executables(root)
+    if stored is None:
+        if trust.is_trusted(root) is True or trust.is_trusted(workspace) is True or not snap:
+            # A record made for THIS project before this release (or by hand): its Yes predates
+            # the list, and adopting what it holds now is the upgrade's one silent step. Or there
+            # is nothing to start.
+            trust.record_executables(root, snap)
+            return ProjectTrust(True)
+        stored = trust.NOTHING_APPROVED  # trusted only through a parent folder: never shown
+    if stored["fingerprint"] == trust.fingerprint(snap):
+        return ProjectTrust(True)
+    # Whole entries, never names: two servers may share a name and MCPClientManager.startup
+    # connects both, so `[a: evil, a: benign]` must not collapse onto an approved `a: benign`.
+    if all(e in stored["servers"] for e in snap):
+        trust.record_executables(root, snap)  # only removals (or a reorder): nothing new runs
+        return ProjectTrust(True)
+    if (str(root), trust.fingerprint(snap)) in _DECLINED:
+        return ProjectTrust(False, NOT_STARTED_DECLINED_EARLIER)
+    if not ask:
+        return ProjectTrust(False, NOT_STARTED_UNASKED.format(one_run=_one_run(channel_mode)))
+    if _confirm_or_no(EXECUTABLES_CHANGED_QUESTION.format(
+            diff=executables_diff(stored["servers"], snap))):
+        trust.record_executables(root, snap)
+        return ProjectTrust(True)
+    _DECLINED.add((str(root), trust.fingerprint(snap)))
+    return ProjectTrust(False, NOT_STARTED_DECLINED)
+
+
+def _confirm_or_no(question: str) -> bool:
+    """The terminal question; a closed stdin (EOF) answers No."""
+    try:
+        return _confirm_on_a_tty(question)
+    except EOFError:
+        return False
+
+
+_UNSHOWABLE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _visible(text: object) -> str:
+    """A value from a file, safe to print inside one line of a question: every control character
+    (escape sequences, carriage returns, newlines, bidi overrides) shown as an escape, so a crafted
+    name or argument can neither redraw the line nor fake a second one."""
+    return _UNSHOWABLE.sub(lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 0x100
+                           else f"\\u{ord(m.group()):04x}", str(text))
+
+
+def _uncovered(old: list[dict], new: list[dict]) -> list[dict]:
+    """The entries of `new` not covered by `old`, counted as a multiset of whole entries: a second
+    verbatim copy of an entry is uncovered too."""
+    from localharness.config.trust import _canonical
+
+    left = Counter(_canonical(e) for e in old)
+    out = []
+    for entry in new:
+        if left[_canonical(entry)]:
+            left[_canonical(entry)] -= 1
+        else:
+            out.append(entry)
+    return out
+
+
+def _diff(old: list[dict], new: list[dict], *, pair: Callable[[dict], tuple], target: Callable[[dict], str],
+          counted: bool, removed: bool) -> str:
+    """One two-space-indented line per entry of `new` not covered by `old` ("+", or "~" when it
+    pairs — display only — with a gone entry of the same `pair` key, each pairing once), then one
+    "-" line per gone entry left unpaired when `removed`; env and header NAMES on a line under."""
+    if counted:
+        added, gone = _uncovered(old, new), _uncovered(new, old)
+    else:
+        added, gone = [e for e in new if e not in old], [e for e in old if e not in new]
+    lines: list[str] = []
+    for entry in added:
+        twin = next((g for g in gone if pair(g) == pair(entry)), None)
+        if twin is not None:
+            gone.remove(twin)
+        lines.append(f"  {'~' if twin is not None else '+'} {_visible(entry.get('name'))} "
+                     f"({_visible(entry.get('file'))}): {_visible(target(entry))}")
+        lines += [f"      {label}: {', '.join(map(_visible, entry[label]))}"
+                  for label in ("env", "headers") if entry.get(label)]
+    if removed:
+        lines += [f"  - {_visible(g.get('name'))} ({_visible(g.get('file'))})" for g in gone]
+    return "\n".join(lines)
+
+
+def _server_target(entry: dict) -> str:
+    if entry.get("transport") == "streamable_http":
+        return str(entry.get("url") or "")
+    return shlex.join([str(entry.get("command") or ""), *map(str, entry.get("args") or [])])
+
+
+def executables_diff(old: list[dict], new: list[dict], *, removed: bool = True) -> str:
+    """The project's servers, old record against the files now: "+ evil2 (a.yaml): /bin/sh -c id"
+    for one that is new, "~ evil (a.yaml): …" for one that changed (paired by file and name for
+    display only — what is new is decided by whole entries), "- web (b.yaml)" for one that is gone
+    (when `removed`), and "env: A, B" under a server that names env vars. Never a value."""
+    return _diff(old, new, pair=lambda e: (e.get("file"), e.get("name")), target=_server_target,
+                 counted=False, removed=removed)
+
+
+def _servers_suffix(snap: list[dict]) -> str:
+    """The server list appended to a trust question, or "" when the project starts none."""
+    return SERVERS_SUFFIX.format(diff=executables_diff([], snap)) if snap else ""

@@ -7,10 +7,11 @@ working HERE. That is one question, asked once per workspace root, remembered fo
 
 Three ways a session gets past it, and only one of them is a prompt:
 
-* **Recognized.** The workspace root already has a state store with sessions in it. Owner, same
-  day: "it should recognize I've been in this environment before, used X tools etc." A place
-  you have already worked in is not a place to be asked about; the record is written so it is
-  explicit from now on, and one quiet line says what happened.
+* **Recognized.** A home-rooted session whose machine store already holds sessions. Owner, same
+  day: "it should recognize I've been in this environment before, used X tools etc." The record
+  is written so it is explicit from now on, and one quiet line says what happened. Only the
+  machine's own store counts: a project's `.localharness/agents/*/sessions/` can be committed to
+  a repository, so a cloned repo would arrive "recognized" — it is asked like any new root.
 * **Recorded.** Somebody answered the question here, or above here — nested folders inherit
   (:func:`~localharness.config.trust.is_trusted_tree`). A "no" is remembered too, and runs the
   session in ``guarded``.
@@ -30,6 +31,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from localharness.agent.gate_types import PermissionRequest
+from localharness.cli.workspace import NEXT_START_REVIEW_NOTICE
 from localharness.config import trust
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir
 
@@ -102,12 +104,13 @@ def trust_root(boundary: Optional[Path]) -> Path:
 
 
 def state_store_for(boundary: Optional[Path]) -> Path:
-    """Where to look for evidence that work has already happened at this root.
+    """Where this root keeps its sessions.
 
-    A project with its own ``.localharness/`` keeps its sessions there. A session with no
-    boundary keeps them in the global store, which is the same directory for every home-rooted
-    run — which is why this only counts as evidence for the home-rooted case, and never lets one
-    old home session vouch for a project directory nobody has opened.
+    A project with its own ``.localharness/`` keeps them there; a session with no boundary keeps
+    them in the global store. Only the second is ever counted as evidence of prior use
+    (:func:`establish_session_trust`): the global store is the machine's, while a project's can
+    be committed to a repository and so vouches for nothing. One old home session never vouches
+    for a project directory nobody has opened either — a project's count is never taken.
     """
     if boundary is None:
         return global_config_dir()
@@ -144,24 +147,30 @@ async def establish_session_trust(gate: Any, notice: Any = None) -> str:
     is optional because the decision must not depend on there being somewhere to print it.
 
     The order is the point: a recorded decision beats everything (it is what the person already
-    said), evidence of prior use beats asking (it is what they already did), and only a root
-    with neither is worth a question.
+    said), evidence of prior use beats asking (it is what they already did — in the machine's own
+    store only), and only a root with neither is worth a question. A run started with
+    `--trust-project` (``gate.trusted_for_run``) skips all of it and records nothing.
     """
     if getattr(gate, "mode", None) != TRUST_GATED_MODE:
         return getattr(gate, "mode", TRUST_GATED_MODE)
+    if getattr(gate, "trusted_for_run", False):
+        return gate.mode  # `--trust-project`: trusted for this run, nothing recorded
 
-    root = trust_root(getattr(gate, "boundary", None))
+    boundary = getattr(gate, "boundary", None)
+    root = trust_root(boundary)
     decision = trust.is_trusted_tree(root)
     if decision is True:
         return gate.mode
     if decision is False:
         return _decline(gate, notice, DECLINED_NOTICE)
 
-    count = trust.prior_session_count(state_store_for(getattr(gate, "boundary", None)))
+    # A project's own `.localharness/agents/*/sessions/` can be committed to a repository, so it is
+    # never evidence; only the machine's store (the home-rooted session's) is.
+    count = trust.prior_session_count(state_store_for(boundary)) if boundary is None else 0
     if count > 0:
         # Recognized, and recorded so it is explicit from here on rather than re-derived from
-        # whatever happens to be on disk next time.
-        trust.record_trust(root, True)
+        # whatever happens to be on disk next time. Never a server approval (R18).
+        trust.record_trust(root, True, unseen_executables=True)
         _say(notice, RECOGNIZED_NOTICE.format(count=count, plural="" if count == 1 else "s"))
         return gate.mode
 
@@ -172,7 +181,11 @@ async def establish_session_trust(gate: Any, notice: Any = None) -> str:
 
     answer = await gate.asker(_request(root))
     if getattr(answer, "allowed", False):
-        trust.record_trust(root, True)
+        # This question never shows the server list, so its Yes approves no server (R18): they
+        # are shown and asked about at the next start on a terminal.
+        trust.record_trust(root, True, unseen_executables=True)
+        if trust.executables_snapshot(root / WORKSPACE_DIR_NAME):
+            _say(notice, NEXT_START_REVIEW_NOTICE)
         return gate.mode
     trust.record_trust(root, False)
     return _decline(gate, notice, DECLINED_NOTICE)
