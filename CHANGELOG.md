@@ -6,6 +6,15 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **A page for each bundled plugin**, under `docs/plugins/` (`image`, `mobile`
+  for the `web` plugin, `memory`, `dispatch`, `autoresearch`), linked from a
+  shorter README next to its localharness.dev page.
+
+### Fixed
+- The example plugin in `examples/plugin-template/` now requires LocalHarness
+  0.16 or later; it said 0.15, which cannot load a v1 plugin.
+
 ## [0.16.0] — 2026-10-02
 
 This release adds a plugin system: one API, one loader and one trust model, for
