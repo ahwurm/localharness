@@ -57,8 +57,8 @@ class SwatchTool(Tool):
             return self.err("no artifact directory was assigned to the example plugin")
         color, size = self._ctx.config.color, self._ctx.agent_config.size
         ref = write_artifact(root, "example", solid_png(size, bytes.fromhex(color[1:])), "image/png")
-        # The file write_artifact made, named in full: no screen shows artifacts yet, so this path,
-        # repeated by the model, is how the user finds the swatch.
+        # The file write_artifact made, named in full: the terminal shows no artifacts, so this path,
+        # repeated by the model, is how a terminal user finds the swatch.
         path = (root / f"{ref.id}.png").absolute()
         return self.ok(f"Rendered a {size}x{size} {color} swatch: artifact {ref.id}, "
                        f"saved to {path}", artifact=ref.model_dump())
