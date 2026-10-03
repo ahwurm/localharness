@@ -9,18 +9,24 @@ import pytest
 from localharness.agent.context import ContentStore
 from localharness.tools.builtin import web_tool
 from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool, WebSearchTool
+from tests.unit.test_web_fetch_guard import public_web
 
 
 def _fake_httpx(monkeypatch, *, text="", json_data=None, content_type="text/html"):
     """Patch web_tool.httpx.AsyncClient to return a fixed body / JSON.
 
-    `get` serves the SearXNG search path; `stream` serves the capped-download fetch path."""
+    `get` serves the SearXNG search path; `stream` serves the capped-download fetch path (every name
+    resolves to a public address, so web_fetch's guard lets it through)."""
+    public_web(monkeypatch)
+
     class _Resp:
         def __init__(self):
             self.text = text
             self.headers = {"content-type": content_type}
             self.url = "https://example.test/page"
             self.encoding = "utf-8"
+            self.status_code = 200
+            self.is_redirect = False
         def raise_for_status(self): pass
         def json(self): return json_data
         async def aiter_bytes(self):
@@ -50,7 +56,8 @@ def _fake_httpx(monkeypatch, *, text="", json_data=None, content_type="text/html
 async def test_web_fetch_ssrf_rejects_internal(bad):
     result = await WebFetchTool().run(url=bad)
     assert result.success is False
-    assert "internal addresses" in result.error
+    assert result.error_type == "validation_error"
+    assert "is not a public address" in result.error and "org.web_fetch_allow_private" in result.error
 
 
 @pytest.mark.asyncio

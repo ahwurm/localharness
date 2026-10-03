@@ -68,57 +68,23 @@ async def test_tool_result_get_scoped_per_agent():
 # --- dispatch-level isolation (8.6): per-agent stores never share bodies ------
 
 def _fake_httpx_by_url(monkeypatch, mapping):
+    """Serve each fetch from `mapping` by the host it names, through web_tool's _TRANSPORT seam. The
+    request itself goes to the checked address (every name resolves to one public address here), so
+    the host the model named is in the Host header."""
+    import httpx
+
     from localharness.tools.builtin import web_tool
+    from tests.unit.test_web_fetch_guard import public_web
 
-    class _Resp:
-        def __init__(self, text):
-            self.text = text
-            self.headers = {"content-type": "text/plain"}
-            self.url = "https://x.test/"
-            self.encoding = "utf-8"
+    public_web(monkeypatch)
 
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return None
-
-        async def aiter_bytes(self):
-            yield self.text.encode("utf-8")
-
-    def _resp_for(url):
+    def _answer(request):
         for key, text in mapping.items():
-            if key in url:
-                return _Resp(text)
-        return _Resp("unmapped")
+            if key in request.headers["host"]:
+                return httpx.Response(200, text=text, headers={"content-type": "text/plain"})
+        return httpx.Response(200, text="unmapped", headers={"content-type": "text/plain"})
 
-    class _Stream:
-        def __init__(self, url):
-            self._url = url
-
-        async def __aenter__(self):
-            return _resp_for(self._url)
-
-        async def __aexit__(self, *a):
-            return False
-
-    class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def get(self, url, **k):
-            return _resp_for(url)
-
-        def stream(self, method, url, **k):
-            return _Stream(url)
-
-    monkeypatch.setattr(web_tool.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(web_tool, "_TRANSPORT", httpx.MockTransport(_answer))
 
 
 @pytest.mark.asyncio

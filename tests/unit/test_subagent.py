@@ -576,8 +576,12 @@ async def test_config_child_write_implies_edit():
 # ---------------------------------------------------------------------------
 
 def _fake_httpx_page(monkeypatch, text: str) -> None:
-    """Minimal web_tool httpx stub (same shape as test_search_verifier's)."""
+    """Minimal web_tool httpx stub (same shape as test_search_verifier's); every name resolves to a
+    public address, so web_fetch's guard lets it through."""
     from localharness.tools.builtin import web_tool
+    from tests.unit.test_web_fetch_guard import public_web
+
+    public_web(monkeypatch)
 
     class _Resp:
         def __init__(self):
@@ -585,6 +589,8 @@ def _fake_httpx_page(monkeypatch, text: str) -> None:
             self.headers = {"content-type": "text/html"}
             self.url = "https://page.test/"
             self.encoding = "utf-8"
+            self.status_code = 200
+            self.is_redirect = False
         def raise_for_status(self): pass
         def json(self): return None
         async def aiter_bytes(self):
