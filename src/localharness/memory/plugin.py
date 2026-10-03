@@ -9,6 +9,7 @@ runs the package __init__, which imports nothing. It never imports cli/start_cmd
 
 doctor() is fast and offline: each memory.db opened read-only, the embedding model looked up in the
 local Hugging Face cache, the sentence_transformers package found — nothing loaded or downloaded.
+`plugins enable memory` on a terminal can download the model, after asking (setup_action).
 Behaviour change (locked "missing -> fail"): on an install without the `embeddings` extra, or
 without the model in the local cache, doctor now reports a failing `memory-embedding` row."""
 from __future__ import annotations
@@ -39,7 +40,15 @@ class MemoryPlugin(MemorySlotPlugin):
         cli=(CliDescriptor(name="memory",
                            help="Browse and edit the agent's persistent memory "
                                 "(list / show / edit / rm / archive / restore).",
-                           target="localharness.cli.memory_cli:memory_app"),))
+                           target="localharness.cli.memory_cli:memory_app"),),
+        setup_action="Download the embedding model now (about 1.2 GB)?",
+        next_steps="In a session, /memory shows what it keeps.",
+        agent_prompt=(
+            "Set up LocalHarness memory on this machine. Install LocalHarness with its embeddings\n"
+            "extra, keeping the extras I already use (a reinstall keeps only the extras it names). Then\n"
+            "run `localharness plugins enable memory` and answer yes to downloading the embedding model\n"
+            "(about 1.2 GB, into the Hugging Face cache). The model runs on the CPU, so no GPU setup is\n"
+            "needed. You are done when `localharness doctor` shows memory-embedding passing."))
     ConfigModel = None  # resolve() strips enabled; nothing else is harness-level
     AgentConfigModel = MemoryConfig
     wants_artifacts = False
@@ -243,6 +252,24 @@ class MemoryPlugin(MemorySlotPlugin):
         return rows + [_embedding_check(getattr(ctx.agent_config, "embedding_model", None)
                                         or "Qwen/Qwen3-Embedding-0.6B")]
 
+    def setup_action(self, ctx: PluginContext) -> list[Check]:
+        """The step's work: put the embedding model in the local Hugging Face cache, so the first
+        memory search does not stop to download it. Nothing to do when the model is a local path or
+        already cached; without the sentence_transformers package it downloads nothing and says how
+        to install it. huggingface_hub (a core dependency) prints its own progress bar."""
+        from pathlib import Path
+        model = getattr(ctx.agent_config, "embedding_model", None) or "Qwen/Qwen3-Embedding-0.6B"
+        if not _embedding_package_installed():
+            return [Check(name="memory-embedding", status="warn",
+                          detail="nothing downloaded: the sentence_transformers package is not installed",
+                          hint="install it first: uv tool install 'localharness[embeddings]', naming the "
+                               "other extras you use too (a reinstall keeps only the extras it names)")]
+        if Path(model).expanduser().exists() or _embedding_check(model).status == "pass":
+            return []
+        from localharness.provider.server import download_model  # lazy: provider/__init__ pulls httpx
+        download_model(model)
+        return [Check(name="memory-embedding", status="pass", detail=f"downloaded {model}")]
+
     def browse(self) -> Any:
         return self._browse
 
@@ -266,6 +293,12 @@ class MemoryPlugin(MemorySlotPlugin):
         except Exception as exc:  # noqa: BLE001 — a read/render slip must never kill the session
             log.warning("/memory failed", exc_info=True)
             return f"/memory failed: {exc}"
+
+
+def _embedding_package_installed() -> bool:
+    """Is the sentence_transformers package importable? Found, never imported."""
+    import importlib.util
+    return importlib.util.find_spec("sentence_transformers") is not None
 
 
 def _embedding_check(model: str) -> Check:
