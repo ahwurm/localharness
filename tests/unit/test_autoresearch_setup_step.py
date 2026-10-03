@@ -129,6 +129,22 @@ def test_a_key_a_header_cannot_carry_fails_without_quoting_it(tmp_path, server) 
     assert server[0] == []  # nothing was sent
 
 
+def test_any_other_error_is_named_by_its_type_never_its_text(tmp_path, server) -> None:
+    """The request carries the key, so an error raised on the way out is never quoted: a transport
+    whose error text holds the Authorization header shows only the error's type."""
+    _, answer = server
+
+    def raise_with_the_header(request):
+        raise RuntimeError(f"transport refused {request.headers['Authorization']}")
+
+    answer[0] = raise_with_the_header
+    rows = _act(_ctx(tmp_path, _PROPOSER))  # _act: the key is never in a row
+
+    assert rows == [Check(name="autoresearch-proposer", status="fail",
+                          detail=f"the check of {URL}/models failed (RuntimeError)",
+                          hint="check proposer.base_url and proposer.api_key")]
+
+
 def test_no_key_sends_no_authorization_header(tmp_path, server) -> None:
     seen, _ = server
     _act(_ctx(tmp_path, {"base_url": URL + "/", "model": "p-model"}))  # api_key defaults to "none"

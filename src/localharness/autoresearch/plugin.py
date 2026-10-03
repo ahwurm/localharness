@@ -115,6 +115,10 @@ def _answers(p: Any) -> Check:
         return Check(name="autoresearch-proposer", status="fail",
                      detail="proposer.api_key holds a character an HTTP header cannot carry",
                      hint="type the key again: `localharness plugins enable autoresearch`")
+    except Exception as exc:  # noqa: BLE001 — the request carried the key: its type, never its text
+        return Check(name="autoresearch-proposer", status="fail",
+                     detail=f"the check of {url}/models failed ({type(exc).__name__})",
+                     hint="check proposer.base_url and proposer.api_key")
     if resp.status_code >= 400:
         return Check(name="autoresearch-proposer", status="fail",
                      detail=f"the proposer at {url} answered {resp.status_code}",
