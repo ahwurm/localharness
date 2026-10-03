@@ -38,6 +38,29 @@ def _own_command(web_channel: Any, acp_channel: Any) -> dict[str, tuple[str, Any
             "acp": ("the editor's handshake has to be answered before a session exists", acp_channel)}
 
 
+def _refuse_unbuildable_channel(channel_mode: str, web_channel: Any = None,
+                                acp_channel: Any = None) -> None:
+    """Tier one: raise typer.BadParameter for an unknown `--channel`, or for one served by its own
+    command that was not handed in. Reads nothing from disk, so `_start_async` and a first start's
+    setup can both ask it before anything else."""
+    known = channel_names()  # static manifests: no plugin is resolved, imported or loaded here
+    if channel_mode not in known:
+        raise typer.BadParameter(
+            UNKNOWN_CHANNEL_ERROR.format(given=channel_mode, known=", ".join(sorted(known))),
+            param_hint="--channel")
+    own = _own_command(web_channel, acp_channel)
+    if channel_mode in own and own[channel_mode][1] is None:
+        # web and acp name channels _start_async cannot BUILD: the HTTP server / the editor's
+        # handshake has to be up and answering before a session exists, so the channel is
+        # constructed by `localharness web` / `localharness acp` and handed in. Without that, its
+        # channel branch would fall through to the terminal — precisely the silent fallback the
+        # check above exists to end, reintroduced by the same commit that ended it.
+        msg = OWN_COMMAND_ERROR.format(name=channel_mode, why=own[channel_mode][0])
+        if channel_mode in plugin_channel_names():
+            msg += f" (if that command is missing, run `localharness plugins enable {channel_mode}`)"
+        raise typer.BadParameter(msg, param_hint="--channel")
+
+
 CHANNEL_PLUGIN_NOT_ON = "channel '{name}' is provided by the {plugin} plugin, which is {state} — {fix}"
 CHANNEL_PLUGIN_NOT_RUNNING = "channel '{name}' is provided by the {plugin} plugin, which did not start — {reason}"
 """Tier 2 (the plugin resolved off / needs-extra / failed) and tier 3 (it resolved on but is not
@@ -525,22 +548,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # so every caller of this function gets the same answer, and before the config lookup so the
     # refusal does not depend on what happens to be on disk: a typo in the channel is a typo
     # whether or not the box has been `init`ed yet.
-    known = channel_names()  # static manifests: no plugin is resolved, imported or loaded here
-    if channel_mode not in known:
-        raise typer.BadParameter(
-            UNKNOWN_CHANNEL_ERROR.format(given=channel_mode, known=", ".join(sorted(known))),
-            param_hint="--channel")
-    own = _own_command(web_channel, acp_channel)
-    if channel_mode in own and own[channel_mode][1] is None:
-        # web and acp name channels this function cannot BUILD: the HTTP server / the editor's
-        # handshake has to be up and answering before a session exists, so the channel is
-        # constructed by `localharness web` / `localharness acp` and handed in. Without that, the
-        # branch below would fall through to the terminal — precisely the silent fallback the check
-        # above exists to end, reintroduced by the same commit that ended it.
-        msg = OWN_COMMAND_ERROR.format(name=channel_mode, why=own[channel_mode][0])
-        if channel_mode in plugin_channel_names():
-            msg += f" (if that command is missing, run `localharness plugins enable {channel_mode}`)"
-        raise typer.BadParameter(msg, param_hint="--channel")
+    _refuse_unbuildable_channel(channel_mode, web_channel, acp_channel)
 
     import time as _time
     import uuid
@@ -1738,6 +1746,7 @@ def start_app(
         # to ask, _start_async's own welcome hint and exit 0 stand (the web/ACP callers use it too).
         from localharness.cli.init_cmd import core_setup, is_interactive  # only a first start pays
         if is_interactive(no_input):
+            _refuse_unbuildable_channel(channel)  # a typo is refused before the setup, not after it
             console.print(FIRST_START_LEAD)
             if not core_setup(config_dir, endpoint=None, model=None, force=False,
                               interactive=True, starting=True).server_ready:
