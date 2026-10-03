@@ -343,3 +343,26 @@ async def test_typo_is_still_tier_one(tmp_path, monkeypatch):
     msg = str(e.value)
     assert msg.startswith("unknown channel 'discrod'; choose one of: "), msg
     assert "discord" in msg.split("choose one of: ")[1].split(", "), msg
+
+
+# --- the machine's remote lock (channels.remote_unattended), through the real start -------------
+
+@pytest.mark.parametrize("locked", [True, False], ids=["remote_unattended-false", "default"])
+async def test_mode_unattended_from_discord_obeys_the_machine_lock(tmp_path, monkeypatch, locked):
+    """`mode unattended` typed in Discord, the machine config read by the real start: refused in one
+    line naming the setting when the machine set `channels.remote_unattended: false`; switched, as
+    in 0.16, by default."""
+    from localharness.agent.gate import REMOTE_UNATTENDED_REFUSAL
+    from localharness.cli.repl import MODE_CHANGED_TEMPLATE, MODE_EFFECTS
+
+    fake = install_fake_discord(monkeypatch)
+    _extra(monkeypatch)
+    cfg = _global(tmp_path, monkeypatch, SETTINGS)
+    if locked:
+        _add_yaml(tmp_path / "config.yaml", {"channels": {"remote_unattended": False}})
+    await _drive(monkeypatch, fake, cfg, before=[(42, 7, "mode unattended")])
+
+    switched = MODE_CHANGED_TEMPLATE.format(mode="unattended", effect=MODE_EFFECTS["unattended"])
+    sent = [text for op, target, text in _sends(fake) if target == "c7"]
+    assert (REMOTE_UNATTENDED_REFUSAL in sent) is locked, sent
+    assert (switched in sent) is not locked, sent
