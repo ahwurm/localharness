@@ -410,6 +410,40 @@ because every one of those tools passes this same gate, what it has added are th
 not things that run. Edit `grants.yaml` to change an answer; there is no CLI verb for it, the prompt
 is the interface and the file is the escape hatch.
 
+**What the agent may change about its own setup.** The agent may extend itself — that is a feature,
+not a leak: it can write a new specialist into `~/.localharness/agents/` and drop a helper script into
+`~/.localharness/tools/`. It is told to compose specialists from the tools the harness already has and
+never to write its own tool for something the harness already provides (web search, fetch, files,
+delegation). What it writes there is held back until you have seen it: an MCP server, an embedding
+model or a permission looser than the shipped default in one of your agent files takes effect only
+after you confirm it once at the next `localharness start` on a terminal (a start without a terminal
+leaves it off and says so), and a script added to or changed in the tools folder since you last
+confirmed your scripts is treated as an unconfirmed shell command — it gets what any shell command
+gets in the mode you are in: `guarded` asks before it runs (an earlier "always" on `python3` or `node`
+does not cover it, and an "always" you give it covers that exact content only), while `auto`,
+`trusted` and `unattended` run it as they run any command — and it is listed for you at that start
+(the scripts already there the first time you start this version are adopted without a question).
+The files that hold the harness's own settings are out of reach altogether: the agent's write and
+edit tools, and any shell command the gate can read as writing or deleting a file, cannot change
+`config.yaml` or `overrides.yaml` in your machine's config folder (`LOCALHARNESS_DIR`, else
+`~/.localharness`) or in any project's `.localharness/`, in any mode, `unattended` included; the model
+is told to ask you to run `localharness components set`. That rule is code, not a deny pattern, so no
+config can remove it. What this does NOT cover: `python_exec` and `cruncher_exec` run code that can
+write any file you can; code run inline through a non-shell interpreter (`python3 -c …`,
+`node -e …`) is not read for the files it touches (a shell payload — `sh -c …`, `bash -c …`, `eval`
+— is); a shell command the gate does not read as writing or deleting that file is not caught —
+`mv` moving it away, `unlink`, `shred`, a `find … -delete` that selects it by name, a hard link made
+to it, a plain `rm` relative to a `cd` earlier in the same command; the harness's own CLI
+(`localharness components set …`, run through `bash_exec`) changes settings by design; outside
+`guarded` an unconfirmed script runs without asking (it is still listed at the next start); a script
+named through a variable or a glob, relative to a `cd` earlier in the same command
+(`cd ~/.localharness/tools && python3 x.py`), or written by the same command that runs it, is not
+recognised as one; files below a dependency or cache folder in the tools folder (`node_modules`,
+`.venv`, `venv`, `__pycache__`, `.git`, `site-packages`) are not tracked — that is where
+`npm install` and a virtual environment put thousands of files; and the scripts and files a confirmed
+command reads are not hashed. What runs is gated — that is the control, not a promise that the agent
+cannot touch its own files.
+
 **Five modes, set in config or switched mid-session with `/mode`.** `auto` is the default: one
 trust question per workspace, then everything runs except the step-2 blacklist, and nothing is
 remembered beyond that one answer. A workspace you declined, and a session with nobody to ask and

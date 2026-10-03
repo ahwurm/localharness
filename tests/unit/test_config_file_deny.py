@@ -216,3 +216,28 @@ def test_the_verdict_itself_still_asks_about_these_files(g, proj):
     result = evaluate("write", {"path": str(g / "config.yaml"), "content": "x"}, WRITE, ctx, SETTINGS)
 
     assert result.verdict is Verdict.ASK and result.request.klass == "protected-path"
+
+
+@pytest.mark.parametrize("command,caught", [
+    ("sh -c \"echo x > {g}/config.yaml\"", True),
+    ("bash -c \"rm -f {g}/config.yaml\"", True),
+    ("eval \"echo x > {g}/overrides.yaml\"", True),
+    ("cd {g} && echo x > config.yaml", True),
+    ("mv {g}/config.yaml /tmp/away.yaml", False),
+    ("unlink {g}/config.yaml", False),
+    ("shred -u {g}/config.yaml", False),
+    ("find {g} -name config.yaml -delete", False),
+    ("ln {g}/config.yaml hard.yaml", False),
+    ("cd {g} && rm config.yaml", False),
+    ("localharness components set provider.base_url http://elsewhere", False),
+], ids=["sh-c", "bash-c", "eval", "redirect-after-cd", "mv-away", "unlink", "shred", "find-by-name",
+        "hard-link", "plain-rm-after-cd", "the-cli"])
+def test_what_security_md_says_the_rule_reads_and_does_not(g, proj, tmp_path, command, caught):
+    """SECURITY.md, "What the agent may change about its own setup": a shell payload is read; a
+    command the gate does not read as writing or deleting that file is not caught, and the
+    harness's own CLI changes settings by design. A change here is a change to that paragraph."""
+    ctx = _gate(tmp_path, proj, "auto", _once).context()
+    hit = verdict.harness_config_file_target("bash_exec", {"command": command.format(g=g)}, ctx,
+                                             SETTINGS)
+
+    assert (hit is not None) is caught

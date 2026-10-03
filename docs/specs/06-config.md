@@ -571,11 +571,11 @@ class PermissionConfig(BaseModel):
     )
 
     deny_patterns: list[str] = Field(
-        # 25 shipped defaults, in four groups — see the table below.
+        # 32 shipped defaults, in five groups — see the table below.
         default_factory=lambda: [
             "write(*/.env)",
             "write(*/secrets*)",
-            # … 23 more; config/models.py is the list
+            # … 30 more; config/models.py is the list
         ],
         description=(
             "List of deny patterns. Each pattern is in the form: "
@@ -628,14 +628,20 @@ class PermissionConfig(BaseModel):
         return patterns
 ```
 
-**The 25 shipped deny defaults**, by what they stop:
+**The 32 shipped deny defaults**, by what they stop:
 
 | Group | Patterns |
 |---|---|
-| Credential and config writes | `write(*/.env)`, `write(*/secrets*)`, `write(*/config.yaml)`, `write(*/agents/*.yaml)` |
+| Credential and config writes | `write(*/.env)`, `write(*/secrets*)`, `write(*/config.yaml)` |
 | Privilege escalation, recursive delete, world-writable | `bash_exec(*sudo *)`, `bash_exec(rm -rf *)`, `bash_exec(*rm -rf *)`, `bash_exec(chmod 777 *)`, `bash_exec(*chmod 777*)` |
-| Destructive container / service ops | `bash_exec(*docker stop*)`, `*docker kill*`, `*docker rm*`, `*docker compose down*`, `*docker-compose down*`, `*systemctl stop*`, `*systemctl disable*`, `*systemctl kill*`, `*systemctl mask*` |
-| Process and machine control | `bash_exec(*pkill*)`, `*killall*`, `kill *`, `* kill *`, `*shutdown*`, `*reboot*`, `*poweroff*` |
+| Destructive container / service ops | `bash_exec(*docker stop*)`, `bash_exec(*docker kill*)`, `bash_exec(*docker rm*)`, `bash_exec(*docker compose down*)`, `bash_exec(*docker-compose down*)`, `bash_exec(*systemctl stop*)`, `bash_exec(*systemctl disable*)`, `bash_exec(*systemctl kill*)`, `bash_exec(*systemctl mask*)` |
+| Process and machine control | `bash_exec(*pkill*)`, `bash_exec(*killall*)`, `bash_exec(kill *)`, `bash_exec(* kill *)`, `bash_exec(*shutdown*)`, `bash_exec(*reboot*)`, `bash_exec(*poweroff*)` |
+| Memory-store artifacts, on both exec surfaces | `bash_exec(*memory.db*)`, `bash_exec(*facts_archive*)`, `bash_exec(*memory-archive*)`, `bash_exec(*localharness memory *)`, `python_exec(*memory.db*)`, `python_exec(*facts_archive*)`, `python_exec(*memory-archive*)`, `python_exec(*localharness memory *)` |
+
+`write(*/agents/*.yaml)` shipped until this release and is no longer a default: the agent may write
+agent files, and what such a file starts, loads or loosens waits for your confirmation at the next
+start. A config written before keeps it; delete it from your deny list if you want the agent's
+`write` tool to create specialists.
 
 Read-only equivalents stay allowed on purpose — `docker ps`, `docker logs`, `systemctl status`,
 `journalctl`. `chmod 777` ships in both the anchored and the embedded form (issue #159): the
@@ -645,7 +651,7 @@ which is why `sudo` and `rm -rf` carry both forms too.
 Because these are unioned into every agent at resolution time, a config that declares
 `deny_patterns: []` is not an agent with nothing denied. `config show`, `components get` and
 `components list` say so where it would otherwise mislead, appending
-`(+25 shipped defaults always enforced)` to an empty value. That printed count is computed from
+`(+32 shipped defaults always enforced)` to an empty value. That printed count is computed from
 the live list at run time, so what the CLI tells you cannot drift from what ships; the number in
 this page is prose, and drifts the moment a default is added without editing here.
 
@@ -1347,7 +1353,7 @@ list — every field is declared there with its own description.
 | `permissions.ask.timeout_s` | float or null | null | 0+ | How long a channel that cannot hold its dialog open (Discord) waits for an answer; null derives it from the tool timeout. Channels that hold the dialog — the terminal, Zed — never time out |
 | `permissions.ask.mcp_trusted_servers` | list[string] | `[]` | server names | MCP servers whose tools skip the once-per-tool ask |
 | `permissions.ask.<rule set>` | list[string] or null | null | — | Override one of the gate rule sets in `agent/gate_types.py`; null = the shipped default |
-| `permissions.deny_patterns` | list[string] | 25 shipped defaults | format: `tool(arg_glob)` | Deny patterns. Unioned down the hierarchy — an agent can add, never remove |
+| `permissions.deny_patterns` | list[string] | 32 shipped defaults | format: `tool(arg_glob)` | Deny patterns. Unioned down the hierarchy — an agent can add, never remove |
 | `permissions.workspace_root` | string or null | `null` | abs or `~/…` path | Hard filesystem confinement for write/edit/bash_exec, enforced as `permission_denied`. Null (the default, workspace or not, since v0.14.1) = unconfined |
 | `permissions.budget.max_actions` | int | `100` | 1–10000 | Max tool calls |
 | `permissions.budget.max_duration_minutes` | float or null | `null` | 0.1–1440 | Max turn duration; null (the default since 0.13.3) = no time limit. A `config.yaml` written by an older `init` still carries `30.0` and still pins it |
@@ -2078,7 +2084,6 @@ permissions:
     - "write(*/.env)"
     - "write(*/secrets*)"
     - "write(*/config.yaml)"
-    - "write(*/agents/*.yaml)"
     - "bash(sudo:*)"
     - "bash(rm -rf *)"
   budget:
@@ -2134,7 +2139,6 @@ permissions:
     - "write(*/.env)"
     - "write(*/secrets*)"
     - "write(*/config.yaml)"
-    - "write(*/agents/*.yaml)"
     - "bash(sudo:*)"
     - "bash(rm -rf *)"
   budget:
@@ -2168,7 +2172,6 @@ permissions:
     - "write(*/.env)"
     - "write(*/secrets*)"
     - "write(*/config.yaml)"
-    - "write(*/agents/*.yaml)"
     - "bash(sudo:*)"
     - "bash(rm -rf *)"
     - "bash(chmod 777 *)"

@@ -401,6 +401,22 @@ def test_a_script_grant_never_covers_another_command(g, proj):
     assert set(both.grant_keys) == {(CLASS, key), ("shell-unfamiliar", "curl")}
 
 
+@pytest.mark.parametrize("command", [
+    "python3 $HOME/.localharness/tools/a.py",
+    "python3 ~/.localharness/tools/*.py",
+    "cd ~/.localharness/tools && python3 a.py",
+    "echo 'print(2)' > ~/.localharness/tools/b.py && python3 ~/.localharness/tools/b.py",
+], ids=["variable", "glob", "relative-to-cd", "written-by-the-same-command"])
+def test_what_security_md_says_is_not_recognised(g, proj, command):
+    """SECURITY.md names these: a script named through a variable or a glob, relative to an
+    earlier `cd`, or written by the same command that runs it, is not recognised as one."""
+    _script(g, "a.py")
+
+    result = _shell(command, _ctx(proj))
+
+    assert all(klass != CLASS for klass, _ in (result.request.grant_keys if result.request else ()))
+
+
 @pytest.mark.parametrize("pending", [None, lambda p: None], ids=["no-rule", "nothing-pending"])
 def test_with_nothing_pending_every_verdict_is_todays(g, proj, pending):
     script = _script(g, "a.py").resolve()
