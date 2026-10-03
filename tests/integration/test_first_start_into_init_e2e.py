@@ -156,13 +156,16 @@ def _hint_only(result, g: Path, detect: AsyncMock, sessions: list) -> None:
     assert sessions == []
 
 
-def test_a_first_start_with_no_input_keeps_the_welcome_hint_and_writes_nothing(tmp_path, monkeypatch):
+@pytest.mark.parametrize("flag", ["--no-input", "--list-models"])
+def test_a_first_start_with_no_input_keeps_the_welcome_hint_and_writes_nothing(tmp_path, monkeypatch, flag):
+    """A terminal IS attached: --no-input (nobody to ask) alone keeps the setup out, and so does
+    --list-models (a listing of the configured server, not a session)."""
     sessions = _machine(tmp_path, monkeypatch)
     detect, _ = _server(monkeypatch)
-    _terminal(monkeypatch)  # a terminal IS attached: --no-input alone keeps the setup out
+    _terminal(monkeypatch)
     _questions(monkeypatch)
 
-    _hint_only(_start(tmp_path, "--no-input"), tmp_path, detect, sessions)
+    _hint_only(_start(tmp_path, flag), tmp_path, detect, sessions)
 
 
 def test_a_first_start_without_a_terminal_keeps_the_welcome_hint_and_writes_nothing(tmp_path, monkeypatch):
@@ -187,7 +190,7 @@ def test_a_first_start_that_finds_no_server_opens_no_session(tmp_path, monkeypat
 
     _exited(result)
     flat = _flat(result)
-    assert LEAD in flat and "startup)" not in flat, flat
+    assert LEAD in flat and "startup)" not in flat and HINT not in flat, flat  # no bounce after it
     if model:
         assert "not checked yet" in flat and (tmp_path / "config.yaml").exists(), flat
     else:
