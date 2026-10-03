@@ -1099,8 +1099,10 @@ restart the session with the conversation kept:
 3. The session comes back with the same conversation, the same `/mode` and any lines you typed
    ahead, and with one indicator in place of the banner: "Restarted with <name> on. Your
    conversation continues.", the `Plugins:` line, and one status line, such as "<name>: on in
-   this session", "<name>: on, but its check failed: <detail>" or "<name>: on, but not set up
-   yet — run /plugins enable <name> to set it up". A failed check never stops the restart.
+   this session", "<name>: on, but its check failed: <detail>", "<name>: on, but not set up
+   yet — <detail>" (a check that was skipped, such as web's "not enrolled yet" before
+   `localharness web` first runs) or "<name>: on, but not set up yet — run /plugins enable
+   <name> to set it up". A failed check never stops the restart.
 
 There is no restart, only one line, for a plugin that is already on and set up ("<name> is already
 on."), one the project's config pins, one missing its install extra, and any switch while a call

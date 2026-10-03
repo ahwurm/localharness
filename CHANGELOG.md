@@ -14,12 +14,12 @@ All notable changes to LocalHarness are documented here. The format follows
   now heads the README.
 - **`/plugins` in a running session.** `/plugins enable <name>` runs the
   plugin's setup step (its questions, a check, what to do next, and a prompt to
-  paste into your coding agent when the check fails), then restarts the session
-  with the plugin on and your conversation kept. `/plugins disable <name>`
-  turns one off the same way, and a bare `/plugins` lists them. The questions
-  are asked only the first time, or while the plugin is not set up yet; a
-  plugin that is already on and set up gets one line and no restart. Terminal
-  sessions only: the phone, Discord and Zed answer with one line.
+  paste into your coding agent when the check does not pass), then restarts the
+  session with the plugin on and your conversation kept. `/plugins disable
+  <name>` turns one off the same way, and a bare `/plugins` lists them. The
+  questions are asked only the first time, or while the plugin is not set up
+  yet; a plugin that is already on and set up gets one line and no restart.
+  Terminal sessions only: the phone, Discord and Zed answer with one line.
 - **Every bundled plugin has a setup step**, run by `localharness plugins
   enable <name>` on a terminal and by `/plugins enable <name>` in a session.
   image asks the ComfyUI address and checks it. Mobile (`web`) asks the address
@@ -90,6 +90,10 @@ All notable changes to LocalHarness are documented here. The format follows
 - Once `localharness web` has run once, or a phone address is saved,
   `/plugins enable web` answers "web is already on.", so the address is changed
   from a shell with `localharness plugins enable web`.
+- Pressing Enter at mobile's phone-address question in a session leaves the
+  address unset, and the session then says "web: on, but not set up yet — not
+  enrolled yet" until `localharness web` has run once, the normal state of a
+  new install.
 - memory asks its download question even when the `embeddings` package is
   missing, then downloads nothing and names the install line. The download
   itself was tested with the downloader faked; it is the one init's guided vLLM
