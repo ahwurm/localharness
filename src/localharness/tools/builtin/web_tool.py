@@ -246,6 +246,9 @@ class WebFetchTool(Tool):
     async def _execute(
         self, url: str, max_chars: int = _FETCH_DEFAULT_CHARS, start_index: int = 0,
     ) -> ToolResult:
+        if not url.startswith(("http://", "https://")):  # the old wording (test_agent_loop pins it);
+            return self.err(f"Invalid URL (must be http/https): {url!r}",  # netguard decides every hop
+                            error_type="validation_error")
         cap = max(500, min(int(max_chars), _FETCH_MAX_CHARS))
         start = max(0, int(start_index))
         target: Any = url
