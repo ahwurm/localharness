@@ -824,6 +824,7 @@ INTERNAL_IDS = (  # internal phase numbers, plan ids and requirement ids
     re.compile(r"\b[Pp]hases?[ -]\(?\d"),
     re.compile(r"\b(?:4[4-9]|5[0-2])-\d{2}\b"),
     re.compile(r"\b(?:PAPI|PLUG|MEMP|ENAB|SAFE|DISP|AUTO|IMGP|WEBP|CORE|DOCS)-\d\d\b"),
+    re.compile(r"\bSETUP-(?:0[5-9]|1[0-5])\b"),  # the setup-wizard rows; SETUP-01..04 are v1.0's, cited by specs 02 and 10
 )
 _ENV_OK = ("deprecat", "fallback", "0.17", "Until", "until")
 
@@ -911,6 +912,8 @@ def test_denylist_bites():
     assert check_denylist("docs/specs/12-audit.md", "## Tracker (design, not built)\n`GuardrailTracker`.\n") == []
     assert check_denylist("SECURITY.md", "Set `org.memory_enabled` to turn memory off.\n")
     assert check_denylist(SPEC09, "**Stability:** UNSTABLE (v1).\n")
+    assert check_denylist("README.md", "SETUP-07 says so.\n")
+    assert check_denylist("docs/specs/10-cli.md", "**Requirements:** SETUP-01, SETUP-04\n") == []
 
 
 # ---------------------------------------------------------------- check 9: links
