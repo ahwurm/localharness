@@ -533,6 +533,7 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
             soft_wrap=True)
     step = ask and after is not None and not missing
     paths = _paths(fresh_loader, workspace) if fresh_loader is not None else None
+    rows: tuple = ()
     if step and has_action and after.state == "on" and (pending or pairs) and (
             not m.setup_action or typer.confirm(m.setup_action, default=True)):
         rows = asyncio.run(setup_action_rows(fresh, name, paths))
@@ -543,8 +544,13 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
         console.print("Checking it now:")
         row = _probe(name, fresh, paths)
         unanswered = any(not _stored(fresh, fresh_loader, after, f.key) for f in setup)
-        if row is not None and _not_clean(row, unanswered):
-            failed = next((c.detail for c in row.checks if c.status in ("fail", "skip")), row.detail)
+        not_clean = row is not None and _not_clean(row, unanswered)
+        # The setup action's rows count as the check's do: one that failed (a far end that does not
+        # answer, a download that raised) is not set up, even when the offline doctor row passes.
+        action_failed = [c for c in rows if c.status == "fail"]
+        if not_clean or action_failed:
+            failed = (next((c.detail for c in row.checks if c.status in ("fail", "skip")), row.detail)
+                      if not_clean else action_failed[0].detail)
             if m.setup_help:  # the one place it prints
                 console.print()
                 console.print(escape(m.setup_help), soft_wrap=True)
