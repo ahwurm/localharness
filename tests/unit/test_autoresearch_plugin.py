@@ -38,6 +38,12 @@ def test_the_manifest():
         ("propose", "localharness.cli.propose_cmd:propose_app")]
     assert AutoresearchPlugin.ConfigModel is None and AutoresearchPlugin.AgentConfigModel is None
     assert AutoresearchPlugin.wants_artifacts is False
+    # Its setup step: the proposer's address and model (core keys under `proposer`, one write).
+    assert [(f.key, f.prompt, f.secret) for f in m.setup] == [
+        ("proposer.base_url", "Proposer address (an OpenAI-compatible base URL)", False),
+        ("proposer.model", "Proposer model id (not your main model)", False)]
+    assert m.next_steps == "Then: `localharness propose --help` shows how to write the first proposal."
+    assert "{machine}" in m.agent_prompt and m.setup_action == ""
     assert AutoresearchPlugin.__doc__.splitlines()[0] == "experiment loop"
 
 
@@ -58,7 +64,7 @@ def test_configure_is_ready_and_start_stop_do_nothing():
 
 _COST = (
     "import sys, localharness.autoresearch.plugin\n"
-    "bad = [m for m in ('aiosqlite', 'scipy', 'localharness.autoresearch.archive',\n"
+    "bad = [m for m in ('aiosqlite', 'scipy', 'httpx', 'localharness.autoresearch.archive',\n"
     "                   'localharness.cli.autoresearch_cmd', 'localharness.cli.experiment_cmd',\n"
     "                   'localharness.cli.propose_cmd', 'localharness.cli.report_cmd') if m in sys.modules]\n"
     "assert not bad, bad\n"
