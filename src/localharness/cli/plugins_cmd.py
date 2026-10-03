@@ -28,6 +28,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, NoReturn, Optional
+from urllib.parse import urlsplit
 
 import typer
 from rich.console import Console
@@ -72,6 +73,9 @@ Workspace = Annotated[bool, typer.Option(
 _BANDS = (LAYER_GLOBAL_CONFIG, LAYER_GLOBAL_OVERRIDES, LAYER_WORKSPACE_CONFIG, LAYER_WORKSPACE_OVERRIDES)
 # The same literal init's scaffolded plugins/README.md links to (a PyPI install has no examples/).
 _TEMPLATE_URL = "https://github.com/ahwurm/localharness/tree/main/examples/plugin-template"
+# A setup question for a secret that is already stored (#28): what Enter does, and how to clear it.
+SECRET_KEPT = "stored key kept — type none to clear, or paste a new one"
+SECRET_KEPT_FOR = "stored key for {host} kept — type none to clear, or paste a new one"
 
 
 def _fail(message: str, json_output: bool = False) -> NoReturn:
@@ -339,21 +343,28 @@ def _checked_all(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry,
     return values | (_checked_core(loader, entry, core, to_workspace, overlay) if core else {})
 
 
+def _stored_node(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, key: str) -> Any:
+    """What KEY holds now, as the validated settings hold it (a secret as its SecretStr); None when
+    nothing does. A key under one of a bundled plugin's `sections` is read from the core settings,
+    any other from the plugin's own validated ones."""
+    m = entry.manifest
+    if entry.bundled and m is not None and key.split(".")[0] in m.sections:
+        node: Any = loader.load_harness().model_dump()
+    else:
+        settings = resolution.settings.get(entry.name)
+        config = settings.config if settings is not None else None
+        node = config.model_dump() if config is not None else {}
+    for part in key.split("."):
+        node = node.get(part) if isinstance(node, dict) else None
+    return node
+
+
 def _stored(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, key: str) -> str:
     """The value KEY holds now, as the text a question offers: "" when it holds nothing. Never
-    returns a secret's value (a SecretStr reads as ""). A key under one of a bundled plugin's
-    `sections` is read from the core settings, any other from the plugin's own validated ones."""
+    returns a secret's value (a SecretStr reads as "")."""
     from pydantic import SecretStr
     try:
-        m = entry.manifest
-        if entry.bundled and m is not None and key.split(".")[0] in m.sections:
-            node: Any = loader.load_harness().model_dump()
-        else:
-            settings = resolution.settings.get(entry.name)
-            config = settings.config if settings is not None else None
-            node = config.model_dump() if config is not None else {}
-        for part in key.split("."):
-            node = node.get(part) if isinstance(node, dict) else None
+        node = _stored_node(resolution, loader, entry, key)
         if node is None or isinstance(node, SecretStr):
             return ""
         return ",".join(map(str, node)) if isinstance(node, (list, tuple)) else str(node)
@@ -361,16 +372,58 @@ def _stored(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, key:
         return ""
 
 
-def _ask_fields(fields: tuple[SetupField, ...], stored: Any) -> list[str]:
+def _cleared(resolution: Resolution, entry: PlanEntry, key: str) -> str:
+    """KEY's own default as text — what `none` at its question writes ("none" for proposer.api_key,
+    "" for discord.token): a bundled plugin's `sections` key from the core settings, any other from
+    the plugin's ConfigModel; "" when it has none."""
+    from localharness.config.loader import _UNSET, _model_default
+    from localharness.config.models import HarnessConfig
+    try:
+        m, parts = entry.manifest, key.split(".")
+        if entry.bundled and m is not None and parts[0] in m.sections:
+            value = _model_default(HarnessConfig, parts)
+        else:
+            value = _model_default(resolution.classes[entry.name].ConfigModel, parts)
+        return "" if value is _UNSET or value is None else str(value)
+    except Exception:  # noqa: BLE001 — no default to name: clearing writes empty
+        return ""
+
+
+def _secret_stored(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, key: str) -> bool:
+    """Does the secret KEY hold a value now — set, not empty, not its own default? Yes or no only:
+    the value is never returned or shown."""
+    from pydantic import SecretStr
+    try:
+        node = _stored_node(resolution, loader, entry, key)
+        return isinstance(node, SecretStr) and node.get_secret_value() not in (
+            "", _cleared(resolution, entry, key))
+    except Exception:  # noqa: BLE001 — unknown reads as nothing stored: the plain question
+        return False
+
+
+def _ask_fields(fields: tuple[SetupField, ...], stored: Any, secret_stored: Any = lambda key: False,
+                cleared: Any = lambda key: "") -> list[str]:
     """Ask each setup question on the terminal; KEY=VALUE for every answer given. A question that
     is not secret offers `stored(key)`, the value it holds now, else its default; a secret one
-    offers nothing, so a stored token is never shown."""
+    offers nothing, so a stored token is never shown. When a secret is stored (`secret_stored`), its
+    question says so: Enter keeps it and writes nothing (R5), `none` writes `cleared(key)` (the
+    setting's own default), anything else is the new value; and when an address asked earlier in
+    the same step was just changed, the question names the host the stored key was for."""
     pairs = []
+    changed_from = ""
     for f in fields:
-        default = "" if f.secret else (stored(f.key) or f.default)
-        answer = typer.prompt(f.prompt, default=default, hide_input=f.secret,
+        was = "" if f.secret else stored(f.key)
+        default = "" if f.secret else (was or f.default)
+        prompt = f.prompt
+        if f.secret and secret_stored(f.key):
+            prompt += f" [{SECRET_KEPT_FOR.format(host=changed_from) if changed_from else SECRET_KEPT}]"
+        answer = typer.prompt(prompt, default=default, hide_input=f.secret,
                               show_default=bool(default)).strip()
-        if answer:  # an empty answer is not written: Enter on a question with nothing to offer skips it
+        if not f.secret and f.key.split(".")[-1].endswith("url") and was and answer and answer != was:
+            changed_from = urlsplit(was).hostname or ""
+        if f.secret and answer.lower() == "none":
+            pairs.append(f"{f.key}={cleared(f.key)}")
+        elif answer:  # an empty answer is not written: Enter on a question with nothing to offer skips it
             pairs.append(f"{f.key}={answer}")
     return pairs
 
@@ -502,7 +555,9 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
                if ask and m is not None and not missing and (in_session or has_action) else True)
     if ask and setup and not missing and (pending or not in_session):
         # the answers go through the one checked write path, as --set values
-        pairs = _ask_fields(setup, lambda key: _stored(resolution, loader, entry, key))
+        pairs = _ask_fields(setup, lambda key: _stored(resolution, loader, entry, key),
+                            lambda key: _secret_stored(resolution, loader, entry, key),
+                            lambda key: _cleared(resolution, entry, key))
     overlay = load_overlay(target)
     set_value_in_dict(overlay, f"{name}.enabled", on)
     values = _checked_all(resolution, loader, entry, pairs, to_workspace, overlay) if pairs else {}

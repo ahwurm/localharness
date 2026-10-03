@@ -681,6 +681,9 @@ def _dispatch_settings(g: Path):
 
 
 TOKEN_QUESTION = ("Discord bot token", "", {"hide_input": True, "show_default": False})
+# Asked with a token stored: the question says Enter keeps it and how to clear it; nothing shows it.
+STORED_TOKEN_QUESTION = ("Discord bot token [stored key kept — type none to clear, or paste a new one]",
+                         "", {"hide_input": True, "show_default": False})
 
 
 def test_dispatch_on_a_terminal_hides_the_token_and_passes_its_check(g, real, typed) -> None:
@@ -723,7 +726,7 @@ def test_a_stored_dispatch_token_never_reaches_the_screen_or_its_prompt(g, real,
 
     assert result.exit_code == 0, result.output
     _token_free(result)
-    assert calls == [TOKEN_QUESTION, ("Your Discord user id(s), comma-separated", "", {
+    assert calls == [STORED_TOKEN_QUESTION, ("Your Discord user id(s), comma-separated", "", {
         "hide_input": False, "show_default": False})]
     assert yaml.safe_load((g / "overrides.yaml").read_text())["dispatch"]["discord"]["token"] == SENTINEL
     _in_order(result.output, "dispatch.discord.allow is empty", AGENT_PROMPT_LEAD, "never print the token")

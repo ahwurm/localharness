@@ -177,6 +177,12 @@ class MCPServerConfig(BaseModel):
         return self
 
 
+# ToolConfig names MCPServerConfig before it exists. Resolved now, so its field carries the real type:
+# config/redact.py reads the fields to find a server's env and header secrets (an unresolved name hid
+# them, and an error on a server printed its env values).
+ToolConfig.model_rebuild()
+
+
 class BudgetConfig(BaseModel):
     """Execution budget constraints for one agent session."""
     model_config = ConfigDict(frozen=False, extra="forbid")

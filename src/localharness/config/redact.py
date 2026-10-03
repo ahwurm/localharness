@@ -10,24 +10,34 @@ message (`validation_text`), an input only as the loader masks it, and a message
 secret value the validated data holds (a validator's own message can quote its input).
 
 Which values are secret is read from the model: a SecretStr field, or a field that holds one in a
-list, a dict or a union arm (masked whole). Core code: pydantic and the standard library only."""
+list, a dict or a union arm (masked whole). Inside a list or dict of models only those models' own
+secret fields are (R14): an endpoint's name or an MCP server's transport is never masked. Core
+code: pydantic and the standard library only."""
 from __future__ import annotations
 
+import collections.abc
 import functools
+import re
 import types
 import typing
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from pydantic import BaseModel, SecretStr, ValidationError
+from pydantic import AliasChoices, AliasPath, BaseModel, SecretStr, ValidationError
 
 SECRET_MASK = "**********"
 _WALK_DEPTH = 8  # a secret field's value is a string; a container held there is walked this deep
+_ANY = "*"  # in a secret path: any one item of a list, or any one value of a dict
 
 
 def is_secret(annotation: Any) -> bool:
-    """A SecretStr leaf (Optional included): its value is never printed, only SECRET_MASK."""
-    return annotation is SecretStr or SecretStr in getattr(annotation, "__args__", ())
+    """A SecretStr leaf, or a container (Optional, list, dict, tuple, union) whose arms hold one —
+    masked whole. A model is not a leaf: its own fields decide (model_dump(mode="json") masks them)."""
+    if annotation is SecretStr:
+        return True
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return False
+    return any(is_secret(a) for a in typing.get_args(annotation))
 
 
 def reveal(node: Any) -> Any:
@@ -70,28 +80,62 @@ def _model_of(annotation: Any) -> type[BaseModel] | None:
     return annotation if isinstance(annotation, type) and issubclass(annotation, BaseModel) else None
 
 
-def _holds_secret(annotation: Any, seen: tuple[type, ...] = ()) -> bool:
+def _element_model(annotation: Any) -> type[BaseModel] | None:
+    """The model each element holds for list[M], tuple[M, ...], Sequence[M] or dict[str, M]
+    (Optional unwrapped); None for anything else."""
+    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
+        arms = [a for a in typing.get_args(annotation) if a is not type(None)]
+        annotation = arms[0] if len(arms) == 1 else None
+    origin, args = typing.get_origin(annotation), typing.get_args(annotation)
+    if origin in (list, collections.abc.Sequence) and len(args) == 1:
+        return _model_of(args[0])
+    if origin is tuple and len(args) == 2 and args[1] is Ellipsis:
+        return _model_of(args[0])
+    if origin in (dict, collections.abc.Mapping) and len(args) == 2:
+        return _model_of(args[1])
+    return None
+
+
+def holds_secret(annotation: Any, seen: tuple[type, ...] = ()) -> bool:
+    """Does a value of this type hold a secret anywhere — a SecretStr, or a model with one, at any
+    depth? A value typed as text for such a field cannot be told apart: it is shown whole as the mask."""
     if annotation is SecretStr:
         return True
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return annotation not in seen and any(
-            _holds_secret(f.annotation, (*seen, annotation)) for f in annotation.model_fields.values())
-    return any(_holds_secret(a, seen) for a in typing.get_args(annotation))
+            holds_secret(f.annotation, (*seen, annotation)) for f in annotation.model_fields.values())
+    return any(holds_secret(a, seen) for a in typing.get_args(annotation))
+
+
+def _alias_keys(alias: Any) -> set[str]:
+    """The input keys an alias names: a str, each choice of an AliasChoices, and the first key of an
+    AliasPath (the whole value under it is then treated as the secret)."""
+    if isinstance(alias, str):
+        return {alias}
+    if isinstance(alias, AliasPath):
+        return {alias.path[0]} if alias.path and isinstance(alias.path[0], str) else set()
+    if isinstance(alias, AliasChoices):
+        return set().union(*(_alias_keys(choice) for choice in alias.choices))
+    return set()
 
 
 @functools.lru_cache(maxsize=None)
 def secret_paths(model: type[BaseModel]) -> tuple[tuple[str, ...], ...]:
-    """Every key path under `model` whose value holds a secret, by field name and by alias."""
+    """Every key path under `model` whose value holds a secret, by field name and by alias. A list
+    or dict of models is walked into (`_ANY` stands for any one of its items), so only its models'
+    own secret fields are paths, never the whole list (R14)."""
     out: list[tuple[str, ...]] = []
 
     def walk(m: type[BaseModel], prefix: tuple[str, ...], seen: tuple[type, ...]) -> None:
         for name, field in m.model_fields.items():
-            keys = {name} | {a for a in (field.alias, field.validation_alias) if isinstance(a, str)}
-            sub = _model_of(field.annotation)
+            keys = {name} | _alias_keys(field.alias) | _alias_keys(field.validation_alias)
+            sub, element = _model_of(field.annotation), _element_model(field.annotation)
             for key in keys:
                 if sub is not None and sub not in seen:
                     walk(sub, (*prefix, key), (*seen, sub))
-                elif _holds_secret(field.annotation):
+                elif element is not None and element not in seen:
+                    walk(element, (*prefix, key, _ANY), (*seen, element))
+                elif holds_secret(field.annotation):
                     out.append((*prefix, key))
 
     walk(model, (), (model,))
@@ -99,9 +143,12 @@ def secret_paths(model: type[BaseModel]) -> tuple[tuple[str, ...], ...]:
 
 
 def at_secret(model: type[BaseModel] | None, loc: Iterable[Any]) -> bool:
-    """Is a pydantic error at `loc` (relative to `model`) on a secret field, or inside one?"""
+    """Is a pydantic error at `loc` (relative to `model`) on a secret field, or inside one? An `_ANY`
+    in a path matches any one part of `loc` (a list index or a dict key)."""
     parts = tuple(map(str, loc))
-    return model is not None and any(parts[:len(p)] == p for p in secret_paths(model))
+    return model is not None and any(
+        len(parts) >= len(p) and all(want in (_ANY, got) for want, got in zip(p, parts))
+        for p in secret_paths(model))
 
 
 def secret_values(model: type[BaseModel] | None, data: Any) -> frozenset[str]:
@@ -115,6 +162,8 @@ def secret_values(model: type[BaseModel] | None, data: Any) -> frozenset[str]:
     def collect(node: Any, depth: int) -> None:
         if isinstance(node, str):
             found.add(node)
+        elif isinstance(node, SecretStr):  # data dumped from a model (mode="python") holds these
+            found.add(node.get_secret_value())
         elif isinstance(node, (int, float)) and not isinstance(node, bool):
             found.add(repr(node))
         elif isinstance(node, (Mapping, list, tuple)) and id(node) not in seen and depth < _WALK_DEPTH:
@@ -122,11 +171,18 @@ def secret_values(model: type[BaseModel] | None, data: Any) -> frozenset[str]:
             for child in node.values() if isinstance(node, Mapping) else node:
                 collect(child, depth + 1)
 
+    def follow(node: Any, path: tuple[str, ...]) -> None:
+        if not path:
+            collect(node, 0)
+        elif path[0] == _ANY:  # every item of a list, every value of a dict; anything else: none
+            items = node.values() if isinstance(node, Mapping) else node if isinstance(node, (list, tuple)) else ()
+            for item in items:
+                follow(item, path[1:])
+        elif isinstance(node, Mapping):
+            follow(node.get(path[0]), path[1:])
+
     for path in secret_paths(model) if model is not None else ():
-        node: Any = data
-        for key in path:
-            node = node.get(key) if isinstance(node, Mapping) else None
-        collect(node, 0)
+        follow(data, path)
     return frozenset(v for v in found if v and v != "none")
 
 
@@ -141,6 +197,8 @@ def yaml_problem(exc: BaseException) -> str:
     if context and mark is not None:
         context = f"{context} at line {mark.line + 1}, column {mark.column + 1}:"
     text = " ".join(str(part) for part in (context, problem) if part)
+    # An alias, anchor or tag name can be text copied from a secret: never quoted back.
+    text = re.sub(r"((?:alias|anchor|tag(?: handle)?) )(?:'[^']*'|\"[^\"]*\")", r"\1'<name>'", text)
     return text or type(exc).__name__
 
 

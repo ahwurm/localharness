@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import re
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any, Optional
@@ -30,7 +31,7 @@ from localharness.config.overlay import (
 from localharness.config.paths import resolve_config_dir, resolve_runtime_path
 from localharness.config.plugin_sections import core_agent_view, core_harness_view
 # The secret-safe error text lives in config/ (the loader uses it too; config/ never imports cli/).
-from localharness.config.redact import SECRET_MASK, is_secret, scrub
+from localharness.config.redact import SECRET_MASK, holds_secret, is_secret, scrub
 from localharness.config.redact import validation_text as _validation_text
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
@@ -230,9 +231,10 @@ def _layer_cell(e: ComponentEntry) -> str:
 
 
 def shown(value: Any, annotation: Any = None) -> str:
-    """repr() for a human, masked for a secret leaf or a SecretStr value."""
+    """repr() for a human, masked for a SecretStr value or a type that holds one anywhere (a typed
+    endpoint list carries its key inside the text, so it is masked whole)."""
     from pydantic import SecretStr
-    return repr(SECRET_MASK) if is_secret(annotation) or isinstance(value, SecretStr) else repr(value)
+    return repr(SECRET_MASK) if holds_secret(annotation) or isinstance(value, SecretStr) else repr(value)
 
 
 def _overlay_secrets(catalogue: dict[str, ComponentEntry], overlay: dict) -> list[str]:
@@ -281,14 +283,26 @@ def _settings_secrets(catalogue: dict[str, ComponentEntry], loader: ConfigLoader
 
 
 def _serialize_value(value: Any, secret: bool = False) -> Any:
-    """Render value for JSON output. Primitives passthrough; complex types -> repr; a secret leaf
-    or SecretStr -> SECRET_MASK."""
-    from pydantic import SecretStr
+    """Render value for JSON output: a secret leaf or SecretStr is SECRET_MASK; a model is its
+    model_dump(mode="json") (which masks its own SecretStr fields); lists, tuples and dicts are
+    walked; other primitives pass through; anything else is its repr."""
+    from pydantic import BaseModel, SecretStr
     if secret or isinstance(value, SecretStr):
         return SECRET_MASK
-    if value is None or isinstance(value, (bool, int, float, str, list, dict)):
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, (list, tuple)):
+        return [_serialize_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _serialize_value(v) for k, v in value.items()}
+    if value is None or isinstance(value, (bool, int, float, str)):
         return value
     return repr(value)
+
+
+def _stdin_is_a_terminal() -> bool:
+    """Is a person typing at stdin? (`components set <secret> -` asks them with a hidden prompt.)"""
+    return sys.stdin is not None and sys.stdin.isatty()
 
 
 # ------------------------------------------------------------------ #
@@ -440,7 +454,11 @@ def components_set(
     ),
     value: str = typer.Argument(
         ...,
-        help="New value as a string. Coerced to the path's target type.",
+        help=(
+            "New value as a string. Coerced to the path's target type. For a secret, `-` reads it "
+            "without echo (a hidden prompt on a terminal, else one line of stdin), so it never sits "
+            "in your shell history or `ps`."
+        ),
     ),
     json_output: bool = typer.Option(False, "--json"),
     config_dir: Annotated[
@@ -489,6 +507,13 @@ def components_set(
     if entry is None:
         _err(json_output, f"Unknown path: {path!r}", exit_code=2)
         return
+    secret = is_secret(entry.annotation)
+    if secret and value == "-":  # read without echo: never in shell history or `ps`
+        value = (typer.prompt(path, hide_input=True, default="", show_default=False).strip()
+                 if _stdin_is_a_terminal() else sys.stdin.readline().rstrip("\r\n"))
+        if not value:
+            _err(json_output, f"No value read for {path}; nothing was written.", exit_code=2)
+            return
 
     # 3. Coerce CLI string to typed value
     try:
@@ -503,7 +528,6 @@ def components_set(
         return
 
     before = entry.current_value
-    secret = is_secret(entry.annotation)
 
     # 4. Load existing overlay, deep-set new value, validate against the model that OWNS the path.
     #    agent.* validates against AgentConfig; everything else against the merged HarnessConfig
