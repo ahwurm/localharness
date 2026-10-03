@@ -734,7 +734,15 @@ def _probe_capabilities(result: DetectorResult, selected_model: str) -> Capabili
         timeout_seconds=300.0,
     )
     client = LLMClient(llm_cfg)
-    cap = asyncio.run(client.detect_capabilities())
+
+    async def _probe() -> CapabilityResult:
+        # Closed in this loop, which owns its connections. Left open, the SDK finalizes it on
+        # whatever loop is running when the GC reaches it — a first start's session loop, where
+        # closing a transport of this closed loop raised "Event loop is closed".
+        async with client:
+            return await client.detect_capabilities()
+
+    cap = asyncio.run(_probe())
 
     # Reachability is a SEPARATE axis from capability (CapabilityResult.server_reached): a probe
     # that never reached the server proves nothing about tool calling, so reporting "✓ configured"
@@ -1054,6 +1062,7 @@ def _receipt(config_file: Path, starting: bool) -> None:
 
 
 PLUGINS_HEADER = "Plugins — the command beside each one turns it on or sets it up:"
+PLUGINS_IN_SESSION = "In a session, /plugins enable <name> does this too and turns it on right away."
 
 
 def _plugin_lines(config_path: Path) -> list[str]:
@@ -1069,7 +1078,7 @@ def _plugin_lines(config_path: Path) -> list[str]:
     return [PLUGINS_HEADER] + [
         f"  {e.name.ljust(width)}  {e.display}"
         + ("" if e.enable_command or not e.step_command else f" — set up: {e.step_command}")
-        for e in entries]
+        for e in entries] + [PLUGINS_IN_SESSION]
 
 
 def _guided_setup(

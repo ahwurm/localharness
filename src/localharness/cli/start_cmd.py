@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -29,6 +30,8 @@ OWN_COMMAND_ERROR = ("the {name} channel is served by its own command, because {
                      "Run `localharness {name}` instead of `localharness start --channel {name}`.")
 
 FIRST_START_LEAD = "LocalHarness is not set up yet. Setting up the model server first:"
+
+RESTARTED_LINE = "Restarted with {name} {state}. Your conversation continues."
 
 
 def _own_command(web_channel: Any, acp_channel: Any) -> dict[str, tuple[str, Any]]:
@@ -128,6 +131,49 @@ def _available_hint(names: list[str]) -> str:
                 f"`localharness plugins enable {names[0]}` to turn it on")
     return (f"i {len(names)} plugins available, not enabled: {', '.join(names)} — run "
             f"`localharness plugins enable <name>` to turn one on")
+
+
+@dataclass(frozen=True)
+class Resume:
+    """What a terminal session carries into its rebuild after `/plugins enable|disable` — plain
+    data, so a later re-exec of the process could write it to a file instead."""
+    action: tuple[str, str]          # ("enable" | "disable", plugin name)
+    agent_name: str                  # the agent this sitting ran; the rebuild shows no picker
+    conversation: tuple[dict, ...]   # AgentLoop's exact model-side messages
+    prior_context: str               # the prior-session context folded into the system prompt
+    eviction_store: Any              # the ContentStore holding evicted tool-result bodies
+    queued: tuple[str, ...]          # lines typed ahead, still waiting in the REPL's queue
+    gate_mode: str                   # /mode as the person left it
+    previous_sitting_id: str         # logged beside the new one; memory needs a fresh id
+    failed_check: str = ""           # from the step: its check's first row that did not pass
+    step_stopped: bool = False       # the step was stopped (Ctrl-C, Ctrl-D, a refusal or an error)
+
+
+@dataclass(frozen=True)
+class Restart:
+    """`_start_async`'s answer when the REPL ended for `/plugins enable|disable`: start_app runs the
+    plugin's step on the plain terminal (`action`), then rebuilds the session from `resume`."""
+    action: tuple[str, str]
+    resume: Resume
+
+
+def _resume_status(resume: Resume, result: Any) -> str:
+    """The indicator's last line after a /plugins restart: did the plugin come up, and how?"""
+    verb, name = resume.action
+    running = result is not None and name in result.loaded_names
+    if verb == "disable":
+        return f"{name}: off in this session" if not running else f"{name}: still on in this session — /plugins shows why"
+    if resume.step_stopped:
+        return f"{name}: {'on' if running else 'not on'} in this session — its setup stopped before it finished"
+    if result is not None and name in result.unconfigured:
+        return f"{name}: on, but not set up yet — run /plugins enable {name} to set it up"
+    if result is not None and name in result.failed:
+        return f"{name}: on, but it could not start: {result.failed[name]}"
+    if resume.failed_check:
+        return f"{name}: on, but its check failed: {resume.failed_check}"
+    if running:
+        return f"{name}: on in this session"
+    return f"{name}: not running in this session — /plugins shows its state"
 
 
 def default_root_agent(agents: list[dict[str, Any]]) -> dict[str, Any]:
@@ -519,8 +565,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                        channel_mode: str = "terminal", subagents: bool = False,
                        model_override: str | None = None, list_models: bool = False,
                        no_input: bool = False, show_reasoning: bool = False,
-                       acp_channel: Any = None, web_channel: Any = None) -> None:
+                       acp_channel: Any = None, web_channel: Any = None,
+                       resume: Resume | None = None) -> Restart | None:
     """Async entry point: discover agent, wire dependencies, run REPL.
+
+    Returns a `Restart` when the REPL ended for `/plugins enable|disable` (a terminal session):
+    start_app runs the plugin's step, then calls this again with `resume` — the conversation, the
+    eviction store, the typed-ahead lines and /mode carried over, a fresh sitting id, and a compact
+    indicator in place of the banner. Otherwise None.
 
     `web_channel` is the PWA adapter (`channels/web.WebChannel`) when this session is being
     driven from a phone. Passed in for the same reason `acp_channel` is — the HTTP server is up
@@ -1074,6 +1126,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # — otherwise their stdlib WARNING/EXCEPTION records leak onto the REPL via lastResort.
     _route_memory_logs_to_file(agent_dir)
     sitting_id = str(uuid.uuid4())  # SESS-01: one session per SITTING, minted once
+    if resume is not None:  # a rebuild is a new sitting: memory's sessions.id is a primary key
+        log.info("session %s resumes %s after /plugins %s %s", sitting_id, resume.previous_sitting_id,
+                 *resume.action)
     # LLMClient built above with probe-derived tool_call_mode.
 
     # --- 2. Core infrastructure ---
@@ -1103,12 +1158,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     plugin_result = None
     session_info = None
     _exit_reason = "complete"
+    restart_request: Restart | None = None
     try:
         # Queryable-handle tool: tool_result_get (restore evicted tool-result bodies). The
         # ContentStore is shared with the ContextManager below so eviction-writes and restore-reads
         # hit the same map. The memory tools are the memory plugin's (step 5).
         from localharness.agent.context import ContentStore
-        eviction_store = ContentStore()
+        # A rebuild keeps the store: the carried conversation's stubs name handles it holds.
+        eviction_store = resume.eviction_store if resume is not None else ContentStore()
         try:
             if agent_config.context.tool_result_eviction:
                 from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
@@ -1345,6 +1402,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             settings=settings_from(agent_config.permissions),
             bus=bus,
         )
+        if resume is not None and resume.gate_mode != gate.mode:
+            gate.set_mode(resume.gate_mode)  # /mode as the person left it (and a declined trust's mode)
 
         # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
         # alongside any configured agent cards so the model knows it can delegate to them. search-verifier
@@ -1432,6 +1491,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # prompt's memory section.
             memory_slot=memory_slot,
         )
+        if resume is not None:  # the next turn carries the earlier conversation, byte for byte
+            agent_loop.resume(list(resume.conversation), resume.prior_context)
         if acp_channel is not None:
             # Built at the ACP handshake (it had to answer `initialize` before any of this
             # existed); the gate attaches to it below exactly like any other channel.
@@ -1491,12 +1552,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # channel.first_prompt_hint below). Piped/non-interactive sessions keep the banner hint.
         interactive = console.is_terminal
         elapsed = _time.monotonic() - start_time
-        from localharness.cli.ui import startup_banner
-        console.print(startup_banner(
-            model=resolved_model, is_returning=is_returning, show_hint=not interactive,
-        ))
-        if interactive and isinstance(channel, TerminalChannel):
-            channel.first_prompt_hint = _first_prompt_hint(is_returning)
+        if resume is None:
+            from localharness.cli.ui import startup_banner
+            console.print(startup_banner(
+                model=resolved_model, is_returning=is_returning, show_hint=not interactive,
+            ))
+            if interactive and isinstance(channel, TerminalChannel):
+                channel.first_prompt_hint = _first_prompt_hint(is_returning)
+        else:  # R3: no wordmark mid-conversation — one line, then the plugin lines and the status
+            console.print(Text(RESTARTED_LINE.format(
+                name=resume.action[1], state="on" if resume.action[0] == "enable" else "off")),
+                soft_wrap=True)
         if hasattr(channel, "tps_source"):
             # The instrument cluster. Colored tok/s readout (status row / thinking label): poll
             # the client's live decode-speed snapshot. The client object survives /model rebinds,
@@ -1534,7 +1600,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # hook that failed to load, a crashed session-start — printed a clean-looking
             # summary and reported nothing. Amber is the site's warning tone.
             summary_line += " " + entity("warning", f"[{'; '.join(warnings)}]")
-        console.print(summary_line, soft_wrap=True)
+        if resume is None:
+            console.print(summary_line, soft_wrap=True)
+        elif warnings:  # a rebuild prints its warnings alone, one amber line
+            console.print("  " + entity("warning", f"[{'; '.join(warnings)}]"), soft_wrap=True)
         if plugin_result is not None and plugin_result.running:
             console.print("  " + entity("tool", "Plugins: " + ", ".join(plugin_result.loaded_names)),
                           soft_wrap=True)
@@ -1542,6 +1611,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             available = [e.name for e in plugin_resolution.plan.entries if e.state == "available"]
             if available:  # Text: a plugin name is outside text, never markup (39-04's lesson)
                 console.print(Text(_available_hint(available)), soft_wrap=True)
+        if resume is not None:
+            console.print(Text(_resume_status(resume, plugin_result)), soft_wrap=True)
 
         # --- Verbose output ---
         if verbose:
@@ -1579,6 +1650,20 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             card_registry.register_from_config(a_cfg)
             if name not in available_agent_names:
                 available_agent_names.append(name)
+
+        async def _plugin_switch(verb: str, name: str) -> str | None:
+            """/plugins for this session: a fresh plan over the session's own layers. A plan that
+            cannot be read answers one line, and the session goes on."""
+            from localharness.cli.plugins_cmd import plugins_overview, switch_decision
+            running = frozenset(plugin_result.loaded_names) if plugin_result is not None else frozenset()
+            try:
+                if verb == "list":
+                    return plugins_overview(running, cfg_path, workspace)
+                return await switch_decision(name, verb == "enable", running, cfg_path, workspace)
+            except Exception as exc:  # noqa: BLE001 — a config broken mid-session never ends it
+                log.warning("/plugins could not read the plugin settings", exc_info=True)
+                return (f"/plugins could not read the plugin settings ({type(exc).__name__}) — "
+                        "`localharness plugins list` in a shell says why.")
 
         if getattr(channel, "has_display_toggles", False):
             # Reasoning stream: the sink is always wired (it no-ops while the flag is off) so
@@ -1658,9 +1743,21 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             harness_config=harness,
             on_agent_deployed=_register_deployed_agent,
             gate=gate,  # what /mode switches; the same object the loop and subagents hold
+            # /plugins enable|disable restarts a terminal session (the channel's own
+            # can_switch_plugins decides); the web and ACP paths never get the hook.
+            on_plugin_switch=_plugin_switch if web_channel is None and acp_channel is None else None,
+            queued=resume.queued if resume is not None else (),
         )
 
         await repl.run()
+        if repl.restart_request is not None:
+            # The REPL ended for /plugins: hand start_app the plain-data handle; the teardown below
+            # runs in its usual order and this sitting's memory row closes normally ("complete").
+            conversation, prior = agent_loop.resume_state()
+            restart_request = Restart(repl.restart_request, Resume(
+                action=repl.restart_request, agent_name=agent_name_str, conversation=tuple(conversation),
+                prior_context=prior, eviction_store=eviction_store, queued=repl.queued,
+                gate_mode=gate.mode, previous_sitting_id=sitting_id))
     except KeyboardInterrupt:
         _exit_reason = "interrupt"
         console.print("\nGoodbye.")
@@ -1692,6 +1789,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # pulling the pool out from under an in-flight shutdown write; closing it never leaked a
         # pool per session (and one more per /model swap).
         await llm.aclose()
+    return restart_request
 
 
 _CHANNEL_HELP = ("Input channel: " + ", ".join(sorted(channel_names())) + " (default terminal). An "
@@ -1756,8 +1854,30 @@ def start_app(
             # reaches it — inside the session's, that raises "Event loop is closed". Collect now.
             import gc
             gc.collect()
+    resume: Resume | None = None
     try:
-        asyncio.run(_start_async(agent, verbose, debug, config_dir, channel, subagents, model,
-                                 list_models, no_input, show_reasoning=show_reasoning))
+        while True:
+            restart = asyncio.run(_start_async(
+                resume.agent_name if resume is not None else agent, verbose, debug, config_dir,
+                channel, subagents and resume is None, model, list_models, no_input,
+                show_reasoning=show_reasoning, resume=resume))
+            if restart is None or channel != "terminal":
+                return
+            # The REPL ended for /plugins and the session is fully torn down: run the plugin's
+            # step here, on the plain terminal (nothing else draws on it; a typed secret never
+            # reaches the input box's history), then rebuild with the conversation carried over.
+            import gc
+
+            from localharness.cli.plugins_cmd import session_step
+            from localharness.provider.client import reset_inference_gate
+            # An object the session left in a reference cycle is finalized when the GC reaches it,
+            # and a finalizer that closes on "the running loop" must find none: collect before the
+            # step's own event loops run, and again before the rebuilt session's.
+            gc.collect()
+            outcome = session_step(restart.action, config_dir)
+            reset_inference_gate()  # the next asyncio.run is a new event loop
+            gc.collect()
+            resume = replace(restart.resume, failed_check=outcome.failed_check,
+                             step_stopped=outcome.stopped)
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
