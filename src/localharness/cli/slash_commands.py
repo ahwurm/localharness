@@ -23,13 +23,15 @@ class SlashCommand:
     `handler` is an OrchestratorREPL method name for a core row, and a bound async callable for a
     plugin row (called with the text after the name; the text — or rich renderable — it returns is
     shown to the user).
-    `takes_args` rows claim "name ..." as well as "name"."""
+    `takes_args` rows claim "name ..." as well as "name".
+    `terminal_only` rows are left out of the phone's menu; typed on another channel they answer one line."""
 
     name: str
     description: str
     handler: str | Callable[[str], Awaitable[Any]]
     takes_args: bool = False
     plugin: str | None = None
+    terminal_only: bool = False
 
     def __iter__(self) -> Iterator[str]:
         return iter((self.name, self.description))
@@ -48,6 +50,8 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/pending", "Tool calls parked for you to answer", "_slash_pending"),
     SlashCommand("/approve", "Run a parked call; /approve [N] (default: the oldest)", "_slash_approve", True),
     SlashCommand("/deny", "Drop a parked call; /deny [N] (default: the oldest)", "_slash_deny", True),
+    SlashCommand("/plugins", "List plugins; /plugins enable|disable <name> to switch one in this session",
+                 "_slash_plugins", True, terminal_only=True),
     SlashCommand("/quit", "Exit LocalHarness", "_slash_quit"),
     SlashCommand("/exit", "Exit LocalHarness", "_slash_quit"),
 )
