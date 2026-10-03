@@ -38,10 +38,13 @@ def test_the_manifest():
         ("propose", "localharness.cli.propose_cmd:propose_app")]
     assert AutoresearchPlugin.ConfigModel is None and AutoresearchPlugin.AgentConfigModel is None
     assert AutoresearchPlugin.wants_artifacts is False
-    # Its setup step: the proposer's address and model (core keys under `proposer`, one write).
+    # Its setup step: the proposer's address, model and key (core keys under `proposer`, one
+    # write). Either setup: the main model again at a local address, or a cloud API with its key.
     assert [(f.key, f.prompt, f.secret) for f in m.setup] == [
-        ("proposer.base_url", "Proposer address (an OpenAI-compatible base URL)", False),
-        ("proposer.model", "Proposer model id (not your main model)", False)]
+        ("proposer.base_url", "Proposer address (an OpenAI-compatible base URL — a local server or a "
+                              "cloud API)", False),
+        ("proposer.model", "Proposer model id", False),
+        ("proposer.api_key", "Proposer API key (leave empty for a local server)", True)]
     assert m.next_steps == "Then: `localharness propose --help` shows how to write the first proposal."
     assert "{machine}" in m.agent_prompt and m.setup_action == ""
     assert AutoresearchPlugin.__doc__.splitlines()[0] == "experiment loop"
@@ -134,8 +137,8 @@ def test_doctor_names_the_proposer_never_its_key(tmp_path, monkeypatch):
 def test_doctor_without_a_proposer_skips_with_the_hint(tmp_path, monkeypatch):
     rows = _doctor(_home(tmp_path), monkeypatch)
     assert rows == [Check(name="autoresearch", status="skip", detail=NO_PROPOSER,
-                          hint="set proposer.base_url / proposer.model (a model distinct from "
-                               "provider.default_model)")]
+                          hint="set proposer.base_url and proposer.model (your main model is fine at a "
+                               "local address), and proposer.api_key for a cloud API")]
 
 
 def test_doctor_on_an_unreadable_config_skips_and_does_not_raise(tmp_path, monkeypatch):

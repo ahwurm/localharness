@@ -330,9 +330,10 @@ def test_autoresearch_with_no_proposer_is_on_but_not_set_up_yet(run, monkeypatch
     monkeypatch.setattr(setup, "gpu_name", lambda: "NVIDIA GB10")  # its prompt names {machine}
     s = run([["hello there", "/plugins enable autoresearch"], ["what now"]], answer="")
 
-    assert [t for t, *_ in s.prompts] == ["Proposer address (an OpenAI-compatible base URL)",
-                                          "Proposer model id (not your main model)"]
-    assert _overrides(s) == {"autoresearch": {"enabled": True}}  # Enter on both: no proposer written
+    assert [(t, kw["hide_input"]) for t, _d, kw, _r in s.prompts] == [
+        ("Proposer address (an OpenAI-compatible base URL — a local server or a cloud API)", False),
+        ("Proposer model id", False), ("Proposer API key (leave empty for a local server)", True)]
+    assert _overrides(s) == {"autoresearch": {"enabled": True}}  # Enter on all three: nothing written
     assert f"i  autoresearch: {NO_PROPOSER}" in s.doctor.getvalue()
     step = s.step.getvalue()
     assert step.index(AGENT_PROMPT_LEAD) < step.index("This machine reports NVIDIA GB10.") < step.index(AR_NEXT)

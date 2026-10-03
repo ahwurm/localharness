@@ -294,9 +294,14 @@ def test_web_the_saved_address_reaches_the_pairing_qr(g, terminal, web_extra, mo
     assert guessed == []
 
 
-# --- autoresearch: the proposer's address and model in one write, then one GET <address>/models ---
+# --- autoresearch: the proposer's address, model and key in one write, then one GET <address>/models
+# Either setup: the main model again at a local address (Enter at the key), or a cloud API and its key.
 
 P_URL = "http://p.test/v1"
+CLOUD_URL = "https://api.cloud.test/v1"
+KEY = "sk-SENTINEL-52-08-cloud-0123456789abcdef"  # long, as a real key is: its tail is checked too
+AR_QUESTIONS = ["Proposer address (an OpenAI-compatible base URL — a local server or a cloud API)",
+                "Proposer model id", "Proposer API key (leave empty for a local server)"]
 AR_NEXT = "Then: `localharness propose --help` shows how to write the first proposal."
 
 
@@ -330,17 +335,17 @@ def proposer(monkeypatch):
 def test_autoresearch_writes_the_proposer_in_one_write_then_checks_it_answers(g, terminal, proposer) -> None:
     asked, answers, _ = terminal
     seen, _, writes = proposer
-    answers.extend([P_URL, "p-model"])
+    answers.extend([P_URL, "p-model", ""])  # Enter at the key: a local server
     result = _enable(g, "autoresearch")
     out = result.output
 
     assert result.exit_code == 0, out
-    assert [q for q, _ in asked["prompt"]] == ["Proposer address (an OpenAI-compatible base URL)",
-                                               "Proposer model id (not your main model)"]
+    assert asked["prompt"] == [(AR_QUESTIONS[0], ""), (AR_QUESTIONS[1], ""), (AR_QUESTIONS[2], "")]
     assert asked["confirm"] == []  # the action has no question: it spends nothing
     expected = {"autoresearch": {"enabled": True}, "proposer": {"base_url": P_URL, "model": "p-model"}}
-    assert writes == [expected] and _overrides(g) == expected
+    assert writes == [expected] and _overrides(g) == expected  # the empty key wrote nothing
     assert [(r.method, str(r.url)) for r in seen] == [("GET", f"{P_URL}/models")]
+    assert "Authorization" not in seen[0].headers  # no key: none sent
     for text in (f"✓ autoresearch-proposer: the proposer answers at {P_URL} and serves p-model",
                  "Checking it now:", f"✓ autoresearch: proposer: p-model at {P_URL}", AR_NEXT):
         assert text in out, text
@@ -348,21 +353,69 @@ def test_autoresearch_writes_the_proposer_in_one_write_then_checks_it_answers(g,
 
 
 @pytest.mark.plugin("autoresearch")
-def test_autoresearch_refuses_the_main_model_and_never_shows_a_stored_key(g, terminal, proposer) -> None:
-    # A stored proposer written by hand: provider first, the key last, so a refusal that echoed
-    # the settings would show it.
-    (g / "config.yaml").write_text(yaml.safe_dump({**_CONFIG, "proposer": {
-        "base_url": "http://old.test/v1", "model": "p-old", "api_key": "SENTINEL-52-05"}},
-        sort_keys=False), encoding="utf-8")
+def test_autoresearch_the_main_model_at_another_address_is_accepted_and_doctor_passes(
+        g, terminal, proposer, monkeypatch) -> None:
+    """A second instance of the main model (provider.default_model is test-model) at the proposer's
+    own address: written, checked, and `localharness doctor`'s autoresearch row passes."""
+    import httpx
+
+    from localharness.cli import doctor_cmd
+    _, answers, _ = terminal
+    seen, answer, writes = proposer
+    answer[0] = lambda request: httpx.Response(200, json={"object": "list", "data": [{"id": "test-model"}]})
+    answers.extend([P_URL, "test-model", ""])
+    result = _enable(g, "autoresearch")
+
+    assert result.exit_code == 0, result.output
+    expected = {"autoresearch": {"enabled": True}, "proposer": {"base_url": P_URL, "model": "test-model"}}
+    assert writes == [expected] and _overrides(g) == expected
+    assert f"✓ autoresearch-proposer: the proposer answers at {P_URL} and serves test-model" in result.output
+    assert AGENT_PROMPT_LEAD not in result.output
+    monkeypatch.setattr(doctor_cmd, "console", Console(width=400))
+    doctor = runner.invoke(app, ["doctor", "--config-dir", str(g)])
+    assert f"✓ autoresearch: proposer: test-model at {P_URL}" in doctor.output, doctor.output
+    assert len(seen) == 1  # doctor never contacts the proposer
+
+
+@pytest.mark.plugin("autoresearch")
+def test_autoresearch_a_cloud_key_is_written_raw_and_only_ever_shown_masked(g, terminal, proposer) -> None:
+    import httpx
+    asked, answers, _ = terminal
+    seen, answer, writes = proposer
+    answer[0] = lambda request: httpx.Response(200, json={"object": "list", "data": [{"id": "cloud-model"}]})
+    answers.extend([CLOUD_URL, "cloud-model", KEY])
+    result = _enable(g, "autoresearch")
+    out = result.output
+
+    assert result.exit_code == 0, out
+    assert asked["prompt"][2] == (AR_QUESTIONS[2], "")  # a secret offers nothing
+    expected = {"autoresearch": {"enabled": True},
+                "proposer": {"base_url": CLOUD_URL, "model": "cloud-model", "api_key": KEY}}
+    assert writes == [expected] and _overrides(g) == expected  # the raw key, as the loader reads it
+    assert (g / "overrides.yaml").stat().st_mode & 0o777 == 0o600
+    assert [r.headers.get("Authorization") for r in seen] == [f"Bearer {KEY}"]  # sent, never shown
+    for text in ("  set proposer.api_key = '**********'",
+                 "Contacting the proposer at https://api.cloud.test (sending proposer.api_key) …",
+                 f"✓ autoresearch-proposer: the proposer answers at {CLOUD_URL} and serves cloud-model",
+                 f"✓ autoresearch: proposer: cloud-model at {CLOUD_URL}", AR_NEXT):
+        assert text in out, text
+    for where in (result.stdout, result.stderr, repr(result.exception)):
+        assert KEY not in where and KEY[-12:] not in where, where
+
+
+@pytest.mark.plugin("autoresearch")
+def test_autoresearch_a_refused_answer_never_shows_the_typed_key(g, terminal, proposer) -> None:
+    """Enter at the model id: the address and key alone do not validate, and pydantic's own text
+    for that error carries the section, the typed key included. The refusal shows neither."""
     _, answers, _ = terminal
     seen, _, writes = proposer
-    answers.extend([P_URL, "test-model"])
+    answers.extend([CLOUD_URL, "", KEY])
     result = _enable(g, "autoresearch")
-    flat = " ".join(result.output.split())
 
     assert result.exit_code == 2, result.output
-    assert "proposer.model must differ" in flat
-    assert "SENTINEL-52-05" not in result.output
+    assert "proposer.model: Field required" in " ".join(result.output.split())
+    for where in (result.stdout, result.stderr, repr(result.exception)):
+        assert KEY not in where and KEY[-12:] not in where, where
     assert writes == [] and not (g / "overrides.yaml").exists() and seen == []
 
 
@@ -377,7 +430,7 @@ def test_autoresearch_a_proposer_that_does_not_answer_is_named_and_the_answers_k
     _, answers, _ = terminal
     seen, answer, _ = proposer
     answer[0] = refuse
-    answers.extend([P_URL, "p-model"])
+    answers.extend([P_URL, "p-model", ""])
     result = _enable(g, "autoresearch")
     out = result.output
 

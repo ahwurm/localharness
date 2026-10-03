@@ -7,8 +7,10 @@ package __init__ re-exports lazily (PEP 562), so the archive (aiosqlite), scipy 
 modules load only when a command runs or doctor() reads the config. It owns the pre-existing core
 settings `proposer:` and `sentinel:` under their old names (`sections`, bundled only). Nothing runs
 in a session: tools, start and stop are the base no-ops. `plugins enable autoresearch` asks the
-proposer's address and model and checks once that it answers (setup_action), reading the address and
-key from the machine-level config only, as `propose` does; doctor never contacts it."""
+proposer's address, model and API key (empty for a local server; never echoed) and checks once that
+it answers (setup_action), reading the address and key from the machine-level config only, as
+`propose` does; doctor never contacts it. The proposer may be the main model again at a local
+address, or a cloud model with its key."""
 from __future__ import annotations
 
 from typing import Any
@@ -17,8 +19,8 @@ from localharness.plugins.api import (
     Check, CliDescriptor, Plugin, PluginContext, PluginManifest, SetupField,
 )
 
-NO_PROPOSER = ("no proposer configured — `propose` and `autoresearch run` need one; "
-               "`experiment`, `report` and `archive` do not")
+NO_PROPOSER = ("no proposer configured — `propose` and `autoresearch run` need one (a local server "
+               "or a cloud API); `experiment`, `report` and `archive` do not")
 
 _TRANSPORT: Any = None
 """httpx transport for the step's one GET (tests swap in httpx.MockTransport); None = the network."""
@@ -42,17 +44,21 @@ class AutoresearchPlugin(Plugin):
                           help="Generate ONE typed mutation {diff, rationale} for ONE component from failed "
                                "TRAIN traces.",
                           target="localharness.cli.propose_cmd:propose_app")),
-        setup=(SetupField(key="proposer.base_url", prompt="Proposer address (an OpenAI-compatible base URL)"),
-               SetupField(key="proposer.model", prompt="Proposer model id (not your main model)")),
+        setup=(SetupField(key="proposer.base_url", prompt="Proposer address (an OpenAI-compatible "
+                                                          "base URL — a local server or a cloud API)"),
+               SetupField(key="proposer.model", prompt="Proposer model id"),
+               SetupField(key="proposer.api_key", prompt="Proposer API key (leave empty for a local server)",
+                          secret=True)),
         next_steps="Then: `localharness propose --help` shows how to write the first proposal.",
         agent_prompt=(
-            "Set up the LocalHarness autoresearch plugin on this machine. It needs a proposer: a second\n"
-            "model, different from the one LocalHarness already runs on, served behind an\n"
-            "OpenAI-compatible endpoint. {machine} Pick the strongest model this hardware can serve\n"
-            "alongside the main one and serve it locally. Then run\n"
-            "`localharness plugins enable autoresearch` and give it that address and model id. Leave\n"
-            "proposer.api_key unset for a local server. You are done when `localharness doctor` shows\n"
-            "the proposer row passing."))
+            "Set up the LocalHarness autoresearch plugin on this machine. It needs a proposer behind an\n"
+            "OpenAI-compatible endpoint: a second local endpoint, where the model LocalHarness already\n"
+            "runs on is fine, or a cloud API with its API key. {machine} For a local proposer, serve the\n"
+            "main model again (or another model this hardware can run alongside it). Then run\n"
+            "`localharness plugins enable autoresearch` and give it the proposer's address and model id.\n"
+            "Leave the key empty for a local server; for a cloud API, let me type the key at its hidden\n"
+            "prompt myself: never print the key or paste it into this chat. You are done when\n"
+            "`localharness doctor` shows the proposer row passing."))
     ConfigModel = None  # proposer:/sentinel: stay core HarnessConfig fields (sections)
     AgentConfigModel = None
 
@@ -68,8 +74,8 @@ class AutoresearchPlugin(Plugin):
             return [Check(name="autoresearch", status="skip", detail=f"config not readable: {type(exc).__name__}")]
         if p is None:
             return [Check(name="autoresearch", status="skip", detail=NO_PROPOSER,
-                          hint="set proposer.base_url / proposer.model (a model distinct from "
-                               "provider.default_model)")]
+                          hint="set proposer.base_url and proposer.model (your main model is fine at a "
+                               "local address), and proposer.api_key for a cloud API")]
         return [Check(name="autoresearch", status="pass", detail=f"proposer: {p.model} at {p.base_url}")]
 
     def setup_action(self, ctx: PluginContext) -> list[Check]:

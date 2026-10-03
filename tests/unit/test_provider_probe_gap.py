@@ -270,8 +270,8 @@ def test_build_bench_client_context_window_uses_canonical_default(monkeypatch):
 
 
 def _proposer_cfg():
-    """A HarnessConfig with a DISTINCT proposer block (PROP-02 _proposer_model_distinct validator
-    forces proposer.model != provider.default_model). Mirrors test_proposer.py::_cfg."""
+    """A HarnessConfig with its own proposer block (PROP-02: the proposer is called through its own
+    config, never through `provider`). Mirrors test_proposer.py::_cfg."""
     from localharness.config.models import HarnessConfig
 
     return HarnessConfig.model_validate(

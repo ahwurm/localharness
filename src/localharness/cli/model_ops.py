@@ -109,7 +109,7 @@ async def persist_default_model(
 
     Flow: load overlay -> set ``provider.default_model`` + ``org.default_model`` +
     union(``available_models``) -> validate the merged HarnessConfig (raises on an invalid
-    result, e.g. a collision with a configured ``proposer.model``) -> ``atomic_write_overlay``
+    result) -> ``atomic_write_overlay``
     -> emit one ``ComponentMutated`` per path. Only ``provider.*`` / ``org.*`` are ever touched
     in the overlay, so an ``agent:`` slice (the kill-lever layer) is preserved untouched.
     Also mutates the in-memory ``harness`` so the live session's view stays consistent.
