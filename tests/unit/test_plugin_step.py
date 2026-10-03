@@ -34,6 +34,7 @@ from tests.unit.test_plugin_sections import _INFO_KEYS
 from tests.unit.test_plugins_enable_setup import _CONFIG
 
 runner = CliRunner()
+_REAL_BUILTINS = builtin.BUILTIN_PLUGINS
 CALLS: list[str] = []          # every setup action that ran, by plugin name
 ACT_READY = [False]            # act's thing is already there, as if fetched before this run
 ACT_QUESTION = "Fetch the thing now (about 1 MB)?"
@@ -546,3 +547,111 @@ def test_session_step_disable_writes_the_switch_off(g, term, capsys) -> None:
     assert yaml.safe_load((g / "overrides.yaml").read_text())["pro"]["enabled"] is False
     assert outcome == plugins_cmd.StepOutcome(name="pro", on=False)
     assert term.asked == [] and term.confirmed == []
+
+
+# --- dispatch's step: the real bundled plugins ------------------------------------------------------
+
+SENTINEL = "SENTINEL-DISPATCH-52"
+DISPATCH_NEXT = "  Then start the Discord session: localharness start --channel discord"
+
+
+@pytest.fixture
+def real(monkeypatch, tmp_path):
+    """The real bundled plugins; Discord's env sources and token file isolated; its extra present."""
+    from localharness.plugins import resolve
+    from tests.dispatch_support import isolate_discord_env
+
+    isolate_discord_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", _REAL_BUILTINS)
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: True)
+
+
+@pytest.fixture
+def typed(monkeypatch):
+    """A terminal whose person types `answers`; each question is recorded with its keywords."""
+    calls: list[tuple] = []
+    answers: list[str] = []
+
+    def prompt(text, default=None, **kw):
+        calls.append((text, default, kw))
+        return answers.pop(0)
+
+    def confirm(*a, **kw):
+        raise AssertionError("dispatch has no setup action to confirm")
+
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    monkeypatch.setattr(plugins_cmd.typer, "confirm", confirm)
+    return calls, answers
+
+
+def _token_free(result) -> None:
+    for where in (result.stdout, result.stderr, repr(result.exception)):
+        assert SENTINEL not in where, where
+
+
+def _dispatch_settings(g: Path):
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+    return resolve(ConfigLoader(config_dir=g)).settings["dispatch"].config.discord
+
+
+TOKEN_QUESTION = ("Discord bot token", "", {"hide_input": True, "show_default": False})
+
+
+def test_dispatch_on_a_terminal_hides_the_token_and_passes_its_check(g, real, typed) -> None:
+    calls, answers = typed
+    answers[:] = [SENTINEL, "123"]
+    result = _enable(g, "dispatch")
+
+    assert result.exit_code == 0, result.output
+    _token_free(result)
+    assert calls[0] == TOKEN_QUESTION
+    assert yaml.safe_load((g / "overrides.yaml").read_text())["dispatch"]["discord"]["token"] == SENTINEL
+    assert _dispatch_settings(g).allow == ["123"]
+    assert "✓ dispatch: Discord configured — 1 allowed user(s)" in result.output
+    assert AGENT_PROMPT_LEAD not in result.output
+    assert DISPATCH_NEXT in result.output
+
+
+def test_dispatch_with_nothing_typed_prints_its_help_and_its_prompt(g, real, typed) -> None:
+    from localharness.dispatch.plugin import DispatchPlugin
+
+    _, answers = typed
+    answers[:] = ["", ""]
+    result = _enable(g, "dispatch")
+
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load((g / "overrides.yaml").read_text()) == {"dispatch": {"enabled": True}}
+    for line in DispatchPlugin.manifest.setup_help.splitlines():
+        assert line in result.output, line
+    _in_order(result.output, "dispatch: Discord not configured", AGENT_PROMPT_LEAD, "never print the token",
+              DISPATCH_NEXT)
+
+
+def test_a_stored_dispatch_token_never_reaches_the_screen_or_its_prompt(g, real, typed) -> None:
+    calls, answers = typed
+    stored = _enable(g, "dispatch", "--set", f"discord.token={SENTINEL}")
+    assert stored.exit_code == 0, stored.output
+    _token_free(stored)
+    answers[:] = ["", ""]  # Enter twice: the stored token is kept, and nothing shows it
+    result = _enable(g, "dispatch")
+
+    assert result.exit_code == 0, result.output
+    _token_free(result)
+    assert calls == [TOKEN_QUESTION, ("Your Discord user id(s), comma-separated", "", {
+        "hide_input": False, "show_default": False})]
+    assert yaml.safe_load((g / "overrides.yaml").read_text())["dispatch"]["discord"]["token"] == SENTINEL
+    _in_order(result.output, "dispatch.discord.allow is empty", AGENT_PROMPT_LEAD, "never print the token")
+
+
+def test_dispatch_without_its_extra_asks_nothing(g, real, term, monkeypatch) -> None:
+    from localharness.plugins import resolve
+
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: False)
+    result = _enable(g, "dispatch")
+
+    assert result.exit_code == 0, result.output
+    assert term.asked == [] and "Checking it now" not in result.output
+    _in_order(result.output, "dispatch is missing its install extra — install `localharness[dispatch]` to use it",
+              DISPATCH_NEXT)

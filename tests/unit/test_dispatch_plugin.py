@@ -58,7 +58,9 @@ def test_manifest():
     assert DispatchPlugin().channels() == {"discord": DispatchChannel}
     assert [(f.key, f.secret) for f in m.setup] == [("discord.token", True), ("discord.allow", False)]
     assert "Message Content intent" in m.setup_help and "User ID" in m.setup_help
-    assert 3 <= len(m.setup_help.splitlines()) <= 5
+    assert len(m.setup_help.splitlines()) == 3
+    assert "never print the token" in m.agent_prompt and "{" not in m.agent_prompt
+    assert m.next_steps == "Then start the Discord session: localharness start --channel discord"
     assert DispatchPlugin.ConfigModel is DispatchConfig and DispatchPlugin.AgentConfigModel is None
     assert DispatchPlugin.wants_artifacts is False
     assert plugin_summary(DispatchPlugin) == "chat: Discord"
