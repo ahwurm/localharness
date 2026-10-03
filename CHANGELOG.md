@@ -196,7 +196,7 @@ All notable changes to LocalHarness are documented here. The format follows
 - **A page-query pattern cannot freeze the session.** `web_page_query` refuses a
   pattern over 128 characters and runs one with regex syntax in a separate
   process stopped after 1 second.
-- **Every stored credential is masked.** `provider.api_key`,
+- **Every stored credential is masked where a command shows it.** `provider.api_key`,
   `active_endpoint.api_key`, each `extra_endpoints` entry's `api_key` and
   `extra_headers`, and an MCP server's `env` and `headers` are now secrets like
   `proposer.api_key` and the Discord token: `**********` in `components
@@ -225,9 +225,9 @@ All notable changes to LocalHarness are documented here. The format follows
   as on the phone; the bot ignores its own reactions, pings nobody but the
   person it replies to, and shows every masked link's address; and it no longer
   reads another program's token file.
-- **Model text cannot drive your terminal.** Escape, OSC, CSI and C1 control
-  sequences are removed from model text, tool output and plugin output before
-  they reach the terminal.
+- **Model text cannot drive your terminal.** The terminal channel removes
+  escape, OSC, CSI and C1 control sequences from model text, tool output and
+  plugin output before it prints them.
 - **Files are owner-only from creation.** `init` makes the config folder 0700,
   a start makes an older one 0700, and the files the harness creates are 0600
   from their first byte. `init --force` saves the old `config.yaml` first and
@@ -241,9 +241,10 @@ All notable changes to LocalHarness are documented here. The format follows
   and `.` entries, never in the folder you stand in (which Windows would search
   first).
 - **A start reaches only your model server.** It no longer builds tiktoken's
-  vocabulary (downloaded when not cached) or imports the MCP client library; a
-  missing embedding model is one line in the start summary, downloaded the first
-  time memory needs it. SECURITY.md lists every host a start may contact.
+  vocabulary (downloaded when not cached) or, with no MCP server configured,
+  imports the MCP client library; a missing embedding model is one line in the
+  start summary, downloaded the first time memory needs it. SECURITY.md lists
+  every host a start may contact.
 
 ### Known limitations (named, not hidden)
 - During a `/plugins` restart the conversation is held only in memory: if the

@@ -129,7 +129,7 @@ and its sealed holdout.) A plugin that ships with LocalHarness may own core sett
 names (`autoresearch` owns `proposer:` and `sentinel:`); a plugin you install that tries to is
 refused at load.
 
-**Every stored credential is masked wherever it is shown.** The settings LocalHarness treats as
+**Stored credentials are masked wherever a command shows them.** The settings LocalHarness treats as
 secrets are `provider.api_key`, the `api_key` and `extra_headers` of each `extra_endpoints` entry,
 `active_endpoint.api_key`, an MCP server's `env` and `headers`, `proposer.api_key` and
 `dispatch.discord.token`. Each is shown as `**********` wherever a command displays it:
@@ -696,20 +696,22 @@ package, and it is never listed as one of your tool scripts.
 
 ## What `localharness start` contacts
 
-A local-first harness should reach nothing but your model server when it starts. A start, and the
-session it opens, reach the network for these and nothing else:
+A local-first harness should reach nothing but your model server when it starts, and a start now
+reaches the model server in your config (starting it first, when your config launches one) and
+nothing else. Two downloads can follow later, each once and only when it is needed:
 
-- the model server in your config (and starts it first, when your config launches one);
-- `huggingface.co`, once, when memory's embedding model is not on this machine yet — the start
-  summary says so in one line, the banner does not wait for it, and the model downloads the first
-  time memory needs it (a memory search that comes first waits for that download);
-- the tiktoken vocabulary host, `openaipublic.blob.core.windows.net`, only on the first approximate
+- `huggingface.co`, when memory's embedding model is not on this machine yet. The start summary
+  says so in one line, the banner does not wait for it, and the model downloads the first time
+  memory needs it (a memory search that comes first waits for that download).
+- the tiktoken vocabulary host, `openaipublic.blob.core.windows.net`, on the first approximate
   token count with no cached vocabulary — which a vLLM or llama.cpp setup never makes, because
   those count tokens on the server. Offline, the estimate falls back to a byte count and says so
   once.
 
-Beyond those, only what you turned on: the MCP servers your agent files name, and the Discord
-connection of the dispatch plugin. A stock start no longer imports the MCP client library at all.
+Beyond those, the network is reached by what you turned on — the MCP servers your agent files name,
+the dispatch plugin's Discord connection — and by what the agent's tools do in the session (a web
+search, a fetched page, a shell command), which the approval gate and the web-fetch rule govern. A
+start with no MCP server configured no longer imports the MCP client library at all.
 
 ## Files the harness writes
 
@@ -813,10 +815,10 @@ fact was saved, not the fact read back. The bench turns memory on only for the t
 that seed it, with the same setting on both sides of a comparison and background consolidation
 off, so a bench result says nothing about how memory behaves in any other scenario.
 
-**What a page or a tool prints cannot drive your terminal.** Model text, reasoning, tool calls and
-their output, errors and plugin output reach the terminal with escape and control sequences
-removed — ESC, OSC, CSI and the C1 range — so text the model copied from a page cannot set your
-clipboard (OSC 52), clear the screen or redraw a permission question above the prompt.
+**Model and tool output is cleaned before it reaches your terminal.** The terminal channel removes
+escape and control sequences — ESC, OSC, CSI and the C1 range — from model text, reasoning, tool
+calls and their output, errors and plugin output, so text the model copied from a page cannot set
+your clipboard (OSC 52), clear the screen or redraw a permission question above the prompt.
 
 **Not yet built: sandboxing.** Host-mutating tools currently run with the machine's
 full trust; there is no OS-level sandbox (e.g. bubblewrap) around them yet. That is on
