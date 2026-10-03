@@ -472,7 +472,8 @@ def init_app(
         bool,
         typer.Option(
             "--force", "-f",
-            help="Overwrite existing config without prompting.",
+            help="Start over without asking: rewrite the config and clear the model and server "
+                 "choices saved in overrides.yaml.",
         ),
     ] = False,
     workspace: Annotated[
@@ -512,7 +513,9 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
     `interactive` gates every question; without it the run takes what is detected and the usual
     settings. An existing config is never rewritten without `force`: it is kept (asked on a
     terminal, said without one) or — after a "no", or for an explicit --endpoint/--model — the
-    change goes to overrides.yaml through a validated overlay write. `starting` is a first `start`
+    change goes to overrides.yaml through a validated overlay write. `force` starts over (R15): a
+    fresh config.yaml AND the saved model and server choices cleared from overrides.yaml — both or
+    neither; nothing else there is touched. `starting` is a first `start`
     calling in, which goes on into the session: its receipt leaves out "run start" and the star.
     Exits 1, writing nothing, on a request it cannot honour.
     """
@@ -531,7 +534,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
                           _probe_capabilities(result, selected_model))
             outcome = SetupResult(config_file, True)
     else:
-        picked = _pick_server(config_path, endpoint, model, interactive)
+        picked = _pick_server(config_path, endpoint, model, interactive, force=force)
         if isinstance(picked, SetupResult):  # skipped for now: saved unchecked, or nothing saved
             outcome = picked
         else:
@@ -539,7 +542,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
             cap = _probe_capabilities(result, selected_model)
             host_tools_on, memory_on = _choose_toggles(interactive)
             _write_config(config_path, result, selected_model, cap, server_config, host_tools_on,
-                          memory_on)
+                          memory_on, force=force)
             _receipt(config_file, starting)
             outcome = SetupResult(config_file, True)
     if outcome.config_file is not None:  # fresh, kept, changed or saved unchecked
@@ -585,7 +588,7 @@ def _existing_config(config_path: Path, config_file: Path, interactive: bool, *,
 
 def _pick_server(
     config_path: Path, endpoint: str | None, model: str | None, interactive: bool, *,
-    changing: bool = False,
+    changing: bool = False, force: bool = False,
 ) -> tuple[DetectorResult, str, ManagedServerConfig | None] | SetupResult:
     """The model server and the model: the explicit --endpoint, else detection — and, finding
     nothing on a terminal, the guided vLLM setup, then "skip for now" (whose SetupResult comes
@@ -660,7 +663,7 @@ def _pick_server(
         guided = _guided_setup(config_path) if interactive else None
         if guided is None:
             if interactive:
-                return _skip_for_now(config_path, model)
+                return _skip_for_now(config_path, model, force=force)
             console.print(
                 "\nStart your LLM server and run 'localharness init' again, or use:"
             )
@@ -681,7 +684,7 @@ def _pick_server(
     return result, _select_model(result, model, interactive), None
 
 
-def _skip_for_now(config_path: Path, model: str | None) -> SetupResult:
+def _skip_for_now(config_path: Path, model: str | None, *, force: bool = False) -> SetupResult:
     """No server answered and the guided setup was declined, on a terminal: save the address and
     the model the user will use, unchecked — or save nothing and say the one next step. A config
     is written only when it names a model (never an incomplete one), and skipping is the user's
@@ -713,7 +716,7 @@ def _skip_for_now(config_path: Path, model: str | None) -> SetupResult:
             permissions=PermissionConfig(defaults_revision=CURRENT_DEFAULTS_REVISION),
         ),
         server=None,
-    ), memory_on=True)
+    ), memory_on=True, force=force)
     console.print(
         "[green]✓[/green] "
         + escape(f"Saved {config_file} — not checked yet. Start your model server, then run `localharness start`."),
@@ -828,35 +831,105 @@ def _served_window(result: DetectorResult) -> int | None:
     return None
 
 
-def _overlay_shadows(config_path: Path) -> None:
-    """Say which server and model keys the machine's overrides.yaml sets: a past change (or `/model`)
-    left them there, and they win over the config.yaml just written — so without this line init
-    would report a server the next start does not use."""
+# R15: what `init --force` clears from the machine's overrides.yaml — the model and server choices
+# the core persists there: a re-run's change (_write_change), `/model` (model_ops.
+# persist_default_model: the default model, its list, a managed server's model) and a peer-endpoint
+# switch (model_ops.persist_active_endpoint: the whole active_endpoint record). Every other key and
+# every plugin section is the user's, and stays.
+_SAVED_CHOICE_KEYS = (
+    "provider.provider_type", "provider.base_url", "provider.default_model",
+    "provider.available_models", "provider.supports_function_calling", "org.default_model",
+    "org.context.max_context_tokens", "server.model", "active_endpoint",
+)
+
+
+def _drop_saved_choices(overlay: dict) -> list[str]:
+    """Remove the saved model and server choices from `overlay` IN PLACE — a parent the removal
+    leaves empty goes too — and return the ones it held, in _SAVED_CHOICE_KEYS order."""
+    dropped = []
+    for path in _SAVED_CHOICE_KEYS:
+        *parents, leaf = path.split(".")
+        chain = [overlay]
+        for key in parents:
+            if not isinstance(chain[-1].get(key), dict):
+                break
+            chain.append(chain[-1][key])
+        else:
+            if leaf in chain[-1]:
+                del chain[-1][leaf]
+                dropped.append(path)
+                for i in range(len(parents) - 1, -1, -1):
+                    if chain[i + 1]:
+                        break
+                    del chain[i][parents[i]]
+    return dropped
+
+
+def _saved_choices_reset(config_path: Path, harness: HarnessConfig) -> tuple[Path, dict, list[str]] | None:
+    """--force (R15): overrides.yaml without the saved model and server choices, checked BEFORE
+    anything is written as the merged config the next start reads (persist_default_model's check).
+    None: it holds none, and it is not rewritten. Exits 1, writing nothing, when overrides.yaml
+    cannot be read or the reset does not validate — --force resets both files or neither."""
+    from localharness.config.overlay import deep_merge
+    from localharness.config.plugin_sections import core_harness_view
+
     overlay_path = ConfigLoader(config_dir=config_path).user_overlay_path
     try:
         overlay = load_overlay(overlay_path)
+        if not isinstance(overlay, dict):
+            raise ValueError("its top level is not a mapping")
+    except Exception as exc:  # noqa: BLE001 — whatever stops the read is reported, never a traceback
+        reason = (str(exc).splitlines() or [type(exc).__name__])[0]
+        err_console.print(
+            "[bold red]Error:[/bold red] "
+            + escape(f"{overlay_path} cannot be read ({reason}). Fix it, then run "
+                     "`localharness init --force` again. Nothing was written."),
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+    cleared = _drop_saved_choices(overlay)
+    if not cleared:
+        return None
+    try:
+        HarnessConfig.model_validate(core_harness_view(deep_merge(
+            harness.model_dump(mode="python"), {k: v for k, v in overlay.items() if k != "agent"})))
+    except ValueError as exc:  # a pydantic ValidationError is one
+        err_console.print(
+            "[bold red]Error:[/bold red] "
+            + escape(f"the new settings do not validate: {exc}. Nothing was written."),
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+    return overlay_path, overlay, cleared
+
+
+def _overlay_shadows(config_path: Path) -> None:
+    """The one case where a saved choice still wins over the config.yaml init just wrote: a fresh
+    write WITHOUT --force — config.yaml was missing (deleted by hand, or a first `start`) while
+    overrides.yaml survived, and nothing leaves overrides.yaml without --force. Say which choices
+    win and how to clear them. After --force none is left to name: it clears them first."""
+    overlay_path = ConfigLoader(config_dir=config_path).user_overlay_path
+    try:
+        saved = _drop_saved_choices(load_overlay(overlay_path))
     except Exception:  # noqa: BLE001 — a malformed overrides.yaml is start's to report, not this note's
         return
-    provider, org = overlay.get("provider"), overlay.get("org")
-    keys = [f"provider.{key}" for key in provider] if isinstance(provider, dict) else []
-    if isinstance(org, dict):
-        keys += ["org.default_model"] * ("default_model" in org)
-        keys += ["org.context.max_context_tokens"] * (
-            isinstance(org.get("context"), dict) and "max_context_tokens" in org["context"])
-    if keys:
+    if saved:
         console.print(
             "  [yellow]⚠[/yellow]  "
-            + escape(f"{overlay_path} still sets {', '.join(keys)} — those win over config.yaml. "
-                     "Remove them there to use what init just found."),
+            + escape(f"{overlay_path} still sets {', '.join(saved)} — those win over config.yaml. "
+                     "To clear them: localharness init --force"),
             soft_wrap=True,
         )
 
 
-def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool) -> Path:
-    """Write config.yaml (owner-only), the agents/ folder and plugins/README.md beside it, and say
-    when overrides.yaml still overrides the server just written."""
+def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *,
+                   force: bool = False) -> Path:
+    """Write config.yaml (owner-only), the agents/ folder and plugins/README.md beside it. With
+    `force` (R15) the saved model and server choices leave overrides.yaml in the same step, checked
+    before either file is written; without it, say which saved choices still win."""
     from pydantic_yaml import to_yaml_str
 
+    reset = _saved_choices_reset(config_path, harness) if force else None
     config_file = config_path / "config.yaml"
     # memory.enabled is the memory plugin's key (MEMP-06); the deprecated org.memory_enabled is
     # never written, so a fresh install has nothing to warn about. On is the default: no key.
@@ -875,13 +948,24 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool) -
     plugins_readme.parent.mkdir(exist_ok=True)
     if not plugins_readme.exists():
         plugins_readme.write_text(GLOBAL_PLUGINS_README, encoding="utf-8")
-    _overlay_shadows(config_path)
+    if reset:
+        overlay_path, overlay, cleared = reset
+        atomic_write_overlay(overlay_path, overlay)  # an emptied overrides.yaml stays, as {}
+        console.print(
+            "[green]✓[/green] "
+            + escape(f"Cleared the saved model and server choices in {overlay_path} "
+                     f"({', '.join(cleared)})."),
+            soft_wrap=True,
+        )
+    elif not force:
+        _overlay_shadows(config_path)
     return config_file
 
 
 def _write_config(
     config_path: Path, result: DetectorResult, selected_model: str, cap: CapabilityResult,
-    server_config: ManagedServerConfig | None, host_tools_on: bool, memory_on: bool,
+    server_config: ManagedServerConfig | None, host_tools_on: bool, memory_on: bool, *,
+    force: bool = False,
 ) -> Path:
     """A fresh config.yaml from the server found, the model chosen and the two posture answers."""
     # Stamp fresh configs at the current shipped-defaults revision so the first `start` never
@@ -911,7 +995,7 @@ def _write_config(
         org=OrgConfig(**org_kwargs),
         server=server_config,
     )
-    return _write_harness(config_path, harness, memory_on)
+    return _write_harness(config_path, harness, memory_on, force=force)
 
 
 def _write_change(config_path: Path, result: DetectorResult, selected_model: str,
