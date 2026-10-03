@@ -1,0 +1,215 @@
+"""The harness's own settings files are out of the agent tools' reach, in every mode.
+
+Orchestrator ruling R13: the agent's `write` and `edit` tools, and every shell command the gate can
+read as writing or deleting a file, cannot change `config.yaml` or `overrides.yaml` in the
+machine's config folder or in any project's `.localharness/` — in every mode, `unattended`
+included. The model gets one line naming `localharness components set`; nobody is asked. The rule
+sits in `PermissionGate.check` AHEAD of the verdict, so no ticket, staged approval or mode turns it
+into an allow, and `evaluate()` keeps answering the protected-path ask the 2026-09-11 pins state.
+
+Self-extension is untouched: agent files, tool scripts, audit.jsonl and memory.db get exactly
+today's outcome. Code run inline through an interpreter is not read (the named residual).
+
+The machine's config folder is conftest's hermetic LOCALHARNESS_HOME.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+from localharness.agent import gate as gate_mod
+from localharness.agent import gate_types, verdict
+from localharness.agent.gate import PermissionGate, call_identity
+from localharness.agent.gate_types import MODE_STRICTNESS, Decision, GateSettings, ToolMeta, Verdict
+from localharness.agent.verdict import GateContext, evaluate
+from localharness.config.grants import GrantStore
+
+SETTINGS = GateSettings()
+MODES = sorted(MODE_STRICTNESS)
+WRITE = ToolMeta(group="fs.write", destructive=True)
+SHELL = ToolMeta(group="shell", destructive=True)
+
+
+@pytest.fixture
+def g(monkeypatch) -> Path:
+    monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
+    home = Path(os.environ["LOCALHARNESS_HOME"])
+    (home / "overrides.yaml").write_text("{}\n", encoding="utf-8")
+    return home
+
+
+@pytest.fixture
+def proj(tmp_path) -> Path:
+    root = (tmp_path / "proj").resolve()
+    (root / ".localharness" / "agents").mkdir(parents=True)
+    for name in ("config.yaml", "overrides.yaml"):
+        (root / ".localharness" / name).write_text("{}\n", encoding="utf-8")
+    return root
+
+
+def _gate(tmp_path: Path, proj: Path, mode: str, asker) -> PermissionGate:
+    return PermissionGate(boundary=proj, workspace=proj, grants=GrantStore(tmp_path / "grants.yaml"),
+                          channel_name="test", mode=mode, asker=asker)  # type: ignore[arg-type]
+
+
+async def _never(request):
+    raise AssertionError(f"asked: {request.display}")
+
+
+async def _once(request):
+    return Decision(kind="allow_once")
+
+
+async def _check(gate: PermissionGate, tool: str, params: dict):
+    return await gate.check(tool, params, SHELL if tool == "bash_exec" else WRITE,
+                            agent_id="a", session_id="s")
+
+
+def _refused(path: Path) -> str:
+    return gate_types.HARNESS_CONFIG_FILE_REASON.format(path=path)
+
+
+BLOCKED = {
+    "write-global-config": lambda g, p: ("write", {"path": str(g / "config.yaml"), "content": "x"},
+                                         g / "config.yaml"),
+    "edit-global-overrides": lambda g, p: ("edit", {"path": str(g / "overrides.yaml"),
+                                                    "old_string": "{}", "new_string": "x"},
+                                           g / "overrides.yaml"),
+    "write-project-config": lambda g, p: ("write", {"path": str(p / ".localharness" / "config.yaml"),
+                                                    "content": "x"}, p / ".localharness/config.yaml"),
+    "write-project-overrides": lambda g, p: (
+        "write", {"path": str(p / ".localharness" / "overrides.yaml"), "content": "x"},
+        p / ".localharness/overrides.yaml"),
+    "write-relative-to-the-workspace": lambda g, p: (
+        "write", {"path": ".localharness/config.yaml", "content": "x"}, p / ".localharness/config.yaml"),
+    "shell-redirect-in-the-project": lambda g, p: (
+        "bash_exec", {"command": "echo x > .localharness/overrides.yaml", "working_dir": str(p)},
+        p / ".localharness/overrides.yaml"),
+    "shell-rm": lambda g, p: ("bash_exec", {"command": f"rm {g / 'config.yaml'}"}, g / "config.yaml"),
+    "shell-tee": lambda g, p: ("bash_exec", {"command": f"tee {g / 'config.yaml'}"}, g / "config.yaml"),
+    "shell-sed-in-place": lambda g, p: ("bash_exec", {"command": f"sed -i s/a/b/ {g / 'overrides.yaml'}"},
+                                        g / "overrides.yaml"),
+    "shell-cp-after-cd": lambda g, p: ("bash_exec", {"command": f"cd {g} && cp /tmp/x overrides.yaml"},
+                                       g / "overrides.yaml"),
+    "write-through-a-symlink": lambda g, p: ("write", {"path": str(p / "link.yaml"), "content": "x"},
+                                             g / "config.yaml"),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("case", sorted(BLOCKED))
+async def test_the_four_files_are_refused_in_every_mode_and_nobody_is_asked(case, mode, g, proj,
+                                                                             tmp_path):
+    (proj / "link.yaml").symlink_to(g / "config.yaml")
+    tool, params, target = BLOCKED[case](g, proj)
+    gate = _gate(tmp_path, proj, mode, _never)
+
+    outcome = await _check(gate, tool, params)
+
+    assert not outcome.allowed
+    assert outcome.reason == _refused(target.resolve())
+    assert outcome.pending is None and not gate.pending, "nothing is staged for a human either"
+
+
+@pytest.mark.asyncio
+async def test_an_approved_ticket_never_turns_it_into_an_allow(g, proj, tmp_path):
+    """Before this rule a config write in `auto` was parked, and `/approve` bought one run of it."""
+    gate = _gate(tmp_path, proj, "auto", _never)
+    params = {"path": str(g / "config.yaml"), "content": "x"}
+    gate._approved_once[call_identity("write", params)] = 1
+
+    outcome = await _check(gate, "write", params)
+
+    assert not outcome.allowed and outcome.reason == _refused((g / "config.yaml").resolve())
+    assert not gate._approved_once, "the ticket is spent on sight, never stockpiled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", MODES)
+async def test_a_config_file_kept_elsewhere_through_a_symlink_is_still_refused(mode, g, proj,
+                                                                               tmp_path):
+    """A dotfiles setup: <global>/config.yaml is a link to a file in another folder. The file the
+    harness reads is still the one named config.yaml in its config folder."""
+    kept = tmp_path / "dotfiles" / "lh-config.yaml"
+    kept.parent.mkdir()
+    kept.write_text((g / "config.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+    (g / "config.yaml").unlink()
+    (g / "config.yaml").symlink_to(kept)
+    gate = _gate(tmp_path, proj, mode, _never)
+
+    for tool, params in (("write", {"path": str(g / "config.yaml"), "content": "x"}),
+                         ("bash_exec", {"command": f"echo x > {g / 'config.yaml'}"})):
+        outcome = await _check(gate, tool, params)
+        assert not outcome.allowed and "localharness components set" in outcome.reason, tool
+
+
+UNTOUCHED = {
+    "global-agent-file": lambda g, p: ("write", {"path": str(g / "agents" / "x.yaml"), "content": "x"}),
+    "global-tool-script": lambda g, p: ("write", {"path": str(g / "tools" / "x.sh"), "content": "x"}),
+    "audit-log": lambda g, p: ("write", {"path": str(g / "audit.jsonl"), "content": "x"}),
+    "memory-db": lambda g, p: ("write", {"path": str(g / "agents" / "orchestrator" / "memory.db"),
+                                         "content": "x"}),
+    "an-agents-config-yaml": lambda g, p: ("write", {"path": str(p / ".localharness" / "agents" /
+                                                                  "config.yaml"), "content": "x"}),
+    "a-backup": lambda g, p: ("write", {"path": str(p / ".localharness" / "config.yaml.bak"),
+                                        "content": "x"}),
+    "a-project-source-config": lambda g, p: ("write", {"path": str(p / "src" / "config.yaml"),
+                                                       "content": "x"}),
+    "shell-read": lambda g, p: ("bash_exec", {"command": f"cat {g / 'config.yaml'}"}),
+    "interpreter-inline": lambda g, p: (
+        "bash_exec", {"command": f"python3 -c \"open('{g / 'config.yaml'}','w')\""}),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", sorted(UNTOUCHED))
+async def test_what_the_rule_never_touches_gets_exactly_todays_outcome(case, g, proj, tmp_path,
+                                                                      monkeypatch):
+    tool, params = UNTOUCHED[case](g, proj)
+    ctx = _gate(tmp_path, proj, "auto", _once).context()
+    assert verdict.harness_config_file_target(tool, params, ctx, SETTINGS) is None
+
+    for mode in MODES:
+        now = await _check(_gate(tmp_path / mode / "now", proj, mode, _once), tool, params)
+        with monkeypatch.context() as m:
+            m.setattr(gate_mod, "harness_config_file_target", lambda *a: None)
+            today = await _check(_gate(tmp_path / mode / "today", proj, mode, _once), tool, params)
+        assert (now.allowed, now.reason) == (today.allowed, today.reason), mode
+
+
+def test_the_reason_is_one_line_naming_the_sanctioned_command(g):
+    reason = _refused((g / "config.yaml").resolve())
+
+    assert "\n" not in reason
+    assert "localharness components set" in reason and str((g / "config.yaml").resolve()) in reason
+
+
+@pytest.mark.parametrize("tool,params", [
+    ("write", {"path": 42, "content": "x"}),
+    ("write", {"path": "$HOME/.localharness/config.yaml", "content": "x"}),
+    ("write", {"content": "x"}),
+    ("write", "not a dict"),
+    ("read", {"path": "<g>/config.yaml"}),
+    ("python_exec", {"code": "open('<g>/config.yaml', 'w')"}),
+    ("bash_exec", {"command": ["rm", "<g>/config.yaml"]}),
+    ("bash_exec", {"command": "echo x > config.yaml", "working_dir": 7}),
+], ids=["non-string-path", "unresolvable", "no-path", "params-not-a-dict", "read-tool",
+        "python-exec", "non-string-command", "unplaceable-working-dir"])
+def test_a_call_this_rule_cannot_read_is_left_to_the_verdict(g, proj, tmp_path, tool, params):
+    if isinstance(params, dict):
+        params = {k: v.replace("<g>", str(g)) if isinstance(v, str) else v for k, v in params.items()}
+    ctx = _gate(tmp_path, proj, "auto", _once).context()
+
+    assert verdict.harness_config_file_target(tool, params, ctx, SETTINGS) is None
+
+
+def test_the_verdict_itself_still_asks_about_these_files(g, proj):
+    """The 2026-09-11 pins: evaluate() answers a protected-path ask; the deny is the gate's."""
+    ctx = GateContext(boundary=proj, workspace=proj, grants=lambda *a: None, mode="auto",
+                      has_review_surface=True)
+    result = evaluate("write", {"path": str(g / "config.yaml"), "content": "x"}, WRITE, ctx, SETTINGS)
+
+    assert result.verdict is Verdict.ASK and result.request.klass == "protected-path"
