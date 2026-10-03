@@ -50,6 +50,11 @@ PlanState = Literal["on", "off", "available", "failed", "skipped", "refused", "n
 _NOT_ON = {"available": "available but not enabled", "needs-extra": "missing its install extra"}
 
 
+def _enable_command_text(name: str) -> str:
+    """The one place `localharness plugins enable <name>` is spelled."""
+    return f"localharness plugins enable {name}"
+
+
 @dataclass(frozen=True)
 class PlanEntry:
     """One plugin's row in the plan — the words `plugins list`, doctor and the banner print."""
@@ -65,7 +70,15 @@ class PlanEntry:
     @property
     def enable_command(self) -> str | None:
         """The exact command that turns an off or available plugin on; None otherwise."""
-        return f"localharness plugins enable {self.name}" if self.state in ("off", "available") else None
+        return _enable_command_text(self.name) if self.state in ("off", "available") else None
+
+    @property
+    def step_command(self) -> str | None:
+        """The command that turns this plugin on and runs its setup step: for a plugin that is off
+        or available (it equals enable_command) and for one that is on or holds for its install
+        extra, where the same command runs the step again; None for a plugin the plan failed,
+        refused or skipped (`display` says why). `init` prints it for every bundled plugin."""
+        return _enable_command_text(self.name) if self.state in ("on", "off", "available", "needs-extra") else None
 
     @property
     def display(self) -> str:
