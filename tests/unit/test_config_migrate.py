@@ -572,3 +572,45 @@ def test_start_auto_migrate_repairs_an_agent_file_and_says_so(tmp_path):
     assert "allow_patterns" not in yaml.safe_load(agent.read_text())["permissions"]
     assert "scout.yaml" in out
     assert list(tmp_path.glob("config.yaml.bak-*")) == [], "config.yaml needed nothing — leave it"
+
+
+# --------------------------------------------------------------------------- #
+# `write(*/agents/*.yaml)` left the shipped defaults (the agent may build its own specialists;
+# what one starts, loads or loosens waits for the user at start). New installs ship without it;
+# the migration never re-adds it and never takes it away from a config that holds it.
+# --------------------------------------------------------------------------- #
+
+AGENTS_YAML_DENY = "write(*/agents/*.yaml)"
+
+
+def test_plan_never_re_adds_the_agents_yaml_deny(tmp_path):
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+    from localharness.config.migrate import plan
+
+    # Revision 2's 25 patterns without this one: the 3 other writes and the 21 shell patterns.
+    without = [p for p in PermissionConfig().deny_patterns if p != AGENTS_YAML_DENY][:24]
+    cfg = _write_config(tmp_path, without)
+    data = yaml.safe_load(cfg.read_text())
+    data["org"]["permissions"]["defaults_revision"] = 2
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    p = plan(yaml.safe_load(cfg.read_text()))
+    assert p is not None and p.from_revision == 2
+    assert AGENTS_YAML_DENY not in p.added
+
+    data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+    assert plan(data) is None
+
+    assert _run(tmp_path).exit_code == 0
+    assert AGENTS_YAML_DENY not in _deny(cfg)
+    assert _perms(cfg)["defaults_revision"] == CURRENT_DEFAULTS_REVISION
+
+
+def test_a_config_that_holds_the_agents_yaml_deny_keeps_it(tmp_path):
+    cfg = _write_config(tmp_path, OLD_7)
+
+    assert _run(tmp_path).exit_code == 0
+
+    new_deny = _deny(cfg)
+    assert new_deny[: len(OLD_7)] == OLD_7, "kept, in place"
+    assert new_deny.count(AGENTS_YAML_DENY) == 1
