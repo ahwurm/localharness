@@ -10,6 +10,7 @@ Every case stores a long key and checks the key, its last 8 characters and pydan
 reads the real home."""
 from __future__ import annotations
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -70,3 +71,60 @@ def test_the_migration_error_itself_carries_no_input(tmp_path) -> None:
         assert "proposer.api_kye: Extra inputs are not permitted" in str(exc)
     else:
         raise AssertionError("a config that fails validation was migrated")
+
+
+# --- /model and `localharness model <name>`: persisting a new default --------------------------
+
+
+def _model_home(tmp_path):
+    g = _home(tmp_path, {"proposer": {"base_url": "http://p/v1", "model": "p-model", "api_key": KEY}})
+    # what `components set proposer.api_key …` leaves: the raw key in overrides.yaml, which the
+    # check merges over the loaded config (whose own key is a masked SecretStr)
+    (g / "overrides.yaml").write_text(yaml.safe_dump({"proposer": {"api_key": KEY}}), encoding="utf-8")
+    return g
+
+
+def test_model_name_refusal_never_echoes_the_key(tmp_path, monkeypatch) -> None:
+    from localharness.cli import model_ops
+
+    g = _model_home(tmp_path)
+    monkeypatch.setattr(model_ops, "list_live_models", lambda base_url, *a, **k: (["test-model", "p-model"], True))
+    before = (g / "overrides.yaml").read_bytes()
+    result = runner.invoke(app, ["model", "p-model", "--config-dir", str(g)])
+
+    assert result.exit_code == 2, result.output
+    _clean(result.stdout, result.stderr, repr(result.exception))
+    assert "proposer.model must differ" in " ".join(result.output.split()), result.output
+    assert (g / "overrides.yaml").read_bytes() == before
+
+
+def test_persisting_a_colliding_default_raises_without_the_key(tmp_path) -> None:
+    """The error /model prints after an in-session swap ("persisting the new default failed")."""
+    import asyncio
+
+    from localharness.cli import model_ops
+    from localharness.config.loader import ConfigLoader
+
+    g = _model_home(tmp_path)
+    harness = ConfigLoader(config_dir=g).load_harness()
+    with pytest.raises(ValueError) as info:
+        asyncio.run(model_ops.persist_default_model(harness, "p-model", config_dir=g))
+    _clean(str(info.value), repr(info.value), repr(info.value.__cause__))
+    assert "proposer.model must differ" in str(info.value)
+
+
+def test_persisting_a_bad_active_endpoint_raises_without_the_input(tmp_path) -> None:
+    """The cross-endpoint /model switch validates through the same check (a bad endpoint value)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from localharness.cli import model_ops
+    from localharness.config.loader import ConfigLoader
+
+    g = _model_home(tmp_path)
+    harness = ConfigLoader(config_dir=g).load_harness()
+    peer = SimpleNamespace(name="peer", base_url=12345, provider_type="vllm", api_key="none")
+    with pytest.raises(ValueError) as info:
+        asyncio.run(model_ops.persist_active_endpoint(harness, peer, "m", config_dir=g))
+    _clean(str(info.value), repr(info.value), repr(info.value.__cause__))
+    assert "active_endpoint.base_url" in str(info.value)
