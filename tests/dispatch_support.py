@@ -1,12 +1,15 @@
 """Shared support for every dispatch test : env isolation + a recording fake `discord`.
 
-SAFETY: a developer's `~/.claude/channels/discord/.env` may hold a live bot token, and the
-dispatch plugin's env fallback reads it. Every
-dispatch test calls `isolate_discord_env` FIRST, so `Path.home()` is a tmp dir and the five env
-token/allow sources are gone — no test can ever see, print or log in with the real token.
+SAFETY: a developer's environment may hold a live bot token in `LOCALHARNESS_DISCORD_TOKEN` or
+`DISCORD_BOT_TOKEN`, which the dispatch plugin's env fallback reads (Claude Code's
+`~/.claude/channels/discord/.env` is no longer read at all). Every dispatch test calls
+`isolate_discord_env` FIRST, so `Path.home()` is a tmp dir and the five env token/allow sources
+are gone — no test can ever see, print or log in with the real token.
 
-The fake `discord` module stands in at the discord.py API boundary (Intents, Client.event /
-start / close, messages with send / add_reaction / edit / reply). It never touches the network.
+The fake `discord` module stands in at the discord.py API boundary (Intents, AllowedMentions,
+Client.event / start / close, messages with send / add_reaction / edit / reply). It never touches
+the network. Like the real gateway, a reaction the bot adds comes back to it as a raw reaction
+event from its own user id (`BOT_USER_ID`): the adapter's self filter is what drops it.
 Every outbound call lands as one `(op, target, payload)` tuple in ONE shared `fake.log`, in call
 order: `target` is a fake id string (`c<channel id>` for a channel, `m<message id>` for a
 message), `payload` the exact text or emoji. Ids are deterministic counters, never time-derived.
@@ -101,9 +104,20 @@ class FakeDiscord:
             def default(cls) -> "Intents":
                 return cls()
 
+        class AllowedMentions:
+            """Stores its keyword arguments, like discord.AllowedMentions' four flags."""
+
+            def __init__(self, **kwargs: Any) -> None:
+                self.kwargs = kwargs
+
+            @classmethod
+            def none(cls) -> "AllowedMentions":
+                return cls(everyone=False, users=False, roles=False, replied_user=False)
+
         class Client:
-            def __init__(self, *, intents: Any = None, **_: Any) -> None:
+            def __init__(self, *, intents: Any = None, allowed_mentions: Any = None, **_: Any) -> None:
                 self.intents = intents
+                self.allowed_mentions = allowed_mentions
                 self.user = types.SimpleNamespace(id=BOT_USER_ID)
                 self.events: dict[str, Any] = {}
                 self._closed = asyncio.Event()
@@ -130,6 +144,7 @@ class FakeDiscord:
                 fake.files.append(self)
 
         mod.Intents = Intents
+        mod.AllowedMentions = AllowedMentions
         mod.Client = Client
         mod.File = File
         return mod
@@ -162,6 +177,12 @@ class _FakeMessage:
 
     async def add_reaction(self, emoji: str) -> None:
         self._fake.log.append(("react", f"m{self.id}", str(emoji)))
+        # The gateway echoes the bot's own reaction back to it, as the real one does.
+        client = self._fake.client
+        handler = client.events.get("on_raw_reaction_add") if client is not None else None
+        if handler is not None:
+            await handler(types.SimpleNamespace(user_id=BOT_USER_ID, message_id=self.id,
+                                                emoji=str(emoji)))
 
     async def edit(self, content: str = "", **_: Any) -> None:
         if self._fake.fail_edits:
