@@ -450,18 +450,20 @@ def test_no_skip_without_a_terminal_no_server_still_exits_1(tmp_path, monkeypatc
 # ------------------------------------------------------------------ the plugin list init ends with
 
 HEADER = "Plugins — the command beside each one turns it on or sets it up:"
+FOOTER = "In a session, /plugins enable <name> does this too and turns it on right away."
 PLUGINS = ["image", "web", "memory", "dispatch", "autoresearch"]  # BUILTIN_PLUGINS order
 
 
 def _plugin_block(result) -> list[str] | None:
     """The rows of the plugin list — which must be the LAST block of the output, after one blank
-    line — or None when init printed no list."""
+    line, and end with the in-session line — or None when init printed no list."""
     lines = (result.output or "").rstrip().splitlines()
     if HEADER not in lines:
         return None
     at = lines.index(HEADER)
     assert lines[at - 1] == "", "one blank line comes before the list"
-    return lines[at + 1:]
+    assert lines[-1] == FOOTER, "the list ends with the in-session line"
+    return lines[at + 1:-1]
 
 
 def test_init_ends_with_every_bundled_plugin_and_its_command(tmp_path, monkeypatch):
@@ -542,7 +544,34 @@ def test_a_plugin_list_failure_never_fails_init(tmp_path, monkeypatch):
     _exited(result, 0)
     assert (tmp_path / "config.yaml").exists()
     assert result.output.rstrip().splitlines()[-1] == "Plugins: run `localharness plugins list` to see them."
-    assert HEADER not in result.output
+    assert HEADER not in result.output and FOOTER not in result.output
+
+
+def test_the_capability_probe_closes_its_client_in_its_own_loop(monkeypatch):
+    """Deferred item 3, the root of 52-04's gc.collect(): init's probe closes its LLMClient inside
+    the probe's own event loop. Left open, the SDK finalizes it on whatever loop is running when the
+    GC reaches it — a first start's session loop, where closing a transport of the probe's closed
+    loop raised "Event loop is closed" on a real terminal."""
+    from localharness.provider import client as client_mod
+
+    seen: list[tuple[str, object]] = []
+
+    async def detect(self):
+        seen.append(("detect", asyncio.get_running_loop()))
+        return _make_capability_result()
+
+    async def aclose(self):
+        seen.append(("aclose", asyncio.get_running_loop()))
+
+    monkeypatch.setattr(client_mod.LLMClient, "detect_capabilities", detect)
+    monkeypatch.setattr(client_mod.LLMClient, "aclose", aclose)
+    assert init_cmd.LLMClient is client_mod.LLMClient  # the probe builds the real client
+
+    cap = init_cmd._probe_capabilities(_make_detector_result(), "test-model:7b")
+
+    assert cap.tool_call_mode == "native"
+    assert [what for what, _ in seen] == ["detect", "aclose"]
+    assert seen[0][1] is seen[1][1]  # closed in the very loop that probed, before asyncio.run returned
 
 
 # ------------------------------------------------------------------ --force: a true core reset (R15)

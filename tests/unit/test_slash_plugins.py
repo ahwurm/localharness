@@ -8,6 +8,9 @@
    that cannot switch plugins, with no session hook, for a wrong spelling, or while a call is
    parked; otherwise the hook's line, or the restart: `restart_request` set and the REPL ended
    as /quit ends it, in the classic loop and in the box loop, typed-ahead lines kept.
+3. The restart indicator (R3): after the rebuild, "Restarted with NAME on. Your conversation
+   continues." and one status line — did the plugin come up, and how? The composed restart
+   itself is tests/integration/test_setup_in_session_e2e.py.
 
 Tests that call asyncio.run are plain `def`: asyncio_mode is "auto". Every REPL here gets an
 explicit gate: on the MagicMock agent, `agent.gate.pending` is truthy and would read as a parked
@@ -16,6 +19,7 @@ call.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -26,7 +30,7 @@ import yaml
 from localharness.channels.base import ChannelAdapter
 from localharness.channels.terminal import TerminalChannel
 from localharness.channels.web.channel import WebChannel
-from localharness.cli import plugins_cmd
+from localharness.cli import plugins_cmd, start_cmd
 from localharness.cli.repl import OrchestratorREPL
 from localharness.cli.slash_commands import all_rows, find_row
 from localharness.plugins import builtin, discovery
@@ -330,3 +334,70 @@ async def test_box_mode_replays_resumed_lines_first():
     assert repl.restart_request == ("enable", "y")
     assert repl.queued == ("/help",)
     assert channel.box_started is True and channel.box_stopped is True
+
+
+# --- 3. the restart indicator ------------------------------------------------------------------
+
+def _resume(action=("enable", "x"), **kw):
+    fields = dict(action=action, agent_name="orchestrator", conversation=(), prior_context="",
+                  eviction_store=None, queued=(), gate_mode="auto", previous_sitting_id="s1")
+    return start_cmd.Resume(**(fields | kw))
+
+
+def _started(loaded=(), failed=None, unconfigured=None):
+    """What start_plugins reported, in LifecycleResult's shape."""
+    return SimpleNamespace(loaded_names=list(loaded), failed=failed or {}, unconfigured=unconfigured or {})
+
+
+def test_indicator_the_restarted_line():
+    assert start_cmd.RESTARTED_LINE.format(name="x", state="on") == \
+        "Restarted with x on. Your conversation continues."
+
+
+def test_indicator_the_handle_is_plain_frozen_data():
+    resume = _resume()
+    assert dataclasses.is_dataclass(resume)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        resume.gate_mode = "unattended"
+    restart = start_cmd.Restart(("enable", "x"), resume)
+    assert restart.action == ("enable", "x") and restart.resume is resume
+
+
+def test_indicator_running():
+    assert start_cmd._resume_status(_resume(), _started(["x"])) == "x: on in this session"
+
+
+def test_indicator_its_check_failed():
+    assert start_cmd._resume_status(_resume(failed_check="no answer at http://c"), _started(["x"])) == \
+        "x: on, but its check failed: no answer at http://c"
+
+
+def test_indicator_not_set_up_yet():
+    assert start_cmd._resume_status(_resume(), _started(unconfigured={"x": "x.url"})) == \
+        "x: on, but not set up yet — run /plugins enable x to set it up"
+
+
+def test_indicator_it_could_not_start():
+    assert start_cmd._resume_status(_resume(), _started(failed={"x": "start() raised OSError: boom"})) == \
+        "x: on, but it could not start: start() raised OSError: boom"
+
+
+def test_indicator_its_step_stopped():
+    stopped = _resume(step_stopped=True)
+    assert start_cmd._resume_status(stopped, _started()) == \
+        "x: not on in this session — its setup stopped before it finished"
+    assert start_cmd._resume_status(stopped, _started(["x"])) == \
+        "x: on in this session — its setup stopped before it finished"
+
+
+def test_indicator_disabled():
+    off = _resume(("disable", "x"))
+    assert start_cmd._resume_status(off, _started(["y"])) == "x: off in this session"
+    assert start_cmd._resume_status(off, _started(["x"])) == "x: still on in this session — /plugins shows why"
+
+
+def test_indicator_otherwise_not_running():
+    assert start_cmd._resume_status(_resume(), _started()) == \
+        "x: not running in this session — /plugins shows its state"
+    assert start_cmd._resume_status(_resume(), None) == \
+        "x: not running in this session — /plugins shows its state"
