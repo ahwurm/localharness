@@ -4,228 +4,49 @@
 
 **Run AI agents on the models you already run locally.**
 
-LocalHarness does not serve models. It sits on top of the one you already serve — vLLM, llama.cpp, Ollama, or LM Studio — and gives it real agents: tools, memory, and permissions, written in YAML instead of Python.
+LocalHarness is an open-source agent harness for local LLMs. It does not serve models: it connects to one you already serve over an OpenAI-compatible API (vLLM, llama.cpp, Ollama or LM Studio) and gives it agents, defined in YAML, with tools, a permission gate in front of every tool call, and helper agents that each work in a fresh context with only the tools they are allowed. A small core runs the agent loop; memory, the phone app, Discord, image generation and the self-improvement loop are plugins that you turn on or off with one command.
 
-Point it at any OpenAI-compatible endpoint and the same agent runs. One main agent reads your task and hands pieces to helpers, each working in its own fresh window with only the tools you allowed it.
+![LocalHarness: init detects your local model, start drops you into a ready agent, and it researches a question live with web search and multi-step tool calls](assets/demo.gif)
 
-The bet behind the project: most of what makes an agent good lives in the harness, not the model. The same model can swing tens of benchmark points depending on what is built around it.
+## A small core, five plugins
 
-Five things it does that are hard to find anywhere else:
-
-- **It reads documents bigger than its own memory.** A long filing or contract is read in sections, start to finish — nothing is skipped and nothing is skimmed — and every number in the answer points back to the line it came from.
-- **A web page cannot talk it into running commands.** Anything fetched off the internet is handled by a helper that has no power to run commands or change files. That wall is built into the structure, so it holds even when the model is fooled.
-- **It remembers by meaning, and forgets what stops mattering.** Memories are recalled by similarity in a small local embedding model's space — the same family as the model you serve — not by keyword rules or hand-tuned scores. While idle it *dreams*: it replays the session's event stream, strengthens the memories that resonated with what actually happened, binds related ones into named groups, and (once you enable it) archives what no longer earns its place. Nothing is deleted — an archived memory restores with one command. It all lives in SQLite plus one ~0.6B embedding model that runs on CPU and never touches your GPU; no vector database.
-- **Each session remembers the last one.** Every run closes with a one-line summary of what you asked, or of the error it resolved, written from the record rather than by the model. The next session opens already knowing what you did last time, so "what did we do yesterday?" gets a real answer with no lookup.
-- **A memory's credibility is earned, never asserted.** Every write is a bet: a new memory starts at its writer's measured track record, seeing the same claim again in a different session adds evidence, and being contradicted subtracts — so a source that keeps being wrong prices its own future claims down. Nothing in the store carries a confidence number a human invented.
-
-![LocalHarness — init detects your local model, start drops you into a ready agent, and it researches a question live with web search and multi-step tool calls](assets/demo.gif)
-
-> `localharness init` finds the server you already have running (here, vLLM serving Qwen) and checks whether its model can call tools. Then `localharness start` needs no setup: it builds the main agent and drops you at a prompt. Ask a real question and watch it work — here it searches the web, fetches pages, and keeps going for several rounds to find the best open model for a 128 GB machine, every tool call visible as it happens.
-
-## Why run agents locally?
-
-Frontier coding agents are great when you're driving them. But metering and rate limits make them an awkward fit for the recurring jobs you'd actually want an agent to *own*: the nightly report, the scheduled cleanup, the watch-and-react task. LocalHarness keeps the Claude Code / OpenCode workflow you already know, pointed at a model running on hardware you control.
-
-- **No metering.** A job that fires every hour runs on hardware you already own, with no per-token bill.
-- **Your data stays put.** Code, files, and prompts never leave the machine.
-- **Always on.** No quota or rate caps to budget around for unattended runs.
-- **Familiar.** Same agent, tool, and permission model as the cloud tools, just local.
-
-**The gate asks about your workspace, not about your work.** From v0.14.1 the default mode is `auto`: the first time a session opens a folder this machine has never worked in, LocalHarness asks once whether you trust it — a project with earlier sessions behind it is recognized and never asked, and the answer, once given, is recorded forever — and after that everything runs except a short blacklist: a delete or a recursive `chmod`/`chown` aimed outside the project, `git push --force`/`--delete`, `git reset --hard`, `git clean -f`, `sudo`/`su`, `curl … | sh`, `dd`/`mkfs`/`shred`, writes to your secret stores or the system directories, and writes to `.git/` or your config files under `.localharness/`. Nothing else interrupts you — not docker, not interpreters, not subagents, not MCP tools, not writes elsewhere. Decline the trust question and the session runs `guarded`, the v0.14.0 behavior: ask once about each new thing, remember the answer. A session with nobody to ask and no record runs `guarded` too.
-
-**And nothing on that blacklist stops the agent.** From v0.14.2 a blacklisted call in `auto` is parked as a pending decision instead of being put to you as a prompt: the model is told to carry on without that step and to name the pending number in its answer, and the turn keeps running. You answer whenever you get back. `/pending` lists what is waiting, `/approve N` runs one and `/deny N` drops one, with the oldest as the default; in the terminal `ctrl+y` and `ctrl+n` answer the oldest, and in Discord the notice carries ✅ and ❌. An approval covers that one call with those exact arguments, once, and is not remembered. `guarded` and `trusted` still ask with a blocking prompt, because that is what they are for.
-
-**One setting a cron job still needs.** A run with nobody to answer a question refuses the call instead of allowing it — including the trust question — so a nightly or cron job needs `permissions.mode: unattended` written in its config, which restores the pre-v0.14 behavior of never asking anything. It is config-only on purpose; see [SECURITY.md](SECURITY.md).
-
-A frontier agent like Claude Code is still the easy way to set the harness up and compose a bespoke subagent for a task. The split that works: frontier to design, local to run.
-
-**Migrating existing headless work?** [LocalShift](https://github.com/ahwurm/localshift) is the companion project. Point Claude Code at a cron job, skill, or bare prompt and it builds a per-workload quality eval, proves the local model is good enough (or honestly says keep-frontier), then cuts the job over to run claude-free on LocalHarness.
-
-## Features
-
-- **YAML-defined agents** — add an agent, division, or tool policy without writing Python
-- **Event-bus core** — components communicate via a typed event stream, persisted as append-only JSONL per agent
-- **Memory that runs on the model, not on rules** — each agent keeps its own SQLite memory, and every similarity judgment (search ranking, idle replay, duplicate detection) is made in a local embedding model's space (`Qwen3-Embedding-0.6B`, CPU; needs the `embeddings` extra — without it memory says so plainly rather than degrading to something else). Idle *dreaming* replays the session stream, ranks what resonates, and binds related memories into named groups; forgetting (off by default) archives what scores below the store's own proven-useful line, restorable any time. A fact that changes is superseded, never overwritten
-- **Workspace layers** — a `.localharness/` folder in a project layers its own agents and config over the machine-wide one (nearest wins, deny patterns union so a project can never widen them); `localharness config show` names the file behind every effective key, and `doctor` names both layers and every key the project overrides
-- **Per-project memory** — where a workspace applies, memory, sessions, history, and the audit log live with the project, so many projects on one machine stop pouring their lessons into each other's context; `/memory promote` moves a single fact to the global store, deliberately
-- **Deny-first permissions** — one deterministic gate in front of every tool call; policies inherit down the hierarchy and can only narrow
-- **Tool-call fallback** — native function calling where the model supports it, XML/Hermes fallback where it doesn't
-- **MCP support** — connect Model Context Protocol servers and expose their tools to agents
-- **Built-in tools** — read, write, edit, glob, grep, bash, python, web search/fetch, and subagent delegation
-- **Benchmark suite** — scenario corpus in `bench/` for measuring harness changes against your own model
-- **Autoresearch loop** — propose → gate → promote mutation archive for harness self-improvement experiments (the bundled `autoresearch` plugin, on by default)
-- **Pluggable channels** — terminal by default, or `localharness start --channel discord` to drive a session from Discord (the `dispatch` plugin, on by default; needs the `dispatch` extra, `uv sync --extra dispatch`, then `localharness plugins enable dispatch --set discord.token=… --set discord.allow=<your user id>`, or `localharness components set dispatch.discord.token …`; the token is never printed. The old `LOCALHARNESS_DISCORD_*` variables still work, with a warning, until 0.17.0. This plugin build of the bot is tested offline and not yet verified on a live Discord server), or `localharness web` to drive one from a phone on your own private network — home-screen install, a pairing QR so you never type the token, and a lock-screen notification when a long turn finishes or the permission gate needs you (needs the `web` extra; ships a bare reference page, **not** a finished chat app — see [docs/web.md](docs/web.md))
-
-**Answering a permission prompt in Discord.** When the gate needs a human, the bot posts a
-🛑 **Permission needed** message and reacts to it with your options: **✅ allow once**,
-**♾️ always allow this in this workspace** (an "always" is written to `grants.yaml` and holds in
-the terminal and Zed too), and **❌ no, this once**. In the default `auto` mode the only
-question that blocks is the workspace trust question, the first time you use a folder. A blacklisted call is
-posted as a pending decision instead, with ✅ (run it), ❌ (skip it) and the `/approve N` spelling in the text;
-answering it resolves the call and holds nothing up, and it does not expire. `♾️` appears in `guarded` and
-`trusted`, where answers are remembered. Only a user on `dispatch.discord.allow` can answer. A blocking
-question in those two modes does expire: if nobody reacts before `permissions.ask.timeout_s`, the call is denied
-and the message is edited to say so. React after that and nothing happens; ask again instead.
-
-## How it compares
-
-LocalHarness is an *agent layer* — not an inference engine, and not a cloud SaaS. It sits on top of whatever serves your model and gives that model agents, tools, memory, and permissions.
-
-| | What it is | LocalHarness relationship |
-|---|---|---|
-| **Ollama / vLLM / LM Studio / llama.cpp** | Inference engines — they *serve* a model over an API | LocalHarness runs on top; point it at their endpoint |
-| **Cloud agent frameworks** (hosted assistants / SaaS) | Agents that run against a vendor's metered API | Same agent / tool / permission model, but against a model on *your* hardware — no metering, data stays local |
-| **Agent libraries** (write-your-own in Python) | Code-first SDKs for building agents | Config-first: agents, divisions, and permissions in YAML, no Python required |
-
-If you already serve a model with Ollama or vLLM and want to run real agents against it — with tools, isolated memory, and deny-first permissions — that's the gap LocalHarness fills.
-
-## Supported runtimes
-
-Every backend is reached over one OpenAI-compatible client, so the *request* path is
-provider-agnostic. What differs per runtime is **lifecycle** (whether the harness can start and
-stop the server itself), **introspection** (exact token counting, context-window discovery), and
-how much has been validated on real hardware. All four also work as a plain
-**attach** target — point `init` at an already-running endpoint. Setup pages:
-[llama.cpp](docs/runtimes/llamacpp.md) · [Ollama](docs/runtimes/ollama.md) ·
-[LM Studio](docs/runtimes/lmstudio.md) · vLLM (see [reference architectures](docs/reference-architectures/README.md)).
-
-| Runtime | Harness-managed lifecycle | Model tree / switch | Tool-calling | Token counting | Context window | Live-validated |
-|---|---|---|---|---|---|---|
-| **vLLM** | ✅ docker / binary | ✅ | ✅ native | ✅ exact | ✅ `max_model_len` | ✅ reference + bench |
-| **llama.cpp** | ✅ spawns `llama-server` | ✅ cross-framework | ✅ XML / Hermes | ✅ exact (`/tokenize`) | ✅ `/props` `n_ctx` | ✅ incl. live heavy-swap |
-| **Ollama** | ✅ spawns + owns `ollama serve` | ✅ | ✅ native | ✅ exact (GGUF)¹ | ✅ `/api/ps`² | ✅ CPU round-trip |
-| **LM Studio** | ✅ drives headless `lms` | ✅ | ✅ native | ✅ exact (GGUF)¹ | ✅ `loaded_context_length`² | ✅ CPU round-trip |
-
-✅ validated — footnotes note setup caveats, not gaps:
-
-1. **Token counting** is exact for every runtime — whole-request exact, not just content. vLLM
-   applies its chat template server-side (`/tokenize` messages-mode) and llama.cpp renders it via
-   `/apply-template` before `/tokenize`, so message counts — *including the rendered tools block* —
-   equal the real call's `usage.prompt_tokens` to the token (verified live on both). Ollama and
-   LM Studio serve no tokenize endpoint, so the harness loads the served model's *own* GGUF vocab +
-   chat template in-process (`llama-cpp-python` vocab-only — the `exact-tokenizer` extra) and counts
-   to the token — verified equal to each server's own count (message structure exact; the tools
-   block is not rendered on these two). Older vLLM/llama.cpp builds without messages-mode /
-   `/apply-template` keep exact content counts and estimate message overhead, disclosed at start;
-   without the extra (or with no local model files), Ollama/LM Studio fall back to a labeled
-   approximate estimate.
-2. **Context window** is read at server level for vLLM (`max_model_len`) and llama.cpp (`/props`),
-   and from the *loaded* model for Ollama (`/api/ps` `context_length`) and LM Studio
-   (`loaded_context_length`) — the latter two are known once the model is resident (the harness
-   warm-loads it) and fall back to config, disclosed, before then. Never a silent guess; the served
-   window, not a model ceiling that would over-report and 400 mid-session.
-
-*Live-validated* means a real end-to-end run on the [DGX Spark](docs/reference-architectures/dgx-spark.md)
-reference machine (detect → serve → tool-call → verified stop). Recorded **bench** runs currently
-exist for vLLM only; the other runtimes ship opt-in `bench.yaml` entries you run against your own
-model. Per-runtime live markers: `LOCALHARNESS_LIVE_{VLLM,OLLAMA,LLAMACPP,LMSTUDIO}=1 uv run pytest -m live_<name>`.
-
-## Requirements
-
-- Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/)
-- A local LLM server with an OpenAI-compatible API (vLLM, Ollama, LM Studio, or llama.cpp)
-- On Windows: [Git for Windows](https://git-scm.com/download/win) — `bash_exec` runs under
-  git-bash (see [Platform support](#platform-support))
+- **Core** owns the agent loop, the built-in tools (read, write, edit, glob, grep, bash, python, web search and fetch, delegation to helper agents), MCP servers, config, the permission gate, the bench and the CLI.
+- **Plugins** add tools, commands, slash commands, `doctor` checks, settings and chat channels through one plugin API. The five that ship with LocalHarness use the same API as a plugin you write yourself. Turning one off removes what it adds; turning off memory or autoresearch leaves their files on disk (the memories, the experiment archive).
 
 ## Quick start
 
-```bash
-git clone https://github.com/ahwurm/localharness.git
-cd localharness
-uv sync --extra embeddings   # the extra powers memory (a small CPU embedding model); plain `uv sync` runs everything else
+You need Python 3.12 or later, [uv](https://docs.astral.sh/uv/), and a model server running.
 
-uv run localharness init    # probes vLLM :8081/:8000, Ollama :11434, LM Studio :1234, llama.cpp :8080
-uv run localharness start   # interactive session
+```bash
+uv tool install 'localharness[embeddings,web]'  # memory's CPU model + the phone app
+localharness init                    # finds your model server, writes your config
+localharness start                   # an interactive session
+
+localharness plugins list            # every plugin and whether it is on
+localharness plugins disable autoresearch
+localharness plugins enable image --set comfyui_url=http://127.0.0.1:8188
 ```
 
-`init` detects your endpoint and models, probes tool-calling capability, and writes `~/.localharness/config.yaml`. No server running? `init` walks you through setup: pick your hardware (reference architecture) and it provisions the local server (pulling the vLLM container where Docker is available) — `start` then reuses it. Inside the REPL, `/model` lists served + downloaded models and swaps between them; `localharness start --model <name>` picks one for a single session without touching config, and `--list-models` lists without starting a session. `localharness model --download <repo_id>` (optionally `--file <name>` for one GGUF quant out of a multi-quant repo) pulls a model from Hugging Face ahead of time. Non-standard setup: `localharness init --endpoint http://host:port/v1`. To give one project its own agents, config, and memory, run `localharness init --workspace` inside it — the resulting `.localharness/` directory is discovered by walking up from wherever you start, and layers over the global config.
+`plugins enable` and `plugins disable` write `overrides.yaml`, never your `config.yaml`. Add `--workspace` to change a bundled plugin for one project only. Add the `dispatch` extra for Discord.
 
-> Got it running? If LocalHarness saved you an API bill, a [star](https://github.com/ahwurm/localharness/stargazers) helps other local-LLM folks find it.
+## Supported runtimes
 
-### Running the harness on a different machine than the model
+Every runtime is reached through one OpenAI-compatible client; `init` can also attach to any endpoint that is already running. Live-validated means a real end-to-end run on the [DGX Spark](docs/reference-architectures/dgx-spark.md) reference machine; recorded bench runs exist for vLLM only.
 
-The harness and the model server are separate processes talking HTTP — they don't need to
-share a machine. A laptop can run agents against a model served elsewhere on your network:
-`localharness init --endpoint http://<server-ip>:8000/v1`. Two things to know:
+| Runtime | Harness starts the server | Tool calling | Token counting | Live-validated |
+|---|---|---|---|---|
+| **vLLM** | docker or binary | native | exact | reference machine and bench |
+| **llama.cpp** | spawns `llama-server` | XML / Hermes fallback | exact | reference machine |
+| **Ollama** | spawns `ollama serve` | native | exact with the `exact-tokenizer` extra, else estimated | CPU round-trip |
+| **LM Studio** | drives headless `lms` | native | exact with the `exact-tokenizer` extra, else estimated | CPU round-trip |
 
-- **Tools run where the harness runs.** bash/file tools execute on the client machine; the
-  model server only sees text in, text out. Pointing a harness at a server doesn't let
-  anyone act on the server.
-- **Secure the endpoint.** Inference servers ship with no authentication by default. On a
-  network with untrusted devices, start the server with an API key (e.g. vLLM `--api-key`)
-  and set `provider.api_key` to match; for access from outside your LAN use a private
-  overlay network (Tailscale/WireGuard). Never port-forward a bare endpoint to the internet.
+Setup: [llama.cpp](docs/runtimes/llamacpp.md), [Ollama](docs/runtimes/ollama.md), [LM Studio](docs/runtimes/lmstudio.md), vLLM ([reference architectures](docs/reference-architectures/README.md)). Details: [spec 13](docs/specs/13-provider-support.md).
 
-## Platform support
+## Security
 
-Tools run where the harness runs, and `bash_exec` always launches a real bash — never
-`/bin/sh`, never WSL. What differs per platform is how that bash is found.
-
-### Linux
-
-- `bash_exec` runs `bash -c` with the bash on `PATH` (falling back to `/bin/bash`), so brace
-  expansion, `[[ ]]` and arrays behave as written even where `/bin/sh` is dash.
-- CI runs on Ubuntu; the Linux path is the one exercised by every test run and the
-  [DGX Spark](docs/reference-architectures/dgx-spark.md) live validation. The `doctor` GPU
-  checks are Linux-only.
-
-### Windows
-
-- **Native, no WSL required.** Install [Git for Windows](https://git-scm.com/download/win).
-  The harness looks for `Git\bin\bash.exe` under `%ProgramFiles%`, `%ProgramFiles(x86)%` and
-  `%LocalAppData%\Programs`, and deliberately skips the WSL launchers (`System32\bash.exe` and
-  the Store alias under `WindowsApps`): without a distro they print UTF-16 garbage, and with
-  one they act on a different filesystem than the native file tools.
-- It picks the `Git\bin\bash.exe` wrapper over `Git\usr\bin\bash.exe` on purpose: the wrapper
-  puts `/usr/bin` on `PATH`, so coreutils (`mkdir`, `ls`, `cp`, …) resolve no matter which shell
-  started the harness. `Git\usr\bin\bash.exe` launched directly inherits a PowerShell PATH with no
-  coreutils on it. To use a different bash, set `LOCALHARNESS_BASH` to a wrapper-style executable.
-- A `bash_exec` command that could not RUN is a tool error on every platform, and its output is
-  forwarded to the model inside the error so it can react (e.g. `command not found`). That is
-  exit 127 (not found), 126 (not executable), and abnormal termination — a signal on POSIX, an
-  NTSTATUS crash code on Windows. 126/127 are the shell's convention rather than a reserved
-  range, so a program that picks those codes for its own reasons is reported as a failure it
-  did not have; that is the deliberate side to err on. A command that ran and returned any
-  other non-zero code is an ordinary result with `exit code N` on the first line: `grep` with
-  no match and `test -f` on a missing file are answers, not faults. A timeout kills the
-  command's whole process tree (a job object on Windows, the process group on POSIX).
-- Paths: the file tools accept Windows or POSIX paths, relative to the harness working directory.
-  `/tmp/...` maps to `%TEMP%`, which is where git-bash mounts `/tmp`, so the file tools and
-  `bash_exec` agree on one tree. Inside `bash_exec` commands, use forward slashes — bash strips
-  backslashes as escapes.
-- Running the model on another machine (e.g. a DGX over Tailscale) and the harness on a Windows
-  laptop is a supported setup; see the previous section.
-
-## CLI
-
-| Command | Purpose |
-|---------|---------|
-| `init` | Detect endpoint/model, write config (`--workspace` scaffolds `./.localharness/` for one project instead) |
-| `start` | Interactive session (`--model`/`-m` for a one-off session model, `--list-models` to list and exit; `--show-reasoning` streams the model's thinking as dim lines while it generates, `/reasoning` toggles it live — needs the server's reasoning parser) |
-| `acp` | Run as an [Agent Client Protocol](https://agentclientprotocol.com) server so LocalHarness appears in Zed's agent panel — see [docs/zed.md](docs/zed.md) |
-| `web` | Serve the session to a phone: a JSON event API plus a bare reference page (`--replay`/`--fixtures` build the UI with the model server down) — see [docs/web.md](docs/web.md) |
-| `doctor` | Check Python, config, endpoint, model, context budget, token counting and directories; inside a project, name both config layers and the keys the project overrides |
-| `config show` | Print the effective merged config and the file that set each key |
-| `config migrate` | Fold new shipped security defaults into an existing config — also auto-applied on the first `start` after an upgrade (revision-stamped, additive, backed up) |
-| `validate` | Validate agent/org YAML |
-| `model` | List served/downloaded models, switch the persisted default, or `--download <repo_id>` (optionally `--file <name>`) a model from Hugging Face |
-| `update` | Upgrade LocalHarness to the latest release on PyPI (`--check` only reports whether one is available) |
-| `agent …` | Manage agent definitions |
-| `memory …` | Browse and edit the agent's persistent memory (list / show / edit / rm / archive / restore) (memory plugin; absent when memory is off) |
-| `bench …` | Run the scenario benchmark |
-| `components …` | Autoresearch component registry |
-| `plugins …` | See, enable and disable plugins (`list`, `info`, `enable`, `disable`) — see [Plugins](#plugins) |
-| `autoresearch …` | Run the self-improvement loop (autoresearch plugin; absent when it is off) |
-| `experiment …` | Gated experiment runs (autoresearch plugin) |
-| `propose` | Propose a harness mutation (autoresearch plugin) |
-| `generate-image` | Make a picture with ComfyUI (image plugin; absent until you enable it) |
-
-A command of a bundled plugin that is off is not listed in `--help`; running it says which plugin
-provides it and how to turn that plugin on, and exits 4.
+An agent that reads untrusted content, such as a web page or an MCP tool's result, is never given tools that change your machine; this separation is on by default, checked when an agent's tools are resolved, and fails closed. Every tool call of every agent, helper agents included, passes one permission gate. A plugin you install has its tools' gate declarations clamped, except for a tool it registers directly on the tool registry instead of returning it from `tools()`, which skips that rule ([SECURITY.md](SECURITY.md#plugins)). Settings that say where the harness connects, which credential it uses or who may talk to it can be set only in your machine-level config, never by a repository you clone. A plugin you turn on is trusted code that runs with your privileges, and nothing contains a plugin that means harm: read [SECURITY.md](SECURITY.md) before you enable one.
 
 ## Plugins
-
-A plugin adds tools, commands, slash commands and `doctor` checks. Five ship with LocalHarness:
 
 | Name | What it does | Default | How to switch |
 |------|--------------|---------|---------------|
@@ -235,62 +56,44 @@ A plugin adds tools, commands, slash commands and `doctor` checks. Five ship wit
 | `dispatch` | chat: Discord | on; needs `localharness[dispatch]` | `localharness plugins disable dispatch` |
 | `autoresearch` | experiment loop | on | `localharness plugins disable autoresearch` |
 
-Plugins you install are found but stay off until you enable them, and only your global config can
-enable them, never a project's ([SECURITY.md](https://github.com/ahwurm/localharness/blob/main/SECURITY.md#plugins)).
-The plugin API is [spec 09](docs/specs/09-hooks-plugins.md).
+Each plugin has its own page:
 
-Turning autoresearch off sets it aside and deletes nothing; its settings keep their names,
-`proposer:` and `sentinel:`, and the bench stays core.
+- **image**: a `generate_image` tool and `localharness generate-image`, against a ComfyUI server you run yourself. [Page](docs/plugins/image.md) · [site](https://localharness.dev/plugins/image/) · [Docs](docs/reference-architectures/image-generation.md)
+- **Mobile (the `web` plugin)**: drive a session from your phone on your own private network. [Page](docs/plugins/mobile.md) · [site](https://localharness.dev/plugins/mobile/) · [Docs](docs/web.md)
+- **memory**: per-agent SQLite memory recalled into each turn, with idle consolidation. [Page](docs/plugins/memory.md) · [site](https://localharness.dev/plugins/memory/) · [Docs](docs/specs/05-memory.md)
+- **dispatch**: `localharness start --channel discord` drives a session from allowlisted Discord messages. [Page](docs/plugins/dispatch.md) · [site](https://localharness.dev/plugins/dispatch/) · [Docs](docs/specs/11-channels.md#the-dispatch-plugin-chat-platforms-discord-today)
+- **autoresearch**: propose one harness change, run it through a statistical gate, adopt or reject it. [Page](docs/plugins/autoresearch.md) · [site](https://localharness.dev/plugins/autoresearch/) · [Docs](docs/specs/09-hooks-plugins.md#the-bundled-plugins)
 
-LocalHarness finds plugins in two places on your machine: installed packages that
-declare a `localharness.plugins` entry point, and folders `~/.localharness/plugins/<name>/`. It
-loads a plugin's code only once you turn that plugin on. Install a plugin package into the same
-Python environment as LocalHarness:
+A plugin you install is found in two places, both on your machine and never in a project: a Python package with a `localharness.plugins` entry point in the same environment as LocalHarness, or a folder `~/.localharness/plugins/<name>/`. It stays off, with none of its code imported, until `localharness plugins enable <name>`, which only your machine-level config can do.
 
-- if you installed LocalHarness with `uv tool`: `uv tool install --with <package> localharness`.
-  Each run replaces the install's plugins and extras with the ones it names, so name your extras
-  too (`'localharness[web]'`) and add a `--with` for every plugin you keep.
-- in a virtual environment: activate it and run `uv pip install <package>`.
+## Write a plugin
 
-`localharness plugins list` shows what was found; `localharness plugins enable <name>` turns one on.
-Enabling a plugin you installed is a machine-level setting, and it is you vouching for what its
-tools say they do ([SECURITY.md](https://github.com/ahwurm/localharness/blob/main/SECURITY.md#plugins)).
-To write one, copy [the example plugin](https://github.com/ahwurm/localharness/tree/main/examples/plugin-template).
+Copy [the example plugin](examples/plugin-template/README.md): one tool, one command, one slash command, one `doctor` check and two settings, exercised by the test suite and in CI. The API is [spec 09](docs/specs/09-hooks-plugins.md); its version is `"1"`, and changes since its first release have only added optional fields. Plugins written for the previous plugin API no longer load; [spec 09](docs/specs/09-hooks-plugins.md#plugins-written-for-015) says how to port one.
 
-## Testing
+## Status and known limitations
 
-```bash
-uv sync --extra dev
-uv run pytest                                          # hermetic — no model server needed
-LOCALHARNESS_LIVE_VLLM=1 uv run pytest -m live_vllm    # opt-in tests against a live endpoint
-```
+Early stage (v0.16.0, pre-1.0). Interfaces and config schema may change without notice. The limits a new user is most likely to meet:
 
-Some bench scenarios read fixture files from `/tmp/bench_fixtures/`. Both `pytest` and `localharness bench` stage these automatically from `tests/fixtures/bench/`, so no manual copy step is needed from a repo checkout.
+- The Discord plugin is tested offline against a stand-in for the Discord library and has not been run against a live Discord server. Files people upload to the bot are not passed to the model.
+- The phone app ships a bare reference page, not a finished chat app: one live session at a time, no chat list, no resume. Its incognito switch only keeps pictures off the phone; memory, sessions and pictures are still written to disk.
+- The image plugin does not install or start ComfyUI or download its model files. The terminal does not display pictures; the phone page and Discord do.
+- With memory on, `localharness doctor` fails until the `embeddings` extra and the embedding model are installed.
+- The Discord token and the autoresearch proposer's API key are stored as plain text in your global `overrides.yaml`.
+- `pre_tool` and `post_tool` hooks do not fire for a helper agent's tool calls, and a hook written as `async def` never runs.
+- `localharness validate` does not check a plugin's own settings, and `plugins enable` and `plugins disable` write no audit event.
+- Apart from the settings SECURITY.md names, a project's `org` settings still merge over your global ones and have not yet been checked one by one for whether a project value can loosen a protection.
 
-## Reference architectures
+The full list is under "Known limitations" in each [CHANGELOG](CHANGELOG.md) release.
 
-LocalHarness is developed against three reference hardware targets: one maintainer-tested and two proposed. All must meet
-the practicality bar — **64k of KV-cache headroom and ≥9.5 tok/s single-stream**. Four
-tested configs on architecture A (Qwen 3.8 / 3.6 and DeepSeek V4 Flash across llama.cpp
-and vLLM); the current default:
+## Links
 
-| | Hardware | Model / Runtime | Status |
-|---|---|---|---|
-| [A: DGX Spark](docs/reference-architectures/dgx-spark.md) | GB10, 128 GB unified | Qwen3.8-27B UD-Q4 GGUF + MTP spec decode / llama.cpp, 64k ctx, 17–21 tok/s measured | TESTED |
-| [B: Base Mac mini](docs/reference-architectures/mac-mini.md) | M4, 16 GB unified | Qwen3.5-9B 4-bit / vLLM (vllm-metal), 64k ctx | PROPOSED |
-
-Start at [docs/reference-architectures/](docs/reference-architectures/README.md). Per-hardware setup and tuning notes — timeouts, context budgets, runtime parity — are in [gaps.md](docs/reference-architectures/gaps.md).
-
-## Documentation
-
-- [docs/zed.md](docs/zed.md) — **Use in Zed**: register `localharness acp` as an agent server, what the panel shows, and what it does not do yet
-- [docs/web.md](docs/web.md) — **Use from a phone**: `localharness web`, what the bare reference page is and is not, how to build your own UI against the event API with the GPU cold, and a table of which channel to use for what
-- [docs/reference-architectures/](docs/reference-architectures/README.md) — supported hardware targets and setup notes
-- [docs/specs/](docs/specs/) — component specs
-
-## Status
-
-Early stage (v0.16.0, pre-1.0). Interfaces and config schema may change without notice.
+- [SECURITY.md](SECURITY.md): trust boundaries, the permission gate, the prompt-injection threat model
+- [docs/specs/](docs/specs/): component specs, starting with the [architecture overview](docs/specs/00-architecture-overview.md); the CLI is [spec 10](docs/specs/10-cli.md)
+- [docs/zed.md](docs/zed.md): use LocalHarness from Zed's agent panel
+- [docs/reference-architectures/](docs/reference-architectures/README.md): tested hardware and setup notes
+- [docs/running-agents-locally.md](docs/running-agents-locally.md): where LocalHarness fits among local agent tools, and where it is behind
+- [LocalShift](https://github.com/ahwurm/localshift): the companion project that moves a headless Claude Code job onto LocalHarness once a local model proves good enough
+- [localharness.dev](https://localharness.dev)
 
 ## License
 
