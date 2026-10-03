@@ -447,6 +447,10 @@ class AcpChannel(ChannelAdapter):
     can_ask = True
     """PRD §3.5: Zed renders an ASK as its own permission dialog, held open with no timeout."""
 
+    local_operator = True
+    """Zed speaks ACP over stdio, so its user is at this machine: `channels.remote_unattended`
+    never limits it, exactly like the terminal."""
+
     ask_holds_dialog = True
     """The client holds the question open, so the gate must not put a deadline on it (PRD §3.5,
     Zed row: "Timeout: none"). A timeout here would turn a user who stepped away from their

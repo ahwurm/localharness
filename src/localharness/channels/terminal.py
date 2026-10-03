@@ -955,6 +955,9 @@ class TerminalChannel(ChannelAdapter):
     """`/plugins enable|disable` restarts the session here: the step's questions are asked on this
     terminal after the input box has closed."""
 
+    local_operator = True
+    """The person at this terminal is at this machine: `channels.remote_unattended` never limits it."""
+
     @property
     def can_ask(self) -> bool:
         """Can a person answer a question here? (PRD §3.5's "non-tty" row.)

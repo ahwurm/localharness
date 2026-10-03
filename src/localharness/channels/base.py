@@ -189,6 +189,12 @@ class ChannelAdapter(ABC):
     setup questions — a bot token among them — are asked at a plain terminal prompt between the two
     halves of the restart, never over a remote channel. False is the safe default."""
 
+    local_operator: bool = False
+    """Does the person answering sit at this machine? True for the terminal and Zed (ACP, over
+    stdio): `channels.remote_unattended` never limits them. False for the phone app and chat
+    channels, which `channels.remote_unattended: false` locks out of `unattended` and "always".
+    False is the safe default: a new channel that says nothing is treated as remote."""
+
     async def ask_permission(self, request: Any) -> Any:
         """Render one ASK verdict and return the human's `Decision` (PRD §3.5).
 
