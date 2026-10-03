@@ -169,5 +169,7 @@ def test_a_stored_secret_is_never_offered_as_the_default(g, monkeypatch) -> None
     monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
     result = _run(g, "plugins", "enable", "secp")
     assert result.exit_code == 0, result.output
-    assert calls == [("Token", "", {"hide_input": True, "show_default": False})]
+    # the question says the stored token is kept and how to clear it — and still shows nothing
+    assert calls == [("Token [stored key kept — type none to clear, or paste a new one]", "",
+                      {"hide_input": True, "show_default": False})]
     assert _overrides(g)["secp"]["tok"] == SENTINEL
