@@ -281,8 +281,8 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 180, (
-        "catalogue should be 180 entries: the 223-entry v0.14 ledger minus the resonance "
+    assert len(entries) == 184, (
+        "catalogue should be 184 entries: the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
         "knobs — chapters/mining/tags/micro-pass/decay/cap machinery deleted with their "
@@ -290,7 +290,10 @@ def test_self_check_leaves_enumerate(components_home):
         "(the subject-family resonance space is owner-addressable) "
         "plus org.memory_enabled x1 (#151: the memory master switch is owner-addressable) "
         "plus memory.enabled x1 (the memory plugin's own switch; the agent.memory.* rows are "
-        "the plugin's now, so this catalogue is built with its rows). "
+        "the plugin's now, so this catalogue is built with its rows) "
+        "plus org.web_fetch_allow_private, server.bind_all, server.require_api_key and "
+        "channels.remote_unattended x4 (the machine-level fetch allowlist, the launched server's "
+        "bind and key switches, and the remote-channel lock). "
         f"got {len(entries)}"
     )
 
@@ -373,8 +376,8 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 180, (
-        "catalogue should be 180 entries: the 223-entry v0.14 ledger minus the resonance "
+    assert len(entries) == 184, (
+        "catalogue should be 184 entries: the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
         "knobs — chapters/mining/tags/micro-pass/decay/cap machinery deleted with their "
@@ -382,7 +385,10 @@ def test_role_sections_leaves_enumerate(components_home):
         "(the subject-family resonance space is owner-addressable) "
         "plus org.memory_enabled x1 (#151: the memory master switch is owner-addressable) "
         "plus memory.enabled x1 (the memory plugin's own switch; the agent.memory.* rows are "
-        "the plugin's now, so this catalogue is built with its rows). "
+        "the plugin's now, so this catalogue is built with its rows) "
+        "plus org.web_fetch_allow_private, server.bind_all, server.require_api_key and "
+        "channels.remote_unattended x4 (the machine-level fetch allowlist, the launched server's "
+        "bind and key switches, and the remote-channel lock). "
         f"got {len(entries)}"
     )
 

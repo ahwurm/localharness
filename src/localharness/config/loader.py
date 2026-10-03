@@ -414,8 +414,22 @@ the global layer's, with a warning naming the key.
 """
 
 HARNESS_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({
-    "org.enforce_capability_floor", "proposer.base_url", "proposer.api_key"})
+    "provider.base_url", "provider.api_key", "extra_endpoints", "active_endpoint", "server",
+    "org.audit_log_path", "org.hooks", "org.enforce_capability_floor",
+    "org.web_fetch_allow_private", "channels.remote_unattended",
+    "proposer.base_url", "proposer.api_key"})
 """The core harness keys only the global config (config.yaml or overrides.yaml) may set.
+
+A project's `.localharness/` loads with no prompt when you stand in the project, so it may set only
+what the agent does there. These keys say where a request or a credential goes (the provider's and
+the proposer's address and key, the peer endpoints and the recorded active endpoint), what the
+harness launches (`server`, the whole section: executable, image, arguments, address), a file it
+writes anywhere on disk (`org.audit_log_path`), free-form settings a hook plugin may read a URL or a
+command from (`org.hooks`), and the protections' own switches (`org.enforce_capability_floor`,
+`org.web_fetch_allow_private`, `channels.remote_unattended`). An address alone is enough to leak:
+every message and every file the agent reads travels to it, key or no key. A member may be a whole
+section or list (`server`, `extra_endpoints`); readers test a dot-path with
+`is_harness_global_only`, which also matches the keys inside a member section.
 
 `org.enforce_capability_floor` is the capability floor's off switch. No direction of it belongs
 to a repository: a cloned repo must not be able to switch the floor off for the sessions started
@@ -432,7 +446,37 @@ endpoints and credentials are. `proposer.base_url` has no default, so when the g
 address the workspace's `proposer:` section cannot stand without one: it gives way whole to the
 global layers' section, or to none. `proposer.model` and the rest of the section stay project
 settings.
+
+`provider.base_url` has no default either, but a session cannot run without a provider: a machine
+whose global layers set no `provider:` at all, in a project that supplies one, is refused with the
+one line NO_MACHINE_PROVIDER rather than run against the project's address.
 """
+
+NO_MACHINE_PROVIDER = (
+    "no model server is set on this machine: set provider.base_url in {global_file} (the value in "
+    "{ws_file} is ignored — a project may not choose where requests go)")
+
+
+def is_harness_global_only(path: str) -> bool:
+    """Is this harness dot-path machine-level only — a member, or a key inside a member section?"""
+    return any(path == f or path.startswith(f + ".") for f in HARNESS_GLOBAL_ONLY_FIELDS)
+
+
+AGENT_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({
+    "memory.embedding_model", "permissions.budget.kill_file"})
+"""Agent-file keys only the global layer decides. `permissions.budget.kill_file` has its own rule at
+the budget resolution (the kill switch is one machine-wide file); a key under a plugin's agent
+section (`memory.embedding_model`: the model sentence-transformers loads, and a local folder it
+imports Python from) is re-resolved by `_narrow_agent_global_only`. Never marked GLOBAL_ONLY on the
+plugin's AgentConfigModel: the resolver refuses such a plugin (plugins/resolve.py)."""
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    """Is `path` inside `root` (both resolved)? False when either cannot be resolved."""
+    try:
+        return Path(path).resolve().is_relative_to(Path(root).resolve())
+    except OSError:
+        return False
 
 _UNSET = object()
 
@@ -571,6 +615,8 @@ class ConfigLoader:
         self._harness_cache: Optional[HarnessConfig] = None
         # Workspace values load_harness() dropped at HARNESS_GLOBAL_ONLY_FIELDS paths (start's summary).
         self.harness_warnings: list[str] = []
+        # Workspace agent-file values dropped at AGENT_GLOBAL_ONLY_FIELDS paths (start's summary).
+        self.agent_warnings: list[str] = []
         self._org_cache: Optional[OrgConfig] = None
         self._raw_harness_dict: Optional[dict] = None
         self._raw_sources_cache: Optional[tuple[dict, dict, dict, dict]] = None
@@ -737,8 +783,17 @@ class ConfigLoader:
             merged = deep_merge(merged, source)
         # Returned, not logged, as merge_plugin_layers does: start prints them in its summary line,
         # and a log record would reach the terminal a second time through logging.lastResort.
-        merged, self.harness_warnings = _narrow_harness_global_only(
-            merged, sources, self.plugin_layer_files()[2:])
+        ws_files = self.plugin_layer_files()[2:]
+        merged, self.harness_warnings = _narrow_harness_global_only(merged, sources, ws_files)
+        # The one refusal: the global layers set no provider and the workspace's gave way whole,
+        # so there is nothing to run against. One line naming the file to set it in — never a field
+        # report, which would show the project's address back.
+        if "provider" not in merged:
+            ignored = [f for src, f in zip(sources[2:], ws_files)
+                       if _dig(src, ["provider", "base_url"]) is not _UNSET]
+            if ignored:
+                raise ConfigError(NO_MACHINE_PROVIDER.format(
+                    global_file=self._config_dir / "config.yaml", ws_file=ignored[-1]))
 
         # deny_patterns carve-out (MERG-02): see _layered_org_deny. Spliced with deep_merge rather
         # than assigned in place for the same non-aliasing reason. Guarded on non-empty so a config
@@ -1262,6 +1317,8 @@ class ConfigLoader:
         # ENAB-01, agent level: `agent.<name>` sections leave before AgentConfig (extra="forbid")
         # validates, and reach the plugin through agent_plugin_sections(). Unknown keys still fail.
         merged, agent_sections = split_plugin_keys(merged, self.plugin_names(), CORE_AGENT_KEYS)
+        if self._local_dir is not None and _is_under(path, self._local_dir):
+            agent_sections = self._narrow_agent_global_only(agent_sections, path)
         # ENAB-01 / MEMP-06: a bundled plugin's agent section fails here exactly as a core agent key
         # does — once memory's settings left AgentConfig, a bad `memory:` would otherwise become a
         # soft plugin failure (`validate` never resolves plugins). Bundled only: a plugin you
@@ -1320,6 +1377,60 @@ class ConfigLoader:
         self._agent_plugin_sections[result.name] = agent_sections
         result._plugin_settings = plugin_settings  # read as attributes: result.memory.recall_scope
         return result
+
+    def _narrow_agent_global_only(self, sections: dict, path: Path) -> dict:
+        """A plugin-section key in AGENT_GLOBAL_ONLY_FIELDS that a WORKSPACE agent file sets: the
+        global layer's value stands (its agents/<same name>.yaml, else the global overrides'
+        `agent:` section), else the plugin's own default; a different workspace value is dropped
+        with one warning naming the key and the file. Never mutates `sections`."""
+        for dotted in sorted(AGENT_GLOBAL_ONLY_FIELDS):
+            head, _, key = dotted.partition(".")
+            section = sections.get(head)
+            if not isinstance(section, dict) or key not in section:
+                continue
+            machine = self._global_agent_value(path.stem, head, key)
+            allowed = machine if machine is not _UNSET else self._plugin_agent_default(head, key)
+            if section[key] == allowed:
+                continue
+            # Returned, not logged, as load_harness's are: start prints them in its summary line,
+            # and a log record would reach the terminal again through logging.lastResort — on
+            # every reload of this file, mid-session included.
+            note = f"ignoring {dotted} in {path}: only the global config may set it"
+            if note not in self.agent_warnings:
+                self.agent_warnings.append(note)
+            kept = {k: v for k, v in section.items() if k != key}
+            if machine is not _UNSET:
+                kept[key] = machine
+            sections = {**sections, head: kept}
+        return sections
+
+    def _global_agent_value(self, stem: str, head: str, key: str) -> Any:
+        """`<head>.<key>` as the GLOBAL layer alone sets it for agent `stem`: its agents/<stem>.yaml,
+        else the global overrides' `agent:` section, else _UNSET. Raw YAML, as
+        `_global_layer_kill_file` reads it: a file that does not parse sets nothing."""
+        def declared(data: Any) -> Any:
+            section = data.get(head) if isinstance(data, dict) else None
+            return section[key] if isinstance(section, dict) and key in section else _UNSET
+
+        def read(load: Callable[[], Any]) -> Any:
+            try:
+                return declared(load())
+            except ConfigError:
+                return _UNSET
+
+        agent_file = self._config_dir / "agents" / f"{stem}.yaml"
+        found = read(lambda: _load_yaml_file(agent_file)) if agent_file.exists() else _UNSET
+        if found is _UNSET:
+            found = read(lambda: load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent"))
+        return found
+
+    @staticmethod
+    def _plugin_agent_default(head: str, key: str) -> Any:
+        """The default of `key` in the bundled plugin `head`'s AgentConfigModel, or _UNSET."""
+        from localharness.plugins.builtin import bundled_plugins
+        cls = next((c for c in bundled_plugins()
+                    if c.manifest.name == head and c.AgentConfigModel is not None), None)
+        return _model_default(cls.AgentConfigModel, [key]) if cls is not None else _UNSET
 
     def _global_layer_kill_file(
         self, stem: str, div_name: Optional[str], org_budget: Any

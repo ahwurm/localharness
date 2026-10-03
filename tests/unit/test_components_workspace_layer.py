@@ -199,16 +199,12 @@ def test_set_warns_that_the_workspace_still_wins_for_a_workspace_owned_path(tmp_
     assert json.loads(after.stdout)["value"] == _WORKSPACE_NAME
 
 
-def test_set_reads_its_audit_path_from_the_workspace_config(tmp_path, monkeypatch, fake_home):
-    """`set`'s own loader must be workspace-aware too, not just the catalogue.
-
-    Written because the prescribed mutation for that wire measured ZERO red: the loader
-    `_build_layered_loader` returns feeds exactly one thing — `cfg.org.audit_log_path` — and no
-    test set that key in a workspace. A wiring line no assertion can see is a wiring line that
-    can be deleted, so this grades it: the project says where its audit trail goes.
-
-    (The BASE stays the global config dir — `resolve_runtime_path(value, loader._config_dir)` —
-    so what the workspace controls here is the name, not the root. Asserted as it behaves.)
+def test_set_never_takes_its_audit_path_from_the_workspace_config(tmp_path, monkeypatch, fake_home):
+    """A project no longer chooses where the audit trail goes: `org.audit_log_path` is
+    machine-level only (a file written anywhere on disk), so `set`'s workspace-aware loader drops
+    the workspace's value and the audit lands at the machine's path — the compiled-in default here,
+    under the global config dir. The workspace's other org setting (`log_level`) still merges; the
+    command succeeds as before.
     """
     layout = _layout(
         tmp_path,
@@ -220,9 +216,9 @@ def test_set_reads_its_audit_path_from_the_workspace_config(tmp_path, monkeypatc
     result = runner.invoke(app, ["components", "set", "org.name", "SET-BY-CLI"])
 
     assert result.exit_code == 0, result.output
-    assert (layout.global_dir / "ws-audit.jsonl").exists(), _listing(layout.global_dir)
-    assert not (layout.global_dir / "audit.jsonl").exists(), (
-        "the audit landed at the compiled-in default — set's loader never read the workspace"
+    assert (layout.global_dir / "audit.jsonl").exists(), _listing(layout.global_dir)
+    assert not (layout.global_dir / "ws-audit.jsonl").exists(), (
+        "the audit landed where the project asked — a project chose where the audit trail goes"
     )
 
 

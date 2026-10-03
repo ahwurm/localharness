@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import yaml
 
-from localharness.registry.provenance import layered_catalogue
+from localharness.registry.provenance import _attributing_layer, layered_catalogue
 
 _GLOBAL = {
     "provider": {
@@ -58,14 +58,22 @@ def test_merged_dict_leaf_is_labelled_accumulated(tmp_path):
     assert entry.winning_layer == "accumulated (global-config + workspace-config)"
 
 
-def test_a_workspace_null_clobber_is_attributed_to_the_workspace(tmp_path):
+def test_a_workspace_null_server_is_ignored_and_credited_to_the_machine(tmp_path):
+    """`server` is machine-level only, so the workspace's `server: null` is dropped at load: the
+    machine's section stands and its leaves are credited to the machine's file. The clobber walk
+    itself is still pinned: a band that replaces an ancestor with a non-dict owns the subtree
+    wherever a project may still write one."""
     global_dir, ws = _layers(tmp_path, {"server": None})
 
     effective, _ = layered_catalogue(global_dir, ws)
 
-    assert effective["server.runtime"].current_value is None
-    assert effective["server.runtime"].winning_layer == "workspace-config"
-    assert effective["server.binary"].winning_layer == "workspace-config"
+    assert effective["server.runtime"].current_value == "llamacpp"
+    assert effective["server.runtime"].winning_layer == "global-config"
+    assert effective["server.binary"].winning_layer == "global-config"
+    assert _attributing_layer("server.runtime", {
+        "workspace-config": {"server": None},
+        "global-config": {"server": {"runtime": "llamacpp"}},
+    }) == "workspace-config"
 
 
 def test_single_layer_attribution_is_untouched(tmp_path):
@@ -83,11 +91,23 @@ def test_single_layer_attribution_is_untouched(tmp_path):
 
 def test_a_workspace_that_only_overrides_wins_alone(tmp_path):
     """A scalar the workspace replaces is still a single-layer answer, not "accumulated"."""
+    global_dir, ws = _layers(tmp_path, {"provider": {"default_model": "ws-model"}})
+
+    effective, _ = layered_catalogue(global_dir, ws)
+
+    assert effective["provider.default_model"].current_value == "ws-model"
+    assert effective["provider.default_model"].winning_layer == "workspace-config"
+
+
+def test_a_workspace_base_url_is_credited_to_the_machine(tmp_path):
+    """The project's address was dropped at load: the machine's value is shown, and credited to
+    the machine's file — never to the project file it did not come from."""
     global_dir, ws = _layers(tmp_path, {"provider": {"base_url": "http://ws-host:8000/v1"}})
 
     effective, _ = layered_catalogue(global_dir, ws)
 
-    assert effective["provider.base_url"].winning_layer == "workspace-config"
+    assert effective["provider.base_url"].current_value == "http://global-host:8000/v1"
+    assert effective["provider.base_url"].winning_layer == "global-config"
 
 
 def test_layered_catalogue_reuses_a_supplied_loader(tmp_path):
