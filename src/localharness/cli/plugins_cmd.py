@@ -34,7 +34,8 @@ from rich.padding import Padding
 from rich.table import Table
 
 from localharness.cli.components_cmd import (
-    _build_layered_loader, _err, _err_config, _serialize_value, is_secret, scrub, shown,
+    _build_layered_loader, _err, _err_config, _serialize_value, _validate_overlay, is_secret, scrub,
+    shown,
 )
 from localharness.cli.workspace import _stdin_is_a_terminal
 from localharness.config.overlay import atomic_write_overlay, load_overlay
@@ -48,6 +49,7 @@ from localharness.registry.provenance import layered_catalogue
 
 if TYPE_CHECKING:
     from localharness.config.loader import ConfigLoader
+    from localharness.plugins.api import PluginManifest, SetupField
     from localharness.plugins.plan import PlanEntry
     from localharness.plugins.resolve import Resolution
 
@@ -266,10 +268,132 @@ def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pai
                                          layer_files=loader.plugin_layer_files())
         model.model_validate({k: v for k, v in section.items() if k != "enabled"})
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — the plugin's own validator: contained
-        why = exc if isinstance(exc, ValidationError) else f"{type(exc).__name__}: {exc}"
-        _fail(scrub(f"Validation failed for {name}: {why}",
+        _fail(scrub(f"Validation failed for {name}: {_validation_text(exc)}",
                     [v for _, v in walk_secret_values(leaves, overlay[name])]))
-    return {key: shown(value, leaves[key]) for key, value in values.items()}
+    return {f"{name}.{key}": shown(value, leaves[key]) for key, value in values.items()}
+
+
+def _validation_text(exc: BaseException) -> str:
+    """Why a value was refused, without echoing any input: each pydantic error's location and
+    message — never its input_value, which can hold a whole section, keys included."""
+    if isinstance(exc, ValidationError):
+        return "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" if e["loc"] else e["msg"]
+                         for e in exc.errors())
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _core_secret_values(loader: ConfigLoader, overlay: dict[str, Any]) -> list[str]:
+    """Every string at a SecretStr leaf of the core settings — the global config.yaml merged with
+    the overlay about to be written (proposer.api_key today) — so a refusal can scrub them. The
+    literal default "none" is left out: scrubbing it would mask every "none" in the refusal."""
+    from localharness.config.models import HarnessConfig
+    from localharness.config.overlay import deep_merge
+    merged = deep_merge(loader.raw_harness_dict(), {k: v for k, v in overlay.items() if k != "agent"})
+    return [v for _k, v in walk_secret_values(dict(walk_model_fields(HarnessConfig)), merged)
+            if isinstance(v, str) and v and v != "none"]
+
+
+def _checked_core(loader: ConfigLoader, entry: PlanEntry, pairs: list[str], to_workspace: bool,
+                  overlay: dict[str, Any]) -> dict[str, str]:
+    """Put each KEY=VALUE whose head is one of a bundled plugin's `sections` at its own path in
+    `overlay`. These are core settings (proposer.model, not <name>.proposer.model), so they are
+    checked TOGETHER against the core settings, as `components set` checks one: the global
+    config.yaml merged with the overlay about to be written. Values that are only valid together
+    (a proposer needs both its base_url and its model) land in one write or none; exit 2, writing
+    nothing, on any refusal. Returns {path: value as it may be shown}."""
+    from localharness.config.models import HarnessConfig
+
+    if to_workspace:
+        keys = ", ".join(pair.partition("=")[0] for pair in pairs)
+        _fail(f"{keys}: these are machine-level settings for {entry.name} — run it without --workspace")
+    try:  # the settings these are checked against must load, as `components set` requires
+        loader.load_harness()
+    except Exception as exc:  # noqa: BLE001 — reported as `components` reports it, exit 2
+        _err_config(False, exc)
+    leaves = dict(walk_model_fields(HarnessConfig))
+    out: dict[str, str] = {}
+    typed_secrets: list[str] = []
+    for pair in pairs:
+        key, sep, raw = pair.partition("=")
+        if not sep:
+            _fail(f"--set takes KEY=VALUE, not {pair!r}")
+        if key not in leaves:
+            _fail(f"{entry.name} has no setting {key!r}")
+        if is_secret(leaves[key]):
+            typed_secrets.append(raw)
+        try:
+            value = coerce_value(raw, leaves[key])
+        except ValueError as exc:
+            _fail(scrub(f"Cannot coerce {shown(raw, leaves[key])} for {key}: {exc}", typed_secrets))
+        set_value_in_dict(overlay, key, value)
+        out[key] = shown(value, leaves[key])
+    try:
+        _validate_overlay(loader, pairs[0].partition("=")[0], overlay)
+    except ValueError as exc:  # a pydantic ValidationError is one
+        _fail(scrub(f"Validation failed for {entry.name}: {_validation_text(exc)}",
+                    typed_secrets + _core_secret_values(loader, overlay)))
+    return out
+
+
+def _checked_all(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pairs: list[str],
+                 to_workspace: bool, overlay: dict[str, Any]) -> dict[str, str]:
+    """`_checked` for the plugin's own keys, `_checked_core` for a bundled plugin's keys under one
+    of its `sections` — so a plugin with no ConfigModel and only such keys is never told it has no
+    settings to set. Returns {path: value as it may be shown}."""
+    m = entry.manifest
+    sections = m.sections if entry.bundled and m is not None else ()
+    core = [pair for pair in pairs if pair.partition("=")[0].split(".")[0] in sections]
+    own = [pair for pair in pairs if pair not in core]
+    values = _checked(resolution, loader, entry, own, to_workspace, overlay) if own else {}
+    return values | (_checked_core(loader, entry, core, to_workspace, overlay) if core else {})
+
+
+def _stored(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, key: str) -> str:
+    """The value KEY holds now, as the text a question offers: "" when it holds nothing. Never
+    returns a secret's value (a SecretStr reads as ""). A key under one of a bundled plugin's
+    `sections` is read from the core settings, any other from the plugin's own validated ones."""
+    from pydantic import SecretStr
+    try:
+        m = entry.manifest
+        if entry.bundled and m is not None and key.split(".")[0] in m.sections:
+            node: Any = loader.load_harness().model_dump()
+        else:
+            settings = resolution.settings.get(entry.name)
+            config = settings.config if settings is not None else None
+            node = config.model_dump() if config is not None else {}
+        for part in key.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if node is None or isinstance(node, SecretStr):
+            return ""
+        return ",".join(map(str, node)) if isinstance(node, (list, tuple)) else str(node)
+    except Exception:  # noqa: BLE001 — a default to offer, never a reason to stop
+        return ""
+
+
+def _ask_fields(fields: tuple[SetupField, ...], stored: Any) -> list[str]:
+    """Ask each setup question on the terminal; KEY=VALUE for every answer given. A question that
+    is not secret offers `stored(key)`, the value it holds now, else its default; a secret one
+    offers nothing, so a stored token is never shown."""
+    pairs = []
+    for f in fields:
+        default = "" if f.secret else (stored(f.key) or f.default)
+        answer = typer.prompt(f.prompt, default=default, hide_input=f.secret,
+                              show_default=bool(default)).strip()
+        if answer:  # an empty answer is not written: Enter on a question with nothing to offer skips it
+            pairs.append(f"{f.key}={answer}")
+    return pairs
+
+
+def _extra_missing(manifest: PluginManifest) -> bool:
+    """Is the plugin's install extra missing? Asked through the very function the resolver uses
+    (resolve()'s `extra_installed` keyword default), so this step and the plan never disagree —
+    and the suite's one seam, `resolve.resolve.__kwdefaults__["extra_installed"]`, covers both."""
+    from localharness.plugins import plan
+    from localharness.plugins.resolve import resolve
+    extra = manifest.requires_extra
+    installed = (getattr(resolve, "__kwdefaults__", None) or {}).get("extra_installed",
+                                                                     plan.extra_installed)
+    return bool(extra) and not installed(extra)
 
 
 def walk_secret_values(leaves: dict[str, Any], section: dict[str, Any]):
@@ -306,25 +430,29 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
               "project first, or leave out --workspace to change the machine-level setting")
     # Each layer's overrides.yaml exactly as config/loader.py reads it.
     target = workspace / "overrides.yaml" if to_workspace else loader.user_overlay_path
-    setup = entry.manifest.setup if (on and entry.manifest is not None) else ()
-    if ask and setup:  # the answers go through the one checked write path, as --set values
-        pairs = [f"{f.key}={typer.prompt(f.prompt, default=f.default, hide_input=f.secret)}"
-                 for f in setup]
+    m = entry.manifest if on else None
+    # A missing extra is tested directly, not through the plan state: a default-on plugin the user
+    # turned off reads `off` there, and would still be asked for settings it cannot use.
+    missing = m is not None and _extra_missing(m)
+    setup = m.setup if m is not None else ()
+    if ask and setup and not missing:  # the answers go through the one checked write path, as --set values
+        pairs = _ask_fields(setup, lambda key: _stored(resolution, loader, entry, key))
     overlay = load_overlay(target)
     set_value_in_dict(overlay, f"{name}.enabled", on)
-    values = _checked(resolution, loader, entry, pairs, to_workspace, overlay) if pairs else {}
+    values = _checked_all(resolution, loader, entry, pairs, to_workspace, overlay) if pairs else {}
     atomic_write_overlay(target, overlay)
     console.print("[green]✓[/green] " + escape(
         f"{name} {verb}d in {target} — takes effect on the next `localharness start`"), soft_wrap=True)
-    for key, value in values.items():
-        console.print(escape(f"  set {name}.{key} = {value}"), soft_wrap=True)
-    if on and not ask and entry.manifest is not None and entry.manifest.requires_extra:
-        # "takes effect on the next start" is not true while its install extra is missing; the
-        # interactive path says so through _probe's row, this one re-reads the plan it just wrote
+    for path, value in values.items():
+        console.print(escape(f"  set {path} = {value}"), soft_wrap=True)
+    if m is not None and m.requires_extra:
+        # "takes effect on the next start" is not true while its install extra is missing: re-read
+        # the plan just written, and say so
         from localharness.config.loader import ConfigLoader as _Loader
         from localharness.plugins.resolve import resolve
         after = resolve(_Loader(config_dir=loader.global_config_dir, local_config_dir=workspace)).plan.entry(name)
         if after is not None and after.state == "needs-extra":
+            missing = True
             console.print("  [yellow]note:[/yellow] " + escape(
                 f"{name} is missing its install extra — {after.reason}"), soft_wrap=True)
     project = [s["enabled"] for s in loader.plugin_layers().get(name, (None,) * 4)[2:]
@@ -334,10 +462,10 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
             f"this project turns {name} {'off' if on else 'on'} ({workspace}), and that still wins "
             f"here — `localharness plugins {verb} {name} --workspace` changes it for this project"),
             soft_wrap=True)
-    if ask and setup:
+    if ask and setup and not missing:
         console.print("Checking it now:")
-        _probe(name, entry.manifest.setup_help, loader, workspace)
-    elif on and setup and not pairs:
+        _probe(name, m.setup_help, loader, workspace)
+    elif not ask and setup and not pairs:
         console.print(escape("  next step — give it the " + ", ".join(f.prompt for f in setup)
                              + ": " + _set_spelling(name, setup)), soft_wrap=True)
 
