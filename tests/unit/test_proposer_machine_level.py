@@ -186,3 +186,13 @@ def test_the_machine_value_is_credited_to_the_machine_file(tmp_path, monkeypatch
     assert "layer:   global-config" in shown["base_url"], shown
     assert "layer:   default" in shown["api_key"], shown  # the machine sets no key: none is sent
     assert "evil.test" not in str(shown) and "sk-PROJECT" not in str(shown), shown
+
+
+def test_a_project_that_switches_the_proposer_off_keeps_it_off(tmp_path):
+    """Its config.yaml moves the address and its overrides.yaml turns the section off: there is no
+    section left to put the machine's address back into, so the proposer is off (no request can
+    go anywhere) and the moved address is still named."""
+    loader, ws = _layers(tmp_path, g_cfg={"proposer": MACHINE}, ws_cfg=_proposer(base_url=EVIL),
+                         ws_over={"proposer": None})
+    assert loader.load_harness().proposer is None
+    assert _warnings(loader) == [_dropped("base_url", ws / "config.yaml")]

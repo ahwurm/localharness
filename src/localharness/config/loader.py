@@ -445,10 +445,6 @@ def _dig(data: Any, parts: list[str]) -> Any:
     return data
 
 
-def _nested(parts: list[str], value: Any) -> dict:
-    return {parts[0]: value if len(parts) == 1 else _nested(parts[1:], value)}
-
-
 def _model_default(model: Any, parts: list[str]) -> Any:
     """The value a HarnessConfig path takes when no layer sets it, as config data (a SecretStr
     default as its text), or _UNSET when the field has none (`proposer.base_url` is required). An
@@ -465,15 +461,14 @@ def _model_default(model: Any, parts: list[str]) -> Any:
 
 
 def _put(data: dict, parts: list[str], value: Any) -> dict:
-    """`data` with `value` at `parts`, or without that key when `value` is _UNSET. Never mutates,
-    and never creates a section only to leave it empty."""
+    """`data` with `value` at `parts`, or without that key when `value` is _UNSET. Never mutates and
+    never creates a section: one a later workspace file replaced (`proposer: null`) holds nothing
+    to put back, and the global layers always reach `merged` before the workspace's."""
     head, rest = parts[0], parts[1:]
     if not rest:
         return {k: v for k, v in data.items() if k != head} if value is _UNSET else {**data, head: value}
     inner = data.get(head)
-    if isinstance(inner, dict):
-        return {**data, head: _put(inner, rest, value)}
-    return data if value is _UNSET else {**data, head: _nested(rest, value)}
+    return {**data, head: _put(inner, rest, value)} if isinstance(inner, dict) else data
 
 
 def _narrow_harness_global_only(merged: dict, sources: tuple[dict, ...],
