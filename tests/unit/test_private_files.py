@@ -482,3 +482,175 @@ def test_budget_file_is_born_private(tmp_path, no_chmod):
     path = tmp_path / "autoresearch" / "window.json"
     WindowMeter(window_budget_tokens=1000, state_path=path, clock=lambda: 100.0)
     assert path.exists() and _mode(path) == 0o600
+
+
+# --------------------------------------------------------------------------- the tighten at start (R10, R16)
+
+
+def _tighten_records(config_dir: Path) -> list[dict]:
+    import json
+
+    audit = config_dir / "audit.jsonl"
+    if not audit.exists():
+        return []
+    rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines() if line]
+    return [r for r in rows if r.get("path") == "config_dir.mode"]
+
+
+def _said_anything_about_it(printed: list[str], captured) -> bool:
+    text = "\n".join(printed) + captured.out + captured.err
+    return any(word in text for word in ("0700", "0o7", "owner-only", "config_dir.mode", "tighten"))
+
+
+def _open_config_dir(tmp_path: Path) -> Path:
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    os.chmod(config_dir, 0o775)  # what an install from before this release has
+    return config_dir
+
+
+async def test_the_tighten_is_silent_and_once(tmp_path, monkeypatch, capsys):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
+
+    config_dir = _open_config_dir(tmp_path)
+    _stub_start_boundaries(config_dir, monkeypatch)
+    printed = _capture_start_console(monkeypatch)
+
+    await _start_async(None, False, False, str(config_dir))
+
+    assert _mode(config_dir) == 0o700
+    (record,) = _tighten_records(config_dir)
+    assert record["event_type"] == "ComponentMutated"
+    assert (record["before_value"], record["after_value"]) == ("0o775", "0o700")
+    assert (record["layer"], record["actor"]) == ("user", "cli")
+    assert not _said_anything_about_it(printed, capsys.readouterr())
+
+    await _start_async(None, False, False, str(config_dir))
+
+    assert len(_tighten_records(config_dir)) == 1, "a second start found nothing to tighten"
+
+
+async def test_a_config_dir_named_by_localharness_dir_is_tightened_too(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_start_cmd import _stub_start_boundaries
+
+    config_dir = _open_config_dir(tmp_path)
+    _stub_start_boundaries(config_dir, monkeypatch)
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(config_dir))
+
+    await _start_async(None, False, False, None)
+
+    assert _mode(config_dir) == 0o700
+    assert len(_tighten_records(config_dir)) == 1
+
+
+@pytest.mark.parametrize("code", [errno.EROFS, errno.EPERM], ids=["read-only", "another-owner"])
+async def test_a_directory_that_cannot_be_tightened_never_blocks_start(tmp_path, monkeypatch, capsys,
+                                                                       code):
+    """SIMULATED: os.chmod refuses for the config folder only (a read-only mount, a folder another
+    account owns); every other chmod runs as usual."""
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
+
+    config_dir = _open_config_dir(tmp_path)
+    _stub_start_boundaries(config_dir, monkeypatch)
+    printed = _capture_start_console(monkeypatch)
+    real_chmod = os.chmod
+
+    def chmod(path, mode, *a, **k):
+        if Path(path) == config_dir:
+            raise OSError(code, os.strerror(code))
+        return real_chmod(path, mode, *a, **k)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+
+    await _start_async(None, False, False, str(config_dir))  # completes
+
+    assert _mode(config_dir) == 0o775
+    assert _tighten_records(config_dir) == []
+    assert not _said_anything_about_it(printed, capsys.readouterr())
+    assert any("startup)" in line for line in printed), "the session came up"
+
+
+# --------------------------------------------------------------------------- doctor's rows
+
+
+def _doctor_layout(tmp_path, monkeypatch, fake_home):
+    from tests.unit.test_doctor_layer_report import _layout
+
+    return _layout(tmp_path, monkeypatch, fake_home, workspace=False).global_dir
+
+
+def _rows(output: str, needle: str) -> list[str]:
+    return [line for line in output.splitlines() if needle in line]
+
+
+def test_doctor_names_an_open_folder_it_owns(tmp_path, monkeypatch, fake_home):
+    from tests.unit.test_doctor_layer_report import _run_doctor
+
+    config_dir = _doctor_layout(tmp_path, monkeypatch, fake_home)
+    os.chmod(config_dir, 0o755)
+
+    (row,) = _rows(_run_doctor(), "readable by other accounts")
+    assert (f"{config_dir} is readable by other accounts on this machine — `localharness start` "
+            f"makes it owner-only (0700), or run `chmod 700 {config_dir}`") in row
+    assert row.lstrip().startswith("⚠")
+
+
+def test_doctor_names_an_open_folder_another_account_owns(tmp_path, monkeypatch, fake_home):
+    from tests.unit.test_doctor_layer_report import _run_doctor
+
+    config_dir = _doctor_layout(tmp_path, monkeypatch, fake_home)
+    os.chmod(config_dir, 0o755)
+    someone_else = os.stat(config_dir).st_uid + 1
+    monkeypatch.setattr(os, "geteuid", lambda: someone_else)  # SIMULATED: never a real chown
+
+    (row,) = _rows(_run_doctor(), "readable by other accounts")
+    assert (f"{config_dir} is readable by other accounts and is owned by another account, so it "
+            "cannot be made owner-only from here — ask its owner, or move your config to a folder "
+            "you own") in row
+
+
+def test_doctor_names_an_open_folder_on_a_read_only_filesystem(tmp_path, monkeypatch, fake_home):
+    from tests.unit.test_doctor_layer_report import _run_doctor
+
+    config_dir = _doctor_layout(tmp_path, monkeypatch, fake_home)
+    os.chmod(config_dir, 0o755)
+    real_statvfs = os.statvfs
+
+    def statvfs(path):  # SIMULATED: the config folder's mount is read-only
+        if Path(path) == config_dir:
+            return SimpleNamespace(f_flag=real_statvfs(path).f_flag | os.ST_RDONLY)
+        return real_statvfs(path)
+
+    monkeypatch.setattr(os, "statvfs", statvfs)
+
+    (row,) = _rows(_run_doctor(), "readable by other accounts")
+    assert (f"{config_dir} is readable by other accounts and is on a read-only filesystem, so start "
+            f"could not make it owner-only — make it writable and run `chmod 700 {config_dir}`, or "
+            "move your config to a folder you own") in row
+
+
+def test_doctor_counts_open_files_inside_a_private_folder(tmp_path, monkeypatch, fake_home):
+    from tests.unit.test_doctor_layer_report import _run_doctor
+
+    config_dir = _doctor_layout(tmp_path, monkeypatch, fake_home)
+    os.chmod(config_dir, 0o700)
+    os.chmod(config_dir / "config.yaml", 0o644)
+
+    (row,) = _rows(_run_doctor(), "readable by other accounts")
+    assert (f"1 file(s) in {config_dir} are readable by other accounts if the folder is ever opened "
+            f"up (e.g. {config_dir / 'config.yaml'}) — `chmod -R go-rwx {config_dir}` makes each "
+            "private") in row
+    assert row.lstrip().startswith("i")
+
+
+def test_doctor_says_nothing_about_an_all_private_folder(tmp_path, monkeypatch, fake_home):
+    from tests.unit.test_doctor_layer_report import _run_doctor
+
+    config_dir = _doctor_layout(tmp_path, monkeypatch, fake_home)
+    os.chmod(config_dir, 0o700)
+    os.chmod(config_dir / "config.yaml", 0o600)
+
+    assert _rows(_run_doctor(), "readable by other accounts") == []
