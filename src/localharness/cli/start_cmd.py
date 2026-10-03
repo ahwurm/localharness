@@ -28,6 +28,8 @@ UNKNOWN_CHANNEL_ERROR = "unknown channel {given!r}; choose one of: {known}"
 OWN_COMMAND_ERROR = ("the {name} channel is served by its own command, because {why}. "
                      "Run `localharness {name}` instead of `localharness start --channel {name}`.")
 
+FIRST_START_LEAD = "LocalHarness is not set up yet. Setting up the model server first:"
+
 
 def _own_command(web_channel: Any, acp_channel: Any) -> dict[str, tuple[str, Any]]:
     """The ONE own-command table: name -> (why it has its own command, the channel it handed in).
@@ -1729,6 +1731,17 @@ def start_app(
     )] = False,
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
+    from localharness.config.paths import resolve_config_dir
+    if not list_models and not (resolve_config_dir(config_dir) / "config.yaml").exists():
+        # First start: no config. On a terminal, run init's core setup here and go on into the
+        # session — no "run localharness init" bounce (owner ruling 2026-10-03). Without a person
+        # to ask, _start_async's own welcome hint and exit 0 stand (the web/ACP callers use it too).
+        from localharness.cli.init_cmd import core_setup, is_interactive  # only a first start pays
+        if is_interactive(no_input):
+            console.print(FIRST_START_LEAD)
+            if not core_setup(config_dir, endpoint=None, model=None, force=False,
+                              interactive=True, starting=True).server_ready:
+                return  # skipped or nothing saved: the setup printed what to do next
     try:
         asyncio.run(_start_async(agent, verbose, debug, config_dir, channel, subagents, model,
                                  list_models, no_input, show_reasoning=show_reasoning))
