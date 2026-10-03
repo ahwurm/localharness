@@ -94,7 +94,7 @@ def at_secret(model: type[BaseModel] | None, loc: Iterable[Any]) -> bool:
 
 def secret_values(model: type[BaseModel] | None, data: Any) -> frozenset[str]:
     """Every value `data`, the input `model` validated, holds at a secret field — as text: a string,
-    or an int's digits (a key typed as a number). A container held there gives everything inside.
+    or a number's repr (a key typed as a number). A container held there gives everything inside.
     Never the literal "none", a proposer's "no key": masking it would hide every "none" around it.
     Linear in the distinct objects walked, so an alias-amplified YAML value stays cheap."""
     found: set[str] = set()
@@ -103,8 +103,8 @@ def secret_values(model: type[BaseModel] | None, data: Any) -> frozenset[str]:
     def collect(node: Any, depth: int) -> None:
         if isinstance(node, str):
             found.add(node)
-        elif isinstance(node, int) and not isinstance(node, bool):
-            found.add(str(node))
+        elif isinstance(node, (int, float)) and not isinstance(node, bool):
+            found.add(repr(node))
         elif isinstance(node, (Mapping, list, tuple)) and id(node) not in seen and depth < _WALK_DEPTH:
             seen.add(id(node))
             for child in node.values() if isinstance(node, Mapping) else node:
