@@ -8,9 +8,10 @@
 - `enable NAME [--set k=v …]` and `disable NAME` write `NAME.enabled` (and the settings) into ONE
   layer's overrides.yaml through the atomic overlay writer — the machine's, or with --workspace this
   project's — and never into a config.yaml. `enable NAME --set k=v` writes the same overlay as
-  `enable NAME` followed by `components set NAME.k v`. On a terminal, with no --set, it asks the
-  plugin's declared setup questions, writes the answers the same way, and runs the plugin's doctor
-  check once.
+  `enable NAME` followed by `components set NAME.k v`. On a terminal, with no --set, `enable` runs
+  the plugin's setup step (`_switch`): its questions, the one write, its setup action, its doctor
+  check and its next steps. `session_step` runs the same step for `/plugins enable|disable NAME`,
+  between the two halves of a terminal session's restart.
 
 A plugin you installed is turned on and off only in machine-level settings: turning it on is your
 trust grant (SAFE-06), so --workspace is refused for it, as it is for a machine-level setting.
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import json as _json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, NoReturn, Optional
 
@@ -445,8 +447,38 @@ def _prompt_values(resolution: Resolution, loader: ConfigLoader, entry: PlanEntr
         "machine": machine_sentence(gpu_name()) if "{machine}" in template else ""}
 
 
+@dataclass(frozen=True)
+class StepOutcome:
+    """What one plugin step did, for the session that resumes after `/plugins enable|disable`
+    (cli/start_cmd): `failed_check` is the first check row that did not pass ("" when it passed or
+    did not run); `stopped` is True when Ctrl-C, Ctrl-D or a refusal ended the step early."""
+    name: str
+    on: bool
+    failed_check: str = ""
+    stopped: bool = False
+
+
+async def step_pending(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry,
+                       paths: PluginPaths) -> bool:
+    """Does this plugin's setup step still have work — the first time, or while it is not set up?
+    Only a plugin that declares a step (setup questions or a setup action) has one, and it does
+    while its check, the row `doctor` prints, is not clean: unconfigured, failed or a failing row;
+    or a skipped row while one of its questions has no stored value. Settings that do not
+    validate leave nothing to check with: not set up. Asks and writes nothing."""
+    from localharness.plugins.lifecycle import _doctor_row
+    from localharness.plugins.setup import has_setup_action
+
+    m, cls = entry.manifest, resolution.classes.get(entry.name)
+    if m is None or cls is None or not (m.setup or has_setup_action(cls)):
+        return False
+    if entry.name not in resolution.settings:
+        return True
+    row = await _doctor_row(resolution, entry.name, paths)
+    return _not_clean(row, any(not _stored(resolution, loader, entry, f.key) for f in m.setup))
+
+
 def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_dir: Optional[str],
-            ask: bool = False) -> None:
+            ask: bool = False, in_session: bool = False) -> StepOutcome:
     """Write `<name>.enabled: <on>`, and any --set values, into one layer's overrides.yaml; turning
     a plugin on, run its setup step around that write. With `ask` (a terminal, no --set): its
     questions are asked first and the answers written as --set values; after the write its setup
@@ -454,7 +486,12 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     declares questions or an action; setup_help and the filled-in coding-agent prompt follow a
     check that is not clean. Without `ask` nothing is asked and nothing runs: the next step says
     what to run. A plugin missing its install extra is asked nothing and not checked. next_steps
-    print on every outcome, and the command exits 0 whether or not the check passes: it wrote."""
+    print on every outcome, and the command exits 0 whether or not the check passes: it wrote.
+
+    `in_session` (the /plugins restart, via session_step): the questions are asked only while the
+    step is pending — a configured plugin is just switched — and the change takes effect in the
+    session that resumes, so the success line does not point at the next start. Either way the
+    setup action runs only while the step is pending or when answers were written in this run."""
     import asyncio
 
     from localharness.cli.doctor_cmd import print_plugin_row
@@ -483,14 +520,19 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     setup = m.setup if m is not None else ()
     cls = resolution.classes.get(name)
     has_action = m is not None and cls is not None and has_setup_action(cls)
-    if ask and setup and not missing:  # the answers go through the one checked write path, as --set values
+    # Before asking, from what is stored now: does the step still have work? The shell asks every
+    # question every time, as it always has; a session asks only while the step is pending.
+    pending = (asyncio.run(step_pending(resolution, loader, entry, _paths(loader, workspace)))
+               if ask and m is not None and not missing and (in_session or has_action) else True)
+    if ask and setup and not missing and (pending or not in_session):
+        # the answers go through the one checked write path, as --set values
         pairs = _ask_fields(setup, lambda key: _stored(resolution, loader, entry, key))
     overlay = load_overlay(target)
     set_value_in_dict(overlay, f"{name}.enabled", on)
     values = _checked_all(resolution, loader, entry, pairs, to_workspace, overlay) if pairs else {}
     atomic_write_overlay(target, overlay)
-    console.print("[green]✓[/green] " + escape(
-        f"{name} {verb}d in {target} — takes effect on the next `localharness start`"), soft_wrap=True)
+    tail = "" if in_session else " — takes effect on the next `localharness start`"
+    console.print("[green]✓[/green] " + escape(f"{name} {verb}d in {target}{tail}"), soft_wrap=True)
     for path, value in values.items():
         console.print(escape(f"  set {path} = {value}"), soft_wrap=True)
     fresh_loader = fresh = after = None
@@ -518,16 +560,18 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
             soft_wrap=True)
     step = ask and after is not None and not missing
     paths = _paths(fresh_loader, workspace) if fresh_loader is not None else None
-    if step and has_action and after.state == "on" and (
+    if step and has_action and after.state == "on" and (pending or pairs) and (
             not m.setup_action or typer.confirm(m.setup_action, default=True)):
         rows = asyncio.run(setup_action_rows(fresh, name, paths))
         if rows:
             print_plugin_row(DoctorRow(name, "on", "", rows), [])
+    failed = ""
     if step and (setup or has_action):
         console.print("Checking it now:")
         row = _probe(name, fresh, paths)
         unanswered = any(not _stored(fresh, fresh_loader, after, f.key) for f in setup)
         if row is not None and _not_clean(row, unanswered):
+            failed = next((c.detail for c in row.checks if c.status in ("fail", "skip")), row.detail)
             if m.setup_help:  # the one place it prints
                 console.print()
                 console.print(escape(m.setup_help), soft_wrap=True)
@@ -545,6 +589,7 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     if m is not None and m.next_steps:
         for line in m.next_steps.splitlines():
             console.print(escape(f"  {line}"), soft_wrap=True)
+    return StepOutcome(name, on, failed_check=failed)
 
 
 def _probe(name: str, resolution: Resolution, paths: PluginPaths) -> DoctorRow | None:
@@ -565,6 +610,27 @@ def _probe(name: str, resolution: Resolution, paths: PluginPaths) -> DoctorRow |
     except Exception as exc:  # noqa: BLE001 — the enable already wrote; the check is advice
         console.print(escape(f"  could not check it now: {type(exc).__name__}: {exc}"), soft_wrap=True)
         return None
+
+
+def session_step(action: tuple[str, str], config_dir: str | None) -> StepOutcome:
+    """The step `/plugins enable|disable NAME` runs between the two halves of a terminal session's
+    restart (cli/start_cmd.start_app): the same _switch the shell command runs, on the plain
+    terminal with nothing else drawing on it — never inside the input box, so a typed secret never
+    reaches the box's history. It never raises: Ctrl-C or Ctrl-D at a question, a refusal, or an
+    error (a failed write, a plugin bug) stops the step and the session resumes anyway."""
+    import click
+    verb, name = action
+    try:
+        return _switch(name, verb == "enable", [], False, config_dir,
+                       ask=_stdin_is_a_terminal(), in_session=True)
+    except (click.exceptions.Abort, click.exceptions.Exit, EOFError, KeyboardInterrupt):
+        console.print("Stopped. Your conversation continues.")
+        return StepOutcome(name, verb == "enable", stopped=True)
+    except Exception as exc:  # noqa: BLE001 — after teardown a raise would lose the conversation
+        why = (f"{type(exc).__name__}: {exc}".splitlines() or [type(exc).__name__])[0]
+        console.print(escape(f"{name}'s setup hit an error: {why}. Your conversation continues."),
+                      soft_wrap=True)
+        return StepOutcome(name, verb == "enable", stopped=True)
 
 
 @plugins_app.command("enable")
