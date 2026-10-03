@@ -850,7 +850,7 @@ async def test_protocol_serves_the_commands_and_modes_from_their_own_sources(tmp
     _, _, _, client = await _stack(tmp_path)
     body = (await client.get("/api/protocol", headers=BEARER)).json()
     assert body["protocol_version"] == PROTOCOL_VERSION
-    assert [c["name"] for c in body["commands"]] == [n for n, _ in SLASH_COMMANDS]
+    assert [c["name"] for c in body["commands"]] == [r.name for r in SLASH_COMMANDS if not r.terminal_only]
     assert set(body["modes"]) == set(MODE_STRICTNESS)
     assert body["default_mid_turn_intent"] == "queue"
     assert set(body["collapsible_groups"]) == {"fs.read", "web", "memory"}

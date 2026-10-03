@@ -4,20 +4,35 @@
    swapped into BUILTIN_PLUGINS and a real config dir. Does `/plugins enable|disable NAME` restart
    the session (None), or answer one line and stay? The decision is made BEFORE teardown, from a
    fresh plan over the session's own layers, and asks and writes nothing.
+2. The REPL: the terminal-only `/plugins` row and `_handle_plugins_cmd`. One line on a channel
+   that cannot switch plugins, with no session hook, for a wrong spelling, or while a call is
+   parked; otherwise the hook's line, or the restart: `restart_request` set and the REPL ended
+   as /quit ends it, in the classic loop and in the box loop, typed-ahead lines kept.
 
-Tests that call asyncio.run are plain `def`: asyncio_mode is "auto".
+Tests that call asyncio.run are plain `def`: asyncio_mode is "auto". Every REPL here gets an
+explicit gate: on the MagicMock agent, `agent.gate.pending` is truthy and would read as a parked
+call.
 """
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
 
+from localharness.channels.base import ChannelAdapter
+from localharness.channels.terminal import TerminalChannel
+from localharness.channels.web.channel import WebChannel
 from localharness.cli import plugins_cmd
+from localharness.cli.repl import OrchestratorREPL
+from localharness.cli.slash_commands import all_rows, find_row
 from localharness.plugins import builtin, discovery
 from tests.unit.test_plugins_enable_setup import _CONFIG, Needy, Stub
+from tests.unit.test_repl_input_box import FakeBoxChannel, _pending_turn, _repl
+from tests.unit.test_repl_unknown_slash import RecordingChannel, _build_repl
 
 _REAL_DISCOVER = discovery.discover
 NEEDY_LINE = ("needy needs its install extra first: install `localharness[nosuchextra]`, "
@@ -135,3 +150,183 @@ def test_decision_enable_of_a_plugin_running_here_whose_flag_is_off_restarts(g):
     # next start — the restart's step is what writes the flag
     _overrides(g, {"stub": {"url": "http://ok"}})
     assert _decide("stub", True, {"stub"}, g) is None
+
+
+# --- 2. the REPL: the terminal-only row and its handler ----------------------------------------
+
+INFO = {"style": "system.info"}
+TERMINAL_ONLY = ("/plugins works only in a terminal session. From a shell: "
+                 "localharness plugins enable <name>")
+NO_SESSION = "/plugins needs a session started with `localharness start`."
+USAGE = "Usage: /plugins, /plugins enable <name> or /plugins disable <name>"
+PARKED = "Answer the parked calls first (/pending lists them): a restart would drop them."
+
+
+class Terminalish(RecordingChannel):
+    """RecordingChannel that, like the terminal, can restart the session for /plugins."""
+    can_switch_plugins = True
+
+
+class BoxTerminal(FakeBoxChannel):
+    can_switch_plugins = True
+
+
+def _classic(channel, *, pending=None, **kw):
+    """_build_repl's REPL, built again with the /plugins keywords (the hook, the queued lines),
+    and an explicit gate holding `pending`."""
+    base, agent, bus = _build_repl(channel)
+    repl = OrchestratorREPL(orchestrator=base._orchestrator, agent_loop=agent, channel=channel,
+                            bus=bus, **kw)
+    repl._gate = SimpleNamespace(pending=pending or {})
+    return repl, agent
+
+
+def _box(**kw):
+    """test_repl_input_box's `_repl`, built again with the /plugins keywords."""
+    base, channel, agent = _repl(BoxTerminal())
+    repl = OrchestratorREPL(orchestrator=base._orchestrator, agent_loop=agent, channel=channel,
+                            bus=base._bus, **kw)
+    repl._box_ctrl_q = asyncio.Queue()
+    repl._gate = SimpleNamespace(pending={})
+    return repl, channel, agent
+
+
+def test_the_plugins_row_is_the_one_terminal_only_row():
+    row = find_row("/plugins")
+    assert row is not None and row.terminal_only and row.takes_args
+    assert row.handler == "_slash_plugins" and row.plugin is None
+    assert find_row("/plugins enable image") is row
+    assert [r.name for r in all_rows() if r.terminal_only] == ["/plugins"]
+
+
+def test_only_the_terminal_can_switch_plugins():
+    assert ChannelAdapter.can_switch_plugins is False
+    assert TerminalChannel.can_switch_plugins is True
+    assert WebChannel.can_switch_plugins is False
+
+
+async def test_plugins_on_a_channel_that_cannot_switch_is_one_line_and_never_calls_the_hook():
+    hook = AsyncMock(return_value=None)
+    channel = RecordingChannel(["/plugins enable image"])
+    repl, _ = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    assert channel.sent == [(TERMINAL_ONLY, INFO)]
+    hook.assert_not_awaited()
+    assert repl.restart_request is None
+
+
+async def test_plugins_without_a_session_hook_says_so():
+    channel = Terminalish(["/plugins enable image"])
+    repl, _ = _classic(channel)
+    await repl.run()
+    assert channel.sent == [(NO_SESSION, INFO)]
+    assert repl.restart_request is None
+
+
+@pytest.mark.parametrize("line", ["/plugins frobnicate x", "/plugins enable", "/plugins enable a b"])
+async def test_plugins_with_a_wrong_spelling_shows_the_usage(line):
+    hook = AsyncMock(return_value=None)
+    channel = Terminalish([line])
+    repl, _ = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    assert channel.sent == [(USAGE, INFO)]
+    hook.assert_not_awaited()
+
+
+async def test_plugins_refuses_the_restart_while_a_call_is_parked():
+    hook = AsyncMock(return_value=None)
+    channel = Terminalish(["/plugins enable image", "/help"])
+    repl, _ = _classic(channel, pending={1: object()}, on_plugin_switch=hook)
+    await repl.run()
+    assert channel.sent[0] == (PARKED, INFO)
+    assert channel.sent[1][0].startswith("Available commands:")  # the session went on
+    hook.assert_not_awaited()
+    assert repl.restart_request is None
+
+
+async def test_plugins_shows_the_hooks_line_and_reads_the_next_input():
+    hook = AsyncMock(return_value="image is already on.")
+    channel = Terminalish(["/plugins enable image", "/help"])
+    repl, _ = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    hook.assert_awaited_once_with("enable", "image")
+    assert channel.sent[0] == ("image is already on.", INFO)
+    assert channel.sent[1][0].startswith("Available commands:")
+    assert repl.restart_request is None
+
+
+@pytest.mark.parametrize(("line", "action", "said"), [
+    ("/plugins enable image", ("enable", "image"), "Restarting with image on — your conversation is kept."),
+    ("/Plugins Disable Image", ("disable", "image"), "Restarting with image off — your conversation is kept."),
+])
+async def test_plugins_restart_ends_the_repl_without_reading_on(line, action, said):
+    hook = AsyncMock(return_value=None)
+    channel = Terminalish([line, "never read"])
+    repl, agent = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    hook.assert_awaited_once_with(*action)
+    assert channel.sent == [(said, INFO)]
+    assert repl.restart_request == action
+    assert channel._inputs == ["never read"]
+    agent.run_turn.assert_not_called()
+
+
+@pytest.mark.parametrize("line", ["/plugins", "/PLUGINS  "])
+async def test_bare_plugins_sends_the_list(line):
+    hook = AsyncMock(return_value="Plugins:\n  image  on")
+    channel = Terminalish([line])
+    repl, _ = _classic(channel, on_plugin_switch=hook)
+    await repl.run()
+    hook.assert_awaited_once_with("list", "")
+    assert channel.sent == [("Plugins:\n  image  on", INFO)]
+    assert repl.restart_request is None
+
+
+async def test_classic_mode_plays_resumed_lines_before_reading_input():
+    channel = Terminalish([])
+    repl, agent = _classic(channel, on_plugin_switch=AsyncMock(return_value=None), queued=("hello",))
+    await repl.run()
+    agent.run_turn.assert_awaited_once()
+    assert agent.run_turn.call_args.kwargs["task"] == "hello"
+    assert repl.queued == ()
+
+
+async def test_classic_mode_keeps_the_lines_after_a_replayed_restart():
+    channel = Terminalish(["never read"])
+    repl, _ = _classic(channel, on_plugin_switch=AsyncMock(return_value=None),
+                       queued=("/plugins enable y", "/help"))
+    await repl.run()
+    assert repl.restart_request == ("enable", "y")
+    assert repl.queued == ("/help",)
+    assert channel._inputs == ["never read"]
+
+
+async def test_box_mode_plugins_enable_ends_the_loop_and_keeps_typed_ahead_lines():
+    hook = AsyncMock(return_value=None)
+    repl, channel, _ = _box(on_plugin_switch=hook)
+    await _pending_turn(repl)
+    running = repl._turn_task
+    try:
+        assert await repl._handle_box_event("submit", "/plugins enable x") is True
+        assert await repl._handle_box_event("submit", "/help") is True
+        assert repl.queued == ("/plugins enable x", "/help")  # slash lines mid-turn are queued
+        hook.assert_not_awaited()
+        done = asyncio.ensure_future(asyncio.sleep(0))
+        await done
+        assert await repl._handle_box_event("turn_done", done) is False
+        hook.assert_awaited_once_with("enable", "x")
+        assert repl.restart_request == ("enable", "x")
+        assert repl.queued == ("/help",)
+        assert ("Restarting with x on — your conversation is kept.", INFO) in channel.sent
+    finally:
+        running.cancel()
+
+
+async def test_box_mode_replays_resumed_lines_first():
+    hook = AsyncMock(return_value=None)
+    repl, channel, _ = _box(on_plugin_switch=hook, queued=("/plugins enable y", "/help"))
+    await asyncio.wait_for(repl._run_with_box(), 5)
+    hook.assert_awaited_once_with("enable", "y")
+    assert repl.restart_request == ("enable", "y")
+    assert repl.queued == ("/help",)
+    assert channel.box_started is True and channel.box_stopped is True

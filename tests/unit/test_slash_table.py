@@ -42,9 +42,11 @@ CORE = [
     ("/pending", "Tool calls parked for you to answer"),
     ("/approve", "Run a parked call; /approve [N] (default: the oldest)"),
     ("/deny", "Drop a parked call; /deny [N] (default: the oldest)"),
+    ("/plugins", "List plugins; /plugins enable|disable <name> to switch one in this session"),
     ("/quit", "Exit LocalHarness"),
     ("/exit", "Exit LocalHarness"),
 ]
+PHONE = [row for row in CORE if row[0] != "/plugins"]  # terminal-only rows never reach the phone
 
 HELP_BEFORE = (
     "Available commands:\n"
@@ -57,6 +59,7 @@ HELP_BEFORE = (
     "  /pending    Tool calls parked for you to answer\n"
     "  /approve    Run a parked call; /approve [N] (default: the oldest)\n"
     "  /deny       Drop a parked call; /deny [N] (default: the oldest)\n"
+    "  /plugins    List plugins; /plugins enable|disable <name> to switch one in this session\n"
     "  /quit       Exit LocalHarness\n"
     "  /exit       Exit LocalHarness\n"
     "\n"
@@ -95,7 +98,7 @@ async def _phone_menu(tmp_path) -> list[dict]:
 
 # ------------------------------------------------------------ no plugin rows: nothing moved
 
-def test_the_core_table_is_todays_eleven_rows_in_order():
+def test_the_core_table_is_twelve_rows_in_order():
     assert [tuple(row) for row in SLASH_COMMANDS] == CORE  # a row unpacks as (name, description)
     assert all_rows() == SLASH_COMMANDS
 
@@ -111,7 +114,7 @@ def test_the_completer_offers_the_same_menu():
 
 
 async def test_the_phone_menu_is_the_same_eleven_rows_in_order(tmp_path):
-    assert await _phone_menu(tmp_path) == [{"name": n, "description": d} for n, d in CORE]
+    assert await _phone_menu(tmp_path) == [{"name": n, "description": d} for n, d in PHONE]
 
 
 # ------------------------------------------------------------ core dispatch: exact parity
@@ -128,6 +131,8 @@ PARITY = [
     ("/APPROVE  2 ", "_handle_pending_answer", ("  2",), {"approve": True}),
     ("/deny", "_handle_pending_answer", ("",), {"approve": False}),
     ("/pending", "_handle_pending_cmd", (), {}),
+    ("/Plugins Enable Image", "_handle_plugins_cmd", ("enable image",), {}),
+    ("/plugins", "_handle_plugins_cmd", ("",), {}),
 ]
 
 
@@ -223,7 +228,7 @@ async def test_a_plugin_row_reaches_every_surface(rows, tmp_path):
     assert await repl._handle_slash("/help") is True
     assert channel.sent == [(help_text(), INFO)] and "/example" in channel.sent[0][0]
     assert await _phone_menu(tmp_path) == [
-        *({"name": n, "description": d} for n, d in CORE), {"name": "/example", "description": EXAMPLE_HELP}]
+        *({"name": n, "description": d} for n, d in PHONE), {"name": "/example", "description": EXAMPLE_HELP}]
 
 
 async def test_a_plugin_row_awaits_its_handler_with_the_arguments_and_shows_its_text(rows):
