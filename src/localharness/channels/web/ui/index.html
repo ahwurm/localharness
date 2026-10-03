@@ -4,10 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>localharness</title>
-<!-- The install (A2). `crossorigin="use-credentials"` is load-bearing, not boilerplate: without
-     it the browser fetches the manifest anonymously, and the server can only hand a pairing
-     `start_url` to a caller that presents the credential. iOS keeps a home-screen app's storage
-     in a different jar from Safari's, so this is what stops the installed app starting blank. -->
+<!-- The install (A2). iOS keeps a home-screen app's storage in a different jar from Safari's, so
+     the installed app starts unpaired and asks for the token once. The server hands a pairing
+     `start_url` to the bearer only, which no manifest fetch carries: a cookie it traded for the
+     token would make that cookie the token. `use-credentials` only lets the manifest load behind
+     a proxy that signs in by cookie. -->
 <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
 <!-- iOS uses THIS for the home-screen icon, not the manifest's, and it does not take an SVG. -->
 <link rel="apple-touch-icon" href="/icon-180.png">
@@ -382,7 +383,8 @@
 // ---------------------------------------------------------------- credentials
 // The token is required on every request, the stream included. It is never put in a URL: a query
 // string lands in logs and referrers. POSTs carry it as a bearer header; the stream uses the
-// SameSite=Strict cookie that /api/auth/enroll sets in exchange for it.
+// SameSite=Strict cookie that /api/auth/enroll sets in exchange for it — a GET-only value derived
+// from the token, never the token itself.
 const LS = window.localStorage;
 // PAIRING (A2). The enrolment QR encodes `https://host/#t=<token>`, and the FRAGMENT is the
 // reason that is allowed: a fragment is never sent to a server, so it lands in no access log,
@@ -392,7 +394,9 @@ const LS = window.localStorage;
 // someone already bookmarked; it is the worse of the two and the QR never produces it.)
 const fragmentToken = new URLSearchParams(location.hash.slice(1)).get("t");
 const queryToken = new URLSearchParams(location.search).get("token");
-let token = LS.getItem("lh.token") || fragmentToken || queryToken || "";
+// A token from a fresh QR wins over the stored one: after a rotation, scanning the new code is
+// the whole re-pairing.
+let token = fragmentToken || queryToken || LS.getItem("lh.token") || "";
 if (fragmentToken || queryToken) {
   LS.setItem("lh.token", token);
   history.replaceState(null, "", location.pathname + location.search.replace(/[?&]token=[^&]*/, ""));
@@ -962,6 +966,7 @@ function onFrame(name, d) {
 
 // ---------------------------------------------------------------- the connection
 let es = null;
+let lastEnroll = 0;
 function connect(from) {
   if (es) es.close();
   // In-context resume only (rule 4, amended): S.seq carries across a backgrounding, so the gap
@@ -974,7 +979,17 @@ function connect(from) {
     "AskExpired", "TurnCancelled", "BringUpStage", "Notice", "GapDetected", "Lagged",
   ]);
   es.onopen = () => { S.offline = false; paint(); };
-  es.onerror = () => { S.offline = true; paint(); };   // EventSource retries on its own
+  const src = es;
+  es.onerror = () => {
+    S.offline = true; paint();   // EventSource retries on its own — unless the server refused it
+    // A refused stream (401: no cookie yet, or one from before the upgrade) CLOSES for good. Trade
+    // the stored bearer for a fresh cookie and reconnect — once per 30 s, so a wrong token cannot
+    // loop.
+    if (src.readyState === EventSource.CLOSED && Date.now() - lastEnroll > 30000) {
+      lastEnroll = Date.now();
+      post("/api/auth/enroll", {}).then(() => connect()).catch(() => {});
+    }
+  };
   const handle = (name) => (ev) => {
     let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
     if (known.has(name)) onFrame(name, d); else onEvent(name, d);
@@ -1636,7 +1651,7 @@ $("recheck").onclick = async () => {
 // ---------------------------------------------------------------- boot
 (async () => {
   if (!token) {
-    const t = prompt("app token (printed by `localharness web`, or scan its QR)");
+    const t = prompt("app token (scan the QR `localharness web` draws, or run `localharness web --show-token`)");
     if (t) { token = t.trim(); LS.setItem("lh.token", token); }
   }
   try { await post("/api/auth/enroll", {}); } catch (e) { /* the bearer header still works */ }

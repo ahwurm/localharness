@@ -296,6 +296,7 @@ class WebServer:
     ) -> None:
         self.channel = channel
         self.token = token
+        self._cookie_value = auth.get_cookie_value(token)
         self.ui_dir = (ui_dir or PACKAGED_UI_DIR).resolve()
         self.on_first_message = on_first_message
         self.on_new_session = on_new_session
@@ -317,17 +318,21 @@ class WebServer:
           Either alone forces a CORS preflight this server answers for no foreign origin, so the
           POST surface is structurally CSRF-safe rather than relying on `SameSite`.
         * **GET** (the stream included) accepts the bearer header or the `SameSite=Strict`
-          cookie set at enrolment. The token is never placed in a URL — a query string lands in
-          logs and referrers.
+          cookie set at enrolment — a value DERIVED from the token, never the token itself, so a
+          service on the same host name that is sent the cookie gains the reads and no verb. A
+          presented bearer is judged alone. The token is never placed in a URL — a query string
+          lands in logs and referrers.
         """
         if post:
             ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
             if ctype in SIMPLE_CONTENT_TYPES or ctype != JSON_CONTENT_TYPE:
                 return _json({"error": auth.CONTENT_TYPE_ERROR}, status=415)
-            presented = self._bearer(request)
+            ok = auth.constant_time_match(self._bearer(request), self.token)
         else:
-            presented = self._bearer(request) or request.cookies.get(auth.AUTH_COOKIE)
-        return None if auth.constant_time_match(presented, self.token) else _unauthorized()
+            bearer = self._bearer(request)
+            ok = (auth.constant_time_match(bearer, self.token) if bearer is not None else
+                  auth.constant_time_match(request.cookies.get(auth.AUTH_COOKIE), self._cookie_value))
+        return None if ok else _unauthorized()
 
     @staticmethod
     def _bearer(request: Request) -> Optional[str]:
@@ -427,18 +432,24 @@ class WebServer:
         return FileResponse(target, headers={"Cache-Control": "no-cache"})
 
     async def enroll(self, request: Request) -> Response:
-        """Trade the app token for the `SameSite=Strict` cookie `EventSource` can carry.
+        """Trade the app token for the cookie `EventSource` can carry: `lh_web_get`, a GET-only
+        value derived from the token, `SameSite=Strict`, `HttpOnly`, `Secure`, scoped to `/api`.
 
-        The one POST that does not already require the cookie, because it is what mints it.
+        Bearer-authenticated like every POST. The page enrols on every load and once more when its
+        stream is refused, so a phone paired before the derived cookie existed sheds the old one
+        (0.16's cookie, which WAS the token, cleared here) without a tap. `Secure` stays
+        unconditional: behind `tailscale serve` this process cannot see the phone's scheme.
         """
         refusal = self._authed(request, post=True)
         if refusal is not None:
             return refusal
         response = _json({"status": "enrolled", "protocol_version": PROTOCOL_VERSION})
         response.set_cookie(
-            auth.AUTH_COOKIE, self.token,
-            httponly=True, samesite="strict", secure=True, path="/",
+            auth.AUTH_COOKIE, self._cookie_value,
+            httponly=True, samesite="strict", secure=True, path=auth.COOKIE_PATH,
         )
+        response.delete_cookie(auth.LEGACY_AUTH_COOKIE, path="/", secure=True, httponly=True,
+                               samesite="strict")
         return response
 
     # ------------------------------------------------------------------ the stream
@@ -1433,8 +1444,14 @@ class WebServer:
         Belt and braces, because that credentialed manifest fetch is browser behavior we cannot
         force: when it does not happen the generic manifest is served, the app installs anyway,
         and the shell shows its pairing field. The install is never blocked — only pre-paired.
+
+        The token-bearing variant is served for the BEARER only, never for the GET cookie. Cookies
+        ignore ports, so a neighbouring service on the same host name is sent that cookie; were it
+        traded for the token here, the cookie would be the token. A browser's manifest fetch
+        carries cookies, not the bearer — and the cookie is scoped to /api besides — so the
+        installed app asks for the token once (docs/web.md says so).
         """
-        authed = self._authed(request, post=False) is None
+        authed = auth.constant_time_match(self._bearer(request), self.token)
         body = dict(MANIFEST)
         if authed:
             body["start_url"] = f"/#{TOKEN_FRAGMENT_KEY}={self.token}"
