@@ -12,12 +12,22 @@ module (owner ruling 2026-09-03). See cli/workspace.resolve_workspace_layer.
 
 Undecided is None, not False: a declined-in-a-script session must not become a permanent
 "no" — only an answered prompt records anything.
+
+Trust is for what you saw. Beside the yes/no, a project's entry keeps the MCP servers its agent
+files start AS THEY WERE SHOWN at the Yes (`executables`), and the machine keeps one record of what
+its own agent files start, load or loosen (`machine_key`). Start compares both with the files on
+disk and asks about a difference once, on a terminal (cli/workspace.decide_project_trust,
+decide_machine_trust). Same file on purpose: it is a protected path in every mode, so the agent can
+ask to write it but never be granted it.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
 
@@ -145,12 +155,113 @@ def prior_session_count(state_dir: Path, before: Optional[float] = None) -> int:
     return count
 
 
-def record_trust(workspace_dir: Path, trusted: bool) -> None:
+def record_trust(workspace_dir: Path, trusted: bool, *, unseen_executables: bool = False) -> None:
     """Persist a decision. Permanent by design — v0.13 ships no expiry and no `workspace trust`
     CLI verb (owner: "trust forever after"); changing an answer means hand-editing
-    `~/.localharness/trusted_workspaces.yaml`, which the config spec documents."""
+    `~/.localharness/trusted_workspaces.yaml`, which the config spec documents.
+
+    Only `trusted` changes: the servers a Yes approved stay. `unseen_executables`: this Yes was
+    given without the server list (the in-session question), so an entry with no servers recorded
+    gets "nothing approved yet" — the next start asks about them rather than adopting them."""
     data = _load(trust_store_path())
-    data[_key(workspace_dir)] = {"trusted": trusted}
+    key = _key(workspace_dir)
+    entry = dict(data[key]) if isinstance(data.get(key), dict) else {}
+    entry["trusted"] = trusted
+    if trusted and unseen_executables and EXECUTABLES_KEY not in entry:
+        entry[EXECUTABLES_KEY] = {**NOTHING_APPROVED, "recorded": _now()}
+    data[key] = entry
+    atomic_write_overlay(trust_store_path(), data)
+
+
+EXECUTABLES_KEY = "executables"
+
+NOTHING_APPROVED: dict = {"fingerprint": "", "servers": []}
+"""What a Yes given WITHOUT the server list records: nothing approved yet, so the next start asks."""
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _canonical(entry: Any) -> str:
+    return json.dumps(entry, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _read_yaml(path: Path) -> Any:
+    """A file's YAML, or None when it cannot be read or parsed — the loader names that file and
+    loads nothing from it, so there is nothing in it to start."""
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+
+
+def _servers(raw: Any) -> list[dict]:
+    tools = raw.get("tools") if isinstance(raw, dict) else None
+    servers = tools.get("mcp_servers") if isinstance(tools, dict) else None
+    return [s for s in servers if isinstance(s, dict)] if isinstance(servers, list) else []
+
+
+def _names(mapping: Any) -> list[str]:
+    """The keys of an `env` or `headers` mapping, never a value (values are often secrets)."""
+    return sorted(map(str, mapping)) if isinstance(mapping, dict) else []
+
+
+def _args(server: dict) -> list[str]:
+    args = server.get("args")
+    args = args if isinstance(args, list) else ([] if args is None else [args])
+    return [str(a) for a in args if a is not None]
+
+
+def executables_snapshot(workspace_dir: Path) -> list[dict]:
+    """What a project's own agent files would start or connect to: every `tools.mcp_servers` entry
+    in `<workspace>/agents/*.yaml`, as {file, name, transport, command, args, env, url, headers}
+    with env and header NAMES only (values are often secrets: never stored, never shown), sorted by
+    file, name, then the entry's canonical JSON (two servers may share a name: their order in the
+    file never changes the fingerprint). A file that does not parse, or is not a mapping, is
+    skipped — the loader warns about it and loads nothing from it. Scripts a command runs are not
+    read (named in SECURITY.md)."""
+    out: list[dict] = []
+    for path in sorted((Path(workspace_dir) / "agents").glob("*.yaml")):
+        for s in _servers(_read_yaml(path)):
+            out.append({"file": path.name, "name": str(s.get("name") or ""),
+                        "transport": str(s.get("transport") or ""),
+                        "command": str(s.get("command") or ""), "args": _args(s),
+                        "env": _names(s.get("env")), "url": str(s.get("url") or ""),
+                        "headers": _names(s.get("headers"))})
+    return sorted(out, key=lambda e: (e["file"], e["name"], _canonical(e)))
+
+
+def fingerprint(snapshot: list[dict]) -> str:
+    """One digest of a snapshot: "sha256:" + hex of its canonical JSON."""
+    return "sha256:" + hashlib.sha256(_canonical(snapshot).encode("utf-8")).hexdigest()
+
+
+def _entry(data: dict, key: str) -> dict:
+    return dict(data[key]) if isinstance(data.get(key), dict) else {}
+
+
+def recorded_executables(workspace_root: Path) -> Optional[dict]:
+    """The executables record kept for this exact root, or None (never recorded — a trust record
+    written before this release, or one written by hand). A malformed record reads as "nothing
+    approved yet", the direction that asks."""
+    rec = _entry(_load(trust_store_path()), _key(workspace_root)).get(EXECUTABLES_KEY)
+    if not isinstance(rec, dict):
+        return None
+    servers = rec.get("servers")
+    return {"fingerprint": rec["fingerprint"] if isinstance(rec.get("fingerprint"), str) else "",
+            "servers": [e for e in servers if isinstance(e, dict)] if isinstance(servers, list) else []}
+
+
+def record_executables(workspace_root: Path, snapshot: list[dict]) -> None:
+    """Store {fingerprint, servers, recorded (UTC ISO seconds)} under the root's own entry, keeping
+    its "trusted" key. On the exact root's key, not a parent's: sibling projects under one trusted
+    folder each keep their own record."""
+    data = _load(trust_store_path())
+    key = _key(workspace_root)
+    entry = _entry(data, key)
+    entry[EXECUTABLES_KEY] = {"fingerprint": fingerprint(snapshot), "servers": snapshot,
+                              "recorded": _now()}
+    data[key] = entry
     atomic_write_overlay(trust_store_path(), data)
 
 
