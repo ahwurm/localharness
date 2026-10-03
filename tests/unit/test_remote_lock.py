@@ -231,7 +231,7 @@ async def test_a_malformed_confirm_token_is_refused_never_raised(tmp_path):
     request_id = next(iter(channel._open_asks))
     token = channel.answer_ask(request_id, "allow_always")["confirm_token"]
 
-    for bad in ("é" + token[1:], "é…", 123, ["x"], {"t": token}):
+    for bad in ("é" + token[1:], "é…", "\ud800" + token[1:], 123, ["x"], {"t": token}):
         got = channel.answer_ask(request_id, "allow_always", confirm=bad)  # type: ignore[arg-type]
         assert got["status"] == "confirm_required" and got["confirm_token"] == token, bad
     assert not task.done()
