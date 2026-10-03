@@ -159,6 +159,11 @@ def _is_dict_leaf(entry: ComponentEntry) -> bool:
     return get_origin(_unwrap_optional(entry.annotation)) is dict
 
 
+def _under(path: str, roots: frozenset[str]) -> bool:
+    """Is `path` one of `roots` or a key inside one (a machine-level section such as `server`)?"""
+    return any(path == r or path.startswith(r + ".") for r in roots)
+
+
 def honest_attribution(
     catalogue: dict[str, ComponentEntry], overlays: dict[str, dict], *,
     global_only: frozenset[str] = frozenset(),
@@ -178,13 +183,14 @@ def honest_attribution(
     contributed; it cannot say which band owns which key, because `walk_model_fields` stops at
     dict leaves and the catalogue has no entry below them. `config show` prints what this returns.
 
-    GLOBAL_ONLY plugin paths (`global_only`, full dot-paths) are judged against the two global bands
-    alone, as build_catalogue attributed them: the workspace value there — a set leaf or a replaced
-    ancestor — was dropped at load (ENAB-02), so it contributed nothing and must not be credited.
+    GLOBAL_ONLY paths (`global_only`, full dot-paths, each covering the keys inside it) are judged
+    against the two global bands alone, as build_catalogue attributed them: the workspace value
+    there — a set leaf or a replaced ancestor — was dropped at load (ENAB-02), so it contributed
+    nothing and must not be credited.
     """
     machine = _global_bands(overlays)
     for path, entry in list(catalogue.items()):
-        bands = machine if path in global_only else overlays
+        bands = machine if _under(path, global_only) else overlays
         contributors = _contributing_layers(path, bands)
         if len(contributors) > 1 and (path in _UNION_PATHS or _is_dict_leaf(entry)):
             catalogue[path] = replace(entry, winning_layer=_accumulated(contributors))

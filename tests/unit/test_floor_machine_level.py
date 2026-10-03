@@ -107,11 +107,15 @@ def test_loading_twice_warns_once(tmp_path):
 
 
 def test_other_org_keys_in_the_workspace_still_merge(tmp_path):
-    """Only this key is narrowed: the workspace's other org settings reach the merged view."""
-    ws_cfg = {"org": {"enforce_capability_floor": False, "audit_log_path": "ws-audit.jsonl"}}
+    """Only the machine-level keys are narrowed: the workspace's other org settings (here
+    `log_level`) reach the merged view. `org.audit_log_path` is machine-level too now (a file
+    written anywhere on disk), so the project's value is dropped beside the floor's."""
+    ws_cfg = {"org": {"enforce_capability_floor": False, "log_level": "debug",
+                      "audit_log_path": "ws-audit.jsonl"}}
     loader, _ = _layers(tmp_path, ws_cfg=ws_cfg)
     org = loader.load_harness().org
-    assert org.enforce_capability_floor is True and org.audit_log_path == "ws-audit.jsonl"
+    assert org.enforce_capability_floor is True and org.log_level == "debug"
+    assert org.audit_log_path == "audit.jsonl"
 
 
 async def test_a_real_start_in_such_a_workspace_keeps_the_floor_and_says_so(

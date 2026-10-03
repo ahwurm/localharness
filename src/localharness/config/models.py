@@ -1,6 +1,7 @@
 """All Pydantic config models for LocalHarness."""
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 from dataclasses import fields as dataclass_fields
@@ -18,6 +19,12 @@ from pydantic import (
 
 from localharness.agent.gate_types import DEFAULT_MODE, GateSettings, Mode
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS, MAX_CONFIGURABLE_MAX_TOKENS
+
+HOSTNAME_RE = re.compile(
+    r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*")
+"""An RFC 1123 host name (use with fullmatch, after stripping one trailing dot): letters, digits and
+hyphens, no label starting or ending with a hyphen, 63 per label, 253 in all."""
 
 log = logging.getLogger(__name__)
 """Where a config DEPRECATION notice goes.
@@ -1467,6 +1474,29 @@ class OrgConfig(BaseModel):
         ),
     )
 
+    web_fetch_allow_private: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Private addresses web_fetch may reach on purpose: an IP address (`100.101.5.7`), a "
+            "network (`192.168.1.0/24`) or a host name (`nas.example.ts.net`). Empty (the default): "
+            "a URL the model hands to web_fetch reaches only public addresses. Machine-level only."
+        ),
+    )
+
+    @field_validator("web_fetch_allow_private")
+    @classmethod
+    def _allow_private_entries(cls, v: list[str]) -> list[str]:
+        for entry in v:
+            try:
+                ipaddress.ip_network(entry, strict=False)
+                continue
+            except ValueError:
+                pass
+            if not HOSTNAME_RE.fullmatch(entry.rstrip(".")):
+                raise ValueError(f"{entry!r} is not an IP address, a network such as "
+                                 "192.168.1.0/24, or a host name")
+        return v
+
 
 class EndpointRef(BaseModel):
     """A peer OpenAI-compatible endpoint the `/model` tree can switch to, beyond the primary
@@ -1730,6 +1760,27 @@ class ManagedServerConfig(BaseModel):
             "True — a harness-managed vLLM server is GPU-bound."
         ),
     )
+    bind_all: bool = Field(
+        default=False,
+        description=(
+            "vLLM only: listen on every network interface (how 0.16 launched it) instead of this "
+            "machine only. False (new installs) launches on 127.0.0.1: docker publishes "
+            "`-p 127.0.0.1:<port>:8000`, a binary gets `--host 127.0.0.1`. A config written before "
+            "this setting existed is given `bind_all: true` by the config migration, so another "
+            "machine using this server keeps working. Machine-level only, like all of `server`."
+        ),
+    )
+    require_api_key: bool = Field(
+        default=False,
+        description=(
+            "vLLM only: launch the server requiring the API key the harness sends it "
+            "(provider.api_key, or the peer endpoint's api_key for a launched peer), passed in its "
+            "environment and never on its command line; the harness's own readiness and "
+            "model-list checks then send the key too. False (the default) launches it with no key, "
+            "as 0.16 did: any program that can reach the port can use it. Machine-level only, like "
+            "all of `server`."
+        ),
+    )
 
     def entry_for(self, name: str) -> Optional[LocalModelEntry]:
         return next((e for e in self.local_models if e.name == name), None)
@@ -1795,6 +1846,22 @@ class TerminalConfig(BaseModel):
     )
 
 
+class ChannelsConfig(BaseModel):
+    """Rules for the remote channels — the phone app (`web`) and Discord (`dispatch`)."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    remote_unattended: bool = Field(
+        default=True,
+        description=(
+            "May a remote channel (the phone app, Discord) switch the session to `unattended` and "
+            "answer a question with \"always\"? True (the default) keeps 0.16's behaviour: a paired "
+            "phone or an allowlisted Discord account can do both. False refuses both from every "
+            "remote channel with one line naming this setting; the terminal and Zed are never "
+            "affected. Machine-level only."
+        ),
+    )
+
+
 class HarnessConfig(BaseModel):
     """Root harness configuration. Stored at ~/.localharness/config.yaml."""
     model_config = ConfigDict(frozen=False, extra="forbid")
@@ -1817,6 +1884,10 @@ class HarnessConfig(BaseModel):
     terminal: TerminalConfig = Field(
         default_factory=TerminalConfig,
         description="Interactive terminal-REPL behavior (type-anytime input box switches).",
+    )
+    channels: ChannelsConfig = Field(
+        default_factory=ChannelsConfig,
+        description="Remote-channel rules (the phone app, Discord). Machine-level only.",
     )
     org: OrgConfig = Field(default_factory=OrgConfig)
     server: Optional[ManagedServerConfig] = Field(
