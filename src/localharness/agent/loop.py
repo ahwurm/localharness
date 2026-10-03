@@ -1168,6 +1168,18 @@ class AgentLoop:
         if text:
             self._user_nudge_inbox.append(text)
 
+    def resume_state(self) -> tuple[list[Message], str]:
+        """(the model-side conversation, the prior-session context folded into the system prompt) —
+        what a session restart in the same process hands its next AgentLoop. Copies."""
+        return list(self._conversation), self._prior_session_context
+
+    def resume(self, conversation: list[Message], prior_context: str) -> None:
+        """Continue a previous sitting's conversation: the next run_turn reuses it as its history
+        (and so does not re-read compact.md, which it loads only for an empty conversation), with
+        the same prior-session context folded into its system prompt."""
+        self._conversation = list(conversation)
+        self._prior_session_context = prior_context
+
     async def run_turn(
         self,
         task: str,

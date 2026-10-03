@@ -220,6 +220,17 @@ class MalformedResponseError(ProviderError):
 #   cross-proc  — flock on a per-endpoint lockfile; LOCALHARNESS_INFERENCE_LOCK=0 disables
 _MAX_CONCURRENT_INFERENCE = max(1, int(os.environ.get("LOCALHARNESS_MAX_CONCURRENT_INFERENCE", "1")))
 _inference_sem = asyncio.Semaphore(_MAX_CONCURRENT_INFERENCE)
+
+
+def reset_inference_gate() -> None:
+    """A fresh in-process inference semaphore. asyncio.Semaphore binds to the event loop it is first
+    contended in, so a second asyncio.run() in the same process — `localharness start` rebuilding
+    its session after `/plugins enable` — must not reuse the first loop's (a contended acquire
+    raises "bound to a different event loop"). Call only between event loops."""
+    global _inference_sem
+    _inference_sem = asyncio.Semaphore(_MAX_CONCURRENT_INFERENCE)
+
+
 _INFERENCE_LOCK_ENABLED = os.environ.get("LOCALHARNESS_INFERENCE_LOCK", "1") != "0"
 
 # #62 (a) FAIL-FAST reachability probe. A cheap TCP connect+close (NO HTTP route → zero server
