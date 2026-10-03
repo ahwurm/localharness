@@ -31,8 +31,10 @@ from pathlib import Path
 import pytest
 
 from localharness.agent.loop import AgentLoop
-from localharness.config.loader import ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS
-from localharness.config.plugin_sections import global_only_paths
+from localharness.config.loader import (
+    AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
+)
+from localharness.config.plugin_sections import CORE_HARNESS_KEYS, global_only_paths
 from localharness.dispatch.config import DiscordSettings, env_fallback
 from localharness.plugins import api
 from localharness.plugins.api import (
@@ -433,25 +435,28 @@ _FILE_SUFFIXES = (".yaml", ".yml", ".md", ".py", ".json", ".env", ".toml", ".txt
 def machine_only_code_set(plugins: Iterable[type[Plugin]] | None = None) -> frozenset[str]:
     """Every setting only the machine-level (global) config may set, computed from code: each
     bundled plugin's GLOBAL_ONLY fields, the `permissions.ask` keys a project may not set, the core
-    harness keys in HARNESS_GLOBAL_ONLY_FIELDS, and
-    `<name>.enabled` for a plugin you install. (An AgentConfigModel may not mark GLOBAL_ONLY at all
-    — the loader refuses such a plugin — so no `agent.` path can be machine-level only.)"""
+    harness keys in HARNESS_GLOBAL_ONLY_FIELDS, `<name>.enabled` for a plugin you install (an
+    AgentConfigModel may not mark GLOBAL_ONLY at all — the loader refuses such a plugin), and
+    AGENT_GLOBAL_ONLY_FIELDS, the agent-file keys the loader re-resolves from the global layer
+    (`memory.embedding_model`, `permissions.budget.kill_file`)."""
     plugins = BUILTIN_PLUGINS if plugins is None else tuple(plugins)
     paths = {f"{P.manifest.name}.{p}" for P in plugins for p in global_only_paths(P.ConfigModel)}
-    paths |= {f"permissions.ask.{f}" for f in ASK_GLOBAL_ONLY_FIELDS} | HARNESS_GLOBAL_ONLY_FIELDS
+    paths |= ({f"permissions.ask.{f}" for f in ASK_GLOBAL_ONLY_FIELDS} | HARNESS_GLOBAL_ONLY_FIELDS
+              | AGENT_GLOBAL_ONLY_FIELDS)
     return frozenset(paths | {"<name>.enabled"})
 
 
 def check_machine_only_list(security_text: str, code_set: frozenset[str] | None = None) -> list[str]:
     """SECURITY.md's `### Machine-level-only settings` list equals the code's set, both ways. The
-    list is the backticked dot-paths on the section's bullet lines (`- `); prose in the section —
-    e.g. the tighten-only rules no code set enumerates — is not compared."""
+    list is the backticked dot-paths on the section's bullet lines (`- `), and a whole core section
+    such as `server` (one token, no dot); prose in the section — e.g. the tighten-only rules no
+    code set enumerates — is not compared."""
     code = machine_only_code_set() if code_set is None else code_set
     body = section(security_text, MACHINE_ONLY_HEADING)
     if body is None:
         return [f"SECURITY.md has no '{MACHINE_ONLY_HEADING}' section"]
     doc = {t for _h, b in bullets(body) for t in ticks(b)
-           if _DOTPATH.fullmatch(t) and not t.endswith(_FILE_SUFFIXES)}
+           if (_DOTPATH.fullmatch(t) or t in CORE_HARNESS_KEYS) and not t.endswith(_FILE_SUFFIXES)}
     return ([f"machine-level only in code, not listed in SECURITY.md: {p}" for p in sorted(code - doc)]
             + [f"listed in SECURITY.md, not machine-level only in code: {p}" for p in sorted(doc - code)])
 
@@ -471,6 +476,10 @@ def test_machine_only_list_bites():
     dropped = good.replace("- `image.workflow`\n", "")
     assert check_machine_only_list(dropped, code) == [
         "machine-level only in code, not listed in SECURITY.md: image.workflow"]
+    assert check_machine_only_list(good.replace("- `server`\n", ""), code) == [
+        "machine-level only in code, not listed in SECURITY.md: server"]
+    assert check_machine_only_list(good + "- `org`\n", code) == [
+        "listed in SECURITY.md, not machine-level only in code: org"]
     assert check_machine_only_list("## Something else\n", code)
 
 
@@ -822,8 +831,8 @@ BANNED = (  # identifiers and sentences that described wiring the code no longer
 )
 INTERNAL_IDS = (  # internal phase numbers, plan ids and requirement ids
     re.compile(r"\b[Pp]hases?[ -]\(?\d"),
-    re.compile(r"\b(?:4[4-9]|5[0-2])-\d{2}\b"),
-    re.compile(r"\b(?:PAPI|PLUG|MEMP|ENAB|SAFE|DISP|AUTO|IMGP|WEBP|CORE|DOCS)-\d\d\b"),
+    re.compile(r"\b(?:4[4-9]|5[0-3])-\d{2}\b"),
+    re.compile(r"\b(?:PAPI|PLUG|MEMP|ENAB|SAFE|DISP|AUTO|IMGP|WEBP|CORE|DOCS|SEC)-\d\d\b"),
     re.compile(r"\bSETUP-(?:0[5-9]|1[0-5])\b"),  # the setup-wizard rows; SETUP-01..04 are v1.0's, cited by specs 02 and 10
 )
 _ENV_OK = ("deprecat", "fallback", "0.17", "Until", "until")
@@ -913,6 +922,8 @@ def test_denylist_bites():
     assert check_denylist("SECURITY.md", "Set `org.memory_enabled` to turn memory off.\n")
     assert check_denylist(SPEC09, "**Stability:** UNSTABLE (v1).\n")
     assert check_denylist("README.md", "SETUP-07 says so.\n")
+    assert check_denylist("README.md", "SEC-04 says so.\n")
+    assert check_denylist("README.md", "as plan 53-02 did\n")
     assert check_denylist("docs/specs/10-cli.md", "**Requirements:** SETUP-01, SETUP-04\n") == []
 
 

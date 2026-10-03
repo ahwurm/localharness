@@ -227,13 +227,19 @@ the global list rather than adding to it. There is exactly one exception:
 `org.permissions.deny_patterns` accumulates across the layers. Every layer's org-level deny rules
 are unioned, so a workspace can add deny rules there and can never remove one the global layer set.
 
-**One org key is machine-level only.** `org.enforce_capability_floor` (bool, default `true`)
-switches the capability floor: when it is on, no agent's tools may combine a tool that declares
-`ingest: untrusted` with one that declares `host: dangerous`, and the root agent is not given the
-untrusted-ingest tools. Only the global `config.yaml` or `overrides.yaml` may set it. A workspace
-value that differs from the global one (or from the default, when the global layer is silent) is
-ignored, and `start` names the key and the file in its startup warnings; a workspace value equal to
-it is treated as yours. The other machine-level-only settings, and why, are listed in
+**Some keys are machine-level only.** A setting that says where a request or a credential goes,
+what the harness launches or imports, which file outside the project it writes, or whether a
+protection is on may be set only by the global `config.yaml` or `overrides.yaml`: `provider.base_url`,
+`provider.api_key`, `extra_endpoints`, `active_endpoint`, `server` (the whole section),
+`org.audit_log_path`, `org.hooks`, `org.enforce_capability_floor`, `org.web_fetch_allow_private`,
+`channels.remote_unattended`, `proposer.base_url`, `proposer.api_key`, and in an agent file
+`memory.embedding_model` and `permissions.budget.kill_file`. A workspace value that differs from
+the global one (or from the default, when the global layer is silent) is ignored, and `start` names
+the key and the file in its startup warnings; a workspace value equal to it is treated as yours.
+`org.enforce_capability_floor` (bool, default `true`) switches the capability floor: when it is on,
+no agent's tools may combine a tool that declares `ingest: untrusted` with one that declares
+`host: dangerous`, and the root agent is not given the untrusted-ingest tools. The other
+machine-level-only settings, and why, are listed in
 [SECURITY.md](../../SECURITY.md#machine-level-only-settings).
 
 Read that guarantee at exactly its own size: it is about the **org-level** list. Deny patterns
@@ -1211,11 +1217,20 @@ class OrgConfig(BaseModel):
     )
 
     audit_log_path: Optional[str] = Field(
-        default="~/.localharness/audit.jsonl",
+        default="audit.jsonl",
         description=(
             "Path to the org-level audit log. "
             "All events from all agents are also written here. "
-            "Set to null to disable org-level audit log."
+            "A bare relative name resolves under the config dir. "
+            "Set to null to disable org-level audit log. Machine-level only."
+        ),
+    )
+
+    web_fetch_allow_private: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Private addresses web_fetch may reach on purpose: an IP address, a network or a host "
+            "name. Empty (the default): only public addresses. Machine-level only."
         ),
     )
 ```
@@ -1255,13 +1270,45 @@ class ProviderConfig(BaseModel):
     )
 
 
+class ManagedServerConfig(BaseModel):
+    """A model server the harness launches (written by init's guided setup). Excerpt: `runtime`,
+    `launch`, `binary`, `docker_image`, `model`, `port`, `extra_args`, `refarch`, `local_models` and
+    `gpu` are in config/models.py. The whole `server:` section is machine-level only."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    bind_all: bool = Field(
+        default=False,
+        description="vLLM only: listen on every network interface instead of 127.0.0.1.",
+    )
+    require_api_key: bool = Field(
+        default=False,
+        description="vLLM only: the launched server requires the API key the harness sends it.",
+    )
+
+
+class ChannelsConfig(BaseModel):
+    """Rules for the remote channels — the phone app and Discord."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    remote_unattended: bool = Field(
+        default=True,
+        description=(
+            "May the phone app or Discord switch the session to `unattended` and answer "
+            "\"always\"? False refuses both from every remote channel, never from the terminal "
+            "or Zed. Machine-level only."
+        ),
+    )
+
+
 class HarnessConfig(BaseModel):
     """Root harness configuration. Stored at ~/.localharness/config.yaml."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
     version: str = Field(default="1", description="Config schema version.")
     provider: ProviderConfig
+    channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     org: OrgConfig = Field(default_factory=OrgConfig)
+    server: Optional[ManagedServerConfig] = None
 ```
 
 ---
