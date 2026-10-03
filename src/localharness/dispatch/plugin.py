@@ -27,7 +27,7 @@ NOT_CONFIGURED_HINT = ("localharness plugins enable dispatch --set discord.token
 def _effective(ctx: PluginContext) -> tuple[DiscordSettings, list[str]]:
     """The settings with the deprecated env sources folded in, and one line per deciding source."""
     cfg = ctx.config if isinstance(ctx.config, DispatchConfig) else DispatchConfig()
-    return env_fallback(cfg.discord, os.environ, Path.home())
+    return env_fallback(cfg.discord, os.environ)
 
 
 class DispatchPlugin(Plugin):

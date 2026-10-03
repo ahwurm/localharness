@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from localharness.config.plugin_sections import global_only_paths
-from localharness.dispatch.config import ENV_FILE_RELATIVE, DiscordSettings, DispatchConfig, _ids, env_fallback
+from localharness.dispatch.config import DiscordSettings, DispatchConfig, _ids, env_fallback
 from tests.dispatch_support import isolate_discord_env
 
 SENTINEL = "SENTINEL-TOKEN"
@@ -75,7 +75,7 @@ def test_importing_config_pulls_no_channel_dependencies():
 
 @pytest.fixture
 def home(monkeypatch, tmp_path):
-    """Isolated from the live ~/.claude/channels/discord/.env; env_fallback gets this home only."""
+    """HOME and the Discord variables isolated (env_fallback itself reads only what it is passed)."""
     return isolate_discord_env(monkeypatch, tmp_path)
 
 
@@ -122,39 +122,40 @@ def _view(s):
 def test_env_fallback_table(home, settings, environ, want, sources):
     """Caveat row: a setting explicitly equal to its default (`allow: []`, `ack: "✅"`) cannot be
     told from unset, so the env fills it — accepted for a one-release fallback."""
-    out, lines = env_fallback(DiscordSettings.model_validate(settings), environ, home)
+    out, lines = env_fallback(DiscordSettings.model_validate(settings), environ)
     assert _view(out) == want
     assert lines == [_line(s, f) for s, f in sources]
     assert not any(SENTINEL in line or "SET-TOKEN" in line for line in lines)
 
 
-def _write_env_file(home, text):
-    path = home / ENV_FILE_RELATIVE
-    path.parent.mkdir(parents=True)
-    path.write_text(text)
+def test_claude_codes_env_file_is_never_a_source(home, tmp_path):
+    """Claude Code's token file belongs to another program: with only it holding a token (both
+    variables empty), the plugin's real settings path — os.environ and this HOME — finds none."""
+    import inspect
 
+    from localharness.core.bus import EventBus
+    from localharness.dispatch.plugin import _effective
+    from localharness.plugins.api import PluginContext, PluginPaths
+    from localharness.tools.registry import ToolRegistry
 
-@pytest.mark.parametrize("value", [SENTINEL, f'"{SENTINEL}"', f"'{SENTINEL}' "])
-def test_env_file_token_only_when_both_vars_empty(home, value):
-    _write_env_file(home, f"OTHER=1\nDISCORD_BOT_TOKEN={value}\n")
-    out, lines = env_fallback(DiscordSettings(), {"LOCALHARNESS_DISCORD_TOKEN": "", "DISCORD_BOT_TOKEN": ""}, home)
-    assert out.token.get_secret_value() == SENTINEL
-    assert lines == [_line("~/.claude/channels/discord/.env", "token")]
-    out, lines = env_fallback(DiscordSettings(), {"DISCORD_BOT_TOKEN": "B"}, home)
-    assert out.token.get_secret_value() == "B" and lines == [_line("DISCORD_BOT_TOKEN", "token")]
-    out, lines = env_fallback(DiscordSettings(token="S"), {}, home)
+    env = home / ".claude" / "channels" / "discord" / ".env"
+    env.parent.mkdir(parents=True)
+    env.write_text(f"OTHER=1\nDISCORD_BOT_TOKEN={SENTINEL}\n")
+    assert list(inspect.signature(env_fallback).parameters) == ["s", "environ"]
+    assert env_fallback(DiscordSettings(), {"LOCALHARNESS_DISCORD_TOKEN": "", "DISCORD_BOT_TOKEN": ""}) == (
+        DiscordSettings(), [])
+    ctx = PluginContext(bus=EventBus(), tools=ToolRegistry(), hooks=None, config=DispatchConfig(),
+                        agent_config=None, llm=None,
+                        paths=PluginPaths(global_config_dir=tmp_path / "g", workspace=None, state_dir=None))
+    settings, lines = _effective(ctx)
+    assert settings.token.get_secret_value() == "" and lines == []
+    out, lines = env_fallback(DiscordSettings(token="S"), {"DISCORD_BOT_TOKEN": "B"})
     assert out.token.get_secret_value() == "S" and lines == []
-
-
-def test_env_file_missing_or_unreadable_is_no_token(home):
-    assert env_fallback(DiscordSettings(), {}, home) == (DiscordSettings(), [])
-    (home / ENV_FILE_RELATIVE).mkdir(parents=True)  # a directory: read_text raises
-    assert env_fallback(DiscordSettings(), {}, home)[1] == []
 
 
 def test_env_bad_id_refused_naming_it(home):
     with pytest.raises(ValidationError, match="'abc'"):
-        env_fallback(DiscordSettings(), {"LOCALHARNESS_DISCORD_ALLOW": "1,abc"}, home)
+        env_fallback(DiscordSettings(), {"LOCALHARNESS_DISCORD_ALLOW": "1,abc"})
 
 
 def test_env_fallback_is_pure(home, monkeypatch):
@@ -170,5 +171,5 @@ def test_env_fallback_is_pure(home, monkeypatch):
     with monkeypatch.context() as m:  # undone before pytest's own teardown touches os.environ
         m.setattr(os, "environ", Boom())
         m.setattr(Path, "home", classmethod(lambda cls: (_ for _ in ()).throw(AssertionError("Path.home"))))
-        out, lines = env_fallback(DiscordSettings(), {"LOCALHARNESS_DISCORD_ALLOW": "3"}, home)
+        out, lines = env_fallback(DiscordSettings(), {"LOCALHARNESS_DISCORD_ALLOW": "3"})
     assert out.allow == ["3"] and lines == [_line("LOCALHARNESS_DISCORD_ALLOW", "allow")]

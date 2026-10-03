@@ -110,6 +110,26 @@
   "❌"
  ],
  [
+  "tap",
+  "m1018",
+  "42 ♾️"
+ ],
+ [
+  "send",
+  "c7",
+  "♾️ is permanent: it is remembered for this workspace and cannot be undone from chat. Tap ✅ on THIS message to confirm it, or ✅ on the question for just this once."
+ ],
+ [
+  "react",
+  "m1019",
+  "✅"
+ ],
+ [
+  "tap",
+  "m1019",
+  "42 ✅"
+ ],
+ [
   "decision",
   null,
   "allow_always"
@@ -121,12 +141,12 @@
  ],
  [
   "react",
-  "m1019",
+  "m1020",
   "✅"
  ],
  [
   "react",
-  "m1019",
+  "m1020",
   "❌"
  ],
  [
@@ -141,22 +161,22 @@
  ],
  [
   "react",
-  "m1020",
+  "m1021",
   "✅"
  ],
  [
   "react",
-  "m1020",
+  "m1021",
   "♾️"
  ],
  [
   "react",
-  "m1020",
+  "m1021",
   "❌"
  ],
  [
   "edit",
-  "m1020",
+  "m1021",
   "🛑 **Permission needed**\n`bash_exec: cargo publish  (shell-unfamiliar — not seen before)`\n✅ allow once  ·  ♾️ always in this workspace  ·  ❌ no\n⌛ No answer within 0s — **denied**. Ask again to retry."
  ],
  [
@@ -171,12 +191,12 @@
  ],
  [
   "react",
-  "m1021",
+  "m1022",
   "✅"
  ],
  [
   "react",
-  "m1021",
+  "m1022",
   "❌"
  ],
  [
@@ -186,12 +206,12 @@
  ],
  [
   "edit",
-  "m1021",
+  "m1022",
   "⏸ **needs you**  #3  `bash_exec: rm -rf ~/old-notes-3`   (1 pending) — react ✅ to run it, ❌ to skip, or reply `/approve 3` · `/deny 3`\n✅ ran #3 — approved; the model re-issues the call."
  ],
  [
   "react",
-  "m1022",
+  "m1023",
   "✅"
  ],
  [
@@ -206,12 +226,12 @@
  ],
  [
   "react",
-  "m1023",
+  "m1024",
   "✅"
  ],
  [
   "react",
-  "m1023",
+  "m1024",
   "❌"
  ],
  [
@@ -221,12 +241,12 @@
  ],
  [
   "edit_failed",
-  "m1023",
+  "m1024",
   "⏸ **needs you**  #4  `bash_exec: rm -rf ~/old-notes-4`   (1 pending) — react ✅ to run it, ❌ to skip, or reply `/approve 4` · `/deny 4`\n❌ skipped #4 — denied."
  ],
  [
   "reply",
-  "m1023",
+  "m1024",
   "❌ skipped #4 — denied."
  ],
  [
@@ -236,12 +256,12 @@
  ],
  [
   "react",
-  "m1024",
+  "m1025",
   "✅"
  ],
  [
   "react",
-  "m1024",
+  "m1025",
   "❌"
  ],
  [

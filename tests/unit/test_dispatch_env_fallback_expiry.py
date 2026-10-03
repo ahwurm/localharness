@@ -15,7 +15,9 @@ import localharness
 import localharness.dispatch.config as dispatch_config
 
 SRC = Path(localharness.__file__).resolve().parent
-MARKERS = ("LOCALHARNESS_DISCORD_", "DISCORD_BOT_TOKEN", ".claude/channels/discord", "def env_fallback")
+MARKERS = ("LOCALHARNESS_DISCORD_", "DISCORD_BOT_TOKEN", "def env_fallback")
+"""Claude Code's `.env` file source was removed ahead of 0.17.0 (it belonged to another program),
+so it is no marker: the refusal line that names the file is a message, not a fallback."""
 EXPIRY = Version("0.17.0")
 
 
