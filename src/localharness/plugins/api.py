@@ -21,7 +21,7 @@ from typing import (
     TYPE_CHECKING, Annotated, Any, ClassVar, Literal, Protocol, Sequence, runtime_checkable,
 )
 
-from pydantic import AfterValidator, BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, ConfigDict, model_validator
 
 if TYPE_CHECKING:
     from localharness.channels.base import ChannelAdapter
@@ -49,6 +49,11 @@ GLOBAL_ONLY: dict[str, Any] = {GLOBAL_ONLY_KEY: True}
 """Mark a ConfigModel field that names a network endpoint, a credential or an access list:
 `Field(default, json_schema_extra=GLOBAL_ONLY)` — a value for it in a project's settings is dropped
 with a warning and the machine-level value stands (ENAB-02)."""
+
+AGENT_PROMPT_PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)\}")
+"""A `{name}` in PluginManifest.agent_prompt: `config_dir`, `machine`, or one of the plugin's own
+setup keys (dots allowed, e.g. `{proposer.base_url}`). Anything else in braces is plain text."""
+AGENT_PROMPT_CORE_NAMES = frozenset({"config_dir", "machine"})
 
 
 def _fullmatch(pattern: re.Pattern[str], rule: str) -> AfterValidator:
@@ -143,6 +148,14 @@ class PluginManifest(BaseModel):
       exception (they keep their pre-plugin names). Tagged as the plugin's rows when it is on,
       omitted from the catalogue when it is off; validation is unchanged in both states. Refused for
       plugins you install. Additive, optional; PLUGIN_API_VERSION unchanged.
+    - `next_steps`: plain lines printed after the plugin's setup step on every outcome — what to
+      run next. Additive, optional; PLUGIN_API_VERSION unchanged.
+    - `agent_prompt`: the "paste this into your coding agent" text, printed after a check that does
+      not pass and by `plugins info NAME`. It may name {config_dir}, {machine} (this machine's GPU,
+      or nothing) and its own setup keys that are not secret and have a default; anything else is
+      refused when the manifest is built. Additive, optional.
+    - `setup_action`: the yes/no question asked on a terminal before Plugin.setup_action() runs (a
+      download names its size); empty runs it without asking. Additive, optional.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -160,6 +173,30 @@ class PluginManifest(BaseModel):
     setup_help: str = ""
     channels: tuple[str, ...] = ()
     sections: tuple[str, ...] = ()
+    next_steps: str = ""
+    agent_prompt: str = ""
+    setup_action: str = ""
+
+    @model_validator(mode="after")
+    def _agent_prompt_names(self) -> "PluginManifest":
+        """agent_prompt names only {config_dir}, {machine} and its own setup keys that are not
+        secret and have a default — so a token can never reach a printed prompt, and nothing
+        renders as an empty hole before it is set."""
+        fields = {f.key: f for f in self.setup}
+        for name in AGENT_PROMPT_PLACEHOLDER.findall(self.agent_prompt):
+            if name in AGENT_PROMPT_CORE_NAMES:
+                continue
+            field = fields.get(name)
+            if field is None:
+                raise ValueError(f"agent_prompt names {{{name}}}, which is none of its setup keys, "
+                                 "{config_dir} or {machine}")
+            if field.secret:
+                raise ValueError(f"agent_prompt names {{{name}}}, a secret setup key: a secret never "
+                                 "appears in a printed prompt")
+            if not field.default:
+                raise ValueError(f"agent_prompt names {{{name}}}, a setup key with no default to show "
+                                 "before it is set")
+        return self
 
 
 Availability = Literal["ready"] | tuple[Literal["unconfigured"], str]
@@ -346,6 +383,14 @@ class Plugin:
 
     def doctor(self, ctx: PluginContext) -> list[Check]:
         """The checks `localharness doctor` runs for this plugin, after core's. ctx.llm is None."""
+        return []
+
+    def setup_action(self, ctx: PluginContext) -> list[Check]:
+        """The work this plugin's setup step does after its questions — a download, a check that an
+        endpoint answers — as Check rows core prints the way doctor prints them. Sync or async.
+        Core runs it only from `plugins enable` on a terminal, after asking manifest.setup_action
+        when that question is set; never at `start` and never from doctor. It is contained like
+        doctor(): an exception becomes one failing row. ctx.llm is None."""
         return []
 
     def channels(self) -> dict[str, type[ChannelAdapter]]:
