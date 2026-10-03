@@ -86,12 +86,33 @@ before the first turn, in this order:
 
 1. **A recorded decision** for this root or any directory above it (`trust.is_trusted_tree`), so
    nested folders inherit. A recorded no runs the session in `guarded`.
-2. **Evidence of prior use** — any `agents/*/sessions/*.jsonl` under the workspace's own
-   `.localharness/`, or under the global config directory for a session rooted at `$HOME` with no
-   project. The trust is recorded and one line says the workspace was recognized. The global store
-   counts only for the home-rooted case, so one old home session never vouches for a project.
+2. **Evidence of prior use** — for a session rooted at `$HOME` with no project only: any
+   `agents/*/sessions/*.jsonl` under the global config directory. The trust is recorded and one
+   line says the workspace was recognized. A project's own `.localharness/agents/*/sessions/`
+   never counts — those files can be committed to a repository — so a project with no record is
+   asked like any new one, and one old home session never vouches for a project.
 3. **The question**, through the channel's own ask path. Yes records trust forever; no records the
    refusal and runs `guarded`.
+
+**The trust store keeps two kinds of record besides the yes and no.** For a project, the MCP
+servers its agent files start (`config/trust.executables_snapshot`: file, name, transport, command,
+arguments, URL, and the names — never the values — of `env` and `headers`), recorded when a Yes was
+given to a question that listed them; at each start (`cli/workspace.decide_project_trust`) the
+project's servers start only when its current list is that record, a list with only removals is
+recorded silently, and a changed list is asked about once on a terminal or else none of the
+project's servers start. A Yes given without the list — the in-session question, a recognized
+workspace — approves no server. For your machine, keyed `<machine><config dir>`, the state of your
+own files (`config/trust.machine_snapshot`): each MCP server and embedding model in
+`<global>/agents/*.yaml`, each permission looser than the shipped default in those files, in
+`<global>/divisions/*.yaml` and in `<global>/org.yaml`, and the sha256 of every script in
+`<global>/tools/` outside dependency and cache folders. `cli/workspace.decide_machine_trust`
+compares the files with it at each start: a change that starts, loads or loosens something is
+confirmed once on a terminal, or withheld from every read of that file for the run
+(`ConfigLoader(machine_withheld=…)`); removals and tightenings are recorded silently, and the first
+start after the upgrade adopts both kinds of record without asking. A tool script not in the
+record is gated as an unconfirmed shell command until a start records it
+(`config/trust.tool_script_pending`). `--trust-project` (or `LOCALHARNESS_TRUST_PROJECT=1`) trusts
+the project for one run and records nothing.
 
 A session that cannot ask and has no record runs `guarded` and **records nothing**, leaving the
 question for the next interactive run. A `permissions.mode` set explicitly to anything other than
@@ -112,8 +133,8 @@ committable). Answer no and **nothing is created**, the session runs `guarded`, 
 "no" in the same `trusted_workspaces.yaml`, so the question is not asked here again (a
 `declined_workspace_offers.yaml` entry written by an earlier version is still honored, which is why
 that file is still protected). Where `./.localharness` already exists only
-the trust half applies: there is nothing to create, and a recognized workspace is not asked about
-at all.
+the trust half applies: there is nothing to create, and a project with a trust record is not asked
+about at all.
 
 **Recognition reads EARLIER sessions only.** The evidence that makes a workspace familiar is
 session files written before this one; the session asking the question never counts itself, so a
@@ -506,7 +527,7 @@ class MCPServerConfig(BaseModel):
         default_factory=list,
         description="Arguments to pass to the command (stdio transport).",
     )
-    env: dict[str, str] = Field(
+    env: dict[str, SecretStr] = Field(
         default_factory=dict,
         description="Environment variables to set for the MCP server process.",
     )
@@ -516,7 +537,7 @@ class MCPServerConfig(BaseModel):
         default=None,
         description="Base URL for the MCP server (streamable_http transport).",
     )
-    headers: dict[str, str] = Field(
+    headers: dict[str, SecretStr] = Field(
         default_factory=dict,
         description="HTTP headers to include in all requests (streamable_http transport).",
     )
@@ -1260,7 +1281,7 @@ class ProviderConfig(BaseModel):
 
     provider_type: str = Field(description="One of the ProviderType constants.")
     base_url: str = Field(description="OpenAI-compatible base URL. Includes /v1 suffix.")
-    api_key: str = Field(default="none", description="API key (usually 'none' for local servers).")
+    api_key: SecretStr = Field(default=SecretStr("none"), description="API key (usually 'none' for local servers).")
     default_model: str = Field(description="First model from the detected backend's model list.")
     available_models: list[str] = Field(default_factory=list)
     supports_function_calling: Optional[bool] = Field(
@@ -1316,6 +1337,29 @@ class HarnessConfig(BaseModel):
     org: OrgConfig = Field(default_factory=OrgConfig)
     server: Optional[ManagedServerConfig] = None
 ```
+
+**Secrets.** `ProviderConfig.api_key`, `EndpointRef.api_key` and `EndpointRef.extra_headers` (each
+`extra_endpoints` entry), `ActiveSelection.api_key` (`active_endpoint`), and `MCPServerConfig.env`
+and `MCPServerConfig.headers` are `SecretStr` (the two dicts hold `SecretStr` values), like
+`proposer.api_key` and `dispatch.discord.token`. Every command that shows one prints `**********`.
+The value is unwrapped only where it is sent (`LLMClient._build_client`, the MCP spawn), and `init`
+and `components set` write it raw to owner-only files (`config/redact.reveal`).
+
+**The launched server.** `server.bind_all` and `server.require_api_key` apply to a vLLM server the
+harness launches. `bind_all: false`, which `init` writes for a new install, listens on 127.0.0.1 —
+docker publishes `-p 127.0.0.1:<port>:8000`, a binary gets `--host 127.0.0.1` — and `true` keeps
+the every-interface launch of earlier releases. A `server:` section, or an `extra_endpoints`
+entry's `lifecycle`, that launches vLLM and has no `bind_all` key gets `bind_all: true` written by
+the config migration (`config/migrate.py` `plan()`, run by the first `localharness start` after an
+upgrade and by `localharness config migrate`), with a backup and one receipt line. That write is not
+tied to the defaults revision, so it never re-adds a deny pattern you deleted, and it reads
+`config.yaml` only. `require_api_key` is off by default; set to `true`, the server is launched with
+`provider.api_key` in its environment (`VLLM_API_KEY`) and every harness probe of its `/v1/`
+routes sends the key.
+
+**`channels.remote_unattended`** (machine-level only, default `true`): `false` refuses `unattended`
+and "always" from the phone and Discord, through the gate and each channel's `local_operator`
+flag; the terminal and Zed are never limited.
 
 ---
 
@@ -1426,13 +1470,13 @@ Pictures are written to `artifacts/image/` under the session's state directory.
 | `dispatch.discord.ack` | string | `"✅"` | — | Reaction added to a message when the agent takes it; `""` adds none. Any layer may set it |
 
 Until 0.17.0, a `dispatch.discord.*` field left at its default is filled from the deprecated
-`LOCALHARNESS_DISCORD_*` variables (and, for the token, `DISCORD_BOT_TOKEN` or
-`~/.claude/channels/discord/.env`), with one warning per variable used; see spec 11, "The dispatch
-plugin".
+`LOCALHARNESS_DISCORD_*` variables (and, for the token, `DISCORD_BOT_TOKEN`), with one warning per
+variable used; no file is read for it. See spec 11, "The dispatch plugin".
 
 **The permission gate keys.** `permissions.mode` picks one of five modes (PRD §3.4). `auto`, the
-default since v0.14.1, asks once whether you trust this workspace — only for a folder this machine
-has never run a session in; one with earlier sessions behind it is recognized and never asked — and
+default since v0.14.1, asks once whether you trust this workspace — a home-rooted session with
+earlier sessions in the machine's own store is recognized and not asked, and a project's own
+session files never count — and
 then allows everything except **`AUTO_BLACKLIST`** (`agent/gate_types.py`), one structure with
 four fields: `target_scoped_verbs` (`rm`, `rmdir`, `chmod`, `chown`, `chgrp`, `truncate`, `find`,
 and the Windows `Remove-Item`/`ri`/`del`/`erase`/`rd` spellings) when the target is outside the
@@ -1503,7 +1547,12 @@ harness config directory — the global `~/.localharness` and a project's `.loca
 `declined_workspace_offers.yaml` and `plugins/**`, the entries that change what the harness does
 next (the last three exist only in the global one). Agents, divisions, tools, session state,
 memory, history, the audit log and the kill file are bookkeeping and are not protected — writing
-them is the harness being used. The two dict-shaped tables (`destructive_flag_verbs`,
+them is the harness being used. `config.yaml` and `overrides.yaml` have one more rule, in code
+ahead of the verdict (`agent/gate.py`, `HARNESS_CONFIG_FILE_REASON`): the agent's `write` and
+`edit` tools and the shell writes the gate can read are refused for them in every mode, with one
+line naming `localharness components set` — see SECURITY.md for what that rule does not cover. A
+tool script in the global `tools/` that the machine's trust record does not hold is gated as an
+unconfirmed shell command (`config/trust.tool_script_pending`). The two dict-shaped tables (`destructive_flag_verbs`,
 `inline_code_flags`) are deliberately **not** overridable: they canonicalize flags into the
 signature, so a wrong entry would silently change what an existing grant means.
 

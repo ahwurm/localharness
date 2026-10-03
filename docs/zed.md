@@ -69,8 +69,10 @@ now*. Unlike every other dialog here the answer is permanent, which is why the b
 goes in `~/.localharness/trusted_workspaces.yaml` and covers both halves of trust (the project's
 config layer loads, and its tool calls run without asking). In a project that has no
 `.localharness/` yet, *Trust this workspace* also creates one, so that project's sessions, memory
-and state live with the project instead of in your global directory; *Not now* creates nothing. A project with earlier sessions behind
-it is recognized and never asked at all. Answer yes and ordinary work — reading, editing, running your build, an unfamiliar command,
+and state live with the project instead of in your global directory; *Not now* creates nothing. A project's own session files never count as having worked there, so a
+project with no trust record is asked. This dialog does not list the MCP servers the project's agent
+files start, so its yes starts none of them: they are listed and asked about at the next
+`localharness start` in a terminal. Answer yes and ordinary work — reading, editing, running your build, an unfamiliar command,
 a docker command, an MCP tool, a subagent — never raises another dialog. Answer no and the thread
 runs in Guarded, which asks about each new thing and remembers it. After a yes you should see no
 further dialogs at all: the blacklist entries in the table above are parked as pending decisions

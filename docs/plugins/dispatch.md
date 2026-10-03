@@ -16,7 +16,9 @@ On a terminal, `plugins enable dispatch` with no `--set`, or `/plugins enable di
 ## What it adds
 
 - The `discord` channel for `localharness start --channel`. No tool and no command.
-- The bot reacts with the ack emoji when it takes a message, replies in 2000-character pieces, and asks permission questions as a message you answer with a reaction; only users on the allow list can answer. A plain `mode <name>` message switches the permission mode.
+- The bot reacts with the ack emoji when it takes a message, replies in 2000-character pieces, and asks permission questions as a message you answer with a reaction; only users on the allow list can answer. ✅ allows once and ❌ refuses; ♾️ ("always") takes a second tap, as on the phone: the bot posts a confirm message, and only ✅ on that message records the grant. The bot ignores its own reactions, so it never answers its own question. A plain `mode <name>` message switches the permission mode.
+- What the bot sends pings nobody but the person it replies to (no `@everyone`, role or user mention from the model's text), and a masked link (`[text](url)`) is sent as its text followed by the plain address, so you see where it goes.
+- An allowlisted account can do what you can do at the terminal, including `mode unattended` and "always". The machine-level setting `channels.remote_unattended: false` keeps those two to the terminal and Zed: `mode unattended` then gets one line naming the setting, and questions offer no ♾️. The default, `true`, changes nothing.
 - Pictures a tool makes (the `image` plugin) are posted as files.
 - A `doctor` check: whether Discord is configured and how many users are allowed. It never prints the token and never logs in.
 
@@ -31,13 +33,13 @@ On a terminal, `plugins enable dispatch` with no `--set`, or `/plugins enable di
 
 A repository you clone cannot point the bot somewhere else or widen who may drive it: a project's value for the three machine-level settings is dropped with a warning.
 
-The older `LOCALHARNESS_DISCORD_*` and `DISCORD_BOT_TOKEN` environment variables and the file `~/.claude/channels/discord/.env` are deprecated: they still fill a setting you have not set, with a warning at start and in `doctor`, and they stop working in 0.17.0. Move each to its setting with `localharness components set dispatch.discord.<key> …`.
+The token comes only from `dispatch.discord.token`, or until 0.17.0 from the deprecated `LOCALHARNESS_DISCORD_TOKEN` and `DISCORD_BOT_TOKEN` environment variables; the other deprecated `LOCALHARNESS_DISCORD_*` variables still fill a setting you have not set. Each prints a warning at start and in `doctor`, and they stop working in 0.17.0. Move each to its setting with `localharness components set dispatch.discord.<key> …`. Claude Code's Discord token file is no longer read: with no token, `start --channel discord` refuses with one line naming `localharness plugins enable dispatch`, which says so.
 
 ## Not there yet
 
 - **Not yet run against a live Discord server.** The plugin is tested offline against a stand-in for the Discord library: logging in, the reactions and a real file upload are unverified.
 - Files people upload to the bot are not passed to the model; the turn sees the message text only.
-- The token is stored as plain text in your global `overrides.yaml` (mode 600 when LocalHarness writes it).
+- The token is stored as it is in your global `overrides.yaml` (owner-only, mode 600, when LocalHarness writes it); every command shows it as `**********`.
 - There is one settings section, `dispatch.discord.*`. A second chat platform added today would share Discord's token, allow list and channels.
 - `localharness start --help` still lists `discord` while the plugin is off.
 

@@ -27,6 +27,7 @@ channel overrides:
 - `bare_mode_command` (False): a plain `mode <name>` message is the `/mode` command (Discord sets it; the terminal does not).
 - `start_banner` (`""`): one line `localharness start` prints, dimmed, after building the channel; empty prints nothing.
 - `can_switch_plugins` (False): `/plugins enable|disable` may restart the session from this channel; only the terminal sets it, so a plugin's setup questions are never asked over a remote channel.
+- `local_operator` (False): the person answering is at this machine. The terminal and ACP (Zed) set it; the phone (`web`) and Discord do not, and an unknown channel counts as remote. `PermissionGate.attach_channel` reads it for the remote lock: with the machine-level `channels.remote_unattended: false`, a mode switch to `unattended` from a channel without it is refused with one line naming the setting (`REMOTE_UNATTENDED_REFUSAL`), and its permission questions are handed over ungrantable, their display ending with a note that "always" is off for remote channels (`REMOTE_ALWAYS_NOTE`), so an "always" that comes back anyway counts once. The default, `true`, changes nothing.
 - `has_review_surface`, `streams_tokens`, `has_display_toggles` (all False): an in-project edit lands where a person sees it, the channel wants the answer as it is generated, and `/reasoning` and `/verbose` mean something on the channel.
 
 Spec 09 ("Manifest and methods") covers how a plugin provides a channel.
@@ -571,6 +572,17 @@ class TerminalChannel(ChannelAdapter):
 
 ### Format Contracts
 
+**No control sequence reaches the terminal from model, tool or plugin text.** The terminal's
+consoles are built with `highlight=False`, under which rich writes a plain string's ESC bytes as
+they are, so the channel removes them itself: `sanitize_for_display` (`channels/base.py`,
+`CONTROL_CHARS_RE`) strips ESC, OSC, CSI and C1 sequences. `send_message` sanitizes before the
+Markdown panel, `send_streaming` draws sanitized text live and final, `send_renderable` sanitizes
+every rendered segment (keeping its style), and every line that puts text into markup goes through
+the module's `escape()`, which is rich's `escape` after `sanitize_for_display` — reasoning,
+narration, tool calls and their output, errors and the echo of what the user typed. Model text
+copied from a page therefore cannot set the clipboard (OSC 52), clear the screen or redraw a
+permission question.
+
 All message types have defined rendering behavior:
 
 | Event / content | Terminal format | Style |
@@ -689,7 +701,9 @@ dispatch:
 
 `localharness plugins enable dispatch --set discord.token=… --set discord.allow=<your user id>` (or `components set dispatch.discord.<key> …`) writes them to the global `overrides.yaml`. A project's `dispatch.discord.token`, `dispatch.discord.allow` or `dispatch.discord.channels` is dropped with a warning and the global value stands, so a repository cannot point the bot at someone else or widen who may drive it. Ids must be digit strings. Start refuses to listen with no token or with an empty allow-list.
 
-**The env fallback (deprecated, removed in 0.17.0).** A field left at its default is filled from the old sources, per field, so the setting always wins: `LOCALHARNESS_DISCORD_TOKEN`, then `DISCORD_BOT_TOKEN`, then a `DISCORD_BOT_TOKEN=` line in `~/.claude/channels/discord/.env` for `token`; `LOCALHARNESS_DISCORD_ALLOW`, `LOCALHARNESS_DISCORD_CHANNELS` and `LOCALHARNESS_DISCORD_ACK` for the others. Each source that decides a field prints one deprecation line in the start banner and one `warn` row in `doctor` (not a failure) naming the setting to use instead. A test fails once the version reaches 0.17.0 while any of this code remains.
+**The env fallback (deprecated, removed in 0.17.0).** A field left at its default is filled from the old environment variables, per field, so the setting always wins: `LOCALHARNESS_DISCORD_TOKEN`, then `DISCORD_BOT_TOKEN`, for `token`; `LOCALHARNESS_DISCORD_ALLOW`, `LOCALHARNESS_DISCORD_CHANNELS` and `LOCALHARNESS_DISCORD_ACK` for the others. No file is read (`env_fallback(settings, environ)` is pure). Each source that decides a field prints one deprecation line in the start banner and one `warn` row in `doctor` (not a failure) naming the setting to use instead. With no token from the setting or a variable, the adapter refuses to start with one line (`TOKEN_MISSING`) that names `localharness plugins enable dispatch`, the two variables that still work until 0.17.0, and that Claude Code's Discord token file is no longer read. A test fails once the version reaches 0.17.0 while any of this code remains.
+
+**Permission questions, "always", and what the bot sends.** A question is a message the allowlisted user answers with a reaction: ✅ once, ❌ no, ♾️ always. ♾️ takes a second tap, as the web channel's server-checked confirm does: the channel posts `PERMISSION_ALWAYS_CONFIRM`, pre-reacted ✅, and only ✅ on that message records the grant (✅ on the question still means once; a second ♾️ changes nothing; a question that cannot be granted offers no ♾️). The gate's deadline bounds the whole ask, and both waiters are removed on every exit. `on_raw_reaction_add` drops reactions from the bot's own account, so the bot's own pre-reactions can never answer a question. The client is built with `allowed_mentions=AllowedMentions(everyone=False, users=False, roles=False, replied_user=True)`, which covers send, edit, reply and file uploads, so model text pings nobody but the person replied to. `send`, `edit` and `reply` pass the text through `plain_links`: a masked link `[text](url)` (also `[text](<url>)` and spaced forms) becomes `text (<url>)`, and any other `](http` seam is broken, so the address a link opens is always in view.
 
 **Attachments.** A typed artifact on a tool result (an image from the `image` plugin) is posted as a file to the conversation being answered. The file is read only from core's artifact folder for that plugin, and only if it is one regular, non-symlink file with an allowed image type. Files that users upload are kept as metadata (name, size, type) and are not passed to the model.
 

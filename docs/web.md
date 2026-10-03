@@ -37,10 +37,20 @@ cd ~/your-project
 localharness web
 ```
 
-It prints the address, the UI directory, an **app token** — generated on first run and stored
-`0600` under your config directory — and a **QR code that encodes both the URL and the token**, so
-you never type the secret into a phone. The token is required on every request, the event stream
-included.
+It prints the address and the UI directory, and on a terminal it draws a **QR code that encodes
+both the URL and the app token**, so you never type the secret into a phone. The token is generated on
+first run and stored `0600` under your config directory, and it is required on every request, the
+event stream included. Its text is printed only on that first run, right after `--rotate-token`, or
+when you ask for it:
+
+```bash
+localharness web --show-token      # print the token and the QR on this terminal, then exit
+```
+
+`--show-token` pairs a phone with a server that is already running, without stopping it. When
+standard output is not a terminal — a pipe, a `tee`, journald — nothing that carries the token is
+printed there: if the process runs in a terminal, the pairing QR is drawn on that terminal
+instead, and otherwise one line says to run `localharness web --show-token` on a terminal.
 
 Tell it the address the phone will actually use:
 
@@ -53,8 +63,11 @@ or save it once with `localharness plugins enable web` (the machine-level settin
 answer it prints the loopback URL and says plainly that no phone can reach it.
 
 ```bash
-localharness web --rotate-token     # invalidate every enrolled client, print a new QR
+localharness web --rotate-token     # invalidate every enrolled client and push subscription, print a new QR
 ```
+
+After a rotation every phone pairs again and turns notifications on again. A `localharness web`
+that is already running keeps accepting the old token until you restart it.
 
 ## Put it on the home screen
 
@@ -65,7 +78,9 @@ deliver anything.
 1. **Publish it over HTTPS** (`tailscale serve --bg 8765`). Over plain HTTP there is no install
    and no notifications, and that is the browser's rule, not ours.
 2. **Scan the QR** with the phone's camera. Safari opens the page already paired.
-3. **Share → Add to Home Screen.** You now have an icon that opens straight into a composer.
+3. **Share → Add to Home Screen.** You now have an icon that opens straight into a composer. iOS
+   keeps the installed app's storage apart from Safari's, so the app asks for the token once:
+   `localharness web --show-token` prints it.
 4. **Open it from the icon** and tap **turn on notifications**. Before the install, that button
    tells you to install first instead of asking.
 
@@ -114,7 +129,8 @@ tailscale serve --bg 8765
 Two browser rules, not LocalHarness limitations, and the second is the fatal one:
 
 - No service worker on a non-secure origin, so no home-screen install and no notifications.
-- **The event stream cannot authenticate.** Enrolment sets a `Secure` cookie, browsers refuse to
+- **The event stream cannot authenticate.** Enrolment sets a `Secure` cookie (a value derived from
+  the token, which only the GET routes accept), browsers refuse to
   keep a `Secure` cookie on a plain-http origin, and `EventSource` cannot send the bearer header
   instead — so every connection attempt is rejected and the page retries forever. It looks
   exactly like bad wifi. The page now says so on load rather than letting you debug your router.
@@ -178,6 +194,13 @@ documented consequence, not a defect — `auto` exists so this is not the daily 
 **"Always allow here" takes two taps, and the second one is checked by the server.** A permanent
 grant is global, keyed by your project's real path, never expires, and has no revoke command, so a
 single request can never write one. `GET /api/grants` lists what you have allowed forever.
+
+**A paired phone can do what you can do at the terminal** — including switching the session to
+`unattended` and answering "always". To keep those two to the terminal and Zed, set
+`channels.remote_unattended: false` in your machine config: the phone then gets one line naming the
+setting, and its questions offer no "always". The default, `true`, changes nothing, and
+`localharness doctor` shows a row while it is on. See
+[SECURITY.md](../SECURITY.md#a-paired-phone-or-discord-account).
 
 **Memory and Pictures appear only when the session has them.** The drawer's Memory button shows
 when memory is on: list and search facts, open one with its history, edit it, forget it (two
@@ -251,10 +274,11 @@ the same round trip a real one does.
 
 ## Not yet
 
-- **The installed app may ask for the token once.** iOS gives a home-screen web app its own
-  storage, separate from Safari's, so pairing the tab does not always pair the app. The manifest
-  hands the installed app the token when the browser asks for it with credentials; when it does
-  not, the app asks you for the token once and then remembers it.
+- **The installed app asks for the token once.** iOS gives a home-screen web app its own
+  storage, separate from Safari's, so pairing the tab does not pair the app. The manifest carries
+  the token only for a request that presents the bearer token, which a browser's manifest fetch
+  never does, so the app asks you for the token once (`localharness web --show-token` prints it)
+  and then remembers it.
 - **No chat list, no titles, no search, no resume.** One live session, from the directory you
   started in. Past sessions are files on disk; nothing browses them yet.
 - **No concurrent sessions.** Not a scheduling convenience: two sittings under one agent append to
@@ -268,7 +292,8 @@ the same round trip a real one does.
 - **No diff review.** In-project edits therefore ask once per workspace rather than never.
 - **The memory view is worse than the terminal's.** The Memory screen is a flat list with no
   promote, and `/memory` gives you the terminal's tree flattened into preformatted text.
-- **No per-device revoke.** `--rotate-token` is all or nothing; every other device re-enrols.
+- **No per-device revoke.** `--rotate-token` is all or nothing; every other device re-enrols, and
+  a server that is already running keeps the old token until it restarts.
 - **No grant revocation.** You can see what you have permanently allowed; removing one means
   editing `~/.localharness/grants.yaml` by hand.
 - **A disk write that fails can leave a hole** in the log a reconnecting client replays from. The
@@ -277,8 +302,9 @@ the same round trip a real one does.
 
 ## When something goes wrong
 
-**401 on everything.** The token is wrong or was rotated. `localharness web` prints the current
-one on startup.
+**401 on everything.** The token is wrong or was rotated. Scan the QR again (`localharness web`
+draws it on every start on a terminal), or print the token with `localharness web --show-token`.
+After a rotation, a server that was already running keeps the old token until it restarts.
 
 **The page loads but nothing streams.** Something between the phone and the process is buffering
 `text/event-stream`. `tailscale serve` is the tested path; a reverse proxy of your own needs
@@ -303,6 +329,6 @@ browser tab. iOS will not grant push to a tab; install it and open it from the i
 worker — and therefore the install and push — needs a secure context; put `tailscale serve` (or
 any TLS proxy) in front of the port and reopen the URL.
 
-**Notifications were on and stopped.** Rotating the token does not unsubscribe a device, but
-reinstalling the app or clearing site data does. Turn them on again from the app; the old
-subscription is dropped automatically the first time the push service reports it gone.
+**Notifications were on and stopped.** Rotating the token clears every push subscription, and
+reinstalling the app or clearing site data drops that device's. Turn them on again from the app
+after it pairs; a subscription the push service reports gone is dropped automatically.

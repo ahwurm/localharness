@@ -90,16 +90,16 @@ class MCPServerConfig(BaseModel):
     name: str
 
     # Transport type.
-    transport: Literal["stdio", "streamable-http"]
+    transport: Literal["stdio", "streamable_http"]
 
     # stdio-specific:
     command: str | None = None          # Executable to run (e.g. "uvx", "python")
     args: list[str] = []               # Arguments to command
-    env: dict[str, str] = {}           # Additional environment variables
+    env: dict[str, SecretStr] = {}     # Additional environment variables (secrets: masked when shown)
 
-    # streamable-http-specific:
+    # streamable_http-specific:
     url: str | None = None             # Full MCP server URL
-    headers: dict[str, str] = {}       # HTTP headers (auth tokens, etc.)
+    headers: dict[str, SecretStr] = {} # HTTP headers (auth tokens, etc.; secrets: masked when shown)
 
     # Tool filtering: applied before registration in ToolRegistry
     tool_filter: MCPToolFilter = Field(default_factory=MCPToolFilter)
@@ -773,11 +773,32 @@ MCP servers execute as a separate process (stdio transport) or network endpoint 
 
 3. **`prefix_tools: true` by default.** Prefixing tool names makes it obvious which tools come from which server. It also prevents a rogue MCP server from shadowing a built-in tool by registering a tool named `bash_exec`.
 
-4. **Environment variable isolation.** stdio MCP server processes inherit the environment filtered to `{os.environ, **config.env}`. In v2, the environment should be cleaned to only the declared `env` dict (no implicit inheritance from the harness process).
+4. **Environment variable inheritance.** A stdio MCP server process inherits the harness's whole environment, with the declared `env` added on top (`{**os.environ, **env}`), unchanged in this release: a server sees every variable the harness sees. In v2, the environment should be cleaned to only the declared `env` dict (no implicit inheritance from the harness process).
 
 5. **Local-only for sensitive servers (v1).** The `streamable-http` transport should only point at localhost or LAN endpoints in v1. Remote MCP servers (public internet) may return malicious tool descriptions that attempt prompt injection. TLS verification and origin pinning are v2 features.
 
 6. **Deny-first applies.** Agent `tool_config.deny` in the tool scope section applies to MCP tools identically to built-in tools. An agent can deny an MCP tool by its registered name.
+
+### Which servers start, and what a value in `env` or `headers` is
+
+A server listed in a **project's** agent files (`<project>/.localharness/agents/*.yaml`) starts
+only in a project the user trusted, and only when the project's whole server list is the one the
+user approved. `localharness start` decides this once, before anything loads
+(`cli/workspace.decide_project_trust`): the trust question lists the servers (command, arguments,
+environment-variable names, URL and header names, never a value), a Yes records exactly that list
+in `trusted_workspaces.yaml` (`config/trust.executables_snapshot`), and a later start whose list
+differs asks once on a terminal, showing what changed. No, or no terminal, removes the project's
+servers before the merge (`ConfigLoader(project_trusted=False)`), so none of them starts, and one
+line names the files and the remedy for the command that was run (`--trust-project`,
+`LOCALHARNESS_TRUST_PROJECT=1`, a Yes at a `localharness start` on a terminal, or the
+`trusted_workspaces.yaml` entry). A server added to the machine's **own** agent files
+(`~/.localharness/agents/*.yaml`) starts after the user confirms it at the next `localharness start`
+on a terminal (`decide_machine_trust`); until then it is withheld, with one line. Neither decision
+is ever asked mid-task.
+
+Values in `env` and `headers` are secrets (`SecretStr`): `validate`, `doctor`, `config show` and
+every error message show `**********`, and only the spawn unwraps them, so the server receives the
+real values. The trust record keeps their names only, so a changed value asks nothing.
 
 ### Prompt injection via tool descriptions
 
@@ -797,8 +818,11 @@ stdio MCP server processes in v1 run as the same user as the harness. A compromi
 `localharness start` (`cli/start_cmd.py`) brings the tool system up in this order: the built-in
 tools, the hook system (wired to the registry), the plugins (resolved, then run through their
 lifecycle; spec 09; the memory tools come from the memory plugin's `tools()` in this step), the
-root agent's capability floor, and last the MCP servers named in the root agent's config. At
-shutdown the MCP servers close first, then the plugins stop in reverse start order. The MCP step, as the code does it:
+root agent's capability floor, and last the MCP servers named in the root agent's config, after
+start's trust decisions have removed any server the user has not approved (see "Which servers
+start" above). The MCP client library is imported only when a server is configured, so a start with
+none never loads it. At shutdown the MCP servers close first, then the plugins stop in reverse
+start order. The MCP step, as the code does it:
 
 ```python
 # cli/start_cmd.py, `_start_async` (the MCP step; simplified)

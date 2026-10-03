@@ -1120,6 +1120,59 @@ class BashExecTool(Tool):
         )
 ```
 
+### `web_fetch` and `web_page_query`
+
+`web_fetch` (`tools/builtin/web_tool.py`) opens a URL the model chose, so every hop goes through
+`tools/builtin/netguard.py` first. `netguard.check(url)` accepts http and https only, refuses a URL
+with a user name or password in it, resolves the host (an address written literally is taken as
+written) and requires every address it resolves to to be public. Loopback, private, link-local and
+cloud-metadata, CGNAT and tailnet, multicast, unspecified, reserved and site-local addresses are
+refused; IPv4-mapped and NAT64 forms are judged by the IPv4 address they carry, and IPv4-compatible
+`::a.b.c.d` is refused, so the answer does not depend on how the address is spelled or on the
+Python version. The machine-level
+`org.web_fetch_allow_private` (IP addresses, networks or host names, read by `start` into
+`netguard.set_private_allowlist`) admits a private target on purpose; multicast, unspecified and
+reserved addresses are never admitted.
+
+The request is pinned to what was checked: the URL carries a checked IP, and the host name goes in
+the `Host` header and httpx's `sni_hostname` extension, with a fresh client per attempt. When a
+checked address refuses the connection (`ConnectError` or `ConnectTimeout`), the next checked
+address is tried — never a fresh lookup; an HTTP error is not retried. Redirects are followed by
+hand, at most 5, and each hop is checked the same way. When an environment proxy applies to a hop
+(`urllib.request.getproxies()` and `proxy_bypass()`, decided once per hop), the original URL goes
+to that proxy after the same local check, through an explicit transport, so httpx never applies
+environment proxies by itself. Every refusal reaches the model as one `validation_error` line, the
+one for a private address naming `org.web_fetch_allow_private`; nobody is asked anything.
+
+`web_page_query` searches the full text a previous `web_fetch` kept, under its `fetch_id`; it
+fetches nothing. A pattern longer than 128 characters is refused. A pattern with no regex syntax is
+a plain substring search in the process; any other pattern runs in a `python -S -I` child process
+that is killed after 1 second, and a timeout or a bad pattern is one tool error.
+
+SECURITY.md ("What a web fetch may reach") states the rule and what it does not cover: a GET to a
+public host can still carry data out, `bash_exec` and `python_exec` reach any address, the guard
+needs working local DNS, and behind a proxy the proxy resolves the name again.
+
+### The `agent` tool: delegating, and building specialists
+
+The `agent` tool (`tools/builtin/agent_tool.py`) delegates a task to a subagent. Its description
+also invites the model to build a specialist by writing `~/.localharness/agents/<name>.yaml` and
+delegating to it at once, and states the owner's boundary in one sentence: "Compose specialists
+from the existing tools; never write your own tool for something the harness already provides (web
+search, fetch, files, delegation)." It says what waits for the user: an MCP server, an embedding
+model or a looser permission put in an agent file applies only after the user confirms it at their
+next `localharness start` on a terminal, and a script added under `~/.localharness/tools/` runs
+only as an unconfirmed shell command (asked about in `guarded`) until they confirm it there.
+
+Two rules in the permission gate back this, both described in SECURITY.md under "What the agent
+may change about its own setup": the unconfirmed-tool-script rule (a script added or changed since
+the last confirmation gets what any shell command gets in the current mode, keyed in `guarded` on
+its path and content) and the settings-file rule (the agent's `write` and `edit` tools and the shell
+writes the gate can read never change `config.yaml` or `overrides.yaml` in the machine's config
+folder or a project's `.localharness/`, in any mode; the model gets one line naming
+`localharness components set`). New installs no longer ship the `write(*/agents/*.yaml)` deny
+pattern (spec 06, the deny table).
+
 ### Built-in tool registration
 
 ```python

@@ -204,10 +204,14 @@ on stdin, or with `--no-input`, it asks nothing at all.
    the model in the global `overrides.yaml` after checking the merged config ("✓ Updated
    <overrides> — your config.yaml is unchanged."); `config.yaml` is never rewritten, and a change
    that does not validate, or finds no server, writes nothing and exits 1. A config that cannot be
-   read exits 1 and names `--force`. `--force` starts over: a fresh `config.yaml`, and the model
+   read exits 1 and names `--force`. `--force` starts over: it first saves the old `config.yaml`
+   beside it as `config.yaml.before-init-<stamp>`, owner-only, and says where ("✓ Saved your
+   previous config to …"); then a fresh `config.yaml`, and the model
    and server choices saved in the global `overrides.yaml` (by an earlier change, `/model`, or a
    switch to another endpoint) are cleared, with one line naming them. Plugin settings and every
-   other key there stay, and the two files are written both or neither.
+   other key there stay, and the two files are written both or neither. `init` creates the config
+   folder owner-only (0700) and `config.yaml` owner-only (0600), and a new install's `server:`
+   section says `bind_all: false`.
 2. **The server.** `--endpoint` skips detection and uses that address; without `--model` it reads
    the server's model list and uses the only model served, else exits 1 naming the ids.
    Otherwise `detect_provider()` (`provider/detector.py`) probes the five ports above with a
@@ -369,6 +373,37 @@ plugin is off. `web` and `acp` are served by their own commands, `localharness w
   `channel 'discord' is provided by the dispatch plugin, which did not start — <reason>`
 
 Spec 11 covers the channels themselves; spec 09 covers how a plugin provides one.
+
+**`--trust-project` trusts the project you stand in for this one run.** Its MCP servers start, the
+session runs as trusted, nothing is asked and nothing is recorded — for CI and scripts.
+`LOCALHARNESS_TRUST_PROJECT=1` does the same for any command that opens a session, `localharness
+web` and `localharness acp` included, which have no flag.
+
+**What a start asks, and only on a terminal.** Before anything loads, `start` decides what the
+project's agent files and your own may start, load or loosen (`cli/workspace.py`:
+`decide_project_trust`, `decide_machine_trust`). In a project with no trust record, the one trust
+question lists the MCP servers the project's agent files start, and a Yes approves that list. A
+project whose server list changed since that Yes gets one question showing the change
+(`+`/`~`/`-` lines). When your own agent files, division files or `org.yaml` gained an MCP server,
+an embedding model or a looser permission, or `~/.localharness/tools/` gained or changed a script,
+one question lists each change ("Apply them?"). These questions are asked only on a terminal with
+`--channel terminal` and without `--no-input`; a No is not asked again in the same process (the
+`/plugins` restart included). Anywhere else, nothing new starts or applies and one line says so,
+naming how to review it; the exit code is unchanged. `--list-models` decides and asks nothing.
+SECURITY.md ("Trust boundaries") is the user-facing account.
+
+**What else a start does without asking.** It makes the config folder owner-only (0700) if it is
+not, recorded in the audit log; writes `server.bind_all: true` into a config from an earlier release
+that launches vLLM (with a backup and one line); and records the trust store's adoption of what you
+had already approved. SECURITY.md, "What `localharness start` writes without asking", lists each.
+A key sent over plain http to another machine gets one warning in the start summary.
+
+**`localharness web`** serves the phone channel (`docs/web.md`). On a terminal it draws the pairing
+QR on every start; the token's text is printed only when it is created or rotated. `--show-token`
+prints the token and the QR on a terminal and exits 0 (with stdout not a terminal it prints
+`--show-token prints the token only to a terminal, and stdout is not one.` and exits 1).
+`--rotate-token` makes a new token, clears the push subscriptions and prints the pairing block; a
+server already running keeps the old token until it restarts.
 
 **REPL Architecture:**
 
@@ -701,6 +736,21 @@ Options:
 14. **Tool calling** — native, XML fallback, or not yet probed.
 15. **Web search** — whether `ddgs` is installed.
 
+Rows added for the hardening, each an `i` (info) row unless noted, never a failure:
+
+- `Model server: reachable from other machines on port <port> (server.bind_all: true) — set
+  server.bind_all: false to keep it on this machine`, for a launched vLLM server (and the same for
+  a launched `extra_endpoints` entry).
+- `Model server: launched without requiring your API key (provider.api_key is set) — set
+  server.require_api_key: true to make it refuse requests without the key`.
+- `Remote channels on (web, dispatch): a paired phone or an allowlisted chat account can switch a
+  session to unattended and answer "always" — set channels.remote_unattended: false to keep both
+  to this terminal`, while a remote channel plugin is on and the lock is not set.
+- A `⚠` row when the config folder is readable by other accounts, worded by why `start` has not
+  made it owner-only (this account's folder not tightened yet, another account's folder, a
+  read-only filesystem); or, the folder being private, one `i` row counting the files inside that
+  other accounts could read if it were opened up, naming `chmod -R go-rwx`.
+
 It does **not** check individual agents' memory databases, and there is no per-agent health table.
 
 **Output format:**
@@ -909,6 +959,13 @@ Additive only — if you deliberately removed a default, re-remove it after migr
 i --dry-run: nothing written.
 ```
 
+The same command also writes `server.bind_all: true` into a `server:` section (or an
+`extra_endpoints` entry's `lifecycle`) that launches vLLM and predates the setting, so that server
+keeps listening on every interface as before; `--dry-run` lists it as
+`+ server.bind_all: true (keeps the model server reachable from other machines)`. That write is not
+tied to the defaults revision: a run that writes only it ends `defaults revision N unchanged`
+instead of stamping, and never re-adds a deny pattern you deleted.
+
 `localharness start` runs this same engine automatically on the first start after an upgrade — see
 SECURITY.md, and `doctor` for the state it leaves behind.
 
@@ -973,9 +1030,16 @@ set org.log_level = 'debug' (was: 'info')
         A per-project value goes in /home/you/proj/.localharness/config.yaml.
 ```
 
-A secret setting (a `SecretStr` such as `dispatch.discord.token` or `proposer.api_key`) is shown as `**********` in the
+A secret setting (a `SecretStr`: `provider.api_key`, `active_endpoint.api_key`, an
+`extra_endpoints` entry's `api_key` and `extra_headers`, an MCP server's `env` and `headers`,
+`proposer.api_key`, `dispatch.discord.token`) is shown as `**********` in the
 `set` receipt and its `--json`, in `list` and `get`, in error messages and in the `ComponentMutated`
-audit event; the file holds the real value.
+audit event; the file holds the real value. `components set <secret setting> -` reads the value
+instead of taking it on the command line: on a terminal with input hidden, otherwise one line from
+stdin, so the key never sits in shell history or `ps`. Nothing read gives exit 2 and `No value read
+for <path>; nothing was written.`; for a setting that is not secret, `-` is the value itself.
+`components get extra_endpoints --json` and `config show --json` serialize the endpoint models,
+keys masked.
 
 All three subcommands take `--config-dir`, which — as everywhere else — replaces the config
 directory outright and switches workspace discovery off with it.
@@ -1107,6 +1171,11 @@ restart the session with the conversation kept:
 There is no restart, only one line, for a plugin that is already on and set up ("<name> is already
 on."), one the project's config pins, one missing its install extra, and any switch while a call
 is parked ("Answer the parked calls first (/pending lists them): a restart would drop them.").
+`/plugins enable <name>` for a plugin you installed (not one that ships with LocalHarness) first
+asks one yes/no question on the plain terminal — "<name> is a plugin you installed, not one that
+ships with LocalHarness: turning it on lets its code run with your permissions on this machine, in
+every session. Turn it on? [y/N]" — and No leaves it off ("<name> stays off. Your conversation
+continues."). Bundled plugins, `/plugins disable` and the shell command ask nothing new.
 Other channels answer "/plugins works only in a terminal session. From a shell: localharness
 plugins enable <name>", and the phone's command menu does not list it. The conversation is held
 in memory during the restart: if the model server goes away in between, the rebuild fails and the
@@ -1119,7 +1188,9 @@ the next start reads `permissions.mode` from config again. `auto` is the default
 once, and after that everything runs except `AUTO_BLACKLIST` — deletes aimed outside the project,
 `git push --force`/`--delete`, `git reset --hard`, `git clean -f`, `sudo`/`su`, `curl … | sh`,
 `dd`/`mkfs`/`shred`/`format`, writes to a secret store or a system directory, and writes to
-`.git/**` or `.localharness/**` — which is parked for a human every time and remembers nothing. `guarded`, the v0.14.0 default, additionally asks before a call crosses
+`.git/**` or a `.localharness/` entry that changes what the harness does next — which is parked for
+a human every time and remembers nothing (a write to a harness `config.yaml` or `overrides.yaml` by
+the agent's file tools, or a shell write the gate can read, is refused outright in every mode). `guarded`, the v0.14.0 default, additionally asks before a call crosses
 the workspace boundary or is unfamiliar, and remembers an
 "always" in `~/.localharness/grants.yaml`. `trusted` is `auto` plus a prompt for destructive
 operations aimed inside the project. `read-only` refuses writes,
@@ -1127,7 +1198,10 @@ non-read-only shell and code execution, returning a message the model can re-pla
 turns every ask into an allow — the pre-v0.14 behaviour — and from v0.14.1 it is settable here like
 any other mode; a scheduled job still writes `permissions.mode: unattended` in its config, because
 nobody is there to type it. Discord takes the same five names as a plain `mode <name>` message, and
-Zed's picker lists them.
+Zed's picker lists them. With `channels.remote_unattended: false` in the machine config,
+`unattended` is refused from the phone and Discord with one line naming the setting
+(`unattended can only be switched on from this machine's terminal or Zed here …`); the terminal and
+Zed are never limited.
 See spec 06 for the config keys and SECURITY.md for what each mode does and does not stop.
 
 **`/pending`, `/approve [N]` and `/deny [N]` answer a parked call.** From v0.14.2 a blacklisted call
