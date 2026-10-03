@@ -49,11 +49,13 @@ from localharness.channels.terminal import TerminalChannel
 from localharness.cli import doctor_cmd, plugins_cmd, start_cmd
 from localharness.plugins import builtin
 from localharness.plugins.api import GLOBAL_ONLY, Check, Plugin, PluginManifest, SetupField
+from localharness.plugins.setup import AGENT_PROMPT_LEAD
 from localharness.provider import client as client_mod
 from localharness.tools.builtin import generate_image_tool
 from tests.conftest import FakeLLMResponse
 from tests.integration.test_all_plugins_off_e2e import _record
 from tests.integration.test_image_plugin_e2e import _fake_comfy, _machine, _record_dials
+from tests.integration.test_setup_steps_e2e import AR_NEXT, PHONE_Q, WEB_NEXT
 from tests.unit.test_restart_primitives import _contend
 from tests.unit.test_start_cmd import _capture_start_console, _read_sessions
 from tests.unit.test_start_plugins import _record_loop
@@ -291,6 +293,50 @@ def test_a_failed_check_never_blocks_the_restart(run, monkeypatch):
     _carried(s)
     assert f"image: on, but its check failed: ComfyUI unreachable at {COMFY}" in s.printed
     assert "generate_image" in _first_request(s, 2)["tools"]
+
+
+def _not_set_up_yet(s, name: str, detail: str) -> None:
+    """A skipped check left unanswered: the step still printed the coding-agent prompt and the next
+    step, the session came back with the conversation, and the indicator says not set up yet —
+    no line says the check failed."""
+    assert s.runs == 2 and len(s.lifecycles) == 2 and s.resets == 1
+    assert name in s.lifecycles[1][1].loaded_names
+    _carried(s)
+    assert f"{name}: on, but not set up yet — {detail}" in s.printed
+    assert not any("failed" in line for line in s.printed[s.printed.index(f"Restarted with {name} on. "
+                                                                          "Your conversation continues."):])
+
+
+@pytest.mark.plugin("web")
+def test_web_left_unset_is_on_but_not_set_up_yet(run):
+    """Deferred #23: Enter at mobile's optional phone address, on a machine where `localharness web`
+    has never run — every new install. Its check is skipped ("not enrolled yet"): a state that is
+    not set up yet, not a failure."""
+    s = run([["hello there", "/plugins enable web"], ["what now"]], answer="")
+
+    assert "Restarting with web on — your conversation is kept." in s.said
+    assert [(t, d, r) for t, d, _kw, r in s.prompts] == [(PHONE_Q, "", False)]
+    assert _overrides(s) == {"web": {"enabled": True}}  # Enter wrote no address
+    assert "i  web: not enrolled yet" in s.doctor.getvalue()
+    step = s.step.getvalue()
+    assert step.index(AGENT_PROMPT_LEAD) < step.index(WEB_NEXT)
+    _not_set_up_yet(s, "web", "not enrolled yet")
+
+
+@pytest.mark.plugin("autoresearch")
+def test_autoresearch_with_no_proposer_is_on_but_not_set_up_yet(run, monkeypatch):
+    from localharness.autoresearch.plugin import NO_PROPOSER
+    from localharness.plugins import setup
+    monkeypatch.setattr(setup, "gpu_name", lambda: "NVIDIA GB10")  # its prompt names {machine}
+    s = run([["hello there", "/plugins enable autoresearch"], ["what now"]], answer="")
+
+    assert [t for t, *_ in s.prompts] == ["Proposer address (an OpenAI-compatible base URL)",
+                                          "Proposer model id (not your main model)"]
+    assert _overrides(s) == {"autoresearch": {"enabled": True}}  # Enter on both: no proposer written
+    assert f"i  autoresearch: {NO_PROPOSER}" in s.doctor.getvalue()
+    step = s.step.getvalue()
+    assert step.index(AGENT_PROMPT_LEAD) < step.index("This machine reports NVIDIA GB10.") < step.index(AR_NEXT)
+    _not_set_up_yet(s, "autoresearch", NO_PROPOSER)
 
 
 @pytest.mark.plugin("image")

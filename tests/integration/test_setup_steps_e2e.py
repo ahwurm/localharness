@@ -254,6 +254,7 @@ def test_web_enter_saves_nothing_and_prints_the_prompt(g, terminal, web_extra) -
     assert "web: not enrolled yet" in out
     assert AGENT_PROMPT_LEAD in out and "tailscale serve --bg 8765" in out
     assert out.index(AGENT_PROMPT_LEAD) < out.index(WEB_NEXT)
+    assert "failed" not in out  # a skipped check is not set up yet, never a failure (deferred #23)
 
 
 @pytest.mark.plugin("web")
