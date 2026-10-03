@@ -170,3 +170,57 @@ def test_a_plugin_validator_quoting_its_section_never_reaches_doctor_or_plugins_
     for args in (("doctor",), ("plugins", "list"), ("plugins", "info", "secq")):
         result = runner.invoke(app, [*args, "--config-dir", str(g)])
         _clean(result.stdout, result.stderr, repr(result.exception))
+
+
+# --- init: a re-run's change, and --force's reset of the saved choices -----------------------------
+
+
+def _init_errors(monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    from localharness.cli import init_cmd
+    buf = io.StringIO()
+    monkeypatch.setattr(init_cmd, "err_console", Console(file=buf, width=400))
+    return buf
+
+
+def test_init_change_refusal_never_echoes_the_key(tmp_path, monkeypatch) -> None:
+    """A re-run that picks the proposer's model as the main one: the change is checked against
+    config.yaml merged with overrides.yaml, `org:` before `proposer:` (the key last in the tail)."""
+    import click
+    from types import SimpleNamespace
+
+    from localharness.cli import init_cmd
+
+    g = _home(tmp_path, {"org": {"log_level": "info"},
+                         "proposer": {"base_url": "http://p/v1", "model": "p-old", "api_key": KEY}})
+    buf = _init_errors(monkeypatch)
+    monkeypatch.setattr(init_cmd, "_served_window", lambda result: None)
+    found = SimpleNamespace(provider_type="vllm", base_url="http://127.0.0.1:9/v1", models=["p-old"])
+    with pytest.raises(click.exceptions.Exit):
+        init_cmd._write_change(g, found, "p-old", SimpleNamespace(tool_call_mode="native"))
+    _clean(buf.getvalue())
+    flat = " ".join(buf.getvalue().split())
+    assert "the new settings do not validate: Value error, proposer.model must differ" in flat, flat
+    assert not (g / "overrides.yaml").exists()
+
+
+def test_init_force_reset_refusal_never_echoes_the_key(tmp_path, monkeypatch) -> None:
+    """--force drops the saved choices from overrides.yaml and checks what is left before writing."""
+    import click
+
+    from localharness.cli import init_cmd
+    from localharness.config.models import HarnessConfig
+
+    g = _home(tmp_path, {})
+    (g / "overrides.yaml").write_text(yaml.safe_dump({
+        "provider": {"default_model": "test-model"},
+        "proposer": {"base_url": "http://p/v1", "model": "test-model", "api_key": KEY}}), encoding="utf-8")
+    buf = _init_errors(monkeypatch)
+    harness = HarnessConfig.model_validate({"version": "1", "provider": _PROVIDER})
+    with pytest.raises(click.exceptions.Exit):
+        init_cmd._saved_choices_reset(g, harness)
+    _clean(buf.getvalue())
+    assert "proposer.model must differ" in " ".join(buf.getvalue().split())

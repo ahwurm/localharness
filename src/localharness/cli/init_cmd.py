@@ -20,6 +20,7 @@ from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.overlay import atomic_write_overlay, load_overlay, restrict_config_file
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir, resolve_config_dir
+from localharness.config.redact import secret_values, validation_text
 from localharness.config.models import (
     ContextConfig,
     HarnessConfig,
@@ -898,13 +899,15 @@ def _saved_choices_reset(config_path: Path, harness: HarnessConfig) -> tuple[Pat
     cleared = _drop_saved_choices(overlay)
     if not cleared:
         return None
+    merged = deep_merge(harness.model_dump(mode="python"), {k: v for k, v in overlay.items() if k != "agent"})
     try:
-        HarnessConfig.model_validate(core_harness_view(deep_merge(
-            harness.model_dump(mode="python"), {k: v for k, v in overlay.items() if k != "agent"})))
+        HarnessConfig.model_validate(core_harness_view(merged))
     except ValueError as exc:  # a pydantic ValidationError is one
+        # location and message only, scrubbed: never the merged config pydantic carries (R16)
+        why = validation_text(exc, secret_values(HarnessConfig, merged))
         err_console.print(
             "[bold red]Error:[/bold red] "
-            + escape(f"the new settings do not validate: {exc}. Nothing was written."),
+            + escape(f"the new settings do not validate: {why}. Nothing was written."),
             soft_wrap=True,
         )
         raise typer.Exit(1)
@@ -1012,7 +1015,7 @@ def _write_change(config_path: Path, result: DetectorResult, selected_model: str
     validated overlay write `/model` uses (persist_default_model's precedent) — validated as the
     merged config the next `start` reads, so config.yaml stays byte-identical and a change that
     does not validate writes nothing."""
-    from localharness.cli.components_cmd import _validate_overlay
+    from localharness.cli.components_cmd import _core_secret_values, _validate_overlay
     from localharness.registry import set_value_in_dict
 
     loader = ConfigLoader(config_dir=config_path)
@@ -1032,9 +1035,11 @@ def _write_change(config_path: Path, result: DetectorResult, selected_model: str
     try:
         _validate_overlay(loader, "provider.base_url", overlay)
     except ValueError as exc:  # a pydantic ValidationError is one
+        # location and message only, scrubbed: never the merged config pydantic carries (R16)
+        why = validation_text(exc, _core_secret_values(loader, overlay))
         err_console.print(
             "[bold red]Error:[/bold red] "
-            + escape(f"the new settings do not validate: {exc}. Nothing was written."),
+            + escape(f"the new settings do not validate: {why}. Nothing was written."),
             soft_wrap=True,
         )
         raise typer.Exit(1)
