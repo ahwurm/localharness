@@ -533,6 +533,14 @@ imports Python from) is re-resolved by `_narrow_agent_global_only`. Never marked
 plugin's AgentConfigModel: the resolver refuses such a plugin (plugins/resolve.py)."""
 
 
+def layer_files(layer_dir: Path, subdir: str) -> list[Path]:
+    """The `<layer_dir>/<subdir>/*.yaml` files of ONE config layer, sorted — the one enumeration
+    the roster (`ConfigLoader.agent_yaml_paths`, `list_divisions`) and the trust fingerprints
+    (config/trust.py) share, so what is fingerprinted is exactly what can load."""
+    folder = Path(layer_dir) / subdir
+    return sorted(folder.glob("*.yaml")) if folder.exists() else []
+
+
 def _is_under(path: Path, root: Path) -> bool:
     """Is `path` inside `root` (both resolved)? False when either cannot be resolved."""
     try:
@@ -1959,12 +1967,7 @@ class ConfigLoader:
         """
         # reversed(): _search_bases is first-wins order, but discover_agents keys a dict by file
         # stem, so the workspace file must be listed LAST to win by overwrite. Global first.
-        return [
-            f
-            for d in (b / "agents" for b in reversed(self._search_bases()))
-            if d.exists()
-            for f in sorted(d.glob("*.yaml"))
-        ]
+        return [f for b in reversed(self._search_bases()) for f in layer_files(b, "agents")]
 
     def discover_agents(
         self, *, on_error: Optional[Callable[[Path, Exception], None]] = None
@@ -2024,13 +2027,7 @@ class ConfigLoader:
         return {f.stem: f for f in self.microagent_paths()}
 
     def list_divisions(self) -> list[str]:
-        names: set[str] = set()
-        for base in self._search_bases():
-            div_dir = base / "divisions"
-            if div_dir.exists():
-                for f in div_dir.glob("*.yaml"):
-                    names.add(f.stem)
-        return sorted(names)
+        return sorted({f.stem for base in self._search_bases() for f in layer_files(base, "divisions")})
 
     def write_agent(self, config: AgentConfig, *, overwrite: bool = False) -> Path:
         dest = self._config_dir / "agents" / f"{config.name}.yaml"
