@@ -212,3 +212,23 @@ def test_a_configured_start_runs_no_setup(tmp_path, monkeypatch):
     assert LEAD not in flat and "startup)" in flat, flat
     detect.assert_not_called()
     assert len(sessions) == 1
+
+
+@pytest.mark.parametrize(("channel", "refusal"), [
+    ("discrod", "unknown channel 'discrod'"), ("web", "the web channel is served by its own command")])
+def test_a_first_start_refuses_a_channel_it_cannot_build_before_any_setup(tmp_path, monkeypatch, channel, refusal):
+    """A typo in --channel is a typo whether or not the box is set up: the tier-one refusal comes
+    before the lead line, detection or any question, not after a setup walk that wrote a config."""
+    sessions = _machine(tmp_path, monkeypatch)
+    detect, _ = _server(monkeypatch)
+    _terminal(monkeypatch)
+    _questions(monkeypatch)
+
+    result = _start(tmp_path, "--channel", channel)
+
+    assert result.exit_code == 2, result.output
+    flat = _flat(result)
+    assert refusal in flat and LEAD not in flat, flat
+    detect.assert_not_called()
+    assert not (tmp_path / "config.yaml").exists()
+    assert sessions == []
