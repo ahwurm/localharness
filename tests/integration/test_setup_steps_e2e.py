@@ -418,10 +418,14 @@ def test_autoresearch_enter_at_the_key_keeps_a_stored_key_and_none_clears_it(g, 
     assert kept.exit_code == 0, kept.output
     assert _overrides(g)["proposer"] == {"base_url": P_URL, "model": "p-model", "api_key": KEY}
     assert "Contacting the proposer at http://p.test (sending proposer.api_key) …" in kept.output
+    # the kept key now goes to a plain-http address on another machine: one warning row, and the
+    # check still runs (53-04, #34)
+    assert "autoresearch-proposer: proposer.api_key travels unencrypted to http://p.test — use https" in kept.output
     cleared = _enable(g, "autoresearch")
     assert cleared.exit_code == 0, cleared.output
     assert _overrides(g)["proposer"] == {"base_url": P_URL, "model": "p-model", "api_key": "none"}
     assert "Contacting the proposer at http://p.test …" in cleared.output
+    assert "unencrypted" not in cleared.output  # no key, nothing travels
     assert [r.headers.get("Authorization") for r in seen] == [f"Bearer {KEY}", None]
     for result in (kept, cleared):
         for where in (result.stdout, result.stderr, repr(result.exception)):
