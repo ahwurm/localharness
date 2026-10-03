@@ -9,8 +9,10 @@ nothing" is proven, not inferred from a default answer.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,7 +22,9 @@ from typer.testing import CliRunner
 
 import localharness.cli.init_cmd as init_cmd
 from localharness.cli.app import app
+from localharness.cli.model_ops import persist_active_endpoint, persist_default_model
 from localharness.config.loader import ConfigLoader
+from localharness.config.overlay import atomic_write_overlay, load_overlay
 from tests.unit.test_init_cmd import _make_capability_result, _make_detector_result
 
 runner = CliRunner()
@@ -541,30 +545,159 @@ def test_a_plugin_list_failure_never_fails_init(tmp_path, monkeypatch):
     assert HEADER not in result.output
 
 
-# ------------------------------------------------------------------ a fresh write under overrides.yaml
+# ------------------------------------------------------------------ --force: a true core reset (R15)
+#
+# `init --force` regenerates config.yaml AND clears from the machine's overrides.yaml exactly the
+# model and server choices the core persists there — a re-run's change, `/model`, a peer-endpoint
+# switch. Every plugin section and every other key is the user's and stays. Without --force nothing
+# leaves overrides.yaml.
 
-SERVER_OVERLAY = ("provider:\n  base_url: http://localhost:8000/v1\n  default_model: model-x\n"
-                  "org:\n  default_model: model-x\n")
+PEER = SimpleNamespace(name="peer", base_url="http://peer:8000/v1", provider_type="vllm", api_key="none")
+USER_KEYS = {"provider": {"timeout_seconds": 900.0}, "image": {"comfyui_url": "http://127.0.0.1:8188"}}
 
 
-@pytest.mark.parametrize("overlay_text, warned", [(SERVER_OVERLAY, True),
-                                                  ("image:\n  enabled: true\n", False)],
-                         ids=["server-keys", "no-server-keys"])
-def test_force_says_when_overrides_yaml_still_wins_over_the_new_config(overlay_text, warned, tmp_path,
-                                                                      monkeypatch):
-    """--force rewrites config.yaml, but the server keys a past change (or `/model`) wrote to
-    overrides.yaml still win over it. Measured before this was said: init reported the new server
-    configured while the next start would use the old one. It says so; it deletes nothing."""
+def _leaf_paths(d: dict, prefix: str = "") -> set[str]:
+    out: set[str] = set()
+    for key, value in d.items():
+        path = f"{prefix}{key}"
+        out |= _leaf_paths(value, path + ".") if isinstance(value, dict) and value else {path}
+    return out
+
+
+def _choices_saved_by_every_writer(g: Path, monkeypatch) -> Path:
+    """A managed-server config whose choices were changed by all three writers that persist them to
+    overrides.yaml — init's change (through the CLI), `/model` and a peer-endpoint switch (the real
+    model_ops functions) — plus the user's own keys: a plugin setting and a provider tuning."""
+    _seed(g, OLD_CONFIG + "server:\n  model: old-model\n  binary: /opt/vllm/bin/vllm\n")
+    _detect(monkeypatch, "new-model")
+    _silent(monkeypatch)
+    _exited(_init(g, "--model", "new-model"), 0)
+    harness = ConfigLoader(config_dir=g).load_harness()
+    asyncio.run(persist_default_model(harness, "slash-model", config_dir=g))
+    asyncio.run(persist_active_endpoint(harness, PEER, "peer-model", config_dir=g))
+    overlay_path = g / "overrides.yaml"
+    overlay = load_overlay(overlay_path)
+    assert {"provider.base_url", "org.default_model", "server.model", "active_endpoint.model"} <= (
+        _leaf_paths(overlay)), "premise: every writer left its choice"
+    overlay["provider"]["timeout_seconds"] = 900.0
+    overlay["image"] = dict(USER_KEYS["image"])
+    atomic_write_overlay(overlay_path, overlay)
+    return overlay_path
+
+
+@pytest.mark.parametrize("flags, tty", [(["--force"], False), (["--force", "--no-input"], True)],
+                         ids=["force", "force-no-input"])
+def test_force_clears_the_saved_model_and_server_choices(flags, tty, tmp_path, monkeypatch):
+    overlay_path = _choices_saved_by_every_writer(tmp_path, monkeypatch)
+    _detect(monkeypatch, "fresh-model")
+    _terminal(monkeypatch, tty)
+    _silent(monkeypatch)
+
+    result = _init(tmp_path, *flags)
+
+    _exited(result, 0)
+    text = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    assert "fresh-model" in text and "old-model" not in text
+    assert load_overlay(overlay_path) == USER_KEYS  # the choices gone; plugin key and tuning kept
+    flat = _flat(result)
+    assert f"Cleared the saved model and server choices in {overlay_path}" in flat, flat
+    assert "still sets" not in flat
+    harness = ConfigLoader(config_dir=tmp_path).load_harness()  # what the next start reads
+    assert (harness.provider.default_model, harness.provider.base_url, harness.org.default_model) == (
+        "fresh-model", "http://localhost:11434", "fresh-model")
+    assert harness.server is None and harness.active_endpoint is None
+    assert harness.provider.timeout_seconds == 900.0
+
+
+def test_force_leaves_an_overrides_yaml_without_saved_choices_alone(tmp_path, monkeypatch):
     _detect(monkeypatch)
     _silent(monkeypatch)
     _seed(tmp_path)
-    overlay = tmp_path / "overrides.yaml"
-    overlay.write_text(overlay_text, encoding="utf-8")
+    overlay_path = tmp_path / "overrides.yaml"
+    overlay_path.write_text("# mine\nimage:\n  enabled: true\n", encoding="utf-8")
 
     result = _init(tmp_path, "--force")
 
     _exited(result, 0)
-    note = (f"{overlay} still sets provider.base_url, provider.default_model, org.default_model — "
-            "those win over config.yaml. Remove them there to use what init just found.")
-    assert (note in _flat(result)) is warned, result.output
-    assert overlay.read_text(encoding="utf-8") == overlay_text
+    assert overlay_path.read_text(encoding="utf-8") == "# mine\nimage:\n  enabled: true\n"
+    assert "Cleared" not in result.output
+
+
+def test_a_rerun_without_force_removes_nothing(tmp_path, monkeypatch):
+    overlay_path = _choices_saved_by_every_writer(tmp_path, monkeypatch)
+    before = overlay_path.read_bytes()
+    saved = _leaf_paths(load_overlay(overlay_path))
+
+    _exited(_init(tmp_path), 0)  # no terminal: kept
+    assert overlay_path.read_bytes() == before
+
+    _detect(monkeypatch, "fresh-model")
+    result = _init(tmp_path, "--model", "fresh-model")  # a change: updates, never removes
+    _exited(result, 0)
+    after = load_overlay(overlay_path)
+    assert saved <= _leaf_paths(after), saved - _leaf_paths(after)
+    assert after["image"] == USER_KEYS["image"] and after["provider"]["timeout_seconds"] == 900.0
+    assert "Cleared" not in result.output
+
+
+def test_a_fresh_write_without_force_names_the_saved_choices_that_still_win(tmp_path, monkeypatch):
+    """config.yaml is missing (deleted by hand, or a first start) while overrides.yaml survived:
+    nothing leaves overrides.yaml without --force, so its saved choices still win — say which."""
+    _detect(monkeypatch)
+    _silent(monkeypatch)
+    overlay_path = tmp_path / "overrides.yaml"
+    saved = ("provider:\n  base_url: http://localhost:8000/v1\n  default_model: model-x\n"
+             "org:\n  default_model: model-x\nimage:\n  enabled: true\n")
+    overlay_path.write_text(saved, encoding="utf-8")
+
+    result = _init(tmp_path)
+
+    _exited(result, 0)
+    assert (tmp_path / "config.yaml").exists()
+    assert overlay_path.read_text(encoding="utf-8") == saved
+    assert (f"{overlay_path} still sets provider.base_url, provider.default_model, org.default_model — "
+            "those win over config.yaml. To clear them: localharness init --force") in _flat(result)
+    assert "Cleared" not in result.output
+
+
+@pytest.mark.parametrize("overlay_text, said", [
+    ("provider:\n  default_model: other-model\nproposer:\n  base_url: http://proposer/v1\n"
+     "  model: test-model:7b\n", "do not validate"),
+    ("provider: [\n", "cannot be read"),
+], ids=["reset-does-not-validate", "unreadable"])
+def test_force_writes_nothing_when_the_reset_cannot_be_written(overlay_text, said, tmp_path,
+                                                               monkeypatch):
+    """--force resets both files or neither: a reset whose merged config would not validate (here the
+    proposer would equal the new default model once the saved model is cleared), or an overrides.yaml
+    that cannot be read, exits 1 with config.yaml and overrides.yaml untouched."""
+    _detect(monkeypatch)
+    _silent(monkeypatch)
+    cfg = _seed(tmp_path)
+    overlay_path = tmp_path / "overrides.yaml"
+    overlay_path.write_text(overlay_text, encoding="utf-8")
+
+    result = _init(tmp_path, "--force")
+
+    _exited(result, 1)
+    flat = _flat(result)
+    assert said in flat and "Nothing was written." in flat, flat
+    assert cfg.read_bytes() == OLD_CONFIG.encode()
+    assert overlay_path.read_text(encoding="utf-8") == overlay_text
+
+
+def test_force_then_skip_for_now_also_clears_the_saved_choices(tmp_path, monkeypatch):
+    """The other fresh write: --force on a terminal, no server, guided setup declined, a model named
+    — the config saved unchecked is the one the next start reads, not overrides.yaml's old choice."""
+    _seed(tmp_path)
+    overlay_path = tmp_path / "overrides.yaml"
+    overlay_path.write_text("provider:\n  base_url: http://localhost:8000/v1\n  default_model: model-x\n"
+                            "image:\n  enabled: true\n", encoding="utf-8")
+    _no_server_on_a_terminal(monkeypatch, "http://localhost:8081/v1", "my-model")
+
+    result = _init(tmp_path, "--force")
+
+    _exited(result, 0)
+    assert load_overlay(overlay_path) == {"image": {"enabled": True}}
+    assert "Cleared the saved model and server choices in" in _flat(result)
+    provider = ConfigLoader(config_dir=tmp_path).load_harness().provider
+    assert (provider.base_url, provider.default_model) == ("http://localhost:8081/v1", "my-model")
