@@ -81,7 +81,10 @@ class _MaskingRepr(repr_lib.Repr):
         return repr(SECRET_MASK) if x in self.secrets else super().repr_str(x, level)
 
     def repr_int(self, x: int, level: int) -> str:
-        return repr(SECRET_MASK) if str(x) in self.secrets else super().repr_int(x, level)
+        return repr(SECRET_MASK) if repr(x) in self.secrets else super().repr_int(x, level)
+
+    def repr_float(self, x: float, level: int) -> str:
+        return repr(SECRET_MASK) if repr(x) in self.secrets else repr(x)
 
 
 def _short_repr(value: Any, limit: int = VALUE_REPR_LIMIT,
@@ -100,8 +103,9 @@ def _short_repr(value: Any, limit: int = VALUE_REPR_LIMIT,
 
     `secrets`: values shown as SECRET_MASK wherever they appear, the value itself included (R16).
     """
-    if (secrets and isinstance(value, (str, int)) and not isinstance(value, bool)
-            and str(value) in secrets):
+    if secrets and not isinstance(value, bool) and (
+            (isinstance(value, str) and value in secrets)
+            or (isinstance(value, (int, float)) and repr(value) in secrets)):
         return repr(SECRET_MASK)
     if value is None or isinstance(value, (bool, int, float)):
         return repr(value)

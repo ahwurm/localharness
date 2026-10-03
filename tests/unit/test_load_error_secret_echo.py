@@ -41,6 +41,7 @@ CASES = {  # what config.yaml holds after `provider:`; each fails validation wit
     "field-missing": {"proposer": {"base_url": "http://p/v1", "api_key": KEY}},
     "not-a-string": {"proposer": {"base_url": "http://p/v1", "model": "p2", "api_key": INT_KEY}},
     "a-float": {"proposer": {"base_url": "http://p/v1", "model": "p2", "api_key": FLOAT_KEY}},
+    "a-float-beside-a-missing-field": {"proposer": {"base_url": "http://p/v1", "api_key": FLOAT_KEY}},
     "misspelled-key": {"proposer": {"base_url": "http://p/v1", "model": "p2", "api_kye": KEY}},
     "removed-plugin": {"gone_plugin": {"enabled": True, "api_key": KEY}},
 }
@@ -90,7 +91,8 @@ def test_a_refused_config_never_echoes_the_key(tmp_path, case, command) -> None:
     texts = (result.stdout, result.stderr, repr(result.exception))
     assert result.exit_code != 0, result.output
     assert any("proposer" in t or "gone_plugin" in t for t in texts), result.output  # it is the refusal
-    secret = {"not-a-string": str(INT_KEY), "a-float": str(FLOAT_KEY)}.get(case, KEY)
+    secret = {"not-a-string": str(INT_KEY), "a-float": str(FLOAT_KEY),
+              "a-float-beside-a-missing-field": str(FLOAT_KEY)}.get(case, KEY)
     for where in texts:
         for piece in (secret, secret[-8:]):
             assert piece not in where, f"{piece!r} reached {command} ({case}):\n{where}"
