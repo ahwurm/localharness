@@ -975,7 +975,7 @@ def test_find_bash_prefers_git_bin_wrapper_and_skips_wsl_stubs(monkeypatch, tmp_
     monkeypatch.delenv("ProgramFiles(x86)", raising=False)
     monkeypatch.setenv("LocalAppData", str(tmp_path / "absent"))
     stub = str(tmp_path / "WindowsApps" / "bash.exe")
-    monkeypatch.setattr(bash_tool.shutil, "which", lambda _name: stub)
+    monkeypatch.setattr(bash_tool, "which_outside_cwd", lambda _name: stub)
 
     assert bash_tool._find_bash() == str(wrapper)
 
@@ -1323,7 +1323,7 @@ def test_find_bash_rejects_wsl_stub(monkeypatch):
         import pytest as _pytest
         _pytest.skip("Windows-only resolution rules")
     monkeypatch.delenv("LOCALHARNESS_BASH", raising=False)
-    monkeypatch.setattr(bash_tool.shutil, "which", lambda _: r"C:\Windows\System32\bash.exe")
+    monkeypatch.setattr(bash_tool, "which_outside_cwd", lambda _: r"C:\Windows\System32\bash.exe")
     monkeypatch.setattr(bash_tool.os.path, "isfile", lambda p: False)
     assert bash_tool._find_bash() is None  # stub rejected, no git-bash found -> clear error path
 

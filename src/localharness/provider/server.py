@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -27,6 +26,7 @@ from typing import Any, Callable
 
 from localharness.config.models import ManagedServerConfig
 from localharness.core.private_files import private_opener, touch_private
+from localharness.core.which import which_outside_cwd
 
 DOCKER_CONTAINER_NAME = "localharness-vllm"
 
@@ -92,7 +92,7 @@ def find_vllm(config_dir: Path) -> str | None:
     venv_bin = venv_vllm_bin(config_dir)
     if venv_bin.exists():
         return str(venv_bin)
-    return shutil.which("vllm")
+    return which_outside_cwd("vllm")
 
 
 def install_vllm_venv(config_dir: Path, package: str) -> str:
@@ -104,7 +104,7 @@ def install_vllm_venv(config_dir: Path, package: str) -> str:
     """
     venv = server_dir(config_dir) / "venv"
     server_dir(config_dir).mkdir(parents=True, exist_ok=True)
-    uv = shutil.which("uv")
+    uv = which_outside_cwd("uv")
     if uv:
         _run_streaming([uv, "venv", "--python", "3.12", str(venv)])
         install = [uv, "pip", "install", "--python", str(venv / "bin" / "python"), package]

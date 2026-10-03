@@ -79,8 +79,11 @@ def readable_by_others(root: Path, limit: int = 10_000) -> list[Path]:
     found: list[Path] = []
     seen = 0
     for top, dirs, files in os.walk(root):
+        seen += len(dirs)
         for name in files:
             seen += 1
+            if seen > limit:
+                return found
             path = Path(top) / name
             try:
                 st = os.lstat(path)
@@ -88,7 +91,6 @@ def readable_by_others(root: Path, limit: int = 10_000) -> list[Path]:
                 continue
             if stat.S_ISREG(st.st_mode) and st.st_mode & 0o044:
                 found.append(path)
-        seen += len(dirs)
         if seen >= limit:
             break
     return found

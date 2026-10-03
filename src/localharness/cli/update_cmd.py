@@ -16,7 +16,6 @@ and this one returns immediately.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
 import urllib.error
@@ -29,6 +28,7 @@ from rich.console import Console
 
 import localharness
 from localharness import resolved_version
+from localharness.core.which import which_outside_cwd
 
 console = Console()
 err_console = Console(stderr=True)
@@ -82,7 +82,7 @@ def _upgrade_command() -> list[str] | None:
     """
     prefix = str(Path(sys.prefix).resolve()).replace("\\", "/")
     if "/uv/tools/" in f"{prefix}/":
-        uv = shutil.which("uv")
+        uv = which_outside_cwd("uv")
         return [uv, "tool", "upgrade", "localharness"] if uv else None
     return [sys.executable, "-m", "pip", "install", "--upgrade", "localharness"]
 

@@ -43,9 +43,9 @@ def _lmstudio_models_root() -> Path:
 
 def _lms_binary() -> str | None:
     """The `lms` CLI, for the authoritative modelKey->path map. Not on PATH by default."""
-    from shutil import which
+    from localharness.core.which import which_outside_cwd
     cand = Path("~/.lmstudio/bin/lms").expanduser()
-    return str(cand) if cand.exists() else which("lms")
+    return str(cand) if cand.exists() else which_outside_cwd("lms")
 
 
 def _resolve_lmstudio_gguf(model: str) -> Path | None:

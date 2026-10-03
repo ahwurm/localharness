@@ -5,12 +5,12 @@ GPU's name (gpu_name, run only when a prompt that names {machine} is rendered)."
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+from localharness.core.which import which_outside_cwd
 from localharness.plugins.api import AGENT_PROMPT_PLACEHOLDER, Plugin
 
 AGENT_PROMPT_LEAD = "Or paste this into your coding agent to set it up for your hardware:"
@@ -63,7 +63,7 @@ def gpu_name() -> str | None:
     (the only source that names a GB10: /proc and sysfs give 'Unknown' or a bare PCI id there),
     then the PCI vendor in sysfs, then a Mac's chip; None when nothing answers. Runs only when a
     prompt is rendered."""
-    exe = shutil.which("nvidia-smi")
+    exe = which_outside_cwd("nvidia-smi")
     names = _lines([exe, "--query-gpu=name", "--format=csv,noheader"]) if exe else []
     if names:
         counts = {n: names.count(n) for n in dict.fromkeys(names)}

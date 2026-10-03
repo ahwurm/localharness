@@ -40,7 +40,7 @@ def test_upgrade_command_uses_uv_for_a_uv_tool_install(monkeypatch, tmp_path):
     uv_prefix = tmp_path / "uv" / "tools" / "localharness"
     uv_prefix.mkdir(parents=True)
     monkeypatch.setattr(update_cmd.sys, "prefix", str(uv_prefix))
-    monkeypatch.setattr(update_cmd.shutil, "which", lambda _n: "/usr/bin/uv")
+    monkeypatch.setattr(update_cmd, "which_outside_cwd", lambda _n: "/usr/bin/uv")
     cmd = update_cmd._upgrade_command()
     assert cmd == ["/usr/bin/uv", "tool", "upgrade", "localharness"]
 
@@ -50,7 +50,7 @@ def test_upgrade_command_returns_none_when_uv_install_but_uv_missing(monkeypatch
     uv_prefix = tmp_path / "uv" / "tools" / "localharness"
     uv_prefix.mkdir(parents=True)
     monkeypatch.setattr(update_cmd.sys, "prefix", str(uv_prefix))
-    monkeypatch.setattr(update_cmd.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(update_cmd, "which_outside_cwd", lambda _n: None)
     assert update_cmd._upgrade_command() is None
 
 

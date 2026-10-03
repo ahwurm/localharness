@@ -3,10 +3,10 @@ import asyncio
 import contextlib
 import os
 import re
-import shutil
 import signal
 from pathlib import Path
 
+from localharness.core.which import which_outside_cwd
 from localharness.tools.builtin.paths import resolve_user_path
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
@@ -83,7 +83,7 @@ def _find_bash() -> str | None:
     override = os.environ.get("LOCALHARNESS_BASH")
     if override:
         return override
-    which = shutil.which("bash")
+    which = which_outside_cwd("bash")
     if os.name != "nt":
         return which or "/bin/bash"
     candidates = []

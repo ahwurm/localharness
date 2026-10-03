@@ -733,6 +733,21 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     except Exception as exc:
         err_console.print(f"[bold red]Error:[/bold red] Cannot load config: {exc}")
         raise typer.Exit(1)
+    # The machine's config dir holds keys, the phone token, grants and every session log: owner-only.
+    # An older install made it at the umask; tighten it once, silently, best effort (a folder that
+    # refuses is left as it is — doctor says so), and record that it happened. An explicit
+    # --config-dir / LOCALHARNESS_DIR is the machine's dir for this run, so it is tightened too (R16).
+    from localharness.core.private_files import PRIVATE_DIR_MODE, ensure_private_dir
+    _previous_mode = ensure_private_dir(server_cfg_path)
+    if _previous_mode is not None and harness.org.audit_log_path:
+        from localharness.core.events import ComponentMutated
+        try:
+            await EventBus(persist_path=resolve_runtime_path(harness.org.audit_log_path, server_cfg_path)).publish(
+                ComponentMutated(path="config_dir.mode", before_value=oct(_previous_mode),
+                                 after_value=oct(PRIVATE_DIR_MODE), layer="user", actor="cli",
+                                 actor_detail="localharness start made the config directory owner-only"))
+        except Exception:  # noqa: BLE001 — a record that cannot be written never stops a start
+            log.debug("the config dir tighten was not recorded", exc_info=True)
     from localharness.provider.server import required_key_kwargs
     # The key the launched server requires, or {} — server.require_api_key is opt-in (default off).
     launch_key = required_key_kwargs(harness.server, harness.provider.api_key)

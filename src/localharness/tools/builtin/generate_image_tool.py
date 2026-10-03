@@ -24,6 +24,7 @@ import secrets
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -95,7 +96,7 @@ def probe(url: str, workflow: str) -> list[Check]:
                                "image` on a terminal for the steps")]
         for cls in sorted({n["class_type"] for n in graph.values()}):
             try:
-                body = client.get(f"{url}/object_info/{cls}").json()
+                body = client.get(f"{url}/object_info/{quote(cls, safe='')}").json()
             except (httpx.HTTPError, ValueError):
                 body = None
             if not isinstance(body, dict):
