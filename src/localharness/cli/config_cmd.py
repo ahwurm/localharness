@@ -74,6 +74,11 @@ def migrate(
     division files are walked and repaired too, each with its own timestamped backup. When your
     config is already at the current defaults revision the repair is the removal ALONE: no deny
     pattern you deleted is re-added.
+
+    It also writes `server.bind_all: true` into a vLLM server section that LocalHarness launches
+    and that was written before that setting existed (earlier releases listened on every network
+    interface; this one listens on this machine only unless `bind_all` is true), so a server
+    another machine uses keeps answering. Set it to false to keep the server on this machine.
     """
     config_file = resolve_config_dir(config_dir) / "config.yaml"
 
@@ -141,6 +146,15 @@ def migrate(
                 soft_wrap=True,
             )
 
+    # A launched vLLM server written before server.bind_all existed keeps its reach (the release
+    # launches on 127.0.0.1 otherwise); `localharness doctor` says how to keep it on this machine.
+    for path in plan.bind_all_paths:
+        console.print(
+            "  [green]+[/green] "
+            + escape(f"{path}.bind_all: true (keeps the model server reachable from other machines)"),
+            soft_wrap=True,
+        )
+
     console.print(f"\n[dim]{_NOTE}[/dim]")
 
     if dry_run:
@@ -164,12 +178,16 @@ def migrate(
         removed_note += (
             f"; cleaned {len(plan.sidecars)} agent/division file(s)"
         )
+    if plan.bind_all_paths:
+        removed_note += "; set " + escape(", ".join(f"{p}.bind_all: true" for p in plan.bind_all_paths))
     stamp_note = (
         "config.yaml already current" if plan.config_unchanged
+        else f"defaults revision {plan.to_revision} unchanged" if plan.defaults_unchanged
         else f"stamped defaults revision {plan.to_revision}"
     )
     console.print(
-        f"\n[green]✓[/green] Added {len(plan.added)} pattern(s){removed_note}; {stamp_note}."
+        f"\n[green]✓[/green] Added {len(plan.added)} pattern(s){removed_note}; {stamp_note}.",
+        soft_wrap=True,
     )
     for backup in backups:
         console.print("  Backup: " + escape(str(backup)), soft_wrap=True)

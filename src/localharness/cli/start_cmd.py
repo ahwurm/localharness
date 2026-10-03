@@ -520,9 +520,17 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
     # an agent file on disk was rewritten, and "1 file cleaned" does not say which (finding R10).
     for sidecar in plan.sidecars:
         removed_note += f"; cleaned {_migrate.DEAD_KEY} from {sidecar.path.name}"
+    # A launched vLLM server that predates server.bind_all keeps listening on every interface, as
+    # it did: written for the user once, said once, and doctor's row says how to undo it.
+    if plan.bind_all_paths:
+        removed_note += (
+            "; kept the model server reachable from other machines ("
+            + escape(", ".join(f"{p}.bind_all: true" for p in plan.bind_all_paths))
+            + ") — `localharness doctor` says how to keep it on this machine"
+        )
     head = (
-        "Config repaired"
-        if plan.config_unchanged
+        "Config repaired" if plan.config_unchanged
+        else "Config updated" if plan.defaults_unchanged
         else (f"Security defaults updated (revision {plan.from_revision} → {plan.to_revision}): "
               f"added {len(plan.added)} deny pattern(s)")
     )
