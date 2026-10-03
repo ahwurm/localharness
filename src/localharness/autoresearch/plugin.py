@@ -111,6 +111,10 @@ def _answers(p: Any) -> Check:
         return Check(name="autoresearch-proposer", status="fail",
                      detail=f"no answer from {url}/models ({type(exc).__name__})",
                      hint="start the proposer's server, or fix proposer.base_url")
+    except UnicodeEncodeError:  # its text would quote a character of the key: never shown
+        return Check(name="autoresearch-proposer", status="fail",
+                     detail="proposer.api_key holds a character an HTTP header cannot carry",
+                     hint="type the key again: `localharness plugins enable autoresearch`")
     if resp.status_code >= 400:
         return Check(name="autoresearch-proposer", status="fail",
                      detail=f"the proposer at {url} answered {resp.status_code}",
