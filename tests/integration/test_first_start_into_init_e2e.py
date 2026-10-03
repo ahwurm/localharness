@@ -252,6 +252,12 @@ def test_a_first_start_collects_the_setup_s_open_clients_before_the_session_s_lo
         def __init__(self, *_a, **_k):
             self._cycle = self  # like the SDK's client graph: only the cyclic GC frees it
 
+        async def __aenter__(self):  # the probe closes its client in its own loop (deferred item 3);
+            return self              # this one stands for anything else the setup leaves behind,
+
+        async def __aexit__(self, *_exc):  # still in a reference cycle until the GC reaches it
+            return None
+
         async def detect_capabilities(self):
             gc.collect()  # it lived through the probe's collections, so it sits in the oldest generation
             return _make_capability_result()
