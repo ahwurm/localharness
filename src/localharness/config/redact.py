@@ -30,6 +30,18 @@ def is_secret(annotation: Any) -> bool:
     return annotation is SecretStr or SecretStr in getattr(annotation, "__args__", ())
 
 
+def reveal(node: Any) -> Any:
+    """The raw values under `node` — SecretStr unwrapped, dicts and lists walked. Only for writing a
+    machine's own config file (0600); never for anything shown."""
+    if isinstance(node, SecretStr):
+        return node.get_secret_value()
+    if isinstance(node, Mapping):
+        return {k: reveal(v) for k, v in node.items()}
+    if isinstance(node, (list, tuple)):
+        return [reveal(v) for v in node]
+    return node
+
+
 def scrub(text: str, secrets: Any) -> str:
     """Replace every non-empty secret string in `text` with SECRET_MASK (error texts may echo input)."""
     for secret in secrets:

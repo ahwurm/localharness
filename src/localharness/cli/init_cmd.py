@@ -20,7 +20,7 @@ from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.overlay import atomic_write_overlay, load_overlay, restrict_config_file
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir, resolve_config_dir
-from localharness.config.redact import secret_values, validation_text
+from localharness.config.redact import reveal, secret_values, validation_text
 from localharness.config.models import (
     ContextConfig,
     HarnessConfig,
@@ -938,13 +938,15 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
     """Write config.yaml (owner-only), the agents/ folder and plugins/README.md beside it. With
     `force` (R15) the saved model and server choices leave overrides.yaml in the same step, checked
     before either file is written; without it, say which saved choices still win."""
-    from pydantic_yaml import to_yaml_str
+    import yaml
 
     reset = _saved_choices_reset(config_path, harness) if force else None
     config_file = config_path / "config.yaml"
     # memory.enabled is the memory plugin's key (MEMP-06); the deprecated org.memory_enabled is
     # never written, so a fresh install has nothing to warn about. On is the default: no key.
-    text = to_yaml_str(harness, exclude={"org": {"memory_enabled"}})
+    # Keys are written as typed (`reveal`): a JSON-mode dump would write the mask in their place.
+    text = yaml.safe_dump(reveal(harness.model_dump(mode="python", exclude={"org": {"memory_enabled"}})),
+                          default_flow_style=False, sort_keys=False, allow_unicode=True)
     config_file.write_text(text + ("" if memory_on else "memory:\n  enabled: false\n"), encoding="utf-8")
     # Owner-only: this file carries `provider.api_key` and the deny/ask policy every session on
     # this machine is gated by. `write_text` lands it at 0664 under the usual 022 umask.

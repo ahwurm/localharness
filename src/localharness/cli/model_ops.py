@@ -237,11 +237,16 @@ async def persist_active_endpoint(
     overlay_path = _resolve_user_overlay_path(global_config_dir(config_dir))
     existing = load_overlay(overlay_path)
     new_overlay = dict(existing)
+    # No key in this record: the key stays with the endpoint it belongs to, `active_endpoint` is not
+    # read back at start, and a SecretStr cannot be written to YAML. A key an earlier version wrote
+    # here would now sit beside another endpoint's address, so it goes.
+    if isinstance(new_overlay.get("active_endpoint"), dict):
+        new_overlay["active_endpoint"] = {
+            k: v for k, v in new_overlay["active_endpoint"].items() if k != "api_key"}
     set_value_in_dict(new_overlay, "active_endpoint.name", getattr(endpoint, "name", ""))
     set_value_in_dict(new_overlay, "active_endpoint.base_url", endpoint.base_url)
     set_value_in_dict(new_overlay, "active_endpoint.provider_type", endpoint.provider_type)
     set_value_in_dict(new_overlay, "active_endpoint.model", model)
-    set_value_in_dict(new_overlay, "active_endpoint.api_key", getattr(endpoint, "api_key", "none"))
 
     # Validate the SAME cascade the next `start` sees (current config ⊕ new overlay), excluding the
     # agent-scope slice — mirrors persist_default_model. Raises ValueError on a bad result.

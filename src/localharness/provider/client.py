@@ -7,15 +7,17 @@ import os
 import re
 import tempfile
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
+import httpx
 import openai
 from openai import AsyncOpenAI
+from pydantic import SecretStr
 
 try:
     import fcntl
@@ -28,6 +30,14 @@ from localharness.provider.detector import LOCAL_INFERENCE_TIMEOUT_MIN
 from localharness.provider.fn_call import _TOOL_INJECTION_MARKER, FnCallConverter
 
 log = logging.getLogger(__name__)
+
+_TRANSPORT: Any = None
+"""Tests' httpx.MockTransport for the model server; None in production (the SDK's own client)."""
+
+
+def _reveal(value: Any) -> Any:
+    """A key or header value as sent: a SecretStr unwrapped here, where it leaves the process."""
+    return value.get_secret_value() if isinstance(value, SecretStr) else value
 
 # ---------------------------------------------------------------------------
 # Configuration dataclass
@@ -45,7 +55,7 @@ _DEFAULT_QUEUE_WAIT_SECONDS = 600.0
 class LLMConfig:
     base_url: str
     model: str
-    api_key: str = "none"
+    api_key: str | SecretStr = "none"
     # #10: 600s suits slow local single-stream decode — a 4096-token completion at ~10 tok/s
     # is ~410s, which the previous 300s default killed mid-generation. Kept in sync with
     # ProviderConfig.timeout_seconds and defaults.DEFAULT_TIMEOUT_SECONDS.
@@ -63,7 +73,7 @@ class LLMConfig:
     tool_call_mode: Literal["native", "xml", "text"] = "native"
     context_window: int = DEFAULT_MAX_CONTEXT_TOKENS
     is_local: bool = True
-    extra_headers: dict[str, str] = field(default_factory=dict)
+    extra_headers: dict[str, str | SecretStr] = field(default_factory=dict)
     stop_sequences: list[str] = field(default_factory=list)
     # Runtime family serving this endpoint ("vllm"/"llamacpp"/"ollama"/"lmstudio"/None-unknown).
     # Keys the measured-speed ledger (speed_stats) — None disables recording, never guesses.
@@ -639,14 +649,15 @@ class LLMClient:
         c = self.config
         return AsyncOpenAI(
             base_url=c.base_url,
-            api_key=c.api_key,
+            api_key=_reveal(c.api_key),
             timeout=openai.Timeout(
                 c.timeout_seconds,
                 connect=c.connect_timeout_seconds,
                 read=c.timeout_seconds,
                 write=c.timeout_seconds,
             ),
-            default_headers=c.extra_headers,
+            default_headers={k: _reveal(v) for k, v in c.extra_headers.items()},
+            **({} if _TRANSPORT is None else {"http_client": httpx.AsyncClient(transport=_TRANSPORT)}),
             # Local single-tenant GPU: a timed-out generation will time out again on
             # retry — the SDK's silent default (2 retries) turned one 600s failure
             # into 30 min of dead air. Fail fast and let the agent loop react.
@@ -691,8 +702,8 @@ class LLMClient:
         self,
         base_url: str,
         *,
-        api_key: str | None = None,
-        extra_headers: dict[str, str] | None = None,
+        api_key: str | SecretStr | None = None,
+        extra_headers: Mapping[str, str | SecretStr] | None = None,
         provider_type: str | None | Any = _REBIND_UNSET,
     ) -> None:
         """Re-point this client at a DIFFERENT server (a cross-endpoint /model swap). The

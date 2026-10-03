@@ -9,12 +9,18 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import Tool as MCPToolDef
+from pydantic import SecretStr
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 if TYPE_CHECKING:
     from localharness.config.models import MCPServerConfig
     from localharness.tools.registry import ToolRegistry
+
+
+def _reveal(value: Any) -> Any:
+    """An env or header value as the server receives it: a SecretStr unwrapped here, at the spawn."""
+    return value.get_secret_value() if isinstance(value, SecretStr) else value
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +172,7 @@ class MCPServerClient:
                 params = StdioServerParameters(
                     command=self._config.command,
                     args=self._config.args,
-                    env={**dict(os.environ), **self._config.env},
+                    env={**dict(os.environ), **{k: _reveal(v) for k, v in self._config.env.items()}},
                 )
                 self._ctx = stdio_client(params)
             elif self._config.transport == "streamable_http":
@@ -176,7 +182,7 @@ class MCPServerClient:
                     )
                 self._ctx = streamablehttp_client(
                     self._config.url,
-                    headers=self._config.headers,
+                    headers={k: _reveal(v) for k, v in self._config.headers.items()},
                 )
             else:
                 raise ValueError(f"Unsupported MCP transport: {self._config.transport!r}")
