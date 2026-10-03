@@ -119,11 +119,16 @@ def secret_values(model: type[BaseModel] | None, data: Any) -> frozenset[str]:
 
 
 def yaml_problem(exc: BaseException) -> str:
-    """What a YAML parse error says, without the source it quotes: the parser's context and problem
-    ("while scanning a quoted scalar … found unexpected end of stream"), never the snippet and
-    caret its marks print, which can show the head or tail of a key on the broken line (R16)."""
-    text = " ".join(str(part) for part in (getattr(exc, "context", None), getattr(exc, "problem", None))
-                    if part)
+    """What a YAML parse error says, without the source it quotes: the parser's context, where that
+    began, and the problem ("while scanning a quoted scalar at line 9, column 12: found unexpected
+    end of stream"), never the snippet and caret its marks print, which can show the head or tail
+    of a key on the broken line (R16). The position matters when the problem is only noticed later,
+    as an unclosed quote is at the end of the file."""
+    context, problem = getattr(exc, "context", None), getattr(exc, "problem", None)
+    mark = getattr(exc, "context_mark", None)
+    if context and mark is not None:
+        context = f"{context} at line {mark.line + 1}, column {mark.column + 1}:"
+    text = " ".join(str(part) for part in (context, problem) if part)
     return text or type(exc).__name__
 
 
