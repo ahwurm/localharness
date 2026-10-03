@@ -864,6 +864,14 @@ class ConfigLoader:
                 str(ws / "config.yaml") if ws is not None else "",
                 str(ws / "overrides.yaml") if ws is not None else "")
 
+    def workspace_value(self, dotpath: str) -> Any:
+        """What the workspace layer writes at `dotpath` — its overrides.yaml over its config.yaml,
+        raw, before any machine-level-only narrowing drops it — or None when it writes nothing
+        there or no workspace applies. For naming a project value that is ignored."""
+        parts = dotpath.split(".")
+        found = [v for v in (_dig(s, parts) for s in self._raw_config_sources()[2:]) if v is not _UNSET]
+        return found[-1] if found else None
+
     def agent_plugin_sections(self, agent_name: str) -> dict[str, Any]:
         """{plugin name: its `agent.<name>` section} for the agent whose `name:` is `agent_name`, as
         split off when this loader loaded it (the agent file over the overrides file's `agent:`

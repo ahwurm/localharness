@@ -7,7 +7,8 @@ package __init__ re-exports lazily (PEP 562), so the archive (aiosqlite), scipy 
 modules load only when a command runs or doctor() reads the config. It owns the pre-existing core
 settings `proposer:` and `sentinel:` under their old names (`sections`, bundled only). Nothing runs
 in a session: tools, start and stop are the base no-ops. `plugins enable autoresearch` asks the
-proposer's address and model and checks once that it answers (setup_action); doctor never does."""
+proposer's address and model and checks once that it answers (setup_action), reading the address and
+key from the machine-level config only, as `propose` does; doctor never contacts it."""
 from __future__ import annotations
 
 from typing import Any
@@ -74,36 +75,67 @@ class AutoresearchPlugin(Plugin):
     def setup_action(self, ctx: PluginContext) -> list[Check]:
         """The step's check that the proposer answers: one GET <base_url>/models (3 s), which spends
         nothing on an OpenAI-compatible server. Run only by `plugins enable` — doctor stays offline
-        (it may be a paid API, and a doctor run must not spend). The key is sent, never shown."""
+        (it may be a paid API, and a doctor run must not spend). The key is sent, never shown.
+
+        The proposer is read from the machine-level config only — the layers `propose` and
+        `autoresearch run` read — never through the project's .localharness/, which loads without a
+        prompt inside it: a cloned repo must not choose where the key is sent. A different address
+        the project sets is named, and ignored."""
         from localharness.config.loader import ConfigLoader
         try:
-            p = ConfigLoader(config_dir=ctx.paths.global_config_dir,
-                             local_config_dir=ctx.paths.workspace).load_harness().proposer
+            p = ConfigLoader(config_dir=ctx.paths.global_config_dir).load_harness().proposer
         except Exception:  # noqa: BLE001 — an unreadable config is doctor's row to report
             return []
-        if p is None:
-            return []
-        import httpx
-        url, key = p.base_url.rstrip("/"), p.api_key.get_secret_value()
-        headers = {"Authorization": f"Bearer {key}"} if key and key != "none" else {}
-        try:
-            with httpx.Client(transport=_TRANSPORT, timeout=3.0) as client:
-                resp = client.get(f"{url}/models", headers=headers)
-        except httpx.HTTPError as exc:
-            return [Check(name="autoresearch-proposer", status="fail",
-                          detail=f"no answer from {url}/models ({type(exc).__name__})",
-                          hint="start the proposer's server, or fix proposer.base_url")]
-        if resp.status_code >= 400:
-            return [Check(name="autoresearch-proposer", status="fail",
-                          detail=f"the proposer at {url} answered {resp.status_code}",
-                          hint="check proposer.base_url and proposer.api_key")]
-        try:
-            served = [m.get("id") for m in resp.json().get("data", []) if isinstance(m, dict)]
-        except (ValueError, AttributeError, TypeError):  # not JSON, or JSON that is not a model list
-            served = []
-        if p.model in served:
-            return [Check(name="autoresearch-proposer", status="pass",
-                          detail=f"the proposer answers at {url} and serves {p.model}")]
-        return [Check(name="autoresearch-proposer", status="warn",
-                      detail=f"the proposer answers at {url}, but its model list does not name {p.model}",
-                      hint="check proposer.model against the server's model list")]
+        return ([] if p is None else [_answers(p)]) + _project_address(ctx, None if p is None else p.base_url)
+
+
+def _answers(p: Any) -> Check:
+    """One GET <base_url>/models, the host it contacts printed before the request leaves."""
+    import httpx
+    url, key = p.base_url.rstrip("/"), p.api_key.get_secret_value()
+    headers = {"Authorization": f"Bearer {key}"} if key and key != "none" else {}
+    try:
+        target = httpx.URL(f"{url}/models")
+        if target.host:  # parsed as httpx sends it: the real host, never a user:password@ part
+            print(f"Contacting the proposer at {target.scheme}://{target.netloc.decode()}"
+                  + (" (sending proposer.api_key)" if headers else "") + " …", flush=True)
+        with httpx.Client(transport=_TRANSPORT, timeout=3.0) as client:
+            resp = client.get(target, headers=headers)
+    except httpx.HTTPError as exc:
+        return Check(name="autoresearch-proposer", status="fail",
+                     detail=f"no answer from {url}/models ({type(exc).__name__})",
+                     hint="start the proposer's server, or fix proposer.base_url")
+    if resp.status_code >= 400:
+        return Check(name="autoresearch-proposer", status="fail",
+                     detail=f"the proposer at {url} answered {resp.status_code}",
+                     hint="check proposer.base_url and proposer.api_key")
+    try:
+        served = [m.get("id") for m in resp.json().get("data", []) if isinstance(m, dict)]
+    except (ValueError, AttributeError, TypeError):  # not JSON, or JSON that is not a model list
+        served = []
+    if p.model in served:
+        return Check(name="autoresearch-proposer", status="pass",
+                     detail=f"the proposer answers at {url} and serves {p.model}")
+    return Check(name="autoresearch-proposer", status="warn",
+                 detail=f"the proposer answers at {url}, but its model list does not name {p.model}",
+                 hint="check proposer.model against the server's model list")
+
+
+def _project_address(ctx: PluginContext, machine: str | None) -> list[Check]:
+    """One warn row when the project's own config sets a proposer.base_url other than the machine's.
+    The value is the project's text: shown escaped and cut short, never as markup or terminal codes."""
+    if ctx.paths.workspace is None:
+        return []
+    import reprlib
+
+    from localharness.config.loader import ConfigLoader
+    try:
+        asked = ConfigLoader(config_dir=ctx.paths.global_config_dir,
+                             local_config_dir=ctx.paths.workspace).workspace_value("proposer.base_url")
+    except Exception:  # noqa: BLE001 — an unreadable project file is start's and doctor's to report
+        return []
+    if asked is None or asked == machine:
+        return []
+    return [Check(name="autoresearch-proposer", status="warn",
+                  detail=f"a project file sets proposer.base_url to {reprlib.Repr(maxstring=120).repr(asked)}; "
+                         "it is ignored here and by `propose`")]

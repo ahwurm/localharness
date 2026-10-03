@@ -6,6 +6,7 @@ may be a paid API). The api key is sent, never shown.
 The proposer answers through autoresearch.plugin._TRANSPORT (an httpx.MockTransport): no socket."""
 from __future__ import annotations
 
+import dataclasses
 import socket
 from pathlib import Path
 
@@ -122,3 +123,71 @@ def test_doctor_stays_offline(tmp_path, monkeypatch, server) -> None:
 
     assert rows == [Check(name="autoresearch", status="pass", detail=f"proposer: p-model at {URL}")]
     assert server[0] == [] and calls == []
+
+
+# --- a project file never chooses where the key is sent ---------------------------------------------
+# A cloned repo's .localharness/ loads without a prompt when you stand in it, and its overrides.yaml
+# outranks the machine's, where the step writes the address. The check reads what `propose` reads:
+# the machine-level config only.
+
+EVIL = "http://evil.test/v1"
+IGNORED = f"a project file sets proposer.base_url to {EVIL!r}; it is ignored here and by `propose`"
+PASSES = Check(name="autoresearch-proposer", status="pass",
+               detail=f"the proposer answers at {URL} and serves p-model")
+
+
+def _in_project(tmp_path: Path, proposer: dict | None, project: dict,
+                file: str = "config.yaml") -> PluginContext:
+    """`_ctx`, standing in a project whose .localharness/<file> holds `project`."""
+    ctx = _ctx(tmp_path, proposer)
+    ws = tmp_path / "proj" / ".localharness"
+    ws.mkdir(parents=True)
+    (ws / file).write_text(yaml.safe_dump(project), encoding="utf-8")
+    return dataclasses.replace(ctx, paths=PluginPaths(global_config_dir=ctx.paths.global_config_dir,
+                                                      workspace=ws, state_dir=ws))
+
+
+@pytest.mark.parametrize("file", ["config.yaml", "overrides.yaml"])
+def test_a_project_file_cannot_choose_where_the_key_is_sent(tmp_path, server, file) -> None:
+    seen, _ = server
+    rows = _act(_in_project(tmp_path, _PROPOSER, {"proposer": {"base_url": EVIL}}, file))
+
+    assert [(r.method, str(r.url), r.headers.get("Authorization")) for r in seen] == [
+        ("GET", f"{URL}/models", "Bearer sk-SENTINEL")]
+    assert rows == [PASSES, Check(name="autoresearch-proposer", status="warn", detail=IGNORED)]
+
+
+def test_the_check_uses_the_machine_key_and_model_as_propose_does(tmp_path, server) -> None:
+    seen, _ = server
+    rows = _act(_in_project(tmp_path, _PROPOSER, {"proposer": {"api_key": "sk-PROJECT", "model": "ws-model"}}))
+
+    [request] = seen
+    assert request.headers["Authorization"] == "Bearer sk-SENTINEL"
+    assert rows == [PASSES] and "sk-PROJECT" not in repr(rows)
+
+
+def test_a_project_restating_the_address_adds_no_note(tmp_path, server) -> None:
+    assert _act(_in_project(tmp_path, _PROPOSER, {"proposer": {"base_url": URL}})) == [PASSES]
+
+
+def test_a_proposer_only_a_project_file_sets_is_never_contacted(tmp_path, server) -> None:
+    rows = _act(_in_project(tmp_path, None, {"proposer": {"base_url": EVIL, "model": "p-model"}}))
+
+    assert server[0] == []
+    assert rows == [Check(name="autoresearch-proposer", status="warn", detail=IGNORED)]
+
+
+@pytest.mark.parametrize(("proposer", "host", "line"), [
+    (_PROPOSER, "p.test", "Contacting the proposer at http://p.test (sending proposer.api_key) …"),
+    ({"base_url": "http://good.test@evil.test:8001/v1", "model": "p-model"}, "evil.test",
+     "Contacting the proposer at http://evil.test:8001 …"),
+], ids=["with its key", "the host it really contacts"])
+def test_the_host_is_named_before_the_request_goes(tmp_path, server, capsys, proposer, host, line) -> None:
+    seen, answer = server
+    printed_by_then: list[str] = []
+    answer[0] = lambda request: printed_by_then.append(capsys.readouterr().out) or httpx.Response(200, json=SERVES)
+
+    _act(_ctx(tmp_path, proposer))
+
+    assert printed_by_then == [line + "\n"]
+    assert [r.url.host for r in seen] == [host]
