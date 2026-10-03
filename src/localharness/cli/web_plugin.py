@@ -11,7 +11,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from localharness.plugins.api import Check, CliDescriptor, Plugin, PluginContext, PluginManifest
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from localharness.plugins.api import (
+    GLOBAL_ONLY, Check, CliDescriptor, Plugin, PluginContext, PluginManifest, SetupField,
+)
 
 if TYPE_CHECKING:
     from localharness.channels.base import ChannelAdapter
@@ -23,6 +27,27 @@ it. It lives here, not in web_cmd, because importing web_cmd from the plugin wou
 cli/start_cmd.py on the plugin's import chain (PAPI-03)."""
 
 
+class WebConfig(BaseModel):
+    """The `web:` section: one setting. public_url is machine-level only — it is the address the
+    pairing QR sends a phone to, so a project folder must never choose where a phone is pointed. The
+    bind address and --allow-unsafe-bind are flags of `localharness web`, never settings: a saved
+    unsafe bind would turn a deliberate per-run choice into a standing one (SECURITY.md)."""
+
+    model_config = ConfigDict(extra="forbid")
+    public_url: str = Field("", json_schema_extra=GLOBAL_ONLY,
+                            description="The address your phone opens this machine at, e.g. "
+                                        "https://yourbox.your-tailnet.ts.net. Empty: `localharness web` "
+                                        "guesses it from Tailscale.")
+
+    @field_validator("public_url")
+    @classmethod
+    def _clean_url(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if v and not v.startswith(("http://", "https://")):
+            raise ValueError("web.public_url must start with http:// or https://")
+        return v
+
+
 class WebPlugin(Plugin):
     """Mobile: the phone page, served with its event API by `localharness web`"""
 
@@ -30,8 +55,18 @@ class WebPlugin(Plugin):
         name="web", version="0.1.0", kind="channel", enabled_by_default=True, requires_extra="web",
         cli=(CliDescriptor(name="web", help="Serve the phone UI and its event API (see docs/web.md).",
                            target="localharness.cli.web_cmd:app"),),
+        setup=(SetupField(key="public_url",
+                          prompt="Phone address, the URL your phone opens (Enter: `localharness web` guesses it)"),),
+        next_steps="Run `localharness web`, then scan its pairing QR with your phone.",
+        agent_prompt=(
+            "Set up the LocalHarness phone app on this machine. Install LocalHarness with its web extra,\n"
+            "keeping the extras I already use. Run `localharness web` and leave it running: it serves the\n"
+            "page on this machine only, so do not pass --allow-unsafe-bind. To reach it from my phone,\n"
+            f"put it behind a private network I already use, for example `tailscale serve --bg {WEB_DEFAULT_PORT}`,\n"
+            "rather than opening a port to the internet. You are done when `localharness doctor` shows\n"
+            "web enrolled and my phone has scanned the pairing QR."),
     )
-    ConfigModel = None  # no settings this phase: resolve() strips `enabled` before validating
+    ConfigModel = WebConfig
 
     def channels(self) -> dict[str, type[ChannelAdapter]]:
         from localharness.channels.web.channel import WebChannel
