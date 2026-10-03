@@ -50,6 +50,14 @@ def _problem_line(text: str) -> int:
     raise AssertionError("the fixture parses")
 
 
+def _context_line(text: str) -> int | None:
+    try:
+        yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        return exc.context_mark.line + 1 if exc.context_mark else None
+    raise AssertionError("the fixture parses")
+
+
 def _clean(*texts: str) -> None:
     for text in texts:
         for piece in (KEY, HEAD, TAIL):
@@ -71,6 +79,9 @@ def test_a_config_that_does_not_parse_names_the_line_never_the_source(tmp_path, 
         line = _problem_line(text)
         flat = " ".join(result.output.split())
         assert f":{line}:" in flat or f"Line {line}:" in flat, flat
+        started = _context_line(text)  # an unclosed quote fails at the file's end: say where it began
+        if started is not None:
+            assert f"at line {started}," in flat, flat
 
 
 def test_an_overrides_file_that_does_not_parse_names_the_line_never_the_source(tmp_path) -> None:
