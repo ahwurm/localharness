@@ -27,7 +27,6 @@ runner = CliRunner()
 MODEL = "Qwen/Qwen3-Embedding-0.6B"
 REAL_EMBEDDING_CHECK = memory_plugin._embedding_check  # captured before conftest patches it per test
 REAL_LOOKUP = huggingface_hub.try_to_load_from_cache
-REAL_FIND_SPEC = importlib.util.find_spec
 
 
 def _config_dir(tmp_path: Path, monkeypatch, extra: str = "") -> Path:
@@ -86,9 +85,10 @@ def test_doctor_embedding_missing_fails_with_hint(tmp_path, monkeypatch):
 
     empty = tmp_path / "empty-hf"
     empty.mkdir()
-    # The real lookup and the real package probe again — only the cache location is chosen.
+    # The real lookup again — only the cache location is chosen. The package probe stays "found"
+    # (`_model_cached`) so this is the model-missing row on any box, CI's without the package too;
+    # test_memory_plugin_doctor.test_embedding_package_missing owns the package-missing row.
     monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", REAL_LOOKUP)
-    monkeypatch.setattr(importlib.util, "find_spec", REAL_FIND_SPEC)
     monkeypatch.setenv("HF_HOME", str(empty))
     monkeypatch.setenv("HF_HUB_CACHE", str(empty))
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")

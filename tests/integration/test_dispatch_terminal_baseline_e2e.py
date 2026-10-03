@@ -2,7 +2,8 @@
 
 Captured from the pre-move tree. One real offline start per case through the memory baseline's
 `_start` (REAL `_start_async`, memory on, one turn), no Discord env and HOME a tmp dir:
-- `absent`: the venv as it is (discord.py not installed);
+- `absent`: `extra_installed` patched False for `dispatch` alone, as if `localharness[dispatch]` were
+  not installed — whatever this venv holds (CI installs discord.py);
 - `present`: `extra_installed` patched True, as if `localharness[dispatch]` were installed.
 
 Pinned per case in `tests/fixtures/dispatch_plugin/terminal_banner.txt`: the `Plugins:` line text
@@ -62,9 +63,9 @@ def _golden_lines(case: str, line: str) -> dict[str, str]:
 @pytest.mark.parametrize("extra", CASES)
 async def test_terminal_banner_prompt_and_tools(extra, tmp_path, monkeypatch):
     isolate_discord_env(monkeypatch, tmp_path)
-    if extra == "present":
-        from localharness.plugins import resolve
-        monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: True)
+    from localharness.plugins import resolve
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed",
+                        lambda e: extra == "present" or e != "dispatch")
 
     await _seed_store(tmp_path)
     out = await _start(tmp_path, monkeypatch, memory={"consolidation": {"enabled": False}})
