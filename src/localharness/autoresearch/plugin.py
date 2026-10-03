@@ -87,12 +87,19 @@ class AutoresearchPlugin(Plugin):
         `autoresearch run` read — never through the project's .localharness/, which loads without a
         prompt inside it: a cloned repo must not choose where the key is sent. A different address
         the project sets is named, and ignored."""
+        from localharness.config.cleartext import cleartext_warning, sends_key
         from localharness.config.loader import ConfigLoader
         try:
             p = ConfigLoader(config_dir=ctx.paths.global_config_dir).load_harness().proposer
         except Exception:  # noqa: BLE001 — an unreadable config is doctor's row to report
             return []
-        return ([] if p is None else [_answers(p)]) + _project_address(ctx, None if p is None else p.base_url)
+        if p is None:
+            return _project_address(ctx, None)
+        # A key headed over plain http to another machine is named — one row; the check still runs.
+        line = cleartext_warning("proposer.api_key", p.base_url, sends_key(p.api_key))
+        cleartext = [Check(name="autoresearch-proposer", status="warn", detail=line,
+                           hint="use an https:// address for a cloud proposer")] if line else []
+        return cleartext + [_answers(p)] + _project_address(ctx, p.base_url)
 
 
 def _answers(p: Any) -> Check:
