@@ -140,9 +140,12 @@ class MCPServerConfig(BaseModel):
         default_factory=list,
         description="Arguments to pass to the command (stdio transport).",
     )
-    env: dict[str, str] = Field(
+    env: dict[str, SecretStr] = Field(
         default_factory=dict,
-        description="Environment variables to set for the MCP server process.",
+        description=(
+            "Environment variables to set for the MCP server process. The values are treated as "
+            "secrets: shown as **********, passed to the server as written."
+        ),
     )
 
     # streamable_http transport fields
@@ -150,9 +153,12 @@ class MCPServerConfig(BaseModel):
         default=None,
         description="Base URL for the MCP server (streamable_http transport).",
     )
-    headers: dict[str, str] = Field(
+    headers: dict[str, SecretStr] = Field(
         default_factory=dict,
-        description="HTTP headers to include in all requests (streamable_http transport).",
+        description=(
+            "HTTP headers to include in all requests (streamable_http transport). The values are "
+            "treated as secrets: shown as **********, sent as written."
+        ),
     )
 
     timeout_seconds: float = Field(
@@ -1514,9 +1520,13 @@ class EndpointRef(BaseModel):
         description="Runtime family — drives the token-counter's tokenize contract (vLLM/llama.cpp "
         "exact, ollama/lmstudio labeled-approximate).",
     )
-    api_key: str = Field(default="none", description="API key ('none' for local servers).")
-    extra_headers: dict[str, str] = Field(
-        default_factory=dict, description="Optional per-endpoint HTTP headers."
+    api_key: SecretStr = Field(default=SecretStr("none"), description=(
+        "API key ('none' for local servers). Written as typed to the machine's 0600 config; shown "
+        "as ********** everywhere."))
+    extra_headers: dict[str, SecretStr] = Field(
+        default_factory=dict, description=(
+            "Optional per-endpoint HTTP headers. The values are treated as secrets: shown as "
+            "**********, sent as written.")
     )
     gpu: bool = Field(
         default=False,
@@ -1592,7 +1602,8 @@ class ActiveSelection(BaseModel):
         default="unknown", description="Active endpoint runtime family."
     )
     model: str = Field(description="Active model id served by that endpoint.")
-    api_key: str = Field(default="none", description="Active endpoint API key.")
+    api_key: SecretStr = Field(default=SecretStr("none"), description=(
+        "Active endpoint API key; shown as **********."))
 
 
 class ProviderConfig(BaseModel):
@@ -1603,7 +1614,9 @@ class ProviderConfig(BaseModel):
         description="Detected provider type.",
     )
     base_url: str = Field(description="OpenAI-compatible base URL with /v1 suffix.")
-    api_key: str = Field(default="none", description="API key (usually 'none' for local servers).")
+    api_key: SecretStr = Field(default=SecretStr("none"), description=(
+        "API key ('none' for local servers). Written as typed to the machine's 0600 config; shown "
+        "as ********** everywhere. Machine-level only."))
     default_model: str = Field(description="First model from the detected backend's model list.")
     available_models: list[str] = Field(default_factory=list)
     supports_function_calling: Optional[bool] = Field(
