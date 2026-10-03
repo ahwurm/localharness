@@ -152,7 +152,8 @@ def web_cmd(
     public_url: Annotated[Optional[str], typer.Option(
         "--public-url",
         help="The URL a PHONE reaches this box at (e.g. https://spark.tail1234.ts.net). Used for "
-             "the enrolment QR. Auto-detected from `tailscale status` when omitted.",
+             "the enrolment QR. Default: the address `plugins enable web` saved, else a guess from "
+             "`tailscale status`.",
     )] = None,
     rotate_token: Annotated[bool, typer.Option(
         "--rotate-token",
@@ -176,6 +177,7 @@ def web_cmd(
     except ImportError as exc:
         console.print(f"[red]{escape(MISSING_DEPENDENCY)}[/red]", soft_wrap=True)
         raise typer.Exit(1) from exc
+    public_url = public_url or _saved_public_url(config_dir)
 
     from localharness.channels.web import auth as web_auth
 
@@ -206,6 +208,18 @@ def web_cmd(
         ))
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
+
+
+def _saved_public_url(config_dir: Optional[str]) -> Optional[str]:
+    """The phone address `plugins enable web` saved (web.public_url, machine-level only), or None."""
+    try:
+        from localharness.config.loader import ConfigLoader
+        from localharness.config.paths import resolve_config_dir
+        from localharness.plugins.resolve import resolve
+        cfg = resolve(ConfigLoader(config_dir=resolve_config_dir(config_dir))).settings.get("web")
+        return (cfg.config.public_url or None) if cfg is not None and cfg.config is not None else None
+    except Exception:  # noqa: BLE001 — no config yet, or an unreadable one: the guess stands
+        return None
 
 
 def detect_public_url(port: int, *, runner: Any = None) -> Optional[str]:

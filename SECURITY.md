@@ -149,6 +149,7 @@ of them:
 - `dispatch.discord.token`
 - `dispatch.discord.allow`
 - `dispatch.discord.channels`
+- `web.public_url`
 - `org.enforce_capability_floor`
 - `permissions.ask.read_only_signatures`
 - `permissions.ask.dropped_commands`
@@ -613,7 +614,10 @@ agent behind it does. Three things hold it, and each is there for a reason:
 - **It binds loopback only.** Startup refuses any other address unless
   `--allow-unsafe-bind` is passed explicitly. A fronting proxy publishes it — this is
   also what keeps a proxy's identity headers meaningful, since they are only
-  trustworthy if nothing but the proxy can reach the backend.
+  trustworthy if nothing but the proxy can reach the backend. `web.public_url`, which
+  `localharness plugins enable web` asks for, is only the address the pairing QR sends
+  your phone to: it never changes what the server binds, and `--allow-unsafe-bind` stays
+  a flag you pass on each run, never a saved setting.
 - **An app token is required on every request**, the event stream included. It is
   generated on first run and stored `0600` under the global config directory.
   Binding loopback makes the boundary tighter in one sense and looser in another:
