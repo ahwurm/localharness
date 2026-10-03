@@ -11,6 +11,8 @@ localharness plugins enable autoresearch
 
 Turning it off removes its commands from `localharness --help` and its settings from `components list`, and deletes nothing: the experiment archive and your settings stay. The bench and its sealed holdout are part of core and work either way.
 
+`localharness plugins enable autoresearch` on a terminal, or `/plugins enable autoresearch` in a running session while no proposer is set up, asks the proposer's address and model id and writes both at once; a model equal to your main one is refused, and nothing is written. Then it asks the proposer for its model list once, to check that it answers and serves that model. `doctor` still never contacts it.
+
 ## What it adds
 
 - `localharness propose`: generate one typed change, a diff and its rationale, for one component, from failed training traces.

@@ -12,6 +12,8 @@ localharness plugins enable web
 
 Without the extra, `localharness plugins list` shows it as `on (install localharness[web] to use it)`.
 
+`localharness plugins enable web` on a terminal asks the phone address: the URL your phone opens. Press Enter to leave it empty and let `localharness web` guess it. In a running session, `/plugins enable web` asks it too, until `localharness web` has run once or an address is saved.
+
 ## What it adds
 
 - `localharness web`, run from the project folder you want the session in. It prints a pairing QR code so you never type the app token. Options include `--port` (default 8765), `--incognito`, `--rotate-token`, `--allow-unsafe-bind` (it binds to loopback only without it), and `--replay` / `--fixtures` to build a UI with the model server down.
@@ -20,7 +22,11 @@ Without the extra, `localharness plugins list` shows it as `on (install localhar
 
 ## Settings
 
-None of its own. A token is required on every request; it is generated on first run and stored in your global config folder.
+| Setting | Meaning |
+|---|---|
+| `web.public_url` | **Machine-level only.** The address your phone opens, put in the pairing QR. Empty: `localharness web` guesses it from Tailscale. `--public-url` still wins for one run. |
+
+The bind address and `--allow-unsafe-bind` stay flags of `localharness web`, never settings. A token is required on every request; it is generated on first run and stored in your global config folder.
 
 ## Not there yet
 
@@ -29,6 +35,8 @@ None of its own. A token is required on every request; it is generated on first 
 - Incognito only keeps pictures off the phone. Memory, sessions and pictures are still written to disk.
 - No image or file upload, no diff review, no per-device revoke (`--rotate-token` re-pairs every device), and the memory screen has no promote button.
 - The memory screen now reads memory through the memory plugin; this is tested on the server only, not yet on a phone.
+- `/plugins` works only in the terminal: a plugin's setup questions are never asked over the phone.
+- Once `localharness web` has run once, or an address is saved, `/plugins enable web` answers "web is already on.": change the phone address from a shell with `localharness plugins enable web`.
 
 ## More
 

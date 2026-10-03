@@ -97,7 +97,11 @@ default; everything else that comes with LocalHarness is built into its core, in
 and its sealed holdout.) A plugin that ships with LocalHarness may own core settings under their old
 names (`autoresearch` owns `proposer:` and `sentinel:`); a plugin you install that tries to is
 refused at load. `proposer.api_key` is shown as `**********` wherever a command displays it; like
-the Discord token, the file `components set` writes holds the real value as plain text.
+the Discord token, the file `components set` writes holds the real value as plain text. In 0.16.0 a
+config that failed to load or validate could still print a stored secret, whole or by its last
+characters, in the error text of commands such as `doctor`, `start` and `components set`; this is
+fixed after 0.16.0, and error text now names only where the problem is and what is wrong, with
+every stored secret masked.
 
 - **Found is not on.** A plugin is found from package metadata and folder names alone, and one you
   installed stays off, with none of its code imported, until you turn it on. `localharness start`,

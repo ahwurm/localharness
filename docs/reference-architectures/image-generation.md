@@ -32,8 +32,10 @@ against the server your machine already points at.
 
 ## Setup
 
-Turn it on with `localharness plugins enable image`. On a terminal it asks for the ComfyUI address,
-checks it, and if ComfyUI is not ready prints the short version below. In a script:
+Turn it on with `localharness plugins enable image` on a terminal: it asks for the ComfyUI address,
+checks it, and if ComfyUI is not ready prints the short version below. `/plugins enable image` in a
+running session does the same while image is not set up, then restarts the session with image on
+and your conversation kept. In a script:
 `localharness plugins enable image --set comfyui_url=http://127.0.0.1:8188` (this form does not run
 the check; run `localharness doctor` afterwards).
 
@@ -48,18 +50,22 @@ Then run `localharness doctor` to check.
 
 ### The coding-agent prompt
 
-After those six lines the CLI prints "Or paste this into your coding agent to set it up for your hardware:" and this prompt:
+After those six lines the CLI prints "Or paste this into your coding agent to set it up for your
+hardware:" and the prompt below, with the address you gave filled in and, when this machine reports
+its GPU, a sentence naming it. `localharness plugins info image` prints the prompt for your machine
+any time.
 
 ```
-Set up ComfyUI on this machine for LocalHarness image generation. Install ComfyUI and run it on
-127.0.0.1, port 8188 (this machine only, not the network). Put these Qwen-Image-2.1 INT8 files in
-its models folder: diffusion_models/qwen_image_2.1_int8_convrot.safetensors (about 7.3 GB),
+Set up ComfyUI on this machine for LocalHarness image generation. Install ComfyUI and run it so
+it answers at http://127.0.0.1:8188; keep it off the open internet. Put these Qwen-Image-2.1 INT8 files
+in its models folder: diffusion_models/qwen_image_2.1_int8_convrot.safetensors (about 7.3 GB),
 text_encoders/qwen3vl_8b_int8_convrot.safetensors (about 9.4 GB) and
 vae/qwen_image_2.1_vae_bf16.safetensors (about 0.7 GB). The weights are under the Qwen Research
-License: personal, non-commercial use. Keep the UNETLoader weight_dtype at "default" (the fp8 fast
-mode spoils the pictures). On an NVIDIA GB10 (DGX Spark) the INT8 kernels compile on first use and
-need the Python headers: start ComfyUI with C_INCLUDE_PATH pointing at them. You are done when
-http://127.0.0.1:8188/system_stats answers and `localharness doctor` shows image reachable.
+License: personal, non-commercial use. Keep the UNETLoader weight_dtype at "default" (the fp8
+fast mode spoils the pictures). On an NVIDIA GB10 (DGX Spark) the INT8 kernels compile
+on first use and need the Python headers: start ComfyUI with C_INCLUDE_PATH pointing at them.
+You are done when http://127.0.0.1:8188/system_stats answers and `localharness doctor` shows image
+reachable.
 ```
 
 In more detail: the three files go under ComfyUI's own `models/` folder —
