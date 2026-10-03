@@ -539,3 +539,32 @@ def test_a_plugin_list_failure_never_fails_init(tmp_path, monkeypatch):
     assert (tmp_path / "config.yaml").exists()
     assert result.output.rstrip().splitlines()[-1] == "Plugins: run `localharness plugins list` to see them."
     assert HEADER not in result.output
+
+
+# ------------------------------------------------------------------ a fresh write under overrides.yaml
+
+SERVER_OVERLAY = ("provider:\n  base_url: http://localhost:8000/v1\n  default_model: model-x\n"
+                  "org:\n  default_model: model-x\n")
+
+
+@pytest.mark.parametrize("overlay_text, warned", [(SERVER_OVERLAY, True),
+                                                  ("image:\n  enabled: true\n", False)],
+                         ids=["server-keys", "no-server-keys"])
+def test_force_says_when_overrides_yaml_still_wins_over_the_new_config(overlay_text, warned, tmp_path,
+                                                                      monkeypatch):
+    """--force rewrites config.yaml, but the server keys a past change (or `/model`) wrote to
+    overrides.yaml still win over it. Measured before this was said: init reported the new server
+    configured while the next start would use the old one. It says so; it deletes nothing."""
+    _detect(monkeypatch)
+    _silent(monkeypatch)
+    _seed(tmp_path)
+    overlay = tmp_path / "overrides.yaml"
+    overlay.write_text(overlay_text, encoding="utf-8")
+
+    result = _init(tmp_path, "--force")
+
+    _exited(result, 0)
+    note = (f"{overlay} still sets provider.base_url, provider.default_model, org.default_model — "
+            "those win over config.yaml. Remove them there to use what init just found.")
+    assert (note in _flat(result)) is warned, result.output
+    assert overlay.read_text(encoding="utf-8") == overlay_text
