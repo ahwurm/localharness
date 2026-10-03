@@ -257,6 +257,21 @@ def test_web_enter_saves_nothing_and_prints_the_prompt(g, terminal, web_extra) -
 
 
 @pytest.mark.plugin("web")
+def test_web_without_its_extra_asks_nothing_and_names_the_install_line(g, terminal, monkeypatch) -> None:
+    from localharness.plugins import resolve
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: e != "web")
+    asked, _, _ = terminal
+    result = _enable(g, "web")
+    flat = " ".join(result.output.split())
+
+    assert result.exit_code == 0, result.output
+    assert asked == {"prompt": [], "confirm": []}
+    assert _overrides(g) == {"web": {"enabled": True}}
+    assert "web is missing its install extra" in flat and "localharness[web]" in flat
+    assert "Checking it now:" not in flat and WEB_NEXT in flat
+
+
+@pytest.mark.plugin("web")
 def test_web_the_saved_address_reaches_the_pairing_qr(g, terminal, web_extra, monkeypatch) -> None:
     """Composed: what the step saved is the address `localharness web` puts in the QR — no guess."""
     pytest.importorskip("starlette")
