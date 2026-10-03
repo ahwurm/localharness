@@ -124,15 +124,35 @@ An artifact is a file a plugin makes for you, like the swatch image.
   file, never overwrites one, and returns an `ArtifactRef`.
 - Only three types are allowed: `image/png`, `image/jpeg` and `image/webp`. Anything else is refused
   before a byte is written.
-- Neither the terminal nor the reference phone page displays an artifact yet. So the swatch tool's
-  result names the file it wrote, `<state dir>/artifacts/example/<id>.png`, and the agent can tell
-  you where the swatch is. The state dir is the `.localharness/` folder of the project you started
-  in, if it has one (`localharness init --workspace` makes it), and `~/.localharness/` otherwise.
-- The web channel serves an artifact to your signed-in phone at `/api/artifacts/<name>/<id>`, if
-  you open that URL.
+- The terminal does not display artifacts. The phone app (`localharness web`) shows an image
+  artifact inline, and the Discord bot posts it as a file. So the
+  swatch tool's result also names the file it wrote, `<state dir>/artifacts/example/<id>.png`, and
+  the agent can tell you where the swatch is. The state dir is the `.localharness/` folder of the
+  project you started in, if it has one (`localharness init --workspace` makes it), and
+  `~/.localharness/` otherwise.
+- The mobile channel (the `web` plugin) serves an artifact to your signed-in phone at `/api/artifacts/<name>/<id>`, only
+  for a plugin that is on in the running session.
 - The swatch tool takes no arguments, so asking for another color changes nothing. A different
   color is a settings change (`localharness components set example.color '#ff7f50'`), read when a
   session starts.
+
+## What this example does not use
+
+Every field below is optional, and the plugin API's version stays `"1"` because each was added
+with a default that leaves an older plugin unchanged. [Spec 09](../../docs/specs/09-hooks-plugins.md#additive-fields)
+lists them all.
+
+- `setup` and `setup_help` on the manifest: the questions `localharness plugins enable <name>` asks
+  on a terminal (`SetupField(key, prompt, default, secret)`; a `secret` answer is not echoed), and
+  the lines printed when the `doctor` check after them does not pass.
+- `configure()` returning `("unconfigured", "<name>.<field>")` until a needed setting is set.
+- A `"warn"` doctor status: shown with its hint, never counted as a failure.
+- `start()`, `stop()` and `startup_warnings`, for a plugin that runs something during a session.
+- `requires` and `uses`, for a plugin that depends on another.
+
+A plugin you install cannot add a chat channel (`channels`, `make_channel`), claim core settings
+(`sections`), or share the memory slot: two memory plugins on at once are both refused, so one you
+install takes the slot only after `localharness plugins disable memory`.
 
 ## Removing a plugin
 
