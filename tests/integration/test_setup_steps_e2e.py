@@ -193,3 +193,86 @@ def test_memory_without_a_terminal_downloads_nothing_and_says_what_to_run(g, no_
     assert ("next step — run `localharness plugins enable memory` on a terminal to answer: "
             f"{DOWNLOAD_Q}") in out
     assert "In a session, /memory shows what it keeps." in out
+
+
+# --- web (mobile): one question, the address the pairing QR sends a phone to ----------------------
+
+PHONE_Q = "Phone address, the URL your phone opens (Enter: `localharness web` guesses it)"
+WEB_NEXT = "Run `localharness web`, then scan its pairing QR with your phone."
+
+
+@pytest.fixture
+def web_extra(monkeypatch):
+    """The web install extra reads as installed (the resolver's one seam)."""
+    from localharness.plugins import resolve
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: True)
+
+
+def _settings(g: Path, name: str):
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.resolve import resolve
+    return resolve(ConfigLoader(config_dir=g)).settings[name].config
+
+
+@pytest.mark.plugin("web")
+def test_web_saves_the_phone_address_then_checks(g, terminal, web_extra) -> None:
+    asked, answers, _ = terminal
+    answers.append("https://spark.example.ts.net")
+    result = _enable(g, "web")
+    out = result.output
+
+    assert result.exit_code == 0, out
+    assert asked == {"prompt": [(PHONE_Q, "")], "confirm": []}
+    assert _settings(g, "web").public_url == "https://spark.example.ts.net"
+    for text in ("set web.public_url = 'https://spark.example.ts.net'", "Checking it now:",
+                 "web: not enrolled yet", WEB_NEXT):
+        assert text in out, text
+    assert out.index("Checking it now:") < out.index(WEB_NEXT)
+    assert AGENT_PROMPT_LEAD not in out  # answered: "not enrolled yet" is the server's first run
+
+
+@pytest.mark.plugin("web")
+def test_web_refuses_an_address_without_a_scheme_and_writes_nothing(g, terminal, web_extra) -> None:
+    _, answers, _ = terminal
+    answers.append("spark.local")
+    result = _enable(g, "web")
+
+    assert result.exit_code == 2, result.output
+    assert "web.public_url must start with http:// or https://" in " ".join(result.output.split())
+    assert not (g / "overrides.yaml").exists()
+
+
+@pytest.mark.plugin("web")
+def test_web_enter_saves_nothing_and_prints_the_prompt(g, terminal, web_extra) -> None:
+    _, answers, _ = terminal
+    answers.append("")
+    result = _enable(g, "web")
+    out = result.output
+
+    assert result.exit_code == 0, out
+    assert _overrides(g) == {"web": {"enabled": True}}
+    assert "web: not enrolled yet" in out
+    assert AGENT_PROMPT_LEAD in out and "tailscale serve --bg 8765" in out
+    assert out.index(AGENT_PROMPT_LEAD) < out.index(WEB_NEXT)
+
+
+@pytest.mark.plugin("web")
+def test_web_the_saved_address_reaches_the_pairing_qr(g, terminal, web_extra, monkeypatch) -> None:
+    """Composed: what the step saved is the address `localharness web` puts in the QR — no guess."""
+    pytest.importorskip("starlette")
+    pytest.importorskip("uvicorn")
+    from localharness.channels.web import auth as web_auth
+    from localharness.cli import web_cmd
+
+    _, answers, _ = terminal
+    answers.append("https://spark.example.ts.net")
+    assert _enable(g, "web").exit_code == 0
+    guessed: list[int] = []
+    monkeypatch.setattr(web_cmd, "detect_public_url", lambda port, **kw: guessed.append(port))
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(g))  # the plugin's command mounts from this machine
+    ran = runner.invoke(app, ["web", "--rotate-token", "--config-dir", str(g)])
+
+    assert ran.exit_code == 0, ran.output
+    token = web_auth.load_or_create_token(str(g))[0]
+    assert f"https://spark.example.ts.net/#t={token}" in ran.output
+    assert guessed == []
