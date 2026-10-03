@@ -12,6 +12,8 @@ localharness plugins enable memory
 
 The switch is `memory.enabled`. With memory off, no memory store is opened, no memory tool or `/memory` command exists, and memory files already on disk stay.
 
+`localharness plugins enable memory` on a terminal, or `/plugins enable memory` in a running session, asks no questions about settings. While the embedding model is missing, it asks "Download the embedding model now (about 1.2 GB)?" and on yes downloads it into the Hugging Face cache; once the model is there, it asks nothing. Without the `embeddings` package it still asks, then downloads nothing and names the install line.
+
 ## What it adds
 
 - Tools: `memory_search`, `memory_get` and `remember`.

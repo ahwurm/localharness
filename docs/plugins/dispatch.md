@@ -11,7 +11,7 @@ localharness start --channel discord
 localharness plugins disable dispatch
 ```
 
-On a terminal, `plugins enable dispatch` with no `--set` asks for the token without echoing it. In the Discord Developer Portal, turn on your bot's Message Content intent and invite it to your server; your user id comes from Discord's Developer Mode (right-click your name, Copy User ID). `start --channel discord` refuses when the plugin is off, the extra is missing, the token is empty or the allow list is empty, and it never falls back to the terminal.
+On a terminal, `plugins enable dispatch` with no `--set`, or `/plugins enable dispatch` in a running session while it is not set up, asks for the bot token (nothing shows as you type, and a stored token is never shown) and your Discord user id(s); Enter on a question writes nothing. It then checks the settings, without logging in to Discord, and ends with the next step: `localharness start --channel discord`. When the check does not pass it also prints a prompt to paste into your coding agent, and that prompt never holds the token. Without the `dispatch` extra it names the install command and asks nothing. In the Discord Developer Portal, turn on your bot's Message Content intent and invite it to your server; your user id comes from Discord's Developer Mode (right-click your name, Copy User ID). `start --channel discord` refuses when the plugin is off, the extra is missing, the token is empty or the allow list is empty, and it never falls back to the terminal.
 
 ## What it adds
 

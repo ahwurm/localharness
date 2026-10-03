@@ -26,6 +26,7 @@ channel overrides:
 - `ask_holds_dialog` (False): the question stays open until a person answers it (terminal, Zed); False gives the question a deadline (`permissions.ask.timeout_s`), as on Discord.
 - `bare_mode_command` (False): a plain `mode <name>` message is the `/mode` command (Discord sets it; the terminal does not).
 - `start_banner` (`""`): one line `localharness start` prints, dimmed, after building the channel; empty prints nothing.
+- `can_switch_plugins` (False): `/plugins enable|disable` may restart the session from this channel; only the terminal sets it, so a plugin's setup questions are never asked over a remote channel.
 - `has_review_surface`, `streams_tokens`, `has_display_toggles` (all False): an in-project edit lands where a person sees it, the channel wants the answer as it is generated, and `/reasoning` and `/verbose` mean something on the channel.
 
 Spec 09 ("Manifest and methods") covers how a plugin provides a channel.

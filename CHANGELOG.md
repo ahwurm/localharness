@@ -12,10 +12,106 @@ All notable changes to LocalHarness are documented here. The format follows
   shorter README next to its localharness.dev page.
 - **A logo**: the phone app's capped-agent icon, at `docs/assets/logo.svg`,
   now heads the README.
+- **`/plugins` in a running session.** `/plugins enable <name>` runs the
+  plugin's setup step (its questions, a check, what to do next, and a prompt to
+  paste into your coding agent when the check fails), then restarts the session
+  with the plugin on and your conversation kept. `/plugins disable <name>`
+  turns one off the same way, and a bare `/plugins` lists them. The questions
+  are asked only the first time, or while the plugin is not set up yet; a
+  plugin that is already on and set up gets one line and no restart. Terminal
+  sessions only: the phone, Discord and Zed answer with one line.
+- **Every bundled plugin has a setup step**, run by `localharness plugins
+  enable <name>` on a terminal and by `/plugins enable <name>` in a session.
+  image asks the ComfyUI address and checks it. Mobile (`web`) asks the address
+  your phone opens and saves it as `web.public_url` (machine-level only), which
+  `localharness web` then puts in the pairing QR. memory downloads the
+  embedding model when it is missing, after asking. dispatch asks the bot token
+  (not echoed) and who may talk to the bot. autoresearch asks the proposer's
+  address and model, saves them together, then asks the proposer for its model
+  list once. `localharness plugins info <name>` prints the coding-agent prompt
+  for your machine.
+- **`init --no-input`** asks nothing. `init` now ends with every bundled
+  plugin and the command that sets it up.
+- **A first `localharness start` with no config sets up the core and goes on
+  into the session**, on a terminal. Without a terminal, or with `--no-input`,
+  it prints how to set up and exits 0, as before.
+- **Plugin API additions** (all optional; `PLUGIN_API_VERSION` stays "1"):
+  `PluginManifest.next_steps`, `agent_prompt` and `setup_action`, and the
+  `Plugin.setup_action(ctx)` method. See spec 09.
+
+### Changed
+- Re-running `init` keeps your config. On a terminal it asks "Config exists:
+  <model> at <url>. Keep it?" first; a change goes to `overrides.yaml` and
+  never rewrites `config.yaml`. `--force` still starts over.
+- On its quick path `init` asks one question on a terminal, whether to keep
+  the usual settings, and asks the two posture questions only after a "no".
+  Without a terminal it asks nothing: with several models served it uses the
+  first and prints the command that picks another.
+- `init` with no model server on a terminal offers to skip for now (it saves
+  the address and model you will use, unchecked) instead of exiting 1. Without
+  a terminal it still exits 1.
+- `plugins enable` offers your saved values as defaults, never shows a saved
+  secret, and no longer writes an empty answer. On a plugin missing its install
+  extra it prints the install command and asks nothing.
+- The refusal of a proposer model equal to your main model now says why in
+  plain words, and `localharness propose` with no proposer says how to set one
+  up; neither prints an internal id any more.
 
 ### Fixed
 - The example plugin in `examples/plugin-template/` now requires LocalHarness
   0.16 or later; it said 0.15, which cannot load a v1 plugin.
+- A config that fails to load or validate no longer prints a stored secret
+  (the proposer's API key, or a plugin's token) in its error text or in
+  `--json`, in any command. In 0.16.0 the key, or its last characters, could
+  appear when a write was refused (`components set`, `plugins enable NAME
+  --set`, `localharness model` and `/model`, `autoresearch adopt`) and in the
+  error of every command that loads a config that does not validate or does not
+  parse (`doctor`, `validate`, `start`, `components list` and `get`,
+  `localharness model`, `config show`, `config migrate`). Error text now names
+  where the problem is and what is wrong, with every stored secret masked; a
+  YAML syntax error names the line and column, never the line's text.
+- `localharness init --force` now also clears the model and server choices
+  saved in your global `overrides.yaml` (by `/model`, `localharness model`, a
+  switch to another endpoint, or a re-run of `init`), which used to keep
+  winning over the fresh `config.yaml`. It names the keys it cleared; plugin
+  settings and every other key stay.
+
+### Known limitations (named, not hidden)
+- During a `/plugins` restart the conversation is held only in memory: if the
+  model server goes away between the two halves, the rebuild fails and the
+  conversation is lost.
+- The restart does not carry a `/model` switch to another endpoint (the
+  rebuilt session uses the configured one), MCP servers' own state (they
+  restart), `/reasoning` and `/verbose` (back to their configured values), or
+  an agent being created with the creation wizard.
+- To decide whether a plugin is already on, `/plugins enable` runs its check
+  inside the session: for image with ComfyUI unreachable, the input can wait
+  up to about 3 seconds.
+- Once `localharness web` has run once, or a phone address is saved,
+  `/plugins enable web` answers "web is already on.", so the address is changed
+  from a shell with `localharness plugins enable web`.
+- memory asks its download question even when the `embeddings` package is
+  missing, then downloads nothing and names the install line. The download
+  itself was tested with the downloader faked; it is the one init's guided vLLM
+  setup uses.
+- `init --force` also clears a hand-set `org.context.max_context_tokens` from
+  `overrides.yaml`: init's own change writes the same key, and the two cannot
+  be told apart.
+- An exported `LOCALHARNESS_ENDPOINT` or `LOCALHARNESS_MODEL` counts as
+  `--endpoint` or `--model`: re-running `init` with either set skips "Keep it?"
+  and goes straight to a change.
+- A config written by init's guided vLLM setup keeps its managed `server:`
+  block after a re-run changes to another server, so if the new server is down
+  at start, `start` launches the old managed one.
+- `provider.api_key`, `endpoints[].api_key` and `active_endpoint.api_key` are
+  plain strings, not secrets: `components list`, `components get` and
+  `config show` display them.
+- A first start on a terminal can ask init's one question and then the
+  session's own "Trust this workspace?" question.
+- A plugin you installed is asked its setup questions only from its second
+  `plugins enable`: the first one turns it on before its manifest is read.
+- During a `/plugins` restart, the closed input box's last frame stays in the
+  scrollback above the setup questions.
 
 ## [0.16.0] — 2026-10-02
 

@@ -10,7 +10,9 @@ localharness plugins enable image --set comfyui_url=http://127.0.0.1:8188  # in 
 localharness plugins disable image
 ```
 
-Either takes effect at the next `localharness start`. Until `image.comfyui_url` is set, the plugin reports itself unconfigured and adds nothing.
+In a running session, type `/plugins enable image`: the first time, or while it is not set up, it asks the same question and checks it, then it restarts the session with image on, your conversation kept. From a shell it takes effect at the next `localharness start`. Until `image.comfyui_url` is set, the plugin reports itself unconfigured and adds nothing.
+
+When the check fails, it prints six short lines (the three model files and how to start ComfyUI) and a prompt to paste into your coding agent, filled in with your address and the GPU your machine reports. `localharness plugins info image` prints that prompt any time.
 
 ## What it adds
 

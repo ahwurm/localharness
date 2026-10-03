@@ -42,13 +42,14 @@ It prints the address, the UI directory, an **app token** — generated on first
 you never type the secret into a phone. The token is required on every request, the event stream
 included.
 
-Tell it the address the phone will actually use, once:
+Tell it the address the phone will actually use:
 
 ```bash
 localharness web --public-url https://your-machine.your-tailnet.ts.net
 ```
 
-Without that flag it asks `tailscale status` for a guess and labels it as a guess; if there is no
+or save it once with `localharness plugins enable web` (the machine-level setting `web.public_url`);
+`--public-url` still wins for one run. Without either, it asks `tailscale status` for a guess and labels it as a guess; if there is no
 answer it prints the loopback URL and says plainly that no phone can reach it.
 
 ```bash

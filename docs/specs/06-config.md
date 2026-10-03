@@ -127,7 +127,8 @@ workspace you went and asked for.
 
 **`--no-input`, for runs with nobody watching.** `start`, `doctor`, `validate` and `agent create`
 take `--no-input`: never ask about an untrusted workspace, skip that layer, say on stderr that it was
-skipped, and **record nothing**. The reason it exists is that the trust answer is permanent. A git
+skipped, and **record nothing**. `init` and `plugins enable` take `--no-input` too, and there it
+means ask nothing at all. The reason it exists is that the trust answer is permanent. A git
 hook, a CI job or a scheduled run that happens to inherit a terminal would otherwise be able to
 answer that question on your behalf, once, forever — a decision about trust made by whatever process
 happened to run first. `--no-input` makes the run declare that it is not the right process to be

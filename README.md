@@ -33,6 +33,8 @@ localharness plugins enable image --set comfyui_url=http://127.0.0.1:8188
 
 `plugins enable` and `plugins disable` write `overrides.yaml`, never your `config.yaml`. Add `--workspace` to change a bundled plugin for one project only. Add the `dispatch` extra for Discord.
 
+`init` ends with every plugin and the command that sets it up. Inside a running session, `/plugins enable <name>` does the same and turns the plugin on right away: the first time, or while the plugin is not set up yet, it asks what the plugin needs and checks it, then it restarts the session with your conversation kept. A first `localharness start` with no config runs `init`'s setup and goes on into the session.
+
 ## Supported runtimes
 
 Every runtime is reached through one OpenAI-compatible client; `init` can also attach to any endpoint that is already running. Live-validated means a real end-to-end run on the [DGX Spark](docs/reference-architectures/dgx-spark.md) reference machine; recorded bench runs exist for vLLM only.
@@ -85,6 +87,7 @@ Early stage (v0.16.0, pre-1.0). Interfaces and config schema may change without 
 - The Discord token and the autoresearch proposer's API key are stored as plain text in your global `overrides.yaml`.
 - `pre_tool` and `post_tool` hooks do not fire for a helper agent's tool calls, and a hook written as `async def` never runs.
 - `localharness validate` does not check a plugin's own settings, and `plugins enable` and `plugins disable` write no audit event.
+- `/plugins enable` and `/plugins disable` work in a terminal session only. The restart keeps the conversation, but not a `/model` switch to another endpoint, `/reasoning` and `/verbose`, or an MCP server's own state; and if the model server goes away during the restart, the conversation is lost.
 - Apart from the settings SECURITY.md names, a project's `org` settings still merge over your global ones and have not yet been checked one by one for whether a project value can loosen a protection.
 
 The full list is under "Known limitations" in each [CHANGELOG](CHANGELOG.md) release.

@@ -126,7 +126,7 @@ def init_app(
         str | None,
         typer.Option(
             "--endpoint", "-e",
-            help="Override auto-detection. Full base URL: http://localhost:8000/v1",
+            help="Override auto-detection. Full base URL: http://localhost:8081/v1",
             envvar="LOCALHARNESS_ENDPOINT",
         )
     ] = None,
@@ -151,7 +151,8 @@ def init_app(
         bool,
         typer.Option(
             "--force", "-f",
-            help="Overwrite existing config without prompting.",
+            help="Start over without asking: rewrite the config and clear the model and server "
+                 "choices saved in overrides.yaml.",
         )
     ] = False,
     workspace: Annotated[
@@ -161,6 +162,14 @@ def init_app(
             help="Scaffold ./.localharness/ for THIS project instead of configuring the "
                  "machine. Non-interactive; never writes a provider block; never overwrites "
                  "an existing one.",
+        )
+    ] = False,
+    no_input: Annotated[
+        bool,
+        typer.Option(
+            "--no-input",
+            help="Ask nothing: use what is detected and the usual settings, write the config, "
+                 "and print what to do next.",
         )
     ] = False,
 ) -> None:
@@ -184,28 +193,62 @@ that is entirely comments — nothing set. It probes nothing, prompts for nothin
 `provider:` block, and refuses (rather than overwriting) if `./.localharness/` already exists or if
 you are standing in the machine's own global config directory.
 
-**Behavior:**
+**Behavior.** `init` sets up the core only: it finds or names the model server and writes the
+config. It asks nothing about plugins; a plugin is set up when it is turned on. Without a terminal
+on stdin, or with `--no-input`, it asks nothing at all.
 
-1. If `~/.localharness/config.yaml` already exists and `--force` not set, print a warning and ask: "Config already exists. Re-run init? [y/N]". Default N.
-2. Run `detect_provider()` (`provider/detector.py`) — probes the five ports above with a short
-   timeout each.
-3. If `--endpoint` is provided, skip probing and use that endpoint directly.
-4. Display detected provider and model list using Rich table.
-5. If multiple models found, prompt user to select one (Rich prompt, numbered list).
-6. Write `~/.localharness/config.yaml` with provider settings.
-7. Print confirmation: `✓ LocalHarness configured. Run 'localharness start' to begin.`
+1. **A config that is already there is kept.** Without `--force`, a terminal asks
+   "Config exists: <model> at <url>. Keep it?" and Enter keeps it ("✓ Kept <file>."); without a
+   terminal it is kept and `init` adds "To start over: localharness init --force". Both exit 0
+   and probe nothing. Answering no, or giving `--endpoint` or `--model`, changes the server and
+   the model in the global `overrides.yaml` after checking the merged config ("✓ Updated
+   <overrides> — your config.yaml is unchanged."); `config.yaml` is never rewritten, and a change
+   that does not validate, or finds no server, writes nothing and exits 1. A config that cannot be
+   read exits 1 and names `--force`. `--force` starts over: a fresh `config.yaml`, and the model
+   and server choices saved in the global `overrides.yaml` (by an earlier change, `/model`, or a
+   switch to another endpoint) are cleared, with one line naming them. Plugin settings and every
+   other key there stay, and the two files are written both or neither.
+2. **The server.** `--endpoint` skips detection and uses that address; without `--model` it reads
+   the server's model list and uses the only model served, else exits 1 naming the ids.
+   Otherwise `detect_provider()` (`provider/detector.py`) probes the five ports above with a
+   short timeout each.
+3. **The model.** One model served is used. With several, `init` uses the one `--model` names,
+   else Ollama's loaded model; otherwise a terminal shows a numbered list to pick from, and
+   without a terminal `init` takes the first and prints the command that picks another.
+4. **The capability probe.** `init` asks the model for one tool call to learn its tool-calling
+   mode. If the server never answers, it exits 1 and writes nothing.
+5. **One question, on a terminal:** "Keep the usual settings — the agent can change files and run
+   commands, and remembers things between sessions?" Enter keeps both. Only a "no" asks the two
+   separately: may the agent change this machine, and should memory be on.
+6. **The write:** `config.yaml` (owner-only), the `agents/` folder and `plugins/README.md`, then
+   `✓ LocalHarness configured at <file>.` and `Run 'localharness start' to begin.`
+7. **The plugin list.** Every outcome that leaves a config (written, kept, changed or saved for
+   later) ends with "Plugins — the command beside each one turns it on or sets it up:", one line
+   per bundled plugin with its state and the exact `localharness plugins enable <name>` for it,
+   and "In a session, /plugins enable <name> does this too and turns it on right away."
 
 **Auto-detection display:**
 
 ```
 Probing for local LLM...
-  ✓ vLLM found at http://localhost:8000/v1
-  
+  ✓ vllm found at http://127.0.0.1:8000/v1
+
 Available models:
   1. Qwen/Qwen3.5-122B-A10B
   2. Qwen/Qwen3-Embedding-0.6B
-  
-Select model [1]: _
+Select model (1): _
+```
+
+The plugin list at the end, for a fresh config:
+
+```
+Plugins — the command beside each one turns it on or sets it up:
+  image         off — turn on: localharness plugins enable image
+  web           on — set up: localharness plugins enable web
+  memory        on — set up: localharness plugins enable memory
+  dispatch      on (install `localharness[dispatch]` to use it) — set up: localharness plugins enable dispatch
+  autoresearch  on — set up: localharness plugins enable autoresearch
+In a session, /plugins enable <name> does this too and turns it on right away.
 ```
 
 **On failure:**
@@ -213,16 +256,26 @@ Select model [1]: _
 ✗ No local LLM detected.
 
 Checked:
-  http://localhost:8000  (vLLM)    — connection refused
-  http://localhost:11434 (Ollama)  — connection refused
-  http://localhost:1234  (LM Studio) — connection refused
-  http://localhost:8080  (llama.cpp) — connection refused
+  http://localhost:8081  (vLLM)  — connection refused
+  http://localhost:8000  (vLLM)  — connection refused
+  http://localhost:11434  (Ollama)  — connection refused
+  http://localhost:1234  (LM Studio)  — connection refused
+  http://localhost:8080  (llama.cpp)  — connection refused
 
 Start your LLM server and run 'localharness init' again, or use:
   localharness init --endpoint http://your-host:port/v1 --model your-model-name
 ```
 
-Exit code 1 on failure.
+Without a terminal this exits 1 and writes nothing.
+
+**Skip for now, on a terminal.** There, `init` first offers the guided vLLM setup; declined, it
+prints "Skip for now: give the address and model you will use, and init saves them without
+checking." and asks for the model server's address and the model name (`--model` answers the
+second). With a model it writes the config unchecked ("✓ Saved <file> — not checked yet. Start
+your model server, then run `localharness start`.") and ends with the plugin list. With no model,
+or an address that does not start with `http://` or `https://`, it writes nothing and prints the
+next step ("Nothing saved. When a model server answers at <url>, run `localharness init`
+again."). Skipping is your choice, so both exit 0.
 
 **`--workspace` (v0.13): a different command in the same name.** `localharness init --workspace`
 does not configure the machine. It scaffolds `./.localharness/` for the project you are standing in
@@ -291,6 +344,14 @@ def start_app(
 
 The excerpt shows three options; the real command has more (`--verbose`, `--model`,
 `--list-models`, `--show-reasoning` and others; `localharness start --help` lists them all).
+
+**A first start sets the core up.** With no `config.yaml` and a terminal, `start` prints
+"LocalHarness is not set up yet. Setting up the model server first:", runs `init`'s core setup
+(the same steps, one question on the quick path) and goes on into the session in the same
+command. A setup that ends without a model server that answered (skipped for now, or nothing
+saved) stops after its own next step and exits 0. Without a terminal, or with `--no-input` or
+`--list-models`, `start` prints the welcome hint ("To configure, run: localharness init"), writes
+nothing and exits 0. A configured `start` asks nothing new, and its banner is unchanged.
 
 **`--channel` (`-c`) picks the input channel.** Core's are `terminal` (the default) and `acp`; a
 bundled plugin of kind `channel` adds its own names, today `web` (the `web` plugin) and `discord`
@@ -939,14 +1000,33 @@ this section covers the commands.
   settings section in your config that no installed plugin owns, with its file, line and fix.
 - `plugins info NAME [--json]` prints one plugin: its state, what it adds (tools, commands, slash
   commands, channels) and every setting it owns, the same rows `components list` tags
-  `(plugin: NAME)`.
+  `(plugin: NAME)`. Its text view ends with the plugin's coding-agent prompt, filled in for this
+  machine; `--json` does not carry it. It contacts no server.
 - `plugins enable NAME [--set KEY=VALUE ...] [--workspace] [--no-input]` writes `NAME.enabled: true`,
   and each `--set` value after checking it against the plugin's settings, into one `overrides.yaml`:
   the machine's, or with `--workspace` the project's. It never writes a `config.yaml`. It prints
   ``✓ image enabled in <file> — takes effect on the next `localharness start` `` and one
-  `set NAME.KEY = …` line per value. On a terminal with no `--set`, it asks the plugin's setup
-  questions, writes the answers the same way and runs the plugin's doctor check once.
+  `set NAME.KEY = …` line per value. On a terminal with no `--set` and no `--workspace`, it runs
+  the plugin's setup step:
+  - it asks the plugin's questions, offering the value stored now, else the default, and never
+    showing a stored secret; an empty answer is not written;
+  - it writes the answers the same way; keys under a bundled plugin's `sections` (autoresearch's
+    `proposer.*`) are checked and written together, or not at all;
+  - it runs the plugin's setup action (memory's download), after its yes/no question, only while
+    the plugin is not set up yet or when answers were written;
+  - it runs the plugin's check once ("Checking it now:"). When the check does not pass, or the
+    setup action fails, it prints the plugin's short help and "Or paste this into your coding
+    agent to set it up for your hardware:" with a prompt filled in with your values;
+  - the plugin's next steps print on every outcome, and it exits 0 whether or not the check
+    passed: it wrote.
+
+  A plugin missing its install extra gets one line naming the extra, and no questions. Without a
+  terminal, or with `--no-input`, it asks nothing, runs nothing, and names the next step.
 - `plugins disable NAME [--workspace]` writes `NAME.enabled: false` the same way.
+
+From a shell, either takes effect on the next `localharness start`. In a running terminal session,
+`/plugins enable NAME` and `/plugins disable NAME` run the same step and take effect at once (see
+[Slash commands](#slash-commands)); there the success line has no "takes effect" tail.
 
 `--workspace` is refused for a plugin you installed and for a machine-level-only setting. These
 commands write no audit event (`components set` does). Exit codes: 0 done; 2 any error (an unknown
@@ -1005,6 +1085,31 @@ A line starting with `/` is a REPL command, not a task. The list is defined once
 (today `/memory`, from the `memory` plugin) join that table when the session starts and leave it
 when the session ends, after core's rows; spec 09 ("Commands, slash commands and doctor") covers
 how a plugin declares one.
+
+**`/plugins` switches a plugin in this session, on the terminal only.** A bare `/plugins` lists
+every plugin and marks the ones running in this session. `/plugins enable <name>` and
+`/plugins disable <name>` write the same switch as `localharness plugins enable|disable`, then
+restart the session with the conversation kept:
+
+1. The REPL prints "Restarting with <name> on — your conversation is kept." and the session shuts
+   down in its usual order.
+2. The plugin's setup step runs on the plain terminal, outside the input box. It asks its
+   questions only the first time, or while the plugin is not set up yet. Ctrl-C at a question
+   stops the step ("Stopped. Your conversation continues.").
+3. The session comes back with the same conversation, the same `/mode` and any lines you typed
+   ahead, and with one indicator in place of the banner: "Restarted with <name> on. Your
+   conversation continues.", the `Plugins:` line, and one status line, such as "<name>: on in
+   this session", "<name>: on, but its check failed: <detail>" or "<name>: on, but not set up
+   yet — run /plugins enable <name> to set it up". A failed check never stops the restart.
+
+There is no restart, only one line, for a plugin that is already on and set up ("<name> is already
+on."), one the project's config pins, one missing its install extra, and any switch while a call
+is parked ("Answer the parked calls first (/pending lists them): a restart would drop them.").
+Other channels answer "/plugins works only in a terminal session. From a shell: localharness
+plugins enable <name>", and the phone's command menu does not list it. The conversation is held
+in memory during the restart: if the model server goes away in between, the rebuild fails and the
+conversation is lost. The rebuilt session uses the configured model endpoint (a `/model` switch to
+another endpoint is not carried), restarts MCP servers, and resets `/reasoning` and `/verbose`.
 
 **`/mode <name>` switches the session's permission mode.** `/mode auto`, `/mode guarded`,
 `/mode trusted` or `/mode read-only` changes it for this session only — nothing is persisted, and
@@ -1084,7 +1189,7 @@ the exit code as *structured output* rather than as a pass/fail flag.
 |---|---|
 | `doctor` | 0 all checks passed; 1 one or more failed |
 | `validate` | 0 all valid; 1 one or more invalid, or a named path that cannot be read; 2 no config files found |
-| `init` | 0 written (or an overwrite you declined); 1 detection, prompt or write failure; 2 conflicting flags, or `--workspace` in the global config directory |
+| `init` | 0 written, kept, changed, or skipped for now; 1 detection, capability-probe or write failure, a config that cannot be read, a change that does not validate or finds no server, no server without a terminal, or a workspace that already exists; 2 conflicting flags, or `--workspace` in the global config directory |
 | `start` | 0 normal exit; 1 config/startup failure; 2 usage error |
 | `agent create` / `agent list` | 0 done; 1 invalid input or write failure; 2 usage error (see `agent create` above) |
 | `config show` / `config migrate` | 0 done; 1 failure; 2 usage error |
