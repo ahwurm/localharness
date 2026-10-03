@@ -218,6 +218,15 @@ def _args(server: dict) -> list[str]:
     return [str(a) for a in args if a is not None]
 
 
+def _agent_files(layer_dir: Path) -> list[Path]:
+    """The agent files of ONE config layer, through the loader's own roster
+    (`ConfigLoader.agent_yaml_paths`, the one discovery implementation): what is fingerprinted is
+    exactly what the loader can load from that layer, whatever its discovery rules become."""
+    from localharness.config.loader import ConfigLoader
+
+    return ConfigLoader(config_dir=Path(layer_dir)).agent_yaml_paths()
+
+
 def executables_snapshot(workspace_dir: Path) -> list[dict]:
     """What a project's own agent files would start or connect to: every `tools.mcp_servers` entry
     in `<workspace>/agents/*.yaml`, as {file, name, transport, command, args, env, url, headers}
@@ -227,7 +236,7 @@ def executables_snapshot(workspace_dir: Path) -> list[dict]:
     skipped — the loader warns about it and loads nothing from it. Scripts a command runs are not
     read (named in SECURITY.md)."""
     out: list[dict] = []
-    for path in sorted((Path(workspace_dir) / "agents").glob("*.yaml")):
+    for path in _agent_files(workspace_dir):
         for s in _servers(_read_yaml(path)):
             out.append({"file": path.name, "name": str(s.get("name") or ""),
                         "transport": str(s.get("transport") or ""),
@@ -295,7 +304,7 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
     legacy org.yaml as the base rung, whose shorter `deny_patterns` does drop shipped patterns).
     Sorted by (file, kind, name, canonical JSON); unparsable files skipped; never an env or header
     value."""
-    from localharness.config.loader import org_deny_loosenings, permission_loosenings
+    from localharness.config.loader import ConfigLoader, org_deny_loosenings, permission_loosenings
 
     root = Path(global_dir)
 
@@ -306,7 +315,7 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
                 for key, shown in sorted(permission_loosenings(perms) + base)]
 
     out: list[dict] = []
-    for path in sorted((root / "agents").glob("*.yaml")):
+    for path in _agent_files(root):
         raw, file = _read_yaml(path), f"agents/{path.name}"
         out += [{"file": file, "kind": "mcp_server", "name": str(s.get("name") or ""),
                  "shown": _shown_server(s), "env": _names(s.get("env")),
@@ -316,8 +325,8 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
             out.append({"file": file, "kind": "embedding_model", "name": "memory.embedding_model",
                         "shown": str(memory["embedding_model"])})
         out += loosenings(file, raw)
-    for path in sorted((root / "divisions").glob("*.yaml")):
-        out += loosenings(f"divisions/{path.name}", _read_yaml(path))
+    for name in ConfigLoader(config_dir=root).list_divisions():  # the loader's own enumeration
+        out += loosenings(f"divisions/{name}.yaml", _read_yaml(root / "divisions" / f"{name}.yaml"))
     if (root / "org.yaml").is_file():
         out += loosenings("org.yaml", _read_yaml(root / "org.yaml"))
     return sorted(out, key=lambda e: (e["file"], e["kind"], e["name"], _canonical(e)))
