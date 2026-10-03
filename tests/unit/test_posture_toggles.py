@@ -1,7 +1,7 @@
 """#151: the two init posture questions — host tools and memory — and per-workspace persistence.
 
-Global `init` asks each question once (TTY only; a scripted init is never prompted and keeps
-today's defaults). A "no" writes ordinary layered keys — `org.permissions.mode: read-only` /
+Global `init` asks one question on a terminal — keep the usual settings? — and these two only
+after a "no" (a scripted init is never prompted and keeps today's defaults). A "no" writes ordinary layered keys — `org.permissions.mode: read-only` /
 `memory.enabled: false` (47-08: the memory plugin's key; the deprecated `org.memory_enabled` is
 never written) — so a project can flip either one in its own
 `.localharness/config.yaml` and the existing deep-merge layering persists the posture per
@@ -81,7 +81,7 @@ def test_no_answers_write_read_only_and_memory_off(mock_client_cls, mock_detect,
     fake_sys.stdin.isatty.return_value = True
     monkeypatch.setattr(init_cmd, "sys", fake_sys)
     fake_confirm = MagicMock()
-    fake_confirm.ask.side_effect = [False, False]  # host tools: no; memory: no
+    fake_confirm.ask.side_effect = [False, False, False]  # usual settings: no; host tools: no; memory: no
     monkeypatch.setattr(init_cmd, "Confirm", fake_confirm)
 
     cfg = _run_init(tmp_path, mock_client_cls, mock_detect)
@@ -89,25 +89,45 @@ def test_no_answers_write_read_only_and_memory_off(mock_client_cls, mock_detect,
     assert org["permissions"]["mode"] == "read-only"
     assert cfg["memory"] == {"enabled": False}
     assert "memory_enabled" not in org
-    assert fake_confirm.ask.call_count == 2
+    assert fake_confirm.ask.call_count == 3
     assert any("sudo" in p for p in org["permissions"]["deny_patterns"])
 
 
 @patch("localharness.cli.init_cmd.detect_provider")
 @patch("localharness.cli.init_cmd.LLMClient")
-def test_yes_answers_keep_defaults(mock_client_cls, mock_detect, tmp_path, monkeypatch):
+def test_keeping_the_usual_settings_asks_one_question(mock_client_cls, mock_detect, tmp_path,
+                                                      monkeypatch):
     import localharness.cli.init_cmd as init_cmd
     fake_sys = MagicMock()
     fake_sys.stdin.isatty.return_value = True
     monkeypatch.setattr(init_cmd, "sys", fake_sys)
     fake_confirm = MagicMock()
-    fake_confirm.ask.side_effect = [True, True]
+    fake_confirm.ask.side_effect = [True]
     monkeypatch.setattr(init_cmd, "Confirm", fake_confirm)
 
     cfg = _run_init(tmp_path, mock_client_cls, mock_detect)
     org = cfg["org"]
     assert "memory_enabled" not in org and "memory" not in cfg
     assert org["permissions"].get("mode") != "read-only"
+    assert fake_confirm.ask.call_count == 1
+
+
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_no_then_yes_twice_keeps_defaults(mock_client_cls, mock_detect, tmp_path, monkeypatch):
+    import localharness.cli.init_cmd as init_cmd
+    fake_sys = MagicMock()
+    fake_sys.stdin.isatty.return_value = True
+    monkeypatch.setattr(init_cmd, "sys", fake_sys)
+    fake_confirm = MagicMock()
+    fake_confirm.ask.side_effect = [False, True, True]  # usual settings: no; host tools: yes; memory: yes
+    monkeypatch.setattr(init_cmd, "Confirm", fake_confirm)
+
+    cfg = _run_init(tmp_path, mock_client_cls, mock_detect)
+    org = cfg["org"]
+    assert "memory_enabled" not in org and "memory" not in cfg
+    assert org["permissions"].get("mode") != "read-only"
+    assert fake_confirm.ask.call_count == 3
 
 
 # ---------------------------------------------------------------------------

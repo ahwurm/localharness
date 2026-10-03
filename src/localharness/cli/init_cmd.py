@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Optional
 from urllib.parse import urlparse
@@ -16,8 +17,8 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from localharness.agent.context import response_reserve
 from localharness.cli.errors import _HANDLED, report_filesystem_error
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
-from localharness.config.loader import ConfigLoader
-from localharness.config.overlay import restrict_config_file
+from localharness.config.loader import ConfigLoader, ConfigValidationError
+from localharness.config.overlay import atomic_write_overlay, load_overlay, restrict_config_file
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir, resolve_config_dir
 from localharness.config.models import (
     ContextConfig,
@@ -28,7 +29,7 @@ from localharness.config.models import (
     ProviderConfig,
 )
 from localharness.provider import server as managed_server
-from localharness.provider.client import LLMClient, LLMConfig
+from localharness.provider.client import CapabilityResult, LLMClient, LLMConfig
 from localharness.provider.detector import (
     DEFAULT_PORTS,
     DetectorResult,
@@ -424,6 +425,20 @@ def _scaffold_workspace(
         )
 
 
+def is_interactive(no_input: bool) -> bool:
+    """Is there a person to ask? Not with --no-input, not without a terminal on stdin. Reads this
+    module's `sys`, so a test that swaps init_cmd.sys for a fake terminal reaches every prompt."""
+    return not no_input and sys.stdin is not None and sys.stdin.isatty()
+
+
+@dataclass(frozen=True)
+class SetupResult:
+    """What core_setup did: the config on disk afterwards (None: nothing was written) and whether
+    a model server answered — `start` goes on into a session only then."""
+    config_file: Path | None
+    server_ready: bool
+
+
 def init_app(
     endpoint: Annotated[
         str | None,
@@ -468,6 +483,10 @@ def init_app(
                  "Non-interactive; never writes a provider block; never overwrites an existing one.",
         ),
     ] = False,
+    no_input: Annotated[bool, typer.Option(
+        "--no-input",
+        help="Ask nothing: use what is detected and the usual settings, write the config, and "
+             "print what to do next.")] = False,
 ) -> None:
     """Auto-detect local LLM and write initial configuration.
 
@@ -480,22 +499,87 @@ def init_app(
     if workspace:
         _scaffold_workspace(endpoint=endpoint, model=model, config_dir=config_dir)
         return
+    core_setup(config_dir, endpoint=endpoint, model=model, force=force,
+               interactive=is_interactive(no_input))
 
+
+def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | None, force: bool,
+               interactive: bool, starting: bool = False) -> SetupResult:
+    """Set up the core: find or name the model server, then write the config. Asks nothing about
+    plugins (owner ruling 2026-10-03: a plugin is set up when it is turned on).
+
+    `interactive` gates every question; without it the run takes what is detected and the usual
+    settings. An existing config is never rewritten without `force`: it is kept (asked on a
+    terminal, said without one) or — after a "no", or for an explicit --endpoint/--model — the
+    change goes to overrides.yaml through a validated overlay write. `starting` is a first `start`
+    calling in, which goes on into the session: its receipt leaves out "run start" and the star.
+    Exits 1, writing nothing, on a request it cannot honour.
+    """
     config_path = resolve_config_dir(config_dir)
     config_path.mkdir(parents=True, exist_ok=True)
     config_file = config_path / "config.yaml"
 
-    # Prompt before overwrite
     if config_file.exists() and not force:
-        overwrite = Confirm.ask(
-            f"Config exists at {config_file}. Overwrite?", default=False
-        )
-        if not overwrite:
-            raise typer.Exit(0)
+        if _existing_config(config_path, config_file, interactive,
+                            changing=endpoint is not None or model is not None):
+            outcome = SetupResult(config_file, False)  # kept: no server was asked this run
+        else:  # a change: overrides.yaml only, and the posture questions are not asked again
+            result, selected_model, _ = _pick_server(config_path, endpoint, model, interactive,
+                                                     changing=True)
+            _write_change(config_path, result, selected_model,
+                          _probe_capabilities(result, selected_model))
+            outcome = SetupResult(config_file, True)
+    else:
+        result, selected_model, server_config = _pick_server(config_path, endpoint, model, interactive)
+        cap = _probe_capabilities(result, selected_model)
+        host_tools_on, memory_on = _choose_toggles(interactive)
+        _write_config(config_path, result, selected_model, cap, server_config, host_tools_on, memory_on)
+        _receipt(config_file, starting)
+        outcome = SetupResult(config_file, True)
+    return outcome
 
-    # ------------------------------------------------------------------ #
-    # Provider detection / endpoint override
-    # ------------------------------------------------------------------ #
+
+def _existing_config(config_path: Path, config_file: Path, interactive: bool, *,
+                     changing: bool = False) -> bool:
+    """A config is already there and --force was not given: True keeps it (the caller is done),
+    False goes on to change it — in overrides.yaml, never config.yaml, so a re-run never wipes a
+    config. `changing` (an explicit --endpoint/--model) is the request to change: nothing is asked.
+
+    A config that cannot be read exits 1 first: neither keeping it nor validating a change on top
+    of it would be honest, and `--force` is the way out the message names."""
+    try:
+        provider = ConfigLoader(config_dir=config_path).load_harness().provider
+    except Exception as exc:  # noqa: BLE001 — whatever stops the read is reported, never a traceback
+        # A ConfigValidationError's first line is only the file's name; its first error is the why.
+        first = exc.errors[0] if isinstance(exc, ConfigValidationError) and exc.errors else exc
+        reason = (str(first).splitlines() or [type(exc).__name__])[0]
+        err_console.print(
+            "[bold red]Error:[/bold red] "
+            + escape(f"{config_file} exists but cannot be read ({reason}). Fix it, or run "
+                     "`localharness init --force` to start over."),
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+    if changing:
+        return False
+    if interactive and not Confirm.ask(
+        escape(f"Config exists: {provider.default_model} at {provider.base_url}. Keep it?"),
+        default=True,
+    ):
+        return False
+    console.print("[green]✓[/green] " + escape(f"Kept {config_file}."), soft_wrap=True)
+    if not interactive:
+        console.print(escape("  To start over: localharness init --force"))
+    return True
+
+
+def _pick_server(
+    config_path: Path, endpoint: str | None, model: str | None, interactive: bool, *,
+    changing: bool = False,
+) -> tuple[DetectorResult, str, ManagedServerConfig | None]:
+    """The model server and the model: the explicit --endpoint, else detection — and, finding
+    nothing on a terminal, the guided vLLM setup. A change (`changing`) never sets a server up:
+    finding nothing keeps the config and exits 1. Exits 1 on what it cannot honour."""
     if endpoint is not None:
         # Skip probe — build result manually
         base_url = _build_base_url_for_endpoint(endpoint)
@@ -548,45 +632,45 @@ def init_app(
             suggested_model=model,
             probe_duration_ms=0.0,
         )
-        selected_model = model
-        server_config = None
-    else:
-        console.print("Probing for local LLM...")
-        result = asyncio.run(detect_provider(timeout_seconds=1.0))
-        server_config = None
+        return result, model, None
 
-        if not result.found:
-            console.print("\n[bold red]✗ No local LLM detected.[/bold red]\n")
-            console.print("Checked:")
-            for port in DEFAULT_PORTS:
-                name = _PORT_LABELS.get(port, "unknown")
-                console.print(f"  http://localhost:{port}  ({name})  — connection refused")
-            guided = _guided_setup(config_path)
-            if guided is None:
-                console.print(
-                    "\nStart your LLM server and run 'localharness init' again, or use:"
-                )
-                console.print(
-                    "  localharness init --endpoint http://your-host:port/v1 --model your-model-name"
-                )
-                raise typer.Exit(1)
-            result, selected_model, server_config = guided
-        else:
-            console.print(f"  [green]✓[/green] {result.provider_type} found at {result.base_url}")
+    console.print("Probing for local LLM...")
+    result = asyncio.run(detect_provider(timeout_seconds=1.0))
+    if not result.found:
+        console.print("\n[bold red]✗ No local LLM detected.[/bold red]\n")
+        console.print("Checked:")
+        for port in DEFAULT_PORTS:
+            name = _PORT_LABELS.get(port, "unknown")
+            console.print(f"  http://localhost:{port}  ({name})  — connection refused")
+        if changing:  # guided setup would write a fresh config.yaml — a change never does
+            console.print("\n" + escape(f"Nothing changed: {config_path / 'config.yaml'} is kept."),
+                          soft_wrap=True)
+            raise typer.Exit(1)
+        guided = _guided_setup(config_path) if interactive else None
+        if guided is None:
+            console.print(
+                "\nStart your LLM server and run 'localharness init' again, or use:"
+            )
+            console.print(
+                "  localharness init --endpoint http://your-host:port/v1 --model your-model-name"
+            )
+            raise typer.Exit(1)
+        return guided
 
-            if len(result.models) == 0:
-                err_console.print("[bold red]Error:[/bold red] No models available at detected endpoint.")
-                raise typer.Exit(1)
-            elif len(result.models) == 1:
-                selected_model = result.models[0]
-                console.print(f"  Model: [bold]{selected_model}[/bold] (auto-selected)")
-            else:
-                # Multiple models — check for hot model on Ollama, otherwise prompt
-                selected_model = _select_model(result)
+    console.print(f"  [green]✓[/green] {result.provider_type} found at {result.base_url}")
+    if len(result.models) == 0:
+        err_console.print("[bold red]Error:[/bold red] No models available at detected endpoint.")
+        raise typer.Exit(1)
+    if len(result.models) == 1:
+        console.print(f"  Model: [bold]{result.models[0]}[/bold] (auto-selected)")
+        return result, result.models[0], None
+    # Multiple models — the one --model named, Ollama's hot model, a question, or the first
+    return result, _select_model(result, model, interactive), None
 
-    # ------------------------------------------------------------------ #
-    # Capability probe
-    # ------------------------------------------------------------------ #
+
+def _probe_capabilities(result: DetectorResult, selected_model: str) -> CapabilityResult:
+    """Ask the chosen server for its tool-calling mode; exit 1, writing nothing, when it never
+    answered."""
     llm_cfg = LLMConfig(
         base_url=result.base_url,
         model=selected_model,
@@ -610,52 +694,50 @@ def init_app(
         console.print("  [green]✓[/green] Tool calling: native")
     else:
         console.print("  [yellow]⚠[/yellow]  Tool calling: XML fallback (less reliable than native)")
+    return cap
 
-    # #151: the two most-asked posture choices, one question each. TTY-gated exactly like
-    # _guided_setup — a scripted init is never blocked on a prompt and gets today's defaults
-    # (host tools on, memory on). Both are ordinary layered keys (org.permissions.mode,
-    # memory.enabled), so a project can flip either per-workspace in .localharness/config.yaml
-    # (the scaffold template shows both).
-    host_tools_on = True
-    memory_on = True
-    if sys.stdin.isatty():
-        console.print()
-        host_tools_on = Confirm.ask(
-            "  Allow the agent to change this machine — write/edit files, run shell commands?",
-            default=True,
+
+def _choose_toggles(interactive: bool) -> tuple[bool, bool]:
+    """(host tools on, memory on). #151: the two most-asked posture choices. With nobody to ask,
+    today's defaults (both on) and no output; on a terminal ONE question keeps the usual settings,
+    and only a "no" asks the two. Both are ordinary layered keys (org.permissions.mode,
+    memory.enabled), so a project can flip either per-workspace in .localharness/config.yaml (the
+    scaffold template shows both)."""
+    if not interactive:
+        return True, True
+    console.print()
+    if Confirm.ask(
+        "  Keep the usual settings — the agent can change files and run commands, and remembers "
+        "things between sessions?",
+        default=True,
+    ):
+        return True, True
+    host_tools_on = Confirm.ask(
+        "  Allow the agent to change this machine — write/edit files, run shell commands?",
+        default=True,
+    )
+    memory_on = Confirm.ask(
+        "  Enable persistent memory — facts saved and recalled across sessions?",
+        default=True,
+    )
+    if not host_tools_on:
+        console.print(
+            "  [green]✓[/green] Read-only sessions (org.permissions.mode: read-only — "
+            "flip it there any time)"
         )
-        memory_on = Confirm.ask(
-            "  Enable persistent memory — facts saved and recalled across sessions?",
-            default=True,
+    if not memory_on:
+        console.print(
+            "  [green]✓[/green] Memory off (memory.enabled: false — existing memory "
+            "files stay on disk, untouched)"
         )
-        if not host_tools_on:
-            console.print(
-                "  [green]✓[/green] Read-only sessions (org.permissions.mode: read-only — "
-                "flip it there any time)"
-            )
-        if not memory_on:
-            console.print(
-                "  [green]✓[/green] Memory off (memory.enabled: false — existing memory "
-                "files stay on disk, untouched)"
-            )
+    return host_tools_on, memory_on
 
-    # ------------------------------------------------------------------ #
-    # Write config
-    # ------------------------------------------------------------------ #
-    from pydantic_yaml import to_yaml_str
 
-    # Fit the context budget to the served window when the provider reports it —
-    # a budget above the real window disables compaction and kills long turns.
-    # Stamp fresh configs at the current shipped-defaults revision so the first `start` never
-    # spuriously migrates and any later deliberate removal of a default is respected (the
-    # revision gate in config/migrate.py only protects configs stamped current at birth).
-    org_kwargs: dict = {
-        "default_model": selected_model,
-        "permissions": PermissionConfig(
-            defaults_revision=CURRENT_DEFAULTS_REVISION,
-            **({} if host_tools_on else {"mode": "read-only"}),
-        ),
-    }
+def _served_window(result: DetectorResult) -> int | None:
+    """The served context window to write as the context budget, or None — saying which, and why.
+
+    Fit the context budget to the served window when the provider reports it — a budget above
+    the real window disables compaction and kills long turns."""
     if result.provider_type == "llamacpp":
         max_len = _detect_llamacpp_nctx(result.base_url)
     elif result.provider_type == "lmstudio":
@@ -668,12 +750,12 @@ def init_app(
     # reserves nothing (<= 1_024) cannot run at all — `start` refuses it, so writing it would only
     # persist a budget the next command rejects.
     if max_len and max_len >= 1_000 and response_reserve(max_len) > 0:
-        org_kwargs["context"] = ContextConfig(max_context_tokens=max_len)
         console.print(
             f"  [green]✓[/green] Context budget: {max_len:,} tokens "
             f"(the full served window — the harness reserves output room inside it)"
         )
-    elif max_len:
+        return max_len
+    if max_len:
         console.print(
             f"  [yellow]⚠[/yellow]  The served window ({max_len:,} tokens) is too small to run "
             "the harness — at or below 1,024 tokens nothing is left to hold the model's reply "
@@ -689,7 +771,52 @@ def init_app(
             "[bold]org.context.max_context_tokens[/bold] in config.yaml (an oversized message "
             "hard-errors on recent Ollama)."
         )
+    return None
 
+
+def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool) -> Path:
+    """Write config.yaml (owner-only), the agents/ folder and plugins/README.md beside it."""
+    from pydantic_yaml import to_yaml_str
+
+    config_file = config_path / "config.yaml"
+    # memory.enabled is the memory plugin's key (MEMP-06); the deprecated org.memory_enabled is
+    # never written, so a fresh install has nothing to warn about. On is the default: no key.
+    text = to_yaml_str(harness, exclude={"org": {"memory_enabled"}})
+    config_file.write_text(text + ("" if memory_on else "memory:\n  enabled: false\n"), encoding="utf-8")
+    # Owner-only: this file carries `provider.api_key` and the deny/ask policy every session on
+    # this machine is gated by. `write_text` lands it at 0664 under the usual 022 umask.
+    restrict_config_file(config_file)
+    # #53: create the agents directory alongside the config. doctor names `init` as the remedy
+    # for a missing agents dir, so init must actually create it (previously only `start` and
+    # `doctor --fix` did, which left that remedy non-functional).
+    (config_path / "agents").mkdir(parents=True, exist_ok=True)
+    # ENAB-05. Written only when absent: a `--force` re-init replaces config.yaml, never notes the
+    # user keeps in this README.
+    plugins_readme = config_path / "plugins" / "README.md"
+    plugins_readme.parent.mkdir(exist_ok=True)
+    if not plugins_readme.exists():
+        plugins_readme.write_text(GLOBAL_PLUGINS_README, encoding="utf-8")
+    return config_file
+
+
+def _write_config(
+    config_path: Path, result: DetectorResult, selected_model: str, cap: CapabilityResult,
+    server_config: ManagedServerConfig | None, host_tools_on: bool, memory_on: bool,
+) -> Path:
+    """A fresh config.yaml from the server found, the model chosen and the two posture answers."""
+    # Stamp fresh configs at the current shipped-defaults revision so the first `start` never
+    # spuriously migrates and any later deliberate removal of a default is respected (the
+    # revision gate in config/migrate.py only protects configs stamped current at birth).
+    org_kwargs: dict = {
+        "default_model": selected_model,
+        "permissions": PermissionConfig(
+            defaults_revision=CURRENT_DEFAULTS_REVISION,
+            **({} if host_tools_on else {"mode": "read-only"}),
+        ),
+    }
+    window = _served_window(result)
+    if window:
+        org_kwargs["context"] = ContextConfig(max_context_tokens=window)
     harness = HarnessConfig(
         version="1",
         provider=ProviderConfig(
@@ -704,31 +831,62 @@ def init_app(
         org=OrgConfig(**org_kwargs),
         server=server_config,
     )
-    # memory.enabled is the memory plugin's key (MEMP-06); the deprecated org.memory_enabled is
-    # never written, so a fresh install has nothing to warn about. On is the default: no key.
-    text = to_yaml_str(harness, exclude={"org": {"memory_enabled"}})
-    config_file.write_text(text + ("" if memory_on else "memory:\n  enabled: false\n"), encoding="utf-8")
-    # Owner-only: this file carries `provider.api_key` and the deny/ask policy every session on
-    # this machine is gated by. `write_text` lands it at 0664 under the usual 022 umask.
-    restrict_config_file(config_file)
-    # #53: create the agents directory alongside the config. doctor names `init` as the remedy
-    # for a missing agents dir, so init must actually create it (previously only `start` and
-    # `doctor --fix` did, which left that remedy non-functional).
-    (config_path / "agents").mkdir(parents=True, exist_ok=True)
-    # ENAB-05. Written only when absent: a re-init the user said yes to replaces config.yaml, never
-    # notes they keep in this README.
-    plugins_readme = config_path / "plugins" / "README.md"
-    plugins_readme.parent.mkdir(exist_ok=True)
-    if not plugins_readme.exists():
-        plugins_readme.write_text(GLOBAL_PLUGINS_README, encoding="utf-8")
+    return _write_harness(config_path, harness, memory_on)
+
+
+def _write_change(config_path: Path, result: DetectorResult, selected_model: str,
+                  cap: CapabilityResult) -> Path:
+    """A re-run's change: the new server and model go to the machine's overrides.yaml through the
+    validated overlay write `/model` uses (persist_default_model's precedent) — validated as the
+    merged config the next `start` reads, so config.yaml stays byte-identical and a change that
+    does not validate writes nothing."""
+    from localharness.cli.components_cmd import _validate_overlay
+    from localharness.registry import set_value_in_dict
+
+    loader = ConfigLoader(config_dir=config_path)
+    overlay = load_overlay(loader.user_overlay_path)
+    for path, value in (
+        ("provider.provider_type", result.provider_type),
+        ("provider.base_url", result.base_url),
+        ("provider.default_model", selected_model),
+        ("provider.available_models", list(result.models)),
+        ("provider.supports_function_calling", cap.tool_call_mode == "native"),
+        ("org.default_model", selected_model),
+    ):
+        set_value_in_dict(overlay, path, value)
+    window = _served_window(result)
+    if window:
+        set_value_in_dict(overlay, "org.context.max_context_tokens", window)
+    try:
+        _validate_overlay(loader, "provider.base_url", overlay)
+    except ValueError as exc:  # a pydantic ValidationError is one
+        err_console.print(
+            "[bold red]Error:[/bold red] "
+            + escape(f"the new settings do not validate: {exc}. Nothing was written."),
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+    atomic_write_overlay(loader.user_overlay_path, overlay)
+    console.print(
+        "[green]✓[/green] "
+        + escape(f"Updated {loader.user_overlay_path} — your config.yaml is unchanged."),
+        soft_wrap=True,
+    )
+    return loader.user_overlay_path
+
+
+def _receipt(config_file: Path, starting: bool) -> None:
+    """The last lines of a fresh setup. A first `start` goes straight on into the session, so it
+    is not told to run `start`."""
     # escape(): the receipt runs AFTER config.yaml is on disk, so an unescaped markup-named config
     # dir crashed here and exited 1 — init reporting failure for a setup that had just succeeded.
     console.print("\n[green]✓[/green] " + escape(f"LocalHarness configured at {config_file}."), soft_wrap=True)
-    console.print("  Run 'localharness start' to begin.")
-    console.print(
-        "\n[dim]★ If this saves you an API bill, a star helps others find it →[/dim] "
-        "[cyan]https://github.com/ahwurm/localharness[/cyan]"
-    )
+    if not starting:
+        console.print("  Run 'localharness start' to begin.")
+        console.print(
+            "\n[dim]★ If this saves you an API bill, a star helps others find it →[/dim] "
+            "[cyan]https://github.com/ahwurm/localharness[/cyan]"
+        )
 
 
 def _guided_setup(
@@ -859,20 +1017,32 @@ def _guided_setup(
     return result, served, srv
 
 
-def _select_model(result: DetectorResult) -> str:
-    """Select model from multiple available options. Auto-selects hot Ollama model if unambiguous."""
+def _select_model(result: DetectorResult, model: str | None, interactive: bool) -> str:
+    """Select one of several served models: the one --model names, Ollama's hot model when
+    unambiguous, the user's pick on a terminal — else the first, saying how to pick another."""
+    if model in result.models:
+        return model
     if result.provider_type == "ollama":
         hot = _get_ollama_hot_model(result.base_url)
         if hot and hot in result.models:
             console.print(f"  Model: [bold]{hot}[/bold] (active — auto-selected)")
             return hot
 
-    console.print("\nAvailable models:")
-    for i, m in enumerate(result.models, start=1):
-        console.print(f"  {i}. {m}")
-    choice = IntPrompt.ask("Select model", default=1)
-    idx = max(1, min(choice, len(result.models))) - 1
-    return result.models[idx]
+    if interactive:
+        console.print("\nAvailable models:")
+        for i, m in enumerate(result.models, start=1):
+            console.print(f"  {i}. {m}")
+        choice = IntPrompt.ask("Select model", default=1)
+        idx = max(1, min(choice, len(result.models))) - 1
+        return result.models[idx]
+    first = result.models[0]
+    console.print(
+        "  Model: [bold]" + escape(first) + "[/bold] "
+        + escape(f"(the first of {len(result.models)} served — `localharness init --endpoint "
+                 f"{result.base_url} --model <name>` picks another)"),
+        soft_wrap=True,
+    )
+    return first
 
 
 def _get_ollama_hot_model(base_url: str) -> str | None:

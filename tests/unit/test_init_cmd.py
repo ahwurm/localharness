@@ -288,12 +288,12 @@ def test_the_plugins_readme_names_both_install_forms(mock_client_cls, mock_detec
         assert phrase in text, phrase
 
 
-@pytest.mark.parametrize("flags, answer", [(["--force"], None), ([], "y\n")],
-                         ids=["force", "confirmed"])
+@pytest.mark.parametrize("flags, rewritten", [(["--force"], True), ([], False)], ids=["force", "kept"])
 @patch("localharness.cli.init_cmd.detect_provider")
 @patch("localharness.cli.init_cmd.LLMClient")
-def test_reinit_keeps_an_edited_plugins_readme(mock_client_cls, mock_detect, flags, answer, tmp_path):
-    """A re-init the user said yes to rewrites config.yaml — never a plugins README they edited."""
+def test_reinit_keeps_an_edited_plugins_readme(mock_client_cls, mock_detect, flags, rewritten, tmp_path):
+    """A --force re-init rewrites config.yaml and a plain one keeps it — neither touches a plugins
+    README the user edited."""
     mock_detect.return_value = _make_detector_result()
     mock_client = MagicMock()
     mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
@@ -301,12 +301,13 @@ def test_reinit_keeps_an_edited_plugins_readme(mock_client_cls, mock_detect, fla
     assert runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"]).exit_code == 0
     readme, config = tmp_path / "plugins" / "README.md", tmp_path / "config.yaml"
     readme.write_text("# my own notes\n", encoding="utf-8")
-    config.write_text("version: '1'\nold: true\n", encoding="utf-8")
+    config.write_text("version: '1'\nprovider:\n  provider_type: ollama\n  base_url: http://original/v1\n"
+                      "  default_model: old-model\n", encoding="utf-8")
 
-    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), *flags], input=answer)
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), *flags])
 
     assert result.exit_code == 0, result.output
-    assert "old: true" not in config.read_text(), "premise: the second init reached its writes"
+    assert ("old-model" not in config.read_text()) is rewritten
     assert readme.read_text(encoding="utf-8") == "# my own notes\n"
 
 
@@ -364,7 +365,7 @@ def test_init_no_server(mock_detect, tmp_path):
 @patch("localharness.cli.init_cmd.detect_provider")
 @patch("localharness.cli.init_cmd.LLMClient")
 def test_init_existing_config_no_force(mock_client_cls, mock_detect, tmp_path):
-    """config.yaml exists, --force not set -> prompts with 'n' -> config not overwritten."""
+    """config.yaml exists, --force not set, no terminal -> kept as it is (exit 0), never probed."""
     # Create existing config
     config_file = tmp_path / "config.yaml"
     original_content = "version: '1'\nprovider:\n  base_url: http://original\n  provider_type: ollama\n  default_model: old-model\n"
@@ -375,10 +376,12 @@ def test_init_existing_config_no_force(mock_client_cls, mock_detect, tmp_path):
     mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
     mock_client_cls.return_value = mock_client
 
-    # User answers "n" to the overwrite prompt
-    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path)], input="n\n")
-    # Should not overwrite
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "Kept" in result.output
     assert config_file.read_text() == original_content
+    mock_detect.assert_not_called()  # a kept config is not probed
 
 
 @patch("localharness.cli.init_cmd.detect_provider")

@@ -248,7 +248,7 @@ def test_a_fresh_init_starts_with_no_deprecation_line(tmp_path, monkeypatch, fak
     fake_sys.stdin.isatty.return_value = True
     monkeypatch.setattr(init_cmd, "sys", fake_sys)
     fake_confirm = MagicMock()
-    fake_confirm.ask.side_effect = [True, memory_on]
+    fake_confirm.ask.side_effect = [False, True, memory_on]  # usual settings: no; host tools; memory
     monkeypatch.setattr(init_cmd, "Confirm", fake_confirm)
     result = runner.invoke(app, ["init", "--config-dir", str(global_dir), "--force"])
     assert result.exit_code == 0, result.output
