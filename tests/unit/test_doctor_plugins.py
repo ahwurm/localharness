@@ -273,7 +273,10 @@ def test_an_unreadable_config_is_one_issue_not_two(cfg, recorded) -> None:
 
     assert _section(out) == ["i  Plugins: not checked — the config above could not be read"]
     assert "config-invalid" in recorded and _plugin_failures(recorded) == [], recorded
-    assert out.count("unclosed") == 1, out  # the parse error is shown once, by the config check
+    # the parse error is shown once, by the config check — by file, line and the parser's message;
+    # the source line it broke on is never printed (R16), so "unclosed" (the file's text) is absent
+    assert out.count("while parsing a flow sequence") == 1, out
+    assert "unclosed" not in out, out
 
 
 # --------------------------------------------------------------------------- the real example plugin
