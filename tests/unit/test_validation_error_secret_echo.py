@@ -84,33 +84,19 @@ def _model_home(tmp_path):
     return g
 
 
-def test_model_name_refusal_never_echoes_the_key(tmp_path, monkeypatch) -> None:
+def test_the_proposers_model_as_the_main_one_is_accepted_and_never_echoes_the_key(tmp_path, monkeypatch) -> None:
+    """The main model may be the proposer's model too (a second instance of it): `localharness
+    model <that model>` persists it. Nothing it prints carries the key, and the raw key stays put."""
     from localharness.cli import model_ops
 
     g = _model_home(tmp_path)
     monkeypatch.setattr(model_ops, "list_live_models", lambda base_url, *a, **k: (["test-model", "p-model"], True))
-    before = (g / "overrides.yaml").read_bytes()
     result = runner.invoke(app, ["model", "p-model", "--config-dir", str(g)])
 
-    assert result.exit_code == 2, result.output
+    assert result.exit_code == 0, result.output
     _clean(result.stdout, result.stderr, repr(result.exception))
-    assert "proposer.model must differ" in " ".join(result.output.split()), result.output
-    assert (g / "overrides.yaml").read_bytes() == before
-
-
-def test_persisting_a_colliding_default_raises_without_the_key(tmp_path) -> None:
-    """The error /model prints after an in-session swap ("persisting the new default failed")."""
-    import asyncio
-
-    from localharness.cli import model_ops
-    from localharness.config.loader import ConfigLoader
-
-    g = _model_home(tmp_path)
-    harness = ConfigLoader(config_dir=g).load_harness()
-    with pytest.raises(ValueError) as info:
-        asyncio.run(model_ops.persist_default_model(harness, "p-model", config_dir=g))
-    _clean(str(info.value), repr(info.value), repr(info.value.__cause__))
-    assert "proposer.model must differ" in str(info.value)
+    saved = yaml.safe_load((g / "overrides.yaml").read_text(encoding="utf-8"))
+    assert saved["provider"]["default_model"] == "p-model" and saved["proposer"] == {"api_key": KEY}
 
 
 def test_persisting_a_bad_active_endpoint_raises_without_the_input(tmp_path) -> None:

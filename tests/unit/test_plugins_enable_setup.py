@@ -334,14 +334,16 @@ def test_sections_answers_land_in_one_core_write(g, scripted) -> None:
     assert "set proposer.model = 'p-model'" in result.output
 
 
-def test_a_sections_answer_the_core_settings_refuse_writes_nothing(g, scripted) -> None:
+def test_the_main_model_id_at_another_address_is_accepted_and_written(g, scripted) -> None:
+    """The proposer may be the main model again, served at the proposer's own address."""
     _, answers = scripted
-    answers[:] = ["http://p/v1", "test-model"]  # provider.default_model: the proposer must differ
+    answers[:] = ["http://p/v1", "test-model"]  # = provider.default_model
     result = _enable(g, "secty")
 
-    assert result.exit_code == 2, result.output
-    assert "proposer.model must differ" in result.output
-    assert not (g / "overrides.yaml").exists()
+    assert result.exit_code == 0, result.output
+    assert _overrides(g) == {"secty": {"enabled": True},
+                             "proposer": {"base_url": "http://p/v1", "model": "test-model"}}
+    assert "set proposer.model = 'test-model'" in result.output
 
 
 def test_half_a_sections_answer_writes_nothing(g, scripted) -> None:
@@ -372,19 +374,15 @@ def test_sections_set_values_are_machine_level(tmp_path, monkeypatch, fake_home,
     assert not (layout.ws_dir / "overrides.yaml").exists()
 
 
-def test_a_refused_sections_write_never_echoes_a_stored_secret(g, no_prompt) -> None:
-    """pydantic's str(ValidationError) carries input_value — the whole merged config, the stored
-    proposer.api_key included — so a refusal must never print it. pydantic shortens that repr to
-    its head and tail, so the key is written LAST, as a hand-written config.yaml has it: sorted
-    keys would hide it in the cut and this test could not see a leak."""
+def test_a_refused_sections_write_never_echoes_a_typed_secret(g, no_prompt) -> None:
+    """pydantic's str(ValidationError) carries input_value — for a missing field, the section
+    around it, the typed proposer.api_key included — so a refusal must never print it."""
     secret = "SENTINEL-KEY-52"
-    cfg = dict(_CONFIG, proposer={"base_url": "http://p/v1", "model": "p-old", "api_key": secret})
-    (g / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     result = _enable(g, "secty", "--set", "proposer.base_url=http://p/v1",
-                     "--set", "proposer.model=test-model")
+                     "--set", f"proposer.api_key={secret}")
 
     assert result.exit_code == 2, result.output
-    assert "proposer.model must differ" in result.output
+    assert "proposer.model: Field required" in " ".join(result.output.split())
     for where in (result.stdout, result.stderr, repr(result.exception)):
         assert secret not in where, where
     assert not (g / "overrides.yaml").exists()

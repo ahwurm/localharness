@@ -2,7 +2,8 @@
 
 Composes Phase 13/14/15 primitives + one model call into the mutation generator:
   - reads FAILED *train* traces (the reward-signal evidence),
-  - asks a STRONGER, DISTINCT model (ProposerConfig — never the main provider model)
+  - asks the proposer model through its OWN config block (ProposerConfig — never the main
+    `provider` block; the main model again is fine when served at the proposer's address)
     for ONE change to ONE component,
   - returns an archive-shape Proposal {"before": current_value, "after": typed_after}.
 
@@ -283,7 +284,7 @@ async def propose(
     before = entry.current_value
 
     # (B) Build the proposer model client from ProposerConfig (PROP-02) — NEVER
-    #     the main harness model. Tests inject `llm` to stay hermetic.
+    #     the main `provider` block. Tests inject `llm` to stay hermetic.
     if llm is None:
         if cfg.proposer is None:
             raise ProposerError(

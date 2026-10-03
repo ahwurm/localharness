@@ -95,16 +95,20 @@ async def test_malformed_proposal_fails_explicitly(proposer_corpus, proposer_res
 # --------------------------------------------------------------------------- #
 
 
-async def test_uses_proposer_config_not_provider(proposer_corpus, proposer_results, monkeypatch):
-    """PROP-02: the LLMConfig built for the proposer carries proposer.model, NOT provider.default_model."""
+@pytest.mark.parametrize("main_model_again", [False, True], ids=["another-model", "the-main-model-again"])
+async def test_uses_proposer_config_not_provider(proposer_corpus, proposer_results, monkeypatch,
+                                                 main_model_again):
+    """PROP-02: the LLMConfig built for the proposer comes from the proposer block — its model, its
+    address and its key — never from `provider`, also when its model is the main model again (a
+    second local instance at its own address)."""
     import localharness.autoresearch.proposer as prop_mod
+    from localharness.config.models import HarnessConfig
 
     captured = {}
 
     class _SpyClient:
         def __init__(self, llm_cfg):
-            captured["model"] = llm_cfg.model
-            captured["base_url"] = llm_cfg.base_url
+            captured.update(model=llm_cfg.model, base_url=llm_cfg.base_url, api_key=llm_cfg.api_key)
             self.config = llm_cfg
 
         async def detect_capabilities(self):
@@ -123,6 +127,10 @@ async def test_uses_proposer_config_not_provider(proposer_corpus, proposer_resul
 
     monkeypatch.setattr(prop_mod, "LLMClient", _SpyClient, raising=False)
     cfg = _cfg()
+    if main_model_again:
+        cfg = HarnessConfig.model_validate({**cfg.model_dump(mode="json"), "proposer": {
+            "base_url": "http://localhost:11435/v1", "model": cfg.provider.default_model,
+            "api_key": "sk-PROPOSER"}})
     await propose(
         "agent.role",
         [proposer_results["train_run_id"]],
@@ -130,8 +138,11 @@ async def test_uses_proposer_config_not_provider(proposer_corpus, proposer_resul
         corpus_path=proposer_corpus,
         results_path=proposer_results["results"],
     )
-    assert captured["model"] == cfg.proposer.model
-    assert captured["model"] != cfg.provider.default_model
+    p = cfg.proposer
+    assert captured == {"model": p.model, "base_url": p.base_url, "api_key": p.api_key.get_secret_value()}
+    assert (captured["model"] == cfg.provider.default_model) is main_model_again
+    if main_model_again:
+        assert captured["base_url"] != cfg.provider.base_url and captured["api_key"] == "sk-PROPOSER"
 
 
 # --------------------------------------------------------------------------- #

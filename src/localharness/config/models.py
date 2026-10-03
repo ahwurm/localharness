@@ -1609,9 +1609,12 @@ class ProviderConfig(BaseModel):
 
 
 class ProposerConfig(BaseModel):
-    """Separate stronger-model config for the autoresearch proposer (PROP-02).
+    """The autoresearch proposer's own config block, separate from `provider` (PROP-02): the
+    proposer is called at its own address with its own key, never through the main provider.
     NO default model/base_url — explicit choice forced (mirrors ScenarioSpec.slice).
-    Frontier example: base_url=https://api.anthropic.com/v1, model=claude-..., is_local=False.
+    Its model may be the main model again, answering at the proposer's address (a second local
+    instance, or the same local server); a cloud model needs `api_key`.
+    Cloud example: base_url=https://api.anthropic.com/v1, model=claude-..., api_key=<key>.
     Local 120B+ example: base_url=http://127.0.0.1:11434/v1, model=gpt-oss:120b,
     is_local=True, timeout_seconds=600 (LLMClient requires >=300s when is_local)."""
     model_config = ConfigDict(frozen=False, extra="forbid")
@@ -1619,7 +1622,10 @@ class ProposerConfig(BaseModel):
         "OpenAI-compatible base URL for the proposer model. Machine-level only: only the global "
         "config.yaml or overrides.yaml may set it; a workspace value that differs is ignored with a "
         "startup warning."))
-    model: str = Field(description="Proposer model id — MUST differ from provider.default_model.")
+    model: str = Field(description=(
+        "Proposer model id. The main model again is fine when it answers at the proposer's "
+        "address (a second local instance, or the same local server); a cloud model needs "
+        "`api_key`."))
     # SecretStr (G2): masked wherever it is shown; proposer.py reads .get_secret_value().
     api_key: SecretStr = Field(default=SecretStr("none"),
                                description="API key ('none' for local). Machine-level only, as base_url is.")
@@ -1821,13 +1827,3 @@ class HarnessConfig(BaseModel):
     sentinel: SentinelConfig = Field(
         default_factory=SentinelConfig,
         description="Eval-sentinel thresholds (REP-03/04). Addressable via `sentinel.{overfit_gap_threshold,duplicate_similarity,duplicate_consecutive_k,saturation_k,saturation_ceiling}`.")
-
-    @model_validator(mode="after")
-    def _proposer_model_distinct(self) -> "HarnessConfig":
-        if self.proposer is not None and self.proposer.model == self.provider.default_model:
-            raise ValueError(
-                "proposer.model must differ from provider.default_model "
-                f"(both are {self.provider.default_model!r}) — the proposer judges the main "
-                "model's work, so it cannot be the same model."
-            )
-        return self

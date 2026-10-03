@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 from typer.testing import CliRunner
 
 from localharness.autoresearch.plugin import AutoresearchPlugin
@@ -47,10 +47,11 @@ def test_the_key_is_a_secret_with_the_same_values():
     assert KEY not in repr(ProposerConfig(**_PROPOSER)) and KEY not in str(ProposerConfig(**_PROPOSER))
 
 
-def test_the_distinct_model_rule_still_holds():
-    with pytest.raises(ValidationError):
-        HarnessConfig.model_validate({"version": "1", "provider": _PROVIDER,
-                                      "proposer": {**_PROPOSER, "model": "test-model"}})
+def test_the_main_model_again_is_accepted_and_its_key_stays_secret():
+    cfg = HarnessConfig.model_validate({"version": "1", "provider": _PROVIDER,
+                                        "proposer": {**_PROPOSER, "model": "test-model"}})
+    assert cfg.proposer.model == cfg.provider.default_model
+    assert cfg.proposer.api_key.get_secret_value() == KEY and KEY not in repr(cfg)
 
 
 async def test_the_proposer_client_receives_the_raw_key(proposer_corpus, proposer_results, monkeypatch):

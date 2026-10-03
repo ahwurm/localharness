@@ -1,5 +1,6 @@
-"""autoresearch's setup action: once `plugins enable autoresearch` has written the proposer's address
-and model, one GET <base_url>/models (3 s) checks that the proposer answers and serves that model.
+"""autoresearch's setup action: once `plugins enable autoresearch` has written the proposer's address,
+model and (for a cloud API) key, one GET <base_url>/models (3 s) checks that the proposer answers and
+serves that model.
 It spends nothing on an OpenAI-compatible server and runs only in the step: doctor stays offline (it
 may be a paid API). The api key is sent, never shown.
 
@@ -61,6 +62,17 @@ def test_nothing_to_check_without_a_readable_proposer(tmp_path, server, config) 
     ctx = _ctx(tmp_path, text="provider: [unclosed\n" if config == "unreadable" else None)
     assert _act(ctx) == []
     assert server[0] == []
+
+
+def test_the_main_model_again_at_its_own_address_is_checked_like_any_proposer(tmp_path, server) -> None:
+    """provider.default_model is test-model: a second instance of it at the proposer's address."""
+    seen, answer = server
+    answer[0] = lambda request: httpx.Response(200, json={"object": "list", "data": [{"id": "test-model"}]})
+    rows = _act(_ctx(tmp_path, {**_PROPOSER, "model": "test-model"}))
+
+    assert [str(r.url) for r in seen] == [f"{URL}/models"]
+    assert rows == [Check(name="autoresearch-proposer", status="pass",
+                          detail=f"the proposer answers at {URL} and serves test-model")]
 
 
 def test_a_proposer_that_serves_the_model_passes(tmp_path, server) -> None:

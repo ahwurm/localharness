@@ -258,18 +258,16 @@ def _harness_dict(**overrides) -> dict:
     return data
 
 
-def test_proposer_model_must_differ():
-    """PROP-02: proposer.model == provider.default_model → ValidationError (distinct-model rule)."""
+def test_the_main_model_again_is_a_valid_proposer():
+    """proposer.model == provider.default_model validates: the main model served again, at a second
+    local endpoint or at the main server itself. PROP-02 still holds — the proposer is its own
+    block, called at its own address, never through `provider`."""
     from localharness.config.models import HarnessConfig
 
-    bad = _harness_dict(
-        proposer={
-            "base_url": "http://localhost:11434/v1",
-            "model": "gpt-oss:120b",  # same as provider.default_model
-        }
-    )
-    with pytest.raises(ValidationError):
-        HarnessConfig.model_validate(bad)
+    for base_url in ("http://localhost:11435/v1", "http://localhost:11434/v1"):  # second instance; same server
+        cfg = HarnessConfig.model_validate(_harness_dict(
+            proposer={"base_url": base_url, "model": "gpt-oss:120b"}))  # = provider.default_model
+        assert (cfg.proposer.base_url, cfg.proposer.model) == (base_url, cfg.provider.default_model)
 
 
 def test_proposer_config_optional():
@@ -435,16 +433,3 @@ def test_managed_server_non_ollama_launch_validators_unchanged(kw):
     from localharness.config.models import ManagedServerConfig
     with pytest.raises(ValidationError):
         ManagedServerConfig(**kw)
-
-
-def test_the_main_model_refusal_speaks_plainly():
-    """The refusal a person sees names the rule and why, with no internal requirement id."""
-    from localharness.config.models import HarnessConfig
-
-    bad = _harness_dict(proposer={"base_url": "http://localhost:11434/v1", "model": "gpt-oss:120b"})
-    with pytest.raises(ValidationError) as info:
-        HarnessConfig.model_validate(bad)
-    msg = info.value.errors()[0]["msg"]
-    assert "proposer.model must differ from provider.default_model" in msg, msg
-    assert "the proposer judges the main model's work, so it cannot be the same model" in msg, msg
-    assert "PROP-" not in msg, msg
