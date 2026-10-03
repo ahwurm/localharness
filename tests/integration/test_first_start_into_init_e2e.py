@@ -18,6 +18,8 @@ NOT proven: a real model server, a real terminal's rendering.
 """
 from __future__ import annotations
 
+import asyncio
+import gc
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -59,12 +61,14 @@ def _hermetic(monkeypatch):
 
 
 def _machine(g: Path, monkeypatch, *, configured: bool = False) -> list:
-    """The session's boundaries stubbed, the REPL a spy. `_stub_start_boundaries` writes a config: a
+    """The session's boundaries stubbed, the REPL a spy that collects garbage inside the session's loop
+    (a real session's GC gets there sooner or later). `_stub_start_boundaries` writes a config: a
     first start removes it, a configured one keeps it, pointed at the discard port. Returns the list
     every session that opened appends to."""
     sessions: list = []
 
     async def repl_run(self):
+        gc.collect()
         sessions.append(self)
 
     _stub_start_boundaries(g, monkeypatch, repl_run=repl_run)
@@ -235,3 +239,35 @@ def test_a_first_start_refuses_a_channel_it_cannot_build_before_any_setup(tmp_pa
     detect.assert_not_called()
     assert not (tmp_path / "config.yaml").exists()
     assert sessions == []
+
+
+def test_a_first_start_collects_the_setup_s_open_clients_before_the_session_s_loop(tmp_path, monkeypatch):
+    """init probes the server in event loops of its own and leaves its client open. The openai SDK
+    finalizes such a client by scheduling its close on whatever loop is running when the GC reaches
+    it; inside the session's loop, closing a transport of the setup's closed loop raised "Event loop
+    is closed" on a real terminal. The setup's garbage is collected before the session's loop runs."""
+    finalized_in: list = []
+
+    class _OpenProbeClient:
+        def __init__(self, *_a, **_k):
+            self._cycle = self  # like the SDK's client graph: only the cyclic GC frees it
+
+        async def detect_capabilities(self):
+            gc.collect()  # it lived through the probe's collections, so it sits in the oldest generation
+            return _make_capability_result()
+
+        def __del__(self):
+            try:
+                finalized_in.append(asyncio.get_running_loop())
+            except RuntimeError:
+                finalized_in.append(None)
+
+    sessions = _machine(tmp_path, monkeypatch)
+    _server(monkeypatch)
+    monkeypatch.setattr(init_cmd, "LLMClient", _OpenProbeClient)
+    _terminal(monkeypatch)
+    _questions(monkeypatch, confirms=[True])
+
+    _exited(_start(tmp_path))
+    assert len(sessions) == 1
+    assert finalized_in == [None]  # finalized while no loop ran, not inside the session's

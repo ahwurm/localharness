@@ -1751,6 +1751,11 @@ def start_app(
             if not core_setup(config_dir, endpoint=None, model=None, force=False,
                               interactive=True, starting=True).server_ready:
                 return  # skipped or nothing saved: the setup printed what to do next
+            # The setup probed the server in event loops of its own, now closed. A client it left
+            # open is finalized by scheduling its close on whatever loop is running when the GC
+            # reaches it — inside the session's, that raises "Event loop is closed". Collect now.
+            import gc
+            gc.collect()
     try:
         asyncio.run(_start_async(agent, verbose, debug, config_dir, channel, subagents, model,
                                  list_models, no_input, show_reasoning=show_reasoning))
