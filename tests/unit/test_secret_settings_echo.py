@@ -153,5 +153,21 @@ def test_the_secret_setup_question_hides_its_input(g, monkeypatch) -> None:
     monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
     result = _run(g, "plugins", "enable", "secp")
     assert result.exit_code == 0, result.output
-    assert calls == [{"text": "Token", "hide_input": True}]
+    assert calls == [{"text": "Token", "hide_input": True, "show_default": False}]
+    assert _overrides(g)["secp"]["tok"] == SENTINEL
+
+
+def test_a_stored_secret_is_never_offered_as_the_default(g, monkeypatch) -> None:
+    """Asked again with a token stored: nothing is shown, and Enter keeps the stored token."""
+    _run(g, "plugins", "enable", "secp", "--set", f"tok={SENTINEL}")
+    calls: list[tuple] = []
+
+    def prompt(text, default=None, **kw):
+        calls.append((text, default, kw))
+        return ""
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    result = _run(g, "plugins", "enable", "secp")
+    assert result.exit_code == 0, result.output
+    assert calls == [("Token", "", {"hide_input": True, "show_default": False})]
     assert _overrides(g)["secp"]["tok"] == SENTINEL
