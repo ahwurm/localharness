@@ -2,9 +2,9 @@
 
 Every command that loads the config reports a refusal with the loader's field errors. Each used to
 carry the rejected input as `(got: …)`, and validate printed the same value. For an error on a
-whole section or model (the proposer-must-differ rule; a missing field, whose input is the section
-around it), that input held `proposer.api_key`, and the bounded repr sorts dict keys, so the key was
-printed whatever the file's order. A key typed under a misspelled name, or a removed plugin's
+whole section or model (a missing top-level section such as `provider:`, whose input is the whole
+config; a missing field, whose input is the section around it), that input held `proposer.api_key`,
+and the bounded repr sorts dict keys, so the key was printed whatever the file's order. A key typed under a misspelled name, or a removed plugin's
 leftover section, has no schema that says what is secret, so its value is never shown at all.
 
 Each case stores a long key LAST in config.yaml and checks the whole key and its last 8 characters
@@ -37,7 +37,7 @@ _PROVIDER = {"provider_type": "vllm", "base_url": "http://127.0.0.1:9/v1",
              "default_model": "test-model", "available_models": ["test-model"]}
 
 CASES = {  # what config.yaml holds after `provider:`; each fails validation with the key inside
-    "must-differ": {"proposer": {"base_url": "http://p/v1", "model": "test-model", "api_key": KEY}},
+    "provider-missing": {"provider": None, "proposer": {"base_url": "http://p/v1", "model": "p2", "api_key": KEY}},
     "field-missing": {"proposer": {"base_url": "http://p/v1", "api_key": KEY}},
     "not-a-string": {"proposer": {"base_url": "http://p/v1", "model": "p2", "api_key": INT_KEY}},
     "a-float": {"proposer": {"base_url": "http://p/v1", "model": "p2", "api_key": FLOAT_KEY}},
@@ -78,6 +78,7 @@ def _home(tmp_path, case: str):
     g.mkdir()
     cfg = {"version": "1", "provider": _PROVIDER, "org": {"audit_log_path": str(g / "audit.jsonl")},
            **CASES[case]}
+    cfg = {k: v for k, v in cfg.items() if v is not None}  # None: the section is left out
     (g / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     return g
 
@@ -102,9 +103,9 @@ def test_a_refused_config_never_echoes_the_key(tmp_path, case, command) -> None:
 
 def test_the_refusal_still_says_what_is_wrong(tmp_path) -> None:
     """Masked, not silenced: the field, the rule and the values that are not secret stay."""
-    g = _home(tmp_path, "must-differ")
+    g = _home(tmp_path, "field-missing")
     out = " ".join(runner.invoke(app, ["validate", "--config-dir", str(g)]).output.split())
-    assert "proposer.model must differ from provider.default_model" in out, out
+    assert "proposer.model: Field required" in out, out
     assert components_cmd.SECRET_MASK in out and "http://p/v1" in out, out
 
     g2 = tmp_path / "two"
@@ -159,8 +160,8 @@ def test_a_load_failure_carries_no_key_into_a_traceback(tmp_path) -> None:
     import traceback
 
     with pytest.raises(ConfigValidationError) as info:
-        ConfigLoader(config_dir=_home(tmp_path, "must-differ")).load_harness()
+        ConfigLoader(config_dir=_home(tmp_path, "provider-missing")).load_harness()
     text = "".join(traceback.format_exception(info.value))
-    assert "proposer.model must differ" in text
+    assert "provider: Field required" in text
     for piece in (KEY, TAIL, "input_value"):
         assert piece not in text, text
