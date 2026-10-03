@@ -197,6 +197,29 @@ def test_below_revision_migrate_is_additive_and_leaves_new_fields_absent(compone
     assert harness.org.permissions.defaults_revision == CURRENT_DEFAULTS_REVISION
 
 
+def test_a_current_config_without_the_agents_yaml_deny_stays_without_it(components_home):
+    """A new install's config carries today's shipped list, which no longer holds
+    `write(*/agents/*.yaml)`; neither the planner nor the CLI puts it back."""
+    cfg = _write_v092_config(components_home, deny=list(PermissionConfig().deny_patterns),
+                             revision=CURRENT_DEFAULTS_REVISION)
+
+    assert plan(yaml.safe_load(cfg.read_text())) is None
+    res = runner.invoke(app, ["config", "migrate", "--config-dir", str(components_home)])
+    assert res.exit_code == 0, res.output
+    assert "write(*/agents/*.yaml)" not in _deny_on_disk(cfg)
+
+
+def test_a_v092_config_keeps_its_agents_yaml_deny_through_the_migration(components_home):
+    cfg = _write_v092_config(components_home)
+
+    res = runner.invoke(app, ["config", "migrate", "--config-dir", str(components_home)])
+    assert res.exit_code == 0, res.output
+
+    new_deny = _deny_on_disk(cfg)
+    assert new_deny[: len(V092_DENY)] == V092_DENY
+    assert "write(*/agents/*.yaml)" in new_deny
+
+
 # --------------------------------------------------------------------------- #
 # (c) A /model overlay write on top of the old config round-trips cleanly.
 # --------------------------------------------------------------------------- #

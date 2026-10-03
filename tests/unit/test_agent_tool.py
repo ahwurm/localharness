@@ -28,6 +28,18 @@ def test_agent_tool_description_lists_agents():
     assert "researcher" in schema.description
 
 
+def test_agent_tool_invites_composition_and_names_the_boundary():
+    """Self-extension stays (owner ruling, Option 1), with the owner's boundary: compose
+    specialists from the tools the harness has, never rebuild one of them as a script."""
+    description = _make_agent_tool().info().description
+
+    assert "BUILD a new specialist" in description
+    assert "~/.localharness/agents/<name>.yaml" in description
+    assert ("compose specialists from the existing tools; never write your own tool for something "
+            "the harness already provides (web search, fetch, files, delegation)") in description.lower()
+    assert "localharness start" in description and "~/.localharness/tools/" in description
+
+
 def test_agent_tool_task_description_distills_and_gives_examples():
     """#73(b): the `task` field must steer the model to write a SELF-CONTAINED
     instruction for the subagent, never the user's verbatim sentence — with
