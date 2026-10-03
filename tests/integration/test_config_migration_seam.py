@@ -183,7 +183,9 @@ def test_below_revision_migrate_is_additive_and_leaves_new_fields_absent(compone
 
     # Additive: the shipped defaults are now a subset; original entries kept verbatim at the front.
     new_deny = _deny_on_disk(cfg)
-    assert set(V092_DENY).issubset(set(new_deny))
+    # write(*/agents/*.yaml) left the shipped defaults: a below-revision migrate no longer adds it
+    # (a config that already holds it keeps it)
+    assert (set(V092_DENY) - {"write(*/agents/*.yaml)"}).issubset(set(new_deny))
     assert new_deny[: len(short_deny)] == short_deny
     # Revision stamped; a backup was written.
     on_disk = yaml.safe_load(cfg.read_text())
