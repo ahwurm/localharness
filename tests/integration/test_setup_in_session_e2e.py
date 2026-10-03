@@ -196,6 +196,7 @@ def run(tmp_path, monkeypatch, fake_home, capfd, caplog):
         assert addresses <= {("127.0.0.1", 9)}, f"the sittings dialed {addresses}"
         return s
 
+    _run.machine = s  # a test may seed the machine's files before it runs
     return _run
 
 
@@ -260,6 +261,36 @@ def test_enabling_a_plugin_in_a_session_keeps_the_conversation_and_offers_its_to
     # each sitting contended the real gate in its own loop without "bound to a different event loop"
     assert s.contended == 2
     assert "GET /system_stats" in s.comfy
+
+
+@pytest.mark.plugin("image")
+def test_an_already_configured_plugin_is_switched_on_without_a_question(run):
+    """Set up before (its address stored, the plugin off): no question — the switch, the check,
+    the restart and the indicator (SETUP-06's second half)."""
+    (run.machine.global_dir / "overrides.yaml").write_text(
+        yaml.safe_dump({"image": {"enabled": False, "comfyui_url": COMFY}}), encoding="utf-8")
+    s = run([["hello there", "/plugins enable image"], ["draw a lighthouse"]])
+
+    assert s.prompts == []
+    assert _overrides(s) == {"image": {"enabled": True, "comfyui_url": COMFY}}
+    assert f"✓ image: ComfyUI reachable at {COMFY}" in s.doctor.getvalue()
+    assert s.runs == 2 and len(s.lifecycles) == 2 and s.resets == 1
+    _carried(s)
+    assert "image: on in this session" in s.printed
+    assert "generate_image" in _first_request(s, 2)["tools"]
+
+
+@pytest.mark.plugin("image")
+def test_a_failed_check_never_blocks_the_restart(run, monkeypatch):
+    _fake_comfy(monkeypatch, host="comfy.test", down=True)
+    s = run([["hello there", "/plugins enable image"], ["draw a lighthouse"]])
+
+    assert f"✗ image: ComfyUI unreachable at {COMFY}" in s.doctor.getvalue()
+    assert _overrides(s) == {"image": {"enabled": True, "comfyui_url": COMFY}}  # it wrote
+    assert s.runs == 2 and len(s.lifecycles) == 2
+    _carried(s)
+    assert f"image: on, but its check failed: ComfyUI unreachable at {COMFY}" in s.printed
+    assert "generate_image" in _first_request(s, 2)["tools"]
 
 
 @pytest.mark.plugin("image")
