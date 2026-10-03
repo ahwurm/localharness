@@ -11,7 +11,7 @@ localharness plugins enable autoresearch
 
 Turning it off removes its commands from `localharness --help` and its settings from `components list`, and deletes nothing: the experiment archive and your settings stay. The bench and its sealed holdout are part of core and work either way.
 
-`localharness plugins enable autoresearch` on a terminal, or `/plugins enable autoresearch` in a running session while no proposer is set up, asks the proposer's address and model id and writes both at once; a model equal to your main one is refused, and nothing is written. Then it asks the proposer for its model list once, to check that it answers and serves that model. `doctor` still never contacts it.
+`localharness plugins enable autoresearch` on a terminal, or `/plugins enable autoresearch` in a running session while no proposer is set up, asks the proposer's address and model id and writes both at once; a model equal to your main one is refused, and nothing is written. Then it asks the proposer for its model list once, to check that it answers and serves that model. It reads the address and key from your machine-level config only, as `propose` does, and prints the host before it sends the key; a different address in the project's own config is named and ignored. `doctor` still never contacts it.
 
 ## What it adds
 
@@ -24,7 +24,7 @@ While the plugin is off, running one of its commands prints how to turn it on an
 
 ## Settings
 
-It keeps the core settings it had before it became a plugin, under the same names; none is machine-level only.
+It keeps the core settings it had before it became a plugin, under the same names. `proposer.base_url` and `proposer.api_key` are machine-level only, because the setup check sends the key to that address: a project's own value for either is ignored with a startup warning, and with no proposer address in your global config a project's whole `proposer:` section is ignored.
 
 | Setting | Meaning |
 |---|---|
