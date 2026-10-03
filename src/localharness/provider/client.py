@@ -653,6 +653,13 @@ class LLMClient:
             max_retries=0 if c.is_local else 2,
         )
 
+    async def __aenter__(self) -> LLMClient:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        """`async with LLMClient(...) as client:` closes it on the way out, in the loop that used it."""
+        await self.aclose()
+
     async def aclose(self) -> None:
         """Release the underlying AsyncOpenAI — its httpx connection pool, sockets and fds (#154).
 
