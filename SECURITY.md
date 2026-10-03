@@ -90,7 +90,14 @@ under the approval gate's named gaps), so a change to them asks nothing; nor are
 environment variables and headers, of which only the names are kept, because values are often
 secrets. The first start after upgrading to this release adopts, without asking, the servers that a
 project you had already trusted names at that moment, and your own agent files and tool scripts as
-they are; later changes are what it asks about. Plugin
+they are; later changes are what it asks about. And the record a Yes writes is an ordinary file in
+your config folder, `trusted_workspaces.yaml`: the agent's write and edit tools and the shell writes
+the gate can read reach it only with your approval (in every mode but `unattended`, which approves
+everything), but code the agent runs — through `python_exec`,
+`cruncher_exec` or an inline interpreter, which `auto` runs without asking — can rewrite it like any
+file you own, recording a server as approved or removing a record so that the next start adopts
+what the files hold. These questions guard what the agent writes with its file tools and the shell,
+not what code that is already running can do. Plugin
 code and the org-level guardrails file are never taken from a workspace. Plugins are found only in
 Python packages installed alongside LocalHarness that declare a `localharness.plugins` entry point,
 and in the `plugins/` folder of your global (machine-level) config directory; nothing of a plugin
@@ -246,7 +253,10 @@ global files is never checked, whoever put it there. A project value equal to yo
 treated as yours and left alone. A plugin you install decides for itself which of its settings are
 machine-level only; this list covers the plugins that ship with LocalHarness. The other `org`
 settings a project may set — its name, default model, temperature, output cap, context settings,
-log level and the memory switch — choose nothing outside the project.
+log level and the memory switch — choose nothing outside the project. One key is announced
+differently: a project agent file's `permissions.budget.kill_file` is ignored like the others, but
+its warning names the agent rather than the file and is logged rather than printed in the start
+summary.
 
 ## Human approval gate
 
@@ -508,7 +518,11 @@ named through a variable or a glob, relative to a `cd` earlier in the same comma
 recognised as one; files below a dependency or cache folder in the tools folder (`node_modules`,
 `.venv`, `venv`, `__pycache__`, `.git`, `site-packages`) are not tracked — that is where
 `npm install` and a virtual environment put thousands of files; the scripts and files a confirmed
-command reads are not hashed; and a session started with `--config-dir` pointing somewhere else is
+command reads are not hashed; an MCP server, an embedding model or a looser permission written into
+`config.yaml` or `overrides.yaml` themselves (whose `agent:` section reaches every agent) is not in
+the record a start compares — the settings-file rule is what keeps the agent's file tools out of
+those two files; the record itself is an ordinary file that code the agent runs can rewrite (see
+trust boundaries); and a session started with `--config-dir` pointing somewhere else is
 outside both rules — they read `LOCALHARNESS_DIR`, else `~/.localharness`, so that session's own
 tools folder is not gated and its `config.yaml` is caught only when its folder is named
 `.localharness`. What runs is gated — that is the control, not a promise that the agent
@@ -696,9 +710,10 @@ package, and it is never listed as one of your tool scripts.
 
 ## What `localharness start` contacts
 
-A local-first harness should reach nothing but your model server when it starts, and a start now
-reaches the model server in your config (starting it first, when your config launches one) and
-nothing else. Two downloads can follow later, each once and only when it is needed:
+A local-first harness should reach nothing at start but what you configured. A start reaches the
+model server in your config (starting it first, when your config launches one) and, when you set
+them up, the MCP servers your agent files name and, as the `discord` channel, Discord — nothing
+else. Two downloads can follow later, each once and only when it is needed:
 
 - `huggingface.co`, when memory's embedding model is not on this machine yet. The start summary
   says so in one line, the banner does not wait for it, and the model downloads the first time
@@ -708,10 +723,9 @@ nothing else. Two downloads can follow later, each once and only when it is need
   those count tokens on the server. Offline, the estimate falls back to a byte count and says so
   once.
 
-Beyond those, the network is reached by what you turned on — the MCP servers your agent files name,
-the dispatch plugin's Discord connection — and by what the agent's tools do in the session (a web
-search, a fetched page, a shell command), which the approval gate and the web-fetch rule govern. A
-start with no MCP server configured no longer imports the MCP client library at all.
+Beyond those, the network is reached by what the agent's tools do in the session (a web search, a
+fetched page, a shell command), which the approval gate and the web-fetch rule govern. A start with
+no MCP server configured no longer imports the MCP client library at all.
 
 ## Files the harness writes
 

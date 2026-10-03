@@ -294,6 +294,16 @@ All notable changes to LocalHarness are documented here. The format follows
 - The first start after upgrading adopts, without asking, the MCP servers of a
   project you had already trusted and your own agent files, division files,
   `org.yaml` and tool scripts as they are; only later changes are asked about.
+- The trust store is an ordinary file in your config folder. Code the agent runs
+  through `python_exec`, `cruncher_exec` or an inline interpreter (which `auto`
+  runs without asking) can rewrite it, recording a server as approved or
+  removing a record so the next start adopts what the files hold.
+- An MCP server, an embedding model or a looser permission written into your
+  machine's `config.yaml` or `overrides.yaml` (whose `agent:` section reaches
+  every agent) is not in the record a start confirms; the settings-file rule
+  keeps the agent's file tools out of those two files.
+- In Zed, the mode shown before the first prompt can be one your own agent file
+  sets that the start then withheld.
 - A GET to a public host can still carry data out in its URL: that is
   `web_fetch`'s purpose. `bash_exec` and `python_exec` reach any address.
 - The fetch guard resolves names on this machine, so a setup where only a proxy
@@ -335,6 +345,14 @@ All notable changes to LocalHarness are documented here. The format follows
   QR drawn on a terminal carries the token into its scrollback, and a token an
   older release printed into a log (a `localharness web | tee` log, journald)
   is still there until `--rotate-token` makes it useless.
+- A home-screen phone app installed and paired before the upgrade cannot pair
+  again after a rotation without being reinstalled, as before the upgrade.
+- On Discord, ✅ on a confirm message whose question has already expired does
+  nothing; the question above it says it was denied.
+- Two `org.web_fetch_allow_private` edges fail closed: an allowlisted IPv4
+  network does not admit the same address written as IPv4-mapped IPv6, and an
+  allowlisted link-local IPv6 address is fetched without its zone, so it does
+  not connect.
 - The phone's failed-start message masks the provider's, the endpoints' and the
   proposer's keys only: the Discord token or an MCP server's `env` value quoted
   in that error is shown as it is.
