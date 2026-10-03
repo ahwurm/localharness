@@ -98,17 +98,17 @@ async def test_malformed_proposal_fails_explicitly(proposer_corpus, proposer_res
 @pytest.mark.parametrize("main_model_again", [False, True], ids=["another-model", "the-main-model-again"])
 async def test_uses_proposer_config_not_provider(proposer_corpus, proposer_results, monkeypatch,
                                                  main_model_again):
-    """PROP-02: the LLMConfig built for the proposer comes from the proposer block — its model, its
-    address and its key — never from `provider`, also when its model is the main model again (a
-    second local instance at its own address)."""
+    """PROP-02: every LLMConfig built for the proposer (the capability probe's and the call's) comes
+    from the proposer block — its model, its address and its key — never from `provider`, also
+    when its model is the main model again (a second local instance at its own address)."""
     import localharness.autoresearch.proposer as prop_mod
     from localharness.config.models import HarnessConfig
 
-    captured = {}
+    built = []
 
     class _SpyClient:
         def __init__(self, llm_cfg):
-            captured.update(model=llm_cfg.model, base_url=llm_cfg.base_url, api_key=llm_cfg.api_key)
+            built.append({"model": llm_cfg.model, "base_url": llm_cfg.base_url, "api_key": llm_cfg.api_key})
             self.config = llm_cfg
 
         async def detect_capabilities(self):
@@ -139,10 +139,11 @@ async def test_uses_proposer_config_not_provider(proposer_corpus, proposer_resul
         results_path=proposer_results["results"],
     )
     p = cfg.proposer
-    assert captured == {"model": p.model, "base_url": p.base_url, "api_key": p.api_key.get_secret_value()}
-    assert (captured["model"] == cfg.provider.default_model) is main_model_again
+    want = {"model": p.model, "base_url": p.base_url, "api_key": p.api_key.get_secret_value()}
+    assert built == [want, want]  # the probe client and the call's client
+    assert (p.model == cfg.provider.default_model) is main_model_again
     if main_model_again:
-        assert captured["base_url"] != cfg.provider.base_url and captured["api_key"] == "sk-PROPOSER"
+        assert p.base_url != cfg.provider.base_url and want["api_key"] == "sk-PROPOSER"
 
 
 # --------------------------------------------------------------------------- #

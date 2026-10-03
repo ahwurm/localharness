@@ -404,6 +404,31 @@ def test_autoresearch_a_cloud_key_is_written_raw_and_only_ever_shown_masked(g, t
 
 
 @pytest.mark.plugin("autoresearch")
+def test_autoresearch_enter_at_the_key_keeps_a_stored_key_and_none_clears_it(g, terminal, proposer) -> None:
+    """An empty answer never writes (R5). Moving from a cloud API to a local server with Enter at
+    the key keeps the stored key, and the check sends it to the new address (named in
+    docs/plugins/autoresearch.md and the CHANGELOG's Known limitations); `none` typed there clears it."""
+    (g / "overrides.yaml").write_text(yaml.safe_dump({"proposer": {
+        "base_url": CLOUD_URL, "model": "cloud-model", "api_key": KEY}}), encoding="utf-8")
+    _, answers, _ = terminal
+    seen, _, _ = proposer
+    answers.extend([P_URL, "p-model", "", P_URL, "p-model", "none"])
+
+    kept = _enable(g, "autoresearch")
+    assert kept.exit_code == 0, kept.output
+    assert _overrides(g)["proposer"] == {"base_url": P_URL, "model": "p-model", "api_key": KEY}
+    assert "Contacting the proposer at http://p.test (sending proposer.api_key) …" in kept.output
+    cleared = _enable(g, "autoresearch")
+    assert cleared.exit_code == 0, cleared.output
+    assert _overrides(g)["proposer"] == {"base_url": P_URL, "model": "p-model", "api_key": "none"}
+    assert "Contacting the proposer at http://p.test …" in cleared.output
+    assert [r.headers.get("Authorization") for r in seen] == [f"Bearer {KEY}", None]
+    for result in (kept, cleared):
+        for where in (result.stdout, result.stderr, repr(result.exception)):
+            assert KEY not in where and KEY[-12:] not in where, where
+
+
+@pytest.mark.plugin("autoresearch")
 def test_autoresearch_a_refused_answer_never_shows_the_typed_key(g, terminal, proposer) -> None:
     """Enter at the model id: the address and key alone do not validate, and pydantic's own text
     for that error carries the section, the typed key included. The refusal shows neither."""
