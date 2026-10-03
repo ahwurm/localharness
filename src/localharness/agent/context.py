@@ -491,6 +491,11 @@ tokenizers — ~1.85x worst case on digit/code-heavy text, near parity on prose 
 biases budgets to OVER-count: compaction fires early instead of the provider 400ing on a real
 context overflow (issue #8)."""
 
+_BYTES_PER_TOKEN = 3
+"""The estimate when the cl100k vocabulary cannot be had (offline on a cold cache, or no tiktoken):
+one token per three UTF-8 bytes. A conservative OVER-count — English prose runs about four bytes a
+token in cl100k — so budgets fire early, never late."""
+
 
 def _as_count(value) -> int | None:
     """Defensive int for a server-reported "count": a malformed 200 (non-numeric field from a
@@ -548,12 +553,10 @@ class TokenCounter:
         model: str | None = None,
         provider_type: str | None = None,
     ) -> None:
+        # The cl100k vocabulary is built on the first count that needs it (`_cl100k`), never here:
+        # an exact runtime never needs it, and building it can fetch it from the network (R8).
         self._encoder = None
-        try:
-            import tiktoken
-            self._encoder = tiktoken.get_encoding("cl100k_base")
-        except (ImportError, Exception):
-            pass
+        self._encoder_state = "unbuilt"  # "unbuilt" | "ready" | "failed" (never retried)
 
         # Model-identity state (owned by rebind so a /model swap can re-derive it):
         # /tokenize lives at the SERVER ROOT, not under /v1.
@@ -625,11 +628,6 @@ class TokenCounter:
             if self._gguf is not None:
                 self._mode = "exact_local"
                 return
-            if self._encoder is None:
-                raise RuntimeError(
-                    f"TokenCounter: {ptype} serves no tokenize endpoint, no local GGUF was found for "
-                    f"exact counting, and tiktoken is unavailable — no counting source exists."
-                )
             self._mode = "approximate"
             log.warning(
                 "TokenCounter: exact GGUF counting unavailable for %s (%s) — no local model file "
@@ -700,11 +698,6 @@ class TokenCounter:
                     f"{why}. Refusing an approximate fallback for a runtime that should "
                     f"count exactly."
                 )
-            if self._encoder is None:
-                raise RuntimeError(
-                    "TokenCounter: no tokenizer available (tiktoken missing, /tokenize "
-                    "unreachable)."
-                )
             self._mode = "approximate"
             log.warning(
                 "TokenCounter: %s/tokenize did not answer a known contract — using "
@@ -712,6 +705,25 @@ class TokenCounter:
                 "run vLLM or llama.cpp for exact counts. (base_url=%s)",
                 root, APPROX_TOKENIZE_SAFETY_FACTOR, base_url,
             )
+
+    def _cl100k(self):
+        """The cl100k encoder behind the approximate estimate, built on the first count that needs
+        it — never at construction, so a start reaches nothing but the model server (R8). tiktoken
+        fetches the vocabulary once, from
+        https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken (sha256-checked,
+        cached under TIKTOKEN_CACHE_DIR, else the temp directory's data-gym-cache), and only when it
+        is not cached. Offline, or without tiktoken, this is None and counts use the byte estimate,
+        said once; a failed build is not retried."""
+        if self._encoder_state == "unbuilt":
+            try:
+                import tiktoken
+                self._encoder = tiktoken.get_encoding("cl100k_base")
+                self._encoder_state = "ready"
+            except Exception:  # noqa: BLE001 — offline, not installed, a bad cache: all one answer
+                self._encoder_state = "failed"
+                log.warning("TokenCounter: the cl100k vocabulary is not available (offline, or "
+                            "tiktoken is not installed) — counting with a byte estimate")
+        return self._encoder
 
     @property
     def mode(self) -> str:
@@ -863,14 +875,15 @@ class TokenCounter:
             n = self._remote_count(text)
             if n is None:
                 raise self._tokenize_failure("/tokenize call")
-        elif self._encoder is not None:
-            # cl100k estimator. disallowed_special=() so literal special-token text is counted as
-            # ordinary text. Approximate mode inflates by the safety factor (over-count is safe);
-            # "off" (no server configured — tests/bench) is the plain, uninflated estimate.
-            raw = len(self._encoder.encode(text, disallowed_special=()))
-            n = math.ceil(raw * APPROX_TOKENIZE_SAFETY_FACTOR) if self._mode == "approximate" else raw
         else:
-            raise RuntimeError("TokenCounter: no tokenizer available (tiktoken missing, no server).")
+            # "off" (no server configured — tests/bench) and "approximate": the cl100k estimator,
+            # built on first use, else the byte estimate. disallowed_special=() so literal
+            # special-token text is counted as ordinary text. Approximate mode inflates by the
+            # safety factor (over-count is safe); "off" is the plain, uninflated estimate.
+            enc = self._cl100k()
+            raw = (len(enc.encode(text, disallowed_special=())) if enc is not None
+                   else math.ceil(len(text.encode("utf-8", "replace")) / _BYTES_PER_TOKEN))
+            n = math.ceil(raw * APPROX_TOKENIZE_SAFETY_FACTOR) if self._mode == "approximate" else raw
         if len(self._cache) < 50_000:
             self._cache[key] = n
         return n

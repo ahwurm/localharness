@@ -640,7 +640,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.plugins.resolve import resolve
     from localharness.provider.client import LLMClient, LLMConfig
     from localharness.tools.hooks import HookSystem
-    from localharness.tools.mcp import MCPClientManager
     from localharness.tools.registry import ToolRegistry
     from localharness.tools.builtin import register_builtin_tools
 
@@ -1304,10 +1303,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 files=", ".join(loader.project_mcp_skipped), why=project_trust.why),
                 markup=False, soft_wrap=True)
         # --- 6. MCP client manager (soft) ---
-        mcp_manager: MCPClientManager | None = None
+        mcp_manager: Any = None  # an MCPClientManager when a server is configured
         try:
             mcp_configs = agent_config.tools.mcp_servers
             if mcp_configs:
+                # Imported only for a configured server: the MCP client pulls mcp, starlette and
+                # uvicorn, which a stock start never needs.
+                from localharness.tools.mcp import MCPClientManager
                 mcp_manager = MCPClientManager(tool_registry)
                 results = await mcp_manager.startup(mcp_configs)
                 mcp_connected = sum(1 for v in results.values() if v > 0)
@@ -1322,9 +1324,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # (doctor's check 5c reports the same) rather than silently mis-metering — an approximate
         # meter is what hid the context overflows (400s). Ollama / LM Studio serve no tokenize
         # endpoint, so they count EXACTLY from the served model's own GGUF vocab (mode exact_local),
-        # falling back to EXPLICIT approximate mode (cl100k x safety factor) — surfaced by the warning
-        # below — only when no local GGUF is reachable. This except also trips if NO tokenizer exists
-        # (tiktoken missing) — a genuinely unusable environment.
+        # falling back to EXPLICIT approximate mode (cl100k x safety factor, or a byte estimate when
+        # the vocabulary cannot be had) — surfaced by the warning below — only when no local GGUF
+        # is reachable.
         try:
             token_counter = TokenCounter(
                 base_url=provider.base_url,
@@ -1333,13 +1335,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             )
         except RuntimeError as exc:
             # #44 defense-in-depth: the probe above already hard-fails an unreachable/unserved model,
-            # so reaching here means the model IS served but its /tokenize is unavailable (or tiktoken
-            # is missing) — the tokenizer message is now accurate. Still point at doctor for the rare
+            # so reaching here means the model IS served but its /tokenize is unavailable — the
+            # tokenizer message is now accurate. Still point at doctor for the rare
             # case where /tokenize is a separate seam from the chat endpoint the probe reached.
             err_console.print(
                 f"[bold red]Error:[/bold red] {exc}\n"
                 f"Ensure the model server at {provider.base_url} exposes an exact tokenizer "
-                f"(vLLM or llama.cpp /tokenize) — or that tiktoken is installed — then retry.\n"
+                f"(vLLM or llama.cpp /tokenize), then retry.\n"
                 f"Run `localharness doctor` to diagnose."
             )
             raise typer.Exit(1)

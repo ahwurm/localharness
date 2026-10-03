@@ -28,6 +28,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+_DEFAULT_MODEL_DOWNLOAD = "about 1.2 GB"  # the shipped default embedding model, as fetched
+# R8: a start whose embedding model must still be fetched says so in one summary line — never a
+# question, never a wait. The download itself happens the first time memory embeds.
+EMBEDDING_DOWNLOAD_NOTICE = ("memory: the embedding model {model} is not on this machine yet — it "
+                             "downloads once from huggingface.co{size} the first time memory needs it")
+
 
 class MemoryPlugin(MemorySlotPlugin):
     """persistent memory: facts recalled into each turn, memory tools, background consolidation"""
@@ -41,7 +47,7 @@ class MemoryPlugin(MemorySlotPlugin):
                            help="Browse and edit the agent's persistent memory "
                                 "(list / show / edit / rm / archive / restore).",
                            target="localharness.cli.memory_cli:memory_app"),),
-        setup_action="Download the embedding model now (about 1.2 GB)?",
+        setup_action=f"Download the embedding model now ({_DEFAULT_MODEL_DOWNLOAD})?",
         next_steps="In a session, /memory shows what it keeps.",
         agent_prompt=(
             "Set up LocalHarness memory on this machine. Install LocalHarness with its embeddings\n"
@@ -115,6 +121,9 @@ class MemoryPlugin(MemorySlotPlugin):
         s, cfg = ctx.session, ctx.agent_config
         try:
             await self._store.open()
+            notice = _embedding_download_notice(cfg.embedding_model)
+            if notice is not None:
+                self.startup_warnings.append(notice)
             try:
                 await self._store.create_session(s.sitting_id, budget=s.budget, model=s.model,
                                                  context_tokens_available=s.context_tokens)
@@ -299,6 +308,24 @@ def _embedding_package_installed() -> bool:
     """Is the sentence_transformers package importable? Found, never imported."""
     import importlib.util
     return importlib.util.find_spec("sentence_transformers") is not None
+
+
+def _embedding_download_notice(model: str) -> str | None:
+    """The one summary line for a start whose embedding model is not on this machine yet. None for
+    a model given as a local path, without the sentence_transformers package (nothing would be
+    fetched), or with the model already in the local cache. Reads the cache only, like doctor."""
+    from pathlib import Path
+
+    if Path(model).expanduser().exists() or not _embedding_package_installed():
+        return None
+    try:
+        if _embedding_check(model).status != "fail":
+            return None
+    except Exception:  # noqa: BLE001 — an id the cache cannot read (a missing local path) is memory's
+        return None    # problem when it embeds, never a reason for memory to fail at start
+    shipped = MemoryConfig.model_fields["embedding_model"].default
+    return EMBEDDING_DOWNLOAD_NOTICE.format(
+        model=model, size=f" ({_DEFAULT_MODEL_DOWNLOAD})" if model == shipped else "")
 
 
 def _embedding_check(model: str) -> Check:
