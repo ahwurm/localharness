@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import io
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 import yaml
+from rich.console import Console
 
 from localharness.channels.base import ChannelAdapter
 from localharness.channels.terminal import TerminalChannel
@@ -34,6 +36,7 @@ from localharness.cli import plugins_cmd, start_cmd
 from localharness.cli.repl import OrchestratorREPL
 from localharness.cli.slash_commands import all_rows, find_row
 from localharness.plugins import builtin, discovery
+from tests.unit.test_plugin_step import Reach
 from tests.unit.test_plugins_enable_setup import _CONFIG, Needy, Stub
 from tests.unit.test_repl_input_box import FakeBoxChannel, _pending_turn, _repl
 from tests.unit.test_repl_unknown_slash import RecordingChannel, _build_repl
@@ -401,3 +404,20 @@ def test_indicator_otherwise_not_running():
         "x: not running in this session — /plugins shows its state"
     assert start_cmd._resume_status(_resume(), None) == \
         "x: not running in this session — /plugins shows its state"
+
+
+def test_indicator_a_failing_setup_action_row_is_a_failed_check(g, monkeypatch):
+    """Deferred item 4: in the session's step, a setup-action row that does not pass while the
+    offline doctor check passes reaches the indicator as "its check failed", not "on"."""
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Needy, Reach))
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(plugins_cmd.typer, "prompt", lambda text, default=None, **kw: "http://far")
+    monkeypatch.setattr(plugins_cmd, "console", Console(file=io.StringIO(), width=400))
+
+    outcome = plugins_cmd.session_step(("enable", "reach"), str(g))
+
+    assert outcome == plugins_cmd.StepOutcome("reach", True, failed_check="no answer from http://far")
+    resume = dataclasses.replace(_resume(("enable", "reach")), failed_check=outcome.failed_check,
+                                 step_stopped=outcome.stopped)
+    assert start_cmd._resume_status(resume, _started(["reach"])) == \
+        "reach: on, but its check failed: no answer from http://far"
