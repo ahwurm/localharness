@@ -12,7 +12,7 @@ localharness plugins enable web
 
 Without the extra, `localharness plugins list` shows it as `on (install localharness[web] to use it)`.
 
-`localharness plugins enable web` on a terminal asks the phone address: the URL your phone opens. Press Enter to leave it empty and let `localharness web` guess it. In a running session, `/plugins enable web` asks it too, until `localharness web` has run once or an address is saved.
+`localharness plugins enable web` on a terminal asks the phone address: the URL your phone opens. Press Enter to leave it empty and let `localharness web` guess it. In a running session, `/plugins enable web` asks it too, until `localharness web` has run once or an address is saved. Press Enter there and the address stays unset: the session comes back saying "web: on, but not set up yet — not enrolled yet" until `localharness web` has run once, the normal state of a new install.
 
 ## What it adds
 
