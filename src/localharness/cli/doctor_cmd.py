@@ -389,8 +389,12 @@ def doctor(
             models_url = root + "/api/tags"
         else:
             models_url = root + "/v1/models"
+        from localharness.provider.server import auth_headers, required_key_kwargs
+        # The provider's key only when the launched server is set to require it
+        # (server.require_api_key, default off); otherwise keyless, as this probe always was.
+        key = required_key_kwargs(harness.server, harness.provider.api_key).get("api_key")
         try:
-            resp = httpx.get(models_url, timeout=5.0)
+            resp = httpx.get(models_url, timeout=5.0, headers=auth_headers(key))
             console.print(f"{_PASS} LLM endpoint reachable: {base_url}")
 
             # 5. Model available

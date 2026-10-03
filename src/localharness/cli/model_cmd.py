@@ -116,8 +116,11 @@ def model(
         raise typer.Exit(2)
 
     provider = harness.provider
+    from localharness.provider.server import required_key_kwargs
     try:
-        live, reachable = model_ops.list_live_models(provider.base_url)
+        # the provider's key only when the launched server is set to require it (default off)
+        live, reachable = model_ops.list_live_models(
+            provider.base_url, **required_key_kwargs(harness.server, provider.api_key))
     except model_ops.MalformedModelListError as exc:
         # #38: reached but the reply isn't a model list — its OWN message, not "Is it running?".
         err_console.print(
