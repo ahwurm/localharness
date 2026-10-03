@@ -350,3 +350,94 @@ def test_force_still_regenerates_config_yaml(tmp_path, monkeypatch):
     text = cfg.read_text(encoding="utf-8")
     assert "old-model" not in text and "http://original/v1" not in text and "test-model:7b" in text
     assert not (tmp_path / "overrides.yaml").exists()
+
+
+# ------------------------------------------------------------------ no server: skip for now
+
+
+def _no_server_on_a_terminal(monkeypatch, *answers: str) -> tuple[MagicMock, MagicMock]:
+    """Detection finds nothing, a terminal is attached, the guided vLLM offer is declined, and
+    Prompt answers `answers` in order. Returns (Prompt, LLMClient) — the probe must not run."""
+    _detect(monkeypatch, found=False)
+    client_cls = MagicMock()
+    monkeypatch.setattr(init_cmd, "LLMClient", client_cls)
+    _terminal(monkeypatch)
+    _answers(monkeypatch, False)  # "Set up vLLM and a model now?" — no
+    prompt = MagicMock()
+    prompt.ask.side_effect = list(answers)
+    monkeypatch.setattr(init_cmd, "Prompt", prompt)
+    return prompt, client_cls
+
+
+def test_skip_for_now_saves_the_address_and_the_model_unchecked(tmp_path, monkeypatch):
+    prompt, client_cls = _no_server_on_a_terminal(monkeypatch, "http://localhost:8081/v1/", "my-model")
+
+    result = _init(tmp_path)
+
+    _exited(result, 0)
+    cfg = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert (cfg["provider"]["base_url"], cfg["provider"]["provider_type"],
+            cfg["provider"]["default_model"]) == ("http://localhost:8081/v1", "unknown", "my-model")
+    assert cfg["org"]["default_model"] == "my-model"
+    flat = _flat(result)
+    assert "Skip for now: give the address and model you will use" in flat, flat
+    assert "not checked yet" in flat and "then run `localharness start`" in flat, flat
+    assert [c.args[0] for c in prompt.ask.call_args_list] == [
+        "Model server address", "Model name (Enter to skip)"]
+    assert prompt.ask.call_args_list[0].kwargs == {"default": "http://localhost:8081/v1"}
+    client_cls.assert_not_called()  # saved without checking: no capability probe
+    # the saved config is one the next start can read
+    assert ConfigLoader(config_dir=tmp_path).load_harness().provider.default_model == "my-model"
+
+
+def test_skip_for_now_reports_no_server_ready(tmp_path, monkeypatch):
+    _no_server_on_a_terminal(monkeypatch, "http://localhost:8081/v1", "my-model")
+
+    out = init_cmd.core_setup(str(tmp_path), endpoint=None, model=None, force=False, interactive=True)
+
+    assert out == init_cmd.SetupResult(tmp_path / "config.yaml", False)
+
+
+def test_skip_for_now_without_a_model_saves_nothing_and_says_what_to_run(tmp_path, monkeypatch):
+    _no_server_on_a_terminal(monkeypatch, "http://localhost:8081/v1", "")
+
+    result = _init(tmp_path)
+
+    _exited(result, 0)
+    assert not (tmp_path / "config.yaml").exists()
+    assert ("Nothing saved. When a model server answers at http://localhost:8081/v1, run "
+            "`localharness init` again.") in _flat(result)
+
+
+def test_skip_for_now_with_model_flag_asks_only_the_address(tmp_path, monkeypatch):
+    prompt, _ = _no_server_on_a_terminal(monkeypatch, "http://10.0.0.5:8000/v1")
+
+    result = _init(tmp_path, "--model", "given-model")
+
+    _exited(result, 0)
+    assert prompt.ask.call_count == 1
+    cfg = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert (cfg["provider"]["base_url"], cfg["provider"]["default_model"]) == (
+        "http://10.0.0.5:8000/v1", "given-model")
+
+
+def test_skip_for_now_refuses_an_address_without_http(tmp_path, monkeypatch):
+    prompt, _ = _no_server_on_a_terminal(monkeypatch, "localhost:8081", "my-model")
+
+    result = _init(tmp_path)
+
+    _exited(result, 0)
+    assert not (tmp_path / "config.yaml").exists()
+    assert "Nothing saved: the address must start with http:// or https://." in _flat(result)
+    assert prompt.ask.call_count == 1  # refused before the model name is asked
+
+
+def test_no_skip_without_a_terminal_no_server_still_exits_1(tmp_path, monkeypatch):
+    _detect(monkeypatch, found=False)
+    _silent(monkeypatch)
+
+    result = _init(tmp_path)
+
+    _exited(result, 1)
+    assert "No local LLM detected" in _flat(result)
+    assert not (tmp_path / "config.yaml").exists()
