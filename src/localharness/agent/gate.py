@@ -45,6 +45,7 @@ from localharness.agent.gate_types import (
 )
 from localharness.agent.permissions import PermissionResult
 from localharness.agent.verdict import DenyFn, GateContext, derive_boundary, evaluate
+from localharness.config import trust
 from localharness.config.grants import GrantStore, new_grant, new_refusal
 from localharness.tools.base import GATE_FAMILIES
 
@@ -552,6 +553,7 @@ class PermissionGate:
             can_ask=self.asker is not None,
             has_review_surface=self.has_review_surface,
             deny=lambda name, params: self._deny(name, params, deny),
+            script_pending=trust.tool_script_pending,
         )
 
     # ---------------------------------------------------------------- check

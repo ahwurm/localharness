@@ -1045,6 +1045,7 @@ def _classify_one(
     cwd = _Cwd() if cwd is None else cwd
     command_text, redirect_targets = _extract_redirections(text)
     argv = _strip_prefixes(_tokenize(command_text))
+    program = argv[0] if argv else ""  # as written: the verdict's tool-script rule reads the path
     if argv:
         argv = [_basename(argv[0]), *argv[1:]]
     if not argv:
@@ -1065,10 +1066,12 @@ def _classify_one(
     if argv[0] in settings.dropped_commands and not redirect_targets:
         return None, [], [text.strip()], argv[0]
 
-    argv = _peel(argv, settings)
-    if not argv:
+    peeled = _peel(argv, settings)
+    if not peeled:
         return None, [], [text.strip()], None
-    return _build(argv, settings, redirect_targets, cwd)
+    if len(peeled) < len(argv):
+        program = peeled[0]  # only the wrapper's word was shortened; the peeled one is as written
+    return _build(peeled, settings, redirect_targets, cwd, program=program)
 
 
 def _strip_prefixes(argv: list[str]) -> list[str]:
@@ -1091,9 +1094,13 @@ def _basename(token: str) -> str:
 
 
 def _build(
-    argv: list[str], settings: GateSettings, redirect_targets: list[str], cwd: _Cwd | None = None
+    argv: list[str], settings: GateSettings, redirect_targets: list[str], cwd: _Cwd | None = None,
+    *, program: str = "",
 ) -> tuple[ShellSegment | None, list[ShellSegment], list[str], str | None]:
-    """Signature + payload lifting for a peeled argv (PRD §3.2 steps 5, 7, 8)."""
+    """Signature + payload lifting for a peeled argv (PRD §3.2 steps 5, 7, 8). ``program`` is the
+    word ``argv[0]`` was shortened from (:attr:`ShellSegment.program`); a caller whose ``argv[0]`` is
+    still as written leaves it empty."""
+    program = program or argv[0]
     argv = [_basename(argv[0]), *argv[1:]]
     head = argv[0]
     extras: list[ShellSegment] = []
@@ -1104,13 +1111,15 @@ def _build(
         prefix, inner_argv = runner
         host, inner_extras, _, _ = _build(inner_argv, settings, redirect_targets, cwd)
         if host is None:  # pragma: no cover - inner argv is non-empty by construction
-            host = _make_segment(prefix, tuple(argv), settings, redirect_targets, cwd=cwd)
+            host = _make_segment(prefix, tuple(argv), settings, redirect_targets, cwd=cwd,
+                                 program=program)
         else:
             host = replace(
                 host,
                 signature=f"{prefix} {host.signature}",
                 argv=tuple(argv),
                 read_only=False,
+                program=program,
             )
         return host, inner_extras, [], head
 
@@ -1172,6 +1181,7 @@ def _build(
         payload_lifted=bool(payload_argvs or payload_texts),
         force_destructive=force_destructive,
         force_read_only=force_read_only,
+        program=program,
     )
     return host, extras, [], head
 
@@ -1187,6 +1197,7 @@ def _make_segment(
     payload_lifted: bool = False,
     force_destructive: bool = False,
     force_read_only: bool = False,
+    program: str = "",
 ) -> ShellSegment:
     """Assemble the segment: destructive/read-only verdict plus step 8's write targets.
 
@@ -1244,6 +1255,7 @@ def _make_segment(
         target_scoped_destructive=operands is not None,
         destructive_targets=scoped_targets,
         unresolvable_destructive=scoped_unresolvable,
+        program=program,
     )
 
 

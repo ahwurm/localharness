@@ -22,9 +22,12 @@ ask to write it but never be granted it.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
+import os
 import shlex
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -179,9 +182,19 @@ EXECUTABLES_KEY = "executables"
 NOTHING_APPROVED: dict = {"fingerprint": "", "servers": []}
 """What a Yes given WITHOUT the server list records: nothing approved yet, so the next start asks."""
 
-MACHINE_KINDS: frozenset[str] = frozenset({"mcp_server", "embedding_model", "permission"})
+TOOL_SCRIPT_KIND = "tool_script"
+
+MACHINE_KINDS: frozenset[str] = frozenset(
+    {"mcp_server", "embedding_model", "permission", TOOL_SCRIPT_KIND})
 """Kinds of entry machine_snapshot() produces. A record made before a kind existed adopts that
-kind's current entries silently once — they predate the rule (53-10 adds "tool_script")."""
+kind's current entries silently once — they predate the rule. That is how the first start that knows
+tool scripts adopts every script already in the tools folder."""
+
+_DEPENDENCY_DIRS: frozenset[str] = frozenset(
+    {"node_modules", ".venv", "venv", "__pycache__", ".git", "site-packages"})
+"""Folders under <global>/tools/ that hold installed dependencies or caches, not scripts: the
+packaged helper asks for `cd ~/.localharness/tools && npm install playwright` (~1,500 files), and a
+venv there holds thousands more. Never listed at start, never gated (a named gap in SECURITY.md)."""
 
 
 def _now() -> str:
@@ -287,6 +300,125 @@ def _shown_server(server: dict) -> str:
     return shlex.join([str(server.get("command") or ""), *_args(server)])
 
 
+@functools.lru_cache(maxsize=1)
+def _packaged_hashes() -> frozenset[str]:
+    """sha256 of every file LocalHarness ships in localharness/assets/ (cached): start installs some
+    of them into the tools folder itself, and they are never the user's or the agent's scripts. Each
+    also as start's text-mode copy writes it on Windows, with CRLF line ends."""
+    from importlib import resources
+
+    out: set[str] = set()
+    try:
+        for item in resources.files("localharness").joinpath("assets").iterdir():
+            if item.is_file():
+                data = item.read_bytes().replace(b"\r\n", b"\n")
+                out |= {hashlib.sha256(data).hexdigest(),
+                        hashlib.sha256(data.replace(b"\n", b"\r\n")).hexdigest()}
+    except (OSError, ValueError):  # nothing shipped: nothing is exempt
+        pass
+    return frozenset(out)
+
+
+def _sha256_file(path: Path) -> Optional[str]:
+    """Hex sha256 of a regular file's bytes, or None when it is not one or cannot be read. Opened
+    non-blocking and checked once open, so a FIFO swapped in for a script cannot stall the gate."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        with open(os.open(path, flags), "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            return hashlib.file_digest(handle, "sha256").hexdigest()
+    except OSError:
+        return None
+
+
+def tool_script_entries(global_dir: Path) -> list[dict]:
+    """Every regular file under <global>/tools/ (recursively, never descending into a
+    _DEPENDENCY_DIRS folder), as {kind: "tool_script", file: "tools/<rel>", name: "<rel>",
+    shown: "sha256:<first 12 hex>", sha256: "<hex>"}, sorted by file. A file whose bytes equal a
+    packaged asset is left out; a symlink resolving outside the tools folder, and a file that
+    cannot be read, are skipped."""
+    tools = Path(global_dir) / "tools"
+    try:
+        root = tools.resolve()
+    except (OSError, RuntimeError):
+        return []
+    out: list[dict] = []
+    for dirpath, dirnames, filenames in os.walk(tools):
+        dirnames[:] = [d for d in dirnames if d not in _DEPENDENCY_DIRS]
+        for name in filenames:
+            path = Path(dirpath) / name
+            try:
+                inside = path.resolve().is_relative_to(root)
+            except (OSError, RuntimeError):
+                continue
+            digest = _sha256_file(path) if inside else None
+            if digest is None or digest in _packaged_hashes():
+                continue
+            rel = path.relative_to(tools).as_posix()
+            out.append({"kind": TOOL_SCRIPT_KIND, "file": f"tools/{rel}", "name": rel,
+                        "shown": f"sha256:{digest[:12]}", "sha256": digest})
+    return sorted(out, key=lambda e: e["file"])
+
+
+_PENDING: dict[tuple, Optional[str]] = {}
+"""tool_script_pending's answers, keyed on the file's and the store's stat (ctime included: it
+cannot be set back the way mtime can)."""
+
+
+def tool_script_pending(path: Path) -> Optional[str]:
+    """None when this file may run as an ordinary command: anything outside <global>/tools/, a file
+    below a _DEPENDENCY_DIRS folder there, an exact copy of a packaged asset, or a tool script whose
+    current sha256 the machine record holds. Otherwise the script's current short digest
+    ("sha256:<first 12 hex>"), which keys the guarded-mode ask so an "always" there covers this
+    exact content only. Reads the store and hashes the file, cached on both files' stat (inode,
+    size, mtime_ns and ctime_ns); a tools file that cannot be read is pending, with the digest
+    "unreadable".
+
+    <global> is global_config_dir() — LOCALHARNESS_DIR, else ~/.localharness — the folder the
+    verdict's protected-path rule reads too; a run with an explicit --config-dir keeps today's
+    scoping. A record from before scripts were a kind holds none: start adopts every script of a
+    kind the record predates, so they all read as confirmed until it records them."""
+    global_dir = global_config_dir()
+    try:
+        root = (global_dir / "tools").resolve()
+        real = Path(path).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if real == root or not real.is_relative_to(root):
+        return None
+    rel = real.relative_to(root)
+    if _DEPENDENCY_DIRS.intersection(rel.parts[:-1]):
+        return None
+    try:
+        st = real.stat()
+        store = trust_store_path()
+        sst = store.stat() if store.exists() else None
+    except OSError:
+        return "unreadable"
+    key = (str(real), str(root), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+           (sst.st_ino, sst.st_size, sst.st_mtime_ns, sst.st_ctime_ns) if sst else None)
+    if key not in _PENDING:
+        if len(_PENDING) > 256:
+            _PENDING.clear()
+        _PENDING[key] = _script_pending(global_dir, f"tools/{rel.as_posix()}", real)
+    return _PENDING[key]
+
+
+def _script_pending(global_dir: Path, file: str, real: Path) -> Optional[str]:
+    digest = _sha256_file(real)
+    if digest is None:
+        return "unreadable"
+    if digest in _packaged_hashes():
+        return None
+    rec = recorded_machine(global_dir)
+    if rec is not None and (TOOL_SCRIPT_KIND not in rec["kinds"] or any(
+            e.get("kind") == TOOL_SCRIPT_KIND and e.get("file") == file and e.get("sha256") == digest
+            for e in rec["entries"])):
+        return None
+    return f"sha256:{digest[:12]}"
+
+
 def machine_snapshot(global_dir: Path) -> list[dict]:
     """What your machine's own files would start, load or loosen: for every `<global>/agents/*.yaml`
     each `tools.mcp_servers` entry ({kind: "mcp_server", file: "agents/<f>", name, shown: command +
@@ -294,9 +426,10 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
     ({kind: "embedding_model", name: "memory.embedding_model", shown: value}); for those files,
     every `<global>/divisions/*.yaml` and `<global>/org.yaml`, each permission loosening
     ({kind: "permission", name: <dotted key>, shown: <value>}, loader.permission_loosenings — the
-    legacy org.yaml as the base rung, whose shorter `deny_patterns` does drop shipped patterns).
-    Sorted by (file, kind, name, canonical JSON); unparsable files skipped; never an env or header
-    value."""
+    legacy org.yaml as the base rung, whose shorter `deny_patterns` does drop shipped patterns); and
+    every script in `<global>/tools/` (tool_script_entries — a shell command runs one, so the gate
+    treats an unconfirmed one as a shell command it has not seen). Sorted by (file, kind, name,
+    canonical JSON); unparsable files skipped; never an env or header value."""
     from localharness.config.loader import layer_files, org_deny_loosenings, permission_loosenings
 
     root = Path(global_dir)
@@ -322,6 +455,7 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
         out += loosenings(f"divisions/{path.name}", _read_yaml(path))
     if (root / "org.yaml").is_file():
         out += loosenings("org.yaml", _read_yaml(root / "org.yaml"))
+    out += tool_script_entries(global_dir)
     return sorted(out, key=lambda e: (e["file"], e["kind"], e["name"], _canonical(e)))
 
 

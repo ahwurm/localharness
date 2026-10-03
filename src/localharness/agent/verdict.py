@@ -37,12 +37,15 @@ from localharness.agent.gate_types import (
     AUTO_ASK_CLASSES,
     DEFAULT_MODE,
     DOTTED_VARIANT_SEPARATOR,
+    TOOL_SCRIPT_UNCONFIRMED,
+    UNCONFIRMED_TOOL_SCRIPT_REASON,
     UNGRANTABLE_CLASSES,
     GateSettings,
     Grant,
     Mode,
     PermissionRequest,
     Refusal,
+    ShellSegment,
     ToolMeta,
     Verdict,
     VerdictResult,
@@ -251,6 +254,7 @@ ASK_SEVERITY_ORDER: tuple[str, ...] = (
     "no-boundary",
     "edit-outside",
     "edit-unreviewed",
+    "tool-script-unconfirmed",
     "shell-unfamiliar",
     "interpreter-inline",
     "code-exec",
@@ -272,6 +276,7 @@ GROUPED_REASON_BY_CLASS: dict[str, str] = {
     "protected-path": "writes protected paths: {details}",
     "no-boundary": "no workspace boundary here, so every write asks: {details}",
     "edit-outside": "writes outside the workspace boundary: {details}",
+    "tool-script-unconfirmed": "tool scripts changed since you last confirmed them: {details}",
     "shell-unfamiliar": "commands not seen in this workspace before: {details}",
     "interpreter-inline": "runs code inline through interpreters: {details}",
 }
@@ -365,6 +370,11 @@ class GateContext:
     can_ask: bool = True
     has_review_surface: bool = False
     deny: Optional[DenyFn] = None
+    script_pending: Optional[Callable[[Path], Optional[str]]] = None
+    """Is a file under the machine's tools folder an unconfirmed tool script? None (tests, the
+    bench's ask-rate report) means no tool-script rule; the session gate passes
+    ``config.trust.tool_script_pending`` (None → the file runs as an ordinary command; a digest →
+    an unconfirmed tool script, see :data:`~localharness.agent.gate_types.TOOL_SCRIPT_UNCONFIRMED`)."""
 
 
 # ------------------------------------------------------------------- internals
@@ -959,6 +969,34 @@ def _auto_blacklisted(
     return None
 
 
+def _pending_scripts(segment: ShellSegment, anchor: Optional[Path],
+                     ctx: GateContext) -> list[tuple[Path, str, int]]:
+    """The machine tools-folder scripts this segment names (any argv word, the program included)
+    whose current content was never confirmed, each with that content's short digest and the
+    word's position in argv. A word holding a variable, glob or substitution cannot be resolved and
+    is not recognised, and a relative word resolves against the call's anchor, not a `cd` earlier
+    in the same command (both named in SECURITY.md). A file that does not exist yet — written by
+    the same command that runs it — is not recognised either."""
+    if ctx.script_pending is None or not segment.argv:
+        return []
+    try:
+        root = (global_config_dir() / "tools").resolve()
+    except (OSError, ValueError, RuntimeError):
+        return []
+    found: list[tuple[Path, str, int]] = []
+    words = (segment.program or segment.argv[0], *segment.argv[1:])
+    for position, word in enumerate(words):
+        path = _resolve(word, anchor)
+        try:
+            is_script = path is not None and _within(root, path) and path.is_file()
+        except OSError:
+            continue
+        digest = ctx.script_pending(path) if is_script else None
+        if digest is not None:
+            found.append((path, digest, position))
+    return found
+
+
 def _evaluate_shell(
     tool_name: str, params: dict, ctx: GateContext, settings: GateSettings
 ) -> VerdictResult:
@@ -1005,6 +1043,21 @@ def _evaluate_shell(
     ))
 
     for segment in non_read_only:
+        runs_it = False
+        for path, digest, position in _pending_scripts(segment, anchor, ctx):
+            key = f"{path}@{digest}"
+            if not _granted(ctx, TOOL_SCRIPT_UNCONFIRMED, key) or _refused(
+                    ctx, TOOL_SCRIPT_UNCONFIRMED, key) is not None:
+                asks.append(_ask_record(TOOL_SCRIPT_UNCONFIRMED, key,
+                                        UNCONFIRMED_TOOL_SCRIPT_REASON.format(path=path)))
+            runs_it = runs_it or position == 0 or (
+                position == 1 and Path(segment.argv[0]).name in settings.interpreter_commands)
+        if runs_it:
+            # The script IS what runs — the program (argv[0]) or an interpreter's first argument
+            # (argv[1]) — so its own ask, or an "always" given to that exact content, stands for
+            # the segment, and no grant on the interpreter covers it. A script path anywhere else
+            # never suppresses that command's own signature ask (orchestrator ruling R23).
+            continue
         if segment.signature in destructive:
             continue  # already asked about, under the stricter class
         if segment.signature.startswith(DYNAMIC_COMMAND_NAME_PREFIXES):
