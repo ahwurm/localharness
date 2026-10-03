@@ -67,9 +67,43 @@ class Plain(Plugin):
     ConfigModel = StubConfig
 
 
+class TwoConfig(BaseModel):
+    url: str = ""
+    label: str = ""
+
+
+class Two(Plugin):
+    """asks two questions, one with nothing to offer"""
+
+    manifest = PluginManifest(
+        name="two", version="0.1.0", kind="tools", enabled_by_default=False,
+        setup=(SetupField(key="url", prompt="Server address", default="http://127.0.0.1:1"),
+               SetupField(key="label", prompt="Label")))
+    ConfigModel = TwoConfig
+
+
+class Needy(Plugin):
+    """needs an install extra nobody has"""
+
+    manifest = PluginManifest(
+        name="needy", version="0.1.0", kind="tools", enabled_by_default=True,
+        requires_extra="nosuchextra",
+        setup=(SetupField(key="url", prompt="Needy address", default="http://127.0.0.1:2"),))
+    ConfigModel = StubConfig
+
+
+class Secty(Plugin):
+    """sets two core settings under the section it claims"""
+
+    manifest = PluginManifest(
+        name="secty", version="0.1.0", kind="dev", sections=("proposer",),
+        setup=(SetupField(key="proposer.base_url", prompt="Proposer address"),
+               SetupField(key="proposer.model", prompt="Proposer model")))
+
+
 @pytest.fixture(autouse=True)
 def bundled(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Plain))
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Stub, Plain, Two, Needy, Secty))
     monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [
         f for f in _REAL_DISCOVER(global_config_dir) if f.source == "folder"])
     monkeypatch.setenv("COLUMNS", "400")
@@ -107,6 +141,22 @@ def no_prompt(monkeypatch):
     def prompt(*a, **kw):
         raise AssertionError("prompted")
     monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+
+
+@pytest.fixture
+def scripted(monkeypatch):
+    """A terminal whose person types `answers` in order; every question is recorded as
+    (text, default, the other keyword arguments)."""
+    calls: list[tuple] = []
+    answers: list[str] = []
+
+    def prompt(text, default=None, **kw):
+        calls.append((text, default, kw))
+        return answers.pop(0)
+
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
+    monkeypatch.setattr(plugins_cmd.typer, "prompt", prompt)
+    return calls, answers
 
 
 def _enable(g: Path, *args: str):
@@ -221,3 +271,118 @@ def test_setup_is_optional_and_frozen() -> None:
     assert field.default == ""
     with pytest.raises(ValidationError):
         field.key = "other"
+
+
+# --- the step's asking rules (52-03) ---------------------------------------------------------------
+
+
+def test_enter_on_a_question_with_nothing_to_offer_writes_nothing(g, scripted) -> None:
+    calls, answers = scripted
+    answers[:] = ["http://ok", ""]
+    result = _enable(g, "two")
+
+    assert result.exit_code == 0, result.output
+    assert [(text, default, kw["show_default"]) for text, default, kw in calls] == [
+        ("Server address", "http://127.0.0.1:1", True), ("Label", "", False)]
+    assert _overrides(g) == {"two": {"enabled": True, "url": "http://ok"}}
+
+
+def test_a_question_offers_the_value_stored_now(g, scripted) -> None:
+    calls, answers = scripted
+    assert _enable(g, "stub", "--set", "url=http://saved").exit_code == 0
+    answers[:] = ["http://ok"]
+    result = _enable(g, "stub")
+
+    assert result.exit_code == 0, result.output
+    assert [(text, default) for text, default, _ in calls] == [("Server address", "http://saved")]
+
+
+NEEDY_NOTE = "needy is missing its install extra — install `localharness[nosuchextra]` to use it"
+
+
+def test_needy_on_a_terminal_asks_nothing_and_names_its_extra(g, monkeypatch, no_prompt) -> None:
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
+    result = _enable(g, "needy")
+
+    assert result.exit_code == 0, result.output
+    assert NEEDY_NOTE in result.output
+    assert _overrides(g) == {"needy": {"enabled": True}}
+    assert "Checking it now" not in result.output and "next step" not in result.output
+
+
+def test_needy_turned_off_still_skips_its_questions(g, monkeypatch, no_prompt) -> None:
+    """Turned off, its plan state is `off`, not `needs-extra`: the extra is tested directly."""
+    (g / "overrides.yaml").write_text(yaml.safe_dump({"needy": {"enabled": False}}), encoding="utf-8")
+    monkeypatch.setattr(plugins_cmd, "_stdin_is_a_terminal", lambda: True)
+    result = _enable(g, "needy")
+
+    assert result.exit_code == 0, result.output
+    assert NEEDY_NOTE in result.output
+    assert _overrides(g) == {"needy": {"enabled": True}}
+
+
+def test_sections_answers_land_in_one_core_write(g, scripted) -> None:
+    calls, answers = scripted
+    answers[:] = ["http://p/v1", "p-model"]
+    result = _enable(g, "secty")
+
+    assert result.exit_code == 0, result.output
+    assert [text for text, _, _ in calls] == ["Proposer address", "Proposer model"]
+    assert _overrides(g) == {"secty": {"enabled": True},
+                             "proposer": {"base_url": "http://p/v1", "model": "p-model"}}
+    assert "set proposer.base_url = 'http://p/v1'" in result.output
+    assert "set proposer.model = 'p-model'" in result.output
+
+
+def test_a_sections_answer_the_core_settings_refuse_writes_nothing(g, scripted) -> None:
+    _, answers = scripted
+    answers[:] = ["http://p/v1", "test-model"]  # provider.default_model: the proposer must differ
+    result = _enable(g, "secty")
+
+    assert result.exit_code == 2, result.output
+    assert "proposer.model must differ" in result.output
+    assert not (g / "overrides.yaml").exists()
+
+
+def test_half_a_sections_answer_writes_nothing(g, scripted) -> None:
+    _, answers = scripted
+    answers[:] = ["http://p/v1", ""]
+    result = _enable(g, "secty")
+
+    assert result.exit_code == 2, result.output
+    assert "proposer.model: Field required" in " ".join(result.output.split())
+    assert not (g / "overrides.yaml").exists()
+
+
+def test_sections_set_values_write_the_same_one_overlay(g, no_prompt) -> None:
+    result = _enable(g, "secty", "--set", "proposer.base_url=http://p/v1", "--set", "proposer.model=p-model")
+
+    assert result.exit_code == 0, result.output
+    assert _overrides(g) == {"secty": {"enabled": True},
+                             "proposer": {"base_url": "http://p/v1", "model": "p-model"}}
+
+
+def test_sections_set_values_are_machine_level(tmp_path, monkeypatch, fake_home, no_prompt) -> None:
+    layout = _layout(tmp_path, monkeypatch, fake_home)
+    result = runner.invoke(app, ["plugins", "enable", "secty", "--workspace", "--set",
+                                 "proposer.base_url=http://p/v1", "--set", "proposer.model=p-model"])
+
+    assert result.exit_code == 2, result.output
+    assert "machine-level settings for secty" in " ".join(result.output.split())
+    assert not (layout.ws_dir / "overrides.yaml").exists()
+
+
+def test_a_refused_sections_write_never_echoes_a_stored_secret(g, no_prompt) -> None:
+    """pydantic's str(ValidationError) carries input_value — the whole merged config, the stored
+    proposer.api_key included — so a refusal must never print it."""
+    secret = "SENTINEL-KEY-52"
+    cfg = dict(_CONFIG, proposer={"base_url": "http://p/v1", "model": "p-old", "api_key": secret})
+    (g / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    result = _enable(g, "secty", "--set", "proposer.base_url=http://p/v1",
+                     "--set", "proposer.model=test-model")
+
+    assert result.exit_code == 2, result.output
+    assert "proposer.model must differ" in result.output
+    for where in (result.stdout, result.stderr, repr(result.exception)):
+        assert secret not in where, where
+    assert not (g / "overrides.yaml").exists()
