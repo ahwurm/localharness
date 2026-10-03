@@ -6,6 +6,8 @@ braces, and each brace is here for a reason that is written down beside it.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import secrets
 import stat
@@ -48,17 +50,31 @@ CONTENT_TYPE_ERROR = (
 
 UNAUTHENTICATED_ERROR = "missing or invalid credentials"
 
-AUTH_COOKIE = "lh_web"
-"""The cookie the SSE stream authenticates with.
+AUTH_COOKIE = "lh_web_get"
+"""The event-stream cookie: GET routes only, derived from the token, never the token itself.
 
 `EventSource` cannot send an `Authorization` header — a real constraint a naive plan discovers
 late — and the two obvious workarounds are both bad: a token in the query string lands in logs
-and referrers, and a plain cookie alone reintroduces CSRF on the POST verbs. So the stream uses
-a `Secure`, `HttpOnly`, `SameSite=Strict` cookie (no other site can cause it to be sent) while
-every POST additionally requires the bearer header AND a JSON content type, which together force
-a preflight the server refuses for a foreign origin. The POST surface is then structurally
-CSRF-safe rather than leaning on the cookie's `SameSite` alone.
+and referrers, and a plain cookie alone reintroduces CSRF on the POST verbs. So the stream (and a
+same-origin `<img>`) uses a `Secure`, `HttpOnly`, `SameSite=Strict` cookie (no other site can
+cause it to be sent) while every POST requires the bearer header AND a JSON content type, which
+together force a preflight the server refuses for a foreign origin. The POST surface is then
+structurally CSRF-safe rather than leaning on the cookie's `SameSite` alone.
+
+Cookies ignore ports, so every service on the same host name is sent this cookie too. That is why
+it is an HMAC under the token rather than the token: it opens the GET routes and nothing else — no
+POST accepts it, and no route trades it for the token.
 """
+
+LEGACY_AUTH_COOKIE = "lh_web"
+"""0.16's cookie, which WAS the bearer token. Cleared at enrolment; accepted nowhere. The new cookie
+has a new name rather than the old name on a new path: Starlette keeps the LAST of two same-named
+cookies and a browser sends the longer path first, so a stale `Path=/` copy would shadow it."""
+
+COOKIE_PATH = "/api"
+"""Where the cookie is sent: the stream and the artifact `<img>` live under it."""
+
+_COOKIE_CONTEXT = b"localharness-web-get-cookie-v1"
 
 
 def token_path(config_dir: Optional[str | Path] = None) -> Path:
@@ -150,8 +166,16 @@ def confine(root: Path, candidate: str) -> Optional[Path]:
     return target if root_real in target.parents else None
 
 
-def constant_time_match(presented: Optional[str], expected: str) -> bool:
-    """Compare a presented credential against the real one without leaking its length in time."""
-    if not presented:
+def get_cookie_value(token: str) -> str:
+    """HMAC-SHA256 of a fixed context under the token: the GET routes accept it; a POST never does,
+    and it cannot be turned back into the token."""
+    return hmac.new(token.encode("utf-8"), _COOKIE_CONTEXT, hashlib.sha256).hexdigest()
+
+
+def constant_time_match(presented: object, expected: str) -> bool:
+    """Compare a presented credential with the real one in constant time. Anything that is not a
+    non-empty string is False — a non-ASCII header or a JSON number is a refusal, never a crash."""
+    if not isinstance(presented, str) or not presented:
         return False
-    return secrets.compare_digest(presented, expected)
+    return hmac.compare_digest(presented.encode("utf-8", "surrogatepass"),
+                               expected.encode("utf-8", "surrogatepass"))
