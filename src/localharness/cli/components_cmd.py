@@ -38,6 +38,7 @@ from localharness.registry import (
     ComponentEntry,
     coerce_value,
     set_value_in_dict,
+    walk_model_fields,
 )
 from localharness.registry.catalogue import PluginRows, plugin_catalogue_rows
 from localharness.registry.provenance import display_note, layered_catalogue
@@ -258,6 +259,48 @@ def _overlay_secrets(catalogue: dict[str, ComponentEntry], overlay: dict) -> lis
                 node = node.get(part) if isinstance(node, dict) else None
             out.append(node)
     return out
+
+
+def walk_secret_values(leaves: dict[str, Any], section: dict[str, Any]):
+    """(key, raw value) for every secret leaf `section` holds — scrubbed from error texts."""
+    for key, ann in leaves.items():
+        if is_secret(ann):
+            node: Any = section
+            for part in key.split("."):
+                node = node.get(part) if isinstance(node, dict) else None
+            yield key, node
+
+
+def _secret_strings(values: Any) -> list[str]:
+    """The values worth scrubbing: non-empty strings, without the literal default "none" (a
+    proposer's "no key"), which would otherwise mask every "none" in the text."""
+    return [v for v in values if isinstance(v, str) and v and v != "none"]
+
+
+def _core_secret_values(loader: ConfigLoader, overlay: dict[str, Any]) -> list[str]:
+    """Every string at a SecretStr leaf of the core settings — the global config.yaml merged with
+    the overlay about to be written (proposer.api_key today) — so a refusal can scrub them."""
+    merged = deep_merge(loader.raw_harness_dict(), {k: v for k, v in overlay.items() if k != _AGENT_KEY})
+    return _secret_strings(v for _k, v in walk_secret_values(dict(walk_model_fields(HarnessConfig)), merged))
+
+
+def _settings_secrets(catalogue: dict[str, ComponentEntry], loader: ConfigLoader,
+                      overlay: dict[str, Any]) -> list[str]:
+    """Every string at a secret leaf the catalogue knows, core and plugin, in the settings a write
+    is checked against: the global config.yaml merged with the overlay about to be written. Not
+    only the overlay's own: a key stored in config.yaml is in what _validate_overlay checks too."""
+    return _secret_strings(_overlay_secrets(catalogue, deep_merge(loader.raw_harness_dict(), overlay)))
+
+
+def _validation_text(exc: BaseException) -> str:
+    """Why a value was refused, without echoing any input: each pydantic error's location and
+    message — never its input_value, which can hold a whole section, keys included. pydantic
+    shortens that repr to its head and tail, so a long key leaks its last characters, which no
+    whole-string scrub can catch: leaving input_value out is the layer that holds."""
+    if isinstance(exc, ValidationError):
+        return "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" if e["loc"] else e["msg"]
+                         for e in exc.errors())
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _serialize_value(value: Any, secret: bool = False) -> Any:
@@ -495,10 +538,13 @@ def components_set(
     try:
         _validate_overlay(loader, path, new_overlay, plugins=plugins)
     except ValueError as exc:  # a pydantic ValidationError, or a plugin's contained validator failure
+        # Never pydantic's input_value (the whole merged settings), and never a secret either file
+        # holds: a plugin validator's own message can quote its section.
+        why = _validation_text(exc) if isinstance(exc, ValidationError) else str(exc)
         _err(
             json_output,
-            scrub(f"Validation failed for {path}={shown(typed_value, entry.annotation)}: {exc}",
-                  _overlay_secrets(catalogue, new_overlay)),
+            scrub(f"Validation failed for {path}={shown(typed_value, entry.annotation)}: {why}",
+                  _settings_secrets(catalogue, loader, new_overlay)),
             exit_code=2,
         )
         return

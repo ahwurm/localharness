@@ -29,15 +29,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, NoReturn, Optional
 
 import typer
-from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape
 from rich.padding import Padding
 from rich.table import Table
 
 from localharness.cli.components_cmd import (
-    _build_layered_loader, _err, _err_config, _serialize_value, _validate_overlay, is_secret, scrub,
-    shown,
+    _build_layered_loader, _core_secret_values, _err, _err_config, _serialize_value,
+    _validate_overlay, _validation_text, is_secret, scrub, shown, walk_secret_values,
 )
 from localharness.cli.workspace import _stdin_is_a_terminal
 from localharness.config.overlay import atomic_write_overlay, load_overlay
@@ -276,29 +275,12 @@ def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pai
                                          layer_files=loader.plugin_layer_files())
         model.model_validate({k: v for k, v in section.items() if k != "enabled"})
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — the plugin's own validator: contained
+        # Its message can quote the section it was given: scrub every layer's secrets, config.yaml's
+        # included, not only the overlay's.
         _fail(scrub(f"Validation failed for {name}: {_validation_text(exc)}",
-                    [v for _, v in walk_secret_values(leaves, overlay[name])]))
+                    [v for layer in layers if isinstance(layer, dict)
+                     for _, v in walk_secret_values(leaves, layer)]))
     return {f"{name}.{key}": shown(value, leaves[key]) for key, value in values.items()}
-
-
-def _validation_text(exc: BaseException) -> str:
-    """Why a value was refused, without echoing any input: each pydantic error's location and
-    message — never its input_value, which can hold a whole section, keys included."""
-    if isinstance(exc, ValidationError):
-        return "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" if e["loc"] else e["msg"]
-                         for e in exc.errors())
-    return f"{type(exc).__name__}: {exc}"
-
-
-def _core_secret_values(loader: ConfigLoader, overlay: dict[str, Any]) -> list[str]:
-    """Every string at a SecretStr leaf of the core settings — the global config.yaml merged with
-    the overlay about to be written (proposer.api_key today) — so a refusal can scrub them. The
-    literal default "none" is left out: scrubbing it would mask every "none" in the refusal."""
-    from localharness.config.models import HarnessConfig
-    from localharness.config.overlay import deep_merge
-    merged = deep_merge(loader.raw_harness_dict(), {k: v for k, v in overlay.items() if k != "agent"})
-    return [v for _k, v in walk_secret_values(dict(walk_model_fields(HarnessConfig)), merged)
-            if isinstance(v, str) and v and v != "none"]
 
 
 def _checked_core(loader: ConfigLoader, entry: PlanEntry, pairs: list[str], to_workspace: bool,
@@ -402,16 +384,6 @@ def _extra_missing(manifest: PluginManifest) -> bool:
     installed = (getattr(resolve, "__kwdefaults__", None) or {}).get("extra_installed",
                                                                      plan.extra_installed)
     return bool(extra) and not installed(extra)
-
-
-def walk_secret_values(leaves: dict[str, Any], section: dict[str, Any]):
-    """(key, raw value) for every secret leaf `section` holds — scrubbed from error texts."""
-    for key, ann in leaves.items():
-        if is_secret(ann):
-            node: Any = section
-            for part in key.split("."):
-                node = node.get(part) if isinstance(node, dict) else None
-            yield key, node
 
 
 def _set_spelling(name: str, setup) -> str:
