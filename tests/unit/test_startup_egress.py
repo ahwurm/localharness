@@ -253,3 +253,16 @@ def _spec_found_for(name: str):
         return real(module, *a, **k)
 
     return find_spec
+
+
+@pytest.mark.parametrize("model", ["./models/not-here", "not a model id"])
+def test_a_model_id_the_cache_cannot_read_is_no_notice_and_no_error(monkeypatch, model):
+    """The cache lookup raises for a missing local path or a malformed id; the notice runs inside
+    memory's start, so it must answer None rather than fail memory for the session."""
+    from localharness.memory import plugin as memory_plugin
+
+    monkeypatch.setattr(memory_plugin, "_embedding_check", _REAL_EMBEDDING_CHECK)
+    monkeypatch.setattr(memory_plugin, "_embedding_package_installed", lambda: True)
+    monkeypatch.setattr("importlib.util.find_spec", _spec_found_for("sentence_transformers"))
+
+    assert memory_plugin._embedding_download_notice(model) is None
