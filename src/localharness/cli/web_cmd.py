@@ -21,10 +21,11 @@ import asyncio
 import contextlib
 import io
 import logging
+import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Optional, TextIO
 
 import typer
 from rich.console import Console
@@ -69,6 +70,10 @@ TOKEN_NOT_A_TTY = (
 )
 
 SHOW_TOKEN_NOT_A_TTY = "--show-token prints the token only to a terminal, and stdout is not one."
+
+PAIRING_ON_TTY = (
+    "Pairing code drawn on the terminal only: stdout is not a terminal, so it gets no copy."
+)
 
 TOKEN_ROTATED = (
     "App token rotated. Every enrolled client is now invalid and must pair again; push "
@@ -321,38 +326,77 @@ def _stdout_is_a_terminal() -> bool:
     return sys.stdout is not None and sys.stdout.isatty()
 
 
+def _open_tty(path: str = "/dev/tty") -> Optional[TextIO]:
+    """This process's controlling terminal, open for writing — or None: no terminal at all
+    (systemd, cron, setsid), a platform without terminal process groups (Windows), or this process
+    is not the terminal's foreground job. A background job (`web > log &`) must not draw over the
+    shell, and with `stty tostop` its write would stop the server before it serves."""
+    if not hasattr(os, "tcgetpgrp"):
+        return None
+    try:  # never O_CREAT, never acquire a terminal: only an existing one is written to
+        tty = open(os.open(path, os.O_WRONLY | os.O_NOCTTY), "w", encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        if os.tcgetpgrp(tty.fileno()) == os.getpgrp():
+            return tty
+    except OSError:
+        pass
+    tty.close()
+    return None
+
+
 def print_pairing(token: str, *, reveal: bool, public_url: Optional[str], host: str,
                   port: int) -> None:
     """Pairing output, by where stdout goes. A terminal gets the QR on every start — it carries
     the token, and scanning it is pairing — plus, when `reveal` (a token just created, rotated or
-    asked for with --show-token), the token's text. Anything else (journald, a tee, a pipe) keeps
-    what is printed, so it gets one line naming --show-token and nothing secret."""
-    if not _stdout_is_a_terminal():
-        console.print(escape(TOKEN_NOT_A_TTY), style="dim", soft_wrap=True)
+    asked for with --show-token), the token's text. A pipe or a file (a tee, journald) keeps what
+    is printed, so when the process has a controlling terminal the same block is drawn there
+    instead (`web | tee -a log` in a terminal window shows the QR; the log gets none of it), and
+    with no terminal at all stdout gets one line naming --show-token and nothing secret."""
+    if _stdout_is_a_terminal():
+        _draw_pairing(console, token, reveal=reveal, public_url=public_url, host=host, port=port)
         return
-    print_enrolment(token, public_url=public_url, host=host, port=port)
+    tty = _open_tty()
+    if tty is not None:
+        try:
+            with tty:
+                _draw_pairing(Console(file=tty), token, reveal=reveal, public_url=public_url,
+                              host=host, port=port)
+        except OSError:  # the terminal went away mid-draw: fall back to the one line
+            tty = None
+    if tty is None:
+        console.print(escape(TOKEN_NOT_A_TTY), style="dim", soft_wrap=True)
+    else:
+        console.print(escape(PAIRING_ON_TTY), style="dim", soft_wrap=True)
+
+
+def _draw_pairing(out: Console, token: str, *, reveal: bool, public_url: Optional[str],
+                  host: str, port: int) -> None:
+    print_enrolment(token, public_url=public_url, host=host, port=port, out=out)
     if reveal:
-        console.print(escape(TOKEN_LINE.format(token=token)), soft_wrap=True)
+        out.print(escape(TOKEN_LINE.format(token=token)), soft_wrap=True)
 
 
-def print_enrolment(token: str, *, public_url: Optional[str], host: str, port: int) -> None:
-    """Print the pairing QR and the address beside it. Nobody hand-types a 256-bit secret into a
-    phone: the QR carries the token in its fragment; the printed address carries none."""
+def print_enrolment(token: str, *, public_url: Optional[str], host: str, port: int,
+                    out: Optional[Console] = None) -> None:
+    """Print the pairing QR and the address beside it (to `out`, default this command's console).
+    Nobody hand-types a 256-bit secret into a phone: the QR carries the token in its fragment; the
+    printed address carries none."""
+    out = out or console
     url, kind = enrolment_url(token, public_url=public_url, host=host, port=port)
-    console.print(escape(ENROLMENT_HEADER.format(url=url.split("#", 1)[0])), soft_wrap=True)
+    out.print(escape(ENROLMENT_HEADER.format(url=url.split("#", 1)[0])), soft_wrap=True)
     art = render_qr(url)
     if art is None:
-        console.print(escape(ENROLMENT_NO_QR), style="dim", soft_wrap=True)
+        out.print(escape(ENROLMENT_NO_QR), style="dim", soft_wrap=True)
     else:
         # No markup, no highlighting and no wrapping: this is a picture made of block
         # characters, and Rich reflowing it would turn it into a QR that does not scan.
-        console.print(art, markup=False, highlight=False, soft_wrap=True)
+        out.print(art, markup=False, highlight=False, soft_wrap=True)
     if kind == "loopback":
-        console.print(escape(ENROLMENT_LOOPBACK_NOTE.format(port=port)), style="dim",
-                      soft_wrap=True)
+        out.print(escape(ENROLMENT_LOOPBACK_NOTE.format(port=port)), style="dim", soft_wrap=True)
     elif kind == "guessed":
-        console.print(escape(ENROLMENT_GUESSED_NOTE.format(port=port)), style="dim",
-                      soft_wrap=True)
+        out.print(escape(ENROLMENT_GUESSED_NOTE.format(port=port)), style="dim", soft_wrap=True)
 
 
 async def _serve(
