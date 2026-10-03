@@ -21,7 +21,9 @@ from localharness.core.bus import EventBus
 from localharness.plugins.api import Check, PluginContext, PluginPaths
 from localharness.tools.registry import ToolRegistry
 
-URL = "http://p.test/v1"
+# https: these tests are about the check itself. A key sent to a plain-http proposer on another
+# machine also gets the cleartext row, pinned by its own tests at the end of this file.
+URL = "https://p.test/v1"
 _PROVIDER = {"provider_type": "vllm", "base_url": "http://127.0.0.1:9/v1", "default_model": "test-model"}
 _PROPOSER = {"base_url": URL, "model": "p-model", "api_key": "sk-SENTINEL"}
 SERVES = {"object": "list", "data": [{"id": "p-model", "object": "model"}]}
@@ -217,7 +219,7 @@ def test_a_proposer_only_a_project_file_sets_is_never_contacted(tmp_path, server
 
 
 @pytest.mark.parametrize(("proposer", "host", "line"), [
-    (_PROPOSER, "p.test", "Contacting the proposer at http://p.test (sending proposer.api_key) …"),
+    (_PROPOSER, "p.test", "Contacting the proposer at https://p.test (sending proposer.api_key) …"),
     ({"base_url": "http://good.test@evil.test:8001/v1", "model": "p-model"}, "evil.test",
      "Contacting the proposer at http://evil.test:8001 …"),
 ], ids=["with its key", "the host it really contacts"])
@@ -230,3 +232,33 @@ def test_the_host_is_named_before_the_request_goes(tmp_path, server, capsys, pro
 
     assert printed_by_then == [line + "\n"]
     assert [r.url.host for r in seen] == [host]
+
+
+# --- a key over plain http to another machine is named, and still sent (#34) ------------------------
+
+PLAIN = "http://p.test/v1"
+CLEARTEXT = Check(name="autoresearch-proposer", status="warn",
+                  detail="proposer.api_key travels unencrypted to http://p.test — use https",
+                  hint="use an https:// address for a cloud proposer")
+
+
+def test_a_key_sent_over_plain_http_is_named_and_the_check_still_runs(tmp_path, server) -> None:
+    seen, _ = server
+    rows = _act(_ctx(tmp_path, {**_PROPOSER, "base_url": PLAIN}))
+
+    assert rows == [CLEARTEXT, Check(name="autoresearch-proposer", status="pass",
+                                     detail=f"the proposer answers at {PLAIN} and serves p-model")]
+    assert [(str(r.url), r.headers["Authorization"]) for r in seen] == [
+        (f"{PLAIN}/models", "Bearer sk-SENTINEL")]
+
+
+@pytest.mark.parametrize("proposer", [
+    {"base_url": PLAIN, "model": "p-model"},                                # no key: nothing travels
+    _PROPOSER,                                                              # https
+    {**_PROPOSER, "base_url": "http://127.0.0.1:8001/v1"},                  # this machine
+], ids=["no key", "https", "loopback"])
+def test_no_key_https_or_this_machine_gets_no_cleartext_row(tmp_path, server, proposer) -> None:
+    rows = _act(_ctx(tmp_path, proposer))
+
+    assert [r for r in rows if "unencrypted" in r.detail] == []
+    assert len(server[0]) == 1  # the check ran
