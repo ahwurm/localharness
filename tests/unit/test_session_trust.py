@@ -138,33 +138,38 @@ async def test_a_channel_that_cannot_ask_runs_guarded_and_records_nothing(tmp_pa
 # ------------------------------------------------------------------ recognition
 
 @pytest.mark.asyncio
-async def test_a_workspace_with_earlier_sessions_is_recognized_not_asked(tmp_path):
-    """Owner: "it should recognize I've been in this environment before, used X tools etc."
-
-    A place you have already worked in is not a place to be asked about. The record is written
-    anyway, so from here on the answer is explicit rather than re-derived from what happens to
-    be on disk.
+async def test_session_files_in_a_project_never_make_it_trusted(tmp_path):
+    """A project's `.localharness/agents/*/sessions/` can be committed to a repository, so a
+    cloned repo would arrive "recognized". Only the machine's own store counts as prior use: a
+    project with old session files and nobody to ask runs guarded and records nothing, and with
+    somebody to ask it gets its one question like any other new root.
     """
     project = tmp_path / "familiar"
     project.mkdir()
     _worked_here(project, sessions=3)
     notices: list[str] = []
+
+    assert await establish_session_trust(_gate(tmp_path, project), notices.append) == UNTRUSTED_MODE
+    assert trust.is_trusted_tree(project) is None
+    assert not any("recognized" in n for n in notices)
+
     asked: list[PermissionRequest] = []
     gate = _gate(tmp_path, project, asker=_answers("reject_once", asked))
-
-    assert await establish_session_trust(gate, notices.append) == "auto"
-    assert asked == []
-    assert notices == [RECOGNIZED_NOTICE.format(count=3, plural="s")]
-    assert trust.is_trusted_tree(project) is True
+    assert await establish_session_trust(gate) == UNTRUSTED_MODE
+    assert len(asked) == 1, "committed session files are not an answer"
 
 
 @pytest.mark.asyncio
-async def test_one_earlier_session_reads_as_one_not_ones(tmp_path):
-    project = tmp_path / "once"
-    project.mkdir()
-    _worked_here(project, sessions=1)
+async def test_one_earlier_session_reads_as_one_not_ones(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    store = home / WORKSPACE_DIR_NAME / "agents" / "orchestrator" / "sessions"
+    store.mkdir(parents=True)
+    (store / "0.jsonl").write_text('{"event_type": "TurnCompleted"}\n', encoding="utf-8")
+    _backdate(store / "0.jsonl")
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(home / WORKSPACE_DIR_NAME))
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
     notices: list[str] = []
-    await establish_session_trust(_gate(tmp_path, project, asker=_answers("reject_once")),
+    await establish_session_trust(_gate(tmp_path, None, asker=_answers("reject_once")),
                                   notices.append)
     assert notices == ["recognized this workspace (1 earlier session)"]
 
@@ -467,16 +472,16 @@ def test_this_runs_own_session_file_is_not_evidence(tmp_path, fake_home):
 
 @pytest.mark.asyncio
 async def test_a_session_file_from_a_previous_run_is_evidence(tmp_path, fake_home):
-    """The other direction, so the fix cannot be read as "recognition stopped working"."""
-    fake_home(tmp_path / "home")
-    project = tmp_path / "familiar"
-    project.mkdir()
-    _backdate(_session_file(project))
+    """The other direction, so the fix cannot be read as "recognition stopped working": a file
+    that predates this process still counts, and in the machine's own store — the home-rooted
+    session's evidence — it still recognizes."""
+    home = fake_home(tmp_path / "home")
+    _backdate(_session_file(home))
 
-    assert trust.prior_session_count(project / WORKSPACE_DIR_NAME) == 1
+    assert trust.prior_session_count(home / WORKSPACE_DIR_NAME) == 1
 
     asked: list[PermissionRequest] = []
-    gate = _gate(tmp_path, project, asker=_answers("reject_once", asked))
+    gate = _gate(tmp_path, None, asker=_answers("reject_once", asked))
     assert await establish_session_trust(gate) == "auto"
     assert asked == []
 

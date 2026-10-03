@@ -30,7 +30,6 @@ from localharness.cli import workspace as ws_mod
 from localharness.cli.workspace import (
     DECLINED_NOTICE,
     OFFER_PROMPT,
-    RECOGNIZED_NOTICE,
     TRUST_ONLY_PROMPT,
     settle_startup_trust,
 )
@@ -356,21 +355,24 @@ def _worked_here_before_this_run(root: Path, sessions: int = 2) -> Path:
     return root / ".localharness"
 
 
-def test_a_workspace_with_earlier_sessions_is_recognized_not_asked(project, monkeypatch, capsys):
-    """Work has happened here before this run started, so there is nothing to ask about (owner:
-    "it should recognize I've been in this environment before"). The answer is recorded anyway,
-    so it is explicit from then on rather than re-derived from the filesystem every startup.
-
-    Nothing is returned because nothing was created — `resolve_workspace_layer` is what decides
-    whether the workspace that was already here loads.
+def test_a_project_with_committed_session_files_is_asked_not_trusted(project, monkeypatch):
+    """Session files inside a project can be committed to a repository, so a fresh clone would
+    arrive looking "worked in". They never make it trusted: only the machine's own trust store
+    counts as prior use. On a terminal the one question is asked like anywhere new; with nobody to
+    ask, nothing is recorded (the session then runs guarded and starts none of its servers).
     """
     _worked_here_before_this_run(project)
-    _tty(monkeypatch)
+    _tty(monkeypatch, False)
     _never_asked(monkeypatch)
 
     assert settle_startup_trust(None) is None
-    assert _decided(project) is True
-    assert RECOGNIZED_NOTICE.format(root=project) in _said(capsys.readouterr().err)
+    assert _decided(project) is None, "nobody answered, so nothing is recorded"
+
+    _tty(monkeypatch)
+    asked = _answer(monkeypatch, False)
+    assert settle_startup_trust(None) is None
+    assert asked == [TRUST_ONLY_PROMPT]
+    assert _decided(project) is False
 
 
 # ------------------------------------------------------------------ where asking would be wrong
