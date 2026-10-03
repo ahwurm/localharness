@@ -103,6 +103,8 @@ def _workspace_start(tmp_path: Path, monkeypatch, fake_home) -> tuple[Path, Path
     """
     home = tmp_path / "home"
     global_dir = _hermetic(monkeypatch, fake_home, home)
+    # as init creates it (owner-only): start has nothing to tighten, so the only audit records are the session's own
+    global_dir.chmod(0o700)
     _stub_start_boundaries(global_dir, monkeypatch)
 
     proj = home / "proj"

@@ -2,7 +2,7 @@
 a coding-agent prompt. nvidia-smi first (the only source that names a GB10), then the PCI vendor
 in sysfs, then a Mac's chip; None when nothing answers, so the prompt prints no sentence.
 
-Every source is faked (setup.shutil, setup._lines, setup._SYSFS_DRM, setup.sys): no test runs
+Every source is faked (setup.which_outside_cwd, setup._lines, setup._SYSFS_DRM, setup.sys): no test runs
 nvidia-smi or reads the real /sys. `_lines` itself runs only this Python interpreter."""
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ SMI = "/usr/bin/nvidia-smi"
 def _machine(monkeypatch, tmp_path: Path, *, smi=None, vendors=(), platform="linux", sysctl=None):
     """`smi`: nvidia-smi's output lines (None: not installed); `vendors`: one sysfs card per PCI
     vendor id; `sysctl`: the Mac's chip line (None: nothing)."""
-    monkeypatch.setattr(setup, "shutil", SimpleNamespace(
-        which=lambda exe: SMI if smi is not None and exe == "nvidia-smi" else None))
+    monkeypatch.setattr(setup, "which_outside_cwd",
+                        lambda exe: SMI if smi is not None and exe == "nvidia-smi" else None)
 
     def lines(argv):
         if argv[0] == SMI:

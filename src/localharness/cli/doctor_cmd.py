@@ -221,6 +221,52 @@ def _print_exposure(harness: HarnessConfig) -> None:
                 soft_wrap=True)
 
 
+def _read_only(path: Path) -> bool:
+    try:
+        return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+    except (AttributeError, OSError):
+        return False
+
+
+def _print_private_files(cfg_path: Path) -> None:
+    """One warn row when the config folder is not owner-only, worded by why `start` has not made it
+    so: a folder of this account's it has not tightened yet, one another account owns, or one on a
+    read-only filesystem. Else, the folder being private, one info row counting the files inside
+    that other accounts could read if it were ever opened up. Doctor changes no mode itself.
+    POSIX only: Windows guards a folder with its access list, not these bits."""
+    import shlex
+
+    from localharness.core.private_files import OPEN_TO_OTHERS, readable_by_others
+
+    if not hasattr(os, "geteuid"):
+        return
+    try:
+        st = os.stat(cfg_path)
+    except OSError:
+        return
+    quoted = shlex.quote(str(cfg_path))
+    if st.st_mode & OPEN_TO_OTHERS:
+        if st.st_uid != os.geteuid():
+            text = (f"{cfg_path} is readable by other accounts and is owned by another account, so it "
+                    "cannot be made owner-only from here — ask its owner, or move your config to a "
+                    "folder you own")
+        elif _read_only(cfg_path):
+            text = (f"{cfg_path} is readable by other accounts and is on a read-only filesystem, so "
+                    f"start could not make it owner-only — make it writable and run `chmod 700 "
+                    f"{quoted}`, or move your config to a folder you own")
+        else:
+            text = (f"{cfg_path} is readable by other accounts on this machine — `localharness start` "
+                    f"makes it owner-only (0700), or run `chmod 700 {quoted}`")
+        console.print(_WARN + " " + escape(text), soft_wrap=True)
+        return
+    found = readable_by_others(cfg_path)
+    if found:
+        console.print(_INFO + " " + escape(
+            f"{len(found)} file(s) in {cfg_path} are readable by other accounts if the folder is ever "
+            f"opened up (e.g. {found[0]}) — `chmod -R go-rwx {quoted}` makes each private"),
+            soft_wrap=True)
+
+
 def _print_remote_lock(loader: ConfigLoader, resolution, on: list[str]) -> None:
     """One info row when a remote channel plugin is on while the remote lock is off
     (`channels.remote_unattended`, true by default): a paired phone or an allowlisted chat account
@@ -432,6 +478,7 @@ def doctor(
     if harness is not None:
         _print_migration_state(cfg_path, harness)
         _print_exposure(harness)
+        _print_private_files(cfg_path)
 
 
     # 4. LLM endpoint reachable

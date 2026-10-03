@@ -71,6 +71,11 @@ Workspace = Annotated[bool, typer.Option(
     "--workspace", help="Write this project's overrides.yaml instead of the machine's. Plugins that "
                         "ship with LocalHarness only: a plugin you installed is switched machine-wide.")]
 _BANDS = (LAYER_GLOBAL_CONFIG, LAYER_GLOBAL_OVERRIDES, LAYER_WORKSPACE_CONFIG, LAYER_WORKSPACE_OVERRIDES)
+# Asked once, in a session, before turning on a plugin the user installed: it is machine-wide trust
+# in code that runs with their permissions (SAFE-06). Bundled plugins and the shell command never ask.
+THIRD_PARTY_CONFIRM = ("{name} is a plugin you installed, not one that ships with LocalHarness: turning "
+                       "it on lets its code run with your permissions on this machine, in every "
+                       "session. Turn it on?")
 # The same literal init's scaffolded plugins/README.md links to (a PyPI install has no examples/).
 _TEMPLATE_URL = "https://github.com/ahwurm/localharness/tree/main/examples/plugin-template"
 # A setup question for a secret that is already stored (#28): what Enter does, and how to clear it.
@@ -540,6 +545,10 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     if to_workspace and workspace is None:
         _fail("no project workspace applies here — run `localharness init --workspace` in the "
               "project first, or leave out --workspace to change the machine-level setting")
+    if (in_session and on and ask and not entry.bundled
+            and not typer.confirm(THIRD_PARTY_CONFIRM.format(name=name), default=False)):
+        console.print(escape(f"{name} stays off. Your conversation continues."), soft_wrap=True)
+        return StepOutcome(name, on, stopped=True)
     # Each layer's overrides.yaml exactly as config/loader.py reads it.
     target = workspace / "overrides.yaml" if to_workspace else loader.user_overlay_path
     m = entry.manifest if on else None

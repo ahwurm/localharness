@@ -497,9 +497,10 @@ def _tighten_records(config_dir: Path) -> list[dict]:
     return [r for r in rows if r.get("path") == "config_dir.mode"]
 
 
-def _said_anything_about_it(printed: list[str], captured) -> bool:
-    text = "\n".join(printed) + captured.out + captured.err
-    return any(word in text for word in ("0700", "0o7", "owner-only", "config_dir.mode", "tighten"))
+def _said_anything_about_it(printed: list[str], captured, config_dir: Path) -> bool:
+    text = ("\n".join(printed) + captured.out + captured.err).replace(str(config_dir), "<dir>")
+    return any(word in text for word in ("0700", "0o700", "0o775", "owner-only", "config_dir.mode",
+                                         "tighten"))
 
 
 def _open_config_dir(tmp_path: Path) -> Path:
@@ -524,7 +525,7 @@ async def test_the_tighten_is_silent_and_once(tmp_path, monkeypatch, capsys):
     assert record["event_type"] == "ComponentMutated"
     assert (record["before_value"], record["after_value"]) == ("0o775", "0o700")
     assert (record["layer"], record["actor"]) == ("user", "cli")
-    assert not _said_anything_about_it(printed, capsys.readouterr())
+    assert not _said_anything_about_it(printed, capsys.readouterr(), config_dir)
 
     await _start_async(None, False, False, str(config_dir))
 
@@ -569,7 +570,7 @@ async def test_a_directory_that_cannot_be_tightened_never_blocks_start(tmp_path,
 
     assert _mode(config_dir) == 0o775
     assert _tighten_records(config_dir) == []
-    assert not _said_anything_about_it(printed, capsys.readouterr())
+    assert not _said_anything_about_it(printed, capsys.readouterr(), config_dir)
     assert any("startup)" in line for line in printed), "the session came up"
 
 
@@ -654,3 +655,13 @@ def test_doctor_says_nothing_about_an_all_private_folder(tmp_path, monkeypatch, 
     os.chmod(config_dir / "config.yaml", 0o600)
 
     assert _rows(_run_doctor(), "readable by other accounts") == []
+
+
+def test_readable_by_others_stops_at_its_limit(tmp_path):
+    from localharness.core.private_files import readable_by_others
+
+    for i in range(5):
+        (tmp_path / f"f{i}").write_text("x")
+        os.chmod(tmp_path / f"f{i}", 0o644)
+    assert len(readable_by_others(tmp_path, limit=3)) == 3
+    assert len(readable_by_others(tmp_path)) == 5

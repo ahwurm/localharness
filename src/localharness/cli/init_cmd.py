@@ -24,6 +24,7 @@ from localharness.config.overlay import atomic_write_overlay, load_overlay
 from localharness.config.paths import WORKSPACE_DIR_NAME, global_config_dir, resolve_config_dir
 from localharness.config.redact import reveal, secret_values, validation_text
 from localharness.core.private_files import ensure_private_dir, touch_private, write_private_bytes
+from localharness.core.which import which_outside_cwd
 from localharness.config.models import (
     ContextConfig,
     HarnessConfig,
@@ -1140,7 +1141,7 @@ def _guided_setup(
     if binary:
         console.print("  [green]✓[/green] " + escape(f"vLLM found: {binary}"), soft_wrap=True)
     elif ra.launch == "docker":
-        if shutil.which("docker") is None:
+        if which_outside_cwd("docker") is None:
             err_console.print(
                 "[bold red]Error:[/bold red] No vllm binary and no docker. "
                 f"This hardware's supported route is the NVIDIA container — see {ra.doc}."
