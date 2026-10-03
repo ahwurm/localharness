@@ -51,7 +51,7 @@ An agent that reads untrusted content, such as a web page or an MCP tool's resul
 | Name | What it does | Default | How to switch |
 |------|--------------|---------|---------------|
 | `image` | makes pictures with ComfyUI | off | `localharness plugins enable image --set comfyui_url=<url>` |
-| `web` | the phone app: `localharness web` serves the web UI and its event API | on; needs `localharness[web]` | `localharness plugins disable web` |
+| `web` | Mobile: the phone page, served with its event API by `localharness web` | on; needs `localharness[web]` | `localharness plugins disable web` |
 | `memory` | persistent memory: facts recalled into each turn, memory tools, background consolidation | on | `localharness plugins disable memory` |
 | `dispatch` | chat: Discord | on; needs `localharness[dispatch]` | `localharness plugins disable dispatch` |
 | `autoresearch` | experiment loop | on | `localharness plugins disable autoresearch` |
