@@ -5,7 +5,7 @@ description = "The copyable LocalHarness plugin: one declared tool, one CLI comm
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
-    "localharness>=0.15,<1",
+    "localharness>=0.16,<1",
     # Imported directly (plugin.py, cli.py) — a transitive dependency is not a promise.
     "pydantic>=2.13,<3",
     "typer>=0.25,<1",

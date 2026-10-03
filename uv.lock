@@ -1297,7 +1297,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "localharness", specifier = ">=0.15,<1" },
+    { name = "localharness", specifier = ">=0.16,<1" },
     { name = "pydantic", specifier = ">=2.13,<3" },
     { name = "typer", specifier = ">=0.25,<1" },
 ]

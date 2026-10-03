@@ -100,7 +100,7 @@ def test_the_entry_point_loads_a_plugin_that_matches_its_distribution(plugin_cls
 
 def test_the_manifest_declares_one_of_each_contribution(plugin_cls):
     m = plugin_cls.manifest
-    assert (m.name, m.version, m.kind, m.requires_localharness) == ("example", "0.1.0", "tools", ">=0.15,<1")
+    assert (m.name, m.version, m.kind, m.requires_localharness) == ("example", "0.1.0", "tools", ">=0.16,<1")
     assert [(d.name, d.help, d.target) for d in m.cli] == [
         ("example", "Show what the example plugin does.", f"{PKG}.cli:app")]
     assert [(d.name, d.target) for d in m.slash] == [("/example", f"{PKG}.slash:run")]
@@ -111,7 +111,8 @@ def test_the_manifest_declares_one_of_each_contribution(plugin_cls):
 
 def test_requires_localharness_admits_this_release_and_the_next(plugin_cls):
     spec = SpecifierSet(plugin_cls.manifest.requires_localharness)
-    assert "0.15.0" in spec and "0.16.3" in spec
+    assert "0.16.0" in spec and "0.17.3" in spec
+    assert "0.15.1" not in spec  # 0.15 cannot load a v1 plugin
     assert localharness.__version__ in spec
 
 

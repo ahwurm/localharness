@@ -56,7 +56,7 @@ class ExamplePlugin(Plugin):
         name="example",
         version=__version__,
         kind="tools",
-        requires_localharness=">=0.15,<1",  # the LocalHarness releases this plugin is tested against
+        requires_localharness=">=0.16,<1",  # tested releases; 0.15 cannot load a v1 plugin
         cli=(CliDescriptor(name="example", help="Show what the example plugin does.",
                            target="localharness_plugin_example.cli:app"),),
         slash=(SlashDescriptor(name="/example", help="Show the example plugin's swatch settings",
