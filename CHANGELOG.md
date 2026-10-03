@@ -10,6 +10,8 @@ All notable changes to LocalHarness are documented here. The format follows
 - **A page for each bundled plugin**, under `docs/plugins/` (`image`, `mobile`
   for the `web` plugin, `memory`, `dispatch`, `autoresearch`), linked from a
   shorter README next to its localharness.dev page.
+- **A logo**: the phone app's capped-agent icon, at `docs/assets/logo.svg`,
+  now heads the README.
 
 ### Fixed
 - The example plugin in `examples/plugin-template/` now requires LocalHarness

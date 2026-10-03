@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ahwurm/localharness/main/docs/assets/logo.svg" alt="LocalHarness logo" width="96" height="96">
+</p>
+
 # LocalHarness
 
 [![GitHub stars](https://img.shields.io/github/stars/ahwurm/localharness?style=social)](https://github.com/ahwurm/localharness/stargazers) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
