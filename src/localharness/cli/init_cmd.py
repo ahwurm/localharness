@@ -828,8 +828,33 @@ def _served_window(result: DetectorResult) -> int | None:
     return None
 
 
+def _overlay_shadows(config_path: Path) -> None:
+    """Say which server and model keys the machine's overrides.yaml sets: a past change (or `/model`)
+    left them there, and they win over the config.yaml just written — so without this line init
+    would report a server the next start does not use."""
+    overlay_path = ConfigLoader(config_dir=config_path).user_overlay_path
+    try:
+        overlay = load_overlay(overlay_path)
+    except Exception:  # noqa: BLE001 — a malformed overrides.yaml is start's to report, not this note's
+        return
+    provider, org = overlay.get("provider"), overlay.get("org")
+    keys = [f"provider.{key}" for key in provider] if isinstance(provider, dict) else []
+    if isinstance(org, dict):
+        keys += ["org.default_model"] * ("default_model" in org)
+        keys += ["org.context.max_context_tokens"] * (
+            isinstance(org.get("context"), dict) and "max_context_tokens" in org["context"])
+    if keys:
+        console.print(
+            "  [yellow]⚠[/yellow]  "
+            + escape(f"{overlay_path} still sets {', '.join(keys)} — those win over config.yaml. "
+                     "Remove them there to use what init just found."),
+            soft_wrap=True,
+        )
+
+
 def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool) -> Path:
-    """Write config.yaml (owner-only), the agents/ folder and plugins/README.md beside it."""
+    """Write config.yaml (owner-only), the agents/ folder and plugins/README.md beside it, and say
+    when overrides.yaml still overrides the server just written."""
     from pydantic_yaml import to_yaml_str
 
     config_file = config_path / "config.yaml"
@@ -850,6 +875,7 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool) -
     plugins_readme.parent.mkdir(exist_ok=True)
     if not plugins_readme.exists():
         plugins_readme.write_text(GLOBAL_PLUGINS_README, encoding="utf-8")
+    _overlay_shadows(config_path)
     return config_file
 
 
