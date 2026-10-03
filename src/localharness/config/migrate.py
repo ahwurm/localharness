@@ -21,6 +21,15 @@ is the documented repair path, and it has to be able to repair the thing that br
 removal is also why the plan is not purely revision-gated: a config already stamped at the
 current revision still gets a plan when the dead key is present.
 
+The one other write is `server.bind_all` and `extra_endpoints[*].lifecycle.bind_all`: `true` into a
+launched vLLM section that predates the setting (`_needs_bind_all`). Earlier releases launched
+vLLM on every network interface and this one launches on 127.0.0.1 unless `bind_all`, so writing
+`true` for an existing config is what keeps a server someone uses from another machine answering
+after the upgrade (a stricter default reaches existing users only through a migration that
+preserves their behaviour). It is not revision-gated and never moves the stamp: bumping the
+revision would re-add deny defaults a user deleted. A plan that writes only this leaves `org`
+exactly as it was.
+
 The two halves stay separate, and that separation is load-bearing (review finding R10): when the
 stamp is already current, the plan is the REMOVAL ALONE. Letting the dead key drag the "add every
 missing shipped default" pass along with it would re-appear a default the user deliberately
@@ -130,6 +139,19 @@ class MigrationPlan:
     updated: dict
     removed_allow_patterns: Optional[list] = None
     sidecars: tuple[SidecarPlan, ...] = ()
+    bind_all_paths: tuple[str, ...] = ()
+    """Each launched vLLM section given `bind_all: true` (`"server"`,
+    `"extra_endpoints[0].lifecycle"`, …) — see `_needs_bind_all`."""
+
+    @property
+    def defaults_unchanged(self) -> bool:
+        """True when the deny-defaults half needs nothing: no pattern added, no dead key, the stamp
+        already current."""
+        return (
+            not self.added
+            and self.removed_allow_patterns is None
+            and self.from_revision >= self.to_revision
+        )
 
     @property
     def config_unchanged(self) -> bool:
@@ -137,11 +159,7 @@ class MigrationPlan:
 
         Rewriting an untouched file would still cost the user a backup and a YAML round-trip
         (comments and key order are not preserved), so the writer skips it."""
-        return (
-            not self.added
-            and self.removed_allow_patterns is None
-            and self.from_revision >= self.to_revision
-        )
+        return self.defaults_unchanged and not self.bind_all_paths
 
 
 def scan_sidecars(config_dir: Path) -> list[SidecarPlan]:
@@ -173,6 +191,23 @@ def scan_sidecars(config_dir: Path) -> list[SidecarPlan]:
     return found
 
 
+def _needs_bind_all(data: dict) -> tuple[str, ...]:
+    """Where a config written before `server.bind_all` existed launches a vLLM server: the server
+    section and each extra endpoint's lifecycle with runtime vllm (the default) and no bind_all key.
+    0.16 launched those on every interface; the migration writes bind_all: true so an upgrade never
+    takes a server off the network someone relies on. A key already present (true or false) is the
+    user's and is never touched. A section written by hand after the upgrade without the key looks
+    exactly like a 0.16 one and is migrated the same way — accepted (orchestrator ruling R19): the
+    receipt and doctor's row say how to keep the server on this machine."""
+    def launches_vllm(spec: object) -> bool:
+        return isinstance(spec, dict) and spec.get("runtime", "vllm") == "vllm" and "bind_all" not in spec
+
+    endpoints = data.get("extra_endpoints") if isinstance(data.get("extra_endpoints"), list) else []
+    return (*(("server",) if launches_vllm(data.get("server")) else ()),
+            *(f"extra_endpoints[{i}].lifecycle" for i, ep in enumerate(endpoints)
+              if isinstance(ep, dict) and launches_vllm(ep.get("lifecycle"))))
+
+
 def plan(data: dict, sidecars: tuple[SidecarPlan, ...] = ()) -> Optional[MigrationPlan]:
     """Return a MigrationPlan if `data` (or any sidecar file) needs work, else None.
 
@@ -180,7 +215,8 @@ def plan(data: dict, sidecars: tuple[SidecarPlan, ...] = ()) -> Optional[Migrati
     `org.permissions.allow_patterns` key, or an agent/division file carrying that key. The
     second and third clauses are not decoration: a file with that key fails validation outright
     (or warns on every load when empty), so the repair has to reach it even when the revision
-    stamp is already current.
+    stamp is already current. Independently of all three, a launched vLLM section with no
+    `bind_all` gets `bind_all: true` (`_needs_bind_all`); on its own that leaves `org` untouched.
 
     When the stamp IS current the plan is the removal alone — `added` stays empty. That is the
     removal-respect path: a stamped-current config is never inspected for missing defaults, so
@@ -195,7 +231,8 @@ def plan(data: dict, sidecars: tuple[SidecarPlan, ...] = ()) -> Optional[Migrati
     stamped = stamped if isinstance(stamped, int) else 0
     has_dead_key = DEAD_KEY in perms
     at_current = stamped >= CURRENT_DEFAULTS_REVISION
-    if at_current and not has_dead_key and not sidecars:
+    bind_all_paths = _needs_bind_all(data)
+    if at_current and not has_dead_key and not sidecars and not bind_all_paths:
         return None
 
     user_deny = perms.get("deny_patterns")
@@ -205,18 +242,28 @@ def plan(data: dict, sidecars: tuple[SidecarPlan, ...] = ()) -> Optional[Migrati
     ]
 
     updated = dict(data)
-    updated_org = dict(org)
-    updated_perms = dict(perms)
     removed = None
-    if has_dead_key:
-        dead = updated_perms.pop(DEAD_KEY)
-        removed = list(dead) if isinstance(dead, list) else []
-    updated_perms["deny_patterns"] = [*user_deny, *added]
-    updated_perms["defaults_revision"] = CURRENT_DEFAULTS_REVISION
-    updated_org["permissions"] = updated_perms
-    updated["org"] = updated_org
+    if not at_current or has_dead_key:  # the deny half; a stamped config is otherwise not rewritten
+        updated_org = dict(org)
+        updated_perms = dict(perms)
+        if has_dead_key:
+            dead = updated_perms.pop(DEAD_KEY)
+            removed = list(dead) if isinstance(dead, list) else []
+        updated_perms["deny_patterns"] = [*user_deny, *added]
+        updated_perms["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+        updated_org["permissions"] = updated_perms
+        updated["org"] = updated_org
+    if "server" in bind_all_paths:
+        updated["server"] = {**data["server"], "bind_all": True}
+    if any(p != "server" for p in bind_all_paths):
+        updated["extra_endpoints"] = [
+            {**ep, "lifecycle": {**ep["lifecycle"], "bind_all": True}}
+            if f"extra_endpoints[{i}].lifecycle" in bind_all_paths else ep
+            for i, ep in enumerate(data["extra_endpoints"])
+        ]
     return MigrationPlan(
-        added, stamped, CURRENT_DEFAULTS_REVISION, updated, removed, tuple(sidecars)
+        added, stamped, CURRENT_DEFAULTS_REVISION, updated, removed, tuple(sidecars),
+        bind_all_paths=bind_all_paths,
     )
 
 

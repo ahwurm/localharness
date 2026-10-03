@@ -187,6 +187,59 @@ def _print_migration_state(cfg_path: Path, harness: HarnessConfig) -> None:
     console.print(escape(f"       Last migrated {when}; backup at {latest}"), soft_wrap=True)
 
 
+def _print_exposure(harness: HarnessConfig) -> None:
+    """One info row per way a server the harness launches is open beyond this machine's own use,
+    each naming the setting that closes it: a launched vLLM server listening on every interface
+    (`bind_all`), and one launched without requiring the API key the harness holds for it
+    (`require_api_key`, opt-in). The key itself is never printed — only whether one is set.
+
+    For the primary server the rows read:
+      i Model server: reachable from other machines on port 8081 (server.bind_all: true) — set
+        server.bind_all: false to keep it on this machine
+      i Model server: launched without requiring your API key (provider.api_key is set) —
+        set server.require_api_key: true to make it refuse requests without the key
+    and a launched peer's name `extra_endpoints[i] (<name>)`, `extra_endpoints[i].lifecycle.*` and
+    its own `extra_endpoints[i].api_key` instead."""
+    from localharness.config.cleartext import sends_key
+
+    launched = [("Model server", "server", harness.server, "your", "provider.api_key",
+                 harness.provider.api_key)]
+    launched += [(f"extra_endpoints[{i}] ({ep.name})", f"extra_endpoints[{i}].lifecycle", ep.lifecycle,
+                  "its", f"extra_endpoints[{i}].api_key", ep.api_key)
+                 for i, ep in enumerate(harness.extra_endpoints)]
+    for label, setting, spec, whose, key_path, key in launched:
+        if spec is None or spec.runtime != "vllm":
+            continue
+        if spec.bind_all:
+            console.print(_INFO + " " + escape(
+                f"{label}: reachable from other machines on port {spec.port} ({setting}.bind_all: true) "
+                f"— set {setting}.bind_all: false to keep it on this machine"), soft_wrap=True)
+        if not spec.require_api_key and sends_key(key):
+            console.print(_INFO + " " + escape(
+                f"{label}: launched without requiring {whose} API key ({key_path} is set) — set "
+                f"{setting}.require_api_key: true to make it refuse requests without the key"),
+                soft_wrap=True)
+
+
+def _print_remote_lock(loader: ConfigLoader, resolution, on: list[str]) -> None:
+    """One info row when a remote channel plugin is on while the remote lock is off
+    (`channels.remote_unattended`, true by default): a paired phone or an allowlisted chat account
+    can then do what this terminal can. Channel plugins are read from their manifests, by kind."""
+    channels = [e.name for e in resolution.plan.entries
+                if e.name in on and e.manifest is not None and e.manifest.kind == "channel"]
+    if not channels:
+        return
+    try:
+        unlocked = loader.load_harness().channels.remote_unattended
+    except Exception:  # noqa: BLE001 — an unreadable config is already reported above
+        return
+    if unlocked:
+        console.print(_INFO + " " + escape(
+            f"Remote channels on ({', '.join(channels)}): a paired phone or an allowlisted chat "
+            'account can switch a session to unattended and answer "always" — '
+            "set channels.remote_unattended: false to keep both to this terminal"), soft_wrap=True)
+
+
 _CHECK_GLYPH = {"pass": _PASS + " ", "fail": _FAIL + " ", "skip": _INFO + "  ", "warn": _WARN + " "}
 # A plugin that is not on: off and available are a choice, not a fault; skipped, needs-extra and
 # unconfigured cannot run as things stand; anything else (failed, refused) is a fault.
@@ -235,6 +288,7 @@ def _print_plugins(cfg_path: Path, workspace: Path | None, loader: ConfigLoader,
     on = [row.name for row in rows if row.state == "on"]
     console.print(_PASS + " " + escape("Plugins: " + ", ".join(on)) if on
                   else f"{_INFO}  Plugins: none on", soft_wrap=True)
+    _print_remote_lock(loader, resolution, on)
     for warning in resolution.warnings:
         console.print(_WARN + " " + escape(warning), soft_wrap=True)
     for row in rows:
@@ -377,6 +431,7 @@ def doctor(
     # docstring). ONE call site on purpose: an owner veto before release is a two-line revert.
     if harness is not None:
         _print_migration_state(cfg_path, harness)
+        _print_exposure(harness)
 
 
     # 4. LLM endpoint reachable
