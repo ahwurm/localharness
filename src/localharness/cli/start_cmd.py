@@ -702,6 +702,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     except Exception as exc:
         err_console.print(f"[bold red]Error:[/bold red] Cannot load config: {exc}")
         raise typer.Exit(1)
+    from localharness.tools.builtin.netguard import set_private_allowlist
+    # The machine's fetch allowlist (machine-level only); the web tools read it per call.
+    set_private_allowlist(harness.org.web_fetch_allow_private)
 
     # --list-models: a lightweight, config-only path — reuses the same live-probe `localharness
     # model` (bare) uses, exposed on `start` too since that's the command most people reach for
@@ -1087,7 +1090,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     start_time = _time.monotonic()
 
     # --- Startup state tracker ---
-    warnings: list[str] = list(loader.harness_warnings)  # machine-level keys a workspace set
+    # machine-level keys a workspace set (its config files, then its agent files)
+    warnings: list[str] = [*loader.harness_warnings, *loader.agent_warnings]
     plugins_loaded = 0
     mcp_connected = 0
     mcp_failed = 0
@@ -1403,6 +1407,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             deny=deny_fn_from(perm_eval, agent_config.permissions),
             settings=settings_from(agent_config.permissions),
             bus=bus,
+            remote_unattended=harness.channels.remote_unattended,
         )
         if resume is not None and resume.gate_mode != gate.mode:
             gate.set_mode(resume.gate_mode)  # /mode as the person left it (and a declined trust's mode)

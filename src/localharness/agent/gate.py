@@ -359,6 +359,8 @@ class PermissionGate:
         settings: Optional[GateSettings] = None,
         bus: Any = None,
         owner_agent_id: Optional[str] = None,
+        remote_unattended: bool = True,
+        trusted_for_run: bool = False,
     ) -> None:
         self.boundary = boundary
         self.workspace = Path(workspace)
@@ -383,6 +385,15 @@ class PermissionGate:
         before it can dispatch anything, so the first caller is the orchestrator by construction,
         and the alternative (labelling every prompt, the orchestrator's included) is noise that
         trains the eye to skip the label."""
+        self.remote_unattended = remote_unattended
+        """`channels.remote_unattended` from the machine config. False: a remote channel (the phone
+        app, Discord) cannot switch this session to `unattended` or answer "always"; a local
+        operator (the terminal, Zed) never is limited. True (the default) is 0.16's behaviour.
+        Enforced by set_mode and the ask path."""
+        self.trusted_for_run = trusted_for_run
+        """True when this run was started with `--trust-project` or `LOCALHARNESS_TRUST_PROJECT=1`:
+        the project counts as trusted for this run only and nothing is recorded. Read by
+        cli/session_trust."""
 
         self._config_deny = deny
         self._warned_cannot_ask = False
