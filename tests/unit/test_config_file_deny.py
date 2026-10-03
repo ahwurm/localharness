@@ -97,6 +97,9 @@ BLOCKED = {
                                        g / "overrides.yaml"),
     "write-through-a-symlink": lambda g, p: ("write", {"path": str(p / "link.yaml"), "content": "x"},
                                              g / "config.yaml"),
+    # macOS and Windows filesystems ignore case: there this IS the settings file.
+    "another-case-spelling": lambda g, p: ("write", {"path": str(g / "Config.YAML"), "content": "x"},
+                                           g / "Config.YAML"),
 }
 
 

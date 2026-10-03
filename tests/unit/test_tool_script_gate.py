@@ -484,3 +484,66 @@ async def test_auto_and_trusted_never_ask_about_an_unconfirmed_script(g, proj, t
         raise AssertionError(f"{mode} asked: {request.display}")
 
     assert (await _run(_gate(tmp_path, proj, mode, _boom), f"python3 {new}")).allowed
+
+
+# --------------------------------------------------------------------------- through the real start
+
+
+@pytest.fixture
+def machine(tmp_path, monkeypatch, fake_home):
+    """The real `_start_async` on a hermetic machine (tests.integration.test_image_plugin_e2e:
+    offline provider, the REPL read loop returning at once), recording every session gate it
+    builds. Real: the machine decision and record, the packaged-helper install, the gate."""
+    from tests.integration.test_image_plugin_e2e import _machine
+
+    global_dir, cwd = _machine(tmp_path, monkeypatch, fake_home, project=False)
+    trust.record_trust(cwd, True)  # the workspace question is not under test here
+    gates: list[PermissionGate] = []
+    real_init = PermissionGate.__init__
+
+    def _init(self, *a, **kw):
+        real_init(self, *a, **kw)
+        gates.append(self)
+
+    monkeypatch.setattr(PermissionGate, "__init__", _init)
+    return global_dir, gates
+
+
+async def _start(monkeypatch, *, tty: bool, answers: tuple[bool, ...] = ()) -> list[str]:
+    from localharness.cli.start_cmd import _start_async
+
+    monkeypatch.setattr(ws_mod, "_stdin_is_a_terminal", lambda: tty)
+    asked = _answers(monkeypatch, *answers)  # one question too many pops an empty queue: a failure
+    await _start_async(None, False, False, None)
+    return asked
+
+
+async def _ask_class(gate: PermissionGate, command: str) -> str:
+    seen = []
+
+    async def _once(request):
+        seen.append(request)
+        return Decision(kind="allow_once")
+
+    gate.mode, gate.asker = "guarded", _once
+    assert (await _run(gate, command)).allowed
+    return seen[-1].klass
+
+
+@pytest.mark.asyncio
+async def test_through_the_real_start_a_new_script_waits_for_one_yes(machine, monkeypatch, capsys):
+    g, gates = machine
+    await _start(monkeypatch, tty=True)  # the first start with this release: adopts, asks nothing
+    assert (g / "tools" / "design-screenshot.js").is_file(), "start installed its own helper"
+    helper = _script(g, "helper.py", b"print('a helper the agent wrote')\n").resolve()
+    capsys.readouterr()
+
+    await _start(monkeypatch, tty=False)
+    err = " ".join(capsys.readouterr().err.split())
+    assert "helper.py (tools/helper.py)" in err and "design-screenshot" not in err
+    assert await _ask_class(gates[-1], f"python3 {helper}") == CLASS
+
+    asked = await _start(monkeypatch, tty=True, answers=(True,))
+    assert len(asked) == 1 and "+ helper.py (tools/helper.py): sha256:" in asked[0]
+    assert "design-screenshot" not in asked[0]
+    assert await _ask_class(gates[-1], f"python3 {helper}") == "shell-unfamiliar"
