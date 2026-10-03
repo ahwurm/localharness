@@ -29,6 +29,7 @@ from localharness.config.overlay import (
     _resolve_user_overlay_path,
 )
 from localharness.config.paths import resolve_config_dir
+from localharness.config.redact import SECRET_MASK, at_secret, scrub, secret_values
 from localharness.config.plugin_sections import (
     CORE_AGENT_KEYS, CORE_HARNESS_KEYS, split_plugin_keys, unowned_hint,
 )
@@ -67,7 +68,24 @@ _BOUNDED_REPR.maxlist = _BOUNDED_REPR.maxtuple = _BOUNDED_REPR.maxset = 8
 _BOUNDED_REPR.maxdict = 8
 
 
-def _short_repr(value: Any, limit: int = VALUE_REPR_LIMIT) -> str:
+class _MaskingRepr(repr_lib.Repr):
+    """_BOUNDED_REPR's limits, with every secret value shown as SECRET_MASK (R16). It masks while
+    the bounded repr walks, so nothing is copied and an amplified value stays cheap."""
+
+    def __init__(self, secrets: frozenset[str]) -> None:
+        super().__init__()
+        self.__dict__.update(vars(_BOUNDED_REPR))
+        self.secrets = secrets
+
+    def repr_str(self, x: str, level: int) -> str:
+        return repr(SECRET_MASK) if x in self.secrets else super().repr_str(x, level)
+
+    def repr_int(self, x: int, level: int) -> str:
+        return repr(SECRET_MASK) if str(x) in self.secrets else super().repr_int(x, level)
+
+
+def _short_repr(value: Any, limit: int = VALUE_REPR_LIMIT,
+                secrets: frozenset[str] = frozenset()) -> str:
     """A bounded, honest repr of the value a config field rejected.
 
     `repr()` on a rejected value is unbounded work on attacker-shaped input: a YAML file using
@@ -79,21 +97,28 @@ def _short_repr(value: Any, limit: int = VALUE_REPR_LIMIT) -> str:
     depth and never materializes the whole structure. The size we report alongside is one that is
     cheap to know — a string's length, a container's top-level item count — never a byte count of
     a repr we deliberately did not build.
+
+    `secrets`: values shown as SECRET_MASK wherever they appear, the value itself included (R16).
     """
+    if (secrets and isinstance(value, (str, int)) and not isinstance(value, bool)
+            and str(value) in secrets):
+        return repr(SECRET_MASK)
     if value is None or isinstance(value, (bool, int, float)):
         return repr(value)
     if isinstance(value, str):
         if len(value) <= limit:
             return repr(value)
         return f"{value[:limit]!r} … (truncated, {len(value)} chars)"
-    text = _BOUNDED_REPR.repr(value)
+    text = (_MaskingRepr(secrets) if secrets else _BOUNDED_REPR).repr(value)
     if isinstance(value, (list, tuple, set, frozenset, dict)) and "..." in text:
         return f"{text[:limit]} (truncated, {len(value)} top-level items)"
     return text[:limit]
 
 
 class ConfigFieldError:
-    """One validation failure for one field."""
+    """One validation failure for one field. Its rejected value is printed only as shown_value()
+    gives it (R16): `secrets` are the secret values the validated data held, `secret` says the
+    error is on or inside a secret field, `withheld` that no schema says what in it is secret."""
     def __init__(
         self,
         field_path: str,
@@ -101,6 +126,10 @@ class ConfigFieldError:
         message: str,
         yaml_line: Optional[int] = None,
         source_path: Optional[str] = None,
+        *,
+        secrets: frozenset[str] = frozenset(),
+        secret: bool = False,
+        withheld: bool = False,
     ) -> None:
         self.field_path = field_path
         self.value = value
@@ -110,11 +139,24 @@ class ConfigFieldError:
         # ConfigValidationError is headed with. None whenever the two agree — which keeps every
         # pre-43 message (agent yamls, org.yaml, a global-only harness error) byte-identical.
         self.source_path = source_path
+        self.secrets, self.secret, self.withheld = secrets, secret, withheld
+
+    def shown_value(self) -> Optional[str]:
+        """The rejected value as it may be printed: the mask on or inside a secret field; None when
+        withheld (a key that is not a setting, or a section no installed plugin owns — nothing says
+        which part of it is secret); else the bounded repr with every secret value masked."""
+        if self.withheld:
+            return None
+        if self.secret:
+            return repr(SECRET_MASK)
+        return _short_repr(self.value, secrets=self.secrets)
 
     def __str__(self) -> str:
         loc = f" (line {self.yaml_line})" if self.yaml_line else ""
         origin = f"{self.source_path}: " if self.source_path else ""
-        return f"{origin}{self.field_path}{loc}: {self.message} (got: {_short_repr(self.value)})"
+        shown = self.shown_value()
+        return f"{origin}{self.field_path}{loc}: {self.message}" + (
+            f" (got: {shown})" if shown is not None else "")
 
 
 class ConfigValidationError(ConfigError):
@@ -233,18 +275,28 @@ def _load_yaml_file(path: Path) -> dict:
     return data or {}
 
 
+def _field_error(field_path: str, err: Any, message: str, yaml_line: Optional[int], *,
+                 model: Any, secrets: frozenset[str]) -> ConfigFieldError:
+    """One pydantic error as a ConfigFieldError that is safe to print (R16): its message scrubbed of
+    `secrets` (what the data `model` validated holds at secret fields), its value masked on or
+    inside a secret field, and withheld for a key the model does not have."""
+    return ConfigFieldError(field_path, err.get("input"), scrub(message, secrets), yaml_line,
+                            secrets=secrets, secret=at_secret(model, err["loc"]),
+                            withheld=err["type"] == "extra_forbidden")
+
+
 def _pydantic_error_to_field_errors(
     exc: ValidationError,
     path: str,
     line_map: dict[str, int],
+    model: Any = None,
+    data: Any = None,
 ) -> list[ConfigFieldError]:
+    secrets = secret_values(model, data)
     errors: list[ConfigFieldError] = []
     for err in exc.errors():
         loc = ".".join(str(p) for p in err["loc"])
-        value = err.get("input")
-        message = err["msg"]
-        yaml_line = line_map.get(loc)
-        errors.append(ConfigFieldError(loc, value, message, yaml_line))
+        errors.append(_field_error(loc, err, err["msg"], line_map.get(loc), model=model, secrets=secrets))
     return errors
 
 
@@ -506,8 +558,9 @@ class ConfigLoader:
         try:
             return model_cls.model_validate(data)
         except ValidationError as exc:
-            errors = _pydantic_error_to_field_errors(exc, path, line_map)
-            raise ConfigValidationError(path, errors) from exc
+            errors = _pydantic_error_to_field_errors(exc, path, line_map, model_cls, data)
+            # from None: the chained pydantic error would carry its input to any traceback (R16)
+            raise ConfigValidationError(path, errors) from None
 
     # ---------------------------------------------------------------- #
     # Public API
@@ -680,6 +733,7 @@ class ConfigLoader:
             line_maps: dict[Path, dict[str, int]] = {str(cfg_path): _build_line_map(text)}
             errors: list[ConfigFieldError] = []
             owners: list[Path] = []
+            secrets = secret_values(HarnessConfig, merged)
             for err in exc.errors():
                 loc = ".".join(str(p) for p in err["loc"])
                 owner = _owning_source(loc, ranked)
@@ -700,9 +754,8 @@ class ConfigLoader:
                 if (err["type"] == "extra_forbidden" and len(err["loc"]) == 1
                         and loc not in CORE_HARNESS_KEYS):
                     message = unowned_hint(loc)
-                errors.append(
-                    ConfigFieldError(loc, err.get("input"), message, line_maps[key].get(loc))
-                )
+                errors.append(_field_error(loc, err, message, line_maps[key].get(loc),
+                                           model=HarnessConfig, secrets=secrets))
 
             # If every error came from ONE file, that file heads the report and no error repeats
             # it — so a workspace-only mistake reads exactly like a global-only one always has,
@@ -712,7 +765,8 @@ class ConfigLoader:
             for field_err, owner_path in zip(errors, owners):
                 if owner_path != header:
                     field_err.source_path = str(owner_path)
-            raise ConfigValidationError(str(header), errors) from exc
+            # from None: the chained pydantic error would carry its input to any traceback (R16)
+            raise ConfigValidationError(str(header), errors) from None
 
         self._harness_cache = result
         return result
@@ -1170,10 +1224,11 @@ class ConfigLoader:
                 plugin_settings[name] = cls.AgentConfigModel.model_validate(
                     agent_sections.get(name, {}))
             except ValidationError as exc:
+                secrets = secret_values(cls.AgentConfigModel, agent_sections.get(name, {}))
                 for err in exc.errors():
                     loc = ".".join([name, *map(str, err["loc"])])
-                    plugin_errors.append(
-                        ConfigFieldError(loc, err.get("input"), err["msg"], line_map.get(loc)))
+                    plugin_errors.append(_field_error(loc, err, err["msg"], line_map.get(loc),
+                                                      model=cls.AgentConfigModel, secrets=secrets))
         try:
             result = AgentConfig.model_validate(merged)
         except ValidationError as exc:
@@ -1182,6 +1237,7 @@ class ConfigLoader:
             # agent file's, which does not contain it. Every other error stays the agent file's.
             errors: list[ConfigFieldError] = []
             owners: list[Path] = []
+            secrets = secret_values(AgentConfig, merged)
             for err in exc.errors():
                 loc = ".".join(str(p) for p in err["loc"])
                 owner, field, line, message = path, loc, line_map.get(loc), err["msg"]
@@ -1192,7 +1248,7 @@ class ConfigLoader:
                         owner, field = overlay_path, f"agent.{loc}"
                         line = _file_line_map(overlay_path).get(field)
                 owners.append(owner)
-                errors.append(ConfigFieldError(field, err.get("input"), message, line))
+                errors.append(_field_error(field, err, message, line, model=AgentConfig, secrets=secrets))
             # load_harness's rule: one owner heads the report; mixed owners keep the agent file and
             # name each foreign owner on its own line.
             header = owners[0] if len(set(owners)) == 1 else path
@@ -1202,7 +1258,8 @@ class ConfigLoader:
             for field_err in plugin_errors:
                 if header != path:
                     field_err.source_path = str(path)
-            raise ConfigValidationError(str(header), errors + plugin_errors) from exc
+            # from None: the chained pydantic error would carry its input to any traceback (R16)
+            raise ConfigValidationError(str(header), errors + plugin_errors) from None
         if plugin_errors:
             raise ConfigValidationError(str(path), plugin_errors)
 
