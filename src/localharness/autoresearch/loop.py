@@ -57,6 +57,7 @@ from localharness.autoresearch.experiment import (
     reaches_gate_arm,
 )
 from localharness.config.overlay import _resolve_user_overlay_path, load_overlay
+from localharness.core.private_files import private_opener
 from localharness.autoresearch.budget import BudgetController, WindowMeter
 from localharness.autoresearch.sampler import BASELINE_ROOT, ParentSampler
 from localharness.registry import LAYER_GLOBAL_OVERRIDES, build_catalogue
@@ -147,7 +148,7 @@ class RunJournal:
 
     def write(self, record: dict) -> None:
         line = json.dumps({"ts": time.time(), "run_id": self._run_id, **record}) + "\n"
-        with open(self._path, "a", encoding="utf-8") as f:
+        with open(self._path, "a", encoding="utf-8", opener=private_opener) as f:
             f.write(line)
 
 

@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Optional
 
 import aiosqlite
 
+from localharness.core.private_files import touch_private
+
 if TYPE_CHECKING:
     from localharness.core.bus import EventBus
 
@@ -125,6 +127,7 @@ class ArchiveStore:
     async def open(self) -> None:
         """Open SQLite connection, enable WAL + FK, apply pending migrations."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)  # lazy materialization
+        touch_private(self._db_path)  # its -wal/-shm side files take this file's mode
         self._db = await aiosqlite.connect(str(self._db_path))
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode = WAL")

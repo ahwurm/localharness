@@ -26,6 +26,8 @@ import json
 import time
 from pathlib import Path
 
+from localharness.core.private_files import touch_private
+
 
 class WindowMeter:
     """Self-meter proposer tokens against a user-set 5h rolling-window budget (AUTO-03).
@@ -66,6 +68,7 @@ class WindowMeter:
 
     def _persist(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        touch_private(self._path)
         self._path.write_text(
             json.dumps({"window_start": self._start, "tokens_spent": self._spent}),
             encoding="utf-8",

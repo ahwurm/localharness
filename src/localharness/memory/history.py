@@ -6,6 +6,7 @@ from typing import Any
 
 import anyio
 
+from localharness.core.private_files import private_opener
 from localharness.memory.errors import DiskFullError, MemoryCorruptionError, MemoryWriteError
 
 VALID_TYPES = frozenset({
@@ -42,7 +43,8 @@ class HistoryWriter:
         line = json.dumps(record, ensure_ascii=False, default=str)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            async with await anyio.open_file(str(self._path), "a", encoding="utf-8") as f:
+            async with await anyio.open_file(str(self._path), "a", encoding="utf-8",
+                                             opener=private_opener) as f:
                 await f.write(line + "\n")
         except OSError as exc:
             if exc.errno == errno.ENOSPC:

@@ -1535,6 +1535,8 @@ def _write_compact_md(path: Path, content: str) -> None:
     import os
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
+    from localharness.core.private_files import touch_private
+    touch_private(tmp)  # the replaced file keeps this one's mode
     tmp.write_text(content, encoding="utf-8")
     os.replace(str(tmp), str(path))
 

@@ -3,6 +3,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from localharness.core.private_files import touch_private
+
 VALID_WRITABLE_SECTIONS = frozenset({"working_notes", "learned_behaviors"})
 
 _SECTION_HEADINGS = {
@@ -177,5 +179,6 @@ def _replace_section(content: str, heading: str, new_body: str) -> str:
 def _atomic_write(path: Path, content: str) -> None:
     """Write content to path atomically using tmp + os.replace."""
     tmp_path = path.with_suffix(".md.tmp")
+    touch_private(tmp_path)  # the replaced file keeps this one's mode
     tmp_path.write_text(content, encoding="utf-8")
     os.replace(tmp_path, path)

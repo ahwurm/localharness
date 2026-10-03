@@ -6,6 +6,8 @@ import time
 import uuid
 from pathlib import Path
 
+from localharness.core.private_files import private_opener
+
 # ---------------------------------------------------------------------------
 # Phase 33.1 (ORCH-02): one-time root-agent rename (default -> orchestrator)
 # ---------------------------------------------------------------------------
@@ -68,5 +70,5 @@ def _migrate_legacy_root_agent_dir(base_dir: Path, agent_id: str) -> None:
         "from_agent_id": _LEGACY_ROOT_AGENT_ID,
         "to_agent_id": _ROOT_AGENT_ID,
     }
-    with (new_dir / "history.jsonl").open("a", encoding="utf-8") as fh:
+    with open(new_dir / "history.jsonl", "a", encoding="utf-8", opener=private_opener) as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
