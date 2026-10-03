@@ -287,6 +287,14 @@ def test_pending_never_names_a_file_the_rule_does_not_cover(g, monkeypatch, tmp_
     assert trust.tool_script_pending(_script(g, "new.py")) == _short(b"print(1)\n")
 
 
+def test_a_record_from_before_scripts_were_a_kind_reads_every_script_as_confirmed(g):
+    """What start's decision counts as adopted the gate counts as adopted: until a start records
+    the kind, every script there predates the rule."""
+    trust.record_machine(g, [], kinds=KINDS_BEFORE_SCRIPTS)
+
+    assert trust.tool_script_pending(_script(g, "a.py")) is None
+
+
 def test_with_no_machine_record_every_tools_file_is_pending(g):
     path = _script(g, "a.py")
 

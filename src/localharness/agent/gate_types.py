@@ -95,6 +95,7 @@ AskClass = Literal[
     "tool-unfamiliar",
     "mcp",
     "network-host",
+    "tool-script-unconfirmed",
 ]
 
 UNGRANTABLE_CLASSES: frozenset[str] = frozenset({"shell-destructive", "protected-path", "no-boundary"})
@@ -104,6 +105,21 @@ which is v0.13's behavior by definition (only the DENY tier holds there, PRD §3
 Checked before any grant lookup (critic finding 12) so an old benign grant can never cover a
 destructive variant.
 """
+
+TOOL_SCRIPT_UNCONFIRMED = "tool-script-unconfirmed"
+"""Ask class: a shell segment runs a script under the machine's tools folder that was added or
+changed since the user last confirmed their tool scripts at start (config.trust.machine_snapshot).
+Keyed on "<path>@sha256:<first 12 hex>" and it replaces the segment's signature ask, so an earlier
+"always" on `python3` or `node` never covers it and an "always" given to it covers that exact
+content only. Grantable and not in AUTO_ASK_CLASSES, so it gets exactly what any shell command gets
+in the current mode (owner's Option 1, orchestrator ruling R21): `guarded` asks; `trusted` allows
+(every ask in the request grantable); `auto` and `unattended` allow. No mode gains an ask it does
+not already have for shell."""
+
+UNCONFIRMED_TOOL_SCRIPT_REASON = (
+    "runs {path}, a tool script added or changed since you last confirmed your tool scripts — "
+    "confirm it at the next `localharness start` on a terminal, or answer always here for this "
+    "exact content")
 
 
 @dataclass(frozen=True)
@@ -344,6 +360,12 @@ class ShellSegment:
 
     ``auto`` reads it as "ask": the whole narrowing rests on knowing where the command points,
     so not knowing is the one answer that cannot be allowed."""
+
+    program: str = field(default="", compare=False, repr=False)
+    """The program word as the command line wrote it, directory kept (`~/.localharness/tools/a.sh`,
+    `/usr/bin/python3`) — after a wrapper is peeled, the peeled program's word. `argv[0]` is its
+    basename, which the signature uses. Empty when not known. Not part of equality or repr, so no
+    existing segment comparison changes; read by the verdict's tool-script rule."""
 
 
 @dataclass(frozen=True)
