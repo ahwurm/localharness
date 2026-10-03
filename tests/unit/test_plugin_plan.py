@@ -419,3 +419,20 @@ def test_extra_installed_on_this_install() -> None:
     """Unmocked: this suite runs under the dev extra (`uv sync --extra dev`)."""
     assert extra_installed("dev") is True
     assert extra_installed("no-such-extra") is False
+
+
+def test_step_command_is_the_enable_command_for_every_state_that_can_load() -> None:
+    """`init` prints step_command for every bundled plugin: the command that turns it on (off,
+    available) or runs its setup step again (on, needs-extra). A plugin the plan failed, refused or
+    skipped has none — `display` says why. enable_command keeps its meaning: off/available only."""
+    def entry(state_: str) -> PlanEntry:
+        return PlanEntry("x", True, state_, "built in", "does x", "a reason")
+
+    states = ("on", "off", "available", "needs-extra", "failed", "refused", "skipped")
+    command = "localharness plugins enable x"
+    assert {s: entry(s).step_command for s in states} == {
+        "on": command, "off": command, "available": command, "needs-extra": command,
+        "failed": None, "refused": None, "skipped": None}
+    assert {s: entry(s).enable_command for s in states} == {
+        "on": None, "off": command, "available": command, "needs-extra": None,
+        "failed": None, "refused": None, "skipped": None}
