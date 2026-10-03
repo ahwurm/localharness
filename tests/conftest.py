@@ -1,5 +1,12 @@
-import logging
+# Typer paints colour codes into `--help` output whenever GITHUB_ACTIONS, FORCE_COLOR or PY_COLORS is
+# set (typer/rich_utils.py FORCE_TERMINAL). On GitHub Actions that turned every plain-text help
+# golden red while the same suite passed locally. The suite renders help the way a pipe sees it,
+# everywhere; this must run before anything imports typer.
 import os
+
+os.environ.setdefault("_TYPER_FORCE_DISABLE_TERMINAL", "1")
+
+import logging
 import pytest
 from dataclasses import dataclass, field
 from pathlib import Path
