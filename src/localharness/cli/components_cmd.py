@@ -29,6 +29,9 @@ from localharness.config.overlay import (
 )
 from localharness.config.paths import resolve_config_dir, resolve_runtime_path
 from localharness.config.plugin_sections import core_agent_view, core_harness_view
+# The secret-safe error text lives in config/ (the loader uses it too; config/ never imports cli/).
+from localharness.config.redact import SECRET_MASK, is_secret, scrub
+from localharness.config.redact import validation_text as _validation_text
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
 from localharness.registry import (
@@ -226,27 +229,10 @@ def _layer_cell(e: ComponentEntry) -> str:
     return e.winning_layer + (f" (plugin: {e.plugin})" if e.plugin else "")
 
 
-SECRET_MASK = "**********"
-
-
-def is_secret(annotation: Any) -> bool:
-    """A SecretStr leaf (Optional included): its value is never printed, only SECRET_MASK."""
-    from pydantic import SecretStr
-    return annotation is SecretStr or SecretStr in getattr(annotation, "__args__", ())
-
-
 def shown(value: Any, annotation: Any = None) -> str:
     """repr() for a human, masked for a secret leaf or a SecretStr value."""
     from pydantic import SecretStr
     return repr(SECRET_MASK) if is_secret(annotation) or isinstance(value, SecretStr) else repr(value)
-
-
-def scrub(text: str, secrets: Any) -> str:
-    """Replace every non-empty secret string in `text` with SECRET_MASK (error texts may echo input)."""
-    for secret in secrets:
-        if isinstance(secret, str) and secret:
-            text = text.replace(secret, SECRET_MASK)
-    return text
 
 
 def _overlay_secrets(catalogue: dict[str, ComponentEntry], overlay: dict) -> list[str]:
@@ -292,15 +278,6 @@ def _settings_secrets(catalogue: dict[str, ComponentEntry], loader: ConfigLoader
     return _secret_strings(_overlay_secrets(catalogue, deep_merge(loader.raw_harness_dict(), overlay)))
 
 
-def _validation_text(exc: BaseException) -> str:
-    """Why a value was refused, without echoing any input: each pydantic error's location and
-    message — never its input_value, which can hold a whole section, keys included. pydantic
-    shortens that repr to its head and tail, so a long key leaks its last characters, which no
-    whole-string scrub can catch: leaving input_value out is the layer that holds."""
-    if isinstance(exc, ValidationError):
-        return "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" if e["loc"] else e["msg"]
-                         for e in exc.errors())
-    return f"{type(exc).__name__}: {exc}"
 
 
 def _serialize_value(value: Any, secret: bool = False) -> Any:
