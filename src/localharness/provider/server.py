@@ -21,12 +21,43 @@ import time
 from pathlib import Path
 
 import httpx
+from pydantic import SecretStr
 
-from typing import Callable
+from typing import Any, Callable
 
 from localharness.config.models import ManagedServerConfig
 
 DOCKER_CONTAINER_NAME = "localharness-vllm"
+
+_TRANSPORT: Any = None
+"""Tests' httpx.MockTransport for wait_ready; None in production (the real network)."""
+
+
+def _raw_key(api_key: Any) -> str | None:
+    raw = api_key.get_secret_value() if isinstance(api_key, SecretStr) else api_key
+    return raw if raw and raw != "none" else None
+
+
+def auth_headers(api_key: Any) -> dict[str, str]:
+    """The Authorization header a keyed server needs, or {} for no key ("none" or empty)."""
+    raw = _raw_key(api_key)
+    return {"Authorization": f"Bearer {raw}"} if raw else {}
+
+
+def key_kwargs(api_key: Any) -> dict[str, str]:
+    """{"api_key": <raw>} when a key is set, else {} — call sites splat it, so a probe of a keyless
+    server is called exactly as before."""
+    raw = _raw_key(api_key)
+    return {"api_key": raw} if raw else {}
+
+
+def required_key_kwargs(spec: Any, api_key: Any) -> dict[str, str]:
+    """The key to launch and probe a server with: {"api_key": <raw>} only when this launched server
+    is set to require one (`require_api_key`, machine-level, default false) AND a key is set;
+    otherwise {} — today's keyless launch and probes, byte for byte. The one place that decision
+    is made (orchestrator ruling R11: requiring a key is opt-in, never a stricter default). Only a
+    real `True` counts, so a stand-in object can never switch it on."""
+    return key_kwargs(api_key) if getattr(spec, "require_api_key", False) is True else {}
 
 
 # ---------------------------------------------------------------------------
@@ -145,8 +176,16 @@ def download_file(repo_id: str, filename: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def serve_command(srv: ManagedServerConfig) -> list[str]:
+def serve_command(srv: ManagedServerConfig, *, keyed: bool = False) -> list[str]:
     """Build the launch command for srv.model.
+
+    A vLLM server listens on this machine only unless `srv.bind_all` (0.16's argv, exactly): a
+    binary gets `--host 127.0.0.1` (vLLM's own default is every interface), placed before the
+    machine's `extra_args` so a `--host` there still wins. Docker changes only the PUBLISHED
+    address (`-p 127.0.0.1:<port>:8000`): inside the container vLLM must keep listening on the
+    container's own interfaces, because the container's loopback is not what `-p` forwards to.
+    `keyed` (docker only) passes `-e VLLM_API_KEY` — the variable's NAME, its value coming from the
+    launch environment (`start_server(api_key=)`); a binary reads that environment directly.
 
     When srv.model names a `local_models` registry entry, the entry's checkpoint dir is
     served (docker: bind-mounted read-only at /models/serving) under --served-model-name
@@ -189,7 +228,8 @@ def serve_command(srv: ManagedServerConfig) -> list[str]:
             "docker", "run", "--rm", "--name", DOCKER_CONTAINER_NAME,
             "--gpus", "all", "--ipc=host",
             *mounts,
-            "-p", f"{srv.port}:8000",
+            *(["-e", "VLLM_API_KEY"] if keyed else []),
+            "-p", f"{srv.port}:8000" if srv.bind_all else f"127.0.0.1:{srv.port}:8000",
             str(srv.docker_image),
             "--model", model_arg,
             *served,
@@ -197,11 +237,15 @@ def serve_command(srv: ManagedServerConfig) -> list[str]:
         ]
     model_arg = str(Path(entry.path).expanduser()) if entry is not None else srv.model
     served = ["--served-model-name", entry.name] if entry is not None else []
-    return [str(srv.binary), "serve", model_arg, "--port", str(srv.port), *served, *extra]
+    return [str(srv.binary), "serve", model_arg, "--port", str(srv.port),
+            *([] if srv.bind_all else ["--host", "127.0.0.1"]), *served, *extra]
 
 
-def start_server(config_dir: Path, cmd: list[str]) -> int:
-    """Launch detached (new session), append stdout+stderr to serve.log, write pidfile."""
+def start_server(config_dir: Path, cmd: list[str], *, api_key: str | None = None) -> int:
+    """Launch detached (new session), append stdout+stderr to serve.log, write pidfile.
+
+    `api_key` (a server set to require one) goes into the child's environment as VLLM_API_KEY —
+    never into `cmd`, so it is in neither the process list nor the launch line logged here."""
     server_dir(config_dir).mkdir(parents=True, exist_ok=True)
     log = open(log_path(config_dir), "ab")
     log.write(f"\n=== launch: {' '.join(cmd)} ===\n".encode())
@@ -212,6 +256,7 @@ def start_server(config_dir: Path, cmd: list[str]) -> int:
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
+        env={**os.environ, "VLLM_API_KEY": api_key} if api_key else None,
     )
     pid_path(config_dir).write_text(str(proc.pid), encoding="utf-8")
     return proc.pid
@@ -369,6 +414,8 @@ async def wait_ready(
     timeout_seconds: float = 1800.0,
     poll_seconds: float = 3.0,
     on_poll: "Callable[[float], None] | None" = None,
+    *,
+    api_key: str | None = None,
 ) -> list[str]:
     """Poll {base_url}/models until the server answers; return served model ids.
 
@@ -376,17 +423,21 @@ async def wait_ready(
     When config_dir is given, a dead managed process fails fast with the log tail.
     `on_poll(elapsed_seconds)` fires after each unready poll — the REPL renders it as a
     live loading line so a minutes-long swap never looks frozen. Must never block.
+    `api_key` (a server that requires one) is sent as a bearer on every poll; without it the
+    poll is exactly the keyless request it always was.
     """
     start = time.monotonic()
     deadline = start + timeout_seconds
-    async with httpx.AsyncClient() as client:
+    headers = auth_headers(api_key)
+    async with httpx.AsyncClient(**({} if _TRANSPORT is None else {"transport": _TRANSPORT})) as client:
         while time.monotonic() < deadline:
             if config_dir is not None and server_pid(config_dir) is None:
                 raise RuntimeError(
                     "vLLM exited during startup. Log tail:\n" + log_tail(config_dir)
                 )
             try:
-                resp = await client.get(f"{base_url.rstrip('/')}/models", timeout=3.0)
+                resp = await client.get(f"{base_url.rstrip('/')}/models", timeout=3.0,
+                                        **({"headers": headers} if headers else {}))
                 if resp.status_code == 200:
                     return [m["id"] for m in resp.json().get("data", [])]
             except httpx.HTTPError:
