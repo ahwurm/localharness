@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import secrets
 import time
@@ -1044,14 +1045,17 @@ class WebChannel(ChannelAdapter):
             return {"status": "unknown", "detail": "no open question with that id"}
         if ask.outcome is not None:
             return {"status": "already_answered", "decision": ask.outcome}
-        if kind not in {o.kind for o in ask.frame.options}:
+        if not isinstance(kind, str) or kind not in {o.kind for o in ask.frame.options}:
             return {"status": "invalid", "detail": f"{kind!r} is not offered for this question"}
 
         if kind in ALWAYS_KINDS and ask.frame.klass != TRUST_KLASS:
             now = time.monotonic()
             held = ask.confirm
             live = held if (held and held[1] == kind and held[2] > now) else None
-            if confirm and live and secrets.compare_digest(confirm, live[0]):
+            # bytes, not str: `compare_digest` raises on a non-ASCII str, and on a non-str, and
+            # either would reach the phone as a 500 — a malformed token is simply not the token.
+            if (isinstance(confirm, str) and confirm and live and hmac.compare_digest(
+                    confirm.encode("utf-8", "surrogatepass"), live[0].encode("utf-8"))):
                 ask.confirm = None
             else:
                 # A WRONG or absent token does not rotate a token that is still live: reissuing

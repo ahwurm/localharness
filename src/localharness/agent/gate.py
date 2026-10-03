@@ -138,6 +138,21 @@ The audit trail that replaces the old refusal: a human may now switch their own 
 unattended without exiting"), and a session that spent part of its life with the gate off should
 say so in its own log rather than only in someone's memory."""
 
+REMOTE_UNATTENDED_REFUSAL = (
+    "unattended can only be switched on from this machine's terminal or Zed here "
+    "(channels.remote_unattended: false) — set it to true in the machine config to allow it from "
+    "this channel")
+"""The one line a phone or Discord `/mode unattended` gets when the machine's lock is set.
+
+Shown verbatim by every channel's `/mode` path (the REPL's handler, which also serves Discord's
+bare `mode <name>` and the web `command` route; the web `/mode` route as its 400 text). It names
+the setting, because the person reading it may be the owner who set it and forgot."""
+
+REMOTE_ALWAYS_NOTE = ('("always" is off for remote channels on this machine: '
+                      'channels.remote_unattended: false — this answer counts once)')
+"""Appended to a locked remote question's ``display``, so the person sees why it offers no
+"always" — and the channel needs no rule of its own: it simply renders an ungrantable request."""
+
 TIMEOUT_DECISION = Decision(kind="reject_once")
 """PRD §3.5: "deny on timeout", and §3.6: a timeout resolves as ``reject_once`` so
 timeout-denies are countable as their own guardrail. Never ``reject_always`` — nobody answered,
@@ -387,9 +402,13 @@ class PermissionGate:
         trains the eye to skip the label."""
         self.remote_unattended = remote_unattended
         """`channels.remote_unattended` from the machine config. False: a remote channel (the phone
-        app, Discord) cannot switch this session to `unattended` or answer "always"; a local
-        operator (the terminal, Zed) never is limited. True (the default) is 0.16's behaviour.
-        Enforced by set_mode and the ask path."""
+        app, Discord) cannot switch this session to `unattended` (:meth:`set_mode` refuses with
+        :data:`REMOTE_UNATTENDED_REFUSAL`) and is never offered "always" (:meth:`_ask` hands it the
+        question ungrantable, so an always that comes back anyway counts once); a local operator
+        (the terminal, Zed) is never limited. True (the default) is 0.16's behaviour."""
+        self._local_operator = False
+        """Is the attached channel's person at this machine? Read off the channel by
+        :meth:`attach_channel` (``ChannelAdapter.local_operator``); False until one is attached."""
         self.trusted_for_run = trusted_for_run
         """True when this run was started with `--trust-project` or `LOCALHARNESS_TRUST_PROJECT=1`:
         the project counts as trusted for this run only and nothing is recorded. Read by
@@ -438,7 +457,13 @@ class PermissionGate:
         self.channel_name = getattr(channel, "channel_id", "none")
         self.has_review_surface = bool(getattr(channel, "has_review_surface", False))
         self.ask_holds_dialog = bool(getattr(channel, "ask_holds_dialog", False))
+        self._local_operator = bool(getattr(channel, "local_operator", False))
         self.asker = channel.ask_permission if getattr(channel, "can_ask", False) else None
+
+    def _remote_locked(self) -> bool:
+        """The machine's lock applies: it is set (remote_unattended False), a channel is attached,
+        and the person answering is not at this machine."""
+        return not self.remote_unattended and self.channel_name != "none" and not self._local_operator
 
     # ---------------------------------------------------------------- modes
 
@@ -458,11 +483,23 @@ class PermissionGate:
         only raise strictness, never lower it (``config/loader.MODE_STRICTNESS``), so a cloned
         repo still cannot put itself in ``auto`` or ``unattended``.
 
-        Raises ``ValueError`` with a message the channel shows verbatim when the name is unknown.
+        The machine may also lock ``unattended`` to the people at it: with
+        ``channels.remote_unattended: false`` (machine config only) a switch to ``unattended``
+        driven from the phone or Discord is refused with :data:`REMOTE_UNATTENDED_REFUSAL`. A
+        paired phone or an allowlisted chat account is otherwise as good as a shell on this
+        machine, and the owner who wants that lock can have it; the default keeps the switch
+        (owner, 2026-10-03: nothing done from the phone or Discord today may start failing). The
+        terminal and Zed are never limited, and neither is a switch with no channel behind it
+        (config, the trust question, a resumed session).
+
+        Raises ``ValueError`` with a message the channel shows verbatim when the name is unknown
+        or the switch is locked.
         """
         if name not in MODE_STRICTNESS:
             known = ", ".join(sorted(MODE_STRICTNESS, key=lambda m: MODE_STRICTNESS[m]))
             raise ValueError(f"unknown mode {name!r}; choose one of: {known}")
+        if from_channel and name == "unattended" and name != self.mode and self._remote_locked():
+            raise ValueError(REMOTE_UNATTENDED_REFUSAL)
         if from_channel and name != self.mode:
             log.info(MODE_SET_FROM_CHANNEL_LOG, self.mode, name, self.channel_name)
         self.mode = name  # type: ignore[assignment]
@@ -763,6 +800,12 @@ class PermissionGate:
         from localharness.core.events import CANCELLED_RESOLUTION, PermissionAsked
 
         request = self._attributed(request, agent_id=agent_id, call_id=call_id)
+        if request.grantable and self._remote_locked():
+            # The machine keeps "always" to the people at it: the remote channel renders an
+            # ungrantable question (no always offered) and `_remember` writes nothing durable
+            # even if an always comes back anyway.
+            request = replace(request, grantable=False,
+                              display=f"{request.display}\n{REMOTE_ALWAYS_NOTE}")
         await self._publish(
             PermissionAsked(
                 agent_id=agent_id,
