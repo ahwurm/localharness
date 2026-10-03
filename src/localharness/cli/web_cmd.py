@@ -21,6 +21,8 @@ import asyncio
 import contextlib
 import io
 import logging
+import sys
+import traceback
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
@@ -53,15 +55,25 @@ Plain HTTP on a non-localhost origin does not work at all: no service worker (so
 home-screen install and no Web Push), and the event stream cannot authenticate, because a
 browser refuses to keep the Secure session cookie there. Both are browser rules. localhost
 is exempt, which is why the development loop needs none of this.
-
-Enrol a client with this token (it is required on every request, including the stream):
-  {token}
 """
 
 TOKEN_NEW_NOTE = "A new app token was generated on this first run and stored 0600 at {path}."
 
+TOKEN_LINE = "App token (required on every request, the stream included):\n  {token}\n"
+"""Printed to a terminal only, and only when the token was just created, rotated or asked for
+with --show-token: journald, tmux and tee logs keep every copy a banner prints."""
+
+TOKEN_NOT_A_TTY = (
+    "No token or QR is printed here because stdout is not a terminal (logs keep what is "
+    "printed). To pair a phone, run `localharness web --show-token` on a terminal."
+)
+
+SHOW_TOKEN_NOT_A_TTY = "--show-token prints the token only to a terminal, and stdout is not one."
+
 TOKEN_ROTATED = (
-    "App token rotated. Every enrolled client is now invalid and must re-enrol with:\n  {token}\n"
+    "App token rotated. Every enrolled client is now invalid and must pair again; push "
+    "subscriptions were cleared, so turn notifications on again on each phone after it pairs.\n"
+    "A `localharness web` that is already running keeps accepting the old token until it restarts.\n"
     "Stored 0600 at {path}.\n"
     "Named gap: rotation is all-or-nothing — there is no per-device revoke."
 )
@@ -84,7 +96,7 @@ TAILSCALE_PROBE_TIMEOUT_S = 2.0
 this runs before the server starts serving: a wedged CLI must not hold up start-up, and the
 answer is a convenience — `--public-url` is the authoritative one."""
 
-ENROLMENT_HEADER = """Pair a phone: scan this with the camera (it carries the URL and the token).
+ENROLMENT_HEADER = """Pair a phone: scan this with the camera (the code carries the address and the token).
   {url}
 """
 
@@ -101,8 +113,9 @@ ENROLMENT_GUESSED_NOTE = (
 )
 
 ENROLMENT_NO_QR = (
-    "No QR: the `segno` package is missing (it ships with the `web` extra). Open the URL above "
-    "on the phone by hand — the part after the # is the token, and it never reaches the server."
+    "No QR: the `segno` package is missing (it ships with the `web` extra). Open the address "
+    "above on the phone and enter the app token when the page asks — `localharness web "
+    "--show-token` prints it on a terminal."
 )
 
 REPLAY_BANNER = """LocalHarness web channel — REPLAY (no model server, no GPU, deterministic)
@@ -159,6 +172,11 @@ def web_cmd(
         "--rotate-token",
         help="Mint a new app token, invalidating every enrolled client, and exit.",
     )] = False,
+    show_token: Annotated[bool, typer.Option(
+        "--show-token",
+        help="Print the app token and the pairing QR to this terminal, then exit — works while a "
+             "server is running.",
+    )] = False,
     incognito: Annotated[bool, typer.Option(
         "--incognito",
         help="Start in incognito: pictures are not kept on the phone (served Cache-Control: "
@@ -183,10 +201,24 @@ def web_cmd(
 
     if rotate_token:
         token = web_auth.rotate_token(config_dir)
-        console.print(escape(TOKEN_ROTATED.format(
-            token=token, path=web_auth.token_path(config_dir),
-        )), soft_wrap=True)
-        print_enrolment(token, public_url=public_url, host=host, port=port)
+        # A lost phone must lose its lock-screen channel too: every subscription goes with the
+        # token it was made under. The store is read on every send, so a running server stops too.
+        from localharness.channels.web import push as web_push
+
+        web_push.subscriptions_path(config_dir).unlink(missing_ok=True)
+        console.print(escape(TOKEN_ROTATED.format(path=web_auth.token_path(config_dir))),
+                      soft_wrap=True)
+        print_pairing(token, reveal=True, public_url=public_url, host=host, port=port)
+        raise typer.Exit(0)
+
+    if show_token:
+        # Prints and exits, so a server already running under systemd or tmux is paired from
+        # another terminal without a second server fighting it for the port.
+        if not _stdout_is_a_terminal():
+            console.print(f"[red]{escape(SHOW_TOKEN_NOT_A_TTY)}[/red]", soft_wrap=True)
+            raise typer.Exit(1)
+        token, _ = web_auth.load_or_create_token(config_dir)
+        print_pairing(token, reveal=True, public_url=public_url, host=host, port=port)
         raise typer.Exit(0)
 
     try:
@@ -204,7 +236,7 @@ def web_cmd(
         asyncio.run(_serve(
             config_dir=config_dir, host=host, port=port, token=token, ui_dir=ui_dir,
             replay=replay, fixtures=fixtures, speed=speed, verbose=verbose, agent=agent,
-            public_url=public_url, incognito=incognito,
+            public_url=public_url, incognito=incognito, reveal_token=created,
         ))
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
@@ -242,8 +274,13 @@ def detect_public_url(port: int, *, runner: Any = None) -> Optional[str]:
         name = (_json.loads(result.stdout).get("Self") or {}).get("DNSName") or ""
     except Exception:  # noqa: BLE001 — no tailscale, no network, bad JSON: all just "no guess"
         return None
-    name = name.rstrip(".")
-    return f"https://{name}" if name else None
+    # It goes into the URL a phone opens and into the QR, so only an RFC 1123 host name may.
+    from localharness.config.models import HOSTNAME_RE
+
+    name = name.rstrip(".") if isinstance(name, str) else ""
+    if not name or not HOSTNAME_RE.fullmatch(name):
+        return None
+    return f"https://{name}"
 
 
 def enrolment_url(token: str, *, public_url: Optional[str], host: str, port: int) -> tuple[str, str]:
@@ -279,10 +316,30 @@ def render_qr(url: str) -> Optional[str]:
     return buffer.getvalue().rstrip("\n")
 
 
+def _stdout_is_a_terminal() -> bool:
+    """Whether what this command prints lands on a terminal rather than in a log (D5)."""
+    return sys.stdout is not None and sys.stdout.isatty()
+
+
+def print_pairing(token: str, *, reveal: bool, public_url: Optional[str], host: str,
+                  port: int) -> None:
+    """Pairing output, by where stdout goes. A terminal gets the QR on every start — it carries
+    the token, and scanning it is pairing — plus, when `reveal` (a token just created, rotated or
+    asked for with --show-token), the token's text. Anything else (journald, a tee, a pipe) keeps
+    what is printed, so it gets one line naming --show-token and nothing secret."""
+    if not _stdout_is_a_terminal():
+        console.print(escape(TOKEN_NOT_A_TTY), style="dim", soft_wrap=True)
+        return
+    print_enrolment(token, public_url=public_url, host=host, port=port)
+    if reveal:
+        console.print(escape(TOKEN_LINE.format(token=token)), soft_wrap=True)
+
+
 def print_enrolment(token: str, *, public_url: Optional[str], host: str, port: int) -> None:
-    """Print the pairing QR and its URL. Nobody hand-types a 256-bit secret into a phone."""
+    """Print the pairing QR and the address beside it. Nobody hand-types a 256-bit secret into a
+    phone: the QR carries the token in its fragment; the printed address carries none."""
     url, kind = enrolment_url(token, public_url=public_url, host=host, port=port)
-    console.print(escape(ENROLMENT_HEADER.format(url=url)), soft_wrap=True)
+    console.print(escape(ENROLMENT_HEADER.format(url=url.split("#", 1)[0])), soft_wrap=True)
     art = render_qr(url)
     if art is None:
         console.print(escape(ENROLMENT_NO_QR), style="dim", soft_wrap=True)
@@ -312,6 +369,7 @@ async def _serve(
     agent: Optional[str],
     public_url: Optional[str] = None,
     incognito: bool = False,
+    reveal_token: bool = False,
 ) -> None:
     import uvicorn
 
@@ -412,9 +470,9 @@ async def _serve(
             console.print(escape(PUSH_UNAVAILABLE), style="dim", soft_wrap=True)
 
         console.print(escape(BANNER.format(
-            host=host, port=port, ui_dir=resolved_ui, cwd=Path.cwd(), token=token,
+            host=host, port=port, ui_dir=resolved_ui, cwd=Path.cwd(),
         )), soft_wrap=True)
-        print_enrolment(token, public_url=public_url, host=host, port=port)
+        print_pairing(token, reveal=reveal_token, public_url=public_url, host=host, port=port)
 
     config = uvicorn.Config(
         server.app, host=host, port=port, log_level="warning", access_log=False,
@@ -478,14 +536,47 @@ async def _bring_up(
                                 failed=True, elapsed=time.monotonic() - started)
         raise
     except Exception as exc:  # noqa: BLE001 — a failed build reports itself; it never kills the server
-        log.warning("web session bring-up failed", exc_info=True)
+        from localharness.config.redact import scrub
+
+        # The server's own line keeps the traceback, masked like the phone's row: stderr is often
+        # a tee or journald, and an error can quote a key.
+        log.warning("web session bring-up failed\n%s", scrub(
+            "".join(traceback.format_exception(exc)).rstrip(), _machine_secrets(config_dir)))
         channel.set_bringup(
-            "failed", detail=str(exc), failed=True, elapsed=time.monotonic() - started,
+            "failed", detail=_failure_text(exc, config_dir), failed=True,
+            elapsed=time.monotonic() - started,
         )
     else:
         # A clean return means the session is OVER (the task runs its whole life). "ready" is
         # published where readiness actually begins — bind_runtime — not here.
         channel.set_bringup("ended", elapsed=time.monotonic() - started)
+
+
+def _machine_secrets(config_dir: Optional[str]) -> frozenset[str]:
+    """Every secret value the machine's config.yaml and overrides.yaml hold. A file that is
+    missing or unreadable contributes none: there is nothing in it to mask."""
+    import yaml
+
+    from localharness.config.models import HarnessConfig
+    from localharness.config.paths import global_config_dir
+    from localharness.config.redact import secret_values
+
+    found: set[str] = set()
+    for name in ("config.yaml", "overrides.yaml"):
+        try:
+            raw = yaml.safe_load((global_config_dir(config_dir) / name).read_text(encoding="utf-8"))
+            found |= secret_values(HarnessConfig, raw)
+        except Exception:  # noqa: BLE001 — no file or bad YAML: no secret to mask from it
+            continue
+    return frozenset(found)
+
+
+def _failure_text(exc: BaseException, config_dir: Optional[str]) -> str:
+    """What the phone is told when the session could not be built: the error's first line, with
+    every secret the machine's config files hold masked (an error can quote a key)."""
+    from localharness.config.redact import scrub
+
+    return scrub(f"{type(exc).__name__}: {exc}".splitlines()[0], _machine_secrets(config_dir))
 
 
 app = typer.Typer(help="Serve the phone UI and its event API (see docs/web.md).")
