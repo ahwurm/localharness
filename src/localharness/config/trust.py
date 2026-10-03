@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -178,6 +179,11 @@ EXECUTABLES_KEY = "executables"
 NOTHING_APPROVED: dict = {"fingerprint": "", "servers": []}
 """What a Yes given WITHOUT the server list records: nothing approved yet, so the next start asks."""
 
+MACHINE_KINDS: frozenset[str] = frozenset({"mcp_server", "embedding_model", "permission"})
+"""Kinds of entry machine_snapshot() produces. A record made before a kind existed adopts that
+kind's current entries silently once — they predate the rule (53-10 adds "tool_script")."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -262,6 +268,79 @@ def record_executables(workspace_root: Path, snapshot: list[dict]) -> None:
     entry[EXECUTABLES_KEY] = {"fingerprint": fingerprint(snapshot), "servers": snapshot,
                               "recorded": _now()}
     data[key] = entry
+    atomic_write_overlay(trust_store_path(), data)
+
+
+def machine_key(global_dir: Path) -> str:
+    """The trust-store key of this machine's own record: never a resolved path, so no workspace
+    lookup reads it; per config dir, so an explicit --config-dir keeps its own record."""
+    return "<machine>" + str(Path(global_dir).resolve())
+
+
+def _shown_server(server: dict) -> str:
+    """What a server runs or reaches: its url, or its command line quoted so that two different
+    argument lists can never read the same."""
+    if str(server.get("transport") or "") == "streamable_http":
+        return str(server.get("url") or "")
+    return shlex.join([str(server.get("command") or ""), *_args(server)])
+
+
+def machine_snapshot(global_dir: Path) -> list[dict]:
+    """What your machine's own files would start, load or loosen: for every `<global>/agents/*.yaml`
+    each `tools.mcp_servers` entry ({kind: "mcp_server", file: "agents/<f>", name, shown: command +
+    args or url, env: [names], headers: [names]}) and its `memory.embedding_model` when set
+    ({kind: "embedding_model", name: "memory.embedding_model", shown: value}); for those files,
+    every `<global>/divisions/*.yaml` and `<global>/org.yaml`, each permission loosening
+    ({kind: "permission", name: <dotted key>, shown: <value>}, loader.permission_loosenings — the
+    legacy org.yaml as the base rung, whose shorter `deny_patterns` does drop shipped patterns).
+    Sorted by (file, kind, name, canonical JSON); unparsable files skipped; never an env or header
+    value."""
+    from localharness.config.loader import org_deny_loosenings, permission_loosenings
+
+    root = Path(global_dir)
+
+    def loosenings(file: str, raw: Any) -> list[dict]:
+        perms = raw.get("permissions") if isinstance(raw, dict) else None
+        base = org_deny_loosenings(perms) if file == "org.yaml" else []
+        return [{"file": file, "kind": "permission", "name": key, "shown": shown}
+                for key, shown in sorted(permission_loosenings(perms) + base)]
+
+    out: list[dict] = []
+    for path in sorted((root / "agents").glob("*.yaml")):
+        raw, file = _read_yaml(path), f"agents/{path.name}"
+        out += [{"file": file, "kind": "mcp_server", "name": str(s.get("name") or ""),
+                 "shown": _shown_server(s), "env": _names(s.get("env")),
+                 "headers": _names(s.get("headers"))} for s in _servers(raw)]
+        memory = raw.get("memory") if isinstance(raw, dict) else None
+        if isinstance(memory, dict) and memory.get("embedding_model") is not None:
+            out.append({"file": file, "kind": "embedding_model", "name": "memory.embedding_model",
+                        "shown": str(memory["embedding_model"])})
+        out += loosenings(file, raw)
+    for path in sorted((root / "divisions").glob("*.yaml")):
+        out += loosenings(f"divisions/{path.name}", _read_yaml(path))
+    if (root / "org.yaml").is_file():
+        out += loosenings("org.yaml", _read_yaml(root / "org.yaml"))
+    return sorted(out, key=lambda e: (e["file"], e["kind"], e["name"], _canonical(e)))
+
+
+def recorded_machine(global_dir: Path) -> Optional[dict]:
+    """This machine's record {fingerprint, entries, kinds}, or None (the first start after the
+    upgrade). Malformed parts read as empty."""
+    rec = _load(trust_store_path()).get(machine_key(global_dir))
+    if not isinstance(rec, dict):
+        return None
+    entries, kinds = rec.get("entries"), rec.get("kinds")
+    return {"fingerprint": rec["fingerprint"] if isinstance(rec.get("fingerprint"), str) else "",
+            "entries": [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else [],
+            "kinds": [str(k) for k in kinds] if isinstance(kinds, list) else []}
+
+
+def record_machine(global_dir: Path, entries: list[dict],
+                   kinds: frozenset[str] = MACHINE_KINDS) -> None:
+    """Store what was confirmed (or adopted) for this machine, through the same 0600 atomic write."""
+    data = _load(trust_store_path())
+    data[machine_key(global_dir)] = {"fingerprint": fingerprint(entries), "entries": entries,
+                                     "kinds": sorted(kinds), "recorded": _now()}
     atomic_write_overlay(trust_store_path(), data)
 
 

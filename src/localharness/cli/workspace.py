@@ -56,9 +56,9 @@ import re
 import shlex
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional, Union
+from typing import Callable, Mapping, Optional, Union
 
 from rich.console import Console
 
@@ -578,3 +578,81 @@ def executables_diff(old: list[dict], new: list[dict], *, removed: bool = True) 
 def _servers_suffix(snap: list[dict]) -> str:
     """The server list appended to a trust question, or "" when the project starts none."""
     return SERVERS_SUFFIX.format(diff=executables_diff([], snap)) if snap else ""
+
+
+# ------------------------------------------------------------------ what the machine's files may do
+#
+# Self-extension stays (owner ruling, Option 1): the agent may write the machine's own agent files —
+# a new specialist is the harness being used. What such a file STARTS (an MCP server), LOADS (a
+# local embedding model is Python sentence-transformers imports) or LOOSENS (a permission looser
+# than the shipped default; in a division file or the legacy org.yaml too, since an agent file may
+# name a division) applies only after one Yes at a start on a terminal (orchestrator ruling R12a).
+# The first start after the upgrade adopts the files as they are (you wrote them); removals and
+# tightenings never ask; without a terminal, or after No, the change is withheld at every read of
+# that file this run (ConfigLoader(machine_withheld=…)) and named in one line.
+
+MACHINE_CHANGED_QUESTION = (
+    "These changed in {global_dir} since you last confirmed them — each starts a program, loads "
+    "code or loosens what the agent may do:\n{diff}\nApply them?")
+MACHINE_WITHHELD_LINE = ("Not applying {n} change(s) in {global_dir} that you have not confirmed "
+                         "({names}): {why}")
+MACHINE_UNASKED = "run `localharness start` on a terminal to review them"
+MACHINE_DECLINED = "you said No — start asks again next time"
+MACHINE_DECLINED_EARLIER = "you said No earlier in this session — start asks again next time"
+
+
+@dataclass(frozen=True)
+class MachineTrust:
+    """What start withheld from the machine's own files: {file: {(kind, name), …}} and one line."""
+    withheld: Mapping[str, frozenset[tuple[str, str]]] = field(default_factory=dict)
+    line: str = ""
+
+
+def machine_diff(old: list[dict], new: list[dict], *, removed: bool = True) -> str:
+    """One line per entry of `new` not covered verbatim by `old`, counted as decide_machine_trust
+    counts: "+ g2 (agents/orchestrator.yaml): /bin/sh -c id" for an added one, "~ …" when it pairs
+    with a no-longer-present entry of the same (file, kind, name) — that pairing is display only —
+    and "- …" for a removed one (only when `removed`), plus "  env: A, B" under an MCP server that
+    names env vars. Never a value of env or headers."""
+    return _diff(old, new, pair=lambda e: (e.get("file"), e.get("kind"), e.get("name")),
+                 target=lambda e: str(e.get("shown") or ""), counted=True, removed=removed)
+
+
+def decide_machine_trust(global_dir: Path, *, ask: bool) -> MachineTrust:
+    """Decided once at start, before anything loads (orchestrator ruling R12a). The agent may write
+    the machine's agent files; what they start, load or loosen applies only after one Yes here."""
+    from localharness.config import trust
+
+    snap = trust.machine_snapshot(global_dir)
+    rec = trust.recorded_machine(global_dir)
+    if rec is None:
+        trust.record_machine(global_dir, snap)  # the first start after the upgrade: adopted
+        return MachineTrust()
+    # Counted, never keyed on (file, kind, name): two MCP servers in one file may share a name. A
+    # kind the record predates is adopted once — its entries were there before the rule.
+    confirmed = [*rec["entries"], *(e for e in snap if e.get("kind") not in rec["kinds"])]
+    changed = _uncovered(confirmed, snap)
+    if not changed:
+        if rec["fingerprint"] != trust.fingerprint(snap) or set(rec["kinds"]) != trust.MACHINE_KINDS:
+            trust.record_machine(global_dir, snap)  # removals, tightenings, a newly known kind
+        return MachineTrust()
+    declined = (trust.machine_key(global_dir), trust.fingerprint(snap))
+    if declined in _DECLINED:
+        return _withhold(changed, global_dir, MACHINE_DECLINED_EARLIER)
+    if not ask:
+        return _withhold(changed, global_dir, MACHINE_UNASKED)
+    if _confirm_or_no(MACHINE_CHANGED_QUESTION.format(global_dir=global_dir,
+                                                      diff=machine_diff(confirmed, snap))):
+        trust.record_machine(global_dir, snap)
+        return MachineTrust()
+    _DECLINED.add(declined)
+    return _withhold(changed, global_dir, MACHINE_DECLINED)
+
+
+def _withhold(changed: list[dict], global_dir: Path, why: str) -> MachineTrust:
+    by_file: dict[str, set[tuple[str, str]]] = {}
+    for entry in changed:
+        by_file.setdefault(entry["file"], set()).add((entry["kind"], entry["name"]))
+    names = ", ".join(f"{_visible(e['name'])} ({_visible(e['file'])})" for e in changed)
+    return MachineTrust({f: frozenset(v) for f, v in by_file.items()}, MACHINE_WITHHELD_LINE.format(
+        n=len(changed), global_dir=global_dir, names=names, why=why))
