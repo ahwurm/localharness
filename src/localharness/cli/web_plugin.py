@@ -24,7 +24,7 @@ cli/start_cmd.py on the plugin's import chain (PAPI-03)."""
 
 
 class WebPlugin(Plugin):
-    """the phone app: `localharness web` serves the web UI and its event API"""
+    """Mobile: the phone page, served with its event API by `localharness web`"""
 
     manifest = PluginManifest(
         name="web", version="0.1.0", kind="channel", enabled_by_default=True, requires_extra="web",
