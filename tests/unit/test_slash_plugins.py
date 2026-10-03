@@ -380,6 +380,13 @@ def test_indicator_not_set_up_yet():
         "x: on, but not set up yet — run /plugins enable x to set it up"
 
 
+def test_indicator_a_skipped_check_is_not_set_up_yet():
+    """Deferred #23: a check the step skipped (web's "not enrolled yet", autoresearch with no
+    proposer) is a plugin that is not set up yet, never "its check failed"."""
+    web = _resume(("enable", "web"), skipped_check="not enrolled yet")
+    assert start_cmd._resume_status(web, _started(["web"])) == "web: on, but not set up yet — not enrolled yet"
+
+
 def test_indicator_it_could_not_start():
     assert start_cmd._resume_status(_resume(), _started(failed={"x": "start() raised OSError: boom"})) == \
         "x: on, but it could not start: start() raised OSError: boom"

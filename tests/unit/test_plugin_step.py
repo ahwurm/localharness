@@ -171,15 +171,39 @@ class Reach(Plugin):
         return [Check(name="reach", status="pass", detail=f"configured: {ctx.config.url}")]
 
 
+OPT_ROWS: list[Check] = []     # what opt's check finds; empty = its one skipped row
+OPT_ACTION: list[Check] = []   # what opt's setup action returns; empty = nothing to do yet
+
+
+class Opt(Plugin):
+    """asks an optional address; its check is skipped until something else has run first (the
+    shape of web, "not enrolled yet" until `localharness web` first runs, and of autoresearch with
+    no proposer, whose action then has nothing to look at)"""
+
+    manifest = PluginManifest(
+        name="opt", version="0.1.0", kind="tools", enabled_by_default=False,
+        setup=(SetupField(key="url", prompt="Optional address"),),
+        next_steps="OPT-NEXT", agent_prompt="Pair it under {config_dir}.")
+    ConfigModel = UrlConfig
+
+    def setup_action(self, ctx):
+        return list(OPT_ACTION)
+
+    def doctor(self, ctx):
+        return list(OPT_ROWS) or [Check(name="opt", status="skip", detail="not paired yet")]
+
+
 @pytest.fixture(autouse=True)
 def bundled(monkeypatch):
-    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Act, Quiet, Boom, Pro, Needx, Secty, Kit, Plain))
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Act, Quiet, Boom, Pro, Needx, Secty, Kit, Plain, Opt))
     monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [])
     monkeypatch.setenv("COLUMNS", "400")
     monkeypatch.setattr(plugins_cmd, "console", Console(width=400))
     monkeypatch.setattr(setup, "gpu_name", lambda: "NVIDIA GB10")
     CALLS.clear()
     ACT_READY[0] = False
+    OPT_ROWS.clear()
+    OPT_ACTION.clear()
 
 
 @pytest.fixture
@@ -536,6 +560,31 @@ def test_in_session_a_configured_plugin_with_questions_and_an_action_does_neithe
 
     assert term.asked == [] and term.confirmed == [] and CALLS == []
     assert outcome.failed_check == ""
+
+
+SKIPPED = Check(name="opt", status="skip", detail="not paired yet")
+
+
+@pytest.mark.parametrize("rows, action, failed, skipped", [
+    ([], [], "", "not paired yet"),
+    ([SKIPPED, Check(name="opt-file", status="fail", detail="mode 644")], [], "mode 644", ""),
+    ([], [Check(name="opt-far", status="fail", detail="no answer")], "no answer", ""),
+    ([Check(name="opt-old", status="warn", detail="old"), SKIPPED], [], "", "not paired yet"),
+], ids=["skipped", "a-failing-row-wins-after-a-skipped-one", "a-failing-action-row-wins",
+        "a-warning-is-never-counted"])
+def test_in_session_a_skipped_check_is_not_set_up_yet_and_only_a_failing_row_is_a_failed_check(
+        g, term, capsys, rows, action, failed, skipped) -> None:
+    """Deferred #23: a skipped row with its question left unanswered is a plugin that is not set up
+    yet, not a failure. `skipped_check` carries it when no row failed; `failed_check` is the first
+    row that failed, the doctor check's or the setup action's. The step itself prints as before:
+    the coding-agent prompt on a check that is not clean, the next step on every outcome."""
+    OPT_ROWS[:], OPT_ACTION[:] = rows, action
+    term.answers[:] = [""]  # Enter at the optional question: nothing is written
+    outcome = _in_session(g, "opt")
+
+    assert outcome == plugins_cmd.StepOutcome("opt", True, failed_check=failed, skipped_check=skipped)
+    assert yaml.safe_load((g / "overrides.yaml").read_text()) == {"opt": {"enabled": True}}
+    _in_order(capsys.readouterr().out, "Checking it now:", AGENT_PROMPT_LEAD, "OPT-NEXT")
 
 
 # --- session_step: never raises out of the restart ---------------------------------------------------

@@ -423,11 +423,14 @@ def _prompt_values(resolution: Resolution, loader: ConfigLoader, entry: PlanEntr
 @dataclass(frozen=True)
 class StepOutcome:
     """What one plugin step did, for the session that resumes after `/plugins enable|disable`
-    (cli/start_cmd): `failed_check` is the first check row that did not pass ("" when it passed or
-    did not run); `stopped` is True when Ctrl-C, Ctrl-D or a refusal ended the step early."""
+    (cli/start_cmd): `failed_check` is the first check row that failed ("" when none did, or the
+    check did not run); `skipped_check` is the first skipped row's detail when no row failed and
+    the check was not clean, a plugin not set up yet (web's "not enrolled yet"), not a failure;
+    `stopped` is True when Ctrl-C, Ctrl-D or a refusal ended the step early."""
     name: str
     on: bool
     failed_check: str = ""
+    skipped_check: str = ""
     stopped: bool = False
 
 
@@ -539,7 +542,7 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
         rows = asyncio.run(setup_action_rows(fresh, name, paths))
         if rows:
             print_plugin_row(DoctorRow(name, "on", "", rows), [])
-    failed, block = "", False
+    failed, skipped, block = "", "", False
     if step and (setup or has_action):
         console.print("Checking it now:")
         row = _probe(name, fresh, paths)
@@ -549,8 +552,13 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
         # answer, a download that raised) is not set up, even when the offline doctor row passes.
         action_failed = [c for c in rows if c.status == "fail"]
         if not_clean or action_failed:
-            failed = (next((c.detail for c in row.checks if c.status in ("fail", "skip")), row.detail)
-                      if not_clean else action_failed[0].detail)
+            # A failing row, the check's or the setup action's, is a failed check; a skipped row with
+            # none failing is a plugin not set up yet (web's "not enrolled yet"), not a failure; a
+            # check row that is not on (unconfigured, failed) has only its state to say.
+            checks = row.checks if not_clean else ()
+            failed = (row.detail if not_clean and row.state != "on" else
+                      next((c.detail for c in (*checks, *action_failed) if c.status == "fail"), ""))
+            skipped = "" if failed else next((c.detail for c in checks if c.status == "skip"), "")
             if m.setup_help:  # the one place it prints
                 console.print()
                 console.print(escape(m.setup_help), soft_wrap=True)
@@ -571,7 +579,7 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
             console.print()
         for line in m.next_steps.splitlines():
             console.print(escape(f"  {line}"), soft_wrap=True)
-    return StepOutcome(name, on, failed_check=failed)
+    return StepOutcome(name, on, failed_check=failed, skipped_check=skipped)
 
 
 def _probe(name: str, resolution: Resolution, paths: PluginPaths) -> DoctorRow | None:

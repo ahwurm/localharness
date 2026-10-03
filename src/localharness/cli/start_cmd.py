@@ -145,7 +145,8 @@ class Resume:
     queued: tuple[str, ...]          # lines typed ahead, still waiting in the REPL's queue
     gate_mode: str                   # /mode as the person left it
     previous_sitting_id: str         # logged beside the new one; memory needs a fresh id
-    failed_check: str = ""           # from the step: its check's first row that did not pass
+    failed_check: str = ""           # from the step: its check's first row that failed
+    skipped_check: str = ""          # from the step: its first skipped row, when none failed
     step_stopped: bool = False       # the step was stopped (Ctrl-C, Ctrl-D, a refusal or an error)
 
 
@@ -171,6 +172,8 @@ def _resume_status(resume: Resume, result: Any) -> str:
         return f"{name}: on, but it could not start: {result.failed[name]}"
     if resume.failed_check:
         return f"{name}: on, but its check failed: {resume.failed_check}"
+    if resume.skipped_check:  # a skipped check is a plugin not set up yet, not a failure
+        return f"{name}: on, but not set up yet — {resume.skipped_check}"
     if running:
         return f"{name}: on in this session"
     return f"{name}: not running in this session — /plugins shows its state"
@@ -1877,6 +1880,6 @@ def start_app(
             reset_inference_gate()  # the next asyncio.run is a new event loop
             gc.collect()
             resume = replace(restart.resume, failed_check=outcome.failed_check,
-                             step_stopped=outcome.stopped)
+                             skipped_check=outcome.skipped_check, step_stopped=outcome.stopped)
     except KeyboardInterrupt:
         console.print("\nGoodbye.")
