@@ -705,7 +705,8 @@ class WebServer:
         `commands[]` comes from the REPL's own slash table, read live (plugin rows included), and
         `modes[]` from the gate's own mode list, rather than being hardcoded here: a one-thumb mode
         chip or command menu that duplicates those lists client-side is exactly the drift the
-        generated event schema exists to prevent.
+        generated event schema exists to prevent. Terminal-only rows (`/plugins`) are left out: the
+        phone cannot run them.
         """
         refusal = self._authed(request, post=False)
         if refusal is not None:
@@ -724,7 +725,8 @@ class WebServer:
             "verbs": [
                 {"method": m, "path": p, "note": n} for m, p, n in _VERBS
             ],
-            "commands": [{"name": n, "description": d} for n, d in all_rows()],
+            "commands": [{"name": r.name, "description": r.description} for r in all_rows()
+                         if not r.terminal_only],
             "modes": sorted(MODE_STRICTNESS, key=lambda m: MODE_STRICTNESS[m]),
             "intents": sorted(INTENTS),
             "default_mid_turn_intent": DEFAULT_MID_TURN_INTENT,

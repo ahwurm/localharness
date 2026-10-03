@@ -951,6 +951,10 @@ class TerminalChannel(ChannelAdapter):
     handlers stopped being `isinstance(TerminalChannel)` checks that refused on every other
     surface (web-channel PRD, WEBCH-19)."""
 
+    can_switch_plugins = True
+    """`/plugins enable|disable` restarts the session here: the step's questions are asked on this
+    terminal after the input box has closed."""
+
     @property
     def can_ask(self) -> bool:
         """Can a person answer a question here? (PRD §3.5's "non-tty" row.)

@@ -184,6 +184,11 @@ class ChannelAdapter(ABC):
     reasoning answers the question by declaring it instead of by being added to a list in `cli`.
     """
 
+    can_switch_plugins: bool = False
+    """Can `/plugins enable|disable` restart this session from here? Only the terminal: a plugin's
+    setup questions — a bot token among them — are asked at a plain terminal prompt between the two
+    halves of the restart, never over a remote channel. False is the safe default."""
+
     async def ask_permission(self, request: Any) -> Any:
         """Render one ASK verdict and return the human's `Decision` (PRD §3.5).
 

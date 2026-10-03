@@ -7,6 +7,7 @@ import re
 import signal
 import time
 from collections import deque
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Optional
 
@@ -92,6 +93,15 @@ BARE_MODE_COMMAND = "mode"
 # #129: a /model swap that writes a new default to the user overlay must SAY so — the write
 # outlives the session, and a silent one leaves the user running an experiment forever.
 SAVED_DEFAULT_NOTE = " (saved as default — persists across restarts)"
+
+PLUGINS_USAGE = "Usage: /plugins, /plugins enable <name> or /plugins disable <name>"
+PLUGINS_TERMINAL_ONLY = ("/plugins works only in a terminal session. From a shell: "
+                         "localharness plugins enable <name>")
+PLUGINS_NO_SESSION = "/plugins needs a session started with `localharness start`."
+PLUGINS_PARKED = "Answer the parked calls first (/pending lists them): a restart would drop them."
+PLUGINS_RESTARTING = "Restarting with {name} {state} — your conversation is kept."
+"""What `/plugins` answers. A restart drops the gate's parked calls with the session, so it is
+refused while any wait; the other channels cannot restart a session at all (R10)."""
 
 
 # Keywords that signal the user wants to create an agent via conversation.
@@ -203,6 +213,8 @@ class OrchestratorREPL:
         harness_config: Any = None,
         on_agent_deployed: Any = None,
         gate: Any = None,
+        on_plugin_switch: Any = None,
+        queued: Sequence[str] = (),
     ) -> None:
         self._orchestrator = orchestrator
         self._agent = agent_loop
@@ -225,6 +237,14 @@ class OrchestratorREPL:
         # /agents lists it and the model can delegate to it without a restart. None in tests
         # / non-interactive paths that don't wire it.
         self._on_agent_deployed = on_agent_deployed
+        # /plugins enable|disable NAME: the session's answer, `await hook(verb, name)` — a line to
+        # show, or None to restart (`hook("list", "")` is bare /plugins). start_cmd passes it for a
+        # terminal session only; None elsewhere.
+        self._on_plugin_switch = on_plugin_switch
+        # Lines typed ahead of a /plugins restart, carried into the rebuilt session: played first.
+        self._resume_queue: list[str] = list(queued)
+        # (verb, plugin name) once /plugins asked for a restart; start_cmd reads it after run().
+        self.restart_request: tuple[str, str] | None = None
         # --- Type-anytime input box (box mode); inert on the classic path ---
         # A sentence a slash command left for the MODEL, to be started as an ordinary user turn
         # once the command has been handled (`/approve` on an idle session). Consumed and
@@ -287,6 +307,11 @@ class OrchestratorREPL:
         the same session and must stay textually distinct.
         """
         return self._workspace if self._workspace is not None else self._config_dir
+
+    @property
+    def queued(self) -> tuple[str, ...]:
+        """Lines typed ahead and not played yet — what a /plugins restart carries over."""
+        return tuple(self._fifo)
 
     async def run(self) -> None:
         """Entry point. Route to the persistent-input-box loop on a real interactive terminal
@@ -407,10 +432,14 @@ class OrchestratorREPL:
         """Main REPL loop: slash commands, agent-creation workflows, then the agent loop."""
         await self._channel.start()
         await self._establish_workspace_trust()
+        # Lines typed ahead of a /plugins restart play first; the ones a replayed /plugins leaves
+        # unplayed stay in the queue (`queued`) for the next rebuild.
+        self._fifo.extend(self._resume_queue)
+        self._resume_queue = []
         try:
             while True:
                 try:
-                    user_input = await self._channel.read_input()
+                    user_input = self._fifo.popleft() if self._fifo else await self._channel.read_input()
                 except EOFError:
                     break
                 if not user_input:
@@ -527,10 +556,18 @@ class OrchestratorREPL:
         self._box_ctrl_q = asyncio.Queue()
         self._turn_task = None
         self._fifo.clear()
+        self._fifo.extend(self._resume_queue)
+        self._resume_queue = []
         self._sigint_armed = False
         try:
             await self._channel.start_input_box(self._box_ctrl_q, self._on_box_interrupt)
             self._ctrl_ready_at = time.monotonic()
+            if self._fifo:  # lines typed ahead of a /plugins restart: play them first
+                self._channel.box_set_queued(len(self._fifo))
+                try:
+                    await self._play_next_from_fifo()
+                except EOFError:
+                    return  # a replayed /quit or /plugins ends this REPL too
             while True:
                 kind, payload = await self._box_ctrl_q.get()
                 if not await self._handle_box_event(kind, payload):
@@ -1161,6 +1198,43 @@ class OrchestratorREPL:
 
     async def _slash_mode(self, args: str, args_lower: str) -> None:
         await self._handle_mode_cmd(args_lower.strip())
+
+    async def _slash_plugins(self, args: str, args_lower: str) -> None:
+        await self._handle_plugins_cmd(args_lower.strip())
+
+    async def _handle_plugins_cmd(self, arg: str) -> None:
+        """/plugins lists the plugins; /plugins enable|disable <name> switches one in THIS session.
+        The session restarts with the flag changed and the conversation carried over: this REPL ends
+        with restart_request set, start_cmd tears the session down in its usual order, runs the
+        plugin's setup step on the plain terminal — never in the input box — and rebuilds the
+        session from the handle. Only a channel that can_switch_plugins (the terminal) does this."""
+        info = {"style": "system.info"}
+        if not getattr(self._channel, "can_switch_plugins", False):
+            await self._channel.send_message(PLUGINS_TERMINAL_ONLY, metadata=info)
+            return
+        if self._on_plugin_switch is None:
+            await self._channel.send_message(PLUGINS_NO_SESSION, metadata=info)
+            return
+        words = arg.split()
+        if not words:
+            await self._channel.send_message(await self._on_plugin_switch("list", ""), metadata=info)
+            return
+        if len(words) != 2 or words[0] not in ("enable", "disable"):
+            await self._channel.send_message(PLUGINS_USAGE, metadata=info)
+            return
+        verb, name = words
+        gate = self._session_gate()
+        if gate is not None and getattr(gate, "pending", None):
+            await self._channel.send_message(PLUGINS_PARKED, metadata=info)
+            return
+        line = await self._on_plugin_switch(verb, name)
+        if line is not None:
+            await self._channel.send_message(line, metadata=info)
+            return
+        self.restart_request = (verb, name)
+        await self._channel.send_message(
+            PLUGINS_RESTARTING.format(name=name, state="on" if verb == "enable" else "off"), metadata=info)
+        raise EOFError()  # ends the REPL as /quit does; start_cmd runs the step and resumes
 
     async def _slash_pending(self, args: str, args_lower: str) -> None:
         await self._handle_pending_cmd()
