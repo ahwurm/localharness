@@ -44,4 +44,6 @@ DEFAULT_MAX_DURATION_MINUTES: float | None = None  # no turn time limit by defau
 #        memory-archive, and the owner-only `localharness memory` CLI. An existing config
 #        picks these up on the next `config migrate` / first `start` — the union is additive,
 #        so a user's own entries are kept and nothing they deleted is smuggled back.
+# A REMOVAL from the shipped list needs no bump: plan() only adds, and a config that already holds
+# the pattern keeps it (write(*/agents/*.yaml) left the defaults this way).
 CURRENT_DEFAULTS_REVISION: int = 3

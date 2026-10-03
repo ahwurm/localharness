@@ -435,7 +435,11 @@ class PermissionConfig(BaseModel):
             "write(*/.env)",
             "write(*/secrets*)",
             "write(*/config.yaml)",
-            "write(*/agents/*.yaml)",
+            # write(*/agents/*.yaml) shipped until this release and is no longer a default: the
+            # agent may write agent files (self-extension), and what such a file starts, loads or
+            # loosens waits for the user's confirmation at the next start
+            # (config/trust.machine_snapshot). A config written before keeps the pattern — the
+            # migration never removes a pattern and never re-adds one that is absent.
             # --- privilege escalation + recursive delete + world-writable ---
             # `sudo *` (bare) + `*sudo *` (embedded); the earlier `sudo:*` glob required a
             # literal colon after 'sudo' (fnmatch) and so matched NO real sudo command.
