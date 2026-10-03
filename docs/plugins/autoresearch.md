@@ -11,7 +11,9 @@ localharness plugins enable autoresearch
 
 Turning it off removes its commands from `localharness --help` and its settings from `components list`, and deletes nothing: the experiment archive and your settings stay. The bench and its sealed holdout are part of core and work either way.
 
-`localharness plugins enable autoresearch` on a terminal, or `/plugins enable autoresearch` in a running session while no proposer is set up, asks the proposer's address, its model id and an API key (nothing shows as you type it; leave it empty for a local server), and writes the answers at once; Enter on a question writes nothing, and answers that do not make a valid proposer together are refused with nothing written. Then it asks the proposer for its model list once, to check that it answers and serves that model. It reads the address and key from your machine-level config only, as `propose` does, and prints the host before it sends the key; a different address in the project's own config is named and ignored. `doctor` still never contacts it.
+`localharness plugins enable autoresearch` on a terminal, or `/plugins enable autoresearch` in a running session while no proposer is set up, asks the proposer's address, its model id and an API key (nothing shows as you type it; leave it empty for a local server), and writes the answers at once; Enter on a question writes nothing, and answers that do not make a valid proposer together are refused with nothing written. Then it asks the proposer for its model list once, to check that it answers and serves that model. It reads the address and key from your machine-level config only, as `propose` does, and prints the host before it sends the key; a different address in the project's own config is named and ignored. A key sent over plain `http://` to another machine adds one warning line before the check (the check still runs and the key is still sent; use an `https://` address for a cloud API). `doctor` still never contacts it.
+
+With a key already stored, the key question never shows it and says what Enter does: `[stored key kept — type none to clear, or paste a new one]`. When you have just changed the address in the same step, it names the old host: `[stored key for <old host> kept — …]`.
 
 ## Two setups for the proposer
 
@@ -62,8 +64,8 @@ It keeps the core settings it had before it became a plugin, under the same name
 
 ## Not there yet
 
-- The key is stored as plain text in your global `overrides.yaml` (mode 600 when LocalHarness writes it), whether `plugins enable autoresearch` or `components set proposer.api_key …` wrote it.
-- Enter at the key question keeps a key stored before. Moving from a cloud API to a local server, type `none` at that question (or run `localharness components set proposer.api_key none`); until then the old key is sent to the new address, as the line before the check says.
+- The key is stored as it is in your global `overrides.yaml` (owner-only, mode 600, when LocalHarness writes it), whether `plugins enable autoresearch` or `components set proposer.api_key …` wrote it. `localharness components set proposer.api_key -` reads it with input hidden, so it never sits in your shell history.
+- Enter at the key question keeps a key stored before, also after the address changed. Moving from a cloud API to a local server, type `none` at that question (or run `localharness components set proposer.api_key none`); until then the old key is sent to the new address, as the question and the line before the check say.
 - Two cases give a script an exit code that `experiment run` also uses for a verdict: when the config cannot be read, an off plugin's command gets `No such command` and exit 2 (reject-holdout); when an on plugin's command fails to import, it exits 1 (reject-train).
 - With the plugin off, `components list` still shows its `autoresearch.enabled` row.
 
