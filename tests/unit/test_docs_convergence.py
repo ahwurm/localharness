@@ -763,8 +763,8 @@ def check_changelog_structure(text: str) -> list[str]:
     out = []
     in_intro = True
     for raw, line in zip(entry.splitlines(), unfenced_lines(entry)):
-        if line.startswith("### "):
-            in_intro = False
+        if line.startswith(("### ", "## [")):
+            in_intro = line.startswith("## [")  # each release entry has its own intro
         if in_intro or not line.strip() or raw != line:
             continue
         if not (line.startswith(("#", "- ", "|")) or re.match(r" {2,}\S", line)):
