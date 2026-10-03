@@ -110,10 +110,11 @@ def load_overlay(path: Path) -> dict:
         # module-level back-import would be circular. Deferred to the raise path only.
         from localharness.config.loader import ConfigParseError
 
-        mark = getattr(e, "problem_mark", None)
-        line = (mark.line + 1) if mark else 0
-        column = (mark.column + 1) if mark else 0
-        raise ConfigParseError(str(path), line, column, str(e)) from e
+        from localharness.config.redact import yaml_problem, yaml_where
+
+        # file, line and column, never the parser's snippet of the line (R16); not chained either
+        line, column = yaml_where(e)
+        raise ConfigParseError(str(path), line, column, yaml_problem(e)) from None
     return data or {}
 
 
