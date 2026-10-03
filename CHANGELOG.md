@@ -136,8 +136,8 @@ All notable changes to LocalHarness are documented here. The format follows
   scrollback above the setup questions.
 - Enter at autoresearch's API key question keeps a key stored before, so after
   moving from a cloud API to a local server the old key is still sent to the
-  new address until `localharness components set proposer.api_key none`
-  clears it.
+  new address until `none` is typed at that question (or `localharness
+  components set proposer.api_key none` is run).
 
 ## [0.16.0] — 2026-10-02
 

@@ -2119,8 +2119,8 @@ class OrchestratorREPL:
     async def _persist_default_model(self, model: str) -> bool:
         """Persist the swap to the atomic, audited USER OVERLAY (issue #22 pattern) so the next
         start uses it — replaces the prior full, non-atomic config.yaml rewrite. Best-effort:
-        a persistence failure (e.g. the new default collides with a configured proposer.model)
-        is surfaced but never crashes the live session, which has already switched."""
+        a persistence failure (e.g. the merged config no longer validates) is surfaced but never
+        crashes the live session, which has already switched."""
         from localharness.cli import model_ops
         try:
             audit_warning = await model_ops.persist_default_model(

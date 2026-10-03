@@ -63,7 +63,7 @@ It keeps the core settings it had before it became a plugin, under the same name
 ## Not there yet
 
 - The key is stored as plain text in your global `overrides.yaml` (mode 600 when LocalHarness writes it), whether `plugins enable autoresearch` or `components set proposer.api_key …` wrote it.
-- Enter at the key question keeps a key stored before. Moving from a cloud API to a local server, clear it with `localharness components set proposer.api_key none`; until then the old key is sent to the new address, as the line before the check says.
+- Enter at the key question keeps a key stored before. Moving from a cloud API to a local server, type `none` at that question (or run `localharness components set proposer.api_key none`); until then the old key is sent to the new address, as the line before the check says.
 - Two cases give a script an exit code that `experiment run` also uses for a verdict: when the config cannot be read, an off plugin's command gets `No such command` and exit 2 (reject-holdout); when an on plugin's command fails to import, it exits 1 (reject-train).
 - With the plugin off, `components list` still shows its `autoresearch.enabled` row.
 
