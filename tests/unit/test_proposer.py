@@ -376,3 +376,16 @@ async def test_empty_archive_front_is_safe(
     )
     assert proposal.component == "agent.role"
     assert spy.complete_calls == 1
+
+
+async def test_no_proposer_says_what_to_set_without_an_internal_id(proposer_corpus, proposer_results):
+    """With no proposer set up, the error names the settings to set, and no requirement id."""
+    from localharness.config.models import HarnessConfig
+
+    cfg = HarnessConfig.model_validate({"version": "1", "provider": {
+        "provider_type": "ollama", "base_url": "http://localhost:11434/v1", "default_model": "m"}})
+    with pytest.raises(ProposerError) as info:
+        await propose("agent.role", [proposer_results["train_run_id"]], cfg=cfg,
+                      corpus_path=proposer_corpus, results_path=proposer_results["results"])
+    assert "proposer.base_url" in str(info.value) and "proposer.model" in str(info.value)
+    assert "PROP-" not in str(info.value), str(info.value)

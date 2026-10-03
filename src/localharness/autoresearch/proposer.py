@@ -287,7 +287,7 @@ async def propose(
     if llm is None:
         if cfg.proposer is None:
             raise ProposerError(
-                "no [proposer] config — set proposer.base_url/model (PROP-02)"
+                "no proposer is set up — set proposer.base_url and proposer.model"
             )
         pc = cfg.proposer
         # Probe the proposer endpoint to determine tool_call_mode (FIDEL-03).

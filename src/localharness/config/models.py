@@ -1823,7 +1823,7 @@ class HarnessConfig(BaseModel):
         if self.proposer is not None and self.proposer.model == self.provider.default_model:
             raise ValueError(
                 "proposer.model must differ from provider.default_model "
-                f"(both are {self.provider.default_model!r}); the proposer requires a "
-                "distinct, stronger model (PROP-02)."
+                f"(both are {self.provider.default_model!r}) — the proposer judges the main "
+                "model's work, so it cannot be the same model."
             )
         return self
