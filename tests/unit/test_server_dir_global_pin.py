@@ -86,8 +86,10 @@ def test_start_cmd_lifecycle_sites_name_the_global_pin():
     # mutation check — the reason that check is mandatory before trusting a structural assertion).
     assert "_managed_server_running(strategy, harness.server, server_cfg_path)" in text
     assert "_managed_server_running(strategy, harness.server, cfg_path)" not in text
-    assert "activate(harness.server, server_cfg_path, provider.base_url)" in text  # launch
-    assert "wait_ready(provider.base_url, config_dir=server_cfg_path)" in text
+    # The two launch calls carry the key the launched server requires (`**launch_key`, which is {}
+    # unless server.require_api_key is on) — the pin is unchanged: both still name server_cfg_path.
+    assert "activate(harness.server, server_cfg_path, provider.base_url, **launch_key)" in text  # launch
+    assert "wait_ready(provider.base_url, config_dir=server_cfg_path, **launch_key)" in text
     assert "wait_ready(provider.base_url, config_dir=cfg_path)" not in text
     # The helper states which layer it expects, so a caller cannot hand it a workspace by accident.
     assert "def _managed_server_running(strategy: Any, srv: Any, global_dir: Path)" in text

@@ -247,3 +247,36 @@ async def test_a_spawned_server_gets_the_key_on_its_readiness_probe_only(tmp_pat
 def test_every_strategy_accepts_a_key(cls):
     param = inspect.signature(cls.activate).parameters["api_key"]
     assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default is None
+
+
+# ------------------------------------------------------------------------------- the other probes
+
+
+def _record_get(monkeypatch) -> list[dict]:
+    """httpx.get as a recorder answering one served model; returns the headers each call sent."""
+    sent: list[dict] = []
+
+    def get(url, **kw):
+        sent.append(dict(kw.get("headers") or {}))
+        return httpx.Response(200, json={"data": [{"id": "m", "max_model_len": 4096}]})
+
+    monkeypatch.setattr(httpx, "get", get)
+    return sent
+
+
+def test_list_live_models_sends_a_key_only_when_given_one(monkeypatch):
+    from localharness.cli import model_ops
+
+    sent = _record_get(monkeypatch)
+    assert model_ops.list_live_models("http://127.0.0.1:8081/v1", api_key=KEY) == (["m"], True)
+    assert model_ops.list_live_models("http://127.0.0.1:8081/v1") == (["m"], True)
+    assert sent == [{"Authorization": f"Bearer {KEY}"}, {}]
+
+
+def test_the_window_probe_sends_a_key_only_when_given_one(monkeypatch):
+    from localharness.agent.context import probe_served_window
+
+    sent = _record_get(monkeypatch)
+    assert probe_served_window("http://127.0.0.1:8081/v1", "m", "vllm", api_key=KEY) == 4096
+    assert probe_served_window("http://127.0.0.1:8081/v1", "m", "vllm") == 4096
+    assert sent == [{"Authorization": f"Bearer {KEY}"}, {}]
