@@ -75,6 +75,10 @@ class LifecycleStrategy(Protocol):
     activate: ensure the target is serving; return its `LiveEndpoint` (base_url + served ids
       + a stop handle). stop: verified + idempotent teardown. liveness: is it serving NOW,
       endpoint/name-based (never the client pid).
+
+    `api_key` is the key the launched server requires, or None. A strategy never decides that:
+    callers pass one only through `server.required_key_kwargs` (machine-level
+    `require_api_key`, default off), so a keyless activation calls everything as it always did.
     """
 
     async def activate(
@@ -85,6 +89,7 @@ class LifecycleStrategy(Protocol):
         *,
         timeout_seconds: float = 1800.0,
         on_poll: Callable[[float], None] | None = None,
+        api_key: str | None = None,
     ) -> LiveEndpoint: ...
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None: ...
@@ -97,7 +102,9 @@ class ManagedVllmStrategy:
     REPL `/model` swap). A thin, ZERO-BEHAVIOR-CHANGE wrapper over `provider/server.py`, which
     both launch modes (`docker`, `binary`) already flow through:
 
-    - activate = `serve_command` → `start_server` → `wait_ready` (returns served ids).
+    - activate = `serve_command` → `start_server` → `wait_ready` (returns served ids); a required
+                 `api_key` reaches all three (the launch environment, never argv), keyword
+                 arguments passed only when there is one.
     - stop     = `stop_server(config_dir, launch=spec.launch)` — the #100 VERIFIED stop
                  (docker: stop → poll name-free → `rm -f` fallback → raise if still stuck).
     - liveness = NAME-based for docker (`docker_container_running` via `docker inspect`), the
@@ -112,14 +119,16 @@ class ManagedVllmStrategy:
         *,
         timeout_seconds: float = 1800.0,
         on_poll: Callable[[float], None] | None = None,
+        api_key: str | None = None,
     ) -> LiveEndpoint:
-        cmd = server.serve_command(spec)
-        pid = server.start_server(config_dir, cmd)
+        cmd = server.serve_command(spec, **({"keyed": True} if api_key else {}))
+        pid = server.start_server(config_dir, cmd, **server.key_kwargs(api_key))
         served = await server.wait_ready(
             base_url,
             config_dir=config_dir,
             timeout_seconds=timeout_seconds,
             on_poll=on_poll,
+            **server.key_kwargs(api_key),
         )
         handle = server.DOCKER_CONTAINER_NAME if spec.launch == "docker" else pid
         return LiveEndpoint(base_url=base_url, served_models=served, handle=handle)
@@ -167,6 +176,7 @@ class SpawnedProcessStrategy:
         *,
         timeout_seconds: float = 1800.0,
         on_poll: Callable[[float], None] | None = None,
+        api_key: str | None = None,
     ) -> LiveEndpoint:
         cmd = server.serve_command(spec)
         pid = server.start_server(config_dir, cmd)
@@ -175,6 +185,7 @@ class SpawnedProcessStrategy:
             config_dir=config_dir,
             timeout_seconds=timeout_seconds,
             on_poll=on_poll,
+            **server.key_kwargs(api_key),
         )
         return LiveEndpoint(base_url=base_url, served_models=served, handle=pid)
 
@@ -218,6 +229,7 @@ class DaemonStrategy:
         *,
         timeout_seconds: float = 1800.0,
         on_poll: Callable[[float], None] | None = None,
+        api_key: str | None = None,
     ) -> LiveEndpoint:
         # CONTRACT: like every LifecycleStrategy.activate, this raises ONLY RuntimeError/TimeoutError
         # on failure — the /model swap callers catch exactly those to tear down + restore. _load
@@ -237,6 +249,7 @@ class DaemonStrategy:
         pid = server.start_server(config_dir, cmd)
         available = await server.wait_ready(             # daemon up; returns PULLED model ids
             v1, config_dir=config_dir, timeout_seconds=timeout_seconds, on_poll=on_poll,
+            **server.key_kwargs(api_key),
         )
         if spec.model not in available:
             await self._pull(spec)                       # tag not on disk → pull it
@@ -358,6 +371,7 @@ class LmsStrategy:
         *,
         timeout_seconds: float = 1800.0,
         on_poll: Callable[[float], None] | None = None,
+        api_key: str | None = None,
     ) -> LiveEndpoint:
         v1 = self._v1(base_url)
         if await self._server_already_up(v1):
@@ -379,6 +393,7 @@ class LmsStrategy:
         await self._run(lms, "server", "start", "--port", str(port), "--bind", "127.0.0.1")
         await server.wait_ready(                                 # confirm the OpenAI endpoint answers
             v1, config_dir=None, timeout_seconds=timeout_seconds, on_poll=on_poll,
+            **server.key_kwargs(api_key),
         )
         # The served id IS the loaded model key (LM Studio's /v1/models also lists any embedding
         # model; the caller takes served_models[0], so return the intended key — the DaemonStrategy

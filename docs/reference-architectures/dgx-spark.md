@@ -294,7 +294,7 @@ Tested recipe:
 
 ```bash
 docker run -d --name vllm-qwen36-35b --gpus all --restart no --ipc=host \
-  -p 8000:8000 \
+  -p 127.0.0.1:8000:8000 \
   -v <MODEL_DIR>:/models/serving:ro \
   vllm/vllm-openai:nightly \
   --model /models/serving --host 0.0.0.0 --port 8000 \
@@ -304,6 +304,15 @@ docker run -d --name vllm-qwen36-35b --gpus all --restart no --ipc=host \
   --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_xml \
   --served-model-name qwen3.6-35b-a3b --enable-prefix-caching
 ```
+
+The `127.0.0.1:` in `-p` keeps the server on this machine. `--host 0.0.0.0` stays inside the
+container: vLLM must listen on the container's own interfaces for Docker to forward the port to
+it. To let another machine on your tailnet or LAN use this server on purpose, publish
+`-p 8000:8000` instead — and when LocalHarness launches the server itself, set
+`server.bind_all: true` in your machine config. A config written before this setting existed has
+it set for you, and `localharness doctor` says so. To make the launched server refuse requests
+without your `provider.api_key`, set `server.require_api_key: true` — it is off by default, so
+anything that can reach the port can use the server.
 
 Image: `vllm/vllm-openai:nightly`, tested at digest
 `sha256:a671d5fcda70fe9ac6f245f9780821de459fb4ee22c018fd07a0f10a55279bf9` — re-checked
