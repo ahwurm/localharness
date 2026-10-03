@@ -530,12 +530,17 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
                           _probe_capabilities(result, selected_model))
             outcome = SetupResult(config_file, True)
     else:
-        result, selected_model, server_config = _pick_server(config_path, endpoint, model, interactive)
-        cap = _probe_capabilities(result, selected_model)
-        host_tools_on, memory_on = _choose_toggles(interactive)
-        _write_config(config_path, result, selected_model, cap, server_config, host_tools_on, memory_on)
-        _receipt(config_file, starting)
-        outcome = SetupResult(config_file, True)
+        picked = _pick_server(config_path, endpoint, model, interactive)
+        if isinstance(picked, SetupResult):  # skipped for now: saved unchecked, or nothing saved
+            outcome = picked
+        else:
+            result, selected_model, server_config = picked
+            cap = _probe_capabilities(result, selected_model)
+            host_tools_on, memory_on = _choose_toggles(interactive)
+            _write_config(config_path, result, selected_model, cap, server_config, host_tools_on,
+                          memory_on)
+            _receipt(config_file, starting)
+            outcome = SetupResult(config_file, True)
     return outcome
 
 
@@ -576,10 +581,11 @@ def _existing_config(config_path: Path, config_file: Path, interactive: bool, *,
 def _pick_server(
     config_path: Path, endpoint: str | None, model: str | None, interactive: bool, *,
     changing: bool = False,
-) -> tuple[DetectorResult, str, ManagedServerConfig | None]:
+) -> tuple[DetectorResult, str, ManagedServerConfig | None] | SetupResult:
     """The model server and the model: the explicit --endpoint, else detection — and, finding
-    nothing on a terminal, the guided vLLM setup. A change (`changing`) never sets a server up:
-    finding nothing keeps the config and exits 1. Exits 1 on what it cannot honour."""
+    nothing on a terminal, the guided vLLM setup, then "skip for now" (whose SetupResult comes
+    back as is). A change (`changing`) never sets a server up: finding nothing keeps the config
+    and exits 1. Exits 1 on what it cannot honour."""
     if endpoint is not None:
         # Skip probe — build result manually
         base_url = _build_base_url_for_endpoint(endpoint)
@@ -648,6 +654,8 @@ def _pick_server(
             raise typer.Exit(1)
         guided = _guided_setup(config_path) if interactive else None
         if guided is None:
+            if interactive:
+                return _skip_for_now(config_path, model)
             console.print(
                 "\nStart your LLM server and run 'localharness init' again, or use:"
             )
@@ -666,6 +674,47 @@ def _pick_server(
         return result, result.models[0], None
     # Multiple models — the one --model named, Ollama's hot model, a question, or the first
     return result, _select_model(result, model, interactive), None
+
+
+def _skip_for_now(config_path: Path, model: str | None) -> SetupResult:
+    """No server answered and the guided setup was declined, on a terminal: save the address and
+    the model the user will use, unchecked — or save nothing and say the one next step. A config
+    is written only when it names a model (never an incomplete one), and skipping is the user's
+    choice, so it exits 0 either way. A bad address is refused before the model is asked."""
+    console.print("Skip for now: give the address and model you will use, and init saves them without checking.")
+    url = Prompt.ask("Model server address", default="http://localhost:8081/v1").strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        console.print("Nothing saved: the address must start with http:// or https://.")
+        return SetupResult(None, False)
+    name = model or Prompt.ask("Model name (Enter to skip)", default="", show_default=False).strip()
+    if not name:
+        console.print(
+            escape(f"Nothing saved. When a model server answers at {url}, run `localharness init` again."),
+            soft_wrap=True,
+        )
+        return SetupResult(None, False)
+    config_file = _write_harness(config_path, HarnessConfig(
+        version="1",
+        provider=ProviderConfig(
+            provider_type="unknown",
+            base_url=url,
+            api_key="none",
+            default_model=name,
+            available_models=[name],
+            timeout_seconds=600.0,
+        ),
+        org=OrgConfig(
+            default_model=name,
+            permissions=PermissionConfig(defaults_revision=CURRENT_DEFAULTS_REVISION),
+        ),
+        server=None,
+    ), memory_on=True)
+    console.print(
+        "[green]✓[/green] "
+        + escape(f"Saved {config_file} — not checked yet. Start your model server, then run `localharness start`."),
+        soft_wrap=True,
+    )
+    return SetupResult(config_file, False)
 
 
 def _probe_capabilities(result: DetectorResult, selected_model: str) -> CapabilityResult:
