@@ -110,6 +110,11 @@ async def test_each_reaction_maps_to_its_decision(emoji, kind):
     sent = ch._current_msg.channel.messages[0]
     assert sent.reactions == list(PERMISSION_REACTIONS)
     _react(ch, sent.id, emoji)
+    if kind == "allow_always":  # the permanent answer takes a second tap, on the confirm message
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert not task.done()
+        _react(ch, ch._current_msg.channel.messages[1].id, "✅")
     assert (await asyncio.wait_for(task, timeout=5.0)).kind == kind
 
 

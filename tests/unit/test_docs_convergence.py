@@ -732,7 +732,7 @@ def discord_env_names() -> frozenset[str]:
         def __contains__(self, key):
             seen.add(key)
             return False
-    env_fallback(DiscordSettings(), Spy(), Path("/nonexistent"))
+    env_fallback(DiscordSettings(), Spy())
     return frozenset(seen)
 
 

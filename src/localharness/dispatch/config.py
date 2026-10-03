@@ -4,12 +4,12 @@ Precedence, per field: a setting wins; an env source fills only a field still at
 env fallback (`env_fallback`) is one release of grace for the pre-settings variables, and
 tests/unit/test_dispatch_env_fallback_expiry.py fails at 0.17.0 until it is deleted (DISP-02).
 Caveat: a field explicitly set to its default (`allow: []`, `ack: "✅"`) is indistinguishable from
-unset, so the env still fills it.
+unset, so the env still fills it. Claude Code's Discord token file is never read: it belongs to
+another program, and a token is this machine's to give this harness, not to borrow.
 """
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SecretStr
@@ -17,8 +17,6 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SecretStr
 from localharness.plugins.api import GLOBAL_ONLY
 
 DEFAULT_ACK = "✅"
-ENV_FILE_RELATIVE = ".claude/channels/discord/.env"
-"""The legacy Claude Code Discord bot-token file, joined onto the home dir passed to env_fallback (deleted at 0.17.0)."""
 
 
 def _ids(value: Any) -> list[str]:
@@ -70,37 +68,22 @@ def _deprecated(source: str, field: str) -> str:
             f"(localharness components set {key} …)")
 
 
-def _file_token(path: Path) -> str:
-    """The `DISCORD_BOT_TOKEN=` line of the legacy Discord .env; a missing or unreadable file is no token."""
-    try:
-        lines = path.read_text().splitlines()
-    except (OSError, UnicodeDecodeError):
-        return ""
-    for line in lines:
-        if line.startswith("DISCORD_BOT_TOKEN="):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return ""
-
-
 def _split(raw: str) -> list[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
-def env_fallback(s: DiscordSettings, environ: Mapping[str, str],
-                 home: Path) -> tuple[DiscordSettings, list[str]]:
+def env_fallback(s: DiscordSettings, environ: Mapping[str, str]) -> tuple[DiscordSettings, list[str]]:
     """The effective settings and one deprecation line per env source that decided a field. Pure:
-    `environ` and `home` are passed in. Sources, in the pre-settings reader's order: token from
-    LOCALHARNESS_DISCORD_TOKEN, else DISCORD_BOT_TOKEN, else `~/.claude/channels/discord/.env`;
-    allow/channels from the comma lists; ack from LOCALHARNESS_DISCORD_ACK when SET (empty disables
-    the ack). Each fills only a field at its default. Deleted at 0.17.0 (DISP-02)."""
+    `environ` is passed in and no file is read. Sources, in the pre-settings reader's order: token
+    from LOCALHARNESS_DISCORD_TOKEN, else DISCORD_BOT_TOKEN; allow/channels from the comma lists;
+    ack from LOCALHARNESS_DISCORD_ACK when SET (empty disables the ack). Each fills only a field at
+    its default. Claude Code's Discord token file is never a source: it belongs to another
+    program. Deleted at 0.17.0 (DISP-02)."""
     update: dict[str, Any] = {}
     lines: list[str] = []
     if not s.token.get_secret_value():
-        file = f"~/{ENV_FILE_RELATIVE}"
-        for source, value in (("LOCALHARNESS_DISCORD_TOKEN", lambda: environ.get("LOCALHARNESS_DISCORD_TOKEN", "")),
-                              ("DISCORD_BOT_TOKEN", lambda: environ.get("DISCORD_BOT_TOKEN", "")),
-                              (file, lambda: _file_token(home / ENV_FILE_RELATIVE))):
-            if token := value():
+        for source in ("LOCALHARNESS_DISCORD_TOKEN", "DISCORD_BOT_TOKEN"):
+            if token := environ.get(source, ""):
                 update["token"] = token
                 lines.append(_deprecated(source, "token"))
                 break

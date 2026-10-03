@@ -17,7 +17,15 @@ No normaliser: every id is a fake counter and the one measured duration (the tim
 
 `fake.log` records every outbound call; the script appends `("read", None, text)` for each
 read_input return, `("decision", None, kind)` for each ask verdict, `("resolve", None, ...)`
-for each resolver call and one `("state", None, ...)` after stop.
+for each resolver call, `("tap", "m<id>", "<user> <emoji>")` for an answer aimed at a named
+message (the ♾️ case: the question, then the confirm message the bot posts) and one
+`("state", None, ...)` after stop.
+
+The fake gateway echoes every reaction the bot adds back to it from `BOT_USER_ID`, which ALLOW
+holds: the adapter's self filter is what keeps the bot's own ✅ from answering its questions.
+
+Regenerated on purpose once (53-07): ♾️ became two taps — the confirm message, its ✅
+pre-reaction, the user's ✅ on it — and every later fake message id moved up by one.
 """
 from __future__ import annotations
 
@@ -94,12 +102,17 @@ def _long_reply() -> str:
 
 
 async def _ask(ch, fake, request, *, answers):
-    """Ask, then answer with each (user, emoji) through the registered reaction listener."""
+    """Ask, then answer with each (user, emoji) through the registered reaction listener — on the
+    question, or with a third element on the named message ("question", or "confirm" = the latest
+    message the bot sent), recorded as a "tap"."""
     task = asyncio.ensure_future(ch.ask_permission(request))
     await _settle()
     msg_id = fake.last_sent.id
-    for user, emoji in answers:
-        await fake.react(msg_id, user, emoji)
+    for user, emoji, *on in answers:
+        target = fake.last_sent.id if on == ["confirm"] else msg_id
+        if on:
+            fake.log.append(("tap", f"m{target}", f"{user} {emoji}"))
+        await fake.react(target, user, emoji)
         await _settle()
     decision = await asyncio.wait_for(task, 1.0)
     fake.log.append(("decision", None, decision.kind))
@@ -138,7 +151,7 @@ async def _script(ch, fake) -> list:
 
     # --- blocking asks
     await _ask(ch, fake, _request(True), answers=[(99, "✅"), (42, "👍"), (42, "✅")])
-    await _ask(ch, fake, _request(True), answers=[(42, "♾️")])
+    await _ask(ch, fake, _request(True), answers=[(42, "♾️", "question"), (42, "✅", "confirm")])
     await _ask(ch, fake, _request(False), answers=[(42, "♾️"), (42, "❌")])
     try:
         await asyncio.wait_for(ch.ask_permission(_request(True)), 0.01)
@@ -203,8 +216,9 @@ async def test_dispatch_start_refusal_texts(fake, monkeypatch):
     assert ch.channel_id == "discord"
     assert ch.start_banner == "Dispatch mode: Discord — listening for allowlisted messages."
     for ch, expected in (
-        (build(token=""), "Discord bot token missing — set dispatch.discord.token "
-                          "(LOCALHARNESS_DISCORD_TOKEN / DISCORD_BOT_TOKEN still work until 0.17.0)"),
+        (build(token=""), "Discord bot token missing — run `localharness plugins enable dispatch` to "
+                          "set dispatch.discord.token (LOCALHARNESS_DISCORD_TOKEN / DISCORD_BOT_TOKEN "
+                          "still work until 0.17.0; ~/.claude/channels/discord/.env is no longer read)"),
         (build(allow=()), "Discord allowlist empty — set dispatch.discord.allow to your user id(s) "
                           "(LOCALHARNESS_DISCORD_ALLOW still works until 0.17.0); "
                           "refusing to listen to everyone"),

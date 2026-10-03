@@ -124,6 +124,18 @@ PERMISSION_REACTIONS_UNGRANTABLE: dict[str, str] = {
 """PRD §3.5: an ungrantable request offers only the `_once` pair — it asks every time by
 construction, so an "always" reaction would be a lie."""
 
+PERMISSION_ALWAYS_CONFIRM = (
+    "♾️ is permanent: it is remembered for this workspace and cannot be undone from chat. "
+    "Tap ✅ on THIS message to confirm it, or ✅ on the question for just this once.")
+"""The second tap a permanent grant takes, as on the phone (the web channel's server-checked
+confirm). Nobody can add the same reaction twice, so the confirm is its own message, pre-reacted
+✅ — and the bot's own ✅ answers nothing: the adapter drops every reaction the bot makes. Until it
+is tapped the question stays open as it was: ✅ on the question is once, ❌ is no, a second ♾️
+changes nothing, and the gate's deadline still ends the whole ask."""
+
+PERMISSION_CONFIRM_REACTION = "✅"
+"""The one reaction that confirms :data:`PERMISSION_ALWAYS_CONFIRM`."""
+
 PERMISSION_DEFAULT_DECISION = "reject_once"
 """Fail closed when there is nowhere to post the question, and what the gate records when the
 wait runs out (PRD §3.5 "deny on timeout")."""
@@ -225,6 +237,17 @@ def pending_notice_body(pending: Any, total: int, limit: int) -> str:
     return PENDING_NOTICE_MESSAGE.format(id=pending.id, rendering=rendering, total=total)
 
 
+class _ConfirmTaps:
+    """The always-confirm message's reaction waiter: it hands each tap to the question's own queue,
+    marked as a confirm tap, so one loop reads both messages in the order the taps arrived."""
+
+    def __init__(self, question: asyncio.Queue) -> None:
+        self._question = question
+
+    def put_nowait(self, emoji: str) -> None:
+        self._question.put_nowait(("confirm", emoji))
+
+
 @dataclass
 class _PendingNotice:
     """One posted notice, and the reaction waiter watching it."""
@@ -280,7 +303,7 @@ class DispatchChannel(ChannelAdapter):
         self._handles: list[Any] = []
         # message id -> queue of emoji, for ask_permission and pending notices: push (a reaction
         # event) bridged to pull (an awaiting gate) the same way on_message is bridged to read_input.
-        self._reaction_waiters: dict[int, asyncio.Queue] = {}
+        self._reaction_waiters: dict[int, asyncio.Queue | _ConfirmTaps] = {}
         # pending id -> the notice posted for it, insertion-ordered (oldest first), for as long
         # as nobody has answered it. Its message is edited in place when the answer arrives.
         self._pending_notices: dict[int, _PendingNotice] = {}
@@ -370,7 +393,8 @@ class DispatchChannel(ChannelAdapter):
         `reject_once` when it runs out. The deadline arrives here as a cancel, and the message is
         annotated on the way out (:data:`PERMISSION_TIMEOUT_LINE`) before the cancel is re-raised,
         so an expired question never looks live. A reaction from anyone not on the allowlist is
-        ignored, not counted as an answer.
+        ignored, not counted as an answer. ♾️ is not an answer on its own: it posts
+        :data:`PERMISSION_ALWAYS_CONFIRM`, and only ✅ on that message records "always".
         """
         from localharness.agent.gate_types import Decision
 
@@ -389,6 +413,7 @@ class DispatchChannel(ChannelAdapter):
         sent = await self._adapter.send(target.conversation, body)
         waiter: asyncio.Queue = asyncio.Queue()
         self._reaction_waiters[int(sent.id)] = waiter
+        confirm: Any = None  # the always-confirm message, once ♾️ was tapped
         asked_at = time.monotonic()
         try:
             for emoji in options:
@@ -397,7 +422,23 @@ class DispatchChannel(ChannelAdapter):
                 except Exception:  # noqa: BLE001 — a failed reaction must not drop the question
                     log.warning(f"{self.channel_id}_permission_reaction_failed", emoji=emoji)
             while True:
-                kind = options.get(await waiter.get())
+                tap = await waiter.get()
+                if isinstance(tap, tuple):  # on the confirm message: only its ✅ means anything
+                    if tap[1] == PERMISSION_CONFIRM_REACTION:
+                        return Decision(kind="allow_always")
+                    continue
+                kind = options.get(tap)
+                if kind == "allow_always":
+                    if confirm is None:
+                        confirm = await self._send_always_confirm(target)
+                        if confirm is not None:  # its waiter first, so no quick tap is lost
+                            self._reaction_waiters[int(confirm.id)] = _ConfirmTaps(waiter)
+                            try:
+                                await self._adapter.react(confirm, PERMISSION_CONFIRM_REACTION)
+                            except Exception:  # noqa: BLE001 — the message names the reaction
+                                log.warning(f"{self.channel_id}_permission_reaction_failed",
+                                            emoji=PERMISSION_CONFIRM_REACTION)
+                    continue
                 if kind is not None:
                     return Decision(kind=kind)
         except asyncio.CancelledError:
@@ -405,6 +446,18 @@ class DispatchChannel(ChannelAdapter):
             raise
         finally:
             self._reaction_waiters.pop(int(sent.id), None)
+            if confirm is not None:
+                self._reaction_waiters.pop(int(confirm.id), None)
+
+    async def _send_always_confirm(self, target: InboundMessage) -> Any:
+        """Post :data:`PERMISSION_ALWAYS_CONFIRM` beside the question; None when the post fails,
+        which leaves the question open as it was (once and no still work; the next ♾️ tries
+        again). The caller registers the waiter: the moment the message exists, it owns it."""
+        try:
+            return await self._adapter.send(target.conversation, PERMISSION_ALWAYS_CONFIRM)
+        except Exception:  # noqa: BLE001 — a failed post must not drop the question
+            log.warning(f"{self.channel_id}_permission_confirm_failed")
+            return None
 
     async def _annotate_expired(self, sent: Any, body: str, waited_s: float) -> None:
         """Mark the 🛑 message as expired and denied (D7): an edit, falling back to a reply; a

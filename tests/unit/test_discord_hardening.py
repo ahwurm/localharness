@@ -194,6 +194,52 @@ async def test_the_deadline_still_bounds_a_confirm_in_progress(ch, fake, tmp_pat
     assert not (tmp_path / "grants.yaml").exists()
 
 
+async def test_a_cancel_while_the_confirm_is_being_reacted_leaks_no_waiter(ch, fake, monkeypatch):
+    """The gate's deadline can land while the bot is still adding ✅ to the confirm message: both
+    waiters must still go, or a dead question keeps a listener for as long as the session runs."""
+    from localharness.dispatch.channel import PERMISSION_ALWAYS_CONFIRM
+
+    task, question = await _ask(ch, fake)
+    real_react = ch._adapter.react
+    stuck = asyncio.Event()
+
+    async def react(message, emoji):
+        if message.content == PERMISSION_ALWAYS_CONFIRM:
+            stuck.set()
+            await asyncio.sleep(3600)  # a gateway that never answers
+        await real_react(message, emoji)
+
+    monkeypatch.setattr(ch._adapter, "react", react)
+    await _tap(fake, question, 42, "♾️")
+    await asyncio.wait_for(stuck.wait(), 1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert ch._reaction_waiters == {}, "the confirm's waiter outlived the cancelled question"
+
+
+async def test_a_confirm_that_cannot_be_posted_leaves_the_question_open(ch, fake, monkeypatch):
+    from localharness.dispatch.channel import PERMISSION_ALWAYS_CONFIRM
+
+    task, question = await _ask(ch, fake)
+    real_send = ch._adapter.send
+    failures = []
+
+    async def send(conversation, text):
+        if text == PERMISSION_ALWAYS_CONFIRM and not failures:
+            failures.append(text)
+            raise RuntimeError("gateway hiccup")
+        return await real_send(conversation, text)
+
+    monkeypatch.setattr(ch._adapter, "send", send)
+    await _tap(fake, question, 42, "♾️")
+    assert failures and not task.done(), "a failed confirm post must not end the question"
+    await _tap(fake, question, 42, "♾️")  # tries again
+    assert fake.last_sent.content == PERMISSION_ALWAYS_CONFIRM
+    await _tap(fake, fake.last_sent, 42, "✅")
+    assert (await asyncio.wait_for(task, 1.0)).kind == "allow_always"
+
+
 # ------------------------------------------------------------------- the bot's own reactions
 
 async def test_the_adapter_drops_the_bots_own_reaction(ch, fake):

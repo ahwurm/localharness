@@ -153,15 +153,20 @@ def test_doctor_warns_per_env_source_without_the_token(tmp_path, monkeypatch):
     assert p.startup_warnings == []  # doctor never starts the plugin
 
 
-def test_doctor_reads_the_token_file_fallback(tmp_path):
+def test_doctor_ignores_the_claude_code_env_file(tmp_path):
+    """Claude Code's token file is another program's: doctor reports Discord not configured,
+    names the setup command, and neither the file nor the token appears in any row."""
     from pathlib import Path
 
     env = Path.home() / ".claude" / "channels" / "discord" / ".env"
     env.parent.mkdir(parents=True)
     env.write_text(f"DISCORD_BOT_TOKEN={TOKEN}\n")
     rows = DispatchPlugin().doctor(_ctx(tmp_path, allow=["42"]))
-    assert [r.status for r in rows] == ["pass", "warn"] and ".env" in rows[1].detail
-    assert not any(TOKEN in r.detail for r in rows)
+    assert [(r.status, r.detail) for r in rows] == [
+        ("skip", "Discord not configured — dispatch.discord.token is empty")]
+    assert "localharness plugins enable dispatch" in rows[0].hint
+    assert not any(".env" in r.detail or ".env" in r.hint for r in rows)
+    assert not any(TOKEN in r.detail or TOKEN in r.hint for r in rows)
 
 
 async def test_doctor_rows_through_the_lifecycle(tmp_path, monkeypatch):

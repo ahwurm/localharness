@@ -39,8 +39,9 @@ from tests.unit.test_start_cmd import _capture_start_console, _stub_start_bounda
 
 SETTINGS = {"token": "tkn-settings-49-07", "allow": ["42"], "channels": ["7"]}
 DROPPED = ": only the global config may set it"
-TOKEN_MISSING = ("Discord bot token missing — set dispatch.discord.token "
-                 "(LOCALHARNESS_DISCORD_TOKEN / DISCORD_BOT_TOKEN still work until 0.17.0)")
+TOKEN_MISSING = ("Discord bot token missing — run `localharness plugins enable dispatch` to set "
+                 "dispatch.discord.token (LOCALHARNESS_DISCORD_TOKEN / DISCORD_BOT_TOKEN still work "
+                 "until 0.17.0; ~/.claude/channels/discord/.env is no longer read)")
 ALLOW_EMPTY = ("Discord allowlist empty — set dispatch.discord.allow to your user id(s) "
                "(LOCALHARNESS_DISCORD_ALLOW still works until 0.17.0); refusing to listen to everyone")
 
