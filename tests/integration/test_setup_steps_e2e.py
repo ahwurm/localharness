@@ -274,7 +274,9 @@ def test_web_without_its_extra_asks_nothing_and_names_the_install_line(g, termin
 
 @pytest.mark.plugin("web")
 def test_web_the_saved_address_reaches_the_pairing_qr(g, terminal, web_extra, monkeypatch) -> None:
-    """Composed: what the step saved is the address `localharness web` puts in the QR — no guess."""
+    """Composed: what the step saved is the address `localharness web` puts in the QR — no guess.
+    On a terminal (CliRunner never is one, so the check is patched) the QR carries the token in its
+    fragment; the address printed beside it carries none."""
     pytest.importorskip("starlette")
     pytest.importorskip("uvicorn")
     from localharness.channels.web import auth as web_auth
@@ -284,13 +286,17 @@ def test_web_the_saved_address_reaches_the_pairing_qr(g, terminal, web_extra, mo
     answers.append("https://spark.example.ts.net")
     assert _enable(g, "web").exit_code == 0
     guessed: list[int] = []
+    drawn: list[str] = []
     monkeypatch.setattr(web_cmd, "detect_public_url", lambda port, **kw: guessed.append(port))
+    monkeypatch.setattr(web_cmd, "render_qr", lambda url: drawn.append(url) or "QR")
+    monkeypatch.setattr(web_cmd, "_stdout_is_a_terminal", lambda: True, raising=False)
     monkeypatch.setenv("LOCALHARNESS_DIR", str(g))  # the plugin's command mounts from this machine
     ran = runner.invoke(app, ["web", "--rotate-token", "--config-dir", str(g)])
 
     assert ran.exit_code == 0, ran.output
     token = web_auth.load_or_create_token(str(g))[0]
-    assert f"https://spark.example.ts.net/#t={token}" in ran.output
+    assert drawn == [f"https://spark.example.ts.net/#t={token}"]
+    assert "https://spark.example.ts.net/" in ran.output and "#t=" not in ran.output
     assert guessed == []
 
 
