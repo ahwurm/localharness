@@ -368,3 +368,20 @@ async def _doctor_row(resolution: Resolution, name: str, paths: PluginPaths) -> 
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — PAPI-11: never fatal
         checks = [Check(name=name, status="fail", detail=f"its doctor check raised {_what(exc)}")]
     return DoctorRow(name, "on", "", tuple(checks))
+
+
+async def setup_action_rows(resolution: Resolution, name: str, paths: PluginPaths) -> tuple[Check, ...]:
+    """Run NAME's setup_action() once, outside any session, against a throwaway context like
+    doctor's (no LLM client). Contained like doctor(): an exception (SystemExit included) or a
+    return that is not a list of Check is one failing row naming it. KeyboardInterrupt propagates.
+    Called only by `plugins enable` on a terminal — never at start."""
+    ctx = plugin_context(resolution, name, bus=EventBus(), registry=ToolRegistry(),
+                         hooks=HookSystem(), llm=None, paths=paths)
+    try:
+        rows = await _call(resolution.classes[name]().setup_action, ctx)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 — PAPI-11: never fatal
+        return (Check(name=name, status="fail", detail=f"its setup action raised {_what(exc)}"),)
+    if not (isinstance(rows, (list, tuple)) and all(isinstance(c, Check) for c in rows)):
+        return (Check(name=name, status="fail",
+                      detail=f"its setup action returned {rows!r:.80}, not a list of Check"),)
+    return tuple(rows)

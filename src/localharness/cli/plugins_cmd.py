@@ -49,7 +49,8 @@ from localharness.registry.provenance import layered_catalogue
 
 if TYPE_CHECKING:
     from localharness.config.loader import ConfigLoader
-    from localharness.plugins.api import PluginManifest, SetupField
+    from localharness.plugins.api import PluginManifest, PluginPaths, SetupField
+    from localharness.plugins.lifecycle import DoctorRow
     from localharness.plugins.plan import PlanEntry
     from localharness.plugins.resolve import Resolution
 
@@ -219,6 +220,11 @@ def plugins_info(name: Name, json_output: Json = False, config_dir: ConfigDir = 
         *rest, last = [f"{s}:" for s in m.sections]
         console.print(escape(f"  {', '.join(rest)} and {last} keep their pre-plugin names" if rest
                              else f"  {last} keeps its pre-plugin name"), soft_wrap=True)
+    if m is not None and m.agent_prompt:  # the text view only: the --json key set is pinned
+        from localharness.plugins.setup import render_agent_prompt
+        console.print()
+        console.print(escape(render_agent_prompt(
+            m.agent_prompt, _prompt_values(resolution, loader, entry, m.agent_prompt))), soft_wrap=True)
 
 
 def _checked(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry, pairs: list[str],
@@ -412,11 +418,51 @@ def _set_spelling(name: str, setup) -> str:
         f"--set {f.key}={f.default or '<' + f.key + '>'}" for f in setup)
 
 
+def _paths(loader: ConfigLoader, workspace: Any) -> PluginPaths:
+    """A plugin's paths outside a session, as doctor gives them: state in the workspace, if any."""
+    from localharness.plugins.api import PluginPaths
+    return PluginPaths(global_config_dir=loader.global_config_dir, workspace=workspace,
+                       state_dir=workspace if workspace is not None else loader.global_config_dir)
+
+
+def _not_clean(row: DoctorRow, field_unanswered: bool) -> bool:
+    """Is this check row short of "set up"? Not on (unconfigured, failed and the rest), a failing
+    check, or a skipped one while one of the plugin's questions has no stored value."""
+    return (row.state != "on" or any(c.status == "fail" for c in row.checks)
+            or (field_unanswered and any(c.status == "skip" for c in row.checks)))
+
+
+def _prompt_values(resolution: Resolution, loader: ConfigLoader, entry: PlanEntry,
+                   template: str) -> dict[str, str]:
+    """What a coding-agent prompt is filled with: each question that is not secret, its stored
+    value else its default; the config dir; and the {machine} sentence. The GPU is asked for only
+    when the template names {machine}, so nvidia-smi runs only then."""
+    from localharness.plugins.setup import gpu_name, machine_sentence
+    fields = entry.manifest.setup if entry.manifest is not None else ()
+    return {f.key: _stored(resolution, loader, entry, f.key) or f.default
+            for f in fields if not f.secret} | {
+        "config_dir": str(loader.global_config_dir),
+        "machine": machine_sentence(gpu_name()) if "{machine}" in template else ""}
+
+
 def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_dir: Optional[str],
             ask: bool = False) -> None:
-    """Write `<name>.enabled: <on>`, and any --set values, into one layer's overrides.yaml. With
-    `ask` (a terminal, no --set), the plugin's declared setup questions are asked first, their
-    answers written as --set values, and its doctor check run once after the write."""
+    """Write `<name>.enabled: <on>`, and any --set values, into one layer's overrides.yaml; turning
+    a plugin on, run its setup step around that write. With `ask` (a terminal, no --set): its
+    questions are asked first and the answers written as --set values; after the write its setup
+    action runs (after its yes/no question, when it has one) and its doctor check runs whenever it
+    declares questions or an action; setup_help and the filled-in coding-agent prompt follow a
+    check that is not clean. Without `ask` nothing is asked and nothing runs: the next step says
+    what to run. A plugin missing its install extra is asked nothing and not checked. next_steps
+    print on every outcome, and the command exits 0 whether or not the check passes: it wrote."""
+    import asyncio
+
+    from localharness.cli.doctor_cmd import print_plugin_row
+    from localharness.config.loader import ConfigLoader
+    from localharness.plugins.lifecycle import DoctorRow, setup_action_rows
+    from localharness.plugins.resolve import resolve
+    from localharness.plugins.setup import has_setup_action, render_agent_prompt
+
     resolution, loader, workspace = _resolve(config_dir, json_output=False)
     entry = _entry(resolution, loader, name, False)
     word, verb = ("on", "enable") if on else ("off", "disable")
@@ -435,6 +481,8 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
     # turned off reads `off` there, and would still be asked for settings it cannot use.
     missing = m is not None and _extra_missing(m)
     setup = m.setup if m is not None else ()
+    cls = resolution.classes.get(name)
+    has_action = m is not None and cls is not None and has_setup_action(cls)
     if ask and setup and not missing:  # the answers go through the one checked write path, as --set values
         pairs = _ask_fields(setup, lambda key: _stored(resolution, loader, entry, key))
     overlay = load_overlay(target)
@@ -445,16 +493,22 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
         f"{name} {verb}d in {target} — takes effect on the next `localharness start`"), soft_wrap=True)
     for path, value in values.items():
         console.print(escape(f"  set {path} = {value}"), soft_wrap=True)
-    if m is not None and m.requires_extra:
-        # "takes effect on the next start" is not true while its install extra is missing: re-read
-        # the plan just written, and say so
-        from localharness.config.loader import ConfigLoader as _Loader
-        from localharness.plugins.resolve import resolve
-        after = resolve(_Loader(config_dir=loader.global_config_dir, local_config_dir=workspace)).plan.entry(name)
-        if after is not None and after.state == "needs-extra":
-            missing = True
-            console.print("  [yellow]note:[/yellow] " + escape(
-                f"{name} is missing its install extra — {after.reason}"), soft_wrap=True)
+    fresh_loader = fresh = after = None
+    if m is not None:
+        # What was just written, read through a NEW loader over the same layers: ConfigLoader caches
+        # its harness and raw sources, and re-deriving the workspace would print its trust notice
+        # (and maybe ask) a second time.
+        fresh_loader = ConfigLoader(config_dir=loader.global_config_dir, local_config_dir=workspace)
+        try:
+            fresh = resolve(fresh_loader)
+            after = fresh.plan.entry(name)
+        except Exception as exc:  # noqa: BLE001 — the enable already wrote; the rest is advice
+            console.print(escape(f"  could not check it now: {type(exc).__name__}: {exc}"),
+                          soft_wrap=True)
+    if after is not None and m.requires_extra and after.state == "needs-extra":
+        missing = True  # "takes effect on the next start" is not true without its install extra
+        console.print("  [yellow]note:[/yellow] " + escape(
+            f"{name} is missing its install extra — {after.reason}"), soft_wrap=True)
     project = [s["enabled"] for s in loader.plugin_layers().get(name, (None,) * 4)[2:]
                if isinstance(s, dict) and isinstance(s.get("enabled"), bool)]
     if not to_workspace and entry.bundled and project and project[-1] is not on:
@@ -462,42 +516,55 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
             f"this project turns {name} {'off' if on else 'on'} ({workspace}), and that still wins "
             f"here — `localharness plugins {verb} {name} --workspace` changes it for this project"),
             soft_wrap=True)
-    if ask and setup and not missing:
+    step = ask and after is not None and not missing
+    paths = _paths(fresh_loader, workspace) if fresh_loader is not None else None
+    if step and has_action and after.state == "on" and (
+            not m.setup_action or typer.confirm(m.setup_action, default=True)):
+        rows = asyncio.run(setup_action_rows(fresh, name, paths))
+        if rows:
+            print_plugin_row(DoctorRow(name, "on", "", rows), [])
+    if step and (setup or has_action):
         console.print("Checking it now:")
-        _probe(name, m.setup_help, loader, workspace)
-    elif not ask and setup and not pairs:
-        console.print(escape("  next step — give it the " + ", ".join(f.prompt for f in setup)
-                             + ": " + _set_spelling(name, setup)), soft_wrap=True)
+        row = _probe(name, fresh, paths)
+        unanswered = any(not _stored(fresh, fresh_loader, after, f.key) for f in setup)
+        if row is not None and _not_clean(row, unanswered):
+            if m.setup_help:  # the one place it prints
+                console.print()
+                console.print(escape(m.setup_help), soft_wrap=True)
+            if m.agent_prompt:
+                console.print()
+                console.print(escape(render_agent_prompt(m.agent_prompt, _prompt_values(
+                    fresh, fresh_loader, after, m.agent_prompt))), soft_wrap=True)
+    elif not ask and m is not None:
+        if setup and not pairs:
+            console.print(escape("  next step — give it the " + ", ".join(f.prompt for f in setup)
+                                 + ": " + _set_spelling(name, setup)), soft_wrap=True)
+        if has_action and m.setup_action:
+            console.print(escape(f"  next step — run `localharness plugins enable {name}` "
+                                 f"on a terminal to answer: {m.setup_action}"), soft_wrap=True)
+    if m is not None and m.next_steps:
+        for line in m.next_steps.splitlines():
+            console.print(escape(f"  {line}"), soft_wrap=True)
 
 
-def _probe(name: str, setup_help: str, loader: ConfigLoader, workspace: Any) -> None:
-    """Run the plugin's doctor check once against what was just written, and print it with doctor's
-    own row printer; `setup_help` follows when it does not pass. Never fails the enable (it wrote)."""
+def _probe(name: str, resolution: Resolution, paths: PluginPaths) -> DoctorRow | None:
+    """Run the plugin's doctor check once against `resolution` — read after the write — and print
+    it with doctor's own row printer. Returns that row, or None when it could not check. Never
+    fails the enable (it wrote)."""
     import asyncio
 
     from localharness.cli.doctor_cmd import print_plugin_row
-    from localharness.config.loader import ConfigLoader as _Loader
-    from localharness.plugins.api import PluginPaths
     from localharness.plugins.lifecycle import DoctorRow, _doctor_row
-    from localharness.plugins.resolve import resolve
 
     try:
-        # A fresh loader over the SAME layers: re-deriving the workspace would print its trust
-        # notice (and maybe ask) a second time.
-        fresh = _Loader(config_dir=loader.global_config_dir, local_config_dir=workspace)
-        resolution = resolve(fresh)
         entry = resolution.plan.entry(name)
-        paths = PluginPaths(global_config_dir=fresh.global_config_dir, workspace=workspace,
-                            state_dir=workspace if workspace is not None else fresh.global_config_dir)
         row = (asyncio.run(_doctor_row(resolution, name, paths)) if entry.state == "on"
                else DoctorRow(name, entry.state, entry.display))
         print_plugin_row(row, [])
+        return row
     except Exception as exc:  # noqa: BLE001 — the enable already wrote; the check is advice
         console.print(escape(f"  could not check it now: {type(exc).__name__}: {exc}"), soft_wrap=True)
-        return
-    if setup_help and (row.state != "on" or any(c.status == "fail" for c in row.checks)):
-        console.print()
-        console.print(escape(setup_help), soft_wrap=True)
+        return None
 
 
 @plugins_app.command("enable")

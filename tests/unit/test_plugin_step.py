@@ -345,3 +345,12 @@ def test_info_ends_with_the_prompt_filled_with_the_stored_value_else_the_default
     assert "  Run it at http://saved. This machine reports" in _info(g, "pro").output
     data = json.loads(_info(g, "pro", "--json").stdout)
     assert set(data) == _INFO_KEYS | {"sections"}
+
+
+def test_a_filled_value_keeps_its_own_spaces(tmp_path, no_term) -> None:
+    """The renderer squeezes the spaces a placeholder that renders empty leaves, never a value's
+    own: a config folder whose name holds two spaces is printed as it is."""
+    g = tmp_path / "My  Home"
+    g.mkdir()
+    (g / "config.yaml").write_text(yaml.safe_dump(_CONFIG), encoding="utf-8")
+    assert f"Set up the thing under {g}." in _info(g, "act").output
