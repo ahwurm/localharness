@@ -229,3 +229,72 @@ async def test_a_failed_bring_up_tells_the_phone_the_error_with_every_stored_sec
     assert "sk-SENT" not in kw["detail"] and "second line" not in kw["detail"]
     assert "bring-up failed" in caplog.text and "could not load" in caplog.text
     assert "sk-SENT" not in caplog.text
+
+
+# ---------------------------------------------------------------- the page
+
+def _run_page(prelude: str, script: str, tmp_path) -> dict:
+    """Run the page's module body (above its boot block) in node under the reference-page DOM
+    shim — `prelude` before it, `script` after — and return the JSON `script` prints last."""
+    import re
+    import subprocess
+
+    from tests.unit.channels.test_web_reference_page import BOOT, DOM_SHIM, PAGE
+
+    module = re.search(r'<script type="module">(.*?)</script>', PAGE.read_text(encoding="utf-8"), re.S)
+    body, sep, _boot = module.group(1).partition(BOOT)
+    assert sep, "the page's boot block moved"
+    path = tmp_path / "page.mjs"
+    path.write_text("\n".join((DOM_SHIM, prelude, body, script)), encoding="utf-8")
+    result = subprocess.run(["node", str(path)], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, f"the page threw:\n{result.stderr}"
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_the_page_prefers_a_fresh_qr_over_its_stored_token(tmp_path):
+    """After a rotation, scanning the new code is the whole re-pairing: the token in the fragment
+    beats the stale one in storage. With no fragment the stored token stands."""
+    show = 'console.log(JSON.stringify({token, stored: store.get("lh.token")}));'
+    stale = 'store.set("lh.token", "old-token");'
+    assert _run_page(stale + ' location.hash = "#t=new-token";', show, tmp_path) == {
+        "token": "new-token", "stored": "new-token"}
+    assert _run_page(stale, show, tmp_path) == {"token": "old-token", "stored": "old-token"}
+
+
+def test_a_refused_stream_re_enrols_once_and_reconnects(tmp_path):
+    """The other half of an already-paired phone keeping working: a stream the server refuses (a
+    cookie from before the upgrade) closes for good, so the page trades its stored bearer for the
+    new cookie and reconnects — once per 30 s, so a wrong token cannot loop. A network blip is
+    EventSource's own business and enrols nothing."""
+    prelude = """
+globalThis.sources = [];
+globalThis.EventSource = class {
+  constructor(url) { this.url = url; this.readyState = 0; sources.push(this); }
+  close() { this.readyState = 2; }
+  addEventListener() {}
+};
+EventSource.CLOSED = 2;
+globalThis.posts = [];
+globalThis.fetch = async (path, opts) => { posts.push(path); return { json: async () => ({}) }; };
+let now = 1000000; Date.now = () => now;
+store.set("lh.token", "stored-token");
+"""
+    script = """
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const fail = async (src, state) => { src.readyState = state; src.onerror(); await tick(); await tick(); };
+connect();
+await fail(sources[0], 0);                    // a blip: EventSource retries by itself
+const blip = posts.length;
+await fail(sources[0], EventSource.CLOSED);   // refused: enrol, then a new stream
+const refused = { posts: posts.slice(), sources: sources.length };
+await fail(sources[1], EventSource.CLOSED);   // refused again inside 30 s: nothing
+const within = { posts: posts.length, sources: sources.length };
+now += 30001;
+await fail(sources[1], EventSource.CLOSED);   // and again after 30 s: one more try
+console.log(JSON.stringify({ blip, refused, within, after: { posts: posts.length, sources: sources.length } }));
+"""
+    got = _run_page(prelude, script, tmp_path)
+    assert got["blip"] == 0
+    assert got["refused"] == {"posts": ["/api/auth/enroll"], "sources": 2}
+    assert got["within"] == {"posts": 1, "sources": 2}
+    assert got["after"] == {"posts": 2, "sources": 3}
