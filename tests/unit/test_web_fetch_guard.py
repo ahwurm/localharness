@@ -539,3 +539,51 @@ async def test_behind_a_connect_proxy_the_tls_name_is_the_host(monkeypatch):
     finally:
         server.close()
         await server.wait_closed()
+
+
+async def test_a_host_no_proxy_bypasses_goes_direct_to_the_checked_address(monkeypatch):
+    """NO_PROXY is matched against the NAME, once, by netguard; httpx never applies the environment's
+    proxies itself. Left to httpx, the pinned request (whose URL carries the IP) would no longer match
+    NO_PROXY=example.com and would go to the proxy. Loopback is reached here on purpose, through the
+    allowlist, so the direct path is a real connection that never leaves this machine."""
+    proxied: list[bytes] = []
+
+    async def proxy_stub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        proxied.append((await reader.readuntil(b"\r\n\r\n")).split(b"\r\n", 1)[0])
+        writer.close()
+
+    async def origin(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = await reader.readuntil(b"\r\n\r\n")
+        host = [h for h in head.split(b"\r\n") if h.lower().startswith(b"host:")][0]
+        body = b"direct hello, " + host
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n"
+                     b"Connection: close\r\n\r\n%s" % (len(body), body))
+        await writer.drain()
+        writer.close()
+
+    proxy = await asyncio.start_server(proxy_stub, "127.0.0.1", 0)
+    site = await asyncio.start_server(origin, "127.0.0.1", 0)
+    port = site.sockets[0].getsockname()[1]
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}")
+    monkeypatch.setenv("NO_PROXY", "example.com")
+    _dns(monkeypatch, {"example.com": ["127.0.0.1"]})
+    netguard.set_private_allowlist(["127.0.0.1"])
+    try:
+        result = await _fetch(f"http://example.com:{port}/page")
+        assert result.success, result.error
+        assert f"direct hello, Host: example.com:{port}" in result.output
+        assert proxied == []
+    finally:
+        for server in (proxy, site):
+            server.close()
+            await server.wait_closed()
+
+
+async def test_a_lookup_that_times_out_or_answers_nothing_is_refused(monkeypatch):
+    async def slow(host: str, port: int) -> list[str]:
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(netguard, "_resolve", slow)
+    assert await _refusal("https://example.com/") == "refused: could not resolve example.com"
+    _dns(monkeypatch, {"example.com": []})
+    assert await _refusal("https://example.com/") == "refused: could not resolve example.com"
