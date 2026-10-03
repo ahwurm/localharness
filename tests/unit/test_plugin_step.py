@@ -68,6 +68,9 @@ class Quiet(Plugin):
         CALLS.append("quiet")
         return [Check(name="quiet", status="pass", detail="done quietly")]
 
+    def doctor(self, ctx):  # an action runs only while the check says it is needed
+        return [Check(name="quiet", status="pass" if "quiet" in CALLS else "fail", detail="set up")]
+
 
 class Boom(Plugin):
     """breaks while it sets up"""
@@ -76,6 +79,9 @@ class Boom(Plugin):
 
     def setup_action(self, ctx):
         raise RuntimeError("boom")
+
+    def doctor(self, ctx):
+        return [Check(name="boom", status="fail", detail="not set up")]
 
 
 class Pro(Plugin):
