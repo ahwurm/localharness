@@ -1615,10 +1615,14 @@ class ProposerConfig(BaseModel):
     Local 120B+ example: base_url=http://127.0.0.1:11434/v1, model=gpt-oss:120b,
     is_local=True, timeout_seconds=600 (LLMClient requires >=300s when is_local)."""
     model_config = ConfigDict(frozen=False, extra="forbid")
-    base_url: str = Field(description="OpenAI-compatible base URL for the proposer model.")
+    base_url: str = Field(description=(
+        "OpenAI-compatible base URL for the proposer model. Machine-level only: only the global "
+        "config.yaml or overrides.yaml may set it; a workspace value that differs is ignored with a "
+        "startup warning."))
     model: str = Field(description="Proposer model id — MUST differ from provider.default_model.")
     # SecretStr (G2): masked wherever it is shown; proposer.py reads .get_secret_value().
-    api_key: SecretStr = Field(default=SecretStr("none"), description="API key ('none' for local).")
+    api_key: SecretStr = Field(default=SecretStr("none"),
+                               description="API key ('none' for local). Machine-level only, as base_url is.")
     is_local: bool = Field(default=False, description="True for local 120B+; requires timeout>=300s.")
     timeout_seconds: float = Field(default=120.0, ge=1.0, le=3600.0)
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)

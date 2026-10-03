@@ -145,10 +145,12 @@ def test_doctor_on_an_unreadable_config_skips_and_does_not_raise(tmp_path, monke
 
 
 def test_doctor_reads_the_workspace_layer(tmp_path, monkeypatch):
-    paths = _home(tmp_path)
+    """A project may pick the proposer's model; its address and key are machine-level only (a
+    proposer only a project file defines is dropped whole: tests/unit/test_proposer_machine_level.py)."""
+    paths = _home(tmp_path, proposer=_PROPOSER)
     ws = tmp_path / "proj" / ".localharness"
     ws.mkdir(parents=True)
-    (ws / "config.yaml").write_text(yaml.safe_dump({"proposer": {**_PROPOSER, "model": "ws-model"}}))
+    (ws / "config.yaml").write_text(yaml.safe_dump({"proposer": {"model": "ws-model"}}))
     rows = _doctor(PluginPaths(global_config_dir=paths.global_config_dir, workspace=ws, state_dir=ws),
                    monkeypatch)
     assert rows[0].status == "pass" and "ws-model" in rows[0].detail

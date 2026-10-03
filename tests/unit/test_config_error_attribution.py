@@ -397,7 +397,8 @@ def test_a_field_no_source_sets_falls_back_to_the_global_config(tmp_path, monkey
 
     Those fall back to the global config.yaml exactly as they did before this plan. Stated as a
     limit rather than hidden: the block that triggers it here lives in the WORKSPACE file, and the
-    report still names the global one.
+    report still names the global one. (The proposer's address is machine-level only, so the
+    global layer gives it; the workspace sets the clashing model.)
     """
     from localharness.config.loader import ConfigValidationError
 
@@ -405,8 +406,8 @@ def test_a_field_no_source_sets_falls_back_to_the_global_config(tmp_path, monkey
         tmp_path,
         monkeypatch,
         fake_home,
-        ws_config='version: "1"\nproposer:\n  base_url: http://127.0.0.1:9/v1\n'
-        "  model: test-model\n",  # identical to the global provider.default_model
+        global_overlay="proposer:\n  base_url: http://127.0.0.1:9/v1\n  model: p-model\n",
+        ws_config='version: "1"\nproposer:\n  model: test-model\n',  # = the global provider.default_model
     )
 
     with pytest.raises(ConfigValidationError) as exc:

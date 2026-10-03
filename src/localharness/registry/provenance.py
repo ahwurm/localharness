@@ -24,7 +24,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional, get_origin
 
-from localharness.config.loader import ConfigLoader, _load_yaml_file
+from localharness.config.loader import HARNESS_GLOBAL_ONLY_FIELDS, ConfigLoader, _load_yaml_file
 from localharness.config.overlay import load_overlay
 from localharness.registry.catalogue import (
     LAYER_GLOBAL_CONFIG,
@@ -241,7 +241,7 @@ def layered_catalogue(
 
         plugins = plugin_catalogue_rows(resolve(loader))
     cat = build_catalogue(cfg, overlays=overlays, tool_registry=tool_registry, plugins=plugins)
-    global_only = frozenset(f"{p.name}.{rel}" for p in plugins for rel in p.global_only)
+    global_only = frozenset(f"{p.name}.{rel}" for p in plugins for rel in p.global_only) | HARNESS_GLOBAL_ONLY_FIELDS
     return honest_attribution(apply_agent_overlay_values(cat, overlays), overlays,
                               global_only=global_only), overlays
 

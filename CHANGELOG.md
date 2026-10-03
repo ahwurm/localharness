@@ -58,6 +58,14 @@ All notable changes to LocalHarness are documented here. The format follows
   up; neither prints an internal id any more.
 
 ### Fixed
+- `localharness plugins enable autoresearch` checks the proposer by sending
+  it `proposer.api_key`; that check now reads the proposer's address and key
+  from your machine-level config only, as `propose` does, and both
+  `proposer.base_url` and `proposer.api_key` are now machine-level-only
+  settings (a project's value is ignored with a startup warning), so a
+  project's config file can no longer choose where your proposer key is sent.
+  The check prints the host before it sends anything. This never shipped: the
+  check is new since 0.16.0.
 - The example plugin in `examples/plugin-template/` now requires LocalHarness
   0.16 or later; it said 0.15, which cannot load a v1 plugin.
 - A config that fails to load or validate no longer prints a stored secret
@@ -68,8 +76,9 @@ All notable changes to LocalHarness are documented here. The format follows
   error of every command that loads a config that does not validate or does not
   parse (`doctor`, `validate`, `start`, `components list` and `get`,
   `localharness model`, `config show`, `config migrate`). Error text now names
-  where the problem is and what is wrong, with every stored secret masked; a
-  YAML syntax error names the line and column, never the line's text.
+  where the problem is and what is wrong, with those secrets masked (the
+  plain-text keys under Known limitations are not); a YAML syntax error names
+  the line and column, never the line's text.
 - `localharness init --force` now also clears the model and server choices
   saved in your global `overrides.yaml` (by `/model`, `localharness model`, a
   switch to another endpoint, or a re-run of `init`), which used to keep
@@ -107,9 +116,14 @@ All notable changes to LocalHarness are documented here. The format follows
 - A config written by init's guided vLLM setup keeps its managed `server:`
   block after a re-run changes to another server, so if the new server is down
   at start, `start` launches the old managed one.
-- `provider.api_key`, `endpoints[].api_key` and `active_endpoint.api_key` are
-  plain strings, not secrets: `components list`, `components get` and
-  `config show` display them.
+- `provider.api_key`, `active_endpoint.api_key`, the `api_key` and
+  `extra_headers` of each `extra_endpoints` entry, and an MCP server's `env`
+  and `headers` are plain-text settings, not treated as secrets yet, and
+  nothing masks them: `components get`, `components list` and `config show`
+  display the provider and endpoint ones, `components set` prints them and
+  writes them to its audit log as they are, and the error text of a config
+  that fails validation can show any of them (only `proposer.api_key` and
+  `dispatch.discord.token` are masked).
 - A first start on a terminal can ask init's one question and then the
   session's own "Trust this workspace?" question.
 - A plugin you installed is asked its setup questions only from its second

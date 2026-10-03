@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
+from localharness.config.loader import HARNESS_GLOBAL_ONLY_FIELDS
 from localharness.config.models import AgentConfig, HarnessConfig
 from localharness.registry.paths import get_value, walk_model_fields
 
@@ -209,8 +210,11 @@ def build_catalogue(
 
     # 1. Static harness-level paths (provider.*, org.*, version). A top-level section a bundled
     #    plugin claims (PluginRows.sections) is tagged as that plugin's while it is on, and left
-    #    out while it is off; the config loader validates it the same either way.
+    #    out while it is off; the config loader validates it the same either way. A core key only
+    #    the global layers may set (HARNESS_GLOBAL_ONLY_FIELDS) is attributed from them alone: a
+    #    workspace value there was dropped at load, so it never supplied what is shown.
     owned = {s: p.name for p in plugins if p.enabled for s in p.sections}
+    machine = _global_bands(overlays)
     hidden = {s for p in plugins if not p.enabled for s in p.sections} - owned.keys()
     if cfg is not None:
         for path, ann in walk_model_fields(HarnessConfig):
@@ -226,7 +230,7 @@ def build_catalogue(
                 type_name=_type_name(ann),
                 current_value=current,
                 default_value=_get_default(HarnessConfig, path),
-                winning_layer=_detect_layer(path, overlays),
+                winning_layer=_detect_layer(path, machine if path in HARNESS_GLOBAL_ONLY_FIELDS else overlays),
                 plugin=owned.get(path.split(".")[0]),
             )
 
@@ -273,8 +277,7 @@ def build_catalogue(
             )
 
     # 4. Dynamic: each plugin's settings (ENAB-04). A GLOBAL_ONLY path is attributed from the two
-    #    global bands alone (see _global_bands); agent-level GLOBAL_ONLY is refused by the resolver.
-    machine = _global_bands(overlays)
+    #    global bands alone (`machine`, above); agent-level GLOBAL_ONLY is refused by the resolver.
     for p in plugins:
         path = f"{p.name}.enabled"
         entries[path] = ComponentEntry(
