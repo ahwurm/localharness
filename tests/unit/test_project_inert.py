@@ -179,6 +179,20 @@ def test_the_machine_value_of_a_section_leaf_is_credited_to_the_machine_file(tmp
     assert "evil-server" not in shown.output, shown.output
 
 
+def test_the_catalogue_judges_a_section_leaf_against_the_machine_files():
+    """build_catalogue's own attribution, before the provenance pass (which repairs it again) runs:
+    `server.binary` sits inside a machine-level section, so only the machine's files are asked."""
+    from localharness.config.models import HarnessConfig
+    from localharness.registry.catalogue import build_catalogue
+
+    cfg = HarnessConfig.model_validate({"provider": PROVIDER, "server": MACHINE_SERVER})
+    overlays = {"workspace-config": {"server": {"binary": "/tmp/evil-server"}},
+                "global-config": {"provider": PROVIDER, "server": MACHINE_SERVER}}
+    catalogue = build_catalogue(cfg, overlays=overlays)
+    assert catalogue["server.binary"].winning_layer == "global-config"
+    assert catalogue["provider.default_model"].winning_layer == "global-config"  # premise: no ws value
+
+
 # ------------------------------------------------------------------ the fetch allowlist
 
 
