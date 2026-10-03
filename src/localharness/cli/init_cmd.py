@@ -506,7 +506,8 @@ def init_app(
 def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | None, force: bool,
                interactive: bool, starting: bool = False) -> SetupResult:
     """Set up the core: find or name the model server, then write the config. Asks nothing about
-    plugins (owner ruling 2026-10-03: a plugin is set up when it is turned on).
+    plugins (owner ruling 2026-10-03: a plugin is set up when it is turned on); every outcome that
+    leaves a config on disk ends with the bundled plugins and the command beside each.
 
     `interactive` gates every question; without it the run takes what is detected and the usual
     settings. An existing config is never rewritten without `force`: it is kept (asked on a
@@ -541,6 +542,10 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
                           memory_on)
             _receipt(config_file, starting)
             outcome = SetupResult(config_file, True)
+    if outcome.config_file is not None:  # fresh, kept, changed or saved unchecked
+        console.print()
+        for line in _plugin_lines(config_path):
+            console.print(escape(line), soft_wrap=True)
     return outcome
 
 
@@ -938,6 +943,25 @@ def _receipt(config_file: Path, starting: bool) -> None:
         )
 
 
+PLUGINS_HEADER = "Plugins — the command beside each one turns it on or sets it up:"
+
+
+def _plugin_lines(config_path: Path) -> list[str]:
+    """The end of init: every bundled plugin with the plan's own state text (PlanEntry.display) and,
+    for one that is on, the command that runs its setup step (PlanEntry.step_command) — the words
+    `plugins list` and doctor print, never restated here. Asks nothing."""
+    from localharness.plugins.resolve import resolve  # lazy: only an init that wrote a config pays
+    try:
+        entries = [e for e in resolve(ConfigLoader(config_dir=config_path)).plan.entries if e.bundled]
+    except Exception:  # noqa: BLE001 — a plugin problem never fails the core setup
+        return ["Plugins: run `localharness plugins list` to see them."]
+    width = max((len(e.name) for e in entries), default=0)
+    return [PLUGINS_HEADER] + [
+        f"  {e.name.ljust(width)}  {e.display}"
+        + ("" if e.enable_command or not e.step_command else f" — set up: {e.step_command}")
+        for e in entries]
+
+
 def _guided_setup(
     config_path: Path,
 ) -> tuple[DetectorResult, str, ManagedServerConfig] | None:
@@ -1118,4 +1142,5 @@ init_app.__doc__ = (
     "Auto-detect local LLM and write initial configuration.\n\n"
     f"Probes known ports in order: {_PROBE_ORDER}. "
     "Writes config to <config-dir>/config.yaml on success."
+    " Ends with every bundled plugin and the command that turns it on or sets it up."
 )
