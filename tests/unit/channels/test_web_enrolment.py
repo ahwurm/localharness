@@ -98,6 +98,8 @@ def test_printing_the_enrolment_never_wraps_the_code(capsys, monkeypatch):
     assert code, "no QR was printed"
     assert len(set(len(line) for line in code)) == 1, "the QR was reflowed into ragged rows"
     assert len(code[0]) > 20, "the QR was wrapped to the console width"
+    # The QR carries the token; the address printed beside it does not (a log keeps the text).
+    assert "#t=" not in out
 
 
 def test_the_command_offers_a_public_url_flag():
@@ -122,6 +124,10 @@ def test_rotating_the_token_reprints_a_qr(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("LOCALHARNESS_DIR", str(tmp_path))
     before = web_auth.load_or_create_token(tmp_path)[0]
     capsys.readouterr()
+    # On a terminal (pytest's capture is not one): off a terminal nothing secret prints at all.
+    monkeypatch.setattr(web_cmd, "_stdout_is_a_terminal", lambda: True, raising=False)
+    real_qr, drawn = web_cmd.render_qr, []
+    monkeypatch.setattr(web_cmd, "render_qr", lambda url: drawn.append(url) or real_qr(url))
 
     with pytest.raises(typer.Exit) as exit_info:
         web_cmd.web_cmd(config_dir=str(tmp_path), rotate_token=True,
@@ -132,8 +138,9 @@ def test_rotating_the_token_reprints_a_qr(tmp_path, capsys, monkeypatch):
     after = web_auth.load_or_create_token(tmp_path)[0]
     assert after != before, "the token was not actually rotated"
     assert "█" in out, "no QR was printed for the new token"
-    assert after in out, "the QR and its URL must carry the NEW token"
-    assert before not in out
+    assert drawn == [f"https://spark.example.ts.net/#t={after}"], "the QR must carry the NEW token"
+    assert after in out, "a rotation prints the new token on a terminal"
+    assert before not in out and "#t=" not in out
 
 
 def _saved(tmp_path, url):
@@ -157,6 +164,7 @@ def _enrolled_for(monkeypatch, g, **flags):
     pytest.importorskip("uvicorn")
     got = []
     monkeypatch.setattr(web_cmd, "print_enrolment", lambda token, **kw: got.append(kw))
+    monkeypatch.setattr(web_cmd, "_stdout_is_a_terminal", lambda: True, raising=False)  # else no QR
     with pytest.raises(typer.Exit) as exit_info:
         web_cmd.web_cmd(config_dir=str(g), rotate_token=True, **flags)
     assert exit_info.value.exit_code == 0
