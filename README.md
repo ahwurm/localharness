@@ -88,7 +88,6 @@ Early stage (v0.16.0, pre-1.0). Interfaces and config schema may change without 
 - `pre_tool` and `post_tool` hooks do not fire for a helper agent's tool calls, and a hook written as `async def` never runs.
 - `localharness validate` does not check a plugin's own settings, and `plugins enable` and `plugins disable` write no audit event.
 - `/plugins enable` and `/plugins disable` work in a terminal session only. The restart keeps the conversation, but not a `/model` switch to another endpoint, `/reasoning` and `/verbose`, or an MCP server's own state; and if the model server goes away during the restart, the conversation is lost.
-- Apart from the settings SECURITY.md names, a project's `org` settings still merge over your global ones and have not yet been checked one by one for whether a project value can loosen a protection.
 
 The full list is under "Known limitations" in each [CHANGELOG](CHANGELOG.md) release.
 

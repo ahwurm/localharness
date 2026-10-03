@@ -147,31 +147,49 @@ gate-family rule above and stays registered if the plugin later fails.
 
 ### Machine-level-only settings
 
-Some settings say where the harness connects, which credential it uses or who may talk to it, and
-one says whether the separation described under
-[Threat model: prompt injection](#threat-model-prompt-injection) is enforced at all. A repository you
-cloned must not be able to point those somewhere else or switch that separation off, so only your
-machine-level (global) config may set them. The autoresearch proposer's address and key are two of
-them, because `plugins enable autoresearch` sends the key to that address to check that the
-proposer answers; with no proposer address in your global config, a project's whole `proposer:`
-section is ignored. A project's value for one of them is ignored, the harness prints a warning
-naming the key and the file, and your global value stands. These are all of them:
+A project's `.localharness/` may set what the agent does inside that project: the model it asks
+for, budgets, prompts and agent structure, memory tuning, and stricter permissions. A setting that
+says where a request or a credential goes, which credential is sent, what program the harness starts
+or imports, or which file outside the project it writes belongs to your machine, so only your
+machine-level (global) `config.yaml` or `overrides.yaml` may set it. A repository you cloned must
+not be able to send your API key or your conversation to an address it picks, start a program of
+its choosing, or switch a protection off — and the address alone is enough to leak, because every
+message and every file the agent reads travels to it. A project's value for one of these settings
+is ignored, the harness prints a warning naming the key and the file, and your global value stands;
+if your global config sets no model server at all, `start` stops with one line naming the file to
+set `provider.base_url` in. The autoresearch proposer's address and key are two of them, because
+`plugins enable autoresearch` sends the key to that address; with no proposer address in your
+global config, a project's whole `proposer:` section is ignored. These are all of them:
 
+- `provider.base_url`
+- `provider.api_key`
+- `extra_endpoints` (the whole list of peer endpoints)
+- `active_endpoint`
+- `server` (the whole section: what the harness launches, with which arguments and on which
+  address)
+- `org.audit_log_path`
+- `org.hooks`
+- `org.enforce_capability_floor`
+- `org.web_fetch_allow_private`
+- `channels.remote_unattended`
+- `proposer.base_url`
+- `proposer.api_key`
 - `image.comfyui_url`
 - `image.workflow`
 - `dispatch.discord.token`
 - `dispatch.discord.allow`
 - `dispatch.discord.channels`
 - `web.public_url`
-- `proposer.base_url`
-- `proposer.api_key`
-- `org.enforce_capability_floor`
 - `permissions.ask.read_only_signatures`
 - `permissions.ask.dropped_commands`
 - `permissions.ask.wrapper_commands`
 - `permissions.ask.subcommand_tools`
 - `permissions.ask.mcp_trusted_servers`
 - `permissions.ask.timeout_s`
+- `memory.embedding_model`, in an agent file (the model the memory plugin loads; a folder named
+  there is code it imports)
+- `permissions.budget.kill_file`, in an agent file (the one kill switch for every agent on the
+  machine)
 - `<name>.enabled`, for a plugin you installed (a plugin that ships with LocalHarness can be
   switched per project)
 
@@ -183,10 +201,9 @@ network-host question on but not off, may not pick a looser `permissions.mode`, 
 **What this does NOT cover.** Your global config is trusted as it is: a value already in your
 global files is never checked, whoever put it there. A project value equal to your global value is
 treated as yours and left alone. A plugin you install decides for itself which of its settings are
-machine-level only; this list covers the plugins that ship with LocalHarness. Apart from the
-settings above, a project's `org` settings (such as `org.audit_log_path`) still merge over your
-global ones; they have not yet been checked one by one for whether a project value can loosen a
-protection.
+machine-level only; this list covers the plugins that ship with LocalHarness. The other `org`
+settings a project may set — its name, default model, temperature, output cap, context settings,
+log level and the memory switch — choose nothing outside the project.
 
 ## Human approval gate
 
