@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from localharness.config.paths import resolve_config_dir
+from localharness.config.redact import yaml_problem, yaml_where
 
 
 # #59: deterministic, leading-anchored cancellation. The old escape was 4 undocumented
@@ -98,8 +99,9 @@ def validate_agent_yaml(yaml_str: str) -> str | None:
 
     try:
         data = _yaml.safe_load(yaml_str)
-    except _yaml.YAMLError as exc:
-        return f"not valid YAML: {exc}"
+    except _yaml.YAMLError as exc:  # where, never the parser's snippet of the line (R16)
+        line, column = yaml_where(exc)
+        return f"not valid YAML (line {line}, column {column}): {yaml_problem(exc)}"
     if not isinstance(data, dict):
         return f"not a YAML mapping (got {type(data).__name__})"
     if not data.get("name"):
@@ -251,8 +253,10 @@ class AgentCreationWorkflow:
         # Parse YAML
         try:
             data = _yaml.safe_load(self._generated_yaml)
-        except _yaml.YAMLError as exc:
-            raise ValueError(f"Generated YAML is not valid: {exc}") from exc
+        except _yaml.YAMLError as exc:  # where, never the parser's snippet of the line (R16)
+            line, column = yaml_where(exc)
+            raise ValueError(f"Generated YAML is not valid (line {line}, column {column}): "
+                             f"{yaml_problem(exc)}") from None
 
         if not isinstance(data, dict):
             raise ValueError(f"Generated YAML is not a mapping (got {type(data).__name__})")

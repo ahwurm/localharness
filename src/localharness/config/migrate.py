@@ -51,7 +51,7 @@ from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.models import HarnessConfig, PermissionConfig
 from localharness.config.overlay import restrict_config_file
 from localharness.config.plugin_sections import core_harness_view
-from localharness.config.redact import secret_values, validation_text
+from localharness.config.redact import secret_values, validation_text, yaml_problem, yaml_where
 
 log = logging.getLogger(__name__)
 
@@ -234,7 +234,9 @@ def load_plan(config_file: Path) -> tuple[bytes, Optional[MigrationPlan]]:
     try:
         data = yaml.safe_load(original.decode("utf-8"))
     except yaml.YAMLError as exc:
-        raise MigrationError(f"Could not parse {config_file}: {exc}") from exc
+        # file, line and column, never the parser's snippet of the line (R16); not chained either
+        line, column = yaml_where(exc)
+        raise MigrationError(f"Could not parse {config_file}:{line}:{column}: {yaml_problem(exc)}") from None
     if not isinstance(data, dict):
         raise MigrationError(f"{config_file} is not a valid config mapping.")
     return original, plan(data, tuple(scan_sidecars(config_file.parent)))

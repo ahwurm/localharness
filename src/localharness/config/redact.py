@@ -116,3 +116,18 @@ def secret_values(model: type[BaseModel] | None, data: Any) -> frozenset[str]:
             node = node.get(key) if isinstance(node, Mapping) else None
         collect(node, 0)
     return frozenset(v for v in found if v and v != "none")
+
+
+def yaml_problem(exc: BaseException) -> str:
+    """What a YAML parse error says, without the source it quotes: the parser's context and problem
+    ("while scanning a quoted scalar … found unexpected end of stream"), never the snippet and
+    caret its marks print, which can show the head or tail of a key on the broken line (R16)."""
+    text = " ".join(str(part) for part in (getattr(exc, "context", None), getattr(exc, "problem", None))
+                    if part)
+    return text or type(exc).__name__
+
+
+def yaml_where(exc: BaseException) -> tuple[int, int]:
+    """(line, column), 1-based, where a YAML parse error's problem is; (0, 0) when it has no mark."""
+    mark = getattr(exc, "problem_mark", None)
+    return (mark.line + 1, mark.column + 1) if mark else (0, 0)

@@ -29,7 +29,9 @@ from localharness.config.overlay import (
     _resolve_user_overlay_path,
 )
 from localharness.config.paths import resolve_config_dir
-from localharness.config.redact import SECRET_MASK, at_secret, scrub, secret_values
+from localharness.config.redact import (
+    SECRET_MASK, at_secret, scrub, secret_values, yaml_problem, yaml_where,
+)
 from localharness.config.plugin_sections import (
     CORE_AGENT_KEYS, CORE_HARNESS_KEYS, split_plugin_keys, unowned_hint,
 )
@@ -272,11 +274,16 @@ def _load_yaml_file(path: Path) -> dict:
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        mark = getattr(e, "problem_mark", None)
-        line = (mark.line + 1) if mark else 0
-        column = (mark.column + 1) if mark else 0
-        raise ConfigParseError(str(path), line, column, str(e)) from e
+        # file, line and column, never the parser's snippet of the line (R16); not chained either
+        raise _parse_error(path, e) from None
     return data or {}
+
+
+def _parse_error(path: Any, exc: BaseException) -> ConfigParseError:
+    """A YAML parse error as ConfigParseError: the file, line and column, and the parser's problem
+    text, never the snippet and caret it prints, which can show a key on the broken line (R16)."""
+    line, column = yaml_where(exc)
+    return ConfigParseError(str(path), line, column, yaml_problem(exc))
 
 
 def _field_error(field_path: str, err: Any, message: str, yaml_line: Optional[int], *,
@@ -1704,6 +1711,8 @@ class ConfigLoader:
                     data["name"] = f.stem
                 agents[f.stem] = data
             except Exception as exc:  # noqa: BLE001
+                if isinstance(exc, yaml.YAMLError):  # its text would quote the broken line (R16)
+                    exc = _parse_error(f, exc)
                 log.warning("skipping unreadable agent file %s: %s", f, exc)
                 if on_error is not None:
                     on_error(f, exc)
