@@ -206,6 +206,17 @@ async def test_every_checked_address_is_kept_in_resolver_order_without_repeats(m
     assert [u.host for u in hop.pinned] == ["93.184.216.34", "93.184.216.35"]
 
 
+async def test_the_name_checked_is_the_name_on_the_wire(monkeypatch):
+    """httpx sends faß.de as xn--fa-hia.de (IDNA 2008); url.host reads 'faß.de', which the system
+    resolver would encode as fass.de (IDNA 2003) — another domain. The guard resolves the ASCII name
+    the connection, the Host header and a proxy would use."""
+    asked = _dns(monkeypatch, {"xn--fa-hia.de": ["93.184.216.34"], "fass.de": ["10.0.0.5"]})
+    hop = await netguard.check("https://faß.de/")
+    assert asked == ["xn--fa-hia.de"]
+    assert [u.host for u in hop.pinned] == ["93.184.216.34"]
+    assert (hop.host_header, hop.sni) == ("xn--fa-hia.de", "xn--fa-hia.de")
+
+
 async def test_a_nat64_address_is_judged_by_the_ipv4_address_it_carries(monkeypatch):
     """On an IPv6-only network with DNS64, every IPv4-only site resolves into 64:ff9b::/96."""
     _dns(monkeypatch, {"v4only.example": ["64:ff9b::5db8:d822"], "rebound.example": ["64:ff9b::7f00:1"]})
