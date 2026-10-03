@@ -157,6 +157,7 @@ async def test_plugin_contributions_default_to_no_ops(tmp_path):
     assert await p.start(ctx) is None
     assert await p.stop(ctx) is None
     assert p.doctor(ctx) == []
+    assert p.setup_action(ctx) == []
     assert p.channels() == {}
     assert p.artifact_root(ctx) == ctx.paths.artifact_dir == tmp_path / "artifacts" / "example"
     assert (_Bare.ConfigModel, _Bare.AgentConfigModel, _Bare.wants_artifacts) == (None, None, False)
