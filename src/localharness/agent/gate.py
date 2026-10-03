@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 from localharness.agent.gate_types import (
     DEFAULT_MODE,
+    HARNESS_CONFIG_FILE_REASON,
     MODE_STRICTNESS,
     PENDING_OBSERVATION,
     PENDING_REPEAT_OBSERVATION,
@@ -44,7 +45,13 @@ from localharness.agent.gate_types import (
     Verdict,
 )
 from localharness.agent.permissions import PermissionResult
-from localharness.agent.verdict import DenyFn, GateContext, derive_boundary, evaluate
+from localharness.agent.verdict import (
+    DenyFn,
+    GateContext,
+    derive_boundary,
+    evaluate,
+    harness_config_file_target,
+)
 from localharness.config import trust
 from localharness.config.grants import GrantStore, new_grant, new_refusal
 from localharness.tools.base import GATE_FAMILIES
@@ -588,6 +595,14 @@ class PermissionGate:
         if self.owner_agent_id is None:
             self.owner_agent_id = agent_id  # see the attribute's docstring: first caller owns
         identity = call_identity(tool_name, tool_params)
+        # The harness's own settings files are never the agent's to change, in any mode — ahead of
+        # the verdict, so no ticket, staged approval or mode turns this into an allow (orchestrator
+        # ruling R13). The verdict itself still answers its protected-path ask for them.
+        hit = harness_config_file_target(tool_name, tool_params, self.context(deny), self.settings)
+        if hit is not None:
+            self._approved_once.pop(identity, None)  # spent on sight, as below: never stockpiled
+            return GateOutcome(allowed=False, reason=HARNESS_CONFIG_FILE_REASON.format(
+                path=str(hit).replace("\r", "\\r").replace("\n", "\\n")))
         # A human answered `/approve` for exactly this call. The ticket is spent on sight, so it
         # can never be stockpiled — but it only turns an ASK into an ALLOW below: a DENY from the
         # verdict (the owner's `permissions.deny_patterns`, or a refusal recorded since the call

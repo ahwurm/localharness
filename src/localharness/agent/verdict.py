@@ -37,6 +37,7 @@ from localharness.agent.gate_types import (
     AUTO_ASK_CLASSES,
     DEFAULT_MODE,
     DOTTED_VARIANT_SEPARATOR,
+    HARNESS_CONFIG_FILES,
     TOOL_SCRIPT_UNCONFIRMED,
     UNCONFIRMED_TOOL_SCRIPT_REASON,
     UNGRANTABLE_CLASSES,
@@ -1203,6 +1204,68 @@ def _first_string(params: dict) -> str:
         if isinstance(value, str) and value.strip():
             return value
     return ""
+
+
+# --------------------------------------------------------- the harness's own settings files
+
+def _named_file(raw: str, anchor: Optional[Path]) -> tuple[Path, ...]:
+    """Where a target lands: its realpath (a symlink TO a settings file is caught) and the
+    directory entry it names (a settings file kept elsewhere through a symlink is caught too, and
+    `mv` or `ln -sf` replace the entry itself). Empty when it cannot be resolved."""
+    real = _resolve(raw, anchor)
+    if real is None:
+        return ()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = Path(anchor) / path  # type: ignore[arg-type] — _resolve placed it, so anchor is set
+    try:
+        return real, path.parent.resolve() / path.name
+    except (OSError, ValueError, RuntimeError):
+        return (real,)
+
+
+def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
+                               settings: GateSettings) -> Optional[Path]:
+    """The machine's or a project's config.yaml / overrides.yaml this call would write or delete,
+    or None. Reads the builtin write/edit tools' path and every write and destructive target of a
+    `bash_exec` command the classifier can read — the operands of a plain `rm`, `truncate` or
+    `chmod` too, which the classifier reads but does not flag destructive — realpathed (a symlink
+    to one of the files is caught) and as the entry it names. A command that runs code inline
+    through an interpreter is not read. Never raises.
+
+    `PermissionGate.check` runs this AHEAD of :func:`evaluate` and denies on a hit (orchestrator
+    ruling R13), so :func:`evaluate`'s own answer for these files stays the protected-path ask."""
+    try:
+        if not isinstance(params, dict):
+            return None
+        if tool_name in WRITE_TOOL_PATH_PARAMS:
+            raw = params.get(WRITE_TOOL_PATH_PARAMS[tool_name])
+            targets = [raw] if isinstance(raw, str) and raw.strip() else []
+            anchor: Optional[Path] = Path(ctx.workspace)
+        elif tool_name in SHELL_COMMAND_PARAMS:
+            command = params.get(SHELL_COMMAND_PARAMS[tool_name])
+            if not isinstance(command, str) or not command.strip():
+                return None
+            from localharness.agent.shell_classify import classify_shell, destructive_targets
+
+            targets = []
+            for segment in classify_shell(command, settings).segments:
+                targets += [*segment.write_targets, *segment.destructive_targets]
+                if not segment.read_only:  # a plain `rm` deletes, though it is not flagged
+                    targets += destructive_targets(segment.signature, segment.argv, settings) or []
+            anchor = _shell_anchor(tool_name, params, ctx)
+        else:
+            return None
+        config_dir = str(global_config_dir().resolve()).casefold()
+        for raw in targets:
+            for path in _named_file(raw, anchor):
+                if path.name.casefold() in HARNESS_CONFIG_FILES and (
+                        str(path.parent).casefold() == config_dir
+                        or path.parent.name.casefold() == WORKSPACE_DIR_NAME):
+                    return path
+    except Exception:  # noqa: BLE001 — what this cannot read stays the verdict's to judge
+        return None
+    return None
 
 
 # ------------------------------------------------------------------- the verdict

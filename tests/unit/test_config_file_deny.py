@@ -89,6 +89,8 @@ BLOCKED = {
         p / ".localharness/overrides.yaml"),
     "shell-rm": lambda g, p: ("bash_exec", {"command": f"rm {g / 'config.yaml'}"}, g / "config.yaml"),
     "shell-tee": lambda g, p: ("bash_exec", {"command": f"tee {g / 'config.yaml'}"}, g / "config.yaml"),
+    "shell-truncate": lambda g, p: ("bash_exec", {"command": f"truncate -s0 {g / 'overrides.yaml'}"},
+                                    g / "overrides.yaml"),
     "shell-sed-in-place": lambda g, p: ("bash_exec", {"command": f"sed -i s/a/b/ {g / 'overrides.yaml'}"},
                                         g / "overrides.yaml"),
     "shell-cp-after-cd": lambda g, p: ("bash_exec", {"command": f"cd {g} && cp /tmp/x overrides.yaml"},
@@ -159,6 +161,7 @@ UNTOUCHED = {
     "a-project-source-config": lambda g, p: ("write", {"path": str(p / "src" / "config.yaml"),
                                                        "content": "x"}),
     "shell-read": lambda g, p: ("bash_exec", {"command": f"cat {g / 'config.yaml'}"}),
+    "shell-find-read": lambda g, p: ("bash_exec", {"command": f"find {g / 'config.yaml'} -maxdepth 0"}),
     "interpreter-inline": lambda g, p: (
         "bash_exec", {"command": f"python3 -c \"open('{g / 'config.yaml'}','w')\""}),
 }

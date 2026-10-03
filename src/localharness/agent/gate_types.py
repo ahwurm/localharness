@@ -857,13 +857,29 @@ them. That is the inversion this constant is: the old rule protected the whole t
 hand-listed five runtime files as exemptions, which made 14 of the 20 prompts a replay of the
 owner's real corpus raised in ``auto`` be the orchestrator creating agents and tool scripts.
 
-An agent yaml is not a free pass for the gate, incidentally: the shipped
-``permissions.deny_patterns`` still carry ``write(*/agents/*.yaml)`` and ``write(*/config.yaml)``,
-which are a DENY — a tier above asking — for anyone who keeps them.
+What an agent yaml may do is decided at start, not here. A config written before the
+``write(*/agents/*.yaml)`` deny left the shipped defaults still carries it (a DENY, a tier above
+asking, for anyone who keeps it); new installs ship without it, because the agent may write agent
+files and what such a file starts, loads or loosens waits for the user's confirmation at the next
+start (``config.trust.machine_snapshot``). ``config.yaml`` and ``overrides.yaml`` are out of the
+agent tools' reach in every mode through :data:`HARNESS_CONFIG_FILES`, ahead of this list; the
+protected-path ask here is still what the verdict answers for them when it is asked directly.
 
 Matched on the FIRST path component under the config directory, so ``config.yaml.bak`` is not
 ``config.yaml`` (a backup is not read by anything) and a file called ``config.yaml`` sitting
 inside ``agents/`` is not either."""
+
+HARNESS_CONFIG_FILES: tuple[str, ...] = ("config.yaml", "overrides.yaml")
+"""The files that hold the harness's own settings — in the machine's config folder and in any
+project's `.localharness/`. The agent's write/edit tools and shell commands the gate can read as
+writing or deleting a file never change them, in any mode (orchestrator ruling R13): the settings
+there decide where requests and keys go, what launches and what the gate allows. Code, not a deny
+pattern, so no config can delete it. Agent files and tool scripts are deliberately NOT here: the
+agent may extend itself, and what such a file starts or loosens waits for the user at start."""
+
+HARNESS_CONFIG_FILE_REASON = (
+    "{path} holds the harness's own settings; the agent's tools do not change it — ask the user to "
+    "run `localharness components set <key> <value>`")
 
 PROTECTED_PATHS_SYSTEM_DEFAULT: tuple[str, ...] = (
     "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/var", "/opt", "/root", "/srv",
