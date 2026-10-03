@@ -43,6 +43,7 @@ from typing import Any
 from localharness.config.models import AgentConfig, HarnessConfig
 from localharness.config.overlay import atomic_write_overlay, deep_merge, load_overlay, _resolve_user_overlay_path
 from localharness.config.plugin_sections import core_agent_view, core_harness_view
+from localharness.config.redact import secret_values, validation_text
 from localharness.registry import (
     LAYER_GLOBAL_OVERRIDES,
     build_catalogue,
@@ -122,21 +123,26 @@ def _validate_merged(cfg, component: str, new_overlay: dict) -> None:
     harness-level overlay validates against the merged HarnessConfig dict. Either failure refuses
     the adoption with no write/commit.
     """
+    secrets: frozenset[str] = frozenset()
     try:
         if component.startswith(_AGENT_PREFIX):
             agent_overlay = new_overlay.get("agent", {})
             merged_agent = deep_merge(dict(_AGENT_VALIDATE_BASE), agent_overlay)
+            secrets = secret_values(AgentConfig, merged_agent)
             # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
             AgentConfig.model_validate(core_agent_view(merged_agent))
         else:
             project_dict = cfg.model_dump(mode="python") if hasattr(cfg, "model_dump") else {}
             merged = deep_merge(project_dict, new_overlay)
+            secrets = secret_values(HarnessConfig, merged)
             # plugin sections are validated by their plugins (ENAB-01); unknown keys are rejected at load
             HarnessConfig.model_validate(core_harness_view(merged))
     except Exception as exc:  # pydantic ValidationError or any validate failure
+        # Location and message only, scrubbed (R16): pydantic's own text carries the merged config,
+        # a key stored raw in overrides.yaml included; not chained, so no traceback carries it.
         raise AdoptionRefused(
-            f"adopting {component!r} produces an invalid config: {exc}"
-        ) from exc
+            f"adopting {component!r} produces an invalid config: {validation_text(exc, secrets)}"
+        ) from None
 
 
 async def adopt(proposal_id: str, *, store, cfg, repo_root, bus=None) -> str:
