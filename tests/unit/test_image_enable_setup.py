@@ -148,7 +148,9 @@ def test_the_prompt_carries_the_typed_address_and_the_gpu(g, prompts, monkeypatc
     assert f"it answers at {URL}; keep it off the open internet." in result.output
     assert f"{URL}/system_stats answers" in result.output
     assert "This machine reports NVIDIA GB10." in result.output
-    assert "  Once ComfyUI answers, the agent can make pictures with generate_image." in result.output
+    # a blank line ends the block to paste: the next step is not part of the prompt
+    assert ("  reachable.\n\n  Once ComfyUI answers, the agent can make pictures with generate_image."
+            in result.output), result.output
 
 
 def test_with_no_gpu_reported_the_prompt_has_no_machine_sentence(g, prompts, monkeypatch):

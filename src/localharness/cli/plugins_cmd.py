@@ -565,7 +565,7 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
         rows = asyncio.run(setup_action_rows(fresh, name, paths))
         if rows:
             print_plugin_row(DoctorRow(name, "on", "", rows), [])
-    failed = ""
+    failed, block = "", False
     if step and (setup or has_action):
         console.print("Checking it now:")
         row = _probe(name, fresh, paths)
@@ -579,6 +579,7 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
                 console.print()
                 console.print(escape(render_agent_prompt(m.agent_prompt, _prompt_values(
                     fresh, fresh_loader, after, m.agent_prompt))), soft_wrap=True)
+            block = bool(m.setup_help or m.agent_prompt)
     elif not ask and m is not None:
         if setup and not pairs:
             console.print(escape("  next step — give it the " + ", ".join(f.prompt for f in setup)
@@ -587,6 +588,8 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
             console.print(escape(f"  next step — run `localharness plugins enable {name}` "
                                  f"on a terminal to answer: {m.setup_action}"), soft_wrap=True)
     if m is not None and m.next_steps:
+        if block:  # a blank line ends the text to paste: the next step is not part of it
+            console.print()
         for line in m.next_steps.splitlines():
             console.print(escape(f"  {line}"), soft_wrap=True)
     return StepOutcome(name, on, failed_check=failed)
