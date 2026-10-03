@@ -150,6 +150,27 @@ class Plain(Plugin):
     manifest = PluginManifest(name="plain", version="0.1.0", kind="tools", enabled_by_default=False)
 
 
+class Reach(Plugin):
+    """asks an address, looks at the far end while it sets up; its doctor stays offline (the
+    shape of autoresearch: a proposer GET in the action, a configuration-only doctor)"""
+
+    manifest = PluginManifest(
+        name="reach", version="0.1.0", kind="tools", enabled_by_default=False,
+        setup=(SetupField(key="url", prompt="Far address", default="http://127.0.0.1:4"),),
+        setup_help="REACH-HELP", agent_prompt="Make {url} answer.")
+    ConfigModel = UrlConfig
+
+    async def configure(self, ctx):
+        return "ready" if ctx.config.url else ("unconfigured", "reach.url")
+
+    def setup_action(self, ctx):
+        CALLS.append("reach")
+        return [Check(name="reach-far", status="fail", detail=f"no answer from {ctx.config.url}")]
+
+    def doctor(self, ctx):
+        return [Check(name="reach", status="pass", detail=f"configured: {ctx.config.url}")]
+
+
 @pytest.fixture(autouse=True)
 def bundled(monkeypatch):
     monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (Act, Quiet, Boom, Pro, Needx, Secty, Kit, Plain))
@@ -277,6 +298,20 @@ def test_a_failing_check_prints_the_row_the_help_then_the_filled_prompt(g, term)
 
     assert result.exit_code == 0, result.output
     _in_order(result.output, "✗ pro: no answer at http://bad", "PRO-HELP", AGENT_PROMPT_LEAD, PROMPT_BAD)
+
+
+def test_a_failing_action_row_counts_as_a_failing_check(g, term, monkeypatch) -> None:
+    """Deferred item 4 (found by 52-05): a setup-action row that does not pass is a failing check,
+    as a doctor row is — setup_help and the filled prompt print — even when the offline doctor check
+    passes (autoresearch: the proposer does not answer, its configuration does)."""
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (*builtin.BUILTIN_PLUGINS, Reach))
+    term.answers[:] = ["http://far"]
+    result = _enable(g, "reach")
+
+    assert result.exit_code == 0, result.output
+    assert CALLS == ["reach"]
+    _in_order(result.output, "✗ reach-far: no answer from http://far", "Checking it now:",
+              "✓ reach: configured: http://far", "REACH-HELP", AGENT_PROMPT_LEAD, "Make http://far answer.")
 
 
 def test_a_passing_check_prints_no_help_and_no_prompt(g, term) -> None:
