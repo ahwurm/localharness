@@ -447,8 +447,8 @@ async def test_a_connection_error_is_fetch_failed_as_today(monkeypatch):
 
 @pytest.mark.parametrize("raw", [
     "http://127.0.0.1/x", "http://[::ffff:7f00:1]/", "http://2130706433/", "http://x@127.0.0.1/",
-    "http://169.254.169.254/latest/meta-data/", "http://100.64.0.1/", "ftp://example.com/",
-    "http://0177.0.0.1/", "http://localhost:8000/x",
+    "http://169.254.169.254/latest/meta-data/", "http://100.64.0.1/", "http://0177.0.0.1/",
+    "http://localhost:8000/x",
 ])
 async def test_every_refusal_reaches_the_model_as_one_line_and_nothing_is_requested(monkeypatch, raw):
     seen = _serve(monkeypatch, lambda r: _text("must not be reached"))
@@ -456,6 +456,22 @@ async def test_every_refusal_reaches_the_model_as_one_line_and_nothing_is_reques
     assert (result.success, result.error_type) == (False, "validation_error")
     assert result.error.startswith("refused: ") and "\n" not in result.error
     assert seen == []
+
+
+async def test_a_url_that_is_not_http_keeps_its_old_wording_and_a_redirect_to_one_is_refused(monkeypatch):
+    """The first URL keeps the tool's old wording (test_agent_loop pins it); every hop after it is
+    netguard's call, so a redirect to another scheme is refused the same way as any other hop."""
+    _dns(monkeypatch, {"example.com": ["93.184.216.34"]})
+    seen = _serve(monkeypatch, lambda r: _to("ftp://example.com/file"))
+    for raw in ("ftp://example.com/", "notaurl", "file:///etc/passwd\nsecond line"):
+        result = await _fetch(raw)
+        assert (result.success, result.error_type) == (False, "validation_error")
+        assert result.error == f"Invalid URL (must be http/https): {raw!r}"
+    assert seen == []
+    result = await _fetch("https://example.com/page")
+    assert (result.error, result.error_type) == ("refused: only http and https URLs are fetched",
+                                                 "validation_error")
+    assert len(seen) == 1
 
 
 async def test_fetch_then_query_through_the_registry_the_loop_uses(monkeypatch):
