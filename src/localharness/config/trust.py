@@ -442,8 +442,10 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
     ({kind: "permission", name: <dotted key>, shown: <value>}, loader.permission_loosenings — the
     legacy org.yaml as the base rung, whose shorter `deny_patterns` does drop shipped patterns); and
     every script in `<global>/tools/` (tool_script_entries — a shell command runs one, so the gate
-    treats an unconfirmed one as a shell command it has not seen). Sorted by (file, kind, name,
-    canonical JSON); unparsable files skipped; never an env or header value."""
+    treats an unconfirmed one as a shell command it has not seen). Also the `agent:` section of
+    `<global>/overrides.yaml` — every agent's default layer — read like an agent file (file
+    "overrides.yaml"). Sorted by (file, kind, name, canonical JSON); unparsable files skipped;
+    never an env or header value."""
     from localharness.config.loader import layer_files, org_deny_loosenings, permission_loosenings
 
     root = Path(global_dir)
@@ -454,17 +456,26 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
         return [{"file": file, "kind": "permission", "name": key, "shown": shown}
                 for key, shown in sorted(permission_loosenings(perms) + base)]
 
-    out: list[dict] = []
-    for path in layer_files(root, "agents"):
-        raw, file = _read_yaml(path), f"agents/{path.name}"
-        out += [{"file": file, "kind": "mcp_server", "name": str(s.get("name") or ""),
-                 "shown": _shown_server(s), "env": _names(s.get("env")),
-                 "headers": _names(s.get("headers"))} for s in _servers(raw)]
+    def agent_entries(file: str, raw: Any) -> list[dict]:
+        found = [{"file": file, "kind": "mcp_server", "name": str(s.get("name") or ""),
+                  "shown": _shown_server(s), "env": _names(s.get("env")),
+                  "headers": _names(s.get("headers"))} for s in _servers(raw)]
         memory = raw.get("memory") if isinstance(raw, dict) else None
         if isinstance(memory, dict) and memory.get("embedding_model") is not None:
-            out.append({"file": file, "kind": "embedding_model", "name": "memory.embedding_model",
-                        "shown": str(memory["embedding_model"])})
-        out += loosenings(file, raw)
+            found.append({"file": file, "kind": "embedding_model", "name": "memory.embedding_model",
+                          "shown": str(memory["embedding_model"])})
+        return found + loosenings(file, raw)
+
+    out: list[dict] = []
+    for path in layer_files(root, "agents"):
+        out += agent_entries(f"agents/{path.name}", _read_yaml(path))
+    # The `agent:` section of overrides.yaml is every agent's default layer (the loader merges it
+    # under each agent file), so what it starts, loads or loosens is fingerprinted the same way:
+    # a server put there — by `python_exec`, or a shell write the settings-file rule does not read —
+    # waits for the same one Yes as a server put in an agent file. (config.yaml cannot carry one.)
+    overrides = _read_yaml(root / "overrides.yaml") if (root / "overrides.yaml").is_file() else None
+    if isinstance(overrides, dict) and isinstance(overrides.get("agent"), dict):
+        out += agent_entries("overrides.yaml", overrides["agent"])
     for path in layer_files(root, "divisions"):
         out += loosenings(f"divisions/{path.name}", _read_yaml(path))
     if (root / "org.yaml").is_file():

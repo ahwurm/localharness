@@ -242,3 +242,69 @@ async def test_listing_models_decides_and_asks_nothing(machine, capsys):
     asked = machine.answers(True)
     await machine.start()
     assert len(asked) == 1 and machine.names() == ["g1", "g2"]
+
+
+# --------------------------------------------------------------------------- overrides.yaml's agent: section
+
+
+def _bare_orchestrator(machine) -> None:
+    """The machine's root agent file with no `tools.mcp_servers` key at all: an explicit list —
+    even an empty one — replaces the overrides' list, since lists are not unioned."""
+    (machine.g / ORCH).write_text(yaml.safe_dump({"name": "orchestrator", "role": "R",
+                                                  "model": "inherit"}), encoding="utf-8")
+
+
+def _overrides_agent(machine, section: dict) -> None:
+    """The global overrides.yaml's `agent:` section is every agent's default layer: the loader
+    merges it under each agent file, so a server there is started for a root agent whose own file
+    names none (an agent file's own list replaces it — lists are not unioned)."""
+    path = machine.g / "overrides.yaml"
+    data = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.exists() else {}
+    data["agent"] = section
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+
+async def test_a_server_added_to_the_overrides_agent_section_is_asked_once_like_an_agent_file(machine):
+    """The re-review's F-A: this section used to be outside the fingerprint, so a server put there
+    (python_exec can write the file unasked in auto) started at the next start with no question."""
+    _bare_orchestrator(machine)
+    await machine.first_start()
+    _overrides_agent(machine, {"tools": {"mcp_servers": [G2]}})
+    asked = machine.answers(True)
+
+    await machine.start()
+
+    assert len(asked) == 1 and "+ g2 (overrides.yaml): /bin/sh -c id" in asked[0]
+    assert machine.names() == ["g2"]
+
+
+@pytest.mark.parametrize("terminal", [False, True], ids=["no-terminal", "answered-no"])
+async def test_without_a_yes_a_server_in_the_overrides_agent_section_never_starts(machine, capsys,
+                                                                                   terminal):
+    _bare_orchestrator(machine)
+    await machine.first_start()
+    _overrides_agent(machine, {"tools": {"mcp_servers": [G2]},
+                               "memory": {"embedding_model": "./models/evil"},
+                               "permissions": {"mode": "unattended"}})
+    machine.tty(terminal)
+    machine.answers(*([False] if terminal else []))
+
+    await machine.start()
+
+    assert machine.names() == [], "the server in overrides.yaml is held back"
+    root = machine.roots[-1]
+    assert root.permissions.mode != "unattended", "the loosening is held back with it"
+    assert root.memory.embedding_model != "./models/evil", "and so is the embedding model"
+    err = _err(capsys)
+    assert "Not applying 3 change(s)" in err and "(overrides.yaml)" in err
+
+
+async def test_an_overrides_agent_section_there_before_the_upgrade_is_adopted_silently(machine):
+    _bare_orchestrator(machine)
+    _overrides_agent(machine, {"tools": {"mcp_servers": [G2]}})
+    machine.tty(True)
+    machine.answers()
+
+    await machine.start()
+
+    assert machine.names() == ["g2"]
