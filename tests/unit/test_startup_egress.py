@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import logging
 import math
+import shutil
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -266,3 +268,154 @@ def test_a_model_id_the_cache_cannot_read_is_no_notice_and_no_error(monkeypatch,
     monkeypatch.setattr("importlib.util.find_spec", _spec_found_for("sentence_transformers"))
 
     assert memory_plugin._embedding_download_notice(model) is None
+
+
+# --------------------------------------------------------------------------- the embedding model's load
+
+
+@pytest.fixture
+def no_network(monkeypatch, tmp_path):
+    """Every request the Hugging Face library makes, and every other connection, recorded and
+    refused. The library's requests go through a fresh client whose transport refuses them (its old
+    client may be in any state, closed included), and its own fetch of an "agent harnesses" list is
+    re-armed, as on a machine whose copy of that list is missing or a day old."""
+    import socket
+
+    import httpx
+    import huggingface_hub
+    from huggingface_hub import constants
+    from huggingface_hub.utils._http import default_client_factory
+
+    asked: list[str] = []
+
+    class Refuse(httpx.BaseTransport):
+        def handle_request(self, request):
+            asked.append(f"{request.method} {request.url}")
+            raise httpx.ConnectError("this test allows no network", request=request)
+
+    real_connect = socket.socket.connect
+
+    def connect(sock, address):
+        if sock.family == getattr(socket, "AF_UNIX", None):
+            return real_connect(sock, address)
+        asked.append(f"connect {address}")
+        raise OSError("this test allows no network")
+
+    def getaddrinfo(host, *args, **kwargs):
+        asked.append(f"resolve {host}")
+        raise OSError("this test allows no network")
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", False)
+    monkeypatch.setattr(constants, "HF_HUB_DISABLE_TELEMETRY", False)
+    monkeypatch.setattr(constants, "AGENT_HARNESSES_PATH", str(tmp_path / "no-list-yet.json"))
+    try:
+        from huggingface_hub.utils import _detect_agent
+        monkeypatch.setattr(_detect_agent, "_registry", None)
+    except ImportError:  # a hub library that fetches no such list
+        pass
+    huggingface_hub.set_client_factory(lambda: httpx.Client(transport=Refuse()))
+    yield asked
+    huggingface_hub.set_client_factory(default_client_factory)
+
+
+def _tiny_model_in_the_cache(cache: Path, repo: str, work: Path) -> None:
+    """A real sentence-transformers model, built from nothing and small enough for a test (one BERT
+    layer of width 8 over an eight-word vocabulary, mean-pooled), placed in a Hugging Face cache
+    laid out as a download leaves it: refs/main naming the snapshot folder that holds the files."""
+    from sentence_transformers import SentenceTransformer
+    from sentence_transformers.sentence_transformer.modules import Pooling, Transformer
+    from transformers import BertConfig, BertModel, BertTokenizer
+
+    words = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "hello", "memory", "world"]
+    BertTokenizer(vocab={w: i for i, w in enumerate(words)}).save_pretrained(work / "raw")
+    BertModel(BertConfig(vocab_size=len(words), hidden_size=8, num_hidden_layers=1,
+                         num_attention_heads=1, intermediate_size=16,
+                         max_position_embeddings=16)).save_pretrained(work / "raw")
+    word = Transformer(str(work / "raw"))
+    SentenceTransformer(modules=[word, Pooling(8)]).save(str(work / "model"), create_model_card=False)
+    commit = "0" * 40
+    home = cache / f"models--{repo.replace('/', '--')}"
+    (home / "refs").mkdir(parents=True)
+    (home / "refs" / "main").write_text(commit)
+    shutil.copytree(work / "model", home / "snapshots" / commit)
+
+
+def test_a_cached_embedding_model_loads_from_the_cache_with_no_network_call(
+        tmp_path, monkeypatch, no_network, caplog):
+    """The verifier's finding: loaded by id, the embedding model was checked against
+    huggingface.co on every load, cached or not, and with `local_files_only=True` the library
+    still fetched its "agent harnesses" list. A model in the cache now loads from its folder."""
+    pytest.importorskip("sentence_transformers")
+    from huggingface_hub import constants
+
+    from localharness.memory.resonance import ResonanceEngine
+
+    _tiny_model_in_the_cache(tmp_path / "hub", "lh-test/tiny", tmp_path)
+    assert no_network == [], "building the test model asked the network"
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    caplog.set_level(logging.DEBUG, logger="localharness.memory.resonance")
+
+    vector = ResonanceEngine("lh-test/tiny").embed_query("hello memory")
+
+    assert no_network == []
+    assert vector.shape == (8,) and math.isclose(float(vector @ vector), 1.0, rel_tol=1e-5)
+    assert "huggingface.co" not in caplog.text
+
+
+class _Said(logging.Handler):
+    """The warnings the engine logs, into the same list as its loads, in order."""
+
+    def __init__(self, events: list[tuple[str, str]]) -> None:
+        super().__init__(logging.WARNING)
+        self.events = events
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.events.append(("said", record.getMessage()))
+
+
+@pytest.mark.parametrize("case", ["not-in-the-cache", "an-interrupted-download", "a-local-folder"])
+def test_only_a_real_cache_miss_downloads_and_the_start_line_comes_first(case, tmp_path,
+                                                                         monkeypatch):
+    """A model not in the cache, or one whose cached copy is missing a file (an interrupted
+    download), is downloaded by id, and the start summary's line goes to memory.log first; a model
+    given as a folder loads from it and is never looked up."""
+    from localharness.memory.resonance import DEFAULT_EMBEDDING_MODEL, ResonanceEngine
+
+    events: list[tuple[str, str]] = []
+    snapshot = tmp_path / "snapshot"
+
+    class FakeSentenceTransformer:
+        prompts: dict = {}
+
+        def __init__(self, name, **kwargs):
+            events.append(("load", name))
+            if name == str(snapshot):
+                raise OSError("model.safetensors is missing")
+
+        def encode(self, texts, **kwargs):
+            return [[0.5] * 4 for _ in texts]
+
+    def lookup(repo, filename, *args, **kwargs):
+        assert case != "a-local-folder", "a local folder was looked up in the hub cache"
+        return str(snapshot / filename) if case == "an-interrupted-download" else None
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers",
+                        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer))
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lookup)
+    logger = logging.getLogger("localharness.memory.resonance")
+    said = _Said(events)
+    monkeypatch.setattr(logger, "level", logging.DEBUG)
+    logger.addHandler(said)
+    model = str(tmp_path) if case == "a-local-folder" else DEFAULT_EMBEDDING_MODEL
+    try:
+        ResonanceEngine(model).embed_query("x")
+    finally:
+        logger.removeHandler(said)
+
+    assert events == {
+        "not-in-the-cache": [("said", NOTICE), ("load", model)],
+        "an-interrupted-download": [("load", str(snapshot)), ("said", NOTICE), ("load", model)],
+        "a-local-folder": [("load", model)],
+    }[case]

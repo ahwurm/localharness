@@ -323,6 +323,12 @@ def _embedding_download_notice(model: str) -> str | None:
             return None
     except Exception:  # noqa: BLE001 — an id the cache cannot read (a missing local path) is memory's
         return None    # problem when it embeds, never a reason for memory to fail at start
+    return embedding_download_line(model)
+
+
+def embedding_download_line(model: str) -> str:
+    """The one line said before `model` is downloaded (R8): in the start summary when the model is
+    not in the cache, and in memory.log by the engine when a load finds it missing."""
     shipped = MemoryConfig.model_fields["embedding_model"].default
     return EMBEDDING_DOWNLOAD_NOTICE.format(
         model=model, size=f" ({_DEFAULT_MODEL_DOWNLOAD})" if model == shipped else "")

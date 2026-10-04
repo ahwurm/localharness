@@ -20,6 +20,8 @@ configured model changes.
 """
 from __future__ import annotations
 
+import logging
+import os
 import threading
 from typing import TYPE_CHECKING
 
@@ -31,6 +33,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
 
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+
+log = logging.getLogger(__name__)
 
 
 class ResonanceUnavailable(MemoryError):
@@ -72,7 +76,7 @@ class ResonanceEngine:
             with _quiet_ml_output():
                 from sentence_transformers import SentenceTransformer
 
-                self._model = SentenceTransformer(self.model_name, device="cpu")
+                self._model = _load(SentenceTransformer, self.model_name)
         except Exception as exc:  # loud, typed, actionable — never swallowed
             raise ResonanceUnavailable(self.model_name, exc) from exc
         return self._model
@@ -111,6 +115,49 @@ class ResonanceEngine:
                     [text], normalize_embeddings=True, show_progress_bar=False, **kwargs,
                 )
         return np.asarray(vec, dtype=np.float32)[0]
+
+
+def cached_copy(model: str) -> str | None:
+    """The folder of `model`'s copy in the local Hugging Face cache, or None. Reads the cache only,
+    as doctor and the start notice do; an id the cache cannot read (a malformed one) is None."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        for name in ("modules.json", "config.json"):
+            found = try_to_load_from_cache(model, name)
+            if isinstance(found, str):
+                return os.path.dirname(found)
+    except Exception:  # noqa: BLE001 — unreadable from the cache is "not cached", never an error here
+        return None
+    return None
+
+
+def _load(factory, model: str):
+    """`model` loaded by `factory` (SentenceTransformer), reaching huggingface.co only on a real
+    cache miss, and only after the start notice's line is logged (R8).
+
+    A model given as a folder loads from it. A model id loads from its copy in the local Hugging
+    Face cache BY THAT FOLDER, so the hub library is never asked: loaded by id, it was checked
+    against huggingface.co on every load, and even with `local_files_only=True` the library still
+    fetched its list of "agent harnesses" for its user-agent header whenever its own copy of that
+    list was missing or a day old (huggingface_hub 1.x). HF_HUB_OFFLINE is no way round it: the
+    library reads it once, at import, and setting it for the process would change it for
+    everything else the session runs. A cached copy missing a file the model needs (an interrupted
+    download) is a cache miss: the download completes it."""
+    folder = os.path.expanduser(model)
+    if os.path.exists(folder):
+        return factory(folder, device="cpu")
+    cached = cached_copy(model)
+    if cached is not None:
+        try:
+            return factory(cached, device="cpu")
+        except OSError:
+            log.debug("the cached copy of %s is incomplete — downloading the rest", model,
+                      exc_info=True)
+    from localharness.memory.plugin import embedding_download_line
+
+    log.warning(embedding_download_line(model))
+    return factory(model, device="cpu")
 
 
 # -- vector packing ---------------------------------------------------------
