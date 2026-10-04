@@ -159,8 +159,9 @@ All notable changes to LocalHarness are documented here. The format follows
   ignored with one startup warning naming the key and the file. SECURITY.md
   lists every one. A project's agent or division file that is a symlink
   leading outside its `.localharness/` (or sits in a symlinked folder that
-  does) is ignored with one warning: a symlink there used to slip past every
-  project rule.
+  does) is ignored with one warning, and `localharness validate` skips it the
+  same way: a symlink there used to slip past every project rule. A symlink
+  among your machine's own agent files still loads as the file it points to.
 - **"No" means no, and trust is for what you saw.** A project's agent files
   start their MCP servers only in a project you trusted, and only the set you
   approved: the trust question lists them, a Yes records exactly that list, a
@@ -171,10 +172,13 @@ All notable changes to LocalHarness are documented here. The format follows
 - **What your own agent files start, load or loosen waits for one Yes.** The
   agent may still write specialists into `~/.localharness/agents/`. An MCP
   server, an embedding model or a looser permission added there or in the
-  `agent:` section of your `overrides.yaml` (every agent's default layer), or a
-  looser permission in a division file or `org.yaml`, applies after you
+  `agent:` section of your `overrides.yaml` (every agent's default layer), a
+  looser permission in a division file, `org.yaml` or the `org:` section of
+  your `config.yaml` or `overrides.yaml`, or a model-server launch command
+  there (`server.binary`, `docker_image`, `extra_args`), applies after you
   confirm it at the next `localharness start` on a terminal, and stays off,
-  with one line, until then.
+  with one line, until then (a launch command left off leaves the whole
+  `server:` section off, so that start launches no server).
 - **A tool script the agent writes is an unconfirmed shell command until you
   confirm it.** A script added to or changed in `~/.localharness/tools/` — a
   symlink there included, judged by its own name and what it points to — gets
@@ -182,14 +186,27 @@ All notable changes to LocalHarness are documented here. The format follows
   and content; `auto`, `trusted` and `unattended` run it) and is listed once at
   the next start on a terminal.
 - **The agent's tools cannot change the harness's settings files.** Its `write`
-  and `edit` tools, and the shell writes the gate reads — onto the file, or a
-  copy, move, link or unpack into the config folder itself (`cp x DIR/`,
-  `tar -x -C`, `unzip -d`, `7z -o`), with `~`, `$HOME` and `${HOME}` expanded —
-  are refused for `config.yaml` and `overrides.yaml` in the session's config
-  folder (`--config-dir` included) and in any project's `.localharness/`,
-  whatever the mode; the model is told to ask you to run `localharness
-  components set`. It covers those shapes only — SECURITY.md names what it
-  does not cover — so it is no backstop in `unattended`.
+  and `edit` tools, and the shell writes the gate reads, with `~`, `$HOME` and
+  `${HOME}` expanded — onto the file (a `-t DIR` destination, `curl
+  --output-dir` and `wget -P` included), a copy, move or link into the config
+  folder of a file of that name, and an unpack, a copy of a folder's contents
+  or a download whose name the server chooses into the folder, since what
+  lands there is not known in advance — are refused for `config.yaml` and
+  `overrides.yaml` in the session's config folder (`--config-dir` included),
+  the default one and any project's `.localharness/`, whatever the mode; the
+  model is told to ask you to run `localharness components set`, or to unpack
+  or fetch elsewhere and copy the files it means. A file of any other name
+  copied into the folder is an ordinary write. The rule covers those shapes
+  only — SECURITY.md lists them and what it does not cover — so it is no
+  backstop in `unattended`.
+- **A `--config-dir` session protects its own config folder.** The six
+  entries protected in a harness config folder (`config.yaml`,
+  `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`,
+  `declined_workspace_offers.yaml`, `plugins/**`) were matched only in the
+  default `~/.localharness`, so in a session started with `--config-dir` the
+  agent could write that folder's `plugins/` in `auto` without a question.
+  The folder the session was started with and the default one are both
+  protected now.
 - **The `agent` tool names the boundary.** It still invites the model to build
   specialists from the tools the harness has, tells it never to write its own
   tool for something the harness already provides (web search, fetch, files,
@@ -252,8 +269,10 @@ All notable changes to LocalHarness are documented here. The format follows
 - **A start reaches only your model server.** It no longer builds tiktoken's
   vocabulary (downloaded when not cached) or, with no MCP server configured,
   imports the MCP client library; a missing embedding model is one line in the
-  start summary, downloaded the first time memory needs it. SECURITY.md lists
-  every host a start may contact.
+  start summary, downloaded the first time memory needs it, and a cached one
+  loads from the cache with no network call (memory used to check
+  huggingface.co each time it loaded the model). SECURITY.md lists every host
+  a start may contact.
 
 ### Known limitations (named, not hidden)
 - During a `/plugins` restart the conversation is held only in memory: if the
@@ -307,11 +326,14 @@ All notable changes to LocalHarness are documented here. The format follows
   through `python_exec`, `cruncher_exec` or an inline interpreter (which `auto`
   runs without asking) can rewrite it, recording a server as approved or
   removing a record so the next start adopts what the files hold.
-- The rest of your machine's `config.yaml` and `overrides.yaml` — where
-  requests go, the capability floor, the remote lock — is not in the record a
-  start confirms (the `agent:` section is): code the agent runs can change it
-  for the next start, and the settings-file rule keeps out only the agent's
-  file tools and the shell writes it reads.
+- Of your machine's `config.yaml` and `overrides.yaml`, the record a start
+  confirms holds the `agent:` section, the looser `org:` permissions and the
+  `server:` launch command only. The rest — among it where requests go, the
+  capability floor, the remote lock (`channels.remote_unattended`), the rest of
+  `server:` (`bind_all` included) and the peer endpoints with their launch
+  specs (`extra_endpoints`) — code the agent runs can change for the next start
+  without a question; the settings-file rule keeps out only the agent's file
+  tools and the shell writes it reads.
 - In Zed, the mode shown before the first prompt can be one your own agent file
   sets that the start then withheld.
 - A GET to a public host can still carry data out in its URL: that is
@@ -334,13 +356,15 @@ All notable changes to LocalHarness are documented here. The format follows
   code run inline through a non-shell interpreter (`python3 -c`), shell
   commands the gate does not read as writing the file (`mv` moving it away,
   `unlink`, `shred`, `find … -delete` by name, a hard link, a plain `rm` after
-  a `cd`, a path holding a variable other than `$HOME`, a command run through
-  `sudo`, an archive unpacked above the config folder), or the harness's own
-  CLI run by the agent.
+  a `cd`, a path holding a variable other than `$HOME`, a `$HOME` the command
+  reassigned first, a symlink to the folder made by the same command, a
+  command run through `sudo`, an archive unpacked above the config folder), or
+  the harness's own CLI run by the agent.
 - Outside `guarded` an unconfirmed tool script runs without asking, as any
   shell command does there. Files below a dependency or cache folder in the
   tools folder (`node_modules`, `.venv`, `venv`, `__pycache__`, `.git`,
-  `site-packages`) are not tracked; a script named through a variable or a
+  `site-packages`, or any folder holding a `pyvenv.cfg`) are not tracked; a
+  script named through a variable or a
   glob, relative to an earlier `cd`, or written by the same command that runs
   it, is not recognised as one; one reached through a symlinked folder is
   judged as the file it points to; and `npm install` there lists

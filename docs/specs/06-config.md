@@ -1545,23 +1545,28 @@ holds the system directories a mistaken write cannot be taken back from — `/et
 `/Applications`, Windows `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`,
 `C:\ProgramData` — because a default that allows ordinary writes has to name those explicitly.
 `protected_paths_system_exempt` carves `/tmp` and `/var/tmp` back out. The harness's own
-directories are protected by file rather than wholesale, through one list that applies to **any**
-harness config directory — the global `~/.localharness` and a project's `.localharness/` alike:
+directories are protected by file rather than wholesale, through one list that applies to each
+harness config directory a session uses — the one it was started with (`--config-dir`), the default
+`~/.localharness` and a project's `.localharness/` alike:
 `config.yaml`, `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`,
 `declined_workspace_offers.yaml` and `plugins/**`, the entries that change what the harness does
 next (the last three exist only in the global one). Agents, divisions, tools, session state,
 memory, history, the audit log and the kill file are bookkeeping and are not protected — writing
 them is the harness being used. `config.yaml` and `overrides.yaml` have one more rule, in code
 ahead of the verdict (`agent/gate.py`, `HARNESS_CONFIG_FILE_REASON`): the agent's `write` and
-`edit` tools and the shell writes the gate reads — onto the file, or a `cp`/`mv`/`install`/`ln`/
-`rsync`, `tar -x -C`, `unzip -d` or `7z -o` into the config folder itself, with a leading `$HOME`
-or `${HOME}` expanded — are refused for them whatever the mode, with one line naming `localharness
-components set` — see SECURITY.md for what that rule does not cover. A tool script in the session's
+`edit` tools and the shell writes the gate reads — onto the file, a `cp`/`mv`/`install`/`ln`/
+`rsync` into the config folder of a file of that name, or a `tar -x -C`, `unzip -d`, `7z x -o`, a
+folder's contents or a server-named download into the folder (`HARNESS_CONFIG_FOLDER_REASON`: what
+lands there is not known in advance), with a leading `$HOME` or `${HOME}` expanded — are refused for
+them whatever the mode, with one line naming `localharness components set` — see SECURITY.md for
+what that rule does not cover. A tool script in the session's
 `tools/` that the machine's trust record does not hold is gated as an unconfirmed shell command
 (`config/trust.tool_script_pending`; a symlink there is judged by its own entry). Both rules read
-the session's config folder (`GateContext.config_dir`, from `--config-dir`). The two dict-shaped tables (`destructive_flag_verbs`,
-`inline_code_flags`) are deliberately **not** overridable: they canonicalize flags into the
-signature, so a wrong entry would silently change what an existing grant means.
+the session's config folder (`GateContext.config_dir`, from `--config-dir`); the protected list
+and the settings-file rule read the default one too (`verdict._config_dirs`). The two dict-shaped
+tables (`destructive_flag_verbs`, `inline_code_flags`) are deliberately **not** overridable: they
+canonicalize flags into the signature, so a wrong entry would silently change what an existing
+grant means.
 
 **The grant store (`~/.localharness/grants.yaml`).** Remembered answers are not config. **The
 default mode neither reads this file nor writes it**: `auto` stages only blacklist classes, which
