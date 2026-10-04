@@ -184,8 +184,14 @@ NOTHING_APPROVED: dict = {"fingerprint": "", "servers": []}
 
 TOOL_SCRIPT_KIND = "tool_script"
 
+ORG_PERMISSION_KIND = "org_permission"
+LAUNCH_KIND = "launch"
+LAUNCH_KEYS: tuple[str, ...] = ("binary", "docker_image", "extra_args")
+"""The `server:` keys that name what the harness executes when it launches the model server."""
+
 MACHINE_KINDS: frozenset[str] = frozenset(
-    {"mcp_server", "embedding_model", "permission", TOOL_SCRIPT_KIND})
+    {"mcp_server", "embedding_model", "permission", TOOL_SCRIPT_KIND, ORG_PERMISSION_KIND,
+     LAUNCH_KIND})
 """Kinds of entry machine_snapshot() produces. A record made before a kind existed adopts that
 kind's current entries silently once — they predate the rule. That is how the first start that knows
 tool scripts adopts every script already in the tools folder."""
@@ -444,8 +450,11 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
     every script in `<global>/tools/` (tool_script_entries — a shell command runs one, so the gate
     treats an unconfirmed one as a shell command it has not seen). Also the `agent:` section of
     `<global>/overrides.yaml` — every agent's default layer — read like an agent file (file
-    "overrides.yaml"). Sorted by (file, kind, name, canonical JSON); unparsable files skipped;
-    never an env or header value."""
+    "overrides.yaml"); and in `<global>/config.yaml` and `overrides.yaml` each loosening of the
+    `org:` section's permissions ({kind: "org_permission", name: "org.permissions.<key>"}) and each
+    launch-command key of the `server:` section ({kind: "launch", name: "server.binary" …}).
+    Sorted by (file, kind, name, canonical JSON); unparsable files skipped; never an env or header
+    value."""
     from localharness.config.loader import layer_files, org_deny_loosenings, permission_loosenings
 
     root = Path(global_dir)
@@ -476,6 +485,22 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
     overrides = _read_yaml(root / "overrides.yaml") if (root / "overrides.yaml").is_file() else None
     if isinstance(overrides, dict) and isinstance(overrides.get("agent"), dict):
         out += agent_entries("overrides.yaml", overrides["agent"])
+    # The two settings files themselves: the `org:` section's permissions reach every agent (its
+    # mode is the one an agent with none of its own runs in; its ask lists feed every gate), and
+    # the `server:` section names what start executes when the model server is down. Code the
+    # agent runs can write either file, so a loosening or a new launch command there waits for the
+    # same one Yes. (A shorter org deny list removes nothing — the shipped list is unioned in.)
+    for file in ("config.yaml", "overrides.yaml"):
+        raw = _read_yaml(root / file) if (root / file).is_file() else None
+        org = raw.get("org") if isinstance(raw, dict) else None
+        out += [{"file": file, "kind": ORG_PERMISSION_KIND, "name": f"org.{key}", "shown": shown}
+                for key, shown in permission_loosenings(
+                    org.get("permissions") if isinstance(org, dict) else None)]
+        server = raw.get("server") if isinstance(raw, dict) else None
+        out += [{"file": file, "kind": LAUNCH_KIND, "name": f"server.{key}",
+                 "shown": server[key] if isinstance(server[key], str) else json.dumps(
+                     server[key], separators=(",", ":"), default=str)}
+                for key in LAUNCH_KEYS if isinstance(server, dict) and server.get(key) is not None]
     for path in layer_files(root, "divisions"):
         out += loosenings(f"divisions/{path.name}", _read_yaml(path))
     if (root / "org.yaml").is_file():
