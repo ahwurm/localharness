@@ -273,6 +273,15 @@ All notable changes to LocalHarness are documented here. The format follows
   loads from the cache with no network call (memory used to check
   huggingface.co each time it loaded the model). SECURITY.md lists every host
   a start may contact.
+- **Memory loads its embedding model only from a checked folder, by its full
+  path.** A model id is read from your Hugging Face cache (downloaded into it
+  on a real miss), never from a same-named folder in the current folder, where
+  a cloned project could ship one (0.16.0 loaded such a folder in the model's
+  place), and a relative folder in `memory.embedding_model` is read from your
+  config folder. A model whose files name code of its own (a module outside
+  sentence-transformers, or `auto_map` or `trust_remote_code` in a config) is
+  refused with one line; memory search and `remember` report it for the
+  session, and nothing else stops.
 
 ### Known limitations (named, not hidden)
 - During a `/plugins` restart the conversation is held only in memory: if the
