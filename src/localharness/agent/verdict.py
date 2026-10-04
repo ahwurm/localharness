@@ -559,6 +559,23 @@ def _protected_system(path: Path, settings: GateSettings) -> bool:
     return any(_system_root_matches(path, raw) for raw in settings.protected_paths_system)
 
 
+def _config_dirs(ctx: GateContext) -> list[Path]:
+    """The machine config folders a session's rules guard, resolved: the one the session was
+    started with (`--config-dir` / LOCALHARNESS_DIR, as start resolved it) and the default one,
+    which still holds the trust store and the grants a `--config-dir` session reads."""
+    out: list[Path] = []
+    for folder in (ctx.config_dir, global_config_dir()):
+        if folder is None:
+            continue
+        try:
+            resolved = Path(folder).resolve()
+        except (OSError, ValueError):
+            continue
+        if resolved not in out:
+            out.append(resolved)
+    return out
+
+
 def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
     """Does this resolved target land on a protected path? (PRD §3.1 ``protected-path``.)
 
@@ -591,12 +608,9 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
             continue
         if path == base or _within(base, path):
             return True
-    try:
-        config_dir = global_config_dir().resolve()
-    except (OSError, ValueError):
-        config_dir = None
-    if config_dir is not None and _within(config_dir, path):
-        return bool(_config_dir_verdict(path.relative_to(config_dir).parts, settings))
+    for config_dir in _config_dirs(ctx):
+        if _within(config_dir, path):
+            return bool(_config_dir_verdict(path.relative_to(config_dir).parts, settings))
     # `auto` keeps only the in-project name whose CONTENTS decide what runs next (owner ruling
     # 2026-09-11): `.git` — hooks and config. Writing your own project's `.env` is ordinary work,
     # and the key material the other patterns guard lives under the home set, which applies in
@@ -1343,8 +1357,9 @@ def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
     contents are not known in advance). A command that runs code inline through an
     interpreter is not read, nor is a path holding any other variable. Never raises.
 
-    The machine's folder is the session's (`ctx.config_dir`, as start resolved `--config-dir` /
-    LOCALHARNESS_DIR), else global_config_dir(); any folder named `.localharness` is a project's.
+    The machine's folders are the session's (`ctx.config_dir`, as start resolved `--config-dir` /
+    LOCALHARNESS_DIR) and the default one (`_config_dirs`); any folder named `.localharness` is a
+    project's.
 
     `PermissionGate.check` runs this AHEAD of :func:`evaluate` and denies on a hit (orchestrator
     ruling R13), so :func:`evaluate`'s own answer for these files stays the protected-path ask."""
@@ -1373,16 +1388,16 @@ def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
             anchor = _shell_anchor(tool_name, params, ctx)
         else:
             return None
-        config_dir = str((ctx.config_dir or global_config_dir()).resolve()).casefold()
+        config_dirs = {str(folder).casefold() for folder in _config_dirs(ctx)}
         for raw in targets:
             for path in _named_file(raw, anchor):
                 if path.name.casefold() in HARNESS_CONFIG_FILES and (
-                        str(path.parent).casefold() == config_dir
+                        str(path.parent).casefold() in config_dirs
                         or path.parent.name.casefold() == WORKSPACE_DIR_NAME):
                     return path
         for raw, names in folders:
             for path in _named_file(raw, anchor):
-                if str(path).casefold() == config_dir or path.name.casefold() == WORKSPACE_DIR_NAME:
+                if str(path).casefold() in config_dirs or path.name.casefold() == WORKSPACE_DIR_NAME:
                     if names is None:
                         return path  # an unpack or a server-named download: not known in advance
                     named = next((n for n in names if n.casefold() in HARNESS_CONFIG_FILES), None)

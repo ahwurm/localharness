@@ -511,6 +511,27 @@ async def test_a_linked_script_in_guarded_asks_by_its_entry_and_no_python3_grant
         Verdict.ASK, CLASS, f"{link}@{_short(b'import os' + NL)}")
 
 
+@pytest.mark.parametrize("mode", ["auto", "guarded"])
+def test_a_config_dir_sessions_protected_entries_are_protected_and_so_are_the_defaults(
+        g, tmp_path, proj, mode):
+    """The verifier's finding: the protected list (plugins/**, grants.yaml, trusted_workspaces.yaml
+    …) was keyed on the default folder only, so in a `--config-dir /custom` session a write to
+    /custom/plugins/x/__init__.py ran in `auto` without a question. Both folders are now guarded:
+    the session's own, and the default one, where its trust store and grants still live."""
+    custom = (tmp_path / "custom").resolve()
+    (custom / "plugins" / "x").mkdir(parents=True)
+    ctx = dataclasses.replace(_base(proj, mode), config_dir=custom)
+    write = ToolMeta(group="fs.write", destructive=True)
+
+    for target in (custom / "plugins" / "x" / "__init__.py", custom / "grants.yaml",
+                   g / "trusted_workspaces.yaml", g / "plugins" / "y.py"):
+        result = evaluate("write", {"path": str(target), "content": "x"}, write, ctx, SETTINGS)
+        assert result.verdict is Verdict.ASK and result.request.klass == "protected-path", target
+    agent_file = evaluate("write", {"path": str(custom / "agents" / "x.yaml"), "content": "x"},
+                          write, ctx, SETTINGS)
+    assert agent_file.verdict is Verdict.ALLOW or agent_file.request.klass != "protected-path"
+
+
 @pytest.mark.asyncio
 async def test_a_session_started_with_its_own_config_dir_guards_that_folder(tmp_path, proj, monkeypatch):
     """`--config-dir /custom`: the gate is handed /custom, so its tools folder and its settings
