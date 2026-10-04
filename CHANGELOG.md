@@ -337,10 +337,10 @@ All notable changes to LocalHarness are documented here. The format follows
   can rewrite any file you own, that record included, and a start believes the
   record it finds.
 - Of your machine's `config.yaml` and `overrides.yaml`, the record a start
-  confirms holds the `agent:` section, the looser `org:` permissions and the
-  `server:` launch command only. Code the agent runs can change any other
-  setting in those files, and the change takes effect at the next start
-  without a question.
+  confirms holds the `agent:` section, the looser `org:` permissions and three
+  `server:` keys (`binary`, `docker_image`, `extra_args`) only. Code the agent
+  runs can change any other setting in those files, other launch settings
+  included, and the change takes effect at the next start without a question.
 - In Zed, the mode shown before the first prompt can be one your own agent file
   sets that the start then withheld.
 - A GET to a public host can still carry data out in its URL: that is
