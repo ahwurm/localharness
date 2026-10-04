@@ -59,6 +59,18 @@ def _embedding_model_cached(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_model_download(monkeypatch):
+    """No test downloads a model. Memory's engine fetches a missing embedding model with
+    `huggingface_hub.snapshot_download` (R24), and under the suite's fake HOME every model is missing:
+    a test that reached it with a stand-in loader once pulled the real 1.2 GB model. A test that means
+    to exercise the download patches it itself."""
+    def refuse(repo_id, *args, **kwargs):
+        raise RuntimeError(f"a test tried to download {repo_id} from the Hugging Face hub")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _pin_terminal_color_env(monkeypatch):
     """#131: color-rendering tests build consoles with force_terminal=True but never pin
     color_system, so Rich still consults the AMBIENT environment for whether color is allowed.

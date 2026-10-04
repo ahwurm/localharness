@@ -346,8 +346,10 @@ def test_a_cached_embedding_model_loads_from_the_cache_with_no_network_call(
         tmp_path, monkeypatch, no_network, caplog):
     """The verifier's finding: loaded by id, the embedding model was checked against
     huggingface.co on every load, cached or not, and with `local_files_only=True` the library
-    still fetched its "agent harnesses" list. A model in the cache now loads from its folder."""
+    still fetched its "agent harnesses" list. A model in the cache now loads from its folder, and
+    the library is handed that folder's absolute path, never the id (R24)."""
     pytest.importorskip("sentence_transformers")
+    import sentence_transformers
     from huggingface_hub import constants
 
     from localharness.memory.resonance import ResonanceEngine
@@ -356,10 +358,19 @@ def test_a_cached_embedding_model_loads_from_the_cache_with_no_network_call(
     assert no_network == [], "building the test model asked the network"
     monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
     caplog.set_level(logging.DEBUG, logger="localharness.memory.resonance")
+    handed: list[str] = []
+
+    class Recording(sentence_transformers.SentenceTransformer):  # model_type is inherited
+        def __init__(self, name, *args, **kwargs):
+            handed.append(name)
+            super().__init__(name, *args, **kwargs)
+
+    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", Recording)
 
     vector = ResonanceEngine("lh-test/tiny").embed_query("hello memory")
 
     assert no_network == []
+    assert handed == [str(tmp_path / "hub" / "models--lh-test--tiny" / "snapshots" / ("0" * 40))]
     assert vector.shape == (8,) and math.isclose(float(vector @ vector), 1.0, rel_tol=1e-5)
     assert "huggingface.co" not in caplog.text
 
@@ -379,12 +390,13 @@ class _Said(logging.Handler):
 def test_only_a_real_cache_miss_downloads_and_the_start_line_comes_first(case, tmp_path,
                                                                          monkeypatch):
     """A model not in the cache, or one whose cached copy is missing a file (an interrupted
-    download), is downloaded by id, and the start summary's line goes to memory.log first; a model
-    given as a folder loads from it and is never looked up."""
+    download), is downloaded into the cache and loaded from there by its folder, never by id (R24),
+    and the start summary's line goes to memory.log first; a model given as a folder loads from it
+    and is never looked up."""
     from localharness.memory.resonance import DEFAULT_EMBEDDING_MODEL, ResonanceEngine
 
     events: list[tuple[str, str]] = []
-    snapshot = tmp_path / "snapshot"
+    snapshot, fetched = tmp_path / "snapshot", tmp_path / "fetched"
 
     class FakeSentenceTransformer:
         prompts: dict = {}
@@ -401,6 +413,12 @@ def test_only_a_real_cache_miss_downloads_and_the_start_line_comes_first(case, t
         assert case != "a-local-folder", "a local folder was looked up in the hub cache"
         return str(snapshot / filename) if case == "an-interrupted-download" else None
 
+    def snapshot_download(repo, *args, **kwargs):
+        events.append(("download", repo))
+        fetched.mkdir()
+        return str(fetched)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
     monkeypatch.setitem(sys.modules, "sentence_transformers",
                         types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer))
     monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lookup)
@@ -415,7 +433,8 @@ def test_only_a_real_cache_miss_downloads_and_the_start_line_comes_first(case, t
         logger.removeHandler(said)
 
     assert events == {
-        "not-in-the-cache": [("said", NOTICE), ("load", model)],
-        "an-interrupted-download": [("load", str(snapshot)), ("said", NOTICE), ("load", model)],
+        "not-in-the-cache": [("said", NOTICE), ("download", model), ("load", str(fetched))],
+        "an-interrupted-download": [("load", str(snapshot)), ("said", NOTICE), ("download", model),
+                                    ("load", str(fetched))],
         "a-local-folder": [("load", model)],
     }[case]

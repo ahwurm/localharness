@@ -20,9 +20,11 @@ configured model changes.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -33,6 +35,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
 
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+# R24: the one line for a model that names code of its own, and the one for a relative folder.
+SHIPS_CODE_LINE = ("memory: the embedding model {model} ships its own code; LocalHarness does not run "
+                   "it — choose a model without custom modules")
+RELATIVE_FOLDER_LINE = ("memory: the embedding model {model} is a relative path, read from the config "
+                        "folder as {folder} (never from the current folder)")
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +58,15 @@ class ResonanceUnavailable(MemoryError):
         )
 
 
+class EmbeddingModelRefused(ResonanceUnavailable):
+    """The embedding model names code of its own (R24): refused in one line, and memory's embedding
+    leg stays off for the session, as for a model that cannot load."""
+
+    def __init__(self, model_name: str) -> None:
+        self.model_name = model_name
+        MemoryError.__init__(self, SHIPS_CODE_LINE.format(model=model_name))
+
+
 class ResonanceEngine:
     """Lazy-loading wrapper around the subject-family sentence-embedding model.
 
@@ -60,9 +76,12 @@ class ResonanceEngine:
     enough that serialization is invisible.
     """
 
-    def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL) -> None:
+    def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL,
+                 config_dir: str | os.PathLike | None = None) -> None:
         self.model_name = model_name
+        self.config_dir = config_dir  # where a relative folder is read from (None: the machine's)
         self._model = None
+        self._refused = False
         self._lock = threading.Lock()
 
     # -- loading -----------------------------------------------------------
@@ -70,13 +89,19 @@ class ResonanceEngine:
     def _ensure_loaded(self):
         if self._model is not None:
             return self._model
+        if self._refused:
+            raise EmbeddingModelRefused(self.model_name)
         try:
             from localharness.memory.embeddings import _quiet_ml_output
 
             with _quiet_ml_output():
                 from sentence_transformers import SentenceTransformer
 
-                self._model = _load(SentenceTransformer, self.model_name)
+                self._model = _load(SentenceTransformer, self.model_name, self.config_dir)
+        except EmbeddingModelRefused as exc:  # said once; every later use is refused as it stands
+            self._refused = True
+            log.warning("%s", exc)
+            raise
         except Exception as exc:  # loud, typed, actionable — never swallowed
             raise ResonanceUnavailable(self.model_name, exc) from exc
         return self._model
@@ -132,32 +157,153 @@ def cached_copy(model: str) -> str | None:
     return None
 
 
-def _load(factory, model: str):
-    """`model` loaded by `factory` (SentenceTransformer), reaching huggingface.co only on a real
-    cache miss, and only after the start notice's line is logged (R8).
+def model_folder(model: str, config_dir: str | os.PathLike | None = None) -> Path | None:
+    """The folder `model` names, as an absolute path, or None when it is a model id. `~` expands. A
+    relative path is the config folder's (`config_dir`, else the machine's), and a folder only when
+    that folder holds it; never the current folder's, where sentence-transformers would look for a
+    name first, so a cloned project could ship one named like the model (R24)."""
+    path = Path(model).expanduser()
+    if not path.is_absolute():
+        if config_dir is None:
+            from localharness.config.paths import global_config_dir
 
-    A model given as a folder loads from it. A model id loads from its copy in the local Hugging
-    Face cache BY THAT FOLDER, so the hub library is never asked: loaded by id, it was checked
-    against huggingface.co on every load, and even with `local_files_only=True` the library still
-    fetched its list of "agent harnesses" for its user-agent header whenever its own copy of that
-    list was missing or a day old (huggingface_hub 1.x). HF_HUB_OFFLINE is no way round it: the
-    library reads it once, at import, and setting it for the process would change it for
-    everything else the session runs. A cached copy missing a file the model needs (an interrupted
-    download) is a cache miss: the download completes it."""
-    folder = os.path.expanduser(model)
-    if os.path.exists(folder):
-        return factory(folder, device="cpu")
-    cached = cached_copy(model)
+            config_dir = global_config_dir()
+        path = Path(config_dir).expanduser() / path
+        if not path.is_dir():
+            return None
+    return path.absolute()
+
+
+def _load(factory, model: str, config_dir: str | os.PathLike | None = None):
+    """`model` loaded by `factory` (SentenceTransformer), only from a vetted folder and only by its
+    absolute path (R24): the library is never handed a name, which it would resolve against the
+    current folder first. A model id is its snapshot in the local Hugging Face cache, and
+    huggingface.co is reached only on a real cache miss, after the start notice's line is logged (R8).
+
+    Loaded by id, the model was checked against huggingface.co on every load, and even with
+    `local_files_only=True` the hub library still fetched its list of "agent harnesses" for its
+    user-agent header whenever its own copy of that list was missing or a day old (huggingface_hub
+    1.x). HF_HUB_OFFLINE is no way round it: the library reads it once, at import, and setting it for
+    the process would change it for everything else the session runs. A cached copy missing a file
+    the model needs (an interrupted download) is a cache miss: the download completes it."""
+    folder = model_folder(model, config_dir)
+    if folder is not None:
+        if not Path(model).expanduser().is_absolute():
+            log.warning(RELATIVE_FOLDER_LINE.format(model=model, folder=folder))
+        if not folder.is_dir():
+            raise FileNotFoundError(f"no such folder: {folder}")
+        return _vetted(factory, folder, model)
+    repo = _repo(factory, model)
+    cached = cached_copy(repo)
     if cached is not None:
         try:
-            return factory(cached, device="cpu")
+            return _vetted(factory, cached, model)
         except OSError:
             log.debug("the cached copy of %s is incomplete — downloading the rest", model,
                       exc_info=True)
+    from huggingface_hub import snapshot_download
+
     from localharness.memory.plugin import embedding_download_line
 
     log.warning(embedding_download_line(model))
-    return factory(model, device="cpu")
+    return _vetted(factory, snapshot_download(repo), model)
+
+
+def _repo(factory, model: str) -> str:
+    """The hub repo of the model id `model`, as `factory` itself resolves a name with no owner: its
+    organisation's (`sentence-transformers/<name>`), except the original transformers models."""
+    org = getattr(factory, "default_huggingface_organization", None)
+    if not org or "/" in model:
+        return model
+    try:
+        from sentence_transformers.util.misc import ORIGINAL_TRANSFORMER_MODELS as originals
+    except ImportError:  # a library without the list keeps every name as given
+        return model
+    return model if model.lower() in originals else f"{org}/{model}"
+
+
+def _vetted(factory, folder: str | os.PathLike, model: str):
+    """`factory` over the model in `folder`, by its absolute path, once nothing in it names code."""
+    folder = Path(folder).absolute()
+    found = code_named(folder)
+    if found is not None:
+        log.debug("embedding model %s: %s", model, found)
+        raise EmbeddingModelRefused(model)
+    return factory(str(folder), device="cpu")
+
+
+_OWN = "sentence_transformers."  # the library's own classes, imported from the installed package
+
+
+def code_named(root: Path) -> str | None:
+    """What in the model at `root` names code of its own, or None. Read from its files; nothing is
+    imported. Every class reference sentence-transformers resolves while loading it must be the
+    library's own, because for anything else it imports the module FROM the model's folder, with no
+    `trust_remote_code` asked (5.6; deprecated, removed in v6): each module type in `modules.json` and
+    in a Router's (or the older Asym's) config, recursively; a Dense module's activation function
+    (torch's); a WordEmbeddings module's tokenizer class. And no config in the model's folders may map
+    a class to code (`auto_map`, what transformers runs with trust) or turn `trust_remote_code` on."""
+    modules = _json(root / "modules.json")
+    todo = [(root, entry) for entry in modules] if isinstance(modules, list) else []
+    folders, seen = [root], set()
+    while todo:
+        parent, entry = todo.pop()
+        ref = entry.get("type") if isinstance(entry, dict) else None
+        if not (isinstance(ref, str) and ref.startswith(_OWN)):
+            return f"module {ref!r}"
+        here = parent / str(entry.get("path") or "")
+        if (os.path.realpath(here), ref) in seen:
+            continue
+        seen.add((os.path.realpath(here), ref))
+        folders.append(here)
+        kind = ref.rsplit(".", 1)[-1]
+        if kind in ("Router", "Asym"):
+            for name in ("router_config.json", "asym_config.json", "config.json"):
+                types = _key(here / name, "types")
+                if isinstance(types, dict):
+                    todo += [(here, {"type": t, "path": str(k)}) for k, t in types.items()]
+        elif kind == "Dense":
+            fn = _key(here / "config.json", "activation_function")
+            if fn is not None and not (isinstance(fn, str) and fn.startswith("torch.")):
+                return f"activation function {fn!r}"
+        elif kind == "WordEmbeddings":
+            cls = _key(here / "wordembedding_config.json", "tokenizer_class")
+            if cls is not None and not (isinstance(cls, str) and cls.startswith(_OWN)):
+                return f"tokenizer {cls!r}"
+    for here in folders:
+        for config in sorted(here.glob("*config*.json")):
+            if _asks_for_code(_json(config)):
+                return f"custom code in {config}"
+    return None
+
+
+def _json(path: Path):
+    """The JSON in `path`, or None when it is missing or unreadable: the library, reading it the same
+    way, could not act on it either."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError, RecursionError):
+        return None
+
+
+def _key(path: Path, key: str):
+    data = _json(path)
+    return data.get(key) if isinstance(data, dict) else None
+
+
+def _asks_for_code(data) -> bool:
+    """Does this config, at any depth, map a class to code (`auto_map`) or turn `trust_remote_code` on?"""
+    todo = [data]
+    while todo:
+        item = todo.pop()
+        if isinstance(item, dict):
+            if "auto_map" in item or item.get("trust_remote_code"):
+                return True
+            todo += item.values()
+        elif isinstance(item, list):
+            todo += item
+    return False
 
 
 # -- vector packing ---------------------------------------------------------

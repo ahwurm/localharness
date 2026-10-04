@@ -105,7 +105,7 @@ class MemoryPlugin(MemorySlotPlugin):
         except Exception:
             log.warning("recall router unavailable — memory reads use the session's store", exc_info=True)
             self._router = None
-        self._engine = ResonanceEngine(cfg.embedding_model)
+        self._engine = ResonanceEngine(cfg.embedding_model, config_dir=ctx.paths.global_config_dir)
         ws = ctx.paths.workspace
         self._browse = StoreBrowse(self._store, self._router,
                                    workspace_identity=str(ws.resolve().parent) if ws is not None else "")
@@ -121,7 +121,7 @@ class MemoryPlugin(MemorySlotPlugin):
         s, cfg = ctx.session, ctx.agent_config
         try:
             await self._store.open()
-            notice = _embedding_download_notice(cfg.embedding_model)
+            notice = _embedding_download_notice(cfg.embedding_model, ctx.paths.global_config_dir)
             if notice is not None:
                 self.startup_warnings.append(notice)
             try:
@@ -266,14 +266,13 @@ class MemoryPlugin(MemorySlotPlugin):
         memory search does not stop to download it. Nothing to do when the model is a local path or
         already cached; without the sentence_transformers package it downloads nothing and says how
         to install it. huggingface_hub (a core dependency) prints its own progress bar."""
-        from pathlib import Path
         model = getattr(ctx.agent_config, "embedding_model", None) or "Qwen/Qwen3-Embedding-0.6B"
         if not _embedding_package_installed():
             return [Check(name="memory-embedding", status="warn",
                           detail="nothing downloaded: the sentence_transformers package is not installed",
                           hint="install it first: uv tool install 'localharness[embeddings]', naming the "
                                "other extras you use too (a reinstall keeps only the extras it names)")]
-        if Path(model).expanduser().exists() or _embedding_check(model).status == "pass":
+        if _is_folder(model, ctx.paths.global_config_dir) or _embedding_check(model).status == "pass":
             return []
         from localharness.provider.server import download_model  # lazy: provider/__init__ pulls httpx
         download_model(model)
@@ -310,13 +309,18 @@ def _embedding_package_installed() -> bool:
     return importlib.util.find_spec("sentence_transformers") is not None
 
 
-def _embedding_download_notice(model: str) -> str | None:
-    """The one summary line for a start whose embedding model is not on this machine yet. None for
-    a model given as a local path, without the sentence_transformers package (nothing would be
-    fetched), or with the model already in the local cache. Reads the cache only, like doctor."""
-    from pathlib import Path
+def _is_folder(model: str, config_dir: Any = None) -> bool:
+    """Does `model` name a folder: an absolute path, or a relative one the config folder holds (R24:
+    never the current folder)? resonance.model_folder is the engine's own rule."""
+    from localharness.memory.resonance import model_folder
+    return model_folder(model, config_dir) is not None
 
-    if Path(model).expanduser().exists() or not _embedding_package_installed():
+
+def _embedding_download_notice(model: str, config_dir: Any = None) -> str | None:
+    """The one summary line for a start whose embedding model is not on this machine yet. None for
+    a model given as a folder, without the sentence_transformers package (nothing would be
+    fetched), or with the model already in the local cache. Reads the cache only, like doctor."""
+    if _is_folder(model, config_dir) or not _embedding_package_installed():
         return None
     try:
         if _embedding_check(model).status != "fail":
