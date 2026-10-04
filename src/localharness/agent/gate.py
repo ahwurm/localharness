@@ -31,6 +31,8 @@ from typing import Any, Optional
 from localharness.agent.gate_types import (
     DEFAULT_MODE,
     HARNESS_CONFIG_FILE_REASON,
+    HARNESS_CONFIG_FILES,
+    HARNESS_CONFIG_FOLDER_REASON,
     MODE_STRICTNESS,
     PENDING_OBSERVATION,
     PENDING_REPEAT_OBSERVATION,
@@ -608,7 +610,9 @@ class PermissionGate:
         hit = harness_config_file_target(tool_name, tool_params, self.context(deny), self.settings)
         if hit is not None:
             self._approved_once.pop(identity, None)  # spent on sight, as below: never stockpiled
-            return GateOutcome(allowed=False, reason=HARNESS_CONFIG_FILE_REASON.format(
+            reason = (HARNESS_CONFIG_FILE_REASON if hit.name.casefold() in HARNESS_CONFIG_FILES
+                      else HARNESS_CONFIG_FOLDER_REASON)  # the folder itself: an unpack, a fetch
+            return GateOutcome(allowed=False, reason=reason.format(
                 path=str(hit).replace("\r", "\\r").replace("\n", "\\n")))
         # A human answered `/approve` for exactly this call. The ticket is spent on sight, so it
         # can never be stockpiled — but it only turns an ASK into an ALLOW below: a DENY from the

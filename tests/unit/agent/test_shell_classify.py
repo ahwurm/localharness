@@ -237,6 +237,35 @@ def test_a_target_directory_flag_is_the_destination(
     assert classify_shell(command, SETTINGS).write_targets == targets
 
 
+SPELLINGS: list[tuple[str, tuple[str, ...]]] = [
+    # ln takes -t too, and a cluster may end in the value-taking letter (the fix-commit review)
+    ("ln -sf -t ~/.ssh key", ("~/.ssh/key",)),
+    ("ln -sft ~/.ssh key", ("~/.ssh/key",)),
+    ("cp -rt ~/.ssh key", ("~/.ssh/key",)),
+    ("cp -t~/.ssh key", ("~/.ssh/key",)),
+    ("install -m755 -t /usr/local/bin tool", ("/usr/local/bin/tool",)),
+    # a short option's value may be attached
+    ("tar -xf a.tar -C/srv/x", ("/srv/x",)),
+    ("unzip -o a.zip -d/srv/x", ("/srv/x",)),
+    ("curl -o/srv/x/out.txt https://h/a", ("/srv/x/out.txt",)),
+    ("wget -O/srv/x/out.txt https://h/a", ("/srv/x/out.txt",)),
+    # tar under its other names, and unzip's own flag only
+    ("bsdtar -xf a.tar -C /srv/x", ("/srv/x",)),
+    ("gtar -xf a.tar --directory=/srv/x", ("/srv/x",)),
+    ("unzip -C a.zip", (".",)),
+    # downloads into a folder
+    ("wget -P /srv/x https://h/a.txt", ("/srv/x/a.txt",)),
+    ("wget -q -P /srv/x -U agent https://h/b.pem", ("/srv/x/b.pem",)),
+    ("curl --output-dir /srv/x -O https://h/a.txt", ("/srv/x/a.txt",)),
+    ("curl --output-dir /srv/x -o b.txt https://h/a", ("/srv/x/b.txt",)),
+]
+
+
+@pytest.mark.parametrize("command,targets", SPELLINGS, ids=[c[0] for c in SPELLINGS])
+def test_every_spelling_of_a_destination_is_read(command: str, targets: tuple[str, ...]) -> None:
+    assert classify_shell(command, SETTINGS).write_targets == targets
+
+
 def test_a_target_directory_is_joined_onto_the_cd() -> None:
     """R6 and R2a compose: a relative `-t` directory still follows the `cd`."""
     assert classify_shell("cd /tmp && cp -t out a", SETTINGS).write_targets == ("/tmp/out/a",)

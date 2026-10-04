@@ -48,6 +48,7 @@ import posixpath
 import re
 import shlex
 from dataclasses import replace
+from typing import NamedTuple, Optional, Sequence
 
 from .gate_types import (
     DOTTED_VARIANT_SEPARATOR,
@@ -557,12 +558,20 @@ being read as the destination."""
 COPY_COMMANDS = ("cp", "mv", "install", "rsync")
 """PRD §3.2 step 8: the commands whose destination is a positional argument."""
 
-TARGET_DIRECTORY_COMMANDS = frozenset({"cp", "mv", "install"})
-"""The coreutils copies that also accept the destination as a FLAG: ``-t DIR`` /
+TARGET_DIRECTORY_COMMANDS = frozenset({"cp", "mv", "install", "ln"})
+"""The coreutils copies (and ``ln``) that also accept the destination as a FLAG: ``-t DIR`` /
 ``--target-directory=DIR`` puts every positional on the SOURCE side, so reading the last
 positional reported the source as the target — ``cp -t ~/.ssh mykey`` looked like a write to
-``mykey`` (finding R6). ``rsync`` is deliberately absent: its ``-t`` is ``--times``
-(cp(1), mv(1), install(1), rsync(1))."""
+``mykey`` (finding R6), and ``ln -sf -t ~/.ssh key`` still did. ``rsync`` is deliberately absent:
+its ``-t`` is ``--times`` (cp(1), mv(1), install(1), ln(1), rsync(1))."""
+
+COPY_VALUE_LETTERS = "tSmog"
+"""The short options of cp/mv/install/ln whose argument follows (``-m 755``) or is attached
+(``-m755``), also inside a cluster (``-sft DIR``): ``t`` is the target directory."""
+
+TAR_FAMILY: frozenset[str] = frozenset({"tar", "bsdtar", "gtar"})
+"""tar under the names it is installed as: each is read as ``tar`` (``-C DIR`` is where an
+extract writes), and the ``write_shaped_commands`` setting names the family as ``tar``."""
 
 TARGET_DIRECTORY_FLAGS = ("-t", "--target-directory")
 NO_TARGET_DIRECTORY_FLAGS = ("-T", "--no-target-directory")
@@ -1764,7 +1773,8 @@ def _write_targets(signature: str, argv: tuple[str, ...], settings: GateSettings
     head = argv[0]
     if signature == "sed -i":
         return _sed_files(list(argv))
-    if head not in settings.write_shaped_commands:
+    family = "tar" if head in TAR_FAMILY else head
+    if family not in settings.write_shaped_commands:
         return []
     if head == "git":
         return _git_targets(signature, argv)
@@ -1772,18 +1782,25 @@ def _write_targets(signature: str, argv: tuple[str, ...], settings: GateSettings
     positionals = [token for token in rest if not token.startswith("-")]
     if head in ("tee", "touch", "mkdir"):
         return positionals
-    if head in COPY_COMMANDS:
+    if head in COPY_COMMANDS or head == "ln":
         return _copy_targets(head, rest)
-    if head == "ln":
-        return positionals[-1:] if len(positionals) >= 2 else positionals
     if head == "dd":
         return [token.split("=", 1)[1] for token in rest if token.startswith("of=")]
     if head == "curl":
-        return _flag_values(rest, ("-o", "--output")) or _remote_names(rest)
+        # --output-dir puts every saved file — named by -o or by the URL (-O) — in that folder
+        names = _flag_values(rest, ("-o", "--output"), attached=True) or _remote_names(rest)
+        folder = _flag_values(rest, ("--output-dir",))
+        return [posixpath.join(folder[-1], name) for name in names] if folder else names
     if head == "wget":
-        return _flag_values(rest, ("-O", "--output-document"))
-    if head in ("unzip", "tar"):
-        return _flag_values(rest, ("-d", "-C", "--directory")) or ["."]
+        named = _flag_values(rest, ("-O", "--output-document"), attached=True)
+        if named:
+            return named
+        prefix = _flag_values(rest, ("-P", "--directory-prefix"), attached=True)
+        return [posixpath.join(prefix[-1], name) for name in _url_leaves(rest)] if prefix else []
+    if family == "tar":
+        return _flag_values(rest, ("-C", "--directory"), attached=True) or ["."]
+    if head == "unzip":
+        return _flag_values(rest, ("-d",), attached=True) or ["."]
     return []
 
 
@@ -1920,15 +1937,91 @@ def _copy_targets(head: str, rest: list[str]) -> list[str]:
     :data:`TARGET_DIRECTORY_COMMANDS` for why ``rsync`` keeps the positional rule.
     """
     if head in TARGET_DIRECTORY_COMMANDS:
-        sources = _positionals(rest, COPY_VALUE_FLAGS)
-        directory = _flag_values(rest, TARGET_DIRECTORY_FLAGS)
-        if directory and not any(token in NO_TARGET_DIRECTORY_FLAGS for token in rest):
-            return [posixpath.join(directory[-1], _leaf(source)) for source in sources] or [
-                directory[-1]
-            ]
-        return sources[-1:] if len(sources) >= 2 else sources
+        ops = copy_operands(rest)
+        if ops.into and ops.destination is not None:
+            return [posixpath.join(ops.destination, _leaf(source))
+                    for source in ops.sources] or [ops.destination]
+        return [ops.destination] if ops.destination is not None else list(ops.sources)
     positionals = [token for token in rest if not token.startswith("-")]
     return positionals[-1:] if len(positionals) >= 2 else positionals
+
+
+class CopyOperands(NamedTuple):
+    """What a ``cp``/``mv``/``install``/``ln`` command copies, and where to."""
+
+    sources: tuple[str, ...]
+    destination: Optional[str]
+    into: bool
+    """The destination was named by ``-t`` / ``--target-directory``: every source lands in it."""
+    contents: bool
+    """``-T`` / ``--no-target-directory``: the destination is the copy itself, so a directory
+    source's CONTENTS land in it under names the command line does not show."""
+
+
+def copy_operands(rest: Sequence[str]) -> CopyOperands:
+    """Split a cp/mv/install/ln argument list (after the program) into sources and destination.
+
+    Reads ``-t DIR``, ``-tDIR``, ``--target-directory[=]DIR`` and a cluster ending in ``t``
+    (``-sft DIR``); skips the value of every value-taking option (``-m 755``, ``-S .bak``,
+    ``--suffix X``) so it is never read as a path; ``--`` ends the options."""
+    positionals: list[str] = []
+    target: Optional[str] = None
+    no_target = False
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        index += 1
+        if token == "--":
+            positionals += rest[index:]
+            break
+        if token.startswith("--"):
+            name, eq, value = token.partition("=")
+            if name in TARGET_DIRECTORY_FLAGS:
+                if eq:
+                    target = value
+                elif index < len(rest):
+                    target, index = rest[index], index + 1
+            elif name in NO_TARGET_DIRECTORY_FLAGS:
+                no_target = True
+            elif name in COPY_VALUE_FLAGS and not eq and name not in ("--backup", "--context"):
+                index += 1  # its value is the next word
+            continue
+        if token.startswith("-") and token != "-":
+            letters = token[1:]
+            for at, letter in enumerate(letters):
+                if letter == "T":
+                    no_target = True
+                if letter in COPY_VALUE_LETTERS:
+                    value = letters[at + 1:]
+                    if not value and index < len(rest):
+                        value, index = rest[index], index + 1
+                    if letter == "t":
+                        target = value
+                    break
+            continue
+        positionals.append(token)
+    if target is not None and not no_target:
+        return CopyOperands(tuple(positionals), target, True, False)
+    if len(positionals) >= 2:
+        return CopyOperands(tuple(positionals[:-1]), positionals[-1], False, no_target)
+    return CopyOperands(tuple(positionals), None, False, no_target)
+
+
+WGET_VALUE_FLAGS: frozenset[str] = frozenset({
+    "-P", "--directory-prefix", "-O", "--output-document", "-o", "--output-file",
+    "-a", "--append-output", "-e", "--execute", "-U", "--user-agent", "--header", "-i",
+    "--input-file", "-B", "--base", "-t", "--tries", "-T", "--timeout", "-w", "--wait", "--user",
+    "--password", "-l", "--level", "-A", "--accept", "-R", "--reject", "-D", "--domains",
+    "-X", "--exclude-directories", "-I", "--include-directories",
+})
+"""wget options whose next word is a value, not a URL (wget(1))."""
+
+
+def _url_leaves(rest: list[str]) -> list[str]:
+    """The file name each URL of a ``wget`` saves under, by default: the last path segment."""
+    urls = _positionals(rest, WGET_VALUE_FLAGS)
+    return [url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] or SUBSTITUTION_SENTINEL
+            for url in urls] or [SUBSTITUTION_SENTINEL]
 
 
 def _positionals(rest: list[str], value_flags: frozenset[str]) -> list[str]:
@@ -1950,14 +2043,19 @@ def _leaf(path: str) -> str:
     return posixpath.basename(path.rstrip("/")) or path
 
 
-def _flag_values(rest: list[str], flags: tuple[str, ...]) -> list[str]:
-    """Values of ``flag VALUE`` / ``flag=VALUE`` occurrences."""
+def _flag_values(rest: list[str], flags: tuple[str, ...], *, attached: bool = False) -> list[str]:
+    """Values of ``flag VALUE`` / ``flag=VALUE`` occurrences — and, with ``attached``, of a short
+    flag written with its value attached (``-C/dir``, ``-d/dir``, ``-ofile``)."""
     values: list[str] = []
     for index, token in enumerate(rest):
         if token in flags and index + 1 < len(rest):
             values.append(rest[index + 1])
         elif any(token.startswith(f"{flag}=") for flag in flags):
             values.append(token.split("=", 1)[1])
+        elif attached and len(token) > 2 and any(
+                len(flag) == 2 and flag[0] == "-" and flag[1] != "-" and token.startswith(flag)
+                for flag in flags):
+            values.append(token[2:])
     return values
 
 

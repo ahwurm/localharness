@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import posixpath
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Callable, Literal, Optional
@@ -1252,11 +1253,20 @@ def _named_file(raw: str, anchor: Optional[Path]) -> tuple[Path, ...]:
         return (real,)
 
 
-_INTO_FOLDER_PROGRAMS: frozenset[str] = frozenset(
-    {"cp", "mv", "install", "rsync", "ln", "tar", "bsdtar", "gtar", "unzip", "7z", "7za", "7zr"})
-"""Programs that copy, move, link or unpack INTO a destination folder (`cp x DIR/`, `ln -s x DIR/`,
-`tar -x -C DIR`, `unzip -d DIR`, `7z x -oDIR`): written into a harness config folder, the settings
-files could land there, under whatever name the source or the archive gives them."""
+_COPY_INTO_PROGRAMS: frozenset[str] = frozenset({"cp", "mv", "install", "ln"})
+"""Programs that put a source INTO a destination folder under the source's own name (`cp x DIR/`,
+`ln -s x DIR/`). Into a harness config folder that is a settings write only when a source is
+named like one of the settings files (`cp /tmp/config.yaml ~/.localharness/`); `cp cert.pem
+~/.localharness/` is an ordinary write and stays with the verdict."""
+
+_UNPACK_PROGRAMS: frozenset[str] = frozenset({"tar", "bsdtar", "gtar", "unzip", "7z", "7za", "7zr"})
+"""Programs that unpack an archive into a folder (`tar -x -C DIR`, `unzip -d DIR`, `7z x -oDIR`):
+what lands there is not on the command line, so into a harness config folder it is refused."""
+
+_SERVER_NAMED = {"curl": ("-J", "--remote-header-name"),
+                 "wget": ("--content-disposition", "--trust-server-names")}
+"""Download options that let the SERVER choose the saved file's name (curl -OJ, wget
+--content-disposition): into a harness config folder the name is not known in advance."""
 
 
 def _expand_home(raw: str) -> str:
@@ -1277,20 +1287,46 @@ def _tar_extracts(args: tuple[str, ...]) -> bool:
                             and "x" in a[1:] for a in args)
 
 
-def _into_folders(segment) -> list[str]:
-    """The folders a copy, move, link or unpack writes into: the classifier's write targets for
-    those programs (only when tar extracts), plus 7z's `-o<dir>`, which it does not model."""
+def _into_folder_writes(segment) -> list[tuple[str, Optional[tuple[str, ...]]]]:
+    """(folder, names written into it, or None when they are not known in advance) for each
+    copy, move, link, unpack or server-named download in `segment`. The folder is the classifier's
+    write target (so a `cd` earlier in the command is followed); the names come off the command
+    line. A `-t DIR` copy needs nothing here: the classifier already reads it as DIR/<name>."""
+    from localharness.agent.shell_classify import copy_operands
+
     program = Path(segment.argv[0]).name.casefold() if segment.argv else ""
-    if program not in _INTO_FOLDER_PROGRAMS:
-        return []
     args = tuple(segment.argv[1:])
-    if program.endswith("tar") and not _tar_extracts(args):
-        return []
-    out = list(segment.write_targets)
-    if program.startswith("7z"):
-        out += [a[2:] or (args[i + 1] if i + 1 < len(args) else "")
-                for i, a in enumerate(args) if a.startswith("-o")]
-    return [t for t in out if t]
+    if program in _COPY_INTO_PROGRAMS:
+        ops = copy_operands(args)
+        if ops.into or ops.destination is None:
+            return []
+        names = tuple(_name_of(source) for source in ops.sources)
+        unknown = ops.contents or any(name in (".", "..", "") for name in names)
+        return [(target, None if unknown else names) for target in segment.write_targets]
+    if program == "rsync":
+        sources = [a for a in args if not a.startswith("-")][:-1]
+        names = tuple(_name_of(source) for source in sources)
+        unknown = any(source.endswith("/") or name in (".", "..", "")  # trailing /: the CONTENTS
+                      for source, name in zip(sources, names))
+        return [(target, None if unknown else names) for target in segment.write_targets]
+    if program in _UNPACK_PROGRAMS:
+        if program.endswith("tar") and not _tar_extracts(args):
+            return []
+        folders = list(segment.write_targets)
+        if program.startswith("7z") and args and args[0] in ("x", "e"):
+            folders += [a[2:] for a in args if a.startswith("-o") and len(a) > 2] or ["."]
+        return [(folder, None) for folder in folders if folder]
+    if program in _SERVER_NAMED and any(
+            a in _SERVER_NAMED[program] or (program == "curl" and a.startswith("-") and
+                                            not a.startswith("--") and "J" in a)
+            for a in args):
+        return [(posixpath.dirname(target) or ".", None) for target in segment.write_targets]
+    return []
+
+
+def _name_of(source: str) -> str:
+    """The name a copy keeps when it lands in a folder (`/tmp/config.yaml` → `config.yaml`)."""
+    return posixpath.basename(source.rstrip("/")) if source.rstrip("/") else source
 
 
 def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
@@ -1300,9 +1336,11 @@ def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
     `bash_exec` command the classifier can read — the operands of a plain `rm`, `truncate` or
     `chmod` too, which the classifier reads but does not flag destructive — realpathed (a symlink
     to one of the files is caught) and as the entry it names; a shell path starting with `$HOME`
-    or `${HOME}` is expanded first. A copy, move, link or unpack whose destination is the config
-    folder itself (`cp x ~/.localharness/`, `tar -x -C`, `unzip -d`, `7z -o`) is caught too: a
-    settings file could land there under any name. A command that runs code inline through an
+    or `${HOME}` is expanded first. A copy, move or link INTO the config folder itself
+    (`cp x ~/.localharness/`) is a settings write only when a source is named like a settings file
+    (the hit is that file); an unpack (`tar -x -C`, `unzip -d`, `7z -o`), or a download whose name
+    the server chooses, into the folder is refused as such (the hit is the folder itself: its
+    contents are not known in advance). A command that runs code inline through an
     interpreter is not read, nor is a path holding any other variable. Never raises.
 
     The machine's folder is the session's (`ctx.config_dir`, as start resolved `--config-dir` /
@@ -1313,7 +1351,7 @@ def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
     try:
         if not isinstance(params, dict):
             return None
-        folders: list[str] = []
+        folders: list[tuple[str, Optional[tuple[str, ...]]]] = []
         if tool_name in WRITE_TOOL_PATH_PARAMS:
             raw = params.get(WRITE_TOOL_PATH_PARAMS[tool_name])
             targets = [raw] if isinstance(raw, str) and raw.strip() else []
@@ -1329,9 +1367,9 @@ def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
                 targets += [*segment.write_targets, *segment.destructive_targets]
                 if not segment.read_only:  # a plain `rm` deletes, though it is not flagged
                     targets += destructive_targets(segment.signature, segment.argv, settings) or []
-                folders += _into_folders(segment)
+                folders += _into_folder_writes(segment)
             targets = [_expand_home(t) for t in targets]
-            folders = [_expand_home(t) for t in folders]
+            folders = [(_expand_home(t), names) for t, names in folders]
             anchor = _shell_anchor(tool_name, params, ctx)
         else:
             return None
@@ -1342,10 +1380,14 @@ def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
                         str(path.parent).casefold() == config_dir
                         or path.parent.name.casefold() == WORKSPACE_DIR_NAME):
                     return path
-        for raw in folders:
+        for raw, names in folders:
             for path in _named_file(raw, anchor):
                 if str(path).casefold() == config_dir or path.name.casefold() == WORKSPACE_DIR_NAME:
-                    return path
+                    if names is None:
+                        return path  # an unpack or a server-named download: not known in advance
+                    named = next((n for n in names if n.casefold() in HARNESS_CONFIG_FILES), None)
+                    if named is not None:
+                        return path / named
     except Exception:  # noqa: BLE001 — what this cannot read stays the verdict's to judge
         return None
     return None
