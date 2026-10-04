@@ -164,13 +164,45 @@ def test_the_packaged_helper_is_never_listed_but_a_modified_copy_is(g):
     assert [e["name"] for e in trust.tool_script_entries(g)] == ["design-screenshot.js"]
 
 
-def test_a_symlink_that_leaves_the_tools_folder_is_skipped(g, tmp_path):
+def test_a_symlink_in_the_tools_folder_is_listed_by_its_own_name_and_what_it_points_to(g, tmp_path):
+    """A file is judged by its entry, not by where it links: skipping a link that leads outside let
+    it run past the tool-script rule as an ordinary command (the re-review's symlink finding)."""
     outside = tmp_path / "outside.py"
-    outside.write_text("print('outside')\n", encoding="utf-8")
+    outside.write_bytes(b"print('outside')\n")
     _script(g, "a.py")
     (g / "tools" / "link.py").symlink_to(outside)
 
-    assert [e["name"] for e in trust.tool_script_entries(g)] == ["a.py"]
+    entries = {e["name"]: e["shown"] for e in trust.tool_script_entries(g)}
+    assert entries == {"a.py": _short(b"print(1)\n"), "link.py": _short(b"print('outside')\n")}
+
+
+def test_a_linked_tool_script_waits_for_its_yes_like_any_other(g, tmp_path, monkeypatch):
+    _script(g, "a.py")
+    _adopt(g, monkeypatch)
+    outside = tmp_path / "outside.py"
+    outside.write_bytes(b"print('outside')\n")
+    link = g / "tools" / "link.py"
+    link.symlink_to(outside)
+
+    assert trust.tool_script_pending(link) == _short(b"print('outside')\n")
+    _answers(monkeypatch, True)
+    assert decide_machine_trust(g, ask=True) == MachineTrust()
+    assert trust.tool_script_pending(link) is None, "confirmed at start"
+    outside.write_bytes(b"print('changed elsewhere')\n")
+    assert trust.tool_script_pending(link) == _short(b"print('changed elsewhere')\n")
+
+
+def test_a_file_reached_through_a_symlinked_folder_is_judged_as_what_it_points_to(g, tmp_path):
+    """Start never walks a symlinked folder (it could lead anywhere, or loop), so a file reached
+    through one is never listed — and is judged where it resolves, as running it from there would be."""
+    lib = tmp_path / "lib"
+    (lib / "x.py").parent.mkdir()
+    (lib / "x.py").write_bytes(b"print(2)\n")
+    (g / "tools").mkdir(exist_ok=True)
+    (g / "tools" / "lib").symlink_to(lib)
+
+    assert trust.tool_script_entries(g) == []
+    assert trust.tool_script_pending(g / "tools" / "lib" / "x.py") is None
 
 
 @pytest.mark.parametrize("rel", [
@@ -441,7 +473,52 @@ async def _run(gate: PermissionGate, command: str):
 
 
 def test_the_session_gate_reads_the_machine_record(tmp_path, proj):
-    assert _gate(tmp_path, proj, "guarded", None).context().script_pending is trust.tool_script_pending
+    pending = _gate(tmp_path, proj, "guarded", None).context().script_pending
+    assert pending.func is trust.tool_script_pending and pending.keywords == {"global_dir": None}
+
+
+@pytest.mark.asyncio
+async def test_a_linked_script_in_guarded_asks_by_its_entry_and_no_python3_grant_covers_it(
+        g, proj, tmp_path, monkeypatch):
+    _script(g, "a.py")
+    _adopt(g, monkeypatch)
+    outside = tmp_path / "evil.py"
+    outside.write_bytes(b"import os\n")
+    link = g / "tools" / "helper.py"
+    link.symlink_to(outside)
+    ctx = _ctx(proj, grants=_granting(("shell-unfamiliar", "python3 <script>")),
+               pending=trust.tool_script_pending)
+
+    assert _asked(_shell(f"python3 {link}", ctx)) == (
+        Verdict.ASK, CLASS, f"{link}@{_short(b'import os' + NL)}")
+
+
+@pytest.mark.asyncio
+async def test_a_session_started_with_its_own_config_dir_guards_that_folder(tmp_path, proj, monkeypatch):
+    """`--config-dir /custom`: the gate is handed /custom, so its tools folder and its settings
+    files are guarded though the folder is not named .localharness and is not the default one."""
+    custom = (tmp_path / "custom").resolve()
+    custom.mkdir()
+    (custom / "config.yaml").write_text("{}\n", encoding="utf-8")
+    body = b"print('agent wrote me')\n"
+    script = custom / "tools" / "x.py"
+    script.parent.mkdir()
+    script.write_bytes(body)
+    asked = []
+
+    async def _record(request):
+        asked.append(request)
+        return Decision(kind="allow_once")
+
+    gate = PermissionGate(boundary=proj, workspace=proj, grants=GrantStore(tmp_path / "grants.yaml"),
+                          channel_name="test", mode="guarded", asker=_record,  # type: ignore[arg-type]
+                          config_dir=custom)
+
+    assert (await _run(gate, f"python3 {script}")).allowed
+    assert [(r.klass, r.key) for r in asked] == [(CLASS, f"{script}@{_short(body)}")]
+    refused = await gate.check("write", {"path": str(custom / "config.yaml"), "content": "x"},
+                               ToolMeta(group="fs.write", destructive=True), agent_id="a", session_id="s")
+    assert not refused.allowed and "localharness components set" in refused.reason
 
 
 @pytest.mark.asyncio

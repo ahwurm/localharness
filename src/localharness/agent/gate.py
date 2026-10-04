@@ -24,6 +24,7 @@ import logging
 import time
 from contextlib import suppress
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any, Optional
 
@@ -384,6 +385,7 @@ class PermissionGate:
         owner_agent_id: Optional[str] = None,
         remote_unattended: bool = True,
         trusted_for_run: bool = False,
+        config_dir: Optional[Path] = None,
     ) -> None:
         self.boundary = boundary
         self.workspace = Path(workspace)
@@ -421,6 +423,10 @@ class PermissionGate:
         """True when this run was started with `--trust-project` or `LOCALHARNESS_TRUST_PROJECT=1`:
         the project counts as trusted for this run only and nothing is recorded. Read by
         cli/session_trust."""
+        self.config_dir = Path(config_dir) if config_dir is not None else None
+        """The session's machine config folder as start resolved it (`--config-dir`,
+        LOCALHARNESS_DIR): the tools folder and settings files the two self-extension rules guard.
+        None: global_config_dir()."""
 
         self._config_deny = deny
         self._warned_cannot_ask = False
@@ -560,7 +566,8 @@ class PermissionGate:
             can_ask=self.asker is not None,
             has_review_surface=self.has_review_surface,
             deny=lambda name, params: self._deny(name, params, deny),
-            script_pending=trust.tool_script_pending,
+            script_pending=partial(trust.tool_script_pending, global_dir=self.config_dir),
+            config_dir=self.config_dir,
         )
 
     # ---------------------------------------------------------------- check
