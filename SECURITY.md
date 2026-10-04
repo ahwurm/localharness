@@ -101,10 +101,9 @@ section of your `overrides.yaml` and tool scripts as they are; later changes are
 about. And the record a Yes writes is an ordinary file in
 your config folder, `trusted_workspaces.yaml`: the agent's write and edit tools and the shell writes
 the gate can read reach it only with your approval (in every mode but `unattended`, which approves
-everything), but code the agent runs — through `python_exec`,
-`cruncher_exec` or an inline interpreter, which `auto` runs without asking — can rewrite it like any
-file you own, recording a server as approved or removing a record so that the next start adopts
-what the files hold. These questions guard what the agent writes with its file tools and the shell,
+everything), but code the agent is already running — an interpreter tool, which `auto` runs without
+asking — can rewrite any file you own, that record included, and a start believes the record it
+finds. These questions guard what the agent writes with its file tools and the shell,
 not what code that is already running can do. Plugin
 code and the org-level guardrails file are never taken from a workspace. Plugins are found only in
 Python packages installed alongside LocalHarness that declare a `localharness.plugins` entry point,
@@ -537,32 +536,25 @@ config can remove it, and it applies whatever the mode — but only to the shape
 not a boundary in `unattended`, where everything else runs unasked.
 What this does NOT cover: `python_exec` and `cruncher_exec` run code that can write any file you
 can; code run inline through a non-shell interpreter (`python3 -c …`, `node -e …`) is not read for
-the files it touches (a shell payload — `sh -c …`, `bash -c …`, `eval` — is); a shell command the
-gate does not read as writing that file is not caught — `mv` moving it away, `unlink`, `shred`, a
-`find … -delete` that selects it by name, a hard link made to it, a plain `rm` relative to a `cd`
-earlier in the same command, a path holding any variable but `$HOME` (`$LOCALHARNESS_DIR`
-included), a `~` or `$HOME` the same command reassigned first (`export HOME=…`), a symlink to the
-folder that the same command makes and then writes through (`ln -s ~/.localharness /tmp/l && cp …
-/tmp/l/`), a command run through `sudo`, an archive unpacked into a folder above the config
-folder, or a folder copied over it, whose contents land there; the harness's own CLI
-(`localharness components set …`, run through `bash_exec`) changes settings by design; outside
-`guarded` an unconfirmed script runs without asking (it is still listed at the next start); a
-script named through a variable or a glob, relative to a `cd` earlier in the same command
-(`cd ~/.localharness/tools && python3 x.py`), or written by the same command that runs it, is not
-recognised as one, and one reached through a symlinked folder in the tools folder is judged as the
-file it points to; files below a dependency or cache folder in the tools folder (`node_modules`,
-`.venv`, `venv`, `__pycache__`, `.git`, `site-packages`, and any folder holding a `pyvenv.cfg` — a
-virtual environment under any name) are not tracked — that is where `npm install` and a virtual
-environment put thousands of files; the scripts and files a confirmed command reads are not
-hashed; of `config.yaml` and `overrides.yaml`, the record a start compares holds the looser `org:`
-permissions and the `server:` launch command (and `overrides.yaml`'s `agent:` section), not the rest
-— among it where requests go (the provider's address and key), the capability floor
-(`org.enforce_capability_floor`), the remote lock (`channels.remote_unattended`), the rest of
-`server:` (`bind_all` included) and the peer endpoints with their launch specs (`extra_endpoints`) —
-so code the agent runs can change those for the next start without a question (the settings-file
-rule keeps out the agent's file tools and the shell writes it reads, nothing more); and the record
-itself is an ordinary file that code the agent runs can rewrite (see trust boundaries). What runs is
-gated — that is the control, not a promise that the agent cannot touch its own files.
+the files it touches (a shell payload — `sh -c …`, `bash -c …`, `eval` — is); the rule reads the
+shell shapes it knows, so a command that reaches the file by a route it does not read — another
+name or a link for it, a path through a variable, `sudo`, a copy or an unpack that lands there from
+above — is not caught; the harness's own CLI (`localharness components set …`, run through
+`bash_exec`) changes settings by design; outside `guarded` an unconfirmed script runs without
+asking (it is still listed at the next start); a script named through a variable or a glob,
+relative to an earlier `cd`, or written by the same command that runs it, is not recognised as one,
+and one reached through a symlinked folder in the tools folder is judged as the file it points to;
+files below a dependency or cache folder in the tools folder (`node_modules`, a virtual
+environment, `.git`) are not tracked — that is where `npm install` and a virtual environment put
+thousands of files; the scripts and files a confirmed command reads are not hashed; of
+`config.yaml` and `overrides.yaml`, the record a start compares holds the looser `org:`
+permissions and the `server:` launch command (and `overrides.yaml`'s `agent:` section), not the
+rest — among it where requests go, the capability floor, the remote lock and the rest of the
+`server:` and endpoint settings — so code the agent runs can change those for the next start
+without a question (the settings-file rule keeps out the agent's file tools and the shell writes it
+reads, nothing more); and the record itself is an ordinary file that code the agent runs can
+rewrite (see trust boundaries). What runs is gated — that is the control, not a promise that the
+agent cannot touch its own files.
 
 **Five modes, set in config or switched mid-session with `/mode`.** `auto` is the default: one
 trust question per workspace, then everything runs except the step-2 blacklist, and nothing is
@@ -640,8 +632,8 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   payloads, and canonicalizes destructive flags — that is an enumerated set of known shapes, not a
   proof. The ask-once on an unfamiliar signature is the backstop for whatever the list misses.
 - **A command whose name comes from a substitution or a variable is unfamiliar, not destructive.**
-  `$(echo rm) -rf build` and `"$RM" -rf build` cannot be signed at classification time, so they are
-  asked about as unknown commands rather than as destructive ones, and a grant on that placeholder
+  A name the shell builds at run time cannot be signed at classification time, so the command is
+  asked about as an unknown one rather than as destructive, and a grant on that placeholder
   covers the next command built the same way. The prompt still happens; the label on it understates
   what may run.
 - **A write target containing a variable, a glob or a substitution is treated as outside.** It
@@ -1052,10 +1044,10 @@ is the thing the cookie design exists to avoid.
 **What this does NOT cover.** `--allow-unsafe-bind` with plain HTTP sends the bearer token
 in cleartext to every hop between the phone and this machine. The token file is the one
 durable copy of the token, and owner-only stops other accounts, not the agent: while
-`localharness web` runs, an agent that can read files and run commands could read the token
-and call the server from this machine — and with `channels.remote_unattended` left at its
-default it could switch its own web session to `unattended` (setting it to `false` closes
-that path too; see [A paired phone or Discord account](#a-paired-phone-or-discord-account)).
+`localharness web` runs, a process running as you — one the agent starts included — holds what a
+paired phone holds (see [A paired phone or Discord account](#a-paired-phone-or-discord-account)),
+and with `channels.remote_unattended` left at its default that includes the switch to
+`unattended` (setting it to `false` closes that path too).
 The QR drawn on a terminal carries the token into that terminal's scrollback (a tmux
 history, a `script` log). A token an older release printed — into a `localharness web | tee`
 log, or journald — is still in those logs; `--rotate-token` makes those copies useless.
