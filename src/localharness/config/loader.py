@@ -714,6 +714,9 @@ class ConfigLoader:
         self.harness_warnings: list[str] = []
         # Workspace agent-file values dropped at AGENT_GLOBAL_ONLY_FIELDS paths (start's summary).
         self.agent_warnings: list[str] = []
+        # Project agent/division files ignored because they link outside the project (also in
+        # agent_warnings; kept apart so `validate` can print exactly these lines).
+        self.ignored_links: list[str] = []
         self._org_cache: Optional[OrgConfig] = None
         self._raw_harness_dict: Optional[dict] = None
         self._raw_sources_cache: Optional[tuple[dict, dict, dict, dict]] = None
@@ -757,6 +760,7 @@ class ConfigLoader:
                 "inside its .localharness/")
         if note not in self.agent_warnings:
             self.agent_warnings.append(note)
+            self.ignored_links.append(note)
         return True
 
     def _project_layer_files(self, subdir: str) -> list[Path]:
@@ -2168,24 +2172,15 @@ class ConfigLoader:
             except ConfigError as e:
                 results.append((str(org_path), e))
 
-        # divisions
-        for base in self._search_bases():
-            div_dir = base / "divisions"
-            if div_dir.exists():
-                for f in sorted(div_dir.glob("*.yaml")):
+        # divisions, then agents — a project's file that links outside its .localharness/ is
+        # ignored here exactly as start ignores it (`ignored_links`, which `validate` prints)
+        for subdir, load in (("divisions", self.load_division_file), ("agents", self.load_agent_file)):
+            for base in self._search_bases():
+                files = (self._project_layer_files(subdir) if base == self._local_dir
+                         else layer_files(base, subdir))
+                for f in files:
                     try:
-                        self.load_division_file(f)
-                        results.append((str(f), None))
-                    except ConfigError as e:
-                        results.append((str(f), e))
-
-        # agents
-        for base in self._search_bases():
-            agents_dir = base / "agents"
-            if agents_dir.exists():
-                for f in sorted(agents_dir.glob("*.yaml")):
-                    try:
-                        self.load_agent_file(f)
+                        load(f)
                         results.append((str(f), None))
                     except ConfigError as e:
                         results.append((str(f), e))

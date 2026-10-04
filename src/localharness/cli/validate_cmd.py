@@ -142,6 +142,11 @@ def validate(
             _print_error_details(error, label_path)
             invalid_count += 1
 
+    # A project file that links outside its .localharness/ is not loaded, so it has no row: the
+    # one line start prints for it, said here too.
+    for note in loader.ignored_links:
+        console.print(f"  [yellow]![/yellow] {escape(note)}", soft_wrap=True)
+
     console.print()
     console.print(Rule())
     console.print(f"{valid_count} config(s) valid, {invalid_count} invalid.")
