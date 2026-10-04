@@ -384,9 +384,11 @@ project's agent files and your own may start, load or loosen (`cli/workspace.py`
 `decide_project_trust`, `decide_machine_trust`). In a project with no trust record, the one trust
 question lists the MCP servers the project's agent files start, and a Yes approves that list. A
 project whose server list changed since that Yes gets one question showing the change
-(`+`/`~`/`-` lines). When your own agent files, division files or `org.yaml` gained an MCP server,
-an embedding model or a looser permission, or `~/.localharness/tools/` gained or changed a script,
-one question lists each change ("Apply them?"). These questions are asked only on a terminal with
+(`+`/`~`/`-` lines). When your own agent files, the `agent:` section of your `overrides.yaml`,
+division files or `org.yaml` gained an MCP server, an embedding model or a looser permission, or
+`~/.localharness/tools/` gained or changed a script, one question lists each change ("Apply
+them?"). A project agent or division file that is a symlink leading outside its `.localharness/`
+is ignored, with one warning in the start summary. These questions are asked only on a terminal with
 `--channel terminal` and without `--no-input`; a No is not asked again in the same process (the
 `/plugins` restart included). Anywhere else, nothing new starts or applies and one line says so,
 naming how to review it; the exit code is unchanged. `--list-models` decides and asks nothing.
@@ -1190,7 +1192,7 @@ once, and after that everything runs except `AUTO_BLACKLIST` — deletes aimed o
 `dd`/`mkfs`/`shred`/`format`, writes to a secret store or a system directory, and writes to
 `.git/**` or a `.localharness/` entry that changes what the harness does next — which is parked for
 a human every time and remembers nothing (a write to a harness `config.yaml` or `overrides.yaml` by
-the agent's file tools, or a shell write the gate can read, is refused outright in every mode). `guarded`, the v0.14.0 default, additionally asks before a call crosses
+the agent's file tools, or a shell write the gate reads, is refused outright whatever the mode). `guarded`, the v0.14.0 default, additionally asks before a call crosses
 the workspace boundary or is unfamiliar, and remembers an
 "always" in `~/.localharness/grants.yaml`. `trusted` is `auto` plus a prompt for destructive
 operations aimed inside the project. `read-only` refuses writes,

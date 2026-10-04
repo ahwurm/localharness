@@ -157,7 +157,10 @@ All notable changes to LocalHarness are documented here. The format follows
   hook plugins, the fetch allowlist, the remote lock, and an agent file's
   embedding model and kill file are machine-level only; a project's value is
   ignored with one startup warning naming the key and the file. SECURITY.md
-  lists every one.
+  lists every one. A project's agent or division file that is a symlink
+  leading outside its `.localharness/` (or sits in a symlinked folder that
+  does) is ignored with one warning: a symlink there used to slip past every
+  project rule.
 - **"No" means no, and trust is for what you saw.** A project's agent files
   start their MCP servers only in a project you trusted, and only the set you
   approved: the trust question lists them, a Yes records exactly that list, a
@@ -167,21 +170,26 @@ All notable changes to LocalHarness are documented here. The format follows
   longer count as having worked there.
 - **What your own agent files start, load or loosen waits for one Yes.** The
   agent may still write specialists into `~/.localharness/agents/`. An MCP
-  server, an embedding model or a looser permission added there (or a looser
-  permission in a division file or `org.yaml`) applies after you confirm it at
-  the next `localharness start` on a terminal, and stays off, with one line,
-  until then.
+  server, an embedding model or a looser permission added there or in the
+  `agent:` section of your `overrides.yaml` (every agent's default layer), or a
+  looser permission in a division file or `org.yaml`, applies after you
+  confirm it at the next `localharness start` on a terminal, and stays off,
+  with one line, until then.
 - **A tool script the agent writes is an unconfirmed shell command until you
-  confirm it.** A script added to or changed in `~/.localharness/tools/` gets
-  what any shell command gets in your mode — `guarded` asks, keyed on its path
-  and content; `auto`, `trusted` and `unattended` run it — and is listed once at
+  confirm it.** A script added to or changed in `~/.localharness/tools/` — a
+  symlink there included, judged by its own name and what it points to — gets
+  what any shell command gets in your mode (`guarded` asks, keyed on its path
+  and content; `auto`, `trusted` and `unattended` run it) and is listed once at
   the next start on a terminal.
 - **The agent's tools cannot change the harness's settings files.** Its `write`
-  and `edit` tools, and shell commands the gate reads as writing or deleting the
-  file, are refused for `config.yaml` and `overrides.yaml` in your machine's
-  config folder and in any project's `.localharness/`, in every mode; the model
-  is told to ask you to run `localharness components set`. SECURITY.md names
-  what this does not cover.
+  and `edit` tools, and the shell writes the gate reads — onto the file, or a
+  copy, move, link or unpack into the config folder itself (`cp x DIR/`,
+  `tar -x -C`, `unzip -d`, `7z -o`), with `~`, `$HOME` and `${HOME}` expanded —
+  are refused for `config.yaml` and `overrides.yaml` in the session's config
+  folder (`--config-dir` included) and in any project's `.localharness/`,
+  whatever the mode; the model is told to ask you to run `localharness
+  components set`. It covers those shapes only — SECURITY.md names what it
+  does not cover — so it is no backstop in `unattended`.
 - **The `agent` tool names the boundary.** It still invites the model to build
   specialists from the tools the harness has, tells it never to write its own
   tool for something the harness already provides (web search, fetch, files,
@@ -237,9 +245,10 @@ All notable changes to LocalHarness are documented here. The format follows
   bundled plugins and the shell command ask nothing new.
 - **No program is taken from the current folder by accident.** The programs
   the harness looks up by name — `bash` for `bash_exec`, `vllm`, `uv`,
-  `docker`, `lms` and `nvidia-smi` — are found on your `PATH`, skipping empty
-  and `.` entries, never in the folder you stand in (which Windows would search
-  first).
+  `docker`, `lms` and `nvidia-smi` — are found on your `PATH`, never in the
+  folder you stand in: on POSIX every relative `PATH` entry is skipped, on
+  Windows (which would search the current folder first) the empty and `.`
+  entries are.
 - **A start reaches only your model server.** It no longer builds tiktoken's
   vocabulary (downloaded when not cached) or, with no MCP server configured,
   imports the MCP client library; a missing embedding model is one line in the
@@ -298,10 +307,11 @@ All notable changes to LocalHarness are documented here. The format follows
   through `python_exec`, `cruncher_exec` or an inline interpreter (which `auto`
   runs without asking) can rewrite it, recording a server as approved or
   removing a record so the next start adopts what the files hold.
-- An MCP server, an embedding model or a looser permission written into your
-  machine's `config.yaml` or `overrides.yaml` (whose `agent:` section reaches
-  every agent) is not in the record a start confirms; the settings-file rule
-  keeps the agent's file tools out of those two files.
+- The rest of your machine's `config.yaml` and `overrides.yaml` — where
+  requests go, the capability floor, the remote lock — is not in the record a
+  start confirms (the `agent:` section is): code the agent runs can change it
+  for the next start, and the settings-file rule keeps out only the agent's
+  file tools and the shell writes it reads.
 - In Zed, the mode shown before the first prompt can be one your own agent file
   sets that the start then withheld.
 - A GET to a public host can still carry data out in its URL: that is
@@ -322,21 +332,23 @@ All notable changes to LocalHarness are documented here. The format follows
   upgrade until you set `server.bind_all: true`.
 - The settings-file rule does not cover `python_exec` and `cruncher_exec`,
   code run inline through a non-shell interpreter (`python3 -c`), shell
-  commands the gate does not read as writing or deleting the file (`mv`,
+  commands the gate does not read as writing the file (`mv` moving it away,
   `unlink`, `shred`, `find … -delete` by name, a hard link, a plain `rm` after
-  a `cd`), or the harness's own CLI run by the agent.
+  a `cd`, a path holding a variable other than `$HOME`, a command run through
+  `sudo`, an archive unpacked above the config folder), or the harness's own
+  CLI run by the agent.
 - Outside `guarded` an unconfirmed tool script runs without asking, as any
   shell command does there. Files below a dependency or cache folder in the
   tools folder (`node_modules`, `.venv`, `venv`, `__pycache__`, `.git`,
   `site-packages`) are not tracked; a script named through a variable or a
   glob, relative to an earlier `cd`, or written by the same command that runs
-  it, is not recognised as one; and `npm install` there lists `package.json`
-  and `package-lock.json` once at the next start.
-- A session started with `--config-dir` somewhere else is outside the
-  tool-script and settings-file rules, which read `LOCALHARNESS_DIR`, else
-  `~/.localharness`; its machine trust record is written to the default trust
-  store. A start makes the folder `--config-dir` or `LOCALHARNESS_DIR` names
-  owner-only (0700), even one you share on purpose.
+  it, is not recognised as one; one reached through a symlinked folder is
+  judged as the file it points to; and `npm install` there lists
+  `package.json` and `package-lock.json` once at the next start.
+- A session started with `--config-dir` writes its machine trust record to the
+  default trust store, under a key of its own. A start makes the folder
+  `--config-dir` or `LOCALHARNESS_DIR` names owner-only (0700), even one you
+  share on purpose.
 - On Windows, a program the harness starts by bare name without looking it up
   first may still be found in the current folder, and the lookup rule above is
   untested there.

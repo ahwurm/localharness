@@ -1167,10 +1167,13 @@ only as an unconfirmed shell command (asked about in `guarded`) until they confi
 Two rules in the permission gate back this, both described in SECURITY.md under "What the agent
 may change about its own setup": the unconfirmed-tool-script rule (a script added or changed since
 the last confirmation gets what any shell command gets in the current mode, keyed in `guarded` on
-its path and content) and the settings-file rule (the agent's `write` and `edit` tools and the shell
-writes the gate can read never change `config.yaml` or `overrides.yaml` in the machine's config
-folder or a project's `.localharness/`, in any mode; the model gets one line naming
-`localharness components set`). New installs no longer ship the `write(*/agents/*.yaml)` deny
+its path and content; a symlink in the tools folder is judged by its own name and what it points
+to) and the settings-file rule (the agent's `write` and `edit` tools and the shell writes the gate
+reads — onto the file, or a copy, move, link or unpack into the config folder itself, with `~`,
+`$HOME` and `${HOME}` expanded — never change `config.yaml` or `overrides.yaml` in the session's
+config folder or a project's `.localharness/`, whatever the mode; the model gets one line naming
+`localharness components set`). Both rules read the folder the session was started with
+(`PermissionGate(config_dir=…)`, as start resolved `--config-dir`). New installs no longer ship the `write(*/agents/*.yaml)` deny
 pattern (spec 06, the deny table).
 
 ### Built-in tool registration

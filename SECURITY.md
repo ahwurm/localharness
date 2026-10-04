@@ -77,8 +77,13 @@ the start after; a start with no terminal starts none and says so; a server that
 recorded without a question. `--trust-project` or `LOCALHARNESS_TRUST_PROJECT=1` trusts the project
 for that one run, starts its servers and records nothing — for CI and scripts. Session files inside
 a repository never count as having worked there; only your machine's own store does (see the trust
-question under the approval gate). Your machine's own agent files are held to the same rule — see
-the paragraph on what the agent may change about its own setup, under the approval gate.
+question under the approval gate). An agent or division file in a project's `.localharness/` that
+is a symlink leading outside it — or that sits in a symlinked folder leading outside it — is
+ignored, with one warning naming the link, and the machine's file of that name is used instead: a
+project's agent files must be files inside its `.localharness/`, judged by where they sit, never by
+where they point. Your machine's own agent files, and the `agent:` section of your `overrides.yaml`,
+are held to the same rule — see the paragraph on what the agent may change about its own setup,
+under the approval gate.
 
 **What this does NOT cover.** If you clone someone's repository and run the harness inside it, that
 repository's `.localharness/` config and agent files load with no prompt, because you are inside
@@ -89,8 +94,9 @@ from inside the repository are not fingerprinted (the same gap as a granted `pyt
 under the approval gate's named gaps), so a change to them asks nothing; nor are the values of
 environment variables and headers, of which only the names are kept, because values are often
 secrets. The first start after upgrading to this release adopts, without asking, the servers that a
-project you had already trusted names at that moment, and your own agent files and tool scripts as
-they are; later changes are what it asks about. And the record a Yes writes is an ordinary file in
+project you had already trusted names at that moment, and your own agent files, the `agent:`
+section of your `overrides.yaml` and tool scripts as they are; later changes are what it asks
+about. And the record a Yes writes is an ordinary file in
 your config folder, `trusted_workspaces.yaml`: the agent's write and edit tools and the shell writes
 the gate can read reach it only with your approval (in every mode but `unattended`, which approves
 everything), but code the agent runs — through `python_exec`,
@@ -488,45 +494,52 @@ not a leak: it can write a new specialist into `~/.localharness/agents/` and dro
 `~/.localharness/tools/`. (A config `init` wrote before this release lists the `write(*/agents/*.yaml)`
 deny pattern, which refuses the agent's `write` tool there and stays; delete it from
 `org.permissions.deny_patterns` if you want the agent to create specialists with it.) It is told to
-compose specialists from the tools the harness already has and
-never to write its own tool for something the harness already provides (web search, fetch, files,
-delegation). What it writes there is held back until you have seen it: an MCP server, an embedding
-model or a permission looser than the shipped default in one of your agent files (or a looser
-permission in a division file or `org.yaml`) takes effect only
-after you confirm it once at the next `localharness start` on a terminal (a start without a terminal
-leaves it off and says so), and a script added to or changed in the tools folder since you last
-confirmed your scripts is treated as an unconfirmed shell command — it gets what any shell command
-gets in the mode you are in: `guarded` asks before it runs (an earlier "always" on `python3` or `node`
-does not cover it, and an "always" you give it covers that exact content only), while `auto`,
-`trusted` and `unattended` run it as they run any command — and it is listed for you at that start
-(the scripts already there the first time you start this version are adopted without a question).
+compose specialists from the tools the harness already has and never to write its own tool for
+something the harness already provides (web search, fetch, files, delegation). What it writes there
+is held back until you have seen it: an MCP server, an embedding model or a permission looser than
+the shipped default in one of your agent files or in the `agent:` section of your `overrides.yaml`
+(every agent's default layer), or a looser permission in a division file or `org.yaml`, takes
+effect only after you confirm it once at the next `localharness start` on a terminal (a start
+without a terminal leaves it off and says so); and a script added to or changed in the tools folder
+since you last confirmed your scripts — a symlink there included, judged by its own name and what
+it points to — is treated as an unconfirmed shell command: it gets what any shell command gets in
+the mode you are in: `guarded` asks before it runs (an earlier "always" on `python3` or `node` does
+not cover it, and an "always" you give it covers that exact content only), while `auto`, `trusted`
+and `unattended` run it as they run any command — and it is listed for you at that start (what was
+already there the first time you start this version is adopted without a question).
+
 The files that hold the harness's own settings have a rule of their own: the agent's write and
-edit tools, and any shell command the gate can read as writing or deleting a file, cannot change
-`config.yaml` or `overrides.yaml` in your machine's config folder (`LOCALHARNESS_DIR`, else
-`~/.localharness`) or in any project's `.localharness/`, in any mode, `unattended` included; the model
-is told to ask you to run `localharness components set`. That rule is code, not a deny pattern, so no
-config can remove it. What this does NOT cover: `python_exec` and `cruncher_exec` run code that can
-write any file you can; code run inline through a non-shell interpreter (`python3 -c …`,
-`node -e …`) is not read for the files it touches (a shell payload — `sh -c …`, `bash -c …`, `eval`
-— is); a shell command the gate does not read as writing or deleting that file is not caught —
-`mv` moving it away, `unlink`, `shred`, a `find … -delete` that selects it by name, a hard link made
-to it, a plain `rm` relative to a `cd` earlier in the same command; the harness's own CLI
-(`localharness components set …`, run through `bash_exec`) changes settings by design; outside
-`guarded` an unconfirmed script runs without asking (it is still listed at the next start); a script
-named through a variable or a glob, relative to a `cd` earlier in the same command
+edit tools, and the shell commands the gate reads as writing them — a redirect, `tee`, `rm`,
+`truncate`, `sed -i`, a `cp`, `mv`, `install` or `ln` onto the file, and a copy, move, link or
+unpack whose destination is the config folder itself (`cp x ~/.localharness/`, `rsync`,
+`tar -x -C`, `unzip -d`, `7z -o`), with `~`, `$HOME` and `${HOME}` expanded — cannot change
+`config.yaml` or `overrides.yaml` in your machine's config folder (the one the session was started
+with: `--config-dir`, else `LOCALHARNESS_DIR`, else `~/.localharness`) or in any project's
+`.localharness/`; the model is told to ask you to run `localharness components set`. That rule is
+code, not a deny pattern, so no config can remove it, and it applies whatever the mode — but only to
+the shapes it reads, so it is not a boundary in `unattended`, where everything else runs unasked.
+What this does NOT cover: `python_exec` and `cruncher_exec` run code that can write any file you
+can; code run inline through a non-shell interpreter (`python3 -c …`, `node -e …`) is not read for
+the files it touches (a shell payload — `sh -c …`, `bash -c …`, `eval` — is); a shell command the
+gate does not read as writing that file is not caught — `mv` moving it away, `unlink`, `shred`, a
+`find … -delete` that selects it by name, a hard link made to it, a plain `rm` relative to a `cd`
+earlier in the same command, a path holding any variable but `$HOME` (`$LOCALHARNESS_DIR`
+included), a command run through `sudo`, an archive unpacked into a folder above the config folder,
+or a folder copied over it, whose contents land there; the harness's own CLI (`localharness
+components set …`, run through `bash_exec`) changes settings by design; outside `guarded` an
+unconfirmed script runs without asking (it is still listed at the next start); a script named
+through a variable or a glob, relative to a `cd` earlier in the same command
 (`cd ~/.localharness/tools && python3 x.py`), or written by the same command that runs it, is not
-recognised as one; files below a dependency or cache folder in the tools folder (`node_modules`,
+recognised as one, and one reached through a symlinked folder in the tools folder is judged as the
+file it points to; files below a dependency or cache folder in the tools folder (`node_modules`,
 `.venv`, `venv`, `__pycache__`, `.git`, `site-packages`) are not tracked — that is where
 `npm install` and a virtual environment put thousands of files; the scripts and files a confirmed
-command reads are not hashed; an MCP server, an embedding model or a looser permission written into
-`config.yaml` or `overrides.yaml` themselves (whose `agent:` section reaches every agent) is not in
-the record a start compares — the settings-file rule is what keeps the agent's file tools out of
-those two files; the record itself is an ordinary file that code the agent runs can rewrite (see
-trust boundaries); and a session started with `--config-dir` pointing somewhere else is
-outside both rules — they read `LOCALHARNESS_DIR`, else `~/.localharness`, so that session's own
-tools folder is not gated and its `config.yaml` is caught only when its folder is named
-`.localharness`. What runs is gated — that is the control, not a promise that the agent
-cannot touch its own files.
+command reads are not hashed; the rest of `config.yaml` and `overrides.yaml` — where requests go,
+the capability floor, the remote lock — is not in the record a start compares, so code the agent
+runs can change it for the next start (the settings-file rule keeps out the agent's file tools and
+the shell writes it reads, nothing more); and the record itself is an ordinary file that code the
+agent runs can rewrite (see trust boundaries). What runs is gated — that is the control, not a
+promise that the agent cannot touch its own files.
 
 **Five modes, set in config or switched mid-session with `/mode`.** `auto` is the default: one
 trust question per workspace, then everything runs except the step-2 blacklist, and nothing is
@@ -537,8 +550,9 @@ about each step-4 class and remembers your answer, and asks about every write wh
 boundary. `trusted` is `auto` plus one thing: a destructive file operation aimed **inside** the
 project asks too. `read-only` refuses writes, non-read-only shell, and code execution with a
 message the model can re-plan against. `unattended` turns every ask into allow, leaving only your
-deny patterns and the settings-file rule above — **this is how the harness behaved before v0.14**,
-named honestly. It is
+deny patterns — and the settings-file rule above for the shell shapes it reads, which is no
+backstop there: code, and every shape it does not read, runs unasked — **this is how the harness
+behaved before v0.14**, named honestly. It is
 never a default, and from v0.14.1 it is settable the same way the others are: `/mode unattended` in
 the terminal, `mode unattended` in Discord, the picker in Zed, or `permissions.mode: unattended` in
 the config file of a bench run or a scheduled job. From the phone and Discord it can be switched on
@@ -696,7 +710,7 @@ left as it is, the start goes on, and `localharness doctor` says why. Read the s
 **The trust store records what you had already approved.** At the first start after the upgrade,
 `trusted_workspaces.yaml` records without asking the MCP servers of a project you had already
 trusted (its Yes predates the list) and the state of your own agent files, division files,
-`org.yaml` and tool scripts (you wrote them). Later changes are compared against these records,
+`org.yaml`, the `agent:` section of `overrides.yaml` and tool scripts (you wrote them). Later changes are compared against these records,
 and those are what a start asks about. A start also records, without asking, a server or script
 that went away, a tightening, and a kind of entry the record did not know yet. A start with
 `--config-dir` writes that folder's record into the default trust store, under a key of its own.

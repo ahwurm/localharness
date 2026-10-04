@@ -103,9 +103,13 @@ recorded silently, and a changed list is asked about once on a terminal or else 
 project's servers start. A Yes given without the list — the in-session question, a recognized
 workspace — approves no server. For your machine, keyed `<machine><config dir>`, the state of your
 own files (`config/trust.machine_snapshot`): each MCP server and embedding model in
-`<global>/agents/*.yaml`, each permission looser than the shipped default in those files, in
+`<global>/agents/*.yaml` and in the `agent:` section of `<global>/overrides.yaml` (every agent's
+default layer), each permission looser than the shipped default in those, in
 `<global>/divisions/*.yaml` and in `<global>/org.yaml`, and the sha256 of every script in
-`<global>/tools/` outside dependency and cache folders. `cli/workspace.decide_machine_trust`
+`<global>/tools/` outside dependency and cache folders (a symlink there by its own name and what it
+points to). A project's agent or division file that leads outside its `.localharness/` — a symlink,
+or a file in a symlinked folder — is never loaded, listed or fingerprinted (one warning names it):
+the loader decides "the project's file" by where a file sits, never by where it resolves. `cli/workspace.decide_machine_trust`
 compares the files with it at each start: a change that starts, loads or loosens something is
 confirmed once on a terminal, or withheld from every read of that file for the run
 (`ConfigLoader(machine_withheld=…)`); removals and tightenings are recorded silently, and the first
@@ -1549,10 +1553,13 @@ next (the last three exist only in the global one). Agents, divisions, tools, se
 memory, history, the audit log and the kill file are bookkeeping and are not protected — writing
 them is the harness being used. `config.yaml` and `overrides.yaml` have one more rule, in code
 ahead of the verdict (`agent/gate.py`, `HARNESS_CONFIG_FILE_REASON`): the agent's `write` and
-`edit` tools and the shell writes the gate can read are refused for them in every mode, with one
-line naming `localharness components set` — see SECURITY.md for what that rule does not cover. A
-tool script in the global `tools/` that the machine's trust record does not hold is gated as an
-unconfirmed shell command (`config/trust.tool_script_pending`). The two dict-shaped tables (`destructive_flag_verbs`,
+`edit` tools and the shell writes the gate reads — onto the file, or a `cp`/`mv`/`install`/`ln`/
+`rsync`, `tar -x -C`, `unzip -d` or `7z -o` into the config folder itself, with a leading `$HOME`
+or `${HOME}` expanded — are refused for them whatever the mode, with one line naming `localharness
+components set` — see SECURITY.md for what that rule does not cover. A tool script in the session's
+`tools/` that the machine's trust record does not hold is gated as an unconfirmed shell command
+(`config/trust.tool_script_pending`; a symlink there is judged by its own entry). Both rules read
+the session's config folder (`GateContext.config_dir`, from `--config-dir`). The two dict-shaped tables (`destructive_flag_verbs`,
 `inline_code_flags`) are deliberately **not** overridable: they canonicalize flags into the
 signature, so a wrong entry would silently change what an existing grant means.
 

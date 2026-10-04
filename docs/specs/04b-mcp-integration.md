@@ -791,9 +791,12 @@ differs asks once on a terminal, showing what changed. No, or no terminal, remov
 servers before the merge (`ConfigLoader(project_trusted=False)`), so none of them starts, and one
 line names the files and the remedy for the command that was run (`--trust-project`,
 `LOCALHARNESS_TRUST_PROJECT=1`, a Yes at a `localharness start` on a terminal, or the
-`trusted_workspaces.yaml` entry). A server added to the machine's **own** agent files
-(`~/.localharness/agents/*.yaml`) starts after the user confirms it at the next `localharness start`
-on a terminal (`decide_machine_trust`); until then it is withheld, with one line. Neither decision
+`trusted_workspaces.yaml` entry). A project agent file that is a symlink leading outside the
+project's `.localharness/` is not loaded at all (one warning names it). A server added to the
+machine's **own** agent files (`~/.localharness/agents/*.yaml`) or to the `agent:` section of its
+`overrides.yaml` (every agent's default layer) starts after the user confirms it at the next
+`localharness start` on a terminal (`decide_machine_trust`); until then it is withheld, with one
+line. Neither decision
 is ever asked mid-task.
 
 Values in `env` and `headers` are secrets (`SecretStr`): `validate`, `doctor`, `config show` and
