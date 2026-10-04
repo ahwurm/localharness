@@ -20,6 +20,8 @@ through a scripted session asker.
 from __future__ import annotations
 
 import os
+import shutil
+from pathlib import Path
 
 import pytest
 import yaml
@@ -384,3 +386,46 @@ async def test_a_subagents_servers_are_never_named_at_start(project, capsys):
     assert project.started == []
     assert NOT_STARTING not in _err(capsys)
     assert project.agents["helper"].tools.mcp_servers == [], "loaded later, still stripped"
+
+
+# --------------------------------------------------------------------------- linked out of the project
+
+
+IGNORED_LINK = "is a symlink leading outside"
+
+
+def _link_out(project, *, folder: bool) -> None:
+    """The project's orchestrator.yaml — or its whole agents/ folder — becomes a relative symlink to
+    a copy elsewhere in the repository. Git keeps symlinks, so a clone arrives exactly like this.
+    Resolving the path before judging it let such a file skip the untrusted-project strip while
+    the trust question still listed its server (the re-review's finding): it must not load at all."""
+    agents = project.ws / "agents"
+    elsewhere = project.cwd / "docs" / "agents"
+    shutil.copytree(agents, elsewhere)
+    if folder:
+        shutil.rmtree(agents)
+        agents.symlink_to(Path("..") / "docs" / "agents")
+    else:
+        (agents / "orchestrator.yaml").unlink()
+        (agents / "orchestrator.yaml").symlink_to(Path("..") / ".." / "docs" / "agents" /
+                                                  "orchestrator.yaml")
+
+
+@pytest.mark.parametrize("folder", [False, True], ids=["file", "folder"])
+@pytest.mark.parametrize("terminal", [True, False], ids=["answered-no", "no-terminal"])
+async def test_an_agent_file_linked_out_of_the_project_starts_nothing_and_is_named_once(
+        project, capsys, folder, terminal):
+    _link_out(project, folder=folder)
+    project.tty(terminal)
+    asked = project.answers(*([False] if terminal else []))
+
+    await project.start()
+    out = capsys.readouterr()
+    text = " ".join((out.out + out.err).split())
+
+    assert project.started == [], "No, or nobody to ask, starts nothing — wherever the file links"
+    assert text.count(IGNORED_LINK) == 1, text
+    named = project.ws / "agents" if folder else project.ws / "agents" / "orchestrator.yaml"
+    assert repr(str(named)) in text, "the one line names the link"
+    assert not any("evil" in question for question in asked), "an ignored file is never offered"
+    assert project.entry() == ({"trusted": False} if terminal else {})
