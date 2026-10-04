@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import reprlib as repr_lib
 from dataclasses import fields as dataclass_fields
@@ -533,20 +534,37 @@ imports Python from) is re-resolved by `_narrow_agent_global_only`. Never marked
 plugin's AgentConfigModel: the resolver refuses such a plugin (plugins/resolve.py)."""
 
 
-def layer_files(layer_dir: Path, subdir: str) -> list[Path]:
+def layer_files(layer_dir: Path, subdir: str, *, contained: bool = False) -> list[Path]:
     """The `<layer_dir>/<subdir>/*.yaml` files of ONE config layer, sorted — the one enumeration
     the roster (`ConfigLoader.agent_yaml_paths`, `list_divisions`) and the trust fingerprints
-    (config/trust.py) share, so what is fingerprinted is exactly what can load."""
+    (config/trust.py) share, so what is fingerprinted is exactly what can load.
+
+    `contained` (a PROJECT layer): a file that leads outside `layer_dir` — a symlink to elsewhere,
+    or a file in a `subdir` folder that is itself such a symlink — is left out. A repository can
+    ship `.localharness/agents/orchestrator.yaml -> ../../docs/orch.yaml` (git keeps symlinks); a
+    project's agent files must be files inside its `.localharness/`."""
     folder = Path(layer_dir) / subdir
-    return sorted(folder.glob("*.yaml")) if folder.exists() else []
+    files = sorted(folder.glob("*.yaml")) if folder.exists() else []
+    return [f for f in files if not leaves_layer(f, layer_dir)] if contained else files
 
 
-def _is_under(path: Path, root: Path) -> bool:
-    """Is `path` inside `root` (both resolved)? False when either cannot be resolved."""
+def in_layer(path: Path, layer_dir: Path) -> bool:
+    """Was `path` found in this layer? Decided by WHERE THE FILE SITS — the path as found,
+    normalised but with no symlink followed — never by where it resolves: a project's
+    `.localharness/agents/orchestrator.yaml` is the project's file even when it links to
+    `docs/orch.yaml`. Resolving first let such a file skip every project rule (the untrusted-project
+    MCP strip, the machine-only embedding model), while the trust question still listed it."""
+    return Path(os.path.abspath(path)).is_relative_to(os.path.abspath(layer_dir))
+
+
+def leaves_layer(path: Path, layer_dir: Path) -> bool:
+    """Does `path` — the file itself, or a folder on the way to it — link to somewhere outside
+    `layer_dir`? Both sides resolved, so a link that stays inside the layer is fine; a path that
+    cannot be resolved counts as leaving."""
     try:
-        return Path(path).resolve().is_relative_to(Path(root).resolve())
-    except OSError:
-        return False
+        return not Path(path).resolve().is_relative_to(Path(layer_dir).resolve())
+    except (OSError, RuntimeError):
+        return True
 
 _UNSET = object()
 
@@ -716,12 +734,35 @@ class ConfigLoader:
         return (self._local_dir, self._config_dir)
 
     def _find_file(self, subdir: str, name: str) -> Optional[Path]:
-        """Return path to first existing {name}.yaml in local_dir or config_dir."""
+        """Return path to first existing {name}.yaml in local_dir or config_dir. A project file
+        that leads outside the project's `.localharness/` is ignored, with one warning, and the
+        machine's file of that name is used instead (`layer_files(contained=True)`)."""
         for base in self._search_bases():
             candidate = base / subdir / f"{name}.yaml"
             if candidate.exists():
+                if base == self._local_dir and self._project_file_leaves(candidate):
+                    continue
                 return candidate
         return None
+
+    def _project_file_leaves(self, path: Path) -> bool:
+        """True (and one warning, once) when a project-layer file leads outside the project's
+        `.localharness/`: such a file is never loaded, fingerprinted or listed."""
+        if not leaves_layer(path, self._local_dir):  # type: ignore[arg-type]
+            return False
+        folder = path.parent
+        shown = folder if leaves_layer(folder, self._local_dir) else path  # type: ignore[arg-type]
+        note = (f"ignoring {str(shown)!r}: it is a symlink leading outside "
+                f"{str(self._local_dir)!r} — a project's agent and division files must be files "
+                "inside its .localharness/")
+        if note not in self.agent_warnings:
+            self.agent_warnings.append(note)
+        return True
+
+    def _project_layer_files(self, subdir: str) -> list[Path]:
+        """layer_files for the project layer, contained, warning once per file left out."""
+        found = layer_files(self._local_dir, subdir)  # type: ignore[arg-type]
+        return [f for f in found if not self._project_file_leaves(f)]
 
     def _validate_dict(self, model_cls: type, data: dict, path: str, yaml_text: str = "") -> Any:
         """Validate data dict through model_cls, raising ConfigValidationError on failure."""
@@ -1153,7 +1194,7 @@ class ConfigLoader:
         """
         text = path.read_text(encoding="utf-8")
         raw = self._without_withheld(_load_yaml_file(path), path)
-        if self._local_dir is not None and _is_under(path, self._local_dir):
+        if self._local_dir is not None and in_layer(path, self._local_dir):
             raw = self._without_project_mcp(raw, path)
 
         # 2. Load org
@@ -1398,7 +1439,7 @@ class ConfigLoader:
         # ENAB-01, agent level: `agent.<name>` sections leave before AgentConfig (extra="forbid")
         # validates, and reach the plugin through agent_plugin_sections(). Unknown keys still fail.
         merged, agent_sections = split_plugin_keys(merged, self.plugin_names(), CORE_AGENT_KEYS)
-        if self._local_dir is not None and _is_under(path, self._local_dir):
+        if self._local_dir is not None and in_layer(path, self._local_dir):
             agent_sections = self._narrow_agent_global_only(agent_sections, path)
         # ENAB-01 / MEMP-06: a bundled plugin's agent section fails here exactly as a core agent key
         # does — once memory's settings left AgentConfig, a bad `memory:` would otherwise become a
@@ -1967,7 +2008,9 @@ class ConfigLoader:
         """
         # reversed(): _search_bases is first-wins order, but discover_agents keys a dict by file
         # stem, so the workspace file must be listed LAST to win by overwrite. Global first.
-        return [f for b in reversed(self._search_bases()) for f in layer_files(b, "agents")]
+        return [f for b in reversed(self._search_bases())
+                for f in (self._project_layer_files("agents") if b == self._local_dir
+                          else layer_files(b, "agents"))]
 
     def discover_agents(
         self, *, on_error: Optional[Callable[[Path, Exception], None]] = None
@@ -2027,7 +2070,9 @@ class ConfigLoader:
         return {f.stem: f for f in self.microagent_paths()}
 
     def list_divisions(self) -> list[str]:
-        return sorted({f.stem for base in self._search_bases() for f in layer_files(base, "divisions")})
+        return sorted({f.stem for base in self._search_bases()
+                       for f in (self._project_layer_files("divisions") if base == self._local_dir
+                                 else layer_files(base, "divisions"))})
 
     def write_agent(self, config: AgentConfig, *, overwrite: bool = False) -> Path:
         dest = self._config_dir / "agents" / f"{config.name}.yaml"

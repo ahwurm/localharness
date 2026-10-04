@@ -237,12 +237,13 @@ def executables_snapshot(workspace_dir: Path) -> list[dict]:
     with env and header NAMES only (values are often secrets: never stored, never shown), sorted by
     file, name, then the entry's canonical JSON (two servers may share a name: their order in the
     file never changes the fingerprint). A file that does not parse, or is not a mapping, is
-    skipped — the loader warns about it and loads nothing from it. Scripts a command runs are not
-    read (named in SECURITY.md)."""
+    skipped — the loader warns about it and loads nothing from it; so is a file that leads outside
+    the project's `.localharness/` (a symlink, or a symlinked `agents/` folder), which the loader
+    never loads. Scripts a command runs are not read (named in SECURITY.md)."""
     from localharness.config.loader import layer_files  # the roster's own enumeration
 
     out: list[dict] = []
-    for path in layer_files(workspace_dir, "agents"):
+    for path in layer_files(workspace_dir, "agents", contained=True):
         for s in _servers(_read_yaml(path)):
             out.append({"file": path.name, "name": str(s.get("name") or ""),
                         "transport": str(s.get("transport") or ""),

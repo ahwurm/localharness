@@ -276,3 +276,65 @@ def test_loading_the_file_twice_warns_once(tmp_path):
     loader.load_agent_file(path)
     loader.load_agent_file(path)
     assert loader.agent_warnings == [_dropped("memory.embedding_model", path)]
+
+
+# ------------------------------------------------------------------ a project file linked elsewhere
+
+EVIL_SERVER = {"name": "evil", "transport": "stdio", "command": "/bin/echo", "args": ["pwned"]}
+
+
+def _linked_agent(tmp_path: Path, ws: Path, *, inside: bool) -> Path:
+    """agents/solo.yaml in the project is a symlink — to docs/ elsewhere in the repository, or to a
+    file that stays inside the project's .localharness/ — whose file sets an embedding model and a
+    server."""
+    target = (ws / "shared" if inside else ws.parent / "docs") / "solo.yaml"
+    _write(target, {"name": AGENT, "role": "r", "memory": {"embedding_model": "./evil-model"},
+                    "tools": {"mcp_servers": [EVIL_SERVER]}})
+    link = ws / "agents" / f"{AGENT}.yaml"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(Path("..") / ("shared" if inside else Path("..") / "docs") / "solo.yaml")
+    return link
+
+
+def test_a_project_agent_file_linked_out_of_the_project_is_ignored_with_one_warning(tmp_path):
+    """The machine's file of that name loads instead; the link is named once, never followed."""
+    g = tmp_path / "global"
+    _write(g / "config.yaml", {"version": "1", "provider": PROVIDER})
+    _agent_file(g, {"embedding_model": "Org/Model"})
+    ws = tmp_path / "proj" / ".localharness"
+    link = _linked_agent(tmp_path, ws, inside=False)
+    loader = ConfigLoader(config_dir=g, local_config_dir=ws, project_trusted=False)
+
+    agent = loader.load_agent(AGENT)
+
+    assert agent.memory.embedding_model == "Org/Model" and agent.tools.mcp_servers == []
+    assert loader.agent_yaml_paths() == [g / "agents" / f"{AGENT}.yaml"], "not listed either"
+    assert len(loader.agent_warnings) == 1 and repr(str(link)) in loader.agent_warnings[0]
+    assert "symlink leading outside" in loader.agent_warnings[0]
+
+
+def test_a_project_file_is_judged_by_where_it_sits_not_where_it_links(tmp_path):
+    """Handed the link directly (validate does), the loader still applies every project rule:
+    the untrusted project's server is stripped and the embedding model is the machine's choice."""
+    loader, ws = _layers(tmp_path)
+    loader = ConfigLoader(config_dir=tmp_path / "global", local_config_dir=ws, project_trusted=False)
+    link = _linked_agent(tmp_path, ws, inside=False)
+
+    agent = loader.load_agent_file(link)
+
+    assert agent.tools.mcp_servers == []
+    assert agent.memory.embedding_model == EMBED_DEFAULT
+    assert _dropped("memory.embedding_model", link) in loader.agent_warnings
+    assert str(link) in loader.project_mcp_skipped
+
+
+def test_a_link_that_stays_inside_the_project_loads_as_the_projects_file(tmp_path):
+    loader, ws = _layers(tmp_path)
+    loader = ConfigLoader(config_dir=tmp_path / "global", local_config_dir=ws, project_trusted=False)
+    link = _linked_agent(tmp_path, ws, inside=True)
+
+    agent = loader.load_agent(AGENT)
+
+    assert agent.tools.mcp_servers == [] and agent.memory.embedding_model == EMBED_DEFAULT
+    assert loader.agent_yaml_paths() == [link]
+    assert not any("symlink" in w for w in loader.agent_warnings)
