@@ -806,9 +806,22 @@ class ConfigLoader:
 
         global_cfg_path = self._config_dir / "config.yaml"
         global_cfg = _load_yaml_file(global_cfg_path) if global_cfg_path.exists() else {}
+        # What start withheld from these two files (an `org:` permission loosening, a `server:`
+        # launch command, config/trust.machine_snapshot) is absent from every read of them.
+        global_cfg = self._without_withheld(global_cfg, global_cfg_path)
 
-        global_overlay = load_overlay(_resolve_user_overlay_path(self._config_dir))
-        global_overlay = {k: v for k, v in global_overlay.items() if k != "agent"}
+        global_overlay_path = _resolve_user_overlay_path(self._config_dir)
+        global_overlay = load_overlay(global_overlay_path)
+        global_overlay = self._without_withheld(
+            {k: v for k, v in global_overlay.items() if k != "agent"}, global_overlay_path)
+        # A withheld launch command (`server.binary`, `docker_image`, `extra_args`) withholds the
+        # whole `server:` section of both files: the session attaches to whatever answers and
+        # launches nothing this run. Dropping one key would leave a section that no longer
+        # validates (a binary launch needs its binary), and the start would fail instead.
+        if any(kind == "launch" for f in ("config.yaml", "overrides.yaml")
+               for kind, _name in (self._machine_withheld or {}).get(f, ())):
+            global_cfg = {k: v for k, v in global_cfg.items() if k != "server"}
+            global_overlay = {k: v for k, v in global_overlay.items() if k != "server"}
 
         ws_cfg: dict = {}
         ws_overlay: dict = {}
@@ -1534,10 +1547,12 @@ class ConfigLoader:
         return self._without_withheld(load_overlay(path).get("agent"), path)
 
     def _without_withheld(self, raw: Any, path: Path) -> Any:
-        """What start withheld from a machine agent, division or org file — an MCP server by name
-        (every server of that name in the file: two may share one, and over-withholding is the safe
-        side), `memory.embedding_model`, a dotted `permissions.…` key — is absent from every read of
-        that file this run, baselines included. Never mutates `raw`."""
+        """What start withheld from a machine agent, division or org file, or from config.yaml or
+        overrides.yaml — an MCP server by name (every server of that name in the file: two may share
+        one, and over-withholding is the safe side), `memory.embedding_model`, a dotted
+        `permissions.…` or `org.permissions.…` key — is absent from every read of that file this
+        run, baselines included (a withheld `server.…` launch key drops the whole section, in
+        `_raw_config_sources`). Never mutates `raw`."""
         withheld = self._machine_withheld.get(self._machine_file(path) or "") if (
             self._machine_withheld) else None
         if not withheld or not isinstance(raw, dict):
@@ -1549,7 +1564,7 @@ class ConfigLoader:
                 s for s in tools["mcp_servers"]
                 if not (isinstance(s, dict) and str(s.get("name") or "") in servers)]}}
         for kind, name in sorted(withheld):
-            if kind in ("embedding_model", "permission"):
+            if kind in ("embedding_model", "permission", "org_permission"):
                 raw = _put(raw, name.split("."), _UNSET)
         return raw
 

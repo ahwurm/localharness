@@ -308,3 +308,74 @@ async def test_an_overrides_agent_section_there_before_the_upgrade_is_adopted_si
     await machine.start()
 
     assert machine.names() == ["g2"]
+
+
+# --------------------------------------------------------------------------- the org: and server: sections
+
+
+def _set(machine, file: str, section: str, value: dict) -> None:
+    """Merge `value` into one top-level section of the machine's config.yaml or overrides.yaml."""
+    path = machine.g / file
+    data = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.exists() else {}
+    data[section] = {**(data.get(section) or {}), **value}
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+
+@pytest.mark.parametrize("file", ["overrides.yaml", "config.yaml"])
+async def test_an_org_mode_loosened_in_the_settings_files_waits_for_one_yes(machine, file):
+    """The fix-commit review: `org: {permissions: {mode: unattended}}` in either settings file
+    made every agent that sets no mode of its own run unattended at the next start, with no
+    question and no line. It is now one more change the start lists."""
+    _bare_orchestrator(machine)
+    await machine.first_start()
+    _set(machine, file, "org", {"permissions": {"mode": "unattended"}})
+    asked = machine.answers(True)
+
+    await machine.start()
+
+    assert len(asked) == 1 and f"+ org.permissions.mode ({file}): unattended" in asked[0]
+    assert machine.roots[-1].permissions.mode == "unattended", "applied after the Yes"
+
+
+@pytest.mark.parametrize("terminal", [False, True], ids=["no-terminal", "answered-no"])
+async def test_without_a_yes_org_loosenings_and_a_launch_command_are_held_back(machine, capsys, terminal):
+    _bare_orchestrator(machine)
+    await machine.first_start()
+    _set(machine, "overrides.yaml", "org", {"permissions": {
+        "mode": "unattended", "ask": {"mcp_trusted_servers": ["evil"]}}})
+    _set(machine, "config.yaml", "server", {"runtime": "vllm", "binary": "/tmp/evil-server",
+                                             "model": "m"})
+    machine.tty(terminal)
+    machine.answers(*([False] if terminal else []))
+    seen: list = []
+    real = ConfigLoader.load_harness
+
+    def load_harness(loader):
+        harness = real(loader)
+        seen.append(harness)
+        return harness
+
+    machine.mp.setattr(ConfigLoader, "load_harness", load_harness)
+
+    await machine.start()
+
+    root = machine.roots[-1]
+    assert root.permissions.mode != "unattended"
+    assert "evil" not in (root.permissions.ask.mcp_trusted_servers or [])
+    assert seen and all(h.server is None or h.server.binary != "/tmp/evil-server" for h in seen)
+    err = _err(capsys)
+    assert "Not applying 3 change(s)" in err
+    assert "org.permissions.mode (overrides.yaml)" in err and "server.binary (config.yaml)" in err
+
+
+async def test_org_settings_and_a_launch_command_there_before_the_upgrade_are_adopted(machine):
+    _bare_orchestrator(machine)
+    _set(machine, "config.yaml", "org", {"permissions": {"mode": "unattended"}})
+    _set(machine, "config.yaml", "server", {"runtime": "vllm", "binary": "/opt/vllm/bin/vllm",
+                                             "model": "m"})
+    machine.tty(True)
+    machine.answers()
+
+    await machine.start()
+
+    assert machine.roots[-1].permissions.mode == "unattended"
