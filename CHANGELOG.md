@@ -331,18 +331,18 @@ All notable changes to LocalHarness are documented here. The format follows
 - The first start after upgrading adopts, without asking, the MCP servers of a
   project you had already trusted and your own agent files, division files,
   `org.yaml` and tool scripts as they are; only later changes are asked about.
-- The trust store is an ordinary file in your config folder. Code the agent runs
-  through `python_exec`, `cruncher_exec` or an inline interpreter (which `auto`
-  runs without asking) can rewrite it, recording a server as approved or
-  removing a record so the next start adopts what the files hold.
+- The trust store is an ordinary file in your config folder. The questions
+  guard what the agent writes with its file tools and the shell; code the agent
+  is already running (an interpreter tool, which `auto` runs without asking)
+  can rewrite any file you own, that record included, and a start believes the
+  record it finds.
 - Of your machine's `config.yaml` and `overrides.yaml`, the record a start
   confirms holds the `agent:` section, the looser `org:` permissions and the
   `server:` launch command only. The rest — among it where requests go, the
-  capability floor, the remote lock (`channels.remote_unattended`), the rest of
-  `server:` (`bind_all` included) and the peer endpoints with their launch
-  specs (`extra_endpoints`) — code the agent runs can change for the next start
-  without a question; the settings-file rule keeps out only the agent's file
-  tools and the shell writes it reads.
+  capability floor, the remote lock and the rest of the `server:` and endpoint
+  settings — code the agent runs can change for the next start without a
+  question; the settings-file rule keeps out only the agent's file tools and
+  the shell writes it reads.
 - In Zed, the mode shown before the first prompt can be one your own agent file
   sets that the start then withheld.
 - A GET to a public host can still carry data out in its URL: that is
@@ -362,18 +362,15 @@ All notable changes to LocalHarness are documented here. The format follows
   `overrides.yaml` is not migrated: that server listens on 127.0.0.1 after the
   upgrade until you set `server.bind_all: true`.
 - The settings-file rule does not cover `python_exec` and `cruncher_exec`,
-  code run inline through a non-shell interpreter (`python3 -c`), shell
-  commands the gate does not read as writing the file (`mv` moving it away,
-  `unlink`, `shred`, `find … -delete` by name, a hard link, a plain `rm` after
-  a `cd`, a path holding a variable other than `$HOME`, a `$HOME` the command
-  reassigned first, a symlink to the folder made by the same command, a
-  command run through `sudo`, an archive unpacked above the config folder), or
-  the harness's own CLI run by the agent.
+  code run inline through a non-shell interpreter (`python3 -c`), a shell
+  command that reaches the file by a route the rule does not read (another
+  name or a link for it, a path through a variable, `sudo`, a copy or an
+  unpack that lands there from above), or the harness's own CLI run by the
+  agent.
 - Outside `guarded` an unconfirmed tool script runs without asking, as any
   shell command does there. Files below a dependency or cache folder in the
-  tools folder (`node_modules`, `.venv`, `venv`, `__pycache__`, `.git`,
-  `site-packages`, or any folder holding a `pyvenv.cfg`) are not tracked; a
-  script named through a variable or a
+  tools folder (`node_modules`, a virtual environment, `.git`) are not tracked;
+  a script named through a variable or a
   glob, relative to an earlier `cd`, or written by the same command that runs
   it, is not recognised as one; one reached through a symlinked folder is
   judged as the file it points to; and `npm install` there lists
