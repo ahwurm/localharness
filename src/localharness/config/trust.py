@@ -334,26 +334,20 @@ def _sha256_file(path: Path) -> Optional[str]:
 
 
 def tool_script_entries(global_dir: Path) -> list[dict]:
-    """Every regular file under <global>/tools/ (recursively, never descending into a
-    _DEPENDENCY_DIRS folder), as {kind: "tool_script", file: "tools/<rel>", name: "<rel>",
-    shown: "sha256:<first 12 hex>", sha256: "<hex>"}, sorted by file. A file whose bytes equal a
-    packaged asset is left out; a symlink resolving outside the tools folder, and a file that
-    cannot be read, are skipped."""
+    """Every file under <global>/tools/ (recursively through real folders — a symlinked folder is
+    not walked — never descending into a _DEPENDENCY_DIRS folder), as {kind: "tool_script", file:
+    "tools/<rel>", name: "<rel>", shown: "sha256:<first 12 hex>", sha256: "<hex>"}, sorted by
+    file. A file is judged by its entry, not by where it links: a symlink there is listed under its
+    own name with the content it points to (skipping one that leads outside let it run past the
+    tool-script rule as an ordinary command). A file whose bytes equal a packaged asset is left
+    out; a file that cannot be read, or is not a regular file, is skipped."""
     tools = Path(global_dir) / "tools"
-    try:
-        root = tools.resolve()
-    except (OSError, RuntimeError):
-        return []
     out: list[dict] = []
     for dirpath, dirnames, filenames in os.walk(tools):
         dirnames[:] = [d for d in dirnames if d not in _DEPENDENCY_DIRS]
         for name in filenames:
             path = Path(dirpath) / name
-            try:
-                inside = path.resolve().is_relative_to(root)
-            except (OSError, RuntimeError):
-                continue
-            digest = _sha256_file(path) if inside else None
+            digest = _sha256_file(path)
             if digest is None or digest in _packaged_hashes():
                 continue
             rel = path.relative_to(tools).as_posix()
@@ -367,7 +361,7 @@ _PENDING: dict[tuple, Optional[str]] = {}
 cannot be set back the way mtime can)."""
 
 
-def tool_script_pending(path: Path) -> Optional[str]:
+def tool_script_pending(path: Path, global_dir: Optional[Path] = None) -> Optional[str]:
     """None when this file may run as an ordinary command: anything outside <global>/tools/, a file
     below a _DEPENDENCY_DIRS folder there, an exact copy of a packaged asset, or a tool script whose
     current sha256 the machine record holds. Otherwise the script's current short digest
@@ -376,20 +370,20 @@ def tool_script_pending(path: Path) -> Optional[str]:
     size, mtime_ns and ctime_ns); a tools file that cannot be read is pending, with the digest
     "unreadable".
 
-    <global> is global_config_dir() — LOCALHARNESS_DIR, else ~/.localharness — the folder the
-    verdict's protected-path rule reads too; a run with an explicit --config-dir keeps today's
-    scoping. A record from before scripts were a kind holds none: start adopts every script of a
+    <global> is `global_dir` — the session's config folder, which the gate passes (a session
+    started with --config-dir gates its own tools folder) — else global_config_dir(). A file is a
+    tool script when it resolves into the tools folder, or when its own entry sits there through
+    real folders (a symlink in the tools folder to a file elsewhere is that entry, hashed by what it
+    points to). A record from before scripts were a kind holds none: start adopts every script of a
     kind the record predates, so they all read as confirmed until it records them."""
-    global_dir = global_config_dir()
+    global_dir = Path(global_dir) if global_dir is not None else global_config_dir()
     try:
         root = (global_dir / "tools").resolve()
         real = Path(path).resolve()
     except (OSError, RuntimeError, ValueError):
         return None
-    if real == root or not real.is_relative_to(root):
-        return None
-    rel = real.relative_to(root)
-    if _DEPENDENCY_DIRS.intersection(rel.parts[:-1]):
+    rel = _tools_rel(Path(path), global_dir, root, real)
+    if rel is None or _DEPENDENCY_DIRS.intersection(rel.parts[:-1]):
         return None
     try:
         st = real.stat()
@@ -397,13 +391,32 @@ def tool_script_pending(path: Path) -> Optional[str]:
         sst = store.stat() if store.exists() else None
     except OSError:
         return "unreadable"
-    key = (str(real), str(root), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+    key = (str(real), rel.as_posix(), str(root), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
            (sst.st_ino, sst.st_size, sst.st_mtime_ns, sst.st_ctime_ns) if sst else None)
     if key not in _PENDING:
         if len(_PENDING) > 256:
             _PENDING.clear()
         _PENDING[key] = _script_pending(global_dir, f"tools/{rel.as_posix()}", real)
     return _PENDING[key]
+
+
+def _tools_rel(path: Path, global_dir: Path, root: Path, real: Path) -> Optional[Path]:
+    """`path` relative to the tools folder, or None when it is not a tool script: by where it
+    resolves (inside the folder), else by its own entry — the path as written, normalised, through
+    real folders only, since start never walks a symlinked folder."""
+    if real != root and real.is_relative_to(root):
+        return real.relative_to(root)
+    lex_root = Path(os.path.abspath(Path(global_dir) / "tools"))
+    lex = Path(os.path.abspath(path))
+    if lex == lex_root or not lex.is_relative_to(lex_root):
+        return None
+    rel = lex.relative_to(lex_root)
+    step = lex_root
+    for part in rel.parts[:-1]:
+        step = step / part
+        if step.is_symlink():
+            return None
+    return rel
 
 
 def _script_pending(global_dir: Path, file: str, real: Path) -> Optional[str]:

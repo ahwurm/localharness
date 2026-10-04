@@ -1468,6 +1468,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             bus=bus,
             remote_unattended=harness.channels.remote_unattended,
             trusted_for_run=trust_flag,
+            config_dir=cfg_path,  # the session's own tools folder and settings files are guarded
         )
         if resume is not None and resume.gate_mode != gate.mode:
             gate.set_mode(resume.gate_mode)  # /mode as the person left it (and a declined trust's mode)

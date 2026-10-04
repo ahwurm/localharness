@@ -28,6 +28,7 @@ family are what a tool says about itself, so a tool that misdescribes itself is 
 from __future__ import annotations
 
 import fnmatch
+import os
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Callable, Literal, Optional
@@ -376,6 +377,9 @@ class GateContext:
     bench's ask-rate report) means no tool-script rule; the session gate passes
     ``config.trust.tool_script_pending`` (None → the file runs as an ordinary command; a digest →
     an unconfirmed tool script, see :data:`~localharness.agent.gate_types.TOOL_SCRIPT_UNCONFIRMED`)."""
+    config_dir: Optional[Path] = None
+    """The session's machine config folder (`--config-dir` / LOCALHARNESS_DIR as start resolved it),
+    whose tools folder and settings files the two rules guard. None: global_config_dir()."""
 
 
 # ------------------------------------------------------------------- internals
@@ -980,22 +984,46 @@ def _pending_scripts(segment: ShellSegment, anchor: Optional[Path],
     the same command that runs it — is not recognised either."""
     if ctx.script_pending is None or not segment.argv:
         return []
+    tools = (ctx.config_dir or global_config_dir()) / "tools"
     try:
-        root = (global_config_dir() / "tools").resolve()
+        root = tools.resolve()
     except (OSError, ValueError, RuntimeError):
         return []
+    entry_root = Path(os.path.abspath(tools))
     found: list[tuple[Path, str, int]] = []
     words = (segment.program or segment.argv[0], *segment.argv[1:])
     for position, word in enumerate(words):
         path = _resolve(word, anchor)
+        if path is None:
+            continue
+        # Judged where it resolves, else by its own entry: a symlink in the tools folder to a file
+        # elsewhere is still a tool script (resolving first let it run as an ordinary command).
+        named = path if _within(root, path) else _entry(word, anchor)
         try:
-            is_script = path is not None and _within(root, path) and path.is_file()
+            is_script = named is not None and (named is path or _within(entry_root, named)) \
+                and path.is_file()
         except OSError:
             continue
-        digest = ctx.script_pending(path) if is_script else None
+        digest = ctx.script_pending(named) if is_script else None
         if digest is not None:
-            found.append((path, digest, position))
+            found.append((named, digest, position))
     return found
+
+
+def _entry(target: str, anchor: Optional[Path]) -> Optional[Path]:
+    """`target` as written — `~` expanded, placed against `anchor`, normalised — with NO symlink
+    followed: the directory entry a command names. None when it cannot be placed."""
+    if any(ch in target for ch in UNRESOLVABLE_TARGET_CHARS):
+        return None
+    try:
+        path = Path(target).expanduser()
+        if not path.is_absolute():
+            if anchor is None:
+                return None
+            path = Path(anchor) / path
+        return Path(os.path.abspath(path))
+    except (OSError, ValueError):
+        return None
 
 
 def _evaluate_shell(
@@ -1224,20 +1252,68 @@ def _named_file(raw: str, anchor: Optional[Path]) -> tuple[Path, ...]:
         return (real,)
 
 
+_INTO_FOLDER_PROGRAMS: frozenset[str] = frozenset(
+    {"cp", "mv", "install", "rsync", "ln", "tar", "bsdtar", "gtar", "unzip", "7z", "7za", "7zr"})
+"""Programs that copy, move, link or unpack INTO a destination folder (`cp x DIR/`, `ln -s x DIR/`,
+`tar -x -C DIR`, `unzip -d DIR`, `7z x -oDIR`): written into a harness config folder, the settings
+files could land there, under whatever name the source or the archive gives them."""
+
+
+def _expand_home(raw: str) -> str:
+    """A leading `$HOME` or `${HOME}` as the shell `bash_exec` starts would expand it — that shell
+    inherits this process's environment. Every other variable stays unexpanded, so unresolvable."""
+    for var in ("${HOME}", "$HOME"):
+        if raw == var or raw.startswith(var + "/"):
+            return os.path.expanduser("~") + raw[len(var):]
+    return raw
+
+
+def _tar_extracts(args: tuple[str, ...]) -> bool:
+    """Does this tar command unpack? (`-C DIR` names the SOURCE when it creates an archive.)"""
+    if any(a in ("--extract", "--get") for a in args):
+        return True
+    old_style = bool(args) and not args[0].startswith("-") and args[0].isalpha() and "x" in args[0]
+    return old_style or any(a.startswith("-") and not a.startswith("--") and a[1:].isalpha()
+                            and "x" in a[1:] for a in args)
+
+
+def _into_folders(segment) -> list[str]:
+    """The folders a copy, move, link or unpack writes into: the classifier's write targets for
+    those programs (only when tar extracts), plus 7z's `-o<dir>`, which it does not model."""
+    program = Path(segment.argv[0]).name.casefold() if segment.argv else ""
+    if program not in _INTO_FOLDER_PROGRAMS:
+        return []
+    args = tuple(segment.argv[1:])
+    if program.endswith("tar") and not _tar_extracts(args):
+        return []
+    out = list(segment.write_targets)
+    if program.startswith("7z"):
+        out += [a[2:] or (args[i + 1] if i + 1 < len(args) else "")
+                for i, a in enumerate(args) if a.startswith("-o")]
+    return [t for t in out if t]
+
+
 def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
                                settings: GateSettings) -> Optional[Path]:
     """The machine's or a project's config.yaml / overrides.yaml this call would write or delete,
     or None. Reads the builtin write/edit tools' path and every write and destructive target of a
     `bash_exec` command the classifier can read — the operands of a plain `rm`, `truncate` or
     `chmod` too, which the classifier reads but does not flag destructive — realpathed (a symlink
-    to one of the files is caught) and as the entry it names. A command that runs code inline
-    through an interpreter is not read. Never raises.
+    to one of the files is caught) and as the entry it names; a shell path starting with `$HOME`
+    or `${HOME}` is expanded first. A copy, move, link or unpack whose destination is the config
+    folder itself (`cp x ~/.localharness/`, `tar -x -C`, `unzip -d`, `7z -o`) is caught too: a
+    settings file could land there under any name. A command that runs code inline through an
+    interpreter is not read, nor is a path holding any other variable. Never raises.
+
+    The machine's folder is the session's (`ctx.config_dir`, as start resolved `--config-dir` /
+    LOCALHARNESS_DIR), else global_config_dir(); any folder named `.localharness` is a project's.
 
     `PermissionGate.check` runs this AHEAD of :func:`evaluate` and denies on a hit (orchestrator
     ruling R13), so :func:`evaluate`'s own answer for these files stays the protected-path ask."""
     try:
         if not isinstance(params, dict):
             return None
+        folders: list[str] = []
         if tool_name in WRITE_TOOL_PATH_PARAMS:
             raw = params.get(WRITE_TOOL_PATH_PARAMS[tool_name])
             targets = [raw] if isinstance(raw, str) and raw.strip() else []
@@ -1253,15 +1329,22 @@ def harness_config_file_target(tool_name: str, params: dict, ctx: GateContext,
                 targets += [*segment.write_targets, *segment.destructive_targets]
                 if not segment.read_only:  # a plain `rm` deletes, though it is not flagged
                     targets += destructive_targets(segment.signature, segment.argv, settings) or []
+                folders += _into_folders(segment)
+            targets = [_expand_home(t) for t in targets]
+            folders = [_expand_home(t) for t in folders]
             anchor = _shell_anchor(tool_name, params, ctx)
         else:
             return None
-        config_dir = str(global_config_dir().resolve()).casefold()
+        config_dir = str((ctx.config_dir or global_config_dir()).resolve()).casefold()
         for raw in targets:
             for path in _named_file(raw, anchor):
                 if path.name.casefold() in HARNESS_CONFIG_FILES and (
                         str(path.parent).casefold() == config_dir
                         or path.parent.name.casefold() == WORKSPACE_DIR_NAME):
+                    return path
+        for raw in folders:
+            for path in _named_file(raw, anchor):
+                if str(path).casefold() == config_dir or path.name.casefold() == WORKSPACE_DIR_NAME:
                     return path
     except Exception:  # noqa: BLE001 — what this cannot read stays the verdict's to judge
         return None

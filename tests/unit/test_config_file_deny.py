@@ -151,6 +151,74 @@ async def test_a_config_file_kept_elsewhere_through_a_symlink_is_still_refused(m
         assert not outcome.allowed and "localharness components set" in outcome.reason, tool
 
 
+# The re-review's F-B: shapes the rule used to walk past — a copy, move, link or unpack whose
+# destination is the config FOLDER (a settings file lands there under the source's or the archive's
+# name), and a `$HOME` path. Each is refused in every mode, `unattended` included.
+INTO_THE_FOLDER = {
+    "cp-into-the-folder": lambda g, p, h: (f"cp /tmp/config.yaml {g}/", g),
+    "cp-into-the-folder-no-slash": lambda g, p, h: (f"cp /tmp/config.yaml {g}", g),
+    "mv-into-the-folder": lambda g, p, h: (f"mv /tmp/config.yaml {g}/", g),
+    "install-into-the-folder": lambda g, p, h: (f"install /tmp/config.yaml {g}", g),
+    "ln-into-the-folder": lambda g, p, h: (f"ln -sf /tmp/config.yaml {g}/", g),
+    "rsync-into-the-folder": lambda g, p, h: (f"rsync -a /tmp/c/ {g}/", g),
+    "tar-extract-into-the-folder": lambda g, p, h: (f"tar -xf a.tar -C {g}", g),
+    "tar-directory-long-form": lambda g, p, h: (f"tar --directory={g} -xf a.tar", g),
+    "tar-old-style-extract": lambda g, p, h: (f"tar xf a.tar -C {g}", g),
+    "unzip-into-the-folder": lambda g, p, h: (f"unzip -o a.zip -d {g}", g),
+    "7z-into-the-folder": lambda g, p, h: (f"7z x a.7z -o{g}", g),
+    "cp-into-a-projects-folder": lambda g, p, h: (f"cp /tmp/config.yaml {p / '.localharness'}/",
+                                                  p / ".localharness"),
+    "cp-to-home-dollar-path": lambda g, p, h: ("cp /tmp/x $HOME/.localharness/config.yaml",
+                                               h / ".localharness" / "config.yaml"),
+    "redirect-to-home-dollar-path": lambda g, p, h: ("echo x > $HOME/.localharness/overrides.yaml",
+                                                     h / ".localharness" / "overrides.yaml"),
+    "redirect-to-braced-home": lambda g, p, h: ("echo x > ${HOME}/.localharness/overrides.yaml",
+                                                h / ".localharness" / "overrides.yaml"),
+    "unzip-into-home-dollar-folder": lambda g, p, h: ("unzip a.zip -d $HOME/.localharness",
+                                                      h / ".localharness"),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("case", sorted(INTO_THE_FOLDER))
+async def test_into_the_folder_and_home_shapes_are_refused_in_every_mode(case, mode, g, proj,
+                                                                        tmp_path, monkeypatch):
+    home = (tmp_path / "home").resolve()
+    monkeypatch.setenv("HOME", str(home))
+    command, target = INTO_THE_FOLDER[case](g, proj, home)
+    gate = _gate(tmp_path, proj, mode, _never)
+
+    outcome = await _check(gate, "bash_exec", {"command": command})
+
+    assert not outcome.allowed
+    assert outcome.reason == _refused(target.resolve())
+    assert outcome.pending is None and not gate.pending
+
+
+@pytest.mark.parametrize("command", [
+    "tar -czf /tmp/backup.tgz -C {g} .",
+    "tar czf /tmp/backup.tgz -C {g} config.yaml",
+    "chmod -R go-rwx {g}",
+    "chmod 700 {g}",
+    "mkdir -p {g}",
+    "touch {g}",
+    "cp {g}/config.yaml /tmp/",
+    "cp a.yaml {g}/agents/",
+    "mv {g}/notes.txt {g}/agents/",
+    "rsync -a {g}/ /tmp/backup/",
+], ids=["tar-create-from-the-folder", "tar-create-one-file", "chmod-recursive", "chmod", "mkdir",
+        "touch", "copy-out", "copy-into-agents", "move-into-agents", "rsync-out"])
+def test_reading_or_tidying_the_folder_is_not_a_settings_write(g, proj, tmp_path, command):
+    """The folder rule reads only a copy, move, link or unpack INTO the folder: an archive made
+    FROM it (`tar -c -C`), doctor's own `chmod -R go-rwx` advice, `mkdir`, and copies out of it or
+    into its agents/ folder stay with the verdict, exactly as before."""
+    ctx = _gate(tmp_path, proj, "auto", _once).context()
+
+    assert verdict.harness_config_file_target("bash_exec", {"command": command.format(g=g)}, ctx,
+                                              SETTINGS) is None
+
+
 UNTOUCHED = {
     "global-agent-file": lambda g, p: ("write", {"path": str(g / "agents" / "x.yaml"), "content": "x"}),
     "global-tool-script": lambda g, p: ("write", {"path": str(g / "tools" / "x.sh"), "content": "x"}),
@@ -233,8 +301,14 @@ def test_the_verdict_itself_still_asks_about_these_files(g, proj):
     ("ln {g}/config.yaml hard.yaml", False),
     ("cd {g} && rm config.yaml", False),
     ("localharness components set provider.base_url http://elsewhere", False),
+    ("cp /tmp/config.yaml {g}/", True),
+    ("tar -xf a.tar -C {g}", True),
+    ("cp /tmp/x $LOCALHARNESS_DIR/config.yaml", False),
+    ("sudo cp /tmp/config.yaml {g}/", False),
+    ("tar -xf evil.tar -C {g}/..", False),
 ], ids=["sh-c", "bash-c", "eval", "redirect-after-cd", "mv-away", "unlink", "shred", "find-by-name",
-        "hard-link", "plain-rm-after-cd", "the-cli"])
+        "hard-link", "plain-rm-after-cd", "the-cli", "copy-into-the-folder", "unpack-into-the-folder",
+        "another-variable", "through-sudo", "unpacked-above-the-folder"])
 def test_what_security_md_says_the_rule_reads_and_does_not(g, proj, tmp_path, command, caught):
     """SECURITY.md, "What the agent may change about its own setup": a shell payload is read; a
     command the gate does not read as writing or deleting that file is not caught, and the
