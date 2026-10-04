@@ -200,7 +200,8 @@ _DEPENDENCY_DIRS: frozenset[str] = frozenset(
     {"node_modules", ".venv", "venv", "__pycache__", ".git", "site-packages"})
 """Folders under <global>/tools/ that hold installed dependencies or caches, not scripts: the
 packaged helper asks for `cd ~/.localharness/tools && npm install playwright` (~1,500 files), and a
-venv there holds thousands more. Never listed at start, never gated (a named gap in SECURITY.md)."""
+venv there holds thousands more. Never listed at start, never gated (a named gap in SECURITY.md).
+A folder holding a `pyvenv.cfg` is skipped too, whatever its name (_is_venv)."""
 
 
 def _now() -> str:
@@ -350,7 +351,8 @@ def tool_script_entries(global_dir: Path) -> list[dict]:
     tools = Path(global_dir) / "tools"
     out: list[dict] = []
     for dirpath, dirnames, filenames in os.walk(tools):
-        dirnames[:] = [d for d in dirnames if d not in _DEPENDENCY_DIRS]
+        dirnames[:] = [d for d in dirnames
+                       if d not in _DEPENDENCY_DIRS and not _is_venv(Path(dirpath) / d)]
         for name in filenames:
             path = Path(dirpath) / name
             digest = _sha256_file(path)
@@ -389,7 +391,9 @@ def tool_script_pending(path: Path, global_dir: Optional[Path] = None) -> Option
     except (OSError, RuntimeError, ValueError):
         return None
     rel = _tools_rel(Path(path), global_dir, root, real)
-    if rel is None or _DEPENDENCY_DIRS.intersection(rel.parts[:-1]):
+    if rel is None or _DEPENDENCY_DIRS.intersection(rel.parts[:-1]) or any(
+            _is_venv(Path(global_dir) / "tools" / Path(*rel.parts[:i]))
+            for i in range(1, len(rel.parts))):
         return None
     try:
         st = real.stat()
@@ -404,6 +408,16 @@ def tool_script_pending(path: Path, global_dir: Optional[Path] = None) -> Option
             _PENDING.clear()
         _PENDING[key] = _script_pending(global_dir, f"tools/{rel.as_posix()}", real)
     return _PENDING[key]
+
+
+def _is_venv(folder: Path) -> bool:
+    """A Python virtual environment, whatever it is called: it holds a `pyvenv.cfg`. Its interpreter
+    symlinks and site-packages are installed dependencies, not scripts (a named gap in SECURITY.md:
+    a script placed in such a folder is not tracked either)."""
+    try:
+        return (folder / "pyvenv.cfg").is_file()
+    except OSError:
+        return False
 
 
 def _tools_rel(path: Path, global_dir: Path, root: Path, real: Path) -> Optional[Path]:

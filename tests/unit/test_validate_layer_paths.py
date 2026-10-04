@@ -231,3 +231,37 @@ def test_workspace_only_valid_config_still_says_the_machine_needs_init(tmp_path,
 
     assert result.exit_code == 2, result.output
     assert "localharness init" in result.output
+
+
+def test_a_project_file_linked_out_of_the_project_is_not_validated_and_is_named_once(tmp_path,
+                                                                                      monkeypatch):
+    """`validate` used to open the target of a project agent file that links outside the project —
+    a file `start` ignores — and file its verdict under the link. It now applies start's rule: no
+    row for it, and start's one line, word for word. (The link's target here is not even YAML.)"""
+    from pathlib import Path
+
+    from typer.testing import CliRunner
+
+    from localharness.cli.app import app
+
+    global_dir, ws = _layers(tmp_path)
+    good = _seed_agent(ws, "fine", role="r")
+    elsewhere = tmp_path / "proj" / "docs" / "orch.yaml"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text("::: not yaml :::\n  - [", encoding="utf-8")
+    link = ws / "agents" / "orchestrator.yaml"
+    link.symlink_to(Path("..") / ".." / "docs" / "orch.yaml")
+
+    loader = ConfigLoader(config_dir=global_dir, local_config_dir=ws)
+    verdicts = dict(loader.validate_all())
+
+    assert str(link) not in verdicts and verdicts[str(good)] is None
+    assert len(loader.ignored_links) == 1 and repr(str(link)) in loader.ignored_links[0]
+
+    monkeypatch.chdir(tmp_path / "proj")
+    (tmp_path / "proj" / ".git").mkdir()
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(global_dir))
+    monkeypatch.setattr("localharness.cli.workspace.resolve_workspace_layer", lambda *a, **k: ws)
+    result = CliRunner().invoke(app, ["validate"])
+    out = " ".join(result.output.split())
+    assert "is a symlink leading outside" in out and "invalid" not in out.split("config(s) valid")[0], out

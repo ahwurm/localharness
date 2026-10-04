@@ -192,6 +192,24 @@ def test_a_linked_tool_script_waits_for_its_yes_like_any_other(g, tmp_path, monk
     assert trust.tool_script_pending(link) == _short(b"print('changed elsewhere')\n")
 
 
+def test_a_virtual_environment_under_any_name_is_never_listed_or_gated(g, tmp_path):
+    """A venv not called `.venv` or `venv` (`python3 -m venv tools/pyenv`): its interpreter links
+    and site-packages were listed as tool scripts. A folder holding pyvenv.cfg is skipped."""
+    _script(g, "a.py")
+    env = g / "tools" / "pyenv"
+    (env / "bin").mkdir(parents=True)
+    (env / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    real_python = tmp_path / "python3.12"
+    real_python.write_bytes(b"#!/bin/sh\n")
+    (env / "bin" / "python").symlink_to(real_python)
+    _script(g, "pyenv/lib/python3.12/site-packages/mod.py")
+
+    assert [e["name"] for e in trust.tool_script_entries(g)] == ["a.py"]
+    assert trust.tool_script_pending(env / "bin" / "python") is None
+    assert trust.tool_script_pending(env / "lib" / "python3.12" / "site-packages" / "mod.py") is None
+    assert trust.tool_script_pending(g / "tools" / "a.py") is not None, "the rule still holds elsewhere"
+
+
 def test_a_file_reached_through_a_symlinked_folder_is_judged_as_what_it_points_to(g, tmp_path):
     """Start never walks a symlinked folder (it could lead anywhere, or loop), so a file reached
     through one is never listed — and is judged where it resolves, as running it from there would be."""
