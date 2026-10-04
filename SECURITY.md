@@ -79,11 +79,13 @@ for that one run, starts its servers and records nothing — for CI and scripts.
 a repository never count as having worked there; only your machine's own store does (see the trust
 question under the approval gate). An agent or division file in a project's `.localharness/` that
 is a symlink leading outside it — or that sits in a symlinked folder leading outside it — is
-ignored, with one warning naming the link, and the machine's file of that name is used instead: a
-project's agent files must be files inside its `.localharness/`, judged by where they sit, never by
-where they point. Your machine's own agent files, and the `agent:` section of your `overrides.yaml`,
-are held to the same rule — see the paragraph on what the agent may change about its own setup,
-under the approval gate.
+ignored, with one warning naming the link (`localharness validate` names it the same way and does
+not check it), and the machine's file of that name is used instead: a project's agent files must be
+files inside its `.localharness/`, judged by where they sit, never by where they point. That rule is
+for a project's files only: a symlink among your machine's own agent files loads as the file it
+points to, as a dotfiles setup expects. What your machine's agent files and the `agent:` section of
+your `overrides.yaml` start, load or loosen waits for one Yes instead — see the paragraph on what
+the agent may change about its own setup, under the approval gate.
 
 **What this does NOT cover.** If you clone someone's repository and run the harness inside it, that
 repository's `.localharness/` config and agent files load with no prompt, because you are inside
@@ -362,18 +364,21 @@ read and argue with. Each step below says what it does in `auto`.
      `~/.gnupg`, `~/.config/gh`, `~/.kube`, `~/.docker`, `~/.git-credentials`, `~/.netrc`,
      `~/.npmrc`, `~/.pypirc`, `~/.config/gcloud`, `~/.azure`, your shell rc and profile files and
      the Windows credential folders. `~/.localharness` is no longer protected as a whole tree:
-     **one six-entry list protects every harness config directory**, global or in-project —
-     `config.yaml`, `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`,
-     `declined_workspace_offers.yaml` and `plugins/**`, the files that change what the harness does
-     next. Everything else under one (agents, divisions, tools, session state, memory, history, the
-     audit log, the kill file) is the harness being *used* and is not protected; naming what is
-     protected rather than what is exempt also means a new kind of runtime state added there is
-     allowed by default rather than becoming a prompt nobody wanted. Two of those entries,
-     `config.yaml` and `overrides.yaml`, never reach this step from the agent's write and edit
-     tools or from a shell write the gate can read: those are refused outright, in every mode (see
-     the paragraph on what the agent may change about its own setup, below). An entry kept elsewhere through a
-     symlink, as a dotfiles setup does, is judged by where it points and is not protected there —
-     except those two, whose refusal also matches the entry by its name.
+     **one six-entry list protects each harness config directory a session uses** — `config.yaml`,
+     `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`, `declined_workspace_offers.yaml`
+     and `plugins/**`, the files that change what the harness does next. Those directories are the
+     one the session was started with (`--config-dir`, else `LOCALHARNESS_DIR`, else
+     `~/.localharness`), the default `~/.localharness` and any `.localharness/` in the project; a
+     config directory the session does not use is not covered. Everything else under one (agents,
+     divisions, tools, session state, memory, history, the audit log, the kill file) is the harness
+     being *used* and is not protected; naming what is protected rather than what is exempt also
+     means a new kind of runtime state added there is allowed by default rather than becoming a
+     prompt nobody wanted. Two of those entries, `config.yaml` and `overrides.yaml`, never reach
+     this step from the agent's write and edit tools or from a shell write the gate can read: those
+     are refused outright, in every mode (see the paragraph on what the agent may change about its
+     own setup, below). An entry kept elsewhere through a symlink, as a dotfiles setup does, is
+     judged by where it points and is not protected there — except those two, whose refusal also
+     matches the entry by its name.
    - **A system directory.** `/etc`, `/usr`, `/bin`, `/sbin`, `/lib` (and `/lib64`), `/boot`,
      `/var` except `/var/tmp`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library` and
      `/Applications`, Windows `C:\Windows`, `C:\Program Files*` and `C:\ProgramData`.
@@ -498,9 +503,12 @@ compose specialists from the tools the harness already has and never to write it
 something the harness already provides (web search, fetch, files, delegation). What it writes there
 is held back until you have seen it: an MCP server, an embedding model or a permission looser than
 the shipped default in one of your agent files or in the `agent:` section of your `overrides.yaml`
-(every agent's default layer), or a looser permission in a division file or `org.yaml`, takes
-effect only after you confirm it once at the next `localharness start` on a terminal (a start
-without a terminal leaves it off and says so); and a script added to or changed in the tools folder
+(every agent's default layer), a looser permission in a division file or `org.yaml` or in the
+`org:` section of your `config.yaml` or `overrides.yaml`, or a model-server launch command there
+(`server.binary`, `server.docker_image`, `server.extra_args`), takes effect only after you confirm
+it once at the next `localharness start` on a terminal (a start without a terminal leaves it off and
+says so; a launch command left off withholds the whole `server:` section, so that start launches no
+server and uses one already answering); and a script added to or changed in the tools folder
 since you last confirmed your scripts — a symlink there included, judged by its own name and what
 it points to — is treated as an unconfirmed shell command: it gets what any shell command gets in
 the mode you are in: `guarded` asks before it runs (an earlier "always" on `python3` or `node` does
@@ -508,38 +516,53 @@ not cover it, and an "always" you give it covers that exact content only), while
 and `unattended` run it as they run any command — and it is listed for you at that start (what was
 already there the first time you start this version is adopted without a question).
 
-The files that hold the harness's own settings have a rule of their own: the agent's write and
-edit tools, and the shell commands the gate reads as writing them — a redirect, `tee`, `rm`,
-`truncate`, `sed -i`, a `cp`, `mv`, `install` or `ln` onto the file, and a copy, move, link or
-unpack whose destination is the config folder itself (`cp x ~/.localharness/`, `rsync`,
-`tar -x -C`, `unzip -d`, `7z -o`), with `~`, `$HOME` and `${HOME}` expanded — cannot change
-`config.yaml` or `overrides.yaml` in your machine's config folder (the one the session was started
-with: `--config-dir`, else `LOCALHARNESS_DIR`, else `~/.localharness`) or in any project's
-`.localharness/`; the model is told to ask you to run `localharness components set`. That rule is
-code, not a deny pattern, so no config can remove it, and it applies whatever the mode — but only to
-the shapes it reads, so it is not a boundary in `unattended`, where everything else runs unasked.
+The files that hold the harness's own settings have a rule of their own: the agent's write and edit
+tools, and the shell commands the gate reads as writing them, cannot change `config.yaml` or
+`overrides.yaml` in your machine's config folder — the one the session was started with
+(`--config-dir`, else `LOCALHARNESS_DIR`, else `~/.localharness`) and the default `~/.localharness`
+— or in any project's `.localharness/`; the model is told to ask you to run `localharness components
+set`. The shell shapes it reads, with `~`, `$HOME` and `${HOME}` expanded: a redirect, `tee`,
+`touch`, `mkdir`, `rm`, `truncate`, `chmod`, `sed -i` or `dd of=` onto the file; a `cp`, `mv`,
+`install`, `ln` or `rsync` onto it, for all but `rsync` the destination also read from `-t DIR` or
+`--target-directory` (`ln -sft ~/.localharness config.yaml`); `curl -o` or `wget -O` onto it, and
+`curl --output-dir` or `wget -P` saving a file of that name into the folder; a copy, move or link
+into the folder of a file named `config.yaml` or `overrides.yaml` (`cp /tmp/config.yaml
+~/.localharness/` — a file of any other name copied there is an ordinary write, left to the gate);
+and, refused because what lands in the folder is not known in advance, an unpack into it (`tar`,
+`bsdtar` or `gtar -x -C`, `unzip -d`, `7z x -o`, the folder attached to the flag or not), a copy of
+a folder's contents into it (`rsync -a src/`, `cp -r src/.`, `cp -T`) or a download into it whose
+name the server chooses (`curl -J`, `wget --content-disposition`) — for those the model is told to
+unpack or fetch elsewhere and copy the files it means. That rule is code, not a deny pattern, so no
+config can remove it, and it applies whatever the mode — but only to the shapes it reads, so it is
+not a boundary in `unattended`, where everything else runs unasked.
 What this does NOT cover: `python_exec` and `cruncher_exec` run code that can write any file you
 can; code run inline through a non-shell interpreter (`python3 -c …`, `node -e …`) is not read for
 the files it touches (a shell payload — `sh -c …`, `bash -c …`, `eval` — is); a shell command the
 gate does not read as writing that file is not caught — `mv` moving it away, `unlink`, `shred`, a
 `find … -delete` that selects it by name, a hard link made to it, a plain `rm` relative to a `cd`
 earlier in the same command, a path holding any variable but `$HOME` (`$LOCALHARNESS_DIR`
-included), a command run through `sudo`, an archive unpacked into a folder above the config folder,
-or a folder copied over it, whose contents land there; the harness's own CLI (`localharness
-components set …`, run through `bash_exec`) changes settings by design; outside `guarded` an
-unconfirmed script runs without asking (it is still listed at the next start); a script named
-through a variable or a glob, relative to a `cd` earlier in the same command
+included), a `~` or `$HOME` the same command reassigned first (`export HOME=…`), a symlink to the
+folder that the same command makes and then writes through (`ln -s ~/.localharness /tmp/l && cp …
+/tmp/l/`), a command run through `sudo`, an archive unpacked into a folder above the config
+folder, or a folder copied over it, whose contents land there; the harness's own CLI
+(`localharness components set …`, run through `bash_exec`) changes settings by design; outside
+`guarded` an unconfirmed script runs without asking (it is still listed at the next start); a
+script named through a variable or a glob, relative to a `cd` earlier in the same command
 (`cd ~/.localharness/tools && python3 x.py`), or written by the same command that runs it, is not
 recognised as one, and one reached through a symlinked folder in the tools folder is judged as the
 file it points to; files below a dependency or cache folder in the tools folder (`node_modules`,
-`.venv`, `venv`, `__pycache__`, `.git`, `site-packages`) are not tracked — that is where
-`npm install` and a virtual environment put thousands of files; the scripts and files a confirmed
-command reads are not hashed; the rest of `config.yaml` and `overrides.yaml` — where requests go,
-the capability floor, the remote lock — is not in the record a start compares, so code the agent
-runs can change it for the next start (the settings-file rule keeps out the agent's file tools and
-the shell writes it reads, nothing more); and the record itself is an ordinary file that code the
-agent runs can rewrite (see trust boundaries). What runs is gated — that is the control, not a
-promise that the agent cannot touch its own files.
+`.venv`, `venv`, `__pycache__`, `.git`, `site-packages`, and any folder holding a `pyvenv.cfg` — a
+virtual environment under any name) are not tracked — that is where `npm install` and a virtual
+environment put thousands of files; the scripts and files a confirmed command reads are not
+hashed; of `config.yaml` and `overrides.yaml`, the record a start compares holds the looser `org:`
+permissions and the `server:` launch command (and `overrides.yaml`'s `agent:` section), not the rest
+— among it where requests go (the provider's address and key), the capability floor
+(`org.enforce_capability_floor`), the remote lock (`channels.remote_unattended`), the rest of
+`server:` (`bind_all` included) and the peer endpoints with their launch specs (`extra_endpoints`) —
+so code the agent runs can change those for the next start without a question (the settings-file
+rule keeps out the agent's file tools and the shell writes it reads, nothing more); and the record
+itself is an ordinary file that code the agent runs can rewrite (see trust boundaries). What runs is
+gated — that is the control, not a promise that the agent cannot touch its own files.
 
 **Five modes, set in config or switched mid-session with `/mode`.** `auto` is the default: one
 trust question per workspace, then everything runs except the step-2 blacklist, and nothing is
@@ -731,7 +754,11 @@ else. Two downloads can follow later, each once and only when it is needed:
 
 - `huggingface.co`, when memory's embedding model is not on this machine yet. The start summary
   says so in one line, the banner does not wait for it, and the model downloads the first time
-  memory needs it (a memory search that comes first waits for that download).
+  memory needs it (a memory search that comes first waits for that download). A model already in
+  the local Hugging Face cache loads from it with no network call, and is never updated on its own
+  (`hf download <model>` fetches a newer copy); a cached copy missing a file, as an interrupted
+  download leaves it, is completed the first time memory needs it, and the same line is written to
+  `memory.log` first.
 - the tiktoken vocabulary host, `openaipublic.blob.core.windows.net`, on the first approximate
   token count with no cached vocabulary — which a vLLM or llama.cpp setup never makes, because
   those count tokens on the server. Offline, the estimate falls back to a byte count and says so

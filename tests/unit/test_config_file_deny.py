@@ -356,9 +356,26 @@ def test_the_verdict_itself_still_asks_about_these_files(g, proj):
     ("cp /tmp/x $LOCALHARNESS_DIR/config.yaml", False),
     ("sudo cp /tmp/config.yaml {g}/", False),
     ("tar -xf evil.tar -C {g}/..", False),
+    ("chmod 777 {g}/config.yaml", True),
+    ("touch {g}/config.yaml", True),
+    ("mkdir {g}/config.yaml", True),
+    ("rsync /tmp/x {g}/config.yaml", True),
+    ("dd if=/tmp/x of={g}/config.yaml", True),
+    ("ln -sft {g} /tmp/config.yaml", True),
+    ("curl -o {g}/config.yaml https://x.test/a", True),
+    ("wget -P {g} https://x.test/config.yaml", True),
+    ("unzip -o a.zip -d{g}", True),
+    ("cd {g} && curl -OJ https://x.test/d", True),
+    ("cp /tmp/cert.pem {g}/", False),
+    ("export HOME={g} && cp /tmp/x ~/config.yaml", False),
+    ("ln -s {g} {g}-l && cp /tmp/config.yaml {g}-l/", False),
 ], ids=["sh-c", "bash-c", "eval", "redirect-after-cd", "mv-away", "unlink", "shred", "find-by-name",
         "hard-link", "plain-rm-after-cd", "the-cli", "copy-into-the-folder", "unpack-into-the-folder",
-        "another-variable", "through-sudo", "unpacked-above-the-folder"])
+        "another-variable", "through-sudo", "unpacked-above-the-folder", "chmod", "touch", "mkdir",
+        "rsync-onto-the-file", "dd-of",
+        "target-directory-in-a-cluster", "curl-o", "wget-P", "unzip-d-attached",
+        "server-named-download", "another-name-into-the-folder", "home-reassigned-first",
+        "a-link-made-by-the-same-command"])
 def test_what_security_md_says_the_rule_reads_and_does_not(g, proj, tmp_path, command, caught):
     """SECURITY.md, "What the agent may change about its own setup": a shell payload is read; a
     command the gate does not read as writing or deleting that file is not caught, and the
