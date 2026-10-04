@@ -59,6 +59,19 @@ def test_empty_and_dot_entries_are_skipped(layout, monkeypatch):
 
 
 @posix_only
+@pytest.mark.parametrize("entry", ["bin", "./", "./bin", "../repo", "../repo/bin"])
+def test_every_relative_entry_is_skipped_on_posix(layout, monkeypatch, entry):
+    """Any entry that is not absolute is read relative to the folder you stand in, so it is the
+    current directory by another spelling (the re-review's finding: only "" and "." were skipped)."""
+    real, _decoy, here = layout
+    _exe(here / "bin" / "tool")
+    _path(monkeypatch, entry)
+    assert which_outside_cwd("tool") is None
+    _path(monkeypatch, entry, str(real.parent))
+    assert which_outside_cwd("tool") == str(real)
+
+
+@posix_only
 def test_only_the_decoy_reachable_finds_nothing(layout, monkeypatch):
     _path(monkeypatch, "", ".")
     assert which_outside_cwd("tool") is None
