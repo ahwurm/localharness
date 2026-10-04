@@ -547,12 +547,10 @@ and one reached through a symlinked folder in the tools folder is judged as the 
 files below a dependency or cache folder in the tools folder (`node_modules`, a virtual
 environment, `.git`) are not tracked — that is where `npm install` and a virtual environment put
 thousands of files; the scripts and files a confirmed command reads are not hashed; of
-`config.yaml` and `overrides.yaml`, the record a start compares holds the looser `org:`
-permissions and the `server:` launch command (and `overrides.yaml`'s `agent:` section), not the
-rest — among it where requests go, the capability floor, the remote lock and the rest of the
-`server:` and endpoint settings — so code the agent runs can change those for the next start
-without a question (the settings-file rule keeps out the agent's file tools and the shell writes it
-reads, nothing more); and the record itself is an ordinary file that code the agent runs can
+`config.yaml` and `overrides.yaml`, the record a start checks holds the looser `org:` permissions,
+the `server:` launch command and `overrides.yaml`'s `agent:` section, nothing else, so code the
+agent runs can change any other setting in those files, and the change takes effect at the next
+start without a question; and the record itself is an ordinary file that code the agent runs can
 rewrite (see trust boundaries). What runs is gated — that is the control, not a promise that the
 agent cannot touch its own files.
 
