@@ -151,29 +151,49 @@ async def test_a_config_file_kept_elsewhere_through_a_symlink_is_still_refused(m
         assert not outcome.allowed and "localharness components set" in outcome.reason, tool
 
 
-# The re-review's F-B: shapes the rule used to walk past — a copy, move, link or unpack whose
-# destination is the config FOLDER (a settings file lands there under the source's or the archive's
-# name), and a `$HOME` path. Each is refused in every mode, `unattended` included.
+# The re-review's F-B and the fix-commit review: shapes the rule used to walk past. A copy, move or
+# link INTO the config folder is a settings write when a source is named like a settings file (the
+# refusal names that file); an unpack, a copy of a folder's CONTENTS, or a download whose name the
+# server chooses, into the folder is refused as the folder (its contents are not known in advance).
+# `$HOME` paths are expanded. Each is refused in every mode, `unattended` included.
 INTO_THE_FOLDER = {
-    "cp-into-the-folder": lambda g, p, h: (f"cp /tmp/config.yaml {g}/", g),
-    "cp-into-the-folder-no-slash": lambda g, p, h: (f"cp /tmp/config.yaml {g}", g),
-    "mv-into-the-folder": lambda g, p, h: (f"mv /tmp/config.yaml {g}/", g),
-    "install-into-the-folder": lambda g, p, h: (f"install /tmp/config.yaml {g}", g),
-    "ln-into-the-folder": lambda g, p, h: (f"ln -sf /tmp/config.yaml {g}/", g),
-    "rsync-into-the-folder": lambda g, p, h: (f"rsync -a /tmp/c/ {g}/", g),
-    "tar-extract-into-the-folder": lambda g, p, h: (f"tar -xf a.tar -C {g}", g),
-    "tar-directory-long-form": lambda g, p, h: (f"tar --directory={g} -xf a.tar", g),
-    "tar-old-style-extract": lambda g, p, h: (f"tar xf a.tar -C {g}", g),
-    "unzip-into-the-folder": lambda g, p, h: (f"unzip -o a.zip -d {g}", g),
-    "7z-into-the-folder": lambda g, p, h: (f"7z x a.7z -o{g}", g),
+    "cp-into-the-folder": lambda g, p, h: (f"cp /tmp/config.yaml {g}/", g / "config.yaml"),
+    "cp-into-the-folder-no-slash": lambda g, p, h: (f"cp /tmp/config.yaml {g}", g / "config.yaml"),
+    "mv-into-the-folder": lambda g, p, h: (f"mv /tmp/overrides.yaml {g}/", g / "overrides.yaml"),
+    "install-into-the-folder": lambda g, p, h: (f"install /tmp/config.yaml {g}", g / "config.yaml"),
+    "ln-into-the-folder": lambda g, p, h: (f"ln -sf /tmp/config.yaml {g}/", g / "config.yaml"),
+    "ln-target-directory": lambda g, p, h: (f"ln -sf -t {g} /tmp/config.yaml", g / "config.yaml"),
+    "ln-target-directory-in-a-cluster": lambda g, p, h: (f"ln -sft {g} /tmp/config.yaml",
+                                                         g / "config.yaml"),
+    "cp-target-directory-in-a-cluster": lambda g, p, h: (f"cp -rt {g} /tmp/overrides.yaml",
+                                                         g / "overrides.yaml"),
     "cp-into-a-projects-folder": lambda g, p, h: (f"cp /tmp/config.yaml {p / '.localharness'}/",
-                                                  p / ".localharness"),
+                                                  p / ".localharness" / "config.yaml"),
+    "wget-into-the-folder": lambda g, p, h: (f"wget -P {g} https://x.test/config.yaml",
+                                             g / "config.yaml"),
+    "curl-into-the-folder": lambda g, p, h: (f"curl --output-dir {g} -O https://x.test/overrides.yaml",
+                                             g / "overrides.yaml"),
     "cp-to-home-dollar-path": lambda g, p, h: ("cp /tmp/x $HOME/.localharness/config.yaml",
                                                h / ".localharness" / "config.yaml"),
     "redirect-to-home-dollar-path": lambda g, p, h: ("echo x > $HOME/.localharness/overrides.yaml",
                                                      h / ".localharness" / "overrides.yaml"),
     "redirect-to-braced-home": lambda g, p, h: ("echo x > ${HOME}/.localharness/overrides.yaml",
                                                 h / ".localharness" / "overrides.yaml"),
+    # the folder itself: what lands there is not on the command line
+    "rsync-a-folders-contents": lambda g, p, h: (f"rsync -a /tmp/c/ {g}/", g),
+    "cp-a-folders-contents": lambda g, p, h: (f"cp -r /tmp/c/. {g}/", g),
+    "cp-no-target-directory": lambda g, p, h: (f"cp -rT /tmp/c {g}", g),
+    "tar-extract-into-the-folder": lambda g, p, h: (f"tar -xf a.tar -C {g}", g),
+    "tar-attached-directory": lambda g, p, h: (f"tar -xf a.tar -C{g}", g),
+    "tar-directory-long-form": lambda g, p, h: (f"tar --directory={g} -xf a.tar", g),
+    "tar-old-style-extract": lambda g, p, h: (f"tar xf a.tar -C {g}", g),
+    "bsdtar-extract": lambda g, p, h: (f"bsdtar -xf a.tar -C {g}", g),
+    "gtar-extract": lambda g, p, h: (f"gtar -xf a.tar --directory={g}", g),
+    "unzip-into-the-folder": lambda g, p, h: (f"unzip -o a.zip -d {g}", g),
+    "unzip-attached-directory": lambda g, p, h: (f"unzip -o a.zip -d{g}", g),
+    "7z-into-the-folder": lambda g, p, h: (f"7z x a.7z -o{g}", g),
+    "wget-server-named": lambda g, p, h: (f"wget --content-disposition -P {g} https://x.test/d", g),
+    "curl-server-named": lambda g, p, h: (f"curl --output-dir {g} -OJ https://x.test/d", g),
     "unzip-into-home-dollar-folder": lambda g, p, h: ("unzip a.zip -d $HOME/.localharness",
                                                       h / ".localharness"),
 }
@@ -192,8 +212,38 @@ async def test_into_the_folder_and_home_shapes_are_refused_in_every_mode(case, m
     outcome = await _check(gate, "bash_exec", {"command": command})
 
     assert not outcome.allowed
-    assert outcome.reason == _refused(target.resolve())
+    reason = (gate_types.HARNESS_CONFIG_FILE_REASON if target.name in ("config.yaml", "overrides.yaml")
+              else gate_types.HARNESS_CONFIG_FOLDER_REASON)
+    assert outcome.reason == reason.format(path=target.resolve())
     assert outcome.pending is None and not gate.pending
+
+
+def test_an_unpack_into_the_folder_says_to_unpack_elsewhere_in_one_line(g):
+    reason = gate_types.HARNESS_CONFIG_FOLDER_REASON.format(path=g)
+    assert "\n" not in reason and "unpack or fetch it elsewhere" in reason
+    assert "localharness components set" in reason
+
+
+@pytest.mark.parametrize("command", [
+    "cp /tmp/cert.pem {g}/",
+    "mv /tmp/notes.txt {g}",
+    "install -m 600 /tmp/key.pem {g}/",
+    "ln -s /tmp/x.yaml {g}/",
+    "cp -t {g} /tmp/cert.pem",
+    "rsync -a /tmp/stuff {g}/",
+    "cp -r /tmp/stuff {g}/",
+    "wget -P {g} https://x.test/cert.pem",
+    "curl --output-dir {g} -O https://x.test/cert.pem",
+], ids=["cp-cert", "mv-notes", "install-key", "ln-other-yaml", "cp-t-cert", "rsync-a-folder",
+        "cp-a-folder", "wget-cert", "curl-cert"])
+def test_a_copy_into_the_folder_of_anything_but_a_settings_file_is_left_to_the_verdict(
+        g, proj, tmp_path, command):
+    """The fix-commit review's precision point: refusing `cp cert.pem ~/.localharness/` sent the
+    model to `components set`, which cannot copy a file. Only a settings file's name is refused."""
+    ctx = _gate(tmp_path, proj, "auto", _once).context()
+
+    assert verdict.harness_config_file_target("bash_exec", {"command": command.format(g=g)}, ctx,
+                                              SETTINGS) is None
 
 
 @pytest.mark.parametrize("command", [

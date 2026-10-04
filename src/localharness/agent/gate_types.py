@@ -881,6 +881,14 @@ HARNESS_CONFIG_FILE_REASON = (
     "{path} holds the harness's own settings; the agent's tools do not change it — ask the user to "
     "run `localharness components set <key> <value>`")
 
+HARNESS_CONFIG_FOLDER_REASON = (
+    "{path} holds the harness's own settings files, and what this would write into it is not known "
+    "in advance (an archive's contents, or a name the server chooses) — unpack or fetch it "
+    "elsewhere and copy the files you mean; settings change with `localharness components set "
+    "<key> <value>`")
+"""The refusal for an unpack or a server-named download INTO a harness config folder: the hit is
+the folder itself, not a settings file, so the copy-elsewhere advice is what the model can act on."""
+
 PROTECTED_PATHS_SYSTEM_DEFAULT: tuple[str, ...] = (
     "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/var", "/opt", "/root", "/srv",
     "/System", "/Library", "/Applications",
