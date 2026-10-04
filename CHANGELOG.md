@@ -338,11 +338,9 @@ All notable changes to LocalHarness are documented here. The format follows
   record it finds.
 - Of your machine's `config.yaml` and `overrides.yaml`, the record a start
   confirms holds the `agent:` section, the looser `org:` permissions and the
-  `server:` launch command only. The rest — among it where requests go, the
-  capability floor, the remote lock and the rest of the `server:` and endpoint
-  settings — code the agent runs can change for the next start without a
-  question; the settings-file rule keeps out only the agent's file tools and
-  the shell writes it reads.
+  `server:` launch command only. Code the agent runs can change any other
+  setting in those files, and the change takes effect at the next start
+  without a question.
 - In Zed, the mode shown before the first prompt can be one your own agent file
   sets that the start then withheld.
 - A GET to a public host can still carry data out in its URL: that is
