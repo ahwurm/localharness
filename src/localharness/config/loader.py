@@ -1226,7 +1226,7 @@ class ConfigLoader:
         # (pre-existing <=0.12.5). Precedence shipped: agent yaml > division > org > overlay >
         # schema default, which is 5b's stated contract with the last two rungs now real.
         overlay_path = _resolve_user_overlay_path(self._config_dir)
-        overlay_agent_raw = load_overlay(overlay_path).get("agent")
+        overlay_agent_raw = self._overlay_agent()
         overlay_agent = overlay_agent_raw if isinstance(overlay_agent_raw, dict) else {}
 
         # Resolve scalar fields: model, temperature, max_tokens
@@ -1526,6 +1526,13 @@ class ConfigLoader:
                 continue
         return None
 
+    def _overlay_agent(self) -> Any:
+        """The global overrides.yaml's `agent:` section — every agent's default layer — with what
+        start withheld from it removed: it is fingerprinted like an agent file (file
+        "overrides.yaml"), so a server put there waits for the same one Yes."""
+        path = _resolve_user_overlay_path(self._config_dir)
+        return self._without_withheld(load_overlay(path).get("agent"), path)
+
     def _without_withheld(self, raw: Any, path: Path) -> Any:
         """What start withheld from a machine agent, division or org file — an MCP server by name
         (every server of that name in the file: two may share one, and over-withholding is the safe
@@ -1590,7 +1597,7 @@ class ConfigLoader:
         found = (read(lambda: self._without_withheld(_load_yaml_file(agent_file), agent_file))
                  if agent_file.exists() else _UNSET)
         if found is _UNSET:
-            found = read(lambda: load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent"))
+            found = read(self._overlay_agent)
         return found
 
     @staticmethod
@@ -1664,7 +1671,7 @@ class ConfigLoader:
         # The overlay's `agent:` section is the lowest rung, exactly as step 5b layers it — and it
         # is GLOBAL-only (`_raw_config_sources` strips `agent:` from the workspace overlay), so a
         # value set by `components set agent.permissions.*` is the operator's, not the repo's.
-        overlay_agent = load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent")
+        overlay_agent = self._overlay_agent()
         overlay_val = _declared(overlay_agent) if isinstance(overlay_agent, dict) else None
 
         return _resolve_scalar(
@@ -1799,7 +1806,7 @@ class ConfigLoader:
                 return {}
 
         global_cfg, global_overlay, _ws_cfg, _ws_overlay = self._raw_config_sources()
-        overlay_agent = load_overlay(_resolve_user_overlay_path(self._config_dir)).get("agent")
+        overlay_agent = self._overlay_agent()
 
         # Lowest rung first: each layer overwrites the keys it declares, exactly as the merge
         # itself resolves them (org < overlay `agent:` < division < agent).
