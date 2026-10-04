@@ -244,8 +244,8 @@ global config, a project's whole `proposer:` section is ignored. These are all o
 - `permissions.ask.subcommand_tools`
 - `permissions.ask.mcp_trusted_servers`
 - `permissions.ask.timeout_s`
-- `memory.embedding_model`, in an agent file (the model the memory plugin loads; a folder named
-  there is code it imports)
+- `memory.embedding_model`, in an agent file (the model the memory plugin loads, and what a cache
+  miss downloads)
 - `permissions.budget.kill_file`, in an agent file (the one kill switch for every agent on the
   machine)
 - `<name>.enabled`, for a plugin you installed (a plugin that ships with LocalHarness can be
@@ -767,6 +767,19 @@ else. Two downloads can follow later, each once and only when it is needed:
 Beyond those, the network is reached by what the agent's tools do in the session (a web search, a
 fetched page, a shell command), which the approval gate and the web-fetch rule govern. A start with
 no MCP server configured no longer imports the MCP client library at all.
+
+**Memory's embedding model loads only from a checked folder, by its full path; the current folder is
+never a model source.** Given a model name, sentence-transformers (5.6) looks for a folder of that
+name in the current folder before the cache, where a cloned project could ship one, and for any
+folder it imports the module code the model names without asking for `trust_remote_code`. So the
+harness never hands it a name: a model id is its snapshot in your local Hugging Face cache
+(downloaded there on a real miss), and a relative path in `memory.embedding_model` is a folder only
+when your config folder holds it (one line in `memory.log` says so), otherwise a model id. Before the
+load it reads the model's files: a model that names code of its own (a module that is not
+sentence-transformers' own, in `modules.json` or a Router's config; a Dense activation outside torch;
+a WordEmbeddings tokenizer outside the library; `auto_map` or `trust_remote_code` in a config) is
+refused with one line; memory search, `remember` and the background embedding report that line for
+the session, and nothing else stops.
 
 ## Files the harness writes
 
