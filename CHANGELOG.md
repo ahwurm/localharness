@@ -6,6 +6,10 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.16.2] — 2026-10-04
+
 ### Added
 - **The phone's session sleeps when nobody is using it, and your next message wakes it with
   the conversation continued.** After thirty minutes with no phone attached, no turn running
