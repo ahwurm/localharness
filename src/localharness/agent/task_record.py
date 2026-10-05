@@ -18,7 +18,9 @@ Delegations are owned by the record (0.16.5 D8): the loop calls `begin_delegatio
 `agent` call (refusing past `delegation_budget`) and `record_delegation` after it, so every
 delegation ends in a runtime status; one still "running" when a human turn arrives or the record
 is reloaded was cancelled and becomes "interrupted". Only the coordinator's `integrate` resolves
-one. Delegations are awaited one at a time, so one writer holds an artifact at a time.
+one. Unintegrated delegations also keep a record whose checks all passed from finishing: its
+status becomes unknown. Delegations are awaited one at a time, so one writer holds an artifact at
+a time.
 """
 from __future__ import annotations
 
@@ -463,7 +465,10 @@ class TaskState:
         if unchanged and open_:
             result = f"{candidate}\n\n{OPEN_JUDGMENTS}{', '.join(open_)}."
         pending = self.unresolved_delegations()
-        if unchanged and pending:
+        downgraded = bool(pending) and self.current.context.status == "complete"
+        if downgraded:
+            self.current.context.status = "unknown"  # unintegrated delegated work keeps the record live
+        if pending and (unchanged or downgraded):
             result += "\n\nDelegated work unresolved: " + "; ".join(
                 f"{d.id} {d.agent}: {d.status}" for d in pending) + "."
         self.save()

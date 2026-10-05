@@ -388,3 +388,64 @@ async def test_close_complete_refused_until_delegations_integrated(tmp_path):
     await tool.run(action="integrate", delegation_id="d1", note="used the review")
     assert (await tool.run(action="close", status="complete")).success
     assert state.current.closed
+
+
+# --- 0.16.5 slice 4: batch declarations on start/update; guidance sentence ----------------------
+
+async def test_start_declares_artifacts_and_references_in_one_call(tmp_path):
+    state, tool = tool_for(tmp_path)
+    (tmp_path / "a.md").write_text("voice")
+    (tmp_path / "b.md").write_text("brief")
+    result = await start(tool, artifacts={"draft": "draft.md"},
+                         references=[{"source": "voice", "path": "a.md"},
+                                     {"source": "brief", "path": "b.md"}])
+    assert result.success, result
+    assert "Declared 1 artifact and 2 references." in result.output
+    rec = state.current
+    assert rec.context.artifacts["draft"] == (tmp_path / "draft.md").resolve()
+    assert rec.context.artifacts["draft"].is_relative_to(tmp_path.resolve())
+    assert [(r.source, r.path) for r in rec.references] == [("voice", "a.md"), ("brief", "b.md")]
+    saved = json.loads(state.path.read_text())
+    assert [r["path"] for r in saved["references"]] == ["a.md", "b.md"]
+    assert "draft" in saved["context"]["artifacts"]
+
+
+async def test_update_batch_is_all_or_nothing(tmp_path):
+    state, tool = tool_for(tmp_path)
+    (tmp_path / "a.md").write_text("voice")
+    await start(tool)
+    before = state.path.read_bytes()
+    result = await tool.run(action="update", references=[{"source": "ok", "path": "a.md"},
+                                                         {"source": "bad", "path": "../outside.md"}],
+                            artifacts={"x": "x.md"})
+    assert refused(result, "Path must stay inside the workspace")
+    assert not any(r.source == "ok" for r in state.current.references)
+    assert "x" not in state.current.context.artifacts
+    assert state.path.read_bytes() == before
+
+
+async def test_batch_shapes_and_caps_are_refused(tmp_path):
+    state, tool = tool_for(tmp_path)
+    for name in "abcde":
+        (tmp_path / f"{name}.md").write_text(name)
+    await start(tool)
+    first_id = state.current.id
+    rule = "each reference needs source and path"
+    assert refused(await tool.run(action="update", references={"source": "a", "path": "a.md"}))
+    assert refused(await tool.run(action="update", references=[{"source": "a"}]), rule)
+    assert refused(await tool.run(action="update", references=[{"source": "a", "handle": "h1"}]), rule)
+    assert refused(await tool.run(action="update",
+                                  references=[{"source": "a", "path": "a.md", "x": 1}]), rule)
+    five = [{"source": n, "path": f"{n}.md"} for n in "abcde"]
+    assert refused(await tool.run(action="update", references=five), "references is limited to four")
+    assert state.current.references == []
+    assert refused(await tool.run(action="update", artifacts=["x.md"]), "artifacts must map keys to paths")
+    assert refused(await tool.run(action="update", artifacts={"x": 3}), "artifacts must map keys to paths")
+    assert refused(await start(tool, references=[{"source": "a", "path": "../out.md"}]))
+    assert state.current.id == first_id
+
+
+def test_description_tells_the_model_to_declare_checks_first(tmp_path):
+    state, _ = tool_for(tmp_path)
+    assert ("Declare a check before you run its command so the run binds as evidence."
+            in TaskTool(state).info().description)

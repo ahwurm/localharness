@@ -481,3 +481,24 @@ def test_tool_less_turn_is_never_rewritten(tmp_path):
     state.record_result("read", {}, "c2", success=True, metadata={}, before={})
     state.observe_human("nudge", new_turn=False)
     assert state.finalize("All done.").startswith("Task remains unverified.")
+
+
+# --- 0.16.5 slice 4: unintegrated delegations keep a passed record live ------------------------
+
+def test_finalize_with_unintegrated_delegation_keeps_record_live(tmp_path):
+    state = started(tmp_path, "Write it and run the lint.")
+    ctx = state.current.context
+    ctx.requested_status = "complete"
+    ctx.revise(Requirement("lint", "Lint passes", "bash_exec", {"command": "lint"}, "exit_code", 0))
+    state.record_result("bash_exec", {"command": "lint"}, "c1", success=True,
+                        metadata={"exit_code": 0}, before={})
+    state.begin_delegation("c2", "reviewer", "review")
+    state.record_delegation("c2", ok_result(status="completed"))
+    assert state.finalize("Done.") == "Done.\n\nDelegated work unresolved: d1 reviewer: completed."
+    assert state.status == "unknown"
+    assert state.packet() != ""
+    assert json.loads(state.path.read_text())["context"]["status"] == "unknown"
+    state.current.delegations[0].integrated = "used it"
+    worked(state)
+    assert state.finalize("Done.") == "Done."
+    assert state.status == "complete"

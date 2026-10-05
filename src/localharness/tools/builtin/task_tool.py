@@ -19,9 +19,10 @@ from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 ALLOWED: dict[str, set[str]] = {
     "start": {"objective", "assignment", "stop_boundary", "requested_status", "instructions_path",
-              "decisions", "human_quote"},
+              "decisions", "human_quote", "references", "artifacts"},
     "update": {"assignment", "stop_boundary", "requested_status", "next_action", "question",
-               "resolve_question", "revision_budget", "delegation_budget", "human_quote"},
+               "resolve_question", "revision_budget", "delegation_budget", "human_quote",
+               "references", "artifacts"},
     "decide": {"text", "human_quote"},
     "artifact": {"key", "path"},
     "check": {"key", "description", "tool", "arguments", "result_field", "expected", "depends_on",
@@ -72,7 +73,8 @@ class TaskTool(Tool):
                 "Declare files the work depends on (instructions, voice samples, sources) as references "
                 "so they stay in view; record editorial criteria with judge — judgments are opinion, "
                 "never evidence. integrate delegated results: say how each subagent's result was used "
-                "before closing as complete."
+                "before closing as complete. Declare a check before you run its command so the run binds "
+                "as evidence."
             ),
             parameters={
                 "type": "object",
@@ -86,6 +88,14 @@ class TaskTool(Tool):
                     "instructions_path": _str("Workspace file with the user's instructions"),
                     "decisions": {"type": "array", "maxItems": MAX_DECISIONS,
                                   "items": {"type": "string", "maxLength": MAX_TEXT}},
+                    "references": {"type": "array", "maxItems": MAX_REFERENCES,
+                                   "description": "start/update: files to keep in view",
+                                   "items": {"type": "object",
+                                             "properties": {"source": {"type": "string", "maxLength": 200},
+                                                            "path": {"type": "string", "maxLength": MAX_TEXT}},
+                                             "required": ["source", "path"]}},
+                    "artifacts": {"type": "object", "description": "start/update: artifact key -> workspace path",
+                                  "additionalProperties": {"type": "string", "maxLength": MAX_TEXT}},
                     "next_action": _str("update: the next step"),
                     "question": _str("update: an open question for the human"),
                     "resolve_question": _str("update: exact text of a question now answered"),
@@ -190,7 +200,27 @@ class TaskTool(Tool):
         lines = [f"Started task {record.id}."]
         if replaced is not None:
             lines.append(f"Replaced unfinished task {replaced.id}.")
-        return " ".join(lines)
+        return " ".join(lines) + self._apply_batch(state, f)
+
+    def _apply_batch(self, state: TaskState, f: dict[str, Any]) -> str:
+        """Declare artifacts/references given with start/update through the per-item helpers; a
+        refusal part-way is undone by _execute's rollback, so the batch is all or nothing."""
+        artifacts, references = f.get("artifacts", {}), f.get("references", [])
+        if not isinstance(artifacts, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in artifacts.items()):
+            raise _Refused("artifacts must map keys to paths")
+        if not isinstance(references, list):
+            raise _Refused("references must be a list of {source, path}")
+        if any(not isinstance(r, dict) or set(r) != {"source", "path"} for r in references):
+            raise _Refused("each reference needs source and path")
+        for key, path in artifacts.items():
+            self._artifact(state, {"key": key, "path": path})
+        for r in references:
+            self._reference(state, {"source": r["source"], "path": r["path"]})
+        if not artifacts and not references:
+            return ""
+        a, n = len(artifacts), len(references)
+        return (f" Declared {a} artifact{'s' * (a != 1)} and {n} reference{'s' * (n != 1)}.")
 
     def _update(self, state: TaskState, f: dict[str, Any]) -> str:
         rec = state.current
@@ -219,7 +249,7 @@ class TaskTool(Tool):
             if len(rec.questions) >= MAX_QUESTIONS:
                 raise _Refused(f"questions is limited to {MAX_QUESTIONS}")
             rec.questions.append(_text("question", f["question"]))
-        return f"Updated task {rec.id}."
+        return f"Updated task {rec.id}." + self._apply_batch(state, f)
 
     def _decide(self, state: TaskState, f: dict[str, Any]) -> str:
         rec = state.current
