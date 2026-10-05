@@ -27,6 +27,12 @@ def started(tmp_path, *turns):
     return state
 
 
+def worked(state):
+    """One tool dispatch this turn: finalize checks only turns with tool activity (R8)."""
+    state.record_result("write", {}, "c0", success=True, metadata={}, before={})
+    return state
+
+
 def test_round_trip_preserves_every_field(tmp_path):
     outline = tmp_path / "outline.md"
     rec = make_record(tmp_path, instructions_path=str(tmp_path / "SKILL.md"),
@@ -154,7 +160,7 @@ def test_packet_contents_and_completion(tmp_path):
 
 
 def test_finalize_closed_without_checks_retires_record(tmp_path):
-    state = started(tmp_path, "Begin.")
+    state = worked(started(tmp_path, "Begin."))
     ctx = state.current.context
     ctx.requested_status = "complete"
     state.current.closed = True
@@ -166,7 +172,7 @@ def test_finalize_closed_without_checks_retires_record(tmp_path):
 
 
 def test_finalize_checkpoint_keeps_packet(tmp_path):
-    state = started(tmp_path, "Begin.")
+    state = worked(started(tmp_path, "Begin."))
     state.current.closed = False
     assert state.finalize("Outline ready.") == "Outline ready."
     assert state.status == "checkpoint"
@@ -322,7 +328,7 @@ def test_revision_budget_counts_edits_to_verified_artifacts(tmp_path):
 
 
 def test_finalize_reports_open_judgments_only_on_unchanged_candidates(tmp_path):
-    state = started(tmp_path, "Begin.")
+    state = worked(started(tmp_path, "Begin."))
     state.current.context.requested_status = "complete"
     state.current.judgments = [Judgment("tone", "Plain tone"), Judgment("flow", "Flows", status="assessed")]
     assert state.finalize("Draft done.") == "Draft done.\n\nOpen editorial judgments (not assessed): tone."
@@ -334,7 +340,7 @@ def test_finalize_reports_open_judgments_only_on_unchanged_candidates(tmp_path):
 
 
 def test_completed_record_does_not_rewrite_later_replies(tmp_path):
-    state = started(tmp_path, "Skip the lint gate for this draft.")
+    state = worked(started(tmp_path, "Skip the lint gate for this draft."))
     ctx = state.current.context
     ctx.requested_status = "complete"
     ctx.revise(Requirement("lint", "Lint", "bash_exec", {"command": "lint"}))
@@ -350,3 +356,128 @@ def test_show_lists_references_and_judgments(tmp_path):
     text = state.show()
     assert "  voice: voice.md (pending)" in text and "  pasted: handle abc (pending)" in text
     assert "  tone: open — Plain tone | assessment: mostly plain | fix: cut adverbs" in text
+
+
+# --- 0.16.5 slice 3: the record owns delegations; tool-less asides are never rewritten ---------
+
+from localharness.agent.task_record import Delegation  # noqa: E402
+from localharness.tools.base import ToolResult  # noqa: E402
+
+REFUSAL = ("Delegation budget (2) used for this task; integrate the results you have or ask the "
+           "user to raise it")
+
+
+def ok_result(output="SUBAGENT RUN COMPLETE ... tail words", **meta):
+    return ToolResult(output=output, metadata={"delegated_to": "reviewer", **meta})
+
+
+def test_delegations_round_trip_and_legacy_records_load_empty(tmp_path):
+    rec = make_record(tmp_path, delegations=[Delegation("d1", "reviewer", "review", "completed",
+                                                        ["/w/r.md"], "f", "u", "r", "used", "c1")])
+    assert TaskRecord.from_dict(json.loads(json.dumps(rec.to_dict()))) == rec
+    legacy = rec.to_dict()
+    del legacy["delegations"]
+    assert legacy["format"] == 1 and TaskRecord.from_dict(legacy).delegations == []
+
+
+def test_begin_delegation_inert_without_record_then_budgeted(tmp_path):
+    bare = TaskState(tmp_path / "task.json", workspace=str(tmp_path))
+    assert bare.begin_delegation("c1", "reviewer", "review") is None
+    assert not (tmp_path / "task.json").exists()
+    state = started(tmp_path)
+    assert state.begin_delegation("c1", "reviewer", "independent review") is None
+    assert state.begin_delegation("c2", "writer", "draft") is None
+    assert state.begin_delegation("c3", "writer", "again") == REFUSAL
+    saved = json.loads(state.path.read_text())["delegations"]
+    assert [(d["id"], d["agent"], d["status"], d["call_id"]) for d in saved] == [
+        ("d1", "reviewer", "running", "c1"), ("d2", "writer", "running", "c2")]
+
+
+@pytest.mark.parametrize("result,status", [
+    (ok_result(status="completed"), "completed"),
+    (ok_result(), "completed"),
+    (ok_result(status="no_result"), "no_result"),
+    (ok_result(status="budget_exhausted"), "budget_exhausted"),
+    (ToolResult(output="", success=False, error="Agent 'reviewer' failed: boom",
+                error_type="execution_error"), "failed: execution_error"),
+    (ToolResult(output="", success=False, error="timed out", error_type="timeout_error"), "timeout"),
+    (None, "failed: execution_error"),
+])
+def test_record_delegation_status_table(tmp_path, result, status):
+    state = started(tmp_path)
+    state.begin_delegation("c1", "reviewer", "review")
+    state.record_delegation("c1", result)
+    state.record_delegation("unknown", result)  # no entry for that call: no-op
+    (d,) = state.current.delegations
+    assert d.status == status
+    if result is None or not result.success:
+        assert d.findings == ((result.error or "")[:400] if result else "")
+
+
+def test_record_delegation_uses_runtime_artifacts_and_handoff_text(tmp_path):
+    state = started(tmp_path)
+    state.begin_delegation("c1", "reviewer", "review")
+    handoff = {"status": "completed", "artifacts": "claimed.md", "findings": "two claims",
+               "uncertainties": "tone", "remaining": "none"}
+    state.record_delegation("c1", ok_result(status="completed", artifacts=["/w/review.md"],
+                                            handoff=handoff))
+    (d,) = state.current.delegations
+    assert (d.artifacts, d.findings, d.uncertainties, d.remaining) == (
+        ["/w/review.md"], "two claims", "tone", "none")
+    state.begin_delegation("c2", "writer", "draft")
+    state.record_delegation("c2", ok_result(output="x" * 900 + "THE END", status="completed"))
+    assert state.current.delegations[1].findings == ("x" * 900 + "THE END")[-400:]
+
+
+def test_running_delegation_becomes_interrupted_on_human_turn_and_on_load(tmp_path):
+    state = started(tmp_path)
+    state.begin_delegation("c1", "reviewer", "review")
+    loaded, _ = TaskState.load(state.path, str(tmp_path))
+    assert loaded.current.delegations[0].status == "interrupted"
+    assert "delegation d1 reviewer interrupted" in loaded.notes
+    assert json.loads(state.path.read_text())["delegations"][0]["status"] == "interrupted"
+    state.observe_human("carry on")
+    assert state.current.delegations[0].status == "interrupted"
+    assert "delegation d1 reviewer interrupted" in state.notes
+
+
+def test_packet_lists_delegations_and_finalize_names_unresolved(tmp_path):
+    state = started(tmp_path)
+    state.current.context.requested_status = "complete"
+    state.begin_delegation("c1", "reviewer", "review")
+    state.record_delegation("c1", ok_result(status="completed"))
+    state.current.delegations[0].integrated = "fixed both claims"
+    state.begin_delegation("c2", "writer", "draft")
+    state.record_delegation("c2", None)
+    assert ("Delegations: d1 reviewer: completed, integrated; d2 writer: failed: execution_error"
+            in state.packet())
+    assert state.unresolved_delegations() == [state.current.delegations[1]]
+    state.record_result("read", {}, "c9", success=True, metadata={}, before={})
+    assert state.finalize("Done.") == (
+        "Done.\n\nDelegated work unresolved: d2 writer: failed: execution_error.")
+
+
+def test_show_lists_delegations(tmp_path):
+    state = started(tmp_path)
+    state.begin_delegation("c1", "reviewer", "independent review")
+    state.record_delegation("c1", ok_result(status="completed", artifacts=["/w/review.md"]))
+    text = state.show()
+    assert "delegations:" in text and "d1 reviewer: completed — independent review" in text
+    assert "/w/review.md" in text
+
+
+def test_tool_less_turn_is_never_rewritten(tmp_path):
+    """R8: an aside with no tool activity this turn keeps its reply, even with a failed check."""
+    state = started(tmp_path)
+    ctx = state.current.context
+    ctx.requested_status = "complete"
+    ctx.revise(Requirement("lint", "Lint passes", "bash_exec", {"command": "lint"}, "exit_code", 0))
+    state.observe_human("go")
+    state.record_result("bash_exec", {"command": "lint"}, "c1", success=True,
+                        metadata={"exit_code": 1}, before={})
+    state.observe_human("by the way, what is a tide pool?")
+    assert state.finalize("A rocky pool left by the tide.") == "A rocky pool left by the tide."
+    state.observe_human("nudge", new_turn=False)  # a mid-turn steering nudge keeps the count
+    state.record_result("read", {}, "c2", success=True, metadata={}, before={})
+    state.observe_human("nudge", new_turn=False)
+    assert state.finalize("All done.").startswith("Task remains unverified.")

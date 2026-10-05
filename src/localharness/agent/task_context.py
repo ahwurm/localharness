@@ -62,7 +62,8 @@ class TaskContext:
         if any(key != req.key for key, req in self.requirements.items()):
             raise ValueError("Requirement keys must match their declarations")
 
-    def observe_human(self, text: str) -> None:
+    def observe_human(self, text: str, new_turn: bool = True) -> None:
+        # `new_turn` exists for interface symmetry with TaskState; it changes nothing here.
         # Preserve verbatim steering; never infer a waiver from model prose or a nudge.
         self.latest_human = text
 

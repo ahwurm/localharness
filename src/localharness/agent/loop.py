@@ -1495,7 +1495,7 @@ class AgentLoop:
                 nudge = self._user_nudge_inbox.pop(0)
                 session.push(human_message(nudge, "steering"))
                 if self._task_context is not None:
-                    self._task_context.observe_human(nudge)
+                    self._task_context.observe_human(nudge, new_turn=False)
                 log.info(
                     "User nudge delivered to %s at iteration %d",
                     self._config.name, session.iteration,
@@ -2107,6 +2107,25 @@ class AgentLoop:
                     stuck_detector.record(tool_call.name, tool_call.arguments)
                     continue
 
+                # An active task record's delegation budget refuses an `agent` call before it
+                # runs: like a denial, it is not an action and the child never starts.
+                refusal = self._delegation_refusal(tool_call)
+                if refusal:
+                    self._record_task_result(tool_call, success=False)
+                    content = f"[tool error] {refusal}"
+                    session.push({"role": "tool", "tool_call_id": tool_call.id, "content": content})
+                    await self._bus.publish(Observation(
+                        agent_id=session.agent_id,
+                        session_id=session.session_id,
+                        observation_type="tool_result",
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_call.name,
+                        output=content,
+                        error=content,
+                    ))
+                    stuck_detector.record(tool_call.name, tool_call.arguments)
+                    continue
+
                 # Counted only now, on the ALLOWED side of the gate. A call a human refused is
                 # not an action the agent took: it never ran, so it must not spend the task's
                 # action budget, must not appear in the "completed N tool calls" line, and must
@@ -2124,6 +2143,7 @@ class AgentLoop:
                 artifact: ArtifactRef | None = None
                 task_before = self._task_context.revisions() if self._task_context else {}
                 result_metadata: dict[str, Any] = {}
+                tool_result = None
                 if self._tools is not None:
                     try:
                         result = await self._tools.dispatch(
@@ -2133,6 +2153,7 @@ class AgentLoop:
                             self._config.division or "",
                             self._config.tools,
                         )
+                        tool_result = result
                         is_error = not result.success
                         result_metadata = result.metadata
                         # Error results carry their message in .error with output "" —
@@ -2163,6 +2184,7 @@ class AgentLoop:
 
                 self._record_task_result(
                     tool_call, success=not is_error, metadata=result_metadata, before=task_before,
+                    result=tool_result,
                 )
                 session.push({
                     "role": "tool",
@@ -2243,7 +2265,7 @@ class AgentLoop:
 
     def _record_task_result(
         self, call: Any, *, success: bool, metadata: dict | None = None,
-        before: dict | None = None,
+        before: dict | None = None, result: Any = None,
     ) -> None:
         if self._task_context is not None:
             self._task_context.record_result(
@@ -2251,6 +2273,20 @@ class AgentLoop:
                 metadata=metadata or {},
                 before=self._task_context.revisions() if before is None else before,
             )
+            # Settle the task record's delegation entry (no entry for this call: a no-op).
+            record = getattr(self._task_context, "record_delegation", None)
+            if call.name == "agent" and record is not None:
+                record(call.id, result)
+
+    def _delegation_refusal(self, call: Any) -> str | None:
+        """Open the task record's entry for an `agent` call, or the refusal when its delegation
+        budget is spent. None without a TaskState or an active record."""
+        begin = getattr(self._task_context, "begin_delegation", None)
+        if call.name != "agent" or begin is None:
+            return None
+        args = call.arguments or {}
+        return begin(call.id, str(args.get("agent_id", "")),
+                     str(args.get("purpose") or args.get("task", ""))[:120])
 
     async def _build_request(self, messages: list[Message], tools: list | None):
         # Re-snapshot and re-declare the active task's references (files may have changed; the
@@ -2612,11 +2648,18 @@ class AgentLoop:
                     "content": f"{DENIED_OBSERVATION_PREFIX}{perm.reason}",
                 })
                 continue
+            refusal = self._delegation_refusal(tool_call)
+            if refusal:
+                self._record_task_result(tool_call, success=False)
+                session.push({"role": "tool", "tool_call_id": tool_call.id,
+                              "content": f"[tool error] {refusal}"})
+                continue
             session.actions_taken += 1
             result_content = ""
             task_before = self._task_context.revisions() if self._task_context else {}
             success = False
             metadata: dict[str, Any] = {}
+            tool_result = None
             if self._tools is not None:
                 try:
                     result = await self._tools.dispatch(
@@ -2629,10 +2672,12 @@ class AgentLoop:
                     result_content = result.output
                     success = result.success
                     metadata = result.metadata
+                    tool_result = result
                 except Exception as exc:
                     result_content = f"Error: {exc}"
             self._record_task_result(
                 tool_call, success=success, metadata=metadata, before=task_before,
+                result=tool_result,
             )
             session.push({
                 "role": "tool",
