@@ -95,8 +95,8 @@ async def test_dispatch_returns_nonempty_and_child_ran_readonly(mock_llm_client,
         permission_evaluator=PermissionEvaluator(),
     )
 
-    assert isinstance(result, str) and result.strip()
-    assert "The file defines a greeting constant." in result
+    assert isinstance(result.text, str) and str(result).strip()
+    assert "The file defines a greeting constant." in str(result)
 
     # Child ran >=1 iteration AND only ever used read-only tools.
     tool_actions = [e for e in bus.history(event_types=[Action]) if e.tool_name]
@@ -234,12 +234,12 @@ async def test_dispatch_return_is_summary_not_event_log(mock_llm_client, bus, tm
     )
 
     # Concise findings header + summary; NOT the raw transcript / event dump.
-    assert result.startswith("SUBAGENT RUN COMPLETE (agent_id=explore")
-    assert "tool calls:" in result.splitlines()[0]
-    assert "The file defines a greeting constant." in result
+    assert str(result).startswith("SUBAGENT RUN COMPLETE (agent_id=explore")
+    assert "tool calls:" in str(result).splitlines()[0]
+    assert "The file defines a greeting constant." in str(result)
     # Transcript/event-log artifacts must not leak into the returned string.
     for leaked in ("Action(", "Observation(", "TaskComplete(", "event_type", "role='tool'", '"role":'):
-        assert leaked not in result
+        assert leaked not in str(result)
 
 
 # ---------------------------------------------------------------------------
@@ -646,9 +646,9 @@ async def test_web_dispatch_retries_a_zero_call_run_then_returns_findings(
         llm=_RetryAwareLLM(), bus=bus, base_registry=base,
         parent_session_id="parent-sess", permission_evaluator=PermissionEvaluator(),
     )
-    assert "SUBAGENT RUN COMPLETE" in result
-    assert "ANSWER: Python 3.14.7" in result
-    assert "not exposed" not in result          # attempt 1's refusal prose never leaks
+    assert "SUBAGENT RUN COMPLETE" in str(result)
+    assert "ANSWER: Python 3.14.7" in str(result)
+    assert "not exposed" not in str(result)          # attempt 1's refusal prose never leaks
 
 
 @pytest.mark.asyncio
@@ -669,11 +669,142 @@ async def test_web_dispatch_zero_calls_twice_fails_honestly_and_discards_the_pro
         llm=llm, bus=bus, base_registry=base,
         parent_session_id="parent-sess", permission_evaluator=PermissionEvaluator(),
     )
-    assert "SUBAGENT RUN FAILED" in result and "tool calls: 0" in result
-    assert "delegation as FAILED" in result
-    assert 'web_search("a")' not in result      # the fabricated transcript is discarded
+    assert "SUBAGENT RUN FAILED" in str(result) and "tool calls: 0" in str(result)
+    assert "delegation as FAILED" in str(result)
+    assert 'web_search("a")' not in str(result)      # the fabricated transcript is discarded
     # The honesty payload (2026-09-17): the parent must see the child's tools WERE on the wire,
     # so a zero-call run can never again be read as a missing/broken toolset and "repaired"
     # with a bash+curl bypass.
-    assert "WERE advertised" in result and "web_search" in result
-    assert "do not 'repair'" in result
+    assert "WERE advertised" in str(result) and "web_search" in str(result)
+    assert "do not 'repair'" in str(result)
+
+
+# ---------------------------------------------------------------------------
+# 0.16.5 slice 3: DelegationResult, HANDOFF parsing, runtime-truth status and artifacts
+# ---------------------------------------------------------------------------
+
+HANDOFF_TEXT = (
+    "Reviewed the draft.\n\nHANDOFF\nstatus: completed\nartifacts: review.md\n"
+    "- findings: two unsupported claims\nevidence: lines 3 and 9\nremaining: none"
+)
+
+
+def test_parse_handoff_reads_trailing_block():
+    from localharness.agent.subagent import parse_handoff
+
+    assert parse_handoff(HANDOFF_TEXT) == {
+        "status": "completed", "artifacts": "review.md", "findings": "two unsupported claims",
+        "evidence": "lines 3 and 9", "uncertainties": "", "remaining": "none",
+    }
+
+
+@pytest.mark.parametrize("text", [
+    "Reviewed the draft. All good.",
+    "HANDOFF\nstatus: maybe\nfindings: x",
+    "## Handoff:\nfindings: no status line",
+    "",
+    "HANDOFF\n:::\n\x00status",
+])
+def test_parse_handoff_absent_or_malformed_is_none(text):
+    from localharness.agent.subagent import parse_handoff
+
+    assert parse_handoff(text) is None
+
+
+def test_parse_handoff_last_marker_wins_and_accepts_heading_forms():
+    from localharness.agent.subagent import parse_handoff
+
+    text = "HANDOFF\nstatus: blocked\nfindings: old\n\n**Handoff:**\nStatus: Partial\nfindings: new"
+    got = parse_handoff(text)
+    assert got["status"] == "partial" and got["findings"] == "new"
+
+
+def test_parse_handoff_never_raises_on_non_text():
+    from localharness.agent.subagent import parse_handoff
+
+    assert parse_handoff(None) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("reason,summary,expected", [
+    ("complete", "Wrote the review.", "completed"),
+    (None, "Wrote the review.", "completed"),
+    ("complete", "I'll now search for more sources.", "no_result"),
+    ("budget_actions", "partial", "budget_exhausted"),
+    ("budget_time", "partial", "budget_exhausted"),
+    ("kill_file", "", "killed"),
+    ("stuck", "", "stuck"),
+    ("error", "", "error"),
+    ("active_step_blocked", "", "error"),
+])
+def test_delegation_status_maps_runtime_reason(reason, summary, expected):
+    from localharness.agent.subagent import _delegation_status, _no_conclusion_note
+
+    if expected == "no_result":
+        assert _no_conclusion_note(summary)  # the fixture really is announce-shaped
+    assert _delegation_status(reason, summary) == expected
+
+
+@pytest.mark.asyncio
+async def test_session_written_paths_keeps_only_successful_writes(bus):
+    from localharness.agent.subagent import _session_written_paths
+
+    async def call(cid, name, path, error=None, sid="child"):
+        await bus.publish(Action(agent_id="w", session_id=sid, action_type="tool_call",
+                                 tool_call_id=cid, tool_name=name, tool_params={"path": path}))
+        await bus.publish(Observation(agent_id="w", session_id=sid, observation_type="tool_result",
+                                      tool_call_id=cid, tool_name=name, output="x", error=error))
+
+    await call("a", "write", "/w/ok.md")
+    await call("b", "write", "/w/denied.md", error="[DENIED] not permitted")
+    await call("c", "edit", "/w/ok.md")
+    await call("d", "read", "/w/read.md")
+    await call("e", "plugin:files.edit", "/w/other.md")
+    await call("f", "write", "/w/elsewhere.md", sid="another")
+    await bus.publish(Action(agent_id="w", session_id="child", action_type="tool_call",
+                             tool_call_id="g", tool_name="write", tool_params={"path": "/w/never.md"}))
+    assert _session_written_paths(bus, "child") == ["/w/ok.md", "/w/other.md"]
+    assert _session_written_paths(object(), "child") == []
+
+
+@pytest.mark.asyncio
+async def test_config_child_brief_has_budget_and_returns_delegation_result(mock_llm_client, bus):
+    from localharness.agent.subagent import DelegationResult, dispatch_config_subagent
+    from localharness.config.models import AgentConfig
+    from tests.unit.test_task_references import capture
+
+    cfg = AgentConfig.model_validate({
+        "name": "reviewer", "role": "Reviews drafts.",
+        "permissions": {"mode": "unattended", "deny_patterns": [],
+                        "budget": {"max_actions": 3, "max_duration_minutes": 5}},
+    })
+    llm = mock_llm_client([mock_llm_client.Response(content=HANDOFF_TEXT),
+                           mock_llm_client.Response(content="CONFIRMED")])  # act-guard reply
+    seen = capture(llm)
+    result = await dispatch_config_subagent(
+        "Review draft.md", agent_config=cfg, llm=llm, bus=bus,
+        base_registry=await _builtin_registry(), parent_session_id="parent",
+        permission_evaluator=PermissionEvaluator(),
+    )
+    first = "\n".join(str(m.get("content")) for m in seen[0])
+    assert "(Your ONLY available tools: read, glob, grep." in first
+    assert first.index("Your ONLY available tools") < first.index("Budget: 3 actions, 5 minutes.") \
+        < first.index("Review draft.md")
+    assert isinstance(result, DelegationResult)
+    assert result.status == "completed" and result.terminated_reason == "complete"
+    assert result.tool_calls == 0 and result.artifacts == []
+    assert result.child_session_id and result.handoff["findings"] == "two unsupported claims"
+    assert str(result) == result.text and "SUBAGENT RUN COMPLETE" in result.text
+
+
+@pytest.mark.asyncio
+async def test_web_zero_call_failure_is_status_failed(mock_llm_client, bus):
+    from localharness.agent.subagent import dispatch_web_subagent
+
+    R = mock_llm_client.Response
+    result = await dispatch_web_subagent(
+        "who is X", llm=mock_llm_client([R(content="no."), R(content="still no.")]), bus=bus,
+        base_registry=await _builtin_registry(), parent_session_id="p",
+        permission_evaluator=PermissionEvaluator(),
+    )
+    assert result.status == "failed" and result.tool_calls == 0
+    assert result.child_session_id and "SUBAGENT RUN FAILED" in str(result)

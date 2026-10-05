@@ -18,6 +18,7 @@ import logging
 import os
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -334,6 +335,58 @@ def _no_conclusion_note(child_final: str) -> str:
     )
 
 
+@dataclass
+class DelegationResult:
+    """What a delegation returns (0.16.5 D8): the findings text plus runtime-observed facts.
+    `status`, `terminated_reason`, `tool_calls`, `artifacts` (paths the child's successful
+    write/edit calls named) and `child_session_id` come from the runtime; `handoff` is the
+    child's own HANDOFF block, parsed or None. `str(result)` is the text, so string callers work."""
+    text: str
+    status: str = "completed"
+    terminated_reason: str | None = None
+    tool_calls: int = 0
+    artifacts: list[str] = field(default_factory=list)
+    child_session_id: str | None = None
+    handoff: dict | None = None
+
+    def __str__(self) -> str:
+        return self.text
+
+
+HANDOFF_KEYS = ("status", "artifacts", "findings", "evidence", "uncertainties", "remaining")
+HANDOFF_STATUSES = {"completed", "partial", "blocked"}
+
+
+def parse_handoff(text: str) -> dict | None:
+    """The child's trailing HANDOFF block as a dict of HANDOFF_KEYS (missing ones ""), or None
+    when there is no marker or its status is not one of HANDOFF_STATUSES. Never raises."""
+    try:
+        lines = text.splitlines()
+        marks = [i for i, ln in enumerate(lines)
+                 if ln.strip().lstrip("#* \t").rstrip(":* \t").lower() == "handoff"]
+        if not marks:
+            return None
+        out = dict.fromkeys(HANDOFF_KEYS, "")
+        for ln in lines[marks[-1] + 1:]:
+            key, sep, value = ln.strip().removeprefix("- ").partition(":")
+            key = key.strip().strip("*").strip().lower()
+            if sep and key in out:
+                out[key] = value.strip()[:400]
+        out["status"] = out["status"].lower()
+        return out if out["status"] in HANDOFF_STATUSES else None
+    except Exception:
+        return None
+
+
+def _delegation_status(reason: str | None, summary: str) -> str:
+    """Runtime-truth delegation status from the child loop's terminated reason."""
+    if reason in (None, "complete"):
+        return "no_result" if _no_conclusion_note(summary) else "completed"
+    if reason.startswith("budget_"):
+        return "budget_exhausted"
+    return {"kill_file": "killed", "stuck": "stuck"}.get(reason, "error")
+
+
 def _format_subagent_result(agent_id: str, task: str, summary: str, tool_calls_used: int) -> str:
     """Shared findings wrapper (FIX 1 + FIX 3): the FIRST line states completion unambiguously —
     previously the header opened with the CHILD's own narration-shaped summary right after a
@@ -479,7 +532,7 @@ async def dispatch_config_subagent(
     max_subagent_depth: int = MAX_DEPTH,
     config_dir: Any = None,
     state_dir: Any = None,
-) -> str:
+) -> DelegationResult:
     """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
 
     This is the 'ability scales with defined subagents' seam: any agents/<name>.yaml becomes a
@@ -503,7 +556,10 @@ async def dispatch_config_subagent(
     # Make the toolset explicit in the brief — small models attend weakly to absent
     # tools (observed live: a bash-less child globbed for `pip` instead of saying
     # "I have no shell"). One line turns capability inference into capability fact.
-    task = prepend_toolset(task, allowed)
+    budget = agent_config.permissions.budget
+    minutes = (f"{budget.max_duration_minutes:g} minutes" if budget.max_duration_minutes
+               else "no time limit")
+    task = prepend_toolset(f"Budget: {budget.max_actions} actions, {minutes}.\n\n{task}", allowed)
 
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
     _kill, _compact = _child_runtime_paths(agent_config, config_dir, state_dir=state_dir)
@@ -521,7 +577,9 @@ async def dispatch_config_subagent(
 
     summary = await child_loop.run_turn(task)
     tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
-    return format_child_findings(agent_config.name, task, summary, tool_calls_used)
+    return _delegation_result(
+        format_child_findings(agent_config.name, task, summary, tool_calls_used),
+        child_loop, bus, summary, tool_calls_used)
 
 
 async def dispatch_explore_subagent(
@@ -541,7 +599,7 @@ async def dispatch_explore_subagent(
     config_override: AgentConfig | None = None,
     config_dir: Any = None,
     state_dir: Any = None,
-) -> str:
+) -> DelegationResult:
     """Spawn a read-only explore child, run one turn on `task`, return structured findings.
 
     Args:
@@ -603,7 +661,8 @@ async def dispatch_explore_subagent(
     child_session_id = child_loop.current_session_id
     tool_calls_used = _count_session_tool_calls(bus, child_session_id)
 
-    return format_findings(task, summary, tool_calls_used)
+    return _delegation_result(format_findings(task, summary, tool_calls_used),
+                              child_loop, bus, summary, tool_calls_used)
 
 
 async def dispatch_web_subagent(
@@ -623,7 +682,7 @@ async def dispatch_web_subagent(
     config_override: AgentConfig | None = None,
     config_dir: Any = None,
     state_dir: Any = None,
-) -> str:
+) -> DelegationResult:
     """Spawn a web-research child (web_search/web_fetch[/web_page_query] only), run one turn, return findings.
 
     Mirrors dispatch_explore_subagent but with the web toolset and budget. The child does all the
@@ -676,7 +735,8 @@ async def dispatch_web_subagent(
         summary = await child_loop.run_turn(brief)
         tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
         if tool_calls_used > 0:
-            return format_web_findings(task, summary, tool_calls_used)
+            return _delegation_result(format_web_findings(task, summary, tool_calls_used),
+                                      child_loop, bus, summary, tool_calls_used)
 
     # Zero calls on every attempt: the text is fabrication-shaped, and a fabricated transcript
     # labeled "failed" still reads like findings to a weak parent — so it is DISCARDED.
@@ -692,7 +752,7 @@ async def dispatch_web_subagent(
         )
     except Exception:  # never let the diagnostic mask the failure it is describing
         advertised = sorted(child_registry._schemas)
-    return (
+    return DelegationResult((
         f"SUBAGENT RUN FAILED (agent_id={child_config.name}, tool calls: 0 after "
         f"{1 + WEB_ZERO_CALL_RETRIES} attempts). The researcher answered in prose without "
         "executing any web tool, so it produced no evidence; its text was discarded. "
@@ -701,7 +761,9 @@ async def dispatch_web_subagent(
         "web-researcher's toolset, and do not research this yourself with bash/curl. "
         "Re-delegate once, or TELL THE USER the researcher is refusing and stop. Treat this "
         "delegation as FAILED — do not present an answer to this task as researched."
-    )
+    ), status="failed", terminated_reason=getattr(child_loop, "last_terminated_reason", None),
+        tool_calls=0,
+        child_session_id=child_loop.current_session_id)
 
 
 # --- search-verifier (P3): blind claim verification + keep-flag ledger --------------------------
@@ -811,7 +873,7 @@ async def dispatch_search_verifier_subagent(
     config_override: AgentConfig | None = None,
     config_dir: Any = None,
     state_dir: Any = None,
-) -> str:
+) -> DelegationResult:
     """Spawn a BLIND search-verifier (web_search/web_fetch/web_page_query), run one turn, write a
     keep-flag ledger row, and return a COMPACT verdict flag (never the transcript).
 
@@ -860,7 +922,8 @@ async def dispatch_search_verifier_subagent(
     write_verification_ledger(
         run_id=parent_session_id, claim=claim, entity=entity, source_url=source_url, verdict=verdict
     )
-    return format_verifier_flag(claim, entity, verdict, tool_calls_used)
+    return _delegation_result(format_verifier_flag(claim, entity, verdict, tool_calls_used),
+                              child_loop, bus, summary, tool_calls_used)
 
 
 def _count_session_tool_calls(bus: Any, session_id: str | None) -> int:
@@ -879,6 +942,39 @@ def _count_session_tool_calls(bus: Any, session_id: str | None) -> int:
     except Exception:
         return 0
     return sum(1 for e in actions if getattr(e, "tool_name", None))
+
+
+def _session_written_paths(bus: Any, session_id: str | None) -> list[str]:
+    """Paths the session's write/edit calls actually wrote: an Action names the path, and only an
+    Observation for the same call with no error counts (Actions publish before the gate, so a
+    denied or failed write has an Action too). Returns [] if history is unavailable."""
+    from localharness.core.events import Action, Observation
+
+    history_fn = getattr(bus, "history", None)
+    if history_fn is None:
+        return []
+    try:
+        events = history_fn(session_id=session_id, event_types=[Action, Observation])
+    except Exception:
+        return []
+    ok = {e.tool_call_id for e in events if isinstance(e, Observation) and e.error is None}
+    paths: list[str] = []
+    for e in events:
+        name = (getattr(e, "tool_name", None) or "").split(".")[-1].split(":")[-1]
+        path = (getattr(e, "tool_params", None) or {}).get("path") if isinstance(e, Action) else None
+        if name in {"write", "edit"} and path and e.tool_call_id in ok and str(path) not in paths:
+            paths.append(str(path))
+    return paths
+
+
+def _delegation_result(text: str, child_loop: Any, bus: Any, summary: str,
+                       tool_calls: int) -> DelegationResult:
+    reason = getattr(child_loop, "last_terminated_reason", None)  # test fakes may lack it
+    sid = child_loop.current_session_id
+    return DelegationResult(
+        text, status=_delegation_status(reason, summary), terminated_reason=reason,
+        tool_calls=tool_calls, artifacts=_session_written_paths(bus, sid),
+        child_session_id=sid, handoff=parse_handoff(summary))
 
 
 def build_cruncher_config(name: str = "cruncher", kill_file: str | None = None) -> AgentConfig:
@@ -1247,7 +1343,7 @@ def make_explore_agent_runner(
     memory_handle: Callable[[], MemoryWriteHandle | None] | None = None,
     config_dir: Any = None,
     state_dir: Any = None,
-) -> Callable[..., Awaitable[str]]:
+) -> Callable[..., Awaitable[Any]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
 
     `config_dir`: the SESSION's config dir (the `--config-dir` value, or None for the resolved
@@ -1337,7 +1433,8 @@ def make_explore_agent_runner(
         )
         return AgentTool(agent_runner=child_runner, available_agents=delegatees)
 
-    async def _run_agent(agent_id: str, task: str, grant_handles: list[str] | None = None) -> str:
+    async def _run_agent(agent_id: str, task: str,
+                         grant_handles: list[str] | None = None) -> DelegationResult:
         name = _sanitize_agent_name(agent_id)
         # Grant-target safety (the keystone's structural floor): a granted handle is readable via
         # tool_result_get/chunk (NOT untrusted-ingest), so refuse handing one to a host-dangerous
@@ -1359,13 +1456,14 @@ def make_explore_agent_runner(
         if name == "cruncher":
             # J3: harness-orchestrated over-window reduce. child_ctx carries the granted read-through
             # store; grant_handles names which over-window bodies to crunch.
-            return await dispatch_cruncher_subagent(
+            r = await dispatch_cruncher_subagent(
                 task, grant_handles=grant_handles, llm=llm, bus=bus, base_registry=base_registry,
                 parent_session_id=get_parent_session_id(), permission_evaluator=permission_evaluator, gate=gate,
                 context_manager=child_ctx, depth=depth, max_subagent_depth=max_subagent_depth,
                 cruncher_config=cruncher_config, memory_handle=memory_handle, config_dir=config_dir,
                 state_dir=state_dir,
             )
+            return r if isinstance(r, DelegationResult) else DelegationResult(str(r))
         if name == "explore":
             dispatch, base_builder = dispatch_explore_subagent, build_explore_config
         elif name == "web-researcher":

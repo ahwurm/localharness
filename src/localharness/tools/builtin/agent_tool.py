@@ -7,6 +7,32 @@ from typing import Any
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 
+HANDOFF_INSTRUCTION = (
+    "Finish with a HANDOFF block: lines `status: completed|partial|blocked`, `artifacts: <paths>`, "
+    "`findings: ...`, `evidence: ...`, `uncertainties: ...`, `remaining: ...`."
+)
+
+
+def compose_brief(
+    task: str, purpose: str | None = None, inputs: list[str] | None = None,
+    constraints: str | None = None, expected_output: str | None = None,
+    checks: list[str] | None = None, stop_condition: str | None = None,
+) -> str:
+    """The child's brief: `task` unchanged for a plain call; otherwise a structured assignment
+    built only from these fields (never the parent transcript) plus the HANDOFF instruction.
+    Inputs are listed, not granted — grant_handles stays the only grant path."""
+    if not any((purpose, inputs, constraints, expected_output, checks, stop_condition)):
+        return task
+    lines = [f"Purpose: {purpose}"] if purpose else []
+    lines.append(f"Assignment: {task}")
+    lines += [f"Inputs: {', '.join(inputs)}"] if inputs else []
+    lines += [f"Constraints: {constraints}"] if constraints else []
+    lines += [f"Expected output: {expected_output}"] if expected_output else []
+    lines += [f"Checks: {'; '.join(checks)}"] if checks else []
+    lines += [f"Stop when: {stop_condition}"] if stop_condition else []
+    return "\n".join(lines) + "\n\n" + HANDOFF_INSTRUCTION
+
+
 class AgentTool(Tool):
     """Delegates a task to a named subagent and returns the summary.
 
@@ -24,7 +50,7 @@ class AgentTool(Tool):
 
     def __init__(
         self,
-        agent_runner: Callable[..., Coroutine[Any, Any, str]],
+        agent_runner: Callable[..., Coroutine[Any, Any, Any]],
         available_agents: list[str] | None = None,
     ) -> None:
         self._agent_runner = agent_runner
@@ -52,7 +78,10 @@ class AgentTool(Tool):
                 "If you only hold a LARGE document as a handle (you saw a stub like "
                 "\"[tool result evicted — call tool_result_get('<id>')]\" or a 'pg-N' page), pass "
                 "that id in grant_handles to let the subagent read the full body by handle — the "
-                "bytes never enter your or its prompt. Delegate over-window analysis to 'cruncher'."
+                "bytes never enter your or its prompt. Delegate over-window analysis to 'cruncher'. "
+                "For substantial work, add purpose/inputs/constraints/expected_output/checks/"
+                "stop_condition: the subagent gets a structured assignment and ends with a "
+                "HANDOFF block."
             ),
             parameters={
                 "type": "object",
@@ -85,6 +114,18 @@ class AgentTool(Tool):
                             "agents; use a no-danger processor like 'cruncher'."
                         ),
                     },
+                    "purpose": {"type": "string", "description": "Why this work is needed."},
+                    "inputs": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "workspace paths or handle ids the subagent should use",
+                    },
+                    "constraints": {"type": "string", "description": "Limits the work must respect."},
+                    "expected_output": {"type": "string", "description": "The deliverable to produce."},
+                    "checks": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "What the result must satisfy.",
+                    },
+                    "stop_condition": {"type": "string", "description": "When the subagent should stop."},
                 },
                 "required": ["agent_id", "task"],
             },
@@ -93,10 +134,25 @@ class AgentTool(Tool):
             destructive=False,
         )
 
-    async def _execute(self, agent_id: str, task: str, grant_handles: list[str] | None = None) -> ToolResult:
+    async def _execute(
+        self, agent_id: str, task: str, grant_handles: list[str] | None = None,
+        purpose: str | None = None, inputs: list[str] | None = None,
+        constraints: str | None = None, expected_output: str | None = None,
+        checks: list[str] | None = None, stop_condition: str | None = None,
+    ) -> ToolResult:
+        brief = compose_brief(task, purpose, inputs, constraints, expected_output, checks,
+                              stop_condition)
         try:
-            summary = await self._agent_runner(agent_id, task, grant_handles)
-            return self.ok(summary, delegated_to=agent_id)
+            result = await self._agent_runner(agent_id, brief, grant_handles)
+            if isinstance(result, str):
+                return self.ok(result, delegated_to=agent_id, status="completed",
+                               terminated_reason=None, tool_calls=0, artifacts=[],
+                               child_session_id=None, handoff=None)
+            # A DelegationResult (duck-typed: importing subagent here would be a cycle).
+            return self.ok(result.text, delegated_to=agent_id, status=result.status,
+                           terminated_reason=result.terminated_reason,
+                           tool_calls=result.tool_calls, artifacts=list(result.artifacts),
+                           child_session_id=result.child_session_id, handoff=result.handoff)
         except ValueError as exc:
             # The runner's ValueErrors are actionable by design ("dispatch not wired
             # (available: ...) — you can CREATE one..."); rebuilding a generic not-found from
