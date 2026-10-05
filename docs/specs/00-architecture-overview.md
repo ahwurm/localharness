@@ -407,7 +407,6 @@ localharness/
 |---------|---------|---------|-------|
 | Python | 3.12+ | Primary language | — |
 | pydantic | 2.13.4 | Event schemas, config models | 1 |
-| bubus | 1.5.6 | In-process async event bus | 1 |
 | PyYAML | 6.0.3 | YAML parsing | 2 |
 | pydantic-yaml | 1.4.0 | YAML ↔ Pydantic round-trip | 2 |
 | openai | 1.x | OpenAI-compat HTTP client | 2 |
@@ -429,7 +428,7 @@ localharness/
 
 **Dependency install:**
 ```bash
-uv add pydantic "pydantic[yaml]" pyyaml bubus aiosqlite structlog typer rich prompt-toolkit openai pluggy
+uv add pydantic "pydantic[yaml]" pyyaml aiosqlite structlog typer rich prompt-toolkit openai pluggy
 uv add --dev pytest pytest-asyncio ruff mypy maturin
 ```
 
@@ -547,12 +546,12 @@ Historical: the initial build order, the order the first version was built in. I
 
 ### Wave 1 — No dependencies
 
-Build these first. They import only from the Python standard library and third-party packages (pydantic, bubus).
+Build these first. They import only from the Python standard library and third-party packages (pydantic; the bus also anyio and structlog).
 
 ```
 core/types.py          — AgentID, SessionID, EventSeq type aliases
 core/events.py         — all Pydantic event models
-core/bus.py            — EventBus (wraps bubus)
+core/bus.py            — EventBus (the project's own pub/sub + JSONL persistence)
 config/models.py       — AgentConfig and all sub-models (Pydantic)
 config/defaults.py     — default values dict
 ```
@@ -622,7 +621,7 @@ cli/validate_cmd.py    — imports config/loader.py
 
 | Concern | v1 | v2 |
 |---------|----|----|
-| Event bus | In-process asyncio (bubus) | PyO3 Tokio broadcast (>10 agents) |
+| Event bus | In-process asyncio (the project's own, `core/bus.py`) | PyO3 Tokio broadcast (>10 agents) |
 | Memory isolation | Per-agent SQLite | Same + FTS5 cross-agent index |
 | Context windows | Per-agent `max_context_tokens` | Same + wave-based launch |
 | Tool execution | Sequential in loop | Parallel tool execution within one turn |

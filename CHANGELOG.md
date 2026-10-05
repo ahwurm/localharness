@@ -6,7 +6,18 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+- **A smaller install: `bubus` is no longer a dependency.** It was declared from the first
+  release but never imported — the harness has always run its own small event bus
+  (`core/bus.py`), written when bubus's event base class turned out to conflict with
+  LocalHarness's immutable events. Nothing you can do changed; a fresh install just has fewer
+  packages in it. The two architecture specs that still described bubus as the bus now describe
+  the bus the code has, and a test fails if a declared dependency ever goes unused again.
+- **Three packages the code imports are declared instead of borrowed.** `click` (behind
+  `/plugins enable`, `/plugins disable` and `localharness memory edit`) was present only because
+  typer pulls it in; `cryptography` (the phone's push keys) only through py-vapid; `torch` (the
+  embedding model's CPU thread cap) only through sentence-transformers. Nothing new is
+  downloaded — the install is now correct by declaration rather than by luck.
 
 ## [0.16.2] — 2026-10-04
 

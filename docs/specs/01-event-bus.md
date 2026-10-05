@@ -4,7 +4,7 @@
 **Component:** `core/events.py`, `core/bus.py`, `core/types.py`  
 **Layer:** 1 (Foundation)  
 **Status:** Authoritative — implement against this document  
-**Last updated:** 2026-05-23
+**Last updated:** 2026-10-05
 
 ---
 
@@ -24,9 +24,9 @@ The event bus occupies Layer 1. It has zero imports from other localharness modu
 
 ### Implementation Strategy
 
-**v1:** Python-native. bubus 1.5.6 provides production-ready Pydantic-powered async pub/sub with FIFO ordering, parent event tracking, and optional WAL persistence. Do not roll a custom implementation.
+**v1:** Python-native and the project's own: `core/bus.py` is a subscriber registry keyed by event class name plus JSONL persistence written through anyio (section 9). No third-party event library is involved. bubus 1.5.6 was tried for this role and set aside before the first release: its `BaseEvent` requires `validate_assignment=True` and writes `event_processed_at` onto the event after dispatch, which conflicts with LocalHarness's frozen events. The package then stayed declared in `pyproject.toml`, never imported, until October 2026; it is gone.
 
-**v2 migration path:** When concurrent agent count exceeds ~10 and event throughput becomes a bottleneck, replace the bubus backend with a PyO3-wrapped Tokio broadcast channel. The Python API of `EventBus` does not change — only the backend implementation.
+**v2 migration path:** When concurrent agent count exceeds ~10 and event throughput becomes a bottleneck, replace the backend with a PyO3-wrapped Tokio broadcast channel. The Python API of `EventBus` does not change — only the backend implementation.
 
 ---
 
@@ -547,7 +547,7 @@ AnyEvent = Union[
 
 ## 4. EventBus Class Interface (`core/bus.py`)
 
-The `EventBus` class wraps bubus 1.5.6 and exposes a stable Python API. All other components interact with the event bus through this class. Never import bubus directly from outside `core/bus.py`.
+The `EventBus` class is the project's own implementation (section 9) and exposes a stable Python API. All other components interact with the event bus through this class.
 
 ```python
 # src/localharness/core/bus.py
@@ -1169,7 +1169,7 @@ def deserialize_event(line: str) -> AnyEvent:
 
 ### 6.3 Implementation Notes
 
-The bubus library uses Python's asyncio event loop and guarantees FIFO delivery within a single event loop. The `seq` counter is maintained as an `asyncio.Lock`-protected integer in `EventBus.__init__`. Assignment happens inside `publish()` before delivery to subscribers.
+Delivery runs on Python's asyncio event loop: `publish()` awaits each matching subscriber in turn, so events are delivered in publish order within a single event loop. The `seq` counter is maintained as an `asyncio.Lock`-protected integer in `EventBus.__init__`. Assignment happens inside `publish()` before delivery to subscribers.
 
 ```python
 # Internal pattern (implementation detail — do not call directly)
@@ -1288,80 +1288,29 @@ bus = EventBus(persist_path=..., handler_timeout_seconds=30.0)
 
 ---
 
-## 9. bubus 1.5.6 Integration
+## 9. Implementation: the project's own bus
 
-### 9.1 What bubus Provides
+No third-party event library is used. `core/bus.py` is a few hundred lines, and this is what they do.
 
-bubus is a production-ready Pydantic-native async event bus used in browser-use (production traffic). Key features used by LocalHarness:
+### 9.1 Subscriber registry
 
-- **Typed events:** Events must be Pydantic BaseModel subclasses. bubus calls `model_validate()` on handlers that declare typed parameters.
-- **FIFO ordering:** Events are delivered in publish order within a single asyncio event loop.
-- **Async handlers:** bubus dispatches handlers as asyncio Tasks.
-- **WAL persistence:** bubus can append events to a file in WAL mode. LocalHarness uses this for JSONL persistence.
-- **Parent event tracking:** bubus supports `parent_id` for causality chains. LocalHarness uses this field natively.
+Subscriptions live in a dict from event key to a list of wrapped handlers, where the key is the event class name (`type(event).__name__`). `subscribe(event_type, handler, *, agent_id=None, session_id=None)` wraps the handler in a filter for the optional agent and session ids and returns a `SubscriptionHandle`; `on(...)` is the decorator form; `unsubscribe(handle)` is idempotent and safe during delivery. Handlers may be plain `def` or `async def`: delivery awaits a result only when it is awaitable.
 
-### 9.2 Wrapping Pattern
+### 9.2 Delivery
 
-`EventBus` in `core/bus.py` wraps bubus without exposing it. Other modules never `import bubus` directly. This is enforced by a ruff rule:
+`publish()` assigns `seq` under an `asyncio.Lock`, appends the sequenced event to an in-memory history (the first 10,000 events of the process), persists it, then awaits every matching handler in subscription order, each under `handler_timeout_seconds` (default 30). A handler that raises is logged (`subscriber_error`) and the rest still run; a timeout is logged (`handler_timeout`). `SystemExit` and `KeyboardInterrupt` propagate. Delivery is sequential within one event loop, which is where the FIFO guarantee in section 6 comes from.
 
-```toml
-# pyproject.toml
-[tool.ruff.lint.per-file-ignores]
-"src/localharness/core/bus.py" = []  # only file allowed to import bubus
-```
+### 9.3 Persistence
 
-And a linting check:
-```toml
-[tool.ruff.lint]
-extend-select = ["E402"]
-# Custom: ban direct bubus imports outside core/bus.py
-# Enforce via: ruff check --select F811 (or custom plugin)
-```
+With a `persist_path`, every event is appended as one JSON line through `anyio.open_file` with `private_opener`, so the file is owner-only from creation. An event carrying a `session_id` is also appended to `<persist_dir>/sessions/<session_id>.jsonl`. A failed write is logged (`persist_failed`) and never fails the publish.
 
-### 9.3 Initialization
+### 9.4 Replay, wait_for, history
 
-```python
-# Internal to core/bus.py
-from bubus import EventBus as _BubusEventBus
+`replay()` streams the JSONL file back through `deserialize_event` in file order, skipping blank or torn lines, with optional `session_id`, `from_seq`, `to_seq` and event-type filters; `replay_and_resubmit()` publishes what it reads again. `wait_for(event_type, *, timeout, predicate, agent_id, session_id)` is a one-shot subscription behind a shielded future. `history()` reads the in-memory list; `event_count()` and `subscriber_count()` report sizes.
 
-class EventBus:
-    def __init__(self, persist_path: Optional[Path] = None, ...) -> None:
-        self._bus = _BubusEventBus()
-        if persist_path is not None:
-            # Configure bubus WAL to the JSONL file
-            persist_path = Path(persist_path).expanduser()
-            persist_path.parent.mkdir(parents=True, exist_ok=True)
-            self._bus.configure_wal(str(persist_path))
-        self._next_seq: int = 0
-        self._seq_lock = asyncio.Lock()
-        self._history: list[AnyEvent] = []
-        self._max_history: int = 10_000
-```
+### 9.5 Why not bubus
 
-### 9.4 Sequence Number Assignment
-
-bubus does not natively assign sequence numbers. The `EventBus` wrapper adds this in `publish()`:
-
-```python
-async def publish(self, event: BaseEvent) -> BaseEvent:
-    if event.seq is not None:
-        raise ValueError(f"Event already published: seq={event.seq}")
-    
-    async with self._seq_lock:
-        seq = EventSeq(self._next_seq)
-        self._next_seq += 1
-    
-    sequenced = event.model_copy(update={"seq": seq})
-    
-    # Append to in-memory history
-    if len(self._history) < self._max_history:
-        self._history.append(sequenced)
-    
-    # Delegate to bubus for fan-out and persistence
-    await self._bus.emit(sequenced)
-    
-    return sequenced
-```
+bubus 1.5.6 (the Pydantic event bus from browser-use) was the planned backend. Its `BaseEvent` requires `validate_assignment=True` and writes `event_processed_at` onto the event after dispatch; LocalHarness events are `frozen=True`, and the two cannot be combined. The registry above replaced it before the first release. The package stayed declared as a dependency, never imported, until October 2026, when it was removed; `tests/unit/test_declared_dependencies.py` fails if a declared main dependency has no import in `src/`.
 
 ---
 
@@ -1427,7 +1376,7 @@ class EventBus:
             from localharness._core import RustEventBus
             self._backend = RustEventBus(persist_path=str(persist_path) if persist_path else None)
         else:
-            self._backend = _BubusEventBus()
+            self._backend = _PythonEventBus()  # today's in-process registry (section 9)
         ...
 ```
 
