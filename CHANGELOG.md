@@ -6,6 +6,10 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.16.3] — 2026-10-05
+
 ### Changed
 - **A smaller install: `bubus` is no longer a dependency.** It was declared from the first
   release but never imported — the harness has always run its own small event bus
