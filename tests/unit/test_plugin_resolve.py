@@ -463,7 +463,7 @@ def test_problems_is_one_line_per_plugin_that_will_not_load(layers, monkeypatch,
     r = resolved(g, ws, version="0.15.0", extra_installed=lambda extra: False)
 
     assert r.problems() == [
-        "plugin web: install `localharness[mobile]` to use it",
+        "plugin mobile: install `localharness[mobile]` to use it",
         "plugin Bad_Name: 'Bad_Name' is not a valid plugin name (a lower-case letter, then up to 63 "
         "lower-case letters, digits, '_' or '-')",
         "plugin boom: could not be imported: RuntimeError: kaput",

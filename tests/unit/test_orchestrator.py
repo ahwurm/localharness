@@ -10,7 +10,7 @@ from localharness.config.models import AgentConfig
 # --- score_card ---
 
 def test_score_card_keyword_match():
-    card = AgentCard(agent_id="research", name="research", description="Web research agent", keywords=["research", "search", "mobile", "crawl"], example_tasks=["Search the web for X"])
+    card = AgentCard(agent_id="research", name="research", description="Web research agent", keywords=["research", "search", "web", "crawl"], example_tasks=["Search the web for X"])
     score = score_card("research this topic using web search", card)
     assert score > 0.30  # above threshold
 
@@ -50,7 +50,7 @@ def test_registry_generate_card_from_config():
 
 def test_registry_route_returns_best_match():
     registry = AgentCardRegistry()
-    registry.register(AgentCard(agent_id="research", name="research", description="Web research", keywords=["research", "search", "mobile"]))
+    registry.register(AgentCard(agent_id="research", name="research", description="Web research", keywords=["research", "search", "web"]))
     registry.register(AgentCard(agent_id="fitness", name="fitness", description="Fitness tracking", keywords=["fitness", "workout", "nutrition"]))
     decision = registry.route("search the web for machine learning papers")
     assert decision.matched is True
@@ -91,7 +91,7 @@ def test_registry_route_tiebreak_fn_called_on_ambiguity():
 def test_registry_route_tiebreak_fn_not_called_when_clear_winner():
     """When there's a clear winner (delta >= 0.10), tiebreak_fn is NOT called."""
     registry = AgentCardRegistry()
-    registry.register(AgentCard(agent_id="research", name="research", description="Web research", keywords=["research", "search", "mobile", "crawl"]))
+    registry.register(AgentCard(agent_id="research", name="research", description="Web research", keywords=["research", "search", "web", "crawl"]))
     registry.register(AgentCard(agent_id="fitness", name="fitness", description="Fitness", keywords=["fitness", "workout"]))
 
     tiebreak_called = [False]
