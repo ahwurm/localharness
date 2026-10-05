@@ -179,3 +179,34 @@ async def test_normal_turn_completes_without_cancel_message():
     await repl.run()
     assert not any("Turn cancelled" in t for t, _ in channel.sent)
     agent.run_turn.assert_awaited_once()
+
+
+def test_the_turn_handler_puts_back_the_sigint_handler_it_found():
+    """0.16.2: the handler in place before a turn is restored afterwards, not Python's default.
+    `localharness mobile` relies on it: uvicorn's graceful-shutdown handler is the one in place,
+    and with the default in its place Ctrl-C after the first turn killed the server instead of
+    stopping it (seen on the real surface, 2026-10-04). The real loop signal API, not a stub."""
+    import signal
+
+    def marker(signum, frame):  # stands in for uvicorn's handle_exit
+        pass
+
+    async def quick_turn(task, on_token=None):
+        await asyncio.sleep(0)
+        return "done"
+
+    channel = RecordingChannel(["one turn"])  # then EOFError ends the loop
+    repl, agent, bus = _build_repl(channel, quick_turn)
+    original = signal.getsignal(signal.SIGINT)
+    seen: dict = {}
+
+    async def scenario():
+        signal.signal(signal.SIGINT, marker)
+        await asyncio.wait_for(repl.run(), timeout=5.0)
+        seen["after"] = signal.getsignal(signal.SIGINT)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        signal.signal(signal.SIGINT, original)
+    assert seen["after"] is marker, f"the turn left {seen['after']!r} in place of the host's handler"

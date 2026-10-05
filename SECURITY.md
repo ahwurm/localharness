@@ -781,7 +781,7 @@ that mode, never written first and changed after: `config.yaml` and its backups
 (`config.yaml.bak-<stamp>` from the security-defaults update, `config.yaml.before-init-<stamp>`
 from `init --force`), `overrides.yaml`, `grants.yaml`, `trusted_workspaces.yaml`, the phone token,
 the push key and the push subscriptions, `audit.jsonl`, each agent's `bus-events.jsonl`, session
-logs, `history.jsonl`, `memory.db` (and its `-wal` and `-shm` files), `MEMORY.md`, `compact.md` and
+logs, the phone session's `sessions/asleep.json` while it sleeps, `history.jsonl`, `memory.db` (and its `-wal` and `-shm` files), `MEMORY.md`, `compact.md` and
 `memory.log`, `.repl_history`, the speed ledger, the live-session files, `vllm/serve.log` and
 `vllm/server.pid`, agent files written by `agent create`, by a start (the root agent) or by the
 in-session creation workflow, autoresearch's archive, run journals and budget file, and

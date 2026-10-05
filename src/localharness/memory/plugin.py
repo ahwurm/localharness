@@ -195,6 +195,10 @@ class MemoryPlugin(MemorySlotPlugin):
             except Exception:
                 log.debug("memory store close failed", exc_info=True)
             self._store = None
+        # The engine holds the embedding model (about 1.2 GB resident once loaded) and the browse
+        # handle holds the closed store; neither outlives the session they served. The next
+        # start's tools() builds a new engine, which loads lazily as before.
+        self._engine = self._browse = None
 
     async def context(self, ctx: PluginContext, turn: str, budget: ContextBudget) -> ContextContribution:
         """This turn's `Division Context` / `Agent Memory` sections, loaded within min(own setting,

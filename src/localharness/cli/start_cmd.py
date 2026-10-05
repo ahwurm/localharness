@@ -34,6 +34,8 @@ OWN_COMMAND_ERROR = ("the {name} channel is served by its own command, because {
 FIRST_START_LEAD = "LocalHarness is not set up yet. Setting up the model server first:"
 
 RESTARTED_LINE = "Restarted with {name} {state}. Your conversation continues."
+RESUMED_LINE = "Awake again, continuing the conversation that went to sleep (sitting {previous})."
+WAKING_DETAIL = "waking the chat you left"
 
 
 def _own_command(mobile_channel: Any, acp_channel: Any) -> dict[str, tuple[str, Any]]:
@@ -135,29 +137,9 @@ def _available_hint(names: list[str]) -> str:
             f"`localharness plugins enable <name>` to turn one on")
 
 
-@dataclass(frozen=True)
-class Resume:
-    """What a terminal session carries into its rebuild after `/plugins enable|disable` — plain
-    data, so a later re-exec of the process could write it to a file instead."""
-    action: tuple[str, str]          # ("enable" | "disable", plugin name)
-    agent_name: str                  # the agent this sitting ran; the rebuild shows no picker
-    conversation: tuple[dict, ...]   # AgentLoop's exact model-side messages
-    prior_context: str               # the prior-session context folded into the system prompt
-    eviction_store: Any              # the ContentStore holding evicted tool-result bodies
-    queued: tuple[str, ...]          # lines typed ahead, still waiting in the REPL's queue
-    gate_mode: str                   # /mode as the person left it
-    previous_sitting_id: str         # logged beside the new one; memory needs a fresh id
-    failed_check: str = ""           # from the step: its check's first row that failed
-    skipped_check: str = ""          # from the step: its first skipped row, when none failed
-    step_stopped: bool = False       # the step was stopped (Ctrl-C, Ctrl-D, a refusal or an error)
-
-
-@dataclass(frozen=True)
-class Restart:
-    """`_start_async`'s answer when the REPL ended for `/plugins enable|disable`: start_app runs the
-    plugin's step on the plain terminal (`action`), then rebuilds the session from `resume`."""
-    action: tuple[str, str]
-    resume: Resume
+from localharness.cli.session_resume import (  # noqa: E402 — the handle lives beside its file form
+    SLEEP_ACTION, Restart, Resume, asleep_path, take_asleep, write_asleep,
+)
 
 
 def _resume_status(resume: Resume, result: Any) -> str:
@@ -582,7 +564,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                        model_override: str | None = None, list_models: bool = False,
                        no_input: bool = False, show_reasoning: bool = False,
                        acp_channel: Any = None, mobile_channel: Any = None,
-                       resume: Resume | None = None, trust_project: bool = False) -> Restart | None:
+                       resume: Resume | None = None, trust_project: bool = False,
+                       fresh_thread: bool = False) -> Restart | None:
     """Async entry point: discover agent, wire dependencies, run REPL.
 
     `trust_project`: `--trust-project` — this run trusts the project it stands in, recording
@@ -591,7 +574,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     Returns a `Restart` when the REPL ended for `/plugins enable|disable` (a terminal session):
     start_app runs the plugin's step, then calls this again with `resume` — the conversation, the
     eviction store, the typed-ahead lines and /mode carried over, a fresh sitting id, and a compact
-    indicator in place of the banner. Otherwise None.
+    indicator in place of the banner. Also when a mobile session went to sleep: the same handle,
+    already written beside the session log, which the next mobile bring-up takes from disk and
+    passes here as `resume` on its own. `fresh_thread` (the phone's new-chat verb) discards a
+    sleeping thread instead of waking it. Otherwise None.
 
     `mobile_channel` is the PWA adapter (`channels/mobile.MobileChannel`) when this session is being
     driven from a phone. Passed in for the same reason `acp_channel` is — the HTTP server is up
@@ -1185,8 +1171,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     _route_memory_logs_to_file(agent_dir)
     sitting_id = str(uuid.uuid4())  # SESS-01: one session per SITTING, minted once
     if resume is not None:  # a rebuild is a new sitting: memory's sessions.id is a primary key
-        log.info("session %s resumes %s after /plugins %s %s", sitting_id, resume.previous_sitting_id,
+        log.info("session %s resumes %s after %s %s", sitting_id, resume.previous_sitting_id,
                  *resume.action)
+    asleep_file = asleep_path(events_path.parent / "sessions")
     # LLMClient built above with probe-derived tool_call_mode.
 
     # --- 2. Core infrastructure ---
@@ -1217,13 +1204,27 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     session_info = None
     _exit_reason = "complete"
     restart_request: Restart | None = None
+    disk_resume: Resume | None = None  # a thread taken off disk, until a session is bound
+    bound = False
     try:
+        if mobile_channel is not None and resume is None:
+            # A thread asleep in this agent's folder wakes here, through the handle a /plugins
+            # restart passes in memory. Taken inside the resource window: a wake that fails before
+            # a session is bound puts it back (the finally), so the thread is not lost to a model
+            # server that happened to be down.
+            if fresh_thread:
+                asleep_file.unlink(missing_ok=True)
+            else:
+                disk_resume = resume = take_asleep(asleep_file)
+            if resume is not None:
+                log.info("session %s wakes %s from %s", sitting_id, resume.previous_sitting_id, asleep_file)
+                mobile_channel.set_bringup("starting the session", detail=WAKING_DETAIL)
         # Queryable-handle tool: tool_result_get (restore evicted tool-result bodies). The
         # ContentStore is shared with the ContextManager below so eviction-writes and restore-reads
         # hit the same map. The memory tools are the memory plugin's (step 5).
         from localharness.agent.context import ContentStore
         # A rebuild keeps the store: the carried conversation's stubs name handles it holds.
-        eviction_store = resume.eviction_store if resume is not None else ContentStore()
+        eviction_store = (resume.eviction_store if resume is not None else None) or ContentStore()
         try:
             if agent_config.context.tool_result_eviction:
                 from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
@@ -1471,7 +1472,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             config_dir=cfg_path,  # the session's own tools folder and settings files are guarded
         )
         if resume is not None and resume.gate_mode != gate.mode:
-            gate.set_mode(resume.gate_mode)  # /mode as the person left it (and a declined trust's mode)
+            try:
+                gate.set_mode(resume.gate_mode)  # /mode as the person left it (and a declined trust's mode)
+            except Exception as exc:  # noqa: BLE001 — only a file can carry a mode the gate refuses
+                warnings.append(f"resume: kept mode {gate.mode} ({exc})")
 
         # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
         # alongside any configured agent cards so the model knows it can delegate to them. search-verifier
@@ -1627,6 +1631,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             ))
             if interactive and isinstance(channel, TerminalChannel):
                 channel.first_prompt_hint = _first_prompt_hint(is_returning)
+        elif resume.slept:
+            console.print(Text(RESUMED_LINE.format(previous=resume.previous_sitting_id)), soft_wrap=True)
         else:  # R3: no wordmark mid-conversation — one line, then the plugin lines and the status
             console.print(Text(RESTARTED_LINE.format(
                 name=resume.action[1], state="on" if resume.action[0] == "enable" else "off")),
@@ -1679,7 +1685,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             available = [e.name for e in plugin_resolution.plan.entries if e.state == "available"]
             if available:  # Text: a plugin name is outside text, never markup (39-04's lesson)
                 console.print(Text(_available_hint(available)), soft_wrap=True)
-        if resume is not None:
+        if resume is not None and not resume.slept:
             console.print(Text(_resume_status(resume, plugin_result)), soft_wrap=True)
 
         # --- Verbose output ---
@@ -1779,6 +1785,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 # computed for this session's running plugins and accepted back from them.
                 artifact_roots=plugin_result.artifact_roots if plugin_result is not None else {},
             )
+            bound = True  # from here a thread taken off disk has become this session
+
 
         if acp_channel is not None:
             # The workspace-trust question, on the path that has no REPL to host it (owner
@@ -1818,14 +1826,21 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         )
 
         await repl.run()
-        if repl.restart_request is not None:
-            # The REPL ended for /plugins: hand start_app the plain-data handle; the teardown below
-            # runs in its usual order and this sitting's memory row closes normally ("complete").
+        request = repl.restart_request or (
+            SLEEP_ACTION if mobile_channel is not None and mobile_channel.sleep_requested else None)
+        if request is not None:
+            # The REPL ended for /plugins (hand start_app the plain-data handle) or for a sleep
+            # (the same handle goes to disk, before a teardown that could hang); either way the
+            # teardown below runs in its usual order and this sitting's memory row closes
+            # normally ("complete").
             conversation, prior = agent_loop.resume_state()
-            restart_request = Restart(repl.restart_request, Resume(
-                action=repl.restart_request, agent_name=agent_name_str, conversation=tuple(conversation),
+            restart_request = Restart(request, Resume(
+                action=request, agent_name=agent_name_str, conversation=tuple(conversation),
                 prior_context=prior, eviction_store=eviction_store, queued=repl.queued,
                 gate_mode=gate.mode, previous_sitting_id=sitting_id))
+            if request == SLEEP_ACTION:
+                write_asleep(asleep_file, restart_request.resume)
+                log.info("session %s asleep at %s", sitting_id, asleep_file)
     except KeyboardInterrupt:
         _exit_reason = "interrupt"
         console.print("\nGoodbye.")
@@ -1833,6 +1848,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _exit_reason = "error"
         raise  # finally still records the session; behavior for callers unchanged
     finally:
+        if disk_resume is not None and not bound:
+            # The wake failed (or was abandoned) before a session existed: the thread is still
+            # asleep, and the next message gets to try again.
+            try:
+                write_asleep(asleep_file, disk_resume)
+            except Exception:  # noqa: BLE001 — never let the put-back replace the real failure
+                log.warning("could not put the sleeping thread back at %s", asleep_file, exc_info=True)
         # --- Ordered shutdown: MCP -> plugins (reverse start order; memory's stop() runs dreaming ->
         # accumulator -> end_session -> router -> store) -> LLMClient LAST (#154) --- (EventBus
         # handles its own file closing on GC/process exit)

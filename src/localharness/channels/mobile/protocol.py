@@ -64,6 +64,11 @@ moves it. That is a re-record without a bump, called out in the commit message: 
 byte-for-byte what it was, and a client written against version 1 renders it identically.
 """
 
+ASLEEP_STAGE = "asleep"
+"""The `BringUpStage.stage` a client sees when the idle session was put to sleep: no session is
+bound, the thread is on disk, and the next message wakes it. Terminal like "ended", but not an
+ending — a client keeps the transcript and changes only its ribbon."""
+
 NEVER_FIRED_EVENTS: frozenset[str] = frozenset({
     "SystemReady",
     "AgentCreated",

@@ -6,7 +6,59 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- **The phone's session sleeps when nobody is using it, and your next message wakes it with
+  the conversation continued.** After thirty minutes with no phone attached, no turn running
+  and nothing waiting (`localharness mobile --sleep-after MINUTES`; `0` never sleeps), the
+  live session writes its exact model-side conversation, its prior context and its
+  permission mode to `sessions/asleep.json` beside its session log, owner-only, and tears
+  itself down through its normal shutdown: memory closes the sitting, and the model client,
+  the memory store, the embedding model and the consolidation timer go with the session. The
+  server stays up holding the channel and the token (measured on the reference box: 83 MB
+  before any session, 1.8 GB with a session and the embedding model loaded, 0.9 GB asleep —
+  the model's memory is released, the libraries it needed stay imported). The next message
+  brings a session up
+  from that file through the same path a `/plugins` restart in the terminal uses, so the
+  model has every earlier turn and memory sees a new sitting. The ribbon says *asleep —
+  wakes on your next message*; `/api/health` reports `model_state: "asleep"` and the
+  bring-up stage frame carries the stage `asleep` (no frame changed shape). Opening the app
+  does not wake it; a message does.
+- **Ctrl-C keeps the conversation too.** A live session is put to sleep rather than killed
+  when the server stops (a running turn is cancelled first; a teardown that takes longer
+  than ten seconds is cancelled the old way and says so in the log), so restarting
+  `localharness mobile` continues the same conversation. The `+` button is how you leave a
+  sleeping conversation behind: it discards the file and builds a fresh chat.
+
+### Fixed
+- **Ctrl-C after a turn killed `localharness mobile` instead of stopping it.** The REPL's
+  mid-turn Ctrl-C handler left Python's default SIGINT handler behind when the turn ended,
+  in place of uvicorn's graceful shutdown; the next Ctrl-C raised KeyboardInterrupt out of
+  the event loop. The handler that was in place before the turn is now put back (the terminal
+  gets the same fix), and the server owns its stop signals, so a stop is graceful and the
+  live session is kept.
+- **After a new chat, the phone's stop, nudge and approve taps reached the previous chat's
+  REPL.** The REPL installs those three handles on the channel and the channel kept them
+  across sessions; it now clears them when a session ends, so the next REPL installs its own.
+  The same kept handles also kept the previous session's loop, registry and embedding model
+  alive for the life of the process.
+
+### Changed
+- `localharness mobile` says in its start banner when it will sleep.
+- A wake that fails before a session exists — the model server down, say — puts the file
+  back, so the next message tries again; a file that cannot be read as a conversation is
+  moved to `asleep.json.corrupt` and the session starts fresh, with a line in the log.
+- The default sleep leaves memory's dreaming pass (ten minutes into the quiet) room to run
+  first; set `--sleep-after` below about thirteen and the pass waits for the next wake.
+
+### Known limitations (named, not hidden)
+- A tool result the sleeping session had evicted from its context comes back as its stub
+  after a wake; the model re-fetches it if it needs it. The eviction store is not in the file.
+- What the phone shows is the page's own transcript: after a server restart, the earlier
+  turns of a woken conversation are in the history drawer, and new turns append below
+  whatever the page shows. The model has all of them.
+- A parked permission call or an open question keeps the session awake: both live only in
+  that session's gate, and sleeping would drop them.
+- Only the phone channel sleeps and resumes; `localharness start` on the terminal does not.
 
 ## [0.16.1] — 2026-10-04
 

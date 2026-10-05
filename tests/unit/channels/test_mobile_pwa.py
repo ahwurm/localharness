@@ -220,7 +220,7 @@ async def test_the_bringup_ticker_names_its_stage_and_can_be_abandoned(page):
     """WEBCH-43. A rising number reports elapsed time, not health."""
     assert "BringUpStage" in page
     where = page.index('case "BringUpStage"')
-    window = page[where:where + 1200]
+    window = page[where:where + 1500]  # the ready/ended/asleep branch sits above the button
     assert "d.stage" in window
     assert "/api/bringup/abort" in window
 
