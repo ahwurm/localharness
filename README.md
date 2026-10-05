@@ -76,20 +76,9 @@ A plugin you install is found in two places, both on your machine and never in a
 
 Copy [the example plugin](examples/plugin-template/README.md): one tool, one command, one slash command, one `doctor` check and two settings, exercised by the test suite and in CI. The API is [spec 09](docs/specs/09-hooks-plugins.md); its version is `"1"`, and changes since its first release have only added optional fields. Plugins written for the previous plugin API no longer load; [spec 09](docs/specs/09-hooks-plugins.md#plugins-written-for-015) says how to port one.
 
-## Status and known limitations
+## Status
 
-Early stage (v0.16.2, pre-1.0). Interfaces and config schema may change without notice. The limits a new user is most likely to meet:
-
-- The Discord plugin is tested offline against a stand-in for the Discord library and has not been run against a live Discord server. Files people upload to the bot are not passed to the model.
-- The phone app ships a bare reference page, not a finished chat app: one live session at a time, which sleeps to disk when idle and resumes on your next message; past chats are read-only in its drawer. Its incognito switch only keeps pictures off the phone; memory, sessions and pictures are still written to disk.
-- The image plugin does not install or start ComfyUI or download its model files. The terminal does not display pictures; the phone page and Discord do.
-- With memory on, `localharness doctor` fails until the `embeddings` extra and the embedding model are installed.
-- The Discord token and the autoresearch proposer's API key are stored as plain text in your global `overrides.yaml`.
-- `pre_tool` and `post_tool` hooks do not fire for a helper agent's tool calls, and a hook written as `async def` never runs.
-- `localharness validate` does not check a plugin's own settings, and `plugins enable` and `plugins disable` write no audit event.
-- `/plugins enable` and `/plugins disable` work in a terminal session only. The restart keeps the conversation, but not a `/model` switch to another endpoint, `/reasoning` and `/verbose`, or an MCP server's own state; and if the model server goes away during the restart, the conversation is lost.
-
-The full list is under "Known limitations" in each [CHANGELOG](CHANGELOG.md) release.
+Early stage (v0.16.2, pre-1.0). Interfaces and config schema may change without notice. Each release's known limitations are listed in the [CHANGELOG](CHANGELOG.md).
 
 ## Links
 
