@@ -12,7 +12,7 @@ localharness plugins enable mobile
 
 Without the extra, `localharness plugins list` shows it as `on (install localharness[mobile] to use it)`.
 
-`localharness plugins enable mobile` on a terminal asks the phone address: the URL your phone opens. Press Enter to leave it empty and let `localharness mobile` guess it. In a running session, `/plugins enable mobile` asks it too, until `localharness mobile` has run once or an address is saved. Press Enter there and the address stays unset: the session comes back saying "web: on, but not set up yet — not enrolled yet" until `localharness mobile` has run once, the normal state of a new install.
+`localharness plugins enable mobile` on a terminal asks the phone address: the URL your phone opens. Press Enter to leave it empty and let `localharness mobile` guess it. In a running session, `/plugins enable mobile` asks it too, until `localharness mobile` has run once or an address is saved. Press Enter there and the address stays unset: the session comes back saying "mobile: on, but not set up yet — not enrolled yet" until `localharness mobile` has run once, the normal state of a new install.
 
 ## What it adds
 

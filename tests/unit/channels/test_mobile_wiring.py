@@ -305,7 +305,7 @@ async def test_doctor_prints_the_web_plugin_check(tmp_path, monkeypatch):
 
     os.chmod(token_path(cfg), 0o644)
     out = await doctor()
-    assert "mobile-token: Web app token is mode 644, expected 600" in out
+    assert "mobile-token: Mobile app token is mode 644, expected 600" in out
     assert f"chmod 600 {token_path(cfg)}" in out
 
 

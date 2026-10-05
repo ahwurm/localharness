@@ -2,7 +2,7 @@
 
 The loader, the startup banner, `plugins list`, `doctor` and `components` all reach it through
 bundled_plugins() — never by importing the name — so there is no second list anywhere and a test can
-swap this one and watch every reader follow. The image plugin is the first entry, web the second,
+swap this one and watch every reader follow. The image plugin is the first entry, mobile the second,
 memory the third, dispatch the fourth and autoresearch the fifth; each bundled feature that converts appends exactly one class. This is the one module in core allowed to import a plugin
 module (CORE-02)."""
 from __future__ import annotations

@@ -124,13 +124,13 @@ An artifact is a file a plugin makes for you, like the swatch image.
   file, never overwrites one, and returns an `ArtifactRef`.
 - Only three types are allowed: `image/png`, `image/jpeg` and `image/webp`. Anything else is refused
   before a byte is written.
-- The terminal does not display artifacts. The phone app (`localharness web`) shows an image
+- The terminal does not display artifacts. The phone app (`localharness mobile`) shows an image
   artifact inline, and the Discord bot posts it as a file. So the
   swatch tool's result also names the file it wrote, `<state dir>/artifacts/example/<id>.png`, and
   the agent can tell you where the swatch is. The state dir is the `.localharness/` folder of the
   project you started in, if it has one (`localharness init --workspace` makes it), and
   `~/.localharness/` otherwise.
-- The mobile channel (the `web` plugin) serves an artifact to your signed-in phone at `/api/artifacts/<name>/<id>`, only
+- The mobile channel (the `mobile` plugin) serves an artifact to your signed-in phone at `/api/artifacts/<name>/<id>`, only
   for a plugin that is on in the running session.
 - The swatch tool takes no arguments, so asking for another color changes nothing. A different
   color is a settings change (`localharness components set example.color '#ff7f50'`), read when a
@@ -184,7 +184,7 @@ install takes the slot only after `localharness plugins disable memory`.
 8. Install it into the same Python environment as LocalHarness, then turn it on with
    `localharness plugins enable <name>`. If you installed LocalHarness with `uv tool`, run
    `uv tool install --with-editable path/to/your-plugin localharness`, naming your extras (as in
-   `'localharness[web]'`) and every other plugin's `--with` again. In a virtual environment,
+   `'localharness[mobile]'`) and every other plugin's `--with` again. In a virtual environment,
    activate it and run `uv pip install -e path/to/your-plugin`.
 
 ## How this repository installs it

@@ -182,17 +182,17 @@ async def test_post_refuses_the_csrf_friendly_content_types(tmp_path):
 async def test_enrolment_hands_back_a_derived_get_only_cookie_and_expires_the_old_one(tmp_path):
     """`EventSource` cannot send an Authorization header, and the token is never put in a URL —
     nor in a cookie: cookies ignore ports, so every service on the same host name would receive
-    it. The stream's cookie is an HMAC under the token, named lh_web_get, scoped to /api,
+    it. The stream's cookie is an HMAC under the token, named lh_mobile_get, scoped to /api,
     HttpOnly, SameSite=Strict and Secure. 0.16's cookie (the raw token, Path=/) is expired."""
     _, _, _, client = await _stack(tmp_path)
     got = await client.post("/api/auth/enroll", json={}, headers=JSON)
     assert got.status_code == 200
     sent = got.headers.get_list("set-cookie")
     cookies = {line.split("=", 1)[0]: line for line in sent}
-    assert auth.AUTH_COOKIE == "lh_web_get" and auth.get_cookie_value(TOKEN) != TOKEN
-    assert cookies["lh_web_get"].startswith(f"lh_web_get={auth.get_cookie_value(TOKEN)};")
+    assert auth.AUTH_COOKIE == "lh_mobile_get" and auth.get_cookie_value(TOKEN) != TOKEN
+    assert cookies["lh_mobile_get"].startswith(f"lh_mobile_get={auth.get_cookie_value(TOKEN)};")
     for attribute in ("httponly", "samesite=strict", "secure", "path=/api"):
-        assert attribute in cookies["lh_web_get"].lower(), attribute
+        assert attribute in cookies["lh_mobile_get"].lower(), attribute
     old = cookies["lh_web"].lower()
     assert "max-age=0" in old and re.search(r"path=/(;|$)", old), old
     assert TOKEN not in " ".join(sent), "the raw token is never a cookie"
@@ -281,7 +281,7 @@ async def test_a_non_ascii_bearer_or_cookie_is_refused_never_a_crash(tmp_path):
         transport=httpx.ASGITransport(app=server.app, raise_app_exceptions=False),
         base_url="http://web.test")
     for headers in ({"Authorization": b"Bearer \xe9\xe8\xff"},
-                    {"Cookie": b"lh_web_get=\xe9\xe8\xff"}):
+                    {"Cookie": b"lh_mobile_get=\xe9\xe8\xff"}):
         got = await client.get("/api/health", headers=headers)
         assert got.status_code == 401, headers
     got = await client.post("/api/sessions/s1/message", content=b"{}", headers={

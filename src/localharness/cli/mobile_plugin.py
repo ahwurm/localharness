@@ -89,6 +89,6 @@ class MobilePlugin(Plugin):
         mode = path.stat().st_mode & 0o777
         rows.append(Check(name="mobile-token", status="pass", detail="token file is mode 600") if mode == 0o600
                     else Check(name="mobile-token", status="fail",
-                               detail=f"Web app token is mode {mode:o}, expected 600 — anyone who can "
+                               detail=f"Mobile app token is mode {mode:o}, expected 600 — anyone who can "
                                       f"read it can drive your agent.", hint=f"chmod 600 {path}"))
         return rows

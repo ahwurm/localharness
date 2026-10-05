@@ -412,7 +412,7 @@ def _ask(question: str, asker: Optional[TrustAsker] = None) -> bool:
 
 TRUST_PROJECT_ENV = "LOCALHARNESS_TRUST_PROJECT"
 """`=1`: trust the project you are in for this run only (any command that starts a session —
-`web` and `acp` have no `--trust-project`). Nothing is recorded and nothing is asked."""
+`mobile` and `acp` have no `--trust-project`). Nothing is recorded and nothing is asked."""
 
 SERVERS_SUFFIX = "\nIts agent files start these programs (MCP servers):\n{diff}"
 

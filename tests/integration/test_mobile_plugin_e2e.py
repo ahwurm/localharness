@@ -87,7 +87,7 @@ def test_web_is_a_plugin_command_on_by_default_and_gone_when_disabled(tmp_path, 
 
     asyncio.run(run())
     assert any("startup)" in line for line in printed), printed
-    assert not any("plugin web:" in line for line in printed), printed
+    assert not any("plugin mobile:" in line for line in printed), printed
 
 
 def test_without_the_extra_web_prints_the_unchanged_hint(tmp_path, monkeypatch, fake_home):

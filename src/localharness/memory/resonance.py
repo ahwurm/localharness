@@ -49,10 +49,11 @@ turn window is minutes of every core. The probe's question — what was this mom
 stored trace does it resemble — is answered by the head of the text. Set on the loaded model, so the
 cut holds for every caller, not only the one that remembered it."""
 
-EMBED_THREADS = 4
+EMBED_THREADS = min(4, os.cpu_count() or 4)
 """CPU threads torch may use for the embedding model: a background job's share of the box, not the
-box. Torch's default is every core, and the dreaming pass runs exactly when nobody is at the keyboard
-to see it (2026-10-04: a phone session idled into a pass that held 20 cores for hours)."""
+box (and never more than the box has). Torch's default is every core, and the dreaming pass runs
+exactly when nobody is at the keyboard to see it (2026-10-04: a phone session idled into a pass that
+held 20 cores for hours)."""
 
 log = logging.getLogger(__name__)
 

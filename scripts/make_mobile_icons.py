@@ -22,7 +22,7 @@ import struct
 import zlib
 from pathlib import Path
 
-UI_DIR = Path(__file__).resolve().parent.parent / "src" / "localharness" / "channels" / "web" / "ui"
+UI_DIR = Path(__file__).resolve().parent.parent / "src" / "localharness" / "channels" / "mobile" / "ui"
 
 BACKGROUND = (17, 17, 17)      # #111111 — the manifest's theme_color
 BAR = (255, 255, 255)

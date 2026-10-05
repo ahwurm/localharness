@@ -1,16 +1,23 @@
-"""The two things that carry over from the `web` name on their own (CHANGELOG, Unreleased): a config
-file that still says `web:` configures the mobile plugin until 0.17.0, said once per file in the log;
-and the token folder a release named `web/` is renamed `mobile/` once, so a paired phone stays paired.
-`localharness web` itself is gone — `test_mobile_plugin_e2e` pins that."""
+"""The two things that carry over from the `web` name on their own (CHANGELOG, 0.16.1): a config file
+that still says `web:` configures the mobile plugin until 0.17.0, said once per file in the log; and
+the token folder a release named `web/` is renamed `mobile/` once, so a paired phone stays paired.
+`localharness web` itself is gone, not aliased."""
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from localharness.channels.mobile import auth, push
+from localharness.cli.app import app
 from localharness.config import loader as config_loader
+
+
+def test_web_is_not_a_command():
+    result = CliRunner().invoke(app, ["web"])
+    assert result.exit_code == 2 and "No such command 'web'" in result.output
 
 
 def test_a_web_section_is_read_as_mobile_and_said_once(tmp_path: Path, caplog: pytest.LogCaptureFixture):

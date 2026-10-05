@@ -379,6 +379,24 @@ async def test_digest_with_nothing_stored_encodes_nothing_and_still_advances_the
     assert again == []                     # and the next pass does not read them twice
 
 
+async def test_facts_without_vectors_leave_the_marks_alone_for_the_next_pass(store: MemoryStore):
+    """A fact exists but has no vector (the model is missing, or was just changed): nothing can be
+    integrated now, so nothing may be marked read — the shortcut is for an EMPTY store only."""
+    class Unavailable(FakeEngine):
+        def embed_docs(self, texts):
+            raise RuntimeError("no model on this machine")
+
+    await store.store_fact("ops", "vllm server listens on port 8000", source="w")  # no embedding
+    _write_session(store._agent_dir, "s1", [
+        [{"event_type": "UserMessage", "content": "turn one"}],
+        [{"event_type": "UserMessage", "content": "turn two"}],
+    ])
+    report = await ConsolidationPass(store, _cfg(), engine=Unavailable()).run()
+    assert report.windows_digested == 0 and report.embedded_backfill == 0
+    waiting, _ = read_new_windows(store._agent_dir / "sessions", await store.get_digest_marks())
+    assert [w.text() for w in waiting] == ["turn one", "turn two"]  # still the next pass's stream
+
+
 async def test_digest_reads_only_the_head_of_a_long_window(store: MemoryStore):
     eng = RecordingEngine()
     await _seed(store, FakeEngine(), "ops", "vllm server listens on port 8000")

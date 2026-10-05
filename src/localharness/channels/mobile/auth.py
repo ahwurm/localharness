@@ -50,7 +50,7 @@ CONTENT_TYPE_ERROR = (
 
 UNAUTHENTICATED_ERROR = "missing or invalid credentials"
 
-AUTH_COOKIE = "lh_web_get"
+AUTH_COOKIE = "lh_mobile_get"
 """The event-stream cookie: GET routes only, derived from the token, never the token itself.
 
 `EventSource` cannot send an `Authorization` header — a real constraint a naive plan discovers
@@ -74,7 +74,7 @@ cookies and a browser sends the longer path first, so a stale `Path=/` copy woul
 COOKIE_PATH = "/api"
 """Where the cookie is sent: the stream and the artifact `<img>` live under it."""
 
-_COOKIE_CONTEXT = b"localharness-web-get-cookie-v1"
+_COOKIE_CONTEXT = b"localharness-mobile-get-cookie-v1"
 
 
 def state_dir(config_dir: Optional[str | Path] = None) -> Path:
@@ -90,7 +90,10 @@ def state_dir(config_dir: Optional[str | Path] = None) -> Path:
     base = global_config_dir(config_dir)
     folder, legacy = base / "mobile", base / "web"
     if legacy.is_dir() and not folder.exists():
-        legacy.rename(folder)
+        try:
+            legacy.rename(folder)
+        except OSError:  # a read-only config folder, or a race: the old folder stays, nothing is lost
+            pass
     return folder
 
 

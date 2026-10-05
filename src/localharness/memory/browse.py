@@ -12,7 +12,7 @@ from localharness.plugins.api import BrowseQuery
 
 
 def fact_row(f: Any) -> dict[str, Any]:
-    """A fact as the phone and /memory see it — the shape web's _fact_row built, full value."""
+    """A fact as the phone and /memory see it — the shape the mobile channel's _fact_row built, full value."""
     return {"name": f.key, "value": f.value or "", "status": f.status, "confidence": f.confidence,
             "source": f.source, "node_kind": getattr(f, "node_kind", None),
             "tags": list(f.tags or []), "updated_at": f.updated_at, "provenance": f.provenance}

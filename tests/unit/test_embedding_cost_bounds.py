@@ -5,6 +5,7 @@ loads, because a cap is a warning, never a failed memory."""
 from __future__ import annotations
 
 import logging
+import os
 import types
 
 import pytest
@@ -17,7 +18,7 @@ def test_the_loaded_model_is_cut_in_tokens_and_capped_in_threads():
     model = types.SimpleNamespace(max_seq_length=32_768)
     assert resonance._bound(model) is model
     assert model.max_seq_length == resonance.EMBED_MAX_TOKENS == 1024
-    assert torch.get_num_threads() == resonance.EMBED_THREADS == 4
+    assert torch.get_num_threads() == resonance.EMBED_THREADS == min(4, os.cpu_count() or 4)
 
 
 def test_a_model_that_refuses_the_cut_still_loads(caplog: pytest.LogCaptureFixture):

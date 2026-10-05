@@ -483,7 +483,7 @@ class StepOutcome:
     """What one plugin step did, for the session that resumes after `/plugins enable|disable`
     (cli/start_cmd): `failed_check` is the first check row that failed ("" when none did, or the
     check did not run); `skipped_check` is the first skipped row's detail when no row failed and
-    the check was not clean, a plugin not set up yet (web's "not enrolled yet"), not a failure;
+    the check was not clean, a plugin not set up yet (mobile's "not enrolled yet"), not a failure;
     `stopped` is True when Ctrl-C, Ctrl-D or a refusal ended the step early."""
     name: str
     on: bool
@@ -617,7 +617,7 @@ def _switch(name: str, on: bool, pairs: list[str], to_workspace: bool, config_di
         action_failed = [c for c in rows if c.status == "fail"]
         if not_clean or action_failed:
             # A failing row, the check's or the setup action's, is a failed check; a skipped row with
-            # none failing is a plugin not set up yet (web's "not enrolled yet"), not a failure; a
+            # none failing is a plugin not set up yet (mobile's "not enrolled yet"), not a failure; a
             # check row that is not on (unconfigured, failed) has only its state to say.
             checks = row.checks if not_clean else ()
             failed = (row.detail if not_clean and row.state != "on" else
