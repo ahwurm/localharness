@@ -6,6 +6,10 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.16.1] — 2026-10-04
+
 ### Added
 - **A page for each bundled plugin**, under `docs/plugins/` (`image`, `mobile`,
   `memory`, `dispatch`, `autoresearch`), linked from a shorter README next to
