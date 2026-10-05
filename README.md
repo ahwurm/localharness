@@ -85,6 +85,7 @@ Early stage (v0.16.4, pre-1.0). Interfaces and config schema may change without 
 - [SECURITY.md](SECURITY.md): trust boundaries, the permission gate, the prompt-injection threat model
 - [docs/specs/](docs/specs/): component specs, starting with the [architecture overview](docs/specs/00-architecture-overview.md); the CLI is [spec 10](docs/specs/10-cli.md)
 - [docs/zed.md](docs/zed.md): use LocalHarness from Zed's agent panel
+- [docs/task-context.md](docs/task-context.md): how a normal session keeps a working record for substantive work (references, checks, delegation, resume), with a synthetic [example workflow](examples/workflows/research-note/)
 - [docs/reference-architectures/](docs/reference-architectures/README.md): tested hardware and setup notes
 - [docs/running-agents-locally.md](docs/running-agents-locally.md): where LocalHarness fits among local agent tools, and where it is behind
 - [LocalShift](https://github.com/ahwurm/localshift): the companion project that moves a headless Claude Code job onto LocalHarness once a local model proves good enough

@@ -6,6 +6,41 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.5] — 2026-10-05
+
+### Added
+- **A working record for substantive work, reachable from `localharness start`.** The model keeps
+  it with a new `task` tool: objective, assignment, decisions, artifacts, checks, and the stop
+  boundary. There is no setup, and ordinary questions get no record. A decision, waiver,
+  checkpoint, or budget raise counts as the human's only when its quoted words appear in a human
+  turn the runtime recorded. See [task context](docs/task-context.md).
+- File-backed references (at most four, 200 KiB each) are re-read before every request of an
+  active record, so their current text stays in view after compaction, edits, and restarts.
+- Editorial judgments, recorded as opinion and never as evidence, and a revision budget that the
+  runtime counts.
+- Delegation handoff: a structured brief, a runtime-observed status for every delegation, a
+  delegation budget, `integrate` to record how a result was used, and `interrupted` for a
+  delegation cancelled mid-run.
+- The record persists in `task.json` (private, atomic, at most 64 KiB) and resumes on the next
+  start in the same folder. `/task` shows it and `/task clear` deletes it. An unreadable file is
+  moved to `task.json.corrupt`.
+- A synthetic research-note [example workflow](examples/workflows/research-note/) in the
+  repository (not in the PyPI package).
+
+### Changed
+- Checks bind to a call whose arguments include every declared argument with the same value;
+  extra arguments such as a timeout are allowed. 0.16.4 required an exact match.
+- The `agent` tool takes optional structured fields (`purpose`, `inputs`, `constraints`,
+  `expected_output`, `checks`, `stop_condition`). A plain call is unchanged.
+- The role prompt gains one sentence asking the model to keep the working record with the `task`
+  tool for substantive multi-step work.
+- `task start` and `task update` accept `artifacts` and `references` in one call; a refused item
+  refuses the whole call.
+
+### Fixed
+- `tool_result_get` refusing more than four references now reaches the model as the narrowing
+  notice instead of a crash message (#172).
+
 ## [0.16.4] — 2026-10-05
 
 Contributors: [ahwurm](https://github.com/ahwurm) and Codex (AI coding assistant).
