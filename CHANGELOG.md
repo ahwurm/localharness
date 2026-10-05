@@ -120,6 +120,24 @@ All notable changes to LocalHarness are documented here. The format follows
   until 0.17.0 (see 0.16.0's Deprecated).
 
 ### Fixed
+- **Idle memory consolidation could hold every CPU core for hours.** The
+  dreaming pass encoded each new turn window whole — tens of thousands of
+  tokens of tool output — through the 0.6B embedding model on CPU, with torch
+  on every core, and did so even when the agent had no stored facts for the
+  window to resonate against. A phone session (`localharness web`) keeps its
+  session alive, so the pass fired as soon as the owner walked away and ran
+  until the process was killed (2026-10-04: 22 undigested windows, four past
+  32k characters, zero facts, 500%+ CPU for hours; each new chat started the
+  same work over, because a pass cut short recorded neither its marks nor its
+  watermark). Now a window with nothing stored to resonate against is marked
+  digested without an encode; the probe reads a window's head (4,000
+  characters) and the model's input is cut at 1,024 tokens for every encode;
+  the model gets 4 CPU threads, not the box; one pass spends at most 60 s
+  encoding (its first window always runs; the rest is the next pass's stream);
+  and a pass cut short by a session ending keeps the marks and the watermark
+  of what it digested. Named gap: an encode already running when a pass is
+  cancelled finishes that one window (seconds at the new bound) — a thread
+  cannot be interrupted.
 - `localharness plugins enable autoresearch` checks the proposer by sending
   it `proposer.api_key`; that check now reads the proposer's address and key
   from your machine-level config only, as `propose` does, and both

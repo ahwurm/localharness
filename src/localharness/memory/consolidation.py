@@ -49,6 +49,20 @@ log = logging.getLogger(__name__)
 _WATERMARK_KEY = "consolidation/last_run"
 _EMBED_MODEL_KEY = "resonance/embed_model"
 
+DIGEST_WINDOW_CHARS = 4_000
+"""How much of a turn window the digest reads: its head, about a thousand tokens.
+
+A window is a whole turn — the prompt, the answer and every tool result — and the long ones are
+tool output by the hundred kilobyte. What the moment was about is in its first screen; the rest is
+cost. A work bound like `iteration_cap`, never a correctness one."""
+
+PASS_BUDGET_S = 60.0
+"""Wall-clock one digest step may spend encoding. The first window of a pass always runs, so every
+pass makes progress; past the budget the rest is simply the next pass's stream, exactly as past
+`iteration_cap`. The mechanism keeps the amount digested as its only clock — this bounds what a
+pass costs the box, not what a window is worth. (2026-10-04: a pass over 22 undigested windows,
+four of them past 32k characters, held every core for hours while the owner was away.)"""
+
 
 @dataclass
 class ConsolidationReport:
@@ -350,14 +364,19 @@ class ConsolidationPass:
             self._step_fold_and_settle,
             self._step_forget,
         ]
-        for step in steps:
-            if self.cancelled:
-                break
-            try:
-                await step(report)
-            except Exception:
-                log.exception("dreaming step %s failed (isolated)", step.__name__)
-        await _set_meta(self._store, _WATERMARK_KEY, str(int(time.time())))
+        try:
+            for step in steps:
+                if self.cancelled:
+                    break
+                try:
+                    await step(report)
+                except Exception:
+                    log.exception("dreaming step %s failed (isolated)", step.__name__)
+        finally:
+            # Recorded even when the task is cancelled from under the pass (a session ending with a
+            # window mid-encode): a pass ran, so the next session's staleness check does not start
+            # the same work over at bring-up — the idle timer drains what is left.
+            await _set_meta(self._store, _WATERMARK_KEY, str(int(time.time())))
         report.cancelled = self.cancelled
         report.duration_s = time.monotonic() - started
         return report
@@ -398,7 +417,12 @@ class ConsolidationPass:
         """Replay the new stream and let the present meet the past: each window's one
         unit of attention distributes over the stored traces by resonance share.
         Standing deltas and ledger marks commit atomically per pass. Windows whose
-        attention concentrated on >=2 traces become binding observations."""
+        attention concentrated on >=2 traces become binding observations.
+
+        Bounded in cost, because it runs while nobody watches: no stored trace means no
+        encode at all; a window is read by its head (DIGEST_WINDOW_CHARS); a step stops
+        encoding past PASS_BUDGET_S; and the marks cover only what was integrated, however
+        the step ended."""
         from localharness.memory import resonance as _res
         from localharness.memory.streams import read_new_windows
 
@@ -415,29 +439,39 @@ class ConsolidationPass:
         deltas: dict[int, float] = {}
         bindings: list[list[int]] = []
         digested = 0
-        for w in windows:
-            if self.cancelled:
-                break
-            text = w.text()
-            if not text.strip():
+        if not id_blobs:
+            # No stored trace can resonate, so a window's attention has nowhere to land: encoding
+            # it would cost a transformer forward pass and change nothing. The marks still advance
+            # — these windows are digested, to the only outcome they could have had (2026-10-04: 22
+            # windows through the model on every core for hours, against zero facts).
+            digested = len(windows)
+        deadline = time.monotonic() + PASS_BUDGET_S
+        try:
+            for w in windows[digested:]:
+                if self.cancelled:
+                    break
+                text = w.text()[:DIGEST_WINDOW_CHARS]
+                if text.strip():
+                    vec = (await self._embed([text]))[0]
+                    shares = _res.shares(vec, id_blobs)
+                    for fid, share in shares.items():
+                        deltas[fid] = deltas.get(fid, 0.0) + share
+                    if len(id_blobs) >= 2 and shares:
+                        # Above-uniform share = this moment's attention CONCENTRATED here.
+                        uniform = 1.0 / len(id_blobs)
+                        cofired = sorted(fid for fid, sh in shares.items() if sh > uniform)
+                        if len(cofired) >= 2:
+                            bindings.append(cofired)
                 digested += 1
-                continue
-            vec = (await self._embed([text]))[0]
-            shares = _res.shares(vec, id_blobs)
-            for fid, share in shares.items():
-                deltas[fid] = deltas.get(fid, 0.0) + share
-            if len(id_blobs) >= 2 and shares:
-                # Above-uniform share = this moment's attention CONCENTRATED here.
-                uniform = 1.0 / len(id_blobs)
-                cofired = sorted(fid for fid, sh in shares.items() if sh > uniform)
-                if len(cofired) >= 2:
-                    bindings.append(cofired)
-            digested += 1
-        if self.cancelled and digested < len(windows):
-            # Marks may only cover what was integrated: re-derive them for the digested
-            # prefix by re-reading with the smaller bound (cheap; file IO only).
-            _, new_marks = read_new_windows(sessions_dir, marks, max_windows=digested)
-        await self._store.apply_digest(deltas, new_marks)
+                if time.monotonic() >= deadline:
+                    break
+        finally:
+            # Marks may only cover what was integrated — cut short by the budget, by a cooperative
+            # cancel, or by the task being cancelled mid-encode alike: re-derive them for the
+            # digested prefix by re-reading with the smaller bound (cheap; file IO only).
+            if digested < len(windows):
+                _, new_marks = read_new_windows(sessions_dir, marks, max_windows=digested)
+            await self._store.apply_digest(deltas, new_marks)
         report.windows_digested = digested
         report.standing_touched = len(deltas)
         await self._step_bind(report, bindings)

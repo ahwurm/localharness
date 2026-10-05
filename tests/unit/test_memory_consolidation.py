@@ -27,6 +27,7 @@ import pytest
 
 from localharness.memory.config import MemoryArchivalConfig, MemoryConsolidationConfig
 from localharness.core.bus import EventBus
+from localharness.memory import consolidation
 from localharness.memory import resonance as res
 from localharness.memory.consolidation import (
     ConsolidationPass,
@@ -346,3 +347,93 @@ async def test_cancelled_pass_reports_cancelled(store: MemoryStore):
     p.cancel()
     report = await p.run()
     assert report.cancelled is True
+
+
+# ------------------------------------------------------- what a pass may cost the box
+# 2026-10-04: a phone session idled into a pass over 22 undigested windows, four of them past
+# 32k characters, each encoded whole on every CPU core, against an agent with zero stored facts
+# — hours at 500%+ CPU for an outcome that could not change. These pin the four bounds.
+
+class RecordingEngine(FakeEngine):
+    """The fake engine, remembering every text it was asked to encode."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.texts: list[str] = []
+
+    def embed_docs(self, texts):
+        self.texts.extend(texts)
+        return super().embed_docs(texts)
+
+
+async def test_digest_with_nothing_stored_encodes_nothing_and_still_advances_the_marks(store: MemoryStore):
+    eng = RecordingEngine()
+    _write_session(store._agent_dir, "s1", [
+        [{"event_type": "UserMessage", "content": "an afternoon of tool output " * 2000}],
+        [{"event_type": "UserMessage", "content": "and another turn"}],
+    ])
+    report = await ConsolidationPass(store, _cfg(), engine=eng).run()
+    assert eng.texts == []                 # no trace can resonate: no forward pass is spent
+    assert report.windows_digested == 2    # yet the windows are digested, to their only outcome
+    again, _ = read_new_windows(store._agent_dir / "sessions", await store.get_digest_marks())
+    assert again == []                     # and the next pass does not read them twice
+
+
+async def test_digest_reads_only_the_head_of_a_long_window(store: MemoryStore):
+    eng = RecordingEngine()
+    await _seed(store, FakeEngine(), "ops", "vllm server listens on port 8000")
+    _write_session(store._agent_dir, "s1", [
+        [{"event_type": "UserMessage", "content": "vllm port?"},
+         {"event_type": "Observation", "output": "x" * 50_000}],
+    ])
+    report = await ConsolidationPass(store, _cfg(), engine=eng).run()
+    assert report.windows_digested == 1
+    assert len(eng.texts) == 1 and len(eng.texts[0]) == consolidation.DIGEST_WINDOW_CHARS
+    assert eng.texts[0].startswith("vllm port?")
+
+
+async def test_digest_stops_at_the_pass_budget_and_marks_only_what_it_digested(
+    store: MemoryStore, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(consolidation, "PASS_BUDGET_S", 0.0)  # spent after the first window
+    eng = RecordingEngine()
+    await _seed(store, FakeEngine(), "ops", "vllm server listens on port 8000")
+    _write_session(store._agent_dir, "s1", [
+        [{"event_type": "UserMessage", "content": f"turn {i} about the vllm server"}] for i in range(3)
+    ])
+    report = await ConsolidationPass(store, _cfg(), engine=eng).run()
+    assert report.windows_digested == 1 and len(eng.texts) == 1   # the first window always runs
+    rest, _ = read_new_windows(store._agent_dir / "sessions", await store.get_digest_marks())
+    assert [w.text() for w in rest] == ["turn 1 about the vllm server", "turn 2 about the vllm server"]
+
+    monkeypatch.setattr(consolidation, "PASS_BUDGET_S", 60.0)
+    report2 = await ConsolidationPass(store, _cfg(), engine=eng).run()
+    assert report2.windows_digested == 2 and len(eng.texts) == 3  # the tail is the next pass's stream
+
+
+async def test_a_pass_cancelled_mid_encode_keeps_its_marks_and_its_watermark(
+    store: MemoryStore, monkeypatch: pytest.MonkeyPatch,
+):
+    eng = FakeEngine()
+    await _seed(store, eng, "ops", "vllm server listens on port 8000")
+    _write_session(store._agent_dir, "s1", [
+        [{"event_type": "UserMessage", "content": "first turn about vllm"}],
+        [{"event_type": "UserMessage", "content": "second turn about vllm"}],
+    ])
+    mid_encode = asyncio.Event()
+
+    async def _embed(self, texts):
+        if "second" in texts[0]:
+            mid_encode.set()
+            await asyncio.sleep(30)  # the encode a session's end cuts short
+        return eng.embed_docs(texts)
+
+    monkeypatch.setattr(ConsolidationPass, "_embed", _embed)
+    task = asyncio.create_task(ConsolidationPass(store, _cfg(), engine=eng).run())
+    await asyncio.wait_for(mid_encode.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    rest, _ = read_new_windows(store._agent_dir / "sessions", await store.get_digest_marks())
+    assert [w.text() for w in rest] == ["second turn about vllm"]   # the first stays digested
+    assert await _get_meta(store, "consolidation/last_run") is not None  # and a pass ran
