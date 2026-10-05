@@ -366,12 +366,12 @@ class OrchestratorREPL:
         if getattr(self._channel, "_pending_resolver", "absent") is None:
             self._channel._pending_resolver = self._resolve_pending_from_channel
         # The same handshake for the two things a channel with its own out-of-band surface (the
-        # web channel's POST verbs) needs and cannot reach on its own: steering the RUNNING turn,
+        # mobile channel's POST verbs) needs and cannot reach on its own: steering the RUNNING turn,
         # and cancelling it. Both live on the REPL because the REPL owns the loop handle and the
         # turn task; a channel that started holding either would be a second owner of the one
         # thing that must have exactly one. Installed only when the channel DECLARES the
         # attribute as None — a channel that does not is skipped with no error, which is why
-        # `WebChannel` declares both as class attributes.
+        # `MobileChannel` declares both as class attributes.
         if getattr(self._channel, "_nudge_resolver", "absent") is None:
             self._channel._nudge_resolver = self._nudge_from_channel
         if getattr(self._channel, "_cancel_resolver", "absent") is None:
@@ -556,7 +556,7 @@ class OrchestratorREPL:
         # a method: a channel that says `streams_tokens` gets the model's answer as it generates,
         # and one that says nothing is driven exactly as before. The terminal says nothing and
         # keeps passing None — it has never streamed answer text — so this adds live text to the
-        # web channel without touching what any existing surface does.
+        # mobile channel without touching what any existing surface does.
         on_token = self._channel.on_token if getattr(self._channel, "streams_tokens", False) else None
         return asyncio.ensure_future(self._agent.run_turn(task=text, on_token=on_token))
 
@@ -940,7 +940,7 @@ class OrchestratorREPL:
         """/reasoning [on|off] — toggle the live reasoning stream on a channel that has one.
 
         Gated on the capability, not on the class: this refused on every non-terminal channel
-        until the web channel could stream reasoning too, at which point an `isinstance` check
+        until the mobile channel could stream reasoning too, at which point an `isinstance` check
         was refusing a command the surface could perfectly well honour (WEBCH-19).
         """
         if not getattr(self._channel, "has_display_toggles", False):

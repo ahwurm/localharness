@@ -245,7 +245,7 @@ def test_invalid_settings_fail_the_plugin_not_the_harness(layers) -> None:
     assert entry.state == "failed" and entry.reason.startswith("invalid settings — foo.color: ")
     # web (46-02) and memory (47) are bundled and on by default; dispatch (49) is bundled and on by default;
     # autoresearch (50) is bundled and on by default
-    assert "foo" not in r.settings and r.plan.order == ("web", "memory", "dispatch", "autoresearch")
+    assert "foo" not in r.settings and r.plan.order == ("mobile", "memory", "dispatch", "autoresearch")
     assert r.problems() == [f"plugin foo: {entry.reason}"]
     assert not [w for w in r.warnings if "foo.color" in w]  # reported once, by problems()
     assert loader.load_harness().provider.default_model == "global-model"
@@ -446,7 +446,7 @@ def test_requires_localharness_is_checked_against_the_version_given(layers) -> N
 def test_problems_is_one_line_per_plugin_that_will_not_load(layers, monkeypatch, sentinels) -> None:
     class Web(Plugin):
         """the phone app"""
-        manifest = PluginManifest(name="web", version="1.0", kind="tools", requires_extra="web")
+        manifest = PluginManifest(name="mobile", version="1.0", kind="tools", requires_extra="mobile")
 
     class Image(Plugin):
         """makes pictures"""
@@ -463,7 +463,7 @@ def test_problems_is_one_line_per_plugin_that_will_not_load(layers, monkeypatch,
     r = resolved(g, ws, version="0.15.0", extra_installed=lambda extra: False)
 
     assert r.problems() == [
-        "plugin web: install `localharness[web]` to use it",
+        "plugin web: install `localharness[mobile]` to use it",
         "plugin Bad_Name: 'Bad_Name' is not a valid plugin name (a lower-case letter, then up to 63 "
         "lower-case letters, digits, '_' or '-')",
         "plugin boom: could not be imported: RuntimeError: kaput",

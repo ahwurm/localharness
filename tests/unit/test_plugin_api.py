@@ -235,14 +235,14 @@ def test_api_version_constant():
 
 def test_the_one_list_holds_the_image_plugin_and_is_read_at_call_time(monkeypatch):
     from localharness.autoresearch.plugin import AutoresearchPlugin
-    from localharness.cli.web_plugin import WebPlugin
+    from localharness.cli.mobile_plugin import MobilePlugin
     from localharness.dispatch.plugin import DispatchPlugin
     from localharness.memory.plugin import MemoryPlugin
     from localharness.tools.builtin.image_plugin import ImagePlugin
 
     # web (46-02) and memory (47) are on by default; dispatch (49) and autoresearch (50) are bundled
     # and on by default
-    shipped = (ImagePlugin, WebPlugin, MemoryPlugin, DispatchPlugin, AutoresearchPlugin)
+    shipped = (ImagePlugin, MobilePlugin, MemoryPlugin, DispatchPlugin, AutoresearchPlugin)
     assert bundled_plugins() == shipped and builtin.BUILTIN_PLUGINS == shipped
     monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", ())
     assert bundled_plugins() == ()

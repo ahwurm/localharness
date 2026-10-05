@@ -1,6 +1,6 @@
 """The phone token (D5): printed only when it is made or asked for, and only to a terminal.
 
-journald, a tee, a tmux pipe — whatever `localharness web` prints, a log keeps, and the 0600 token
+journald, a tee, a tmux pipe — whatever `localharness mobile` prints, a log keeps, and the 0600 token
 file protects nothing once a copy sits in one of them. So the token TEXT is printed once, when it is
 created, or on `--show-token`; the pairing QR (which carries the token, and scanning it is pairing)
 is drawn only on a terminal; a run whose stdout is not a terminal prints one line naming
@@ -21,7 +21,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from localharness.cli import web_cmd
+from localharness.cli import mobile_cmd
 
 pytest.importorskip("starlette")
 pytest.importorskip("uvicorn")
@@ -29,7 +29,7 @@ pytest.importorskip("uvicorn")
 PUBLIC = "https://spark.example.ts.net"
 FAKE_QR = "█▀▄ the pairing code ▄▀█"
 TOKEN_LINE = "App token (required on every request, the stream included):"
-SHOW_TOKEN = "localharness web --show-token"
+SHOW_TOKEN = "localharness mobile --show-token"
 
 
 class FakeTty(io.StringIO):
@@ -44,7 +44,7 @@ class FakeTty(io.StringIO):
 
 @pytest.fixture
 def web(tmp_path, monkeypatch):
-    """`localharness web <args>` through the real command and the real `_serve`. Faked: uvicorn's
+    """`localharness mobile <args>` through the real command and the real `_serve`. Faked: uvicorn's
     listen (it records that serving began), the QR renderer (it records the URL it was handed) and
     the tailscale guess. `tty` patches the stdout check; None keeps the real one, which under
     CliRunner reads a captured stream — never a terminal. `ctty` is what the controlling-terminal
@@ -61,21 +61,21 @@ def web(tmp_path, monkeypatch):
         return FAKE_QR
 
     monkeypatch.setattr(uvicorn.Server, "serve", no_listen)
-    monkeypatch.setattr(web_cmd, "render_qr", qr)
-    monkeypatch.setattr(web_cmd, "detect_public_url", lambda port, **kw: None)  # no `tailscale`
-    real = getattr(web_cmd, "_stdout_is_a_terminal", None)
+    monkeypatch.setattr(mobile_cmd, "render_qr", qr)
+    monkeypatch.setattr(mobile_cmd, "detect_public_url", lambda port, **kw: None)  # no `tailscale`
+    real = getattr(mobile_cmd, "_stdout_is_a_terminal", None)
 
     def invoke(*args, tty=None, ctty=None):
-        monkeypatch.setattr(web_cmd, "_stdout_is_a_terminal",
+        monkeypatch.setattr(mobile_cmd, "_stdout_is_a_terminal",
                             real if tty is None else (lambda: tty), raising=False)
-        monkeypatch.setattr(web_cmd, "_open_tty", lambda: seen.opened.append(ctty) or ctty,
+        monkeypatch.setattr(mobile_cmd, "_open_tty", lambda: seen.opened.append(ctty) or ctty,
                             raising=False)
         return CliRunner().invoke(
-            web_cmd.app, ["--config-dir", str(tmp_path), "--public-url", PUBLIC, *args],
+            mobile_cmd.app, ["--config-dir", str(tmp_path), "--public-url", PUBLIC, *args],
             env={"COLUMNS": "200"})
 
     seen.invoke = invoke
-    seen.token = lambda: (tmp_path / "web" / "token").read_text(encoding="utf-8").strip()
+    seen.token = lambda: (tmp_path / "mobile" / "token").read_text(encoding="utf-8").strip()
     return seen
 
 
@@ -91,7 +91,7 @@ def test_a_run_whose_stdout_is_not_a_terminal_prints_no_token_and_no_qr(web, tmp
     result = web.invoke()  # the REAL stdout check: CliRunner's stdout is not one
     assert result.exit_code == 0, result.output
     token = web.token()
-    assert stat.S_IMODE(os.stat(tmp_path / "web" / "token").st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(tmp_path / "mobile" / "token").st_mode) == 0o600
     assert web.opened == [None], "the controlling terminal was looked for, and there is none"
     assert token not in result.output
     assert web.qr == [] and FAKE_QR not in result.output, "the QR carries the token: no QR either"
@@ -100,7 +100,7 @@ def test_a_run_whose_stdout_is_not_a_terminal_prints_no_token_and_no_qr(web, tmp
 
 
 def test_a_piped_stdout_draws_the_pairing_block_on_the_controlling_terminal(web):
-    """The owner's own launcher: `localharness web | tee -a ~/lh-web.log` in a tmux window. The
+    """The owner's own launcher: `localharness mobile | tee -a ~/lh-web.log` in a tmux window. The
     pairing block — the QR every start, the token's text when it was just made — goes to the
     controlling terminal, so the window shows it; the pipe, and so the log, carries no token."""
     ctty = FakeTty()
@@ -123,7 +123,7 @@ def test_a_piped_stdout_draws_the_pairing_block_on_the_controlling_terminal(web)
 
 
 def test_a_rotation_through_a_pipe_shows_the_new_token_on_the_terminal_only(web, tmp_path):
-    from localharness.channels.web import auth
+    from localharness.channels.mobile import auth
 
     old, _ = auth.load_or_create_token(tmp_path)
     ctty = FakeTty()
@@ -144,15 +144,15 @@ def test_the_controlling_terminal_is_used_only_by_its_foreground_job(tmp_path, m
     fake.write_text("", encoding="utf-8")
     monkeypatch.setattr(os, "getpgrp", lambda: 42)
     monkeypatch.setattr(os, "tcgetpgrp", lambda fd: 42)  # this job is in the foreground
-    tty = web_cmd._open_tty(str(fake))
+    tty = mobile_cmd._open_tty(str(fake))
     assert tty is not None
     tty.close()
     missing = tmp_path / "no-such-terminal"
-    assert web_cmd._open_tty(str(missing)) is None and not missing.exists(), "nothing is created"
+    assert mobile_cmd._open_tty(str(missing)) is None and not missing.exists(), "nothing is created"
     monkeypatch.setattr(os, "tcgetpgrp", lambda fd: 7)  # another job is
-    assert web_cmd._open_tty(str(fake)) is None
+    assert mobile_cmd._open_tty(str(fake)) is None
     monkeypatch.delattr(os, "tcgetpgrp")  # Windows
-    assert web_cmd._open_tty(str(fake)) is None
+    assert mobile_cmd._open_tty(str(fake)) is None
 
 
 def test_on_a_terminal_the_qr_is_drawn_every_start_and_the_token_text_only_when_made(web):
@@ -176,7 +176,7 @@ def test_on_a_terminal_the_qr_is_drawn_every_start_and_the_token_text_only_when_
 def test_show_token_prints_and_exits_without_serving(web, tmp_path, monkeypatch):
     """The friction answer: a server already running under systemd or tmux is paired from another
     terminal without stopping it — `--show-token` prints and exits, it never binds the port."""
-    from localharness.channels.web import auth
+    from localharness.channels.mobile import auth
 
     token, _ = auth.load_or_create_token(tmp_path)
     served: list = []
@@ -184,7 +184,7 @@ def test_show_token_prints_and_exits_without_serving(web, tmp_path, monkeypatch)
     async def fake_serve(**kw):
         served.append(kw)
 
-    monkeypatch.setattr(web_cmd, "_serve", fake_serve)
+    monkeypatch.setattr(mobile_cmd, "_serve", fake_serve)
     result = web.invoke("--show-token", tty=True)
     assert result.exit_code == 0, result.output
     assert TOKEN_LINE in result.output and token in result.output
@@ -193,7 +193,7 @@ def test_show_token_prints_and_exits_without_serving(web, tmp_path, monkeypatch)
 
 
 def test_show_token_refuses_a_stdout_that_is_not_a_terminal(web, tmp_path):
-    from localharness.channels.web import auth
+    from localharness.channels.mobile import auth
 
     token, _ = auth.load_or_create_token(tmp_path)
     result = web.invoke("--show-token")  # the real check
@@ -208,7 +208,7 @@ def test_show_token_refuses_a_stdout_that_is_not_a_terminal(web, tmp_path):
 def test_rotation_clears_push_and_says_notifications_must_be_turned_on_again(web, tmp_path):
     """A stolen phone kept receiving notifications after a rotation: its push subscription
     outlived its token. Rotation now deletes every subscription, and its receipt says so."""
-    from localharness.channels.web import auth, push
+    from localharness.channels.mobile import auth, push
 
     old, _ = auth.load_or_create_token(tmp_path)
     subs = push.subscriptions_path(tmp_path)
@@ -227,7 +227,7 @@ def test_rotation_clears_push_and_says_notifications_must_be_turned_on_again(web
 
 
 def test_rotation_off_a_terminal_prints_no_token_and_names_show_token(web, tmp_path):
-    from localharness.channels.web import auth, push
+    from localharness.channels.mobile import auth, push
 
     old, _ = auth.load_or_create_token(tmp_path)
     subs = push.subscriptions_path(tmp_path)
@@ -253,22 +253,22 @@ def _tailscale(name):
 ])
 def test_a_dns_name_that_is_not_a_host_name_never_reaches_the_qr(name):
     """tailscaled's answer goes into a URL a phone opens; only a real host name may."""
-    assert web_cmd.detect_public_url(8765, runner=_tailscale(name)) is None
+    assert mobile_cmd.detect_public_url(8765, runner=_tailscale(name)) is None
 
 
 def test_a_host_name_with_its_trailing_dot_is_the_guess():
-    got = web_cmd.detect_public_url(8765, runner=_tailscale("spark.tail1234.ts.net."))
+    got = mobile_cmd.detect_public_url(8765, runner=_tailscale("spark.tail1234.ts.net."))
     assert got == "https://spark.tail1234.ts.net"
 
 
 def test_without_the_qr_library_the_note_says_to_enter_the_token_and_names_show_token(web, monkeypatch):
     """The printed address carries no fragment any more, so "the part after the #" is gone."""
-    monkeypatch.setattr(web_cmd, "render_qr", lambda url: None)
+    monkeypatch.setattr(mobile_cmd, "render_qr", lambda url: None)
     result = web.invoke(tty=True)
     assert result.exit_code == 0, result.output
-    assert _flat(web_cmd.ENROLMENT_NO_QR) in _flat(result.output)
-    assert "#" not in web_cmd.ENROLMENT_NO_QR and "the part after" not in web_cmd.ENROLMENT_NO_QR
-    assert SHOW_TOKEN in web_cmd.ENROLMENT_NO_QR
+    assert _flat(mobile_cmd.ENROLMENT_NO_QR) in _flat(result.output)
+    assert "#" not in mobile_cmd.ENROLMENT_NO_QR and "the part after" not in mobile_cmd.ENROLMENT_NO_QR
+    assert SHOW_TOKEN in mobile_cmd.ENROLMENT_NO_QR
 
 
 # ---------------------------------------------------------------- a failed bring-up
@@ -295,7 +295,7 @@ async def test_a_failed_bring_up_tells_the_phone_the_error_with_every_stored_sec
     channel = SimpleNamespace(session_id=None,
                               set_bringup=lambda stage, **kw: stages.append((stage, kw)))
     with caplog.at_level(logging.WARNING):
-        await web_cmd._bring_up(channel, config_dir=str(tmp_path), verbose=False, agent=None)
+        await mobile_cmd._bring_up(channel, config_dir=str(tmp_path), verbose=False, agent=None)
 
     stage, kw = stages[-1]
     assert stage == "failed" and kw["failed"] is True
@@ -313,7 +313,7 @@ def _run_page(prelude: str, script: str, tmp_path) -> dict:
     import re
     import subprocess
 
-    from tests.unit.channels.test_web_reference_page import BOOT, DOM_SHIM, PAGE
+    from tests.unit.channels.test_mobile_reference_page import BOOT, DOM_SHIM, PAGE
 
     module = re.search(r'<script type="module">(.*?)</script>', PAGE.read_text(encoding="utf-8"), re.S)
     body, sep, _boot = module.group(1).partition(BOOT)

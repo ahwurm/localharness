@@ -15,24 +15,24 @@ from localharness.config import session_presence
 
 def test_a_lone_session_finds_nobody(tmp_path):
     others = session_presence.register(
-        tmp_path, agent="orchestrator", channel="web", session_id="s1", workspace=tmp_path)
+        tmp_path, agent="orchestrator", channel="mobile", session_id="s1", workspace=tmp_path)
     assert others == []
 
 
 def test_a_second_session_on_the_same_agent_is_detected_and_named(tmp_path):
-    """The acceptance criterion: start the terminal while the web channel serves, and the newcomer
+    """The acceptance criterion: start the terminal while the mobile channel serves, and the newcomer
     says what else is running — naming it, because "something else is running" sends a person
     hunting through `ps` for the thing this already knew."""
-    session_presence.register(tmp_path, agent="orchestrator", channel="web", session_id="s1",
+    session_presence.register(tmp_path, agent="orchestrator", channel="mobile", session_id="s1",
                               workspace=tmp_path, pid=os.getpid())
     others = session_presence.register(
         tmp_path, agent="orchestrator", channel="terminal", session_id="s2",
         workspace=tmp_path, pid=os.getpid() + 100000)
 
     assert len(others) == 1
-    assert others[0].channel == "web"
+    assert others[0].channel == "mobile"
     text = session_presence.warning(others, agent="orchestrator")
-    assert "web" in text and str(os.getpid()) in text
+    assert "mobile" in text and str(os.getpid()) in text
     assert "orchestrator" in text
     # It has to say it is not stopping anybody.
     assert "not a refusal" in text
@@ -42,7 +42,7 @@ def test_a_second_session_on_the_same_agent_is_detected_and_named(tmp_path):
 def test_a_different_agent_is_not_a_co_tenant(tmp_path):
     """Two agents in one workspace write different files. Warning about them is noise, and noise
     is how a real warning gets ignored."""
-    session_presence.register(tmp_path, agent="orchestrator", channel="web", session_id="s1",
+    session_presence.register(tmp_path, agent="orchestrator", channel="mobile", session_id="s1",
                               workspace=tmp_path, pid=os.getpid())
     others = session_presence.register(tmp_path, agent="cruncher", channel="terminal",
                                        session_id="s2", workspace=tmp_path,
@@ -54,7 +54,7 @@ def test_a_different_workspace_is_not_a_co_tenant(tmp_path):
     one, two = tmp_path / "proj-a", tmp_path / "proj-b"
     one.mkdir()
     two.mkdir()
-    session_presence.register(tmp_path, agent="orchestrator", channel="web", session_id="s1",
+    session_presence.register(tmp_path, agent="orchestrator", channel="mobile", session_id="s1",
                               workspace=one, pid=os.getpid())
     others = session_presence.register(tmp_path, agent="orchestrator", channel="terminal",
                                        session_id="s2", workspace=two,
@@ -70,7 +70,7 @@ def test_the_same_workspace_by_a_symlinked_path_is_a_co_tenant(tmp_path):
     link = tmp_path / "shortcut"
     link.symlink_to(real)
 
-    session_presence.register(tmp_path, agent="orchestrator", channel="web", session_id="s1",
+    session_presence.register(tmp_path, agent="orchestrator", channel="mobile", session_id="s1",
                               workspace=real, pid=os.getpid())
     others = session_presence.register(tmp_path, agent="orchestrator", channel="terminal",
                                        session_id="s2", workspace=link,
@@ -85,7 +85,7 @@ def test_a_dead_session_is_pruned_not_reported(tmp_path):
     directory.mkdir(parents=True)
     dead_pid = 2 ** 22   # above any real pid_max on this box
     (directory / f"{dead_pid}.json").write_text(json.dumps({
-        "pid": dead_pid, "agent": "orchestrator", "channel": "web",
+        "pid": dead_pid, "agent": "orchestrator", "channel": "mobile",
         "workspace": str(tmp_path), "session_id": "old", "started_at": 0.0,
     }))
 
@@ -100,7 +100,7 @@ def test_a_corrupt_entry_is_discarded_rather_than_crashing_startup(tmp_path):
     directory.mkdir(parents=True)
     (directory / "9999999.json").write_text("{not json at all")
 
-    assert session_presence.register(tmp_path, agent="a", channel="web", session_id="s",
+    assert session_presence.register(tmp_path, agent="a", channel="mobile", session_id="s",
                                      workspace=tmp_path) == []
 
 
@@ -110,12 +110,12 @@ def test_an_unwritable_registry_never_fails_a_start(tmp_path, monkeypatch):
         raise OSError("read-only file system")
 
     monkeypatch.setattr("pathlib.Path.mkdir", boom)
-    assert session_presence.register(tmp_path, agent="a", channel="web", session_id="s",
+    assert session_presence.register(tmp_path, agent="a", channel="mobile", session_id="s",
                                      workspace=tmp_path) == []
 
 
 def test_release_removes_only_this_session(tmp_path):
-    session_presence.register(tmp_path, agent="a", channel="web", session_id="s1",
+    session_presence.register(tmp_path, agent="a", channel="mobile", session_id="s1",
                               workspace=tmp_path, pid=os.getpid())
     session_presence.release(tmp_path, pid=os.getpid())
     assert session_presence.live_sessions(tmp_path) == []
@@ -124,10 +124,10 @@ def test_release_removes_only_this_session(tmp_path):
 def test_the_summary_is_serialisable_for_the_health_endpoint(tmp_path):
     """`GET /api/health` carries this, because the warning itself is a one-shot line on the wire
     and a one-shot line is invisible to a phone that connected afterwards."""
-    session_presence.register(tmp_path, agent="orchestrator", channel="web", session_id="s1",
+    session_presence.register(tmp_path, agent="orchestrator", channel="mobile", session_id="s1",
                               workspace=tmp_path, pid=os.getpid())
     rows = session_presence.summary(session_presence.live_sessions(tmp_path))
-    assert json.loads(json.dumps(rows))[0]["channel"] == "web"
+    assert json.loads(json.dumps(rows))[0]["channel"] == "mobile"
 
 
 class _FakeChannel:
@@ -156,13 +156,13 @@ async def test_the_startup_hook_warns_and_hands_the_channel_the_co_tenants(tmp_p
 
     # pid 1 is alive and is not us — `register` excludes only the CALLING process, which is
     # what makes "another session" mean another process rather than this one twice.
-    session_presence.register(tmp_path, agent="orchestrator", channel="web", session_id="s1",
+    session_presence.register(tmp_path, agent="orchestrator", channel="mobile", session_id="s1",
                               workspace=tmp_path, pid=1)
     channel = _FakeChannel()
     await _announce_presence(channel, config_dir=str(tmp_path), agent="orchestrator",
                              channel_mode="terminal", session_id="s2", workspace=tmp_path)
 
-    assert channel.co_tenants and channel.co_tenants[0].channel == "web"
+    assert channel.co_tenants and channel.co_tenants[0].channel == "mobile"
     assert len(channel.errors) == 1
     assert "ANOTHER SESSION IS LIVE" in channel.errors[0]
     assert "not a refusal" in channel.errors[0]
@@ -177,7 +177,7 @@ async def test_the_hook_hands_over_a_rescan_that_sees_a_session_that_joined_late
 
     channel = _FakeChannel()
     await _announce_presence(channel, config_dir=str(tmp_path), agent="orchestrator",
-                             channel_mode="web", session_id="s1", workspace=tmp_path)
+                             channel_mode="mobile", session_id="s1", workspace=tmp_path)
     assert channel.co_tenants == []
 
     # Somebody opens a terminal on the same agent afterwards.
@@ -195,7 +195,7 @@ async def test_the_startup_hook_is_silent_when_nobody_else_is_there(tmp_path):
 
     channel = _FakeChannel()
     await _announce_presence(channel, config_dir=str(tmp_path), agent="orchestrator",
-                             channel_mode="web", session_id="s1", workspace=tmp_path)
+                             channel_mode="mobile", session_id="s1", workspace=tmp_path)
 
     assert channel.errors == []
     assert channel.co_tenants == []

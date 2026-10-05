@@ -177,7 +177,7 @@ OPT_ACTION: list[Check] = []   # what opt's setup action returns; empty = nothin
 
 class Opt(Plugin):
     """asks an optional address; its check is skipped until something else has run first (the
-    shape of web, "not enrolled yet" until `localharness web` first runs, and of autoresearch with
+    shape of web, "not enrolled yet" until `localharness mobile` first runs, and of autoresearch with
     no proposer, whose action then has nothing to look at)"""
 
     manifest = PluginManifest(

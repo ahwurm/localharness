@@ -201,7 +201,7 @@ LocalHarness loads neither until you turn it on:
    environment as LocalHarness:
    - if you installed LocalHarness with `uv tool`, run
      `uv tool install --with <package> localharness`. Each run replaces the install's plugins and
-     extras with the ones it names, so name your extras too (`'localharness[web]'`) and add a
+     extras with the ones it names, so name your extras too (`'localharness[mobile]'`) and add a
      `--with` for every plugin you keep;
    - in a virtual environment, activate it and run `uv pip install <package>`.
 2. Put a folder here, `plugins/<name>/`, whose `__init__.py` binds the name `plugin` to the

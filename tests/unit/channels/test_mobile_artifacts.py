@@ -17,13 +17,13 @@ from pathlib import Path
 
 import pytest
 
-from localharness.channels.web import auth
-from localharness.channels.web import server as server_mod
-from localharness.channels.web.channel import WebChannel
-from localharness.channels.web.protocol import PROTOCOL_VERSION
+from localharness.channels.mobile import auth
+from localharness.channels.mobile import server as server_mod
+from localharness.channels.mobile.channel import MobileChannel
+from localharness.channels.mobile.protocol import PROTOCOL_VERSION
 from localharness.core.artifacts import artifact_root, mint_artifact_id, write_artifact
 from localharness.core.bus import EventBus
-from tests.unit.channels.test_web_server import BEARER, JSON, TOKEN, _stack
+from tests.unit.channels.test_mobile_server import BEARER, JSON, TOKEN, _stack
 
 pytestmark = pytest.mark.asyncio
 
@@ -162,7 +162,7 @@ async def test_the_session_owns_the_roots(tmp_path):
     """bind_runtime takes a copy of the core-computed roots; a new session starts with none."""
     root = artifact_root(tmp_path / "state", "example")
     roots = {"example": root}
-    channel = WebChannel(bus=EventBus(persist_path=tmp_path / "bus.jsonl"), config={})
+    channel = MobileChannel(bus=EventBus(persist_path=tmp_path / "bus.jsonl"), config={})
     assert channel.artifact_roots() == {}
     channel.bind_runtime(session_id="s1", agent_id="orchestrator", artifact_roots=roots)
     roots["image"] = root
@@ -310,18 +310,18 @@ async def test_the_switch_is_a_bool_with_no_root_and_refuses_a_bad_body(tmp_path
 
 
 def _invoke_web(tmp_path, monkeypatch, *args):
-    """`web` with _serve faked; sync because web_cmd runs its own asyncio.run (call via a thread)."""
+    """`mobile` with _serve faked; sync because mobile_cmd runs its own asyncio.run (call via a thread)."""
     from typer.testing import CliRunner
 
-    from localharness.cli import web_cmd
+    from localharness.cli import mobile_cmd
 
     seen: dict = {}
 
     async def fake_serve(**kw):
         seen.update(kw)
 
-    monkeypatch.setattr(web_cmd, "_serve", fake_serve)
-    result = CliRunner().invoke(web_cmd.app, ["--config-dir", str(tmp_path), *args],
+    monkeypatch.setattr(mobile_cmd, "_serve", fake_serve)
+    result = CliRunner().invoke(mobile_cmd.app, ["--config-dir", str(tmp_path), *args],
                                 env={"COLUMNS": "200"})
     return result, seen
 
@@ -335,15 +335,15 @@ async def test_incognito_flag_reaches_the_server(tmp_path, monkeypatch):
 
 
 async def test_the_real_serve_hands_incognito_to_the_server_it_builds(tmp_path, monkeypatch):
-    """The real `_serve` (live path), only uvicorn's listen faked: the WebServer it builds carries
+    """The real `_serve` (live path), only uvicorn's listen faked: the MobileServer it builds carries
     the flag. The CLI test above stops at `_serve`'s kwargs; this one starts there."""
     import uvicorn
 
-    from localharness.cli import web_cmd
+    from localharness.cli import mobile_cmd
 
     built: list = []
 
-    class _Spy(server_mod.WebServer):
+    class _Spy(server_mod.MobileServer):
         def __init__(self, *a, **kw):
             super().__init__(*a, **kw)
             built.append(self)
@@ -351,11 +351,11 @@ async def test_the_real_serve_hands_incognito_to_the_server_it_builds(tmp_path, 
     async def no_listen(self, *a, **kw):
         return None
 
-    monkeypatch.setattr(server_mod, "WebServer", _Spy)
+    monkeypatch.setattr(server_mod, "MobileServer", _Spy)
     monkeypatch.setattr(uvicorn.Server, "serve", no_listen)
-    monkeypatch.setattr(web_cmd, "_open_tty", lambda: None, raising=False)  # never the real /dev/tty
+    monkeypatch.setattr(mobile_cmd, "_open_tty", lambda: None, raising=False)  # never the real /dev/tty
     for flag in (True, False):
-        await web_cmd._serve(config_dir=str(tmp_path), host="127.0.0.1", port=0, token=TOKEN,
+        await mobile_cmd._serve(config_dir=str(tmp_path), host="127.0.0.1", port=0, token=TOKEN,
                              ui_dir=None, replay=None, fixtures=None, speed=1.0, verbose=False,
                              agent=None, incognito=flag)
     assert [s.incognito for s in built] == [True, False]
@@ -370,7 +370,7 @@ async def test_incognito_help_names_its_limit(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ screens presence (46-07, v5)
 
 async def test_screens_follow_the_slot_and_the_policy(tmp_path):
-    from tests.unit.channels.test_web_server import _fake_slot
+    from tests.unit.channels.test_mobile_server import _fake_slot
 
     async def screens(**kw):
         _, _, _, client = await _stack(tmp_path, **kw)
@@ -390,7 +390,7 @@ async def test_the_memory_button_means_a_browse_api_exists(tmp_path):
     button, rather than a button whose every tap 404s."""
     from localharness.plugins.api import MemorySlotPlugin
     from localharness.plugins.slot import MemorySlot
-    from tests.unit.channels.test_web_server import _fake_slot
+    from tests.unit.channels.test_mobile_server import _fake_slot
 
     slot = MemorySlot()
     slot.seat(MemorySlotPlugin(), name="no-browse")  # the base browse() answers None

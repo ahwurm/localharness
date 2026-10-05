@@ -1,9 +1,9 @@
-"""Phase 46 (the web channel as a plugin), composed on the surfaces the rig can reach.
+"""Phase 46 (the mobile channel as a plugin), composed on the surfaces the rig can reach.
 
 The unit tests of 46-02..46-07 prove each part; this file proves they compose through the real
-entry points: the Typer app through CliRunner (`--help`, `web`, `plugins list|disable`, `start`);
-the plugin resolver and its config layers; `_start_async` run in web mode with a real WebChannel
-handed in; the WebServer over httpx's ASGI transport (no socket); the page's reducer run verbatim
+entry points: the Typer app through CliRunner (`--help`, `mobile`, `plugins list|disable`, `start`);
+the plugin resolver and its config layers; `_start_async` run in web mode with a real MobileChannel
+handed in; the MobileServer over httpx's ASGI transport (no socket); the page's reducer run verbatim
 under node, fed the exact bodies the server returned.
 
 STUBBED: the LLM probe, the tokenizer and the REPL's read loop (`_stub_start_boundaries`; the
@@ -24,17 +24,17 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
-from localharness.channels.web.channel import WebChannel
-from localharness.channels.web.server import ARTIFACT_PAGE, MEMORY_OFF, WebServer
+from localharness.channels.mobile.channel import MobileChannel
+from localharness.channels.mobile.server import ARTIFACT_PAGE, MEMORY_OFF, MobileServer
 from localharness.cli.app import app
 from localharness.cli.slash_commands import set_plugin_rows
-from localharness.cli.web_cmd import MISSING_DEPENDENCY
+from localharness.cli.mobile_cmd import MISSING_DEPENDENCY
 from localharness.core.bus import EventBus
 from tests.integration.test_image_plugin_e2e import _fake_comfy, _machine
-from tests.unit.channels.test_web_artifacts import IMMUTABLE, PNG
-from tests.unit.channels.test_web_reference_page import BUTTONS, PAGE, _drive
-from tests.unit.channels.test_web_server import BEARER, TOKEN
-from tests.unit.channels.test_web_server import JSON as JSON_POST
+from tests.unit.channels.test_mobile_artifacts import IMMUTABLE, PNG
+from tests.unit.channels.test_mobile_reference_page import BUTTONS, PAGE, _drive
+from tests.unit.channels.test_mobile_server import BEARER, TOKEN
+from tests.unit.channels.test_mobile_server import JSON as JSON_POST
 from tests.unit.test_plugin_cli_mount import _help_rows
 from tests.unit.test_start_cmd import _capture_start_console
 
@@ -64,19 +64,19 @@ def _flat(text: str) -> str:
 
 def test_web_is_a_plugin_command_on_by_default_and_gone_when_disabled(tmp_path, monkeypatch, fake_home):
     global_dir, _ = _machine(tmp_path, monkeypatch, fake_home)
-    assert "web" in _help_rows(_invoke("--help").output)
-    helped = _invoke("web", "--help")
+    assert "mobile" in _help_rows(_invoke("--help").output)
+    helped = _invoke("mobile", "--help")
     assert helped.exit_code == 0, helped.output
     assert "--incognito" in helped.output and "--rotate-token" in helped.output, helped.output
     listed = _invoke("plugins", "list").output
-    assert any(line.split()[:1] == ["web"] for line in listed.splitlines()), listed
+    assert any(line.split()[:1] == ["mobile"] for line in listed.splitlines()), listed
 
-    disabled = _invoke("plugins", "disable", "web")
+    disabled = _invoke("plugins", "disable", "mobile")
     assert disabled.exit_code == 0, disabled.output
-    assert "web" not in _help_rows(_invoke("--help").output)
-    gone = _invoke("web")
+    assert "mobile" not in _help_rows(_invoke("--help").output)
+    gone = _invoke("mobile")
     # off bundled plugin: hint + exit 4, not Click's exit 2 (exit 2 is experiment run's reject-holdout verdict)
-    assert gone.exit_code == 4 and "is provided by the web plugin, which is off" in gone.stderr, gone.output
+    assert gone.exit_code == 4 and "is provided by the mobile plugin, which is off" in gone.stderr, gone.output
 
     # the terminal is unaffected: a terminal session still boots with web off
     printed = _capture_start_console(monkeypatch)
@@ -97,13 +97,13 @@ def test_without_the_extra_web_prints_the_unchanged_hint(tmp_path, monkeypatch, 
     monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: False)
     monkeypatch.setitem(sys.modules, "starlette", None)
     monkeypatch.setitem(sys.modules, "uvicorn", None)
-    assert "web" in _help_rows(_invoke("--help").output)  # still mounted: the hint, not "No such command"
-    ran = _invoke("web")
+    assert "mobile" in _help_rows(_invoke("--help").output)  # still mounted: the hint, not "No such command"
+    ran = _invoke("mobile")
     assert ran.exit_code == 1, ran.output
     assert _flat(MISSING_DEPENDENCY) in _flat(ran.output), ran.output
     listed = _invoke("plugins", "list").output
-    (row,) = [line for line in listed.splitlines() if line.split()[:1] == ["web"]]
-    assert "on (install `localharness[web]` to use it)" in row, row
+    (row,) = [line for line in listed.splitlines() if line.split()[:1] == ["mobile"]]
+    assert "on (install `localharness[mobile]` to use it)" in row, row
 
 
 # --- criterion 2: a channel typo is refused before any plugin loads -------------------------------
@@ -120,7 +120,7 @@ def test_a_channel_typo_is_refused_before_any_plugin_loads(tmp_path, monkeypatch
     monkeypatch.setattr("localharness.plugins.resolve.resolve", boom)
     ran = _invoke("start", "--channel", "wbe")
     assert ran.exit_code != 0, ran.output
-    assert "unknown channel 'wbe'; choose one of: acp, discord, terminal, web" in _flat(ran.output), ran.output
+    assert "unknown channel 'wbe'; choose one of: acp, discord, mobile, terminal" in _flat(ran.output), ran.output
     assert called == [], "resolve() ran before the channel name was checked"
 
 
@@ -129,13 +129,13 @@ def test_a_channel_typo_is_refused_before_any_plugin_loads(tmp_path, monkeypatch
 
 def _web_session(monkeypatch, work, *, incognito: bool = False) -> dict:
     """One web-mode session through `_start_async`; `work(channel, client, out)` runs while it is
-    live, against a WebServer over ASGI. Returns `out`; an error inside `work` fails the test."""
+    live, against a MobileServer over ASGI. Returns `out`; an error inside `work` fails the test."""
     out: dict = {"printed": _capture_start_console(monkeypatch)}
 
     async def drive(self):  # stands in for OrchestratorREPL.run
         await self._channel.start()
         try:
-            server = WebServer(self._channel, token=TOKEN, incognito=incognito)
+            server = MobileServer(self._channel, token=TOKEN, incognito=incognito)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),
                                          base_url="http://web.test") as client:
                 await work(self._channel, client, out)
@@ -149,8 +149,8 @@ def _web_session(monkeypatch, work, *, incognito: bool = False) -> dict:
 
     async def run() -> None:
         from localharness.cli.start_cmd import _start_async
-        await _start_async(None, False, False, None, channel_mode="web",
-                           web_channel=WebChannel(bus=EventBus(), config={}))
+        await _start_async(None, False, False, None, channel_mode="mobile",
+                           mobile_channel=MobileChannel(bus=EventBus(), config={}))
 
     asyncio.run(run())
     if "error" in out:
@@ -189,7 +189,7 @@ def test_memory_on_the_screen_is_present_and_every_route_works_through_the_slot(
 
     async def work(ch, c, out):
         browse = ch.memory_slot().browse()  # the session's own store, behind the slot
-        await browse._store.store_fact(key=FACT, value="the phone reads this", tags=["web"],
+        await browse._store.store_fact(key=FACT, value="the phone reads this", tags=["mobile"],
                                        source="remember")
         out["protocol"] = (await c.get("/api/protocol", headers=BEARER)).json()
         out["list"] = await c.get("/api/memory", headers=BEARER)
@@ -208,8 +208,8 @@ def test_memory_on_the_screen_is_present_and_every_route_works_through_the_slot(
     assert s["fact"].status_code == 200 and len(s["fact"].json()["history"]) == 1
     assert s["edit"].status_code == 200 and s["edit"].json()["status"] == "edited"
     assert s["edited"]["fact"]["value"] == "edited on the phone"
-    assert s["edited"]["fact"]["provenance"].endswith(";web"), s["edited"]["fact"]
-    assert "web" in s["edited"]["fact"]["tags"] and len(s["edited"]["history"]) == 2
+    assert s["edited"]["fact"]["provenance"].endswith(";mobile"), s["edited"]["fact"]
+    assert "mobile" in s["edited"]["fact"]["tags"] and len(s["edited"]["history"]) == 2
     assert s["forget"].status_code == 200 and s["forget"].json()["status"] == "forgotten"
     assert not any(f["name"] == FACT for f in s["after_list"]["facts"])
     assert s["after"].status_code == 200 and s["after"].json()["history"], "forget destroyed history"

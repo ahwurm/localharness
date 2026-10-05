@@ -64,7 +64,7 @@ def test_add_then_lookup_round_trip(global_dir, tmp_path):
 
 def test_nested_workspace_inherits_the_parent_grant(global_dir, tmp_path):
     parent = (tmp_path / "proj").resolve()
-    child = parent / "packages" / "web"
+    child = parent / "packages" / "mobile"
     child.mkdir(parents=True)
     GrantStore().add(_grant(parent))
     assert GrantStore().lookup(child, "shell-unfamiliar", "git push") is not None
@@ -72,7 +72,7 @@ def test_nested_workspace_inherits_the_parent_grant(global_dir, tmp_path):
 
 def test_a_child_grant_never_leaks_up_to_the_parent(global_dir, tmp_path):
     parent = (tmp_path / "proj").resolve()
-    child = parent / "packages" / "web"
+    child = parent / "packages" / "mobile"
     child.mkdir(parents=True)
     GrantStore().add(_grant(child))
     assert GrantStore().lookup(parent, "shell-unfamiliar", "git push") is None

@@ -70,7 +70,7 @@ def _granted(gate: PermissionGate, asked: PermissionRequest) -> bool:
 
 # ------------------------------------------------------------------- mode, through the gate
 
-@pytest.mark.parametrize("channel_id", ["web", "discord"])
+@pytest.mark.parametrize("channel_id", ["mobile", "discord"])
 def test_the_lock_refuses_unattended_from_a_remote_channel(tmp_path, channel_id):
     gate = _gate(tmp_path, remote_unattended=False)
     gate.attach_channel(_Remote(channel_id))
@@ -85,7 +85,7 @@ def test_the_lock_leaves_every_other_switch_alone(tmp_path):
     """Only `unattended` from the channel is locked: the other modes still switch from the phone,
     and the config/trust paths (no `from_channel`) are the machine's own decisions."""
     gate = _gate(tmp_path, remote_unattended=False)
-    gate.attach_channel(_Remote("web"))
+    gate.attach_channel(_Remote("mobile"))
     assert gate.set_mode("trusted", from_channel=True) == "trusted"
     assert gate.set_mode("guarded", from_channel=True) == "guarded"
     assert gate.set_mode("unattended") == "unattended"
@@ -113,11 +113,11 @@ def test_a_local_operator_is_never_locked(tmp_path, build):
 
 def test_remote_channels_are_not_local_operators():
     from localharness.channels.base import ChannelAdapter
-    from localharness.channels.web.channel import WebChannel
+    from localharness.channels.mobile.channel import MobileChannel
     from localharness.dispatch.channel import DispatchChannel
 
     assert ChannelAdapter.local_operator is False
-    assert WebChannel.local_operator is False and DispatchChannel.local_operator is False
+    assert MobileChannel.local_operator is False and DispatchChannel.local_operator is False
 
 
 async def test_the_default_keeps_remote_unattended_and_always(tmp_path):
@@ -189,7 +189,7 @@ async def test_the_repl_mode_command_shows_the_refusal_as_one_error_line(tmp_pat
 # ------------------------------------------------------------------- the web /mode route
 
 async def test_the_web_mode_route_answers_400_with_the_refusal(tmp_path):
-    from tests.unit.channels.test_web_server import JSON, _stack
+    from tests.unit.channels.test_mobile_server import JSON, _stack
 
     gate = _gate(tmp_path, remote_unattended=False)
     _, channel, _, client = await _stack(tmp_path, runtime={"gate": gate})
@@ -204,7 +204,7 @@ async def test_the_web_mode_route_answers_400_with_the_refusal(tmp_path):
 
 
 async def test_the_web_mode_route_still_switches_with_the_default(tmp_path):
-    from tests.unit.channels.test_web_server import JSON, _stack
+    from tests.unit.channels.test_mobile_server import JSON, _stack
 
     gate = _gate(tmp_path)
     _, channel, _, client = await _stack(tmp_path, runtime={"gate": gate})
@@ -223,7 +223,7 @@ def _grantable() -> PermissionRequest:
 async def test_a_malformed_confirm_token_is_refused_never_raised(tmp_path):
     """`secrets.compare_digest` raises TypeError on a non-ASCII str or a non-str — a 500 from
     anything holding the bearer. Every malformed token is just "not the token"."""
-    from tests.unit.channels.test_web_server import _stack
+    from tests.unit.channels.test_mobile_server import _stack
 
     _, channel, _, _ = await _stack(tmp_path)
     task = asyncio.ensure_future(channel.ask_permission(_grantable()))
@@ -240,7 +240,7 @@ async def test_a_malformed_confirm_token_is_refused_never_raised(tmp_path):
 
 
 async def test_a_malformed_answer_over_the_wire_is_a_4xx_never_a_500(tmp_path):
-    from tests.unit.channels.test_web_server import JSON, _stack
+    from tests.unit.channels.test_mobile_server import JSON, _stack
 
     _, channel, _, client = await _stack(tmp_path)
     task = asyncio.ensure_future(channel.ask_permission(_grantable()))

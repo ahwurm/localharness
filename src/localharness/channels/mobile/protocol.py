@@ -1,4 +1,4 @@
-"""The web channel's wire contract: the SSE-only frames, and the generated schema behind them.
+"""The mobile channel's wire contract: the SSE-only frames, and the generated schema behind them.
 
 Read §4.2 of the web-channel PRD before changing anything here. The one rule everything else
 hangs off:
@@ -46,7 +46,7 @@ buttons only when the session has them (memory: the slot's occupant offers a bro
 an artifact root is bound and --incognito is off), and GET /api/artifacts lists the gallery. No event
 or frame schema moved.
 
-Enforced rather than remembered: `tests/unit/channels/test_web_protocol.py` snapshots every
+Enforced rather than remembered: `tests/unit/channels/test_mobile_protocol.py` snapshots every
 event and frame schema into a checked-in fixture and fails if a schema moves without this
 integer moving in the same diff. A project that auto-generates its schema specifically because
 it distrusts humans to keep two things in sync should not then trust a human to remember the

@@ -33,7 +33,7 @@ from urllib.parse import urlencode, urlparse
 
 import structlog
 
-from localharness.channels.web import auth
+from localharness.channels.mobile import auth
 
 log = structlog.get_logger(__name__)
 
@@ -128,19 +128,15 @@ PUSH_CLASSES: tuple[str, ...] = (CLASS_TURN_FINISHED, CLASS_NEEDS_YOU)
 
 
 def vapid_path(config_dir: Optional[str | Path] = None) -> Path:
-    """`<global config dir>/web/vapid.pem` — beside the app token, and global for the same
+    """`<global config dir>/mobile/vapid.pem` — beside the app token, and global for the same
     reason: one listener per machine, and the phone enrolled against it does not know which
     project directory the process was started in."""
-    from localharness.config.paths import global_config_dir
-
-    return global_config_dir(config_dir) / "web" / "vapid.pem"
+    return auth.state_dir(config_dir) / "vapid.pem"
 
 
 def subscriptions_path(config_dir: Optional[str | Path] = None) -> Path:
-    """`<global config dir>/web/push-subscriptions.json`."""
-    from localharness.config.paths import global_config_dir
-
-    return global_config_dir(config_dir) / "web" / "push-subscriptions.json"
+    """`<global config dir>/mobile/push-subscriptions.json`."""
+    return auth.state_dir(config_dir) / "push-subscriptions.json"
 
 
 def _b64(raw: bytes) -> str:
@@ -183,7 +179,7 @@ def load_or_create_vapid(config_dir: Optional[str | Path] = None) -> VapidKeys:
         try:
             return _keys_from_pem(path.read_bytes())
         except Exception:  # noqa: BLE001 — a corrupt key file is replaced, not fatal
-            log.warning("web_vapid_unreadable", path=str(path))
+            log.warning("mobile_vapid_unreadable", path=str(path))
 
     path.parent.mkdir(parents=True, exist_ok=True)
     vapid = Vapid02()
@@ -228,7 +224,7 @@ class SubscriptionStore:
         except FileNotFoundError:
             return []
         except (OSError, ValueError):
-            log.warning("web_push_subscriptions_unreadable", path=str(self.path))
+            log.warning("mobile_push_subscriptions_unreadable", path=str(self.path))
             return []
         return [r for r in rows if isinstance(r, dict) and r.get("endpoint")] if isinstance(
             rows, list) else []
@@ -496,7 +492,7 @@ class PushSender:
             body = self._encrypt(subscription, message.to_json())
             headers = self._headers(endpoint, len(body))
         except Exception:  # noqa: BLE001 — a bad stored subscription must not kill the turn
-            log.warning("web_push_encode_failed", endpoint=endpoint[:60], exc_info=True)
+            log.warning("mobile_push_encode_failed", endpoint=endpoint[:60], exc_info=True)
             return False
         try:
             if client is not None:
@@ -505,12 +501,12 @@ class PushSender:
                 async with self.session() as own:
                     response = await own.post(endpoint, content=body, headers=headers)
         except Exception:  # noqa: BLE001 — no network is not evidence the phone is gone
-            log.info("web_push_send_failed", endpoint=endpoint[:60], exc_info=True)
+            log.info("mobile_push_send_failed", endpoint=endpoint[:60], exc_info=True)
             return None
         if response.status_code in (404, 410):
             return False
         if response.status_code >= 400:
-            log.info("web_push_rejected", status=response.status_code, endpoint=endpoint[:60])
+            log.info("mobile_push_rejected", status=response.status_code, endpoint=endpoint[:60])
             return None
         return True
 
@@ -603,7 +599,7 @@ class PushService:
                     # reset phone. Keeping it means signing and encrypting for a corpse every
                     # time anything happens.
                     await asyncio.to_thread(self.store.remove, subscription["endpoint"])
-                    log.info("web_push_pruned", endpoint=subscription["endpoint"][:60])
+                    log.info("mobile_push_pruned", endpoint=subscription["endpoint"][:60])
         finally:
             if client is not None:
                 await client.aclose()

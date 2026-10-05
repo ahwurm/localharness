@@ -33,7 +33,7 @@ from typing import Any, Optional
 
 import structlog
 
-from .channel import WebChannel
+from .channel import MobileChannel
 from .protocol import FRAME_TYPES, StatusTick, TokenDelta, WireFrame
 
 log = structlog.get_logger(__name__)
@@ -114,7 +114,7 @@ class ReplayDriver:
 
     def __init__(
         self,
-        channel: WebChannel,
+        channel: MobileChannel,
         path: Path,
         *,
         speed: float = 1.0,

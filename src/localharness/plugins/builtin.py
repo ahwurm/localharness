@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from localharness.plugins.api import Plugin
 from localharness.autoresearch.plugin import AutoresearchPlugin
-from localharness.cli.web_plugin import WebPlugin
+from localharness.cli.mobile_plugin import MobilePlugin
 from localharness.dispatch.plugin import DispatchPlugin
 from localharness.memory.plugin import MemoryPlugin
 from localharness.tools.builtin.image_plugin import ImagePlugin
 
-BUILTIN_PLUGINS: tuple[type[Plugin], ...] = (ImagePlugin, WebPlugin, MemoryPlugin, DispatchPlugin,
+BUILTIN_PLUGINS: tuple[type[Plugin], ...] = (ImagePlugin, MobilePlugin, MemoryPlugin, DispatchPlugin,
                                               AutoresearchPlugin)
 
 

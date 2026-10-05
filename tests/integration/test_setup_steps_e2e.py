@@ -197,8 +197,8 @@ def test_memory_without_a_terminal_downloads_nothing_and_says_what_to_run(g, no_
 
 # --- web (mobile): one question, the address the pairing QR sends a phone to ----------------------
 
-PHONE_Q = "Phone address, the URL your phone opens (Enter: `localharness web` guesses it)"
-WEB_NEXT = "Run `localharness web`, then scan its pairing QR with your phone."
+PHONE_Q = "Phone address, the URL your phone opens (Enter: `localharness mobile` guesses it)"
+WEB_NEXT = "Run `localharness mobile`, then scan its pairing QR with your phone."
 
 
 @pytest.fixture
@@ -214,87 +214,87 @@ def _settings(g: Path, name: str):
     return resolve(ConfigLoader(config_dir=g)).settings[name].config
 
 
-@pytest.mark.plugin("web")
+@pytest.mark.plugin("mobile")
 def test_web_saves_the_phone_address_then_checks(g, terminal, web_extra) -> None:
     asked, answers, _ = terminal
     answers.append("https://spark.example.ts.net")
-    result = _enable(g, "web")
+    result = _enable(g, "mobile")
     out = result.output
 
     assert result.exit_code == 0, out
     assert asked == {"prompt": [(PHONE_Q, "")], "confirm": []}
-    assert _settings(g, "web").public_url == "https://spark.example.ts.net"
-    for text in ("set web.public_url = 'https://spark.example.ts.net'", "Checking it now:",
-                 "web: not enrolled yet", WEB_NEXT):
+    assert _settings(g, "mobile").public_url == "https://spark.example.ts.net"
+    for text in ("set mobile.public_url = 'https://spark.example.ts.net'", "Checking it now:",
+                 "mobile: not enrolled yet", WEB_NEXT):
         assert text in out, text
     assert out.index("Checking it now:") < out.index(WEB_NEXT)
     assert AGENT_PROMPT_LEAD not in out  # answered: "not enrolled yet" is the server's first run
 
 
-@pytest.mark.plugin("web")
+@pytest.mark.plugin("mobile")
 def test_web_refuses_an_address_without_a_scheme_and_writes_nothing(g, terminal, web_extra) -> None:
     _, answers, _ = terminal
     answers.append("spark.local")
-    result = _enable(g, "web")
+    result = _enable(g, "mobile")
 
     assert result.exit_code == 2, result.output
-    assert "web.public_url must start with http:// or https://" in " ".join(result.output.split())
+    assert "mobile.public_url must start with http:// or https://" in " ".join(result.output.split())
     assert not (g / "overrides.yaml").exists()
 
 
-@pytest.mark.plugin("web")
+@pytest.mark.plugin("mobile")
 def test_web_enter_saves_nothing_and_prints_the_prompt(g, terminal, web_extra) -> None:
     _, answers, _ = terminal
     answers.append("")
-    result = _enable(g, "web")
+    result = _enable(g, "mobile")
     out = result.output
 
     assert result.exit_code == 0, out
-    assert _overrides(g) == {"web": {"enabled": True}}
-    assert "web: not enrolled yet" in out
+    assert _overrides(g) == {"mobile": {"enabled": True}}
+    assert "mobile: not enrolled yet" in out
     assert AGENT_PROMPT_LEAD in out and "tailscale serve --bg 8765" in out
     assert out.index(AGENT_PROMPT_LEAD) < out.index(WEB_NEXT)
     assert "failed" not in out  # a skipped check is not set up yet, never a failure (deferred #23)
 
 
-@pytest.mark.plugin("web")
+@pytest.mark.plugin("mobile")
 def test_web_without_its_extra_asks_nothing_and_names_the_install_line(g, terminal, monkeypatch) -> None:
     from localharness.plugins import resolve
-    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: e != "web")
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: e != "mobile")
     asked, _, _ = terminal
-    result = _enable(g, "web")
+    result = _enable(g, "mobile")
     flat = " ".join(result.output.split())
 
     assert result.exit_code == 0, result.output
     assert asked == {"prompt": [], "confirm": []}
-    assert _overrides(g) == {"web": {"enabled": True}}
-    assert "web is missing its install extra" in flat and "localharness[web]" in flat
+    assert _overrides(g) == {"mobile": {"enabled": True}}
+    assert "mobile is missing its install extra" in flat and "localharness[mobile]" in flat
     assert "Checking it now:" not in flat and WEB_NEXT in flat
 
 
-@pytest.mark.plugin("web")
+@pytest.mark.plugin("mobile")
 def test_web_the_saved_address_reaches_the_pairing_qr(g, terminal, web_extra, monkeypatch) -> None:
-    """Composed: what the step saved is the address `localharness web` puts in the QR — no guess.
+    """Composed: what the step saved is the address `localharness mobile` puts in the QR — no guess.
     On a terminal (CliRunner never is one, so the check is patched) the QR carries the token in its
     fragment; the address printed beside it carries none."""
     pytest.importorskip("starlette")
     pytest.importorskip("uvicorn")
-    from localharness.channels.web import auth as web_auth
-    from localharness.cli import web_cmd
+    from localharness.channels.mobile import auth as mobile_auth
+    from localharness.cli import mobile_cmd
 
     _, answers, _ = terminal
     answers.append("https://spark.example.ts.net")
-    assert _enable(g, "web").exit_code == 0
+    assert _enable(g, "mobile").exit_code == 0
     guessed: list[int] = []
     drawn: list[str] = []
-    monkeypatch.setattr(web_cmd, "detect_public_url", lambda port, **kw: guessed.append(port))
-    monkeypatch.setattr(web_cmd, "render_qr", lambda url: drawn.append(url) or "QR")
-    monkeypatch.setattr(web_cmd, "_stdout_is_a_terminal", lambda: True, raising=False)
+    monkeypatch.setattr(mobile_cmd, "detect_public_url", lambda port, **kw: guessed.append(port))
+    monkeypatch.setattr(mobile_cmd, "render_qr", lambda url: drawn.append(url) or "QR")
+    monkeypatch.setattr(mobile_cmd, "_stdout_is_a_terminal", lambda: True, raising=False)
     monkeypatch.setenv("LOCALHARNESS_DIR", str(g))  # the plugin's command mounts from this machine
-    ran = runner.invoke(app, ["web", "--rotate-token", "--config-dir", str(g)])
+    ran = runner.invoke(app, ["mobile", "--rotate-token", "--config-dir", str(g)])
 
     assert ran.exit_code == 0, ran.output
-    token = web_auth.load_or_create_token(str(g))[0]
+    token = mobile_auth.load_or_create_token(str(g))[0]
     assert drawn == [f"https://spark.example.ts.net/#t={token}"]
     assert "https://spark.example.ts.net/" in ran.output and "#t=" not in ran.output
     assert guessed == []

@@ -1,4 +1,4 @@
-"""`WebChannel`: the raw-event wire, the transcript contract, and the permission spine.
+"""`MobileChannel`: the raw-event wire, the transcript contract, and the permission spine.
 
 The permission tests are the ones that matter. The web PRD calls the gate THE load-bearing
 design, and the property under test is not "a human can answer" — it is that **nothing except a
@@ -13,7 +13,7 @@ import json
 import pytest
 
 from localharness.agent.gate_types import Decision, PermissionRequest
-from localharness.channels.web.channel import ALWAYS_KINDS, ASK_FALLBACK_DECISION, WebChannel
+from localharness.channels.mobile.channel import ALWAYS_KINDS, ASK_FALLBACK_DECISION, MobileChannel
 from localharness.core.bus import EventBus
 from localharness.core.events import (
     Action,
@@ -35,8 +35,8 @@ def _request(**over):
     return PermissionRequest(**base)
 
 
-async def _channel(bus=None) -> WebChannel:
-    channel = WebChannel(bus=bus or EventBus(), config={})
+async def _channel(bus=None) -> MobileChannel:
+    channel = MobileChannel(bus=bus or EventBus(), config={})
     await channel.start()
     return channel
 
@@ -329,16 +329,16 @@ async def test_the_trust_bridge_carries_an_answer_across_the_thread_boundary(tmp
 
 async def test_a_trust_question_nobody_answers_leaves_the_workspace_untrusted(tmp_path):
     """It is the one ask with no gate behind it, so it carries its own deadline (§5.6.3)."""
-    import localharness.channels.web.channel as web_channel
+    import localharness.channels.mobile.channel as mobile_channel
 
     channel = await _channel()
     channel.attach_client()
-    original = web_channel.TRUST_ASK_TIMEOUT_S
-    web_channel.TRUST_ASK_TIMEOUT_S = 0.05
+    original = mobile_channel.TRUST_ASK_TIMEOUT_S
+    mobile_channel.TRUST_ASK_TIMEOUT_S = 0.05
     try:
         assert await channel._ask_trust("trust this place?") is False
     finally:
-        web_channel.TRUST_ASK_TIMEOUT_S = original
+        mobile_channel.TRUST_ASK_TIMEOUT_S = original
     assert channel.open_asks() == [], "the expired question must not keep showing live buttons"
 
 
@@ -412,8 +412,8 @@ async def test_a_swallowed_persist_failure_becomes_a_visible_gap(tmp_path):
 async def test_a_client_that_falls_behind_is_told_rather_than_grown(tmp_path):
     """Overflow is VISIBLE. An unbounded queue would let a sleeping phone pin the session in
     memory; a silent drop would let it miss the answer and never know."""
-    from localharness.channels.web.channel import CLIENT_QUEUE_MAX_FRAMES
-    from localharness.channels.web.protocol import Notice
+    from localharness.channels.mobile.channel import CLIENT_QUEUE_MAX_FRAMES
+    from localharness.channels.mobile.protocol import Notice
 
     channel = await _channel()
     client = channel.attach_client()
@@ -457,18 +457,18 @@ async def test_a_rich_renderable_survives_as_preformatted_text(tmp_path):
 async def test_the_flags_are_the_locked_ones(tmp_path):
     """WEBCH-10. `has_review_surface=True` would silently REMOVE a gate; `ask_holds_dialog=True`
     would let one unanswered question hang a turn forever."""
-    assert WebChannel.channel_id == "web"
-    assert WebChannel.can_ask is True
-    assert WebChannel.ask_holds_dialog is False
-    assert WebChannel.has_review_surface is False
-    assert WebChannel.has_display_toggles is True
+    assert MobileChannel.channel_id == "mobile"
+    assert MobileChannel.can_ask is True
+    assert MobileChannel.ask_holds_dialog is False
+    assert MobileChannel.has_review_surface is False
+    assert MobileChannel.has_display_toggles is True
 
 
 async def test_the_repl_installable_resolvers_are_declared(tmp_path):
     """The REPL installs each handle ONLY if the channel already declares it as None. A channel
     that does not declare one is skipped with NO error — which fails silently, at a tap, later."""
     for name in ("_pending_resolver", "_nudge_resolver", "_cancel_resolver"):
-        assert getattr(WebChannel, name, "absent") is None, name
+        assert getattr(MobileChannel, name, "absent") is None, name
 
 
 async def test_parked_calls_travel_typed_not_as_prose(tmp_path):
@@ -509,7 +509,7 @@ async def test_stop_releases_every_subscription(tmp_path):
 
 async def test_a_subagents_turn_end_must_not_stop_the_root_ticker(tmp_path):
     bus = EventBus(persist_path=tmp_path / "e.jsonl")
-    channel = WebChannel(bus=bus, config={})
+    channel = MobileChannel(bus=bus, config={})
     await channel.start()
     channel.progress_source = lambda: {"phase": "writing"}
     channel.attach_client()

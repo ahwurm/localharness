@@ -67,7 +67,7 @@ a project lists them when there are any (so does the question about a workspace 
 project), and a Yes records exactly what you were shown: each server's command, arguments,
 environment-variable names, URL and header names. No, or no terminal to ask, starts none of them:
 one line names the files and how to change that for the command you ran — `--trust-project` on
-`start`, `LOCALHARNESS_TRUST_PROJECT=1` for `localharness web` and `localharness acp`, a Yes to the
+`start`, `LOCALHARNESS_TRUST_PROJECT=1` for `localharness mobile` and `localharness acp`, a Yes to the
 trust question at a `localharness start` on a terminal, or the project's entry in
 `trusted_workspaces.yaml` — and in the default `auto` mode the session runs `guarded`. A Yes given
 where the list was not shown — the question a channel asks during a session, in Zed or Discord —
@@ -137,7 +137,7 @@ deny patterns remain the mechanism that stops specific actions.
 A plugin is code that adds tools, commands, checks or settings to the harness. One trust model
 covers every plugin; where a plugin that ships with LocalHarness and one you install yourself are
 treated differently, it says so below. (Five features ship as plugins: image generation, off until you
-turn it on, and the phone app `web`, memory, Discord (`dispatch`) and autoresearch, each on by
+turn it on, and the phone app `mobile`, memory, Discord (`dispatch`) and autoresearch, each on by
 default; everything else that comes with LocalHarness is built into its core, including the bench
 and its sealed holdout.) A plugin that ships with LocalHarness may own core settings under their old
 names (`autoresearch` owns `proposer:` and `sentinel:`); a plugin you install that tries to is
@@ -236,7 +236,7 @@ global config, a project's whole `proposer:` section is ignored. These are all o
 - `dispatch.discord.token`
 - `dispatch.discord.allow`
 - `dispatch.discord.channels`
-- `web.public_url`
+- `mobile.public_url`
 - `permissions.ask.read_only_signatures`
 - `permissions.ask.dropped_commands`
 - `permissions.ask.wrapper_commands`
@@ -808,7 +808,7 @@ its old mode.
 No setting LocalHarness treats as a secret is written to `.repl_history`, `bus-events.jsonl`,
 `audit.jsonl`, the session logs or the model's prompt: a secret changed with `components set` is
 recorded as changed, with `**********` for its old and new value. The phone token is printed to
-nothing but a terminal (see [`localharness web`](#localharness-web)). `vllm/serve.log` holds the
+nothing but a terminal (see [`localharness mobile`](#localharness-mobile)). `vllm/serve.log` holds the
 launch command, which never contains a key, because a required key travels in the server's
 environment. **What this does NOT cover:** what reaches the conversation as ordinary text — a key
 you paste into a message, or a file the agent reads that holds one, your own `config.yaml`
@@ -981,23 +981,23 @@ a stand-in that behaves the way vLLM's source says vLLM does, not against vLLM i
 launch listens on every interface without `--host`, that it reads `VLLM_API_KEY`, and which routes
 its key guards are vLLM's behaviour as read from its source, not measured here.
 
-### `localharness web`
+### `localharness mobile`
 
-The web channel adds a second listener, and it is a more serious one than the model
+The mobile channel adds a second listener, and it is a more serious one than the model
 server: **it can run arbitrary shell with your privileges**, because that is what the
 agent behind it does. Three things hold it, and each is there for a reason:
 
 - **It binds loopback only.** Startup refuses any other address unless
   `--allow-unsafe-bind` is passed explicitly. A fronting proxy publishes it — this is
   also what keeps a proxy's identity headers meaningful, since they are only
-  trustworthy if nothing but the proxy can reach the backend. `web.public_url`, which
-  `localharness plugins enable web` asks for, is only the address the pairing QR sends
+  trustworthy if nothing but the proxy can reach the backend. `mobile.public_url`, which
+  `localharness plugins enable mobile` asks for, is only the address the pairing QR sends
   your phone to: it never changes what the server binds, and `--allow-unsafe-bind` stays
   a flag you pass on each run, never a saved setting.
 - **An app token is required on every request**, the event stream included. It is
   generated on first run and stored `0600` under the global config directory. Its text is
   printed only to a terminal, and only when it is created, right after `--rotate-token`, or
-  when you ask with `localharness web --show-token` (which prints it with the pairing QR
+  when you ask with `localharness mobile --show-token` (which prints it with the pairing QR
   and exits, so a server that is already running can be paired from another terminal).
   On a terminal the pairing QR is drawn on every start: it carries the token, and
   scanning it is pairing. When standard output is a pipe or a file — a `tee`, journald —
@@ -1005,9 +1005,9 @@ agent behind it does. Three things hold it, and each is there for a reason:
   terminal, the pairing block is drawn on that terminal instead, and otherwise one line
   names `--show-token`. Binding loopback makes the boundary tighter in one sense and
   looser in another: every local process on the machine can now reach that port,
-  including one an agent itself started. `localharness web --rotate-token` makes every
+  including one an agent itself started. `localharness mobile --rotate-token` makes every
   enrolled client invalid and also clears the push subscriptions, so each phone turns
-  notifications on again after it pairs; a `localharness web` that is already running
+  notifications on again after it pairs; a `localharness mobile` that is already running
   keeps accepting the old token until it restarts.
   **Named gap:** there is no per-device revoke — rotation is all or nothing.
 - **The POST surface is CSRF-safe by construction.** Every write verb requires both a
@@ -1043,12 +1043,12 @@ is the thing the cookie design exists to avoid.
 **What this does NOT cover.** `--allow-unsafe-bind` with plain HTTP sends the bearer token
 in cleartext to every hop between the phone and this machine. The token file is the one
 durable copy of the token, and owner-only stops other accounts, not the agent: while
-`localharness web` runs, a process running as you — one the agent starts included — holds what a
+`localharness mobile` runs, a process running as you — one the agent starts included — holds what a
 paired phone holds (see [A paired phone or Discord account](#a-paired-phone-or-discord-account)),
 and with `channels.remote_unattended` left at its default that includes the switch to
 `unattended` (setting it to `false` closes that path too).
 The QR drawn on a terminal carries the token into that terminal's scrollback (a tmux
-history, a `script` log). A token an older release printed — into a `localharness web | tee`
+history, a `script` log). A token an older release printed — into a `localharness mobile | tee`
 log, or journald — is still in those logs; `--rotate-token` makes those copies useless.
 Cookies are scoped by host name, not by port, so another service published under the same
 host name receives the stream cookie and could read what the GET routes serve, though it
@@ -1103,7 +1103,7 @@ One more, added with plugins:
   machine-level settings a project folder cannot set; a project can at most turn image on against
   the server the machine already points at.
 
-Added with the web plugin:
+Added with the mobile plugin:
 
 - **`GET /api/artifacts` lists pictures, and says little about them.** It takes the same
   credential as every other `/api` route. It lists only the folders bound in this session (in a
@@ -1124,7 +1124,7 @@ Added with the web plugin:
   cached pictures; a browser that ignores the header keeps what it had.
 - **The phone reaches memory only through the memory slot's browse API.** The four
   `/api/memory` routes call the slot's occupant; with memory off the slot is empty and they
-  answer 404. A test pins that the web channel's server, channel, push, replay and protocol
+  answer 404. A test pins that the mobile channel's server, channel, push, replay and protocol
   modules import nothing from `memory/` or the image plugin.
 - **Memory is the bundled `memory` plugin.** Its tools (`memory_search`, `memory_get`, `remember`)
   carry the same safety declarations they always had, and as a bundled plugin it is exempt from

@@ -30,7 +30,7 @@ class _Exploding(Plugin):
 def test_channel_names_are_core_and_bundled_channel_manifests(monkeypatch):
     from localharness.dispatch.plugin import DispatchPlugin
 
-    assert channel_names() == {"terminal", "acp", "discord", "web"}
+    assert channel_names() == {"terminal", "acp", "discord", "mobile"}
     # discord comes only from the bundled dispatch plugin's manifest: without it, no discord
     monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (ImagePlugin,))
     assert channel_names() == {"terminal", "acp"}
@@ -54,24 +54,24 @@ async def test_a_typo_is_refused_before_any_plugin_loads(tmp_path, monkeypatch):
     monkeypatch.setattr("localharness.plugins.resolve.resolve", boom)
     with pytest.raises(typer.BadParameter) as exc:
         await _start_async(None, False, False, str(tmp_path), channel_mode="wbe")
-    assert "unknown channel 'wbe'; choose one of: acp, discord, terminal, web" in str(exc.value)
+    assert "unknown channel 'wbe'; choose one of: acp, discord, mobile, terminal" in str(exc.value)
 
 
 @pytest.mark.asyncio
 async def test_web_and_acp_without_their_channel_are_sent_to_their_own_command(tmp_path):
-    from localharness.cli.start_cmd import WEB_NEEDS_ITS_OWN_COMMAND, _start_async
+    from localharness.cli.start_cmd import MOBILE_NEEDS_ITS_OWN_COMMAND, _start_async
 
-    assert WEB_NEEDS_ITS_OWN_COMMAND == (
-        "the web channel is served by its own command, because the HTTP server has to be reachable "
-        "before a session exists. Run `localharness web` instead of `localharness start --channel web`.")
+    assert MOBILE_NEEDS_ITS_OWN_COMMAND == (
+        "the mobile channel is served by its own command, because the HTTP server has to be reachable "
+        "before a session exists. Run `localharness mobile` instead of `localharness start --channel mobile`.")
     with pytest.raises(typer.BadParameter) as exc:
         await _start_async(None, False, False, str(tmp_path), channel_mode="acp")
     assert "Run `localharness acp` instead of `localharness start --channel acp`" in str(exc.value)
     assert "plugins enable" not in str(exc.value)  # acp is core, not a plugin
     with pytest.raises(typer.BadParameter) as exc:
-        await _start_async(None, False, False, str(tmp_path), channel_mode="web")
-    assert WEB_NEEDS_ITS_OWN_COMMAND in str(exc.value)
-    assert "(if that command is missing, run `localharness plugins enable web`)" in str(exc.value)
+        await _start_async(None, False, False, str(tmp_path), channel_mode="mobile")
+    assert MOBILE_NEEDS_ITS_OWN_COMMAND in str(exc.value)
+    assert "(if that command is missing, run `localharness plugins enable mobile`)" in str(exc.value)
 
 
 def test_the_channel_help_lists_the_resolved_names():
@@ -79,7 +79,7 @@ def test_the_channel_help_lists_the_resolved_names():
 
     start = typer.main.get_command(app).commands["start"]
     (opt,) = [p for p in start.params if p.name == "channel"]
-    assert "acp, discord, terminal, web" in opt.help
+    assert "acp, discord, mobile, terminal" in opt.help
 
 
 # ------------------------------------------------------------------ the needs-extra line at start (46, ruling 5)
@@ -112,7 +112,7 @@ def test_plugins_list_still_shows_the_missing_extra(monkeypatch):
     monkeypatch.setenv("COLUMNS", "400")
     out = CliRunner().invoke(app, ["plugins", "list"])
     assert out.exit_code == 0, out.output
-    assert "on (install `localharness[web]` to use it)" in out.output
+    assert "on (install `localharness[mobile]` to use it)" in out.output
 
 
 def test_an_installed_plugins_needs_extra_still_warns_at_start():
@@ -121,8 +121,8 @@ def test_an_installed_plugins_needs_extra_still_warns_at_start():
     from localharness.plugins.plan import LoadPlan, PlanEntry
     from localharness.plugins.resolve import Resolution
 
-    reason = "install `localharness[web]` to use it"
-    entries = (PlanEntry("web", True, "needs-extra", "built in", "", reason),
+    reason = "install `localharness[mobile]` to use it"
+    entries = (PlanEntry("mobile", True, "needs-extra", "built in", "", reason),
                PlanEntry("thirdparty", False, "needs-extra", "entry point", "", "install `thirdparty[x]` to use it"),
                PlanEntry("broken", True, "failed", "built in", "", "boom"))
     res = Resolution(plan=LoadPlan(entries=entries, order=(), memory_occupant=None),
@@ -154,7 +154,7 @@ def test_start_and_the_resolver_name_the_same_own_command_channels():
     from localharness.cli.start_cmd import _own_command
     from localharness.plugins.channels import OWN_COMMAND
 
-    assert set(_own_command(web_channel=None, acp_channel=None)) == OWN_COMMAND
+    assert set(_own_command(mobile_channel=None, acp_channel=None)) == OWN_COMMAND
 
 
 def test_a_channel_plugin_turned_off_is_not_accepted(tmp_path, monkeypatch):

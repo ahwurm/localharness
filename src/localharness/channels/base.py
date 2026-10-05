@@ -167,7 +167,7 @@ class ChannelAdapter(ABC):
     False is the safe default and it is what every existing channel keeps: the terminal has never
     streamed answer text (`cli/repl` passed `on_token=None`, and `send_streaming` has zero call
     sites anywhere in `src/`), so a channel that says nothing is driven exactly as before. True on
-    the web channel, which turns `run_turn`'s plain `on_token` callback into `TokenDelta` frames.
+    the mobile channel, which turns `run_turn`'s plain `on_token` callback into `TokenDelta` frames.
 
     Declared rather than duck-typed off the presence of an `on_token` attribute: a flag says what
     a channel MEANS, where an attribute check would silently start streaming into anything that
@@ -178,7 +178,7 @@ class ChannelAdapter(ABC):
     """Does `/reasoning` / `/verbose` mean anything here? (web-channel PRD, WEBCH-19.)
 
     True for a channel that owns `show_reasoning` and `verbose` and renders the reasoning stream:
-    the terminal, and the web channel. The REPL's two handlers were gated on
+    the terminal, and the mobile channel. The REPL's two handlers were gated on
     `isinstance(TerminalChannel)`, which refused on every other channel — correct while the
     terminal was the only one that could show reasoning, and wrong the moment a second one could.
     A capability flag rather than a widening isinstance chain, so the next channel that streams

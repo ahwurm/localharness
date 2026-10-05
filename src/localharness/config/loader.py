@@ -269,6 +269,12 @@ def _owning_source(
     return None
 
 
+RENAMED_SECTIONS = {"web": "mobile"}
+"""Top-level sections a release renamed, read under the new name until 0.17.0: a file that still
+says `web:` configures the mobile plugin, and says so once per file in the log."""
+_RENAMED_SAID: set[str] = set()
+
+
 def _load_yaml_file(path: Path) -> dict:
     """Read file, safe_load, return dict (empty dict if file is empty/None)."""
     try:
@@ -280,7 +286,26 @@ def _load_yaml_file(path: Path) -> dict:
     except yaml.YAMLError as e:
         # file, line and column, never the parser's snippet of the line (R16); not chained either
         raise _parse_error(path, e) from None
-    return data or {}
+    return _adopt_renamed_sections(data or {}, path)
+
+
+def _adopt_renamed_sections(data: Any, path: Path) -> Any:
+    """`data` with each RENAMED_SECTIONS key folded under its new name (the new name's own values
+    win). Nothing else about the file changes; a key that is not a mapping moves as it is."""
+    if not isinstance(data, dict):
+        return data
+    for old, new in RENAMED_SECTIONS.items():
+        if old not in data:
+            continue
+        legacy = data.pop(old)
+        current = data.get(new)
+        data[new] = (deep_merge(legacy, current) if isinstance(legacy, dict) and isinstance(current, dict)
+                     else current if current is not None else legacy)
+        if str(path) not in _RENAMED_SAID:
+            _RENAMED_SAID.add(str(path))
+            log.warning("config: `%s:` in %s is now `%s:` — rename the key; `%s:` stops being read in 0.17.0",
+                        old, path, new, old)
+    return data
 
 
 def _parse_error(path: Any, exc: BaseException) -> ConfigParseError:

@@ -1,9 +1,9 @@
 """The phone's memory screen against the memory PLUGIN occupant, in a real web session (rig half of
 phase 47 criterion 2; the device half is the owner's).
 
-A real `_start_async(..., channel_mode="web")` with only the external boundaries stubbed: the slot the
-web channel holds is the one the memory plugin occupies through the lifecycle, and the four memory
-routes answer over ASGI with the shapes phase 46 pinned (tests/unit/channels/test_web_server.py::
+A real `_start_async(..., channel_mode="mobile")` with only the external boundaries stubbed: the slot the
+mobile channel holds is the one the memory plugin occupies through the lifecycle, and the four memory
+routes answer over ASGI with the shapes phase 46 pinned (tests/unit/channels/test_mobile_server.py::
 test_memory_list_edit_history_and_forget_roundtrip). Memory off by either key: every route 404s and
 `screens.memory` is false, so the phone shows no Memory button.
 """
@@ -14,11 +14,11 @@ from typing import Any
 import httpx
 import pytest
 
-from localharness.channels.web.channel import WebChannel
-from localharness.channels.web.server import WebServer
+from localharness.channels.mobile.channel import MobileChannel
+from localharness.channels.mobile.server import MobileServer
 from localharness.core.bus import EventBus
 from localharness.memory.sqlite import USER_EDIT_PROVENANCE_PREFIX, MemoryStore
-from tests.unit.channels.test_web_server import BEARER, JSON, TOKEN
+from tests.unit.channels.test_mobile_server import BEARER, JSON, TOKEN
 from tests.unit.test_start_cmd import _stub_start_boundaries
 
 pytestmark = pytest.mark.asyncio
@@ -44,7 +44,7 @@ async def _session(tmp_path, monkeypatch, phone, *, config_extra: str = "") -> d
     seen: dict[str, Any] = {}
 
     async def _repl(self):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=WebServer(ch, token=TOKEN).app),
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=MobileServer(ch, token=TOKEN).app),
                                      base_url="http://web.test") as client:
             await phone(client, ch, seen)
 
@@ -56,8 +56,8 @@ async def _session(tmp_path, monkeypatch, phone, *, config_extra: str = "") -> d
     if config_extra:
         with (tmp_path / "config.yaml").open("a", encoding="utf-8") as f:
             f.write(config_extra)
-    ch = WebChannel(bus=EventBus(), config={})
-    await _start_async(None, False, False, str(tmp_path), channel_mode="web", web_channel=ch)
+    ch = MobileChannel(bus=EventBus(), config={})
+    await _start_async(None, False, False, str(tmp_path), channel_mode="mobile", mobile_channel=ch)
     return seen
 
 
@@ -96,7 +96,7 @@ async def test_phone_memory_routes_answer_through_the_plugin(tmp_path, monkeypat
     assert seen["edit"].status_code == 200 and seen["edit"].json()["status"] == "edited"
     edited = seen["edited"]["fact"]
     assert edited["value"] == "run it on port 9999" and "workaround" in edited["tags"]
-    assert edited["provenance"].startswith(USER_EDIT_PROVENANCE_PREFIX) and edited["provenance"].endswith(";web")
+    assert edited["provenance"].startswith(USER_EDIT_PROVENANCE_PREFIX) and edited["provenance"].endswith(";mobile")
     assert any(f["value"] == "run it on port 8888" and f["status"] == "superseded"
                for f in seen["edited"]["history"])
     assert seen["forget"].status_code == 200 and seen["forget"].json()["status"] == "forgotten"

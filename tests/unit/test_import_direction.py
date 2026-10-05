@@ -19,7 +19,7 @@ import pytest
 SRC = Path(__file__).resolve().parents[2] / "src" / "localharness"
 
 # Directories that are wholly one kind: the directory entry IS the explicit list.
-PLUGIN_DIRS = ("memory/", "dispatch/", "channels/web/", "autoresearch/", "tools/builtin/workflows/")
+PLUGIN_DIRS = ("memory/", "dispatch/", "channels/mobile/", "autoresearch/", "tools/builtin/workflows/")
 CORE_DIRS = ("core/", "config/", "provider/", "agent/", "orchestrator/", "registry/", "plugins/",
              "bench/")
 # cli/, channels/ and tools/ hold both kinds, so every file in them is named. A new file there is
@@ -27,7 +27,7 @@ CORE_DIRS = ("core/", "config/", "provider/", "agent/", "orchestrator/", "regist
 # module, or a plugin file turned into a package, never becomes core by default.
 PLUGIN_FILES = frozenset({
     "tools/builtin/memory_tools.py", "tools/builtin/generate_image_tool.py", "tools/builtin/image_plugin.py",
-    "cli/memory_cmd.py", "cli/memory_cli.py", "cli/web_cmd.py", "cli/web_plugin.py", "cli/generate_image_cmd.py",
+    "cli/memory_cmd.py", "cli/memory_cli.py", "cli/mobile_cmd.py", "cli/mobile_plugin.py", "cli/generate_image_cmd.py",
     "cli/autoresearch_cmd.py", "cli/experiment_cmd.py", "cli/propose_cmd.py", "cli/report_cmd.py",
 })
 _MIXED_DIR_CORE = {
@@ -131,7 +131,7 @@ def test_files_are_classified_by_explicit_list_not_directory():
     assert classify("tools/builtin/generate_image_tool.py") == "plugin"
     assert classify("tools/builtin/memory_tools.py") == "plugin"
     assert classify("tools/builtin/read_tool.py") == "core"
-    assert classify("cli/web_cmd.py") == "plugin"
+    assert classify("cli/mobile_cmd.py") == "plugin"
     assert classify("channels/terminal.py") == "core"
     assert classify("plugins/api.py") == "core"
     # In a directory holding both kinds, a new file is nobody's until it is named.
@@ -181,7 +181,7 @@ def test_an_injected_plugin_import_in_agent_loop_is_reported():
     ("agent/loop.py", "def f():\n    from localharness.memory.sqlite import MemoryStore\n",
      "memory/sqlite.py"),
     ("agent/loop.py", "if TYPE_CHECKING:\n    from localharness.channels import web\n",
-     "channels/web/__init__.py"),
+     "channels/mobile/__init__.py"),
     ("agent/loop.py", "import localharness.autoresearch.loop as ar\n", "autoresearch/loop.py"),
     ("agent/loop.py", "importlib.import_module('localharness.dispatch.plugin')\n",
      "dispatch/plugin.py"),

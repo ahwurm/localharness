@@ -1,5 +1,5 @@
 """MEMP-01, WEBP-03: in a real session the memory plugin occupies the ONE slot object that reaches
-both the AgentLoop and the web channel; memory off leaves it empty; a replacement memory plugin
+both the AgentLoop and the mobile channel; memory off leaves it empty; a replacement memory plugin
 occupies it instead; two memory plugins are both refused and it stays empty. A failed plugin
 substrate now leaves the slot EMPTY — memory is a plugin, so no plugin lifecycle means no memory and
 no phone memory screen (46's transitional occupant, seated by start_cmd outside the lifecycle, is
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.asyncio
 
 async def _drive(tmp_path, monkeypatch, *, config_extra: str = "") -> dict[str, Any]:
     """Run a web session; return what the channel and the root loop held while it was live."""
-    from localharness.channels.web.channel import WebChannel
+    from localharness.channels.mobile.channel import MobileChannel
     from localharness.cli.start_cmd import _start_async
     from localharness.core.bus import EventBus
 
@@ -35,8 +35,8 @@ async def _drive(tmp_path, monkeypatch, *, config_extra: str = "") -> dict[str, 
     if config_extra:
         with (tmp_path / "config.yaml").open("a", encoding="utf-8") as f:
             f.write(config_extra)
-    ch = WebChannel(bus=EventBus(), config={})
-    await _start_async(None, False, False, str(tmp_path), channel_mode="web", web_channel=ch)
+    ch = MobileChannel(bus=EventBus(), config={})
+    await _start_async(None, False, False, str(tmp_path), channel_mode="mobile", mobile_channel=ch)
     seen["after"] = ch.memory_slot()
     return seen
 
@@ -57,10 +57,10 @@ async def test_memory_off_binds_an_empty_slot(tmp_path, monkeypatch):
 
 
 async def test_a_replacement_memory_plugin_occupies_the_slot(tmp_path, monkeypatch):
-    from localharness.cli.web_plugin import WebPlugin
+    from localharness.cli.mobile_plugin import MobilePlugin
 
     monkeypatch.setattr("localharness.plugins.builtin.BUILTIN_PLUGINS",
-                        (_memory_plugin("recall"), WebPlugin))
+                        (_memory_plugin("recall"), MobilePlugin))
     seen = await _drive(tmp_path, monkeypatch)
     slot = seen["channel_slot"]
     assert slot.occupied and slot.occupant_name == "recall"
@@ -69,11 +69,11 @@ async def test_a_replacement_memory_plugin_occupies_the_slot(tmp_path, monkeypat
 
 
 async def test_two_memory_plugins_are_refused_and_the_slot_stays_empty(tmp_path, monkeypatch):
-    from localharness.cli.web_plugin import WebPlugin
+    from localharness.cli.mobile_plugin import MobilePlugin
     from localharness.memory.plugin import MemoryPlugin
 
     monkeypatch.setattr("localharness.plugins.builtin.BUILTIN_PLUGINS",
-                        (WebPlugin, MemoryPlugin, _memory_plugin("recall")))
+                        (MobilePlugin, MemoryPlugin, _memory_plugin("recall")))
     seen = await _drive(tmp_path, monkeypatch)
     assert seen["channel_slot"].occupied is False
     assert seen["browse"] is None

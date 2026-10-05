@@ -1,6 +1,6 @@
-"""The web channel: a JSON event API and the static shell that consumes it.
+"""The mobile channel: a JSON event API and the static shell that consumes it.
 
-`localharness web` serves two things on a private network boundary — the bus event stream over
+`localharness mobile` serves two things on a private network boundary — the bus event stream over
 SSE, and the deliberately-ugly reference page that exercises every wire feature. The wire
 protocol is not invented: the bus already assigns a monotonic `seq` to every event and persists
 it before delivering it, so the channel forwards those exact bytes and three properties fall out.
@@ -16,11 +16,11 @@ one honest hole in it, which `GapDetected` makes visible rather than inherits si
 **A closed phone cannot hang the agent.** In `auto` — the default — the gate PARKS a gated call
 instead of blocking, so the phone's permission surface is a queue with a badge, not a modal.
 
-See `.planning/web-channel-PRD.md` for the full design and `docs/web.md` for the user-facing
+See `.planning/web-channel-PRD.md` for the full design and `docs/mobile.md` for the user-facing
 account, including the honest "not yet" list.
 """
-from .channel import WebChannel
+from .channel import MobileChannel
 from .protocol import PROTOCOL_VERSION
-from .server import WebServer
+from .server import MobileServer
 
-__all__ = ["PROTOCOL_VERSION", "WebChannel", "WebServer"]
+__all__ = ["PROTOCOL_VERSION", "MobileChannel", "MobileServer"]

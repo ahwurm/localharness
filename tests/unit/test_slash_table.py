@@ -29,7 +29,7 @@ from localharness.cli.slash_commands import (
     help_text,
     set_plugin_rows,
 )
-from tests.unit.channels.test_web_server import BEARER, _stack
+from tests.unit.channels.test_mobile_server import BEARER, _stack
 from tests.unit.test_repl_unknown_slash import RecordingChannel, _build_repl
 
 CORE = [

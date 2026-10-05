@@ -76,7 +76,7 @@ exact-tokenizer = [
 json-repair = [
     "json-repair>=0.30,<1",
 ]
-# The web channel (`localharness web`): the ASGI app and the server behind it. OPTIONAL, on the
+# The mobile channel (`localharness mobile`): the ASGI app and the server behind it. OPTIONAL, on the
 # `dispatch` precedent — a terminal-only install should not carry an HTTP server.
 #
 # DECLARED EXPLICITLY even though `mcp` (a main dependency) already pulls both in today. That is
@@ -86,7 +86,7 @@ json-repair = [
 # the bus `seq` IS the SSE id); uvicorn rather than a hand-rolled h11 loop; ASGI rather than
 # aiohttp so the whole surface is drivable in-process by `httpx.ASGITransport` with no socket and
 # no model, which is how every web test runs.
-web = [
+mobile = [
     "starlette>=0.40,<1",
     "uvicorn>=0.30,<1",
     # Web Push (RFC 8291/8292), for the phone to buzz when a turn finishes or the gate needs a
@@ -101,7 +101,7 @@ web = [
     "http-ece>=1.2,<2",
     # The enrolment QR (WEBCH-27): nobody should hand-type a bearer token into a phone keyboard.
     # Pure Python, zero dependencies of its own, and it renders to a terminal directly — no
-    # Pillow, no image file. Absent, `localharness web` prints the URL and says so (it degrades,
+    # Pillow, no image file. Absent, `localharness mobile` prints the URL and says so (it degrades,
     # it does not crash).
     "segno>=1.6,<2",
 ]

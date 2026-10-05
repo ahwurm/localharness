@@ -271,7 +271,7 @@ async def test_the_display_families_label_exactly_the_tools_that_declare_ingest(
     from types import SimpleNamespace
 
     from localharness.channels.terminal import _BURST_GROUPS, _UNTRUSTED_NOTE
-    from localharness.channels.web.channel import WebChannel
+    from localharness.channels.mobile.channel import MobileChannel
     from localharness.core.bus import EventBus
 
     schemas = (await _builtin_registry()).global_schemas()
@@ -279,7 +279,7 @@ async def test_the_display_families_label_exactly_the_tools_that_declare_ingest(
     assert declared == set(WEB)
     grouped = {n for group, note, _style in _BURST_GROUPS if note == _UNTRUSTED_NOTE for n in group}
     assert grouped == declared
-    channel = WebChannel(bus=EventBus(), config={})
+    channel = MobileChannel(bus=EventBus(), config={})
     labelled = {s.name for s in schemas
                 if channel._ask_frame("r1", SimpleNamespace(tool_name=s.name, klass="shell")).untrusted_ingest}
     assert labelled == declared

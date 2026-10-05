@@ -273,7 +273,7 @@ def test_the_plugins_readme_names_both_install_forms(mock_client_cls, mock_detec
     """QA-04: a `uv tool` install has no virtual environment, so `uv pip install <package>` fails
     there ("No virtual environment found"). Measured: `uv tool install --with <package>` adds a
     plugin to an existing install too, and each run replaces the install's plugins and extras with
-    the ones it names (a re-run without `[web]` uninstalled the web extra's packages; one without a
+    the ones it names (a re-run without `[web]` uninstalled the mobile extra's packages; one without a
     `--with` uninstalled that plugin) — so the README says to name them all again."""
     mock_detect.return_value = _make_detector_result()
     mock_client = MagicMock()
@@ -284,7 +284,7 @@ def test_the_plugins_readme_names_both_install_forms(mock_client_cls, mock_detec
     assert result.exit_code == 0, result.output
     text = (tmp_path / "plugins" / "README.md").read_text(encoding="utf-8")
     for phrase in ("`uv tool install --with <package> localharness`", "`uv pip install <package>`",
-                   "`'localharness[web]'`", "every plugin you keep"):
+                   "`'localharness[mobile]'`", "every plugin you keep"):
         assert phrase in text, phrase
 
 

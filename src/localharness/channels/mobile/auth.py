@@ -77,16 +77,26 @@ COOKIE_PATH = "/api"
 _COOKIE_CONTEXT = b"localharness-web-get-cookie-v1"
 
 
-def token_path(config_dir: Optional[str | Path] = None) -> Path:
-    """Where the app token lives: `<global config dir>/web/token`.
+def state_dir(config_dir: Optional[str | Path] = None) -> Path:
+    """`<global config dir>/mobile/` — the app token, the VAPID key and the push subscriptions.
 
     GLOBAL on purpose, like the GPU daemon's pidfile: there is one listener per machine and the
     phone enrolled against it does not know or care which project directory the process was
-    started in.
+    started in. A `web/` folder left by a release that called this channel `web` is renamed here,
+    once, so a paired phone stays paired across the rename (0.17.0 drops the rename).
     """
     from localharness.config.paths import global_config_dir
 
-    return global_config_dir(config_dir) / "web" / "token"
+    base = global_config_dir(config_dir)
+    folder, legacy = base / "mobile", base / "web"
+    if legacy.is_dir() and not folder.exists():
+        legacy.rename(folder)
+    return folder
+
+
+def token_path(config_dir: Optional[str | Path] = None) -> Path:
+    """Where the app token lives: `<global config dir>/mobile/token`."""
+    return state_dir(config_dir) / "token"
 
 
 def load_or_create_token(config_dir: Optional[str | Path] = None) -> tuple[str, bool]:

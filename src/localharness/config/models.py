@@ -1870,7 +1870,7 @@ class TerminalConfig(BaseModel):
 
 
 class ChannelsConfig(BaseModel):
-    """Rules for the remote channels — the phone app (`web`) and Discord (`dispatch`)."""
+    """Rules for the remote channels — the phone app (`mobile`) and Discord (`dispatch`)."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
     remote_unattended: bool = Field(

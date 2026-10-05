@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from localharness.channels.web.protocol import FRAME_TYPES, PROTOCOL_VERSION
-from localharness.channels.web.server import MANIFEST, PACKAGED_UI_DIR
+from localharness.channels.mobile.protocol import FRAME_TYPES, PROTOCOL_VERSION
+from localharness.channels.mobile.server import MANIFEST, PACKAGED_UI_DIR
 
 PAGE = PACKAGED_UI_DIR / "index.html"
 
@@ -122,8 +122,8 @@ def test_a_protocol_version_mismatch_is_loud(page):
 
     By reference, not literal: a literal here pinned version 1 while the server moved to 2,
     which is how the page shipped a red banner to the phone (2026-09-28). The page<->constant
-    sync itself is enforced in test_web_protocol.py."""
-    from localharness.channels.web.protocol import PROTOCOL_VERSION
+    sync itself is enforced in test_mobile_protocol.py."""
+    from localharness.channels.mobile.protocol import PROTOCOL_VERSION
 
     assert f"d.protocol_version !== {PROTOCOL_VERSION}" in page
 
@@ -180,7 +180,7 @@ def test_the_page_treats_a_subagents_turn_boundary_as_a_child_event(page):
 
 def test_a_stuck_build_can_be_abandoned_from_the_page(page):
     """WEBCH-43's second half. The server has had `POST /api/bringup/abort` since the surface
-    landed; the page did not call it, so `docs/web.md`'s "offers a way out" was an overclaim.
+    landed; the page did not call it, so `docs/mobile.md`'s "offers a way out" was an overclaim.
     Cancelling a TURN is a different state machine and does not apply to a build."""
     assert "/api/bringup/abort" in page
     assert "give up on this build" in page
@@ -416,7 +416,7 @@ def test_safe_group_calls_consolidate_into_one_counter_row_by_default(page, tmp_
 onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
                   protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
 S.tools = {read: {group: "fs.read"}, grep: {group: "fs.read"}, bash_exec: {group: "execute"}};
-S.collapsible = ["fs.read", "web", "memory"];
+S.collapsible = ["fs.read", "mobile", "memory"];
 onEvent("Action", {seq: 2, action_type: "tool_call", tool_name: "read",
                    tool_call_id: "c1", tool_params: {path: "a.py"}});
 onEvent("Action", {seq: 3, action_type: "tool_call", tool_name: "grep",

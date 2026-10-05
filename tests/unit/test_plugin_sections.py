@@ -115,7 +115,7 @@ def test_every_declared_section_is_a_real_core_setting(cls) -> None:
     assert set(cls.manifest.sections) <= set(HarnessConfig.model_fields)
 
 
-@pytest.mark.parametrize("name", ["image", "web", "memory", "dispatch"])
+@pytest.mark.parametrize("name", ["image", "mobile", "memory", "dispatch"])
 def test_the_existing_bundled_manifests_claim_nothing(name) -> None:
     assert next(c for c in _REAL_BUILTINS if c.manifest.name == name).manifest.sections == ()
 
@@ -150,7 +150,7 @@ _INFO_KEYS = {"name", "state", "state_kind", "what_it_does", "from", "enable_com
               "requires", "uses", "cli", "slash", "settings", "setup_command", "note"}
 
 
-@pytest.mark.parametrize("name", ["web", "memory"])
+@pytest.mark.parametrize("name", ["mobile", "memory"])
 def test_a_plugin_that_claims_nothing_gains_only_an_empty_sections_key(tmp_path, name) -> None:
     g = _home(tmp_path)
     assert "pre-plugin name" not in _info(g, name)

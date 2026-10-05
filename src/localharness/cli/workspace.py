@@ -435,8 +435,8 @@ _start_async in the same process and must not ask the same question again (orche
 
 
 def _one_run(channel_mode: str) -> str:
-    """The one-run escape for the command that was run: `web` and `acp` have no --trust-project."""
-    return ("set LOCALHARNESS_TRUST_PROJECT=1 for one run" if channel_mode in ("web", "acp")
+    """The one-run escape for the command that was run: `mobile` and `acp` have no --trust-project."""
+    return ("set LOCALHARNESS_TRUST_PROJECT=1 for one run" if channel_mode in ("mobile", "acp")
             else "pass --trust-project for one run")
 
 

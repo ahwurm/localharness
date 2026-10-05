@@ -7,9 +7,9 @@ All notable changes to LocalHarness are documented here. The format follows
 ## [Unreleased]
 
 ### Added
-- **A page for each bundled plugin**, under `docs/plugins/` (`image`, `mobile`
-  for the `web` plugin, `memory`, `dispatch`, `autoresearch`), linked from a
-  shorter README next to its localharness.dev page.
+- **A page for each bundled plugin**, under `docs/plugins/` (`image`, `mobile`,
+  `memory`, `dispatch`, `autoresearch`), linked from a shorter README next to
+  its localharness.dev page.
 - **A logo**: the phone app's capped-agent icon, at `docs/assets/logo.svg`,
   now heads the README.
 - **`/plugins` in a running session.** `/plugins enable <name>` runs the
@@ -22,9 +22,9 @@ All notable changes to LocalHarness are documented here. The format follows
   Terminal sessions only: the phone, Discord and Zed answer with one line.
 - **Every bundled plugin has a setup step**, run by `localharness plugins
   enable <name>` on a terminal and by `/plugins enable <name>` in a session.
-  image asks the ComfyUI address and checks it. Mobile (`web`) asks the address
-  your phone opens and saves it as `web.public_url` (machine-level only), which
-  `localharness web` then puts in the pairing QR. memory downloads the
+  image asks the ComfyUI address and checks it. Mobile (`mobile`) asks the address
+  your phone opens and saves it as `mobile.public_url` (machine-level only), which
+  `localharness mobile` then puts in the pairing QR. memory downloads the
   embedding model when it is missing, after asking. dispatch asks the bot token
   (not echoed) and who may talk to the bot. autoresearch asks the proposer's
   address, model and API key (not echoed; empty for a local server), saves them
@@ -49,10 +49,10 @@ All notable changes to LocalHarness are documented here. The format follows
 - **`org.web_fetch_allow_private`**: the private addresses, networks or host
   names `web_fetch` may reach on purpose. Machine-level only.
 - **`localharness start --trust-project`, and `LOCALHARNESS_TRUST_PROJECT=1`**
-  for any command that opens a session (`web` and `acp` too): trust the project
+  for any command that opens a session (`mobile` and `acp` too): trust the project
   you are in for one run, start its MCP servers and record nothing. For CI and
   scripts.
-- **`localharness web --show-token`** prints the app token and the pairing QR
+- **`localharness mobile --show-token`** prints the app token and the pairing QR
   on a terminal and exits, so a running server can be paired from another
   terminal.
 - **`localharness components set <secret setting> -`** reads the value with
@@ -63,6 +63,19 @@ All notable changes to LocalHarness are documented here. The format follows
   files in it) other accounts can read.
 
 ### Changed
+- **The phone channel is `mobile`, nowhere `web`.** The command is
+  `localharness mobile` (`localharness web` is gone, not aliased), the plugin
+  is `mobile` (`localharness plugins enable mobile`, `mobile.public_url`, the
+  `mobile` and `mobile-token` doctor rows), the install extra is
+  `localharness[mobile]`, the page is `docs/mobile.md`, and the module is
+  `localharness.channels.mobile` (`cli/mobile_cmd.py`, `cli/mobile_plugin.py`).
+  Two things carry over on their own: a `web:` section in a config file is read
+  as `mobile:` until 0.17.0, with one line in the log asking for the rename; and
+  the app token, VAPID key and push subscriptions move from `<config>/web/` to
+  `<config>/mobile/` the first time the new name touches them, so a paired
+  phone stays paired. History rows written before this release still say
+  `channel: web`. The `web` tool group (`web_fetch`, `web_search`,
+  `web_page_query`) is about the web and keeps its name.
 - Re-running `init` keeps your config. On a terminal it asks "Config exists:
   <model> at <url>. Keep it?" first; a change goes to `overrides.yaml` and
   never rewrites `config.yaml`. `--force` still starts over.
@@ -101,7 +114,7 @@ All notable changes to LocalHarness are documented here. The format follows
 - `start` names a key sent over plain http to another machine with one warning
   in its summary, and the autoresearch setup check does the same for the
   proposer's key. The key is still sent.
-- `localharness web` with standard output not a terminal prints one line
+- `localharness mobile` with standard output not a terminal prints one line
   naming `--show-token` instead of the token, and draws the pairing QR on the
   terminal when it runs in one. A new home-screen install of the phone app asks
   for the token once.
@@ -124,7 +137,7 @@ All notable changes to LocalHarness are documented here. The format follows
   dreaming pass encoded each new turn window whole — tens of thousands of
   tokens of tool output — through the 0.6B embedding model on CPU, with torch
   on every core, and did so even when the agent had no stored facts for the
-  window to resonate against. A phone session (`localharness web`) keeps its
+  window to resonate against. A phone session (`localharness mobile`) keeps its
   session alive, so the pass fired as soon as the owner walked away and ran
   until the process was killed (2026-10-04: 22 undigested windows, four past
   32k characters, zero facts, 500%+ CPU for hours; each new chat started the
@@ -247,7 +260,7 @@ All notable changes to LocalHarness are documented here. The format follows
   text, the `components set` audit record and the phone's failed-start message.
   `validate` no longer prints an MCP server's `env` and header values. The files
   hold the real value.
-- **The phone token stays out of logs.** `localharness web` prints the token's
+- **The phone token stays out of logs.** `localharness mobile` prints the token's
   text only to a terminal, and only when it is created, rotated or asked for with
   `--show-token`. The event-stream cookie is now a value derived from the token
   that only GET routes accept; `--rotate-token` also clears push subscriptions; a
@@ -312,12 +325,12 @@ All notable changes to LocalHarness are documented here. The format follows
 - To decide whether a plugin is already on, `/plugins enable` runs its check
   inside the session: for image with ComfyUI unreachable, the input can wait
   up to about 3 seconds.
-- Once `localharness web` has run once, or a phone address is saved,
-  `/plugins enable web` answers "web is already on.", so the address is changed
-  from a shell with `localharness plugins enable web`.
+- Once `localharness mobile` has run once, or a phone address is saved,
+  `/plugins enable mobile` answers "mobile is already on.", so the address is changed
+  from a shell with `localharness plugins enable mobile`.
 - Pressing Enter at mobile's phone-address question in a session leaves the
   address unset, and the session then says "web: on, but not set up yet — not
-  enrolled yet" until `localharness web` has run once, the normal state of a
+  enrolled yet" until `localharness mobile` has run once, the normal state of a
   new install.
 - memory asks its download question even when the `embeddings` package is
   missing, then downloads nothing and names the install line. The download
@@ -399,9 +412,9 @@ All notable changes to LocalHarness are documented here. The format follows
   first may still be found in the current folder, and the lookup rule above is
   untested there.
 - No per-device phone tokens: `--rotate-token` re-pairs every device, and a
-  `localharness web` already running keeps the old token until it restarts. The
+  `localharness mobile` already running keeps the old token until it restarts. The
   QR drawn on a terminal carries the token into its scrollback, and a token an
-  older release printed into a log (a `localharness web | tee` log, journald)
+  older release printed into a log (a `localharness mobile | tee` log, journald)
   is still there until `--rotate-token` makes it useless.
 - A home-screen phone app installed and paired before the upgrade cannot pair
   again after a rotation without being reinstalled, as before the upgrade.

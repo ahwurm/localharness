@@ -1,6 +1,6 @@
 """The HTTP surface, driven in-process over ASGI — no socket, no model, no GPU.
 
-`httpx.ASGITransport` is the web channel's equivalent of the ACP test's socket pair: the point is
+`httpx.ASGITransport` is the mobile channel's equivalent of the ACP test's socket pair: the point is
 that every assertion here speaks the real wire — real routes, real auth, real SSE framing —
 rather than calling the server's own methods and proving nothing about what a phone would see.
 """
@@ -14,10 +14,10 @@ import httpx
 import pytest
 from starlette.routing import Route
 
-from localharness.channels.web import auth
-from localharness.channels.web.channel import WebChannel
-from localharness.channels.web.protocol import PROTOCOL_VERSION
-from localharness.channels.web.server import WebServer
+from localharness.channels.mobile import auth
+from localharness.channels.mobile.channel import MobileChannel
+from localharness.channels.mobile.protocol import PROTOCOL_VERSION
+from localharness.channels.mobile.server import MobileServer
 from localharness.core.bus import EventBus
 from localharness.core.events import Action, Observation, TaskComplete, UserMessage
 
@@ -30,13 +30,13 @@ BEARER = {"Authorization": f"Bearer {TOKEN}"}
 
 async def _stack(tmp_path, **kw):
     bus = EventBus(persist_path=tmp_path / "bus-events.jsonl")
-    channel = WebChannel(bus=bus, config={})
+    channel = MobileChannel(bus=bus, config={})
     await channel.start()
     channel.bind_runtime(
         session_id="s1", agent_id="orchestrator",
         session_dir=tmp_path / "sessions", **kw.pop("runtime", {}),
     )
-    server = WebServer(channel, token=TOKEN, **kw)
+    server = MobileServer(channel, token=TOKEN, **kw)
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=server.app), base_url="http://web.test"
     )
@@ -363,7 +363,7 @@ async def test_the_history_list_is_newest_first_titled_by_the_first_user_message
 
     bus, channel, server, client = await _stack(tmp_path)
     await bus.publish(UserMessage(agent_id="a", session_id="s1",
-                                  content="hello phone", channel="web"))
+                                  content="hello phone", channel="mobile"))
     old = tmp_path / "sessions" / "s0.jsonl"
     old.write_text(
         "not json — a torn line is skipped\n"
@@ -390,7 +390,7 @@ async def test_worker_session_logs_are_hidden_from_the_drawer_and_search(tmp_pat
     decides worker-ness; the log stays on disk and still replays by id."""
     bus, _, _, client = await _stack(tmp_path)
     await bus.publish(UserMessage(agent_id="a", session_id="s1",
-                                  content="the real chat", channel="web"))
+                                  content="the real chat", channel="mobile"))
     worker = tmp_path / "sessions" / "w1.jsonl"
     worker.write_text(
         "not json — a torn first line must not blur the verdict\n"
@@ -414,14 +414,14 @@ async def test_worker_session_logs_are_hidden_from_the_drawer_and_search(tmp_pat
 
 
 async def test_live_events_reach_the_stream_when_the_session_bus_is_not_the_construction_bus(tmp_path):
-    """THE 2026-09-15 FOUNDATIONAL BUG, wired the way PRODUCTION wires it: `localharness web`
+    """THE 2026-09-15 FOUNDATIONAL BUG, wired the way PRODUCTION wires it: `localharness mobile`
     constructs the channel on a placeholder bus before any session exists, and the session
     later publishes on its OWN bus. Without bind_runtime carrying the subscriptions over,
     live events never reach a phone — while frames still do, which is exactly what made the
     app look alive while every transcript stayed frozen until a refresh. Every other test in
     this file builds channel and publisher on ONE bus, which is why none of them could see it."""
     placeholder = EventBus(persist_path=tmp_path / "placeholder.jsonl")
-    channel = WebChannel(bus=placeholder, config={})
+    channel = MobileChannel(bus=placeholder, config={})
     session_bus = EventBus(persist_path=tmp_path / "bus-events.jsonl")
     # PRODUCTION ORDER: bind first (start_cmd:1637), the session builder's start() after.
     # Both must collapse to ONE subscription set — the first after-fix repro rendered every
@@ -431,7 +431,7 @@ async def test_live_events_reach_the_stream_when_the_session_bus_is_not_the_cons
         session_dir=tmp_path / "sessions", bus=session_bus,
     )
     await channel.start()
-    server = WebServer(channel, token=TOKEN)
+    server = MobileServer(channel, token=TOKEN)
 
     async def _publish_soon():
         await asyncio.sleep(0.05)
@@ -528,7 +528,7 @@ async def test_a_fresh_sessions_events_pass_the_seam_even_with_a_stale_cursor(tm
         # A fresh session's first events reuse low seq numbers on a NEW bus — they must pass.
         channel._emit("UserMessage", 1, json.dumps(
             {"seq": 1, "session_id": "s2", "event_type": "UserMessage",
-             "content": "fresh chat", "channel": "web"}))
+             "content": "fresh chat", "channel": "mobile"}))
 
     task = asyncio.ensure_future(_emit_soon())
     frames = await _read_frames(server, 5, path=f"/api/stream?from={published[1].seq}")
@@ -613,7 +613,7 @@ async def test_search_filters_sessions_by_what_was_said(tmp_path):
     each hit row carries a snippet centred on the hit."""
     bus, _, _, client = await _stack(tmp_path)
     await bus.publish(UserMessage(agent_id="a", session_id="s1",
-                                  content="the alpha question", channel="web"))
+                                  content="the alpha question", channel="mobile"))
     await bus.publish(TaskComplete(agent_id="a", session_id="s1", success=True,
                                    summary="a beta styled answer", duration_seconds=1.0,
                                    iterations=1))
@@ -636,7 +636,7 @@ async def test_delete_moves_an_ended_chat_to_trash_and_refuses_the_live_one(tmp_
     the live chat is a 409, a missing id a 404."""
     bus, _, _, client = await _stack(tmp_path)
     await bus.publish(UserMessage(agent_id="a", session_id="s1",
-                                  content="live chat", channel="web"))
+                                  content="live chat", channel="mobile"))
     old = tmp_path / "sessions" / "s0.jsonl"
     old.write_text(json.dumps({"seq": 0, "event_type": "UserMessage",
                                "content": "old chat"}) + "\n", encoding="utf-8")
@@ -661,7 +661,7 @@ async def test_delete_confines_the_id_to_the_sessions_dir(tmp_path):
     not be able to move the agent's bus ledger into the trash."""
     bus, _, server, client = await _stack(tmp_path)
     await bus.publish(UserMessage(agent_id="a", session_id="s1",
-                                  content="anything", channel="web"))   # materialises both files
+                                  content="anything", channel="mobile"))   # materialises both files
     outside = tmp_path / "bus-events.jsonl"
     assert outside.exists()
     # At the wire the router already refuses the slash shape (405 once %2F decodes) — and the
@@ -675,9 +675,9 @@ async def test_delete_confines_the_id_to_the_sessions_dir(tmp_path):
 
 async def test_memory_list_edit_history_and_forget_roundtrip(tmp_path):
     """The memory page's whole contract against a REAL store: list shows the fact, an edit
-    supersedes (history kept, user_edit@…;web stamped, tags carried), forget retires without
+    supersedes (history kept, user_edit@…;mobile stamped, tags carried), forget retires without
     destroying — and the history endpoint still serves the retired row."""
-    from localharness.channels.web.server import MEMORY_SNIPPET_CHARS
+    from localharness.channels.mobile.server import MEMORY_SNIPPET_CHARS
     from localharness.memory.browse import StoreBrowse
     from localharness.memory.sqlite import MemoryStore, USER_EDIT_PROVENANCE_PREFIX
     from localharness.plugins.slot import MemorySlot
@@ -714,7 +714,7 @@ async def test_memory_list_edit_history_and_forget_roundtrip(tmp_path):
                                    headers=BEARER)).json()
         assert detail["fact"]["value"] == "edited content"
         assert detail["fact"]["provenance"].startswith(USER_EDIT_PROVENANCE_PREFIX)
-        assert detail["fact"]["provenance"].endswith(";web")
+        assert detail["fact"]["provenance"].endswith(";mobile")
         assert "workaround" in detail["fact"]["tags"]          # tags carried, not dropped
         assert len(detail["history"]) == 2                     # original kept, superseded
         assert any(f["value"] == "original content" and f["status"] == "superseded"
@@ -1065,7 +1065,7 @@ async def test_the_packaged_reference_page_is_served_by_default(tmp_path):
 
 
 async def test_replay_refuses_a_path_that_is_not_a_session_log(tmp_path):
-    from localharness.channels.web.replay import ReplayDriver
+    from localharness.channels.mobile.replay import ReplayDriver
 
     secret = tmp_path / "secrets.env"
     secret.write_text("TOKEN=hunter2")
@@ -1191,8 +1191,8 @@ async def test_the_collapse_rule_itemizes_the_measured_tool_mix_on_the_REAL_regi
     allowlist. A fake registry cannot tell you that; a real one that grew a new dangerous tool in
     a collapsible group would fail here the day it landed.
     """
-    from localharness.channels.web.protocol import COLLAPSIBLE_GROUPS
-    from localharness.channels.web.server import _tool_rows
+    from localharness.channels.mobile.protocol import COLLAPSIBLE_GROUPS
+    from localharness.channels.mobile.server import _tool_rows
     from localharness.tools.builtin import register_builtin_tools
     from localharness.tools.registry import ToolRegistry
 

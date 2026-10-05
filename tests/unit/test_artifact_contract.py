@@ -3,7 +3,7 @@ artifacts, never where they live".
 
 Core computes the root (`<state dir>/artifacts/<plugin>/`), mints every id in one shape, and allows
 three image mimes. ArtifactRef is a typed reference, NOT an event: the web protocol snapshot must not
-move (tests/unit/channels/test_web_protocol.py runs in the same verify command).
+move (tests/unit/channels/test_mobile_protocol.py runs in the same verify command).
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 import localharness.core.artifacts as artifacts
-from localharness.channels.web.protocol import event_schemas
+from localharness.channels.mobile.protocol import event_schemas
 from localharness.core.artifacts import ARTIFACTS_DIR_NAME, artifact_root, mint_artifact_id, write_artifact
 from localharness.core.events import ARTIFACT_ID_RE, ARTIFACT_MIMES, EVENT_TYPE_MAP, ArtifactRef, BaseEvent
 

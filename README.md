@@ -22,7 +22,7 @@ LocalHarness is an open-source agent harness for local LLMs. It does not serve m
 You need Python 3.12 or later, [uv](https://docs.astral.sh/uv/), and a model server running.
 
 ```bash
-uv tool install 'localharness[embeddings,web]'  # memory's CPU model + the phone app
+uv tool install 'localharness[embeddings,mobile]'  # memory's CPU model + the phone app
 localharness init                    # finds your model server, writes your config
 localharness start                   # an interactive session
 
@@ -57,7 +57,7 @@ An agent that reads untrusted content, such as a web page or an MCP tool's resul
 | Name | What it does | Default | How to switch |
 |------|--------------|---------|---------------|
 | `image` | makes pictures with ComfyUI | off | `localharness plugins enable image --set comfyui_url=<url>` |
-| `web` | Mobile: the phone page, served with its event API by `localharness web` | on; needs `localharness[web]` | `localharness plugins disable web` |
+| `mobile` | Mobile: the phone page, served with its event API by `localharness mobile` | on; needs `localharness[mobile]` | `localharness plugins disable mobile` |
 | `memory` | persistent memory: facts recalled into each turn, memory tools, background consolidation | on | `localharness plugins disable memory` |
 | `dispatch` | chat: Discord | on; needs `localharness[dispatch]` | `localharness plugins disable dispatch` |
 | `autoresearch` | experiment loop | on | `localharness plugins disable autoresearch` |
@@ -65,7 +65,7 @@ An agent that reads untrusted content, such as a web page or an MCP tool's resul
 Each plugin has its own page:
 
 - **image**: a `generate_image` tool and `localharness generate-image`, against a ComfyUI server you run yourself. [Page](docs/plugins/image.md) · [site](https://localharness.dev/plugins/image/) · [Docs](docs/reference-architectures/image-generation.md)
-- **Mobile (the `web` plugin)**: drive a session from your phone on your own private network. [Page](docs/plugins/mobile.md) · [site](https://localharness.dev/plugins/mobile/) · [Docs](docs/web.md)
+- **Mobile (the `mobile` plugin)**: drive a session from your phone on your own private network. [Page](docs/plugins/mobile.md) · [site](https://localharness.dev/plugins/mobile/) · [Docs](docs/mobile.md)
 - **memory**: per-agent SQLite memory recalled into each turn, with idle consolidation. [Page](docs/plugins/memory.md) · [site](https://localharness.dev/plugins/memory/) · [Docs](docs/specs/05-memory.md)
 - **dispatch**: `localharness start --channel discord` drives a session from allowlisted Discord messages. [Page](docs/plugins/dispatch.md) · [site](https://localharness.dev/plugins/dispatch/) · [Docs](docs/specs/11-channels.md#the-dispatch-plugin-chat-platforms-discord-today)
 - **autoresearch**: propose one harness change, run it through a statistical gate, adopt or reject it. [Page](docs/plugins/autoresearch.md) · [site](https://localharness.dev/plugins/autoresearch/) · [Docs](docs/specs/09-hooks-plugins.md#the-bundled-plugins)

@@ -307,20 +307,20 @@ def _not_set_up_yet(s, name: str, detail: str) -> None:
                                                                           "Your conversation continues."):])
 
 
-@pytest.mark.plugin("web")
+@pytest.mark.plugin("mobile")
 def test_web_left_unset_is_on_but_not_set_up_yet(run):
-    """Deferred #23: Enter at mobile's optional phone address, on a machine where `localharness web`
+    """Deferred #23: Enter at mobile's optional phone address, on a machine where `localharness mobile`
     has never run — every new install. Its check is skipped ("not enrolled yet"): a state that is
     not set up yet, not a failure."""
-    s = run([["hello there", "/plugins enable web"], ["what now"]], answer="")
+    s = run([["hello there", "/plugins enable mobile"], ["what now"]], answer="")
 
-    assert "Restarting with web on — your conversation is kept." in s.said
+    assert "Restarting with mobile on — your conversation is kept." in s.said
     assert [(t, d, r) for t, d, _kw, r in s.prompts] == [(PHONE_Q, "", False)]
-    assert _overrides(s) == {"web": {"enabled": True}}  # Enter wrote no address
-    assert "i  web: not enrolled yet" in s.doctor.getvalue()
+    assert _overrides(s) == {"mobile": {"enabled": True}}  # Enter wrote no address
+    assert "i  mobile: not enrolled yet" in s.doctor.getvalue()
     step = s.step.getvalue()
     assert step.index(AGENT_PROMPT_LEAD) < step.index(WEB_NEXT)
-    _not_set_up_yet(s, "web", "not enrolled yet")
+    _not_set_up_yet(s, "mobile", "not enrolled yet")
 
 
 @pytest.mark.plugin("autoresearch")

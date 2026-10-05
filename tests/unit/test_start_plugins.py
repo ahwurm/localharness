@@ -243,16 +243,16 @@ async def test_start_runs_a_bundled_plugin_through_the_lifecycle(tmp_path, monke
 
 async def test_the_web_channel_gets_the_artifact_roots_core_accepted(tmp_path, monkeypatch):
     """PAPI-10: the root core computed for a plugin that wants artifacts, `<state dir>/artifacts/
-    <name>`, is handed to the web channel, which then serves from it and nowhere else."""
-    from localharness.channels.web.channel import WebChannel
+    <name>`, is handed to the mobile channel, which then serves from it and nowhere else."""
+    from localharness.channels.mobile.channel import MobileChannel
     from localharness.cli.start_cmd import _start_async
     from localharness.core.bus import EventBus
 
-    from localharness.cli.web_plugin import WebPlugin
+    from localharness.cli.mobile_plugin import MobilePlugin
 
     _stub_start_boundaries(tmp_path, monkeypatch)
-    _bundle(monkeypatch, _Probe, WebPlugin)  # `web` is a --channel name only while bundled (46-04)
-    channel = WebChannel(bus=EventBus(), config={})
+    _bundle(monkeypatch, _Probe, MobilePlugin)  # `mobile` is a --channel name only while bundled (46-04)
+    channel = MobileChannel(bus=EventBus(), config={})
     bound: list[dict] = []
     real_bind = channel.bind_runtime
 
@@ -262,7 +262,7 @@ async def test_the_web_channel_gets_the_artifact_roots_core_accepted(tmp_path, m
 
     channel.bind_runtime = _rec_bind  # type: ignore[method-assign]
 
-    await _start_async(None, False, False, str(tmp_path), channel_mode="web", web_channel=channel)
+    await _start_async(None, False, False, str(tmp_path), channel_mode="mobile", mobile_channel=channel)
 
     root = tmp_path / "artifacts" / "probe"
     assert [b["artifact_roots"] for b in bound] == [{"probe": root}]

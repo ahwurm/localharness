@@ -143,7 +143,6 @@
     "doctor",
     "validate",
     "model",
-    "propose",
     "update",
     "acp",
     "agent",
@@ -154,7 +153,8 @@
     "autoresearch",
     "experiment",
     "memory",
-    "web"
+    "mobile",
+    "propose"
   ],
   "root_rows": [
     [
@@ -198,6 +198,10 @@
       "Browse and edit the agent's persistent memory (list / show / edit / rm / archive / restore)."
     ],
     [
+      "mobile",
+      "Serve the phone UI and its event API (see docs/mobile.md)."
+    ],
+    [
       "model",
       "List available models, or switch the persisted default with `localharness model <name>`."
     ],
@@ -220,10 +224,6 @@
     [
       "validate",
       "Validate agent YAML configuration files."
-    ],
-    [
-      "web",
-      "Serve the phone UI and its event API (see docs/web.md)."
     ]
   ],
   "run_help": {
