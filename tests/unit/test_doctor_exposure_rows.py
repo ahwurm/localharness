@@ -19,7 +19,7 @@ NETWORK_ROW = ("i Model server: reachable from other machines on port 8081 (serv
                "set server.bind_all: false to keep it on this machine")
 KEY_ROW = ("i Model server: launched without requiring your API key (provider.api_key is set) — "
            "set server.require_api_key: true to make it refuse requests without the key")
-REMOTE_ROW = ('i Remote channels on (web): a paired phone or an allowlisted chat account can switch a '
+REMOTE_ROW = ('i Remote channels on (mobile): a paired phone or an allowlisted chat account can switch a '
               'session to unattended and answer "always" — set channels.remote_unattended: false to '
               'keep both to this terminal')
 SECRET = "sk-DOCTOR-0001"

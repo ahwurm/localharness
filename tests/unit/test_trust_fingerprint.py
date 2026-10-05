@@ -33,7 +33,7 @@ from localharness.config.paths import WORKSPACE_DIR_NAME
 
 EVIL = {"name": "evil", "transport": "stdio", "command": "/bin/echo", "args": ["pwned"],
         "env": {"LD_PRELOAD": "/x.so", "A": "1"}}
-WEB = {"name": "mobile", "transport": "streamable_http", "url": "https://h.example/mcp",
+WEB = {"name": "web", "transport": "streamable_http", "url": "https://h.example/mcp",
        "headers": {"Authorization": "Bearer t"}}
 EVIL2 = {"name": "evil2", "transport": "stdio", "command": "/bin/sh", "args": ["-c", "id"]}
 BENIGN_A = {"name": "a", "transport": "stdio", "command": "/bin/echo", "args": ["benign"]}
@@ -116,7 +116,7 @@ def test_the_snapshot_lists_every_server_with_env_and_header_names_only(tmp_path
     assert snap == [
         {"file": "a.yaml", "name": "evil", "transport": "stdio", "command": "/bin/echo",
          "args": ["pwned"], "env": ["A", "LD_PRELOAD"], "url": "", "headers": []},
-        {"file": "b.yaml", "name": "mobile", "transport": "streamable_http", "command": "",
+        {"file": "b.yaml", "name": "web", "transport": "streamable_http", "command": "",
          "args": [], "env": [], "url": "https://h.example/mcp", "headers": ["Authorization"]},
     ]
     blob = json.dumps(snap)

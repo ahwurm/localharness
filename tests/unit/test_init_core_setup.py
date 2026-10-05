@@ -492,7 +492,7 @@ def test_init_ends_with_every_bundled_plugin_and_its_command(tmp_path, monkeypat
     assert "on — set up: localharness plugins enable autoresearch" in autoresearch
     assert ("(install `localharness[dispatch]` to use it) — set up: localharness plugins enable "
             "dispatch") in dispatch
-    assert "(install `localharness[mobile]` to use it) — set up: localharness plugins enable mobile" in web
+    assert "(install `localharness[mobile]` to use it) — set up: localharness plugins enable mobile" in mobile
     out = result.output
     assert out.index("LocalHarness configured at") < out.index("★") < out.index(HEADER)
     assert init_cmd.PLUGINS_HEADER == HEADER

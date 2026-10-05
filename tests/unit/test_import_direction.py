@@ -180,7 +180,7 @@ def test_an_injected_plugin_import_in_agent_loop_is_reported():
 @pytest.mark.parametrize("rel, source, target", [
     ("agent/loop.py", "def f():\n    from localharness.memory.sqlite import MemoryStore\n",
      "memory/sqlite.py"),
-    ("agent/loop.py", "if TYPE_CHECKING:\n    from localharness.channels import web\n",
+    ("agent/loop.py", "if TYPE_CHECKING:\n    from localharness.channels import mobile\n",
      "channels/mobile/__init__.py"),
     ("agent/loop.py", "import localharness.autoresearch.loop as ar\n", "autoresearch/loop.py"),
     ("agent/loop.py", "importlib.import_module('localharness.dispatch.plugin')\n",

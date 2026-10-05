@@ -394,7 +394,7 @@ _REQUIRES = ["pydantic>=2", "colorama>=0.4; python_version >= '3'",  # base requ
 
 @pytest.mark.parametrize("installed, extra, expected", [
     ({"starlette": "0.46.0", "uvicorn": "0.34.0"}, "mobile", True),
-    ({"starlette": "0.46.0", "uvicorn": "0.34.0"}, "Web", True),       # extras compare normalized
+    ({"starlette": "0.46.0", "uvicorn": "0.34.0"}, "Mobile", True),    # extras compare normalized
     ({"starlette": "0.46.0"}, "mobile", False),                           # one requirement missing
     ({"starlette": "1.2.0", "uvicorn": "0.34.0"}, "mobile", False),       # one out of its range
     ({"starlette": "0.46.0", "uvicorn": "0.34.0"}, "dispatch", False),
