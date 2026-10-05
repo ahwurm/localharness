@@ -66,5 +66,5 @@ class ToolResultGetTool(Tool):
             try:
                 self._store.declare_active_reference(active_step, id, source)
             except ActiveReferenceError as exc:
-                return self.err(str(exc), error_type="active_reference_blocked")
+                return self.err(str(exc), error_type="validation_error")
         return self.ok(body)
