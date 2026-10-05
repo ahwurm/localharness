@@ -50,6 +50,7 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/pending", "Tool calls parked for you to answer", "_slash_pending"),
     SlashCommand("/approve", "Run a parked call; /approve [N] (default: the oldest)", "_slash_approve", True),
     SlashCommand("/deny", "Drop a parked call; /deny [N] (default: the oldest)", "_slash_deny", True),
+    SlashCommand("/task", "Show the working task record; /task clear to delete it", "_slash_task", True),
     SlashCommand("/plugins", "List plugins; /plugins enable|disable <name> to switch one in this session",
                  "_slash_plugins", True, terminal_only=True),
     SlashCommand("/quit", "Exit LocalHarness", "_slash_quit"),

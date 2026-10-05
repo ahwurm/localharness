@@ -35,7 +35,9 @@ def _build_validator_model(tool_name: str, parameters: dict[str, Any]) -> type[B
     field_definitions: dict[str, Any] = {}
 
     for field_name, field_schema in properties.items():
-        py_type = _JSON_SCHEMA_TYPE_MAP.get(field_schema.get("type", "string"), Any)
+        json_type = field_schema.get("type", "string")
+        # A JSON-schema type union (["string", "integer", ...]) accepts any of them.
+        py_type = _JSON_SCHEMA_TYPE_MAP.get(json_type, Any) if isinstance(json_type, str) else Any
         default = field_schema.get("default", ...)
         is_required = field_name in required_fields
         if not is_required and default is ...:

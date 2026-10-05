@@ -42,6 +42,7 @@ CORE = [
     ("/pending", "Tool calls parked for you to answer"),
     ("/approve", "Run a parked call; /approve [N] (default: the oldest)"),
     ("/deny", "Drop a parked call; /deny [N] (default: the oldest)"),
+    ("/task", "Show the working task record; /task clear to delete it"),
     ("/plugins", "List plugins; /plugins enable|disable <name> to switch one in this session"),
     ("/quit", "Exit LocalHarness"),
     ("/exit", "Exit LocalHarness"),
@@ -59,6 +60,7 @@ HELP_BEFORE = (
     "  /pending    Tool calls parked for you to answer\n"
     "  /approve    Run a parked call; /approve [N] (default: the oldest)\n"
     "  /deny       Drop a parked call; /deny [N] (default: the oldest)\n"
+    "  /task       Show the working task record; /task clear to delete it\n"
     "  /plugins    List plugins; /plugins enable|disable <name> to switch one in this session\n"
     "  /quit       Exit LocalHarness\n"
     "  /exit       Exit LocalHarness\n"

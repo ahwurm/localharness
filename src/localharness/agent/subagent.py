@@ -404,7 +404,8 @@ CONFIG_CHILD_DEFAULT_TOOLS: list[str] = ["read", "glob", "grep"]
 
 def _config_child_allowed(agent_config: Any) -> list[str]:
     """Resolve a config child's effective allowlist: tools.add (or the safe default) minus deny,
-    with `agent` always stripped (config children never delegate further). One source of truth so
+    with `agent` and `task` always stripped (config children never delegate further or touch the
+    parent's task record). One source of truth so
     the grant-target safety check and dispatch_config_subagent can't drift."""
     tool_cfg = getattr(agent_config, "tools", None)
     add = list(getattr(tool_cfg, "add", None) or []) or list(CONFIG_CHILD_DEFAULT_TOOLS)
@@ -416,7 +417,7 @@ def _config_child_allowed(agent_config: Any) -> list[str]:
     # an explicit deny of `edit` still wins below.
     if "write" in add and "edit" not in add:
         add.append("edit")
-    return [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] != "agent"]
+    return [t for t in add if t not in deny and t.split(".")[-1].split(":")[-1] not in {"agent", "task"}]
 
 
 # Builtin dispatch toolsets keyed by sanitized agent name — used ONLY by the grant-target safety

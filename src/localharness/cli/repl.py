@@ -1273,6 +1273,18 @@ class OrchestratorREPL:
     async def _slash_deny(self, args: str, args_lower: str) -> None:
         await self._handle_pending_answer(args_lower, approve=False)
 
+    async def _slash_task(self, args: str, args_lower: str) -> None:
+        from localharness.agent.task_record import TaskState
+        state = getattr(self._agent, "_task_context", None)
+        if not isinstance(state, TaskState):
+            text = "No task record."
+        elif args_lower.strip() == "clear":
+            state.clear()
+            text = "Task record cleared; task.json deleted."
+        else:
+            text = state.show()
+        await self._channel.send_message(text, metadata={"style": "system.info"})
+
     async def _slash_agents(self, args: str, args_lower: str) -> None:
         cards = self._orchestrator._card_registry.all_cards()
         if not cards:

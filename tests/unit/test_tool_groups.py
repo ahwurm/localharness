@@ -29,6 +29,7 @@ EXPECTED_GROUPS = {
     "python_exec": "code",
     "cruncher_exec": "code",
     "agent": "delegate",
+    "task": "task",
     "web_search": "web",
     "web_fetch": "web",
     "web_page_query": "web",
@@ -73,13 +74,15 @@ async def test_registered_builtins_match_the_ruled_taxonomy():
         assert schema.group == EXPECTED_GROUPS[name], f"{name}: {schema.group}"
 
 
-@pytest.mark.parametrize("name", ["python_exec", "cruncher_exec", "agent"])
+@pytest.mark.parametrize("name", ["python_exec", "cruncher_exec", "agent", "task"])
 def test_the_conditionally_registered_tools_name_a_group(name):
     """python_exec, cruncher_exec and agent are wired by the subagent/start paths rather than by
     `register_builtin_tools`, so the sweep above cannot see them. They carry the same obligation."""
+    from localharness.agent.task_record import TaskState
     from localharness.tools.builtin.agent_tool import AgentTool
     from localharness.tools.builtin.cruncher_exec import CruncherExecTool
     from localharness.tools.builtin.python_tool import PythonExecTool
+    from localharness.tools.builtin.task_tool import TaskTool
 
     async def _runner(*args, **kwargs):  # pragma: no cover - never invoked
         return ""
@@ -88,6 +91,7 @@ def test_the_conditionally_registered_tools_name_a_group(name):
         "python_exec": PythonExecTool(),
         "cruncher_exec": CruncherExecTool(seed={}),
         "agent": AgentTool(agent_runner=_runner),
+        "task": TaskTool(TaskState()),
     }
     schema = tools[name].info()
     assert schema.name == name

@@ -3221,3 +3221,54 @@ async def test_startup_summary_counts_are_entity_colored(tmp_path, monkeypatch):
 
     rgb = ";".join(str(int(ENTITY_STYLES["agent"][i:i + 2], 16)) for i in (1, 3, 5))
     assert rgb in buf.getvalue(), buf.getvalue()[-600:]
+
+
+# ---------------------------------------------------------------------------
+# 0.16.5 Q1: the working task record is reachable from a plain `localharness start`.
+# ---------------------------------------------------------------------------
+
+def _capture_loop_kwargs(monkeypatch) -> list[dict]:
+    import localharness.agent.loop as _loop_mod
+    real = _loop_mod.AgentLoop.__init__
+    seen: list[dict] = []
+
+    def _rec(self, *args, **kwargs):
+        seen.append(kwargs)
+        return real(self, *args, **kwargs)
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop.__init__", _rec)
+    return seen
+
+
+async def test_start_wires_task_tool_and_task_state(tmp_path, monkeypatch):
+    import os
+    from localharness.agent.task_context import TaskContext
+    from localharness.agent.task_record import TaskRecord, TaskState
+    from localharness.cli.start_cmd import _start_async
+    monkeypatch.chdir(tmp_path)
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    seen = _capture_loop_kwargs(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    kw = seen[-1]
+    state = kw["task_context"]
+    assert isinstance(state, TaskState) and state.current is None
+    assert kw["tool_registry"].schema_of("task") is not None
+    assert not state.path.exists()  # an ordinary start writes no record
+    saved = TaskState(state.path, workspace=os.getcwd())
+    saved.begin(TaskRecord(context=TaskContext("Tide pool report"), workspace=os.getcwd()))
+    saved.save()
+    await _start_async(None, False, False, str(tmp_path))
+    assert seen[-1]["task_context"].current.id == saved.current.id
+
+
+async def test_start_moves_corrupt_task_state_aside(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    monkeypatch.chdir(tmp_path)
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    seen = _capture_loop_kwargs(monkeypatch)
+    await _start_async(None, False, False, str(tmp_path))
+    path = seen[-1]["task_context"].path
+    path.write_text("{not json")
+    await _start_async(None, False, False, str(tmp_path))
+    assert path.with_name("task.json.corrupt").exists() and not path.exists()
+    assert seen[-1]["task_context"].current is None and len(seen) == 2
+    assert _read_sessions(tmp_path)[-1][3] == "complete"  # the start still ran to the end

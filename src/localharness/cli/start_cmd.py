@@ -1541,6 +1541,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             available_agents=available_agent_names,
         )
         await tool_registry.register(agent_tool, scope="global")
+        # The working task record (0.16.5): root only, loaded from this agent's folder; children
+        # and bench never hold it. No record = no packet and no file.
+        from localharness.agent.task_record import TaskState
+        from localharness.tools.builtin.task_tool import TaskTool
+        task_state, task_notice = TaskState.load(agent_dir / "task.json", workspace=os.getcwd())
+        if task_notice:
+            console.print(f"[yellow]{task_notice}[/yellow]")
+        await tool_registry.register(TaskTool(task_state), scope="global")
 
         # --- 10. Agent loop ---
         # #35: resolve the kill-file value against THIS config dir (a bare default 'KILL' lands at
@@ -1571,6 +1579,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
             # prompt's memory section.
             memory_slot=memory_slot,
+            task_context=task_state,
         )
         if resume is not None:  # the next turn carries the earlier conversation, byte for byte
             agent_loop.resume(list(resume.conversation), resume.prior_context)
