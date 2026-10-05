@@ -187,3 +187,166 @@ def test_show_and_clear(tmp_path):
     assert state.current.id in text and "human: Five sections" in text and "revision 0/1" in text
     state.clear()
     assert state.current is None and not state.path.exists()
+
+
+# --- 0.16.5 slice 2: references, judgments, revision budget ---
+
+from localharness.agent.context import ContentStore  # noqa: E402
+from localharness.agent.task_record import BUDGET_EXHAUSTED, Judgment, Reference  # noqa: E402
+
+
+def test_round_trip_with_references_judgments_and_verified_revision(tmp_path):
+    rec = make_record(tmp_path, references=[Reference("voice", "voice.md", "abc", "f" * 64, "current"),
+                                            Reference("pasted", handle="def")],
+                      judgments=[Judgment("tone", "Plain tone", "ok", "para 2", "cut adverbs", "assessed")],
+                      verified_revision={"draft": "a" * 64})
+    assert TaskRecord.from_dict(json.loads(json.dumps(rec.to_dict()))) == rec
+    old = make_record(tmp_path).to_dict()
+    for k in ("references", "judgments", "verified_revision"):
+        old.pop(k)
+    back = TaskRecord.from_dict(old)
+    assert (back.references, back.judgments, back.verified_revision) == ([], [], {})
+
+
+def refs_state(tmp_path, *refs):
+    state = started(tmp_path, "Begin the draft.")
+    state.current.references = list(refs)
+    return state
+
+
+def test_refresh_snapshots_redeclares_and_resnapshots_changes(tmp_path):
+    voice = tmp_path / "voice.md"
+    voice.write_text("Short sentences.")
+    state, store = refs_state(tmp_path, Reference("voice", "voice.md")), ContentStore()
+    state.refresh_references(store)
+    ref = state.current.references[0]
+    assert ref.status == "current" and store.get(ref.handle) == "Short sentences."
+    assert store.active_step == f"task {state.current.id}"
+    assert [r.source for r in store.active_references] == ["voice"]
+    assert json.loads(state.path.read_text())["references"][0]["handle"] == ref.handle
+    store.clear_active_references()  # the per-human-turn reset
+    state.refresh_references(store)
+    assert [r.handle for r in store.active_references] == [ref.handle] and ref.status == "current"
+    first = ref.handle
+    voice.write_text("Longer, winding sentences.")
+    state.refresh_references(store)
+    assert ref.status == "refreshed (changed)" and ref.handle != first
+    assert store.get(ref.handle) == "Longer, winding sentences."
+    assert [r.handle for r in store.active_references] == [ref.handle]
+    state.refresh_references(store)
+    assert ref.status == "current"
+
+
+def test_refresh_problem_statuses_never_raise(tmp_path, monkeypatch):
+    import localharness.agent.task_record as tr
+    (tmp_path / "big.md").write_text("x" * 64)
+    (tmp_path / "ok.md").write_text("fine")
+    monkeypatch.setattr(tr, "MAX_REFERENCE_BYTES", 32)
+    store = ContentStore()
+    for i in range(4):
+        store.declare_active_reference("model step", store.put(f"other {i}"), f"other{i}")
+    state = refs_state(tmp_path, Reference("big", "big.md"), Reference("gone", handle="0123456789ab"),
+                       Reference("lost", "lost.md"), Reference("ok", "ok.md"))
+    state.refresh_references(store)
+    big, gone, lost, ok = state.current.references
+    assert big.status == "too large; narrow the reference" and big.handle is None
+    assert gone.status == "unavailable; read it again"
+    assert lost.status == "missing; the file could not be read"
+    assert ok.status.startswith("unprotected: ") and "four references" in ok.status
+    assert store.active_step == "model step"  # merged into the model-declared set, not replaced
+    packet = state.packet()
+    assert "References: big: too large; narrow the reference; gone: unavailable; read it again" in packet
+
+
+def test_refresh_is_inert_without_a_live_record(tmp_path):
+    (tmp_path / "v.md").write_text("v")
+    empty = TaskState(tmp_path / "none.json", workspace=str(tmp_path))
+    store = ContentStore()
+    empty.refresh_references(store)
+    assert not store.active_references and not (tmp_path / "none.json").exists()
+    state = refs_state(tmp_path, Reference("v", "v.md"))
+    state.refresh_references(None)
+    assert state.current.references[0].handle is None
+    state.current.closed = True
+    state.refresh_references(store)
+    assert not store.active_references and state.current.references[0].handle is None
+
+
+def test_reconcile_nulls_handles_and_notes_reference_changes(tmp_path):
+    (tmp_path / "voice.md").write_text("one")
+    (tmp_path / "src.md").write_text("src")
+    state = refs_state(tmp_path, Reference("voice", "voice.md"), Reference("src", "src.md"),
+                       Reference("pasted", handle="abc"))
+    store = ContentStore()
+    store.put("pasted body")
+    state.refresh_references(store)
+    state.save()
+    (tmp_path / "voice.md").write_text("two")
+    (tmp_path / "src.md").unlink()
+    loaded, _ = TaskState.load(state.path, workspace=str(tmp_path))
+    assert [r.handle for r in loaded.current.references] == [None, None, None]
+    assert loaded.current.references[2].status == "unavailable; read it again"
+    assert "reference voice changed since last session" in loaded.notes
+    assert "reference src missing" in loaded.notes
+
+
+def test_revision_budget_counts_edits_to_verified_artifacts(tmp_path):
+    draft = tmp_path / "draft.md"
+    draft.write_text("v1")
+    state = started(tmp_path, "Begin.")
+    rec, ctx = state.current, state.current.context
+    ctx.artifacts["draft"] = draft
+    ctx.revise(Requirement("lint", "Lint", "bash_exec", {"command": "lint"}, "exit_code", 0, ("draft",)))
+
+    def lint(code, call):
+        state.record_result("bash_exec", {"command": "lint"}, call, success=True,
+                            metadata={"exit_code": code}, before=state.revisions())
+
+    def edit(text, call):
+        before = state.revisions()
+        draft.write_text(text)
+        state.record_result("write", {"path": "draft.md"}, call, success=True, metadata={}, before=before)
+
+    lint(1, "c1")
+    assert ctx.outcomes()["lint"] == "failed" and "draft" in rec.verified_revision
+    state.record_result("read", {"path": "x"}, "c2", success=True, metadata={}, before=state.revisions())
+    assert rec.revisions_used == 0
+    edit("v2", "c3")
+    assert rec.revisions_used == 1 and "draft" not in rec.verified_revision
+    edit("v3", "c4")  # unverified since the last edit: not another revision
+    assert rec.revisions_used == 1 and "Revision budget: used 1 of 1" in state.packet()
+    assert BUDGET_EXHAUSTED not in state.packet()
+    lint(0, "c5")
+    edit("v4", "c6")
+    assert rec.revisions_used == 2 and BUDGET_EXHAUSTED in state.packet()
+
+
+def test_finalize_reports_open_judgments_only_on_unchanged_candidates(tmp_path):
+    state = started(tmp_path, "Begin.")
+    state.current.context.requested_status = "complete"
+    state.current.judgments = [Judgment("tone", "Plain tone"), Judgment("flow", "Flows", status="assessed")]
+    assert state.finalize("Draft done.") == "Draft done.\n\nOpen editorial judgments (not assessed): tone."
+    state.current.context.revise(Requirement("lint", "Lint", "bash_exec", {"command": "lint"}))
+    out = state.finalize("Draft done.")
+    assert out.startswith("Task remains unverified") and "editorial" not in out
+    state.current.judgments[0].status = "waived"
+    assert "Open editorial" not in state.finalize("Draft done.")
+
+
+def test_completed_record_does_not_rewrite_later_replies(tmp_path):
+    state = started(tmp_path, "Skip the lint gate for this draft.")
+    ctx = state.current.context
+    ctx.requested_status = "complete"
+    ctx.revise(Requirement("lint", "Lint", "bash_exec", {"command": "lint"}))
+    ctx.waive("lint", human_decision="skip the lint gate")
+    assert state.finalize("Done.").startswith("Task finished with a human waiver")
+    assert state.status == "complete"
+    assert state.finalize("4") == "4"  # a later aside is not rewritten
+
+
+def test_show_lists_references_and_judgments(tmp_path):
+    state = refs_state(tmp_path, Reference("voice", "voice.md"), Reference("pasted", handle="abc"))
+    state.current.judgments = [Judgment("tone", "Plain tone", assessment="mostly plain", fix="cut adverbs")]
+    text = state.show()
+    assert "  voice: voice.md (pending)" in text and "  pasted: handle abc (pending)" in text
+    assert "  tone: open — Plain tone | assessment: mostly plain | fix: cut adverbs" in text

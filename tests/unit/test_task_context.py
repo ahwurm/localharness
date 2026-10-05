@@ -89,12 +89,29 @@ def test_checkpoint_retains_unfinished_asks_then_correction(tmp_path):
     assert "stricter gate" in ctx.packet()
 
 
-def make_loop(llm, bus, tmp_path, task=None, registry=None, window=32768):
+def test_check_binds_by_declared_argument_subset(tmp_path):
+    lint = Requirement("lint", "Lint", "bash_exec", {"command": "python lint.py draft.md"}, "exit_code", 0)
+    bare = Requirement("bare", "Any bash", "bash_exec", {})
+    ctx = TaskContext("Draft", {"lint": lint, "bare": bare})
+    for i, (tool, args) in enumerate([("bash_exec", {"command": "ls"}), ("bash_exec", {}),
+                                      ("read", {"command": "python lint.py draft.md"}),
+                                      ("bash_exec", {"timeout_s": 30})]):
+        ctx.record_result(tool, args, f"miss{i}", success=True, metadata={"exit_code": 0}, before={})
+        assert "lint" not in ctx.receipts, args
+    assert "bare" in ctx.receipts and ctx.receipts["bare"].call_id == "miss1"  # only the empty call
+    ctx.record_result("bash_exec", {"command": "python lint.py draft.md", "timeout_s": 30}, "hit",
+                      success=True, metadata={"exit_code": 0}, before={})
+    assert ctx.receipts["lint"].call_id == "hit" and ctx.outcomes()["lint"] == "passed"
+    assert ctx.receipts["bare"].call_id == "miss1"  # {} never binds to a call with arguments
+
+
+def make_loop(llm, bus, tmp_path, task=None, registry=None, window=32768, ctx=None):
     cfg = AgentConfig.model_validate({
         "name": "evidence", "role": "Complete the requested task.",
         "permissions": {"mode": "unattended", "deny_patterns": []},
     })
-    return AgentLoop(cfg, llm, bus, ContextManager(max_context_tokens=window), registry,
+    ctx = ContextManager(max_context_tokens=window) if ctx is None else ctx
+    return AgentLoop(cfg, llm, bus, ctx, registry,
                      PermissionEvaluator(), compact_md_path=COMPACT_DISABLED,
                      config_dir=tmp_path, task_context=task)
 
