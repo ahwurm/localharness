@@ -25,7 +25,7 @@ except ImportError:  # non-POSIX: no cross-process lock, in-process semaphore st
     fcntl = None  # type: ignore[assignment]
 
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
-from localharness.core.types import Message, ToolCall, ToolSchema
+from localharness.core.types import Message, ToolSchema, provider_messages
 from localharness.provider.detector import LOCAL_INFERENCE_TIMEOUT_MIN
 from localharness.provider.fn_call import _TOOL_INJECTION_MARKER, FnCallConverter
 
@@ -1122,7 +1122,7 @@ class LLMClient:
         never an is_local blanket; a server that 400s it is caught by the _extra_body_rejected flag."""
         kwargs: dict[str, Any] = {
             "model": self.config.model,
-            "messages": messages,
+            "messages": provider_messages(messages),
             "temperature": self.config.temperature,
             **_max_tokens_kwarg(max_tokens or self.config.max_tokens),
             **_presence_penalty_kwarg(presence_penalty),
@@ -1512,7 +1512,7 @@ class LLMClient:
         Returns (message, usage).
         """
         injected_messages = self._fold_tool_injection(
-            self._downgrade_history_for_xml(messages), tools
+            self._downgrade_history_for_xml(provider_messages(messages)), tools
         )
         kwargs: dict[str, Any] = {
             "model": self.config.model,
@@ -1568,7 +1568,7 @@ class LLMClient:
 
         Returns (message, usage).
         """
-        msgs = self._fold_tool_injection(self._downgrade_history_for_xml(messages), tools)
+        msgs = self._fold_tool_injection(self._downgrade_history_for_xml(provider_messages(messages)), tools)
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": msgs,

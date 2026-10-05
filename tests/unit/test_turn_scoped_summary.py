@@ -179,15 +179,15 @@ async def test_confirmed_with_in_turn_answer_does_not_reprompt(bus):
 
 
 def test_strip_sentinel_exchanges_drops_nudge_confirmed_pair():
-    # The nudge must be the harness's VERBATIM self-check text — only its own nudges are
-    # poppable now, so a paraphrase would (correctly) be kept as user content.
+    # Only structured harness origin permits removing the inducing nudge.
     from localharness.agent.loop import _SELF_CHECK_NUDGE, _strip_sentinel_exchanges
+    from localharness.core.types import harness_message
 
     msgs = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "the task"},
         {"role": "assistant", "content": "The answer is 42."},
-        {"role": "user", "content": _SELF_CHECK_NUDGE},
+        harness_message(_SELF_CHECK_NUDGE, "self_check"),
         {"role": "assistant", "content": "CONFIRMED"},
     ]
     out = _strip_sentinel_exchanges(msgs)
