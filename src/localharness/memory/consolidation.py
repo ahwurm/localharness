@@ -436,13 +436,18 @@ class ConsolidationPass:
         if not windows:
             return
         id_blobs = await self._store.active_embedded()
+        if not id_blobs and await self._store.facts_missing_embedding(limit=1):
+            # Facts exist but none has a vector yet (the model is missing, refused, or was just
+            # changed and the backfill failed): nothing can be integrated NOW, and the marks must
+            # not move — these windows are the next pass's stream, once the backfill has run.
+            return
         deltas: dict[int, float] = {}
         bindings: list[list[int]] = []
         digested = 0
         if not id_blobs:
-            # No stored trace can resonate, so a window's attention has nowhere to land: encoding
-            # it would cost a transformer forward pass and change nothing. The marks still advance
-            # — these windows are digested, to the only outcome they could have had (2026-10-04: 22
+            # No stored trace at all, so a window's attention has nowhere to land: encoding it
+            # would cost a transformer forward pass and change nothing. The marks still advance —
+            # these windows are digested, to the only outcome they could have had (2026-10-04: 22
             # windows through the model on every core for hours, against zero facts).
             digested = len(windows)
         deadline = time.monotonic() + PASS_BUDGET_S

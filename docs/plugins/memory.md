@@ -32,7 +32,7 @@ All under `agent.memory.*` in an agent's file or `overrides.yaml`; none is machi
 |---|---|
 | `memory.enabled` | Turns the plugin on or off. |
 | `agent.memory.recall_scope` | `workspace` (default), `global` or `both`: which store recall reads in a project. Writes always go to the session's own store. |
-| `agent.memory.consolidation.enabled` | Idle consolidation. Default on. Bounded: it runs the embedding model on 4 CPU threads, reads each turn by its first 4,000 characters, spends at most 60 s encoding per pass, and encodes nothing when the agent has no stored facts yet. |
+| `agent.memory.consolidation.enabled` | Idle consolidation. Default on. Bounded: the embedding model gets 4 CPU threads, each turn is read by its first 4,000 characters, the scoring step starts no new turn after 60 s, and with no stored facts at all the model is not touched. |
 | `agent.memory.archival.enabled` | Moves facts that stopped earning their place to an archive, restorable with `localharness memory restore`; nothing is deleted. Default off. |
 | `agent.memory.embedding_model` | Default `Qwen/Qwen3-Embedding-0.6B`. |
 

@@ -100,7 +100,7 @@ async def test_start_without_the_web_extra_does_not_warn_about_web(tmp_path, mon
     _no_extra(monkeypatch)
     await _start_async(None, False, False, str(tmp_path))
     assert any("startup)" in line for line in printed), printed
-    assert not any("plugin web:" in line for line in printed), printed
+    assert not any("plugin mobile:" in line for line in printed), printed
 
 
 def test_plugins_list_still_shows_the_missing_extra(monkeypatch):

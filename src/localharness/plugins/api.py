@@ -7,7 +7,7 @@ start → running → stop in reverse — in dependency order. A plugin gets one
 (PluginContext), never imports cli/start_cmd.py and never imports another plugin. The copyable
 reference is examples/plugin-template/.
 
-One contract, two kinds of author: the features that ship with LocalHarness (memory, web, image,
+One contract, two kinds of author: the features that ship with LocalHarness (memory, mobile, image,
 dispatch, autoresearch — each becomes a bundled plugin listed in plugins/builtin.py) and plugins you
 write and install yourself. Where the rules differ between the two, the docstring says so.
 """

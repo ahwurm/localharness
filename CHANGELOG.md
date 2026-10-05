@@ -67,18 +67,15 @@ Nothing yet.
   files in it) other accounts can read.
 
 ### Changed
-- **The phone channel is `mobile`, nowhere `web`.** The command is
-  `localharness mobile` (`localharness web` is gone, not aliased), the plugin
-  is `mobile` (`localharness plugins enable mobile`, `mobile.public_url`, the
-  `mobile` and `mobile-token` doctor rows), the install extra is
-  `localharness[mobile]`, the page is `docs/mobile.md`, and the module is
-  `localharness.channels.mobile` (`cli/mobile_cmd.py`, `cli/mobile_plugin.py`).
-  Two things carry over on their own: a `web:` section in a config file is read
-  as `mobile:` until 0.17.0, with one line in the log asking for the rename; and
-  the app token, VAPID key and push subscriptions move from `<config>/web/` to
-  `<config>/mobile/` the first time the new name touches them, so a paired
-  phone stays paired. History rows written before this release still say
-  `channel: web`. The `web` tool group (`web_fetch`, `web_search`,
+- **The phone channel is `mobile`.** `localharness mobile` serves the phone
+  app; the plugin is `mobile` (`localharness plugins enable mobile`,
+  `mobile.public_url`, the `mobile` and `mobile-token` doctor rows), the
+  install extra is `localharness[mobile]` (`[web]` installs nothing now), the
+  page is `docs/mobile.md`, and the module is `localharness.channels.mobile`
+  (`cli/mobile_cmd.py`, `cli/mobile_plugin.py`). 0.16.0 briefly shipped the
+  same channel under the name `web`; that name is gone, and a `web:` config
+  section or a `<config>/web/` token folder from it is picked up under the new
+  name until 0.17.0. The `web` tool group (`web_fetch`, `web_search`,
   `web_page_query`) is about the web and keeps its name.
 - Re-running `init` keeps your config. On a terminal it asks "Config exists:
   <model> at <url>. Keep it?" first; a change goes to `overrides.yaml` and
@@ -137,24 +134,27 @@ Nothing yet.
   until 0.17.0 (see 0.16.0's Deprecated).
 
 ### Fixed
-- **Idle memory consolidation could hold every CPU core for hours.** The
-  dreaming pass encoded each new turn window whole — tens of thousands of
-  tokens of tool output — through the 0.6B embedding model on CPU, with torch
-  on every core, and did so even when the agent had no stored facts for the
-  window to resonate against. A phone session (`localharness mobile`) keeps its
-  session alive, so the pass fired as soon as the owner walked away and ran
-  until the process was killed (2026-10-04: 22 undigested windows, four past
-  32k characters, zero facts, 500%+ CPU for hours; each new chat started the
-  same work over, because a pass cut short recorded neither its marks nor its
-  watermark). Now a window with nothing stored to resonate against is marked
-  digested without an encode; the probe reads a window's head (4,000
-  characters) and the model's input is cut at 1,024 tokens for every encode;
-  the model gets 4 CPU threads, not the box; one pass spends at most 60 s
-  encoding (its first window always runs; the rest is the next pass's stream);
-  and a pass cut short by a session ending keeps the marks and the watermark
-  of what it digested. Named gap: an encode already running when a pass is
-  cancelled finishes that one window (seconds at the new bound) — a thread
-  cannot be interrupted.
+- **Idle memory consolidation could hold every CPU core for hours.** While a
+  session sits idle, memory re-reads the new turns of the session log and
+  scores them against the stored facts with the embedding model, on CPU. It
+  read each turn whole — tens of thousands of tokens of tool output — with
+  torch on every core, and did so even when there were no stored facts to
+  score against, so the work could change nothing. A phone session keeps its
+  session alive, so this started as soon as the owner walked away and ran
+  until the process was killed; on the maintainer's machine it held all 20
+  cores for hours, and each new chat started the same work over, because a
+  pass cut short recorded no progress. Now: with no stored facts at all, the
+  new turns are marked read without touching the model; with facts that have
+  no vectors yet (the model missing, or just changed), nothing is marked and
+  the turns wait for the next pass; each turn is read by its first 4,000
+  characters and the model's input is cut at 1,024 tokens for every encode;
+  the model gets 4 CPU threads (fewer on a smaller machine), not the box; the
+  scoring step starts no new turn after 60 s (its first turn always runs; the
+  rest waits for the next idle pass); and a pass cut short by a session ending
+  keeps the progress it made. Named gaps: an encode already running when a
+  pass is cancelled finishes that one turn (about 7 s on 4 threads) and holds
+  the model's lock, so a recall at that moment waits for it; the step that
+  gives facts their vectors has no time bound of its own.
 - `localharness plugins enable autoresearch` checks the proposer by sending
   it `proposer.api_key`; that check now reads the proposer's address and key
   from your machine-level config only, as `propose` does, and both
@@ -186,7 +186,7 @@ Nothing yet.
 
 ### Security
 - **A project you clone can no longer choose where your requests and keys go,
-  or what runs.** A project's `.localharness/` may set only what changes the
+  or what the harness launches or loads.** A project's `.localharness/` may set only what changes the
   agent's behaviour inside that project. The provider and proposer addresses
   and keys, peer endpoints, the `server:` launch section, the audit log path,
   hook plugins, the fetch allowlist, the remote lock, and an agent file's
@@ -220,7 +220,7 @@ Nothing yet.
   what any shell command gets in your mode (`guarded` asks, keyed on its path
   and content; `auto`, `trusted` and `unattended` run it) and is listed once at
   the next start on a terminal.
-- **The agent's tools cannot change the harness's settings files.** Its `write`
+- **The agent's tools are refused the harness's settings files, for the shapes the gate reads.** Its `write`
   and `edit` tools, and the shell writes the gate reads, with `~`, `$HOME` and
   `${HOME}` expanded — onto the file (a `-t DIR` destination, `curl
   --output-dir` and `wget -P` included), a copy, move or link into the config
@@ -246,7 +246,7 @@ Nothing yet.
   specialists from the tools the harness has, tells it never to write its own
   tool for something the harness already provides (web search, fetch, files,
   delegation), and says what waits for your confirmation.
-- **`web_fetch` reaches only public addresses.** Every address a URL resolves
+- **`web_fetch` refuses non-public addresses.** Every address a URL resolves
   to, at every redirect (at most 5, followed by the tool itself), must be
   public: loopback, private, link-local, cloud-metadata, CGNAT and tailnet, and
   multicast addresses are refused however they are spelled, and the request goes
@@ -263,7 +263,8 @@ Nothing yet.
   get/list/set`, `config show` and its `--json`, `validate`, `doctor`, error
   text, the `components set` audit record and the phone's failed-start message.
   `validate` no longer prints an MCP server's `env` and header values. The files
-  hold the real value.
+  hold the real value. The phone's failed-start message masks the provider,
+  endpoint and proposer keys only.
 - **The phone token stays out of logs.** `localharness mobile` prints the token's
   text only to a terminal, and only when it is created, rotated or asked for with
   `--show-token`. The event-stream cookie is now a value derived from the token
@@ -285,9 +286,12 @@ Nothing yet.
   as on the phone; the bot ignores its own reactions, pings nobody but the
   person it replies to, and shows every masked link's address; and it no longer
   reads another program's token file.
-- **Model text cannot drive your terminal.** The terminal channel removes
-  escape, OSC, CSI and C1 control sequences from model text, tool output and
-  plugin output before it prints them.
+- **The terminal channel strips control sequences from model and tool text.** It
+  removes escape, OSC, CSI and C1 control sequences from model text, tool
+  output and plugin output before it prints them. `localharness memory
+  list|show` and `localharness agent list` print stored text as it is, so a
+  fact or an agent file the model wrote can still carry a sequence there (see
+  Known limitations).
 - **Files are owner-only from creation.** `init` makes the config folder 0700,
   a start makes an older one 0700, and the files the harness creates are 0600
   from their first byte. `init --force` saves the old `config.yaml` first and
@@ -301,7 +305,7 @@ Nothing yet.
   folder you stand in: on POSIX every relative `PATH` entry is skipped, on
   Windows (which would search the current folder first) the empty and `.`
   entries are.
-- **A start reaches only your model server.** It no longer builds tiktoken's
+- **A start reaches only the servers you configured.** It no longer builds tiktoken's
   vocabulary (downloaded when not cached) or, with no MCP server configured,
   imports the MCP client library; a missing embedding model is one line in the
   start summary, downloaded the first time memory needs it, and a cached one
@@ -319,6 +323,13 @@ Nothing yet.
   session, and nothing else stops.
 
 ### Known limitations (named, not hidden)
+- `localharness memory list|show` and `localharness agent list` print stored
+  text as it is: a fact or an agent file the model wrote can carry a terminal
+  control sequence there. The terminal channel strips them; these two commands
+  do not yet.
+- A memory encode already running when idle consolidation is cancelled
+  finishes its turn (about 7 s on 4 threads) and holds the embedding model's
+  lock for that long, so a recall at that moment waits.
 - During a `/plugins` restart the conversation is held only in memory: if the
   model server goes away between the two halves, the rebuild fails and the
   conversation is lost.
@@ -333,7 +344,7 @@ Nothing yet.
   `/plugins enable mobile` answers "mobile is already on.", so the address is changed
   from a shell with `localharness plugins enable mobile`.
 - Pressing Enter at mobile's phone-address question in a session leaves the
-  address unset, and the session then says "web: on, but not set up yet — not
+  address unset, and the session then says "mobile: on, but not set up yet — not
   enrolled yet" until `localharness mobile` has run once, the normal state of a
   new install.
 - memory asks its download question even when the `embeddings` package is

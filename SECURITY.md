@@ -874,10 +874,12 @@ fact was saved, not the fact read back. The bench turns memory on only for the t
 that seed it, with the same setting on both sides of a comparison and background consolidation
 off, so a bench result says nothing about how memory behaves in any other scenario.
 
-**Model and tool output is cleaned before it reaches your terminal.** The terminal channel removes
+**The terminal channel cleans model and tool output before it prints it.** It removes
 escape and control sequences — ESC, OSC, CSI and the C1 range — from model text, reasoning, tool
 calls and their output, errors and plugin output, so text the model copied from a page cannot set
 your clipboard (OSC 52), clear the screen or redraw a permission question above the prompt.
+`localharness memory list|show` and `localharness agent list` print stored text as it is, so a
+fact or an agent file the model wrote can still carry a sequence there; that gap is open.
 
 **Not yet built: sandboxing.** Host-mutating tools currently run with the machine's
 full trust; there is no OS-level sandbox (e.g. bubblewrap) around them yet. That is on
@@ -939,7 +941,7 @@ a named host (the model is told the name could not be resolved). Behind an envir
 proxy resolves the name again: a DNS answer that changes between the two lookups, or a name the
 proxy resolves differently (split-horizon DNS), reaches whatever the proxy can reach. And a pattern
 with no regex syntax is searched inside the session itself, which on a hostile page holds it for
-up to about a second and a half (measured on a 4 MB page).
+up to about a second and a half (about, on a 4 MB page).
 
 ## Securing the endpoint
 

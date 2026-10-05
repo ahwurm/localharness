@@ -432,7 +432,7 @@ class MobileServer:
         return FileResponse(target, headers={"Cache-Control": "no-cache"})
 
     async def enroll(self, request: Request) -> Response:
-        """Trade the app token for the cookie `EventSource` can carry: `lh_web_get`, a GET-only
+        """Trade the app token for the cookie `EventSource` can carry: `lh_mobile_get`, a GET-only
         value derived from the token, `SameSite=Strict`, `HttpOnly`, `Secure`, scoped to `/api`.
 
         Bearer-authenticated like every POST. The page enrols on every load and once more when its
