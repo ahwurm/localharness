@@ -9,5 +9,6 @@ memory_get
 memory_search
 read
 remember
+task
 tool_result_get
 write

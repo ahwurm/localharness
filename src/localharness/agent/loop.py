@@ -30,6 +30,7 @@ from localharness.core.types import Message, harness_message, human_message, is_
 from localharness.agent.context import APPROX_CHARS_PER_TOKEN, response_reserve
 from localharness.agent.context import ActiveReferenceError
 from localharness.agent.task_context import TaskContext
+from localharness.agent.task_record import TaskState
 from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
 
@@ -924,7 +925,7 @@ class AgentLoop:
         gate: Any = None,  # PermissionGate
         guardrails_path: Path | None = None,
         memory_slot: Any = None,  # plugins.slot.MemorySlot
-        task_context: TaskContext | None = None,
+        task_context: TaskContext | TaskState | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
@@ -2245,12 +2246,14 @@ class AgentLoop:
 
     async def _build_request(self, messages: list[Message], tools: list | None):
         packed, budget = await self._ctx.build_messages(messages, tools)
-        if self._task_context is not None:
+        # An empty packet (a TaskState with no active record) is an ordinary request.
+        packet = self._task_context.packet() if self._task_context is not None else ""
+        if packet:
             # Request-local, after every lossy transform: one current packet, no growing log.
-            packed = [*packed, harness_message(self._task_context.packet(), "active_task")]
+            packed = [*packed, harness_message(packet, "active_task")]
             packed = self._ctx.ensure_active_references(packed, tools, enforce_budget=True)
             budget = replace(budget, current_usage=self._ctx._token_counter.estimate_messages(packed))
-        active = self._task_context is not None or bool(
+        active = bool(packet) or bool(
             getattr(getattr(self._ctx, "_content_store", None), "active_references", ())
         )
         mode = getattr(getattr(self._llm, "config", None), "tool_call_mode", "native")
