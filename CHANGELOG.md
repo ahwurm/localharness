@@ -6,7 +6,11 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+- **Memory no longer logs a CPU-thread-cap warning when torch is not installed at all.** There is
+  nothing to cap in that case (a model that needed torch could not have loaded); the warning still
+  fires when torch is present but refuses the cap. Reachable only in test setups without the
+  `embeddings` extra, which is what kept the project's CI red from 0.16.1 to 0.16.3.
 
 ## [0.16.3] — 2026-10-05
 

@@ -86,10 +86,12 @@ def test_a_launched_peer_with_a_key_and_no_requirement_gets_its_own_row(tmp_path
 # ------------------------------------------------------------------------------- D7: the remote lock
 
 
+# dispatch is on by default and counts as a remote channel wherever discord.py is installed (CI installs
+# the extra); the row under test is mobile's, so dispatch is switched off explicitly in both tests.
 @pytest.mark.plugin("mobile")
 def test_a_remote_channel_with_the_lock_off_is_named(tmp_path, monkeypatch, fake_home):
     pytest.importorskip("starlette")
-    assert REMOTE_ROW in _doctor(tmp_path, monkeypatch, fake_home)
+    assert REMOTE_ROW in _doctor(tmp_path, monkeypatch, fake_home, dispatch={"enabled": False})
 
 
 @pytest.mark.plugin("mobile")
@@ -97,7 +99,7 @@ def test_a_remote_channel_with_the_lock_off_is_named(tmp_path, monkeypatch, fake
                          ids=["lock on", "no channel plugin on"])
 def test_no_remote_row_with_the_lock_on_or_no_channel_on(tmp_path, monkeypatch, fake_home, sections):
     pytest.importorskip("starlette")
-    out = _doctor(tmp_path, monkeypatch, fake_home, **sections)
+    out = _doctor(tmp_path, monkeypatch, fake_home, dispatch={"enabled": False}, **sections)
     assert "Remote channels on" not in out and "Plugins:" in out
 
 

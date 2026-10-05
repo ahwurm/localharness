@@ -160,14 +160,17 @@ def _bound(model):
     """`model` with its input cut at EMBED_MAX_TOKENS and torch's CPU threads capped at EMBED_THREADS.
 
     Neither cap may fail a load: a model object without the attribute, or a torch without thread
-    control, keeps the model usable and says so once in the log."""
+    control, keeps the model usable and says so once in the log. No torch at all is nothing to cap
+    (a model that needed it could not have loaded), so that case says nothing."""
     try:
         model.max_seq_length = EMBED_MAX_TOKENS
     except Exception:  # noqa: BLE001
         log.warning("memory: could not cap the embedding model's input at %d tokens", EMBED_MAX_TOKENS)
     try:
         import torch
-
+    except ImportError:
+        return model
+    try:
         torch.set_num_threads(EMBED_THREADS)
     except Exception:  # noqa: BLE001
         log.warning("memory: could not cap the embedding model at %d CPU threads", EMBED_THREADS)
