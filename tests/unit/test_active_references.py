@@ -170,6 +170,8 @@ async def test_declarations_are_bounded_and_releasable_without_changing_plain_re
         assert (await tool.run(id=handle, active_step="draft", source=f"source-{n}")).success
     rejected = await tool.run(id=handle, active_step="draft", source="source-5")
     assert not rejected.success
+    assert rejected.error_type == "validation_error"
+    assert rejected.error == "Active step exceeds four references; split or narrow the step."
     assert len(store.active_references) == 4
     assert (await tool.run(id=handle, active_step="")).success
     assert not store.active_references
@@ -203,3 +205,31 @@ async def test_general_eviction_restores_only_the_declared_reference(monkeypatch
     assert not any(m.get("content") == unrelated for m in packed)
     assert any("tool result evicted" in (m.get("content") or "") for m in packed)
     assert packed == ctx.repair_tool_pairing(packed)
+
+
+@pytest.mark.asyncio
+async def test_over_four_refusal_reaches_the_model_through_the_loop(tmp_path, bus, mock_llm_client):
+    from localharness.tools.base import ToolResult
+    from tests.unit.test_task_context import make_loop
+
+    store = ContentStore()
+    handle = store.put("Source snapshot")
+    tool = ToolResultGetTool(store)
+
+    class Registry:
+        def get_tools_for_agent(self, *args):
+            return {}
+
+        async def dispatch(self, name, args, *rest) -> ToolResult:
+            return await tool.run(**args)
+
+    calls = [mock_llm_client.ToolCall(id=f"g{n}", name="tool_result_get",
+                                      arguments={"id": handle, "active_step": "draft", "source": f"s{n}"})
+             for n in range(5)]
+    llm = mock_llm_client([mock_llm_client.Response(content=None, tool_calls=calls),
+                           mock_llm_client.Response(content="Narrowing the step.")])
+    loop = make_loop(llm, bus, tmp_path, registry=Registry())
+    await loop.run_turn("Draft from the five sources.")
+    tool_messages = [m for m in loop._conversation if m.get("role") == "tool"]
+    assert len(tool_messages) == 5
+    assert "exceeds four references; split or narrow" in tool_messages[-1]["content"]
