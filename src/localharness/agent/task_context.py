@@ -26,7 +26,7 @@ class Requirement:
     expected: Any = None
     dependencies: tuple[str, ...] = ()
     revision: str = "1"
-    origin: Literal["human", "caller"] = "caller"
+    origin: Literal["human", "caller", "model"] = "caller"
 
     def fingerprint(self) -> str:
         return hashlib.sha256(json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()
