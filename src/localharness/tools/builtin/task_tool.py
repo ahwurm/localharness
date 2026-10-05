@@ -12,8 +12,8 @@ from typing import Any
 
 from localharness.agent.task_context import Requirement, TaskContext
 from localharness.agent.task_record import (
-    MAX_DECISIONS, MAX_OBJECTIVE, MAX_QUESTIONS, MAX_TEXT, Decision, TaskRecord, TaskRecordTooLarge,
-    TaskState,
+    MAX_DECISIONS, MAX_JUDGMENTS, MAX_OBJECTIVE, MAX_QUESTIONS, MAX_REFERENCES, MAX_TEXT, Decision,
+    Judgment, Reference, TaskRecord, TaskRecordTooLarge, TaskState,
 )
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
@@ -26,6 +26,8 @@ ALLOWED: dict[str, set[str]] = {
     "artifact": {"key", "path"},
     "check": {"key", "description", "tool", "arguments", "result_field", "expected", "depends_on",
               "human_quote"},
+    "reference": {"source", "path", "handle"},
+    "judge": {"key", "criterion", "assessment", "passages", "fix"},
     "waive": {"key", "human_quote"},
     "close": {"status", "note", "human_quote"},
     "show": set(),
@@ -65,7 +67,10 @@ class TaskTool(Tool):
                 "delegation). Only for that — never for questions or answer-only discussion. start a "
                 "task, record the human's corrections as decisions (quote their words in human_quote), "
                 "register artifacts and machine-checkable checks, and close at the requested boundary. "
-                "Receipts, hashes, and human turns are recorded by the runtime; you cannot write them."
+                "Receipts, hashes, and human turns are recorded by the runtime; you cannot write them. "
+                "Declare files the work depends on (instructions, voice samples, sources) as references "
+                "so they stay in view; record editorial criteria with judge — judgments are opinion, "
+                "never evidence."
             ),
             parameters={
                 "type": "object",
@@ -86,17 +91,25 @@ class TaskTool(Tool):
                     "delegation_budget": {"type": "integer"},
                     "text": _str("decide: the decision"),
                     "human_quote": _str("The human's own words that support this"),
-                    "key": _str("artifact/check/waive key"),
-                    "path": _str("artifact: workspace file path"),
+                    "key": _str("artifact/check/judge/waive key"),
+                    "path": _str("artifact/reference: workspace file path"),
+                    "source": _str("reference: a short label, e.g. voice sample", 200),
+                    "handle": _str("reference: a tool_result_get handle instead of a path", 64),
+                    "criterion": _str("judge: the editorial criterion"),
+                    "assessment": _str("judge: your assessment against the criterion"),
+                    "passages": _str("judge: the passages the assessment concerns"),
+                    "fix": _str("judge: the proposed fix"),
                     "description": _str("check: what it proves"),
-                    "tool": _str("check: tool name of the exact call that proves it"),
-                    "arguments": {"type": "object", "description": "check: that call's arguments"},
+                    "tool": _str("check: tool name of the call that proves it"),
+                    "arguments": {"type": "object",
+                                  "description": "check: the arguments that identify that call "
+                                                 "(extra actual arguments such as a timeout are allowed)"},
                     "result_field": _str("check: result metadata field to compare"),
                     "expected": {"type": ["string", "integer", "number", "boolean"],
                                  "description": "check: expected value of result_field (e.g. 0 for exit_code)"},
                     "depends_on": {"type": "array", "items": {"type": "string", "maxLength": MAX_TEXT},
                                    "description": "check: artifact keys it depends on"},
-                    "status": {"type": "string", "enum": ["complete", "checkpoint", "blocked"]},
+                    "status": {"type": "string", "enum": ["complete", "checkpoint", "partial", "blocked"]},
                     "note": _str("close: what remains"),
                 },
                 "required": ["action"],
@@ -121,12 +134,13 @@ class TaskTool(Tool):
         if action != "start" and (rec is None or rec.closed or rec.context.status == "complete"):
             return self.err("No active task; call task start for substantive work",
                             error_type="validation_error")
-        prev = rec.to_dict() if rec is not None else None
+        prev, prev_notes = (rec.to_dict() if rec is not None else None), list(state.notes)
         try:
             message = getattr(self, f"_{action}")(state, fields)
             state.save()
         except (_Refused, TaskRecordTooLarge, ValueError) as exc:
             state.current = TaskRecord.from_dict(prev) if prev else None
+            state.notes = prev_notes
             text = str(exc)
             if isinstance(exc, TaskRecordTooLarge):
                 text = "Task record exceeds 64 KiB; narrow the record"
@@ -239,7 +253,11 @@ class TaskTool(Tool):
         depends = f.get("depends_on", [])
         if not isinstance(depends, list) or any(d not in ctx.artifacts for d in depends):
             raise _Refused("depends_on must name declared artifact keys")
+        if not arguments:
+            raise _Refused("declare the exact arguments of the call that proves this check")
         key = _text("key", f["key"])
+        if any(j.key == key for j in state.current.judgments):  # type: ignore[union-attr]
+            raise _Refused("check keys must differ from judgment keys")
         if key not in ctx.requirements and len(ctx.requirements) >= MAX_ITEMS:
             raise _Refused(f"requirements is limited to {MAX_ITEMS}")
         old = ctx.requirements.get(key)
@@ -251,13 +269,68 @@ class TaskTool(Tool):
         ))
         return f"Check {key} declared (revision {ctx.requirements[key].revision})."
 
+    def _reference(self, state: TaskState, f: dict[str, Any]) -> str:
+        rec = state.current
+        assert rec is not None
+        if "source" not in f:
+            raise _Refused("reference requires source")
+        source = _text("source", f["source"], 200)
+        if ("path" in f) == ("handle" in f):
+            raise _Refused("reference requires exactly one of path or handle")
+        if "path" in f:
+            target = self._inside(_text("path", f["path"]))
+            if not target.is_file():
+                raise _Refused("reference path must be an existing file")
+            ref = Reference(source, path=str(target.relative_to(
+                Path(state.workspace or os.getcwd()).resolve())))
+        else:
+            ref = Reference(source, handle=_text("handle", f["handle"], 64))
+        same = [i for i, r in enumerate(rec.references) if r.source == source]
+        if same:
+            rec.references[same[0]] = ref
+        elif len(rec.references) >= MAX_REFERENCES:
+            raise _Refused("references is limited to four; split or narrow the step")
+        else:
+            rec.references.append(ref)
+        return f"Reference {source} declared; it is kept in view from the next request."
+
+    def _judge(self, state: TaskState, f: dict[str, Any]) -> str:
+        rec = state.current
+        assert rec is not None
+        if "key" not in f:
+            raise _Refused("judge requires key")
+        key = _text("key", f["key"])
+        if key in rec.context.requirements:
+            raise _Refused("judgment keys must differ from check keys")
+        judgment = next((j for j in rec.judgments if j.key == key), None)
+        if judgment is None:
+            if "criterion" not in f:
+                raise _Refused("a new judgment requires criterion")
+            if len(rec.judgments) >= MAX_JUDGMENTS:
+                raise _Refused(f"judgments is limited to {MAX_JUDGMENTS}")
+            judgment = Judgment(key, _text("criterion", f["criterion"]))
+            rec.judgments.append(judgment)
+        elif judgment.status == "waived":
+            raise _Refused(f"judgment {key} was waived by the human")
+        for name in ("criterion", "assessment", "passages", "fix"):
+            if name in f:
+                setattr(judgment, name, _text(name, f[name]))
+        if "assessment" in f:
+            judgment.status = "assessed"
+        return f"Judgment {key}: {judgment.status} (editorial opinion, not evidence)."
+
     def _waive(self, state: TaskState, f: dict[str, Any]) -> str:
-        ctx = state.current.context  # type: ignore[union-attr]
-        key = f.get("key")
-        if key not in ctx.requirements:
-            raise _Refused("waive requires the key of a declared check")
+        rec = state.current
+        assert rec is not None
+        ctx, key = rec.context, f.get("key")
+        judgment = next((j for j in rec.judgments if j.key == key), None)
+        if key not in ctx.requirements and judgment is None:
+            raise _Refused("waive requires the key of a declared check or judgment")
         if not self._quoted(f):
             raise _Refused("A waiver is a human decision; quote the human's words in human_quote")
+        if judgment is not None:
+            judgment.status = "waived"
+            return f"Judgment {key} waived by the human."
         ctx.waive(key, human_decision=f["human_quote"])
         return f"Check {key} waived by the human."
 
@@ -265,10 +338,22 @@ class TaskTool(Tool):
         rec = state.current
         assert rec is not None
         status = f.get("status")
-        if status not in {"complete", "checkpoint", "blocked"}:
-            raise _Refused("close requires status complete, checkpoint, or blocked")
+        if status not in {"complete", "checkpoint", "partial", "blocked"}:
+            raise _Refused("close requires status complete, checkpoint, partial, or blocked")
         if status == "checkpoint" and not self._quoted(f):
             raise _Refused(CHECKPOINT_RULE)
+        if status == "complete":
+            bad = [f"{k}: {o}" for k, o in rec.context.outcomes().items() if o not in {"passed", "waived"}]
+            open_ = [j.key for j in rec.judgments if j.status == "open"]
+            reasons = []
+            if bad:
+                reasons.append("Cannot close as complete: " + ", ".join(bad)
+                               + ". Rerun it, ask the human to waive it, or close as partial or blocked.")
+            if open_:
+                reasons.append("Open editorial judgments: " + ", ".join(open_)
+                               + ". Assess them with judge, ask the human to waive them, or close as partial.")
+            if reasons:
+                raise _Refused(" ".join(reasons))
         rec.context.requested_status = status  # type: ignore[assignment]
         rec.closed = status == "complete"
         if "note" in f:

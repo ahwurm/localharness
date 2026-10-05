@@ -1,14 +1,22 @@
 """One persisted working record per agent, composed over the TaskContext evidence core.
 
 The record keeps what a coworker keeps on substantive work: the objective, the current bounded
-assignment, accepted decisions, artifacts, and machine-checkable checks. The runtime owns
+assignment, accepted decisions, artifacts, file-backed references, editorial judgments, and
+machine-checkable checks. The runtime owns
 receipts, artifact hashes, human turns, and timestamps; the model changes the record only
 through the bounded `task` tool, and a human decision counts only when its quoted words are
 found in a turn the runtime itself recorded (`substantiated`). `TaskState` is the holder the
 loop and the tool share: with no record it is inert (no packet, no file).
+
+References are re-snapshotted from disk before every request of an active task
+(`refresh_references`) and re-declared as active references, so their current bodies survive
+eviction, file changes and restarts; there is no file watcher. Judgments are model opinion,
+never evidence. The revision budget is counted by the runtime: an edit to an artifact that a
+receipt verified spends one revision.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -19,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from localharness.agent.context import MAX_ACTIVE_REFERENCES, ActiveReferenceError
 from localharness.agent.task_context import Receipt, Requirement, TaskContext
 from localharness.core.private_files import write_private_bytes
 
@@ -32,6 +41,12 @@ MAX_QUESTIONS = 8
 MAX_HUMAN_TURNS = 24
 MAX_TURN_CHARS = 2000
 MAX_RECORD_BYTES = 64 * 1024
+MAX_REFERENCES = MAX_ACTIVE_REFERENCES
+MAX_JUDGMENTS = 8
+MAX_REFERENCE_BYTES = 200 * 1024
+OPEN_JUDGMENTS = "Open editorial judgments (not assessed): "
+BUDGET_EXHAUSTED = ("Revision budget exhausted: stop with the usable artifact and list the remaining gaps; "
+                    "continue only on new user direction.")
 CORRUPT_NOTICE = "Task state could not be read; starting without it"
 _QUOTES = str.maketrans("", "", "\"'“”‘’`")
 
@@ -56,6 +71,25 @@ class Decision:
 
 
 @dataclass
+class Reference:
+    source: str
+    path: str | None = None  # workspace-relative
+    handle: str | None = None
+    sha256: str | None = None
+    status: str = "pending"
+
+
+@dataclass
+class Judgment:
+    key: str
+    criterion: str
+    assessment: str = ""
+    passages: str = ""
+    fix: str = ""
+    status: Literal["open", "assessed", "waived"] = "open"
+
+
+@dataclass
 class TaskRecord:
     context: TaskContext
     workspace: str
@@ -74,6 +108,9 @@ class TaskRecord:
     human_turns: list[str] = field(default_factory=list)
     artifact_revisions: dict[str, str | None] = field(default_factory=dict)
     closed: bool = False
+    references: list[Reference] = field(default_factory=list)
+    judgments: list[Judgment] = field(default_factory=list)
+    verified_revision: dict[str, str | None] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         ctx = self.context
@@ -86,6 +123,9 @@ class TaskRecord:
             "revisions_used": self.revisions_used, "delegation_budget": self.delegation_budget,
             "human_turns": self.human_turns, "artifact_revisions": self.artifact_revisions,
             "closed": self.closed,
+            "references": [vars(r) for r in self.references],
+            "judgments": [vars(j) for j in self.judgments],
+            "verified_revision": self.verified_revision,
             "context": {
                 "objective": ctx.objective, "stop_boundary": ctx.stop_boundary,
                 "requested_status": ctx.requested_status, "status": ctx.status,
@@ -128,6 +168,9 @@ class TaskRecord:
             human_turns=[str(t) for t in d.get("human_turns", [])],
             artifact_revisions=dict(d.get("artifact_revisions", {})),
             closed=bool(d.get("closed", False)),
+            references=[Reference(**x) for x in d.get("references", [])],
+            judgments=[Judgment(**x) for x in d.get("judgments", [])],
+            verified_revision=dict(d.get("verified_revision", {})),
         )
 
 
@@ -173,6 +216,71 @@ class TaskState:
                 self.notes.append(f"{key} missing")
             elif key in now and now[key] != saved:
                 self.notes.append(f"{key} changed since last session")
+        root = Path(self.current.workspace).resolve()
+        for ref in self.current.references:
+            ref.handle = None  # the content store is per process; re-snapshot on the next request
+            if ref.path is None:
+                ref.status = "unavailable; read it again"
+                continue
+            try:
+                digest = hashlib.sha256((root / ref.path).read_bytes()).hexdigest()
+            except OSError:
+                self.notes.append(f"reference {ref.source} missing")
+                continue
+            if ref.sha256 is not None and digest != ref.sha256:
+                self.notes.append(f"reference {ref.source} changed since last session")
+
+    def _live(self) -> TaskRecord | None:
+        rec = self.current
+        return None if rec is None or rec.closed or rec.context.status == "complete" else rec
+
+    def refresh_references(self, store: Any) -> None:
+        """Re-snapshot declared references into `store` and declare them for this request.
+
+        Called before every request of an active task. Every available snapshot is re-declared
+        each time because the per-turn reset clears protection; a file is re-put only when its
+        handle is gone or its hash moved. Never raises: problems become the reference status."""
+        rec = self._live()
+        if store is None or rec is None or not rec.references:
+            return
+        root = Path(rec.workspace).resolve()
+        step = store.active_step or f"task {rec.id}"
+        before = [(r.handle, r.sha256, r.status) for r in rec.references]
+        for ref in rec.references:
+            if ref.path is not None:
+                target = (root / ref.path).resolve()
+                if not target.is_relative_to(root):
+                    ref.handle, ref.status = None, "unprotected: the path leaves the workspace"
+                    continue
+                try:
+                    too_large = target.stat().st_size > MAX_REFERENCE_BYTES
+                    data = b"" if too_large else target.read_bytes()
+                except OSError:
+                    ref.handle, ref.status = None, "missing; the file could not be read"
+                    continue
+                if too_large:
+                    ref.handle, ref.status = None, "too large; narrow the reference"
+                    continue
+                digest = hashlib.sha256(data).hexdigest()
+                changed = ref.sha256 is not None and digest != ref.sha256
+                if changed or ref.handle is None or store.get(ref.handle) is None:
+                    ref.handle, ref.sha256 = store.put(data.decode("utf-8", "replace")), digest
+                status = "refreshed (changed)" if changed else "current"
+            elif ref.handle is None or store.get(ref.handle) is None:
+                ref.status = "unavailable; read it again"
+                continue
+            else:
+                status = "current"
+            try:
+                store.declare_active_reference(step, ref.handle, ref.source)
+                ref.status = status
+            except ActiveReferenceError as exc:
+                ref.status = f"unprotected: {exc}"
+        if before != [(r.handle, r.sha256, r.status) for r in rec.references]:
+            try:
+                self.save()
+            except TaskRecordTooLarge:
+                log.warning("task record too large to save after a reference refresh")
 
     @property
     def active(self) -> bool:
@@ -204,14 +312,26 @@ class TaskState:
 
     def record_result(self, tool: str, arguments: dict[str, Any], call_id: str, *,
                       success: bool, metadata: dict[str, Any], before: dict[str, str | None]) -> None:
-        if self.current is not None:
-            self.current.context.record_result(tool, arguments, call_id, success=success,
-                                               metadata=metadata, before=before)
-            self.save()
+        rec = self.current
+        if rec is None:
+            return
+        ctx = rec.context
+        after = ctx.revisions()
+        for key, verified in list(rec.verified_revision.items()):
+            if verified is not None and after.get(key) != verified:
+                rec.revisions_used += 1  # an edit to a verified artifact is one focused revision
+                del rec.verified_revision[key]
+        ctx.record_result(tool, arguments, call_id, success=success, metadata=metadata, before=before)
+        for key, req in ctx.requirements.items():
+            receipt = ctx.receipts.get(key)
+            if receipt is not None and receipt.call_id == call_id:
+                for dep in req.dependencies:
+                    rec.verified_revision[dep] = after.get(dep)
+        self.save()
 
     def packet(self) -> str:
-        rec = self.current
-        if rec is None or rec.closed or rec.context.status == "complete":
+        rec = self._live()
+        if rec is None:
             return ""
         lines = [f"Task {rec.id} (working record; update it with the task tool)"]
         if rec.assignment:
@@ -223,14 +343,26 @@ class TaskState:
             lines.append("Open questions: " + "; ".join(rec.questions))
         if rec.next_action:
             lines.append(f"Next action: {rec.next_action}")
+        if rec.references:
+            lines.append("References: " + "; ".join(f"{r.source}: {r.status}" for r in rec.references))
+        if rec.judgments:
+            lines.append("Editorial judgments (model opinion, not evidence): " + "; ".join(
+                f"{j.key}: {j.status} — {j.criterion}" for j in rec.judgments))
+        lines.append(f"Revision budget: used {rec.revisions_used} of {rec.revision_budget}")
+        if rec.revisions_used > rec.revision_budget:
+            lines.append(BUDGET_EXHAUSTED)
         if self.notes:
             lines.append("Since last session: " + "; ".join(self.notes))
         return "\n".join([*lines, rec.context.packet()])
 
     def finalize(self, candidate: str) -> str:
-        if self.current is None:
+        # A record already finalized as complete never rewrites later, unrelated replies.
+        if self.current is None or self.current.context.status == "complete":
             return candidate
         result = self.current.context.finalize(candidate)
+        open_ = [j.key for j in self.current.judgments if j.status == "open"]
+        if result == candidate and open_:
+            result = f"{candidate}\n\n{OPEN_JUDGMENTS}{', '.join(open_)}."
         self.save()
         return result
 
@@ -286,6 +418,12 @@ class TaskState:
         lines += [f"  {k}: {outcomes[k]} ({r.origin}) — {r.description}" for k, r in ctx.requirements.items()]
         lines.append("waivers:")
         lines += [f"  {k}: {w[1]}" for k, w in ctx.waivers.items()]
+        lines.append("references:")
+        lines += [f"  {r.source}: {r.path or 'handle ' + str(r.handle)} ({r.status})" for r in rec.references]
+        lines.append("judgments:")
+        lines += [f"  {j.key}: {j.status} — {j.criterion}" + "".join(
+            f" | {name}: {getattr(j, name)}" for name in ("assessment", "passages", "fix") if getattr(j, name))
+            for j in rec.judgments]
         lines.append("questions:")
         lines += [f"  {q}" for q in rec.questions]
         lines += [f"next action: {rec.next_action or '-'}",

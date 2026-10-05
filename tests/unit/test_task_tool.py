@@ -69,7 +69,10 @@ async def test_decide_waive_and_budget_raise_need_human_words(tmp_path):
     await tool.run(action="decide", text="Short intro")
     assert [d.origin for d in state.current.decisions] == ["human", "model", "model"]
     assert "[human] Five sections; [assumption] Plain tone" in state.packet()
-    await tool.run(action="check", key="lint", description="Lint", tool="bash_exec", arguments={})
+    assert refused(await tool.run(action="check", key="lint", description="Lint", tool="bash_exec",
+                                  arguments={}), "declare the exact arguments")
+    await tool.run(action="check", key="lint", description="Lint", tool="bash_exec",
+                   arguments={"command": "lint"})
     assert refused(await tool.run(action="waive", key="lint", human_quote="skip the lint please"))
     assert refused(await tool.run(action="waive", key="nope", human_quote="must have five sections"))
     assert (await tool.run(action="waive", key="lint", human_quote="must have five sections")).success
@@ -89,7 +92,8 @@ async def test_check_origin_revision_and_dependencies(tmp_path):
                    depends_on=["draft"], human_quote="run lint with exit code zero")
     req = state.current.context.requirements["lint"]
     assert (req.origin, req.revision, req.dependencies, req.expected) == ("human", "1", ("draft",), 0)
-    await tool.run(action="check", key="lint", description="Lint v2", tool="bash_exec")
+    await tool.run(action="check", key="lint", description="Lint v2", tool="bash_exec",
+                   arguments={"command": "lint"})
     req = state.current.context.requirements["lint"]
     assert (req.origin, req.revision) == ("model", "2")
 
@@ -146,7 +150,7 @@ async def test_every_mutation_saves_and_show_never_writes(tmp_path):
     await start(tool)
     for call in ({"action": "update", "next_action": "draft"}, {"action": "decide", "text": "d"},
                  {"action": "artifact", "key": "a", "path": "a.md"},
-                 {"action": "check", "key": "k", "description": "d", "tool": "t"},
+                 {"action": "check", "key": "k", "description": "d", "tool": "t", "arguments": {"x": 1}},
                  {"action": "close", "status": "blocked", "note": "waiting"}):
         stamp = state.path.read_bytes()
         assert (await tool.run(**call)).success
@@ -253,3 +257,91 @@ async def test_slash_task_shows_and_clears(tmp_path):
 
 async def _record(sent, text):
     sent.append(text)
+
+
+# --- 0.16.5 slice 2: reference, judge, close tightening ---
+
+async def test_reference_by_path_or_handle(tmp_path):
+    state, tool = tool_for(tmp_path)
+    (tmp_path / "voice").mkdir()
+    (tmp_path / "voice" / "sample.md").write_text("Short sentences.")
+    (tmp_path.parent / "outside.md").write_text("no")
+    await start(tool)
+    ok = await tool.run(action="reference", source="voice sample", path="voice/sample.md")
+    assert ok.success and "kept in view" in ok.output
+    assert state.current.references[0].path == "voice/sample.md"
+    assert (await tool.run(action="reference", source="pasted", handle="abc123")).success
+    assert state.current.references[1].handle == "abc123" and state.current.references[1].path is None
+    assert refused(await tool.run(action="reference", source="x", path="voice/sample.md", handle="a"),
+                   "exactly one of path or handle")
+    assert refused(await tool.run(action="reference", source="x"), "exactly one of path or handle")
+    assert refused(await tool.run(action="reference", path="voice/sample.md"), "requires source")
+    assert refused(await tool.run(action="reference", source="x", path="../outside.md"), "inside the workspace")
+    assert refused(await tool.run(action="reference", source="x", path="nope.md"), "existing file")
+    for name in ("a", "b"):
+        assert (await tool.run(action="reference", source=name, handle=name)).success
+    assert refused(await tool.run(action="reference", source="fifth", handle="e"), "limited to four")
+    assert (await tool.run(action="reference", source="pasted", path="voice/sample.md")).success  # replace
+    assert len(state.current.references) == 4 and state.current.references[1].status == "pending"
+
+
+async def test_judge_actions_and_key_clashes(tmp_path):
+    state, tool = tool_for(tmp_path, "The tone gate is optional, skip the tone judgment if needed.")
+    await start(tool)
+    assert refused(await tool.run(action="judge", key="tone"), "requires criterion")
+    assert (await tool.run(action="judge", key="tone", criterion="Plain tone")).output.startswith(
+        "Judgment tone: open")
+    out = await tool.run(action="judge", key="tone", assessment="Mostly plain", passages="para 2")
+    assert "assessed (editorial opinion, not evidence)" in out.output
+    await tool.run(action="check", key="lint", description="Lint", tool="bash_exec",
+                   arguments={"command": "lint"})
+    assert refused(await tool.run(action="judge", key="lint", criterion="c"), "differ from check keys")
+    assert refused(await tool.run(action="check", key="tone", description="d", tool="bash_exec",
+                                  arguments={"command": "x"}), "differ from judgment keys")
+    for i in range(7):
+        await tool.run(action="judge", key=f"j{i}", criterion="c")
+    assert refused(await tool.run(action="judge", key="j9", criterion="c"), "8")
+    assert refused(await tool.run(action="waive", key="j0", human_quote="please skip it all"))
+    assert (await tool.run(action="waive", key="j0", human_quote="skip the tone judgment")).success
+    assert state.current.judgments[1].status == "waived"
+    assert refused(await tool.run(action="judge", key="j0", assessment="x"), "waived")
+    assert refused(await tool.run(action="waive", key="nope", human_quote="skip the tone judgment"),
+                   "check or judgment")
+
+
+async def test_close_complete_needs_passed_checks_and_no_open_judgments(tmp_path):
+    state, tool = tool_for(tmp_path, "Skip the lint gate for this draft, I accept it as is.")
+    await start(tool)
+    await tool.run(action="check", key="lint", description="Lint", tool="bash_exec",
+                   arguments={"command": "lint"}, result_field="exit_code", expected=0)
+    state.record_result("bash_exec", {"command": "lint"}, "c1", success=True,
+                        metadata={"exit_code": 1}, before={})
+    await tool.run(action="judge", key="support", criterion="Claims are sourced")
+    out = await tool.run(action="close", status="complete")
+    assert refused(out, "Cannot close as complete: lint: failed. Rerun it, ask the human to waive it")
+    assert "Open editorial judgments: support." in out.error and state.current.closed is False
+    await tool.run(action="waive", key="lint", human_quote="skip the lint gate for this draft")
+    assert refused(await tool.run(action="close", status="complete"), "Open editorial judgments: support")
+    await tool.run(action="waive", key="support", human_quote="skip the lint gate for this draft")
+    assert (await tool.run(action="close", status="complete")).success and state.current.closed
+
+
+async def test_close_partial_keeps_the_record_live(tmp_path):
+    state, tool = tool_for(tmp_path)
+    await start(tool)
+    await tool.run(action="judge", key="support", criterion="Claims are sourced")
+    assert (await tool.run(action="close", status="partial", note="sources remain")).success
+    assert state.current.closed is False and state.current.context.requested_status == "partial"
+    assert "Requested stopping status: partial" in state.packet()
+
+
+async def test_refused_start_restores_record_and_notes(tmp_path, monkeypatch):
+    import localharness.agent.task_record as tr
+    state, tool = tool_for(tmp_path)
+    await start(tool)
+    state.notes = ["outline changed since last session"]
+    before = state.current
+    monkeypatch.setattr(tr, "MAX_RECORD_BYTES", 10)  # begin() ran and cleared notes; save refuses
+    assert refused(await tool.run(action="start", objective="New", assignment="Other"), "narrow the record")
+    assert state.notes == ["outline changed since last session"]
+    assert state.current.id == before.id and state.current == before

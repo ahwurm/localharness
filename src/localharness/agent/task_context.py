@@ -1,7 +1,9 @@
 """Bounded, opt-in task evidence for runtime callers; never model-authored proof.
 
 This is task-local state, not a persisted workflow or a public completion protocol.
-Callers declare exact tool calls and their machine-checkable result fields. The loop
+Callers declare a tool name and the argument values that identify the proving call (the
+actual call may carry extra arguments, e.g. a timeout; a requirement declaring no arguments
+matches only a call with none) plus its machine-checkable result fields. The loop
 records only actual dispatch outcomes. Selecting obligations remains the caller's job.
 """
 from __future__ import annotations
@@ -94,7 +96,8 @@ class TaskContext:
     ) -> None:
         after = self.revisions()
         for key, req in self.requirements.items():
-            if req.tool != tool or req.arguments != arguments:
+            if req.tool != tool or (arguments != {} if not req.arguments else any(
+                    k not in arguments or arguments[k] != v for k, v in req.arguments.items())):
                 continue
             dependencies = {dep: before.get(dep) for dep in req.dependencies}
             outcome: Outcome = "passed"
