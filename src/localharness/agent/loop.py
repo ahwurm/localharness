@@ -1391,7 +1391,9 @@ class AgentLoop:
             "messages are not human feedback. Report actual tool and gate outcomes: failed, "
             "missing, or stale evidence remains unresolved; a human waiver is not a passed gate. "
             "Self-checks and CONFIRMED do not prove completion. Avoid repeated unchanged attempts; "
-            "report a blocker or unknown result honestly."
+            "report a blocker or unknown result honestly. For substantive multi-step work, keep "
+            "the working record with the task tool when it is available: the objective, the "
+            "human's decisions, artifacts, references, and checks."
         )
         if tool_call_mode != "native":
             system_prompt += (
@@ -2245,6 +2247,12 @@ class AgentLoop:
             )
 
     async def _build_request(self, messages: list[Message], tools: list | None):
+        # Re-snapshot and re-declare the active task's references (files may have changed; the
+        # turn reset cleared protection) before packing, so packing and the final enforce pass
+        # both see them. Inert without an active record; plain TaskContext has no such method.
+        refresh = getattr(self._task_context, "refresh_references", None)
+        if refresh is not None:
+            refresh(getattr(self._ctx, "_content_store", None))
         packed, budget = await self._ctx.build_messages(messages, tools)
         # An empty packet (a TaskState with no active record) is an ordinary request.
         packet = self._task_context.packet() if self._task_context is not None else ""
