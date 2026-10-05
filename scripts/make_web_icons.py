@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the web channel's placeholder app icons.
+"""Regenerate the mobile channel's placeholder app icons.
 
 The icons are a PLACEHOLDER and are meant to be replaced — three stacked bars on a dark square,
 which reads at 60 pixels on a home screen and pretends to be nothing more than a marker. This
@@ -9,7 +9,7 @@ that are committed.
     python scripts/make_web_icons.py
 
 Replacing them properly needs no build step and no code change: drop your own `icon-192.png`,
-`icon-512.png` and `icon-180.png` into `src/localharness/channels/web/ui/` (and edit `icon.svg`),
+`icon-512.png` and `icon-180.png` into `src/localharness/channels/mobile/ui/` (and edit `icon.svg`),
 and the manifest already points at them.
 
 stdlib only — deliberately. Pillow is not a dependency of this project and adding an image
