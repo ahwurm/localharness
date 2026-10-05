@@ -149,6 +149,10 @@ hundreds of times is an audit question for the CLI, not a phone screen."""
 MEMORY_OFF = {"error": "memory is off for this session"}
 """What every memory route answers (404) when the session's memory slot is empty (WEBP-03)."""
 
+MEMORY_ASLEEP = {"error": "the chat is asleep — send a message to wake it, then open memory"}
+"""What every memory route answers (409) while the session sleeps: the slot is empty because the
+store closed with the session, which is not the same fact as memory being off."""
+
 TRASH_DIRNAME = "sessions-trash"
 """Where a deleted chat's log MOVES (never unlinks) — beside `sessions/` in the agent dir.
 
@@ -1093,6 +1097,15 @@ class MobileServer:
         path = self._session_log(session_id)
         if path is None or not path.exists():
             return _json({"error": "no log with that id"}, status=404)
+        # The sleeping chat is this log's thread, on disk beside it: deleting the chat discards
+        # the thread too, or the next message would resume a conversation the drawer no longer
+        # shows. Checked against the file, not the channel: the file may predate this process.
+        from localharness.cli.session_resume import asleep_path, sleeping_sitting
+
+        asleep = asleep_path(self.channel.session_dir) if self.channel.session_dir else None
+        if asleep is not None and sleeping_sitting(asleep) == session_id:
+            asleep.unlink(missing_ok=True)
+            self.channel.clear_sleep()
 
         def _move() -> None:
             trash = path.parent.parent / TRASH_DIRNAME
@@ -1117,9 +1130,15 @@ class MobileServer:
 
     def _browse(self) -> Any:
         """The memory screen's only path to memory: the session's slot (WEBP-03). None when the slot
-        is empty or its occupant offers no browse API — the routes then answer 404."""
+        is empty or its occupant offers no browse API — the routes then answer `_memory_closed`."""
         slot = self.channel.memory_slot()
         return slot.browse() if slot.occupied else None
+
+    def _memory_closed(self) -> JSONResponse:
+        """No store behind the slot: the chat is asleep (a message wakes it) or memory is off."""
+        if self.channel.asleep:
+            return _json(MEMORY_ASLEEP, status=409)
+        return _json(MEMORY_OFF, status=404)
 
     async def memory_list(self, request: Request) -> Response:
         """The memory page's list: active facts, store-ranked; `?q=` narrows via the store's FTS."""
@@ -1128,7 +1147,7 @@ class MobileServer:
             return refusal
         b = self._browse()
         if b is None:
-            return _json(MEMORY_OFF, status=404)
+            return self._memory_closed()
         from localharness.plugins.api import BrowseQuery
 
         q = (request.query_params.get("q") or "").strip()
@@ -1146,7 +1165,7 @@ class MobileServer:
             return refusal
         b = self._browse()
         if b is None:
-            return _json(MEMORY_OFF, status=404)
+            return self._memory_closed()
         name = (request.query_params.get("name") or "").strip()
         if not name:
             return _json({"error": "pass ?name="}, status=400)
@@ -1171,7 +1190,7 @@ class MobileServer:
             return refusal
         b = self._browse()
         if b is None:
-            return _json(MEMORY_OFF, status=404)
+            return self._memory_closed()
         try:
             body = await self._body(request)
         except (ValueError, json.JSONDecodeError) as exc:
@@ -1199,7 +1218,7 @@ class MobileServer:
             return refusal
         b = self._browse()
         if b is None:
-            return _json(MEMORY_OFF, status=404)
+            return self._memory_closed()
         try:
             body = await self._body(request)
         except (ValueError, json.JSONDecodeError) as exc:
@@ -1466,9 +1485,10 @@ class MobileServer:
         response.headers["Cache-Control"] = "no-store"
         return response
 
-    def session_asleep(self) -> None:
-        """The runner put the session to sleep: the next message or command brings one up again
-        (`_ensure_session`), a connect alone does not (`_maybe_prewarm`)."""
+    def session_over(self) -> None:
+        """The session task ended with no session live — asleep, failed, or a build abandoned: the
+        next message or command brings one up again (`_ensure_session`); a connect alone does not
+        wake a sleeping one (`_maybe_prewarm`)."""
         self._bringup_started = False
 
     def _ensure_session(self) -> bool:

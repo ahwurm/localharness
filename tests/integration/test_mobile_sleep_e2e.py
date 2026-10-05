@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import stat
 
 import pytest
@@ -90,7 +91,7 @@ def test_the_thread_sleeps_to_disk_and_wakes_in_the_next_session(tmp_path, monke
     async def main():
         async def talk_then_sleep(ch):
             ch._agent_loop.resume(list(CONV), "PRIOR")  # the turns a model would have produced
-            ch._gate.set_mode("unattended")
+            ch._gate.set_mode("guarded")  # stricter than the configured auto: this one travels
             assert ch.idle(), "bound, nothing running, nobody attached, nothing open"
             ch.request_sleep()
 
@@ -117,21 +118,59 @@ def test_the_thread_sleeps_to_disk_and_wakes_in_the_next_session(tmp_path, monke
 
     first, second = seen["first"], seen["second"]
     assert first is not None and first.resume.slept
-    assert first.resume.conversation == tuple(CONV) and first.resume.gate_mode == "unattended"
+    assert first.resume.conversation == tuple(CONV) and first.resume.gate_mode == "guarded"
     assert seen["file_after_first"]["conversation"] == CONV
     assert seen["file_after_first"]["previous_sitting_id"] == first.resume.previous_sitting_id
     assert seen["mode_600"] == 0o600 and seen["where"] == ("sessions", "orchestrator")
 
     assert seen["resumed"] == [(CONV, "PRIOR")], "the exact conversation, into the next AgentLoop"
-    assert seen["mode"] == "unattended", "the permission mode as it was left"
+    assert seen["mode"] == "guarded", "a stricter mode as it was left"
     assert seen["sleep_requested_at_bind"] is False and seen["file_gone_while_awake"]
     assert second.resume.previous_sitting_id != first.resume.previous_sitting_id, "same thread, new sitting"
     assert seen["file_after_second"]["previous_sitting_id"] == second.resume.previous_sitting_id
 
 
+def test_a_planted_file_cannot_loosen_the_mode_or_type_for_you(tmp_path, monkeypatch, fake_home):
+    """The folder is one a cloned repo can ship and the agent's own write tool can reach, so the
+    file carries conversation text and never authority: a looser mode is not applied (the gate's
+    own rule for a layer that is not a human), and typed-ahead lines are not read."""
+    path = _rig(tmp_path, monkeypatch, fake_home)
+    printed = _capture_start_console(monkeypatch)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"format": 1, "workspace": os.getcwd(), "agent_name": "orchestrator",
+                                "previous_sitting_id": "planted", "gate_mode": "unattended",
+                                "prior_context": "PLANTED", "queued": ["/mode unattended"],
+                                "conversation": CONV}))
+    channel = MobileChannel(bus=EventBus(), config={})
+    seen: dict = {}
+
+    async def look_then_sleep(ch):
+        seen["mode"] = ch._gate.mode
+        seen["queued"] = ch.queued_input
+        ch.request_sleep()
+
+    asyncio.run(_session(channel, look_then_sleep))
+    assert seen == {"mode": "auto", "queued": 0}
+    assert any("looser than auto" in p for p in printed), printed
+
+
+def test_a_thread_that_slept_in_another_folder_is_left_alone(tmp_path, monkeypatch, fake_home):
+    path = _rig(tmp_path, monkeypatch, fake_home)
+    write_asleep(path, _record(), workspace="/somewhere/else")
+    resumed = _spy_resume(monkeypatch)
+    channel = MobileChannel(bus=EventBus(), config={})
+
+    async def sleep_at_once(ch):
+        ch.request_sleep()
+
+    asyncio.run(_session(channel, sleep_at_once))
+    assert resumed == [], "a fresh session here"
+    assert path.exists(), "and the other folder's thread is still where it was"
+
+
 def test_a_wake_that_fails_before_a_session_exists_puts_the_thread_back(tmp_path, monkeypatch, fake_home):
     path = _rig(tmp_path, monkeypatch, fake_home)
-    write_asleep(path, _record())
+    write_asleep(path, _record(), workspace=os.getcwd())
     import localharness.tools.builtin as builtin
 
     def boom(*a, **kw):
@@ -146,7 +185,7 @@ def test_a_wake_that_fails_before_a_session_exists_puts_the_thread_back(tmp_path
 
 def test_the_new_chat_verb_discards_a_sleeping_thread(tmp_path, monkeypatch, fake_home):
     path = _rig(tmp_path, monkeypatch, fake_home)
-    write_asleep(path, _record())
+    write_asleep(path, _record(), workspace=os.getcwd())
     resumed = _spy_resume(monkeypatch)
     channel = MobileChannel(bus=EventBus(), config={})
 

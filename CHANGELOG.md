@@ -27,11 +27,16 @@ Nothing yet.
   wakes on your next message*; `/api/health` reports `model_state: "asleep"` and the
   bring-up stage frame carries the stage `asleep` (no frame changed shape). Opening the app
   does not wake it; a message does.
-- **Ctrl-C keeps the conversation too.** A live session is put to sleep rather than killed
-  when the server stops (a running turn is cancelled first; a teardown that takes longer
-  than ten seconds is cancelled the old way and says so in the log), so restarting
-  `localharness mobile` continues the same conversation. The `+` button is how you leave a
-  sleeping conversation behind: it discards the file and builds a fresh chat.
+- **Stopping the server keeps the conversation too.** A live session is put to sleep rather
+  than killed on Ctrl-C or a service stop (a running turn is cancelled first; a second
+  signal stops waiting for the teardown), so restarting `localharness mobile` continues the
+  same conversation. The `+` button is how you leave a sleeping conversation behind, and so
+  is deleting the sleeping chat from the drawer: both discard the file.
+- **The file carries the conversation, never authority.** Its permission mode is applied on
+  wake only when it is no looser than the configured one — the folder it sits in is one a
+  cloned repo can ship and the agent's own write tool can reach — and typed-ahead lines are
+  never in it. The thread belongs to the folder it slept in: a server started from another
+  folder leaves it alone and starts fresh.
 
 ### Fixed
 - **Ctrl-C after a turn killed `localharness mobile` instead of stopping it.** The REPL's
@@ -49,14 +54,23 @@ Nothing yet.
 ### Changed
 - `localharness mobile` says in its start banner when it will sleep.
 - A wake that fails before a session exists — the model server down, say — puts the file
-  back, so the next message tries again; a file that cannot be read as a conversation is
-  moved to `asleep.json.corrupt` and the session starts fresh, with a line in the log.
+  back, and the next message tries again (a failed or abandoned bring-up used to leave the
+  phone unable to start one until the `+` button); a file that cannot be read as a
+  conversation is moved to `asleep.json.corrupt` and the session starts fresh, with a line
+  in the log.
+- While the chat sleeps, the memory screen says so instead of "memory is off".
 - The default sleep leaves memory's dreaming pass (ten minutes into the quiet) room to run
   first; set `--sleep-after` below about thirteen and the pass waits for the next wake.
 
 ### Known limitations (named, not hidden)
 - A tool result the sleeping session had evicted from its context comes back as its stub
-  after a wake; the model re-fetches it if it needs it. The eviction store is not in the file.
+  after a wake; `tool_result_get` reports it gone and the model has to redo the call that
+  produced it. The eviction store is not in the file.
+- Only a clean stop keeps an awake chat: a crash, a power cut or a closed terminal (SIGHUP is
+  not handled) loses the conversation of a session that was awake; a sleeping one is already
+  on disk.
+- A mode you loosened during the chat (`/mode unattended` from `auto`) is not restored after a
+  sleep; set it again.
 - What the phone shows is the page's own transcript: after a server restart, the earlier
   turns of a woken conversation are in the history drawer, and new turns append below
   whatever the page shows. The model has all of them.

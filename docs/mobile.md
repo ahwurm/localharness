@@ -18,8 +18,10 @@ same rule `localharness start` and `localharness acp` follow — and serves exac
 from that directory. There is no switching between live chats. Close the page, come back, and you
 are in the conversation you left: a session nobody has used for thirty minutes goes to sleep (its
 conversation is written beside its session log and the session is torn down), and your next
-message wakes it and continues the same conversation. Restart the process and it continues the
-same way, from that file. The `+` button starts a fresh chat; the old one stays in the drawer.
+message wakes it and continues the same conversation. Stopping the server (Ctrl-C, or a service
+stop) puts a live session to sleep the same way, so a restart continues it too; a crash, a power
+cut or a closed terminal loses a chat that was awake. The `+` button starts a fresh chat; the old
+one stays in the drawer.
 
 ## Install
 
@@ -155,7 +157,7 @@ A fourth channel with no map is the predictable confusion. Honestly:
 | Can ask a permission question | yes | yes | yes | **yes** |
 | Holds a question open with no deadline | yes | no | yes | no — a pocket is not a person |
 | Reviews an edit as a diff | yes, after the fact | no | yes, per hunk | **no** (so in-project edits ask once per workspace) |
-| Past chats / resume | no | scrollback | per Zed thread | **yes** — a drawer, and a sleeping chat resumes |
+| Past chats / resume | no | scrollback | per Zed thread | **the drawer lists them read-only; the one sleeping chat resumes** |
 | Notifies you when a long turn finishes | no | yes (it is a chat app) | no | **yes** — lock-screen push |
 | Reachable before the model server is up | no | yes | yes | **yes** |
 | Memory browsing (`/memory`) | best — a real tree | flattened | flattened | flattened into a `<pre>` |
@@ -196,11 +198,18 @@ model has every earlier turn, and memory sees one sitting end and another begin.
 does not wake it; only a message does — a backgrounded page reconnects on its own, and the point
 of sleeping was that nobody's pocket keeps the box busy. The first reply after a wake pays the
 warm-up. Ctrl-C with a live session puts it to sleep the same way, so a server restart continues
-the conversation too; the `+` button is how you leave a sleeping conversation behind. A wake that
-fails before a session exists — the model server down, say — puts the file back for the next
+the conversation too (a second Ctrl-C stops waiting for the teardown); the `+` button is how you
+leave a sleeping conversation behind, and so is deleting the sleeping chat from the drawer. A wake
+that fails before a session exists — the model server down, say — puts the file back for the next
 message to try again. The default leaves memory's dreaming pass (ten minutes into the quiet) room
 to run first; below about thirteen minutes it waits for the next wake. A parked permission call
 or an open question keeps the session awake: both live only in that session's gate.
+
+The file carries the conversation, at the trust level of the session log beside it, and never
+authority: a permission mode looser than your configured one is not restored from it (the folder
+is one a cloned repo can ship and the agent's own write tool can reach), and lines typed ahead
+are never in it. The thread belongs to the folder it slept in: a server started from another
+folder leaves it where it is and starts fresh.
 
 **Permission questions are a queue, not a modal.** In `auto` — the default — a blacklisted call is
 *parked*: the model is told to carry on without that step, the turn keeps running, and the page
@@ -306,7 +315,8 @@ the same round trip a real one does.
   switching between live chats and no reopening an ended one. After a server restart, the earlier
   turns of a woken conversation are in the drawer, not on the screen above the composer; the model
   has them. A tool result the sleeping session had evicted from its context comes back as its
-  stub, and the model re-fetches it if it needs it: the eviction store is not in the file.
+  stub; `tool_result_get` reports it gone, and the model has to redo the call that produced it.
+  The eviction store is not in the file.
 - **No concurrent sessions.** Not a scheduling convenience: two sittings under one agent append to
   the same unlocked per-agent history file, and the per-agent summary is last-writer-wins, so one
   chat can inherit another's prior context. Fixing that comes before concurrency, not after.

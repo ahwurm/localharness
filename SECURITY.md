@@ -781,7 +781,8 @@ that mode, never written first and changed after: `config.yaml` and its backups
 (`config.yaml.bak-<stamp>` from the security-defaults update, `config.yaml.before-init-<stamp>`
 from `init --force`), `overrides.yaml`, `grants.yaml`, `trusted_workspaces.yaml`, the phone token,
 the push key and the push subscriptions, `audit.jsonl`, each agent's `bus-events.jsonl`, session
-logs, the phone session's `sessions/asleep.json` while it sleeps, `history.jsonl`, `memory.db` (and its `-wal` and `-shm` files), `MEMORY.md`, `compact.md` and
+logs, the phone session's `sessions/asleep.json` while it sleeps, `history.jsonl`, `memory.db`
+(and its `-wal` and `-shm` files), `MEMORY.md`, `compact.md` and
 `memory.log`, `.repl_history`, the speed ledger, the live-session files, `vllm/serve.log` and
 `vllm/server.pid`, agent files written by `agent create`, by a start (the root agent) or by the
 in-session creation workflow, autoresearch's archive, run journals and budget file, and
@@ -789,6 +790,12 @@ in-session creation workflow, autoresearch's archive, run journals and budget fi
 `.localharness/` (its sessions, history and memory). The one script `start` installs,
 `tools/design-screenshot.js`, is owner-only and executable (0700). `init --force` saves the old
 `config.yaml` beside the new one before it writes, and says where.
+
+The phone session's `sessions/asleep.json` carries the sleeping conversation — text at the trust
+level of the session log beside it — and never authority: the permission mode it records is applied
+on wake only when it is no looser than the configured one (the folder is one a cloned repo can ship
+and the agent's own `write` tool can reach), typed-ahead lines are never read from it, and a thread
+wakes only in the folder it slept in.
 
 **What this does NOT cover.** Pictures the image plugin generates are written at your umask. In a
 session with no project they sit in the owner-only config folder, which keeps other accounts out,

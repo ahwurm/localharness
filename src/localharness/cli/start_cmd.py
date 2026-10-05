@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -1215,7 +1215,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if fresh_thread:
                 asleep_file.unlink(missing_ok=True)
             else:
-                disk_resume = resume = take_asleep(asleep_file)
+                disk_resume = resume = take_asleep(asleep_file, workspace=os.getcwd())
             if resume is not None:
                 log.info("session %s wakes %s from %s", sitting_id, resume.previous_sitting_id, asleep_file)
                 mobile_channel.set_bringup("starting the session", detail=WAKING_DETAIL)
@@ -1472,10 +1472,19 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             config_dir=cfg_path,  # the session's own tools folder and settings files are guarded
         )
         if resume is not None and resume.gate_mode != gate.mode:
-            try:
-                gate.set_mode(resume.gate_mode)  # /mode as the person left it (and a declined trust's mode)
-            except Exception as exc:  # noqa: BLE001 — only a file can carry a mode the gate refuses
-                warnings.append(f"resume: kept mode {gate.mode} ({exc})")
+            from localharness.agent.gate_types import MODE_STRICTNESS
+
+            if resume.slept and MODE_STRICTNESS.get(resume.gate_mode, -1) < MODE_STRICTNESS[gate.mode]:
+                # A file may carry a mode but may not loosen one: the folder it sits in is one a
+                # cloned repo can ship and the agent's own write tool can reach, and the gate's
+                # rule for a layer that is not a human is "stricter only" (gate.set_mode).
+                warnings.append(f"resume: the sleeping chat's mode {resume.gate_mode} is looser than "
+                                f"{gate.mode}; kept {gate.mode}")
+            else:
+                try:
+                    gate.set_mode(resume.gate_mode)  # /mode as the person left it (and a declined trust's mode)
+                except Exception as exc:  # noqa: BLE001 — only a file can carry a mode the gate refuses
+                    warnings.append(f"resume: kept mode {gate.mode} ({exc})")
 
         # Built-in subagents wired in the runner (subagent.make_explore_agent_runner) — advertise them
         # alongside any configured agent cards so the model knows it can delegate to them. search-verifier
@@ -1827,7 +1836,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
         await repl.run()
         request = repl.restart_request or (
-            SLEEP_ACTION if mobile_channel is not None and mobile_channel.sleep_requested else None)
+            SLEEP_ACTION if mobile_channel is not None and mobile_channel.sleeping else None)
         if request is not None:
             # The REPL ended for /plugins (hand start_app the plain-data handle) or for a sleep
             # (the same handle goes to disk, before a teardown that could hang); either way the
@@ -1839,7 +1848,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 prior_context=prior, eviction_store=eviction_store, queued=repl.queued,
                 gate_mode=gate.mode, previous_sitting_id=sitting_id))
             if request == SLEEP_ACTION:
-                write_asleep(asleep_file, restart_request.resume)
+                write_asleep(asleep_file, restart_request.resume, workspace=os.getcwd())
                 log.info("session %s asleep at %s", sitting_id, asleep_file)
     except KeyboardInterrupt:
         _exit_reason = "interrupt"
@@ -1852,7 +1861,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # The wake failed (or was abandoned) before a session existed: the thread is still
             # asleep, and the next message gets to try again.
             try:
-                write_asleep(asleep_file, disk_resume)
+                write_asleep(asleep_file, disk_resume, workspace=os.getcwd())
             except Exception:  # noqa: BLE001 — never let the put-back replace the real failure
                 log.warning("could not put the sleeping thread back at %s", asleep_file, exc_info=True)
         # --- Ordered shutdown: MCP -> plugins (reverse start order; memory's stop() runs dreaming ->
