@@ -1,7 +1,8 @@
 """All 33 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
-event_type field values are PascalCase matching the Python class name — required for bubus routing
-(bubus routes by class.__name__; lowercase Literal values break routing silently).
+event_type field values are PascalCase matching the Python class name: the bus keys subscriptions
+and delivery by the class name, and deserialize_event resolves a logged line through EVENT_TYPE_MAP
+by that same name, so the two must agree.
 
 Events are immutable (frozen=True). Use model_copy(update={...}) to create modified instances.
 
