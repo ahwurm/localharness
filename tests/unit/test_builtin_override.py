@@ -187,4 +187,4 @@ async def test_web_dispatch_uses_config_override_not_builder(monkeypatch, bus):
     )
     assert captured["config"] is override
     assert captured["config"].permissions.budget.max_actions == 41
-    assert "child summary" in out
+    assert "child summary" in str(out)

@@ -190,7 +190,7 @@ async def test_cruncher_routed_and_granted_via_run_agent(monkeypatch):
         get_parent_session_id=lambda: "sid", parent_store=parent,
     )
     out = await runner("cruncher", "distill it", grant_handles=[h])
-    assert out.startswith("[cruncher]")
+    assert str(out).startswith("[cruncher]")
     assert captured["grant_handles"] == [h]
     assert captured["context_manager"]._content_store.get(h) == "the granted over-window doc"  # read-through
 

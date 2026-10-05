@@ -932,6 +932,9 @@ class AgentLoop:
         self._bus = bus
         self._ctx = context_manager
         self._task_context = task_context
+        # How the last run_turn ended ("complete", "error", "stuck", "budget_*", ...): a
+        # delegating parent reads it to report the child's runtime-truth status.
+        self.last_terminated_reason: str | None = None
         # Tools whose schema could not be read; one warning each per session (_tool_facts).
         self._unknown_tool_meta_warned: set[str] = set()
         # Dynamic per-call output cap. None = the client's configured max_tokens — which is
@@ -1236,6 +1239,7 @@ class AgentLoop:
             # fact was "your model server went away" (live 2026-08-10).
             log.warning("Provider failure ended the turn for %s: %s", self._config.name, exc)
             session.terminated_reason = "error"
+            self.last_terminated_reason = "error"
             summary = str(exc)
             await self._bus.publish(TurnFailed(
                 agent_id=session.agent_id,
@@ -1252,6 +1256,7 @@ class AgentLoop:
         except Exception as exc:
             log.exception("Unhandled error in agent loop for %s", self._config.name)
             session.terminated_reason = "error"
+            self.last_terminated_reason = "error"
             summary = _format_error_summary(session, exc)
             await self._bus.publish(TurnFailed(
                 agent_id=session.agent_id,
@@ -1268,6 +1273,7 @@ class AgentLoop:
 
         session.summary = summary
         reason = session.terminated_reason or "complete"
+        self.last_terminated_reason = reason
         if reason in ("budget_actions", "budget_time"):
             await self._bus.publish(TurnFailed(
                 agent_id=session.agent_id,

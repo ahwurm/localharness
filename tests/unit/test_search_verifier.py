@@ -134,7 +134,7 @@ async def test_runner_routes_search_verifier(monkeypatch):
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
     )
     out = await runner("search-verifier", "claim: x\nentity: y\nsource_url: z")
-    assert out.startswith("[search-verifier]") and seen["task"].startswith("claim:")
+    assert str(out).startswith("[search-verifier]") and seen["task"].startswith("claim:")
 
 
 @pytest.mark.asyncio
@@ -200,7 +200,7 @@ async def test_deterministic_gate_wrong_entity_past_inline_cap(mock_llm_client, 
     )
 
     # 1) verdict surfaced to the parent as a compact flag
-    assert "verdict=WRONG_ENTITY" in flag and "entity=QNT" in flag
+    assert "verdict=WRONG_ENTITY" in str(flag) and "entity=QNT" in str(flag)
 
     # 2) lossless: the verifier's own fetch (pg-1) retained the FULL page, and web_page_query
     #    surfaces the PAST-cap disconfirming sentence (the inline preview clips it at 5000 chars).
@@ -240,6 +240,6 @@ async def test_deterministic_gate_stale_verdict(mock_llm_client, bus, tmp_path, 
         llm=llm, bus=bus, base_registry=base, parent_session_id="run-stale",
         permission_evaluator=PermissionEvaluator(),
     )
-    assert "verdict=STALE" in flag
+    assert "verdict=STALE" in str(flag)
     row = json.loads((tmp_path / "verification-ledger.jsonl").read_text(encoding="utf-8").strip())
     assert row["verdict"] == "STALE" and row["flags"] == ["STALE"] and row["kept_in_report"] is True
