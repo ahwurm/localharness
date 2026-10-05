@@ -8,6 +8,8 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [0.16.4] — 2026-10-05
 
+Contributors: [ahwurm](https://github.com/ahwurm) and Codex (AI coding assistant).
+
 ### Changed
 - Harness nudges now carry internal provenance and a short provider-visible origin marker.
   Human corrections and quoted markers remain human content; provider payloads omit private
