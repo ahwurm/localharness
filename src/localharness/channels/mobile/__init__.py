@@ -16,7 +16,7 @@ one honest hole in it, which `GapDetected` makes visible rather than inherits si
 **A closed phone cannot hang the agent.** In `auto` — the default — the gate PARKS a gated call
 instead of blocking, so the phone's permission surface is a queue with a badge, not a modal.
 
-See `.planning/web-channel-PRD.md` for the full design and `docs/mobile.md` for the user-facing
+See `docs/mobile.md` for the user-facing
 account, including the honest "not yet" list.
 """
 from .channel import MobileChannel
