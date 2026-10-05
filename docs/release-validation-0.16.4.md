@@ -1,5 +1,7 @@
 # LocalHarness 0.16.4 validation
 
+Release contributors: [ahwurm](https://github.com/ahwurm) and Codex (AI coding assistant).
+
 Baseline: `e33a5f247717bf5c6a0cdba2dc91bba625d85617` (0.16.3 plus its CI fix).
 The release tag identifies the candidate. No persistent-memory retrieval or writes were used
 in the behavioral comparison. Private source evidence and raw evaluation traces are excluded
