@@ -54,10 +54,6 @@ default lets the session consolidate what it learned before it goes to sleep."""
 SLEEP_POLL_S = 15.0
 """How often the idle watch looks. One coroutine wake; the question it asks is cheap."""
 
-SHUTDOWN_SLEEP_GRACE_S = 10.0
-"""How long Ctrl-C waits for a live session to fall asleep (its normal teardown, which writes
-the thread to disk) before cancelling it the old way and losing the thread."""
-
 ASLEEP_DETAIL = "wakes on your next message"
 
 BANNER = """LocalHarness mobile channel
@@ -516,14 +512,17 @@ async def _serve(
             channel.set_bringup_abort(session_task.cancel)
 
         def _after_session(task: asyncio.Task) -> None:
-            """The session task is over. If it went to sleep: the next message brings a session up
-            again (the server's latch), the model the session held goes with it (the plugin,
-            registry and scheduler leave a cycle the GC has to reach), and a message that
-            arrived while the session was falling asleep wakes it right now rather than waiting
-            for the one after."""
-            if task.cancelled() or not channel.asleep:
+            """The session task is over with no session live — asleep, failed, or a build abandoned
+            — so the next message brings one up again (the server's latch; a failed wake has put
+            its file back and tries again that way). A sleep also lets the model the session
+            held go (the plugin, registry and scheduler leave a cycle the GC has to reach), and a
+            line that arrived while the session was falling asleep wakes it right now rather
+            than waiting for the one after."""
+            if channel.session_id is not None:
+                return  # ended with its handles still bound (/quit): not this callback's to undo
+            server.session_over()
+            if not channel.asleep:
                 return
-            server.session_asleep()
             gc.collect()
             if channel.queued_input:
                 _begin_session()
@@ -593,7 +592,8 @@ async def _serve(
         nonlocal stops
         stops += 1
         if stops > 1 and session_task is not None and not session_task.done():
-            log.warning("second stop signal: cancelling the session, thread not kept")
+            log.warning("second stop signal: cancelling the session without waiting for its "
+                        "teardown (the thread is kept only if its file was already written)")
             loop.call_soon_threadsafe(session_task.cancel)
 
     previous: dict[int, Any] = {}
@@ -635,27 +635,19 @@ async def _sleep_watch(channel: Any, *, after_s: float, poll_s: float = SLEEP_PO
             channel.request_sleep()
 
 
-async def _sleep_or_cancel(channel: Any, session_task: asyncio.Task, *,
-                           grace_s: float = SHUTDOWN_SLEEP_GRACE_S) -> None:
+async def _sleep_or_cancel(channel: Any, session_task: asyncio.Task) -> None:
     """The process is leaving with a session up: keep the thread. A running turn is cancelled first
     (its work is lost either way), then the session sleeps through its normal teardown, which
-    writes the conversation beside the session log. A teardown that outlives the grace is
-    cancelled as before, and the loss is said in the log. A build still in progress is cancelled:
-    there is no thread yet, and a wake that was abandoned puts its file back on its own."""
+    writes the conversation beside the session log — a stop no waiting line can cancel, and
+    waited for however long the teardown takes: memory's own shutdown waits up to fifteen
+    seconds for a dreaming pass, and cutting it short would leave its store open. A second stop
+    signal is the way out (`_serve`). A build still in progress is cancelled: there is no thread
+    yet, and a wake that was abandoned puts its file back on its own."""
     if channel.session_id is None:
         session_task.cancel()
     else:
         await channel.cancel_turn()  # False when nothing runs: a no-op with an honest answer
-        channel.request_sleep()
-        try:
-            await asyncio.wait_for(asyncio.shield(session_task), grace_s)
-            return
-        except asyncio.TimeoutError:
-            log.warning("the session did not fall asleep within %.0fs; cancelled, thread not kept", grace_s)
-            session_task.cancel()
-        except asyncio.CancelledError:
-            if not session_task.done():
-                raise  # this task was cancelled, not the session's (a second stop signal)
+        channel.request_sleep(now=True)
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await session_task
 

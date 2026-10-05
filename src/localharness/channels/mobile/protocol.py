@@ -167,8 +167,9 @@ class Hello(WireFrame):
     )
     model_state: str = Field(
         default="unknown",
-        description="ready | cold | unreachable | building | unknown — what `GET /api/health` "
-                    "would say, delivered on connect so the first screen never has to ask.",
+        description="ready | cold | asleep | unreachable | building | unknown — what "
+                    "`GET /api/health` would say, delivered on connect so the first screen never "
+                    "has to ask. asleep: the idle session was put to sleep; a message wakes it.",
     )
     session_live: bool = Field(
         default=False,

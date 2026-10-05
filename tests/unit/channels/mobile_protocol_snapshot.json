@@ -1,5 +1,5 @@
 {
-  "_note": "Regenerate ONLY together with a PROTOCOL_VERSION bump, or for a prose-only correction to a description \u2014 which moves a digest without moving the wire, and is said so in the commit. See test_mobile_protocol.py.",
+  "_note": "Regenerate ONLY together with a PROTOCOL_VERSION bump, or for a prose-only correction to a description — which moves a digest without moving the wire, and is said so in the commit. See test_mobile_protocol.py.",
   "protocol_version": 5,
   "types": {
     "Action": "65edde367f5433b5",
@@ -18,7 +18,7 @@
     "ExpectationAttached": "c8bda93795dffae6",
     "GapDetected": "c84722ab0154d63d",
     "Heartbeat": "4e43c5fa407474a2",
-    "Hello": "4d57297fb488ae53",
+    "Hello": "bc8f9c9097401cc8",
     "InputRouted": "c506d2b31b0dc06c",
     "Lagged": "7a6c3216423b1834",
     "MemoryGateFired": "54ae391510447ea6",

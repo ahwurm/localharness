@@ -81,7 +81,7 @@ Copy [the example plugin](examples/plugin-template/README.md): one tool, one com
 Early stage (v0.16.2, pre-1.0). Interfaces and config schema may change without notice. The limits a new user is most likely to meet:
 
 - The Discord plugin is tested offline against a stand-in for the Discord library and has not been run against a live Discord server. Files people upload to the bot are not passed to the model.
-- The phone app ships a bare reference page, not a finished chat app: one live session at a time, no chat list, no resume. Its incognito switch only keeps pictures off the phone; memory, sessions and pictures are still written to disk.
+- The phone app ships a bare reference page, not a finished chat app: one live session at a time, which sleeps to disk when idle and resumes on your next message; past chats are read-only in its drawer. Its incognito switch only keeps pictures off the phone; memory, sessions and pictures are still written to disk.
 - The image plugin does not install or start ComfyUI or download its model files. The terminal does not display pictures; the phone page and Discord do.
 - With memory on, `localharness doctor` fails until the `embeddings` extra and the embedding model are installed.
 - The Discord token and the autoresearch proposer's API key are stored as plain text in your global `overrides.yaml`.

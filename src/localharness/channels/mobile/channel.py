@@ -53,8 +53,8 @@ from localharness.core.events import (
 )
 
 from . import push as push_mod
-from .protocol import ASLEEP_STAGE
 from .protocol import (
+    ASLEEP_STAGE,
     AskExpired,
     AskOption,
     BlockingAsk,
@@ -268,6 +268,8 @@ class MobileChannel(ChannelAdapter):
         # Set by the runner's idle watch (and at shutdown): the REPL's next `read_input` ends the
         # session instead of waiting, and the session builder writes the thread to disk.
         self._sleep_event = asyncio.Event()
+        self._sleep_now = False   # a stop: the REPL ends at its next read even with lines waiting
+        self._sleeping = False    # latched when read_input ended the REPL for a sleep; the builder reads it
         self._handles: list[Any] = []
         self._open_asks: dict[str, _OpenAsk] = {}
         self._started = False
@@ -402,6 +404,7 @@ class MobileChannel(ChannelAdapter):
         # cancels a live session — which is exactly what a stray thumb did on 2026-09-14.
         self.set_bringup_abort(None)
         self._sleep_event.clear()  # a session starts awake, whatever ended the last one
+        self._sleep_now = self._sleeping = False
         self.set_bringup("ready", elapsed=self._bringup.elapsed if self._bringup else 0.0)
 
     def reset_session(self) -> None:
@@ -442,6 +445,7 @@ class MobileChannel(ChannelAdapter):
         self._turn_running = False
         self._open_asks.clear()
         self._sleep_event.clear()
+        self._sleep_now = self._sleeping = False
         self._model_reachable = None  # the answer belonged to the session's endpoint, which is gone
         self.set_bringup_abort(None)
 
@@ -882,9 +886,16 @@ class MobileChannel(ChannelAdapter):
         """
         if not self._started:
             raise NotInteractiveError("MobileChannel.start() must be called before read_input()")
-        # A message and a sleep request race here, and the message wins: a line that arrived is a
-        # person, and it clears the request. The REPL reads EOF — the same end `/quit` takes —
-        # only when nothing is waiting, so the session that ends has nothing in hand.
+        # A message and the idle watch's sleep request race here, and the message wins: a line
+        # that arrived is a person, and it clears the request. The REPL reads EOF — the same end
+        # `/quit` takes — only when nothing is waiting, so the session that ends has nothing in
+        # hand. A STOP (`request_sleep(now=True)`) is different: the process is leaving, so the
+        # REPL ends now and a waiting line stays queued. Either way `sleeping` is latched the
+        # moment EOF is raised, because a line arriving during the teardown clears the request
+        # and must not make the builder forget what ended the REPL.
+        if self._sleep_now:
+            self._sleeping = True
+            raise EOFError()
         getter = asyncio.ensure_future(self._inbound.get())
         sleeper = asyncio.ensure_future(self._sleep_event.wait())
         try:
@@ -893,9 +904,12 @@ class MobileChannel(ChannelAdapter):
             sleeper.cancel()
             if not getter.done():
                 getter.cancel()  # Queue.get leaves the item in place when cancelled before it got one
-        if getter in done:
+        if getter in done and not self._sleep_now:
             self._sleep_event.clear()
             return getter.result()
+        if getter in done:
+            self._inbound.put_nowait(getter.result())  # a stop arrived with it: the line waits for the wake
+        self._sleeping = True
         raise EOFError()
 
     def submit(self, text: str) -> None:
@@ -908,15 +922,36 @@ class MobileChannel(ChannelAdapter):
         self._sleep_event.clear()  # a person spoke: whatever idle watch was about to sleep, this comes first
         self._inbound.put_nowait(text)
 
-    def request_sleep(self) -> None:
+    def request_sleep(self, *, now: bool = False) -> None:
         """End the session at its next idle moment, keeping the thread: the REPL's `read_input` reads
         EOF, and the session builder writes the conversation beside the session log before the
-        teardown. A message that arrives first cancels it (see `read_input`)."""
+        teardown. A message that arrives first cancels it (see `read_input`) — unless `now`, the
+        stop signal's form, which no line can cancel."""
+        if now:
+            self._sleep_now = True
         self._sleep_event.set()
 
     @property
     def sleep_requested(self) -> bool:
-        return self._sleep_event.is_set()
+        return self._sleep_event.is_set() or self._sleep_now
+
+    @property
+    def sleeping(self) -> bool:
+        """`read_input` ended the REPL for a sleep. Latched there, cleared when a session binds or
+        resets, so the builder's answer does not depend on what arrived during the teardown."""
+        return self._sleeping
+
+    @property
+    def session_dir(self) -> Optional[Path]:
+        """The agent's session-log folder, kept across sessions (the drawer lists it; the sleeping
+        thread's file sits in it)."""
+        return self._session_dir
+
+    def clear_sleep(self) -> None:
+        """Nothing is asleep any more (the sleeping thread was discarded from disk): the ribbon
+        goes back to cold."""
+        if self.asleep:
+            self._bringup = None
 
     @property
     def asleep(self) -> bool:

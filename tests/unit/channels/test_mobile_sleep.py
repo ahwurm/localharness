@@ -53,7 +53,19 @@ async def test_a_sleep_request_ends_read_input_the_way_quit_does(tmp_path):
     channel.request_sleep()
     with pytest.raises(EOFError):
         await asyncio.wait_for(reader, timeout=1)
-    assert channel.sleep_requested, "still set: the builder reads it after the REPL ends"
+    assert channel.sleeping, "latched: the builder reads it after the REPL ends"
+
+
+async def test_the_sleep_latch_survives_a_line_that_arrives_during_the_teardown(tmp_path):
+    channel = await _channel(tmp_path)
+    reader = asyncio.ensure_future(channel.read_input())
+    await asyncio.sleep(0)
+    channel.request_sleep()
+    with pytest.raises(EOFError):
+        await asyncio.wait_for(reader, timeout=1)
+    channel.submit("arrived while the session was falling asleep")
+    assert channel.sleeping, "the builder must still write the thread"
+    assert channel.queued_input == 1, "and the runner wakes it for this line"
 
 
 async def test_a_message_already_waiting_beats_the_sleep_request(tmp_path):
@@ -139,6 +151,8 @@ async def test_bring_up_turns_the_builders_sleep_into_the_asleep_stage_and_drops
         return _slept()
 
     monkeypatch.setattr(start_cmd, "_start_async", builder)
+    # what the REPL leaves on the channel: its own bound methods, which the next REPL must not find
+    channel._pending_resolver = channel._nudge_resolver = channel._cancel_resolver = object()
     phone = channel.attach_client()
     await mobile_cmd._bring_up(channel, config_dir=None, verbose=False, agent=None, fresh_thread=True)
 
@@ -184,7 +198,7 @@ async def test_after_sleep_the_next_message_wakes_the_session_and_a_connect_does
         assert await channel.read_input() == "hi"  # the REPL that came up read it
         channel.set_bringup(ASLEEP_STAGE, detail=mobile_cmd.ASLEEP_DETAIL)
         channel.reset_session()
-        server.session_asleep()  # what the runner does once the session task is over
+        server.session_over()  # what the runner does once the session task is over
 
         health = (await client.get("/api/health", headers=BEARER)).json()
         assert (health["model_state"], health["session_live"]) == ("asleep", False)
@@ -319,24 +333,38 @@ async def test_shutdown_puts_a_live_idle_session_to_sleep_instead_of_cancelling_
 
     task = asyncio.ensure_future(session())
     await asyncio.sleep(0)
-    await mobile_cmd._sleep_or_cancel(channel, task, grace_s=1.0)
+    await mobile_cmd._sleep_or_cancel(channel, task)
     assert task.result() == "slept"
+
+
+async def test_shutdown_sleeps_even_with_a_line_queued_and_waits_for_the_teardown(tmp_path):
+    """A line typed ahead must not turn the stop into another turn (it did: the line won the race
+    and cleared the request), and the teardown is waited for however long it takes — memory's own
+    shutdown can hold it for fifteen seconds, and cutting it short left its store open."""
+    channel = await _channel(tmp_path)
+    _bind(channel, tmp_path)
+    channel.submit("typed ahead")
+
+    async def session() -> str:
+        try:
+            got = await channel.read_input()
+        except EOFError:
+            await asyncio.sleep(0.3)  # the ordered teardown
+            return "slept"
+        return f"ran a turn for {got!r}"
+
+    task = asyncio.ensure_future(session())
+    await asyncio.sleep(0)
+    await mobile_cmd._sleep_or_cancel(channel, task)
+    assert task.result() == "slept"
+    assert channel.queued_input == 1, "the line waits for the wake, it is not lost to the stop"
 
 
 async def test_shutdown_cancels_a_build_that_has_no_thread_yet(tmp_path):
     channel = await _channel(tmp_path)
     task = asyncio.ensure_future(asyncio.sleep(3600))
-    await mobile_cmd._sleep_or_cancel(channel, task, grace_s=1.0)
+    await mobile_cmd._sleep_or_cancel(channel, task)
     assert task.cancelled() and not channel.sleep_requested
-
-
-async def test_shutdown_gives_up_on_a_session_that_will_not_fall_asleep(tmp_path, caplog):
-    channel = await _channel(tmp_path)
-    _bind(channel, tmp_path)
-    task = asyncio.ensure_future(asyncio.sleep(3600))  # never reads input
-    with caplog.at_level("WARNING"):
-        await mobile_cmd._sleep_or_cancel(channel, task, grace_s=0.1)
-    assert task.cancelled() and "thread not kept" in caplog.text
 
 
 # ---------------------------------------------------------------- the stop signal, through the real uvicorn
@@ -440,4 +468,77 @@ async def test_a_second_stop_signal_gives_up_on_the_sleep(tmp_path, monkeypatch,
 
     with caplog.at_level("WARNING"):
         await _serve_real_uvicorn(monkeypatch, tmp_path, bring_up=bring_up, after_started=stop_twice)
-    assert ended == ["cancelled"] and "thread not kept" in caplog.text
+    assert ended == ["cancelled"] and "second stop signal" in caplog.text
+
+
+# ---------------------------------------------------------------- a failed wake tries again
+
+async def test_a_failed_bring_up_reopens_the_latch_so_the_next_message_retries(tmp_path, monkeypatch):
+    """A wake that fails before a session exists puts its file back (the builder's job) — and the
+    next message must be able to try again, which the server's latch used to prevent."""
+    calls: list = []
+
+    async def bring_up(channel, **kw):
+        calls.append(1)
+        channel.set_bringup("failed", detail="the model server is down", failed=True)
+
+    out: dict = {}
+
+    async def scenario(server):
+        assert server._ensure_session() is True
+        await _until(lambda: len(calls) == 1 and not server._bringup_started, "the latch reopened")
+        assert server._ensure_session() is True, "the next message tries again"
+        await _until(lambda: len(calls) == 2, "the retry ran")
+        out["calls"] = len(calls)
+
+    await _serve_with(monkeypatch, tmp_path, scenario=scenario, bring_up=bring_up, sleep_after=0)
+    assert out["calls"] == 2
+
+
+# ---------------------------------------------------------------- the screens and the drawer while asleep
+
+async def _asleep(tmp_path, sid: str = "s1") -> MobileChannel:
+    channel = await _channel(tmp_path)
+    _bind(channel, tmp_path, sid)
+    channel.set_bringup(ASLEEP_STAGE, detail=mobile_cmd.ASLEEP_DETAIL)
+    channel.reset_session()
+    assert channel.asleep
+    return channel
+
+
+async def test_the_memory_screen_says_asleep_not_off(tmp_path):
+    channel = await _asleep(tmp_path)
+    server = server_mod.MobileServer(channel, token=TOKEN)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),
+                                 base_url="http://web.test") as client:
+        got = await client.get("/api/memory", headers=BEARER)
+        assert got.status_code == 409 and "asleep" in got.json()["error"]
+        got = await client.get("/api/memory/fact?name=x", headers=BEARER)
+        assert got.status_code == 409
+        channel.clear_sleep()
+        got = await client.get("/api/memory", headers=BEARER)
+        assert got.status_code == 404 and got.json() == server_mod.MEMORY_OFF
+
+
+async def test_deleting_the_sleeping_chat_from_the_drawer_discards_the_thread(tmp_path):
+    import os
+
+    from localharness.cli.session_resume import asleep_path, write_asleep
+
+    channel = await _asleep(tmp_path, "s1")
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "s1.jsonl").write_text('{"seq": 1}\n')
+    (sessions / "s0.jsonl").write_text('{"seq": 1}\n')
+    write_asleep(asleep_path(sessions), _slept("s1").resume, workspace=os.getcwd())
+    server = server_mod.MobileServer(channel, token=TOKEN)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),
+                                 base_url="http://web.test") as client:
+        other = await client.post("/api/sessions/s0/delete", headers=JSON, json={})
+        assert other.status_code == 200 and asleep_path(sessions).exists(), "another chat: the thread stays"
+        gone = await client.post("/api/sessions/s1/delete", headers=JSON, json={})
+        assert gone.status_code == 200
+        assert not asleep_path(sessions).exists(), "the sleeping chat's thread goes with its log"
+        assert not channel.asleep
+        health = (await client.get("/api/health", headers=BEARER)).json()
+        assert health["model_state"] == "cold"

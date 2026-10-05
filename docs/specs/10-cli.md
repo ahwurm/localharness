@@ -405,7 +405,10 @@ QR on every start; the token's text is printed only when it is created or rotate
 prints the token and the QR on a terminal and exits 0 (with stdout not a terminal it prints
 `--show-token prints the token only to a terminal, and stdout is not one.` and exits 1).
 `--rotate-token` makes a new token, clears the push subscriptions and prints the pairing block; a
-server already running keeps the old token until it restarts.
+server already running keeps the old token until it restarts. `--sleep-after MINUTES` (default 30;
+`0` never) is how long the live session may sit unused — no phone attached, no turn, nothing waiting
+— before it is written to `sessions/asleep.json` beside its session log and torn down; the next
+message wakes it with the conversation continued (`docs/mobile.md`, "What to expect").
 
 **REPL Architecture:**
 
