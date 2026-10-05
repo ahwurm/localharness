@@ -59,7 +59,7 @@ def test_a_marked_test_skips_only_when_its_plugin_is_off(monkeypatch):
     node = _Node(pytest.mark.plugin("autoresearch"))
     monkeypatch.delenv("LOCALHARNESS_TEST_PLUGINS_OFF", raising=False)
     assert plugin_off_reason(node) is None
-    monkeypatch.setenv("LOCALHARNESS_TEST_PLUGINS_OFF", "web")
+    monkeypatch.setenv("LOCALHARNESS_TEST_PLUGINS_OFF", "mobile")
     assert plugin_off_reason(node) is None
     monkeypatch.setenv("LOCALHARNESS_TEST_PLUGINS_OFF", "web,autoresearch")
     assert plugin_off_reason(node) == "plugin autoresearch is off (LOCALHARNESS_TEST_PLUGINS_OFF)"

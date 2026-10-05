@@ -1,7 +1,7 @@
-"""The wiring: the `web` branch, the unknown-`--channel` fix, and the REPL handles.
+"""The wiring: the `mobile` branch, the unknown-`--channel` fix, and the REPL handles.
 
 These are the "is it actually reachable" tests. A green test on a channel nobody constructs is a
-checkmark on a lie, so each one here asserts something about the path a real `localharness web`
+checkmark on a lie, so each one here asserts something about the path a real `localharness mobile`
 takes: which branch picks the channel, which resolvers the REPL installs, which command surfaces
 stop refusing.
 """
@@ -13,7 +13,7 @@ import inspect
 import pytest
 import typer
 
-from localharness.channels.web.channel import WebChannel
+from localharness.channels.mobile.channel import MobileChannel
 from localharness.core.bus import EventBus
 
 pytestmark = pytest.mark.asyncio
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.asyncio
 # ------------------------------------------------------------------ the CLI surface
 
 async def test_the_web_command_mounts_through_the_plugin_descriptor(monkeypatch):
-    """A channel that exists only in the docs is a channel nobody finds. `web` is the web plugin's
+    """A channel that exists only in the docs is a channel nobody finds. `mobile` is the mobile plugin's
     command: not registered eagerly in cli/app.py, listed in --help from the manifest, and RUN through
     the lazy descriptor (its own --help is the real command's). Config comes from conftest's autouse
     hermetic LOCALHARNESS_HOME, never the real ~/.localharness."""
@@ -31,11 +31,11 @@ async def test_the_web_command_mounts_through_the_plugin_descriptor(monkeypatch)
     from localharness.cli.app import app
 
     monkeypatch.setenv("COLUMNS", "400")
-    assert "web" not in {c.name for c in app.registered_commands}
+    assert "mobile" not in {c.name for c in app.registered_commands}
     helped = CliRunner().invoke(app, ["--help"])
     assert helped.exit_code == 0 and any(
-        line.strip("│ ").split(None, 1)[:1] == ["web"] for line in helped.output.splitlines()), helped.output
-    ran = CliRunner().invoke(app, ["web", "--help"])
+        line.strip("│ ").split(None, 1)[:1] == ["mobile"] for line in helped.output.splitlines()), helped.output
+    ran = CliRunner().invoke(app, ["mobile", "--help"])
     assert ran.exit_code == 0, ran.output
     assert "--rotate-token" in ran.output and "--port" in ran.output
 
@@ -45,7 +45,7 @@ async def test_start_async_takes_a_prebuilt_web_channel():
     from localharness.cli.start_cmd import _start_async
 
     params = inspect.signature(_start_async).parameters
-    assert "web_channel" in params and params["web_channel"].default is None
+    assert "mobile_channel" in params and params["mobile_channel"].default is None
 
 
 async def test_an_unknown_channel_is_refused_instead_of_silently_becoming_the_terminal(tmp_path):
@@ -54,11 +54,11 @@ async def test_an_unknown_channel_is_refused_instead_of_silently_becoming_the_te
     from localharness.cli.start_cmd import _start_async
     from localharness.plugins.channels import channel_names
 
-    assert channel_names() == {"terminal", "acp", "discord", "web"}
+    assert channel_names() == {"terminal", "acp", "discord", "mobile"}
     with pytest.raises(typer.BadParameter) as exc:
         await _start_async(None, False, False, str(tmp_path), channel_mode="discrod")
     assert "discrod" in str(exc.value)
-    assert "terminal" in str(exc.value) and "web" in str(exc.value)
+    assert "terminal" in str(exc.value) and "mobile" in str(exc.value)
 
 
 async def test_the_refusal_happens_before_any_session_is_built(tmp_path):
@@ -94,7 +94,7 @@ def _repl(channel):
 async def test_the_repl_installs_the_nudge_and_cancel_handles():
     """§6.0.1: the REPL installs each one ONLY if the channel declares it as None, and a channel
     that does not is skipped with NO error — which fails silently, at a tap, much later."""
-    channel = WebChannel(bus=EventBus(), config={})
+    channel = MobileChannel(bus=EventBus(), config={})
     repl = _repl(channel)
     repl._subscribe_pending()
 
@@ -124,7 +124,7 @@ async def test_the_nudge_handle_reaches_push_user_nudge_only_while_a_turn_runs()
         def push_user_nudge(self, text):
             pushed.append(text)
 
-    repl = _repl(WebChannel(bus=EventBus(), config={}))
+    repl = _repl(MobileChannel(bus=EventBus(), config={}))
     repl._agent = _Agent()
 
     assert await repl._nudge_from_channel("too late") is False
@@ -143,7 +143,7 @@ async def test_the_nudge_handle_reaches_push_user_nudge_only_while_a_turn_runs()
 
 
 async def test_the_cancel_handle_cancels_the_turn_not_the_session():
-    repl = _repl(WebChannel(bus=EventBus(), config={}))
+    repl = _repl(MobileChannel(bus=EventBus(), config={}))
     assert await repl._cancel_from_channel() is False
 
     async def _forever():
@@ -159,14 +159,14 @@ async def test_the_cancel_handle_cancels_the_turn_not_the_session():
 
 async def test_a_turn_streams_only_when_the_channel_offers_a_token_sink():
     """WEBCH-05. The terminal declares no `on_token` and keeps passing None — it has never
-    streamed answer text — so this adds live text to the web channel and changes nothing else."""
+    streamed answer text — so this adds live text to the mobile channel and changes nothing else."""
     from localharness.channels.base import ChannelAdapter
     from localharness.channels.terminal import TerminalChannel
 
     assert ChannelAdapter.streams_tokens is False          # the safe default
     assert TerminalChannel.streams_tokens is False         # unchanged: it has never streamed
-    assert WebChannel.streams_tokens is True
-    assert callable(getattr(WebChannel, "on_token", None))
+    assert MobileChannel.streams_tokens is True
+    assert callable(getattr(MobileChannel, "on_token", None))
 
     seen: dict = {}
 
@@ -178,7 +178,7 @@ async def test_a_turn_streams_only_when_the_channel_offers_a_token_sink():
             seen["on_token"] = on_token
             return "done"
 
-    channel = WebChannel(bus=EventBus(), config={})
+    channel = MobileChannel(bus=EventBus(), config={})
     repl = _repl(channel)
     repl._agent = _Agent()
     task = await repl._start_user_turn("hello")
@@ -197,13 +197,13 @@ async def test_the_display_toggles_are_capability_gated_not_class_gated():
 
     assert ChannelAdapter.has_display_toggles is False   # safe default
     assert TerminalChannel.has_display_toggles is True
-    assert WebChannel.has_display_toggles is True
+    assert MobileChannel.has_display_toggles is True
 
 
 async def test_reasoning_and_verbose_act_on_the_web_channel():
     said: list[str] = []
 
-    channel = WebChannel(bus=EventBus(), config={})
+    channel = MobileChannel(bus=EventBus(), config={})
 
     async def _say(content, agent_id=None, metadata=None):
         said.append(content)
@@ -244,7 +244,7 @@ async def test_bringup_stages_are_named_and_abortable():
     """WEBCH-43: a rising number reports elapsed time, not health. A wedged memory lock, a
     failing MCP server and a sibling process holding the inference flock all look identical to a
     healthy slow start."""
-    channel = WebChannel(bus=EventBus(), config={})
+    channel = MobileChannel(bus=EventBus(), config={})
     await channel.start()
     client = channel.attach_client()
 
@@ -270,13 +270,13 @@ async def test_bringup_stages_are_named_and_abortable():
 
 async def test_doctor_prints_the_web_plugin_check(tmp_path, monkeypatch):
     """A security posture nobody can check is a security posture nobody trusts. The real
-    `localharness doctor` prints the web plugin's Check rows (print_plugin_row), never the token."""
+    `localharness doctor` prints the mobile plugin's Check rows (print_plugin_row), never the token."""
     import os
 
     import yaml
     from typer.testing import CliRunner
 
-    from localharness.channels.web.auth import rotate_token, token_path
+    from localharness.channels.mobile.auth import rotate_token, token_path
     from localharness.cli.app import app
 
     monkeypatch.setenv("COLUMNS", "400")
@@ -295,31 +295,31 @@ async def test_doctor_prints_the_web_plugin_check(tmp_path, monkeypatch):
     async def doctor() -> str:  # doctor calls asyncio.run: off this test's running loop
         return await asyncio.to_thread(_doctor)
 
-    assert "web: not enrolled yet" in await doctor()
+    assert "mobile: not enrolled yet" in await doctor()
     rotate_token(cfg)
     out = await doctor()
-    assert "web: enrolled; binds 127.0.0.1:8765 (loopback only unless --allow-unsafe-bind)" in out
-    assert "A token is required on every request" in out and "web-token: token file is mode 600" in out
+    assert "mobile: enrolled; binds 127.0.0.1:8765 (loopback only unless --allow-unsafe-bind)" in out
+    assert "A token is required on every request" in out and "mobile-token: token file is mode 600" in out
     # ...and it never prints the secret itself: doctor output ends up in bug reports.
     assert token_path(cfg).read_text().strip() not in out
 
     os.chmod(token_path(cfg), 0o644)
     out = await doctor()
-    assert "web-token: Web app token is mode 644, expected 600" in out
+    assert "mobile-token: Web app token is mode 644, expected 600" in out
     assert f"chmod 600 {token_path(cfg)}" in out
 
 
 async def test_start_channel_web_without_a_server_is_refused_not_silently_a_terminal(tmp_path):
     """The regression the unknown-channel fix could have re-introduced by its own hand.
 
-    `web` names a channel `_start_async` cannot BUILD — the HTTP server must be reachable before a
-    session exists, so `localharness web` constructs it and hands it in. Adding `web` to the known
-    set without this check made `--channel web` pass validation and then fall through to the
+    `mobile` names a channel `_start_async` cannot BUILD — the HTTP server must be reachable before a
+    session exists, so `localharness mobile` constructs it and hands it in. Adding `mobile` to the known
+    set without this check made `--channel mobile` pass validation and then fall through to the
     TERMINAL branch: exactly the silent fallback the same commit existed to end.
     """
-    from localharness.cli.start_cmd import WEB_NEEDS_ITS_OWN_COMMAND, _start_async
+    from localharness.cli.start_cmd import MOBILE_NEEDS_ITS_OWN_COMMAND, _start_async
 
     with pytest.raises(typer.BadParameter) as exc:
-        await _start_async(None, False, False, str(tmp_path), channel_mode="web")
-    assert "localharness web" in str(exc.value)
-    assert WEB_NEEDS_ITS_OWN_COMMAND in str(exc.value)
+        await _start_async(None, False, False, str(tmp_path), channel_mode="mobile")
+    assert "localharness mobile" in str(exc.value)
+    assert MOBILE_NEEDS_ITS_OWN_COMMAND in str(exc.value)

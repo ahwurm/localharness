@@ -1,7 +1,7 @@
 """Who else is driving this agent right now (WEBCH-29).
 
 **The hazard this makes visible.** `history.jsonl` and `compact.md` are appended without a lock.
-One process is fine. TWO processes on the same agent in the same workspace — `localharness web`
+One process is fine. TWO processes on the same agent in the same workspace — `localharness mobile`
 serving a phone while `localharness start` runs in a terminal, which is a habit, not an exotic
 case — interleave their appends, and an append above `PIPE_BUF` can tear. Nothing today notices.
 

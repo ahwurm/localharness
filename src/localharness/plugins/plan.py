@@ -84,7 +84,7 @@ class PlanEntry:
     def display(self) -> str:
         """The STATE text `plugins list`, doctor and the banner all print (PRD §4): "on";
         "off — turn on: localharness plugins enable x"; "available — turn on: …";
-        "on (install `localharness[web]` to use it)" for needs-extra; else "<state> — <reason>".
+        "on (install `localharness[mobile]` to use it)" for needs-extra; else "<state> — <reason>".
         Reasons never repeat the state word."""
         if self.state == "on":
             return "on"

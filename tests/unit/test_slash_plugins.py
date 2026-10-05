@@ -31,7 +31,7 @@ from rich.console import Console
 
 from localharness.channels.base import ChannelAdapter
 from localharness.channels.terminal import TerminalChannel
-from localharness.channels.web.channel import WebChannel
+from localharness.channels.mobile.channel import MobileChannel
 from localharness.cli import plugins_cmd, start_cmd
 from localharness.cli.repl import OrchestratorREPL
 from localharness.cli.slash_commands import all_rows, find_row
@@ -209,7 +209,7 @@ def test_the_plugins_row_is_the_one_terminal_only_row():
 def test_only_the_terminal_can_switch_plugins():
     assert ChannelAdapter.can_switch_plugins is False
     assert TerminalChannel.can_switch_plugins is True
-    assert WebChannel.can_switch_plugins is False
+    assert MobileChannel.can_switch_plugins is False
 
 
 async def test_plugins_on_a_channel_that_cannot_switch_is_one_line_and_never_calls_the_hook():
@@ -383,8 +383,8 @@ def test_indicator_not_set_up_yet():
 def test_indicator_a_skipped_check_is_not_set_up_yet():
     """Deferred #23: a check the step skipped (web's "not enrolled yet", autoresearch with no
     proposer) is a plugin that is not set up yet, never "its check failed"."""
-    web = _resume(("enable", "web"), skipped_check="not enrolled yet")
-    assert start_cmd._resume_status(web, _started(["web"])) == "web: on, but not set up yet — not enrolled yet"
+    web = _resume(("enable", "mobile"), skipped_check="not enrolled yet")
+    assert start_cmd._resume_status(web, _started(["mobile"])) == "mobile: on, but not set up yet — not enrolled yet"
 
 
 def test_indicator_it_could_not_start():

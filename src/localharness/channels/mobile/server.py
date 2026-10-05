@@ -21,7 +21,7 @@ Starlette + uvicorn, not aiohttp and not a hand-rolled h11 loop: the PRD names a
 is what lets the whole surface be driven in-process by `httpx.ASGITransport` with no socket and
 no model (which is how every test in `tests/unit/channels/test_web_*.py` runs), and both are
 already in the tree as transitive dependencies of `mcp`. They are declared explicitly in the
-`web` extra anyway — a transitive dependency is not a promise, and this repo has already been
+`mobile` extra anyway — a transitive dependency is not a promise, and this repo has already been
 bitten by treating one as though it were.
 """
 from __future__ import annotations
@@ -45,7 +45,7 @@ from localharness.config import session_presence
 from localharness.core.events import ARTIFACT_ID_RE, ARTIFACT_MIMES
 
 from . import auth, push
-from .channel import WebChannel
+from .channel import MobileChannel
 from .protocol import (
     COLLAPSIBLE_GROUPS,
     FINISH_REASONS_KNOWN,
@@ -242,7 +242,7 @@ def _unauthorized() -> JSONResponse:
 
 _SUFFIX_MIMES: dict[str, str] = {s: m for m, s in ARTIFACT_MIMES.items()} | {".jpeg": "image/jpeg"}
 """The artifact route's suffix -> media type: core's allowlist read backwards (PAPI-10)."""
-# Chosen only by WebServer._artifact_policy — the one decision point `--incognito` flips.
+# Chosen only by MobileServer._artifact_policy — the one decision point `--incognito` flips.
 ARTIFACT_CACHE_CONTROL = "private, max-age=31536000, immutable"
 ARTIFACT_NO_STORE = "no-store"
 ARTIFACT_PAGE = 60
@@ -279,12 +279,12 @@ def _find_artifact(root: Path, artifact_id: str) -> tuple[Path, str | None] | No
     return _sole_file(_stem_candidates(root).get(artifact_id, []))
 
 
-class WebServer:
-    """Routes, auth and the SSE loop for one `localharness web` process."""
+class MobileServer:
+    """Routes, auth and the SSE loop for one `localharness mobile` process."""
 
     def __init__(
         self,
-        channel: WebChannel,
+        channel: MobileChannel,
         *,
         token: str,
         ui_dir: Optional[Path] = None,
@@ -550,7 +550,7 @@ class WebServer:
                     self.channel.session_id, self._log_max_seq(self.channel.session_id)
                 )
                 if gap is not None:
-                    log.error("web_replay_gap", from_seq=gap.from_seq, to_seq=gap.to_seq)
+                    log.error("mobile_replay_gap", from_seq=gap.from_seq, to_seq=gap.to_seq)
                     yield _frame(gap.frame_type, None, gap.model_dump_json())
 
             if self.channel.bringup is not None:
@@ -670,7 +670,7 @@ class WebServer:
         if self.channel.session_id is not None:
             return
         if await self.channel.probe_model() is not True:
-            log.info("web_prewarm_skipped", reason="provider not answering; waiting for a message")
+            log.info("mobile_prewarm_skipped", reason="provider not answering; waiting for a message")
             return
         self._bringup_started = True
         self.on_first_message()
@@ -1155,7 +1155,7 @@ class WebServer:
                       "history": got["history"][:MEMORY_HISTORY_CAP]})
 
     async def memory_edit(self, request: Request) -> Response:
-        """Owner edit: supersede the fact's content — history kept, `user_edit@…;web` stamped.
+        """Owner edit: supersede the fact's content — history kept, `user_edit@…;mobile` stamped.
 
         Edit-only by design: the row must already exist (the agent's `remember` and the memory
         subsystems create facts). Tags and node_kind carry forward — an edit that silently
@@ -1176,7 +1176,7 @@ class WebServer:
         if not name or not content:
             return _json({"error": "body needs {name, content}"}, status=400)
         try:
-            res = await b.edit(name, content, origin="web")
+            res = await b.edit(name, content, origin="mobile")
         except Exception as exc:
             return _json({"error": f"memory edit failed: {exc}"}, status=500)
         if res["status"] == "missing":
@@ -1449,7 +1449,7 @@ class WebServer:
         ignore ports, so a neighbouring service on the same host name is sent that cookie; were it
         traded for the token here, the cookie would be the token. A browser's manifest fetch
         carries cookies, not the bearer — and the cookie is scoped to /api besides — so the
-        installed app asks for the token once (docs/web.md says so).
+        installed app asks for the token once (docs/mobile.md says so).
         """
         authed = auth.constant_time_match(self._bearer(request), self.token)
         body = dict(MANIFEST)

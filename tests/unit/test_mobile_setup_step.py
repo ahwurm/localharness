@@ -1,7 +1,7 @@
-"""mobile's (the `web` plugin's) setup step: one setting, web.public_url, the address the pairing QR
+"""mobile's (the `mobile` plugin's) setup step: one setting, mobile.public_url, the address the pairing QR
 sends a phone to. It is machine-level only (a project folder must never choose where a phone is
-pointed) and `localharness web` uses it when --public-url is omitted. The bind address and
---allow-unsafe-bind stay flags of `localharness web`, never settings."""
+pointed) and `localharness mobile` uses it when --public-url is omitted. The bind address and
+--allow-unsafe-bind stay flags of `localharness mobile`, never settings."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,8 +10,8 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from localharness.cli import web_cmd
-from localharness.cli.web_plugin import WebConfig, WebPlugin
+from localharness.cli import mobile_cmd
+from localharness.cli.mobile_plugin import MobileConfig, MobilePlugin
 from localharness.config.loader import ConfigLoader
 from localharness.plugins import discovery
 from localharness.plugins.api import AGENT_PROMPT_PLACEHOLDER
@@ -34,22 +34,22 @@ def _g(tmp_path: Path, overrides: dict | None = None) -> Path:
 
 
 def test_the_one_setting_is_the_phone_address() -> None:
-    assert WebPlugin.ConfigModel is WebConfig
-    assert set(WebConfig.model_fields) == {"public_url"}  # never host, port or allow_unsafe_bind
+    assert MobilePlugin.ConfigModel is MobileConfig
+    assert set(MobileConfig.model_fields) == {"public_url"}  # never host, port or allow_unsafe_bind
 
 
 def test_the_address_is_cleaned_and_must_be_http() -> None:
-    assert WebConfig(public_url=" https://spark.example.ts.net/ ").public_url == "https://spark.example.ts.net"
-    assert WebConfig(public_url="").public_url == "" and WebConfig().public_url == ""
-    with pytest.raises(ValidationError, match="web.public_url must start with http:// or https://"):
-        WebConfig(public_url="spark.local")
+    assert MobileConfig(public_url=" https://spark.example.ts.net/ ").public_url == "https://spark.example.ts.net"
+    assert MobileConfig(public_url="").public_url == "" and MobileConfig().public_url == ""
+    with pytest.raises(ValidationError, match="mobile.public_url must start with http:// or https://"):
+        MobileConfig(public_url="spark.local")
 
 
 def test_the_manifest_asks_the_phone_address_and_names_the_next_step() -> None:
-    m = WebPlugin.manifest
+    m = MobilePlugin.manifest
     [field] = m.setup
     assert (field.key, field.secret, field.default) == ("public_url", False, "")
-    assert m.next_steps == "Run `localharness web`, then scan its pairing QR with your phone."
+    assert m.next_steps == "Run `localharness mobile`, then scan its pairing QR with your phone."
     assert "tailscale serve --bg 8765" in m.agent_prompt
     assert "do not pass --allow-unsafe-bind" in m.agent_prompt
     assert not AGENT_PROMPT_PLACEHOLDER.search(m.agent_prompt)
@@ -61,34 +61,34 @@ def test_a_project_cannot_choose_where_a_phone_is_pointed(tmp_path, monkeypatch)
     g.mkdir()
     ws.mkdir(parents=True)
     (g / "config.yaml").write_text(yaml.safe_dump(
-        {**_CONFIG, "web": {"public_url": "https://mine.example.ts.net"}}), encoding="utf-8")
+        {**_CONFIG, "mobile": {"public_url": "https://mine.example.ts.net"}}), encoding="utf-8")
     (ws / "config.yaml").write_text(yaml.safe_dump(
-        {"web": {"public_url": "https://elsewhere.example"}}), encoding="utf-8")
+        {"mobile": {"public_url": "https://elsewhere.example"}}), encoding="utf-8")
     loader = ConfigLoader(config_dir=g, local_config_dir=ws)
     loader.load_harness()
 
     res = resolve(loader, extra_installed=lambda e: True)
 
-    assert res.settings["web"].config.public_url == "https://mine.example.ts.net"
-    dropped = [w for w in res.warnings if w.startswith("ignoring web.public_url")]
+    assert res.settings["mobile"].config.public_url == "https://mine.example.ts.net"
+    dropped = [w for w in res.warnings if w.startswith("ignoring mobile.public_url")]
     assert len(dropped) == 1 and str(ws / "config.yaml") in dropped[0], res.warnings
 
 
 def test_the_saved_address_is_read_back(tmp_path) -> None:
-    g = _g(tmp_path, {"web": {"enabled": True, "public_url": "https://spark.example.ts.net"}})
-    assert web_cmd._saved_public_url(str(g)) == "https://spark.example.ts.net"
+    g = _g(tmp_path, {"mobile": {"enabled": True, "public_url": "https://spark.example.ts.net"}})
+    assert mobile_cmd._saved_public_url(str(g)) == "https://spark.example.ts.net"
 
 
 def test_nothing_saved_reads_as_none(tmp_path) -> None:
-    assert web_cmd._saved_public_url(str(_g(tmp_path))) is None
-    assert web_cmd._saved_public_url(str(_g(tmp_path / "x", {"web": {"public_url": ""}}))) is None
+    assert mobile_cmd._saved_public_url(str(_g(tmp_path))) is None
+    assert mobile_cmd._saved_public_url(str(_g(tmp_path / "x", {"mobile": {"public_url": ""}}))) is None
 
 
 @pytest.mark.parametrize("broken", ["config", "value"])
 def test_a_config_that_cannot_be_read_reads_as_none(tmp_path, broken) -> None:
     """The guess stands: no config yet, an unreadable one, or a saved value that does not validate."""
-    g = _g(tmp_path, {"web": {"public_url": "spark.local"}} if broken == "value" else None)
+    g = _g(tmp_path, {"mobile": {"public_url": "spark.local"}} if broken == "value" else None)
     if broken == "config":
         (g / "config.yaml").write_text("provider: [unclosed\n", encoding="utf-8")
-    assert web_cmd._saved_public_url(str(g)) is None
-    assert web_cmd._saved_public_url(str(tmp_path / "no-such-dir")) is None
+    assert mobile_cmd._saved_public_url(str(g)) is None
+    assert mobile_cmd._saved_public_url(str(tmp_path / "no-such-dir")) is None

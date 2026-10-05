@@ -14,7 +14,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from localharness.channels.web import protocol
+from localharness.channels.mobile import protocol
 from localharness.core.events import Observation, TurnCompleted, TurnFailed
 from localharness.plugins.builtin import bundled_plugins
 from localharness.tools.builtin.image_plugin import ImagePlugin
@@ -32,7 +32,7 @@ def test_the_forbidden_strings_appear_nowhere():
     files = [p for d in ("src", "tests") for p in (ROOT / d).rglob("*")
              if p.is_file() and p.suffix in SUFFIXES and "__pycache__" not in p.parts]
     assert any(p.name == "index.html" for p in files) and any(
-        p.name == "web_protocol_snapshot.json" for p in files), "the walk missed the page or the snapshot"
+        p.name == "mobile_protocol_snapshot.json" for p in files), "the walk missed the page or the snapshot"
     hits = [f"{p.relative_to(ROOT)}:{n}: {needle}"
             for p in files
             for n, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1)

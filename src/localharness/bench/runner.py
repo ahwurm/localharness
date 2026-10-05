@@ -85,7 +85,7 @@ async def _start_bench_memory(agent_config: Any, scenario: ScenarioSpec, seeds: 
     result = None
     try:
         (d / "config.yaml").write_text(yaml.safe_dump(
-            {"version": "1", "memory": {"enabled": True}, "web": {"enabled": False},
+            {"version": "1", "memory": {"enabled": True}, "mobile": {"enabled": False},
              "image": {"enabled": False}}))
         (d / "agents").mkdir()
         (d / "agents" / f"{agent_config.name}.yaml").write_text(yaml.safe_dump(

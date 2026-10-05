@@ -86,14 +86,14 @@ def test_a_launched_peer_with_a_key_and_no_requirement_gets_its_own_row(tmp_path
 # ------------------------------------------------------------------------------- D7: the remote lock
 
 
-@pytest.mark.plugin("web")
+@pytest.mark.plugin("mobile")
 def test_a_remote_channel_with_the_lock_off_is_named(tmp_path, monkeypatch, fake_home):
     pytest.importorskip("starlette")
     assert REMOTE_ROW in _doctor(tmp_path, monkeypatch, fake_home)
 
 
-@pytest.mark.plugin("web")
-@pytest.mark.parametrize("sections", [{"channels": {"remote_unattended": False}}, {"web": {"enabled": False}}],
+@pytest.mark.plugin("mobile")
+@pytest.mark.parametrize("sections", [{"channels": {"remote_unattended": False}}, {"mobile": {"enabled": False}}],
                          ids=["lock on", "no channel plugin on"])
 def test_no_remote_row_with_the_lock_on_or_no_channel_on(tmp_path, monkeypatch, fake_home, sections):
     pytest.importorskip("starlette")

@@ -18,9 +18,9 @@ Criteria, verbatim (ROADMAP, the image plugin phase, as amended):
 
 REAL: every CLI command (the Typer app through CliRunner); plugin discovery, the resolver and
 lifecycle, the settings layers and their machine-only rule; the session, `_start_async` run in web
-mode (a WebChannel handed in, the one mode that binds the artifact route); the loop, the tool
+mode (a MobileChannel handed in, the one mode that binds the artifact route); the loop, the tool
 registry, the permission gate in its default mode; the image tool writing through core's
-`write_artifact`; the web channel's own queued wire frame; the web server over ASGI (no socket); the
+`write_artifact`; the mobile channel's own queued wire frame; the web server over ASGI (no socket); the
 page's reducer run verbatim under node.
 
 STUBBED: ComfyUI (an `httpx.MockTransport` at `generate_image_tool._TRANSPORT`, the one seam the
@@ -45,8 +45,8 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from localharness.channels.web.channel import WebChannel
-from localharness.channels.web.server import WebServer
+from localharness.channels.mobile.channel import MobileChannel
+from localharness.channels.mobile.server import MobileServer
 from localharness.cli.app import app
 from localharness.cli.slash_commands import set_plugin_rows
 from localharness.core.bus import EventBus
@@ -55,9 +55,9 @@ from localharness.tools.builtin import generate_image_tool
 from tests.conftest import FakeLLMResponse, FakeToolCall
 from tests.integration.test_guardrails_from_global_dir_e2e import _let_the_stub_tokenizer_run_a_turn
 from tests.integration.test_workspace_cli_surface_e2e import _DISCARD_URL, _offline_provider
-from tests.unit.channels.test_web_artifacts import IMMUTABLE, PNG
-from tests.unit.channels.test_web_server import BEARER, TOKEN
-from tests.unit.channels.test_web_reference_page import FIND_IMAGES, HELLO, PAGE, _drive
+from tests.unit.channels.test_mobile_artifacts import IMMUTABLE, PNG
+from tests.unit.channels.test_mobile_server import BEARER, TOKEN
+from tests.unit.channels.test_mobile_reference_page import FIND_IMAGES, HELLO, PAGE, _drive
 from tests.unit.test_image_plugin import _full
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
 from tests.unit.test_start_plugins import _record_loop
@@ -174,7 +174,7 @@ def _session(monkeypatch, *, turn: str | None = None, tool_args: dict | None = N
             art = next((o["artifact"] for o in obs if o.get("artifact")), None)
             if art:
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(
-                        app=WebServer(self._channel, token=TOKEN).app), base_url="http://web.test") as c:
+                        app=MobileServer(self._channel, token=TOKEN).app), base_url="http://web.test") as c:
                     out["get"] = await c.get(f"/api/artifacts/image/{art['id']}", headers=BEARER)
         finally:
             await self._channel.stop()
@@ -183,8 +183,8 @@ def _session(monkeypatch, *, turn: str | None = None, tool_args: dict | None = N
 
     async def run() -> None:
         from localharness.cli.start_cmd import _start_async
-        await _start_async(None, False, False, None, channel_mode="web",
-                           web_channel=WebChannel(bus=EventBus(), config={}))
+        await _start_async(None, False, False, None, channel_mode="mobile",
+                           mobile_channel=MobileChannel(bus=EventBus(), config={}))
 
     asyncio.run(run())
     (loop,) = out["loops"]

@@ -1,2 +1,2 @@
-absent	Plugins: web, memory	warnings=[]
-present	Plugins: web, memory	warnings=[]
+absent	Plugins: mobile, memory	warnings=[]
+present	Plugins: mobile, memory	warnings=[]

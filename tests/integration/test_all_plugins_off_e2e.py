@@ -113,7 +113,7 @@ async def test_core_boots_and_works_with_every_plugin_off(tmp_path, monkeypatch)
     resolution, result = out["resolution"], out["lifecycle"]
 
     # Discovery really ran: the installed example plugin is known, and everything is off.
-    assert set(resolution.enabled) == {"image", "web", "memory", "dispatch", "autoresearch", "example"}, dict(resolution.enabled)
+    assert set(resolution.enabled) == {"image", "mobile", "memory", "dispatch", "autoresearch", "example"}, dict(resolution.enabled)
     assert not any(resolution.enabled.values()), dict(resolution.enabled)
     from localharness.plugins.channels import accepted_channels
     assert {e.name: e.state for e in resolution.plan.entries}["dispatch"] == "off"
@@ -149,20 +149,20 @@ def test_help_lists_no_plugin_commands_when_all_off(tmp_path, monkeypatch):
     res = CliRunner().invoke(app, ["--help"], env={"LOCALHARNESS_DIR": str(tmp_path)})
     assert res.exit_code == 0, res.output
     assert re.search(r"│ plugins\s", res.output), res.output  # the table really rendered
-    assert not re.search(r"│ web\s", res.output), res.output
+    assert not re.search(r"│ mobile\s", res.output), res.output
     assert "generate-image" not in res.output, res.output
     for name in ("autoresearch", "experiment", "propose"):  # PRD §8 "All plugins off"
         assert not re.search(rf"│ {name}\s", res.output), res.output
 
 
 def test_help_lists_web_when_it_is_on(tmp_path, monkeypatch):
-    """The --help twin: the same config dir with web at its default lists `web` — so the absence
+    """The --help twin: the same config dir with web at its default lists `mobile` — so the absence
     above is the config's doing, not a table that never lists plugin commands."""
     _stub_start_boundaries(tmp_path, monkeypatch, real_plugins=True)
     from localharness.cli.app import app
     res = CliRunner().invoke(app, ["--help"], env={"LOCALHARNESS_DIR": str(tmp_path)})
     assert res.exit_code == 0, res.output
-    assert re.search(r"│ web\s", res.output), res.output
+    assert re.search(r"│ mobile\s", res.output), res.output
     assert all(re.search(rf"│ {n}\s", res.output) for n in ("autoresearch", "experiment", "propose")), res.output
 
 

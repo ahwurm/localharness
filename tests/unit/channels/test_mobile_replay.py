@@ -13,8 +13,8 @@ import json
 
 import pytest
 
-from localharness.channels.web.channel import WebChannel
-from localharness.channels.web.replay import ReplayDriver, ReplayFixtures
+from localharness.channels.mobile.channel import MobileChannel
+from localharness.channels.mobile.replay import ReplayDriver, ReplayFixtures
 from localharness.core.bus import EventBus
 
 pytestmark = pytest.mark.asyncio
@@ -46,7 +46,7 @@ async def _drain(client):
 
 
 async def _channel():
-    channel = WebChannel(bus=EventBus(), config={})
+    channel = MobileChannel(bus=EventBus(), config={})
     await channel.start()
     return channel
 
@@ -56,7 +56,7 @@ async def test_replay_synthesizes_the_stream_the_log_does_not_contain(tmp_path):
     provisional-supersede path — the client logic most likely to be wrong — is exercised offline."""
     path = _log(
         tmp_path,
-        _row(1, "UserMessage", content="is the daemon up?", channel="web", attachments=[]),
+        _row(1, "UserMessage", content="is the daemon up?", channel="mobile", attachments=[]),
         _row(2, "Action", action_type="llm_response", content="Yes, it is up.",
              has_tool_calls=False),
         _row(3, "TaskComplete", success=True, summary="Yes, it is up.",
@@ -98,7 +98,7 @@ async def test_the_parked_queue_replays_for_real(tmp_path):
     """PermissionStaged/PermissionResolved are ordinary bus events carrying the whole PendingCall,
     so unlike a blocking ask they need no fixture at all."""
     staged = _row(
-        1, "PermissionStaged", total=1, channel="web",
+        1, "PermissionStaged", total=1, channel="mobile",
         pending={
             "id": 1, "rendering": "bash_exec: rm -rf build/", "agent_label": "",
             "session_id": "abc123", "created_at": 1.0,
@@ -188,12 +188,12 @@ async def test_replay_never_writes_into_a_real_session_log(tmp_path):
 
 async def test_the_replay_hello_says_it_is_synthetic(tmp_path):
     """So nobody mistakes a replayed session for a live one, or a synthesized tick for a reading."""
-    from localharness.channels.web.server import WebServer
+    from localharness.channels.mobile.server import MobileServer
 
     path = _log(tmp_path, _row(1, "Heartbeat", iteration=1, context_utilization_pct=1.0))
     channel = await _channel()
     driver = ReplayDriver(channel, path, speed=1000)
-    server = WebServer(channel, token="t", replay=driver)
+    server = MobileServer(channel, token="t", replay=driver)
     client = channel.attach_client()
     hello = await channel.hello(client, None)
     assert hello.synthetic is False                 # the channel itself does not know
@@ -207,7 +207,7 @@ async def test_replay_paces_itself_from_the_persisted_timestamps(tmp_path):
     """Real gaps run to minutes (the measured median between turns is 3.7 of them) and nobody
     iterating on a stylesheet wants to wait one out — so the pause is CAPPED, not dropped:
     ordering and the feel of a pause survive while the dead time does not."""
-    from localharness.channels.web.replay import MAX_STEP_S
+    from localharness.channels.mobile.replay import MAX_STEP_S
 
     rows = [
         _row(1, "Heartbeat", iteration=1, context_utilization_pct=1.0),
@@ -223,15 +223,15 @@ async def test_replay_paces_itself_from_the_persisted_timestamps(tmp_path):
 
 
 async def test_playback_starts_when_a_client_connects_not_when_the_server_boots(tmp_path):
-    """Found by driving the real command: a browser opened a few seconds after `localharness web
+    """Found by driving the real command: a browser opened a few seconds after `localharness mobile
     --replay` had already missed the opening of the session it came to watch — and "edit the
     page, pull to refresh, watch it again" is the entire loop --replay exists for."""
-    from localharness.channels.web.server import WebServer
+    from localharness.channels.mobile.server import MobileServer
 
     path = _log(tmp_path, _row(1, "Heartbeat", iteration=1, context_utilization_pct=1.0))
     channel = await _channel()
     driver = ReplayDriver(channel, path, speed=1000)
-    server = WebServer(channel, token="t", replay=driver)
+    server = MobileServer(channel, token="t", replay=driver)
 
     assert driver._task is None, "constructing the server must not start playback"
     await server._maybe_prewarm()                 # what a connect does

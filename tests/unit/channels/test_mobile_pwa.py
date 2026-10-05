@@ -1,7 +1,7 @@
 """The app half: manifest, service worker, install sequencing and the QR pairing fragment.
 
 The page assertions are string checks against the shipped file, in the style of
-`test_web_reference_page.py`. There is no browser here, so what these can prove is that the
+`test_mobile_reference_page.py`. There is no browser here, so what these can prove is that the
 GUARDS are present and phrased the only way that works — which is precisely the class of bug
 that ships silently: a service worker registered on plain HTTP, a notification permission asked
 before install (iOS then grants a subscription that can never deliver), or a token handed to an
@@ -15,12 +15,12 @@ import shutil
 import httpx
 import pytest
 
-from localharness.channels.web.channel import WebChannel
-from localharness.channels.web.server import (
+from localharness.channels.mobile.channel import MobileChannel
+from localharness.channels.mobile.server import (
     MANIFEST_CONTENT_TYPE,
     PACKAGED_UI_DIR,
     TOKEN_FRAGMENT_KEY,
-    WebServer,
+    MobileServer,
 )
 from localharness.core.bus import EventBus
 
@@ -55,10 +55,10 @@ def body_of(source: str, signature: str) -> str:
 
 async def _client(tmp_path):
     bus = EventBus(persist_path=tmp_path / "bus-events.jsonl")
-    channel = WebChannel(bus=bus, config={})
+    channel = MobileChannel(bus=bus, config={})
     await channel.start()
     channel.bind_runtime(session_id="s1", agent_id="orchestrator", session_dir=tmp_path / "s")
-    server = WebServer(channel, token=TOKEN, config_dir=tmp_path)
+    server = MobileServer(channel, token=TOKEN, config_dir=tmp_path)
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=server.app), base_url="http://web.test"
     )

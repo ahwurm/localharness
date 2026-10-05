@@ -28,7 +28,7 @@ The CLI does not contain business logic. It parses arguments, sets up the event 
 `src/localharness/cli/app.py` builds one Typer app and registers twelve visible top-level
 commands — seven flat commands and five subcommand groups. `localharness --help` prints this
 list, then the commands of each plugin that is on, read from its manifest (the bundled ones are
-`autoresearch`, `experiment` and `propose` from the `autoresearch` plugin, `generate-image`, `memory` and `web`; the bundled `dispatch` plugin adds no command, since Discord is a mode of `start --channel discord`; see spec 09, "Commands, slash commands and doctor"). A thirteenth, `ask-rate`, is registered `hidden=True` and does not appear in it; it
+`autoresearch`, `experiment` and `propose` from the `autoresearch` plugin, `generate-image`, `memory` and `mobile`; the bundled `dispatch` plugin adds no command, since Discord is a mode of `start --channel discord`; see spec 09, "Commands, slash commands and doctor"). A thirteenth, `ask-rate`, is registered `hidden=True` and does not appear in it; it
 reports permission prompts per session over a trace corpus and is documented by its own `--help`.
 
 | Command | What it does |
@@ -93,7 +93,7 @@ app.add_typer(components_app, name="components")
 app.add_typer(config_app, name="config")
 app.add_typer(plugins_app, name="plugins")
 # No plugin module is imported here: `autoresearch`, `experiment`, `propose`, `generate-image`,
-# `memory` and `web` reach the app through PluginCommandGroup.
+# `memory` and `mobile` reach the app through PluginCommandGroup.
 
 def main() -> None:
     """Entry point registered in pyproject.toml."""
@@ -248,7 +248,7 @@ The plugin list at the end, for a fresh config:
 ```
 Plugins — the command beside each one turns it on or sets it up:
   image         off — turn on: localharness plugins enable image
-  web           on — set up: localharness plugins enable web
+  mobile        on — set up: localharness plugins enable mobile
   memory        on — set up: localharness plugins enable memory
   dispatch      on (install `localharness[dispatch]` to use it) — set up: localharness plugins enable dispatch
   autoresearch  on — set up: localharness plugins enable autoresearch
@@ -358,14 +358,14 @@ saved) stops after its own next step and exits 0. Without a terminal, or with `-
 nothing and exits 0. A configured `start` asks nothing new, and its banner is unchanged.
 
 **`--channel` (`-c`) picks the input channel.** Core's are `terminal` (the default) and `acp`; a
-bundled plugin of kind `channel` adds its own names, today `web` (the `web` plugin) and `discord`
+bundled plugin of kind `channel` adds its own names, today `mobile` (the `mobile` plugin) and `discord`
 (the `dispatch` plugin). `start --help` lists every bundled channel name, including one whose
-plugin is off. `web` and `acp` are served by their own commands, `localharness web` and
+plugin is off. `mobile` and `acp` are served by their own commands, `localharness mobile` and
 `localharness acp`. `start` never falls back to the terminal; each refusal is a usage error
 (exit 2) and names the fix:
 
-- an unknown name, before any config is read: `unknown channel 'discrod'; choose one of: acp, discord, terminal, web`
-- `web` or `acp`: ``the web channel is served by its own command, because the HTTP server has to be reachable before a session exists. Run `localharness web` instead of `localharness start --channel web`.`` (for `web`, followed by ``(if that command is missing, run `localharness plugins enable web`)``)
+- an unknown name, before any config is read: `unknown channel 'discrod'; choose one of: acp, discord, mobile, terminal`
+- `mobile` or `acp`: ``the mobile channel is served by its own command, because the HTTP server has to be reachable before a session exists. Run `localharness mobile` instead of `localharness start --channel mobile`.`` (for `mobile`, followed by ``(if that command is missing, run `localharness plugins enable mobile`)``)
 - a plugin channel whose plugin is off, missing its install extra, or not loaded:
   ``channel 'discord' is provided by the dispatch plugin, which is off — run `localharness plugins enable dispatch` ``
   (for a missing extra, ``which is missing its install extra — install `localharness[dispatch]` to use it``)
@@ -377,7 +377,7 @@ Spec 11 covers the channels themselves; spec 09 covers how a plugin provides one
 **`--trust-project` trusts the project you stand in for this one run.** Its MCP servers start, the
 session runs as trusted, nothing is asked and nothing is recorded — for CI and scripts.
 `LOCALHARNESS_TRUST_PROJECT=1` does the same for any command that opens a session, `localharness
-web` and `localharness acp` included, which have no flag.
+mobile` and `localharness acp` included, which have no flag.
 
 **What a start asks, and only on a terminal.** Before anything loads, `start` decides what the
 project's agent files and your own may start, load or loosen (`cli/workspace.py`:
@@ -400,7 +400,7 @@ that launches vLLM (with a backup and one line); and records the trust store's a
 had already approved. SECURITY.md, "What `localharness start` writes without asking", lists each.
 A key sent over plain http to another machine gets one warning in the start summary.
 
-**`localharness web`** serves the phone channel (`docs/web.md`). On a terminal it draws the pairing
+**`localharness mobile`** serves the phone channel (`docs/mobile.md`). On a terminal it draws the pairing
 QR on every start; the token's text is printed only when it is created or rotated. `--show-token`
 prints the token and the QR on a terminal and exits 0 (with stdout not a terminal it prints
 `--show-token prints the token only to a terminal, and stdout is not one.` and exits 1).
@@ -745,7 +745,7 @@ Rows added for the hardening, each an `i` (info) row unless noted, never a failu
   a launched `extra_endpoints` entry).
 - `Model server: launched without requiring your API key (provider.api_key is set) — set
   server.require_api_key: true to make it refuse requests without the key`.
-- `Remote channels on (web, dispatch): a paired phone or an allowlisted chat account can switch a
+- `Remote channels on (mobile, dispatch): a paired phone or an allowlisted chat account can switch a
   session to unattended and answer "always" — set channels.remote_unattended: false to keep both
   to this terminal`, while a remote channel plugin is on and the lock is not set.
 - A `⚠` row when the config folder is readable by other accounts, worded by why `start` has not
@@ -1166,8 +1166,8 @@ restart the session with the conversation kept:
    ahead, and with one indicator in place of the banner: "Restarted with <name> on. Your
    conversation continues.", the `Plugins:` line, and one status line, such as "<name>: on in
    this session", "<name>: on, but its check failed: <detail>", "<name>: on, but not set up
-   yet — <detail>" (a check that was skipped, such as web's "not enrolled yet" before
-   `localharness web` first runs) or "<name>: on, but not set up yet — run /plugins enable
+   yet — <detail>" (a check that was skipped, such as mobile's "not enrolled yet" before
+   `localharness mobile` first runs) or "<name>: on, but not set up yet — run /plugins enable
    <name> to set it up". A failed check never stops the restart.
 
 There is no restart, only one line, for a plugin that is already on and set up ("<name> is already

@@ -166,7 +166,7 @@ async def test_owner_hand_is_pinned_at_any_score(tmp_path):
         await store.store_fact("mine", "remembered by owner", source="remember")
         await store.store_fact(
             "edited", "owner edited this", source="w",
-            provenance=f"{USER_EDIT_PROVENANCE_PREFIX}123;web",
+            provenance=f"{USER_EDIT_PROVENANCE_PREFIX}123;mobile",
         )
         for key in ("mine", "edited"):
             fact = await store.get_fact(key)

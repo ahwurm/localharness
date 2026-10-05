@@ -346,36 +346,36 @@ def test_the_mount_lets_through_exactly_what_typers_main_loop_handles() -> None:
     assert issubclass(TyperGroup, plugin_mount._COMMAND)
 
 
-# --------------------------------------------------------------------------- the bundled web plugin
+# --------------------------------------------------------------------------- the bundled mobile plugin
 
 
 def test_a_needs_extra_plugins_command_still_mounts_and_prints_its_hint(monkeypatch) -> None:
-    """Without the web extra the command is still there, and running it prints the install hint
+    """Without the mobile extra the command is still there, and running it prints the install hint
     (WEBP-01) instead of "No such command"."""
-    from localharness.cli.web_plugin import WebPlugin
+    from localharness.cli.mobile_plugin import MobilePlugin
     from localharness.plugins import resolve
 
-    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (WebPlugin,))
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (MobilePlugin,))
     monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: False)
     monkeypatch.setitem(sys.modules, "starlette", None)
     monkeypatch.setitem(sys.modules, "uvicorn", None)
 
-    helped, ran = _run("--help"), _run("web")
+    helped, ran = _run("--help"), _run("mobile")
 
-    assert "web" in _help_rows(helped.output), helped.output
+    assert "mobile" in _help_rows(helped.output), helped.output
     assert ran.exit_code == 1, ran.output
-    assert "the web channel needs its optional extra" in ran.output
+    assert "the mobile channel needs its optional extra" in ran.output
 
 
 def test_a_disabled_web_plugin_has_no_command(mounted, monkeypatch) -> None:
-    """`plugins disable web` writes web.enabled: false to overrides.yaml; the command is gone."""
-    from localharness.cli.web_plugin import WebPlugin
+    """`plugins disable mobile` writes web.enabled: false to overrides.yaml; the command is gone."""
+    from localharness.cli.mobile_plugin import MobilePlugin
 
-    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (WebPlugin,))
-    (mounted / "overrides.yaml").write_text("web: {enabled: false}\n", encoding="utf-8")
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (MobilePlugin,))
+    (mounted / "overrides.yaml").write_text("mobile: {enabled: false}\n", encoding="utf-8")
 
-    helped, ran = _run("--help"), _run("web")
+    helped, ran = _run("--help"), _run("mobile")
 
-    assert "web" not in _help_rows(helped.output)
+    assert "mobile" not in _help_rows(helped.output)
     # off bundled plugin: hint + exit 4, not Click's exit 2 (exit 2 is experiment run's reject-holdout verdict)
-    assert ran.exit_code == 4 and "is provided by the web plugin, which is off" in ran.stderr, ran.output
+    assert ran.exit_code == 4 and "is provided by the mobile plugin, which is off" in ran.stderr, ran.output

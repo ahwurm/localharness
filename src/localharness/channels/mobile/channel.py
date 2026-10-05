@@ -1,4 +1,4 @@
-"""`WebChannel` — the harness's bus, faithfully, over one SSE connection.
+"""`MobileChannel` — the harness's bus, faithfully, over one SSE connection.
 
 The shape of this file follows three rules from the PRD, and every oddity in it is one of them:
 
@@ -214,8 +214,8 @@ class _OpenAsk:
         self.confirm: Optional[tuple[str, str, float]] = None  # (token, kind, expires_at)
 
 
-class WebChannel(ChannelAdapter):
-    """The channel behind `localharness web`.
+class MobileChannel(ChannelAdapter):
+    """The channel behind `localharness mobile`.
 
     Driven the HYBRID way (§6.0): the HTTP server is up before any session exists (ACP's
     reachability), but once a session is built it is `OrchestratorREPL` that drives this channel,
@@ -225,7 +225,7 @@ class WebChannel(ChannelAdapter):
     with no user turns in it at all.
     """
 
-    channel_id = "web"
+    channel_id = "mobile"
 
     can_ask = True
     """There is a human with a screen. Declaring False would silently convert every ASK into a
@@ -245,7 +245,7 @@ class WebChannel(ChannelAdapter):
     streams_tokens = True
     """The first channel in the harness with live answer text in its own UI. The terminal passes
     `on_token=None`; ACP gives streaming to Zed but not to anything the harness draws. So "parity
-    with the terminal" was never the bar here — the web channel exceeds it."""
+    with the terminal" was never the bar here — the mobile channel exceeds it."""
 
     has_display_toggles = True
     """`/reasoning` and `/verbose` act on this channel: it owns `show_reasoning` and `verbose`
@@ -372,7 +372,7 @@ class WebChannel(ChannelAdapter):
     ) -> None:
         """Hand the channel the session objects the HTTP surface has to answer questions about.
 
-        Called from `_start_async`'s `web` branch once the session exists. Kept as one explicit
+        Called from `_start_async`'s `mobile` branch once the session exists. Kept as one explicit
         call rather than reaching through the bus for each: `/api/tools`, `/api/permissions` and
         `/api/health` are *state* questions, and a channel that has to reconstruct state from an
         event stream it also forwards is a channel with two sources of truth.
@@ -506,7 +506,7 @@ class WebChannel(ChannelAdapter):
             except asyncio.QueueFull:
                 client.lagged = True
                 client.dropped = client.queue.qsize()
-                log.warning("web_client_lagged", client=client.id, dropped=client.dropped)
+                log.warning("mobile_client_lagged", client=client.id, dropped=client.dropped)
                 with contextlib.suppress(asyncio.QueueFull):
                     while not client.queue.empty():
                         client.queue.get_nowait()
@@ -609,7 +609,7 @@ class WebChannel(ChannelAdapter):
         try:
             await self._push.deliver(message)
         except Exception:  # noqa: BLE001 — a convenience never takes the turn down with it
-            log.warning("web_push_failed", exc_info=True)
+            log.warning("mobile_push_failed", exc_info=True)
 
     async def flush_push(self, timeout: Optional[float] = None) -> None:
         """Wait for in-flight pushes. Used by `stop()` so a turn-finished push is not dropped on
@@ -720,7 +720,7 @@ class WebChannel(ChannelAdapter):
 
         This makes the web the FIRST channel with live answer text in the harness's own UI: the
         terminal passes `on_token=None` and `send_streaming` has zero call sites in `src/`. So
-        "parity with the terminal" was never the bar here; the web channel exceeds it.
+        "parity with the terminal" was never the bar here; the mobile channel exceeds it.
         """
         if not text:
             return
@@ -816,7 +816,7 @@ class WebChannel(ChannelAdapter):
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — the instrument never takes the session with it
-            log.warning("web_status_ticker_failed", exc_info=True)
+            log.warning("mobile_status_ticker_failed", exc_info=True)
 
     # ---------------------------------------------------------------- bring-up
 
@@ -851,11 +851,11 @@ class WebChannel(ChannelAdapter):
         """Block until a client POSTs a message. The REPL's pull side of the push/pull bridge.
 
         Identical in shape to Discord's: an `asyncio.Queue` fed by the inbound HTTP verb. Taking
-        this shape is what earns the web channel slash commands, the input router, the pending
+        this shape is what earns the mobile channel slash commands, the input router, the pending
         resolver and `UserMessage` publishing without re-implementing any of them.
         """
         if not self._started:
-            raise NotInteractiveError("WebChannel.start() must be called before read_input()")
+            raise NotInteractiveError("MobileChannel.start() must be called before read_input()")
         return await self._inbound.get()
 
     def submit(self, text: str) -> None:
@@ -953,7 +953,7 @@ class WebChannel(ChannelAdapter):
             ))
             raise
         except Exception:  # noqa: BLE001 — a render fault denies; it never allows
-            log.warning("web_ask_failed", request_id=request_id, exc_info=True)
+            log.warning("mobile_ask_failed", request_id=request_id, exc_info=True)
             return Decision(kind=ASK_FALLBACK_DECISION)
         finally:
             self._open_asks.pop(request_id, None)
@@ -1131,7 +1131,7 @@ class WebChannel(ChannelAdapter):
                 # CancelledError is caught EXPLICITLY: it is a BaseException, so a bare
                 # `except Exception` would let a cancelled bridge escape as an exception out of a
                 # worker thread instead of as the denial it means.
-                log.warning("web_trust_ask_failed", exc_info=True)
+                log.warning("mobile_trust_ask_failed", exc_info=True)
                 return False
 
         return _ask
@@ -1152,7 +1152,7 @@ class WebChannel(ChannelAdapter):
         from localharness.agent.gate_types import PermissionRequest
 
         if not self._clients:
-            log.info("web_trust_no_client", detail="no attached client to ask; leaving untrusted")
+            log.info("mobile_trust_no_client", detail="no attached client to ask; leaving untrusted")
             return False
         try:
             decision = await asyncio.wait_for(
@@ -1236,7 +1236,7 @@ class WebChannel(ChannelAdapter):
         """The `/memory` tree and anything else built as a rich renderable.
 
         Flattened to text and marked `preformatted`, so the box-drawing survives in a `<pre>`.
-        This is the one place the web channel is WORSE than the terminal, and memory legibility is
+        This is the one place the mobile channel is WORSE than the terminal, and memory legibility is
         this project's north star — a JSON memory endpoint is the first thing after Phase B, not
         vague later work.
         """

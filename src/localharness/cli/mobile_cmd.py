@@ -1,4 +1,4 @@
-"""`localharness web` — serve the event API and the PWA shell on a private network boundary.
+"""`localharness mobile` — serve the event API and the PWA shell on a private network boundary.
 
 The shape of this command is the web PRD's §6.0 hybrid, and the ORDER is the point:
 
@@ -9,10 +9,10 @@ cold. Then the SSE connection itself — not the first prompt — starts session
 background, because this is the one channel with a connect event the others lack, and by the time
 a thumb has finished typing the session is usually already up.
 
-When bring-up runs it calls `_start_async(channel_mode="web", web_channel=...)`, which hands the
+When bring-up runs it calls `_start_async(channel_mode="mobile", mobile_channel=...)`, which hands the
 already-built channel to `OrchestratorREPL`. That is Discord's drive loop, and taking it is what
-earns the web channel slash commands, the input router, the pending resolver and `UserMessage`
-publishing for free. An ACP-shaped web channel would have re-implemented the first three and
+earns the mobile channel slash commands, the input router, the pending resolver and `UserMessage`
+publishing for free. An ACP-shaped mobile channel would have re-implemented the first three and
 shipped a history with no user turns in it.
 """
 from __future__ import annotations
@@ -31,19 +31,19 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 
-from localharness.cli.web_plugin import WEB_DEFAULT_PORT as DEFAULT_PORT  # the one literal lives there
+from localharness.cli.mobile_plugin import MOBILE_DEFAULT_PORT as DEFAULT_PORT  # the one literal lives there
 
 log = logging.getLogger(__name__)
 console = Console()
 
 MISSING_DEPENDENCY = (
-    "the web channel needs its optional extra — install it with:\n"
-    "    uv pip install 'localharness[web]'\n"
-    "(or `uv sync --extra web` in a checkout). It pulls starlette and uvicorn, which are the "
-    "ASGI app and the server behind `localharness web`."
+    "the mobile channel needs its optional extra — install it with:\n"
+    "    uv pip install 'localharness[mobile]'\n"
+    "(or `uv sync --extra mobile` in a checkout). It pulls starlette and uvicorn, which are the "
+    "ASGI app and the server behind `localharness mobile`."
 )
 
-BANNER = """LocalHarness web channel
+BANNER = """LocalHarness mobile channel
   serving   http://{host}:{port}
   UI        {ui_dir}
   workspace {cwd}
@@ -66,7 +66,7 @@ with --show-token: journald, tmux and tee logs keep every copy a banner prints."
 
 TOKEN_NOT_A_TTY = (
     "No token or QR is printed here because stdout is not a terminal (logs keep what is "
-    "printed). To pair a phone, run `localharness web --show-token` on a terminal."
+    "printed). To pair a phone, run `localharness mobile --show-token` on a terminal."
 )
 
 SHOW_TOKEN_NOT_A_TTY = "--show-token prints the token only to a terminal, and stdout is not one."
@@ -78,13 +78,13 @@ PAIRING_ON_TTY = (
 TOKEN_ROTATED = (
     "App token rotated. Every enrolled client is now invalid and must pair again; push "
     "subscriptions were cleared, so turn notifications on again on each phone after it pairs.\n"
-    "A `localharness web` that is already running keeps accepting the old token until it restarts.\n"
+    "A `localharness mobile` that is already running keeps accepting the old token until it restarts.\n"
     "Stored 0600 at {path}.\n"
     "Named gap: rotation is all-or-nothing — there is no per-device revoke."
 )
 
 PUSH_UNAVAILABLE = (
-    "Web Push is unavailable (its `web` extra packages are missing or the VAPID key could not "
+    "Web Push is unavailable (its `mobile` extra packages are missing or the VAPID key could not "
     "be written). Everything else works; the phone just will not buzz."
 )
 
@@ -109,7 +109,7 @@ ENROLMENT_LOOPBACK_NOTE = (
     "That is a LOOPBACK url, which no phone can reach. Publish the port, then re-run with the "
     "address the phone will use:\n"
     "    tailscale serve --bg {port}\n"
-    "    localharness web --public-url https://<your-machine>.<your-tailnet>.ts.net"
+    "    localharness mobile --public-url https://<your-machine>.<your-tailnet>.ts.net"
 )
 
 ENROLMENT_GUESSED_NOTE = (
@@ -118,12 +118,12 @@ ENROLMENT_GUESSED_NOTE = (
 )
 
 ENROLMENT_NO_QR = (
-    "No QR: the `segno` package is missing (it ships with the `web` extra). Open the address "
-    "above on the phone and enter the app token when the page asks — `localharness web "
+    "No QR: the `segno` package is missing (it ships with the `mobile` extra). Open the address "
+    "above on the phone and enter the app token when the page asks — `localharness mobile "
     "--show-token` prints it on a terminal."
 )
 
-REPLAY_BANNER = """LocalHarness web channel — REPLAY (no model server, no GPU, deterministic)
+REPLAY_BANNER = """LocalHarness mobile channel — REPLAY (no model server, no GPU, deterministic)
   serving   http://{host}:{port}
   log       {log}
   speed     {speed}x{fixtures}
@@ -134,7 +134,7 @@ them. A BlockingAsk has no persisted analog at all, so it comes only from --fixt
 """
 
 
-def web_cmd(
+def mobile_cmd(
     config_dir: Annotated[
         Optional[str],
         typer.Option("--config-dir", envvar="LOCALHARNESS_DIR", show_default=False,
@@ -170,7 +170,7 @@ def web_cmd(
     public_url: Annotated[Optional[str], typer.Option(
         "--public-url",
         help="The URL a PHONE reaches this box at (e.g. https://spark.tail1234.ts.net). Used for "
-             "the enrolment QR. Default: the address `plugins enable web` saved, else a guess from "
+             "the enrolment QR. Default: the address `plugins enable mobile` saved, else a guess from "
              "`tailscale status`.",
     )] = None,
     rotate_token: Annotated[bool, typer.Option(
@@ -191,8 +191,8 @@ def web_cmd(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Detailed session view.")] = False,
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Start a specific agent.")] = None,
 ) -> None:
-    """Serve the phone UI and its event API (see docs/web.md)."""
-    # FIRST: channels.web's package init imports starlette, so the hint must precede any channels.web
+    """Serve the phone UI and its event API (see docs/mobile.md)."""
+    # FIRST: channels.mobile's package init imports starlette, so the hint must precede any channels.mobile
     # import (without the extra, that import raised before the hint could print).
     try:
         import starlette  # noqa: F401
@@ -202,16 +202,16 @@ def web_cmd(
         raise typer.Exit(1) from exc
     public_url = public_url or _saved_public_url(config_dir)
 
-    from localharness.channels.web import auth as web_auth
+    from localharness.channels.mobile import auth as mobile_auth
 
     if rotate_token:
-        token = web_auth.rotate_token(config_dir)
+        token = mobile_auth.rotate_token(config_dir)
         # A lost phone must lose its lock-screen channel too: every subscription goes with the
         # token it was made under. The store is read on every send, so a running server stops too.
-        from localharness.channels.web import push as web_push
+        from localharness.channels.mobile import push as mobile_push
 
-        web_push.subscriptions_path(config_dir).unlink(missing_ok=True)
-        console.print(escape(TOKEN_ROTATED.format(path=web_auth.token_path(config_dir))),
+        mobile_push.subscriptions_path(config_dir).unlink(missing_ok=True)
+        console.print(escape(TOKEN_ROTATED.format(path=mobile_auth.token_path(config_dir))),
                       soft_wrap=True)
         print_pairing(token, reveal=True, public_url=public_url, host=host, port=port)
         raise typer.Exit(0)
@@ -222,19 +222,19 @@ def web_cmd(
         if not _stdout_is_a_terminal():
             console.print(f"[red]{escape(SHOW_TOKEN_NOT_A_TTY)}[/red]", soft_wrap=True)
             raise typer.Exit(1)
-        token, _ = web_auth.load_or_create_token(config_dir)
+        token, _ = mobile_auth.load_or_create_token(config_dir)
         print_pairing(token, reveal=True, public_url=public_url, host=host, port=port)
         raise typer.Exit(0)
 
     try:
-        web_auth.check_bind(host, allow_unsafe=allow_unsafe_bind)
+        mobile_auth.check_bind(host, allow_unsafe=allow_unsafe_bind)
     except ValueError as exc:
         console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(2) from exc
 
-    token, created = web_auth.load_or_create_token(config_dir)
+    token, created = mobile_auth.load_or_create_token(config_dir)
     if created:
-        console.print(escape(TOKEN_NEW_NOTE.format(path=web_auth.token_path(config_dir))),
+        console.print(escape(TOKEN_NEW_NOTE.format(path=mobile_auth.token_path(config_dir))),
                       style="dim", soft_wrap=True)
 
     try:
@@ -248,12 +248,12 @@ def web_cmd(
 
 
 def _saved_public_url(config_dir: Optional[str]) -> Optional[str]:
-    """The phone address `plugins enable web` saved (web.public_url, machine-level only), or None."""
+    """The phone address `plugins enable mobile` saved (mobile.public_url, machine-level only), or None."""
     try:
         from localharness.config.loader import ConfigLoader
         from localharness.config.paths import resolve_config_dir
         from localharness.plugins.resolve import resolve
-        cfg = resolve(ConfigLoader(config_dir=resolve_config_dir(config_dir))).settings.get("web")
+        cfg = resolve(ConfigLoader(config_dir=resolve_config_dir(config_dir))).settings.get("mobile")
         return (cfg.config.public_url or None) if cfg is not None and cfg.config is not None else None
     except Exception:  # noqa: BLE001 — no config yet, or an unreadable one: the guess stands
         return None
@@ -329,7 +329,7 @@ def _stdout_is_a_terminal() -> bool:
 def _open_tty(path: str = "/dev/tty") -> Optional[TextIO]:
     """This process's controlling terminal, open for writing — or None: no terminal at all
     (systemd, cron, setsid), a platform without terminal process groups (Windows), or this process
-    is not the terminal's foreground job. A background job (`web > log &`) must not draw over the
+    is not the terminal's foreground job. A background job (`mobile > log &`) must not draw over the
     shell, and with `stty tostop` its write would stop the server before it serves."""
     if not hasattr(os, "tcgetpgrp"):
         return None
@@ -352,7 +352,7 @@ def print_pairing(token: str, *, reveal: bool, public_url: Optional[str], host: 
     the token, and scanning it is pairing — plus, when `reveal` (a token just created, rotated or
     asked for with --show-token), the token's text. A pipe or a file (a tee, journald) keeps what
     is printed, so when the process has a controlling terminal the same block is drawn there
-    instead (`web | tee -a log` in a terminal window shows the QR; the log gets none of it), and
+    instead (`mobile | tee -a log` in a terminal window shows the QR; the log gets none of it), and
     with no terminal at all stdout gets one line naming --show-token and nothing secret."""
     if _stdout_is_a_terminal():
         _draw_pairing(console, token, reveal=reveal, public_url=public_url, host=host, port=port)
@@ -417,9 +417,9 @@ async def _serve(
 ) -> None:
     import uvicorn
 
-    from localharness.channels.web.channel import WebChannel
-    from localharness.channels.web.replay import ReplayDriver, ReplayFixtures
-    from localharness.channels.web.server import PACKAGED_UI_DIR, WebServer
+    from localharness.channels.mobile.channel import MobileChannel
+    from localharness.channels.mobile.replay import ReplayDriver, ReplayFixtures
+    from localharness.channels.mobile.server import PACKAGED_UI_DIR, MobileServer
     from localharness.core.bus import EventBus
 
     resolved_ui = Path(ui_dir).expanduser().resolve() if ui_dir else PACKAGED_UI_DIR
@@ -434,7 +434,7 @@ async def _serve(
     if replay is not None:
         # A bus with NO persist path: replay must never write into a real session log. The
         # channel's own fan-out is the only thing it drives.
-        channel = WebChannel(bus=EventBus(), config={})
+        channel = MobileChannel(bus=EventBus(), config={})
         await channel.start()
         try:
             log_path = ReplayDriver.resolve(replay)
@@ -459,14 +459,14 @@ async def _serve(
         registry = ToolRegistry()
         await register_builtin_tools(registry)
         channel._tool_registry = registry
-        server = WebServer(channel, token=token, ui_dir=resolved_ui, replay=driver,
+        server = MobileServer(channel, token=token, ui_dir=resolved_ui, replay=driver,
                            config_dir=config_dir, incognito=incognito)
         console.print(escape(REPLAY_BANNER.format(
             host=host, port=port, log=log_path, speed=speed,
             fixtures=f"   fixtures  {fixtures}" if fixtures else "",
         )), soft_wrap=True)
     else:
-        channel = WebChannel(bus=EventBus(), config={})
+        channel = MobileChannel(bus=EventBus(), config={})
 
         def _begin_session() -> None:
             """Start session bring-up once, in the background, and never twice.
@@ -500,14 +500,14 @@ async def _serve(
             channel.reset_session()
             _begin_session()
 
-        server = WebServer(
+        server = MobileServer(
             channel, token=token, ui_dir=resolved_ui, on_first_message=_begin_session,
             on_new_session=_new_session, config_dir=config_dir, incognito=incognito,
         )
         # Web Push, on the live path only. A `--replay` run must never buzz a phone about a
         # session that finished last week.
         try:
-            from localharness.channels.web.push import PushService
+            from localharness.channels.mobile.push import PushService
 
             channel.set_push(PushService.build(config_dir))
         except Exception:  # noqa: BLE001 — no push is a missing convenience, not a failed start
@@ -566,7 +566,7 @@ async def _bring_up(
     try:
         await _start_async(
             agent, verbose, False, config_dir,
-            channel_mode="web", web_channel=channel,
+            channel_mode="mobile", mobile_channel=channel,
         )
     except asyncio.CancelledError:
         # Two very different cancels share this except: a bound session means the NEW-CHAT verb
@@ -584,7 +584,7 @@ async def _bring_up(
 
         # The server's own line keeps the traceback, masked like the phone's row: stderr is often
         # a tee or journald, and an error can quote a key.
-        log.warning("web session bring-up failed\n%s", scrub(
+        log.warning("mobile session bring-up failed\n%s", scrub(
             "".join(traceback.format_exception(exc)).rstrip(), _machine_secrets(config_dir)))
         channel.set_bringup(
             "failed", detail=_failure_text(exc, config_dir), failed=True,
@@ -623,5 +623,5 @@ def _failure_text(exc: BaseException, config_dir: Optional[str]) -> str:
     return scrub(f"{type(exc).__name__}: {exc}".splitlines()[0], _machine_secrets(config_dir))
 
 
-app = typer.Typer(help="Serve the phone UI and its event API (see docs/web.md).")
-app.command()(web_cmd)  # the plugin's CliDescriptor targets this; web_cmd stays a plain function for tests
+app = typer.Typer(help="Serve the phone UI and its event API (see docs/mobile.md).")
+app.command()(mobile_cmd)  # the plugin's CliDescriptor targets this; mobile_cmd stays a plain function for tests

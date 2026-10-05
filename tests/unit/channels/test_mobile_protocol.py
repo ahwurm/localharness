@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from localharness.channels.web.protocol import (
+from localharness.channels.mobile.protocol import (
     COLLAPSIBLE_GROUPS,
     FRAME_TYPES,
     NEVER_FIRED_EVENTS,
@@ -27,7 +27,7 @@ from localharness.channels.web.protocol import (
     frame_schemas,
 )
 
-SNAPSHOT = Path(__file__).parent / "web_protocol_snapshot.json"
+SNAPSHOT = Path(__file__).parent / "mobile_protocol_snapshot.json"
 
 
 def _digest() -> dict[str, str]:
@@ -74,7 +74,7 @@ def test_the_reference_page_is_written_against_the_current_version():
     the v1->v2 bump moved the snapshot and both server pins, and nothing forced the page."""
     import re
 
-    from localharness.channels.web.server import PACKAGED_UI_DIR
+    from localharness.channels.mobile.server import PACKAGED_UI_DIR
 
     html = (PACKAGED_UI_DIR / "index.html").read_text(encoding="utf-8")
     pins = [int(x) for pair in re.findall(r"protocol_version !== (\d+)|written against (\d+)", html)

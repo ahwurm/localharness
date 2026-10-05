@@ -1,6 +1,6 @@
-"""The enrolment QR (WEBCH-27): `localharness web` prints something a phone can scan.
+"""The enrolment QR (WEBCH-27): `localharness mobile` prints something a phone can scan.
 
-The criterion is "a new user sets up from `docs/web.md` alone, on a phone, without hand-typing a
+The criterion is "a new user sets up from `docs/mobile.md` alone, on a phone, without hand-typing a
 secret" — so the failure these guard against is a QR that encodes a URL no phone can reach, or
 one that omits the token and therefore saves nobody any typing.
 """
@@ -11,13 +11,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from localharness.cli import web_cmd
+from localharness.cli import mobile_cmd
 
 
 def test_the_qr_carries_the_token_in_the_fragment():
     """The fragment is the whole reason this is allowed: it is never sent to a server, so it
     lands in no access log, no proxy log and no Referer — which is what §7.3's rule protects."""
-    url, kind = web_cmd.enrolment_url(
+    url, kind = mobile_cmd.enrolment_url(
         "sekrit", public_url="https://spark.example.ts.net", host="127.0.0.1", port=8765)
     assert url == "https://spark.example.ts.net/#t=sekrit"
     assert kind == "given"
@@ -26,7 +26,7 @@ def test_the_qr_carries_the_token_in_the_fragment():
 
 
 def test_a_given_public_url_beats_any_guess():
-    url, kind = web_cmd.enrolment_url(
+    url, kind = mobile_cmd.enrolment_url(
         "s", public_url="https://explicit.example/", host="127.0.0.1", port=8765)
     assert url.startswith("https://explicit.example/#t=")
     assert kind == "given"
@@ -41,7 +41,7 @@ def test_the_tailnet_name_is_guessed_when_no_url_is_given():
         )
 
     # The real function with an injected runner, rather than patching around it.
-    assert web_cmd.detect_public_url(8765, runner=fake_run) == "https://spark.tail1234.ts.net"
+    assert mobile_cmd.detect_public_url(8765, runner=fake_run) == "https://spark.tail1234.ts.net"
 
 
 def test_no_tailscale_is_not_an_error():
@@ -50,20 +50,20 @@ def test_no_tailscale_is_not_an_error():
     def explode(cmd):
         raise FileNotFoundError("tailscale")
 
-    assert web_cmd.detect_public_url(8765, runner=explode) is None
+    assert mobile_cmd.detect_public_url(8765, runner=explode) is None
 
 
 def test_a_loopback_fallback_says_so(monkeypatch):
     """The honest failure. A QR of `http://127.0.0.1:8765` scans perfectly and then does
     nothing at all on a phone, which is the worst kind of working."""
-    monkeypatch.setattr(web_cmd, "detect_public_url", lambda port, **kw: None)
-    url, kind = web_cmd.enrolment_url("s", public_url=None, host="127.0.0.1", port=8765)
+    monkeypatch.setattr(mobile_cmd, "detect_public_url", lambda port, **kw: None)
+    url, kind = mobile_cmd.enrolment_url("s", public_url=None, host="127.0.0.1", port=8765)
     assert kind == "loopback"
     assert url == "http://127.0.0.1:8765/#t=s"
 
 
 def test_the_qr_renders_as_terminal_art():
-    art = web_cmd.render_qr("https://spark.example.ts.net/#t=" + "x" * 43)
+    art = mobile_cmd.render_qr("https://spark.example.ts.net/#t=" + "x" * 43)
     assert art is not None
     lines = art.splitlines()
     # Compact half-block rendering: it has to fit a terminal nobody resized.
@@ -83,7 +83,7 @@ def test_a_missing_segno_costs_the_qr_and_nothing_else(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", no_segno)
-    assert web_cmd.render_qr("https://example/#t=x") is None
+    assert mobile_cmd.render_qr("https://example/#t=x") is None
 
 
 def test_printing_the_enrolment_never_wraps_the_code(capsys, monkeypatch):
@@ -91,8 +91,8 @@ def test_printing_the_enrolment_never_wraps_the_code(capsys, monkeypatch):
     markup off and wrapping off. A narrow console is the case that would expose it."""
     from rich.console import Console
 
-    monkeypatch.setattr(web_cmd, "console", Console(width=20, force_terminal=False))
-    web_cmd.print_enrolment("tok", public_url="https://spark.example.ts.net", host="h", port=1)
+    monkeypatch.setattr(mobile_cmd, "console", Console(width=20, force_terminal=False))
+    mobile_cmd.print_enrolment("tok", public_url="https://spark.example.ts.net", host="h", port=1)
     out = capsys.readouterr().out
     code = [line for line in out.splitlines() if "█" in line]
     assert code, "no QR was printed"
@@ -106,7 +106,7 @@ def test_the_command_offers_a_public_url_flag():
     """Without it the QR can only ever guess, and WEBCH-27 is a setup a stranger can complete."""
     import inspect
 
-    assert "public_url" in inspect.signature(web_cmd.web_cmd).parameters
+    assert "public_url" in inspect.signature(mobile_cmd.mobile_cmd).parameters
 
 
 def test_rotating_the_token_reprints_a_qr(tmp_path, capsys, monkeypatch):
@@ -119,23 +119,23 @@ def test_rotating_the_token_reprints_a_qr(tmp_path, capsys, monkeypatch):
     """
     import typer
 
-    from localharness.channels.web import auth as web_auth
+    from localharness.channels.mobile import auth as mobile_auth
 
     monkeypatch.setenv("LOCALHARNESS_DIR", str(tmp_path))
-    before = web_auth.load_or_create_token(tmp_path)[0]
+    before = mobile_auth.load_or_create_token(tmp_path)[0]
     capsys.readouterr()
     # On a terminal (pytest's capture is not one): off a terminal nothing secret prints at all.
-    monkeypatch.setattr(web_cmd, "_stdout_is_a_terminal", lambda: True, raising=False)
-    real_qr, drawn = web_cmd.render_qr, []
-    monkeypatch.setattr(web_cmd, "render_qr", lambda url: drawn.append(url) or real_qr(url))
+    monkeypatch.setattr(mobile_cmd, "_stdout_is_a_terminal", lambda: True, raising=False)
+    real_qr, drawn = mobile_cmd.render_qr, []
+    monkeypatch.setattr(mobile_cmd, "render_qr", lambda url: drawn.append(url) or real_qr(url))
 
     with pytest.raises(typer.Exit) as exit_info:
-        web_cmd.web_cmd(config_dir=str(tmp_path), rotate_token=True,
+        mobile_cmd.mobile_cmd(config_dir=str(tmp_path), rotate_token=True,
                         public_url="https://spark.example.ts.net")
     assert exit_info.value.exit_code == 0
 
     out = capsys.readouterr().out
-    after = web_auth.load_or_create_token(tmp_path)[0]
+    after = mobile_auth.load_or_create_token(tmp_path)[0]
     assert after != before, "the token was not actually rotated"
     assert "█" in out, "no QR was printed for the new token"
     assert drawn == [f"https://spark.example.ts.net/#t={after}"], "the QR must carry the NEW token"
@@ -144,7 +144,7 @@ def test_rotating_the_token_reprints_a_qr(tmp_path, capsys, monkeypatch):
 
 
 def _saved(tmp_path, url):
-    """A machine whose `plugins enable web` saved `url` as the phone address."""
+    """A machine whose `plugins enable mobile` saved `url` as the phone address."""
     import yaml
 
     g = tmp_path / "g"
@@ -152,21 +152,21 @@ def _saved(tmp_path, url):
     (g / "config.yaml").write_text(yaml.safe_dump({
         "version": "1", "provider": {"provider_type": "vllm", "base_url": "http://127.0.0.1:9/v1",
                                      "default_model": "test-model"}}), encoding="utf-8")
-    (g / "overrides.yaml").write_text(yaml.safe_dump({"web": {"public_url": url}}), encoding="utf-8")
+    (g / "overrides.yaml").write_text(yaml.safe_dump({"mobile": {"public_url": url}}), encoding="utf-8")
     return g
 
 
 def _enrolled_for(monkeypatch, g, **flags):
-    """The keyword arguments `localharness web --rotate-token` prints its enrolment with."""
+    """The keyword arguments `localharness mobile --rotate-token` prints its enrolment with."""
     import typer
 
     pytest.importorskip("starlette")
     pytest.importorskip("uvicorn")
     got = []
-    monkeypatch.setattr(web_cmd, "print_enrolment", lambda token, **kw: got.append(kw))
-    monkeypatch.setattr(web_cmd, "_stdout_is_a_terminal", lambda: True, raising=False)  # else no QR
+    monkeypatch.setattr(mobile_cmd, "print_enrolment", lambda token, **kw: got.append(kw))
+    monkeypatch.setattr(mobile_cmd, "_stdout_is_a_terminal", lambda: True, raising=False)  # else no QR
     with pytest.raises(typer.Exit) as exit_info:
-        web_cmd.web_cmd(config_dir=str(g), rotate_token=True, **flags)
+        mobile_cmd.mobile_cmd(config_dir=str(g), rotate_token=True, **flags)
     assert exit_info.value.exit_code == 0
     [kw] = got
     return kw

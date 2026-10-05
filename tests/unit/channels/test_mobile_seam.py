@@ -10,7 +10,7 @@ import pytest
 
 from tests.unit.test_import_direction import SRC, _imported_modules, module_file
 
-WEB_FILES = sorted(p.relative_to(SRC).as_posix() for p in (SRC / "channels/web").glob("*.py"))
+WEB_FILES = sorted(p.relative_to(SRC).as_posix() for p in (SRC / "channels/mobile").glob("*.py"))
 FORBIDDEN = ("memory/", "tools/builtin/image_plugin.py", "tools/builtin/generate_image_tool.py",
              "cli/generate_image_cmd.py", "tools/builtin/workflows/")
 
@@ -29,10 +29,10 @@ def test_the_web_package_imports_no_memory_and_no_image_code(rel):
 
 
 def test_the_scan_sees_a_top_level_memory_import():
-    found = imported_files("channels/web/server.py", "from localharness.memory.sqlite import FactQuery\n")
+    found = imported_files("channels/mobile/server.py", "from localharness.memory.sqlite import FactQuery\n")
     assert "memory/sqlite.py" in found and any(f.startswith(FORBIDDEN) for f in found)
 
 
 def test_the_scan_sees_a_function_level_import():
     src = "def f():\n    from localharness.tools.builtin import image_plugin\n"
-    assert "tools/builtin/image_plugin.py" in imported_files("channels/web/server.py", src)
+    assert "tools/builtin/image_plugin.py" in imported_files("channels/mobile/server.py", src)

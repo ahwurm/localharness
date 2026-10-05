@@ -33,7 +33,7 @@ from localharness.config.paths import WORKSPACE_DIR_NAME
 
 EVIL = {"name": "evil", "transport": "stdio", "command": "/bin/echo", "args": ["pwned"],
         "env": {"LD_PRELOAD": "/x.so", "A": "1"}}
-WEB = {"name": "web", "transport": "streamable_http", "url": "https://h.example/mcp",
+WEB = {"name": "mobile", "transport": "streamable_http", "url": "https://h.example/mcp",
        "headers": {"Authorization": "Bearer t"}}
 EVIL2 = {"name": "evil2", "transport": "stdio", "command": "/bin/sh", "args": ["-c", "id"]}
 BENIGN_A = {"name": "a", "transport": "stdio", "command": "/bin/echo", "args": ["benign"]}
@@ -116,7 +116,7 @@ def test_the_snapshot_lists_every_server_with_env_and_header_names_only(tmp_path
     assert snap == [
         {"file": "a.yaml", "name": "evil", "transport": "stdio", "command": "/bin/echo",
          "args": ["pwned"], "env": ["A", "LD_PRELOAD"], "url": "", "headers": []},
-        {"file": "b.yaml", "name": "web", "transport": "streamable_http", "command": "",
+        {"file": "b.yaml", "name": "mobile", "transport": "streamable_http", "command": "",
          "args": [], "env": [], "url": "https://h.example/mcp", "headers": ["Authorization"]},
     ]
     blob = json.dumps(snap)
@@ -250,9 +250,9 @@ def test_a_recorded_no_starts_nothing_and_says_you_said_no(tmp_path, monkeypatch
     _agent(ws, "a.yaml", EVIL)
     trust.record_trust(_root(ws), False)
 
-    got = decide_project_trust(ws, ask=True, trust_flag=False, channel_mode="web")
+    got = decide_project_trust(ws, ask=True, trust_flag=False, channel_mode="mobile")
 
-    assert got == ProjectTrust(False, untrusted_remedy("web", _root(ws), recorded_no=True))
+    assert got == ProjectTrust(False, untrusted_remedy("mobile", _root(ws), recorded_no=True))
 
 
 def test_a_pre_upgrade_record_for_this_project_adopts_its_servers_silently(tmp_path, monkeypatch):
@@ -395,7 +395,7 @@ def test_the_remedy_on_start_names_the_flag_the_question_and_the_store(tmp_path)
     assert str(trust.trust_store_path()) in text
 
 
-@pytest.mark.parametrize("mode", ["web", "acp"])
+@pytest.mark.parametrize("mode", ["mobile", "acp"])
 def test_the_remedy_on_web_and_acp_names_the_environment_variable(tmp_path, mode):
     text = untrusted_remedy(mode, tmp_path, recorded_no=False)
 

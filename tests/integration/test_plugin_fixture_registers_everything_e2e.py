@@ -22,8 +22,8 @@ on what the command actually produced (exit code, output, files).
 
 REAL: every CLI command (the Typer app through CliRunner); discovery (unmocked importlib.metadata),
 the resolver, the plan, the lifecycle, the tool registry, the root capability floor, the permission
-gate in its default `auto` mode; the session, `_start_async`, run the way `localharness web` runs it
-(a WebChannel handed in) because that is the one mode that binds the artifact route — the banner,
+gate in its default `auto` mode; the session, `_start_async`, run the way `localharness mobile` runs it
+(a MobileChannel handed in) because that is the one mode that binds the artifact route — the banner,
 the turn and the slash dispatch are the same code in `localharness start`; the REPL's own
 `_dispatch_input` taking a typed line and a slash command the phone POSTed; the example's tool
 writing its PNG through core's `write_artifact`; the web server's routes over ASGI (no socket) on the
@@ -63,8 +63,8 @@ from typer.testing import CliRunner
 
 import localharness
 from localharness.channels.terminal import SlashCommandCompleter
-from localharness.channels.web.channel import WebChannel
-from localharness.channels.web.server import WebServer
+from localharness.channels.mobile.channel import MobileChannel
+from localharness.channels.mobile.server import MobileServer
 from localharness.cli.app import app
 from localharness.cli.slash_commands import find_row, set_plugin_rows
 from localharness.cli.theme import entity
@@ -75,7 +75,7 @@ from tests.dispatch_support import isolate_discord_env
 from tests.conftest import FakeLLMResponse, FakeToolCall
 from tests.integration.test_guardrails_from_global_dir_e2e import _let_the_stub_tokenizer_run_a_turn
 from tests.integration.test_workspace_cli_surface_e2e import _DISCARD_URL, _offline_provider
-from tests.unit.channels.test_web_server import BEARER, TOKEN
+from tests.unit.channels.test_mobile_server import BEARER, TOKEN
 from tests.unit.test_init_cmd import _make_capability_result, _make_detector_result
 from tests.unit.test_start_cmd import _capture_start_console, _read_sessions, _stub_start_boundaries
 from tests.unit.test_start_plugins import _record_loop
@@ -244,7 +244,7 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
             art = ART_ID.search(tool_text)
             seen["art_id"] = art.group(0) if art else None
             async with httpx.AsyncClient(transport=httpx.ASGITransport(
-                    app=WebServer(self._channel, token=TOKEN).app), base_url="http://web.test") as phone:
+                    app=MobileServer(self._channel, token=TOKEN).app), base_url="http://web.test") as phone:
                 queued = await phone.post(f"/api/sessions/{self._channel.session_id}/command",
                                           json={"text": "/example"}, headers=BEARER)
                 seen["queued"] = queued.json()
@@ -263,15 +263,15 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
 
     async def session() -> None:
         from localharness.cli.start_cmd import _start_async
-        await _start_async(None, False, False, None, channel_mode="web",
-                           web_channel=WebChannel(bus=EventBus(), config={}))
+        await _start_async(None, False, False, None, channel_mode="mobile",
+                           mobile_channel=MobileChannel(bus=EventBus(), config={}))
 
     asyncio.run(session())
 
     # The banner: one plugin, named on its own line under the summary; nothing to warn about it.
     i = next(n for n, line in enumerate(printed) if "startup)" in line)
     assert entity("tool", "5 plugins") in printed[i]  # web (46-02) and memory (47) are bundled and on by default; dispatch (49) and autoresearch (50) are bundled and on by default
-    assert printed[i + 1] == "  " + entity("tool", "Plugins: web, memory, dispatch, autoresearch, example"), printed[i:i + 2]  # web (46-02) and memory (47) are bundled and on by default; dispatch (49) and autoresearch (50) are bundled and on by default
+    assert printed[i + 1] == "  " + entity("tool", "Plugins: mobile, memory, dispatch, autoresearch, example"), printed[i:i + 2]  # web (46-02) and memory (47) are bundled and on by default; dispatch (49) and autoresearch (50) are bundled and on by default
     assert "plugin example" not in printed[i], f"a startup warning about the example: {printed[i]}"
     assert not any("available, not enabled" in line for line in printed), "an enabled plugin was hinted"
     assert sentinel.exists() and PKG in sys.modules, "an enabled plugin was not imported by start"
@@ -330,7 +330,7 @@ def test_fixture_registers_everything(tmp_path, monkeypatch, fake_home):
 
     # --- doctor: its check, in the plugins section, where the session put its artifacts ----------
     doctor = _invoke("doctor").output
-    assert "✓ Plugins: web, memory, dispatch, autoresearch, example" in doctor, doctor  # web (46-02) and memory (47) are bundled and on by default; dispatch (49) and autoresearch (50) are bundled and on by default
+    assert "✓ Plugins: mobile, memory, dispatch, autoresearch, example" in doctor, doctor  # web (46-02) and memory (47) are bundled and on by default; dispatch (49) and autoresearch (50) are bundled and on by default
     assert (f"✓ example: swatches render in #4a90d9; artifacts go to {ws / 'artifacts' / 'example'}"
             in doctor), doctor
     assert not [line for line in doctor.splitlines() if line.startswith("✗") and "example" in line]

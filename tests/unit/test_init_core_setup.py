@@ -454,7 +454,7 @@ def test_no_skip_without_a_terminal_no_server_still_exits_1(tmp_path, monkeypatc
 
 HEADER = "Plugins — the command beside each one turns it on or sets it up:"
 FOOTER = "In a session, /plugins enable <name> does this too and turns it on right away."
-PLUGINS = ["image", "web", "memory", "dispatch", "autoresearch"]  # BUILTIN_PLUGINS order
+PLUGINS = ["image", "mobile", "memory", "dispatch", "autoresearch"]  # BUILTIN_PLUGINS order
 
 
 def _plugin_block(result) -> list[str] | None:
@@ -486,13 +486,13 @@ def test_init_ends_with_every_bundled_plugin_and_its_command(tmp_path, monkeypat
     rows = _plugin_block(result)
     assert rows is not None, result.output
     assert [r.split()[0] for r in rows] == PLUGINS, rows
-    image, web, memory, dispatch, autoresearch = rows
+    image, mobile, memory, dispatch, autoresearch = rows
     assert image == "  image         off — turn on: localharness plugins enable image"
     assert "on — set up: localharness plugins enable memory" in memory
     assert "on — set up: localharness plugins enable autoresearch" in autoresearch
     assert ("(install `localharness[dispatch]` to use it) — set up: localharness plugins enable "
             "dispatch") in dispatch
-    assert "(install `localharness[web]` to use it) — set up: localharness plugins enable web" in web
+    assert "(install `localharness[mobile]` to use it) — set up: localharness plugins enable mobile" in web
     out = result.output
     assert out.index("LocalHarness configured at") < out.index("★") < out.index(HEADER)
     assert init_cmd.PLUGINS_HEADER == HEADER

@@ -244,7 +244,7 @@ class Observation(BaseEvent):
     original_length: Optional[int] = None
     error: Optional[str] = None
     exit_code: Optional[int] = None
-    # v4 (channels/web/protocol.py): a file a plugin tool produced, validated by the loop from
+    # v4 (channels/mobile/protocol.py): a file a plugin tool produced, validated by the loop from
     # ToolResult.metadata["artifact"]. The page builds /api/artifacts/<plugin>/<id> from it and
     # never from output text. Additive/default-None: every replayed JSONL line stays valid; an older
     # line carrying the unreleased v2 image field loads (unknown keys are ignored) and shows no picture.

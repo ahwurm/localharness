@@ -9,7 +9,7 @@ plugins the resolved plan has on."""
 from __future__ import annotations
 
 CORE_CHANNELS = frozenset({"terminal", "acp"})
-OWN_COMMAND = frozenset({"web", "acp"})   # served by their own command, never built by start
+OWN_COMMAND = frozenset({"mobile", "acp"})   # served by their own command, never built by start
 
 
 def _names(cls) -> tuple[str, ...]:

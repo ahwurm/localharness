@@ -287,14 +287,14 @@ def test_a_cycle_is_named_from_where_it_closes() -> None:
 
 
 def test_a_missing_install_extra_is_a_displayed_state_not_a_load() -> None:
-    web = make("web", requires_extra="web")
-    plan = build(bundled=(web,), enabled={"web": True}, extras=lambda extra: extra != "web")
+    web = make("mobile", requires_extra="mobile")
+    plan = build(bundled=(web,), enabled={"mobile": True}, extras=lambda extra: extra != "mobile")
 
-    entry = plan.entry("web")
-    assert (entry.state, entry.reason) == ("needs-extra", "install `localharness[web]` to use it")
-    assert entry.display == "on (install `localharness[web]` to use it)"
+    entry = plan.entry("mobile")
+    assert (entry.state, entry.reason) == ("needs-extra", "install `localharness[mobile]` to use it")
+    assert entry.display == "on (install `localharness[mobile]` to use it)"
     assert entry.enable_command is None and plan.order == ()
-    assert state(build(bundled=(web,), enabled={"web": True}), "web") == ("on", "")
+    assert state(build(bundled=(web,), enabled={"mobile": True}), "mobile") == ("on", "")
 
 
 def test_invalid_settings_fail_an_on_plugin_and_its_dependents_but_an_off_one_stays_off() -> None:
@@ -319,8 +319,8 @@ def test_display_is_the_one_state_text_every_reader_prints() -> None:
     assert show("on") == "on"
     assert show("off") == "off — turn on: localharness plugins enable x"
     assert show("available") == "available — turn on: localharness plugins enable x"
-    assert show("needs-extra", "install `localharness[web]` to use it") == (
-        "on (install `localharness[web]` to use it)")
+    assert show("needs-extra", "install `localharness[mobile]` to use it") == (
+        "on (install `localharness[mobile]` to use it)")
     assert show("skipped", "requires localharness >=9, this is 0.15.0") == (
         "skipped — requires localharness >=9, this is 0.15.0")
     assert show("refused", "dependency cycle: a → b → a") == "refused — dependency cycle: a → b → a"
@@ -328,12 +328,12 @@ def test_display_is_the_one_state_text_every_reader_prints() -> None:
 
 def _every_state() -> dict:
     return dict(
-        bundled=(make("on"), make("off"), make("web", requires_extra="web"),
+        bundled=(make("on"), make("off"), make("mobile", requires_extra="mobile"),
                  make("mem", kind="memory", base=MemorySlotPlugin), make("a", requires=("b",)),
                  make("b", requires=("a",))),
         discovered=(found("avail"), found("boom"), found("old"), found("exa", dist="lh-exa"),
                     found("org")),
-        enabled={"on": True, "off": False, "web": True, "mem": True, "a": True, "b": True,
+        enabled={"on": True, "off": False, "mobile": True, "mem": True, "a": True, "b": True,
                  "boom": True, "old": True, "exa": True, "org": True},
         imported={"boom": RuntimeError("x"), "old": make("old", requires_localharness=">=9"),
                   "exa": make("exa", uses=("mem",))},
@@ -387,22 +387,22 @@ def _fake_dists(monkeypatch, *, requires: list[str], extras: list[str], installe
 
 
 _REQUIRES = ["pydantic>=2", "colorama>=0.4; python_version >= '3'",  # base requirements: not web's
-             "starlette<1,>=0.40; extra == 'web'", "uvicorn>=0.30; extra == 'web'",
+             "starlette<1,>=0.40; extra == 'mobile'", "uvicorn>=0.30; extra == 'mobile'",
              "discord.py>=2.3; extra == 'dispatch'",
-             "pywin32>=300; sys_platform == 'nonesuch' and extra == 'web'"]
+             "pywin32>=300; sys_platform == 'nonesuch' and extra == 'mobile'"]
 
 
 @pytest.mark.parametrize("installed, extra, expected", [
-    ({"starlette": "0.46.0", "uvicorn": "0.34.0"}, "web", True),
+    ({"starlette": "0.46.0", "uvicorn": "0.34.0"}, "mobile", True),
     ({"starlette": "0.46.0", "uvicorn": "0.34.0"}, "Web", True),       # extras compare normalized
-    ({"starlette": "0.46.0"}, "web", False),                           # one requirement missing
-    ({"starlette": "1.2.0", "uvicorn": "0.34.0"}, "web", False),       # one out of its range
+    ({"starlette": "0.46.0"}, "mobile", False),                           # one requirement missing
+    ({"starlette": "1.2.0", "uvicorn": "0.34.0"}, "mobile", False),       # one out of its range
     ({"starlette": "0.46.0", "uvicorn": "0.34.0"}, "dispatch", False),
     ({"starlette": "0.46.0", "uvicorn": "0.34.0"}, "image", False),    # an extra this release lacks
-    ({"starlette": "0.46.0", "uvicorn": "2004d"}, "web", False),       # a version that is not PEP 440
+    ({"starlette": "0.46.0", "uvicorn": "2004d"}, "mobile", False),       # a version that is not PEP 440
 ])
 def test_extra_installed_reads_the_distribution_metadata(monkeypatch, installed, extra, expected) -> None:
-    _fake_dists(monkeypatch, requires=_REQUIRES, extras=["web", "dispatch"], installed=installed)
+    _fake_dists(monkeypatch, requires=_REQUIRES, extras=["mobile", "dispatch"], installed=installed)
 
     assert extra_installed(extra) is expected
 
@@ -412,7 +412,7 @@ def test_extra_installed_is_false_without_an_installed_localharness(monkeypatch)
     monkeypatch.setattr(importlib.metadata, "distribution",
                         lambda name: (_ for _ in ()).throw(importlib.metadata.PackageNotFoundError(name)))
 
-    assert extra_installed("web") is False
+    assert extra_installed("mobile") is False
 
 
 def test_extra_installed_on_this_install() -> None:

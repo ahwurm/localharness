@@ -54,8 +54,8 @@ import textwrap
 import pytest
 from pydantic import BaseModel, Field
 
-from localharness.channels.web import auth
-from localharness.channels.web import server as server_mod
+from localharness.channels.mobile import auth
+from localharness.channels.mobile import server as server_mod
 from localharness.cli.slash_commands import set_plugin_rows
 from localharness.cli.theme import entity
 from localharness.config.loader import ConfigLoader, ConfigValidationError
@@ -70,8 +70,8 @@ from localharness.tools.registry import ToolRegistry
 from tests.integration.test_guardrails_from_global_dir_e2e import _let_the_stub_tokenizer_run_a_turn
 from tests.integration.test_plugin_fixture_registers_everything_e2e import _invoke, _record_dials
 from tests.integration.test_workspace_cli_surface_e2e import _DISCARD_URL, _offline_provider
-from tests.unit.channels.test_web_artifacts import GIF, IMMUTABLE, PNG
-from tests.unit.channels.test_web_server import BEARER, _stack
+from tests.unit.channels.test_mobile_artifacts import GIF, IMMUTABLE, PNG
+from tests.unit.channels.test_mobile_server import BEARER, _stack
 from tests.unit.test_import_direction import BURN_DOWN, SRC, classify, edges_of, scan, violations
 from tests.unit.test_memory_slot import _loop, _memory_plugin
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
@@ -307,8 +307,8 @@ def test_the_line_the_one_list_the_empty_slot_the_route(tmp_path, monkeypatch, f
     (root / f"{gif_id}.gif").write_bytes(GIF)
 
     async def route():
-        (tmp_path / "web").mkdir()
-        _, channel, _, client = await _stack(tmp_path / "web", runtime={"artifact_roots": lifecycle.artifact_roots})
+        (tmp_path / "mobile").mkdir()
+        _, channel, _, client = await _stack(tmp_path / "mobile", runtime={"artifact_roots": lifecycle.artifact_roots})
         try:
             got = {"unauthenticated": await client.get(f"/api/artifacts/kept/{served.id}"),
                    "refused root": await client.get(f"/api/artifacts/strays/{strayed.id}", headers=BEARER),

@@ -27,7 +27,7 @@ from tests.integration.test_memory_compat_baseline_e2e import (
 )
 from tests.integration.test_memory_slash_golden_e2e import _Recorder
 from tests.integration.test_workspace_cli_surface_e2e import _offline_provider
-from tests.unit.channels.test_web_server import BEARER, _stack
+from tests.unit.channels.test_mobile_server import BEARER, _stack
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
 
 UNKNOWN = "Unknown command: /memory — /help lists commands."

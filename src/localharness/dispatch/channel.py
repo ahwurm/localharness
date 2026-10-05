@@ -127,7 +127,7 @@ construction, so an "always" reaction would be a lie."""
 PERMISSION_ALWAYS_CONFIRM = (
     "♾️ is permanent: it is remembered for this workspace and cannot be undone from chat. "
     "Tap ✅ on THIS message to confirm it, or ✅ on the question for just this once.")
-"""The second tap a permanent grant takes, as on the phone (the web channel's server-checked
+"""The second tap a permanent grant takes, as on the phone (the mobile channel's server-checked
 confirm). Nobody can add the same reaction twice, so the confirm is its own message, pre-reacted
 ✅ — and the bot's own ✅ answers nothing: the adapter drops every reaction the bot makes. Until it
 is tapped the question stays open as it was: ✅ on the question is once, ❌ is no, a second ♾️

@@ -24,7 +24,7 @@ LocalHarness is a model-agnostic hierarchical agent harness for local LLMs. It p
 - A thin orchestrator that routes tasks and manages agent creation conversationally
 - A YAML configuration system that lets users define agents without writing code
 - A CLI entry point with auto-detection of local LLM backends
-- A plugin system: the bundled features (`image`, `web`, `memory`, `dispatch`, `autoresearch`) are plugins that can be switched on or off, and core never imports them
+- A plugin system: the bundled features (`image`, `mobile`, `memory`, `dispatch`, `autoresearch`) are plugins that can be switched on or off, and core never imports them
 
 The harness is the product. The LLM is interchangeable.
 
@@ -72,7 +72,7 @@ Core components are organized into five layers. The intent is that a component i
 │  Plugins (beside the layers; reach core only through ctx)       │
 │                                                                 │
 │  image         tools/builtin/image_plugin.py (+ generate_image) │
-│  web           cli/web_plugin.py, channels/web/                 │
+│  mobile        cli/mobile_plugin.py, channels/mobile/                 │
 │  memory        memory/                                          │
 │  dispatch      dispatch/ (Discord adapter in dispatch/adapters/)│
 │  autoresearch  autoresearch/                                    │
@@ -113,7 +113,7 @@ The CLI entry point and the core channel adapters. These are the components that
 
 A plugin is a feature that ships with LocalHarness but sits outside core: it can be switched on or off, and core does not import it. `BUILTIN_PLUGINS` in `plugins/builtin.py` is the only list of what ships, and that module is the only core module allowed to import a plugin. A plugin reaches the session only through the `PluginContext` it is given (section 5). The plugin API is spec 09.
 
-**Files:** `tools/builtin/image_plugin.py` and `tools/builtin/generate_image_tool.py` (`image`); `cli/web_plugin.py` and `channels/web/` (`web`); `memory/` (`memory`); `dispatch/` (`dispatch`); `autoresearch/` (`autoresearch`)
+**Files:** `tools/builtin/image_plugin.py` and `tools/builtin/generate_image_tool.py` (`image`); `cli/mobile_plugin.py` and `channels/mobile/` (`mobile`); `memory/` (`memory`); `dispatch/` (`dispatch`); `autoresearch/` (`autoresearch`)
 
 ---
 
@@ -155,7 +155,7 @@ A plugin is a feature that ships with LocalHarness but sits outside core: it can
 | `channels/terminal.py` | 5 | stdout channel adapter (Rich streaming) |
 | `channels/acp.py` | 5 | Agent Client Protocol adapter (Zed) |
 | `memory/` | plugin | Facts store, history, MEMORY.md notes, recall and consolidation (the `memory` plugin) |
-| `channels/web/` | plugin | The phone app's server and event API (the `web` plugin) |
+| `channels/mobile/` | plugin | The phone app's server and event API (the `mobile` plugin) |
 | `dispatch/` | plugin | Chat channels; Discord is the first adapter (the `dispatch` plugin) |
 | `autoresearch/` | plugin | Experiment loop (the `autoresearch` plugin) |
 
@@ -385,9 +385,9 @@ localharness/
 │       │                             #   verdict.py, subagent.py, ...
 │       ├── orchestrator/             # Layer 4: router.py, workflow.py, cards.py
 │       ├── channels/                 # Layer 5: base.py (ChannelAdapter), terminal.py, acp.py
-│       │   └── web/                  # plugin: the phone app (web)
+│       │   └── mobile/               # plugin: the phone app (mobile)
 │       ├── cli/                      # Layer 5: app.py, init_cmd.py, start_cmd.py, agent_cmd.py,
-│       │                             #   repl.py and the other *_cmd.py modules; web_plugin.py
+│       │                             #   repl.py and the other *_cmd.py modules; mobile_plugin.py
 │       │                             #   and the plugin command modules belong to their plugins
 │       ├── bench/                    # Layer 5: the benchmark runner behind `localharness bench`
 │       ├── memory/                   # plugin: memory
@@ -628,7 +628,7 @@ cli/validate_cmd.py    — imports config/loader.py
 | Tool execution | Sequential in loop | Parallel tool execution within one turn |
 | Audit logging | structlog JSONL | Rust PyO3 SHA-256 hash chain |
 | LLM abstraction | Thin openai client | LiteLLM if multi-provider routing needed |
-| Channel adapters | Terminal and ACP in core; the phone (`web` plugin) and Discord (`dispatch` plugin, the first adapter of its `DispatchChannel`) as bundled plugins | Slack and other chat platforms as further `dispatch` adapters |
+| Channel adapters | Terminal and ACP in core; the phone (`mobile` plugin) and Discord (`dispatch` plugin, the first adapter of its `DispatchChannel`) as bundled plugins | Slack and other chat platforms as further `dispatch` adapters |
 | Permissions | Deny patterns (auto mode) | bubblewrap sandbox + guardian subagent |
 
 ---

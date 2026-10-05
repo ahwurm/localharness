@@ -1230,7 +1230,7 @@ exact-tokenizer = [
 json-repair = [
     { name = "json-repair" },
 ]
-web = [
+mobile = [
     { name = "http-ece" },
     { name = "py-vapid" },
     { name = "segno" },
@@ -1251,7 +1251,7 @@ requires-dist = [
     { name = "bubus", specifier = ">=1.5,<2" },
     { name = "ddgs", specifier = ">=6.0" },
     { name = "discord-py", marker = "extra == 'dispatch'", specifier = ">=2.3" },
-    { name = "http-ece", marker = "extra == 'web'", specifier = ">=1.2,<2" },
+    { name = "http-ece", marker = "extra == 'mobile'", specifier = ">=1.2,<2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "huggingface-hub", specifier = ">=0.26" },
     { name = "json-repair", marker = "extra == 'json-repair'", specifier = ">=0.30,<1" },
@@ -1263,7 +1263,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=23.2" },
     { name = "pluggy", specifier = ">=1.5,<2" },
     { name = "prompt-toolkit", specifier = ">=3.0,<4" },
-    { name = "py-vapid", marker = "extra == 'web'", specifier = ">=1.9,<2" },
+    { name = "py-vapid", marker = "extra == 'mobile'", specifier = ">=1.9,<2" },
     { name = "pydantic", specifier = ">=2.13,<3" },
     { name = "pydantic-yaml", specifier = ">=1.4,<2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
@@ -1272,15 +1272,15 @@ requires-dist = [
     { name = "rich", specifier = ">=15.0,<16" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "scipy", specifier = ">=1.17,<2" },
-    { name = "segno", marker = "extra == 'web'", specifier = ">=1.6,<2" },
+    { name = "segno", marker = "extra == 'mobile'", specifier = ">=1.6,<2" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.2,<6" },
-    { name = "starlette", marker = "extra == 'web'", specifier = ">=0.40,<1" },
+    { name = "starlette", marker = "extra == 'mobile'", specifier = ">=0.40,<1" },
     { name = "structlog", specifier = ">=25.5,<26" },
     { name = "tiktoken", specifier = ">=0.13.0" },
     { name = "typer", specifier = ">=0.25,<1" },
-    { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.30,<1" },
+    { name = "uvicorn", marker = "extra == 'mobile'", specifier = ">=0.30,<1" },
 ]
-provides-extras = ["dispatch", "embeddings", "exact-tokenizer", "json-repair", "web", "dev"]
+provides-extras = ["dispatch", "embeddings", "exact-tokenizer", "json-repair", "mobile", "dev"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "localharness-plugin-example", editable = "examples/plugin-template" }]

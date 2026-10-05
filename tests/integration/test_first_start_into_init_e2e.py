@@ -122,8 +122,9 @@ def _start(g: Path, *flags: str):
 
 
 def _flat(result) -> str:
-    """Rich wraps at 80 columns — normalize whitespace so a phrase survives the wrap."""
-    return " ".join((result.output or "").split())
+    """Rich wraps at 80 columns, inside a bordered box for an error — drop the border and normalize
+    whitespace so a phrase survives the wrap."""
+    return " ".join((result.output or "").replace("│", " ").split())
 
 
 def _exited(result, code: int = 0) -> None:
@@ -222,7 +223,7 @@ def test_a_configured_start_runs_no_setup(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(("channel", "refusal"), [
-    ("discrod", "unknown channel 'discrod'"), ("web", "the web channel is served by its own command")])
+    ("discrod", "unknown channel 'discrod'"), ("mobile", "the mobile channel is served by its own command")])
 def test_a_first_start_refuses_a_channel_it_cannot_build_before_any_setup(tmp_path, monkeypatch, channel, refusal):
     """A typo in --channel is a typo whether or not the box is set up: the tier-one refusal comes
     before the lead line, detection or any question, not after a setup walk that wrote a config."""

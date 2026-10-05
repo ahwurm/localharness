@@ -18,7 +18,7 @@ from localharness.plugins.api import PLUGIN_API_VERSION, Check, Plugin, PluginMa
 from localharness.plugins.channels import accepted_channels, plugin_channel_names
 from localharness.plugins.lifecycle import DoctorRow
 from localharness.plugins.resolve import resolve
-from localharness.cli.web_plugin import WebPlugin
+from localharness.cli.mobile_plugin import MobilePlugin
 
 
 class _MultiChannel(Plugin):
@@ -37,7 +37,7 @@ def _global(tmp_path, extra: dict | None = None):
 
 @pytest.fixture
 def multichat(monkeypatch):
-    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (WebPlugin, _MultiChannel))
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (MobilePlugin, _MultiChannel))
     monkeypatch.setattr(discovery, "discover", lambda global_config_dir: [])
 
 
@@ -48,18 +48,18 @@ def test_plugin_api_version_stays_1():
 def test_only_the_dispatch_manifest_declares_channels():
     # dispatch (49) is bundled and on by default; every other bundled manifest declares none
     assert {c.manifest.name: c.manifest.channels for c in builtin.BUILTIN_PLUGINS} == {
-        "image": (), "web": (), "memory": (), "dispatch": ("discord",), "autoresearch": ()}
+        "image": (), "mobile": (), "memory": (), "dispatch": ("discord",), "autoresearch": ()}
 
 
 def test_manifest_channels_replace_the_plugin_name(multichat):
     names = plugin_channel_names()
-    assert {"alpha", "beta", "web"} == names
+    assert {"alpha", "beta", "mobile"} == names
     assert "multichat" not in names
 
 
 def test_web_still_contributes_exactly_web(monkeypatch):
-    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (WebPlugin,))
-    assert plugin_channel_names() == {"web"}
+    monkeypatch.setattr(builtin, "BUILTIN_PLUGINS", (MobilePlugin,))
+    assert plugin_channel_names() == {"mobile"}
 
 
 def test_accepted_channels_follows_the_plan(tmp_path, multichat):
@@ -109,9 +109,9 @@ def test_bare_mode_command_is_set_by_the_channel_class():
 
 def test_web_and_acp_channels_inherit_no_bare_mode_command():
     from localharness.channels.acp import AcpChannel
-    from localharness.channels.web.channel import WebChannel
+    from localharness.channels.mobile.channel import MobileChannel
 
-    assert AcpChannel.bare_mode_command is False and WebChannel.bare_mode_command is False
+    assert AcpChannel.bare_mode_command is False and MobileChannel.bare_mode_command is False
 
 
 class _FixtureChat:

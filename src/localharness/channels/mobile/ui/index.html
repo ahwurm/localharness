@@ -1651,7 +1651,7 @@ $("recheck").onclick = async () => {
 // ---------------------------------------------------------------- boot
 (async () => {
   if (!token) {
-    const t = prompt("app token (scan the QR `localharness web` draws, or run `localharness web --show-token`)");
+    const t = prompt("app token (scan the QR `localharness mobile` draws, or run `localharness mobile --show-token`)");
     if (t) { token = t.trim(); LS.setItem("lh.token", token); }
   }
   try { await post("/api/auth/enroll", {}); } catch (e) { /* the bearer header still works */ }

@@ -17,9 +17,9 @@ import signal
 import httpx
 import pytest
 
-from localharness.channels.web import auth, push
-from localharness.channels.web.channel import WebChannel
-from localharness.channels.web.server import WebServer
+from localharness.channels.mobile import auth, push
+from localharness.channels.mobile.channel import MobileChannel
+from localharness.channels.mobile.server import MobileServer
 from localharness.core.bus import EventBus
 
 TOKEN = "test-token-not-a-real-one"
@@ -45,10 +45,10 @@ def _subscription(endpoint: str = "https://push.example/aaa") -> dict:
 
 async def _stack(tmp_path, **kw):
     bus = EventBus(persist_path=tmp_path / "bus-events.jsonl")
-    channel = WebChannel(bus=bus, config={})
+    channel = MobileChannel(bus=bus, config={})
     await channel.start()
     channel.bind_runtime(session_id="s1", agent_id="orchestrator", session_dir=tmp_path / "s")
-    server = WebServer(channel, token=TOKEN, config_dir=tmp_path, **kw)
+    server = MobileServer(channel, token=TOKEN, config_dir=tmp_path, **kw)
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=server.app), base_url="http://web.test"
     )
@@ -359,7 +359,7 @@ class _Recorder:
 
 async def _pushable(tmp_path):
     bus = EventBus(persist_path=tmp_path / "bus-events.jsonl")
-    channel = WebChannel(bus=bus, config={})
+    channel = MobileChannel(bus=bus, config={})
     await channel.start()
     channel.bind_runtime(session_id="s1", agent_id="orchestrator", session_dir=tmp_path / "s")
     store = push.SubscriptionStore(tmp_path)
@@ -382,7 +382,7 @@ async def test_a_parked_call_on_the_bus_reaches_the_push_sender(tmp_path):
         agent_label="", session_id="s1", created_at=0.0,
     )
     await bus.publish(PermissionStaged(session_id="s1", agent_id="orchestrator", pending=pending, total=1,
-                                    channel="web"))
+                                    channel="mobile"))
     await channel.flush_push()
 
     assert len(recorder.sent) == 1
@@ -459,7 +459,7 @@ async def test_answering_in_another_surface_clears_the_badge_here(tmp_path):
     pending = PendingCall(id=3, request=_request(), rendering="bash_exec: ls", agent_label="",
                           session_id="s1", created_at=0.0)
     await bus.publish(PermissionStaged(session_id="s1", agent_id="orchestrator", pending=pending, total=1,
-                                    channel="web"))
+                                    channel="mobile"))
     await bus.publish(PermissionResolved(
         session_id="s1", agent_id="orchestrator", pending_id=3, decision="allow_once",
         klass="shell", key="k", tool_name="bash_exec",
@@ -475,7 +475,7 @@ async def test_a_channel_with_no_push_service_still_runs_a_turn(tmp_path):
     from localharness.core.events import TurnCompleted, TurnStarted
 
     bus = EventBus(persist_path=tmp_path / "bus-events.jsonl")
-    channel = WebChannel(bus=bus, config={})
+    channel = MobileChannel(bus=bus, config={})
     await channel.start()
     channel.bind_runtime(session_id="s1", agent_id="orchestrator", session_dir=tmp_path / "s")
     await bus.publish(TurnStarted(session_id="s1", agent_id="orchestrator", task_summary="t", budget={"max_actions": 5}))
@@ -655,7 +655,7 @@ async def test_a_push_that_finished_just_before_the_flush_does_not_spin_it_forev
             delivered.append(message)
             return 1
 
-    channel = WebChannel(bus=EventBus(), config={})
+    channel = MobileChannel(bus=EventBus(), config={})
     channel.set_push(_Instant())
     message = push.Push(title="x", body="y", tag="t", badge=1, data={}, alert=True)
     channel._push_fire(message)

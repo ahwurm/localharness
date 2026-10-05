@@ -71,11 +71,11 @@ async def test_edit_unchanged_edited_and_missing(store):
     await _seed(store)
     b = StoreBrowse(store)
     assert await b.edit("pref/style", LONG + "  ") == {"status": "unchanged", "name": "pref/style"}
-    assert await b.edit("pref/style", "brief", origin="web") == \
+    assert await b.edit("pref/style", "brief", origin="mobile") == \
         {"status": "edited", "name": "pref/style"}
     f = await store.get_fact("pref/style")
     assert f.value == "brief" and f.source == "user_edit"
-    assert re.fullmatch(r"user_edit@\d+;web", f.provenance), f.provenance
+    assert re.fullmatch(r"user_edit@\d+;mobile", f.provenance), f.provenance
     assert (list(f.tags), f.confidence, f.node_kind) == (["pref"], 0.8, "preference")
     await b.edit("proj/db", "postgres")
     g = await store.get_fact("proj/db")

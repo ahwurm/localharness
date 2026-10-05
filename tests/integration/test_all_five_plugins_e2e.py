@@ -24,8 +24,8 @@ from typer.testing import CliRunner
 from localharness.cli.app import app
 from tests.dispatch_support import isolate_discord_env
 
-FIVE = {"image", "web", "memory", "dispatch", "autoresearch"}
-ON_BY_DEFAULT = ["web", "memory", "dispatch", "autoresearch"]  # image is off by default
+FIVE = {"image", "mobile", "memory", "dispatch", "autoresearch"}
+ON_BY_DEFAULT = ["mobile", "memory", "dispatch", "autoresearch"]  # image is off by default
 runner = CliRunner()
 
 

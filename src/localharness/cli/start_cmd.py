@@ -36,14 +36,14 @@ FIRST_START_LEAD = "LocalHarness is not set up yet. Setting up the model server 
 RESTARTED_LINE = "Restarted with {name} {state}. Your conversation continues."
 
 
-def _own_command(web_channel: Any, acp_channel: Any) -> dict[str, tuple[str, Any]]:
+def _own_command(mobile_channel: Any, acp_channel: Any) -> dict[str, tuple[str, Any]]:
     """The ONE own-command table: name -> (why it has its own command, the channel it handed in).
     Its keys must equal plugins.channels.OWN_COMMAND (pinned by a test)."""
-    return {"web": ("the HTTP server has to be reachable before a session exists", web_channel),
+    return {"mobile": ("the HTTP server has to be reachable before a session exists", mobile_channel),
             "acp": ("the editor's handshake has to be answered before a session exists", acp_channel)}
 
 
-def _refuse_unbuildable_channel(channel_mode: str, web_channel: Any = None,
+def _refuse_unbuildable_channel(channel_mode: str, mobile_channel: Any = None,
                                 acp_channel: Any = None) -> None:
     """Tier one: raise typer.BadParameter for an unknown `--channel`, or for one served by its own
     command that was not handed in. Reads nothing from disk, so `_start_async` and a first start's
@@ -53,11 +53,11 @@ def _refuse_unbuildable_channel(channel_mode: str, web_channel: Any = None,
         raise typer.BadParameter(
             UNKNOWN_CHANNEL_ERROR.format(given=channel_mode, known=", ".join(sorted(known))),
             param_hint="--channel")
-    own = _own_command(web_channel, acp_channel)
+    own = _own_command(mobile_channel, acp_channel)
     if channel_mode in own and own[channel_mode][1] is None:
-        # web and acp name channels _start_async cannot BUILD: the HTTP server / the editor's
+        # mobile and acp name channels _start_async cannot BUILD: the HTTP server / the editor's
         # handshake has to be up and answering before a session exists, so the channel is
-        # constructed by `localharness web` / `localharness acp` and handed in. Without that, its
+        # constructed by `localharness mobile` / `localharness acp` and handed in. Without that, its
         # channel branch would fall through to the terminal — precisely the silent fallback the
         # check above exists to end, reintroduced by the same commit that ended it.
         msg = OWN_COMMAND_ERROR.format(name=channel_mode, why=own[channel_mode][0])
@@ -95,7 +95,7 @@ def _channel_refusal(channel_mode: str, resolution: Any) -> str | None:
     return CHANNEL_PLUGIN_NOT_ON.format(name=channel_mode, plugin=entry.name, state=state, fix=fix)
 
 
-WEB_NEEDS_ITS_OWN_COMMAND = OWN_COMMAND_ERROR.format(name="web", why=_own_command(None, None)["web"][0])
+MOBILE_NEEDS_ITS_OWN_COMMAND = OWN_COMMAND_ERROR.format(name="mobile", why=_own_command(None, None)["mobile"][0])
 """Shown verbatim. A refusal naming the alternatives is the difference between a typo costing a
 second and a typo costing a session."""
 
@@ -581,7 +581,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                        channel_mode: str = "terminal", subagents: bool = False,
                        model_override: str | None = None, list_models: bool = False,
                        no_input: bool = False, show_reasoning: bool = False,
-                       acp_channel: Any = None, web_channel: Any = None,
+                       acp_channel: Any = None, mobile_channel: Any = None,
                        resume: Resume | None = None, trust_project: bool = False) -> Restart | None:
     """Async entry point: discover agent, wire dependencies, run REPL.
 
@@ -593,7 +593,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     eviction store, the typed-ahead lines and /mode carried over, a fresh sitting id, and a compact
     indicator in place of the banner. Otherwise None.
 
-    `web_channel` is the PWA adapter (`channels/web.WebChannel`) when this session is being
+    `mobile_channel` is the PWA adapter (`channels/mobile.MobileChannel`) when this session is being
     driven from a phone. Passed in for the same reason `acp_channel` is — the HTTP server is up
     and serving before any session exists, so the channel outlives and precedes this call — but
     it takes the opposite exit: the web branch does NOT replace the REPL. That is the hybrid of
@@ -601,7 +601,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     buys reachability-before-a-session and costs the REPL's slash commands, the input router, the
     pending resolver and `UserMessage` publishing — which is why an ACP session's log contains no
     user turns at all. Discord's shape buys all of those and cannot be reached before a session.
-    The web channel is built early like ACP and driven by `OrchestratorREPL` like Discord.
+    The mobile channel is built early like ACP and driven by `OrchestratorREPL` like Discord.
 
     `acp_channel` is the Zed/ACP adapter (`channels/acp.AcpChannel`) when this session is being
     driven over the Agent Client Protocol. It is passed IN rather than built here because the
@@ -619,7 +619,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # so every caller of this function gets the same answer, and before the config lookup so the
     # refusal does not depend on what happens to be on disk: a typo in the channel is a typo
     # whether or not the box has been `init`ed yet.
-    _refuse_unbuildable_channel(channel_mode, web_channel, acp_channel)
+    _refuse_unbuildable_channel(channel_mode, mobile_channel, acp_channel)
 
     import time as _time
     import uuid
@@ -670,8 +670,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         MCP_NOT_STARTED_LINE, TRUST_PROJECT_ENV, MachineTrust, ProjectTrust, _stdin_is_a_terminal,
         decide_machine_trust, decide_project_trust, resolve_workspace_layer, settle_startup_trust)
     interactive = False if no_input else None
-    if web_channel is not None:
-        # The web channel is already live and a client is already attached (its SSE connection is
+    if mobile_channel is not None:
+        # The mobile channel is already live and a client is already attached (its SSE connection is
         # what triggered this bring-up), so the one question a phone CAN answer at this point is
         # the one about an outside `.localharness/`. `resolve_workspace_layer`'s asker is
         # synchronous and runs on a worker thread, so the channel bridges the answer back with
@@ -679,7 +679,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # loudly: it silently makes an outside workspace invisible forever, which is exactly the
         # phase-39 failure the trust dialog was added to prevent.
         workspace = await asyncio.to_thread(
-            resolve_workspace_layer, config_dir, asker=web_channel.trust_asker()
+            resolve_workspace_layer, config_dir, asker=mobile_channel.trust_asker()
         )
     else:
         workspace = resolve_workspace_layer(config_dir, interactive=interactive)
@@ -1565,11 +1565,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # Built at the ACP handshake (it had to answer `initialize` before any of this
             # existed); the gate attaches to it below exactly like any other channel.
             channel = acp_channel
-        elif web_channel is not None:
-            # Built by `localharness web` before this call, for the same reason: the HTTP server
+        elif mobile_channel is not None:
+            # Built by `localharness mobile` before this call, for the same reason: the HTTP server
             # answers, serves history and holds the pending queue with the model server cold.
             # Unlike ACP it does NOT take a `serve()` branch below — the REPL drives it.
-            channel = web_channel
+            channel = mobile_channel
         elif channel_mode in plugin_channel_names() - OWN_COMMAND:
             # Any bundled channel plugin, built without core naming it: the running plugin's own
             # make_channel (it hands the channel its validated settings), else its channels() class.
@@ -1639,7 +1639,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # NONE of this is on the bus — `stream_snapshot` and friends are direct callables —
             # so a channel that wants a status row gets it by being wired here, exactly as the
             # terminal is. Keyed on the attribute rather than on `isinstance(TerminalChannel)`
-            # because the web channel needs the identical three sources to build its `StatusTick`
+            # because the mobile channel needs the identical three sources to build its `StatusTick`
             # frame, and a widening isinstance chain here is a second list to keep in step.
             channel.tps_source = llm.gen_speed_snapshot
             channel.progress_source = llm.stream_snapshot  # phase + live token tallies
@@ -1754,12 +1754,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if llm is not None:
                 llm.on_reasoning = channel.on_reasoning
 
-        if web_channel is not None:
+        if mobile_channel is not None:
             # Everything the HTTP surface has to answer a STATE question about — `/api/tools`,
             # `/api/permissions`, `/api/health`, and the session log `?from={seq}` replays from.
             # One explicit handoff rather than the channel reconstructing state from the event
             # stream it also forwards, which would give it two sources of truth for the same fact.
-            web_channel.bind_runtime(
+            mobile_channel.bind_runtime(
                 session_id=sitting_id,
                 agent_id=agent_config.name,
                 gate=gate,
@@ -1813,7 +1813,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             gate=gate,  # what /mode switches; the same object the loop and subagents hold
             # /plugins enable|disable restarts a terminal session (the channel's own
             # can_switch_plugins decides); the web and ACP paths never get the hook.
-            on_plugin_switch=_plugin_switch if web_channel is None and acp_channel is None else None,
+            on_plugin_switch=_plugin_switch if mobile_channel is None and acp_channel is None else None,
             queued=resume.queued if resume is not None else (),
         )
 
@@ -1861,8 +1861,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
 
 _CHANNEL_HELP = ("Input channel: " + ", ".join(sorted(channel_names())) + " (default terminal). An "
-                 "unknown name is refused, not silently treated as terminal. web and acp are served "
-                 "by their own commands: `localharness web`, `localharness acp`.")
+                 "unknown name is refused, not silently treated as terminal. mobile and acp are served "
+                 "by their own commands: `localharness mobile`, `localharness acp`.")
 
 
 def start_app(
