@@ -29,6 +29,7 @@ ALLOWED: dict[str, set[str]] = {
     "reference": {"source", "path", "handle"},
     "judge": {"key", "criterion", "assessment", "passages", "fix"},
     "waive": {"key", "human_quote"},
+    "integrate": {"delegation_id", "note"},
     "close": {"status", "note", "human_quote"},
     "show": set(),
 }
@@ -70,7 +71,8 @@ class TaskTool(Tool):
                 "Receipts, hashes, and human turns are recorded by the runtime; you cannot write them. "
                 "Declare files the work depends on (instructions, voice samples, sources) as references "
                 "so they stay in view; record editorial criteria with judge — judgments are opinion, "
-                "never evidence."
+                "never evidence. integrate delegated results: say how each subagent's result was used "
+                "before closing as complete."
             ),
             parameters={
                 "type": "object",
@@ -110,7 +112,8 @@ class TaskTool(Tool):
                     "depends_on": {"type": "array", "items": {"type": "string", "maxLength": MAX_TEXT},
                                    "description": "check: artifact keys it depends on"},
                     "status": {"type": "string", "enum": ["complete", "checkpoint", "partial", "blocked"]},
-                    "note": _str("close: what remains"),
+                    "note": _str("close: what remains; integrate: how the delegated result was used"),
+                    "delegation_id": _str("integrate: the delegation id, e.g. d1", 16),
                 },
                 "required": ["action"],
             },
@@ -334,6 +337,20 @@ class TaskTool(Tool):
         ctx.waive(key, human_decision=f["human_quote"])
         return f"Check {key} waived by the human."
 
+    def _integrate(self, state: TaskState, f: dict[str, Any]) -> str:
+        rec = state.current
+        assert rec is not None
+        if not f.get("delegation_id") or not f.get("note"):
+            raise _Refused("integrate requires delegation_id and note")
+        d = next((x for x in rec.delegations if x.id == f["delegation_id"]), None)
+        if d is None:
+            raise _Refused(f"Unknown delegation {f['delegation_id']!r}; known: "
+                           f"{', '.join(x.id for x in rec.delegations) or 'none'}")
+        if d.status == "running":
+            raise _Refused(f"delegation {d.id} is still running")
+        d.integrated = _text("note", f["note"])
+        return f"Delegation {d.id} integrated."
+
     def _close(self, state: TaskState, f: dict[str, Any]) -> str:
         rec = state.current
         assert rec is not None
@@ -352,6 +369,11 @@ class TaskTool(Tool):
             if open_:
                 reasons.append("Open editorial judgments: " + ", ".join(open_)
                                + ". Assess them with judge, ask the human to waive them, or close as partial.")
+            pending = state.unresolved_delegations()
+            if pending:
+                reasons.append("Unintegrated delegations: " + "; ".join(
+                    f"{d.id} {d.agent}: {d.status}" for d in pending)
+                    + ". Integrate each with integrate (delegation_id, note), or close as partial.")
             if reasons:
                 raise _Refused(" ".join(reasons))
         rec.context.requested_status = status  # type: ignore[assignment]

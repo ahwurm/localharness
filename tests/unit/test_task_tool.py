@@ -345,3 +345,46 @@ async def test_refused_start_restores_record_and_notes(tmp_path, monkeypatch):
     assert refused(await tool.run(action="start", objective="New", assignment="Other"), "narrow the record")
     assert state.notes == ["outline changed since last session"]
     assert state.current.id == before.id and state.current == before
+
+
+# --- 0.16.5 slice 3: integrate delegated results; close refuses unintegrated work --------------
+
+def delegated(state, *statuses):
+    for i, status in enumerate(statuses, 1):
+        state.begin_delegation(f"c{i}", "reviewer", "review")
+        if status != "running":
+            state.record_delegation(f"c{i}", ToolResult(output="tail", metadata={"status": status}))
+
+
+async def test_integrate_marks_the_delegation(tmp_path):
+    state, tool = tool_for(tmp_path)
+    await start(tool)
+    delegated(state, "completed")
+    result = await tool.run(action="integrate", delegation_id="d1", note="fixed both claims")
+    assert result.success and result.output == "Delegation d1 integrated."
+    assert state.current.delegations[0].integrated == "fixed both claims"
+    assert json.loads(state.path.read_text())["delegations"][0]["integrated"] == "fixed both claims"
+
+
+async def test_integrate_refusals(tmp_path):
+    state, tool = tool_for(tmp_path)
+    await start(tool)
+    delegated(state, "completed", "running")
+    assert refused(await tool.run(action="integrate", delegation_id="d1"),
+                   "integrate requires delegation_id and note")
+    assert refused(await tool.run(action="integrate", delegation_id="d9", note="x"), "d1, d2")
+    assert refused(await tool.run(action="integrate", delegation_id="d2", note="x"),
+                   "delegation d2 is still running")
+    assert all(not d.integrated for d in state.current.delegations)
+
+
+async def test_close_complete_refused_until_delegations_integrated(tmp_path):
+    state, tool = tool_for(tmp_path)
+    await start(tool)
+    delegated(state, "completed")
+    assert refused(await tool.run(action="close", status="complete"),
+                   "Unintegrated delegations: d1 reviewer: completed.")
+    assert not state.current.closed
+    await tool.run(action="integrate", delegation_id="d1", note="used the review")
+    assert (await tool.run(action="close", status="complete")).success
+    assert state.current.closed

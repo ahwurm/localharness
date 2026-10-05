@@ -13,6 +13,12 @@ References are re-snapshotted from disk before every request of an active task
 eviction, file changes and restarts; there is no file watcher. Judgments are model opinion,
 never evidence. The revision budget is counted by the runtime: an edit to an artifact that a
 receipt verified spends one revision.
+
+Delegations are owned by the record (0.16.5 D8): the loop calls `begin_delegation` before an
+`agent` call (refusing past `delegation_budget`) and `record_delegation` after it, so every
+delegation ends in a runtime status; one still "running" when a human turn arrives or the record
+is reloaded was cancelled and becomes "interrupted". Only the coordinator's `integrate` resolves
+one. Delegations are awaited one at a time, so one writer holds an artifact at a time.
 """
 from __future__ import annotations
 
@@ -25,11 +31,14 @@ import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from localharness.agent.context import MAX_ACTIVE_REFERENCES, ActiveReferenceError
 from localharness.agent.task_context import Receipt, Requirement, TaskContext
 from localharness.core.private_files import write_private_bytes
+
+if TYPE_CHECKING:
+    from localharness.tools.base import ToolResult
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +53,7 @@ MAX_RECORD_BYTES = 64 * 1024
 MAX_REFERENCES = MAX_ACTIVE_REFERENCES
 MAX_JUDGMENTS = 8
 MAX_REFERENCE_BYTES = 200 * 1024
+MAX_DELEGATIONS = 8
 OPEN_JUDGMENTS = "Open editorial judgments (not assessed): "
 BUDGET_EXHAUSTED = ("Revision budget exhausted: stop with the usable artifact and list the remaining gaps; "
                     "continue only on new user direction.")
@@ -90,6 +100,20 @@ class Judgment:
 
 
 @dataclass
+class Delegation:
+    id: str
+    agent: str
+    purpose: str = ""
+    status: str = "running"
+    artifacts: list[str] = field(default_factory=list)
+    findings: str = ""
+    uncertainties: str = ""
+    remaining: str = ""
+    integrated: str = ""
+    call_id: str = ""
+
+
+@dataclass
 class TaskRecord:
     context: TaskContext
     workspace: str
@@ -111,6 +135,7 @@ class TaskRecord:
     references: list[Reference] = field(default_factory=list)
     judgments: list[Judgment] = field(default_factory=list)
     verified_revision: dict[str, str | None] = field(default_factory=dict)
+    delegations: list[Delegation] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         ctx = self.context
@@ -126,6 +151,7 @@ class TaskRecord:
             "references": [vars(r) for r in self.references],
             "judgments": [vars(j) for j in self.judgments],
             "verified_revision": self.verified_revision,
+            "delegations": [vars(x) for x in self.delegations],
             "context": {
                 "objective": ctx.objective, "stop_boundary": ctx.stop_boundary,
                 "requested_status": ctx.requested_status, "status": ctx.status,
@@ -171,6 +197,7 @@ class TaskRecord:
             references=[Reference(**x) for x in d.get("references", [])],
             judgments=[Judgment(**x) for x in d.get("judgments", [])],
             verified_revision=dict(d.get("verified_revision", {})),
+            delegations=[Delegation(**x) for x in d.get("delegations", [])],
         )
 
 
@@ -183,6 +210,7 @@ class TaskState:
         self.workspace = workspace
         self.recent_turns: list[str] = []
         self.notes: list[str] = []  # runtime-only restart notes
+        self.turn_dispatches = 0  # tool dispatches since the last human turn (runtime-only)
 
     @classmethod
     def load(cls, path: Path, workspace: str) -> tuple[TaskState, str | None]:
@@ -210,6 +238,8 @@ class TaskState:
     def reconcile(self) -> None:
         if self.current is None:
             return
+        if self._interrupt_running():
+            self._save_quietly()
         now = self.current.context.revisions()
         for key, saved in self.current.artifact_revisions.items():
             if key in now and now[key] is None:
@@ -229,6 +259,21 @@ class TaskState:
                 continue
             if ref.sha256 is not None and digest != ref.sha256:
                 self.notes.append(f"reference {ref.source} changed since last session")
+
+    def _interrupt_running(self) -> bool:
+        """A delegation still "running" at a step boundary or reload was cancelled mid-flight."""
+        changed = False
+        for d in self.current.delegations if self.current else []:
+            if d.status == "running":
+                d.status, changed = "interrupted", True
+                self.notes.append(f"delegation {d.id} {d.agent} interrupted")
+        return changed
+
+    def _save_quietly(self) -> None:
+        try:
+            self.save()
+        except TaskRecordTooLarge:
+            log.warning("task record too large to save")
 
     def _live(self) -> TaskRecord | None:
         rec = self.current
@@ -299,12 +344,17 @@ class TaskState:
         q = normalize_quote(quote or "")
         return len(q) >= 8 and any(q in normalize_quote(t) for t in self.recent_turns)
 
-    def observe_human(self, text: str) -> None:
+    def observe_human(self, text: str, new_turn: bool = True) -> None:
+        """`new_turn=False` for a mid-turn steering nudge: it does not reset the turn's dispatch
+        count, so a nudge after tool activity cannot exempt the final reply from the check."""
+        if new_turn:
+            self.turn_dispatches = 0
         turn = text[:MAX_TURN_CHARS]
         self.recent_turns = [*self.recent_turns, turn][-MAX_HUMAN_TURNS:]
         if self.current is not None:
             self.current.context.observe_human(text)
             self.current.human_turns = [*self.current.human_turns, turn][-MAX_HUMAN_TURNS:]
+            self._interrupt_running()
             self.save()
 
     def revisions(self) -> dict[str, str | None]:
@@ -312,6 +362,7 @@ class TaskState:
 
     def record_result(self, tool: str, arguments: dict[str, Any], call_id: str, *,
                       success: bool, metadata: dict[str, Any], before: dict[str, str | None]) -> None:
+        self.turn_dispatches += 1
         rec = self.current
         if rec is None:
             return
@@ -328,6 +379,47 @@ class TaskState:
                 for dep in req.dependencies:
                     rec.verified_revision[dep] = after.get(dep)
         self.save()
+
+    def begin_delegation(self, call_id: str, agent: str, purpose: str) -> str | None:
+        """Open a "running" entry before an `agent` call, or return why it is refused. Inert
+        (None, no entry) without a live record, so users without a task are unaffected."""
+        rec = self._live()
+        if rec is None:
+            return None
+        if len(rec.delegations) >= rec.delegation_budget:
+            return (f"Delegation budget ({rec.delegation_budget}) used for this task; integrate the "
+                    "results you have or ask the user to raise it")
+        if len(rec.delegations) >= MAX_DELEGATIONS:
+            return f"delegations is limited to {MAX_DELEGATIONS} per task"
+        rec.delegations.append(Delegation(f"d{len(rec.delegations) + 1}", agent[:200],
+                                          purpose[:MAX_TEXT], call_id=call_id))
+        self.save()
+        return None
+
+    def record_delegation(self, call_id: str, result: ToolResult | None) -> None:
+        """Settle the entry for `call_id` from the agent tool's result (None: dispatch raised).
+        Status and artifacts are runtime facts; findings/uncertainties/remaining are the child's
+        HANDOFF text when present, else the tail of its output (its own final words)."""
+        rec = self.current
+        d = next((x for x in rec.delegations if x.call_id == call_id), None) if rec else None
+        if d is None:
+            return
+        if result is None or not result.success:
+            kind = result.error_type if result is not None else None
+            d.status = "timeout" if kind == "timeout_error" else f"failed: {kind or 'execution_error'}"
+            d.findings = ((result.error or "") if result is not None else "")[:MAX_TEXT]
+        else:
+            meta = result.metadata
+            handoff = meta.get("handoff") or {}
+            d.status = str(meta.get("status") or "completed")[:MAX_TEXT]
+            d.artifacts = [str(p)[:MAX_TEXT] for p in (meta.get("artifacts") or [])][:16]
+            d.findings = str(handoff.get("findings") or result.output[-MAX_TEXT:])[:MAX_TEXT]
+            d.uncertainties = str(handoff.get("uncertainties") or "")[:MAX_TEXT]
+            d.remaining = str(handoff.get("remaining") or "")[:MAX_TEXT]
+        self._save_quietly()
+
+    def unresolved_delegations(self) -> list[Delegation]:
+        return [d for d in self.current.delegations if not d.integrated] if self.current else []
 
     def packet(self) -> str:
         rec = self._live()
@@ -348,6 +440,10 @@ class TaskState:
         if rec.judgments:
             lines.append("Editorial judgments (model opinion, not evidence): " + "; ".join(
                 f"{j.key}: {j.status} — {j.criterion}" for j in rec.judgments))
+        if rec.delegations:
+            lines.append("Delegations: " + "; ".join(
+                f"{d.id} {d.agent}: {d.status}" + (", integrated" if d.integrated else "")
+                for d in rec.delegations))
         lines.append(f"Revision budget: used {rec.revisions_used} of {rec.revision_budget}")
         if rec.revisions_used > rec.revision_budget:
             lines.append(BUDGET_EXHAUSTED)
@@ -359,10 +455,17 @@ class TaskState:
         # A record already finalized as complete never rewrites later, unrelated replies.
         if self.current is None or self.current.context.status == "complete":
             return candidate
+        if self.turn_dispatches == 0:
+            return candidate  # a tool-less aside changed nothing the record could check
         result = self.current.context.finalize(candidate)
+        unchanged = result == candidate
         open_ = [j.key for j in self.current.judgments if j.status == "open"]
-        if result == candidate and open_:
+        if unchanged and open_:
             result = f"{candidate}\n\n{OPEN_JUDGMENTS}{', '.join(open_)}."
+        pending = self.unresolved_delegations()
+        if unchanged and pending:
+            result += "\n\nDelegated work unresolved: " + "; ".join(
+                f"{d.id} {d.agent}: {d.status}" for d in pending) + "."
         self.save()
         return result
 
@@ -424,6 +527,11 @@ class TaskState:
         lines += [f"  {j.key}: {j.status} — {j.criterion}" + "".join(
             f" | {name}: {getattr(j, name)}" for name in ("assessment", "passages", "fix") if getattr(j, name))
             for j in rec.judgments]
+        lines.append("delegations:")
+        lines += [f"  {d.id} {d.agent}: {d.status} — {d.purpose}"
+                  + (f" | artifacts: {', '.join(d.artifacts)}" if d.artifacts else "")
+                  + (f" | integrated: {d.integrated}" if d.integrated else "")
+                  for d in rec.delegations]
         lines.append("questions:")
         lines += [f"  {q}" for q in rec.questions]
         lines += [f"next action: {rec.next_action or '-'}",
