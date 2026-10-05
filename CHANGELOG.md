@@ -6,6 +6,39 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.4] — 2026-10-05
+
+### Changed
+- Harness nudges now carry internal provenance and a short provider-visible origin marker.
+  Human corrections and quoted markers remain human content; provider payloads omit private
+  metadata. Compaction preserves origin lineage and frames the summarizer input.
+- Compact completion guidance follows the latest human scope, requested checkpoints, and
+  observed tool outcomes. Ordinary queries gain no preflight model call.
+
+### Added
+- Bounded active references through the existing `tool_result_get` tool: opt into up to four
+  snapshots for one step. The final packed request restores missing content as tool data or
+  reports that the step must be narrowed when content is unavailable or cannot fit with reply
+  reserve. Protection expires at the next human turn.
+- Optional internal caller task contracts bind machine-checkable requirements to actual tool
+  receipts and relevant artifact revisions. Failed, missing, or stale evidence cannot project
+  a declared task as complete; human waivers stay distinct from passed checks. Existing public
+  completion events retain their meaning. See [task context](docs/task-context.md).
+
+### Validation and limitations
+- Focused regressions cover origin versus quoted text, provider wire conversion, compaction,
+  reference overflow and tool pairing, stale artifacts, failed/missing receipts, checkpoints,
+  and the ordinary one-call path. Prompt snapshots were updated for the intentional guidance.
+- Eight preregistered synthetic tasks ran against baseline and candidate on the same local
+  model with persistent memory disabled. Each variant used 14 model calls; both quick queries
+  used one call. Reviewed task outcomes showed no material regression. Candidate aggregate
+  latency was 73.78 seconds versus 63.90 seconds; this single unblinded sample does not establish
+  a speed or quality improvement. See [validation details](docs/release-validation-0.16.4.md).
+- Reference handles are snapshots, not file watchers; callers must redeclare changed sources.
+  Evidence checks cover declared obligations only, and callers must revise contracts after
+  scope changes. These changes cannot guarantee attribution, prose quality, user acceptance,
+  or recovery from a child that never returns. No configuration migration is required.
+
 ### Fixed
 - **Memory no longer logs a CPU-thread-cap warning when torch is not installed at all.** There is
   nothing to cap in that case (a model that needed torch could not have loaded); the warning still
