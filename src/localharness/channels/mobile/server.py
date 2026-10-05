@@ -669,6 +669,11 @@ class MobileServer:
             return
         if self.channel.session_id is not None:
             return
+        if self.channel.asleep:
+            # A sleeping thread wakes on a message, never on a connect: a backgrounded page
+            # reconnects on its own, and the point of sleeping was that nobody's pocket keeps
+            # the box busy.
+            return
         if await self.channel.probe_model() is not True:
             log.info("mobile_prewarm_skipped", reason="provider not answering; waiting for a message")
             return
@@ -1460,6 +1465,11 @@ class MobileServer:
         # Never let a proxy or a shared cache keep the token-bearing variant.
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    def session_asleep(self) -> None:
+        """The runner put the session to sleep: the next message or command brings one up again
+        (`_ensure_session`), a connect alone does not (`_maybe_prewarm`)."""
+        self._bringup_started = False
 
     def _ensure_session(self) -> bool:
         """Start session bring-up if it has not begun. Returns True if this call started it."""

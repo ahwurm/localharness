@@ -53,6 +53,7 @@ from localharness.core.events import (
 )
 
 from . import push as push_mod
+from .protocol import ASLEEP_STAGE
 from .protocol import (
     AskExpired,
     AskOption,
@@ -264,6 +265,9 @@ class MobileChannel(ChannelAdapter):
         super().__init__(bus, config)
         self._clients: dict[str, _Client] = {}
         self._inbound: asyncio.Queue[str] = asyncio.Queue()
+        # Set by the runner's idle watch (and at shutdown): the REPL's next `read_input` ends the
+        # session instead of waiting, and the session builder writes the thread to disk.
+        self._sleep_event = asyncio.Event()
         self._handles: list[Any] = []
         self._open_asks: dict[str, _OpenAsk] = {}
         self._started = False
@@ -397,6 +401,7 @@ class MobileChannel(ChannelAdapter):
         # it is wired to the session TASK's cancel, and once the build is over that handle
         # cancels a live session — which is exactly what a stray thumb did on 2026-09-14.
         self.set_bringup_abort(None)
+        self._sleep_event.clear()  # a session starts awake, whatever ended the last one
         self.set_bringup("ready", elapsed=self._bringup.elapsed if self._bringup else 0.0)
 
     def reset_session(self) -> None:
@@ -413,10 +418,31 @@ class MobileChannel(ChannelAdapter):
         self._gate = None
         self._llm = None
         self._agent_loop = None
+        # The registry holds the memory tools, which hold the embedding engine, which holds the
+        # model: a sleeping server that kept it would keep the one thing sleep exists to drop.
+        # The same for the session's bus (everything the session subscribed to it) and the
+        # instrument sources (closures over the session's client and loop): the channel goes
+        # back to the placeholder bus it was built on, and the next bind hands it a new one.
+        self._tool_registry = None
+        for handle in self._handles:
+            with contextlib.suppress(Exception):
+                self.bus.unsubscribe(handle)
+        self._handles = []
+        self._started = False
+        self.bus = EventBus()
+        self.tps_source = self.progress_source = self.model_source = None
+        # The REPL installs these as ITS bound methods and installs them only where the channel
+        # still says None, so a channel that kept them would route the next session's stop,
+        # nudge and approve taps to a REPL that is gone — and keep that REPL, its loop, the
+        # registry, the memory tools and the embedding model alive with it (found by measuring
+        # the sleeping server, 2026-10-04).
+        self._pending_resolver = self._nudge_resolver = self._cancel_resolver = None
         self._memory_slot = MemorySlot()  # closes with the session — a dead store must not answer
         self._artifact_roots = {}  # the next session's plugins decide what is served
         self._turn_running = False
         self._open_asks.clear()
+        self._sleep_event.clear()
+        self._model_reachable = None  # the answer belonged to the session's endpoint, which is gone
         self.set_bringup_abort(None)
 
     def memory_slot(self) -> MemorySlot:
@@ -856,7 +882,21 @@ class MobileChannel(ChannelAdapter):
         """
         if not self._started:
             raise NotInteractiveError("MobileChannel.start() must be called before read_input()")
-        return await self._inbound.get()
+        # A message and a sleep request race here, and the message wins: a line that arrived is a
+        # person, and it clears the request. The REPL reads EOF — the same end `/quit` takes —
+        # only when nothing is waiting, so the session that ends has nothing in hand.
+        getter = asyncio.ensure_future(self._inbound.get())
+        sleeper = asyncio.ensure_future(self._sleep_event.wait())
+        try:
+            done, _ = await asyncio.wait({getter, sleeper}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            sleeper.cancel()
+            if not getter.done():
+                getter.cancel()  # Queue.get leaves the item in place when cancelled before it got one
+        if getter in done:
+            self._sleep_event.clear()
+            return getter.result()
+        raise EOFError()
 
     def submit(self, text: str) -> None:
         """Queue a user message for the REPL's next `read_input()`.
@@ -865,7 +905,42 @@ class MobileChannel(ChannelAdapter):
         message posted mid-turn simply waits for the turn to end and then runs as the next one.
         Nothing is dropped and nothing interleaves.
         """
+        self._sleep_event.clear()  # a person spoke: whatever idle watch was about to sleep, this comes first
         self._inbound.put_nowait(text)
+
+    def request_sleep(self) -> None:
+        """End the session at its next idle moment, keeping the thread: the REPL's `read_input` reads
+        EOF, and the session builder writes the conversation beside the session log before the
+        teardown. A message that arrives first cancels it (see `read_input`)."""
+        self._sleep_event.set()
+
+    @property
+    def sleep_requested(self) -> bool:
+        return self._sleep_event.is_set()
+
+    @property
+    def asleep(self) -> bool:
+        """No session is bound and the last thing that happened to one was a sleep: the thread is
+        on disk and the next message wakes it."""
+        return (self.session_id is None and self._bringup is not None
+                and self._bringup.stage == ASLEEP_STAGE)
+
+    @property
+    def queued_input(self) -> int:
+        """Lines POSTed and not yet read by a REPL — what a session that just slept left waiting."""
+        return self._inbound.qsize()
+
+    def idle(self) -> bool:
+        """Nothing is happening and nobody is here: a live session, no turn running, no phone
+        attached, nothing queued, no question open, nothing parked for an answer. The idle watch
+        sleeps the session only after this has held for the whole timeout.
+
+        A parked call keeps the session awake: it is a future a human still has to answer, and
+        it lives only in this session's gate. Sleeping would drop it — the same reason a
+        `/plugins` restart refuses while something is parked."""
+        return (self.session_id is not None and not self._turn_running and not self._clients
+                and self._inbound.empty() and not self._open_asks
+                and not getattr(self._gate, "pending", None))
 
     async def nudge(self, text: str) -> bool:
         """Steer the RUNNING turn at its next step boundary (`intent=nudge`).
@@ -1277,15 +1352,18 @@ class MobileChannel(ChannelAdapter):
         )
 
     def model_state(self) -> str:
-        """ready | cold | unreachable | building | unknown — what `/api/health` reports.
+        """ready | cold | asleep | unreachable | building | unknown — what `/api/health` reports.
 
         Distinct states matter: "cold" and "unreachable" are different problems with different
-        actions, and neither is an indefinite spinner (WEBCH-26).
+        actions, and neither is an indefinite spinner (WEBCH-26). "asleep" is the one state that
+        is not a problem: the thread is on disk and the next message wakes it.
         """
         if self._model_reachable is False:
             return "unreachable"
         if self._bringup is not None and self._bringup.failed:
             return "unreachable"
+        if self.asleep:
+            return "asleep"
         if self.session_id is None:
             return "building" if self._bringup is not None else "cold"
         if self._model_reachable is None:

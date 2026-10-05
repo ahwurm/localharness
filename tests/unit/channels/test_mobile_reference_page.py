@@ -653,3 +653,29 @@ console.log(JSON.stringify({imgs: imgs().map((i) => i.src), before: P.before,
     assert got["before"] == "art-20260930-142502-abcdef" and got["more"] is False
     assert got["asked"] == ["/api/artifacts", "/api/artifacts?before=art-20260930-142502-abcdef",
                             "/api/artifacts"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_asleep_keeps_the_transcript_and_changes_only_the_ribbon(page, tmp_path):
+    """0.16.2: a slept session is not an ended one. The stage removes the build row, puts on the
+    ribbon the words health's `asleep` puts there, draws no red row, and the next bring-up row
+    replaces it as usual."""
+    got = _js(page, tmp_path, """
+globalThis.fetch = async () => ({json: async () => ({})});
+const out = {};
+onFrame("BringUpStage", {stage: "starting the session", abortable: true, elapsed: 0});
+out.building = [$("state").textContent, rows().length];
+onFrame("BringUpStage", {stage: "asleep", detail: "wakes on your next message", abortable: false});
+out.asleep = [$("state").textContent, rows(), S.bring === null];
+paint("asleep");
+out.viaHealth = $("state").textContent;
+onFrame("BringUpStage", {stage: "starting the session", detail: "waking the chat you left", abortable: true});
+out.waking = [$("state").textContent, rows().map((r) => [r.cls, r.text])];
+console.log(JSON.stringify(out));
+""")
+    assert got["building"] == ["starting: starting the session", 1]
+    assert got["asleep"] == ["asleep — wakes on your next message", [], True]
+    assert got["viaHealth"] == "asleep — wakes on your next message"
+    assert got["waking"][0] == "starting: starting the session"
+    ((cls, text),) = got["waking"][1]
+    assert cls == "row sys" and "waking the chat you left" in text

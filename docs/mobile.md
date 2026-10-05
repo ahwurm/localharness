@@ -15,9 +15,11 @@ API that is already complete.
 
 **One live session at a time.** `localharness mobile` binds to the directory you launch it in — the
 same rule `localharness start` and `localharness acp` follow — and serves exactly one live session
-from that directory. There is no chat list, no session switching and no resume yet. Close the
-page, come back, and you are in the same session you left; restart the process and it is a new
-one.
+from that directory. There is no switching between live chats. Close the page, come back, and you
+are in the conversation you left: a session nobody has used for thirty minutes goes to sleep (its
+conversation is written beside its session log and the session is torn down), and your next
+message wakes it and continues the same conversation. Restart the process and it continues the
+same way, from that file. The `+` button starts a fresh chat; the old one stays in the drawer.
 
 ## Install
 
@@ -153,7 +155,7 @@ A fourth channel with no map is the predictable confusion. Honestly:
 | Can ask a permission question | yes | yes | yes | **yes** |
 | Holds a question open with no deadline | yes | no | yes | no — a pocket is not a person |
 | Reviews an edit as a diff | yes, after the fact | no | yes, per hunk | **no** (so in-project edits ask once per workspace) |
-| Past chats / resume | no | scrollback | per Zed thread | **not yet** |
+| Past chats / resume | no | scrollback | per Zed thread | **yes** — a drawer, and a sleeping chat resumes |
 | Notifies you when a long turn finishes | no | yes (it is a chat app) | no | **yes** — lock-screen push |
 | Reachable before the model server is up | no | yes | yes | **yes** |
 | Memory browsing (`/memory`) | best — a real tree | flattened | flattened | flattened into a `<pre>` |
@@ -179,6 +181,26 @@ Sending a message always brings the session up; opening the app only does so whe
 already answering. If you send before the session is ready, the page names the stage it is waiting
 on and gives you a way out of a build that has stuck — a rising number tells you how long you have
 waited, not whether anything is wrong.
+
+**A session nobody is using goes to sleep, and your next message wakes it.** After thirty minutes
+with no phone attached, no turn running and nothing waiting (`--sleep-after MINUTES`; `0` never
+sleeps), the live session writes its conversation, its prior context and its permission mode to
+`sessions/asleep.json` beside its session log, owner-only, and tears itself down through its
+normal shutdown: memory closes the sitting, and the model client, the memory store, the embedding
+model and the consolidation timer go with the session. The server stays up holding the channel
+and the token: on the reference box, 83 MB before any session, 1.8 GB with a session and the
+embedding model loaded, 0.9 GB asleep (the model's memory is released; the libraries it needed
+stay imported). The ribbon says *asleep — wakes on your next message*. Your next message brings a
+session up from that file and the conversation continues where it left off, as a new sitting: the
+model has every earlier turn, and memory sees one sitting end and another begin. Opening the app
+does not wake it; only a message does — a backgrounded page reconnects on its own, and the point
+of sleeping was that nobody's pocket keeps the box busy. The first reply after a wake pays the
+warm-up. Ctrl-C with a live session puts it to sleep the same way, so a server restart continues
+the conversation too; the `+` button is how you leave a sleeping conversation behind. A wake that
+fails before a session exists — the model server down, say — puts the file back for the next
+message to try again. The default leaves memory's dreaming pass (ten minutes into the quiet) room
+to run first; below about thirteen minutes it waits for the next wake. A parked permission call
+or an open question keeps the session awake: both live only in that session's gate.
 
 **Permission questions are a queue, not a modal.** In `auto` — the default — a blacklisted call is
 *parked*: the model is told to carry on without that step, the turn keeps running, and the page
@@ -279,8 +301,12 @@ the same round trip a real one does.
   the token only for a request that presents the bearer token, which a browser's manifest fetch
   never does, so the app asks you for the token once (`localharness mobile --show-token` prints it)
   and then remembers it.
-- **No chat list, no titles, no search, no resume.** One live session, from the directory you
-  started in. Past sessions are files on disk; nothing browses them yet.
+- **One live session, from the directory you started in.** The drawer lists past chats and
+  searches what was said, and a sleeping chat resumes on your next message, but there is no
+  switching between live chats and no reopening an ended one. After a server restart, the earlier
+  turns of a woken conversation are in the drawer, not on the screen above the composer; the model
+  has them. A tool result the sleeping session had evicted from its context comes back as its
+  stub, and the model re-fetches it if it needs it: the eviction store is not in the file.
 - **No concurrent sessions.** Not a scheduling convenience: two sittings under one agent append to
   the same unlocked per-agent history file, and the per-agent summary is last-writer-wins, so one
   chat can inherit another's prior context. Fixing that comes before concurrency, not after.
@@ -312,7 +338,8 @@ buffering off for that content type.
 
 **"model server unreachable".** That is a real TCP probe of your provider endpoint, not a guess —
 the model server is down or the URL is wrong. "cold" is different and means the session simply has
-not been built yet; send a message and it will be.
+not been built yet; send a message and it will be. "asleep" means the conversation is on disk and
+your next message continues it.
 
 **A question expired before you got to it.** The gate's deadline, not the page's. Use `auto`, where
 calls park and wait indefinitely, or answer from the terminal.

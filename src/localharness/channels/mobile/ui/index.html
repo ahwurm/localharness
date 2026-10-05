@@ -920,9 +920,12 @@ function onFrame(name, d) {
         add(el("div", "row err", d.stage + (d.detail ? " — " + d.detail : "")));
         break;
       }
-      if (d.stage === "ready" || d.stage === "ended") {
+      if (d.stage === "ready" || d.stage === "ended" || d.stage === "asleep") {
+        // asleep is terminal like ended, but not an ending: the thread is on disk and the next
+        // message wakes it, so the transcript stays and only the ribbon changes.
         if (S.bring) { S.bring.remove(); S.bring = null; }
-        $("state").textContent = d.stage === "ready" ? "harness" : "chat ended";
+        $("state").textContent = d.stage === "ready" ? "harness"
+          : d.stage === "ended" ? "chat ended" : ASLEEP_RIBBON;
         if (d.stage === "ready") refreshScreens();
         break;
       }
@@ -1032,6 +1035,7 @@ function ensureWorking() {
   }
 }
 
+const ASLEEP_RIBBON = "asleep — wakes on your next message";
 function paint(modelState) {
   closeBurst();   // any state moment — turn boundary, a permission — freezes an open counter
   const s = $("state");
@@ -1044,6 +1048,7 @@ function paint(modelState) {
   } else s.className = "";
   if (modelState === "unreachable") s.textContent = "model server unreachable — start it, then retry";
   else if (modelState === "cold") s.textContent = "cold — send to start the session";
+  else if (modelState === "asleep") s.textContent = ASLEEP_RIBBON;
   if (s.dataset.dream) s.textContent += " · dreaming";
   $("pcount").textContent = String(S.parked.size + S.asks.size);
   // the amber pill is an ACTION MOMENT: on the ribbon only while something actually waits

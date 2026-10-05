@@ -16,7 +16,7 @@ Without the extra, `localharness plugins list` shows it as `on (install localhar
 
 ## What it adds
 
-- `localharness mobile`, run from the project folder you want the session in. On a terminal it draws a pairing QR code so you never type the app token; when its output goes to a pipe or a log, it prints one line instead. Options include `--port` (default 8765), `--show-token` (print the token and the QR on a terminal and exit, to pair a phone with a server that is already running), `--incognito`, `--rotate-token` (every device pairs again and turns notifications on again; a running server keeps the old token until it restarts), `--allow-unsafe-bind` (it binds to loopback only without it), and `--replay` / `--fixtures` to build a UI with the model server down.
+- `localharness mobile`, run from the project folder you want the session in. On a terminal it draws a pairing QR code so you never type the app token; when its output goes to a pipe or a log, it prints one line instead. Options include `--port` (default 8765), `--show-token` (print the token and the QR on a terminal and exit, to pair a phone with a server that is already running), `--incognito`, `--rotate-token` (every device pairs again and turns notifications on again; a running server keeps the old token until it restarts), `--allow-unsafe-bind` (it binds to loopback only without it), `--sleep-after` (minutes of nothing before the live session sleeps to disk; default 30, `0` never), and `--replay` / `--fixtures` to build a UI with the model server down.
 - On the phone: streaming answers, live tool calls, the permission gate and the pending queue, a memory screen (when memory is on), a picture gallery (when a plugin makes pictures), home-screen install and a notification when a long turn finishes or the gate needs you.
 - A `doctor` check: whether the phone is paired, the address the server binds, and that the token file is mode 600.
 
@@ -33,7 +33,7 @@ A paired phone can do what you can do at the terminal, including switching the s
 ## Not there yet
 
 - It is a reference page to fork, **not a finished chat app**.
-- One live session at a time, from the folder you started in: no chat list, no search, no resume, no concurrent sessions. Nothing stops you running the terminal and the phone on the same agent at once, which can mix their history; you are warned.
+- One live session at a time, from the folder you started in: no switching between live chats, no concurrent sessions. An idle session sleeps to disk and your next message resumes it; the drawer lists past chats. Nothing stops you running the terminal and the phone on the same agent at once, which can mix their history; you are warned.
 - Incognito only keeps pictures off the phone. Memory, sessions and pictures are still written to disk.
 - No image or file upload, no diff review, no per-device revoke (`--rotate-token` re-pairs every device and clears push subscriptions), and the memory screen has no promote button.
 - The memory screen now reads memory through the memory plugin; this is tested on the server only, not yet on a phone.

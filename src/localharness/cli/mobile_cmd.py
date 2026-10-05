@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import io
 import logging
 import os
+import signal
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Annotated, Any, Optional, TextIO
@@ -43,11 +46,26 @@ MISSING_DEPENDENCY = (
     "ASGI app and the server behind `localharness mobile`."
 )
 
+SLEEP_AFTER_DEFAULT_MIN = 30
+"""Idle minutes before the live session sleeps. Above the memory plugin's 10-minute dreaming
+threshold with room for its poll grid (a pass begins 10 to 12.5 minutes into the quiet), so the
+default lets the session consolidate what it learned before it goes to sleep."""
+
+SLEEP_POLL_S = 15.0
+"""How often the idle watch looks. One coroutine wake; the question it asks is cheap."""
+
+SHUTDOWN_SLEEP_GRACE_S = 10.0
+"""How long Ctrl-C waits for a live session to fall asleep (its normal teardown, which writes
+the thread to disk) before cancelling it the old way and losing the thread."""
+
+ASLEEP_DETAIL = "wakes on your next message"
+
 BANNER = """LocalHarness mobile channel
   serving   http://{host}:{port}
   UI        {ui_dir}
   workspace {cwd}
   session   builds on first connect (or first message)
+  sleeps    {sleep}
 
 Put a TLS-terminating proxy in front of it before reaching it from a phone:
   tailscale serve --bg {port}            (recommended: auto-renewing certs, and the only
@@ -190,6 +208,12 @@ def mobile_cmd(
     )] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Detailed session view.")] = False,
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Start a specific agent.")] = None,
+    sleep_after: Annotated[int, typer.Option(
+        "--sleep-after", min=0, metavar="MINUTES",
+        help="Minutes of nothing — no phone attached, no turn, nothing waiting — after which the "
+             "live session is written to disk and torn down. The next message wakes it and the "
+             "conversation continues. 0: never sleep.",
+    )] = SLEEP_AFTER_DEFAULT_MIN,
 ) -> None:
     """Serve the phone UI and its event API (see docs/mobile.md)."""
     # FIRST: channels.mobile's package init imports starlette, so the hint must precede any channels.mobile
@@ -242,9 +266,11 @@ def mobile_cmd(
             config_dir=config_dir, host=host, port=port, token=token, ui_dir=ui_dir,
             replay=replay, fixtures=fixtures, speed=speed, verbose=verbose, agent=agent,
             public_url=public_url, incognito=incognito, reveal_token=created,
+            sleep_after=sleep_after,
         ))
     except KeyboardInterrupt:
-        console.print("\nGoodbye.")
+        pass
+    console.print("\nGoodbye.")
 
 
 def _saved_public_url(config_dir: Optional[str]) -> Optional[str]:
@@ -414,6 +440,7 @@ async def _serve(
     public_url: Optional[str] = None,
     incognito: bool = False,
     reveal_token: bool = False,
+    sleep_after: int = SLEEP_AFTER_DEFAULT_MIN,
 ) -> None:
     import uvicorn
 
@@ -430,6 +457,7 @@ async def _serve(
 
     driver: Any = None
     session_task: Optional[asyncio.Task] = None
+    sleep_task: Optional[asyncio.Task] = None
 
     if replay is not None:
         # A bus with NO persist path: replay must never write into a real session log. The
@@ -468,21 +496,37 @@ async def _serve(
     else:
         channel = MobileChannel(bus=EventBus(), config={})
 
-        def _begin_session() -> None:
+        def _begin_session(*, fresh_thread: bool = False) -> None:
             """Start session bring-up once, in the background, and never twice.
 
             Held in a closure rather than on the channel because the channel must not be able to
             start a session — it is the surface, and one process serves one LIVE session at a
             time (LOCKED for the whole milestone; §6.6's unlocked `history.jsonl` appends are
             what that rule keeps closed, not merely scheduling convenience).
+
+            A thread asleep in the agent's folder wakes in this bring-up; `fresh_thread` (the
+            new-chat verb) discards it instead.
             """
             nonlocal session_task
             if session_task is not None and not session_task.done():
                 return
-            session_task = asyncio.ensure_future(
-                _bring_up(channel, config_dir=config_dir, verbose=verbose, agent=agent)
-            )
+            session_task = asyncio.ensure_future(_bring_up(
+                channel, config_dir=config_dir, verbose=verbose, agent=agent, fresh_thread=fresh_thread))
+            session_task.add_done_callback(_after_session)
             channel.set_bringup_abort(session_task.cancel)
+
+        def _after_session(task: asyncio.Task) -> None:
+            """The session task is over. If it went to sleep: the next message brings a session up
+            again (the server's latch), the model the session held goes with it (the plugin,
+            registry and scheduler leave a cycle the GC has to reach), and a message that
+            arrived while the session was falling asleep wakes it right now rather than waiting
+            for the one after."""
+            if task.cancelled() or not channel.asleep:
+                return
+            server.session_asleep()
+            gc.collect()
+            if channel.queued_input:
+                _begin_session()
 
         async def _new_session() -> None:
             """The + button's other half: end the live session, then begin a fresh one.
@@ -498,7 +542,7 @@ async def _serve(
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await session_task
             channel.reset_session()
-            _begin_session()
+            _begin_session(fresh_thread=True)  # a thread asleep on disk is not the chat they asked for
 
         server = MobileServer(
             channel, token=token, ui_dir=resolved_ui, on_first_message=_begin_session,
@@ -515,8 +559,12 @@ async def _serve(
 
         console.print(escape(BANNER.format(
             host=host, port=port, ui_dir=resolved_ui, cwd=Path.cwd(),
+            sleep=(f"after {sleep_after} idle minutes, keeping the conversation (--sleep-after)"
+                   if sleep_after else "never (--sleep-after 0)"),
         )), soft_wrap=True)
         print_pairing(token, reveal=reveal_token, public_url=public_url, host=host, port=port)
+        if sleep_after:
+            sleep_task = asyncio.ensure_future(_sleep_watch(channel, after_s=sleep_after * 60.0))
 
     config = uvicorn.Config(
         server.app, host=host, port=port, log_level="warning", access_log=False,
@@ -528,20 +576,93 @@ async def _serve(
     # pull to refresh, watch it again" replays from the beginning instead of joining a playback
     # that has been running since the server booted. Found by driving the real command.
     runner = uvicorn.Server(config)
+    # The stop signals are this server's to own. uvicorn captures SIGINT and SIGTERM for its
+    # graceful shutdown and then RE-RAISES the signal to whatever handler was installed before
+    # it — asyncio's by default, which cancels this task so the cancellation lands on the first
+    # await of the finally below; the live session was killed instead of put to sleep (seen on
+    # the real surface, 2026-10-04). A plain handler of this server's own receives the re-raise
+    # instead (the physical signal went to uvicorn's), so the finally runs whole; a SECOND
+    # signal, during the grace wait, is the way to say "do not wait for the sleep". Not
+    # `loop.add_signal_handler`: the loop hears every delivery through its wakeup fd, the
+    # re-raise included, so one Ctrl-C would count as two. The REPL's own mid-turn handler
+    # puts back what it found (repl.py), so uvicorn's stays in place across turns.
+    stops = 0
+    loop = asyncio.get_running_loop()
+
+    def _stop_signal(signum: int, frame: Any) -> None:
+        nonlocal stops
+        stops += 1
+        if stops > 1 and session_task is not None and not session_task.done():
+            log.warning("second stop signal: cancelling the session, thread not kept")
+            loop.call_soon_threadsafe(session_task.cancel)
+
+    previous: dict[int, Any] = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous[sig] = signal.signal(sig, _stop_signal)
+        except (ValueError, OSError):  # not the main thread, or a platform without the signal
+            continue
     try:
         await runner.serve()
     finally:
         if driver is not None:
             await driver.stop()
+        if sleep_task is not None:
+            sleep_task.cancel()
         if session_task is not None and not session_task.done():
-            session_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await session_task
+            await _sleep_or_cancel(channel, session_task)
         await channel.stop()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+async def _sleep_watch(channel: Any, *, after_s: float, poll_s: float = SLEEP_POLL_S) -> None:
+    """Put the live session to sleep once `channel.idle()` has held for `after_s` seconds; runs for
+    the life of the server. A poll rather than a timer per event: one coroutine wake every
+    `poll_s` costs nothing, and the question is about a stretch of time, not about any one event.
+    """
+    idle_since: Optional[float] = None
+    while True:
+        await asyncio.sleep(poll_s)
+        if not channel.idle():
+            idle_since = None
+            continue
+        now = time.monotonic()
+        if idle_since is None:
+            idle_since = now
+        if now - idle_since >= after_s:
+            idle_since = None
+            channel.request_sleep()
+
+
+async def _sleep_or_cancel(channel: Any, session_task: asyncio.Task, *,
+                           grace_s: float = SHUTDOWN_SLEEP_GRACE_S) -> None:
+    """The process is leaving with a session up: keep the thread. A running turn is cancelled first
+    (its work is lost either way), then the session sleeps through its normal teardown, which
+    writes the conversation beside the session log. A teardown that outlives the grace is
+    cancelled as before, and the loss is said in the log. A build still in progress is cancelled:
+    there is no thread yet, and a wake that was abandoned puts its file back on its own."""
+    if channel.session_id is None:
+        session_task.cancel()
+    else:
+        await channel.cancel_turn()  # False when nothing runs: a no-op with an honest answer
+        channel.request_sleep()
+        try:
+            await asyncio.wait_for(asyncio.shield(session_task), grace_s)
+            return
+        except asyncio.TimeoutError:
+            log.warning("the session did not fall asleep within %.0fs; cancelled, thread not kept", grace_s)
+            session_task.cancel()
+        except asyncio.CancelledError:
+            if not session_task.done():
+                raise  # this task was cancelled, not the session's (a second stop signal)
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await session_task
 
 
 async def _bring_up(
-    channel: Any, *, config_dir: Optional[str], verbose: bool, agent: Optional[str]
+    channel: Any, *, config_dir: Optional[str], verbose: bool, agent: Optional[str],
+    fresh_thread: bool = False,
 ) -> None:
     """Build the session and hand the channel to the REPL, reporting the build to the client.
 
@@ -557,16 +678,15 @@ async def _bring_up(
     which part of it is slow. Naming the wedges means instrumenting `_start_async` itself, and
     that is the fast-follow this docstring is not allowed to pretend already happened.
     """
-    import time
-
+    from localharness.channels.mobile.protocol import ASLEEP_STAGE
     from localharness.cli.start_cmd import _start_async
 
     started = time.monotonic()
     channel.set_bringup("starting the session", elapsed=0.0)
     try:
-        await _start_async(
+        restart = await _start_async(
             agent, verbose, False, config_dir,
-            channel_mode="mobile", mobile_channel=channel,
+            channel_mode="mobile", mobile_channel=channel, fresh_thread=fresh_thread,
         )
     except asyncio.CancelledError:
         # Two very different cancels share this except: a bound session means the NEW-CHAT verb
@@ -593,7 +713,15 @@ async def _bring_up(
     else:
         # A clean return means the session is OVER (the task runs its whole life). "ready" is
         # published where readiness actually begins — bind_runtime — not here.
-        channel.set_bringup("ended", elapsed=time.monotonic() - started)
+        if restart is not None and restart.resume.slept:
+            # The thread is on disk (the builder wrote it before its teardown). The stage goes
+            # out while the session id is still bound, so the client knows which chat slept;
+            # then the runtime handles are dropped, which is what makes `model_state` answer
+            # "asleep" and lets the model the session held go.
+            channel.set_bringup(ASLEEP_STAGE, detail=ASLEEP_DETAIL, elapsed=time.monotonic() - started)
+            channel.reset_session()
+        else:
+            channel.set_bringup("ended", elapsed=time.monotonic() - started)
 
 
 def _machine_secrets(config_dir: Optional[str]) -> frozenset[str]:

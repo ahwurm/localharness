@@ -887,11 +887,27 @@ class OrchestratorREPL:
 
         Idle Ctrl+C is unchanged: at the prompt the input app's own c-c key binding
         (TerminalChannel.read_input) absorbs it. A second Ctrl+C while a turn is already
-        cancelling restores the default SIGINT handler, so a further Ctrl+C hard-exits
-        (escape hatch). `turn_task` is the already-started turn (from _dispatch_input)."""
+        cancelling puts back the handler that was in place before the turn, so a further
+        Ctrl+C exits the way the host does (escape hatch). `turn_task` is the already-started
+        turn (from _dispatch_input).
+
+        The handler in place before the turn goes back afterwards — not Python's default, which
+        is what `remove_signal_handler` alone leaves. When `localharness mobile` hosts this REPL
+        that handler is uvicorn's graceful shutdown; with the default in its place, Ctrl-C after
+        the first turn raised KeyboardInterrupt out of the loop and killed the process instead
+        of stopping it (seen on the real surface, 2026-10-04)."""
         loop = asyncio.get_running_loop()
         interrupts = 0
         cancelled_by_user = False
+        previous = signal.getsignal(signal.SIGINT)
+
+        def _restore() -> None:
+            try:
+                loop.remove_signal_handler(signal.SIGINT)
+                if previous is not None:
+                    signal.signal(signal.SIGINT, previous)
+            except (NotImplementedError, RuntimeError, ValueError, TypeError):
+                pass
 
         def _on_sigint() -> None:
             nonlocal interrupts, cancelled_by_user
@@ -900,11 +916,7 @@ class OrchestratorREPL:
                 cancelled_by_user = True
                 turn_task.cancel()
             else:
-                # Escape hatch: restore the default SIGINT so a further Ctrl+C hard-exits.
-                try:
-                    loop.remove_signal_handler(signal.SIGINT)
-                except (NotImplementedError, RuntimeError, ValueError):
-                    pass
+                _restore()  # escape hatch: a further Ctrl+C reaches the host's handler
 
         handler_installed = False
         try:
@@ -931,10 +943,7 @@ class OrchestratorREPL:
                 raise
         finally:
             if handler_installed:
-                try:
-                    loop.remove_signal_handler(signal.SIGINT)
-                except (NotImplementedError, RuntimeError, ValueError):
-                    pass
+                _restore()
 
     async def _handle_reasoning_cmd(self, arg: str) -> None:
         """/reasoning [on|off] — toggle the live reasoning stream on a channel that has one.
