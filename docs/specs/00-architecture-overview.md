@@ -198,7 +198,7 @@ The rule governs facts, not capabilities. A component that needs to *do* somethi
 
 A component that needs a capability receives it as a constructor parameter, supplied by the start-up wiring (`cli/start_cmd.py` for a session, `agent/subagent.py` for a child loop, `plugins/lifecycle.py` for a plugin's context). It never discovers one by importing a module or looking it up. These are the exceptions, by name, and a test holds this list equal to the code:
 
-- `AgentLoop.__init__`: `config`, `llm`, `bus`, `context_manager`, `tool_registry`, `permission_evaluator`, `kill_file_path`, `compact_md_path`, `session_id`, `config_dir`, `gate`, `guardrails_path`, `memory_slot`
+- `AgentLoop.__init__`: `config`, `llm`, `bus`, `context_manager`, `tool_registry`, `permission_evaluator`, `kill_file_path`, `compact_md_path`, `session_id`, `config_dir`, `gate`, `guardrails_path`, `memory_slot`, `task_context`
 - `PluginContext`: `bus`, `tools`, `hooks`, `config`, `agent_config`, `paths`, `llm`, `idle_llm`, `session` (the last two are additive fields; the first seven are the original plugin API)
 
 What the loop does with them: it publishes facts on `bus`, calls the model through `llm`, runs tools through `tool_registry.dispatch`, asks `gate` and `permission_evaluator` before a tool runs, and asks `memory_slot` for the recalled context it adds to the turn's system prompt. The results it gets back become events again, so the replay log stays complete.

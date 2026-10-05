@@ -2100,7 +2100,9 @@ async def test_fired_summary_is_committed_into_the_history_and_a_later_build_doe
     # The caller's list shrank IN PLACE: head kept, one summary, tail kept.
     assert len(msgs) == before - removed and removed >= 2
     assert msgs[0]["content"] == "sys" and msgs[-1]["content"] == "recent short tail"
-    assert msgs[idx] == {"role": "assistant", "content": f"{COMPACTION_SUMMARY_MARKER}the gist"}
+    assert msgs[idx]["role"] == "assistant"
+    assert msgs[idx]["content"] == f"{COMPACTION_SUMMARY_MARKER}the gist"
+    assert msgs[idx]["_lh"]["subtype"] == "compaction_summary"
     assert sum((m.get("content") or "").startswith(COMPACTION_SUMMARY_MARKER) for m in msgs) == 1
     # A later build starts from the shorter history: nothing to summarize, no model call.
     again, budget = await cm.build_messages(msgs)

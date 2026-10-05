@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
-from localharness.core.types import Message
+from localharness.core.types import Message, provider_messages
 
 log = logging.getLogger("localharness.agent.context")
 
@@ -215,6 +215,20 @@ def _content_handle(content: str) -> str:
     return hashlib.sha1(content.encode("utf-8", "replace")).hexdigest()[:12]
 
 
+class ActiveReferenceError(RuntimeError):
+    """A declared dependent step cannot run with its required reference snapshots."""
+
+
+@dataclass(frozen=True)
+class ActiveReference:
+    source: str
+    handle: str
+    revision: str
+
+
+MAX_ACTIVE_REFERENCES = 4
+
+
 class ContentStore:
     """One per-agent content-addressable store: handle -> (body, origin).
 
@@ -248,6 +262,40 @@ class ContentStore:
         self._max_web = max_web
         self._parent = parent
         self._granted = frozenset(granted or ())
+        self.active_step: str | None = None
+        self._active_references: dict[str, ActiveReference] = {}
+
+    @property
+    def active_references(self) -> tuple[ActiveReference, ...]:
+        return tuple(self._active_references.values())
+
+    def clear_active_references(self) -> None:
+        """End a dependent step; protection never persists across human turns."""
+        self.active_step = None
+        self._active_references.clear()
+
+    def declare_active_reference(self, step: str, handle: str, source: str | None = None) -> None:
+        """Opt in a stored snapshot for one bounded step, replacing this source's revision.
+
+        Source is a caller label, not a promise to watch a filesystem path. Callers must
+        explicitly declare a new handle after a source changes. Handles identify immutable
+        revisions; no additional content copy or persistent registry is introduced.
+        """
+        if not step:
+            self.clear_active_references()
+            return
+        source = source or handle
+        if len(step) > 160 or len(source) > 240:
+            raise ActiveReferenceError("Active step/source labels are too long; narrow the declaration.")
+        body = self.get(handle)
+        if body is None:
+            raise ActiveReferenceError("Required reference is unavailable; read it again before this step.")
+        references = dict(self._active_references) if self.active_step == step else {}
+        if source not in references and len(references) >= MAX_ACTIVE_REFERENCES:
+            raise ActiveReferenceError("Active step exceeds four references; split or narrow the step.")
+        references[source] = ActiveReference(source, handle, _content_handle(body))
+        self.active_step = step
+        self._active_references = references
 
     def put(self, body: str, origin: Origin = "trusted", derived_from: str | None = None) -> str:
         """Store a body, return its handle. Origin is sticky: untrusted if explicitly untrusted,
@@ -314,6 +362,7 @@ class ContentStore:
         self._web.clear()
         self._aliases.clear()
         self._fetch_seq = 0
+        self.clear_active_references()
 
 
 def _call_meta(messages: list[Message]) -> dict[str, tuple[str, str]]:
@@ -907,6 +956,7 @@ class TokenCounter:
         arithmetic slices history into fragments — that spine uses estimate_messages."""
         if not messages:
             return 0  # a template render of [] is a server-side error, not a count
+        messages = provider_messages(messages)
         if not (self._mode in ("vllm", "llamacpp") and self._messages_exact):
             if self._mode == "exact_local":
                 # The GGUF tokenizer renders the model's REAL chat template + tokenizes once — the
@@ -938,6 +988,7 @@ class TokenCounter:
         shape. exact_local delegates to the GGUF render (which falls back internally on
         template-rejected shapes). For the exact cost of a COMPLETE request, use
         count_messages."""
+        messages = provider_messages(messages)
         if self._mode == "exact_local":
             return self._gguf.count_messages(messages)
         total = 0
@@ -1209,7 +1260,17 @@ class SummaryCompactionStage:
                 except Exception as exc:
                     log.warning("Summarization failed: %s. Stopping compaction at current state.", exc)
                     return working, modified
-                summary_message = {"role": "assistant", "content": f"{COMPACTION_SUMMARY_MARKER}{summary_text}"}
+                sources = set()
+                for message in middle:
+                    metadata = message.get("_lh") or {}
+                    if metadata.get("origin"):
+                        sources.add(f"{metadata['origin']}:{metadata.get('subtype', 'unknown')}"[:80])
+                    sources.update(str(s)[:80] for s in metadata.get("sources", []))
+                summary_message = {
+                    "role": "assistant", "content": f"{COMPACTION_SUMMARY_MARKER}{summary_text}",
+                    "_lh": {"origin": "harness", "subtype": "compaction_summary",
+                            "sources": sorted(sources)[:16]},
+                }
                 working = working[:first_boundary] + [summary_message] + working[last_boundary:]
                 modified = True
                 self.last_span = (first_n, last_n)
@@ -1569,6 +1630,9 @@ def render_summarizer_input(messages: list, max_input_chars: int | None = None) 
     `max_input_chars` by cutting every ordinary line down (floor SUMMARIZER_MIN_MESSAGE_CHARS)
     before, as a last resort, cutting the tail of the rendering itself."""
     def prefix(m: Any) -> str:
+        metadata = m.get("_lh") or {}
+        if metadata.get("origin") in {"human", "harness"}:
+            return f"[{m.get('role', '?')}; {metadata['origin']}:{metadata.get('subtype', 'unknown')}]: "
         return f"[{m.get('role', '?')}]: "
 
     def carried(m: Any) -> bool:
@@ -1603,7 +1667,9 @@ def make_compaction_summarize_fn(llm: Any, max_input_chars: int | None = None) -
         prompt = [
             {"role": "system", "content": (
                 "Summarize the following conversation history concisely. Preserve key facts, "
-                "decisions, and tool results. Output a dense summary paragraph."
+                "decisions, and tool results. Distinguish human requirements from harness "
+                "control messages and tool observations; never attribute harness feedback to "
+                "the user. Output a dense summary paragraph."
             )},
             {"role": "user", "content": render_summarizer_input(messages, max_input_chars)},
         ]
@@ -1722,6 +1788,68 @@ class ContextManager:
         self._compaction_fires = 0
         self._pre_turn_restore_ids = None
         self._emergency_fires = 0
+        self._content_store.clear_active_references()
+
+    def ensure_active_references(
+        self, messages: list[Message], tool_schemas: list[dict] | None = None,
+        *, enforce_budget: bool = False,
+    ) -> list[Message]:
+        """Validate the final packed request, restoring missing snapshots as paired tool data.
+
+        Run after all lossy transforms and again after caller request-only additions. A
+        failure blocks this step once, without another inference or a restore/evict loop.
+        Ordinary requests do no additional counting or storage work here.
+        """
+        references = self._content_store.active_references
+        if not references and not enforce_budget:
+            return messages
+        packed = self.repair_tool_pairing(messages)
+        for reference in references:
+            body = self._content_store.get(reference.handle)
+            if body is None or _content_handle(body) != reference.revision:
+                raise ActiveReferenceError(
+                    "Required reference snapshot is unavailable; read it again or narrow the step."
+                )
+            # A full result remains available even when the request-only eviction ledger
+            # was appended to it. A substring of a summary or a truncated body is not proof.
+            if any(
+                m.get("role") == "tool" and (
+                    m.get("content") == body
+                    or (m.get("content") or "").startswith(body + "\n\n[out of view:")
+                ) for m in packed
+            ):
+                continue
+            call_id = "lh-ref-" + _content_handle(
+                f"{self._content_store.active_step}:{reference.source}:{reference.revision}"
+            )
+            packed.extend([
+                {
+                    "role": "assistant", "content": "Restoring a required reference snapshot.",
+                    "_lh": {"origin": "harness", "subtype": "active_reference"},
+                    "tool_calls": [{
+                        "id": call_id, "type": "function",
+                        "function": {"name": "tool_result_get", "arguments": json.dumps({
+                            "id": reference.handle, "active_step": self._content_store.active_step,
+                            "source": reference.source,
+                        })},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": call_id, "content": body},
+            ])
+        # Use the same tool wire conversion as the provider, including schema overhead.
+        from localharness.provider.client import _tools_to_api_format
+        wire_tools = _tools_to_api_format(tool_schemas)[0] if tool_schemas else None
+        usage = self._token_counter.count_messages(provider_messages(packed), tools=wire_tools)
+        # The local GGUF template currently ignores tool schemas; conservatively add them.
+        if self._token_counter.mode == "exact_local" and wire_tools:
+            usage += self._token_counter.count(json.dumps(wire_tools))
+        reserve = response_reserve(self.max_context_tokens, self.max_response_tokens)
+        if self.max_context_tokens > 0 and usage + reserve > self.max_context_tokens:
+            raise ActiveReferenceError(
+                "Active step and the complete prompt cannot fit with reply reserve; "
+                "split or narrow the active step."
+            )
+        return packed
 
     def _restore_pins(self, messages: list[Message]) -> frozenset[str]:
         """#134: tool_call ids of THIS turn's tool_result_get calls — the restored bodies the
@@ -1951,6 +2079,8 @@ class ContextManager:
                     )
             emergency_modified = n_dropped > 0 or shrunk
 
+        # Pair repair and restoration must follow EVERY lossy stage, including the floor.
+        repaired = self.ensure_active_references(repaired, tool_schemas)
         # Recompute budget AFTER any compaction so the return reflects what will ship
         post_usage = self._token_counter.estimate_messages(repaired)
         budget = TokenBudget(

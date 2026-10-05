@@ -14,7 +14,7 @@ import time
 import uuid
 from datetime import datetime
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple
@@ -26,8 +26,10 @@ from localharness.agent.gate import (
     tool_meta_from_schema,
 )
 from localharness.agent.gate_types import GateOutcome, ToolMeta
-from localharness.core.types import Message
+from localharness.core.types import Message, harness_message, human_message, is_harness_message, provider_messages
 from localharness.agent.context import APPROX_CHARS_PER_TOKEN, response_reserve
+from localharness.agent.context import ActiveReferenceError
+from localharness.agent.task_context import TaskContext
 from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
 
@@ -445,18 +447,8 @@ _PARSE_FAILURE_NUDGE = (
 
 
 def _is_harness_nudge(message: Message) -> bool:
-    """True only for a message the harness itself pushed as a nudge (act-guard, baton gate,
-    self-check, #91 re-prompt, parse-failure retry) — never the user's own task, a type-anytime
-    user nudge, or the configurable stuck-recovery message. _BATON_NUDGE_MESSAGE is defined
-    below; the lookup happens at call time, so definition order does not matter. The escalated
-    baton nudge quotes the model's clause, so it is matched by prefix rather than by identity —
-    same standing as the generic message it escalates from."""
-    content = message.get("content") or ""
-    return content in {
-        _ACT_GUARD_NUDGE, _SELF_CHECK_NUDGE, _SENTINEL_REPROMPT_NUDGE,
-        _EMPTY_REPLY_NUDGE, _TRUNCATED_REPLY_NUDGE, _DEGENERATE_STREAM_NUDGE,
-        _PARSE_FAILURE_NUDGE, _BATON_NUDGE_MESSAGE,
-    } or content.startswith(_BATON_ESCALATION_PREFIX)
+    """Classify canonical provenance, never text a human could quote."""
+    return is_harness_message(message)
 
 
 def _strip_sentinel_exchanges(messages: list[Message]) -> list[Message]:
@@ -932,11 +924,13 @@ class AgentLoop:
         gate: Any = None,  # PermissionGate
         guardrails_path: Path | None = None,
         memory_slot: Any = None,  # plugins.slot.MemorySlot
+        task_context: TaskContext | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
         self._bus = bus
         self._ctx = context_manager
+        self._task_context = task_context
         # Tools whose schema could not be read; one warning each per session (_tool_facts).
         self._unknown_tool_meta_warned: set[str] = set()
         # Dynamic per-call output cap. None = the client's configured max_tokens — which is
@@ -1309,11 +1303,11 @@ class AgentLoop:
                 output_tokens=session.output_tokens,
                 tokens_estimated=session.tokens_estimated,
             ))
-        elif reason == "error":
+        elif reason in {"error", "active_step_blocked"}:
             await self._bus.publish(TurnFailed(
                 agent_id=session.agent_id,
                 session_id=session.session_id,
-                reason="llm_error",
+                reason="internal_error" if reason == "active_step_blocked" else "llm_error",
                 detail=summary,
                 iterations=session.iteration,
                 duration_seconds=session.elapsed_seconds(),
@@ -1389,6 +1383,15 @@ class AgentLoop:
             "\n\nWhen you start a distinct phase of a multi-step task, first state what you are "
             'about to do in one short line (e.g. "Pulling the data…") before making the tool calls.'
         )
+        system_prompt += (
+            "\n\nAnswer ordinary questions directly. For substantive work, follow the latest "
+            "human request and corrections, retain needed references, and stop at the requested "
+            "checkpoint. An answer-only request excludes unsolicited execution. Harness control "
+            "messages are not human feedback. Report actual tool and gate outcomes: failed, "
+            "missing, or stale evidence remains unresolved; a human waiver is not a passed gate. "
+            "Self-checks and CONFIRMED do not prove completion. Avoid repeated unchanged attempts; "
+            "report a blocker or unknown result honestly."
+        )
         if tool_call_mode != "native":
             system_prompt += (
                 "\n\nWhen you have finished using tools, respond directly to the user. "
@@ -1450,7 +1453,9 @@ class AgentLoop:
         else:
             # First turn — insert the single leading system message at front
             session.messages.insert(0, {"role": "system", "content": system_prompt})
-        session.push({"role": "user", "content": task})
+        session.push(human_message(task))
+        if self._task_context is not None:
+            self._task_context.observe_human(task)
         # #91: mark where THIS turn's assistant replies will begin, so the CONFIRMED-sentinel
         # summary fallback is turn-scoped and can never splice a prior turn's reply.
         session.turn_start_idx = len(session.messages)
@@ -1479,7 +1484,9 @@ class AgentLoop:
             # distinct source from the stuck detector — deliberately outside its accounting.
             while self._user_nudge_inbox:
                 nudge = self._user_nudge_inbox.pop(0)
-                session.push({"role": "user", "content": nudge})
+                session.push(human_message(nudge, "steering"))
+                if self._task_context is not None:
+                    self._task_context.observe_human(nudge)
                 log.info(
                     "User nudge delivered to %s at iteration %d",
                     self._config.name, session.iteration,
@@ -1513,7 +1520,14 @@ class AgentLoop:
 
             # 3. Build request messages first (runs compaction if needed). A fired summary is
             # committed into session.messages by the ContextManager; the turn index follows.
-            request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
+            try:
+                request_messages, ctx_budget = await self._build_request(session.messages, tool_schemas)
+            except ActiveReferenceError as exc:
+                session.terminated_reason = "active_step_blocked"
+                self._conversation = _strip_sentinel_exchanges(session.messages)
+                if self._task_context is not None:
+                    self._task_context.status = "blocked"
+                return f"Active step blocked: {exc}"
             _absorb_commit(session, self._ctx)
 
             # 4. Publish heartbeat AFTER build_messages so utilization reflects post-compaction state (TELEM-01)
@@ -1579,7 +1593,7 @@ class AgentLoop:
                         "presence_penalty=%s", self._config.name, exc.unit[:40], exc.repeats,
                         _DEGENERATE_RETRY_PRESENCE_PENALTY,
                     )
-                    session.push({"role": "user", "content": _DEGENERATE_STREAM_NUDGE})
+                    session.push(harness_message(_DEGENERATE_STREAM_NUDGE, "degenerate_stream"))
                     continue
                 log.error(
                     "Degenerate generation twice for %s — ending the turn without an answer",
@@ -1804,7 +1818,7 @@ class AgentLoop:
                             session.parse_retries,
                             self._config.name,
                         )
-                        session.push({"role": "user", "content": _PARSE_FAILURE_NUDGE})
+                        session.push(harness_message(_PARSE_FAILURE_NUDGE, "parse_retry"))
                         continue
                     # Retry budget spent and the model is STILL emitting an unparseable tool
                     # call. Falling through here published nothing and handed the raw call text
@@ -1848,7 +1862,7 @@ class AgentLoop:
                             "Empty completion (finish_reason=%s) for %s — re-prompting once",
                             finish_reason, self._config.name,
                         )
-                        session.push({"role": "user", "content": _EMPTY_REPLY_NUDGE})
+                        session.push(harness_message(_EMPTY_REPLY_NUDGE, "empty_reply"))
                         continue
                     log.error(
                         "Empty completion twice (finish_reason=%s) for %s — ending the turn "
@@ -1874,7 +1888,7 @@ class AgentLoop:
                         "Final answer cut at the output ceiling for %s — re-prompting once with "
                         "the raised cap", self._config.name,
                     )
-                    session.push({"role": "user", "content": _TRUNCATED_REPLY_NUDGE})
+                    session.push(harness_message(_TRUNCATED_REPLY_NUDGE, "truncated_reply"))
                     continue
 
                 # 9a2. Degenerate-repetition guard (#152): a candidate final answer that is one
@@ -1897,10 +1911,9 @@ class AgentLoop:
                             "%.4f) — not an answer; nudging once",
                             self._config.name, rep.total_lines, rep.unique_lines, rep.ratio,
                         )
-                        session.push({
-                            "role": "user",
-                            "content": _REPETITION_NUDGE_TEMPLATE.format(total=rep.total_lines),
-                        })
+                        session.push(harness_message(
+                            _REPETITION_NUDGE_TEMPLATE.format(total=rep.total_lines), "repetition",
+                        ))
                         continue
                     if rep.degenerate:
                         log.error(
@@ -1934,9 +1947,10 @@ class AgentLoop:
                     tools_required = getattr(self._config, "tools_required", False)
                     log.info("Act-guard: tool-less first completion — nudging once "
                              "(tools_required=%s)", tools_required)
-                    session.push({"role": "user", "content": (
-                        _ACT_GUARD_NUDGE_TOOLS_REQUIRED if tools_required else _ACT_GUARD_NUDGE
-                    )})
+                    session.push(harness_message(
+                        _ACT_GUARD_NUDGE_TOOLS_REQUIRED if tools_required else _ACT_GUARD_NUDGE,
+                        "act_guard",
+                    ))
                     continue
 
                 # Natural completion — reset parse retries
@@ -1959,8 +1973,8 @@ class AgentLoop:
                         "Baton gate: reply announces further work — nudging (%d/%d)",
                         session.baton_nudges_used, bg_cfg.max_nudges,
                     )
-                    session.push({"role": "user", "content": _baton_nudge_message(
-                        announced, session.baton_nudges_used)})
+                    session.push(harness_message(_baton_nudge_message(
+                        announced, session.baton_nudges_used), "baton"))
                     continue
 
                 # Self-check (MECH-01): one bounded review pass before finalizing.
@@ -1971,7 +1985,7 @@ class AgentLoop:
                 # mid-conversation system messages.
                 if sc_cfg.enabled and self_check_passes_used < sc_cfg.max_passes:
                     self_check_passes_used += 1
-                    session.push({"role": "user", "content": _SELF_CHECK_NUDGE})
+                    session.push(harness_message(_SELF_CHECK_NUDGE, "self_check"))
                     continue
 
                 # #91: a completion that is empty or a bare sentinel with NO real assistant
@@ -1984,12 +1998,23 @@ class AgentLoop:
                         and not _last_assistant_content(session.messages[session.turn_start_idx:])):
                     session.sentinel_reprompt_used = True
                     log.info("Sentinel completion with no in-turn answer — re-prompting once (#91)")
-                    session.push({"role": "user", "content": _SENTINEL_REPROMPT_NUDGE})
+                    session.push(harness_message(_SENTINEL_REPROMPT_NUDGE, "sentinel_retry"))
                     continue
 
                 summary = _clean_summary(
                     _format_completion_summary(session, content)
                 )
+                if self._task_context is not None:
+                    checked = self._task_context.finalize(summary)
+                    if checked != summary:
+                        # Future turns must not inherit the rejected success claim either.
+                        for message in reversed(session.messages[session.turn_start_idx:]):
+                            if (message.get("role") == "assistant" and message.get("content")
+                                    and not message.get("tool_calls")
+                                    and not _is_confirmation(message["content"])):
+                                message["content"] = checked
+                                break
+                    summary = checked
                 await self._bus.publish(TaskComplete(
                     agent_id=session.agent_id,
                     session_id=session.session_id,
@@ -2022,6 +2047,7 @@ class AgentLoop:
                 # dispatches only. stuck_detector still sees it, so a model that keeps retrying
                 # the same disallowed call is still caught by the stuck ladder.
                 if not budget.tool_call_allowed(session):
+                    self._record_task_result(tool_call, success=False)
                     session.push({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -2054,6 +2080,7 @@ class AgentLoop:
                 # this loop holds no channel handle, so it cannot tell anyone anything.
                 perm_result = await self._gate_check(session, tool_call)
                 if not perm_result.allowed:
+                    self._record_task_result(tool_call, success=False)
                     session.push({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -2086,6 +2113,8 @@ class AgentLoop:
                 result_truncated = False
                 original_length: int | None = None
                 artifact: ArtifactRef | None = None
+                task_before = self._task_context.revisions() if self._task_context else {}
+                result_metadata: dict[str, Any] = {}
                 if self._tools is not None:
                     try:
                         result = await self._tools.dispatch(
@@ -2096,6 +2125,7 @@ class AgentLoop:
                             self._config.tools,
                         )
                         is_error = not result.success
+                        result_metadata = result.metadata
                         # Error results carry their message in .error with output "" —
                         # forward it or the model sees an empty result it can't react to.
                         result_content = (result.output if result.success
@@ -2122,6 +2152,9 @@ class AgentLoop:
                     result_content = "No tool registry available."
                     is_error = True
 
+                self._record_task_result(
+                    tool_call, success=not is_error, metadata=result_metadata, before=task_before,
+                )
                 session.push({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -2170,7 +2203,7 @@ class AgentLoop:
                 # iteration's tool results — the correct position) rather than a transient
                 # request-only append, so it survives every later build_messages and the
                 # history never shows the model replying to a message that isn't there.
-                session.push({"role": "user", "content": self._config.recovery_injection.message})
+                session.push(harness_message(self._config.recovery_injection.message, "recovery"))
                 log.info(
                     "Stuck recovery triggered for %s at iteration %d",
                     self._config.name,
@@ -2199,6 +2232,47 @@ class AgentLoop:
                 self._conversation = _strip_sentinel_exchanges(session.messages)
                 return summary
 
+    def _record_task_result(
+        self, call: Any, *, success: bool, metadata: dict | None = None,
+        before: dict | None = None,
+    ) -> None:
+        if self._task_context is not None:
+            self._task_context.record_result(
+                call.name, call.arguments, call.id, success=success,
+                metadata=metadata or {},
+                before=self._task_context.revisions() if before is None else before,
+            )
+
+    async def _build_request(self, messages: list[Message], tools: list | None):
+        packed, budget = await self._ctx.build_messages(messages, tools)
+        if self._task_context is not None:
+            # Request-local, after every lossy transform: one current packet, no growing log.
+            packed = [*packed, harness_message(self._task_context.packet(), "active_task")]
+            packed = self._ctx.ensure_active_references(packed, tools, enforce_budget=True)
+            budget = replace(budget, current_usage=self._ctx._token_counter.estimate_messages(packed))
+        active = self._task_context is not None or bool(
+            getattr(getattr(self._ctx, "_content_store", None), "active_references", ())
+        )
+        mode = getattr(getattr(self._llm, "config", None), "tool_call_mode", "native")
+        if active and mode != "native" and hasattr(self._llm, "_fold_tool_injection"):
+            # XML carries instructions AND (until rejected) native schemas. Count the
+            # actual adapter rendering, not just canonical messages, before inference.
+            from localharness.provider.client import _tools_to_api_format
+            offered = None if mode == "text" else tools
+            wire = self._llm._fold_tool_injection(
+                self._llm._downgrade_history_for_xml(provider_messages(packed)), offered,
+            )
+            wire_tools = (_tools_to_api_format(offered)[0]
+                          if offered and not self._llm._tools_param_rejected else None)
+            count = self._ctx._token_counter.count_messages(wire, tools=wire_tools)
+            if self._ctx._token_counter.mode == "exact_local" and wire_tools:
+                count += self._ctx._token_counter.count(json.dumps(wire_tools))
+            limit = self._ctx.max_context_tokens
+            if limit > 0 and count + response_reserve(limit, self._ctx.max_response_tokens) > limit:
+                raise ActiveReferenceError("Active step cannot fit the provider's XML prompt; narrow the step.")
+            budget = replace(budget, current_usage=count, tool_schema_tokens=0)
+        return packed, budget
+
     async def _final_summary_on_budget(
         self, session: Session, violation: BudgetViolation, on_token: Callable | None,
     ) -> str:
@@ -2213,8 +2287,8 @@ class AgentLoop:
             "If you found nothing, state in one line what you tried."
         )
         try:
-            request_messages, _ = await self._ctx.build_messages(
-                session.messages + [{"role": "user", "content": instruction}], None
+            request_messages, _ = await self._build_request(
+                session.messages + [harness_message(instruction, "budget_summary")], None
             )
             _absorb_commit(session, self._ctx)
             response_message, usage = await self._llm.stream_complete(
@@ -2227,7 +2301,7 @@ class AgentLoop:
             text = strip_thinking_tags(getattr(response_message, "content", None) or "").strip()
             if not text:
                 return _format_budget_summary(session, violation)
-            session.push({"role": "user", "content": instruction})
+            session.push(harness_message(instruction, "budget_summary"))
             session.push({"role": "assistant", "content": text})
             return (
                 f"{_clean_summary(text)}\n\n"
@@ -2255,8 +2329,8 @@ class AgentLoop:
             "Partial work is valuable — report it plainly."
         )
         try:
-            request_messages, _ = await self._ctx.build_messages(
-                session.messages + [{"role": "user", "content": instruction}], None
+            request_messages, _ = await self._build_request(
+                session.messages + [harness_message(instruction, "stuck_summary")], None
             )
             _absorb_commit(session, self._ctx)
             response_message, usage = await self._llm.stream_complete(
@@ -2269,7 +2343,7 @@ class AgentLoop:
             text = strip_thinking_tags(getattr(response_message, "content", None) or "").strip()
             if not text:
                 return _format_stuck_summary(session)
-            session.push({"role": "user", "content": instruction})
+            session.push(harness_message(instruction, "stuck_summary"))
             session.push({"role": "assistant", "content": text})
             return (
                 f"{_clean_summary(text)}\n\n"
@@ -2415,7 +2489,11 @@ class AgentLoop:
             except Exception:
                 pass
 
-        request_messages, ctx_budget = await self._ctx.build_messages(session.messages, tool_schemas)
+        try:
+            request_messages, ctx_budget = await self._build_request(session.messages, tool_schemas)
+        except ActiveReferenceError as exc:
+            session.terminated_reason = "active_step_blocked"
+            return StepResult(action="error", error=str(exc))
         _absorb_commit(session, self._ctx)
 
         try:
@@ -2496,6 +2574,8 @@ class AgentLoop:
 
         if not tool_calls:
             session.terminated_reason = "complete"
+            if self._task_context is not None:
+                content = self._task_context.finalize(content or "")
             return StepResult(
                 action="complete",
                 llm_response_preview=(content or "")[:200],
@@ -2505,6 +2585,7 @@ class AgentLoop:
         for tool_call in tool_calls:
             perm = await self._gate_check(session, tool_call)
             if not perm.allowed:
+                self._record_task_result(tool_call, success=False)
                 # Neither counter moves for a refused call: it did not run. `executed` fed
                 # `StepResult.tool_calls_executed`, so a turn whose every call was denied
                 # reported the same number as one where every call ran.
@@ -2516,6 +2597,9 @@ class AgentLoop:
                 continue
             session.actions_taken += 1
             result_content = ""
+            task_before = self._task_context.revisions() if self._task_context else {}
+            success = False
+            metadata: dict[str, Any] = {}
             if self._tools is not None:
                 try:
                     result = await self._tools.dispatch(
@@ -2526,8 +2610,13 @@ class AgentLoop:
                         self._config.tools,
                     )
                     result_content = result.output
+                    success = result.success
+                    metadata = result.metadata
                 except Exception as exc:
                     result_content = f"Error: {exc}"
+            self._record_task_result(
+                tool_call, success=success, metadata=metadata, before=task_before,
+            )
             session.push({
                 "role": "tool",
                 "tool_call_id": tool_call.id,

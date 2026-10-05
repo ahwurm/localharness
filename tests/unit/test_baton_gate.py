@@ -359,11 +359,12 @@ def test_escalated_nudge_counts_as_a_harness_nudge():
     reply to it is stripped from the persisted history together with its inducing nudge."""
     from localharness.agent.loop import _is_harness_nudge, _strip_sentinel_exchanges
     escalated = _BATON_ESCALATION_PREFIX + '"Now let me read the notebooks" — and so on.'
-    assert _is_harness_nudge({"role": "user", "content": escalated}) is True
+    from localharness.core.types import harness_message
+    assert _is_harness_nudge(harness_message(escalated, "baton")) is True
     kept = _strip_sentinel_exchanges([
         {"role": "user", "content": "analyze"},
         {"role": "assistant", "content": "Now let me read the notebooks."},
-        {"role": "user", "content": escalated},
+        harness_message(escalated, "baton"),
         {"role": "assistant", "content": "CONFIRMED"},
     ])
     assert [m["content"] for m in kept] == ["analyze", "Now let me read the notebooks."]
