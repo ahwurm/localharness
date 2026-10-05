@@ -41,6 +41,19 @@ SHIPS_CODE_LINE = ("memory: the embedding model {model} ships its own code; Loca
 RELATIVE_FOLDER_LINE = ("memory: the embedding model {model} is a relative path, read from the config "
                         "folder as {folder} (never from the current folder)")
 
+EMBED_MAX_TOKENS = 1024
+"""Where the model's input is cut, in tokens, for every encode (facts, stream windows, queries).
+
+The model accepts 32k tokens and runs on CPU, where attention is quadratic in length: one 32k-token
+turn window is minutes of every core. The probe's question — what was this moment about, which
+stored trace does it resemble — is answered by the head of the text. Set on the loaded model, so the
+cut holds for every caller, not only the one that remembered it."""
+
+EMBED_THREADS = 4
+"""CPU threads torch may use for the embedding model: a background job's share of the box, not the
+box. Torch's default is every core, and the dreaming pass runs exactly when nobody is at the keyboard
+to see it (2026-10-04: a phone session idled into a pass that held 20 cores for hours)."""
+
 log = logging.getLogger(__name__)
 
 
@@ -97,7 +110,7 @@ class ResonanceEngine:
             with _quiet_ml_output():
                 from sentence_transformers import SentenceTransformer
 
-                self._model = _load(SentenceTransformer, self.model_name, self.config_dir)
+                self._model = _bound(_load(SentenceTransformer, self.model_name, self.config_dir))
         except EmbeddingModelRefused as exc:  # said once; every later use is refused as it stands
             self._refused = True
             log.warning("%s", exc)
@@ -140,6 +153,24 @@ class ResonanceEngine:
                     [text], normalize_embeddings=True, show_progress_bar=False, **kwargs,
                 )
         return np.asarray(vec, dtype=np.float32)[0]
+
+
+def _bound(model):
+    """`model` with its input cut at EMBED_MAX_TOKENS and torch's CPU threads capped at EMBED_THREADS.
+
+    Neither cap may fail a load: a model object without the attribute, or a torch without thread
+    control, keeps the model usable and says so once in the log."""
+    try:
+        model.max_seq_length = EMBED_MAX_TOKENS
+    except Exception:  # noqa: BLE001
+        log.warning("memory: could not cap the embedding model's input at %d tokens", EMBED_MAX_TOKENS)
+    try:
+        import torch
+
+        torch.set_num_threads(EMBED_THREADS)
+    except Exception:  # noqa: BLE001
+        log.warning("memory: could not cap the embedding model at %d CPU threads", EMBED_THREADS)
+    return model
 
 
 def cached_copy(model: str) -> str | None:
