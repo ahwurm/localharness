@@ -27,6 +27,8 @@ bitten by treating one as though it were.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import time
 from pathlib import Path
@@ -42,6 +44,7 @@ from starlette.responses import StreamingResponse
 from starlette.routing import Route
 
 from localharness.config import session_presence
+from localharness.core.content import MAX_IMAGE_BYTES, ImageError, image_part
 from localharness.core.events import ARTIFACT_ID_RE, ARTIFACT_MIMES
 
 from . import auth, push
@@ -78,6 +81,14 @@ MAX_BODY_BYTES = 1 << 20
 """1 MiB. Sourced from the measured message corpus: the longest real user message is 10,900
 characters, so this is two orders of magnitude of headroom for a text verb while still refusing
 to buffer something that is not a message at all."""
+
+MAX_MESSAGE_BODY_BYTES = 24 << 20
+"""24 MiB, the message route only: up to `MAX_IMAGES` pictures ride as base64 (4/3 the bytes),
+so one 20 MiB image (`core.content.MAX_IMAGE_BYTES`) plus its encoding fits. Every other route
+keeps `MAX_BODY_BYTES`."""
+
+MAX_IMAGES = 4
+"""Pictures per message. A phone composer attaches a handful; more is a batch upload, not a turn."""
 
 KEEPALIVE_S = 15.0
 """Comment-only `: ping` cadence. Derived from the failure it prevents: proxies kill idle
@@ -344,9 +355,9 @@ class MobileServer:
         scheme, _, value = header.partition(" ")
         return value.strip() if scheme.lower() == "bearer" and value.strip() else None
 
-    async def _body(self, request: Request) -> dict:
+    async def _body(self, request: Request, max_bytes: int = MAX_BODY_BYTES) -> dict:
         raw = await request.body()
-        if len(raw) > MAX_BODY_BYTES:
+        if len(raw) > max_bytes:
             raise ValueError("body too large")
         if not raw:
             return {}
@@ -1254,20 +1265,28 @@ class MobileServer:
         if refusal is not None:
             return refusal
         try:
-            body = await self._body(request)
+            body = await self._body(request, MAX_MESSAGE_BODY_BYTES)
         except (ValueError, json.JSONDecodeError) as exc:
             return _json({"error": str(exc)}, status=400)
         text = (body.get("text") or "").strip()
-        if not text:
+        try:
+            parts = _image_parts(body.get("images"))
+        except ImageError as exc:
+            return _json({"error": str(exc)}, status=400)
+        if not text and not parts:
             return _json({"error": "text is required"}, status=400)
         intent = body.get("intent") or ""
         if intent and intent not in INTENTS:
             return _json({"error": f"intent must be one of {sorted(INTENTS)}"}, status=400)
+        if parts and (intent or (DEFAULT_MID_TURN_INTENT if self.channel._turn_running else "")) == "nudge":
+            # The loop's steer path carries text only; a picture there would be silently lost.
+            return _json({"error": "images cannot ride a nudge; send them as a new message"},
+                         status=400)
 
         started = self._ensure_session()
         if not self.channel._turn_running:
             # Between turns there is nothing to nudge: every intent is the same "run it next".
-            self.channel.submit(text)
+            self.channel.submit(text, parts)
             return _json({"status": "queued", "intent": "queue", "bringing_up": started})
 
         effective = intent or DEFAULT_MID_TURN_INTENT
@@ -1282,9 +1301,9 @@ class MobileServer:
         if effective == "auto":
             # The terminal's behaviour, kept available for a caller that wants the classifier.
             # Not the default here, and §4.4.1 says why at length.
-            self.channel.submit(text)
+            self.channel.submit(text, parts)
             return _json({"status": "queued", "intent": "auto"})
-        self.channel.submit(text)
+        self.channel.submit(text, parts)
         return _json({"status": "queued", "intent": "queue"})
 
     async def cancel(self, request: Request) -> Response:
@@ -1504,7 +1523,10 @@ class MobileServer:
 
 _VERBS: tuple[tuple[str, str, str], ...] = (
     ("POST", "/api/sessions/new", "end the current session, build a fresh one; the old log stays"),
-    ("POST", "/api/sessions/{id}/message", "a user turn; body {text, intent?}"),
+    ("POST", "/api/sessions/{id}/message",
+     "a user turn; body {text, intent?, images?: [{data: base64, mime, name}]}; at most 4 images, "
+     "20 MiB each, 24 MiB body; type read from the bytes (PNG/JPEG/GIF/WebP), else 400; "
+     "text may be empty when images ride; images on a nudge are refused (400)"),
     ("POST", "/api/sessions/{id}/cancel", "cancel the in-flight turn, then emit TurnCancelled"),
     ("POST", "/api/sessions/{id}/mode", "set the permission mode; body {mode}"),
     ("POST", "/api/sessions/{id}/command", "a slash command through the REPL's dispatcher"),
@@ -1543,6 +1565,31 @@ _VERBS: tuple[tuple[str, str, str], ...] = (
     ("GET", "/api/schema", "JSON Schema for every event and frame"),
     ("GET", "/api/protocol", "this document, as data"),
 )
+
+
+def _image_parts(images: Any) -> list[dict]:
+    """`images: [{data, mime?, name?}]` → validated image parts. The type is read from the bytes'
+    own header (`core.content.sniff`), never from `mime`; anything wrong is an `ImageError`."""
+    if images is None:
+        return []
+    if not isinstance(images, list):
+        raise ImageError("images must be a list of {data, mime, name}")
+    if len(images) > MAX_IMAGES:
+        raise ImageError(f"{len(images)} images; at most {MAX_IMAGES} ride one message")
+    parts = []
+    for i, img in enumerate(images):
+        if not isinstance(img, dict) or not isinstance(img.get("data"), str):
+            raise ImageError(f"images[{i}] needs a base64 string in `data`")
+        name = str(img.get("name") or "upload")
+        try:
+            data = base64.b64decode(img["data"], validate=True)
+        except (binascii.Error, ValueError):
+            raise ImageError(f"{name}: `data` is not valid base64") from None
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ImageError(f"{name} is {len(data) / 1024 / 1024:.1f} MiB; the limit is "
+                             f"{MAX_IMAGE_BYTES // 1024 // 1024} MiB")
+        parts.append(image_part(data, name=name))
+    return parts
 
 
 def _store_add(store: Any, subscription: dict) -> int:

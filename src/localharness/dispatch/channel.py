@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 import structlog
@@ -28,6 +28,7 @@ from localharness.channels.base import ChannelAdapter, sanitize_for_display
 from localharness.channels.errors import ChannelStartError
 from localharness.core.artifacts import artifact_root
 from localharness.core.bus import EventBus
+from localharness.core.content import image_label
 from localharness.core.events import (
     ARTIFACT_MIMES,
     Action,
@@ -47,8 +48,11 @@ log = structlog.get_logger(__name__)
 @dataclass(frozen=True)
 class InboundMessage:
     """One platform message, normalised by the adapter. `handle` is the platform message (the ack
-    and reply target); `conversation` is where replies are sent. `attachments` is metadata only:
-    it is NOT fed into the turn, and an attachment-only message is still dropped as empty."""
+    and reply target); `conversation` is where replies are sent. `attachments` is metadata only.
+    `load_images`, when the platform message carries pictures, fetches them as
+    `(image parts, note lines)`; the allow gate awaits it only after admitting the author and
+    conversation, then stores the parts in `images` and appends each note (a picture that could
+    not be read, named) to `text`. A message with no text but an image is a turn."""
 
     author_id: str
     conversation_id: str
@@ -57,6 +61,8 @@ class InboundMessage:
     handle: Any
     conversation: Any
     attachments: tuple = ()
+    images: list = field(default_factory=list)
+    load_images: Callable[[], Awaitable[tuple[list, list]]] | None = None
 
 
 OnMessage = Callable[[InboundMessage], Awaitable[None]]
@@ -299,6 +305,7 @@ class DispatchChannel(ChannelAdapter):
         self._state_dir = config.get("state_dir")
         self._queue: asyncio.Queue = asyncio.Queue()
         self._ready: asyncio.Event = asyncio.Event()
+        self._images: list[dict] = []  # parts of the message read_input last returned, until taken
         self._current_msg: InboundMessage | None = None  # the message being answered (reply target)
         self._handles: list[Any] = []
         # message id -> queue of emoji, for ask_permission and pending notices: push (a reaction
@@ -339,14 +346,19 @@ class DispatchChannel(ChannelAdapter):
         self._ready.set()
 
     async def _on_message(self, msg: InboundMessage) -> None:
-        """The allow gate, in today's order: bot, user, conversation, empty text."""
+        """The allow gate, in today's order: bot, user, conversation, then (admitted only) the
+        image fetch, then empty — no text and no image."""
         if msg.is_bot:
             return
         if msg.author_id not in self._allow:
             return
         if self._channels and msg.conversation_id not in self._channels:
             return
-        if not (msg.text or "").strip():
+        if msg.load_images is not None:
+            images, notes = await msg.load_images()
+            msg = replace(msg, text="\n".join(t for t in (msg.text or "", *notes) if t),
+                          images=list(images), load_images=None)
+        if not (msg.text or "").strip() and not msg.images:
             return
         await self._queue.put(msg)
 
@@ -379,12 +391,17 @@ class DispatchChannel(ChannelAdapter):
             raise ChannelStartError("DispatchChannel.start() must be called before read_input()")
         msg = await self._queue.get()
         self._current_msg = msg
+        self._images = list(msg.images)
         if self._ack:
             try:
                 await self._adapter.react(msg.handle, self._ack)
             except Exception:  # noqa: BLE001 — a failed reaction must never drop the turn
                 pass
-        return (msg.text or "").strip()
+        return (msg.text or "").strip() or " ".join(image_label(p) for p in msg.images)
+
+    def take_images(self) -> list[dict]:
+        images, self._images = self._images, []
+        return images
 
     async def ask_permission(self, request: Any) -> Any:
         """Post the question and wait for an allowlisted reaction (PRD §3.5).

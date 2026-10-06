@@ -14,7 +14,7 @@ LocalHarness is an open-source agent harness for local LLMs. It does not serve m
 
 ## A small core, five plugins
 
-- **Core** owns the agent loop, the built-in tools (read, write, edit, glob, grep, bash, python, web search and fetch, delegation to helper agents), MCP servers, config, the permission gate, the bench and the CLI.
+- **Core** owns the agent loop, the built-in tools (read, write, edit, glob, grep, bash, python, web search and fetch, delegation to helper agents), MCP servers, config, the permission gate, the bench and the CLI. With a vision model it also takes pictures: drop a screenshot onto the terminal or `/image <path>`, paste one into Zed or the phone page, or attach one on Discord.
 - **Plugins** add tools, commands, slash commands, `doctor` checks, settings and chat channels through one plugin API. The five that ship with LocalHarness use the same API as a plugin you write yourself. Turning one off removes what it adds; turning off memory or autoresearch leaves their files on disk (the memories, the experiment archive).
 
 ## Quick start

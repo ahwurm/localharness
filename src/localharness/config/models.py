@@ -733,6 +733,18 @@ class ContextConfig(BaseModel):
         ),
     )
 
+    max_image_tokens: int = Field(
+        default=4096,
+        ge=128,
+        le=65_536,
+        description=(
+            "The most context one attached image may cost, in tokens (one per 32×32-pixel patch "
+            "on Qwen3-VL: 1080p ≈ 2,042, 1440p ≈ 3,602, 4K ≈ 8,100). A larger image is downscaled "
+            "to fit when Pillow is installed (`localharness[vision]`), otherwise refused with the "
+            "number — never resized or dropped silently."
+        ),
+    )
+
     system_prompt_file: Optional[str] = Field(
         default=None,
         description=(

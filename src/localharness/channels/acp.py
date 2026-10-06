@@ -52,6 +52,7 @@ from acp.helpers import (
 )
 from acp.schema import (
     AgentCapabilities,
+    PromptCapabilities,
     Implementation,
     InitializeResponse,
     NewSessionResponse,
@@ -543,7 +544,11 @@ class AcpChannel(ChannelAdapter):
 
         return InitializeResponse(
             protocol_version=acp.PROTOCOL_VERSION,
-            agent_capabilities=AgentCapabilities(load_session=False),
+            # Images: Zed's panel pastes / drops a screenshot as an image block only when the agent
+            # says it can read one; the block becomes an image part the model sees (_prompt_parts).
+            agent_capabilities=AgentCapabilities(
+                load_session=False, prompt_capabilities=PromptCapabilities(image=True),
+            ),
             auth_methods=[],
             agent_info=Implementation(name=AGENT_NAME, version=resolved_version()),
         )
@@ -691,7 +696,7 @@ class AcpChannel(ChannelAdapter):
         turn on, so it falls through the ordinary path below and Zed sees the retry stream.
         """
         self._require_live_session(session_id)
-        text = _prompt_text(prompt)
+        text, images = _prompt_parts(prompt)
 
         # First prompt only: whatever `session/new` could not say because there was no panel yet.
         if self._pending_notice is not None:
@@ -715,8 +720,17 @@ class AcpChannel(ChannelAdapter):
             await self.send_message(self._session_error or BRINGUP_FAILED.format(error="unknown"))
             return PromptResponse(stop_reason="end_turn")
 
+        if images:
+            from localharness.core.content import ImageError, fit_all
+            try:
+                images = fit_all(images, self._agent_loop._config.context.max_image_tokens)
+            except ImageError as exc:
+                await self.send_message(f"Not sent: {exc}")
+                return PromptResponse(stop_reason="end_turn")
+
         self._streamed_this_turn = False
-        task = asyncio.create_task(self._agent_loop.run_turn(task=text, on_token=self._on_token))
+        task = asyncio.create_task(
+            self._agent_loop.run_turn(task=text, on_token=self._on_token, images=images))
         self._turn_task = task
         try:
             # `asyncio.wait` rather than `await task`: a cancelled turn must be reported as
@@ -1320,6 +1334,31 @@ def _block_label(block: Any) -> str:
                 return value.strip()
     kind = getattr(block, "type", None)
     return kind.strip() if isinstance(kind, str) and kind.strip() else ATTACHMENT_UNNAMED_LABEL
+
+
+def _prompt_parts(blocks: list[Any]) -> tuple[str, list[dict]]:
+    """The user's turn as (text, image parts). An image block — base64 `data` + `mime_type`,
+    what Zed sends for a pasted or dropped picture — becomes a part the model sees
+    (core.content.image_part, validated by header). One that cannot be read keeps a
+    placeholder line naming the reason, in its position, like every other unread block."""
+    import base64
+    from types import SimpleNamespace
+
+    from localharness.core.content import image_part
+
+    images: list[dict] = []
+    rest: list[Any] = []
+    for block in blocks or []:
+        data, mime = getattr(block, "data", None), getattr(block, "mime_type", None)
+        if (getattr(block, "type", None) == "image" and isinstance(data, str)
+                and isinstance(mime, str) and mime.startswith("image/")):
+            try:
+                images.append(image_part(base64.b64decode(data), name=getattr(block, "uri", None) or "pasted image"))
+            except ValueError as exc:   # ImageError, or base64 that does not decode
+                rest.append(SimpleNamespace(name=f"image — not readable: {exc}"))
+            continue
+        rest.append(block)
+    return _prompt_text(rest), images
 
 
 def _prompt_text(blocks: list[Any]) -> str:

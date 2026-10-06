@@ -61,6 +61,7 @@ _IMPORT_NAME = {
     "agent-client-protocol": "acp",
     "discord.py": "discord",
     "llama-cpp-python": "llama_cpp",
+    "pillow": "PIL",
 }
 
 

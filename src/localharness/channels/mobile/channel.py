@@ -37,6 +37,7 @@ import structlog
 from localharness.channels.base import ChannelAdapter, sanitize_for_display
 from localharness.channels.errors import NotInteractiveError
 from localharness.core.bus import EventBus
+from localharness.core.content import image_label
 from localharness.plugins.slot import MemorySlot
 # Only the four types this channel REACTS to beyond forwarding. Everything else reaches the
 # client through `EVENT_TYPE_MAP` in `start()`, which is the point: nothing here is a list of
@@ -264,7 +265,8 @@ class MobileChannel(ChannelAdapter):
     def __init__(self, bus: EventBus, config: dict[str, Any]) -> None:
         super().__init__(bus, config)
         self._clients: dict[str, _Client] = {}
-        self._inbound: asyncio.Queue[str] = asyncio.Queue()
+        self._inbound: asyncio.Queue[tuple[str, list[dict]]] = asyncio.Queue()
+        self._images: list[dict] = []   # parts that rode with the line read_input last returned
         # Set by the runner's idle watch (and at shutdown): the REPL's next `read_input` ends the
         # session instead of waiting, and the session builder writes the thread to disk.
         self._sleep_event = asyncio.Event()
@@ -906,13 +908,20 @@ class MobileChannel(ChannelAdapter):
                 getter.cancel()  # Queue.get leaves the item in place when cancelled before it got one
         if getter in done and not self._sleep_now:
             self._sleep_event.clear()
-            return getter.result()
+            text, self._images = getter.result()
+            # An image-only message still has to read as a line: the REPL drops blank input, so
+            # the picture's label stands in for the text it did not come with.
+            return text or " ".join(image_label(p) for p in self._images)
         if getter in done:
             self._inbound.put_nowait(getter.result())  # a stop arrived with it: the line waits for the wake
         self._sleeping = True
         raise EOFError()
 
-    def submit(self, text: str) -> None:
+    def take_images(self) -> list[dict]:
+        images, self._images = self._images, []
+        return images
+
+    def submit(self, text: str, parts: Optional[list[dict]] = None) -> None:
         """Queue a user message for the REPL's next `read_input()`.
 
         This IS `intent=queue`: the classic REPL loop does not read input while a turn runs, so a
@@ -920,7 +929,7 @@ class MobileChannel(ChannelAdapter):
         Nothing is dropped and nothing interleaves.
         """
         self._sleep_event.clear()  # a person spoke: whatever idle watch was about to sleep, this comes first
-        self._inbound.put_nowait(text)
+        self._inbound.put_nowait((text, list(parts or [])))
 
     def request_sleep(self, *, now: bool = False) -> None:
         """End the session at its next idle moment, keeping the thread: the REPL's `read_input` reads

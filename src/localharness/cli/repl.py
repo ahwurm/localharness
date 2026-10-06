@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shlex
 import signal
 import time
 from collections import deque
@@ -16,6 +17,7 @@ from rich.protocol import is_renderable
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.slash_commands import SlashCommand, find_row, help_text
+from localharness.core.content import ImageError, describe, fit_all, fit_to_tokens
 from localharness.core.events import (
     PENDING_APPROVED_NUDGE,
     PENDING_DENIED_NUDGE,
@@ -87,6 +89,21 @@ the human. The box cannot answer the gate itself; the REPL owns it, and one seri
 answering it is what keeps the queue race-free."""
 
 BARE_MODE_COMMAND = "mode"
+
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def _dropped_image_path(line: str) -> str | None:
+    """The path when the whole line is ONE token naming an existing picture — what a terminal
+    pastes for a file dragged onto it (shell-quoted when the name has spaces). Anything else,
+    including a sentence that merely mentions a .png, is None."""
+    try:
+        tokens = shlex.split(line.strip())
+    except ValueError:
+        return None
+    if len(tokens) != 1 or not tokens[0].lower().endswith(_IMAGE_SUFFIXES):
+        return None
+    return tokens[0] if Path(tokens[0]).expanduser().is_file() else None
 """On a channel whose class sets `bare_mode_command` (PRD §3.4), this first word IS the command."""
 
 
@@ -269,6 +286,11 @@ class OrchestratorREPL:
         # once the command has been handled (`/approve` on an idle session). Consumed and
         # cleared by _dispatch_input; None the rest of the time.
         self._slash_followup: Optional[str] = None
+        # Pictures attached for the NEXT turn (/image, Ctrl+V, a dropped path), consumed by
+        # _start_user_turn together with whatever the channel's own transport carried.
+        self._staged_images: list[dict] = []
+        if hasattr(self._channel, "on_paste_image"):
+            self._channel.on_paste_image = self._paste_image
         self._turn_task: Optional[asyncio.Task] = None      # the in-flight turn, or None (idle)
         self._current_task: str = ""                          # its originating request (tier-2 context)
         self._fifo: deque[str] = deque()                      # queued messages → future turns (FIFO)
@@ -491,6 +513,13 @@ class OrchestratorREPL:
         intent — OR publish a UserMessage and START a turn task. Returns the started turn task,
         or None when the line was fully handled without a turn. Shared by classic + box paths;
         may raise EOFError (e.g. /quit) which the caller treats as 'exit the REPL'."""
+        # A dropped file: terminals paste the path of a file dragged onto them. One token naming
+        # an existing picture is an attachment, not a sentence for the model.
+        dropped = _dropped_image_path(user_input)
+        if dropped is not None:
+            await self._slash_image(dropped, dropped.lower())
+            return None
+
         # Slash commands — deterministic, no LLM
         if user_input.startswith("/"):
             if await self._handle_slash(user_input):
@@ -544,12 +573,28 @@ class OrchestratorREPL:
         # Publish user message for memory pipeline. channel_id is the adapter's class
         # attribute ("terminal", a chat platform's id, ...) — history rows carry the REAL channel.
         ch_id = getattr(self._channel, "channel_id", None)
+        # Pictures: the ones staged here (/image, Ctrl+V, a dropped path — already fitted to the
+        # cap when staged) plus the ones the channel's transport carried with this very line (a
+        # phone upload, a chat attachment), fitted now. A picture that cannot fit stops the line:
+        # half a message, sent silently, is the failure this feature exists to avoid.
+        images, self._staged_images = list(self._staged_images), []
+        carried = getattr(self._channel, "take_images", list)()
+        if not isinstance(carried, list):   # a stand-in without the seam carries nothing
+            getattr(carried, "close", lambda: None)()  # an un-awaited coroutine, closed quietly
+            carried = []
+        if carried:
+            try:
+                images += fit_all(carried, self._agent._config.context.max_image_tokens)
+            except ImageError as exc:
+                await self._channel.send_message(f"Not sent: {exc}", metadata={"style": "system.error"})
+                return None
         await self._bus.publish(
             UserMessage(
                 agent_id=self._agent._config.name,
                 session_id=self._agent.current_session_id,
                 content=text,
                 channel=ch_id if isinstance(ch_id, str) else "terminal",
+                attachments=[describe(p) for p in images],
             )
         )
         # Streaming is opt-in BY THE CHANNEL, through a declared flag rather than the presence of
@@ -558,7 +603,10 @@ class OrchestratorREPL:
         # keeps passing None — it has never streamed answer text — so this adds live text to the
         # mobile channel without touching what any existing surface does.
         on_token = self._channel.on_token if getattr(self._channel, "streams_tokens", False) else None
-        return asyncio.ensure_future(self._agent.run_turn(task=text, on_token=on_token))
+        # `images=` only when there are any: every agent-loop stand-in that takes (task, on_token)
+        # keeps working, and a text-only line is the call it always was.
+        extra = {"images": images} if images else {}
+        return asyncio.ensure_future(self._agent.run_turn(task=text, on_token=on_token, **extra))
 
     # ------------------------------------------------------------------ #
     # Persistent type-anytime input box coordinator (box mode)
@@ -716,6 +764,12 @@ class OrchestratorREPL:
         coordinator. It is optimistically QUEUED at once (owner: uncertain/late → queue) and
         classified in the BACKGROUND; the verdict funnels back through the one control queue and
         may upgrade the message to a live nudge iff it is still queued (see _apply_tier2_result)."""
+        # A line with a picture staged is a NEW turn, never a nudge: the running turn's nudge
+        # path is text-only, and the picture would otherwise wait for some later line.
+        if self._staged_images and not forced:
+            await self._deliver_route(
+                clean, input_router.Decision(input_router.Route.QUEUE, "tier1", "image-attached"))
+            return
         # Slash commands mid-turn are session-level actions — queue them deterministically
         # (run between turns), never spend an LLM classification call on a command.
         if not forced and clean.startswith("/"):
@@ -1272,6 +1326,46 @@ class OrchestratorREPL:
 
     async def _slash_deny(self, args: str, args_lower: str) -> None:
         await self._handle_pending_answer(args_lower, approve=False)
+
+    async def _slash_image(self, args: str, args_lower: str) -> None:
+        """Attach a picture to the next message: `/image <path>`, `/image` (the clipboard),
+        `/image clear`. Staged here; _start_user_turn sends it with the next line."""
+        from localharness.core.content import image_part, load_image_file
+        arg = args.strip()
+        if args_lower.strip() == "clear":
+            n, self._staged_images = len(self._staged_images), []
+            await self._channel.send_message(f"Dropped {n} staged image(s)." if n else "No images staged.",
+                                             metadata={"style": "system.info"})
+            return
+        try:
+            if arg:
+                tokens = shlex.split(arg)
+                part = load_image_file(tokens[0] if len(tokens) == 1 else arg)
+            else:
+                from localharness.channels.clipboard import read_clipboard_image
+                part = image_part(read_clipboard_image(), name="clipboard")
+        except (ImageError, ValueError) as exc:
+            await self._channel.send_message(f"Not attached: {exc}", metadata={"style": "system.error"})
+            return
+        await self._stage_image(part)
+
+    async def _stage_image(self, part: dict) -> None:
+        """Fit one picture to `context.max_image_tokens` and stage it, printing the receipt
+        (size, cost) or the refusal — the user learns the cost before the line is sent."""
+        try:
+            part = fit_to_tokens(part, self._agent._config.context.max_image_tokens)
+        except ImageError as exc:
+            await self._channel.send_message(f"Not attached: {exc}", metadata={"style": "system.error"})
+            return
+        self._staged_images.append(part)
+        n = len(self._staged_images)
+        await self._channel.send_message(
+            f"📎 {describe(part)} — attached to your next message" + (f" ({n} staged)" if n > 1 else ""),
+            metadata={"style": "system.info"})
+
+    async def _paste_image(self) -> None:
+        """Ctrl+V in the input box: the clipboard's picture, staged exactly like `/image`."""
+        await self._slash_image("", "")
 
     async def _slash_task(self, args: str, args_lower: str) -> None:
         from localharness.agent.task_record import TaskState

@@ -114,11 +114,17 @@ mobile = [
     # (46, 47, 48...) and the two hazmat APIs used are long stable.
     "cryptography>=46",
 ]
+vision = [
+    # Downscales an attached image that would cost more than context.max_image_tokens. Without
+    # it the harness refuses that image with the number — never a silent resize or drop.
+    "pillow>=10,<13",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
     "mypy>=1.13",
+    "pillow>=10,<13",
 ]
 
 [project.scripts]

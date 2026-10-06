@@ -51,6 +51,9 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/approve", "Run a parked call; /approve [N] (default: the oldest)", "_slash_approve", True),
     SlashCommand("/deny", "Drop a parked call; /deny [N] (default: the oldest)", "_slash_deny", True),
     SlashCommand("/task", "Show the working task record; /task clear to delete it", "_slash_task", True),
+    SlashCommand("/image", "Attach a picture to your next message; /image <path>, /image (the clipboard), "
+                 "/image clear — or drop the file onto the terminal, or Ctrl+V",
+                 "_slash_image", True, terminal_only=True),
     SlashCommand("/plugins", "List plugins; /plugins enable|disable <name> to switch one in this session",
                  "_slash_plugins", True, terminal_only=True),
     SlashCommand("/quit", "Exit LocalHarness", "_slash_quit"),

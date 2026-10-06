@@ -198,12 +198,14 @@ def _box(**kw):
     return repl, channel, agent
 
 
-def test_the_plugins_row_is_the_one_terminal_only_row():
+def test_the_terminal_only_rows_are_image_and_plugins():
     row = find_row("/plugins")
     assert row is not None and row.terminal_only and row.takes_args
     assert row.handler == "_slash_plugins" and row.plugin is None
     assert find_row("/plugins enable image") is row
-    assert [r.name for r in all_rows() if r.terminal_only] == ["/plugins"]
+    # /image names a file on the machine the terminal runs on (or its clipboard); the phone has
+    # its own 📎, Zed pastes natively, Discord attaches — so it is terminal-only too.
+    assert [r.name for r in all_rows() if r.terminal_only] == ["/image", "/plugins"]
 
 
 def test_only_the_terminal_can_switch_plugins():
