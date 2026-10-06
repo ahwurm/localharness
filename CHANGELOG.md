@@ -6,6 +6,34 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.6] — 2026-10-06
+
+### Added
+- **Image input: a screenshot reaches a vision model from every surface.** Terminal:
+  `/image <path>`, a file dropped onto the terminal (its pasted path is recognised), or Ctrl+V
+  when a clipboard is reachable (`wl-paste`, `xclip`, `pngpaste`; over SSH the message says the
+  clipboard is on your own machine and names the alternatives). Zed: paste or drop into the agent
+  panel (the ACP agent now advertises `promptCapabilities.image`). Phone page: paste, drop, or the
+  📎 button, up to four per message. Discord: an attached image, read only after the allowlist
+  gate. A picture rides as an OpenAI content part in the user turn; text-only turns are unchanged.
+- Pictures are charged to the context budget by the model's own resize rule (one token per
+  32×32 patch of the preprocessed size — 1080p ≈ 2,042 tokens, verified against vLLM's
+  `usage.prompt_tokens`), counted exactly through vLLM `/tokenize`, and named in the text when
+  compaction or the emergency floor leaves one out — never dropped silently. New setting
+  `agent.context.max_image_tokens` (default 4096): a larger picture is downscaled when Pillow is
+  installed (new optional extra `localharness[vision]`) and otherwise refused with the number.
+- `/image clear` drops staged pictures; a line typed mid-turn with a picture staged is queued
+  for a new turn, never delivered as a nudge. HTTP-400 logs redact image bytes.
+
+### Known limitations
+- Verified live on vLLM (Qwen3.8-27B) through the terminal only. The phone page's paste, drop and
+  📎 flows and a real Discord attachment were tested against stand-ins, not a browser or Discord.
+  llama.cpp needs `--mmproj` and was not exercised; its picture counts are the formula, not the
+  server's.
+- No tool can return an image (a rendered chart, a `read` of a .png): only a human can attach one.
+- Staged terminal pictures are session state (a `/plugins` restart drops them), and a resumed
+  session's `asleep.json` carries the bytes of every picture still in history.
+
 ## [0.16.5] — 2026-10-05
 
 ### Added
