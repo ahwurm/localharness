@@ -34,6 +34,10 @@ All notable changes to LocalHarness are documented here. The format follows
 - Staged terminal pictures are session state (a `/plugins` restart drops them), and a resumed
   session's `asleep.json` carries the bytes of every picture still in history.
 
+Post-release validation on a developer machine: the candidate's deterministic suite is green apart
+from a documented test-environment coupling in `test_start_cmd.py`. See
+[validation details](docs/release-validation-0.16.6.md).
+
 ## [0.16.5] — 2026-10-05
 
 ### Added
