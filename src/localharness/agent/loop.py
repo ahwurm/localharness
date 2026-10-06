@@ -28,7 +28,7 @@ from localharness.agent.gate import (
 from localharness.agent.gate_types import GateOutcome, ToolMeta
 from localharness.core.types import Message, harness_message, human_message, is_harness_message, provider_messages
 from localharness.agent.context import APPROX_CHARS_PER_TOKEN, response_reserve
-from localharness.agent.context import ActiveReferenceError
+from localharness.agent.context import ActiveReferenceError, ActiveReferenceOverflow
 from localharness.agent.task_context import TaskContext
 from localharness.agent.task_record import TaskState
 from localharness.plugins.api import ContextBudget
@@ -2272,6 +2272,27 @@ class AgentLoop:
         refresh = getattr(self._task_context, "refresh_references", None)
         if refresh is not None:
             refresh(getattr(self._ctx, "_content_store", None))
+        try:
+            return await self._pack_request(messages, tools)
+        except ActiveReferenceOverflow:
+            # Reported, not enforced: the task references are withdrawn for this request (the
+            # packet marks them unprotected) and the request goes out; the model decides whether
+            # to drop or narrow them. Withdrawal clears the store's whole active set, including a
+            # model's own tool_result_get declarations merged into the task step. With nothing to
+            # withdraw (no task record, no references) the overflow propagates and blocks.
+            withdraw = getattr(self._task_context, "withdraw_references", None)
+            if withdraw is None or not withdraw():
+                raise
+            # build_messages raises from inside (it runs the same fit check) or returns a base
+            # that already carries restore pairs, so the whole pack runs again. A summary fired
+            # by the first pass is already in `messages`; keep its commit for _absorb_commit.
+            commit = self._ctx.last_commit
+            packed, budget = await self._pack_request(messages, tools)
+            if self._ctx.last_commit is None:
+                self._ctx.last_commit = commit
+            return packed, budget
+
+    async def _pack_request(self, messages: list[Message], tools: list | None):
         packed, budget = await self._ctx.build_messages(messages, tools)
         # An empty packet (a TaskState with no active record) is an ordinary request.
         packet = self._task_context.packet() if self._task_context is not None else ""
@@ -2299,7 +2320,7 @@ class AgentLoop:
                 count += self._ctx._token_counter.count(json.dumps(wire_tools))
             limit = self._ctx.max_context_tokens
             if limit > 0 and count + response_reserve(limit, self._ctx.max_response_tokens) > limit:
-                raise ActiveReferenceError("Active step cannot fit the provider's XML prompt; narrow the step.")
+                raise ActiveReferenceOverflow("Active step cannot fit the provider's XML prompt; narrow the step.")
             budget = replace(budget, current_usage=count, tool_schema_tokens=0)
         return packed, budget
 

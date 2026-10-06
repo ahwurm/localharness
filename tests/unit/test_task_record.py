@@ -219,6 +219,7 @@ def test_show_and_clear(tmp_path):
 
 from localharness.agent.context import ContentStore  # noqa: E402
 from localharness.agent.task_record import Judgment, Reference  # noqa: E402
+from localharness.tools.builtin.read_tool import render_numbered  # noqa: E402
 
 
 def test_round_trip_with_references_and_judgments(tmp_path):
@@ -246,7 +247,7 @@ def test_refresh_snapshots_redeclares_and_resnapshots_changes(tmp_path):
     state, store = refs_state(tmp_path, Reference("voice", "voice.md")), ContentStore()
     state.refresh_references(store)
     ref = state.current.references[0]
-    assert ref.status == "current" and store.get(ref.handle) == "Short sentences."
+    assert ref.status == "current" and store.get(ref.handle) == render_numbered("Short sentences.")
     assert store.active_step == f"task {state.current.id}"
     assert [r.source for r in store.active_references] == ["voice"]
     assert json.loads(state.path.read_text())["references"][0]["handle"] == ref.handle
@@ -257,10 +258,39 @@ def test_refresh_snapshots_redeclares_and_resnapshots_changes(tmp_path):
     voice.write_text("Longer, winding sentences.")
     state.refresh_references(store)
     assert ref.status == "refreshed (changed)" and ref.handle != first
-    assert store.get(ref.handle) == "Longer, winding sentences."
+    assert store.get(ref.handle) == render_numbered("Longer, winding sentences.")
     assert [r.handle for r in store.active_references] == [ref.handle]
     state.refresh_references(store)
     assert ref.status == "current"
+
+
+def test_drop_reference_clears_the_store_and_the_next_refresh_declares_the_rest(tmp_path):
+    for name in ("voice", "source"):
+        (tmp_path / f"{name}.md").write_text(name)
+    state, store = refs_state(tmp_path, Reference("voice", "voice.md"), Reference("source", "source.md")), ContentStore()
+    state.refresh_references(store)
+    assert [r.source for r in store.active_references] == ["voice", "source"]
+    assert state.drop_reference("voice") and not store.active_references
+    assert not state.drop_reference("voice")
+    state.refresh_references(store)
+    assert [r.source for r in store.active_references] == ["source"]
+
+
+def test_withdraw_references_marks_unfit_and_clears_the_store(tmp_path):
+    from localharness.agent.task_record import UNFIT
+    assert UNFIT == "unprotected: cannot fit with reply reserve; drop or narrow references"
+    (tmp_path / "voice.md").write_text("v")
+    state, store = refs_state(tmp_path, Reference("voice", "voice.md"), Reference("pasted", handle="x")), ContentStore()
+    assert not state.withdraw_references()  # no store seen yet
+    state.refresh_references(store)
+    assert store.active_references
+    assert state.withdraw_references()
+    assert [r.status for r in state.current.references] == [UNFIT, UNFIT] and not store.active_references
+    assert [r["status"] for r in json.loads(state.path.read_text())["references"]] == [UNFIT, UNFIT]
+    state.current.references = []
+    assert not state.withdraw_references()
+    state.current = None
+    assert not state.withdraw_references()
 
 
 def test_refresh_problem_statuses_never_raise(tmp_path, monkeypatch):

@@ -7,9 +7,10 @@ the model (captured at `stream_complete`)."""
 import json
 
 from localharness.agent import context as context_mod
-from localharness.agent.context import ContentStore, ContextManager
+from localharness.agent.context import ContentStore, ContextManager, TokenCounter
 from localharness.agent.task_record import TaskState
 from localharness.tools.base import ToolResult
+from localharness.tools.builtin.read_tool import render_numbered
 from localharness.tools.builtin.task_tool import TaskTool
 from tests.unit.test_task_context import make_loop
 
@@ -30,7 +31,7 @@ class Registry:
         if name == "task":
             return await self.tool.run(**args)
         if name == "read":
-            return ToolResult(output=(self.root / args["path"]).read_text())
+            return ToolResult(output=render_numbered((self.root / args["path"]).read_text()))
         if name == "write":
             (self.root / args["path"]).write_text(args["content"])
             return ToolResult(output="written", metadata={"path": args["path"]})
@@ -86,6 +87,48 @@ def ref(name):
     return ("task", {"action": "reference", "source": name, "path": f"{name}.md"})
 
 
+def is_restore(m):
+    return (m.get("_lh") or {}).get("subtype") == "active_reference"
+
+
+def copies(messages, body):
+    """Tool messages carrying the whole numbered `body` (a read may end with the run's budget note)."""
+    text = render_numbered(body)
+    return sum(m.get("role") == "tool" and (m.get("content") == text or (m.get("content") or "")
+               .startswith(text + "\n\n[budget:")) for m in messages)
+
+
+async def test_a0_read_reference_is_one_copy(tmp_path, bus, mock_llm_client):
+    state = setup(tmp_path, instructions=INSTRUCTIONS, voice=VOICE, source=SOURCE)
+    names = ("instructions", "voice", "source")
+    llm = scripted(mock_llm_client, START, *(ref(n) for n in names),
+                   *(("read", {"path": f"{n}.md"}) for n in names), ("noop", {}), "Outline ready.")
+    seen = capture(llm)
+    loop = make_loop(llm, bus, tmp_path, state, Registry(state, tmp_path))
+    assert await loop.run_turn("Draft the tide pool note from my files.") == "Outline ready."
+    last = seen[-1]
+    assert not any(is_restore(m) for m in last)
+    for r, body in zip(state.current.references, (INSTRUCTIONS, VOICE, SOURCE)):
+        assert copies(last, body) == 1, r.source
+        assert restored(last, r.handle) == []
+    assert "References: instructions: current; voice: current; source: current" in packet_of(last)
+
+
+def test_budget_note_does_not_hide_the_read():
+    ctx = ContextManager(max_context_tokens=32768)
+    store = ctx._content_store
+    body = render_numbered(VOICE)
+    store.declare_active_reference("step", store.put(body), "voice")
+    messages = [
+        {"role": "user", "content": "Use voice.md."},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "r1", "type": "function", "function": {"name": "read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "r1", "content": body + "\n\n[budget: 3/24 tool calls used]"},
+    ]
+    out = ctx.ensure_active_references(messages)
+    assert not any(is_restore(m) for m in out) and len(out) == len(messages)
+
+
 async def test_a_references_survive_forced_eviction(tmp_path, bus, mock_llm_client, monkeypatch):
     monkeypatch.setattr(context_mod, "TOOL_EVICT_USAGE_FRACTION", 0.0)
     state = setup(tmp_path, instructions=INSTRUCTIONS, voice=VOICE, source=SOURCE)
@@ -101,21 +144,41 @@ async def test_a_references_survive_forced_eviction(tmp_path, bus, mock_llm_clie
     assert any("tool result evicted" in (m.get("content") or "") for m in last)
     assert last == ctx.repair_tool_pairing(last)
     for r, body in zip(state.current.references, (INSTRUCTIONS, VOICE, SOURCE)):
-        assert restored(last, r.handle) == [body], r.source
+        assert restored(last, r.handle) == [render_numbered(body)], r.source
+        assert copies(last, body) == 1, r.source
     assert "References: instructions: current; voice: current; source: current" in packet_of(last)
 
 
-async def test_b_overflow_blocks_once_with_the_narrowing_notice(tmp_path, bus, mock_llm_client):
+async def test_b_overflow_proceeds_with_references_unprotected(tmp_path, bus, mock_llm_client):
     big = " ".join(f"word{i % 997}" for i in range(150 * 1024 // 8))
     assert 140 * 1024 < len(big) < 200 * 1024
     state = setup(tmp_path, big=big)
-    llm = scripted(mock_llm_client, START, ref("big"), "never sent")
+    llm = scripted(mock_llm_client, START, ref("big"), "Noted.")
     seen = capture(llm)
     loop = make_loop(llm, bus, tmp_path, state, Registry(state, tmp_path))
-    out = await loop.run_turn("Use big.md as the reference for the note.")
+    assert await loop.run_turn("Use big.md as the reference for the note.") == "Noted."
+    assert len(seen) == 3
+    assert "big: unprotected: cannot fit with reply reserve; drop or narrow references" in packet_of(seen[2])
+    assert not any(is_restore(m) for m in seen[2])
+    assert restored(seen[2], state.current.references[0].handle) == []
+    assert state.status != "blocked"
+
+
+async def test_b2_prompt_that_cannot_fit_still_blocks(tmp_path, bus, mock_llm_client):
+    class Full(TokenCounter):
+        def count_messages(self, messages, tools=None):
+            return 32768
+
+    state = setup(tmp_path, small="A short reference.")
+    ctx = ContextManager(max_context_tokens=32768, token_counter=Full())
+    start = ("task", {**START[1], "references": [{"source": "small", "path": "small.md"}]})
+    llm = scripted(mock_llm_client, ("task", start[1]), "never sent")
+    seen = capture(llm)
+    loop = make_loop(llm, bus, tmp_path, state, Registry(state, tmp_path), ctx=ctx)
+    out = await loop.run_turn("Use small.md for the note.")
     assert out.startswith("Active step blocked:") and "split or narrow" in out
-    assert len(seen) == 2 and not packet_of(seen[0])  # no model call after the declaration
-    assert state.status == "blocked"
+    assert len(seen) == 1 and state.status == "blocked"
+    assert state.current.references[0].status.startswith("unprotected: cannot fit")
 
 
 async def test_c_changed_source_reaches_the_next_request(tmp_path, bus, mock_llm_client):
@@ -127,9 +190,9 @@ async def test_c_changed_source_reaches_the_next_request(tmp_path, bus, mock_llm
     await loop.run_turn("Draft from source.md.")
     before, after, later = seen[2], seen[3], seen[4]
     assert "source: current" in packet_of(before)
-    assert any(m.get("content") == SOURCE for m in before if m.get("role") == "tool")
+    assert any(m.get("content") == render_numbered(SOURCE) for m in before if m.get("role") == "tool")
     handle = state.current.references[0].handle
-    assert restored(after, handle) == [NEW_SOURCE]
+    assert restored(after, handle) == [render_numbered(NEW_SOURCE)]
     assert not any(SOURCE in (m.get("content") or "") for m in after)
     assert "source: refreshed (changed)" in packet_of(after)
     assert "source: current" in packet_of(later)
@@ -153,8 +216,8 @@ async def test_d_restart_resnapshots_path_references(tmp_path, bus, mock_llm_cli
     loop2 = make_loop(llm2, bus, tmp_path, reloaded, Registry(reloaded, tmp_path))
     assert await loop2.run_turn("Continue.") == "Picking up where we left off."
     instructions, voice, hand = reloaded.current.references
-    assert restored(seen[0], instructions.handle) == [INSTRUCTIONS]
-    assert restored(seen[0], voice.handle) == [VOICE + "Prefer the active voice."]
+    assert restored(seen[0], instructions.handle) == [render_numbered(INSTRUCTIONS)]
+    assert restored(seen[0], voice.handle) == [render_numbered(VOICE + "Prefer the active voice.")]
     packet = packet_of(seen[0])
     assert "pasted: unavailable; read it again" in packet and hand.handle is None
     assert "voice: refreshed (changed)" in packet and "reference voice changed since last session" in packet
@@ -234,5 +297,6 @@ async def test_unchanged_reference_is_redeclared_after_the_next_human_turn(tmp_p
     await loop.run_turn("Use voice.md for the note.")
     await loop.run_turn("Now continue the note.")  # the turn reset cleared the protection
     handle = state.current.references[0].handle
-    assert restored(seen[2], handle) == [VOICE] and restored(seen[3], handle) == [VOICE]
+    numbered = render_numbered(VOICE)
+    assert restored(seen[2], handle) == [numbered] and restored(seen[3], handle) == [numbered]
     assert "voice: current" in packet_of(seen[3])
