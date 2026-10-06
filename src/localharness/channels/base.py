@@ -326,6 +326,13 @@ class ChannelAdapter(ABC):
         Console(file=buf, width=100).print(renderable)
         await self.send_message(buf.getvalue().rstrip("\n"), agent_id=agent_id, metadata=metadata)
 
+    def take_images(self) -> list[dict]:
+        """Image parts (core.content.image_part) that arrived WITH the input `read_input` last
+        returned — a phone upload, a chat attachment. Consumed once, by the REPL, at the moment
+        that input becomes a turn; a channel that carries none returns []. The REPL fits them to
+        `context.max_image_tokens` and hands them to `run_turn(images=...)`."""
+        return []
+
     @abstractmethod
     async def read_input(self, prompt: str = "> ") -> str:
         """

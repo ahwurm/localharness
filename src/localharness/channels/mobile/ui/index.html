@@ -237,6 +237,14 @@
   #acts #send { order:9; margin-left:auto; padding:6px 20px; font-weight:600;
                 color:var(--agent-ink); background:var(--agent); border-color:var(--agent); }
   #acts #cancel { order:8; margin-left:auto; }  /* mid-turn, stop takes send's right edge */
+  #composer.drop { border-color:var(--agent); }
+  #chips { display:flex; gap:6px; flex-wrap:wrap; padding:4px 4px 2px; }
+  .chip { position:relative; width:56px; height:56px; border:1px solid var(--line);
+          border-radius:10px; overflow:hidden; background:var(--raised); }
+  .chip img { width:100%; height:100%; object-fit:cover; display:block; }
+  .chip button { position:absolute; top:2px; right:2px; min-height:0; width:20px; height:20px;
+                 padding:0; font-size:12px; line-height:1; border-radius:999px;
+                 color:var(--ink); background:var(--surface); }
 
   dialog { width:min(94vw,34rem); max-width:min(94vw,34rem); color:var(--ink);
            background:var(--surface); border:1px solid var(--line); border-radius:18px;
@@ -311,8 +319,11 @@
 <main id="hist" hidden></main>
 
 <div id="composer">
+  <div id="chips" hidden></div>
   <textarea id="text" placeholder="ask…" autocomplete="off" autocapitalize="sentences"></textarea>
+  <input id="filePick" type="file" accept="image/*" multiple hidden>
   <div id="acts">
+    <button id="attach" title="attach images (or paste / drop them here)" aria-label="attach images">📎</button>
     <button class="small" id="modelBtn" title="model and session settings"><span id="model">settings</span></button>
     <button id="retry" hidden title="re-send the last message as a NEW turn; the old answer stays">retry</button>
     <button id="nudge" hidden title="steer the running turn now — no classifier, no model call">nudge</button>
@@ -554,7 +565,11 @@ function onEvent(name, data) {
     case "UserMessage": {
       // The bus's echo of a message THIS page sent claims the local-echo bubble instead of
       // drawing a second one — the provisional pattern (rule 2), applied to the user's own text.
-      const e = S.echoes.length && S.echoes[0].text === data.content ? S.echoes.shift() : null;
+      // With pictures, the bus's text is the REPL's rendering (an image-only send reads as its
+      // `[image: …]` label), so it is matched by containment rather than equality.
+      const head = S.echoes[0];
+      const e = head && (head.text === data.content ||
+        (head.images && String(data.content || "").includes(head.text))) ? S.echoes.shift() : null;
       if (e) { e.meta.textContent = "you · via " + data.channel; break; }
       const r = add(el("div", "row user"));
       r.appendChild(el("div", null, data.content));
@@ -1136,21 +1151,84 @@ async function showSheet(title, body) {
 }
 
 // ---------------------------------------------------------------- composer
+// Staged images: pasted, dropped or picked. Read to base64 only at send; the type the server
+// trusts is the one in the bytes' header, not `file.type`.
+const MAX_IMAGES = 4;
+let staged = [];   // [{file, url}]
+function paintChips() {
+  const box = $("chips");
+  box.replaceChildren(...staged.map((s, i) => {
+    const c = el("div", "chip");
+    const img = el("img"); img.src = s.url; img.alt = s.file.name || "image";
+    const x = el("button", null, "×"); x.setAttribute("aria-label", "remove image");
+    x.onclick = () => { URL.revokeObjectURL(s.url); staged.splice(i, 1); paintChips(); };
+    c.append(img, x);
+    return c;
+  }));
+  box.hidden = staged.length === 0;
+}
+function stage(files) {
+  const imgs = [...files].filter(f => f && f.type.startsWith("image/"));
+  for (const f of imgs) {
+    if (staged.length >= MAX_IMAGES) { add(el("div", "row err", `at most ${MAX_IMAGES} images per message`)); break; }
+    staged.push({ file: f, url: URL.createObjectURL(f) });
+  }
+  paintChips();
+  return imgs.length;
+}
+const b64 = f => new Promise((ok, bad) => {
+  const r = new FileReader();
+  r.onload = () => ok(String(r.result).replace(/^data:[^,]*,/, ""));
+  r.onerror = () => bad(r.error);
+  r.readAsDataURL(f);
+});
+$("text").onpaste = e => {
+  const files = [...(e.clipboardData?.items || [])].filter(i => i.kind === "file").map(i => i.getAsFile());
+  if (stage(files.length ? files : (e.clipboardData?.files || []))) e.preventDefault();
+};
+$("composer").ondragover = e => { e.preventDefault(); $("composer").classList.add("drop"); };
+$("composer").ondragleave = () => $("composer").classList.remove("drop");
+$("composer").ondrop = e => {
+  e.preventDefault(); $("composer").classList.remove("drop");
+  stage(e.dataTransfer?.files || []);
+};
+$("attach").onclick = () => $("filePick").click();
+$("filePick").onchange = () => { stage($("filePick").files); $("filePick").value = ""; };
+
 async function send(intent) {
   const text = $("text").value.trim();
-  if (!text) return;
-  S.lastSent = text;
+  if (!text && !staged.length) return;
+  const sending = staged.slice();
+  let images;
+  try {
+    images = await Promise.all(sending.map(async s =>
+      ({ data: await b64(s.file), mime: s.file.type, name: s.file.name || "clipboard" })));
+  } catch (err) { add(el("div", "row err", "could not read the image: " + err)); return; }
+  if (text) S.lastSent = text;
   $("text").value = "";
   // LOCAL ECHO (owner, 2026-09-14, "I don't even see my message after I send it"): the bubble
   // appears the moment the thumb hits send, and its meta line carries the delivery truth. The
   // bus's own UserMessage echo later claims this row (see the reducer) rather than duplicating.
   const row = add(el("div", "row user"));
-  row.appendChild(el("div", null, text));
+  if (text) row.appendChild(el("div", null, text));
+  if (images.length) row.appendChild(el("div", "meta", `📎 ${images.length} image${images.length > 1 ? "s" : ""}`));
   const meta = el("div", "meta", "you · sending…");
   row.appendChild(meta);
-  S.echoes.push({ text, meta });
-  const r = await post(`/api/sessions/${S.session || "current"}/message`,
-                       intent ? { text, intent } : { text });
+  S.echoes.push({ text, meta, images: images.length });
+  const body = { text, ...(intent ? { intent } : {}), ...(images.length ? { images } : {}) };
+  const r = await post(`/api/sessions/${S.session || "current"}/message`, body);
+  if (r.error) {
+    // Refused (not an image, too many, a nudge with pictures): nothing was queued, so the text
+    // and the chips stay for a second try.
+    meta.textContent = "you · NOT delivered"; add(el("div", "row err", r.error));
+    S.echoes.splice(S.echoes.findIndex(e => e.meta === meta), 1);
+    if (!$("text").value) $("text").value = text;
+    return;
+  }
+  if (sending.length) {
+    sending.forEach(s => URL.revokeObjectURL(s.url));
+    staged = staged.filter(s => !sending.includes(s)); paintChips();
+  }
   if (r.status === "no_resolver") { meta.textContent = "you · NOT delivered"; add(el("div", "row err", r.detail)); }
   else if (r.bringing_up) meta.textContent = "you · sent — the session is starting for this message";
   else meta.textContent = "you · sent";

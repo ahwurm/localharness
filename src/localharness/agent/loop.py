@@ -27,6 +27,7 @@ from localharness.agent.gate import (
 )
 from localharness.agent.gate_types import GateOutcome, ToolMeta
 from localharness.core.types import Message, harness_message, human_message, is_harness_message, provider_messages
+from localharness.core.content import redact_images, text_part
 from localharness.agent.context import APPROX_CHARS_PER_TOKEN, response_reserve
 from localharness.agent.context import ActiveReferenceError, ActiveReferenceOverflow
 from localharness.agent.task_context import TaskContext
@@ -1183,8 +1184,13 @@ class AgentLoop:
         task: str,
         initial_messages: list[Message] | None = None,
         on_token: Callable | None = None,
+        images: list[dict] | None = None,
     ) -> str:
-        """Execute a full agent turn. Never raises — all errors become summary strings."""
+        """Execute a full agent turn. Never raises — all errors become summary strings.
+
+        `images`: image parts (core.content.image_part) the human attached to this turn. They
+        ride in the session message as OpenAI content parts; `task` stays the text the
+        bookkeeping (task summary, memory, task record) reads."""
         from localharness.core.events import TurnStarted, TurnCompleted, TurnFailed, BudgetSpec
 
         # Session continuity: reuse prior conversation if available
@@ -1229,7 +1235,7 @@ class AgentLoop:
         from localharness.provider.client import ProviderError
 
         try:
-            summary = await self._execute_loop(session, task, on_token)
+            summary = await self._execute_loop(session, task, on_token, images)
         except ProviderError as exc:
             # A provider failure escaping _execute_loop — e.g. the TokenCounter hitting a dead
             # endpoint in build_messages after the server was killed mid-session. A KNOWN
@@ -1337,7 +1343,8 @@ class AgentLoop:
             ))
         return summary
 
-    async def _execute_loop(self, session: Session, task: str, on_token: Callable | None) -> str:
+    async def _execute_loop(self, session: Session, task: str, on_token: Callable | None,
+                            images: list[dict] | None = None) -> str:
         from localharness.provider.client import (
             ProviderConnectionError,
             ProviderDegenerateError,
@@ -1462,7 +1469,9 @@ class AgentLoop:
         else:
             # First turn — insert the single leading system message at front
             session.messages.insert(0, {"role": "system", "content": system_prompt})
-        session.push(human_message(task))
+        session.push(human_message(
+            [*([text_part(task)] if task else []), *images] if images else task
+        ))
         if self._task_context is not None:
             self._task_context.observe_human(task)
         # #91: mark where THIS turn's assistant replies will begin, so the CONFIRMED-sentinel
@@ -1659,7 +1668,7 @@ class AgentLoop:
                         "HTTP 400 from LLM in %s — server error: %s. Request messages: %s",
                         self._config.name,
                         str(exc)[:300],
-                        json.dumps(request_messages, default=str),
+                        json.dumps(redact_images(request_messages), default=str),
                     )
                 session.terminated_reason = "error"
                 return _format_error_summary(session, exc)

@@ -36,7 +36,7 @@ _MIXED_DIR_CORE = {
             "plugin_mount", "plugins_cmd", "repl",
             "session_accumulator", "session_resume", "session_trust", "slash_commands", "start_cmd", "theme", "ui",
             "update_cmd", "validate_cmd", "workspace"),
-    "channels": ("__init__", "acp", "base", "errors", "input_router", "terminal"),
+    "channels": ("__init__", "acp", "base", "clipboard", "errors", "input_router", "terminal"),
     "tools": ("__init__", "base", "capabilities", "hooks", "mcp", "registry"),
     "tools/builtin": ("__init__", "agent_tool", "bash_tool", "chunk_tool", "cruncher_exec",
                       "edit_tool", "glob_tool", "grep_tool", "load_document_tool", "netguard", "paths",

@@ -180,6 +180,17 @@ class ChannelAdapter(ABC):
         """
         ...
 
+    def take_images(self) -> list[dict]:
+        """
+        Image parts (core.content.image_part) that arrived WITH the input read_input()
+        last returned — a phone upload, a chat attachment. Consumed once by the REPL when
+        that input becomes a turn; the REPL fits them to context.max_image_tokens and
+        passes them to run_turn(images=...). Default: [] (a channel that carries none).
+        For an image-only message, read_input() returns the pictures' "[image: W×H png]"
+        labels as the text so the turn still starts.
+        """
+        return []
+
     @abstractmethod
     async def read_input(self, prompt: str = "> ") -> str:
         """

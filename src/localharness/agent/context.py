@@ -14,6 +14,14 @@ from typing import Any, Literal
 
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 from localharness.core.types import Message, provider_messages
+from localharness.core.content import content_image_tokens, drop_images, text_of, with_text
+
+
+def _text_only(messages: list[Message]) -> list[Message]:
+    """Each parts-list body replaced by its text projection — for the renderers that only
+    speak text (llama.cpp /apply-template, the local GGUF template)."""
+    return [{**m, "content": text_of(m["content"])} if isinstance(m.get("content"), list) else m
+            for m in messages]
 
 log = logging.getLogger("localharness.agent.context")
 
@@ -961,13 +969,21 @@ class TokenCounter:
         if not messages:
             return 0  # a template render of [] is a server-side error, not a count
         messages = provider_messages(messages)
+        # vLLM's /tokenize counts image parts itself (verified live 2026-10-06: == usage.prompt_tokens).
+        # llama.cpp's /apply-template and the local GGUF render are text renders, so there the
+        # pictures are charged by the patch formula on top of their text projection. The offline
+        # estimator (off/approximate) reads parts natively inside estimate_messages.
+        pictures = 0
+        if self._mode in ("llamacpp", "exact_local") and any(isinstance(m.get("content"), list) for m in messages):
+            pictures = sum(content_image_tokens(m.get("content")) for m in messages)
+            messages = _text_only(messages)
         if not (self._mode in ("vllm", "llamacpp") and self._messages_exact):
             if self._mode == "exact_local":
                 # The GGUF tokenizer renders the model's REAL chat template + tokenizes once — the
                 # exact count the server produces (message structure incl. role markers / default
                 # system prompt). Template-rejected shapes fall back inside GgufTokenizer.
-                return self._gguf.count_messages(messages)
-            return self.estimate_messages(messages) + (
+                return self._gguf.count_messages(messages) + pictures
+            return self.estimate_messages(messages) + pictures + (
                 self.count(json.dumps(tools, default=str)) if tools else 0
             )
         key = "msgs:" + hashlib.sha1(
@@ -975,13 +991,13 @@ class TokenCounter:
         ).hexdigest()
         cached = self._cache.get(key)
         if cached is not None:
-            return cached
+            return cached + pictures
         n = self._remote_count_messages(messages, tools)
         if n is None:
             raise self._tokenize_failure("message-level tokenize")
         if len(self._cache) < 50_000:
             self._cache[key] = n
-        return n
+        return n + pictures
 
     def estimate_messages(self, messages: list[dict]) -> int:
         """Structural token ESTIMATE for budget arithmetic — safe on ANY message fragment
@@ -992,15 +1008,21 @@ class TokenCounter:
         shape. exact_local delegates to the GGUF render (which falls back internally on
         template-rejected shapes). For the exact cost of a COMPLETE request, use
         count_messages."""
+        # Pictures are charged by the patch formula (core.content) on the canonical list, whose
+        # part-level _lh still carries the pixel size; the text goes through the usual counters.
+        pictures = sum(content_image_tokens(m.get("content")) for m in messages)
         messages = provider_messages(messages)
         if self._mode == "exact_local":
-            return self._gguf.count_messages(messages)
-        total = 0
+            return self._gguf.count_messages(_text_only(messages)) + pictures
+        total = pictures
         for msg in messages:
             total += 4  # message overhead tokens
             content = msg.get("content") or ""
             if isinstance(content, str):
                 total += self.count(content)
+            elif isinstance(content, list):
+                total += sum(self.count(p.get("text") or "") for p in content
+                             if isinstance(p, dict) and p.get("type") == "text")
             # tool_calls in assistant messages
             for tc in (msg.get("tool_calls") or []):
                 fn = tc.get("function", {}) if isinstance(tc, dict) else {}
@@ -1341,7 +1363,7 @@ def _commit_summary(
     lb = _safe_cut_boundary(messages, len(messages) - last_n, "backward")
     if lb - fb < 2:
         return None
-    replaced = sum(len(m.get("content") or "") for m in messages[fb:lb])
+    replaced = sum(len(text_of(m.get("content") or "")) for m in messages[fb:lb])
     if len(summary_message.get("content") or "") >= replaced:
         return None
     messages[fb:lb] = [dict(summary_message)]
@@ -1573,8 +1595,15 @@ def _shrink_content_to_budget(
     guard, limit = 0, len(working) * 16 + 32
     while token_counter.estimate_messages(working) > max_msg_tokens and guard < limit:
         guard += 1
-        i = max(range(len(working)), key=lambda k: len(working[k].get("content") or ""))
+        i = max(range(len(working)), key=lambda k: len(text_of(working[k].get("content") or ""))
+                + content_image_tokens(working[k].get("content")) * 4)
         content = working[i].get("content") or ""
+        if isinstance(content, list):
+            # The floor drops the pictures before it cuts text — named in the text that stays,
+            # never silent (a model told "this screenshot" with none attached invents one).
+            working[i] = {**working[i], "content": drop_images(content)}
+            shrunk_any = True
+            continue
         if len(content) <= min_chars:
             break  # largest body already minimal — no further shrink possible
         shrunk = _head_tail(content, max(min_chars, len(content) // 2))
@@ -1640,16 +1669,16 @@ def render_summarizer_input(messages: list, max_input_chars: int | None = None) 
         return f"[{m.get('role', '?')}]: "
 
     def carried(m: Any) -> bool:
-        return (m.get("content") or "").startswith(COMPACTION_SUMMARY_MARKER)
+        return text_of(m.get("content") or "").startswith(COMPACTION_SUMMARY_MARKER)
 
     def line(m: Any, cap: int) -> str:
-        content = m.get("content") or ""
+        content = text_of(m.get("content") or "")  # the summarizer reads "[image: 1920×1080 png]"
         return prefix(m) + (content if carried(m) else content[:cap])
     text = "\n".join(line(m, SUMMARIZER_MESSAGE_CHARS) for m in messages)
     if max_input_chars is None or len(text) <= max_input_chars:
         return text
     # What the cap cannot touch: every prefix and newline, and the carried summaries whole.
-    fixed = sum(len(prefix(m)) + 1 + (len(m.get("content") or "") if carried(m) else 0)
+    fixed = sum(len(prefix(m)) + 1 + (len(text_of(m.get("content") or "")) if carried(m) else 0)
                 for m in messages)
     ordinary = sum(1 for m in messages if not carried(m))
     cap = max(SUMMARIZER_MIN_MESSAGE_CHARS, (max_input_chars - fixed) // max(1, ordinary))
@@ -2029,7 +2058,7 @@ class ContextManager:
         if note and repaired and repaired[-1].get("role") in ("user", "tool"):
             last = repaired[-1]
             repaired = [*repaired[:-1],
-                        {**last, "content": f"{last.get('content') or ''}\n\n{note}"}]
+                        {**last, "content": with_text(last.get("content") or "", note)}]
         floor_usage = self._token_counter.estimate_messages(repaired)
         # emergency_modified/emergency_pre_frac: a single oversized message (e.g. one huge first
         # user turn, no history) gives SummaryCompactionStage no safe "middle" to summarize — the

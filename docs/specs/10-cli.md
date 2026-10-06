@@ -1209,6 +1209,22 @@ Zed's picker lists them. With `channels.remote_unattended: false` in the machine
 Zed are never limited.
 See spec 06 for the config keys and SECURITY.md for what each mode does and does not stop.
 
+**`/image` attaches a picture to your next message** (a vision model such as the reference
+Qwen3.8 reads it; a text-only model gets an error from its server). `/image <path>` stages a
+PNG, JPEG, GIF or WebP file, validated by its header, never by its name; dropping the file onto
+the terminal (the terminal pastes its path) does the same; `/image` with no path, or Ctrl+V in
+the input box, reads the OS clipboard — on a desktop session with `wl-paste` or `xclip`
+(`pngpaste` on macOS); over SSH there is no clipboard to read and the message says so and names
+the two alternatives. The receipt states the size and the context cost (`📎 shot.png 1920×1080
+png · ~2,042 tokens — attached to your next message`); the next line you send carries every
+staged picture, `/image clear` drops them. One picture may cost at most
+`agent.context.max_image_tokens` (default 4096 — a 1440p screenshot passes untouched); a larger
+one is downscaled when Pillow is installed (`localharness[vision]`) and refused with the number
+otherwise. A line typed mid-turn while a picture is staged is queued for a new turn, never
+delivered as a nudge (the nudge path is text-only). Pictures that reach the model are charged
+to the context budget like any other content; when compaction or the emergency floor leaves one
+out, the text that stays says so (`[image dropped to fit the context window: …]`).
+
 **`/pending`, `/approve [N]` and `/deny [N]` answer a parked call.** From v0.14.2 a blacklisted call
 in `auto` is not put to you as a blocking prompt: the gate parks it, the model is told to continue
 without that step and to name the pending number in its final answer, and the turn runs on.

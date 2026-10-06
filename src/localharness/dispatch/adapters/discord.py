@@ -17,6 +17,7 @@ from typing import Any
 import structlog
 
 from localharness.channels.errors import ChannelStartError
+from localharness.core.content import MAX_IMAGE_BYTES, ImageError, image_part
 from localharness.dispatch.channel import InboundMessage, OnMessage, OnReaction
 
 log = structlog.get_logger(__name__)
@@ -50,6 +51,43 @@ def _attachment_meta(msg: Any) -> tuple:
     """`(filename, size, content_type)` per uploaded file — metadata only, never the bytes."""
     return tuple((str(getattr(a, "filename", "")), int(getattr(a, "size", 0) or 0),
                   getattr(a, "content_type", None)) for a in (getattr(msg, "attachments", ()) or ()))
+
+
+MAX_IMAGES_PER_MESSAGE = 4
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def _is_image(a: Any) -> bool:
+    return str(getattr(a, "content_type", "") or "").startswith("image/") \
+        or str(getattr(a, "filename", "")).lower().endswith(_IMAGE_SUFFIXES)
+
+
+async def _read_images(msg: Any) -> tuple[list[dict], list[str]]:
+    """Image parts for the picture attachments (header-validated by core.content), plus one
+    `[attachment <name> not read: <reason>]` note per picture that could not become a part — too
+    big, over the per-message cap, unreadable, not really an image. Never a silent drop. Other
+    files stay metadata only."""
+    parts: list[dict] = []
+    notes: list[str] = []
+    for a in (getattr(msg, "attachments", ()) or ()):
+        if not _is_image(a):
+            continue
+        name, size = str(getattr(a, "filename", "")), int(getattr(a, "size", 0) or 0)
+        if len(parts) >= MAX_IMAGES_PER_MESSAGE:
+            notes.append(f"[attachment {name} not read: only {MAX_IMAGES_PER_MESSAGE} images per message]")
+            continue
+        if size > MAX_IMAGE_BYTES:
+            notes.append(f"[attachment {name} not read: {size / 1024 / 1024:.1f} MiB is over the "
+                         f"{MAX_IMAGE_BYTES // 1024 // 1024} MiB limit]")
+            continue
+        try:
+            parts.append(image_part(await a.read(), name=name))
+        except ImageError as e:
+            notes.append(f"[attachment {name} not read: {e}]")
+        except Exception as e:  # noqa: BLE001 — a failed download is named, never fatal
+            log.warning("discord_attachment_read_failed", name=name, error=f"{type(e).__name__}: {e}")
+            notes.append(f"[attachment {name} not read: download failed ({type(e).__name__})]")
+    return parts, notes
 
 
 class DiscordAdapter:
@@ -95,10 +133,13 @@ class DiscordAdapter:
         async def on_message(msg: Any) -> None:
             if client.user is not None and msg.author.id == client.user.id:
                 return
+            # The bytes are fetched by the channel, and only after its allow gate admits the
+            # author and conversation: a stranger's upload is never downloaded.
             await deliver(InboundMessage(
                 author_id=str(msg.author.id), conversation_id=str(msg.channel.id),
                 text=msg.content or "", is_bot=bool(msg.author.bot), handle=msg,
                 conversation=msg.channel, attachments=_attachment_meta(msg),
+                load_images=(lambda: _read_images(msg)) if any(map(_is_image, msg.attachments or ())) else None,
             ))
 
         @client.event

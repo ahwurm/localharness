@@ -323,8 +323,17 @@ the same round trip a real one does.
 - **Nothing stops you running the terminal and the mobile channel at once** on the same agent, which
   reopens exactly that path. You are now *warned* when you start the second one, and the phone
   shows it too — but nothing prevents it, and that is the owner's call to make, not the harness's.
-- **No image or file upload.** The attachment field exists in the event schema and nothing has
-  ever produced or consumed it.
+- **Images only, no other files.** The composer takes a pasted screenshot, a dropped file or a
+  picked photo (📎): `POST /api/sessions/{id}/message` with `images: [{data, mime, name}]`, base64.
+  At most 4 per message, 20 MiB each, a 24 MiB request body (every other route stays at 1 MiB).
+  The type is read from the bytes, never from `mime`: PNG, JPEG, GIF and WebP pass, anything else
+  is a 400 that says so. Text may be empty when an image rides; the turn's text is then the
+  image's label, e.g. `[image: 1920×1080 png, shot.png]`. Images on a mid-turn `nudge` are a
+  400 — steering carries text only — so send them as a new message. The model sees the pictures
+  as image parts beside the text, after the REPL fits each to `context.max_image_tokens`
+  (downscaled with the `vision` extra installed, refused otherwise); a model without vision
+  support will not see them. Paste and drag-and-drop are browser-dependent and have not been
+  exercised on a real phone.
 - **No diff review.** In-project edits therefore ask once per workspace rather than never.
 - **The memory view is worse than the terminal's.** The Memory screen is a flat list with no
   promote, and `/memory` gives you the terminal's tree flattened into preformatted text.

@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 from typing import Any, Literal, NewType, TypedDict
 
+from localharness.core.content import Content, strip_private
+
 AgentID = NewType("AgentID", str)
 SessionID = NewType("SessionID", str)
 EventSeq = NewType("EventSeq", int)
@@ -20,7 +22,9 @@ class MessageProvenance(TypedDict):
     subtype: str
 
 
-def human_message(content: str, subtype: str = "request") -> Message:
+def human_message(content: Content, subtype: str = "request") -> Message:
+    """A human turn: a ``str``, or OpenAI content parts when an image rides with the text
+    (see :mod:`localharness.core.content`)."""
     return {"role": "user", "content": content,
             "_lh": MessageProvenance(origin="human", subtype=subtype)}
 
@@ -53,6 +57,8 @@ def provider_messages(messages: list[Message]) -> list[Message]:
                 marker + content if isinstance(content, str)
                 else [{"type": "text", "text": marker}, *content]
             )
+        if isinstance(wire.get("content"), list):
+            wire["content"] = strip_private(wire["content"])  # part-level _lh (image facts) stays home
         rendered.append(wire)
     return rendered
 

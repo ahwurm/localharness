@@ -20,6 +20,7 @@ On a terminal, `plugins enable dispatch` with no `--set`, or `/plugins enable di
 - What the bot sends pings nobody but the person it replies to (no `@everyone`, role or user mention from the model's text), and a masked link (`[text](url)`) is sent as its text followed by the plain address, so you see where it goes.
 - An allowlisted account can do what you can do at the terminal, including `mode unattended` and "always". The machine-level setting `channels.remote_unattended: false` keeps those two to the terminal and Zed: `mode unattended` then gets one line naming the setting, and questions offer no ♾️. The default, `true`, changes nothing.
 - Pictures a tool makes (the `image` plugin) are posted as files.
+- Pictures you attach (PNG, JPEG, GIF, WebP; up to 4 per message, 20 MiB each) go to the model with your message; a picture alone is a message too. One that cannot be read (too big, past the fourth, a download failure, or not really an image) is named in the message text as `[attachment <name> not read: <reason>]`, never dropped silently. Pictures are downloaded only from people on the allow list. Seeing them needs a vision model; large ones are fitted to `context.max_image_tokens` like any other image.
 - A `doctor` check: whether Discord is configured and how many users are allowed. It never prints the token and never logs in.
 
 ## Settings
@@ -38,7 +39,7 @@ The token comes only from `dispatch.discord.token`, or until 0.17.0 from the dep
 ## Not there yet
 
 - **Not yet run against a live Discord server.** The plugin is tested offline against a stand-in for the Discord library: logging in, the reactions and a real file upload are unverified.
-- Files people upload to the bot are not passed to the model; the turn sees the message text only.
+- Attached pictures are tested against the stand-in only: a real Discord upload reaching the model has not been run. Other files (PDFs, text) are still not passed to the model; the turn sees their name nowhere, only the message text.
 - The token is stored as it is in your global `overrides.yaml` (owner-only, mode 600, when LocalHarness writes it); every command shows it as `**********`.
 - There is one settings section, `dispatch.discord.*`. A second chat platform added today would share Discord's token, allow list and channels.
 - `localharness start --help` still lists `discord` while the plugin is off.

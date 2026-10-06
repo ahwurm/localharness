@@ -1645,8 +1645,8 @@ class LLMClient:
                     stripped["content"] = rendered
                 m = stripped
             if out and m.get("role") in ("user", "assistant") and out[-1].get("role") == m.get("role"):
-                merged = ((out[-1].get("content") or "") + "\n\n" + (m.get("content") or "")).strip()
-                out[-1] = {**out[-1], "content": merged}
+                from localharness.core.content import join_contents
+                out[-1] = {**out[-1], "content": join_contents(out[-1].get("content"), m.get("content"))}
             else:
                 out.append(dict(m))
         return out

@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator, Callable
 
 import structlog
 from prompt_toolkit.application import Application
+from prompt_toolkit.application.run_in_terminal import in_terminal
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.buffer import Buffer, CompletionState
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
@@ -587,9 +588,25 @@ def _build_permission_app(options: str, grantable: bool, output: Any = None) -> 
     )
 
 
+def _bind_paste_image(kb: KeyBindings, on_paste_image: Callable[[], Any] | None) -> None:
+    """Ctrl+V asks the OS clipboard for a picture (channels/clipboard.py) — a terminal never
+    delivers one as keystrokes — and the REPL's callback stages it and prints the receipt. Text
+    paste is untouched: terminals send that as bracketed-paste or plain keys, not as Ctrl+V."""
+    if on_paste_image is None:
+        return
+
+    @kb.add("c-v")
+    def _paste_image(event) -> None:
+        async def go() -> None:
+            async with in_terminal():
+                await on_paste_image()
+        event.app.create_background_task(go())
+
+
 def _build_input_app(
     history: FileHistory, prompt: str, hint: str, context_pct: float | None = None,
     model_names_fn: Callable[[], list[str]] | None = None,
+    on_paste_image: Callable[[], Any] | None = None,
 ) -> Application:
     """Inline application: ╭─╮ │ > input │ ╰─ hint ──── meter ─╯. Exits with the entered line."""
     buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False,
@@ -625,6 +642,8 @@ def _build_input_app(
     def _eof(event) -> None:
         if not buf.text:
             event.app.exit(exception=EOFError(), style="class:exiting")
+
+    _bind_paste_image(kb, on_paste_image)
 
     def _wall(char: str) -> Window:
         return Window(width=1, char=char)
@@ -672,6 +691,7 @@ def _build_persistent_input_app(
     pending_fn: Callable[[], list[tuple[str, str]]] = lambda: [],
     on_pending_answer: Callable[[bool], None] = lambda _approve: None,
     on_keystroke: Callable[[], None] = lambda: None,
+    on_paste_image: Callable[[], Any] | None = None,
 ) -> Application:
     """Long-lived input box that stays usable while turn output streams above it.
 
@@ -711,6 +731,7 @@ def _build_persistent_input_app(
 
     kb = KeyBindings()
     _add_menu_keys(kb, buf, injected_prefix=_MODEL_PICK_PREFIX)
+    _bind_paste_image(kb, on_paste_image)
 
     @kb.add("enter")
     @kb.add("c-j")  # raw LF: prompt_toolkit's own default treats \n as Enter, because some
@@ -1027,6 +1048,9 @@ class TerminalChannel(ChannelAdapter):
         # one keystroke and needs these to put it back exactly as it was.
         self._box_restart_args: tuple[Any, Any] | None = None
         self._box_app: Application | None = None
+        # Ctrl+V in either input app: set by the REPL (it owns the staged pictures); None means
+        # the key does nothing here.
+        self.on_paste_image: Callable[[], Any] | None = None
         self._box_task: asyncio.Task | None = None
         self._box_patch = None                   # patch_stdout(raw=True) ctx, held for the box's life
         self._box_ticker: asyncio.Task | None = None
@@ -1454,7 +1478,7 @@ class TerminalChannel(ChannelAdapter):
         hint, self.first_prompt_hint = self.first_prompt_hint, ""
         app = _build_input_app(
             self._history, prompt, hint=hint, context_pct=self._context_pct,
-            model_names_fn=self._model_names_for_menu,
+            model_names_fn=self._model_names_for_menu, on_paste_image=self.on_paste_image,
         )
         try:
             line = await app.run_async()
@@ -1524,7 +1548,7 @@ class TerminalChannel(ChannelAdapter):
             status_fn=self._box_status_frags, placeholder_fn=self._box_placeholder,
             model_names_fn=self._model_names_for_menu,
             pending_fn=self._box_pending_frags, on_pending_answer=_on_pending_answer,
-            on_keystroke=self._note_keystroke,
+            on_keystroke=self._note_keystroke, on_paste_image=self.on_paste_image,
         )
         self._box_patch = patch_stdout(raw=True)
         self._box_patch.__enter__()

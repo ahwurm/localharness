@@ -1062,6 +1062,8 @@ async def test_an_at_mention_reaches_the_model_as_a_visible_placeholder(
         prompt=[
             text_block("summarise"),
             ResourceContentBlock(type="resource_link", name="notes.md", uri="file:///notes.md"),
+            # Bytes that are not a picture: an image block is READ now (test_acp_images.py), so
+            # the one that cannot be is still announced, with the reason, in its position.
             ImageContentBlock(type="image", data="AAAA", mime_type="image/png"),
             text_block("please"),
         ],
@@ -1070,7 +1072,7 @@ async def test_an_at_mention_reaches_the_model_as_a_visible_placeholder(
     sent = session.llm.seen_messages[0]
     task = "\n".join(str(m.get("content") or "") for m in sent)
     assert ATTACHMENT_PLACEHOLDER.format(label="notes.md") in task
-    assert ATTACHMENT_PLACEHOLDER.format(label="image") in task
+    assert "[attachment: image — not readable: not a PNG, JPEG, GIF or WebP image" in task
     assert task.index("summarise") < task.index("notes.md") < task.index("please"), (
         "the placeholder must sit where the block was sent"
     )

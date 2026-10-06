@@ -281,8 +281,9 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 184, (
-        "catalogue should be 184 entries: the 223-entry v0.14 ledger minus the resonance "
+    assert len(entries) == 186, (
+        "catalogue should be 186 entries (184 + the 2026-10 context.max_image_tokens field, "
+        "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
         "knobs — chapters/mining/tags/micro-pass/decay/cap machinery deleted with their "
@@ -376,8 +377,9 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 184, (
-        "catalogue should be 184 entries: the 223-entry v0.14 ledger minus the resonance "
+    assert len(entries) == 186, (
+        "catalogue should be 186 entries (184 + the 2026-10 context.max_image_tokens field, "
+        "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
         "knobs — chapters/mining/tags/micro-pass/decay/cap machinery deleted with their "

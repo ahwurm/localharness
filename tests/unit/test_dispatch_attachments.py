@@ -7,8 +7,9 @@ Anything else: one warning, nothing sent, the turn goes on. Driven through the R
 on the recording fake `discord` (tests.dispatch_support), whose channel logs a file send as
 `("send", c<id>, "")` followed by `("file", c<id>, <filename>)` and keeps the `File` in `fake.files`.
 
-Inbound: the adapter normalises uploads to `(filename, size, content_type)` and the core does not
-feed them to the turn — an attachment-only message is still dropped, text + file enqueues the text.
+Inbound: the adapter normalises uploads to `(filename, size, content_type)`; picture uploads are
+read (only once the allow gate admits the author) into image parts that `take_images()` hands the
+REPL, and every picture that cannot be read is named in the text. Other files stay metadata only.
 """
 from __future__ import annotations
 
@@ -20,8 +21,10 @@ from structlog.testing import capture_logs
 
 from localharness.core.artifacts import artifact_root, write_artifact
 from localharness.core.bus import EventBus
+from localharness.core.content import MAX_IMAGE_BYTES
 from localharness.core.events import ArtifactRef, Observation
 from tests.dispatch_support import build_dispatch_discord, install_fake_discord, isolate_discord_env
+from tests.unit.test_image_content import png_bytes
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 
@@ -154,7 +157,67 @@ async def test_a_failed_upload_is_logged_and_swallowed(fake, tmp_path):
     await ch.stop()
 
 
-async def test_inbound_attachments_are_metadata_and_never_reach_the_turn(fake, tmp_path):
+def _upload(name, data=b"", content_type=None, size=None):
+    async def read():
+        return data
+    return types.SimpleNamespace(filename=name, size=len(data) if size is None else size,
+                                 content_type=content_type, url=f"https://cdn.example/{name}", read=read)
+
+
+async def _started(fake, **kw):
+    ch = build_dispatch_discord(EventBus(), allow={"42"}, channels=set(), ack="", **kw)
+    await ch.start()
+    return ch
+
+
+async def test_an_image_with_text_reaches_the_turn_as_a_part(fake, tmp_path):
+    ch = await _started(fake)
+    await fake.deliver(fake.message(42, 7, "what is this?",
+                                    attachments=[_upload("shot.png", png_bytes(265, 51), "image/png")]))
+    assert await asyncio.wait_for(ch.read_input(), 1) == "what is this?"
+    [part] = ch.take_images()
+    assert part["type"] == "image_url" and part["image_url"]["url"].startswith("data:image/png;base64,")
+    assert (part["_lh"]["width"], part["_lh"]["height"], part["_lh"]["name"]) == (265, 51, "shot.png")
+    assert ch.take_images() == [], "take_images is consumed once"
+    await ch.stop()
+
+
+async def test_an_image_only_message_is_a_turn_named_by_its_label(fake, tmp_path):
+    ch = await _started(fake)
+    await fake.deliver(fake.message(42, 7, "", attachments=[_upload("shot.png", png_bytes(265, 51))]))
+    assert await asyncio.wait_for(ch.read_input(), 1) == "[image: 265×51 png, shot.png]"
+    assert len(ch.take_images()) == 1
+    await ch.stop()
+
+
+async def test_a_png_name_that_is_not_an_image_is_named_in_the_text(fake, tmp_path):
+    ch = await _started(fake)
+    await fake.deliver(fake.message(42, 7, "look", attachments=[_upload("fake.png", b"hello", "image/png")]))
+    text = await asyncio.wait_for(ch.read_input(), 1)
+    assert text.startswith("look\n[attachment fake.png not read: not a PNG, JPEG, GIF or WebP"), text
+    assert ch.take_images() == []
+    await ch.stop()
+
+
+async def test_failed_download_oversize_and_over_cap_are_each_named(fake, tmp_path):
+    async def boom():
+        raise OSError("404")
+    broken = _upload("gone.png", content_type="image/png")
+    broken.read = boom
+    shots = [_upload(f"s{i}.png", png_bytes(40, 40)) for i in range(5)]
+    huge = _upload("huge.png", b"x", "image/png", size=MAX_IMAGE_BYTES + 1)
+    ch = await _started(fake)
+    await fake.deliver(fake.message(42, 7, "", attachments=[broken, huge, *shots]))
+    text = await asyncio.wait_for(ch.read_input(), 1)
+    assert text.splitlines() == [
+        "[attachment gone.png not read: download failed (OSError)]",
+        "[attachment huge.png not read: 20.0 MiB is over the 20 MiB limit]",
+        "[attachment s4.png not read: only 4 images per message]"], text
+    assert [p["_lh"]["name"] for p in ch.take_images()] == ["s0.png", "s1.png", "s2.png", "s3.png"]
+    await ch.stop()
+
+
+async def test_non_image_attachments_stay_metadata_only(fake, tmp_path):
     ch = build_dispatch_discord(EventBus(), allow={"42"}, channels=set(), ack="")
     seen = []
     gate = ch._on_message
@@ -165,12 +228,27 @@ async def test_inbound_attachments_are_metadata_and_never_reach_the_turn(fake, t
 
     ch._on_message = record  # the adapter is handed this at connect
     await ch.start()
-    upload = types.SimpleNamespace(filename="cat.png", size=1234, content_type="image/png",
-                                   url="https://cdn.example/cat.png")
+    upload = _upload("notes.pdf", b"%PDF-1.4", "application/pdf")
     await fake.deliver(fake.message(42, 7, "", attachments=[upload]))          # attachment only
     await fake.deliver(fake.message(42, 7, "what is this?", attachments=[upload]))
-    assert [m.attachments for m in seen] == [(("cat.png", 1234, "image/png"),)] * 2
+    assert [m.attachments for m in seen] == [(("notes.pdf", 8, "application/pdf"),)] * 2
+    assert [m.load_images for m in seen] == [None, None]
     assert ch._queue.qsize() == 1, "the attachment-only message was enqueued"
     assert await asyncio.wait_for(ch.read_input(), 1) == "what is this?"
-    assert ch._queue.empty()
+    assert ch.take_images() == []
+    await ch.stop()
+
+
+async def test_a_strangers_image_is_never_downloaded(fake, tmp_path):
+    reads = []
+    upload = _upload("shot.png", png_bytes(40, 40))
+    orig = upload.read
+
+    async def counting():
+        reads.append(1)
+        return await orig()
+    upload.read = counting
+    ch = await _started(fake)
+    await fake.deliver(fake.message(99, 7, "", attachments=[upload]))
+    assert reads == [] and ch._queue.empty()
     await ch.stop()

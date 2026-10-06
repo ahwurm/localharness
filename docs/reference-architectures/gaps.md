@@ -153,18 +153,24 @@ profile and backend (vllm-metal).
   thresholds, optional llama.cpp `:8080` endpoint variant) so harness changes are
   regression-tested against **both** reference architectures before merge.
 
-## §10 No multimodal input path
+## §10 Multimodal input path — images from the human (shipped 2026-10)
 
 Architecture A's default model (Qwen3.8-27B, config A1) is natively multimodal — its
-checkpoint ships both image and video preprocessor configs. The harness has **no way to
-send an image**: there is no multimodal field anywhere in the config schema, and the
-message path assembles text content only.
+checkpoint ships both image and video preprocessor configs. A human can now hand the model a
+picture from every surface: the terminal (`/image <path>`, a file dropped onto the terminal,
+Ctrl+V when a clipboard is reachable), Zed (paste or drop into the agent panel), the phone page
+(paste, drop, 📎) and Discord (an attached image). It rides as an OpenAI `image_url` part in the
+user turn; the budget charges it by the model's own resize rule (`core/content.py`,
+one token per 32×32 patch of the preprocessed size, measured against vLLM's `usage` live);
+compaction and the emergency floor name a picture they leave out rather than drop it in silence.
+`context.max_image_tokens` (default 4096) caps one picture; over it, Pillow (`localharness[vision]`)
+downscales, or the picture is refused with the number.
 
-- **Consequence:** the reference architecture's headline capability is unreachable from the
-  harness today. Screenshots, diagrams and UI state all have to be described in words.
-- **Fix:** accept image parts in the OpenAI-format content array, add a tool-result shape
-  that can carry an image, and decide how images are counted against the context budget
-  (they are not free — they expand to a large number of tokens).
+- **Still open:** no TOOL can return an image (a `bash_exec` that renders a chart, a `read` of a
+  .png) — only a human can attach one, by design for now (the model cannot pull a file into its
+  own context through this path). llama.cpp and local-GGUF token counts for pictures are the
+  formula, not the server's own count; vLLM counts them exactly through `/tokenize`. Verified
+  live on vLLM only — llama.cpp needs `--mmproj` and has not been exercised.
 
 ## §11 Speculative-decoding setup is opaque to the harness
 
@@ -231,8 +237,8 @@ being equally explicit about its edges, because "recently validated" is easy to 
 1. §12 cross-session memory continuity + a forced compaction test (untested paths beat
    under-tuned ones — and these two are the memory subsystem's actual promise)
 2. §5 tool-call hardening (agent-loop correctness)
-3. §10 multimodal input path (the default reference model's headline capability is
-   unreachable)
+3. ~~§10 multimodal input path~~ — shipped for human-attached images (2026-10); tool-returned
+   images remain open
 4. §3 runtime parity validation + doctor RAM-fit warning
 5. §11 speculative-decoding validation + acceptance telemetry
 6. §1 timeout derivation (constant works today; re-opens silently on slower models)

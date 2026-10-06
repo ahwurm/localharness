@@ -88,6 +88,7 @@ def _repl(channel):
     repl._bus = EventBus()
     repl._pending_handles = []
     repl._turn_task = None
+    repl._staged_images = []
     return repl
 
 

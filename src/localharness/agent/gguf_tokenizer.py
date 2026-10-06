@@ -185,6 +185,9 @@ class GgufTokenizer:
             content = msg.get("content") or ""
             if isinstance(content, str):
                 total += self.count(content)
+            elif isinstance(content, list):  # text parts by vocab, pictures by the patch formula
+                from localharness.core.content import content_image_tokens, text_of
+                total += self.count(text_of(content)) + content_image_tokens(content)
             for tc in (msg.get("tool_calls") or []):
                 fn = tc.get("function", {}) if isinstance(tc, dict) else {}
                 total += self.count(fn.get("name", "")) + self.count(fn.get("arguments", ""))

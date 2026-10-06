@@ -43,11 +43,14 @@ CORE = [
     ("/approve", "Run a parked call; /approve [N] (default: the oldest)"),
     ("/deny", "Drop a parked call; /deny [N] (default: the oldest)"),
     ("/task", "Show the working task record; /task clear to delete it"),
+    ("/image", "Attach a picture to your next message; /image <path>, /image (the clipboard), "
+               "/image clear — or drop the file onto the terminal, or Ctrl+V"),
     ("/plugins", "List plugins; /plugins enable|disable <name> to switch one in this session"),
     ("/quit", "Exit LocalHarness"),
     ("/exit", "Exit LocalHarness"),
 ]
-PHONE = [row for row in CORE if row[0] != "/plugins"]  # terminal-only rows never reach the phone
+TERMINAL_ONLY = ("/image", "/plugins")
+PHONE = [row for row in CORE if row[0] not in TERMINAL_ONLY]  # terminal-only rows never reach the phone
 
 HELP_BEFORE = (
     "Available commands:\n"
@@ -61,6 +64,8 @@ HELP_BEFORE = (
     "  /approve    Run a parked call; /approve [N] (default: the oldest)\n"
     "  /deny       Drop a parked call; /deny [N] (default: the oldest)\n"
     "  /task       Show the working task record; /task clear to delete it\n"
+    "  /image      Attach a picture to your next message; /image <path>, /image (the clipboard), "
+    "/image clear — or drop the file onto the terminal, or Ctrl+V\n"
     "  /plugins    List plugins; /plugins enable|disable <name> to switch one in this session\n"
     "  /quit       Exit LocalHarness\n"
     "  /exit       Exit LocalHarness\n"
@@ -100,7 +105,7 @@ async def _phone_menu(tmp_path) -> list[dict]:
 
 # ------------------------------------------------------------ no plugin rows: nothing moved
 
-def test_the_core_table_is_twelve_rows_in_order():
+def test_the_core_table_is_thirteen_rows_in_order():
     assert [tuple(row) for row in SLASH_COMMANDS] == CORE  # a row unpacks as (name, description)
     assert all_rows() == SLASH_COMMANDS
 
