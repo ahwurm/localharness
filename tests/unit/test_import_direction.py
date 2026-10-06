@@ -31,7 +31,7 @@ PLUGIN_FILES = frozenset({
     "cli/autoresearch_cmd.py", "cli/experiment_cmd.py", "cli/propose_cmd.py", "cli/report_cmd.py",
 })
 _MIXED_DIR_CORE = {
-    "cli": ("__init__", "acp_cmd", "agent_cmd", "app", "askrate_cmd", "bench_cmd", "components_cmd",
+    "cli": ("__init__", "acp_cmd", "agent_cmd", "app", "askrate_cmd", "bench_cmd", "coauthor", "components_cmd",
             "config_cmd", "doctor_cmd", "errors", "init_cmd", "model_cmd", "model_ops",
             "plugin_mount", "plugins_cmd", "repl",
             "session_accumulator", "session_resume", "session_trust", "slash_commands", "start_cmd", "theme", "ui",

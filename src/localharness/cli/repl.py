@@ -1091,6 +1091,16 @@ class OrchestratorREPL:
         for text in pending:
             await _notice_later(text)
 
+        # Co-author consent (spec 14): settle once per project + install the hook.
+        # Best-effort — a failure here costs a log line, never the session.
+        from localharness.cli.coauthor import settle_coauthor_startup
+        try:
+            await settle_coauthor_startup(gate, self._workspace, pending.append)
+        except Exception:  # noqa: BLE001
+            log.warning("could not settle co-author consent", exc_info=True)
+        for text in pending:
+            await _notice_later(text)
+
     def _session_gate(self) -> Any:
         """The gate `/mode` acts on — the one the running loop and its subagents share."""
         return self._gate if self._gate is not None else getattr(self._agent, "gate", None)
