@@ -108,7 +108,7 @@ async def test_completed_delegation_integrated_then_closed(tmp_path, bus, mock_l
 
 
 @pytest.mark.asyncio
-async def test_failed_delegation_blocks_close_and_is_named_in_reply(
+async def test_failed_delegation_is_named_in_reply_and_keeps_record_live(
     tmp_path, bus, mock_llm_client, monkeypatch,
 ):
     async def boom(*args, **kwargs):
@@ -123,9 +123,9 @@ async def test_failed_delegation_blocks_close_and_is_named_in_reply(
 
     (d,) = state.current.delegations
     assert d.status == "failed: execution_error" and "boom" in d.findings
-    assert tool_messages(seen, "Unintegrated delegations: d1 reviewer")
-    assert not state.current.closed
-    assert reply.endswith("Delegated work unresolved: d1 reviewer: failed: execution_error.")
+    assert tool_messages(seen, "reviewer (d1): failed: execution_error, not integrated")
+    assert state.current.closed and state._live() is not None  # closing never refuses
+    assert reply == "Done.\n\nTask evidence: reviewer (d1): failed: execution_error, not integrated."
     (obs,) = agent_observations(bus)
     assert obs.error and "boom" in obs.error
 
@@ -173,7 +173,7 @@ async def test_cancelled_delegation_becomes_interrupted(tmp_path, bus, mock_llm_
     await loop.run_turn("continue")
     assert state.current.delegations[0].status == "interrupted"
     assert "delegation d1 reviewer interrupted" in state.packet()
-    assert "Delegations: d1 reviewer: interrupted" in state.packet()
+    assert "Delegations (1): d1 reviewer: interrupted" in state.packet()
 
 
 @pytest.mark.asyncio

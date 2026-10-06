@@ -1,4 +1,4 @@
-"""The `task` tool: bounded record updates, runtime-verified human quotes, loop packet seam."""
+"""The `task` tool: bounded record updates, human-turn citations, loop packet seam."""
 import json
 import os
 from types import SimpleNamespace
@@ -7,7 +7,7 @@ import pytest
 
 from localharness.agent.task_record import TaskState
 from localharness.tools.base import ToolResult
-from localharness.tools.builtin.task_tool import CHECKPOINT_RULE, TaskTool
+from localharness.tools.builtin.task_tool import CHECKPOINT_NEEDS_TURN, TaskTool
 from tests.unit.test_task_context import make_loop
 
 HUMAN = "Write the outline in outline.md and stop after the outline for my review."
@@ -48,37 +48,58 @@ async def test_start_creates_record_and_replacement_drops_old_state(tmp_path):
     assert not ctx.requirements and not ctx.artifacts and not state.current.decisions
 
 
-async def test_checkpoint_requires_a_substantiated_quote(tmp_path):
+async def test_checkpoint_requires_a_cited_human_turn(tmp_path):
     state, tool = tool_for(tmp_path)
-    assert refused(await start(tool, requested_status="checkpoint"), CHECKPOINT_RULE)
+    assert refused(await start(tool, requested_status="checkpoint"), CHECKPOINT_NEEDS_TURN)
     assert state.current is None
-    assert refused(await start(tool, requested_status="checkpoint", human_quote="stop whenever you like"))
-    ok = await start(tool, requested_status="checkpoint", human_quote="stop after the outline")
+    assert refused(await start(tool, requested_status="checkpoint", human_turn=5),
+                   "human turn 5 is not on record; stored turns: 1-1")
+    assert refused(await start(tool, human_turn=1), "cites a checkpoint request")
+    ok = await start(tool, requested_status="checkpoint", human_turn=1)
     assert ok.success and state.current.context.requested_status == "checkpoint"
-    assert refused(await tool.run(action="update", requested_status="checkpoint"), CHECKPOINT_RULE)
-    assert refused(await tool.run(action="close", status="checkpoint"), CHECKPOINT_RULE)
-    assert (await tool.run(action="close", status="checkpoint",
-                           human_quote="stop after the outline for my review")).success
+    assert (state.current.checkpoint_turn, state.current.checkpoint_text) == (1, HUMAN)
+    assert f'Checkpoint requested at turn 1: "{HUMAN}"' in state.packet()
+    assert f'1: "{HUMAN[:80]}"' in ok.output  # the start reply echoes the turns on record
+    assert refused(await tool.run(action="update", requested_status="checkpoint"), CHECKPOINT_NEEDS_TURN)
+    assert refused(await tool.run(action="close", status="checkpoint"), CHECKPOINT_NEEDS_TURN)
+    assert (await tool.run(action="close", status="checkpoint", human_turn=1)).success
+    assert (await tool.run(action="close", status="partial")).success  # the model's own stop: no turn
 
 
-async def test_decide_waive_and_budget_raise_need_human_words(tmp_path):
+async def test_decide_check_and_waive_cite_human_turns(tmp_path):
     state, tool = tool_for(tmp_path, HUMAN, "Correction: the outline must have five sections.")
     await start(tool)
-    await tool.run(action="decide", text="Five sections", human_quote="must have five sections")
-    await tool.run(action="decide", text="Plain tone", human_quote="please use a plain tone")
-    await tool.run(action="decide", text="Short intro")
-    assert [d.origin for d in state.current.decisions] == ["human", "model", "model"]
-    assert "[human] Five sections; [assumption] Plain tone" in state.packet()
+    assert (await tool.run(action="decide", text="Five sections", human_turn=2)).output == (
+        "Recorded human decision (turn 2).")
+    assert (await tool.run(action="decide", text="Plain tone")).output == (
+        "Recorded assumption (no human turn cited).")
+    assert refused(await tool.run(action="decide", text="Short intro", human_turn=7),
+                   "human turn 7 is not on record; stored turns: 1-2")
+    assert [(d.origin, d.human_turn) for d in state.current.decisions] == [("human", 2), ("model", None)]
+    assert ('[human turn 2: "Correction: the outline must have five sections."] Five sections; '
+            "[assumption] Plain tone") in state.packet()
     assert refused(await tool.run(action="check", key="lint", description="Lint", tool="bash_exec",
                                   arguments={}), "declare the exact arguments")
     await tool.run(action="check", key="lint", description="Lint", tool="bash_exec",
                    arguments={"command": "lint"})
-    assert refused(await tool.run(action="waive", key="lint", human_quote="skip the lint please"))
-    assert refused(await tool.run(action="waive", key="nope", human_quote="must have five sections"))
-    assert (await tool.run(action="waive", key="lint", human_quote="must have five sections")).success
-    assert refused(await tool.run(action="update", revision_budget=3), "human_quote")
-    assert refused(await tool.run(action="update", delegation_budget=5, human_quote="go big"))
-    assert (await tool.run(action="update", revision_budget=0)).success  # lowering is the model's call
+    assert refused(await tool.run(action="waive", key="lint"), "cites the human turn")
+    assert refused(await tool.run(action="waive", key="lint", human_turn=3), "not on record")
+    assert refused(await tool.run(action="waive", key="nope", human_turn=2), "check or judgment")
+    assert (await tool.run(action="waive", key="lint", human_turn=2)).success
+    assert state.current.context.waivers["lint"][1] == (
+        'turn 2: "Correction: the outline must have five sections."')
+    assert refused(await tool.run(action="update", revision_budget=3), "not valid for update")
+    assert refused(await tool.run(action="update", delegation_budget=5), "not valid for update")
+
+
+async def test_start_with_mixed_decisions(tmp_path):
+    state, tool = tool_for(tmp_path, "Five sections, please.")
+    ok = await start(tool, decisions=["Plain tone", {"text": "Five sections", "human_turn": 1}])
+    assert ok.success, ok
+    assert ('[assumption] Plain tone; [human turn 1: "Five sections, please."] Five sections'
+            in state.packet())
+    assert refused(await start(tool, decisions=[{"text": "x", "human_turn": 4}]), "not on record")
+    assert refused(await start(tool, decisions=[{"text": "x"}]), "{text, human_turn}")
 
 
 async def test_check_origin_revision_and_dependencies(tmp_path):
@@ -89,9 +110,10 @@ async def test_check_origin_revision_and_dependencies(tmp_path):
     await tool.run(action="artifact", key="draft", path="draft.md")
     await tool.run(action="check", key="lint", description="Lint", tool="bash_exec",
                    arguments={"command": "lint"}, result_field="exit_code", expected=0,
-                   depends_on=["draft"], human_quote="run lint with exit code zero")
+                   depends_on=["draft"], human_turn=1)
     req = state.current.context.requirements["lint"]
     assert (req.origin, req.revision, req.dependencies, req.expected) == ("human", "1", ("draft",), 0)
+    assert req.human_text == "Run lint with exit code zero before you finish."
     await tool.run(action="check", key="lint", description="Lint v2", tool="bash_exec",
                    arguments={"command": "lint"})
     req = state.current.context.requirements["lint"]
@@ -120,7 +142,7 @@ async def test_caps_and_fields_not_valid_for_the_action(tmp_path):
     assert refused(await start(tool, decisions=[f"d{i}" for i in range(9)]), "8")
     await start(tool)
     assert refused(await tool.run(action="decide", text="t" * 401), "400")
-    assert refused(await tool.run(action="decide", text="ok", key="x"), "allowed: human_quote, text")
+    assert refused(await tool.run(action="decide", text="ok", key="x"), "allowed: human_turn, text")
     assert refused(await tool.run(action="check", key="k", description="d", tool="t",
                                   arguments={"x": "y" * 2001}), "2000")
     for i in range(8):
@@ -301,15 +323,17 @@ async def test_judge_actions_and_key_clashes(tmp_path):
     for i in range(7):
         await tool.run(action="judge", key=f"j{i}", criterion="c")
     assert refused(await tool.run(action="judge", key="j9", criterion="c"), "8")
-    assert refused(await tool.run(action="waive", key="j0", human_quote="please skip it all"))
-    assert (await tool.run(action="waive", key="j0", human_quote="skip the tone judgment")).success
-    assert state.current.judgments[1].status == "waived"
-    assert refused(await tool.run(action="judge", key="j0", assessment="x"), "waived")
-    assert refused(await tool.run(action="waive", key="nope", human_quote="skip the tone judgment"),
-                   "check or judgment")
+    assert refused(await tool.run(action="waive", key="j0"), "human_turn")
+    assert (await tool.run(action="waive", key="j0", human_turn=1)).success
+    j0 = state.current.judgments[1]
+    assert (j0.status, j0.waived_by) == (
+        "waived", 'turn 1: "The tone gate is optional, skip the tone judgment if needed."')
+    out = await tool.run(action="judge", key="j0", assessment="Reads fine to me")
+    assert out.success and (j0.status, j0.assessment) == ("waived", "Reads fine to me")  # waiver stands
+    assert refused(await tool.run(action="waive", key="nope", human_turn=1), "check or judgment")
 
 
-async def test_close_complete_needs_passed_checks_and_no_open_judgments(tmp_path):
+async def test_close_complete_with_unresolved_evidence_stays_live(tmp_path):
     state, tool = tool_for(tmp_path, "Skip the lint gate for this draft, I accept it as is.")
     await start(tool)
     await tool.run(action="check", key="lint", description="Lint", tool="bash_exec",
@@ -318,12 +342,13 @@ async def test_close_complete_needs_passed_checks_and_no_open_judgments(tmp_path
                         metadata={"exit_code": 1}, before={})
     await tool.run(action="judge", key="support", criterion="Claims are sourced")
     out = await tool.run(action="close", status="complete")
-    assert refused(out, "Cannot close as complete: lint: failed. Rerun it, ask the human to waive it")
-    assert "Open editorial judgments: support." in out.error and state.current.closed is False
-    await tool.run(action="waive", key="lint", human_quote="skip the lint gate for this draft")
-    assert refused(await tool.run(action="close", status="complete"), "Open editorial judgments: support")
-    await tool.run(action="waive", key="support", human_quote="skip the lint gate for this draft")
-    assert (await tool.run(action="close", status="complete")).success and state.current.closed
+    assert out.success and state.current.closed  # never refused
+    assert "stays live until its declared evidence is settled: Task evidence: lint: failed." in out.output
+    assert state.finalize("Done.") == "Done.\n\nTask evidence: lint: failed."
+    assert state.packet() != "" and not state.current.retired
+    await tool.run(action="waive", key="lint", human_turn=1)
+    assert state.packet() == ""  # open judgments never block retirement
+    assert state.finalize("Done.") == "Done." and state.current.retired
 
 
 async def test_close_partial_keeps_the_record_live(tmp_path):
@@ -347,7 +372,7 @@ async def test_refused_start_restores_record_and_notes(tmp_path, monkeypatch):
     assert state.current.id == before.id and state.current == before
 
 
-# --- 0.16.5 slice 3: integrate delegated results; close refuses unintegrated work --------------
+# --- 0.16.5 slice 3: integrate delegated results; unintegrated work keeps the record live -------
 
 def delegated(state, *statuses):
     for i, status in enumerate(statuses, 1):
@@ -378,16 +403,17 @@ async def test_integrate_refusals(tmp_path):
     assert all(not d.integrated for d in state.current.delegations)
 
 
-async def test_close_complete_refused_until_delegations_integrated(tmp_path):
+async def test_close_complete_with_unintegrated_delegation_stays_live(tmp_path):
     state, tool = tool_for(tmp_path)
     await start(tool)
     delegated(state, "completed")
-    assert refused(await tool.run(action="close", status="complete"),
-                   "Unintegrated delegations: d1 reviewer: completed.")
-    assert not state.current.closed
+    out = await tool.run(action="close", status="complete")
+    assert out.success and state.current.closed
+    assert "reviewer (d1): completed, not integrated" in out.output
+    assert state._live() is not None
     await tool.run(action="integrate", delegation_id="d1", note="used the review")
-    assert (await tool.run(action="close", status="complete")).success
-    assert state.current.closed
+    assert state._live() is None
+    assert state.finalize("Done.") == "Done." and state.current.retired
 
 
 # --- 0.16.5 slice 4: batch declarations on start/update; guidance sentence ----------------------

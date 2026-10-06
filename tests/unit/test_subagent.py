@@ -728,7 +728,7 @@ def test_parse_handoff_never_raises_on_non_text():
 @pytest.mark.parametrize("reason,summary,expected", [
     ("complete", "Wrote the review.", "completed"),
     (None, "Wrote the review.", "completed"),
-    ("complete", "I'll now search for more sources.", "no_result"),
+    ("complete", "I'll now search for more sources.", "completed"),  # prose never decides it
     ("budget_actions", "partial", "budget_exhausted"),
     ("budget_time", "partial", "budget_exhausted"),
     ("kill_file", "", "killed"),
@@ -737,11 +737,9 @@ def test_parse_handoff_never_raises_on_non_text():
     ("active_step_blocked", "", "error"),
 ])
 def test_delegation_status_maps_runtime_reason(reason, summary, expected):
-    from localharness.agent.subagent import _delegation_status, _no_conclusion_note
+    from localharness.agent.subagent import _delegation_status
 
-    if expected == "no_result":
-        assert _no_conclusion_note(summary)  # the fixture really is announce-shaped
-    assert _delegation_status(reason, summary) == expected
+    assert _delegation_status(reason) == expected
 
 
 @pytest.mark.asyncio

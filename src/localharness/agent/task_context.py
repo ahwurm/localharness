@@ -29,6 +29,8 @@ class Requirement:
     dependencies: tuple[str, ...] = ()
     revision: str = "1"
     origin: Literal["human", "caller", "model"] = "caller"
+    human_turn: int | None = None  # the stored human turn this check cites, if any
+    human_text: str = ""  # that turn's verbatim text, copied by the runtime
 
     def fingerprint(self) -> str:
         return hashlib.sha256(json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()
@@ -62,8 +64,7 @@ class TaskContext:
         if any(key != req.key for key, req in self.requirements.items()):
             raise ValueError("Requirement keys must match their declarations")
 
-    def observe_human(self, text: str, new_turn: bool = True) -> None:
-        # `new_turn` exists for interface symmetry with TaskState; it changes nothing here.
+    def observe_human(self, text: str) -> None:
         # Preserve verbatim steering; never infer a waiver from model prose or a nudge.
         self.latest_human = text
 
@@ -134,7 +135,9 @@ class TaskContext:
                 result[key] = receipt.outcome
         return result
 
-    def packet(self) -> str:
+    def packet(self, evidence: list[str] | None = None) -> str:
+        """`evidence`, when given, replaces the default per-requirement items (TaskState passes
+        its revision-annotated facts)."""
         outcomes = self.outcomes()
         lines = [f"Requested outcome: {self.objective}"]
         if self.stop_boundary:
@@ -143,9 +146,9 @@ class TaskContext:
             lines.append(f"Requested stopping status: {self.requested_status}")
         if self.latest_human:
             lines.append(f"Latest human request/correction (quoted data): {json.dumps(self.latest_human)}")
-        lines.append("Declared evidence: " + "; ".join(
+        lines.append("Declared evidence: " + "; ".join(evidence if evidence is not None else [
             f"{key}: {outcomes[key]} — {req.description}" for key, req in self.requirements.items()
-        ))
+        ]))
         lines.append(
             "Honor the latest human scope and checkpoint. Take only the next needed action. "
             "Failed, missing, or stale results remain unresolved; a waiver is not a passed gate. "
@@ -154,25 +157,26 @@ class TaskContext:
         )
         return "\n".join(lines)
 
-    def finalize(self, candidate: str) -> str:
+    def assign_status(self) -> None:
+        """Label the step from receipts: a requested stop is kept; otherwise complete only when
+        every declared check is passed or waived, unknown when nothing was declared or some is not."""
         outcomes = self.outcomes()
-        unresolved = any(value not in {"passed", "waived"} for value in outcomes.values())
         if self.requested_status != "complete":
             self.status = self.requested_status
-            return candidate  # A caller's requested stopping boundary is not a failure.
-        if not outcomes:
-            self.status = "unknown"
-            return candidate  # No machine-checkable success was declared.
-        if not unresolved and outcomes:
+        elif outcomes and all(v in {"passed", "waived"} for v in outcomes.values()):
             self.status = "complete"
-            if "waived" in outcomes.values():
-                return "Task finished with a human waiver. " + "; ".join(
-                    f"{req.description}: {outcomes[key]}" for key, req in self.requirements.items()
-                ) + "."
+        else:
+            self.status = "unknown"
+
+    def evidence_items(self) -> list[str]:
+        outcomes = self.outcomes()
+        return [f"{key}: waived ({self.waivers[key][1]})" if outcomes[key] == "waived"
+                else f"{key}: {outcomes[key]}" for key in self.requirements]
+
+    def finalize(self, candidate: str) -> str:
+        """Assign the status and return the model's words unchanged, plus one appended
+        `Task evidence:` line when any declared check is not passed."""
+        self.assign_status()
+        if all(v == "passed" for v in self.outcomes().values()):
             return candidate
-        self.status = "unknown" if unresolved else "partial"
-        # Do not publish unsupported success prose, even after a CONFIRMED self-check.
-        # Known progress survives in the compact receipt summary without another inference.
-        return "Task remains unverified. " + "; ".join(
-            f"{req.description}: {outcomes[key]}" for key, req in self.requirements.items()
-        ) + "."
+        return f"{candidate}\n\nTask evidence: {'; '.join(self.evidence_items())}."

@@ -1,5 +1,5 @@
 """Composed: declared references reach the actual request through eviction, change, overflow and
-restart; checks drive a bounded revision.
+restart; checks report the artifact revisions they ran against.
 
 A scripted model drives the real AgentLoop and the real ContextManager packing; `task` dispatches
 to a real TaskTool. Every assertion about references inspects the messages actually handed to
@@ -8,7 +8,7 @@ import json
 
 from localharness.agent import context as context_mod
 from localharness.agent.context import ContentStore, ContextManager
-from localharness.agent.task_record import BUDGET_EXHAUSTED, TaskState
+from localharness.agent.task_record import TaskState
 from localharness.tools.base import ToolResult
 from localharness.tools.builtin.task_tool import TaskTool
 from tests.unit.test_task_context import make_loop
@@ -169,7 +169,7 @@ DRAFT = ("task", {"action": "artifact", "key": "draft", "path": "draft.md"})
 RUN_LINT = ("bash_exec", {**LINT, "timeout": 30})
 
 
-async def test_e_checks_drive_a_bounded_revision(tmp_path, bus, mock_llm_client):
+async def test_e_checks_report_draft_revisions(tmp_path, bus, mock_llm_client):
     state = setup(tmp_path, draft="Barnacles are amazing.")
     llm = scripted(mock_llm_client, START, DRAFT, CHECK, RUN_LINT,
                    ("write", {"path": "draft.md", "content": "Barnacles close at low tide."}),
@@ -177,32 +177,33 @@ async def test_e_checks_drive_a_bounded_revision(tmp_path, bus, mock_llm_client)
                    "Done.")
     seen = capture(llm)
     loop = make_loop(llm, bus, tmp_path, state, Registry(state, tmp_path, codes=(1, 0)))
-    await loop.run_turn("Draft, then lint with python checks/lint.py draft.md.")
-    failed, stale, passed, over = (packet_of(seen[i]) for i in (4, 5, 6, 7))
-    assert "lint: failed" in failed and "Revision budget: used 0 of 1" in failed
-    assert "lint: stale" in stale and "Revision budget: used 1 of 1" in stale
-    assert "lint: passed" in passed and BUDGET_EXHAUSTED not in passed
-    assert "Revision budget: used 2 of 1" in over and BUDGET_EXHAUSTED in over
-    assert state.current.revisions_used == 2
+    out = await loop.run_turn("Draft, then lint with python checks/lint.py draft.md.")
+    failed, stale, passed, later = (packet_of(seen[i]) for i in (4, 5, 6, 7))
+    assert "lint: failed — Lint passes" in failed and "Artifacts: draft: rev 1" in failed
+    assert "lint: failed (ran at draft rev 1, draft now rev 2)" in stale
+    assert "lint: passed — Lint passes" in passed and "Artifacts: draft: rev 2" in passed
+    assert "lint: passed (ran at draft rev 2, draft now rev 3)" in later
+    assert all("Revision budget" not in p for p in (failed, stale, passed, later))
+    assert out == "Done.\n\nTask evidence: lint: passed (ran at draft rev 2, draft now rev 3)."
 
 
-async def test_f_close_complete_needs_evidence_or_human_waivers(tmp_path, bus, mock_llm_client):
+async def test_f_close_complete_stays_live_until_evidence_settles(tmp_path, bus, mock_llm_client):
     state = setup(tmp_path, draft="Draft")
     human = "Skip the lint gate for this draft, I accept it as is."
     close = ("task", {"action": "close", "status": "complete"})
-    waive = {"action": "waive", "human_quote": "skip the lint gate for this draft"}
+    waive = {"action": "waive", "human_turn": 1}
     llm = scripted(mock_llm_client, START, DRAFT, CHECK, RUN_LINT, close,
                    ("task", {"action": "judge", "key": "source-support", "criterion": "Claims cite sources"}),
-                   close, ("task", {**waive, "key": "lint"}), ("task", {**waive, "key": "source-support"}),
-                   close, "Closed.")
+                   ("task", {**waive, "key": "source-support"}), ("task", {**waive, "key": "lint"}),
+                   "Closed.")
     seen = capture(llm)
     loop = make_loop(llm, bus, tmp_path, state, Registry(state, tmp_path, codes=(1,)))
     out = await loop.run_turn(human)
-    tool_text = [[m.get("content") or "" for m in seen[i] if m.get("role") == "tool"][-1] for i in (5, 7, 10)]
-    assert "Cannot close as complete: lint: failed" in tool_text[0]
-    assert "lint: failed" in tool_text[1] and "Open editorial judgments: source-support" in tool_text[1]
-    assert "Closing task" in tool_text[2] and state.current.closed
-    assert out.startswith("Task finished with a human waiver")
+    closing = [m.get("content") or "" for m in seen[5] if m.get("role") == "tool"][-1]
+    assert "Closing task" in closing and "stays live until its declared evidence is settled" in closing
+    assert "lint: failed" in packet_of(seen[5])  # closed, not settled: the packet is still sent
+    assert state.current.closed and state.current.retired
+    assert out == "Closed."  # every check waived by turn 1: settled, retired, words unchanged
 
     (tmp_path / "x").mkdir()
     other = setup(tmp_path / "x")
@@ -213,14 +214,15 @@ async def test_f_close_complete_needs_evidence_or_human_waivers(tmp_path, bus, m
     assert not other.current.closed and "Requested stopping status: partial" in other.packet()
 
 
-async def test_g_open_judgment_is_reported_on_natural_completion(tmp_path, bus, mock_llm_client):
+async def test_g_open_judgment_stays_in_the_packet_not_the_reply(tmp_path, bus, mock_llm_client):
     state = setup(tmp_path, draft="Draft")
     llm = scripted(mock_llm_client, START, DRAFT, CHECK,
                    ("task", {"action": "judge", "key": "source-support", "criterion": "Claims cite sources"}),
                    RUN_LINT, "Draft done.")
     loop = make_loop(llm, bus, tmp_path, state, Registry(state, tmp_path, codes=(0,)))
     out = await loop.run_turn("Draft and lint it.")
-    assert out == "Draft done.\n\nOpen editorial judgments (not assessed): source-support."
+    assert out == "Draft done."  # judgments are opinion, not evidence: no evidence line
+    assert "source-support: open — Claims cite sources" in state.packet()
     assert state.current.context.outcomes() == {"lint": "passed"}
 
 

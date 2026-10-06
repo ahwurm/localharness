@@ -35,8 +35,9 @@ def test_actual_structured_gate_result_not_prose(tmp_path, success, metadata, ou
     ctx = contract(tmp_path)
     record(ctx, success=success, metadata=metadata)
     assert ctx.outcomes() == {"lint": outcome}
-    answer = ctx.finalize("All gates green. CONFIRMED")
-    assert ("All gates green" in answer) == (outcome == "passed")
+    answer = ctx.finalize("All gates green. CONFIRMED")  # the words stay; the facts sit beside them
+    assert answer == "All gates green. CONFIRMED" + (
+        "" if outcome == "passed" else f"\n\nTask evidence: lint: {outcome}.")
 
 
 def test_only_changed_dependency_invalidates_receipt(tmp_path):
@@ -52,8 +53,8 @@ def test_only_changed_dependency_invalidates_receipt(tmp_path):
     assert ctx.outcomes()["lint"] == "passed"
     ctx.artifacts["draft"].write_text("Changed draft")
     assert ctx.outcomes()["lint"] == "stale"
-    assert "All gates green" not in ctx.finalize("All gates green")
-    assert "All gates green" not in ctx.finalize("All gates green")
+    assert ctx.finalize("All gates green") == "All gates green\n\nTask evidence: lint: stale."
+    assert ctx.status == "unknown"
 
 
 def test_changed_requirement_and_explicit_waiver_are_not_passes(tmp_path):
@@ -63,8 +64,9 @@ def test_changed_requirement_and_explicit_waiver_are_not_passes(tmp_path):
     assert ctx.outcomes()["lint"] == "stale"
     ctx.waive("lint", human_decision="Skip this gate for the outline checkpoint.")
     assert ctx.outcomes()["lint"] == "waived"
-    assert "All gates green" not in ctx.finalize("All gates green")
-    assert "human waiver" in ctx.finalize("Done")
+    assert ctx.finalize("Done") == (
+        "Done\n\nTask evidence: lint: waived (Skip this gate for the outline checkpoint.).")
+    assert ctx.status == "complete"  # a waiver settles the check; the line still reports it
     ctx.revise(replace(ctx.requirements["lint"], expected=3, revision="3"))
     assert ctx.outcomes()["lint"] == "stale"
 
@@ -80,12 +82,13 @@ def test_dependency_changed_during_check_is_unverified(tmp_path):
 def test_checkpoint_retains_unfinished_asks_then_correction(tmp_path):
     ctx = contract(tmp_path)
     ctx.requested_status = "checkpoint"
-    assert ctx.finalize("Outline checkpoint reached; draft remains.") == "Outline checkpoint reached; draft remains."
+    assert ctx.finalize("Outline checkpoint reached; draft remains.") == (
+        "Outline checkpoint reached; draft remains.\n\nTask evidence: lint: unknown.")
     assert ctx.status == "checkpoint"
     ctx.observe_human("Continue, and use the stricter gate.")
     ctx.requested_status = "complete"
     ctx.revise(replace(ctx.requirements["lint"], revision="2"))
-    assert "unverified" in ctx.finalize("Done")
+    assert ctx.finalize("Done") == "Done\n\nTask evidence: lint: unknown."
     assert "stricter gate" in ctx.packet()
 
 
@@ -144,12 +147,13 @@ async def test_loop_records_dispatch_and_preserves_public_event(
     loop = make_loop(llm, bus, tmp_path, ctx, Registry())
     answer = await loop.run_turn("Run the gate, then report the draft status.")
     assert ctx.outcomes()["lint"] == expected
-    assert ("All gates green" in answer) == (expected == "passed")
+    assert answer == "All gates green." + (
+        "" if expected == "passed" else f"\n\nTask evidence: lint: {expected}.")
     events = bus.history(event_types=[TaskComplete])
     assert events[-1].success is True  # Turn execution semantics stay compatible.
     assert events[-1].summary == answer
-    if expected != "passed":
-        assert not any(m.get("content") == "All gates green." for m in loop._conversation)
+    # History keeps the model's own words; the packet carries the facts on the next request.
+    assert any(m.get("content") == "All gates green." for m in loop._conversation)
 
 
 @pytest.mark.asyncio
@@ -159,7 +163,7 @@ async def test_missing_child_and_sentinel_cannot_complete(tmp_path, bus, mock_ll
     llm = mock_llm_client([mock_llm_client.Response(content="CONFIRMED")])
     loop = make_loop(llm, bus, tmp_path, ctx)
     answer = await loop.run_turn("Finish with the critic result.")
-    assert "Requested critic: unknown" in answer
+    assert answer.endswith("\n\nTask evidence: lint: unknown; critic: unknown.")
     assert ctx.status == "unknown"
 
 
@@ -225,7 +229,7 @@ async def test_xml_injection_is_counted_at_final_boundary(tmp_path, bus):
     await llm._client.close()
 
 
-# --- 0.16.5 slice 3: delegation budget before dispatch; tool-less asides are not rewritten ----
+# --- 0.16.5 slice 3/5: delegation entries open before dispatch; replies keep their words -------
 
 class DelegatingRegistry:
     """`task` -> a real TaskTool, `agent` -> a real AgentTool over a spy runner."""
@@ -244,6 +248,8 @@ class DelegatingRegistry:
     async def dispatch(self, name, args, *rest):
         if name in self.tools:
             return await self.tools[name].run(**args)
+        if name == "bash_exec":
+            return ToolResult(output="lint ran", metadata={"exit_code": 1})
         return ToolResult(output="ok")
 
 
@@ -256,26 +262,28 @@ START = ("task", {"action": "start", "objective": "Review the draft", "assignmen
 
 
 @pytest.mark.asyncio
-async def test_delegation_over_budget_refused_before_dispatch(tmp_path, bus, mock_llm_client):
+async def test_delegation_opens_entry_before_dispatch_without_refusal(tmp_path, bus, mock_llm_client):
     from localharness.agent.task_record import TaskState
 
     state = TaskState(tmp_path / "task.json", workspace=str(tmp_path))
     reg = DelegatingRegistry(state)
-    llm = _script(mock_llm_client, START,
-                  ("task", {"action": "update", "delegation_budget": 0}), "Ready.",
-                  ("agent", {"agent_id": "reviewer", "task": "Review draft.md"}), "Stopped.")
-    from tests.unit.test_task_references import capture
-    seen = capture(llm)
+    during = []
+
+    async def runner(*args):
+        during.append([(d.id, d.status) for d in state.current.delegations])
+        return "SUBAGENT RUN COMPLETE. reviewed."
+    reg.runner.side_effect = runner
+    llm = _script(mock_llm_client, START, "Ready.",
+                  ("agent", {"agent_id": "reviewer", "task": "Review draft.md"}), "Delegated.")
     loop = make_loop(llm, bus, tmp_path, state, reg)
     await loop.run_turn("Review the draft")
-    assert await loop.run_turn("now delegate the review") == "Stopped."
-    reg.runner.assert_not_called()
+    reply = await loop.run_turn("now delegate the review")
+    reg.runner.assert_awaited_once()
+    assert during == [[("d1", "running")]]  # the entry exists while the child runs
+    assert state.current.delegations[0].status == "completed"
     obs = [e for e in bus.history(event_types=[Observation]) if e.tool_name == "agent"]
-    assert len(obs) == 1 and "Delegation budget (0) used for this task" in obs[0].error
-    assert state.current.delegations == []
-    refusal = next(m["content"] for m in seen[-1] if m.get("role") == "tool"
-                   and "Delegation budget" in str(m.get("content")))
-    assert "[budget: 0/100 tool calls used]" in refusal  # the refused call is not an action
+    assert len(obs) == 1 and obs[0].error is None and "[tool error]" not in (obs[0].output or "")
+    assert reply == "Delegated.\n\nTask evidence: reviewer (d1): completed, not integrated."
 
 
 @pytest.mark.asyncio
@@ -292,7 +300,7 @@ async def test_delegation_without_record_is_unchanged(tmp_path, bus, mock_llm_cl
 
 
 @pytest.mark.asyncio
-async def test_tool_less_aside_reply_is_not_rewritten(tmp_path, bus, mock_llm_client):
+async def test_aside_keeps_its_words_and_gets_the_evidence_line(tmp_path, bus, mock_llm_client):
     from localharness.agent.task_record import TaskState
 
     state = TaskState(tmp_path / "task.json", workspace=str(tmp_path))
@@ -300,10 +308,12 @@ async def test_tool_less_aside_reply_is_not_rewritten(tmp_path, bus, mock_llm_cl
     check = ("task", {"action": "check", "key": "lint", "description": "Lint passes",
                       "tool": "bash_exec", "arguments": {"command": "lint"},
                       "result_field": "exit_code", "expected": 0})
-    llm = _script(mock_llm_client, START, check, "Set up.",
+    llm = _script(mock_llm_client, START, check, ("bash_exec", {"command": "lint"}), "Set up.",
                   "A tide pool is a rocky pool.",
                   ("read", {"path": "x"}), "Finished the report.")
     loop = make_loop(llm, bus, tmp_path, state, reg)
     await loop.run_turn("Write the report")
-    assert await loop.run_turn("what is a tide pool?") == "A tide pool is a rocky pool."
-    assert (await loop.run_turn("continue")).startswith("Task remains unverified.")
+    assert await loop.run_turn("what is a tide pool?") == (
+        "A tide pool is a rocky pool.\n\nTask evidence: lint: failed.")
+    assert any(m.get("content") == "A tide pool is a rocky pool." for m in loop._conversation)
+    assert await loop.run_turn("continue") == "Finished the report.\n\nTask evidence: lint: failed."

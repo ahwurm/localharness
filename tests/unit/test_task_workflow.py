@@ -13,6 +13,7 @@ from tests.unit.test_task_context import make_loop
 ASK = ("Help me prepare a short report on tide pools. For now write only the outline in "
        "outline.md and stop after the outline for my review.")
 THREE = "# Tide pools\n1. Zones\n2. Species\n3. Threats\n"
+CITED = '[human turn 2: "Correction: the outline must have five sections, not three."] Outline has five sections'
 FIVE = "# Tide pools\n1. Zones\n2. Species\n3. Adaptations\n4. Threats\n5. Visiting\n"
 
 
@@ -65,19 +66,17 @@ async def test_correction_aside_checkpoint_and_restart_from_disk(tmp_path, bus, 
         mock_llm_client,
         ("task", {"action": "start", "objective": "Short report on tide pools",
                   "assignment": "Outline in outline.md", "stop_boundary": "outline only",
-                  "requested_status": "checkpoint", "human_quote": "stop after the outline for my review"}),
+                  "requested_status": "checkpoint", "human_turn": 1}),
         ("write", {"path": "outline.md", "content": THREE}),
         ("task", {"action": "artifact", "key": "outline", "path": "outline.md"}),
         "Outline drafted.",
         # turn 2: the human's correction, plus one decision the human never said
-        ("task", {"action": "decide", "text": "Outline has five sections",
-                  "human_quote": "the outline must have five sections"}),
+        ("task", {"action": "decide", "text": "Outline has five sections", "human_turn": 2}),
         ("task", {"action": "decide", "text": "Use a playful tone"}),
         "Noted.",
         "4",  # turn 3: the aside
         ("write", {"path": "outline.md", "content": FIVE}),
-        ("task", {"action": "close", "status": "checkpoint",
-                  "human_quote": "stop after the outline for my review"}),
+        ("task", {"action": "close", "status": "checkpoint", "human_turn": 1}),
         "Five-section outline ready for your review.",
     )
     seen = capture(llm)
@@ -87,9 +86,10 @@ async def test_correction_aside_checkpoint_and_restart_from_disk(tmp_path, bus, 
     assert not packet_of(seen[0])  # no record yet on the first request
     assert await loop.run_turn("Correction: the outline must have five sections, not three.") == "Noted."
     mark = len(seen)
-    assert await loop.run_turn("Quick aside: what is 2 + 2?") == "4"
+    assert await loop.run_turn("Quick aside: what is 2 + 2?") == "4"  # nothing declared: no line
     aside = packet_of(seen[mark])
-    assert "Short report on tide pools" in aside and "[human] Outline has five sections" in aside
+    assert "Short report on tide pools" in aside and CITED in aside
+    assert "Human turns on record: 1-3" in aside
     assert "[assumption] Use a playful tone" in aside
     answer = await loop.run_turn("OK, continue.")
     assert answer == "Five-section outline ready for your review."  # a checkpoint is not a failure
@@ -108,7 +108,7 @@ async def test_correction_aside_checkpoint_and_restart_from_disk(tmp_path, bus, 
     assert await loop2.run_turn("Looks good. What is next?") == "Next is the draft, when you say so."
     packet = packet_of(seen2[0])
     assert "Outline in outline.md" in packet
-    assert "[human] Outline has five sections" in packet
+    assert CITED in packet
     assert "Requested stopping status: checkpoint" in packet
     assert "changed since last session" not in packet
     assert reloaded.current.decisions == decisions  # no duplicated decisions
