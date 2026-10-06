@@ -1817,6 +1817,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 await establish_session_trust(gate, lambda text: console.print(f"[dim]{text}[/dim]"))
             except Exception:  # noqa: BLE001 — a broken trust store costs a notice, not the session
                 log.warning("could not settle workspace trust", exc_info=True)
+            # Co-author consent (spec 14): settle once per project + install the hook.
+            from localharness.cli.coauthor import settle_coauthor_startup
+            try:
+                await settle_coauthor_startup(
+                    gate, workspace, lambda text: console.print(f"[dim]{text}[/dim]")
+                )
+            except Exception:  # noqa: BLE001
+                log.warning("could not settle co-author consent", exc_info=True)
             # ACP's turn loop is the protocol itself: `session/prompt` requests run turns
             # directly on this loop, so there is no line to pull and no REPL. `serve()` returns
             # when the connection closes, and the ordered teardown in `finally` runs unchanged.

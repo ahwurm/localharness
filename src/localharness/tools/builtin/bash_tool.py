@@ -312,6 +312,9 @@ class BashExecTool(Tool):
             # /c flag, cmd starts INTERACTIVE on the inherited stdin and sits there for the
             # full timeout. start_new_session (POSIX) makes the process group the whole
             # tree so a timeout can kill all of it (see _kill_tree).
+            # LOCALHARNESS_COMMIT=1 marks every command the harness runs, so the
+            # prepare-commit-msg hook (spec 14) can scope itself to harness commits
+            # only — a user's hand-run `git commit` never carries the marker.
             proc = await asyncio.create_subprocess_exec(
                 bash,
                 "-c",
@@ -320,6 +323,7 @@ class BashExecTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                env={**os.environ, "LOCALHARNESS_COMMIT": "1"},
                 **({} if os.name == "nt" else {"start_new_session": True}),
             )
             job = _WindowsJob() if os.name == "nt" else None

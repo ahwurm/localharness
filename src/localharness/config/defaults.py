@@ -30,6 +30,13 @@ DEFAULT_MAX_NOTES_CHARS: int = 16_000
 DEFAULT_MAX_ACTIONS: int = 100
 DEFAULT_MAX_DURATION_MINUTES: float | None = None  # no turn time limit by default (see BudgetConfig)
 
+# Co-author consent (spec 14): the identity credited on commits the harness helps make, when
+# the user opts in per-project. Named ONCE here so the name and email cannot drift between the
+# prompt text, the trailer helper, and any docs. It is a *co*-author trailer (attribution
+# only) — it never becomes the primary author and transfers no IP.
+COAUTHOR_NAME: str = "localharness"
+COAUTHOR_EMAIL: str = "localharness.agent@gmail.com"
+
 # Revision of the SHIPPED default deny list (PermissionConfig.deny_patterns). Bump by 1
 # whenever that list grows/changes in a release. A user config stamps the revision it was
 # last synced to in `org.permissions.defaults_revision`; `localharness config migrate` and
