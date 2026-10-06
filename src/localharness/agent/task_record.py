@@ -1,26 +1,15 @@
 """One persisted working record per agent, composed over the TaskContext evidence core.
 
-The record keeps what a coworker keeps on substantive work: the objective, the current bounded
-assignment, accepted decisions, artifacts, file-backed references, editorial judgments, and
-machine-checkable checks. The runtime owns
-receipts, artifact hashes, human turns, and timestamps; the model changes the record only
-through the bounded `task` tool, and a human decision counts only when its quoted words are
-found in a turn the runtime itself recorded (`substantiated`). `TaskState` is the holder the
-loop and the tool share: with no record it is inert (no packet, no file).
-
-References are re-snapshotted from disk before every request of an active task
-(`refresh_references`) and re-declared as active references, so their current bodies survive
-eviction, file changes and restarts; there is no file watcher. Judgments are model opinion,
-never evidence. The revision budget is counted by the runtime: an edit to an artifact that a
-receipt verified spends one revision.
-
-Delegations are owned by the record (0.16.5 D8): the loop calls `begin_delegation` before an
-`agent` call (refusing past `delegation_budget`) and `record_delegation` after it, so every
-delegation ends in a runtime status; one still "running" when a human turn arrives or the record
-is reloaded was cancelled and becomes "interrupted". Only the coordinator's `integrate` resolves
-one. Unintegrated delegations also keep a record whose checks all passed from finishing: its
-status becomes unknown. Delegations are awaited one at a time, so one writer holds an artifact at
-a time.
+The runtime is substrate: it records receipts, artifact hashes, human turns (verbatim, numbered in
+arrival order), delegation outcomes and timestamps, bounds them, and renders them. The model keeps
+the rest (assignment, decisions, artifacts, references, judgments, checks) through the bounded
+`task` tool. A citation names a stored human turn by number; the runtime checks only that the turn
+is stored and copies its text. There are no budgets, no quote matching and no refusals on the
+model's behalf; policy lives in the prompt and workflow instructions. The record retires only when
+it was closed as complete with every declared check passed or waived and every delegation
+integrated. Replies are never replaced: at most one `Task evidence:` line is appended. References
+are re-snapshotted before every request of a live task (`refresh_references`); judgments are
+opinion, never evidence. Without a record `TaskState` is inert (no packet, no file).
 """
 from __future__ import annotations
 
@@ -28,7 +17,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -56,11 +44,9 @@ MAX_REFERENCES = MAX_ACTIVE_REFERENCES
 MAX_JUDGMENTS = 8
 MAX_REFERENCE_BYTES = 200 * 1024
 MAX_DELEGATIONS = 8
-OPEN_JUDGMENTS = "Open editorial judgments (not assessed): "
-BUDGET_EXHAUSTED = ("Revision budget exhausted: stop with the usable artifact and list the remaining gaps; "
-                    "continue only on new user direction.")
+MAX_ARTIFACT_HISTORY = 16
+MAX_QUOTE_DISPLAY = 200
 CORRUPT_NOTICE = "Task state could not be read; starting without it"
-_QUOTES = str.maketrans("", "", "\"'“”‘’`")
 
 
 class TaskRecordTooLarge(ValueError):
@@ -71,15 +57,21 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def normalize_quote(text: str) -> str:
-    return re.sub(r"\s+", " ", text.translate(_QUOTES).lower()).strip()
+def _clip(text: str, cap: int = MAX_QUOTE_DISPLAY) -> str:
+    """Display capacity only; the stored turn stays verbatim."""
+    return text if len(text) <= cap else text[:cap] + "…"
+
+
+def _turn_label(n: int, text: str) -> str:
+    return f"turn {n}: {json.dumps(text, ensure_ascii=False)}"
 
 
 @dataclass(frozen=True)
 class Decision:
     text: str
     origin: Literal["human", "model"]
-    turn: int
+    human_turn: int | None = None
+    human_text: str = ""  # the cited turn's verbatim text, copied by the runtime
 
 
 @dataclass
@@ -99,6 +91,7 @@ class Judgment:
     passages: str = ""
     fix: str = ""
     status: Literal["open", "assessed", "waived"] = "open"
+    waived_by: str = ""  # 'turn N: "..."' of the human turn that waived it
 
 
 @dataclass
@@ -128,15 +121,16 @@ class TaskRecord:
     decisions: list[Decision] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
     next_action: str = ""
-    revision_budget: int = 1
-    revisions_used: int = 0
-    delegation_budget: int = 2
-    human_turns: list[str] = field(default_factory=list)
-    artifact_revisions: dict[str, str | None] = field(default_factory=dict)
-    closed: bool = False
+    human_turns: list[dict[str, Any]] = field(default_factory=list)  # [{"n": int, "text": str}]
+    artifact_revisions: dict[str, str | None] = field(default_factory=dict)  # hashes at last save
+    artifact_history: dict[str, list[str]] = field(default_factory=dict)  # distinct hashes seen
+    artifact_history_dropped: dict[str, int] = field(default_factory=dict)  # keeps rev numbers stable
+    checkpoint_turn: int | None = None
+    checkpoint_text: str = ""
+    closed: bool = False  # the model closed it as complete
+    retired: bool = False  # latched at finalize once closed and settled
     references: list[Reference] = field(default_factory=list)
     judgments: list[Judgment] = field(default_factory=list)
-    verified_revision: dict[str, str | None] = field(default_factory=dict)
     delegations: list[Delegation] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -146,13 +140,14 @@ class TaskRecord:
             "workspace": self.workspace, "assignment": self.assignment,
             "instructions_path": self.instructions_path,
             "decisions": [vars(d) for d in self.decisions], "questions": self.questions,
-            "next_action": self.next_action, "revision_budget": self.revision_budget,
-            "revisions_used": self.revisions_used, "delegation_budget": self.delegation_budget,
+            "next_action": self.next_action,
             "human_turns": self.human_turns, "artifact_revisions": self.artifact_revisions,
-            "closed": self.closed,
+            "artifact_history": self.artifact_history,
+            "artifact_history_dropped": self.artifact_history_dropped,
+            "checkpoint_turn": self.checkpoint_turn, "checkpoint_text": self.checkpoint_text,
+            "closed": self.closed, "retired": self.retired,
             "references": [vars(r) for r in self.references],
             "judgments": [vars(j) for j in self.judgments],
-            "verified_revision": self.verified_revision,
             "delegations": [vars(x) for x in self.delegations],
             "context": {
                 "objective": ctx.objective, "stop_boundary": ctx.stop_boundary,
@@ -190,15 +185,15 @@ class TaskRecord:
             assignment=d.get("assignment", ""), instructions_path=d.get("instructions_path", ""),
             decisions=[Decision(**x) for x in d.get("decisions", [])],
             questions=list(d.get("questions", [])), next_action=d.get("next_action", ""),
-            revision_budget=int(d.get("revision_budget", 1)),
-            revisions_used=int(d.get("revisions_used", 0)),
-            delegation_budget=int(d.get("delegation_budget", 2)),
-            human_turns=[str(t) for t in d.get("human_turns", [])],
+            human_turns=[{"n": int(t["n"]), "text": str(t["text"])} for t in d.get("human_turns", [])],
             artifact_revisions=dict(d.get("artifact_revisions", {})),
-            closed=bool(d.get("closed", False)),
+            artifact_history={k: [str(h) for h in v] for k, v in d.get("artifact_history", {}).items()},
+            artifact_history_dropped={k: int(v) for k, v in d.get("artifact_history_dropped", {}).items()},
+            checkpoint_turn=None if d.get("checkpoint_turn") is None else int(d["checkpoint_turn"]),
+            checkpoint_text=str(d.get("checkpoint_text", "")),
+            closed=bool(d.get("closed", False)), retired=bool(d.get("retired", False)),
             references=[Reference(**x) for x in d.get("references", [])],
             judgments=[Judgment(**x) for x in d.get("judgments", [])],
-            verified_revision=dict(d.get("verified_revision", {})),
             delegations=[Delegation(**x) for x in d.get("delegations", [])],
         )
 
@@ -210,9 +205,8 @@ class TaskState:
         self.current: TaskRecord | None = None
         self.path = path
         self.workspace = workspace
-        self.recent_turns: list[str] = []
+        self.recent_turns: list[dict[str, Any]] = []  # [{"n": int, "text": str}]
         self.notes: list[str] = []  # runtime-only restart notes
-        self.turn_dispatches = 0  # tool dispatches since the last human turn (runtime-only)
 
     @classmethod
     def load(cls, path: Path, workspace: str) -> tuple[TaskState, str | None]:
@@ -233,21 +227,20 @@ class TaskState:
                      path, record.workspace, workspace)
             return state, None
         state.current = record
-        state.recent_turns = list(record.human_turns)
+        state.recent_turns = [dict(t) for t in record.human_turns]
         state.reconcile()
         return state, None
 
     def reconcile(self) -> None:
+        """Restart notes are a plain saved-vs-current hash diff: changed, removed, or nothing."""
         if self.current is None:
             return
         if self._interrupt_running():
             self._save_quietly()
         now = self.current.context.revisions()
         for key, saved in self.current.artifact_revisions.items():
-            if key in now and now[key] is None:
-                self.notes.append(f"{key} missing")
-            elif key in now and now[key] != saved:
-                self.notes.append(f"{key} changed since last session")
+            if key in now and saved:
+                self._diff_note(key, saved, now[key])
         root = Path(self.current.workspace).resolve()
         for ref in self.current.references:
             ref.handle = None  # the content store is per process; re-snapshot on the next request
@@ -255,12 +248,17 @@ class TaskState:
                 ref.status = "unavailable; read it again"
                 continue
             try:
-                digest = hashlib.sha256((root / ref.path).read_bytes()).hexdigest()
+                digest: str | None = hashlib.sha256((root / ref.path).read_bytes()).hexdigest()
             except OSError:
-                self.notes.append(f"reference {ref.source} missing")
-                continue
-            if ref.sha256 is not None and digest != ref.sha256:
-                self.notes.append(f"reference {ref.source} changed since last session")
+                digest = None
+            if ref.sha256:
+                self._diff_note(f"reference {ref.source}", ref.sha256, digest)
+
+    def _diff_note(self, label: str, saved: str, now: str | None) -> None:
+        if now is None:
+            self.notes.append(f"{label} removed since last session")
+        elif now != saved:
+            self.notes.append(f"{label} changed since last session")
 
     def _interrupt_running(self) -> bool:
         """A delegation still "running" at a step boundary or reload was cancelled mid-flight."""
@@ -279,7 +277,11 @@ class TaskState:
 
     def _live(self) -> TaskRecord | None:
         rec = self.current
-        return None if rec is None or rec.closed or rec.context.status == "complete" else rec
+        return None if rec is None or rec.retired or (rec.closed and self._settled(rec)) else rec
+
+    def _settled(self, rec: TaskRecord) -> bool:
+        return (all(o in {"passed", "waived"} for o in rec.context.outcomes().values())
+                and all(d.integrated for d in rec.delegations))
 
     def refresh_references(self, store: Any) -> None:
         """Re-snapshot declared references into `store` and declare them for this request.
@@ -342,20 +344,22 @@ class TaskState:
         if self.current is not None:
             self.current.context.status = value  # type: ignore[assignment]
 
-    def substantiated(self, quote: str | None) -> bool:
-        q = normalize_quote(quote or "")
-        return len(q) >= 8 and any(q in normalize_quote(t) for t in self.recent_turns)
+    def cite(self, n: Any) -> dict[str, Any] | None:
+        """The stored human turn numbered `n`, or None. The only check: the turn exists."""
+        turns = self.current.human_turns if self.current else self.recent_turns
+        return next((t for t in turns if t["n"] == n), None) if isinstance(n, int) else None
 
-    def observe_human(self, text: str, new_turn: bool = True) -> None:
-        """`new_turn=False` for a mid-turn steering nudge: it does not reset the turn's dispatch
-        count, so a nudge after tool activity cannot exempt the final reply from the check."""
-        if new_turn:
-            self.turn_dispatches = 0
-        turn = text[:MAX_TURN_CHARS]
+    def turn_range(self) -> str:
+        turns = self.current.human_turns if self.current else self.recent_turns
+        return f"{turns[0]['n']}-{turns[-1]['n']}" if turns else ""
+
+    def observe_human(self, text: str) -> None:
+        n = self.recent_turns[-1]["n"] + 1 if self.recent_turns else 1
+        turn = {"n": n, "text": text[:MAX_TURN_CHARS]}
         self.recent_turns = [*self.recent_turns, turn][-MAX_HUMAN_TURNS:]
         if self.current is not None:
             self.current.context.observe_human(text)
-            self.current.human_turns = [*self.current.human_turns, turn][-MAX_HUMAN_TURNS:]
+            self.current.human_turns = [*self.current.human_turns, dict(turn)][-MAX_HUMAN_TURNS:]
             self._interrupt_running()
             self.save()
 
@@ -364,39 +368,29 @@ class TaskState:
 
     def record_result(self, tool: str, arguments: dict[str, Any], call_id: str, *,
                       success: bool, metadata: dict[str, Any], before: dict[str, str | None]) -> None:
-        self.turn_dispatches += 1
-        rec = self.current
-        if rec is None:
+        if self.current is None:
             return
-        ctx = rec.context
-        after = ctx.revisions()
-        for key, verified in list(rec.verified_revision.items()):
-            if verified is not None and after.get(key) != verified:
-                rec.revisions_used += 1  # an edit to a verified artifact is one focused revision
-                del rec.verified_revision[key]
-        ctx.record_result(tool, arguments, call_id, success=success, metadata=metadata, before=before)
-        for key, req in ctx.requirements.items():
-            receipt = ctx.receipts.get(key)
-            if receipt is not None and receipt.call_id == call_id:
-                for dep in req.dependencies:
-                    rec.verified_revision[dep] = after.get(dep)
+        self.current.context.record_result(tool, arguments, call_id, success=success,
+                                           metadata=metadata, before=before)
         self.save()
 
-    def begin_delegation(self, call_id: str, agent: str, purpose: str) -> str | None:
-        """Open a "running" entry before an `agent` call, or return why it is refused. Inert
-        (None, no entry) without a live record, so users without a task are unaffected."""
+    def begin_delegation(self, call_id: str, agent: str, purpose: str) -> None:
+        """Open a "running" entry before an `agent` call; never refuses. Inert without a live
+        record. At capacity the oldest integrated entry is dropped; with every entry still
+        unintegrated this call is not recorded (it still runs)."""
         rec = self._live()
         if rec is None:
-            return None
-        if len(rec.delegations) >= rec.delegation_budget:
-            return (f"Delegation budget ({rec.delegation_budget}) used for this task; integrate the "
-                    "results you have or ask the user to raise it")
+            return
+        n = 1 + max((int(d.id[1:]) for d in rec.delegations if d.id[1:].isdigit()), default=0)
         if len(rec.delegations) >= MAX_DELEGATIONS:
-            return f"delegations is limited to {MAX_DELEGATIONS} per task"
-        rec.delegations.append(Delegation(f"d{len(rec.delegations) + 1}", agent[:200],
-                                          purpose[:MAX_TEXT], call_id=call_id))
+            old = next((d for d in rec.delegations if d.integrated), None)
+            if old is None:
+                log.warning("task record holds %d unintegrated delegations; this one is not recorded",
+                            MAX_DELEGATIONS)
+                return
+            rec.delegations.remove(old)
+        rec.delegations.append(Delegation(f"d{n}", agent[:200], purpose[:MAX_TEXT], call_id=call_id))
         self.save()
-        return None
 
     def record_delegation(self, call_id: str, result: ToolResult | None) -> None:
         """Settle the entry for `call_id` from the agent tool's result (None: dispatch raised).
@@ -420,6 +414,65 @@ class TaskState:
             d.remaining = str(handoff.get("remaining") or "")[:MAX_TEXT]
         self._save_quietly()
 
+    def _observe_artifacts(self) -> None:
+        """Append each newly seen artifact hash to its history (distinct contents, last 16 kept;
+        dropped entries are counted so revision numbers never change)."""
+        rec = self.current
+        if rec is None:
+            return
+        for key, digest in rec.context.revisions().items():
+            history = rec.artifact_history.setdefault(key, [])
+            if digest is None or digest in history:
+                continue
+            history.append(digest)
+            while len(history) > MAX_ARTIFACT_HISTORY:
+                history.pop(0)
+                rec.artifact_history_dropped[key] = rec.artifact_history_dropped.get(key, 0) + 1
+
+    def _rev(self, key: str, digest: str | None) -> str:
+        rec = self.current
+        if digest is None:
+            return "missing"
+        history = rec.artifact_history.get(key, []) if rec else []
+        if digest not in history:
+            return "an unrecorded revision"
+        return f"rev {rec.artifact_history_dropped.get(key, 0) + history.index(digest) + 1}"  # type: ignore[union-attr]
+
+    def _check_facts(self) -> list[str]:
+        """One fact per declared check, in declaration order; nothing here counts or judges."""
+        rec = self.current
+        if rec is None:
+            return []
+        ctx = rec.context
+        outcomes, now = ctx.outcomes(), ctx.revisions()
+        facts = []
+        for key, req in ctx.requirements.items():
+            outcome, receipt = outcomes[key], ctx.receipts.get(key)
+            if outcome == "waived":
+                facts.append(f"{key}: waived ({ctx.waivers[key][1]})")
+            elif outcome == "stale" and receipt is not None \
+                    and receipt.requirement_revision == req.fingerprint():
+                facts.append(f"{key}: {receipt.outcome} (" + "; ".join(
+                    f"ran at {dep} {self._rev(dep, h)}, {dep} now {self._rev(dep, now.get(dep))}"
+                    for dep, h in receipt.dependencies.items() if h != now.get(dep)) + ")")
+            elif outcome == "stale":
+                facts.append(f"{key}: stale (declared again after its run)")
+            else:
+                facts.append(f"{key}: {outcome}")
+        return facts
+
+    def evidence_line(self) -> str:
+        """`Task evidence: ...` when some declared check is not passed or some delegation is not
+        integrated; "" otherwise (including when nothing is declared)."""
+        rec = self.current
+        if rec is None:
+            return ""
+        pending = self.unresolved_delegations()
+        if all(o == "passed" for o in rec.context.outcomes().values()) and not pending:
+            return ""
+        items = self._check_facts() + [f"{d.agent} ({d.id}): {d.status}, not integrated" for d in pending]
+        return "Task evidence: " + "; ".join(items) + "."
+
     def unresolved_delegations(self) -> list[Delegation]:
         return [d for d in self.current.delegations if not d.integrated] if self.current else []
 
@@ -427,59 +480,64 @@ class TaskState:
         rec = self._live()
         if rec is None:
             return ""
+        self._observe_artifacts()
+        ctx = rec.context
         lines = [f"Task {rec.id} (working record; update it with the task tool)"]
         if rec.assignment:
             lines.append(f"Current assignment: {rec.assignment}")
         if rec.decisions:
             lines.append("Accepted decisions: " + "; ".join(
-                f"[{'human' if d.origin == 'human' else 'assumption'}] {d.text}" for d in rec.decisions))
+                f"[human {_turn_label(d.human_turn, _clip(d.human_text))}] {d.text}"
+                if d.human_turn is not None else f"[assumption] {d.text}" for d in rec.decisions))
+        if rec.human_turns:
+            lines.append(f"Human turns on record: {self.turn_range()} (cite one with human_turn)")
+        if rec.checkpoint_turn is not None:
+            lines.append(f"Checkpoint requested at {_turn_label(rec.checkpoint_turn, _clip(rec.checkpoint_text))}")
         if rec.questions:
             lines.append("Open questions: " + "; ".join(rec.questions))
         if rec.next_action:
             lines.append(f"Next action: {rec.next_action}")
+        if ctx.artifacts:
+            now = ctx.revisions()
+            lines.append("Artifacts: " + "; ".join(f"{k}: {self._rev(k, now.get(k))}" for k in ctx.artifacts))
         if rec.references:
             lines.append("References: " + "; ".join(f"{r.source}: {r.status}" for r in rec.references))
         if rec.judgments:
             lines.append("Editorial judgments (model opinion, not evidence): " + "; ".join(
                 f"{j.key}: {j.status} — {j.criterion}" for j in rec.judgments))
         if rec.delegations:
-            lines.append("Delegations: " + "; ".join(
+            lines.append(f"Delegations ({len(rec.delegations)}): " + "; ".join(
                 f"{d.id} {d.agent}: {d.status}" + (", integrated" if d.integrated else "")
                 for d in rec.delegations))
-        lines.append(f"Revision budget: used {rec.revisions_used} of {rec.revision_budget}")
-        if rec.revisions_used > rec.revision_budget:
-            lines.append(BUDGET_EXHAUSTED)
         if self.notes:
             lines.append("Since last session: " + "; ".join(self.notes))
-        return "\n".join([*lines, rec.context.packet()])
+        evidence = [f"{fact} — {req.description}"
+                    for fact, req in zip(self._check_facts(), ctx.requirements.values())]
+        return "\n".join([*lines, ctx.packet(evidence)])
 
     def finalize(self, candidate: str) -> str:
-        # A record already finalized as complete never rewrites later, unrelated replies.
-        if self.current is None or self.current.context.status == "complete":
+        """Return the model's words unchanged, plus at most one appended evidence line. A record
+        closed as complete whose declared evidence is settled retires here (latched)."""
+        rec = self.current
+        if rec is None or rec.retired:
             return candidate
-        if self.turn_dispatches == 0:
-            return candidate  # a tool-less aside changed nothing the record could check
-        result = self.current.context.finalize(candidate)
-        unchanged = result == candidate
-        open_ = [j.key for j in self.current.judgments if j.status == "open"]
-        if unchanged and open_:
-            result = f"{candidate}\n\n{OPEN_JUDGMENTS}{', '.join(open_)}."
-        pending = self.unresolved_delegations()
-        downgraded = bool(pending) and self.current.context.status == "complete"
-        if downgraded:
-            self.current.context.status = "unknown"  # unintegrated delegated work keeps the record live
-        if pending and (unchanged or downgraded):
-            result += "\n\nDelegated work unresolved: " + "; ".join(
-                f"{d.id} {d.agent}: {d.status}" for d in pending) + "."
+        self._observe_artifacts()
+        rec.context.assign_status()
+        if rec.context.status == "complete" and self.unresolved_delegations():
+            rec.context.status = "unknown"  # unintegrated delegated work is not finished work
+        if rec.closed and self._settled(rec):
+            rec.retired = True
+            self.save()
+            return candidate
+        line = self.evidence_line()
         self.save()
-        return result
+        return f"{candidate}\n\n{line}" if line else candidate
 
     def begin(self, record: TaskRecord) -> TaskRecord | None:
-        replaced = self.current if self.current and not self.current.closed \
-            and self.current.context.status != "complete" else None
-        record.human_turns = list(self.recent_turns[-MAX_HUMAN_TURNS:])
+        replaced = self.current if self._live() is not None else None
+        record.human_turns = [dict(t) for t in self.recent_turns[-MAX_HUMAN_TURNS:]]
         if self.recent_turns and not record.context.latest_human:
-            record.context.latest_human = self.recent_turns[-1]  # the turn that asked for the work
+            record.context.latest_human = self.recent_turns[-1]["text"]  # the turn that asked for the work
         self.current, self.notes = record, []
         return replaced
 
@@ -489,6 +547,7 @@ class TaskState:
         rec = self.current
         rec.updated = _now()
         rec.artifact_revisions = rec.context.revisions()
+        self._observe_artifacts()
         data = json.dumps(rec.to_dict(), ensure_ascii=True).encode()
         while len(data) > MAX_RECORD_BYTES and rec.human_turns:
             rec.human_turns = rec.human_turns[1:]
@@ -509,28 +568,40 @@ class TaskState:
         rec = self.current
         if rec is None:
             return "No task record."
+        self._observe_artifacts()
         ctx = rec.context
-        if rec.closed:
+        if rec.retired:
             status = ("closed (no machine checks declared)" if not ctx.requirements
                       else f"closed ({ctx.status})")
+        elif rec.closed:
+            status = f"{ctx.status} (closed as complete; live until its evidence is settled)"
         else:
             status = ctx.status
-        revs, outcomes = ctx.revisions(), ctx.outcomes()
+        revs = ctx.revisions()
         lines = [f"Task {rec.id}", f"status: {status}", f"requested status: {ctx.requested_status}",
                  f"objective: {ctx.objective}", f"assignment: {rec.assignment or '-'}",
-                 f"stop boundary: {ctx.stop_boundary or '-'}", "decisions:"]
-        lines += [f"  {'human' if d.origin == 'human' else 'assumption'}: {d.text}" for d in rec.decisions]
+                 f"stop boundary: {ctx.stop_boundary or '-'}"]
+        if rec.checkpoint_turn is not None:
+            lines.append(f"checkpoint requested at {_turn_label(rec.checkpoint_turn, rec.checkpoint_text)}")
+        lines.append("decisions:")
+        lines += [f"  human {_turn_label(d.human_turn, d.human_text)} -> {d.text}" if d.human_turn is not None
+                  else f"  assumption: {d.text}" for d in rec.decisions]
         lines.append("artifacts:")
-        lines += [f"  {k}: {p} ({(revs.get(k) or 'missing')[:12]})" for k, p in ctx.artifacts.items()]
+        lines += [f"  {k}: {p} ({(revs.get(k) or 'missing')[:12]}, {self._rev(k, revs.get(k))})"
+                  for k, p in ctx.artifacts.items()]
         lines.append("checks:")
-        lines += [f"  {k}: {outcomes[k]} ({r.origin}) — {r.description}" for k, r in ctx.requirements.items()]
+        lines += [f"  {fact} ({r.origin}"
+                  + (f", {_turn_label(r.human_turn, r.human_text)}" if r.human_turn is not None else "")
+                  + f") — {r.description}"
+                  for fact, r in zip(self._check_facts(), ctx.requirements.values())]
         lines.append("waivers:")
         lines += [f"  {k}: {w[1]}" for k, w in ctx.waivers.items()]
         lines.append("references:")
         lines += [f"  {r.source}: {r.path or 'handle ' + str(r.handle)} ({r.status})" for r in rec.references]
         lines.append("judgments:")
         lines += [f"  {j.key}: {j.status} — {j.criterion}" + "".join(
-            f" | {name}: {getattr(j, name)}" for name in ("assessment", "passages", "fix") if getattr(j, name))
+            f" | {name.replace('_', ' ')}: {getattr(j, name)}" for name in ("assessment", "passages", "fix")
+            if getattr(j, name)) + (f" | waived by {j.waived_by}" if j.waived_by else "")
             for j in rec.judgments]
         lines.append("delegations:")
         lines += [f"  {d.id} {d.agent}: {d.status} — {d.purpose}"
@@ -539,10 +610,9 @@ class TaskState:
                   for d in rec.delegations]
         lines.append("questions:")
         lines += [f"  {q}" for q in rec.questions]
-        lines += [f"next action: {rec.next_action or '-'}",
-                  f"budgets: revision {rec.revisions_used}/{rec.revision_budget}, "
-                  f"delegation {rec.delegation_budget}",
-                  f"file: {self.path}"]
+        lines.append("human turns:")
+        lines += [f"  {t['n']}: {_clip(t['text'])}" for t in rec.human_turns]
+        lines += [f"next action: {rec.next_action or '-'}", f"file: {self.path}"]
         if self.notes:
             lines.append("since last session: " + "; ".join(self.notes))
         return "\n".join(lines)

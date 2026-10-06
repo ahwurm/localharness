@@ -1,8 +1,8 @@
 """TaskTool: the model's one bounded way to keep the working task record.
 
 The runtime owns receipts, artifact hashes, human turns and timestamps; nothing here writes them.
-A human decision, waiver, checkpoint or budget raise counts only when `human_quote` is found in
-a human turn the runtime recorded (TaskState.substantiated)."""
+Human decisions, waivers and checkpoints cite a stored human turn by number (human_turn); the
+runtime checks only that the turn exists and copies its verbatim text."""
 from __future__ import annotations
 
 import json
@@ -13,29 +13,28 @@ from typing import Any
 from localharness.agent.task_context import Requirement, TaskContext
 from localharness.agent.task_record import (
     MAX_DECISIONS, MAX_JUDGMENTS, MAX_OBJECTIVE, MAX_QUESTIONS, MAX_REFERENCES, MAX_TEXT, Decision,
-    Judgment, Reference, TaskRecord, TaskRecordTooLarge, TaskState,
+    Judgment, Reference, TaskRecord, TaskRecordTooLarge, TaskState, _turn_label,
 )
 from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 ALLOWED: dict[str, set[str]] = {
     "start": {"objective", "assignment", "stop_boundary", "requested_status", "instructions_path",
-              "decisions", "human_quote", "references", "artifacts"},
+              "decisions", "human_turn", "references", "artifacts"},
     "update": {"assignment", "stop_boundary", "requested_status", "next_action", "question",
-               "resolve_question", "revision_budget", "delegation_budget", "human_quote",
-               "references", "artifacts"},
-    "decide": {"text", "human_quote"},
+               "resolve_question", "human_turn", "references", "artifacts"},
+    "decide": {"text", "human_turn"},
     "artifact": {"key", "path"},
     "check": {"key", "description", "tool", "arguments", "result_field", "expected", "depends_on",
-              "human_quote"},
+              "human_turn"},
     "reference": {"source", "path", "handle"},
     "judge": {"key", "criterion", "assessment", "passages", "fix"},
-    "waive": {"key", "human_quote"},
+    "waive": {"key", "human_turn"},
     "integrate": {"delegation_id", "note"},
-    "close": {"status", "note", "human_quote"},
+    "close": {"status", "note", "human_turn"},
     "show": set(),
 }
-CHECKPOINT_RULE = ("A checkpoint is a human-requested boundary; quote the human's words in human_quote, "
-                   "or use partial for your own stop")
+CHECKPOINT_NEEDS_TURN = ("checkpoint requires human_turn: the human turn that asked to stop; "
+                         "use partial for your own stop")
 MAX_ITEMS = 16
 MAX_ARGUMENTS_CHARS = 2000
 
@@ -67,13 +66,13 @@ class TaskTool(Tool):
             description=(
                 "Keep the working record for substantive multi-step work (artifacts, several steps, "
                 "delegation). Only for that — never for questions or answer-only discussion. start a "
-                "task, record the human's corrections as decisions (quote their words in human_quote), "
+                "task, record the human's corrections as decisions (cite the human turn number in human_turn; turns are numbered in arrival order), "
                 "register artifacts and machine-checkable checks, and close at the requested boundary. "
                 "Receipts, hashes, and human turns are recorded by the runtime; you cannot write them. "
                 "Declare files the work depends on (instructions, voice samples, sources) as references "
                 "so they stay in view; record editorial criteria with judge — judgments are opinion, "
-                "never evidence. integrate delegated results: say how each subagent's result was used "
-                "before closing as complete. Declare a check before you run its command so the run binds "
+                "never evidence. integrate delegated results: say how each subagent's result was used. "
+                "Declare a check before you run its command so the run binds "
                 "as evidence."
             ),
             parameters={
@@ -87,7 +86,12 @@ class TaskTool(Tool):
                                          "enum": ["complete", "checkpoint", "partial", "blocked", "unknown"]},
                     "instructions_path": _str("Workspace file with the user's instructions"),
                     "decisions": {"type": "array", "maxItems": MAX_DECISIONS,
-                                  "items": {"type": "string", "maxLength": MAX_TEXT}},
+                                  "items": {"anyOf": [
+                                      {"type": "string", "maxLength": MAX_TEXT},
+                                      {"type": "object",
+                                       "properties": {"text": {"type": "string", "maxLength": MAX_TEXT},
+                                                      "human_turn": {"type": "integer"}},
+                                       "required": ["text", "human_turn"]}]}},
                     "references": {"type": "array", "maxItems": MAX_REFERENCES,
                                    "description": "start/update: files to keep in view",
                                    "items": {"type": "object",
@@ -99,10 +103,10 @@ class TaskTool(Tool):
                     "next_action": _str("update: the next step"),
                     "question": _str("update: an open question for the human"),
                     "resolve_question": _str("update: exact text of a question now answered"),
-                    "revision_budget": {"type": "integer"},
-                    "delegation_budget": {"type": "integer"},
                     "text": _str("decide: the decision"),
-                    "human_quote": _str("The human's own words that support this"),
+                    "human_turn": {"type": "integer", "minimum": 1,
+                                   "description": "Number of the human turn this rests on "
+                                                  "(the packet lists the stored turns)"},
                     "key": _str("artifact/check/judge/waive key"),
                     "path": _str("artifact/reference: workspace file path"),
                     "source": _str("reference: a short label, e.g. voice sample", 200),
@@ -144,7 +148,7 @@ class TaskTool(Tool):
         if action == "show":
             return self.ok(state.show())
         rec = state.current
-        if action != "start" and (rec is None or rec.closed or rec.context.status == "complete"):
+        if action != "start" and state._live() is None:
             return self.err("No active task; call task start for substantive work",
                             error_type="validation_error")
         prev, prev_notes = (rec.to_dict() if rec is not None else None), list(state.notes)
@@ -169,14 +173,31 @@ class TaskTool(Tool):
             raise _Refused(f"Path must stay inside the workspace {root}")
         return target
 
-    def _quoted(self, fields: dict[str, Any]) -> bool:
-        return self._state.substantiated(fields.get("human_quote"))
+    def _cited(self, f: dict[str, Any], required: str | None = None) -> dict[str, Any] | None:
+        """The stored human turn `f["human_turn"]` names; the only check is that it is stored."""
+        if "human_turn" not in f:
+            if required:
+                raise _Refused(required)
+            return None
+        turn = self._state.cite(f["human_turn"])
+        if turn is None or isinstance(f["human_turn"], bool):
+            span = self._state.turn_range()
+            raise _Refused(f"human turn {f['human_turn']} is not on record; "
+                           + (f"stored turns: {span}" if span else "no human turns are stored"))
+        return turn
 
-    def _requested(self, fields: dict[str, Any]) -> str | None:
-        status = fields.get("requested_status")
-        if status == "checkpoint" and not self._quoted(fields):
-            raise _Refused(CHECKPOINT_RULE)
-        return status
+    def _checkpoint(self, rec: TaskRecord, f: dict[str, Any]) -> None:
+        """start/update: a requested checkpoint cites the human turn that asked for it."""
+        status = f.get("requested_status")
+        if status == "checkpoint":
+            t = self._cited(f, CHECKPOINT_NEEDS_TURN)
+            rec.checkpoint_turn, rec.checkpoint_text = t["n"], t["text"]  # type: ignore[index]
+        elif "human_turn" in f:
+            raise _Refused("on start/update, human_turn cites a checkpoint request")
+        elif status:
+            rec.checkpoint_turn, rec.checkpoint_text = None, ""
+        if status:
+            rec.context.requested_status = status
 
     def _start(self, state: TaskState, f: dict[str, Any]) -> str:
         for name in ("objective", "assignment"):
@@ -186,20 +207,30 @@ class TaskTool(Tool):
         if not isinstance(decisions, list) or len(decisions) > MAX_DECISIONS:
             raise _Refused(f"decisions is limited to {MAX_DECISIONS}")
         ctx = TaskContext(_text("objective", f["objective"], MAX_OBJECTIVE),
-                          stop_boundary=_text("stop_boundary", f.get("stop_boundary", "")),
-                          requested_status=self._requested(f) or "complete")  # type: ignore[arg-type]
+                          stop_boundary=_text("stop_boundary", f.get("stop_boundary", "")))
         raw = f.get("instructions_path")
         record = TaskRecord(
             context=ctx, workspace=state.workspace or os.getcwd(),
             assignment=_text("assignment", f["assignment"]),
             instructions_path=str(self._inside(_text("instructions_path", raw))) if raw else "",
-            decisions=[Decision(_text("decision", d), "human" if state.substantiated(d) else "model",
-                                len(state.recent_turns)) for d in decisions],
         )
         replaced = state.begin(record)
+        for d in decisions:
+            if isinstance(d, dict):
+                if set(d) != {"text", "human_turn"}:
+                    raise _Refused("a cited decision is {text, human_turn}")
+                t = self._cited(d)
+                record.decisions.append(Decision(_text("decision", d["text"]), "human",
+                                                 t["n"], t["text"]))  # type: ignore[index]
+            else:
+                record.decisions.append(Decision(_text("decision", d), "model"))
+        self._checkpoint(record, f)
         lines = [f"Started task {record.id}."]
         if replaced is not None:
             lines.append(f"Replaced unfinished task {replaced.id}.")
+        if record.human_turns:
+            lines.append("Human turns on record: " + "; ".join(
+                f"{t['n']}: {json.dumps(t['text'][:80], ensure_ascii=False)}" for t in record.human_turns) + ".")
         return " ".join(lines) + self._apply_batch(state, f)
 
     def _apply_batch(self, state: TaskState, f: dict[str, Any]) -> str:
@@ -225,16 +256,7 @@ class TaskTool(Tool):
     def _update(self, state: TaskState, f: dict[str, Any]) -> str:
         rec = state.current
         assert rec is not None
-        for name in ("revision_budget", "delegation_budget"):
-            if name in f:
-                if not isinstance(f[name], int) or f[name] < 0:
-                    raise _Refused(f"{name} must be a non-negative integer")
-                if f[name] > getattr(rec, name) and not self._quoted(f):
-                    raise _Refused(f"Raising {name} needs the human's words in human_quote")
-                setattr(rec, name, f[name])
-        status = self._requested(f)
-        if status:
-            rec.context.requested_status = status  # type: ignore[assignment]
+        self._checkpoint(rec, f)
         if "assignment" in f:
             rec.assignment = _text("assignment", f["assignment"])
         if "stop_boundary" in f:
@@ -258,10 +280,13 @@ class TaskTool(Tool):
             raise _Refused("decide requires text")
         if len(rec.decisions) >= MAX_DECISIONS:
             raise _Refused(f"decisions is limited to {MAX_DECISIONS}")
-        origin = "human" if self._quoted(f) else "model"
-        rec.decisions.append(Decision(_text("text", f["text"]), origin, len(state.recent_turns)))
-        label = "human decision" if origin == "human" else "assumption (no matching human words)"
-        return f"Recorded {label}."
+        t = self._cited(f)
+        text = _text("text", f["text"])
+        if t is None:
+            rec.decisions.append(Decision(text, "model"))
+            return "Recorded assumption (no human turn cited)."
+        rec.decisions.append(Decision(text, "human", t["n"], t["text"]))
+        return f"Recorded human decision (turn {t['n']})."
 
     def _artifact(self, state: TaskState, f: dict[str, Any]) -> str:
         ctx = state.current.context  # type: ignore[union-attr]
@@ -294,11 +319,13 @@ class TaskTool(Tool):
         if key not in ctx.requirements and len(ctx.requirements) >= MAX_ITEMS:
             raise _Refused(f"requirements is limited to {MAX_ITEMS}")
         old = ctx.requirements.get(key)
+        t = self._cited(f)
         ctx.revise(Requirement(
             key, _text("description", f["description"]), _text("tool", f["tool"]), arguments,
             _text("result_field", f["result_field"]) if "result_field" in f else None,
             f.get("expected"), tuple(depends),
-            str(int(old.revision) + 1) if old else "1", "human" if self._quoted(f) else "model",
+            str(int(old.revision) + 1) if old else "1", "human" if t else "model",
+            t["n"] if t else None, t["text"] if t else "",
         ))
         return f"Check {key} declared (revision {ctx.requirements[key].revision})."
 
@@ -343,13 +370,11 @@ class TaskTool(Tool):
                 raise _Refused(f"judgments is limited to {MAX_JUDGMENTS}")
             judgment = Judgment(key, _text("criterion", f["criterion"]))
             rec.judgments.append(judgment)
-        elif judgment.status == "waived":
-            raise _Refused(f"judgment {key} was waived by the human")
         for name in ("criterion", "assessment", "passages", "fix"):
             if name in f:
                 setattr(judgment, name, _text(name, f[name]))
-        if "assessment" in f:
-            judgment.status = "assessed"
+        if "assessment" in f and judgment.status != "waived":
+            judgment.status = "assessed"  # the waiver stands; the assessment is recorded beside it
         return f"Judgment {key}: {judgment.status} (editorial opinion, not evidence)."
 
     def _waive(self, state: TaskState, f: dict[str, Any]) -> str:
@@ -359,13 +384,13 @@ class TaskTool(Tool):
         judgment = next((j for j in rec.judgments if j.key == key), None)
         if key not in ctx.requirements and judgment is None:
             raise _Refused("waive requires the key of a declared check or judgment")
-        if not self._quoted(f):
-            raise _Refused("A waiver is a human decision; quote the human's words in human_quote")
+        t = self._cited(f, "A waiver cites the human turn that waives it: set human_turn")
+        label = _turn_label(t["n"], t["text"])  # type: ignore[index]
         if judgment is not None:
-            judgment.status = "waived"
-            return f"Judgment {key} waived by the human."
-        ctx.waive(key, human_decision=f["human_quote"])
-        return f"Check {key} waived by the human."
+            judgment.status, judgment.waived_by = "waived", label
+            return f"Judgment {key} waived (human turn {t['n']})."  # type: ignore[index]
+        ctx.waive(key, human_decision=label)
+        return f"Check {key} waived (human turn {t['n']})."  # type: ignore[index]
 
     def _integrate(self, state: TaskState, f: dict[str, Any]) -> str:
         rec = state.current
@@ -387,28 +412,18 @@ class TaskTool(Tool):
         status = f.get("status")
         if status not in {"complete", "checkpoint", "partial", "blocked"}:
             raise _Refused("close requires status complete, checkpoint, partial, or blocked")
-        if status == "checkpoint" and not self._quoted(f):
-            raise _Refused(CHECKPOINT_RULE)
-        if status == "complete":
-            bad = [f"{k}: {o}" for k, o in rec.context.outcomes().items() if o not in {"passed", "waived"}]
-            open_ = [j.key for j in rec.judgments if j.status == "open"]
-            reasons = []
-            if bad:
-                reasons.append("Cannot close as complete: " + ", ".join(bad)
-                               + ". Rerun it, ask the human to waive it, or close as partial or blocked.")
-            if open_:
-                reasons.append("Open editorial judgments: " + ", ".join(open_)
-                               + ". Assess them with judge, ask the human to waive them, or close as partial.")
-            pending = state.unresolved_delegations()
-            if pending:
-                reasons.append("Unintegrated delegations: " + "; ".join(
-                    f"{d.id} {d.agent}: {d.status}" for d in pending)
-                    + ". Integrate each with integrate (delegation_id, note), or close as partial.")
-            if reasons:
-                raise _Refused(" ".join(reasons))
+        if status == "checkpoint":
+            t = self._cited(f, CHECKPOINT_NEEDS_TURN)
+            rec.checkpoint_turn, rec.checkpoint_text = t["n"], t["text"]  # type: ignore[index]
+        elif "human_turn" in f:
+            raise _Refused("on close, human_turn cites a checkpoint request")
+        else:
+            rec.checkpoint_turn, rec.checkpoint_text = None, ""
         rec.context.requested_status = status  # type: ignore[assignment]
         rec.closed = status == "complete"
         if "note" in f:
             rec.next_action = _text("note", f["note"])
-        return (f"Closing task {rec.id} as {status}. The final status is decided by the runtime at "
-                "the end of this turn from actual evidence.")
+        line = state.evidence_line() if status == "complete" else ""
+        return (f"Closing task {rec.id} as {status}."
+                + (f" The record stays live until its declared evidence is settled: {line}" if line else "")
+                + " The final status is decided by the runtime at the end of this turn from actual evidence.")

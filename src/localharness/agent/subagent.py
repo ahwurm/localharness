@@ -378,10 +378,10 @@ def parse_handoff(text: str) -> dict | None:
         return None
 
 
-def _delegation_status(reason: str | None, summary: str) -> str:
-    """Runtime-truth delegation status from the child loop's terminated reason."""
+def _delegation_status(reason: str | None) -> str:
+    """Runtime-truth delegation status: only how the child's turn ended, never its prose."""
     if reason in (None, "complete"):
-        return "no_result" if _no_conclusion_note(summary) else "completed"
+        return "completed"
     if reason.startswith("budget_"):
         return "budget_exhausted"
     return {"kill_file": "killed", "stuck": "stuck"}.get(reason, "error")
@@ -972,7 +972,7 @@ def _delegation_result(text: str, child_loop: Any, bus: Any, summary: str,
     reason = getattr(child_loop, "last_terminated_reason", None)  # test fakes may lack it
     sid = child_loop.current_session_id
     return DelegationResult(
-        text, status=_delegation_status(reason, summary), terminated_reason=reason,
+        text, status=_delegation_status(reason), terminated_reason=reason,
         tool_calls=tool_calls, artifacts=_session_written_paths(bus, sid),
         child_session_id=sid, handoff=parse_handoff(summary))
 

@@ -7,7 +7,7 @@ Each entry names a test that exists (`test_every_mapped_test_exists` resolves th
    tests/unit/test_task_tool.py::test_loop_without_record_is_an_ordinary_request
    tests/unit/test_task_context.py::test_ordinary_query_one_call_and_no_task_packet
    tests/unit/test_task_context.py::test_delegation_without_record_is_unchanged
-   tests/unit/test_task_context.py::test_tool_less_aside_reply_is_not_rewritten
+   tests/unit/test_task_context.py::test_aside_keeps_its_words_and_gets_the_evidence_line
    tests/unit/test_coworker_acceptance.py::test_case1_ordinary_question_adds_no_call_with_a_task_state
 2. Goal plus aside plus correction:
    tests/unit/test_task_workflow.py::test_correction_aside_checkpoint_and_restart_from_disk
@@ -15,10 +15,10 @@ Each entry names a test that exists (`test_every_mapped_test_exists` resolves th
    tests/unit/test_task_context.py::test_checkpoint_retains_unfinished_asks_then_correction
 3. Existing accepted decision plus one material ambiguity:
    tests/unit/test_coworker_acceptance.py::test_case3_open_question_resolved_and_earlier_human_decision_carried
-   tests/unit/test_task_tool.py::test_decide_waive_and_budget_raise_need_human_words
+   tests/unit/test_task_tool.py::test_decide_check_and_waive_cite_human_turns
 4. Outline checkpoint and restart:
    tests/unit/test_task_workflow.py::test_correction_aside_checkpoint_and_restart_from_disk
-   tests/unit/test_task_tool.py::test_checkpoint_requires_a_substantiated_quote
+   tests/unit/test_task_tool.py::test_checkpoint_requires_a_cited_human_turn
    tests/unit/test_task_record.py::test_finalize_checkpoint_keeps_packet
 5. Source/voice dependencies under forced compaction, with overflow:
    tests/unit/test_task_references.py::test_a_references_survive_forced_eviction
@@ -26,18 +26,18 @@ Each entry names a test that exists (`test_every_mapped_test_exists` resolves th
    tests/unit/test_task_references.py::test_unchanged_reference_is_redeclared_after_the_next_human_turn
    tests/unit/test_task_context.py::test_oversized_task_packet_blocks_without_model_call
 6. Failed executable check, focused fix, rerun:
-   tests/unit/test_task_references.py::test_e_checks_drive_a_bounded_revision
-   tests/unit/test_task_references.py::test_f_close_complete_needs_evidence_or_human_waivers
+   tests/unit/test_task_references.py::test_e_checks_report_draft_revisions
+   tests/unit/test_task_references.py::test_f_close_complete_stays_live_until_evidence_settles
    tests/unit/test_task_context.py::test_actual_structured_gate_result_not_prose
 7. Successful, failed, missing, malformed, and interrupted delegated review:
    tests/unit/test_task_delegation.py::test_completed_delegation_integrated_then_closed
-   tests/unit/test_task_delegation.py::test_failed_delegation_blocks_close_and_is_named_in_reply
+   tests/unit/test_task_delegation.py::test_failed_delegation_is_named_in_reply_and_keeps_record_live
    tests/unit/test_task_delegation.py::test_malformed_handoff_is_none_and_status_stays_runtime
    tests/unit/test_task_delegation.py::test_cancelled_delegation_becomes_interrupted
    tests/unit/test_task_delegation.py::test_child_out_of_budget_is_budget_exhausted
    tests/unit/test_task_record.py::test_record_delegation_status_table (no_result = missing)
    tests/unit/test_task_record.py::test_finalize_with_unintegrated_delegation_keeps_record_live
-   tests/unit/test_task_context.py::test_delegation_over_budget_refused_before_dispatch
+   tests/unit/test_task_context.py::test_delegation_opens_entry_before_dispatch_without_refusal
 8. Changed source/draft after restart:
    tests/unit/test_task_references.py::test_c_changed_source_reaches_the_next_request
    tests/unit/test_task_references.py::test_d_restart_resnapshots_path_references
@@ -45,11 +45,11 @@ Each entry names a test that exists (`test_every_mapped_test_exists` resolves th
    tests/unit/test_task_record.py::test_reconcile_nulls_handles_and_notes_reference_changes
    tests/unit/test_task_context.py::test_only_changed_dependency_invalidates_receipt
 9. Missing primary research and conflicting standards:
-   tests/unit/test_coworker_acceptance.py::test_case9_unsupported_research_is_an_assumption_and_cannot_be_waived
-   tests/unit/test_task_tool.py::test_decide_waive_and_budget_raise_need_human_words
+   tests/unit/test_coworker_acceptance.py::test_case9_uncited_research_is_an_assumption_and_a_waiver_needs_a_turn
+   tests/unit/test_task_tool.py::test_decide_check_and_waive_cite_human_turns
 10. Bounded revision and workspace isolation:
-   tests/unit/test_task_references.py::test_e_checks_drive_a_bounded_revision
-   tests/unit/test_task_record.py::test_revision_budget_counts_edits_to_verified_artifacts
+   tests/unit/test_task_references.py::test_e_checks_report_draft_revisions
+   tests/unit/test_task_record.py::test_artifact_revisions_and_run_facts_in_packet
    tests/unit/test_task_record.py::test_load_missing_corrupt_and_foreign
    tests/unit/test_task_workflow.py::test_correction_aside_checkpoint_and_restart_from_disk (the
    reload from another folder)
@@ -122,10 +122,8 @@ async def test_case3_open_question_resolved_and_earlier_human_decision_carried(
         ("task", {"action": "update", "question": QUESTION}),
         "One question: should the profile name the region?",
         ("task", {"action": "update", "resolve_question": QUESTION}),
-        ("task", {"action": "decide", "text": "Region stays anonymous",
-                  "human_quote": "keep the region anonymous"}),
-        ("task", {"action": "decide", "text": "Interview notes are the primary source",
-                  "human_quote": "use the interview notes as the primary source"}),
+        ("task", {"action": "decide", "text": "Region stays anonymous", "human_turn": 2}),
+        ("task", {"action": "decide", "text": "Interview notes are the primary source", "human_turn": 1}),
         "Noted.",
         "The outline.",
     )
@@ -142,25 +140,26 @@ async def test_case3_open_question_resolved_and_earlier_human_decision_carried(
     assert await loop.run_turn("What is next?") == "The outline."
     packet = packet_of(seen[mark])
     assert "Open questions" not in packet
-    assert "[human] Region stays anonymous" in packet
-    assert "[human] Interview notes are the primary source" in packet
+    assert '[human turn 2: "Keep the region anonymous."] Region stays anonymous' in packet
+    assert ('[human turn 1: "Prepare the Acme customer profile from the sources folder. Use the '
+            'interview notes as the primary source."] Interview notes are the primary source') in packet
     assert state.current.questions == []
 
 
-async def test_case9_unsupported_research_is_an_assumption_and_cannot_be_waived(
+async def test_case9_uncited_research_is_an_assumption_and_a_waiver_needs_a_turn(
         tmp_path, bus, mock_llm_client):
     state = TaskState(tmp_path / "agents" / "t" / "task.json", workspace=str(tmp_path))
-    claim = "the interviews confirm 40% growth"
     llm = scripted(
         mock_llm_client,
         ("task", {"action": "start", "objective": "Acme profile from sources/ only",
                   "assignment": "Draft the profile"}),
-        ("task", {"action": "decide", "text": "Interviews confirm 40% growth", "human_quote": claim}),
+        ("task", {"action": "decide", "text": "Interviews confirm 40% growth"}),
         ("task", {"action": "artifact", "key": "draft", "path": "draft.md"}),
         ("task", {"action": "check", "key": "lint", "description": "Draft passes the lint",
                   "tool": "bash_exec", "arguments": {"command": "python3 checks/lint.py draft.md"},
                   "result_field": "exit_code", "expected": 0, "depends_on": ["draft"]}),
-        ("task", {"action": "waive", "key": "lint", "human_quote": claim}),
+        ("task", {"action": "waive", "key": "lint"}),
+        ("task", {"action": "waive", "key": "lint", "human_turn": 9}),
         "There are no interview notes; stopping.",
     )
     seen = capture(llm)
@@ -171,11 +170,12 @@ async def test_case9_unsupported_research_is_an_assumption_and_cannot_be_waived(
     (decision,) = state.current.decisions
     assert decision.origin == "model"
     assert any("[assumption] Interviews confirm 40% growth" in packet_of(r) for r in seen[2:])
-    assert any("A waiver is a human decision" in str(m.get("content")) for r in seen for m in r
-               if m.get("role") == "tool")
+    tool_text = [str(m.get("content")) for r in seen for m in r if m.get("role") == "tool"]
+    assert any("A waiver cites the human turn that waives it" in t for t in tool_text)
+    assert any("human turn 9 is not on record; stored turns: 1-1" in t for t in tool_text)
     ctx = state.current.context
-    assert "lint" not in ctx.waivers and ctx.outcomes()["lint"] != "waived"
-    assert reply.startswith("Task remains unverified.")  # an unresolved check is never a success
+    assert "lint" not in ctx.waivers and ctx.outcomes()["lint"] == "unknown"
+    assert reply == "There are no interview notes; stopping.\n\nTask evidence: lint: unknown."
 
 
 def test_every_mapped_test_exists():
