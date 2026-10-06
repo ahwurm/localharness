@@ -25,7 +25,7 @@ Each entry names a test that exists (`test_every_mapped_test_exists` resolves th
    tests/unit/test_task_references.py::test_b_overflow_blocks_once_with_the_narrowing_notice
    tests/unit/test_task_references.py::test_unchanged_reference_is_redeclared_after_the_next_human_turn
    tests/unit/test_task_context.py::test_oversized_task_packet_blocks_without_model_call
-6. Failed executable check, focused fix, rerun:
+6. Failed executable check, focused fix, rerun, with revision facts:
    tests/unit/test_task_references.py::test_e_checks_report_draft_revisions
    tests/unit/test_task_references.py::test_f_close_complete_stays_live_until_evidence_settles
    tests/unit/test_task_context.py::test_actual_structured_gate_result_not_prose
@@ -35,7 +35,7 @@ Each entry names a test that exists (`test_every_mapped_test_exists` resolves th
    tests/unit/test_task_delegation.py::test_malformed_handoff_is_none_and_status_stays_runtime
    tests/unit/test_task_delegation.py::test_cancelled_delegation_becomes_interrupted
    tests/unit/test_task_delegation.py::test_child_out_of_budget_is_budget_exhausted
-   tests/unit/test_task_record.py::test_record_delegation_status_table (no_result = missing)
+   tests/unit/test_task_record.py::test_record_delegation_status_table
    tests/unit/test_task_record.py::test_finalize_with_unintegrated_delegation_keeps_record_live
    tests/unit/test_task_context.py::test_delegation_opens_entry_before_dispatch_without_refusal
 8. Changed source/draft after restart:
@@ -44,17 +44,18 @@ Each entry names a test that exists (`test_every_mapped_test_exists` resolves th
    tests/unit/test_task_record.py::test_reconcile_notes_changed_and_missing_artifacts
    tests/unit/test_task_record.py::test_reconcile_nulls_handles_and_notes_reference_changes
    tests/unit/test_task_context.py::test_only_changed_dependency_invalidates_receipt
-9. Missing primary research and conflicting standards:
+9. Missing primary research: uncited claims stay assumptions; a waiver must cite a turn:
    tests/unit/test_coworker_acceptance.py::test_case9_uncited_research_is_an_assumption_and_a_waiver_needs_a_turn
    tests/unit/test_task_tool.py::test_decide_check_and_waive_cite_human_turns
-10. Bounded revision and workspace isolation:
+10. Revision facts and workspace isolation:
    tests/unit/test_task_references.py::test_e_checks_report_draft_revisions
    tests/unit/test_task_record.py::test_artifact_revisions_and_run_facts_in_packet
    tests/unit/test_task_record.py::test_load_missing_corrupt_and_foreign
    tests/unit/test_task_workflow.py::test_correction_aside_checkpoint_and_restart_from_disk (the
    reload from another folder)
 
-These tests prove the runtime's half: what is recorded, sent, refused, and reported. Whether a
+These tests prove the runtime's half: the runtime records and reports facts; it refuses only
+malformed or over-capacity input, and never refuses or rewrites on the model's behalf. Whether a
 model asks one useful question, avoids redrafting, or writes good prose is not deterministic. That
 belongs to the preregistered live comparison, which this file does not replace.
 """

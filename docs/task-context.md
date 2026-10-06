@@ -22,13 +22,13 @@ The model changes the record only through this tool. Every change is saved at on
 | Action | What it does |
 |--------|--------------|
 | `start` | Creates the record: objective, assignment, stop boundary, requested status, instructions file, decisions. It replaces any earlier record, and the tool says so if that record was unfinished. |
-| `update` | Changes the assignment, stop boundary, requested status, next action, open questions, or the revision and delegation budgets. |
+| `update` | Changes the assignment, stop boundary, requested status, next action, or open questions. |
 | `decide` | Records a decision. |
 | `artifact` | Names a workspace file the work produces, such as `draft.md`. |
 | `reference` | Names a file (or a `tool_result_get` handle) the work depends on. |
 | `check` | Declares a machine check: which tool call proves it and what result it must give. |
 | `judge` | Records an editorial criterion and the model's assessment of it. |
-| `waive` | Waives a check or judgment. This needs the human's words. |
+| `waive` | Waives a check or judgment. It must cite the human turn that waives it. |
 | `integrate` | Records how a delegated result was used. |
 | `close` | Closes as `complete`, `checkpoint`, `partial`, or `blocked`. |
 | `show` | Prints the record. |
@@ -37,14 +37,26 @@ The model changes the record only through this tool. Every change is saved at on
 path) in the same call. If any item is refused, the whole call is refused and the record stays as
 it was.
 
-**The human's words.** A decision, waiver, checkpoint, or budget raise counts as the human's only
-when its `human_quote` appears in a human turn that the runtime recorded. The match ignores case,
-extra spaces, and quote marks, and the quote must be at least 8 characters. Without a match, a
-decision is recorded but labelled as an assumption. A waiver, checkpoint, or budget raise is
-refused.
+**The human's words.** The runtime stores each human turn verbatim and numbers it in arrival
+order. The last 24 turns are kept, and their numbers never change. A decision, check, waiver, or
+checkpoint may cite one with `human_turn`. The runtime checks only that the turn is stored, then
+copies its text beside the model's wording, for example
+`[human turn 3: "Correction: five sections"] Outline has five sections`. A decision without a
+citation is shown as an assumption. A waiver and a checkpoint must cite a turn; a `partial` stop
+needs none. The runtime does not judge whether the turn supports the claim. The quoted text is
+there for the reader to judge. The packet lists the stored turn numbers, and the `start` reply
+echoes the turns on record.
 
 **What the runtime owns.** The model cannot write any of these: check receipts, artifact and
-reference hashes, the human turns, delegation statuses, the revision count, and timestamps.
+reference hashes, the human turns, delegation statuses, the artifact revision history, and
+timestamps.
+
+**Where the policy lives.** The runtime records facts and reports them. It does not enforce
+working rules on the model's behalf: when to ask, when to stop, how many revisions or delegations
+are reasonable. Those rules live in the role prompt, the guidance text in the packet, and your
+workflow's instruction file. The runtime refuses only malformed input (a missing field, an
+uncited waiver, a turn number that is not stored, a key clash), input over a size limit, and paths
+outside the workspace.
 
 ## References
 
@@ -76,14 +88,34 @@ Each check has one outcome: passed, failed, unknown, stale, or waived. Stale mea
 file it depends on changed after the run. Declare a check before running its command, so that the
 run binds as evidence.
 
-A judgment is the model's editorial opinion. It is never evidence. `close complete` is refused
-while any check is not passed or waived, any judgment is still open, or any delegation is not
-integrated.
+A judgment is the model's editorial opinion. It is never evidence. A judgment the human waived
+keeps the status `waived`; a later assessment by the model is recorded beside it.
 
-**Revision budget** (default 1). Editing an artifact after a check that depends on it has run
-spends one revision, whether that run passed or failed. Once more revisions are used than the
-budget allows, the packet tells the model to stop with the usable artifact and list the remaining
-gaps. Raising the budget needs the human's words.
+**Artifact revisions.** Each distinct content of an artifact seen at a save gets a revision number
+(`draft: rev 3`). The last 16 are kept, and the numbers never change. A check whose dependency
+changed after its run shows both: `lint: failed (ran at draft rev 2, draft now rev 3)`. Nothing
+counts revisions against a limit.
+
+**When the record retires.** `close complete` is never refused. The record stops being sent only
+when it was closed as complete, every check is passed or waived, and every delegation is
+integrated. Open judgments do not keep it live. With nothing declared, closing retires it.
+Otherwise it stays live and keeps showing what is unresolved. Passing checks alone never retires a
+record that was not closed.
+
+### The evidence line
+
+The runtime never replaces the model's reply. When some declared check is not passed, or some
+delegation is not integrated, it appends one line to the reply, for example:
+
+```
+Task evidence: lint: failed (ran at draft rev 2, draft now rev 3); review: unknown; reviewer (d1): failed: execution_error, not integrated.
+```
+
+A waived check is listed as `waived (turn 4: "…")`, with the waiving turn. Nothing is appended
+when nothing is declared, or when every check passed and every delegation is integrated.
+Judgments are not part of the line. The line is added to the reply you see; session history keeps
+the model's own words, and the next request's packet carries the current facts. A bare
+`TaskContext` caller gets the same line for its checks, without revision numbers.
 
 ## Delegation handoff
 
@@ -95,16 +127,19 @@ The child ends with a HANDOFF block, which is the child's own text, not proof. T
 observes only the status, the reason the child stopped, its tool-call count, the paths of files it
 wrote, and the child session id.
 
-Each delegation ends in one of these statuses: `completed`, `no_result`, `budget_exhausted`,
-`killed`, `stuck`, `error`, `failed` (with the error kind), `timeout`, or `interrupted`. A call
+Each delegation ends in one of these statuses: `completed`, `budget_exhausted`, `killed`,
+`stuck`, `error`, `failed` (with the error kind), `timeout`, or `interrupted`. The status comes
+only from how the child's turn ended, never from its prose. A call
 that is cancelled while running becomes `interrupted` at the next human turn or restart. There is
 no watchdog for a stalled child; only the `agent` tool's own timeout applies. Delegations run one
 at a time.
 
-The delegation budget (default 2) and the delegation entries apply only while a record is active.
-`integrate` records how the coordinator used each result. If every check passes but a delegation
-is not integrated, the turn ends with status unknown, the record stays active, and the reply names
-the unresolved delegation.
+Delegations have no budget. While a record is live, the runtime opens a `running` entry before
+each `agent` call and settles it after; the call always runs. A record holds at most 8 entries:
+the oldest integrated entry is dropped to make room, and with 8 unintegrated entries a further
+call still runs but is not recorded (a warning is logged). `integrate` records how the coordinator
+used each result. An unintegrated delegation keeps the record live, sets the status to unknown if
+every check passed, and is named in the evidence line.
 
 ## Persistence and recovery
 
@@ -121,8 +156,9 @@ replaces the saved record.
 
 If the file cannot be read, it is moved to `task.json.corrupt` and the session prints "Task state
 could not be read; starting without it". When a record is loaded again, running delegations
-become `interrupted`, and artifacts or references whose files changed are noted as "changed since
-last session".
+become `interrupted`. An artifact or reference whose saved and current hashes differ is noted as
+"changed since last session"; one whose saved file can no longer be read is noted as "removed
+since last session".
 
 `/task` shows the record. `/task clear` deletes it and `task.json`.
 
@@ -149,8 +185,8 @@ workspace. Then send these messages in the normal session:
    first." A model that uses the tool starts a record with INSTRUCTIONS.md, the voice sample and
    the sources as references.
 2. "Use the second angle. Write the outline and stop for my review." The record shows your choice
-   as a decision in your words, `outline.md` as an artifact, and a checkpoint requested with your
-   words.
+   as a decision citing your turn, `outline.md` as an artifact, and a checkpoint that cites your
+   turn.
 3. Exit, run `localharness start` again, and type `/task`. The record is back, with any changed
    files noted.
 4. "Outline approved. Write the draft and run the lint." The record shows `draft.md` as an
@@ -188,7 +224,8 @@ A requirement matches a call with the same tool name whose arguments include eve
 argument with the same value. Receipts come from actual dispatch results. A command that runs but
 exits nonzero does not pass an exit-code gate. Omitting `result_field` verifies only that the call
 succeeded, never quality. `TaskComplete` still describes the end of the agent turn, not user
-acceptance.
+acceptance. Changed from 0.16.4: `TaskContext.finalize` appends the evidence line to the reply
+instead of replacing the reply.
 
 ### Lower-level references (0.16.4)
 
@@ -207,7 +244,10 @@ declare the new handle. File-backed task references, described above, are re-rea
 - Each request carries one more tool schema and one more sentence of role guidance.
 - The act-guard is unchanged: with tools available, a first reply without a tool call still gets
   the existing one-time CONFIRMED nudge. This is the same in 0.16.4 and 0.16.5.
-- Streaming text can reach you before the final check rewrites the reply.
+- Streaming text reaches you before the evidence line is appended to the final reply.
+- The record reports facts; nothing is enforced on the model's behalf. A model can close as
+  complete with a failed check; the record then stays live and the reply carries the evidence
+  line.
 - Evidence covers declared checks only. Judgments and HANDOFF text are not proof.
 - There is no file watcher and no watchdog for a stalled child.
 - References by handle do not survive a restart.

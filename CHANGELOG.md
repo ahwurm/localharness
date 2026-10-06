@@ -11,16 +11,18 @@ All notable changes to LocalHarness are documented here. The format follows
 ### Added
 - **A working record for substantive work, reachable from `localharness start`.** The model keeps
   it with a new `task` tool: objective, assignment, decisions, artifacts, checks, and the stop
-  boundary. There is no setup, and ordinary questions get no record. A decision, waiver,
-  checkpoint, or budget raise counts as the human's only when its quoted words appear in a human
-  turn the runtime recorded. See [task context](docs/task-context.md).
+  boundary. There is no setup, and ordinary questions get no record. Decisions, checks, waivers,
+  and checkpoints cite a stored human turn by number; the runtime copies that turn's text beside
+  the model's wording. See [task context](docs/task-context.md).
 - File-backed references (at most four, 200 KiB each) are re-read before every request of an
   active record, so their current text stays in view after compaction, edits, and restarts.
-- Editorial judgments, recorded as opinion and never as evidence, and a revision budget that the
-  runtime counts.
-- Delegation handoff: a structured brief, a runtime-observed status for every delegation, a
-  delegation budget, `integrate` to record how a result was used, and `interrupted` for a
+- Editorial judgments, recorded as opinion and never as evidence, and artifact revision facts
+  (`draft: rev 3`, `ran at draft rev 2`) next to each check.
+- Delegation handoff: a structured brief, a runtime-observed status for every delegation,
+  `integrate` to record how a result was used, and `interrupted` for a
   delegation cancelled mid-run.
+- A record retires only when closed as complete with every declared check passed or waived and
+  every delegation integrated; `close` never refuses.
 - The record persists in `task.json` (private, atomic, at most 64 KiB) and resumes on the next
   start in the same folder. `/task` shows it and `/task clear` deletes it. An unreadable file is
   moved to `task.json.corrupt`.
@@ -36,6 +38,8 @@ All notable changes to LocalHarness are documented here. The format follows
   tool for substantive multi-step work.
 - `task start` and `task update` accept `artifacts` and `references` in one call; a refused item
   refuses the whole call.
+- The 0.16.4 receipt summary no longer replaces the reply; it is appended as one evidence line.
+- Delegation status comes only from how the child's turn ended.
 
 ### Fixed
 - `tool_result_get` refusing more than four references now reaches the model as the narrowing

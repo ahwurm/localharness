@@ -46,7 +46,7 @@ objective and the current stage as the assignment; declare this file, the voice 
 source files you use as references; declare `draft.md` (and `outline.md`) as artifacts; declare
 the lint command as a check before you run it (tool `bash_exec`, arguments
 `{"command": "python3 checks/lint.py draft.md"}`, result_field `exit_code`, expected `0`,
-depends on the draft artifact); record the user's corrections as decisions with their words;
+depends on the draft artifact); record the user's corrections as decisions citing the turn where the user said them (`human_turn`);
 record the editorial criteria as judgments. Close the task at the stage the user asked for.
 
 ## Boundaries
