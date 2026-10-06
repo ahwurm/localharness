@@ -6,6 +6,28 @@ All notable changes to LocalHarness are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.7] — 2026-10-06
+
+### Added
+- **Co-author consent: localharness is credited on the commits it helps make.** A per-project
+  yes/no asks, once per project, whether localharness is credited as a co-author on commits the
+  harness helps make. It is attribution only — MIT license, no loss of ownership, just a
+  shoutout. The answer is remembered in the global config dir
+  (`~/.localharness/coauthor_consent.yaml`) and never asked again for that project.
+- Integration is a `prepare-commit-msg` git hook, installed at session start, that scopes itself
+  to harness commits via the `LOCALHARNESS_COMMIT=1` marker (injected by `bash_exec`). A
+  hand-run `git commit` never carries the marker, so the hook is a no-op for it. A granted
+  consent appends `Co-Authored-By: localharness <localharness.agent@gmail.com>` on its own
+  line, never duplicated.
+- Fail closed: a project with no recorded answer and no way to ask gets no trailer and no
+  record, so a later interactive session still gets its one question.
+
+### Known limitations
+- The consent is per-project (the git repo root); there is no machine-wide default.
+- The hook only fires for commits the harness stages (marked `LOCALHARNESS_COMMIT=1`); commits
+  made by hand are untouched.
+- The trailer is on the commit message only — not on pushes, PRs, or release notes.
+
 ## [0.16.6] — 2026-10-06
 
 ### Added
