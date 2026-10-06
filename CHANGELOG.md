@@ -48,6 +48,19 @@ All notable changes to LocalHarness are documented here. The format follows
 - `tool_result_get` refusing more than four references now reaches the model as the narrowing
   notice instead of a crash message (#172).
 
+### Validation and limitations
+- Feature tests cover citations, the appended evidence line, the retire rule, restart diffs,
+  reference snapshots with one copy per request, the overflow fallback, delegation statuses,
+  cancellation, and the ordinary-query path. Full suite: 7454 passed, 22 skipped, 4 xfailed.
+- Thirteen preregistered synthetic cases ran against the published 0.16.4 on the same local model
+  with memory disabled and identical real toolsets. The candidate kept goals through asides and
+  corrections, raised one clarification instead of guessing, resumed from disk in 2 calls, and
+  replaced 20 delegations with 4; it used about 2.5 times the input tokens, and three of its turns
+  (two for the baseline) ended with the model exhausting its output budget. Review was unblinded,
+  one sample per case. See [validation details](docs/release-validation-0.16.5.md).
+- The runtime records facts and citations and enforces no policy on the model; the model must
+  choose to use the `task` tool. Pre-existing loop mechanisms such as the act-guard are unchanged.
+
 ## [0.16.4] — 2026-10-05
 
 Contributors: [ahwurm](https://github.com/ahwurm) and Codex (AI coding assistant).
