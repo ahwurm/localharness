@@ -25,7 +25,7 @@ The model changes the record only through this tool. Every change is saved at on
 | `update` | Changes the assignment, stop boundary, requested status, next action, or open questions. |
 | `decide` | Records a decision. |
 | `artifact` | Names a workspace file the work produces, such as `draft.md`. |
-| `reference` | Names a file (or a `tool_result_get` handle) the work depends on. |
+| `reference` | Names a file (or a `tool_result_get` handle) the work depends on; `drop: true` removes one. |
 | `check` | Declares a machine check: which tool call proves it and what result it must give. |
 | `judge` | Records an editorial criterion and the model's assessment of it. |
 | `waive` | Waives a check or judgment. It must cite the human turn that waives it. |
@@ -69,8 +69,25 @@ There is no file watcher. A file that changes is picked up at the next request. 
 `tool_result_get` handle has no file behind it, so it does not survive a restart; it is then
 marked "unavailable; read it again".
 
+The kept text is the read tool's numbered view of the whole file, the same text `read` returns.
+When the model has already read the whole file and that result is still in the request, the
+reference is not added a second time. A read result that ends with the run's budget note still
+counts. After that result is evicted, the reference comes back in the same numbered form. A file
+larger than the read tool's default view (2000 lines or 100,000 characters) was never fully shown
+by one `read`, so its reference is always added.
+
 Task references share the four-reference limit with any set the model declares through
-`tool_result_get`. A reference that does not fit is marked "unprotected: ..." with the reason.
+`tool_result_get`. A reference that cannot be declared is marked "unprotected: ..." with the
+reason.
+
+When the request with its references cannot fit with the reply reserve, the request still goes
+out. Each task reference is marked "unprotected: cannot fit with reply reserve; drop or narrow
+references" in the packet, and no reference text is added to that request. Any `tool_result_get`
+references the model declared are left out of that request as well. The turn is blocked only when
+the prompt does not fit even without references.
+
+`reference` with `{source, drop: true}` removes the reference with that source. From the next
+request, only the remaining references are kept in view.
 
 ## Checks and judgments
 

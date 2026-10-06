@@ -15,7 +15,10 @@ All notable changes to LocalHarness are documented here. The format follows
   and checkpoints cite a stored human turn by number; the runtime copies that turn's text beside
   the model's wording. See [task context](docs/task-context.md).
 - File-backed references (at most four, 200 KiB each) are re-read before every request of an
-  active record, so their current text stays in view after compaction, edits, and restarts.
+  active record, so their current text stays in view after compaction, edits, and restarts. The
+  kept text is the read tool's numbered view, so a file already read in full is not added twice.
+  References that cannot fit with the reply reserve are marked unprotected in the packet and the
+  request still goes out; `reference` with `drop: true` removes one.
 - Editorial judgments, recorded as opinion and never as evidence, and artifact revision facts
   (`draft: rev 3`, `ran at draft rev 2`) next to each check.
 - Delegation handoff: a structured brief, a runtime-observed status for every delegation,
