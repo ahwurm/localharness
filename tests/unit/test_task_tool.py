@@ -418,6 +418,25 @@ async def test_close_complete_with_unintegrated_delegation_stays_live(tmp_path):
 
 # --- 0.16.5 slice 4: batch declarations on start/update; guidance sentence ----------------------
 
+async def test_reference_drop_by_source(tmp_path):
+    state, tool = tool_for(tmp_path)
+    await start(tool)
+    (tmp_path / "voice.md").write_text("v")
+    assert (await tool.run(action="reference", source="voice", path="voice.md")).success
+    assert (await tool.run(action="reference", source="pasted", handle="abc")).success
+    assert refused(await tool.run(action="reference", source="voice", drop=True, path="voice.md"),
+                   "drop takes only source")
+    assert refused(await tool.run(action="reference", source="voice", drop=True, handle="abc"),
+                   "drop takes only source")
+    assert refused(await tool.run(action="reference", source="voice", drop=False), "drop takes only source")
+    assert refused(await tool.run(action="reference", source="nope", drop=True), "no reference named nope")
+    out = await tool.run(action="reference", source="voice", drop=True)
+    assert out.success and "voice" in out.output and "dropped" in out.output
+    assert [r.source for r in state.current.references] == ["pasted"]
+    saved = json.loads((tmp_path / "task.json").read_text())
+    assert [r["source"] for r in saved["references"]] == ["pasted"]
+
+
 async def test_start_declares_artifacts_and_references_in_one_call(tmp_path):
     state, tool = tool_for(tmp_path)
     (tmp_path / "a.md").write_text("voice")

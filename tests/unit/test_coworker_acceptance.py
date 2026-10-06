@@ -21,8 +21,10 @@ Each entry names a test that exists (`test_every_mapped_test_exists` resolves th
    tests/unit/test_task_tool.py::test_checkpoint_requires_a_cited_human_turn
    tests/unit/test_task_record.py::test_finalize_checkpoint_keeps_packet
 5. Source/voice dependencies under forced compaction, with overflow:
+   tests/unit/test_task_references.py::test_a0_read_reference_is_one_copy
    tests/unit/test_task_references.py::test_a_references_survive_forced_eviction
-   tests/unit/test_task_references.py::test_b_overflow_blocks_once_with_the_narrowing_notice
+   tests/unit/test_task_references.py::test_b_overflow_proceeds_with_references_unprotected
+   tests/unit/test_task_references.py::test_b2_prompt_that_cannot_fit_still_blocks
    tests/unit/test_task_references.py::test_unchanged_reference_is_redeclared_after_the_next_human_turn
    tests/unit/test_task_context.py::test_oversized_task_packet_blocks_without_model_call
 6. Failed executable check, focused fix, rerun, with revision facts:

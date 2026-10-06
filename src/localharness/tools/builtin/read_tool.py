@@ -42,6 +42,15 @@ def _is_memory_store_artifact(target) -> bool:
     return any(stem in name for stem in MEMORY_STORE_FILENAMES)
 
 
+def render_numbered(text: str, *, start: int = 0) -> str:
+    """The read tool's view of ``text``: each line prefixed with its 1-based number and a tab.
+
+    One rendering shared by ``read`` and the task record's reference snapshots, so a file the
+    model has read whole is byte-identical to its snapshot.
+    """
+    return "\n".join(f"{start + i + 1}\t{line}" for i, line in enumerate(text.splitlines()))
+
+
 class ReadTool(Tool):
     def info(self) -> ToolSchema:
         return ToolSchema(
@@ -124,7 +133,7 @@ class ReadTool(Tool):
         start = max(0, offset - 1)
         selected = all_lines[start : start + limit]
 
-        numbered = "\n".join(f"{start + i + 1}\t{line}" for i, line in enumerate(selected))
+        numbered = render_numbered("".join(line + "\n" for line in selected), start=start)
         full_len = len(numbered)
         truncated = full_len > MAX_RETURNED_CHARS
         if truncated:

@@ -26,7 +26,7 @@ ALLOWED: dict[str, set[str]] = {
     "artifact": {"key", "path"},
     "check": {"key", "description", "tool", "arguments", "result_field", "expected", "depends_on",
               "human_turn"},
-    "reference": {"source", "path", "handle"},
+    "reference": {"source", "path", "handle", "drop"},
     "judge": {"key", "criterion", "assessment", "passages", "fix"},
     "waive": {"key", "human_turn"},
     "integrate": {"delegation_id", "note"},
@@ -111,6 +111,7 @@ class TaskTool(Tool):
                     "path": _str("artifact/reference: workspace file path"),
                     "source": _str("reference: a short label, e.g. voice sample", 200),
                     "handle": _str("reference: a tool_result_get handle instead of a path", 64),
+                    "drop": {"type": "boolean", "description": "reference: true removes the reference named by source"},
                     "criterion": _str("judge: the editorial criterion"),
                     "assessment": _str("judge: your assessment against the criterion"),
                     "passages": _str("judge: the passages the assessment concerns"),
@@ -335,6 +336,12 @@ class TaskTool(Tool):
         if "source" not in f:
             raise _Refused("reference requires source")
         source = _text("source", f["source"], 200)
+        if "drop" in f:
+            if f["drop"] is not True or "path" in f or "handle" in f:
+                raise _Refused("drop takes only source and drop: true")
+            if not state.drop_reference(source):
+                raise _Refused(f"no reference named {source}")
+            return f"Reference {source} dropped; it is no longer kept in view."
         if ("path" in f) == ("handle" in f):
             raise _Refused("reference requires exactly one of path or handle")
         if "path" in f:

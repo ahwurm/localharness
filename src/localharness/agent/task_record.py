@@ -47,6 +47,7 @@ MAX_DELEGATIONS = 8
 MAX_ARTIFACT_HISTORY = 16
 MAX_QUOTE_DISPLAY = 200
 CORRUPT_NOTICE = "Task state could not be read; starting without it"
+UNFIT = "unprotected: cannot fit with reply reserve; drop or narrow references"
 
 
 class TaskRecordTooLarge(ValueError):
@@ -207,6 +208,7 @@ class TaskState:
         self.workspace = workspace
         self.recent_turns: list[dict[str, Any]] = []  # [{"n": int, "text": str}]
         self.notes: list[str] = []  # runtime-only restart notes
+        self._store: Any = None  # the content store of the last refresh (for withdraw/drop)
 
     @classmethod
     def load(cls, path: Path, workspace: str) -> tuple[TaskState, str | None]:
@@ -288,7 +290,18 @@ class TaskState:
 
         Called before every request of an active task. Every available snapshot is re-declared
         each time because the per-turn reset clears protection; a file is re-put only when its
-        handle is gone or its hash moved. Never raises: problems become the reference status."""
+        handle is gone or its hash moved. Never raises: problems become the reference status.
+
+        A file snapshot is the read tool's numbered rendering (`render_numbered`), so a whole-file
+        `read` still in the request is byte-identical and `ensure_active_references` adds no second
+        copy; after eviction it comes back in the same form. A file beyond the read tool's default
+        view (2000 lines / MAX_RETURNED_CHARS) was never fully shown, so a restore is correct then.
+        An editor-attached read (file_read_hook) reads the buffer while the snapshot reads the
+        disk, so the two differ while the buffer is unsaved."""
+        from localharness.tools.builtin.read_tool import render_numbered  # local: import cycle
+
+        if store is not None:
+            self._store = store
         rec = self._live()
         if store is None or rec is None or not rec.references:
             return
@@ -313,7 +326,7 @@ class TaskState:
                 digest = hashlib.sha256(data).hexdigest()
                 changed = ref.sha256 is not None and digest != ref.sha256
                 if changed or ref.handle is None or store.get(ref.handle) is None:
-                    ref.handle, ref.sha256 = store.put(data.decode("utf-8", "replace")), digest
+                    ref.handle, ref.sha256 = store.put(render_numbered(data.decode("utf-8", "replace"))), digest
                 status = "refreshed (changed)" if changed else "current"
             elif ref.handle is None or store.get(ref.handle) is None:
                 ref.status = "unavailable; read it again"
@@ -330,6 +343,30 @@ class TaskState:
                 self.save()
             except TaskRecordTooLarge:
                 log.warning("task record too large to save after a reference refresh")
+
+    def withdraw_references(self) -> bool:
+        """The packed request cannot fit with its references: mark each one UNFIT and clear the
+        store's active set for this request (the whole set, including a model's own
+        tool_result_get declarations merged into the task step). False when there is nothing to
+        withdraw, so the caller lets the overflow stand."""
+        rec = self._live()
+        if rec is None or not rec.references or self._store is None:
+            return False
+        for ref in rec.references:
+            ref.status = UNFIT
+        self._store.clear_active_references()
+        self._save_quietly()
+        return True
+
+    def drop_reference(self, source: str) -> bool:
+        """Remove the reference named `source`; the next refresh declares only the rest."""
+        rec = self.current
+        if rec is None or not any(r.source == source for r in rec.references):
+            return False
+        rec.references = [r for r in rec.references if r.source != source]
+        if self._store is not None:
+            self._store.clear_active_references()
+        return True
 
     @property
     def active(self) -> bool:

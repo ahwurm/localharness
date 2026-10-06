@@ -219,6 +219,10 @@ class ActiveReferenceError(RuntimeError):
     """A declared dependent step cannot run with its required reference snapshots."""
 
 
+class ActiveReferenceOverflow(ActiveReferenceError):
+    """The packed request with its references cannot fit with the reply reserve."""
+
+
 @dataclass(frozen=True)
 class ActiveReference:
     source: str
@@ -1810,12 +1814,14 @@ class ContextManager:
                 raise ActiveReferenceError(
                     "Required reference snapshot is unavailable; read it again or narrow the step."
                 )
-            # A full result remains available even when the request-only eviction ledger
-            # was appended to it. A substring of a summary or a truncated body is not proof.
+            # A full result remains available even when the request-only eviction ledger or
+            # the run's budget note (both harness-appended suffixes, never model text) was
+            # appended to it. A substring of a summary or a truncated body is not proof.
             if any(
                 m.get("role") == "tool" and (
                     m.get("content") == body
-                    or (m.get("content") or "").startswith(body + "\n\n[out of view:")
+                    or (m.get("content") or "").startswith(
+                        (body + "\n\n[out of view:", body + "\n\n[budget:"))
                 ) for m in packed
             ):
                 continue
@@ -1845,7 +1851,7 @@ class ContextManager:
             usage += self._token_counter.count(json.dumps(wire_tools))
         reserve = response_reserve(self.max_context_tokens, self.max_response_tokens)
         if self.max_context_tokens > 0 and usage + reserve > self.max_context_tokens:
-            raise ActiveReferenceError(
+            raise ActiveReferenceOverflow(
                 "Active step and the complete prompt cannot fit with reply reserve; "
                 "split or narrow the active step."
             )

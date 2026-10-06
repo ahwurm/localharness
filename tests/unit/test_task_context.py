@@ -209,7 +209,7 @@ async def test_ordinary_query_one_call_and_no_task_packet(tmp_path, bus, mock_ll
 
 @pytest.mark.asyncio
 async def test_xml_injection_is_counted_at_final_boundary(tmp_path, bus):
-    from localharness.agent.context import ActiveReferenceError, TokenCounter
+    from localharness.agent.context import ActiveReferenceOverflow, TokenCounter
     from localharness.provider.client import LLMClient, LLMConfig
     from localharness.tools.base import ToolSchema
 
@@ -224,7 +224,7 @@ async def test_xml_injection_is_counted_at_final_boundary(tmp_path, bus):
     loop = make_loop(llm, bus, tmp_path, contract(tmp_path), window=8192)
     loop._ctx._token_counter = Counter()
     tools = [ToolSchema(name="check", description="giant tool instruction", parameters={})]
-    with pytest.raises(ActiveReferenceError, match="XML prompt"):
+    with pytest.raises(ActiveReferenceOverflow, match="XML prompt"):
         await loop._build_request([{"role": "user", "content": "Check"}], tools)
     await llm._client.close()
 
