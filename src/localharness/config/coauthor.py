@@ -22,6 +22,7 @@ from localharness.config.overlay import atomic_write_overlay
 from localharness.config.paths import global_config_dir
 
 COAUTHOR_CONSENT_FILE = "coauthor_consent.yaml"
+COAUTHOR_PENDING_FILE = "coauthor_pending"
 
 
 def consent_store_path() -> Path:
@@ -80,6 +81,51 @@ def record_consent(project_root: str, granted: bool) -> None:
     root = _normalize_root(project_root)
     data["projects"][root] = {"co_author": granted, "recorded": _now()}
     atomic_write_overlay(consent_store_path(), data)
+
+
+# --------------------------------------------------------------------------- pending marker
+
+def _pending_path() -> Path:
+    """The global pending-marker file. Lives in the config dir (never the workspace)."""
+    return global_config_dir() / COAUTHOR_PENDING_FILE
+
+
+def write_pending_marker(project_root: str) -> None:
+    """Write a marker that a commit was made for a project with no recorded consent.
+
+    The git hook (which has no tty — ``bash_exec`` uses ``stdin=DEVNULL``) calls this
+    on the first harness commit for an undecided project. The main process reads and
+    clears it after the turn to trigger the consent question.
+
+    Idempotent: overwriting with the same root is a no-op in effect."""
+    root = _normalize_root(project_root)
+    try:
+        _pending_path().write_text(root, encoding="utf-8")
+    except OSError:
+        pass  # fail closed: no marker, no question, no trailer
+
+
+def read_pending_marker() -> Optional[str]:
+    """Read the pending marker, returning the project root, or None if absent.
+
+    Does NOT clear the marker — the caller clears it via ``clear_pending_marker``
+    after settling (or deciding not to ask)."""
+    path = _pending_path()
+    if not path.exists():
+        return None
+    try:
+        root = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return root or None
+
+
+def clear_pending_marker() -> None:
+    """Remove the pending marker. Called after the consent question is settled."""
+    try:
+        _pending_path().unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------- trailer
