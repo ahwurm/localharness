@@ -232,6 +232,19 @@ def _names(mapping: Any) -> list[str]:
     return sorted(map(str, mapping)) if isinstance(mapping, dict) else []
 
 
+def _value_digests(mapping: Any) -> dict[str, str]:
+    """SHA-256 hex of each env/header value, keyed by name. A value-only change (e.g. swapping a
+    TOKEN) now trips the fingerprint; the raw value is never stored (no-plaintext preserved).
+    No salt: the value is already non-public and the digest is one-way, so a salt only adds
+    management for no security gain, and an unsalted digest is stable across runs.
+    Handles both plain strings (from YAML) and SecretStr (from config models)."""
+    if not isinstance(mapping, dict):
+        return {}
+    def _resolve(v: Any) -> str:
+        return v.get_secret_value() if hasattr(v, "get_secret_value") else str(v)
+    return {str(k): hashlib.sha256(_resolve(v).encode("utf-8")).hexdigest() for k, v in mapping.items()}
+
+
 def _args(server: dict) -> list[str]:
     args = server.get("args")
     args = args if isinstance(args, list) else ([] if args is None else [args])
@@ -255,8 +268,8 @@ def executables_snapshot(workspace_dir: Path) -> list[dict]:
             out.append({"file": path.name, "name": str(s.get("name") or ""),
                         "transport": str(s.get("transport") or ""),
                         "command": str(s.get("command") or ""), "args": _args(s),
-                        "env": _names(s.get("env")), "url": str(s.get("url") or ""),
-                        "headers": _names(s.get("headers"))})
+                        "env": _value_digests(s.get("env")), "url": str(s.get("url") or ""),
+                        "headers": _value_digests(s.get("headers"))})
     return sorted(out, key=lambda e: (e["file"], e["name"], _canonical(e)))
 
 
@@ -481,8 +494,8 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
 
     def agent_entries(file: str, raw: Any) -> list[dict]:
         found = [{"file": file, "kind": "mcp_server", "name": str(s.get("name") or ""),
-                  "shown": _shown_server(s), "env": _names(s.get("env")),
-                  "headers": _names(s.get("headers"))} for s in _servers(raw)]
+                  "shown": _shown_server(s), "env": _value_digests(s.get("env")),
+                  "headers": _value_digests(s.get("headers"))} for s in _servers(raw)]
         memory = raw.get("memory") if isinstance(raw, dict) else None
         if isinstance(memory, dict) and memory.get("embedding_model") is not None:
             found.append({"file": file, "kind": "embedding_model", "name": "memory.embedding_model",

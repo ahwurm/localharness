@@ -56,6 +56,8 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
                  "_slash_image", True, terminal_only=True),
     SlashCommand("/plugins", "List plugins; /plugins enable|disable <name> to switch one in this session",
                  "_slash_plugins", True, terminal_only=True),
+    SlashCommand("/mcp", "Manage MCP servers for the session's agent (list, add, edit, test, remove)",
+                 "_slash_mcp", True, terminal_only=True),
     SlashCommand("/quit", "Exit LocalHarness", "_slash_quit"),
     SlashCommand("/exit", "Exit LocalHarness", "_slash_quit"),
 )

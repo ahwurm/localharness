@@ -11,6 +11,7 @@ The global dir is conftest's hermetic LOCALHARNESS_HOME; answers are `rich.promp
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -169,7 +170,7 @@ def test_the_machine_snapshot_lists_servers_models_and_loosenings_with_names_onl
         {"file": "agents/o2.yaml", "kind": "permission", "name": "permissions.mode",
          "shown": "unattended"},
         {"file": ORCH, "kind": "mcp_server", "name": "g1", "shown": "/bin/echo hi",
-         "env": ["T"], "headers": []},
+         "env": {"T": hashlib.sha256(b"secret-v").hexdigest()}, "headers": {}},
         {"file": "divisions/d.yaml", "kind": "permission", "name": "permissions.mode",
          "shown": "unattended"},
         {"file": "org.yaml", "kind": "permission", "name": "permissions.workspace_root",

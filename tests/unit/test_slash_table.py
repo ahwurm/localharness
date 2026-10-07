@@ -46,10 +46,11 @@ CORE = [
     ("/image", "Attach a picture to your next message; /image <path>, /image (the clipboard), "
                "/image clear — or drop the file onto the terminal, or Ctrl+V"),
     ("/plugins", "List plugins; /plugins enable|disable <name> to switch one in this session"),
+    ("/mcp", "Manage MCP servers for the session's agent (list, add, edit, test, remove)"),
     ("/quit", "Exit LocalHarness"),
     ("/exit", "Exit LocalHarness"),
 ]
-TERMINAL_ONLY = ("/image", "/plugins")
+TERMINAL_ONLY = ("/image", "/plugins", "/mcp")
 PHONE = [row for row in CORE if row[0] not in TERMINAL_ONLY]  # terminal-only rows never reach the phone
 
 HELP_BEFORE = (
@@ -67,6 +68,7 @@ HELP_BEFORE = (
     "  /image      Attach a picture to your next message; /image <path>, /image (the clipboard), "
     "/image clear — or drop the file onto the terminal, or Ctrl+V\n"
     "  /plugins    List plugins; /plugins enable|disable <name> to switch one in this session\n"
+    "  /mcp        Manage MCP servers for the session's agent (list, add, edit, test, remove)\n"
     "  /quit       Exit LocalHarness\n"
     "  /exit       Exit LocalHarness\n"
     "\n"

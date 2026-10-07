@@ -250,6 +250,7 @@ class OrchestratorREPL:
         on_agent_deployed: Any = None,
         gate: Any = None,
         on_plugin_switch: Any = None,
+        mcp_manager: Any = None,
         queued: Sequence[str] = (),
     ) -> None:
         self._orchestrator = orchestrator
@@ -277,6 +278,8 @@ class OrchestratorREPL:
         # show, or None to restart (`hook("list", "")` is bare /plugins). start_cmd passes it for a
         # terminal session only; None elsewhere.
         self._on_plugin_switch = on_plugin_switch
+        # /mcp: the live MCPClientManager for hot-connect/hot-remove. None in tests.
+        self._mcp_manager = mcp_manager
         # Lines typed ahead of a /plugins restart, carried into the rebuilt session: played first.
         self._resume_queue: list[str] = list(queued)
         # (verb, plugin name) once /plugins asked for a restart; start_cmd reads it after run().
@@ -1310,6 +1313,12 @@ class OrchestratorREPL:
 
     async def _slash_plugins(self, args: str, args_lower: str) -> None:
         await self._handle_plugins_cmd(args_lower.strip())
+
+    async def _slash_mcp(self, args: str, args_lower: str) -> None:
+        # /mcp — in-session MCP server management (spec 15). Session state is reached
+        # via `self`; the handler has no ctx parameter.
+        from localharness.cli.mcp_cmd import run_mcp_slash
+        await run_mcp_slash(self, args)
 
     async def _handle_plugins_cmd(self, arg: str) -> None:
         """/plugins lists the plugins; /plugins enable|disable <name> switches one in THIS session.
