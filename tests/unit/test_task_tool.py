@@ -344,7 +344,7 @@ async def test_close_complete_with_unresolved_evidence_stays_live(tmp_path):
     out = await tool.run(action="close", status="complete")
     assert out.success and state.current.closed  # never refused
     assert "stays live until its declared evidence is settled: Task evidence: lint: failed." in out.output
-    assert state.finalize("Done.") == "Done.\n\nTask evidence: lint: failed."
+    assert state.finalize("Done.") == "Done."
     assert state.packet() != "" and not state.current.retired
     await tool.run(action="waive", key="lint", human_turn=1)
     assert state.packet() == ""  # open judgments never block retirement

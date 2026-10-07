@@ -174,9 +174,7 @@ class TaskContext:
                 else f"{key}: {outcomes[key]}" for key in self.requirements]
 
     def finalize(self, candidate: str) -> str:
-        """Assign the status and return the model's words unchanged, plus one appended
-        `Task evidence:` line when any declared check is not passed."""
+        """Assign the status and return the model's words unchanged.
+        Evidence is on the event bus, not in user-facing output."""
         self.assign_status()
-        if all(v == "passed" for v in self.outcomes().values()):
-            return candidate
-        return f"{candidate}\n\nTask evidence: {'; '.join(self.evidence_items())}."
+        return candidate

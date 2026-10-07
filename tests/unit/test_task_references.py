@@ -247,7 +247,7 @@ async def test_e_checks_report_draft_revisions(tmp_path, bus, mock_llm_client):
     assert "lint: passed — Lint passes" in passed and "Artifacts: draft: rev 2" in passed
     assert "lint: passed (ran at draft rev 2, draft now rev 3)" in later
     assert all("Revision budget" not in p for p in (failed, stale, passed, later))
-    assert out == "Done.\n\nTask evidence: lint: passed (ran at draft rev 2, draft now rev 3)."
+    assert out == "Done."
 
 
 async def test_f_close_complete_stays_live_until_evidence_settles(tmp_path, bus, mock_llm_client):
