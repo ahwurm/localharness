@@ -49,11 +49,11 @@ def test_completer_lists_all_commands_on_bare_slash():
 
 
 def test_memory_off_offers_no_memory_command():
-    assert _texts("/m") == {"/model", "/mode"} and _texts("/me") == set()
+    assert _texts("/m") == {"/model", "/mode", "/mcp"} and _texts("/me") == set()
 
 
 def test_completer_prefix_filters(memory_on):
-    assert _texts("/m") == {"/memory", "/model", "/mode"}   # every m-command
+    assert _texts("/m") == {"/memory", "/model", "/mode", "/mcp"}   # every m-command
     assert _texts("/me") == {"/memory"}             # /model and /mode are /mo…, excluded
     assert _texts("/mo") == {"/model", "/mode"}
     assert _texts("/mod") == {"/model", "/mode"}

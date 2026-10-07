@@ -205,7 +205,7 @@ def test_the_terminal_only_rows_are_image_and_plugins():
     assert find_row("/plugins enable image") is row
     # /image names a file on the machine the terminal runs on (or its clipboard); the phone has
     # its own 📎, Zed pastes natively, Discord attaches — so it is terminal-only too.
-    assert [r.name for r in all_rows() if r.terminal_only] == ["/image", "/plugins"]
+    assert [r.name for r in all_rows() if r.terminal_only] == ["/image", "/plugins", "/mcp"]
 
 
 def test_only_the_terminal_can_switch_plugins():

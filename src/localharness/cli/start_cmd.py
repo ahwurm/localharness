@@ -1845,6 +1845,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             harness_config=harness,
             on_agent_deployed=_register_deployed_agent,
             gate=gate,  # what /mode switches; the same object the loop and subagents hold
+            # /mcp: the live MCPClientManager so list-status / hot-add / hot-remove reach it.
+            # None when no MCP server is configured (the command degrades to config-only).
+            mcp_manager=mcp_manager,
             # /plugins enable|disable restarts a terminal session (the channel's own
             # can_switch_plugins decides); the web and ACP paths never get the hook.
             on_plugin_switch=_plugin_switch if mobile_channel is None and acp_channel is None else None,

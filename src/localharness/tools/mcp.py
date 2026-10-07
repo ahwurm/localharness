@@ -325,6 +325,18 @@ class MCPClientManager:
         """Names of currently-connected MCP servers."""
         return [name for name, c in self._clients.items() if c.is_connected]
 
+    def get_client(self, name: str) -> "MCPServerClient | None":
+        """The live client for `name`, or None if not connected."""
+        return self._clients.get(name)
+
+    def add_client(self, name: str, client: "MCPServerClient") -> None:
+        """Track a newly-connected client (hot-add from CLI)."""
+        self._clients[name] = client
+
+    def remove_client(self, name: str) -> "MCPServerClient | None":
+        """Drop a client from tracking (hot-remove from CLI). Returns the client."""
+        return self._clients.pop(name, None)
+
     async def reconnect_server(self, server_name: str) -> bool:
         """Manually trigger reconnection for a named server."""
         client = self._clients.get(server_name)

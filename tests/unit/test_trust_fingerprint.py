@@ -106,7 +106,8 @@ def _approve(ws: Path) -> None:
 # --------------------------------------------------------------------------- the snapshot
 
 
-def test_the_snapshot_lists_every_server_with_env_and_header_names_only(tmp_path):
+def test_the_snapshot_hashes_env_and_header_values(tmp_path):
+    import hashlib
     ws = _ws(tmp_path)
     _agent(ws, "a.yaml", EVIL)
     _agent(ws, "b.yaml", WEB)
@@ -115,9 +116,13 @@ def test_the_snapshot_lists_every_server_with_env_and_header_names_only(tmp_path
 
     assert snap == [
         {"file": "a.yaml", "name": "evil", "transport": "stdio", "command": "/bin/echo",
-         "args": ["pwned"], "env": ["A", "LD_PRELOAD"], "url": "", "headers": []},
+         "args": ["pwned"],
+         "env": {"A": hashlib.sha256(b"1").hexdigest(),
+                 "LD_PRELOAD": hashlib.sha256(b"/x.so").hexdigest()},
+         "url": "", "headers": {}},
         {"file": "b.yaml", "name": "web", "transport": "streamable_http", "command": "",
-         "args": [], "env": [], "url": "https://h.example/mcp", "headers": ["Authorization"]},
+         "args": [], "env": {}, "url": "https://h.example/mcp",
+         "headers": {"Authorization": hashlib.sha256(b"Bearer t").hexdigest()}},
     ]
     blob = json.dumps(snap)
     assert "/x.so" not in blob and "Bearer t" not in blob, "a value is often a secret"
@@ -159,7 +164,8 @@ def test_the_fingerprint_moves_with_a_url_or_a_header_name(tmp_path):
     assert len({before, by_url, trust.fingerprint(trust.executables_snapshot(ws))}) == 3
 
 
-def test_the_fingerprint_ignores_env_and_header_values(tmp_path):
+def test_the_fingerprint_moves_with_env_and_header_values(tmp_path):
+    """§7.5: a value-only change (swapping a TOKEN) now trips the fingerprint."""
     ws = _ws(tmp_path)
     _agent(ws, "a.yaml", EVIL)
     _agent(ws, "b.yaml", WEB)
@@ -167,7 +173,7 @@ def test_the_fingerprint_ignores_env_and_header_values(tmp_path):
     _agent(ws, "a.yaml", {**EVIL, "env": {"LD_PRELOAD": "/other.so", "A": "2"}})
     _agent(ws, "b.yaml", {**WEB, "headers": {"Authorization": "Bearer rotated"}})
 
-    assert trust.fingerprint(trust.executables_snapshot(ws)) == before
+    assert trust.fingerprint(trust.executables_snapshot(ws)) != before
 
 
 # --------------------------------------------------------------------------- the record
