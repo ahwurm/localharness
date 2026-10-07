@@ -125,7 +125,7 @@ async def test_failed_delegation_is_named_in_reply_and_keeps_record_live(
     assert d.status == "failed: execution_error" and "boom" in d.findings
     assert tool_messages(seen, "reviewer (d1): failed: execution_error, not integrated")
     assert state.current.closed and state._live() is not None  # closing never refuses
-    assert reply == "Done.\n\nTask evidence: reviewer (d1): failed: execution_error, not integrated."
+    assert reply == "Done."
     (obs,) = agent_observations(bus)
     assert obs.error and "boom" in obs.error
 

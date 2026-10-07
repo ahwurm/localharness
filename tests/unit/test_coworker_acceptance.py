@@ -178,7 +178,7 @@ async def test_case9_uncited_research_is_an_assumption_and_a_waiver_needs_a_turn
     assert any("human turn 9 is not on record; stored turns: 1-1" in t for t in tool_text)
     ctx = state.current.context
     assert "lint" not in ctx.waivers and ctx.outcomes()["lint"] == "unknown"
-    assert reply == "There are no interview notes; stopping.\n\nTask evidence: lint: unknown."
+    assert reply == "There are no interview notes; stopping."
 
 
 def test_every_mapped_test_exists():

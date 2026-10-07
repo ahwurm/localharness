@@ -390,24 +390,22 @@ def test_artifact_revisions_and_run_facts_in_packet(tmp_path):
     assert "Artifacts: draft: rev 23" in loaded.packet()
 
 
-def test_finalize_appends_one_evidence_line(tmp_path):
+def test_finalize_returns_words_unchanged(tmp_path):
     state, lint, edit = lint_state(tmp_path)
     ctx = state.current.context
     ctx.requested_status = "complete"
     lint(1, "c1")
-    assert state.finalize("4") == "4\n\nTask evidence: lint: failed."
-    state.current.judgments = [Judgment("tone", "Plain tone")]  # opinion: never part of the line
+    assert state.finalize("4") == "4"  # evidence is on the bus, not in user output
+    state.current.judgments = [Judgment("tone", "Plain tone")]
     ctx.revise(Requirement("review", "Review", "bash_exec", {"command": "review"}))
     state.observe_human("Skip the review gate for this draft.")
     ctx.waive("review", human_decision='turn 2: "Skip the review gate for this draft."')
-    assert state.finalize("Draft done.") == (
-        'Draft done.\n\nTask evidence: lint: failed; review: waived (turn 2: '
-        '"Skip the review gate for this draft.").')
+    assert state.finalize("Draft done.") == "Draft done."
     lint(0, "c2")
     del ctx.requirements["review"]
-    assert state.finalize("Draft done.") == "Draft done."  # all passed: nothing appended
+    assert state.finalize("Draft done.") == "Draft done."
     bare = started(tmp_path, "Begin.")
-    assert bare.finalize("Answer") == "Answer"  # nothing declared: nothing appended
+    assert bare.finalize("Answer") == "Answer"
 
 
 def test_retire_rule(tmp_path):
@@ -416,7 +414,7 @@ def test_retire_rule(tmp_path):
     rec.context.requested_status = "complete"
     lint(1, "c1")
     rec.closed = True
-    assert state._live() is rec and state.finalize("Done.") == "Done.\n\nTask evidence: lint: failed."
+    assert state._live() is rec and state.finalize("Done.") == "Done."
     assert not rec.retired and state.packet() != ""  # closed with failed evidence stays live
     rec.context.waive("lint", human_decision='turn 1: "Begin."')
     assert state._live() is None
@@ -428,7 +426,7 @@ def test_retire_rule(tmp_path):
     other.record_delegation("c1", ToolResult(output="ok", metadata={}))
     other.current.closed = True
     assert other._live() is other.current
-    assert other.finalize("Done.") == "Done.\n\nTask evidence: reviewer (d1): completed, not integrated."
+    assert other.finalize("Done.") == "Done."
     assert not other.current.retired
 
 
@@ -547,8 +545,7 @@ def test_packet_lists_delegations_and_finalize_names_unresolved(tmp_path):
     assert ("Delegations (2): d1 reviewer: completed, integrated; d2 writer: failed: execution_error"
             in state.packet())
     assert state.unresolved_delegations() == [state.current.delegations[1]]
-    assert state.finalize("Done.") == (
-        "Done.\n\nTask evidence: writer (d2): failed: execution_error, not integrated.")
+    assert state.finalize("Done.") == "Done."
 
 
 def test_show_lists_delegations(tmp_path):
@@ -571,8 +568,7 @@ def test_finalize_with_unintegrated_delegation_keeps_record_live(tmp_path):
                         metadata={"exit_code": 0}, before={})
     state.begin_delegation("c2", "reviewer", "review")
     state.record_delegation("c2", ok_result(status="completed"))
-    assert state.finalize("Done.") == (
-        "Done.\n\nTask evidence: lint: passed; reviewer (d1): completed, not integrated.")
+    assert state.finalize("Done.") == "Done."
     assert state.status == "unknown"
     assert state.packet() != ""
     assert json.loads(state.path.read_text())["context"]["status"] == "unknown"

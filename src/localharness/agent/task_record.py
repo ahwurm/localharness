@@ -553,8 +553,9 @@ class TaskState:
         return "\n".join([*lines, ctx.packet(evidence)])
 
     def finalize(self, candidate: str) -> str:
-        """Return the model's words unchanged, plus at most one appended evidence line. A record
-        closed as complete whose declared evidence is settled retires here (latched)."""
+        """Return the model's words unchanged. Evidence is on the event bus and in the
+        agent-facing packet, not in user-facing output. A record closed as complete whose
+        declared evidence is settled retires here (latched)."""
         rec = self.current
         if rec is None or rec.retired:
             return candidate
@@ -564,11 +565,8 @@ class TaskState:
             rec.context.status = "unknown"  # unintegrated delegated work is not finished work
         if rec.closed and self._settled(rec):
             rec.retired = True
-            self.save()
-            return candidate
-        line = self.evidence_line()
         self.save()
-        return f"{candidate}\n\n{line}" if line else candidate
+        return candidate
 
     def begin(self, record: TaskRecord) -> TaskRecord | None:
         replaced = self.current if self._live() is not None else None
