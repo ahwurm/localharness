@@ -4,6 +4,20 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.17.0] — 2026-10-07
+
+### Added
+- **`/mcp` slash command: in-session MCP server management.** List, add, edit, test, and
+  remove MCP servers for the session's agent without leaving the terminal. Config writes go
+  to the agent file (`agents/<name>.yaml` → `tools.mcp_servers`) at the layer matching the
+  session context (workspace agent file in a project, global agent file otherwise).
+- **Trust gate hardening:** `/mcp test` and `/mcp edit` refuse to connect in an untrusted
+  workspace (not just warn). Per-server confirm on new/changed servers shows the actual
+  command/URL target (secrets masked), not just the name.
+- **Value-hashing in trust snapshots:** `executables_snapshot` and `machine_snapshot` now
+  hash env/header *values* (SHA-256), not just names, so a secret swap re-prompts on the
+  next `start`. One-time bounded re-confirmation for existing trusted workspaces.
+
 ## [0.16.8] — 2026-10-07
 
 ### Changed

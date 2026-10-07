@@ -86,6 +86,12 @@ def make_repl(workspace=None, config_dir=None, channel=None, manager=None,
     )
 
 
+def trust_workspace(monkeypatch):
+    """Force the session's workspace to read as trusted so connect-path logic
+    (test / hot-add) runs past the untrusted hard gate."""
+    monkeypatch.setattr(mcp_cmd, "_workspace_trusted", lambda repl: True)
+
+
 def write_agent(ws_or_dir: Path, name: str, servers: list[dict]) -> Path:
     path = Path(ws_or_dir) / "agents" / f"{name}.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -331,6 +337,7 @@ async def test_test_connect_success(tmp_path, monkeypatch):
     write_agent(ws, "orchestrator", [
         {"name": "gsd", "transport": "stdio", "command": "node"},
     ])
+    trust_workspace(monkeypatch)
     monkeypatch.setattr(mcp_cmd, "MCPServerClient",
                         make_fake_client(tools=("gsd__state_load", "gsd__state_update")))
     ch = FakeChannel()
@@ -348,6 +355,7 @@ async def test_test_connect_failure(tmp_path, monkeypatch):
     write_agent(ws, "orchestrator", [
         {"name": "gsd", "transport": "stdio", "command": "node"},
     ])
+    trust_workspace(monkeypatch)
     monkeypatch.setattr(mcp_cmd, "MCPServerClient",
                         make_fake_client(fail=RuntimeError("spawn ENOENT — command 'node' not found")))
     ch = FakeChannel()
@@ -412,6 +420,7 @@ async def test_secret_not_exposed(tmp_path, monkeypatch):
     assert "supersecretvalue123" not in ch.all_text()
 
     # test: a connect error embedding the env value must be masked
+    trust_workspace(monkeypatch)
     monkeypatch.setattr(
         mcp_cmd, "MCPServerClient",
         make_fake_client(fail=RuntimeError("auth failed for supersecretvalue123")))

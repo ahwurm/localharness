@@ -250,6 +250,24 @@ def _format_tool_names(names: list[str]) -> str:
     return ", ".join(names[:5]) + ("…" if len(names) > 5 else "")
 
 
+def _server_target_detail(config: MCPServerConfig) -> str:
+    """A short, secret-safe description of what a server connects to.
+
+    stdio: 'command args…'. streamable_http: the URL with any query string
+    (which may carry a token) masked. Used in the per-server connect confirm
+    so the user sees the actual target, not just the name.
+    """
+    if config.transport == "stdio":
+        parts = [config.command or ""]
+        if config.args:
+            parts.append(" ".join(config.args[:3]) + ("…" if len(config.args) > 3 else ""))
+        return " ".join(p for p in parts if p)
+    url = config.url or ""
+    if "?" in url:
+        url = url.split("?", 1)[0] + "?●●●●"
+    return url
+
+
 def _config_from_dict(d: dict) -> MCPServerConfig:
     """Build an MCPServerConfig from a raw agent-file server dict."""
     return MCPServerConfig(
@@ -372,11 +390,13 @@ async def _hot_add(repl: Any, config: MCPServerConfig) -> bool:
     # Trust re-check (§7.6)
     if not _workspace_trusted(repl):
         return False
-    # Per-server confirm for new/changed servers
+    # Per-server confirm for new/changed servers — show what we're connecting to,
+    # not just the name, so the user can verify the target before it runs.
     uncovered = _uncovered_servers(repl)
     for entry in uncovered:
         if entry.get("name") == config.name:
-            if not await _confirm(repl, f"Connect new/changed MCP server '{config.name}' this session?"):
+            detail = _server_target_detail(config)
+            if not await _confirm(repl, f"Connect new/changed MCP server '{config.name}' ({detail}) this session?"):
                 return False
     # Connect
     client = MCPServerClient(config)
@@ -668,11 +688,12 @@ async def _test(repl: Any, name: str) -> None:
             await _say(repl, "\n".join(lines))
             return
 
-    # Trust warning: one-shot test opens a live connection in an untrusted workspace
+    # Hard gate: one-shot test opens a live connection — refuse in an untrusted workspace
     workspace = getattr(repl, "_workspace", None)
     if workspace is not None and not _workspace_trusted(repl):
-        await _say(repl, "⚠ Workspace not trusted — this test opens a live connection "
-                         "to a server defined in an untrusted project.", style="system.error")
+        await _say(repl, "⚠ Workspace not trusted — refusing to connect. "
+                         "Run 'localharness start' to grant trust, then retry.", style="system.error")
+        return
 
     # One-shot test
     try:
