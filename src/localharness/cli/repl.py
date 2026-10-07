@@ -500,6 +500,9 @@ class OrchestratorREPL:
                     if task is not None:
                         self._turn_task = task  # so `_turn_running()` is true here too
                         await self._await_turn_with_sigint(task)
+                    # Co-author consent (spec 14): if the git hook flagged a first
+                    # commit for an undecided project, ask now (after the turn).
+                    await self._settle_pending_coauthor()
                     # NOTE: Do NOT send_message here. The TaskComplete event handler
                     # in TerminalChannel.on_task_complete() handles output.
                     # Sending here would produce duplicate output.
@@ -705,6 +708,7 @@ class OrchestratorREPL:
                 await self._finish_turn(payload)
                 self._turn_task = None
                 self._channel.box_notify_working(False)
+                await self._settle_pending_coauthor()
                 await self._play_next_from_fifo()
                 return True
             if kind in PENDING_HOTKEYS:
@@ -1100,6 +1104,19 @@ class OrchestratorREPL:
             log.warning("could not settle co-author consent", exc_info=True)
         for text in pending:
             await _notice_later(text)
+
+    async def _settle_pending_coauthor(self) -> None:
+        """After a turn: if the git hook flagged a first commit for an undecided
+        project, ask the consent question now. Best-effort — a failure costs a log
+        line, never the session."""
+        from localharness.cli.coauthor import settle_pending_coauthor
+        gate = self._session_gate()
+        if gate is None:
+            return
+        try:
+            await settle_pending_coauthor(gate, lambda t: None)
+        except Exception:  # noqa: BLE001
+            log.warning("could not settle pending co-author consent", exc_info=True)
 
     def _session_gate(self) -> Any:
         """The gate `/mode` acts on — the one the running loop and its subagents share."""

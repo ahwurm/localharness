@@ -256,3 +256,100 @@ def test_prompt_does_not_ask_when_already_recorded(tmp_path):
     result = asyncio.run(establish_coauthor_consent(gate, root))
     assert result is True  # the recorded True wins, the asker is never called
     assert gate.requests == []
+
+
+# --------------------------------------------------------------------------- pending marker
+#
+# The "ask on the first git commit, not at workspace open" mechanism: the
+# prepare-commit-msg hook (no tty) writes a marker for an undecided project, and
+# the REPL reads + clears it after the turn to trigger the consent question.
+
+
+def _expected_pending() -> Path:
+    return Path(os.environ["LOCALHARNESS_HOME"]) / "coauthor_pending"
+
+
+def test_pending_marker_written_to_global_dir():
+    """The marker lives in the GLOBAL config dir, keyed by the resolved project root."""
+    from localharness.config.coauthor import write_pending_marker
+
+    root = str(Path.home() / "proj")
+    write_pending_marker(root)
+    p = _expected_pending()
+    assert p.exists()
+    assert p.read_text(encoding="utf-8").strip() == str(Path(root).resolve())
+
+
+def test_read_pending_marker_absent_is_none():
+    from localharness.config.coauthor import read_pending_marker
+
+    assert read_pending_marker() is None
+
+
+def test_read_pending_marker_is_non_destructive():
+    """Reading the marker does not clear it — the caller clears via clear_pending_marker."""
+    from localharness.config.coauthor import read_pending_marker, write_pending_marker
+
+    root = str(Path.home() / "proj")
+    write_pending_marker(root)
+    assert read_pending_marker() == str(Path(root).resolve())
+    assert read_pending_marker() == str(Path(root).resolve())  # still there
+    assert _expected_pending().exists()
+
+
+def test_clear_pending_marker_removes_file():
+    from localharness.config.coauthor import clear_pending_marker, write_pending_marker
+
+    root = str(Path.home() / "proj")
+    write_pending_marker(root)
+    assert _expected_pending().exists()
+    clear_pending_marker()
+    assert not _expected_pending().exists()
+
+
+def _gate(allowed: bool) -> _FakeGate:
+    """A gate whose asker appends to ITS OWN requests list (self-referential), so
+    ``gate.requests`` reflects the asks it was asked."""
+    gate = _FakeGate(allowed=allowed)
+    gate.asker = gate._make_asker()
+    return gate
+
+
+def test_settle_pending_no_marker_does_nothing(tmp_path):
+    """No marker → no ask, no record. The common case after a turn with no first commit."""
+    from localharness.cli.coauthor import settle_pending_coauthor
+    from localharness.config.coauthor import consent
+
+    root = str(tmp_path / "proj")
+    gate = _gate(allowed=True)
+    asyncio.run(settle_pending_coauthor(gate))
+    assert gate.requests == []
+    assert consent(root) is None
+
+
+def test_settle_pending_asks_records_and_clears(tmp_path):
+    """A marker from the first commit → ask via the gate, record the answer, clear the marker."""
+    from localharness.cli.coauthor import settle_pending_coauthor
+    from localharness.config.coauthor import consent, write_pending_marker
+
+    root = str(tmp_path / "proj")
+    write_pending_marker(root)
+    gate = _gate(allowed=True)
+    asyncio.run(settle_pending_coauthor(gate))
+    assert len(gate.requests) == 1  # the consent question was asked
+    assert consent(root) is True
+    assert not _expected_pending().exists()  # marker cleared
+
+
+def test_settle_pending_fail_closed_no_asker(tmp_path):
+    """A marker but no asker → fail closed: no record, marker cleared, project stays undecided."""
+    from localharness.cli.coauthor import settle_pending_coauthor
+    from localharness.config.coauthor import consent, write_pending_marker
+
+    root = str(tmp_path / "proj")
+    write_pending_marker(root)
+    gate = _FakeGate(asker=None)
+    asyncio.run(settle_pending_coauthor(gate))
+    assert gate.requests == []
+    assert consent(root) is None  # nothing recorded — the question is still owed
+    assert not _expected_pending().exists()  # marker cleared

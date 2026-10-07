@@ -4,7 +4,16 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
-## [Unreleased]
+## [0.16.8] — 2026-10-07
+
+### Changed
+- **Co-author consent: shorter question, asked on first commit (not workspace open).** The
+  consent prompt is now a single sentence: "Credit localharness as a co-author on commits in
+  this project? Adds a Co-Authored-By line — attribution only, no ownership ever. Asked
+  once." The question is no longer asked at session start; it is asked after the first
+  harness commit in a project with no recorded consent. The git hook writes a pending
+  marker (`~/.localharness/coauthor_pending`) on the first commit; the REPL picks it up
+  after the turn and asks via the gate.
 
 ## [0.16.7] — 2026-10-06
 

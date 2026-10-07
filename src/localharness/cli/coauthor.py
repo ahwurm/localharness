@@ -1,26 +1,26 @@
-"""Per-project co-author consent prompt + git hook (spec 14).
+"""Per-project co-author consent + git hook (spec 14).
 
 Two integration surfaces:
 
-1. **Startup prompt** (``establish_coauthor_consent``): the gate/channel asks the
-   user once per project at session start. The answer is recorded in the global
-   consent store.
+1. **Hook install** (``settle_coauthor_startup``): at session start, installs the
+   ``prepare-commit-msg`` hook into ``.git/hooks/``. No prompt here — the user is
+   not asked at workspace open.
 
-2. **``prepare-commit-msg`` git hook** (``install_hook``): installed at session
-   start into ``.git/hooks/``. Fires on every ``git commit`` the harness runs
-   (scoped by ``LOCALHARNESS_COMMIT=1``). Reads the recorded consent; if granted,
-   appends the trailer to the commit message file. If no record exists, prompts
-   via ``/dev/tty`` (the controlling terminal) and records the answer.
+2. **``prepare-commit-msg`` git hook** (``install_hook``): fires on every ``git
+   commit`` the harness runs (scoped by ``LOCALHARNESS_COMMIT=1``). Reads the
+   recorded consent; if granted, appends the trailer to the commit message file.
+   If no record exists, asks via ``/dev/tty`` (the controlling terminal) on the
+   FIRST harness commit and records the answer.
 
-The hook is the integration seam: it is the one place the trailer is applied.
-A user's hand-run ``git commit`` never carries the env var, so the hook is a
-no-op for commits the harness did not make.
+The hook is the integration seam: it is the one place the trailer is applied, and
+the one place the consent question is asked (on the first commit, not at workspace
+open). A user's hand-run ``git commit`` never carries the env var, so the hook is
+a no-op for commits the harness did not make.
 """
 from __future__ import annotations
 
 import logging
 import os
-import stat
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -32,15 +32,7 @@ log = logging.getLogger(__name__)
 
 COAUTHOR_QUESTION = (
     "Credit localharness as a co-author on commits in this project? "
-    "This adds a 'Co-Authored-By: localharness <localharness.agent@gmail.com>' line to "
-    "commit messages in {project_root}. It is attribution only — MIT license, no loss of "
-    "ownership, just a shoutout."
-)
-
-COAUTHOR_QUESTION_DETAIL = (
-    "Answering yes records this for this project and it is not asked again for this project. "
-    "Answering no means no co-author line is ever added to commits in this project. You can "
-    "change your answer any time by editing ~/.localharness/coauthor_consent.yaml."
+    "Adds a Co-Authored-By line — attribution only, no ownership ever. Asked once."
 )
 
 COAUTHOR_OPTIONS_LEGEND = "[y]es, credit it   [n]o, no co-author line"
@@ -145,8 +137,21 @@ def main() -> int:
     if repo_root is None:
         return 0
     consent = _read_consent(repo_root)
+    if consent is None:
+        # No record yet: signal the main process to ask on its next turn. The hook
+        # has no tty (bash_exec uses stdin=DEVNULL), so it cannot ask itself — it
+        # leaves a marker in the global config dir and the main process picks it up.
+        try:
+            config_dir = Path(os.environ.get("LOCALHARNESS_DIR", str(Path.home() / ".localharness")))
+            config_dir.mkdir(parents=True, exist_ok=True)
+            (config_dir / "coauthor_pending").write_text(
+                str(Path(repo_root).resolve()), encoding="utf-8"
+            )
+        except OSError:
+            pass  # fail closed: no marker, no question, no trailer
+        return 0
     if consent is not True:
-        return 0  # declined or no record: no trailer (fail closed)
+        return 0  # declined: no trailer
     trailer = "Co-Authored-By: localharness <localharness.agent@gmail.com>"
     try:
         content = msg_file.read_text(encoding="utf-8")
@@ -187,28 +192,41 @@ def git_repo_root(start_dir: str | Path) -> Optional[str]:
 
 
 async def settle_coauthor_startup(gate: Any, workspace: Optional[str | Path], notice: Any = None) -> None:
-    """Settle co-author consent + install the hook for this session's project.
+    """Install the co-author hook for this session's project.
 
     Called at session start, right after workspace trust is settled. Resolves the
-    git repo root from the workspace; if there is one, settles consent (asking once
-    per project) and installs the prepare-commit-msg hook. Best-effort: a failure
-    here costs a log line, never the session."""
+    git repo root from the workspace; if there is one, installs the
+    prepare-commit-msg hook. Does NOT ask the consent question — that happens on
+    the first harness commit (the hook writes a pending marker, and the REPL asks
+    after the turn). Best-effort: a failure here costs a log line, never the session."""
     if workspace is None:
         return
     repo_root = git_repo_root(workspace)
     if repo_root is None:
         return  # not a git repo: no commits to credit
     try:
-        await establish_coauthor_consent(gate, repo_root, notice)
-    except Exception:  # noqa: BLE001 — a broken consent store costs a notice, not the session
-        log.warning("could not settle co-author consent", exc_info=True)
-        return
-    try:
         hook = install_hook(repo_root)
         if hook is not None:
             log.info("co-author hook installed at %s", hook)
     except Exception:  # noqa: BLE001
         log.warning("could not install co-author hook", exc_info=True)
+
+
+async def settle_pending_coauthor(gate: Any, notice: Any = None) -> None:
+    """Check for a pending co-author consent marker and ask if found.
+
+    Called by the REPL after each turn completes. If the git hook wrote a pending
+    marker (first harness commit for an undecided project), this asks the consent
+    question via the gate and records the answer. If no marker, returns immediately.
+    Best-effort: a failure here costs a log line, never the session."""
+    pending_root = coauthor.read_pending_marker()
+    if pending_root is None:
+        return
+    coauthor.clear_pending_marker()
+    try:
+        await establish_coauthor_consent(gate, pending_root, notice)
+    except Exception:  # noqa: BLE001
+        log.warning("could not settle pending co-author consent", exc_info=True)
 
 
 def install_hook(repo_root: str) -> Optional[Path]:
@@ -242,8 +260,8 @@ def _request(project_root: str) -> PermissionRequest:
         klass="coauthor-consent",
         key=root,
         grantable=False,
-        reason=COAUTHOR_QUESTION.format(project_root=root),
-        display=f"{COAUTHOR_QUESTION.format(project_root=root)}\n{COAUTHOR_QUESTION_DETAIL}",
+        reason=COAUTHOR_QUESTION,
+        display=COAUTHOR_QUESTION,
         options_legend=COAUTHOR_OPTIONS_LEGEND,
     )
 

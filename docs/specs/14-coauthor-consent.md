@@ -192,15 +192,7 @@ Discord — because it goes through the channel's own ask path.
 ```python
 COAUTHOR_QUESTION = (
     "Credit localharness as a co-author on commits in this project? "
-    "This adds a 'Co-Authored-By: localharness <localharness.agent@gmail.com>' line to "
-    "commit messages in {project_root}. It is attribution only — MIT license, no loss of "
-    "ownership, just a shoutout."
-)
-
-COAUTHOR_QUESTION_DETAIL = (
-    "Answering yes records this for this project and it is not asked again for this project. "
-    "Answering no means no co-author line is ever added to commits in this project. You can "
-    "change your answer any time by editing ~/.localharness/coauthor_consent.yaml."
+    "Adds a Co-Authored-By line — attribution only, no ownership ever. Asked once."
 )
 
 COAUTHOR_OPTIONS_LEGEND = "[y]es, credit it   [n]o, no co-author line"
@@ -221,8 +213,8 @@ def _request(project_root: str) -> PermissionRequest:
         klass="coauthor-consent",
         key=root,
         grantable=False,
-        reason=COAUTHOR_QUESTION.format(project_root=root),
-        display=f"{COAUTHOR_QUESTION.format(project_root=root)}\n{COAUTHOR_QUESTION_DETAIL}",
+        reason=COAUTHOR_QUESTION,
+        display=COAUTHOR_QUESTION,
         options_legend=COAUTHOR_OPTIONS_LEGEND,
     )
 
@@ -247,20 +239,24 @@ async def establish_coauthor_consent(gate: Any, project_root: str, notice: Any =
 
 ### When to ask
 
-Two triggers, both per-project (project = git repo root):
+One trigger, per-project (project = git repo root):
 
-1. **Startup (primary).** At session start, before the first turn, for the **current git repo
-   root** (resolved via `git rev-parse --show-toplevel` from the workspace directory). This is
-   the same slot `establish_session_trust` occupies (`cli/workspace.settle_startup_trust`). If
-   the project already has a recorded answer, no prompt — the recorded value is returned
-   silently. If the workspace is **not a git repo**, no prompt (there are no commits to
-   credit; the consent is irrelevant).
+1. **First harness commit (primary and only).** The `prepare-commit-msg` git hook fires on
+   every `git commit` the harness runs (scoped by `LOCALHARNESS_COMMIT=1`). If the project
+   has **no recorded consent**, the hook writes a pending marker to the global config dir
+   (`~/.localharness/coauthor_pending`). The REPL checks for this marker after each turn
+   completes; if found, it calls `settle_pending_coauthor(gate)` which asks the consent
+   question via the gate and records the answer. If the channel cannot ask (no `asker`), it
+   fails closed: no trailer, no record.
 
-2. **Lazy (fallback).** If a commit is prepared in a project that has **no recorded answer**
-   (e.g. the workspace contains multiple git repos, and the agent works in one that was not
-   the startup repo), the seam calls
-   `establish_coauthor_consent(gate, project_b_root)` before applying the trailer. If the
-   channel cannot ask (no `asker`), it fails closed: no trailer, no record.
+The hook does **not** ask directly — it has no tty (`bash_exec` uses `stdin=DEVNULL` +
+`start_new_session=True`). It signals "pending" via the marker file, and the main process
+asks on its next idle moment (after the turn).
+
+**Startup is install-only.** `settle_coauthor_startup` installs the `prepare-commit-msg`
+hook into `.git/hooks/` at session start. It does **not** ask the consent question. The
+user is not bothered at workspace open; the question arrives only when the first commit
+actually happens.
 
 The `notice` callable (the console's print, a list's append in a test) reports the outcome;
 the decision must not depend on there being somewhere to print it (`session_trust.py:146-147`).
