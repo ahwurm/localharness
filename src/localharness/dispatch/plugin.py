@@ -6,14 +6,13 @@ module for every `--help`, `doctor` and `plugins list`, so at module level it im
 plugin API and its own settings; the channel core and the adapters are imported inside the methods
 (importing anything under localharness.channels runs channels/__init__.py, which pulls in
 prompt_toolkit). start() opens no network: the gateway connects when the REPL starts the channel.
-The legacy env variables are read in one place, `_effective`, through `env_fallback`."""
+The settings are the only source of the Discord token, allow-list, channels and ack."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from localharness.dispatch.config import DiscordSettings, DispatchConfig, env_fallback
+from localharness.dispatch.config import DiscordSettings, DispatchConfig
 from localharness.plugins.api import Availability, Check, Plugin, PluginContext, PluginManifest, SetupField
 
 if TYPE_CHECKING:
@@ -24,10 +23,10 @@ NOT_CONFIGURED_HINT = ("localharness plugins enable dispatch --set discord.token
                        "--set discord.allow=<your user id>")
 
 
-def _effective(ctx: PluginContext) -> tuple[DiscordSettings, list[str]]:
-    """The settings with the deprecated env sources folded in, and one line per deciding source."""
+def _effective(ctx: PluginContext) -> DiscordSettings:
+    """The Discord settings of this context (a context without a DispatchConfig has the defaults)."""
     cfg = ctx.config if isinstance(ctx.config, DispatchConfig) else DispatchConfig()
-    return env_fallback(cfg.discord, os.environ)
+    return cfg.discord
 
 
 class DispatchPlugin(Plugin):
@@ -71,11 +70,9 @@ class DispatchPlugin(Plugin):
         return "ready"
 
     async def start(self, ctx: PluginContext) -> None:
-        """Resolve the effective settings once and put each deprecation line on startup_warnings.
-        No network."""
-        self._settings, lines = _effective(ctx)
+        """Resolve the settings once. No network."""
+        self._settings = _effective(ctx)
         self._state_dir = ctx.paths.state_dir
-        self.startup_warnings.extend(lines)
 
     def channels(self) -> dict[str, type[ChannelAdapter]]:
         from localharness.dispatch.adapters import ADAPTERS
@@ -97,9 +94,9 @@ class DispatchPlugin(Plugin):
                                      "ack": s.ack, "state_dir": self._state_dir})
 
     def doctor(self, ctx: PluginContext) -> list[Check]:
-        """Configured or not, from the effective settings (doctor runs without start()); one warn row
-        per deprecated env source. Never the token, and no login."""
-        s, lines = _effective(ctx)
+        """Configured or not, from the settings (doctor runs without start()). Never the token, and
+        no login."""
+        s = _effective(ctx)
         token, allow = bool(s.token.get_secret_value()), bool(s.allow)
         if token and allow:
             where = f"{len(s.channels)} channel(s)" if s.channels else "any channel the bot can see"
@@ -110,6 +107,4 @@ class DispatchPlugin(Plugin):
             detail = "Discord not configured" + ("" if len(missing) == 2 else
                                                  f" — dispatch.discord.{missing[0]} is empty")
             rows = [Check(name="dispatch", status="skip", detail=detail, hint=NOT_CONFIGURED_HINT)]
-        # doctor prints "<name>: <detail>", so the line's own "dispatch: " prefix would double
-        return rows + [Check(name="dispatch", status="warn", detail=line.removeprefix("dispatch: "))
-                       for line in lines]
+        return rows

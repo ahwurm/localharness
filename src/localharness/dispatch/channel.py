@@ -322,8 +322,7 @@ class DispatchChannel(ChannelAdapter):
         if not self._allow:
             raise ChannelStartError(
                 f"{self._adapter.title} allowlist empty — set dispatch.{self.channel_id}.allow to "
-                f"your user id(s) (LOCALHARNESS_{self.channel_id.upper()}_ALLOW still works until "
-                f"0.17.0); refusing to listen to everyone"
+                f"your user id(s); refusing to listen to everyone"
             )
         self._handles = [
             self.bus.subscribe(Action, self.on_action),

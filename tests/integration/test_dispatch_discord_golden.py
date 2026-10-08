@@ -217,10 +217,8 @@ async def test_dispatch_start_refusal_texts(fake, monkeypatch):
     assert ch.start_banner == "Dispatch mode: Discord — listening for allowlisted messages."
     for ch, expected in (
         (build(token=""), "Discord bot token missing — run `localharness plugins enable dispatch` to "
-                          "set dispatch.discord.token (LOCALHARNESS_DISCORD_TOKEN / DISCORD_BOT_TOKEN "
-                          "still work until 0.17.0; ~/.claude/channels/discord/.env is no longer read)"),
-        (build(allow=()), "Discord allowlist empty — set dispatch.discord.allow to your user id(s) "
-                          "(LOCALHARNESS_DISCORD_ALLOW still works until 0.17.0); "
+                          "set dispatch.discord.token (~/.claude/channels/discord/.env is no longer read)"),
+        (build(allow=()), "Discord allowlist empty — set dispatch.discord.allow to your user id(s); "
                           "refusing to listen to everyone"),
     ):
         with pytest.raises(ChannelStartError) as e:

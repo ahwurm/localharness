@@ -1,4 +1,5 @@
-"""`start --channel discord` configured by env only, through the REAL `_start_async`, offline.
+"""`start --channel discord` configured by the `dispatch.discord.*` settings, through the REAL
+`_start_async`, offline.
 
 Pinned on the pre-move tree (Phase 49 Wave 0); the assertions must survive the move unedited.
 This module never imports the old channel module, so it does not care where Discord lives.
@@ -13,8 +14,7 @@ Boundaries stubbed: LLM probe, tokenizer, plugin discovery (`_stub_start_boundar
 the discard port, `LLMClient.stream_complete` -> "pong from the model", and the `discord` module
 (`tests.dispatch_support`). `extra_installed` is patched True now so that after the cut, when the
 dispatch plugin needs its extra, this test passes with the same assertions. HOME is a tmp dir;
-the real Discord token file under the owner home is unreachable. No warning-absence is asserted (49-06
-adds deprecation lines for the env path).
+the real Discord token file under the owner home is unreachable.
 """
 from __future__ import annotations
 
@@ -26,11 +26,7 @@ from tests.integration.test_guardrails_from_global_dir_e2e import _let_the_stub_
 from tests.integration.test_workspace_cli_surface_e2e import _offline_provider
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
 
-ENV = {
-    "LOCALHARNESS_DISCORD_TOKEN": "tkn",
-    "LOCALHARNESS_DISCORD_ALLOW": "42",
-    "LOCALHARNESS_DISCORD_CHANNELS": "7",
-}
+SETTINGS = "dispatch:\n  discord:\n    token: tkn\n    allow: ['42']\n    channels: ['7']\n"
 REPLY = "pong from the model"
 BANNER = "Dispatch mode: Discord — listening for allowlisted messages."
 
@@ -44,10 +40,8 @@ async def _wait_for(pred, what: str, timeout: float = 15.0) -> None:
         await asyncio.sleep(0.01)
 
 
-async def test_env_only_discord_start_turns_one_message_into_one_reply(tmp_path, monkeypatch):
+async def test_discord_start_from_the_settings_turns_one_message_into_one_reply(tmp_path, monkeypatch):
     isolate_discord_env(monkeypatch, tmp_path)
-    for k, v in ENV.items():
-        monkeypatch.setenv(k, v)
     fake = install_fake_discord(monkeypatch)
 
     from localharness.cli.repl import OrchestratorREPL
@@ -78,6 +72,8 @@ async def test_env_only_discord_start_turns_one_message_into_one_reply(tmp_path,
 
     _stub_start_boundaries(tmp_path, monkeypatch, repl_run=run)
     _offline_provider(tmp_path)
+    with (tmp_path / "config.yaml").open("a", encoding="utf-8") as f:
+        f.write(SETTINGS)
     _let_the_stub_tokenizer_run_a_turn(monkeypatch)
     printed = _capture_start_console(monkeypatch)
 
@@ -97,53 +93,3 @@ async def test_env_only_discord_start_turns_one_message_into_one_reply(tmp_path,
     assert fake.log.index(ack) < fake.log.index(("send", "c7", REPLY)), fake.log
     assert [r for r in fake.log if r[0] == "send" and r[2] == REPLY] == [("send", "c7", REPLY)]
     assert any(BANNER in p for p in printed), printed
-
-
-async def test_env_only_start_warns_once_per_variable(tmp_path, monkeypatch):
-    """All four LOCALHARNESS_DISCORD_* variables decide a field, so the start summary carries
-    exactly four deprecation lines, one per variable, and never the token itself."""
-    isolate_discord_env(monkeypatch, tmp_path)
-    token = "tkn-NEVER-PRINTED-49"
-    env = {"LOCALHARNESS_DISCORD_TOKEN": token, "LOCALHARNESS_DISCORD_ALLOW": "42",
-           "LOCALHARNESS_DISCORD_CHANNELS": "7", "LOCALHARNESS_DISCORD_ACK": "👀"}
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    fake = install_fake_discord(monkeypatch)
-
-    from localharness.cli.repl import OrchestratorREPL
-    from localharness.plugins import resolve
-
-    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: True)
-    real_run = OrchestratorREPL.run
-
-    async def feeder():
-        await _wait_for(lambda: fake.client is not None and "on_message" in fake.client.events,
-                        "the channel to register its gateway handlers")
-        await fake.deliver(fake.message(42, 7, "/quit"))
-
-    async def run(self):
-        feed = asyncio.ensure_future(feeder())
-        try:
-            await real_run(self)
-        finally:
-            feed.cancel()
-
-    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=run)
-    _offline_provider(tmp_path)
-    printed = _capture_start_console(monkeypatch)
-
-    from localharness.cli.start_cmd import _start_async
-    await asyncio.wait_for(
-        _start_async(None, False, False, str(tmp_path), channel_mode="discord"), 60
-    )
-
-    want = [f"dispatch: LOCALHARNESS_DISCORD_{var} is deprecated and stops working in 0.17.0 — set "
-            f"dispatch.discord.{field} (localharness components set dispatch.discord.{field} …)"
-            for var, field in (("TOKEN", "token"), ("ALLOW", "allow"), ("CHANNELS", "channels"),
-                               ("ACK", "ack"))]
-    summary = next(p for p in printed if "startup)" in p)  # warnings ride the summary line, `; `-joined
-    assert summary.count("dispatch: LOCALHARNESS_DISCORD_") == 4, summary
-    assert all(f"{w};" in summary or f"{w}]" in summary for w in want), summary
-    assert any(BANNER in p for p in printed), printed
-    assert any(r[0] == "react" and r[2] == "👀" for r in fake.log), fake.log  # the env ack decided
-    assert not any(token in str(p) for p in printed), "the token reached the console"

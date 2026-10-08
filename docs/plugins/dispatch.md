@@ -34,7 +34,7 @@ On a terminal, `plugins enable dispatch` with no `--set`, or `/plugins enable di
 
 A repository you clone cannot point the bot somewhere else or widen who may drive it: a project's value for the three machine-level settings is dropped with a warning.
 
-The token comes only from `dispatch.discord.token`, or until 0.17.0 from the deprecated `LOCALHARNESS_DISCORD_TOKEN` and `DISCORD_BOT_TOKEN` environment variables; the other deprecated `LOCALHARNESS_DISCORD_*` variables still fill a setting you have not set. Each prints a warning at start and in `doctor`, and they stop working in 0.17.0. Move each to its setting with `localharness components set dispatch.discord.<key> …`. Claude Code's Discord token file is no longer read: with no token, `start --channel discord` refuses with one line naming `localharness plugins enable dispatch`, which says so.
+The token comes only from `dispatch.discord.token`. The deprecated environment variables of 0.16.x are no longer read (deleted in 0.17.1); set each value with `localharness components set dispatch.discord.<key> …`. Claude Code's Discord token file is not read either: with no token, `start --channel discord` refuses with one line naming `localharness plugins enable dispatch`, which says so.
 
 ## Not there yet
 

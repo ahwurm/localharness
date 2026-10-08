@@ -30,8 +30,6 @@ from tests.dispatch_support import isolate_discord_env
 from tests.unit.test_plugins_enable_setup import _CONFIG
 
 SENTINEL = "SENTINEL.dispatch.token.0000"
-ENV = {"LOCALHARNESS_DISCORD_TOKEN": SENTINEL, "LOCALHARNESS_DISCORD_ALLOW": "42",
-       "LOCALHARNESS_DISCORD_CHANNELS": "7", "LOCALHARNESS_DISCORD_ACK": "👀"}
 runner = CliRunner()
 
 
@@ -186,23 +184,6 @@ def _issues(output: str) -> str | None:
     return m.group(1) if m else None
 
 
-def test_doctor_env_only_warns_per_variable_without_changing_the_exit_code(g, caplog, monkeypatch) -> None:
-    _present(monkeypatch)
-    bare = _run(g, caplog, "doctor")
-    for k, v in ENV.items():
-        monkeypatch.setenv(k, v)
-    env = _run(g, caplog, "doctor")
-    flat = _flat(env.output)
-    for var, field in (("TOKEN", "token"), ("ALLOW", "allow"), ("CHANNELS", "channels"), ("ACK", "ack")):
-        assert (f"dispatch: LOCALHARNESS_DISCORD_{var} is deprecated and stops working in 0.17.0 — set "
-                f"dispatch.discord.{field}") in flat, env.output
-    assert flat.count("dispatch: LOCALHARNESS_DISCORD_") == 4, env.output
-    assert "⚠ dispatch: LOCALHARNESS_DISCORD_TOKEN is deprecated" in flat, env.output
-    assert "dispatch: dispatch:" not in flat, env.output  # the row name is printed once
-    assert (env.exit_code, _issues(env.output)) == (bare.exit_code, _issues(bare.output)), (
-        bare.output, env.output)
-
-
 def test_doctor_not_configured_skip_row(g, caplog, monkeypatch) -> None:
     _present(monkeypatch)
     r = _run(g, caplog, "doctor")
@@ -214,14 +195,10 @@ def test_doctor_not_configured_skip_row(g, caplog, monkeypatch) -> None:
 
 def test_doctor_extra_absent_names_the_install_line_and_runs_no_checks(g, caplog, monkeypatch) -> None:
     _absent(monkeypatch)
-    for k, v in ENV.items():
-        monkeypatch.setenv(k, v)
     r = _run(g, caplog, "doctor")
     flat = _flat(r.output)
     assert "localharness[dispatch]" in flat, r.output
     assert "Discord configured" not in flat and "Discord not configured" not in flat, r.output
-    # RESEARCH open question 2: the deprecation rows appear once the extra is installed.
-    assert "LOCALHARNESS_DISCORD_" not in flat, r.output
 
 
 def test_components_set_receipt_and_json_receipt(g, caplog, monkeypatch) -> None:

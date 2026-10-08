@@ -1153,10 +1153,9 @@ Added with the mobile plugin:
   whatever mode you give it). It is never printed: `plugins enable`, `components set`/`list`/`get`,
   `plugins info`, `doctor`, the start banner, the setup prompt, error messages and the
   `components set` audit event show `**********`. The token comes only from
-  `dispatch.discord.token` or, until 0.17.0, the deprecated `LOCALHARNESS_DISCORD_TOKEN` and
-  `DISCORD_BOT_TOKEN` variables (the other `LOCALHARNESS_DISCORD_*` variables still fill their
-  unset fields until then too), each with a deprecation warning. Another program's token file,
-  `~/.claude/channels/discord/.env`, is no longer read; with no token anywhere the start refuses
+  `dispatch.discord.token`: the deprecated environment variables of 0.16.x are no longer read
+  (deleted in 0.17.1). Another program's token file, `~/.claude/channels/discord/.env`, is not
+  read either; with no token anywhere the start refuses
   with one line that says so and names `localharness plugins enable dispatch`. ♾️ — "always" —
   takes a second tap, as on the phone: the bot posts a confirm message, and only ✅ on that message
   records the grant (✅ on the question counts once). The bot ignores its own reactions, so it can

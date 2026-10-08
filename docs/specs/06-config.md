@@ -395,9 +395,7 @@ where the table says — the setting moves reads only. `05-memory.md` §11 cover
 
 ### Environment variables
 
-**There is no environment override for config values.** (One deprecated exception, outside `config/`:
-the `dispatch` plugin still fills its Discord settings from the old `LOCALHARNESS_DISCORD_*`
-variables until 0.17.0; see the dispatch plugin fields below.) Nothing in `config/` reads the environment
+**There is no environment override for config values.** Nothing in `config/` reads the environment
 except `config/paths.py`, and what it reads is where the configuration lives, not what is in it. Two
 variables do that:
 
@@ -1473,9 +1471,9 @@ Pictures are written to `artifacts/image/` under the session's state directory.
 | `dispatch.discord.channels` | list[string] | `[]` | machine-level only; digit ids | Channel ids the bot listens in; empty = any channel the bot can see |
 | `dispatch.discord.ack` | string | `"✅"` | — | Reaction added to a message when the agent takes it; `""` adds none. Any layer may set it |
 
-Until 0.17.0, a `dispatch.discord.*` field left at its default is filled from the deprecated
-`LOCALHARNESS_DISCORD_*` variables (and, for the token, `DISCORD_BOT_TOKEN`), with one warning per
-variable used; no file is read for it. See spec 11, "The dispatch plugin".
+The settings are the only source of a `dispatch.discord.*` value: the deprecated environment
+variables of 0.16.x were deleted in 0.17.1, and no file is read for them. See spec 11, "The
+dispatch plugin".
 
 **The permission gate keys.** `permissions.mode` picks one of five modes (PRD §3.4). `auto`, the
 default since v0.14.1, asks once whether you trust this workspace — a home-rooted session with
