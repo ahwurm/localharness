@@ -4,6 +4,34 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.17.1] — 2026-10-08
+
+Hygiene release: 0.17.0 becomes what it said it was. Nothing new to configure.
+
+### Fixed
+- **The version the harness reports.** `src/localharness/__init__.py` stayed at 0.16.7 through
+  0.16.8, 0.16.9 and 0.17.0, so the banner, `--version` and `localharness update` all said 0.16.7,
+  and `update` offered 0.17.0 to an installation that already had it, every time. A test now holds
+  `pyproject.toml`, `__version__`, `uv.lock`, the README and this file to one number.
+- **`doctor` says what `start` does with the context budget.** The factory default above the
+  served window is information ("`start` fits it to <window> for the session"), not a counted
+  failure, and the number it names is the window `start` fits to. An explicit budget above the
+  window is still a failure, and the line now says that `start` refuses to run.
+- **`doctor` no longer warns about a bundled plugin waiting on its install extra** (`mobile` and
+  `dispatch` on an install without them): that row is information, as it is at start, because
+  nobody opted in. A plugin you installed yourself still warns.
+
+### Removed
+- **The Discord env fallback**, as 0.16.0 announced for 0.17.0: `LOCALHARNESS_DISCORD_TOKEN`,
+  `DISCORD_BOT_TOKEN`, `LOCALHARNESS_DISCORD_ALLOW`, `LOCALHARNESS_DISCORD_CHANNELS` and
+  `LOCALHARNESS_DISCORD_ACK` are no longer read. Set each value with
+  `localharness components set dispatch.discord.<key> …`. (The 0.17.0 wheel still read them, with
+  its "stops working in 0.17.0" warning, because the test that enforced the removal keyed on the
+  stale version constant above.)
+- **A `web:` config section is no longer read as `mobile:`**, as 0.16.1 announced for 0.17.0. A
+  file that still says `web:` is refused as a section nothing owns, naming the file and line;
+  rename the key to `mobile:`.
+
 ## [0.17.0] — 2026-10-07
 
 ### Added
@@ -17,6 +45,12 @@ All notable changes to LocalHarness are documented here. The format follows
 - **Value-hashing in trust snapshots:** `executables_snapshot` and `machine_snapshot` now
   hash env/header *values* (SHA-256), not just names, so a secret swap re-prompts on the
   next `start`. One-time bounded re-confirmation for existing trusted workspaces.
+
+## [0.16.9] — 2026-10-07
+
+### Changed
+- The "Task evidence" line is no longer appended to the user-facing reply. The evidence stays on
+  the event bus and in the agent packet.
 
 ## [0.16.8] — 2026-10-07
 
