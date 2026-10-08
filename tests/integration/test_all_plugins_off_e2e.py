@@ -1,6 +1,6 @@
 """CORE-01 — the core boots and does real work with every plugin off (Phase 47).
 
-**What this proves.** With the bundled image, web and memory plugins all off and the installed
+**What this proves.** With the bundled image, mobile and memory plugins all off and the installed
 example plugin off (installed by the dev extra, never enabled), a REAL `start` completes a scripted
 turn that calls `read` on a real file and `bash_exec` `echo core-only`. The proof is on what
 executed: the resolver's recorded `enabled` map, the lifecycle's recorded result (nothing running,
@@ -32,7 +32,7 @@ from tests.unit.test_start_cmd import _stub_start_boundaries
 GUARDRAILS = "# Org guardrails\nCORE-ONLY-GUARDRAILS-SENTINEL\n"
 MEMORY_TOOLS = {"memory_search", "memory_get", "remember"}
 # dispatch (49) and autoresearch (50) are bundled and on by default, so "every plugin off" turns them off too
-ALL_OFF = ("memory:\n  enabled: false\nweb:\n  enabled: false\ndispatch:\n  enabled: false\n"
+ALL_OFF = ("memory:\n  enabled: false\nmobile:\n  enabled: false\ndispatch:\n  enabled: false\n"
            "autoresearch:\n  enabled: false\n")
 
 

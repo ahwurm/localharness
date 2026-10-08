@@ -1,10 +1,9 @@
-"""The two things that carry over from the `web` name on their own (CHANGELOG, 0.16.1): a config file
-that still says `web:` configures the mobile plugin until 0.17.0, said once per file in the log; and
-the token folder a release named `web/` is renamed `mobile/` once, so a paired phone stays paired.
-`localharness web` itself is gone, not aliased."""
+"""What carries over from the `web` name on its own (CHANGELOG, 0.16.1): the token folder a release
+named `web/` is renamed `mobile/` once, so a paired phone stays paired. A config file that still
+says `web:` was read as `mobile:` until 0.17.0; since 0.17.1 the loader leaves it alone, so it is
+refused as a section nothing owns, like any other. `localharness web` itself is gone, not aliased."""
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import pytest
@@ -20,22 +19,27 @@ def test_web_is_not_a_command():
     assert result.exit_code == 2 and "No such command 'web'" in result.output
 
 
-def test_a_web_section_is_read_as_mobile_and_said_once(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+def test_a_web_section_is_no_longer_read_as_mobile(tmp_path: Path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("version: '1'\nweb:\n  public_url: https://box.example\n", encoding="utf-8")
-    with caplog.at_level(logging.WARNING, logger="localharness.config.loader"):
-        data = config_loader._load_yaml_file(cfg)
-        again = config_loader._load_yaml_file(cfg)
-    assert data == {"version": "1", "mobile": {"public_url": "https://box.example"}} == again
-    assert caplog.text.count("`web:` in") == 1 and "is now `mobile:`" in caplog.text
+    assert config_loader._load_yaml_file(cfg) == {"version": "1", "web": {"public_url": "https://box.example"}}
 
 
-def test_mobile_values_win_over_a_leftover_web_section(tmp_path: Path):
-    cfg = tmp_path / "overrides.yaml"
-    cfg.write_text("web:\n  public_url: https://old.example\n  enabled: false\n"
-                   "mobile:\n  public_url: https://new.example\n", encoding="utf-8")
-    assert config_loader._load_yaml_file(cfg) == {
-        "mobile": {"public_url": "https://new.example", "enabled": False}}
+def test_a_stale_web_section_is_refused_as_a_section_nothing_owns(tmp_path: Path):
+    """The 0.17.0 sunset, kept in 0.17.1: a file that still says `web:` fails to load naming the
+    file, the line and the fix, as any section no core key and no installed plugin owns does."""
+    from localharness.config.loader import ConfigLoader, ConfigValidationError
+
+    g, ws = tmp_path / "g", tmp_path / "proj" / ".localharness"
+    g.mkdir()
+    ws.mkdir(parents=True)
+    (g / "config.yaml").write_text(
+        "version: '1'\nprovider:\n  provider_type: vllm\n  base_url: http://127.0.0.1:9/v1\n"
+        "  default_model: test-model\nweb:\n  public_url: https://box.example\n", encoding="utf-8")
+    with pytest.raises(ConfigValidationError) as exc:
+        ConfigLoader(config_dir=g, local_config_dir=ws).load_harness()
+    assert exc.value.path == str(g / "config.yaml")
+    assert "web (line 6): not a LocalHarness setting" in str(exc.value), str(exc.value)
 
 
 def test_the_web_state_folder_is_renamed_mobile_once(tmp_path: Path):
