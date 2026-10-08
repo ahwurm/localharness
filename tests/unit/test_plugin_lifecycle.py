@@ -505,11 +505,12 @@ async def test_doctor_rows_cover_every_plugin_state_without_a_session(paths):
 
     assert rows["shiny"] == DoctorRow(
         "shiny", "available", "available — turn on: localharness plugins enable shiny")
-    assert rows["off"] == DoctorRow("off", "off", "off — turn on: localharness plugins enable off")
+    assert rows["off"] == DoctorRow("off", "off", "off — turn on: localharness plugins enable off",
+                                    bundled=True)
     assert rows["future"] == DoctorRow(
-        "future", "skipped", "skipped — requires localharness >=9, this is 0.15.0")
+        "future", "skipped", "skipped — requires localharness >=9, this is 0.15.0", bundled=True)
     assert rows["checked"] == DoctorRow(
-        "checked", "on", "", (Check(name="checked", status="pass", detail="fine"),))
+        "checked", "on", "", (Check(name="checked", status="pass", detail="fine"),), bundled=True)
     [ctx] = seen
     assert ctx.llm is None and ctx.paths.artifact_dir == paths.state_dir / "artifacts" / "checked"
     [check] = rows["raising"].checks
@@ -517,8 +518,10 @@ async def test_doctor_rows_cover_every_plugin_state_without_a_session(paths):
     assert check.detail == "its doctor check raised ZeroDivisionError: division by zero"
     [check] = rows["junk"].checks
     assert check.status == "fail" and "not a list of Check" in check.detail
-    assert rows["waiting"] == DoctorRow("waiting", "unconfigured", "unconfigured — set waiting.url")
-    assert rows["broken"] == DoctorRow("broken", "failed", "failed — configure() raised SystemExit: 2")
+    assert rows["waiting"] == DoctorRow("waiting", "unconfigured", "unconfigured — set waiting.url",
+                                        bundled=True)
+    assert rows["broken"] == DoctorRow("broken", "failed", "failed — configure() raised SystemExit: 2",
+                                       bundled=True)
     assert list(rows) == [e.name for e in resolution.plan.entries]
 
 

@@ -327,12 +327,14 @@ async def stop_plugins(result: LifecycleResult) -> None:
 class DoctorRow:
     """One plugin in doctor (PAPI-08). `state` is a plan state, or "unconfigured"; `detail` is the
     plan's display text for a plugin that is not on, "unconfigured — set <key>", "failed — <why>" for
-    an on plugin that failed to come up, or "" beside an on plugin's `checks`."""
+    an on plugin that failed to come up, or "" beside an on plugin's `checks`. `bundled` is the plan
+    entry's: a bundled plugin waiting on its install extra is information, not a warning."""
 
     name: str
     state: str
     detail: str
     checks: tuple[Check, ...] = ()
+    bundled: bool = False
 
 
 async def doctor_rows(resolution: Resolution, *, paths: PluginPaths) -> list[DoctorRow]:
@@ -342,24 +344,26 @@ async def doctor_rows(resolution: Resolution, *, paths: PluginPaths) -> list[Doc
     HookSystem, no LLM client — and its doctor() checks are returned; each call is contained, and a
     doctor() that raises is one failing check naming the exception."""
     return [await _doctor_row(resolution, entry.name, paths) if entry.state == "on"
-            else DoctorRow(entry.name, entry.state, entry.display)
+            else DoctorRow(entry.name, entry.state, entry.display, bundled=entry.bundled)
             for entry in resolution.plan.entries]
 
 
 async def _doctor_row(resolution: Resolution, name: str, paths: PluginPaths) -> DoctorRow:
     ctx = plugin_context(resolution, name, bus=EventBus(), registry=ToolRegistry(),
                          hooks=HookSystem(), llm=None, paths=paths)
+    entry = resolution.plan.entry(name)
+    bundled = entry.bundled if entry is not None else False
     stage = "__init__"
     try:
         plugin = resolution.classes[name]()
         stage = "configure"
         state, detail = _availability(await _call(plugin.configure, ctx))
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — PAPI-11: never fatal
-        return DoctorRow(name, "failed", f"failed — {stage}() raised {_what(exc)}")
+        return DoctorRow(name, "failed", f"failed — {stage}() raised {_what(exc)}", bundled=bundled)
     if state == "unconfigured":
-        return DoctorRow(name, state, f"unconfigured — set {detail}")
+        return DoctorRow(name, state, f"unconfigured — set {detail}", bundled=bundled)
     if state == "failed":
-        return DoctorRow(name, state, f"failed — {detail}")
+        return DoctorRow(name, state, f"failed — {detail}", bundled=bundled)
     try:
         checks = await _call(plugin.doctor, ctx)
         if not (isinstance(checks, (list, tuple)) and all(isinstance(c, Check) for c in checks)):
@@ -367,7 +371,7 @@ async def _doctor_row(resolution: Resolution, name: str, paths: PluginPaths) -> 
                             detail=f"its doctor check returned {checks!r:.80}, not a list of Check")]
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — PAPI-11: never fatal
         checks = [Check(name=name, status="fail", detail=f"its doctor check raised {_what(exc)}")]
-    return DoctorRow(name, "on", "", tuple(checks))
+    return DoctorRow(name, "on", "", tuple(checks), bundled=bundled)
 
 
 async def setup_action_rows(resolution: Resolution, name: str, paths: PluginPaths) -> tuple[Check, ...]:

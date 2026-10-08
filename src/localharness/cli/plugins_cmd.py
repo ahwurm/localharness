@@ -658,7 +658,7 @@ def _probe(name: str, resolution: Resolution, paths: PluginPaths) -> DoctorRow |
     try:
         entry = resolution.plan.entry(name)
         row = (asyncio.run(_doctor_row(resolution, name, paths)) if entry.state == "on"
-               else DoctorRow(name, entry.state, entry.display))
+               else DoctorRow(name, entry.state, entry.display, bundled=entry.bundled))
         print_plugin_row(row, [])
         return row
     except Exception as exc:  # noqa: BLE001 — the enable already wrote; the check is advice

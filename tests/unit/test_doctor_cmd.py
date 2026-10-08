@@ -792,6 +792,78 @@ def test_doctor_fails_on_a_pin_that_exceeds_the_served_window(mock_httpx, tmp_pa
     assert "200,000" in result.output
     assert "EXCEEDS" in result.output
     assert "pinned for m" in result.output
+    assert "`start` refuses to run" in result.output and "clamps to" not in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_factory_default_above_the_served_window_is_information(mock_httpx, tmp_path):
+    """The untouched factory default (131,072) on a 65,536 server is the reference setup: `start`
+    fits it to the served window for the session (#127) and does not abort, so doctor must not
+    count a failure start never raises — and the number it names is the one start fits to (the
+    served window, #145), not served-minus-reserve."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _write_orchestrator(tmp_path, 131_072)
+    _llamacpp_mocks(mock_httpx, served=65_536, slots=1, slot_ctx=65_536)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "EXCEEDS" not in result.output and "61,440" not in result.output
+    assert "factory default (131,072)" in result.output
+    assert "`start` fits it to 65,536 for the session" in result.output
+    assert "context.max_context_tokens: 65536" in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_explicit_budget_above_the_served_window_still_fails(mock_httpx, tmp_path):
+    """Only the factory default is fitted: an explicit 120,000 on a 65,536 server makes `start`
+    refuse, so doctor counts it and says so."""
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _write_orchestrator(tmp_path, 120_000)
+    _llamacpp_mocks(mock_httpx, served=65_536, slots=1, slot_ctx=65_536)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 1, result.output
+    assert "Context budget 120,000 EXCEEDS served window 65,536" in result.output
+    assert "`start` refuses to run" in result.output and "fits it to" not in result.output
+
+
+@patch("localharness.cli.doctor_cmd.httpx")
+def test_doctor_bundled_plugin_waiting_on_its_extra_is_information(mock_httpx, tmp_path, monkeypatch):
+    """A terminal-only install never asked for the phone or the chat bot: the bundled `mobile` and
+    `dispatch` rows print as information, not warnings (the ruling the start banner applies)."""
+    from localharness.plugins import resolve
+
+    monkeypatch.setitem(resolve.resolve.__kwdefaults__, "extra_installed", lambda e: False)
+    _write_config(tmp_path, "llamacpp", "http://localhost:8080/v1", model="m")
+    _write_orchestrator(tmp_path, 56_000)
+    _llamacpp_mocks(mock_httpx, served=65_536, slots=1, slot_ctx=65_536)
+
+    result = runner.invoke(app, ["doctor", "--config-dir", str(tmp_path)])
+    out = " ".join(result.output.split())
+    assert "i mobile: on (install `localharness[mobile]` to use it)" in out, result.output
+    assert "i dispatch: on (install `localharness[dispatch]` to use it)" in out, result.output
+    assert "⚠ mobile:" not in out and "⚠ dispatch:" not in out, result.output
+
+
+def test_an_installed_plugin_waiting_on_its_extra_still_warns(monkeypatch):
+    """The information glyph is for bundled plugins only: the user opted in to a plugin they
+    installed, so its missing extra stays a warning."""
+    import io
+
+    from rich.console import Console
+
+    from localharness.cli import doctor_cmd
+    from localharness.plugins.lifecycle import DoctorRow
+
+    buf = io.StringIO()
+    monkeypatch.setattr(doctor_cmd, "console", Console(file=buf, width=200, no_color=True))
+    failures: list[str] = []
+    reason = "on (install `thirdparty[x]` to use it)"
+    doctor_cmd.print_plugin_row(DoctorRow("thirdparty", "needs-extra", reason, bundled=False), failures)
+    doctor_cmd.print_plugin_row(DoctorRow("mobile", "needs-extra", reason, bundled=True), failures)
+    lines = buf.getvalue().splitlines()
+    assert lines == [f"⚠ thirdparty: {reason}", f"i  mobile: {reason}"], lines
+    assert failures == []
 
 
 @patch("localharness.cli.doctor_cmd.httpx")
