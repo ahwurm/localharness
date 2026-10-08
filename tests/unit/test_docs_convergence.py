@@ -35,7 +35,6 @@ from localharness.config.loader import (
     AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
 )
 from localharness.config.plugin_sections import CORE_HARNESS_KEYS, global_only_paths
-from localharness.dispatch.config import DiscordSettings, env_fallback
 from localharness.plugins import api
 from localharness.plugins.api import (
     Check, MemoryBrowse, MemorySlotPlugin, Plugin, PluginContext, PluginManifest, PluginPaths,
@@ -720,22 +719,6 @@ def changelog_slice(text: str) -> str:
     return "\n".join(entry("## [Unreleased]") + entry("## [0.16.0]"))
 
 
-def discord_env_names() -> frozenset[str]:
-    """The environment variables the Discord fallback reads, observed by running it."""
-    seen: set[str] = set()
-
-    class Spy(dict):
-        def get(self, key, default=None):
-            seen.add(key)
-            return default
-
-        def __contains__(self, key):
-            seen.add(key)
-            return False
-    env_fallback(DiscordSettings(), Spy())
-    return frozenset(seen)
-
-
 IMAGE_FIRST_RELEASE = "- **Image generation, as a plugin"
 GUARDRAILS_BULLET = "- **`GUARDRAILS.md` reaches the model with memory on or off.**"
 
@@ -743,8 +726,7 @@ GUARDRAILS_BULLET = "- **`GUARDRAILS.md` reaches the model with memory on or off
 def check_changelog_items(text: str) -> list[str]:
     """The release entry names the four user-visible changes: the `localharness plugins` command
     and its verbs, the settings keys (`memory.enabled` replacing deprecated `org.memory_enabled`,
-    `image.comfyui_url`, `dispatch.discord.*`), every Discord variable the fallback reads with its
-    0.17.0 removal, and the image plugin's first release under Added."""
+    `image.comfyui_url`, `dispatch.discord.*`), and the image plugin's first release under Added."""
     entry = changelog_slice(text)
     if not entry:
         return ["CHANGELOG has no ## [Unreleased] entry"]
@@ -757,8 +739,6 @@ def check_changelog_items(text: str) -> list[str]:
                and ("deprecat" in b.lower() or "deprecat" in h.lower()) for h, b in items):
         out.append("no bullet says `org.memory_enabled` is deprecated in favour of `memory.enabled`")
     out += [f"the entry does not name `{k}`" for k in ("image.comfyui_url", "dispatch.discord.") if k not in entry]
-    out += [f"no bullet names `{n}` with its 0.17.0 removal" for n in sorted(discord_env_names())
-            if not any(n in b and "0.17.0" in b for _h, b in items)]
     if not any(b.startswith(IMAGE_FIRST_RELEASE) and h == "Added" for h, b in items):
         out.append("no Added bullet for the image plugin's first release")
     return out
@@ -798,7 +778,6 @@ def test_changelog_structure_live():
 
 
 def _good_changelog() -> str:
-    names = ", ".join(f"`{n}`" for n in sorted(discord_env_names()))
     return (
         "# Changelog\n\n## [Unreleased]\n\nThis release adds plugins.\n\n### Added\n"
         "- **`localharness plugins`.** `list`, `info NAME`, `enable NAME`, `disable NAME`.\n"
@@ -807,14 +786,12 @@ def _good_changelog() -> str:
         f"{GUARDRAILS_BULLET} Core reads it\n  on every turn.\n"
         "- Discord reads `dispatch.discord.*`.\n"
         "### Deprecated\n- `org.memory_enabled` — use `memory.enabled`.\n"
-        f"- The variables {names}\n  stop working in 0.17.0.\n"
         "\n## [0.15.1] — 2026-10-01\n\nstray text in an older entry is not checked\n")
 
 
 def test_changelog_bites():
     good = _good_changelog()
     assert check_changelog(good) == []
-    assert check_changelog_items(good.replace("0.17.0", "a later release"))
     broken = good.replace(GUARDRAILS_BULLET, " the model with memory on or off.**")
     assert len(check_changelog_structure(broken)) == 2, check_changelog_structure(broken)
     assert check_changelog_items(good.replace("`info NAME`, ", ""))
@@ -835,7 +812,6 @@ INTERNAL_IDS = (  # internal phase numbers, plan ids and requirement ids
     re.compile(r"\b(?:PAPI|PLUG|MEMP|ENAB|SAFE|DISP|AUTO|IMGP|WEBP|CORE|DOCS|SEC)-\d\d\b"),
     re.compile(r"\bSETUP-(?:0[5-9]|1[0-5])\b"),  # the setup-wizard rows; SETUP-01..04 are v1.0's, cited by specs 02 and 10
 )
-_ENV_OK = ("deprecat", "fallback", "0.17", "Until", "until")
 
 
 def public_docs() -> list[str]:
@@ -845,33 +821,16 @@ def public_docs() -> list[str]:
               and d != "docs/task-intent-and-clarification-prd.md"]]
 
 
-def _blocks(lines: list[str]) -> list[str]:
-    """For each line, the block it sits in: its paragraph, list item (with continuation lines) or
-    table row."""
-    owner: list[str] = []
-    start = 0
-    for i in range(len(lines) + 1):
-        line = lines[i] if i < len(lines) else ""
-        if i == len(lines) or not line.strip() or line.lstrip().startswith(("- ", "* ", "|")):
-            block = "\n".join(lines[start:i])
-            owner += [block] * (i - start)
-            start = i
-            if i < len(lines) and not line.strip():
-                owner.append("")
-                start = i + 1
-    return owner
-
-
 def check_denylist(rel: str, text: str) -> list[str]:
-    """No public doc names removed wiring, an internal phase / plan / requirement id, or a
-    deprecated name outside its deprecation note: a Discord fallback variable only in a paragraph
-    or list item that says deprecated / fallback / until 0.17, `org.memory_enabled` only within 200
-    characters of "deprecated" / "older", `GuardrailTracker` only where the line or its section
-    heading says design / not built. The CHANGELOG is history, so it may name all of these, but
-    never an internal id. When the Discord fallback is deleted at 0.17.0, its doc lines go too."""
+    """No public doc names removed wiring, an internal phase / plan / requirement id, a Discord
+    fallback variable (the fallback was deleted in 0.17.1, so its doc lines went too), or a
+    deprecated name outside its deprecation note: `org.memory_enabled` only within 200 characters
+    of "deprecated" / "older", `GuardrailTracker` only where the line or its section heading says
+    design / not built. The CHANGELOG is history, so it may name all of these, but never an
+    internal id."""
     out = []
     lines = text.splitlines()
-    blocks, heading = _blocks(lines), ""
+    heading = ""
     for no, (line, plain) in enumerate(zip(lines, unfenced_lines(text)), 1):
         where = f"{rel}:{no}"
         heading = h[1] if (h := _heading(plain)) else heading
@@ -886,9 +845,8 @@ def check_denylist(rel: str, text: str) -> list[str]:
             out.append(f"{where}: 'GuardrailTracker' presented as built")
         if rel == SPEC09 and "UNSTABLE" in line:
             out.append(f"{where}: 'UNSTABLE'")
-        out += [f"{where}: {env!r} outside a deprecation/fallback note"
-                for env in ("LOCALHARNESS_DISCORD_", "DISCORD_BOT_TOKEN")
-                if env in line and not any(k in blocks[no - 1] for k in _ENV_OK)]
+        out += [f"{where}: {env!r} names the deleted Discord env fallback"
+                for env in ("LOCALHARNESS_DISCORD_", "DISCORD_BOT_TOKEN") if env in line]
     if rel != "CHANGELOG.md":
         for m in re.finditer(r"org\.memory_enabled", text):
             near = text[max(0, m.start() - 200):m.end() + 200].lower()
@@ -905,9 +863,6 @@ def test_denylist_live(rel):
 
 
 def test_denylist_bites():
-    lines = ["para", "two", "", "- item", "  more", "| row |", "- next"]
-    assert _blocks(lines) == ["para\ntwo", "para\ntwo", "", "- item\n  more", "- item\n  more",
-                              "| row |", "- next"]
     assert check_denylist("README.md", "Dates like 2026-10-02 and 44-17 on a 2026-10-02 line are fine.\n") == []
     for text in ("the Phase-36 model look", "in Phase 4 we", "Phase 47 shipped it", "plan 51-03 did",
                  "memory is still part of core", "MEMP-02 says", "a future phase (36/37)"):
@@ -915,7 +870,7 @@ def test_denylist_bites():
     assert check_denylist("CHANGELOG.md", "- Removed `run_pre_hooks`.\n") == []
     assert check_denylist("CHANGELOG.md", "- Shipped in Phase 49.\n")
     assert check_denylist("docs/specs/11-channels.md", "Set `LOCALHARNESS_DISCORD_TOKEN`.\n")
-    assert check_denylist("docs/specs/11-channels.md", "`LOCALHARNESS_DISCORD_TOKEN` (deprecated).\n") == []
+    assert check_denylist("docs/specs/11-channels.md", "`LOCALHARNESS_DISCORD_TOKEN` (deprecated).\n")
     assert check_denylist("README.md", "- Set\n  `LOCALHARNESS_DISCORD_TOKEN`.\n- It is deprecated.\n")
     assert check_denylist("docs/specs/12-audit.md", "## Tracker\n`GuardrailTracker` runs.\n")
     assert check_denylist("docs/specs/12-audit.md", "## Tracker (design, not built)\n`GuardrailTracker`.\n") == []

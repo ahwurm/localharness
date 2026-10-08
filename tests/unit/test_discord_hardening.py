@@ -30,8 +30,7 @@ ALLOW = ("42", str(BOT_USER_ID))  # the bot's own id allowlisted: only the self 
 EVIL = "see [click here](https://evil.example/x)"
 SHOWN = "see click here (<https://evil.example/x>)"
 TOKEN_MISSING = ("Discord bot token missing — run `localharness plugins enable dispatch` to set "
-                 "dispatch.discord.token (LOCALHARNESS_DISCORD_TOKEN / DISCORD_BOT_TOKEN still work "
-                 "until 0.17.0; ~/.claude/channels/discord/.env is no longer read)")
+                 "dispatch.discord.token (~/.claude/channels/discord/.env is no longer read)")
 
 
 @pytest.fixture
@@ -302,15 +301,6 @@ def test_plain_links(text, shown):
 
 # ------------------------------------------------------------------- its own token only
 
-def test_the_token_comes_only_from_the_two_variables():
-    from localharness.dispatch.config import DiscordSettings, env_fallback
-
-    assert env_fallback(DiscordSettings(), {"LOCALHARNESS_DISCORD_TOKEN": "A",
-                                            "DISCORD_BOT_TOKEN": "B"})[0].token.get_secret_value() == "A"
-    assert env_fallback(DiscordSettings(), {"DISCORD_BOT_TOKEN": "B"})[0].token.get_secret_value() == "B"
-    assert env_fallback(DiscordSettings(), {}) == (DiscordSettings(), [])
-
-
 def _claude_code_env_file(home: Path) -> None:
     env = home / ".claude" / "channels" / "discord" / ".env"
     env.parent.mkdir(parents=True)
@@ -331,8 +321,8 @@ async def test_claude_codes_env_file_is_never_read(fake, tmp_path):
                         config=DispatchConfig(discord={"allow": ["42"]}), agent_config=None,
                         paths=PluginPaths(global_config_dir=tmp_path / "g", workspace=None,
                                           state_dir=tmp_path / "s"), llm=None)
-    settings, lines = _effective(ctx)
-    assert settings.token.get_secret_value() == "" and lines == []
+    settings = _effective(ctx)
+    assert settings.token.get_secret_value() == ""
 
     plugin = DispatchPlugin()
     await plugin.start(ctx)

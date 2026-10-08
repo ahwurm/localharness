@@ -13,7 +13,7 @@ inside dispatch/. Everything else is real: tier 1/tier 2 channel acceptance, the
 
 Named gap: DispatchPlugin has ONE settings section (`dispatch.discord.*`), and `make_channel` hands
 every adapter `token=<discord token>` plus the Discord allow/channels/ack. So this fixture's
-allow-list comes from `LOCALHARNESS_DISCORD_ALLOW`. A real second platform needs its own settings
+allow-list comes from `dispatch.discord.allow`. A real second platform needs its own settings
 section and a per-platform branch in `make_channel` — a plugin-internal edit, not a core one.
 
 Stubbed boundaries as in test_dispatch_start_e2e: LLM probe, tokenizer, plugin discovery,
@@ -81,7 +81,6 @@ def _model():
 
 async def test_fixture_platform_runs_through_the_real_start(tmp_path, monkeypatch):
     isolate_discord_env(monkeypatch, tmp_path)
-    monkeypatch.setenv("LOCALHARNESS_DISCORD_ALLOW", "42")  # the named gap: one settings section
     fixture.INSTANCES.clear()
     REGISTRATION.clear()
     _register(monkeypatch)
@@ -145,6 +144,8 @@ async def test_fixture_platform_runs_through_the_real_start(tmp_path, monkeypatc
 
     _stub_start_boundaries(tmp_path, monkeypatch, repl_run=run)
     _offline_provider(tmp_path)
+    with (tmp_path / "config.yaml").open("a", encoding="utf-8") as f:
+        f.write("dispatch:\n  discord:\n    allow: ['42']\n")  # the named gap: one settings section
     _let_the_stub_tokenizer_run_a_turn(monkeypatch)
     printed = _capture_start_console(monkeypatch)
     monkeypatch.setattr("localharness.provider.client.LLMClient.stream_complete", _model())

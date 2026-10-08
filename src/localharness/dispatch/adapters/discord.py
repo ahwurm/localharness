@@ -25,8 +25,7 @@ log = structlog.get_logger(__name__)
 
 TOKEN_MISSING = (
     "Discord bot token missing — run `localharness plugins enable dispatch` to set "
-    "dispatch.discord.token (LOCALHARNESS_DISCORD_TOKEN / DISCORD_BOT_TOKEN still work until "
-    "0.17.0; ~/.claude/channels/discord/.env is no longer read)")
+    "dispatch.discord.token (~/.claude/channels/discord/.env is no longer read)")
 """The one line a start with no token gets. The last clause is for the person whose bot just
 stopped starting: it borrowed Claude Code's token file, which belongs to another program."""
 

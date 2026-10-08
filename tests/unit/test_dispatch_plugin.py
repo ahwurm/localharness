@@ -1,4 +1,4 @@
-"""DispatchPlugin (49-05): manifest, settings, deprecation lines, doctor rows, make_channel — unit
+"""DispatchPlugin (49-05): manifest, settings, doctor rows, make_channel — unit
 level and through the real lifecycle (start_plugins / doctor_rows). Not yet in BUILTIN_PLUGINS.
 
 Every test runs with HOME and the Discord env sources isolated (tests/dispatch_support.py), so the
@@ -86,31 +86,21 @@ async def test_configure_is_always_ready(tmp_path):
     assert await DispatchPlugin().configure(_ctx(tmp_path)) == "ready"
 
 
-async def test_start_warns_once_per_deciding_env_source_and_opens_nothing(tmp_path, monkeypatch, fake):
-    monkeypatch.setenv("LOCALHARNESS_DISCORD_ALLOW", "42")
-    p = DispatchPlugin()
-    await p.start(_ctx(tmp_path))
-    assert len(p.startup_warnings) == 1
-    assert "LOCALHARNESS_DISCORD_ALLOW" in p.startup_warnings[0]
-    assert "dispatch.discord.allow" in p.startup_warnings[0]
-    assert fake.client is None and fake.log == []
-
-
-async def test_start_without_env_has_no_lines(tmp_path):
+async def test_start_reads_the_settings_and_opens_nothing(tmp_path, fake):
     p = DispatchPlugin()
     await p.start(_ctx(tmp_path, token=TOKEN, allow=["42"]))
     assert p.startup_warnings == []
+    assert fake.client is None and fake.log == []
 
 
-async def test_lifecycle_routes_the_line_onto_the_session_warnings(tmp_path, monkeypatch, fake):
-    """The real start_plugins: the deprecation line reaches result.warnings (the banner)."""
-    monkeypatch.setenv("LOCALHARNESS_DISCORD_TOKEN", TOKEN)
-    result = await start_plugins(_resolution(allow=["42"]), bus=EventBus(), registry=ToolRegistry(),
-                                 hooks=None, llm=None, paths=_paths(tmp_path))
+async def test_lifecycle_starts_from_the_settings_alone(tmp_path, fake):
+    """The real start_plugins: the settings reach the channel, and no warning (and never the
+    token) rides the banner."""
+    result = await start_plugins(_resolution(token=TOKEN, allow=["42"]), bus=EventBus(),
+                                 registry=ToolRegistry(), hooks=None, llm=None, paths=_paths(tmp_path))
     try:
         assert [r.name for r in result.running] == ["dispatch"]
-        dep = [w for w in result.warnings if "deprecated" in w]
-        assert len(dep) == 1 and "LOCALHARNESS_DISCORD_TOKEN" in dep[0] and TOKEN not in dep[0]
+        assert not any("deprecated" in w or TOKEN in w for w in result.warnings), result.warnings
         ch = result.running[0].plugin.make_channel("discord", EventBus())
         assert ch._adapter._token == TOKEN and ch._allow == {"42"}
         assert fake.client is None
@@ -142,14 +132,15 @@ def test_doctor_configured(tmp_path):
     assert rows[0].detail == "Discord configured — 1 allowed user(s); listens in any channel the bot can see"
 
 
-def test_doctor_warns_per_env_source_without_the_token(tmp_path, monkeypatch):
+def test_doctor_ignores_the_old_environment_variables(tmp_path, monkeypatch):
+    """The pre-settings variables were deleted in 0.17.1: set, they decide nothing, and no row
+    names them or the token."""
     monkeypatch.setenv("LOCALHARNESS_DISCORD_TOKEN", TOKEN)
     monkeypatch.setenv("LOCALHARNESS_DISCORD_ALLOW", "42")
     p = DispatchPlugin()
     rows = p.doctor(_ctx(tmp_path))
-    assert [r.status for r in rows] == ["pass", "warn", "warn"]
-    assert {r.detail.split()[0] for r in rows[1:]} == {"LOCALHARNESS_DISCORD_TOKEN", "LOCALHARNESS_DISCORD_ALLOW"}
-    assert not any(TOKEN in r.detail or TOKEN in r.hint for r in rows)
+    assert [(r.status, r.detail) for r in rows] == [("skip", "Discord not configured")]
+    assert not any(TOKEN in r.detail or TOKEN in r.hint or "DISCORD_" in r.detail for r in rows)
     assert p.startup_warnings == []  # doctor never starts the plugin
 
 
@@ -169,12 +160,11 @@ def test_doctor_ignores_the_claude_code_env_file(tmp_path):
     assert not any(TOKEN in r.detail or TOKEN in r.hint for r in rows)
 
 
-async def test_doctor_rows_through_the_lifecycle(tmp_path, monkeypatch):
-    """The real doctor_rows: configured, never started, one warn line, no token."""
-    monkeypatch.setenv("LOCALHARNESS_DISCORD_ALLOW", "42")
-    [row] = await doctor_rows(_resolution(token=TOKEN), paths=_paths(tmp_path))
+async def test_doctor_rows_through_the_lifecycle(tmp_path):
+    """The real doctor_rows: configured, never started, no token."""
+    [row] = await doctor_rows(_resolution(token=TOKEN, allow=["42"]), paths=_paths(tmp_path))
     assert (row.name, row.state) == ("dispatch", "on")
-    assert [c.status for c in row.checks] == ["pass", "warn"]
+    assert [c.status for c in row.checks] == ["pass"]
     assert not any(TOKEN in c.detail for c in row.checks)
 
 

@@ -1,10 +1,11 @@
 """Shared support for every dispatch test : env isolation + a recording fake `discord`.
 
 SAFETY: a developer's environment may hold a live bot token in `LOCALHARNESS_DISCORD_TOKEN` or
-`DISCORD_BOT_TOKEN`, which the dispatch plugin's env fallback reads (Claude Code's
-`~/.claude/channels/discord/.env` is no longer read at all). Every dispatch test calls
-`isolate_discord_env` FIRST, so `Path.home()` is a tmp dir and the five env token/allow sources
-are gone — no test can ever see, print or log in with the real token.
+`DISCORD_BOT_TOKEN`. Nothing reads those variables since 0.17.1 (the env fallback is gone, and
+Claude Code's `~/.claude/channels/discord/.env` was never read), but every dispatch test still
+calls `isolate_discord_env` FIRST, so `Path.home()` is a tmp dir and the five old variables are
+unset — no test can ever see, print or log in with the real token; a test that proves the
+variables are ignored sets them itself.
 
 The fake `discord` module stands in at the discord.py API boundary (Intents, AllowedMentions,
 Client.event / start / close, messages with send / add_reaction / edit / reply). It never touches

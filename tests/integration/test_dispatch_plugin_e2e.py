@@ -2,7 +2,7 @@
 
 Criteria (ROADMAP Phase 49):
   1. Discord runs only through the dispatch plugin, configured by settings.
-  2. The env variables fall back per field for one release, each with a deprecation line.
+  2. (The one-release env fallback of 0.16.x was deleted in 0.17.1; settings are the only source.)
   3. Every way `start --channel discord` cannot run is a named refusal, never the terminal.
 
 Per test:
@@ -10,7 +10,6 @@ Per test:
   - test_workspace_layer_cannot_set_machine_keys     criterion 1: token/allow/channels are global-only
   - test_workspace_layer_cannot_widen_the_allowlist  criterion 1: a project cannot add a user
   - test_workspace_ack_applies                       criterion 1: ack IS layered
-  - test_setting_wins_env_fills_the_rest             criterion 2: per-field precedence, one line each
   - test_disabled_dispatch_refuses_discord           criterion 3: tier 2, plugin off (real CLI)
   - test_missing_extra_refuses_with_install_line     criterion 3: tier 2, extra absent (pinned missing)
   - test_plugin_start_failure_never_falls_back       criterion 3: tier 3, start() raised
@@ -40,10 +39,9 @@ from tests.unit.test_start_cmd import _capture_start_console, _stub_start_bounda
 SETTINGS = {"token": "tkn-settings-49-07", "allow": ["42"], "channels": ["7"]}
 DROPPED = ": only the global config may set it"
 TOKEN_MISSING = ("Discord bot token missing — run `localharness plugins enable dispatch` to set "
-                 "dispatch.discord.token (LOCALHARNESS_DISCORD_TOKEN / DISCORD_BOT_TOKEN still work "
-                 "until 0.17.0; ~/.claude/channels/discord/.env is no longer read)")
-ALLOW_EMPTY = ("Discord allowlist empty — set dispatch.discord.allow to your user id(s) "
-               "(LOCALHARNESS_DISCORD_ALLOW still works until 0.17.0); refusing to listen to everyone")
+                 "dispatch.discord.token (~/.claude/channels/discord/.env is no longer read)")
+ALLOW_EMPTY = ("Discord allowlist empty — set dispatch.discord.allow to your user id(s); "
+               "refusing to listen to everyone")
 
 
 _REAL: dict = {}
@@ -235,29 +233,6 @@ async def test_workspace_ack_applies(tmp_path, monkeypatch, printed, fake_home):
     assert ("react", f"m{hello.id}", "👀") in fake.log, fake.log
     assert not any(r[0] == "react" and r[2] == "✅" for r in fake.log), fake.log
     assert "ignoring dispatch.discord.ack" not in _summary(printed)
-
-
-# --- criterion 2 -----------------------------------------------------------------------------------
-
-
-async def test_setting_wins_env_fills_the_rest(tmp_path, monkeypatch, printed):
-    fake = install_fake_discord(monkeypatch)
-    _extra(monkeypatch)
-    monkeypatch.setenv("LOCALHARNESS_DISCORD_ALLOW", "99")
-    monkeypatch.setenv("LOCALHARNESS_DISCORD_CHANNELS", "7")
-    cfg = _global(tmp_path, monkeypatch, {"token": SETTINGS["token"], "allow": ["42"]})
-
-    seen, _, ignored = await _drive(monkeypatch, fake, cfg,
-                                    before=[(99, 7, "env-listed user"), (42, 8, "outside env channels")])
-
-    assert [e.content for e in seen] == ["hello"], seen  # allow stays ["42"]; channels = env ["7"]
-    assert _sends(fake) == [("send", "c7", REPLY)], fake.log
-    _none_acked(fake, ignored)
-    summary = _summary(printed)
-    assert summary.count("dispatch: LOCALHARNESS_DISCORD_") == 1, summary
-    assert ("dispatch: LOCALHARNESS_DISCORD_CHANNELS is deprecated and stops working in 0.17.0 — set "
-            "dispatch.discord.channels (localharness components set dispatch.discord.channels …)") \
-        in summary, summary
 
 
 # --- criterion 3 -----------------------------------------------------------------------------------
