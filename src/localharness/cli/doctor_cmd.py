@@ -288,7 +288,9 @@ def _print_remote_lock(loader: ConfigLoader, resolution, on: list[str]) -> None:
 
 _CHECK_GLYPH = {"pass": _PASS + " ", "fail": _FAIL + " ", "skip": _INFO + "  ", "warn": _WARN + " "}
 # A plugin that is not on: off and available are a choice, not a fault; skipped, needs-extra and
-# unconfigured cannot run as things stand; anything else (failed, refused) is a fault.
+# unconfigured cannot run as things stand; anything else (failed, refused) is a fault. A BUNDLED
+# plugin waiting on its install extra is information, not a warning: nobody opted in (46, ruling 5,
+# the same ruling the start banner applies).
 _ROW_GLYPH = {"off": _INFO + "  ", "available": _INFO + "  ", "skipped": _WARN + " ",
               "needs-extra": _WARN + " ", "unconfigured": _WARN + " "}
 
@@ -353,8 +355,10 @@ def print_plugin_row(row, failures: list[str]) -> None:
             failures.append(f"plugin-{row.name}")
     if row.state == "on":
         return
-    console.print(_ROW_GLYPH.get(row.state, _FAIL + " ") + escape(f"{row.name}: {row.detail}"),
-                  soft_wrap=True)
+    glyph = _ROW_GLYPH.get(row.state, _FAIL + " ")
+    if row.state == "needs-extra" and row.bundled:
+        glyph = _INFO + "  "
+    console.print(glyph + escape(f"{row.name}: {row.detail}"), soft_wrap=True)
     if row.state not in _ROW_GLYPH:
         failures.append(f"plugin-{row.name}")
 
@@ -589,12 +593,30 @@ def doctor(
                 # settings, and the fix for each lives in a different place.
                 attr = f" (pinned for {pinned_for})" if pinned_for else ""
                 if cfg_ctx > served:
-                    console.print(
-                        f"{_FAIL} Context budget {cfg_ctx:,}{attr} EXCEEDS served window "
-                        f"{served:,} — compaction can't fire, long turns will 400 at the "
-                        f"provider input cap. `start` clamps to {served - reserve:,}."
-                    )
-                    failures.append("context-budget-too-high")
+                    # The same three conditions under which `start` fits the budget to the
+                    # served window for the session (#127) — and the window it fits to is the
+                    # served window itself, not served-minus-reserve (#145). Doctor says what
+                    # start will do; a different number here was a stale prediction.
+                    from localharness.agent.context import response_reserve
+                    from localharness.cli.start_cmd import MIN_CONFIGURABLE_CONTEXT_TOKENS
+                    from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
+                    auto_fit = (cfg_ctx == DEFAULT_MAX_CONTEXT_TOKENS
+                                and served >= MIN_CONFIGURABLE_CONTEXT_TOKENS
+                                and response_reserve(served) > 0)
+                    if auto_fit:
+                        console.print(
+                            f"{_INFO}  Context budget is the factory default ({cfg_ctx:,}), above "
+                            f"the served window {served:,} — `start` fits it to {served:,} for the "
+                            f"session. To pin it, set context.max_context_tokens: {served}."
+                        )
+                    else:
+                        console.print(
+                            f"{_FAIL} Context budget {cfg_ctx:,}{attr} EXCEEDS served window "
+                            f"{served:,} — a long turn would 400 at the provider input cap, so "
+                            f"`start` refuses to run. Set context.max_context_tokens ≤ {served:,}, "
+                            f"or raise the window at the server."
+                        )
+                        failures.append("context-budget-too-high")
                 elif cfg_ctx < (served - reserve) * 0.75:
                     fix = (
                         f"Raise context.model_context_overrides['{pinned_for}']"
