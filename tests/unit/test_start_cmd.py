@@ -2657,7 +2657,7 @@ async def test_window_guard_errors_name_the_model(tmp_path, monkeypatch, served,
         "version: '1'\n"
         "provider:\n"
         "  provider_type: llamacpp\n"
-        "  base_url: http://localhost:8080/v1\n"
+        "  base_url: http://127.0.0.1:9/v1\n"   # the discard port: a live :8080 would rename the model
         "  default_model: guard-probe-model\n"
         "  api_key: none\n"
         "org:\n"
@@ -2693,7 +2693,7 @@ def _pinned_window_config(tmp_path, *, overrides_block: str) -> None:
         "version: '1'\n"
         "provider:\n"
         "  provider_type: llamacpp\n"
-        "  base_url: http://localhost:8080/v1\n"
+        "  base_url: http://127.0.0.1:9/v1\n"   # the discard port: a live :8080 would rename the model
         "  default_model: pinned-model\n"
         "  api_key: none\n"
         "org:\n"
