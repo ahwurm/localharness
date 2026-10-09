@@ -1690,9 +1690,11 @@ class OrchestratorREPL:
                 # own launch would otherwise clobber its handle and orphan it as a 2nd heavy — THEN
                 # restore the incumbent we stopped.
                 await self._safe_stop(ep.lifecycle)
-                restored = await self._restore_incumbent(stopped)
-                tail = (f" Restored {restored}." if restored
-                        else " The box now has NO model serving — manual attention needed." if stopped
+                restored, why = await self._restore_incumbent(stopped)
+                tail = (f" Restored {restored}." + (f" {why}" if why else "") if restored
+                        else f" Could not restore it: {why}" if why
+                        else " The box now has NO model serving — manual attention needed."
+                        if stopped
                         else "")
                 await self._channel.send_message(
                     f"Launch of {ep.name} failed: {exc}{tail}", metadata={"style": "system.error"}
@@ -1727,6 +1729,20 @@ class OrchestratorREPL:
         # re-point the client back FIRST so the restart's probe + wait_ready target the vLLM, not
         # the peer. A no-op in the common case (current already == primary).
         _prim = getattr(self._harness, "provider", None)
+        from localharness.provider.server import (
+            RUNTIME_LABELS,
+            effective_posture,
+            launch_decision,
+            required_key_kwargs,
+        )
+        # The one launch decision, asked BEFORE the rebind-back, the stop of any peer holding the
+        # accelerator and the announcement (D-08): a refused restart leaves the client bound where it
+        # was and the incumbent serving.
+        launch_kw = required_key_kwargs(managed, getattr(_prim, "api_key", None))
+        decision = launch_decision(managed, bool(launch_kw))
+        if decision.refusal is not None:
+            await self._channel.send_message(decision.refusal, metadata={"style": "system.error"})
+            return
         # Tradeoff BEFORE the rebind-back below — cur_ptype must key where the current model
         # actually ran (possibly a peer), not the primary we are about to re-point at.
         tradeoff = self._swap_tradeoff_note(cur_ptype, current, prim_ptype, target)
@@ -1737,12 +1753,15 @@ class OrchestratorREPL:
             llm.rebind_endpoint(_prim.base_url, api_key=_prim.api_key, extra_headers={},
                                 provider_type=_prim.provider_type)
         from localharness.provider.lifecycle import free_accelerator, strategy_for
-        from localharness.provider.server import required_key_kwargs
         strategy = strategy_for(managed)
+        label = RUNTIME_LABELS.get(managed.runtime, managed.runtime)
+        _, posture = effective_posture(managed, keyed=bool(launch_kw), decision=decision)
         await self._send_info(
-            f"Restarting managed vLLM with {target} — model load can take several minutes..."
-            f"{tradeoff}", colorize=True,
+            f"Restarting managed {label} with {target}{f' ({posture})' if posture else ''}"
+            f" — model load can take several minutes...{tradeoff}", colorize=True,
         )
+        if decision.note:
+            await self._send_info(decision.note)
         box_note = getattr(self._channel, "box_activity", None)
 
         def _swap_progress(elapsed: float) -> None:
@@ -1777,7 +1796,7 @@ class OrchestratorREPL:
             # the provider's key, only when the managed server is set to require one (default off)
             ep = await strategy.activate(
                 managed, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress,
-                **required_key_kwargs(managed, getattr(_prim, "api_key", None)),
+                **launch_kw,
             )
             models = ep.served_models
         except (RuntimeError, TimeoutError) as exc:
@@ -1785,9 +1804,11 @@ class OrchestratorREPL:
             # a peer incumbent (shared pidfile → else it orphans). If we freed a peer (b2 swap-back),
             # restore it; otherwise the primary is simply down (the pre-existing restart-failure mode).
             await self._safe_stop(managed)
-            restored = await self._restore_incumbent(freed)
-            tail = (f" Restored {restored}." if restored
-                    else " The box now has NO model serving — manual attention needed." if freed
+            restored, why = await self._restore_incumbent(freed)
+            tail = (f" Restored {restored}." + (f" {why}" if why else "") if restored
+                    else f" Could not restore it: {why}" if why
+                    else " The box now has NO model serving — manual attention needed."
+                    if freed
                     else " The managed server is down — retry /model to relaunch.")
             await self._channel.send_message(
                 f"Model swap failed: {exc}{tail}", metadata={"style": "system.error"}
@@ -1992,22 +2013,33 @@ class OrchestratorREPL:
         except Exception:  # noqa: BLE001 — cleanup is best-effort
             pass
 
-    async def _restore_incumbent(self, stopped) -> str | None:
+    async def _restore_incumbent(self, stopped) -> tuple[str | None, str | None]:
         """Best-effort re-launch of a heavy incumbent stopped for a swap that then FAILED, so the box
         is never left with nothing serving. ``stopped`` is the ``(spec, base_url)`` free_accelerator
-        returned, or None. Returns a label on success (and restores ``_active_heavy``), None on
-        failure — the caller then reports the box needs manual attention."""
+        returned, or None. Returns ``(label, note)`` on success (and restores ``_active_heavy``) —
+        ``note`` is the launch decision's one line when it withheld a widening — and
+        ``(None, refusal)`` when the decision refuses the relaunch, so the caller reports the cause
+        instead of "nothing serving" (D-08). ``(None, None)`` is nothing to restore or a failed
+        launch: the caller then reports the box needs manual attention."""
         if stopped is None:
-            return None
+            return None, None
         spec, base_url = stopped
         from localharness.provider import lifecycle as _lifecycle
+        from localharness.provider.server import LaunchRefused
+        peer_ep = self._peer_by_base_url(base_url)
+        # the peer's name only when the spec IS that peer's own lifecycle (identity, not equality), so
+        # a refusal names `extra_endpoints[<name>]` exactly for a peer and `server` for the primary
+        peer = peer_ep.name if peer_ep is not None and getattr(peer_ep, "lifecycle", None) is spec else None
         try:
-            await _lifecycle.strategy_for(spec).activate(spec, self._server_config_dir, base_url,
-                                                         **_launch_key(self._harness, base_url, spec))
+            live = await _lifecycle.strategy_for(spec).activate(
+                spec, self._server_config_dir, base_url, peer=peer,
+                **_launch_key(self._harness, base_url, spec))
             self._active_heavy = (spec, base_url)
-            return spec.model
+            return spec.model, getattr(live, "note", None)
+        except LaunchRefused as exc:
+            return None, str(exc)
         except Exception:  # noqa: BLE001 — restore is best-effort; the caller surfaces the failure
-            return None
+            return None, None
 
     def _provider_type_for_base_url(self, base_url: str) -> str | None:
         """Resolve the runtime ``provider_type`` for ``base_url`` against the CURRENT session config
