@@ -1206,7 +1206,7 @@ def _guided_setup(
     # step. The [dim] tag stays outside the escaped data, as everywhere else in cli/.
     console.print("\n  Launching: [dim]" + escape(" ".join(cmd)) + "[/dim]", soft_wrap=True)
     console.print("  " + escape(f"Log: {managed_server.log_path(server_config_path)}"), soft_wrap=True)
-    managed_server.start_server(server_config_path, cmd)
+    managed_server.start_server(server_config_path, cmd, runtime="vllm")
     console.print("  Waiting for the server — model load can take several minutes...")
     try:
         models = asyncio.run(managed_server.wait_ready(base_url, config_dir=server_config_path))

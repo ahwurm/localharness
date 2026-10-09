@@ -6,6 +6,9 @@ must survive. Dropped names are logged, names only.
 """
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 from structlog.testing import capture_logs
 
@@ -161,3 +164,26 @@ def test_the_launch_line_never_holds_the_key(tmp_path, popen):  # noqa: F811
     server.start_server(tmp_path, ["serve", "--port", "8080"], runtime="llamacpp", api_key=KEY)
     log = server.log_path(tmp_path).read_text(encoding="utf-8")
     assert "=== launch: serve --port 8080 ===" in log and KEY not in log
+
+
+# ------------------------------------------------------------------------------- every call names its runtime
+
+
+def test_every_start_server_call_in_src_passes_runtime():
+    """D-14, D-30: a call that omits `runtime=` would silently launch with the vLLM scrub, so every
+    call in src names its runtime (init's guided launch passes "vllm" until Phase 5)."""
+    src = Path(__file__).resolve().parents[2] / "src" / "localharness"
+    calls: list[tuple[str, int, bool]] = []
+    for path in sorted(src.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            named = (isinstance(func, ast.Attribute) and func.attr == "start_server") or (
+                isinstance(func, ast.Name) and func.id == "start_server")
+            if named:
+                calls.append((f"{path.relative_to(src)}:{node.lineno}", node.lineno,
+                              any(kw.arg == "runtime" for kw in node.keywords)))
+    missing = [where for where, _, has in calls if not has]
+    assert not missing, f"start_server called without runtime= at {missing}"
+    assert len(calls) >= 4, f"expected lifecycle.py's three and init_cmd.py's one, found {calls}"

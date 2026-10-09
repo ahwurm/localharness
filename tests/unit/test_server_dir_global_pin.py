@@ -129,7 +129,7 @@ def test_init_guided_setup_names_the_global_pin():
         "managed_server.server_dir(server_config_path)",
         "managed_server.install_vllm_venv(server_config_path",
         "managed_server.log_path(server_config_path)",
-        "managed_server.start_server(server_config_path, cmd)",
+        "managed_server.start_server(server_config_path, cmd, runtime=\"vllm\")",
         "wait_ready(base_url, config_dir=server_config_path)",
     ):
         assert pinned in text, f"guided setup lost its pin: {pinned}"
