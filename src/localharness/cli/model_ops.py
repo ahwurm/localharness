@@ -159,7 +159,11 @@ async def persist_default_model(
     # #34: with a managed server configured, ALSO persist server.model — else cold start rebuilds
     # `vllm serve <srv.model>` from the stale config value and relaunches the old model. Only when
     # a server block exists (never invent one: a bare server:{model} fails validation).
-    if harness.server is not None:
+    # For vLLM, Ollama and LM Studio server.model IS the served name the strategies warm-load, so a
+    # cold start relaunches the chosen model. For llama.cpp server.model is the GGUF path and the
+    # alias is `served_name`, so the alias must never reach `-m`: it is written to neither the
+    # overlay (here) nor the in-memory record (below).
+    if harness.server is not None and harness.server.runtime != "llamacpp":
         set_value_in_dict(new_overlay, "server.model", model)
 
     # Validate the SAME cascade the next `start` sees: current config ⊕ new overlay. Exclude the
@@ -173,7 +177,7 @@ async def persist_default_model(
     harness.provider.default_model = model
     harness.org.default_model = model
     harness.provider.available_models = merged_avail
-    if harness.server is not None:
+    if harness.server is not None and harness.server.runtime != "llamacpp":
         harness.server.model = model
 
     # Audit trail (mirrors components_cmd): one ComponentMutated per path written. A bare default
