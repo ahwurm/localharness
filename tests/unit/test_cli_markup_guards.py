@@ -223,7 +223,7 @@ def test_init_guided_setup_names_the_launch_command_and_log(hostile_project, tmp
     monkeypatch.setattr(init_cmd.Prompt, "ask", staticmethod(lambda *a, **k: str(tmp_path)))
     # The one real path that matters is log_path(); find_vllm is stubbed only to skip the install.
     monkeypatch.setattr(managed_server, "find_vllm", lambda d: str(d / "server" / "venv" / "vllm"))
-    monkeypatch.setattr(managed_server, "start_server", lambda d, cmd: None)
+    monkeypatch.setattr(managed_server, "start_server", lambda d, cmd, **kw: None)
 
     async def _ready(base_url, config_dir=None):
         return ["m"]

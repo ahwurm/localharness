@@ -125,11 +125,11 @@ async def test_activate_docker_delegates_and_returns_live_endpoint(tmp_path, mon
     target). on_poll + timeout are threaded straight through to wait_ready — no behavior added."""
     calls: dict = {}
 
-    def fake_serve_command(spec):
+    def fake_serve_command(spec, **kw):
         calls["serve_command"] = spec
         return ["CMD", "--model", "m"]
 
-    def fake_start_server(config_dir, cmd):
+    def fake_start_server(config_dir, cmd, **kw):
         calls["start_server"] = (config_dir, cmd)
         return 4321
 
@@ -161,8 +161,8 @@ async def test_activate_docker_delegates_and_returns_live_endpoint(tmp_path, mon
 
 async def test_activate_binary_handle_is_the_launched_pid(tmp_path, monkeypatch):
     """binary mode: the handle is the pid start_server returned (there the pid IS the server)."""
-    monkeypatch.setattr(server, "serve_command", lambda spec: ["/usr/bin/vllm", "serve", "m"])
-    monkeypatch.setattr(server, "start_server", lambda config_dir, cmd: 9999)
+    monkeypatch.setattr(server, "serve_command", lambda spec, **kw: ["/usr/bin/vllm", "serve", "m"])
+    monkeypatch.setattr(server, "start_server", lambda config_dir, cmd, **kw: 9999)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
         return ["served-m"]
@@ -242,11 +242,11 @@ async def test_spawned_activate_delegates_and_handle_is_pid(tmp_path, monkeypatc
     threaded straight through to wait_ready."""
     calls: dict = {}
 
-    def fake_serve_command(spec):
+    def fake_serve_command(spec, **kw):
         calls["serve_command"] = spec
         return ["llama-server", "-m", "x"]
 
-    def fake_start_server(config_dir, cmd):
+    def fake_start_server(config_dir, cmd, **kw):
         calls["start_server"] = (config_dir, cmd)
         return 5555
 
@@ -330,9 +330,9 @@ async def test_daemon_activate_spawns_daemon_and_loads_target_model(tmp_path, mo
     from localharness.provider import lifecycle
     calls: dict = {}
     monkeypatch.setattr(server, "serve_command",
-                        lambda spec: ["env", "OLLAMA_HOST=127.0.0.1:11434", "ollama", "serve"])
+                        lambda spec, **kw: ["env", "OLLAMA_HOST=127.0.0.1:11434", "ollama", "serve"])
 
-    def fake_start(cd, cmd):
+    def fake_start(cd, cmd, **kw):
         calls["start"] = (cd, cmd)
         return 5555
 
@@ -364,8 +364,8 @@ async def test_daemon_activate_spawns_daemon_and_loads_target_model(tmp_path, mo
 async def test_daemon_activate_pulls_when_tag_not_on_disk(tmp_path, monkeypatch):
     """If the tag isn't in wait_ready's pulled list, activate pulls it BEFORE loading (pull→load)."""
     from localharness.provider import lifecycle
-    monkeypatch.setattr(server, "serve_command", lambda spec: ["ollama", "serve"])
-    monkeypatch.setattr(server, "start_server", lambda cd, cmd: 1)
+    monkeypatch.setattr(server, "serve_command", lambda spec, **kw: ["ollama", "serve"])
+    monkeypatch.setattr(server, "start_server", lambda cd, cmd, **kw: 1)
 
     async def fake_wait(base_url, config_dir=None, timeout_seconds=1800.0, on_poll=None):
         return ["other:1b"]  # target NOT present on disk
@@ -428,7 +428,7 @@ async def test_daemon_activate_fails_fast_on_preexisting_daemon(tmp_path, monkey
     rather than silently mis-tracking it (which a later stop would miss = silent two-heavy)."""
     from localharness.provider import lifecycle
     spawned = {"n": 0}
-    monkeypatch.setattr(server, "start_server", lambda cd, cmd: spawned.__setitem__("n", spawned["n"] + 1) or 1)
+    monkeypatch.setattr(server, "start_server", lambda cd, cmd, **kw: spawned.__setitem__("n", spawned["n"] + 1) or 1)
 
     async def _already_up(self, v1):
         return True
@@ -448,8 +448,8 @@ async def test_daemon_activate_normalizes_bare_base_url_to_v1(tmp_path, monkeypa
         seen["wait_url"] = base_url
         return ["qwen2.5:7b"]
 
-    monkeypatch.setattr(server, "serve_command", lambda spec: ["ollama", "serve"])
-    monkeypatch.setattr(server, "start_server", lambda cd, cmd: 1)
+    monkeypatch.setattr(server, "serve_command", lambda spec, **kw: ["ollama", "serve"])
+    monkeypatch.setattr(server, "start_server", lambda cd, cmd, **kw: 1)
     monkeypatch.setattr(server, "wait_ready", fake_wait)
 
     async def _not_up(self, v1):
