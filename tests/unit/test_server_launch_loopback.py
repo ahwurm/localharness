@@ -3,9 +3,10 @@ reaches it through its environment — never its command line or serve.log.
 
 - vLLM, docker: `-p 127.0.0.1:<port>:8000`. Only the published address changes: inside the container
   vLLM keeps listening on the container's own interfaces, which is what `-p` forwards to.
-- vLLM, binary: `--host 127.0.0.1` after `--port` (a machine-level `extra_args` `--host` comes later
-  and still wins).
-- `server.bind_all: true` gives back 0.16's argv exactly; llama.cpp and ollama were loopback already.
+- vLLM, binary and llama.cpp: `--host 127.0.0.1` is the LAST argument whenever the launch binds
+  loopback, so an `extra_args` `--host` can never widen it (the server keeps the last `--host`).
+- `server.bind_all: true` gives back 0.16's argv exactly for vLLM; llama.cpp gains `--host 0.0.0.0`
+  (before `extra_args`); ollama was loopback already.
 - Requiring a key is opt-in (`server.require_api_key`, default false): `required_key_kwargs` is the
   one place that decides it, so with the default every launch and probe is called as in 0.16.
 
@@ -72,8 +73,8 @@ def test_a_keyed_docker_launch_names_the_variable_never_its_value():
 
 def test_a_binary_vllm_gets_host_127_0_0_1():
     assert server.serve_command(_binary()) == [
-        "/opt/vllm", "serve", "org/repo", "--port", "8081", "--host", "127.0.0.1",
-        "--max-model-len", "65536",
+        "/opt/vllm", "serve", "org/repo", "--port", "8081", "--max-model-len", "65536",
+        "--host", "127.0.0.1",
     ]
 
 
@@ -87,26 +88,67 @@ def test_a_keyed_binary_launch_has_the_same_argv():
     assert server.serve_command(_binary(), keyed=True) == server.serve_command(_binary())
 
 
-def test_a_registry_entry_keeps_its_served_name_after_the_host():
+def test_a_registry_entry_keeps_its_served_name_and_the_host_comes_last():
     srv = _binary(model="m27", extra_args=[],
                   local_models=[{"name": "m27", "path": "/x/Q27", "extra_args": ["--enforce-eager"]}])
     assert server.serve_command(srv) == [
-        "/opt/vllm", "serve", "/x/Q27", "--port", "8081", "--host", "127.0.0.1",
-        "--served-model-name", "m27", "--enforce-eager",
+        "/opt/vllm", "serve", "/x/Q27", "--port", "8081",
+        "--served-model-name", "m27", "--enforce-eager", "--host", "127.0.0.1",
     ]
 
 
-def test_a_machine_level_host_in_extra_args_still_wins():
+def test_an_extra_args_host_never_widens_a_loopback_launch():
     cmd = server.serve_command(_binary(extra_args=["--host", "100.64.0.7"]))
-    assert cmd[-2:] == ["--host", "100.64.0.7"]  # vLLM takes the last value
+    assert cmd[-2:] == ["--host", "127.0.0.1"]  # the server takes the last value
+
+
+def test_with_bind_all_an_extra_args_host_still_stands():
+    cmd = server.serve_command(_binary(extra_args=["--host", "100.64.0.7"], bind_all=True))
+    assert cmd[-2:] == ["--host", "100.64.0.7"]
+
+
+def _llama(**over) -> ManagedServerConfig:
+    return ManagedServerConfig(**{"runtime": "llamacpp", "binary": "/x/llama-server",
+                                  "model": "/x/m.gguf", "port": 8080, **over})
+
+
+def test_a_loopback_llama_cpp_launch_ends_with_the_loopback_host():
+    assert server.serve_command(_llama(extra_args=["-c", "4096"])) == [
+        "/x/llama-server", "-m", "/x/m.gguf", "--port", "8080", "-c", "4096", "--host", "127.0.0.1"]
+
+
+def test_a_bind_all_llama_cpp_launch_puts_its_host_before_extra_args():
+    assert server.serve_command(_llama(extra_args=["-c", "4096"], bind_all=True)) == [
+        "/x/llama-server", "-m", "/x/m.gguf", "--port", "8080", "--host", "0.0.0.0", "-c", "4096"]
+
+
+@pytest.mark.parametrize("extra", [["--host", "0.0.0.0"], ["--host=0.0.0.0"], []])
+def test_no_extra_args_host_outlives_the_narrowing_on_llama_cpp(extra):
+    cmd = server.serve_command(_llama(extra_args=extra))
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_a_bind_all_launch_narrowed_by_the_decision_ends_with_the_loopback_host():
+    cmd = server.serve_command(_llama(bind_all=True), loopback=True)
+    assert cmd[-2:] == ["--host", "127.0.0.1"] and "0.0.0.0" not in cmd
+
+
+def test_a_narrower_extra_args_host_still_beats_the_bind_all_host():
+    cmd = server.serve_command(_llama(bind_all=True, extra_args=["--host", "100.64.0.7"]))
+    assert cmd[-2:] == ["--host", "100.64.0.7"] and cmd.index("0.0.0.0") < cmd.index("100.64.0.7")
+
+
+def test_a_docker_launch_narrowed_by_the_decision_publishes_on_loopback():
+    cmd = server.serve_command(_docker(bind_all=True), loopback=True)
+    assert cmd[cmd.index("-p") + 1] == "127.0.0.1:8081:8000"
+
+
+def test_a_vllm_binary_narrowed_by_the_decision_ends_with_the_loopback_host():
+    assert server.serve_command(_binary(bind_all=True), loopback=True)[-2:] == ["--host", "127.0.0.1"]
 
 
 @pytest.mark.parametrize("bind_all", [False, True])
-def test_llama_cpp_and_ollama_argv_are_unchanged(bind_all):
-    llama = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/m.gguf",
-                                port=8080, extra_args=["-c", "4096"], bind_all=bind_all)
-    assert server.serve_command(llama) == [
-        "/x/llama-server", "-m", "/x/m.gguf", "--host", "127.0.0.1", "--port", "8080", "-c", "4096"]
+def test_ollama_argv_is_unchanged(bind_all):
     ollama = ManagedServerConfig(runtime="ollama", model="qwen2.5:0.5b", port=11434, bind_all=bind_all)
     assert server.serve_command(ollama) == [
         "env", "OLLAMA_HOST=127.0.0.1:11434", "OLLAMA_KEEP_ALIVE=-1", "ollama", "serve"]
@@ -186,14 +228,17 @@ async def test_a_keyed_vllm_activation_threads_the_key_through_launch_and_readin
     calls = record_chain(monkeypatch)
     await lifecycle.ManagedVllmStrategy().activate(_docker(), tmp_path, "http://127.0.0.1:8081/v1",
                                                    api_key=KEY)
-    assert calls == {"serve_command": {"keyed": True}, "start_server": {"api_key": KEY},
-                     "wait_ready": {"api_key": KEY}}
+    assert calls == {"serve_command": {"keyed": True, "loopback": True, "key_file_ok": False,
+                                       "context": None, "cache_ram": None},
+                     "start_server": {"api_key": KEY}, "wait_ready": {"api_key": KEY}}
 
 
 async def test_a_keyless_vllm_activation_calls_everything_as_before(tmp_path, monkeypatch):
     calls = record_chain(monkeypatch)
     await lifecycle.ManagedVllmStrategy().activate(_docker(), tmp_path, "http://127.0.0.1:8081/v1")
-    assert calls == {"serve_command": {}, "start_server": {}, "wait_ready": {}}
+    assert calls == {"serve_command": {"keyed": False, "loopback": True, "key_file_ok": False,
+                                       "context": None, "cache_ram": None},
+                     "start_server": {}, "wait_ready": {}}
 
 
 async def test_a_spawned_server_gets_the_key_on_its_readiness_probe_only(tmp_path, monkeypatch):
@@ -201,7 +246,9 @@ async def test_a_spawned_server_gets_the_key_on_its_readiness_probe_only(tmp_pat
     spec = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/m.gguf", port=8080)
     await lifecycle.SpawnedProcessStrategy().activate(spec, tmp_path, "http://127.0.0.1:8080/v1",
                                                       api_key=KEY)
-    assert calls == {"serve_command": {}, "start_server": {}, "wait_ready": {"api_key": KEY}}
+    assert calls == {"serve_command": {"keyed": True, "loopback": True, "key_file_ok": False,
+                                       "context": None, "cache_ram": None},
+                     "start_server": {}, "wait_ready": {"api_key": KEY}}
 
 
 @pytest.mark.parametrize("cls", [lifecycle.LifecycleStrategy, lifecycle.ManagedVllmStrategy,
@@ -209,6 +256,14 @@ async def test_a_spawned_server_gets_the_key_on_its_readiness_probe_only(tmp_pat
                                  lifecycle.LmsStrategy])
 def test_every_strategy_accepts_a_key(cls):
     param = inspect.signature(cls.activate).parameters["api_key"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default is None
+
+
+@pytest.mark.parametrize("cls", [lifecycle.LifecycleStrategy, lifecycle.ManagedVllmStrategy,
+                                 lifecycle.SpawnedProcessStrategy, lifecycle.DaemonStrategy,
+                                 lifecycle.LmsStrategy])
+def test_every_strategy_accepts_a_peer(cls):
+    param = inspect.signature(cls.activate).parameters["peer"]
     assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default is None
 
 

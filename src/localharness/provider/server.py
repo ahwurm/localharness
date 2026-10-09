@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -105,6 +107,69 @@ def excluded_option(name: str) -> str | None:
         if key == env.lower() or key in {f.lstrip("-").lower() for f in flags}:
             return category
     return None
+
+
+@dataclass(frozen=True)
+class LaunchDecision:
+    """The one launch decision every path meets: `refusal` (why nothing may start, or None),
+    `loopback` (the launch must bind this machine only), `key_file_ok` (`--api-key-file` may ride
+    argv) and `note` (the one line to show when the widening was withheld, or None).
+
+    It is never a narrowed copy of the spec: `_active_heavy` holds the spec object and
+    `free_accelerator` compares it by identity, so a copy would read as a second heavy."""
+
+    refusal: str | None
+    loopback: bool
+    key_file_ok: bool
+    note: str | None
+
+
+class LaunchRefused(RuntimeError):
+    """The decision's refusal, raised from `activate`. A RuntimeError so every caller that prints a
+    failed launch as one line (the Ollama / LM Studio foreign-daemon shape) keeps doing so, while
+    `_restore_incumbent` can tell a refusal from a failed launch."""
+
+
+def launch_decision(spec: Any, keyed: bool, *, peer: str | None = None) -> LaunchDecision:
+    """The one place a launch is decided, beside `required_key_kwargs`. `keyed` means a key is
+    actually held on the launch path (the caller already gated through `required_key_kwargs`);
+    `peer` is the `EndpointRef.name` when `spec` is a peer's lifecycle, None for the primary.
+
+    - Ollama and LM Studio always bind loopback (their argv hard-codes it).
+    - A llama.cpp record with no `binary` is declared, not launchable: refused with one line.
+    - With no `api_key_file` the launch binds by `bind_all`.
+    - With one, `key_file_ok` is `keyed and the path is a regular file`, judged by `os.stat` alone —
+      the file is NEVER opened here, so a FIFO or a swapped file can neither block nor leak through
+      the decision. Anything else withholds the widening, not the launch: loopback for this run,
+      the file left off argv, and a note saying why.
+
+    Pure with respect to the spec (it is read, never copied or changed)."""
+    runtime = getattr(spec, "runtime", "vllm")
+    if runtime in ("ollama", "lmstudio"):
+        return LaunchDecision(None, True, False, None)
+    if runtime == "llamacpp" and not getattr(spec, "binary", None):
+        refusal = ("no llama-server — set server.binary" if peer is None
+                   else f"no llama-server — set extra_endpoints[{peer}].lifecycle.binary")
+        return LaunchDecision(refusal, True, False, None)
+    loopback = getattr(spec, "bind_all", False) is not True
+    key_file = getattr(spec, "api_key_file", None)
+    if not key_file:
+        return LaunchDecision(None, loopback, False, None)
+    path = Path(key_file).expanduser()
+    try:
+        regular = stat.S_ISREG(os.stat(path).st_mode)
+        reason = None if regular else "not a regular file"
+    except FileNotFoundError:
+        reason = "no such file"
+    except (OSError, ValueError) as exc:
+        reason = getattr(exc, "strerror", None) or type(exc).__name__
+    if reason is None and not keyed:
+        reason = "the harness holds no key for it"
+    if reason is not None:
+        return LaunchDecision(
+            None, True, False,
+            f"--api-key-file {path} unreadable: {reason} — launched on 127.0.0.1 for this run")
+    return LaunchDecision(None, loopback, True, None)
 
 
 # ---------------------------------------------------------------------------
@@ -223,14 +288,25 @@ def download_file(repo_id: str, filename: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def serve_command(srv: ManagedServerConfig, *, keyed: bool = False) -> list[str]:
-    """Build the launch command for srv.model.
+def serve_command(
+    srv: ManagedServerConfig,
+    *,
+    keyed: bool = False,
+    loopback: bool = False,
+    key_file_ok: bool = False,
+    context: int | None = None,
+    cache_ram: int | None = None,
+) -> list[str]:
+    """Build the launch command for srv.model. Pure: list argv, no shell, no I/O.
 
-    A vLLM server listens on this machine only unless `srv.bind_all` (0.16's argv, exactly): a
-    binary gets `--host 127.0.0.1` (vLLM's own default is every interface), placed before the
-    machine's `extra_args` so a `--host` there still wins. Docker changes only the PUBLISHED
-    address (`-p 127.0.0.1:<port>:8000`): inside the container vLLM must keep listening on the
-    container's own interfaces, because the container's loopback is not what `-p` forwards to.
+    A server listens on this machine only unless `srv.bind_all` (and `loopback`, the launch
+    decision's narrowing, is not set): the loopback `--host 127.0.0.1` comes LAST, after
+    `extra_args`, because the server keeps the last `--host` it sees — so `bind_all` is the only
+    exposure switch and an `extra_args` `--host 0.0.0.0` can never outlive the narrowing. Docker
+    changes only the PUBLISHED address (`-p 127.0.0.1:<port>:8000`): inside the container vLLM
+    must keep listening on the container's own interfaces, because the container's loopback is
+    not what `-p` forwards to. `key_file_ok` and the two fit keywords `context` / `cache_ram` are
+    what `activate` passes (the decision's judgment, then the fit); this function judges nothing.
     `keyed` (docker only) passes `-e VLLM_API_KEY` — the variable's NAME, its value coming from the
     launch environment (`start_server(api_key=)`); a binary reads that environment directly.
 
@@ -241,14 +317,15 @@ def serve_command(srv: ManagedServerConfig, *, keyed: bool = False) -> list[str]
     Otherwise srv.model passes through untouched (HF repo id resolved via the cache).
 
     runtime='llamacpp' (0.11 Phase B) is a separate, simpler shape the harness spawns directly:
-    `llama-server -m <gguf> --host 127.0.0.1 --port <port>` with the served-model alias (-a),
-    context (-c) and GPU offload (-ngl) carried in extra_args — a GGUF file IS the model, so
-    there is no docker mount / --served-model-name registry indirection."""
+    `llama-server -m <gguf> --port <p> [--host 0.0.0.0] <extra_args> [--host 127.0.0.1]` — a GGUF
+    file IS the model, so there is no docker mount / --served-model-name registry indirection."""
+    loop = loopback or not srv.bind_all
     if srv.runtime == "llamacpp":
         return [
-            str(srv.binary), "-m", srv.model,
-            "--host", "127.0.0.1", "--port", str(srv.port),
+            str(srv.binary), "-m", os.path.expanduser(srv.model), "--port", str(srv.port),
+            *([] if loop else ["--host", "0.0.0.0"]),
             *srv.extra_args,
+            *(["--host", "127.0.0.1"] if loop else []),
         ]
     if srv.runtime == "ollama":
         # Ollama (0.11 Phase D): the harness spawns the DAEMON — `ollama serve` takes NO model arg
@@ -276,7 +353,7 @@ def serve_command(srv: ManagedServerConfig, *, keyed: bool = False) -> list[str]
             "--gpus", "all", "--ipc=host",
             *mounts,
             *(["-e", "VLLM_API_KEY"] if keyed else []),
-            "-p", f"{srv.port}:8000" if srv.bind_all else f"127.0.0.1:{srv.port}:8000",
+            "-p", f"127.0.0.1:{srv.port}:8000" if loop else f"{srv.port}:8000",
             str(srv.docker_image),
             "--model", model_arg,
             *served,
@@ -284,8 +361,8 @@ def serve_command(srv: ManagedServerConfig, *, keyed: bool = False) -> list[str]
         ]
     model_arg = str(Path(entry.path).expanduser()) if entry is not None else srv.model
     served = ["--served-model-name", entry.name] if entry is not None else []
-    return [str(srv.binary), "serve", model_arg, "--port", str(srv.port),
-            *([] if srv.bind_all else ["--host", "127.0.0.1"]), *served, *extra]
+    return [str(srv.binary), "serve", model_arg, "--port", str(srv.port), *served, *extra,
+            *(["--host", "127.0.0.1"] if loop else [])]
 
 
 def start_server(config_dir: Path, cmd: list[str], *, api_key: str | None = None) -> int:
