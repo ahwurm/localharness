@@ -312,3 +312,24 @@ async def test_a_failed_launch_names_the_runtime_in_the_error_line(tmp_path, mon
     assert [line for line in _err_text(seen.err) if "Error:" in line][0] == (
         "[bold red]Error:[/bold red] managed llama.cpp failed to start: boom")
     assert not [line for line in _err_text(seen.err) if REFUSAL in line]
+
+
+async def test_a_failed_launch_message_with_brackets_reaches_the_error_console_verbatim(tmp_path, monkeypatch):
+    # Real Rich console on the error stream: a raw `[/x]` in the exception text used to raise
+    # MarkupError while `start` was reporting the failure.
+    import io
+
+    from rich.console import Console
+
+    seen = _boot(tmp_path, monkeypatch, server_block={"runtime": "llamacpp", "binary": "/x/llama-server",
+                                                      "model": "/x/m.gguf", "port": 8080})
+    buf = io.StringIO()
+    monkeypatch.setattr(start_cmd, "err_console", Console(file=buf, width=500, force_terminal=False))
+    message = "log tail: [bold]warn[/bold] [/oops] [red]x"
+
+    def boom(config_dir, cmd, **kw):
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(server, "start_server", boom)
+    assert await _drive(tmp_path) == 1
+    assert f"Error: managed llama.cpp failed to start: {message}" in buf.getvalue()

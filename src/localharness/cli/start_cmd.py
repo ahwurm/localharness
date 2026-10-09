@@ -1007,7 +1007,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # Managed-server lifecycle is POSIX-only for now; degrade to a message, not a traceback.
             from localharness.provider.server import RUNTIME_LABELS
             label = RUNTIME_LABELS.get(harness.server.runtime, harness.server.runtime)
-            err_console.print(f"[bold red]Error:[/bold red] managed {label} failed to start: {exc}")
+            # escape(): `exc` can quote llama-server's own log tail (wait_ready) or a path — a
+            # bracketed fragment there is not markup, and a stray `[/x]` raises MarkupError here.
+            err_console.print(
+                "[bold red]Error:[/bold red] " + escape(f"managed {label} failed to start: {exc}"),
+                soft_wrap=True)
         if refusal is not None:
             # The one refusal line is the whole answer: no `Error:` line, no `doctor` pointer.
             err_console.print(refusal, markup=False, soft_wrap=True)
