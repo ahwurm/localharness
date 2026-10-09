@@ -141,6 +141,8 @@ def test_start_stop_lifecycle(tmp_path):
     try:
         assert server.server_pid(tmp_path) == pid
         assert server.pid_path(tmp_path).exists()
+        pid_text, start_text = server.pid_path(tmp_path).read_text(encoding="utf-8").split()
+        assert int(pid_text) == pid and int(start_text) > 0  # `<pid> <starttime>` (D-17)
     finally:
         assert server.stop_server(tmp_path) is True
     deadline = time.monotonic() + 5
