@@ -392,3 +392,168 @@ def test_inheritance_assigns_in_place_so_identity_holds():
     lifecycle = peer.lifecycle
     cfg = _harness(_llama(), peer)
     assert cfg.extra_endpoints[0].lifecycle is lifecycle
+
+
+# ---------------------------------------------------------------------------
+# The (flag, env) exclusion table and the env / config_ini validators
+# ---------------------------------------------------------------------------
+
+# Written out here (not imported) so the table cannot drift without this test noticing: the spec's
+# names plus the two the llama.cpp checkout adds (LLAMA_ARG_SPEC_DRAFT_HF_REPO, LLAMA_ARG_MMPROJ_URL).
+EXCLUDED_ENV_CATEGORY = {
+    "LLAMA_API_KEY": "key",
+    "LLAMA_ARG_API_KEY_FILE": "key",
+    "LLAMA_ARG_API_KEY": "key",
+    "LLAMA_ARG_HOST": "host/port",
+    "LLAMA_ARG_PORT": "host/port",
+    "LLAMA_ARG_MODEL_URL": "download",
+    "LLAMA_ARG_MMPROJ_URL": "download",
+    "LLAMA_ARG_DOCKER_REPO": "download",
+    "LLAMA_ARG_HF_REPO": "download",
+    "LLAMA_ARG_HF_FILE": "download",
+    "LLAMA_ARG_SPEC_DRAFT_HF_REPO": "download",
+    "LLAMA_ARG_SSL_KEY_FILE": "tls",
+    "LLAMA_ARG_SSL_CERT_FILE": "tls",
+}
+
+# Every flag spelling, dashes stripped, in the lowercase form a config.ini key takes.
+EXCLUDED_FLAG_KEYS = {
+    "api-key": "key", "api-key-file": "key",
+    "host": "host/port", "port": "host/port",
+    "mu": "download", "model-url": "download", "mmu": "download", "mmproj-url": "download",
+    "dr": "download", "docker-repo": "download", "hf": "download", "hfr": "download",
+    "hf-repo": "download", "hff": "download", "hf-file": "download",
+    "spec-draft-hf": "download", "hfd": "download", "hfrd": "download",
+    "hf-repo-draft": "download",
+    "ssl-key-file": "tls", "ssl-cert-file": "tls",
+}
+
+
+def test_the_table_is_the_expected_thirteen_env_names():
+    from localharness.provider.server import LLAMA_EXCLUDED_ENV, LLAMA_EXCLUDED_OPTIONS
+
+    assert LLAMA_EXCLUDED_ENV == frozenset(EXCLUDED_ENV_CATEGORY)
+    assert len(LLAMA_EXCLUDED_OPTIONS) == 13
+    assert "LLAMA_ARG_NO_HOST" not in LLAMA_EXCLUDED_ENV  # a compute switch, not a bind option
+
+
+def test_excluded_ini_keys_are_env_names_lowercased_plus_dashless_flags():
+    from localharness.provider.server import LLAMA_EXCLUDED_INI_KEYS
+
+    assert LLAMA_EXCLUDED_INI_KEYS == (
+        {n.lower() for n in EXCLUDED_ENV_CATEGORY} | set(EXCLUDED_FLAG_KEYS))
+    assert "llama_arg_no_host" not in LLAMA_EXCLUDED_INI_KEYS
+
+
+@pytest.mark.parametrize("name,want", [
+    ("LLAMA_ARG_N_GPU_LAYERS", None),
+    ("LLAMA_ARG_NO_HOST", None),
+    ("n-gpu-layers", None),
+    ("llama_arg_host", "host/port"),
+    ("  LLAMA_ARG_PORT  ", "host/port"),
+    ("hf-repo", "download"),
+    ("hfd", "download"),
+    ("ssl-cert-file", "tls"),
+    ("api-key", "key"),
+    ("API-KEY", "key"),
+    ("llama_api_key", "key"),
+    ("", None),
+])
+def test_excluded_option(name, want):
+    from localharness.provider.server import excluded_option
+
+    assert excluded_option(name) == want
+
+
+def test_ordinary_llama_arg_env_validates():
+    srv = _llama(env={"LLAMA_ARG_N_GPU_LAYERS": "99", "LLAMA_ARG_NO_MMAP": "1",
+                      "LLAMA_ARG_NO_HOST": "1"})
+    assert srv.env["LLAMA_ARG_NO_HOST"] == "1"
+
+
+@pytest.mark.parametrize("name", sorted(EXCLUDED_ENV_CATEGORY))
+def test_excluded_env_name_is_refused_with_its_category(name):
+    with pytest.raises(ValueError) as exc:
+        _llama(env={name: "x"})
+    msg = str(exc.value)
+    assert name in msg
+    assert f"a {EXCLUDED_ENV_CATEGORY[name]} option" in msg
+
+
+@pytest.mark.parametrize("name", [
+    "MTMD_BACKEND_DEVICE", "HF_TOKEN", "CUDA_VISIBLE_DEVICES", "PATH", "llama_arg_host",
+    "LLAMA_ARG_A=B", "LLAMA_ARG_", "LLAMA_ARG_lower", "LLAMA_ARG_N GPU",
+])
+def test_env_name_outside_llama_arg_is_refused(name):
+    with pytest.raises(ValueError, match="not a LLAMA_ARG_ name"):
+        _llama(env={name: "x"})
+
+
+@pytest.mark.parametrize("value", ["1\x00", "a\x00b"])
+def test_env_value_with_nul_is_refused(value):
+    with pytest.raises(ValueError, match="value contains a NUL byte"):
+        _llama(env={"LLAMA_ARG_N_GPU_LAYERS": value})
+
+
+@pytest.mark.parametrize("value", ["1\n", "a\nb", "a\rb"])
+def test_env_value_with_a_newline_is_refused(value):
+    with pytest.raises(ValueError, match="newline"):
+        _llama(env={"LLAMA_ARG_N_GPU_LAYERS": value})
+
+
+def test_env_refusal_lists_every_offender_in_sorted_order_whatever_the_dict_order():
+    a = {"LLAMA_ARG_HOST": "x", "LLAMA_ARG_API_KEY": "y"}
+    b = dict(reversed(list(a.items())))
+    with pytest.raises(ValueError) as e1:
+        _llama(env=a)
+    with pytest.raises(ValueError) as e2:
+        _llama(env=b)
+    m1, m2 = str(e1.value), str(e2.value)
+    assert m1.index("LLAMA_ARG_API_KEY") < m1.index("LLAMA_ARG_HOST")
+    assert m1.split("Value error, ")[-1] == m2.split("Value error, ")[-1]
+
+
+def test_config_ini_with_ordinary_options_validates():
+    ini = "[*]\nn-gpu-layers = 99\nLLAMA_ARG_CTX_SIZE=4096\n; c\n# c\n\n"
+    assert _llama(config_ini=ini).config_ini == ini
+
+
+def test_empty_config_ini_validates():
+    assert _llama(config_ini="").config_ini == ""
+
+
+@pytest.mark.parametrize("key", sorted(EXCLUDED_FLAG_KEYS.keys() | {n.lower() for n in EXCLUDED_ENV_CATEGORY}))
+def test_config_ini_refuses_every_excluded_key_in_a_section(key):
+    with pytest.raises(ValueError, match="config_ini refuses"):
+        _llama(config_ini=f"[model]\n{key} = x\n")
+
+
+@pytest.mark.parametrize("line,cat", [
+    ("  HOST = 0.0.0.0", "host/port"),
+    ("Api-Key = k", "key"),
+    ("hfd=x", "download"),
+    ("LLAMA_ARG_SSL_KEY_FILE=/k", "tls"),
+    ("\tPort\t=\t1", "host/port"),
+])
+def test_config_ini_refuses_by_any_spelling_and_case(line, cat):
+    with pytest.raises(ValueError) as exc:
+        _llama(config_ini=f"[*]\nn-gpu-layers = 99\n{line}\n")
+    msg = str(exc.value)
+    assert "config_ini refuses" in msg and f"a {cat} option" in msg
+
+
+def test_config_ini_refusal_lists_offenders_in_line_order():
+    with pytest.raises(ValueError) as exc:
+        _llama(config_ini="port = 1\napi-key = k\n")
+    msg = str(exc.value)
+    assert msg.index("port") < msg.index("api-key")
+
+
+def test_config_ini_comment_that_mentions_an_excluded_key_is_not_a_setting():
+    ini = "; host = 0.0.0.0\n# api-key = k\n[host]\nn-gpu-layers = 1\n"
+    assert _llama(config_ini=ini).config_ini == ini
+
+
+def test_env_and_config_ini_stay_refused_on_vllm():
+    with pytest.raises(ValueError, match="llama.cpp-only"):
+        ManagedServerConfig(**_other("vllm"), env={"LLAMA_ARG_N_GPU_LAYERS": "1"})
