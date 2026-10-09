@@ -141,7 +141,9 @@ class ManagedVllmStrategy:
         cmd = server.serve_command(
             spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
             context=None, cache_ram=None)
-        pid = server.start_server(config_dir, cmd, **server.key_kwargs(api_key))
+        pid = server.start_server(
+            config_dir, cmd, runtime=spec.runtime, record_env=getattr(spec, "env", None),
+            **server.key_kwargs(api_key))
         served = await server.wait_ready(
             base_url,
             config_dir=config_dir,
@@ -207,7 +209,9 @@ class SpawnedProcessStrategy:
         cmd = server.serve_command(
             spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
             context=None, cache_ram=None)
-        pid = server.start_server(config_dir, cmd)
+        pid = server.start_server(
+            config_dir, cmd, runtime=spec.runtime, record_env=getattr(spec, "env", None),
+            **server.key_kwargs(api_key))
         served = await server.wait_ready(
             base_url,
             config_dir=config_dir,
@@ -275,7 +279,7 @@ class DaemonStrategy:
                 "starts; stop the existing one first (attach-and-own is deferred)."
             )
         cmd = server.serve_command(spec)                 # env-prefixed `ollama serve`
-        pid = server.start_server(config_dir, cmd)
+        pid = server.start_server(config_dir, cmd, runtime=spec.runtime)
         available = await server.wait_ready(             # daemon up; returns PULLED model ids
             v1, config_dir=config_dir, timeout_seconds=timeout_seconds, on_poll=on_poll,
             **server.key_kwargs(api_key),
