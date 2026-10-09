@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
+import structlog
 from pydantic import SecretStr
 
 from types import MappingProxyType
@@ -31,6 +32,9 @@ from typing import Any, Callable, Mapping
 from localharness.config.models import ManagedServerConfig
 from localharness.core.private_files import private_opener, touch_private
 from localharness.core.which import which_outside_cwd
+
+logger = structlog.get_logger(__name__)
+"""The module logger. Named `logger`, not `log`: `start_server` holds its serve.log handle as `log`."""
 
 DOCKER_CONTAINER_NAME = "localharness-vllm"
 
@@ -454,11 +458,67 @@ def effective_posture(spec: Any, *, keyed: bool, decision: LaunchDecision) -> tu
     return exposed, EVERY_INTERFACE_NO_KEY if exposed and not argv_keyed else None
 
 
-def start_server(config_dir: Path, cmd: list[str], *, api_key: str | None = None) -> int:
+def _scrubbed(runtime: str, name: str) -> bool:
+    """True when `name` is in the launched runtime's own argv-equivalent namespace (D-15).
+
+    A blocklist: it names only what that runtime reads as a setting or a key. HF_TOKEN,
+    CUDA_VISIBLE_DEVICES, LD_LIBRARY_PATH, PATH and HF_HOME are never in it."""
+    if runtime == "llamacpp":
+        return name.startswith("LLAMA_ARG_") or name in {"LLAMA_API_KEY", "MTMD_BACKEND_DEVICE"}
+    if runtime == "vllm":
+        return name == "VLLM_API_KEY"
+    return False
+
+
+def child_environment(
+    runtime: str,
+    base: Mapping[str, str],
+    *,
+    record_env: Mapping[str, str] | None = None,
+    api_key: str | None = None,
+) -> tuple[dict[str, str] | None, list[str]]:
+    """The environment a launched server inherits, and the sorted names dropped from `base`.
+
+    Built in this order: copy `base`, scrub the launched runtime's own namespace, apply the
+    record's `env:`, then set `KEY_ENV[runtime]` last when keyed, so nothing inherited or recorded
+    can replace the key the harness holds. The scrub is a blocklist, never an allowlist:
+    CUDA_VISIBLE_DEVICES, LD_LIBRARY_PATH, PATH and HF_HOME must survive. Pure over `base`.
+
+    With nothing dropped, no record env and no key it returns `(None, [])`: Popen inherits the
+    environment unchanged, byte for byte as 0.17 did."""
+    dropped = sorted(name for name in base if _scrubbed(runtime, name))
+    if not dropped and not record_env and not api_key:
+        return None, []
+    env = {name: value for name, value in base.items() if name not in dropped}
+    env.update(record_env or {})
+    if api_key:
+        if runtime not in KEY_ENV:
+            raise ValueError(f"runtime {runtime!r} launches with no key variable")
+        env[KEY_ENV[runtime]] = api_key
+    return env, dropped
+
+
+def start_server(
+    config_dir: Path,
+    cmd: list[str],
+    *,
+    runtime: str = "vllm",
+    api_key: str | None = None,
+    record_env: Mapping[str, str] | None = None,
+) -> int:
     """Launch detached (new session), append stdout+stderr to serve.log, write pidfile.
 
-    `api_key` (a server set to require one) goes into the child's environment as VLLM_API_KEY —
-    never into `cmd`, so it is in neither the process list nor the launch line logged here."""
+    `api_key` (a server set to require one) goes into the child's copied environment as
+    `KEY_ENV[runtime]` — never into `cmd`, so it is in neither the process list nor the launch line
+    logged here. `child_environment` scrubs the launched runtime's own namespace first and adds
+    `record_env` (the record's `env:`); the dropped names are logged, names only."""
+    env, dropped = child_environment(runtime, os.environ, record_env=record_env, api_key=api_key)
+    if dropped:
+        logger.info("launch environment scrubbed", runtime=runtime, dropped=dropped)
+    if runtime == "vllm":
+        inherited = sorted(n for n in os.environ if n.startswith("VLLM_") and n != "VLLM_API_KEY")
+        if inherited:
+            logger.info("launch environment inherits VLLM_ settings", runtime=runtime, names=inherited)
     server_dir(config_dir).mkdir(parents=True, exist_ok=True)
     log = open(log_path(config_dir), "ab", opener=private_opener)
     log.write(f"\n=== launch: {' '.join(cmd)} ===\n".encode())
@@ -469,7 +529,7 @@ def start_server(config_dir: Path, cmd: list[str], *, api_key: str | None = None
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
-        env={**os.environ, "VLLM_API_KEY": api_key} if api_key else None,
+        env=env,
     )
     touch_private(pid_path(config_dir))
     pid_path(config_dir).write_text(str(proc.pid), encoding="utf-8")

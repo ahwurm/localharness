@@ -259,7 +259,8 @@ def test_a_required_key_travels_in_the_environment_not_in_argv_or_the_log(tmp_pa
     assert "=== launch: true ===" in log and KEY not in log
 
 
-def test_without_a_key_the_launch_inherits_the_environment(tmp_path, popen):  # noqa: F811
+def test_without_a_key_the_launch_inherits_the_environment(tmp_path, popen, monkeypatch):  # noqa: F811
+    monkeypatch.delenv("VLLM_API_KEY", raising=False)
     server.start_server(tmp_path, ["true"])
     assert popen[0]["env"] is None
 
@@ -322,7 +323,8 @@ async def test_a_keyed_vllm_activation_threads_the_key_through_launch_and_readin
                                                    api_key=KEY)
     assert calls == {"serve_command": {"keyed": True, "loopback": True, "key_file_ok": False,
                                        "context": None, "cache_ram": None},
-                     "start_server": {"api_key": KEY}, "wait_ready": {"api_key": KEY}}
+                     "start_server": {"runtime": "vllm", "record_env": None, "api_key": KEY},
+                     "wait_ready": {"api_key": KEY}}
 
 
 async def test_a_keyless_vllm_activation_calls_everything_as_before(tmp_path, monkeypatch):
@@ -330,17 +332,18 @@ async def test_a_keyless_vllm_activation_calls_everything_as_before(tmp_path, mo
     await lifecycle.ManagedVllmStrategy().activate(_docker(), tmp_path, "http://127.0.0.1:8081/v1")
     assert calls == {"serve_command": {"keyed": False, "loopback": True, "key_file_ok": False,
                                        "context": None, "cache_ram": None},
-                     "start_server": {}, "wait_ready": {}}
+                     "start_server": {"runtime": "vllm", "record_env": None}, "wait_ready": {}}
 
 
-async def test_a_spawned_server_gets_the_key_on_its_readiness_probe_only(tmp_path, monkeypatch):
+async def test_a_spawned_server_gets_the_key_in_its_launch_environment_and_readiness_probe(tmp_path, monkeypatch):
     calls = record_chain(monkeypatch)
     spec = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/m.gguf", port=8080)
     await lifecycle.SpawnedProcessStrategy().activate(spec, tmp_path, "http://127.0.0.1:8080/v1",
                                                       api_key=KEY)
     assert calls == {"serve_command": {"keyed": True, "loopback": True, "key_file_ok": False,
                                        "context": None, "cache_ram": None},
-                     "start_server": {}, "wait_ready": {"api_key": KEY}}
+                     "start_server": {"runtime": "llamacpp", "record_env": None, "api_key": KEY},
+                     "wait_ready": {"api_key": KEY}}
 
 
 @pytest.mark.parametrize("cls", [lifecycle.LifecycleStrategy, lifecycle.ManagedVllmStrategy,
