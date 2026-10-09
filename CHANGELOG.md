@@ -4,6 +4,26 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.17.2] — 2026-10-09
+
+Phone fix: a chat whose last turn ended without an answer no longer follows you through every
+reopen and server restart (#173). Nothing new to configure.
+
+### Fixed
+- **A sleeping phone thread wakes at its last answered request.** When a turn ended without an
+  answer — the model replied empty twice, a tool call never got its result, a harness nudge was
+  the last word — the loop committed that exchange to the conversation, the sleep file stored it,
+  and every wake (the next message, a reopened app, a restarted server) resumed it verbatim; each
+  next message then read a history that ends in blanks and came back blank too. `take_asleep` now
+  cuts the slept conversation back to the last assistant reply with text and no pending tool
+  call and logs how many messages it dropped. The drawer's chat log still shows the failed turn.
+  Live since 0.16.2, when sleep/wake shipped.
+- **The failure row on the phone names the escape**: `stuck? + starts a fresh chat`.
+
+### Known
+- A live session that has not slept still carries a failed turn: the agent loop commits it, and
+  that is the loop's fix, not this one. Until it lands, ＋ (New Chat) is the escape mid-session.
+
 ## [0.17.1] — 2026-10-08
 
 Hygiene release: 0.17.0 becomes what it said it was. Nothing new to configure.
