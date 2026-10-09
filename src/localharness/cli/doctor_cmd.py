@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import sys
 from datetime import datetime
@@ -187,33 +188,57 @@ def _print_migration_state(cfg_path: Path, harness: HarnessConfig) -> None:
     console.print(escape(f"       Last migrated {when}; backup at {latest}"), soft_wrap=True)
 
 
+def _is_regular_file(path: str | None) -> bool:
+    """Is `path` a regular file? A `stat` and nothing else: the key file is never opened here, because
+    the agent can run doctor, so a key file's content must never be read, echoed or waited on (a FIFO
+    would block an open). Unset, missing, unreadable or any other kind of file is False."""
+    if not path:
+        return False
+    try:
+        return stat.S_ISREG(os.stat(os.path.expanduser(path)).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
 def _print_exposure(harness: HarnessConfig) -> None:
     """One info row per way a server the harness launches is open beyond this machine's own use,
-    each naming the setting that closes it: a launched vLLM server listening on every interface
-    (`bind_all`), and one launched without requiring the API key the harness holds for it
-    (`require_api_key`, opt-in). The key itself is never printed — only whether one is set.
+    each naming the setting that closes it: a launched vLLM or llama.cpp server listening on every
+    interface (`bind_all`), and one launched without requiring the API key the harness holds for it
+    (`require_api_key`, opt-in). The rows are computed from the argv the launch would use, not from
+    the flags; a regular-file `api_key_file` counts as keyed and is never opened. The key itself is
+    never printed — only whether one is set.
 
     For the primary server the rows read:
       i Model server: reachable from other machines on port 8081 (server.bind_all: true) — set
-        server.bind_all: false to keep it on this machine
+        server.bind_all: false to keep it on this machine [— every interface, no key]
       i Model server: launched without requiring your API key (provider.api_key is set) —
         set server.require_api_key: true to make it refuse requests without the key
     and a launched peer's name `extra_endpoints[i] (<name>)`, `extra_endpoints[i].lifecycle.*` and
     its own `extra_endpoints[i].api_key` instead."""
     from localharness.config.cleartext import sends_key
+    from localharness.provider.server import effective_posture, launch_decision
 
     launched = [("Model server", "server", harness.server, "your", "provider.api_key",
-                 harness.provider.api_key)]
+                 harness.provider.api_key, None)]
     launched += [(f"extra_endpoints[{i}] ({ep.name})", f"extra_endpoints[{i}].lifecycle", ep.lifecycle,
-                  "its", f"extra_endpoints[{i}].api_key", ep.api_key)
+                  "its", f"extra_endpoints[{i}].api_key", ep.api_key, ep.name)
                  for i, ep in enumerate(harness.extra_endpoints)]
-    for label, setting, spec, whose, key_path, key in launched:
-        if spec is None or spec.runtime != "vllm":
+    for label, setting, spec, whose, key_path, key, peer in launched:
+        # Ollama and LM Studio argv hard-code loopback; only these two honour bind_all/require_api_key.
+        if spec is None or spec.runtime not in ("vllm", "llamacpp"):
             continue
-        if spec.bind_all:
-            console.print(_INFO + " " + escape(
-                f"{label}: reachable from other machines on port {spec.port} ({setting}.bind_all: true) "
-                f"— set {setting}.bind_all: false to keep it on this machine"), soft_wrap=True)
+        keyed = getattr(spec, "require_api_key", False) is True and (
+            sends_key(key) or _is_regular_file(getattr(spec, "api_key_file", None)))
+        decision = launch_decision(spec, keyed, peer=peer)
+        if decision.refusal is not None:
+            continue  # a declared-only record has no launch to report
+        exposed, line = effective_posture(spec, keyed=keyed, decision=decision)
+        if exposed:
+            text = (f"{label}: reachable from other machines on port {spec.port} ({setting}.bind_all: true) "
+                    f"— set {setting}.bind_all: false to keep it on this machine")
+            if line:
+                text += f" — {line}"
+            console.print(_INFO + " " + escape(text), soft_wrap=True)
         if not spec.require_api_key and sends_key(key):
             console.print(_INFO + " " + escape(
                 f"{label}: launched without requiring {whose} API key ({key_path} is set) — set "
