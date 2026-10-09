@@ -175,3 +175,169 @@ async def test_the_cold_launch_passes_the_peer_name_to_activate(tmp_path, bounda
     # the REPL's own decision and the strategy's enforcement both name the peer
     assert seen and set(seen) == {"llamacpp-local"}
     assert len(seen) >= 2
+
+
+# --- path 3: the managed restart / swap-back --------------------------------------------------- #
+
+
+def _llama_primary(*, binary: str | None = "/x/llama-server", **extra) -> ManagedServerConfig:
+    return ManagedServerConfig(
+        runtime="llamacpp", binary=binary, model="/x/primary.gguf", port=8081, gpu=True, **extra)
+
+
+def _on_the_cold_peer(repl, agent, peer) -> None:
+    """The session sits on a launched cold peer: it holds the accelerator and the client is bound to it."""
+    repl._active_heavy = (peer.lifecycle, peer.base_url)
+    agent._llm.config.base_url = peer.base_url
+    agent._llm.config.model = "qwen-gguf"
+
+
+@pytest.mark.asyncio
+async def test_a_swap_back_to_a_declared_only_primary_refuses_before_its_rebind(
+        tmp_path, boundaries, monkeypatch):
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    peer = _launchable_peer()
+    _, repl, channel, agent = _session(tmp_path, peer, server=_llama_primary(binary=None))
+    _on_the_cold_peer(repl, agent, peer)
+    held = repl._active_heavy
+
+    await repl._handle_slash("/model cached-b")
+
+    assert channel.messages[-1] == NO_LLAMA_PRIMARY
+    assert agent._llm.rebinds == []
+    assert boundaries.stops == [] and boundaries.cmds == [] and boundaries.waits == []
+    assert repl._active_heavy is held
+    assert agent._llm.config.base_url == peer.base_url
+
+
+@pytest.mark.asyncio
+async def test_a_llama_cpp_restart_names_the_runtime(tmp_path, boundaries, monkeypatch):
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=_llama_primary())
+
+    await repl._handle_slash("/model cached-b")
+
+    assert any(m.startswith(
+        "Restarting managed llama.cpp with cached-b — model load can take several minutes...")
+        for m in channel.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_vllm_restart_announcement_is_unchanged(tmp_path, boundaries, monkeypatch):
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer())
+
+    await repl._handle_slash("/model cached-b")
+
+    assert any(m.startswith(
+        "Restarting managed vLLM with cached-b — model load can take several minutes...")
+        for m in channel.messages)
+    assert not any("every interface" in m for m in channel.messages)
+
+
+# --- path 4: _restore_incumbent ----------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_restoring_nothing_gives_nothing(tmp_path, boundaries):
+    _, repl, _, _ = _session(tmp_path, _launchable_peer())
+
+    assert await repl._restore_incumbent(None) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_restored_peer_returns_its_label_and_the_decisions_note(tmp_path, boundaries):
+    key_dir = tmp_path / "keys"
+    key_dir.mkdir()
+    peer = _launchable_peer(bind_all=True, require_api_key=True, api_key_file=str(key_dir))
+    _, repl, _, _ = _session(tmp_path, peer)
+    repl._active_heavy = None
+
+    label, why = await repl._restore_incumbent((peer.lifecycle, PEER_URL))
+
+    assert label == peer.lifecycle.model
+    assert why == (f"--api-key-file {key_dir} unreadable: not a regular file — "
+                   "launched on 127.0.0.1 for this run")
+    assert repl._active_heavy == (peer.lifecycle, PEER_URL)
+
+
+@pytest.mark.asyncio
+async def test_a_restore_without_a_note_gives_no_why(tmp_path, boundaries):
+    peer = _launchable_peer()
+    _, repl, _, _ = _session(tmp_path, peer)
+
+    assert await repl._restore_incumbent((peer.lifecycle, PEER_URL)) == (peer.lifecycle.model, None)
+
+
+@pytest.mark.asyncio
+async def test_a_declared_only_primary_is_refused_not_swallowed(tmp_path, boundaries):
+    primary = _llama_primary(binary=None)
+    _, repl, _, _ = _session(tmp_path, _launchable_peer(), server=primary)
+    repl._active_heavy = None
+
+    assert await repl._restore_incumbent((primary, PRIMARY_URL)) == (None, NO_LLAMA_PRIMARY)
+    assert repl._active_heavy is None
+    assert boundaries.cmds == []
+
+
+@pytest.mark.asyncio
+async def test_a_declared_only_peer_is_refused_by_name(tmp_path, boundaries):
+    peer = _declared_only_peer(name="flash-next")
+    _, repl, _, _ = _session(tmp_path, peer)
+    repl._active_heavy = None
+
+    assert await repl._restore_incumbent((peer.lifecycle, PEER_URL)) == (
+        None, "no llama-server — set extra_endpoints[flash-next].lifecycle.binary")
+    assert repl._active_heavy is None
+
+
+@pytest.mark.asyncio
+async def test_a_spec_that_is_not_the_peers_own_lifecycle_is_not_named_as_the_peer(
+        tmp_path, boundaries):
+    peer = _declared_only_peer(name="flash-next")
+    _, repl, _, _ = _session(tmp_path, peer)
+    stranger = peer.lifecycle.model_copy()
+
+    assert await repl._restore_incumbent((stranger, PEER_URL)) == (None, NO_LLAMA_PRIMARY)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_cold_launch_reports_why_the_incumbent_was_not_restored(
+        tmp_path, boundaries, monkeypatch):
+    primary = _llama_primary(binary=None)
+    peer = _launchable_peer()
+    _, repl, channel, agent = _session(tmp_path, peer, server=primary)
+
+    async def never_ready(base_url, config_dir=None, **kw):
+        raise TimeoutError("llama-server never became ready")
+
+    monkeypatch.setattr(managed_server, "wait_ready", never_ready)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    last = channel.messages[-1]
+    assert f"Could not restore it: {NO_LLAMA_PRIMARY}" in last
+    assert "NO model serving" not in last
+    assert agent._llm.rebinds == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_swap_back_reports_why_the_peer_was_not_restored(
+        tmp_path, boundaries, monkeypatch):
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    peer = _declared_only_peer(name="flash-next")  # a vLLM primary lends it no binary
+    _, repl, channel, agent = _session(tmp_path, peer)
+    _on_the_cold_peer(repl, agent, peer)
+
+    async def never_ready(base_url, config_dir=None, **kw):
+        raise TimeoutError("llama-server never became ready")
+
+    monkeypatch.setattr(managed_server, "wait_ready", never_ready)
+
+    await repl._handle_slash("/model cached-b")
+
+    last = channel.messages[-1]
+    assert last.startswith("Model swap failed:")
+    assert ("Could not restore it: no llama-server — set extra_endpoints[flash-next]"
+            ".lifecycle.binary") in last
+    assert "NO model serving" not in last
