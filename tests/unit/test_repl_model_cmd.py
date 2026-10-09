@@ -221,7 +221,7 @@ async def test_model_managed_restart_path(tmp_path, monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     monkeypatch.setattr(managed_server, "stop_server", lambda cfg, launch="binary": calls.append("stop") or True)
-    monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd: calls.append("start") or 1234)
+    monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: calls.append("start") or 1234)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
         calls.append("wait")
@@ -341,7 +341,7 @@ async def test_model_managed_restart_rebinds_token_counter(tmp_path, monkeypatch
     monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 3)
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     monkeypatch.setattr(managed_server, "stop_server", lambda cfg, launch="binary": True)
-    monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd: 1234)
+    monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: 1234)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
         return ["cached-b"]
@@ -894,7 +894,7 @@ async def test_model_cold_peer_heavy_swap_stops_incumbent_launches_rebinds(tmp_p
     monkeypatch.setattr(managed_server, "stop_server",
                         lambda cfg, launch="binary": calls.append(f"stop:{launch}") or True)
     monkeypatch.setattr(managed_server, "start_server",
-                        lambda cfg, cmd: calls.append("start") or 4321)
+                        lambda cfg, cmd, **kw: calls.append("start") or 4321)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
         calls.append("wait")
@@ -947,7 +947,7 @@ async def test_model_cold_peer_launch_failure_restores_incumbent(tmp_path, monke
     monkeypatch.setattr(managed_server, "stop_server",
                         lambda cfg, launch="binary": events.append(f"stop:{launch}") or True)
     monkeypatch.setattr(managed_server, "start_server",
-                        lambda cfg, cmd: events.append("start") or 4321)
+                        lambda cfg, cmd, **kw: events.append("start") or 4321)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
         # the PEER (8080) never comes up; the RESTORE of the primary (8081) succeeds
@@ -994,7 +994,7 @@ async def test_model_swap_back_to_primary_stops_cold_peer_first(tmp_path, monkey
     stops: list[str] = []
     monkeypatch.setattr(managed_server, "stop_server",
                         lambda cfg, launch="binary": stops.append(launch) or True)
-    monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd: 1234)
+    monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: 1234)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
         return ["cached-b"]
@@ -1033,7 +1033,7 @@ async def test_model_swap_back_free_fail_reports_no_change(tmp_path, monkeypatch
         return True
 
     monkeypatch.setattr(managed_server, "stop_server", _boom_stop)
-    monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd: started.append(cmd) or 1)
+    monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: started.append(cmd) or 1)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
         return ["cached-b"]

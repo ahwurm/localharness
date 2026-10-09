@@ -80,7 +80,7 @@ def _serve(monkeypatch, key: str | None) -> _Server:
 def _record_launch(monkeypatch) -> list[dict]:
     launched: list[dict] = []
 
-    def start_server(config_dir, cmd, *, api_key=None):
+    def start_server(config_dir, cmd, *, api_key=None, **kw):
         launched.append({"cmd": list(cmd), "api_key": api_key})
         monkeypatch.setattr(server, "server_pid", lambda _d: 4242)  # the launched process lives
         return 4242

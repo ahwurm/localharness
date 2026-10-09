@@ -110,7 +110,7 @@ async def test_swap_to_registry_model_full_choreography(tmp_path, monkeypatch):
     def fake_stop(cfg, launch="binary", **kw):
         calls["stop"] = (cfg, launch)
 
-    def fake_start(cfg, cmd):
+    def fake_start(cfg, cmd, **kw):
         calls["cmd"] = cmd
         return 1
 
@@ -145,7 +145,7 @@ async def test_swap_failure_reports_and_keeps_current_model(tmp_path, monkeypatc
     r, chan, llm, persisted = _mk(tmp_path, _managed())
 
     monkeypatch.setattr(ms, "stop_server", lambda cfg, launch="binary", **kw: None)
-    monkeypatch.setattr(ms, "start_server", lambda cfg, cmd: 1)
+    monkeypatch.setattr(ms, "start_server", lambda cfg, cmd, **kw: 1)
 
     async def fake_ready(base_url, config_dir=None, on_poll=None, **kw):
         raise TimeoutError("vLLM not ready after 1800s.")
