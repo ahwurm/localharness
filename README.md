@@ -78,7 +78,7 @@ Copy [the example plugin](examples/plugin-template/README.md): one tool, one com
 
 ## Status
 
-Early stage (v0.17.1, pre-1.0). Interfaces and config schema may change without notice. Each release's known limitations are listed in the [CHANGELOG](CHANGELOG.md).
+Early stage (v0.17.2, pre-1.0). Interfaces and config schema may change without notice. Each release's known limitations are listed in the [CHANGELOG](CHANGELOG.md).
 
 ## Links
 
