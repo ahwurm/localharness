@@ -12,6 +12,7 @@ covers both.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 import signal
 import stat
@@ -24,7 +25,8 @@ from pathlib import Path
 import httpx
 from pydantic import SecretStr
 
-from typing import Any, Callable
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
 
 from localharness.config.models import ManagedServerConfig
 from localharness.core.private_files import private_opener, touch_private
@@ -172,6 +174,50 @@ def launch_decision(spec: Any, keyed: bool, *, peer: str | None = None) -> Launc
     return LaunchDecision(None, loopback, True, None)
 
 
+KEY_ENV: Mapping[str, str] = MappingProxyType({"vllm": "VLLM_API_KEY", "llamacpp": "LLAMA_API_KEY"})
+"""The one key-variable table: the environment variable each launched runtime reads its key from.
+`start_server`'s child environment and the docker `-e` both read it, so the mapping lives in one
+place. (llama-server reads `LLAMA_API_KEY`; `LLAMA_ARG_API_KEY` is read by nothing.)"""
+
+RUNTIME_LABELS: Mapping[str, str] = MappingProxyType(
+    {"vllm": "vLLM", "llamacpp": "llama.cpp", "ollama": "Ollama", "lmstudio": "LM Studio"})
+"""The runtime names `start`'s and `/model`'s launch lines print."""
+
+EVERY_INTERFACE_NO_KEY = "every interface, no key"
+"""The exposure phrase: a launch that binds beyond loopback with no key accompanying it."""
+
+
+def classify_hosts(value: str) -> str:
+    """Classify a `--host` value (or a comma-separated list of them) as "loopback", "address" or
+    "unsupported", by its literal text alone — a name is never resolved, so no DNS answer can turn
+    an exposure into a loopback.
+
+    Entries split on commas, are stripped, and empty ones dropped; nothing left is unsupported.
+    The literal `localhost` and any address `ipaddress` calls loopback (an IPv4-mapped IPv6 address
+    is judged by the IPv4 address it wraps) are loopback; any other address is "address"; anything
+    that is not an address (a hostname, a `.sock` path) is unsupported. One unsupported entry makes
+    the whole value unsupported, else one address entry makes it "address". The import and the
+    upgrade conversion read this same function (spec §8, §9)."""
+    entries = [e for e in (part.strip() for part in value.split(",")) if e]
+    if not entries:
+        return "unsupported"
+    kinds = set()
+    for entry in entries:
+        if entry == "localhost":
+            kinds.add("loopback")
+            continue
+        try:
+            addr = ipaddress.ip_address(entry)
+        except ValueError:
+            kinds.add("unsupported")
+            continue
+        addr = getattr(addr, "ipv4_mapped", None) or addr
+        kinds.add("loopback" if addr.is_loopback else "address")
+    if "unsupported" in kinds:
+        return "unsupported"
+    return "address" if "address" in kinds else "loopback"
+
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -317,12 +363,28 @@ def serve_command(
     Otherwise srv.model passes through untouched (HF repo id resolved via the cache).
 
     runtime='llamacpp' (0.11 Phase B) is a separate, simpler shape the harness spawns directly:
-    `llama-server -m <gguf> --port <p> [--host 0.0.0.0] <extra_args> [--host 127.0.0.1]` — a GGUF
-    file IS the model, so there is no docker mount / --served-model-name registry indirection."""
+    `llama-server -m <gguf> [-a <alias>] [--mmproj <p>] [--cache-type-k/-v <t>] [-c <n>]
+    [--cache-ram <n>] [--api-key-file <p>] --port <p> [--host 0.0.0.0] <extra_args>
+    [--host 127.0.0.1]` — every item from the record, in that order, each only when set; the
+    record's own `context` / `cache_ram` win over the fit keywords, which fill an unset one; `~` in
+    the model, mmproj and key-file paths is expanded as a string (no stat); the key file rides argv
+    only when `key_file_ok`. A GGUF file IS the model, so there is no docker mount /
+    --served-model-name registry indirection."""
     loop = loopback or not srv.bind_all
     if srv.runtime == "llamacpp":
+        ctx = srv.context if srv.context is not None else context
+        ram = srv.cache_ram if srv.cache_ram is not None else cache_ram
+        key_file = os.path.expanduser(srv.api_key_file) if srv.api_key_file else None
         return [
-            str(srv.binary), "-m", os.path.expanduser(srv.model), "--port", str(srv.port),
+            str(srv.binary), "-m", os.path.expanduser(srv.model),
+            *(["-a", srv.served_name] if srv.served_name is not None else []),
+            *(["--mmproj", os.path.expanduser(srv.mmproj)] if srv.mmproj is not None else []),
+            *(["--cache-type-k", srv.cache_type_k] if srv.cache_type_k is not None else []),
+            *(["--cache-type-v", srv.cache_type_v] if srv.cache_type_v is not None else []),
+            *(["-c", str(ctx)] if ctx is not None else []),
+            *(["--cache-ram", str(ram)] if ram is not None else []),
+            *(["--api-key-file", key_file] if key_file_ok and key_file else []),
+            "--port", str(srv.port),
             *([] if loop else ["--host", "0.0.0.0"]),
             *srv.extra_args,
             *(["--host", "127.0.0.1"] if loop else []),
@@ -352,7 +414,7 @@ def serve_command(
             "docker", "run", "--rm", "--name", DOCKER_CONTAINER_NAME,
             "--gpus", "all", "--ipc=host",
             *mounts,
-            *(["-e", "VLLM_API_KEY"] if keyed else []),
+            *(["-e", KEY_ENV["vllm"]] if keyed else []),
             "-p", f"127.0.0.1:{srv.port}:8000" if loop else f"{srv.port}:8000",
             str(srv.docker_image),
             "--model", model_arg,
@@ -363,6 +425,33 @@ def serve_command(
     served = ["--served-model-name", entry.name] if entry is not None else []
     return [str(srv.binary), "serve", model_arg, "--port", str(srv.port), *served, *extra,
             *(["--host", "127.0.0.1"] if loop else [])]
+
+
+def effective_posture(spec: Any, *, keyed: bool, decision: LaunchDecision) -> tuple[bool, str | None]:
+    """(exposed, line): does the launch bind beyond this machine, and the exposure phrase when it
+    does so with no key. Read from the argv `serve_command` would build for `decision` plus the key
+    actually held — never from the `bind_all` / `require_api_key` flags, so `require_api_key: true`
+    with no key held still reads `every interface, no key`. Ollama, LM Studio and a refused launch
+    expose nothing and build no command. Pure; the key file is never opened."""
+    runtime = getattr(spec, "runtime", "vllm")
+    if runtime in ("ollama", "lmstudio") or decision.refusal is not None:
+        return False, None
+    cmd = serve_command(spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok)
+    if runtime != "llamacpp" and getattr(spec, "launch", "binary") == "docker":
+        exposed = not cmd[cmd.index("-p") + 1].startswith("127.0.0.1:")
+    else:
+        host: str | None = None
+        for i, token in enumerate(cmd):
+            if token == "--host" and i + 1 < len(cmd):
+                host = cmd[i + 1]
+            elif token.startswith("--host="):
+                host = token[len("--host="):]
+        # llama-server's own default is loopback, vLLM's is every interface
+        exposed = runtime != "llamacpp" if host is None else classify_hosts(host) != "loopback"
+    argv_keyed = keyed or any(
+        token in ("--api-key", "--api-key-file") or token.startswith(("--api-key=", "--api-key-file="))
+        for token in cmd)
+    return exposed, EVERY_INTERFACE_NO_KEY if exposed and not argv_keyed else None
 
 
 def start_server(config_dir: Path, cmd: list[str], *, api_key: str | None = None) -> int:
