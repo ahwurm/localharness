@@ -154,6 +154,98 @@ def test_ollama_argv_is_unchanged(bind_all):
         "env", "OLLAMA_HOST=127.0.0.1:11434", "OLLAMA_KEEP_ALIVE=-1", "ollama", "serve"]
 
 
+# ------------------------------------------------------------------------------- the record reaches argv
+
+
+def _full_llama(**over) -> ManagedServerConfig:
+    return _llama(model="~/m/x.gguf", served_name="qwen", mmproj="~/m/p.gguf", cache_type_k="q8_0",
+                  cache_type_v="q8_0", context=65536, cache_ram=0, require_api_key=True,
+                  api_key_file="/k/key", extra_args=["-fa", "on"], **over)
+
+
+def test_every_record_field_reaches_the_llama_cpp_argv_in_order():
+    cmd = server.serve_command(_full_llama(), keyed=True, loopback=True, key_file_ok=True)
+    assert cmd == [
+        "/x/llama-server", "-m", os.path.expanduser("~/m/x.gguf"), "-a", "qwen",
+        "--mmproj", os.path.expanduser("~/m/p.gguf"), "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
+        "-c", "65536", "--cache-ram", "0", "--api-key-file", "/k/key", "--port", "8080",
+        "-fa", "on", "--host", "127.0.0.1",
+    ]
+
+
+def test_the_key_file_rides_argv_only_when_the_decision_passes_it():
+    cmd = server.serve_command(_full_llama(), keyed=True, loopback=True, key_file_ok=False)
+    assert "--api-key-file" not in cmd and "/k/key" not in cmd
+
+
+def test_an_unset_field_adds_nothing():
+    assert server.serve_command(_llama()) == [
+        "/x/llama-server", "-m", "/x/m.gguf", "--port", "8080", "--host", "127.0.0.1"]
+
+
+def test_the_fit_keywords_fill_an_unset_record_and_never_override_a_set_one():
+    filled = server.serve_command(_llama(), context=32768, cache_ram=512)
+    assert filled[filled.index("-c") + 1] == "32768" and filled[filled.index("--cache-ram") + 1] == "512"
+    kept = server.serve_command(_llama(context=4096, cache_ram=0), context=32768, cache_ram=512)
+    assert kept[kept.index("-c") + 1] == "4096" and kept[kept.index("--cache-ram") + 1] == "0"
+    assert kept.count("-c") == 1 and kept.count("--cache-ram") == 1
+
+
+def test_a_zero_cache_ram_is_passed_not_dropped():
+    assert server.serve_command(_llama(cache_ram=0)).count("--cache-ram") == 1
+
+
+def test_the_fit_keywords_do_nothing_to_a_vllm_record():
+    assert server.serve_command(_binary(), context=32768, cache_ram=512) == server.serve_command(_binary())
+    assert server.serve_command(_docker(), context=32768, cache_ram=512) == server.serve_command(_docker())
+
+
+def test_serve_command_does_no_io_and_is_deterministic(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("serve_command touched the filesystem")
+
+    spec = _full_llama()
+    with record_opens() as opened:
+        monkeypatch.setattr(os, "stat", boom)
+        first = server.serve_command(spec, keyed=True, loopback=True, key_file_ok=True)
+        second = server.serve_command(spec, keyed=True, loopback=True, key_file_ok=True)
+    assert first == second
+    assert not any(p.endswith(("x.gguf", "p.gguf", "key")) for p in opened)
+
+
+def test_a_0_17_vllm_docker_record_keeps_its_argv_byte_for_byte():
+    srv = _docker(extra_args=["--max-model-len", "65536"], bind_all=True)
+    assert server.serve_command(srv, keyed=True) == [
+        "docker", "run", "--rm", "--name", server.DOCKER_CONTAINER_NAME, "--gpus", "all", "--ipc=host",
+        "-v", f"{_hf_cache()}:/root/.cache/huggingface", "-e", "VLLM_API_KEY",
+        "-p", "8081:8000", "img:tag", "--model", "org/repo", "--max-model-len", "65536",
+    ]
+
+
+def test_a_0_17_vllm_binary_record_keeps_every_token_and_only_the_host_moves():
+    old_literal = ["/opt/vllm", "serve", "org/repo", "--port", "8081", "--host", "127.0.0.1",
+                   "--max-model-len", "65536"]
+    assert sorted(server.serve_command(_binary())) == sorted(old_literal)
+
+
+def test_one_table_names_each_runtimes_key_variable():
+    assert dict(server.KEY_ENV) == {"vllm": "VLLM_API_KEY", "llamacpp": "LLAMA_API_KEY"}
+    with pytest.raises(TypeError):
+        server.KEY_ENV["x"] = "y"  # type: ignore[index]
+
+
+def test_the_docker_launch_names_the_variable_from_that_table():
+    cmd = server.serve_command(_docker(), keyed=True)
+    assert cmd[cmd.index("-e") + 1] == server.KEY_ENV["vllm"]
+
+
+def test_every_runtime_has_a_label():
+    assert dict(server.RUNTIME_LABELS) == {
+        "vllm": "vLLM", "llamacpp": "llama.cpp", "ollama": "Ollama", "lmstudio": "LM Studio"}
+    with pytest.raises(TypeError):
+        server.RUNTIME_LABELS["x"] = "y"  # type: ignore[index]
+
+
 # ------------------------------------------------------------------------------- the launch
 
 

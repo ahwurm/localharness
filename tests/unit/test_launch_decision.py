@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import os
+import socket
 import threading
 
 import pytest
@@ -305,3 +306,129 @@ def test_every_activate_takes_a_keyword_only_peer(cls):
 
 def test_live_endpoint_note_defaults_to_none():
     assert lifecycle.LiveEndpoint("u", ["m"], 1).note is None
+
+
+# ------------------------------------------------------------------------------- the literal host classifier
+
+
+@pytest.mark.parametrize("value", ["127.0.0.1", "127.0.0.2", "127.0.0.1,::1", "localhost", "::ffff:127.0.0.1",
+                                   "::1", " 127.0.0.1 , localhost ", "127.0.0.1,"])
+def test_loopback_hosts_classify_as_loopback(value):
+    assert server.classify_hosts(value) == "loopback"
+
+
+@pytest.mark.parametrize("value", ["0.0.0.0", "192.168.1.5", "127.0.0.1,0.0.0.0", "::", "100.64.0.7",
+                                   "::ffff:192.168.1.5"])
+def test_other_addresses_classify_as_address(value):
+    assert server.classify_hosts(value) == "address"
+
+
+@pytest.mark.parametrize("value", ["ip6-localhost", "/run/llama.sock", "", " , ", "example.com",
+                                   "127.0.0.1,ip6-localhost", "0.0.0.0,/run/x.sock"])
+def test_names_paths_and_nothing_classify_as_unsupported(value):
+    assert server.classify_hosts(value) == "unsupported"
+
+
+def test_the_classifier_never_resolves_a_name(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("classify_hosts resolved a name")
+
+    monkeypatch.setattr(socket, "getaddrinfo", boom)
+    monkeypatch.setattr(socket, "gethostbyname", boom)
+    assert [server.classify_hosts(v) for v in ("localhost", "127.0.0.1", "0.0.0.0", "example.com", "")] == [
+        "loopback", "loopback", "address", "unsupported", "unsupported"]
+
+
+# ------------------------------------------------------------------------------- the effective posture
+
+
+def _posture(spec, keyed=False, **kw):
+    return server.effective_posture(spec, keyed=keyed, decision=server.launch_decision(spec, keyed, **kw))
+
+
+def _vllm_binary(**over) -> ManagedServerConfig:
+    return ManagedServerConfig(**{"launch": "binary", "binary": "/opt/vllm", "model": "org/repo",
+                                  "port": 8081, **over})
+
+
+def _vllm_docker(**over) -> ManagedServerConfig:
+    return ManagedServerConfig(**{"launch": "docker", "docker_image": "img:tag", "model": "org/repo",
+                                  "port": 8081, **over})
+
+
+def test_the_exposure_phrase_is_the_contract():
+    assert server.EVERY_INTERFACE_NO_KEY == "every interface, no key"
+
+
+def test_a_bind_all_llama_cpp_launch_without_a_key_is_exposed_and_says_so():
+    assert _posture(_llama(bind_all=True)) == (True, "every interface, no key")
+
+
+def test_a_bind_all_llama_cpp_launch_with_a_held_key_is_exposed_without_the_phrase():
+    assert _posture(_llama(bind_all=True), keyed=True) == (True, None)
+
+
+def test_a_loopback_llama_cpp_launch_is_not_exposed():
+    assert _posture(_llama()) == (False, None)
+    assert _posture(_llama(), keyed=True) == (False, None)
+
+
+def test_require_api_key_with_no_key_held_still_reads_every_interface_no_key():
+    spec = _llama(bind_all=True, require_api_key=True)
+    assert _posture(spec, keyed=False) == (True, "every interface, no key")
+
+
+def test_a_regular_key_file_with_a_held_key_counts_as_keyed(tmp_path):
+    key = tmp_path / "key"
+    key.write_text("K", encoding="utf-8")
+    with record_opens() as opened:
+        assert _posture(_keyed_llama(key, bind_all=True), keyed=True) == (True, None)
+    assert str(key) not in opened
+
+
+def test_a_withheld_key_file_launches_loopback_and_is_not_exposed(tmp_path):
+    assert _posture(_keyed_llama(tmp_path, bind_all=True), keyed=True) == (False, None)
+
+
+def test_a_vllm_binary_binds_every_interface_by_default_when_bind_all():
+    assert _posture(_vllm_binary(bind_all=True)) == (True, "every interface, no key")
+    assert _posture(_vllm_binary()) == (False, None)
+
+
+def test_a_vllm_binary_keyed_by_its_own_argv_is_not_flagged():
+    spec = _vllm_binary(bind_all=True, extra_args=["--api-key", "K"])
+    assert _posture(spec) == (True, None)
+    assert _posture(_vllm_binary(bind_all=True, extra_args=["--api-key=K"])) == (True, None)
+
+
+def test_the_effective_host_is_the_last_one_in_either_form():
+    narrow = _llama(bind_all=True, extra_args=["--host=127.0.0.1"])
+    assert _posture(narrow) == (False, None)
+    wide = _vllm_binary(bind_all=True, extra_args=["--host", "127.0.0.1", "--host=0.0.0.0"])
+    assert _posture(wide) == (True, "every interface, no key")
+    assert _posture(_vllm_binary(bind_all=True, extra_args=["--host", "127.0.0.1"])) == (False, None)
+
+
+def test_a_host_that_is_a_name_or_a_socket_path_counts_as_exposed():
+    assert _posture(_llama(bind_all=True, extra_args=["--host", "/run/llama.sock"])) == (
+        True, "every interface, no key")
+
+
+def test_a_docker_launch_is_exposed_when_it_publishes_beyond_loopback():
+    assert _posture(_vllm_docker(bind_all=True)) == (True, "every interface, no key")
+    assert _posture(_vllm_docker(bind_all=True), keyed=True) == (True, None)
+    assert _posture(_vllm_docker()) == (False, None)
+
+
+@pytest.mark.parametrize("runtime", ["ollama", "lmstudio"])
+def test_ollama_and_lmstudio_are_never_exposed_and_build_no_command(runtime, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("serve_command must not be called")
+
+    monkeypatch.setattr(server, "serve_command", boom)
+    spec = ManagedServerConfig(runtime=runtime, model="m", bind_all=True)
+    assert _posture(spec) == (False, None)
+
+
+def test_a_refused_launch_is_not_exposed():
+    assert _posture(_llama(binary=None, bind_all=True)) == (False, None)
