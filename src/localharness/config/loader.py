@@ -480,6 +480,7 @@ HARNESS_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({
     "provider.base_url", "provider.api_key", "extra_endpoints", "active_endpoint", "server",
     "org.audit_log_path", "org.hooks", "org.enforce_capability_floor",
     "org.web_fetch_allow_private", "channels.remote_unattended",
+    "autosense", "effort_budget", "org.default_effort",
     "proposer.base_url", "proposer.api_key"})
 """The core harness keys only the global config (config.yaml or overrides.yaml) may set.
 
@@ -493,6 +494,11 @@ command from (`org.hooks`), and the protections' own switches (`org.enforce_capa
 every message and every file the agent reads travels to it, key or no key. A member may be a whole
 section or list (`server`, `extra_endpoints`); readers test a dot-path with
 `is_harness_global_only`, which also matches the keys inside a member section.
+
+`autosense`, `effort_budget` and `org.default_effort` decide how the harness sizes and bounds what
+it serves on this machine's hardware (memory margins, model folders, the reasoning share of every
+reply), so a project may not move them. A whole-section workspace value is warned even when it
+restates the defaults, because the comparison is against the section's default object.
 
 `org.enforce_capability_floor` is the capability floor's off switch. No direction of it belongs
 to a repository: a cloned repo must not be able to switch the floor off for the sessions started

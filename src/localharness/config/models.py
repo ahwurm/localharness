@@ -1443,6 +1443,14 @@ class OrgConfig(BaseModel):
     )
 
     default_temperature: float = Field(default=0.6, ge=0.0, le=2.0)
+    default_effort: Optional[EffortLevel] = Field(
+        default=None,
+        description=(
+            "The machine's default reasoning effort (off, low, high or max), named like "
+            "default_model and default_temperature. Unset (the default) means no machine default. "
+            "Machine-level only: a project's value is ignored."
+        ),
+    )
     default_max_tokens: Optional[int] = Field(
         default=None,
         ge=1,
@@ -2024,6 +2032,43 @@ class ChannelsConfig(BaseModel):
     )
 
 
+class AutosenseConfig(BaseModel):
+    """How the harness sizes the window and prompt cache of a server it launches. Machine-level
+    only: these set memory margins and the folders searched for model files on this machine's
+    hardware, so a project may not move them. Every ratio is a share bounded to (0, 1]."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    compute_margin_ratio: float = Field(default=0.10, gt=0.0, le=1.0, description=(
+        "Share of the weights' bytes held back for compute buffers when the harness sizes a "
+        "window."))
+    template_margin_ratio: float = Field(default=0.0156, gt=0.0, le=1.0, description=(
+        "Share of the window held back for chat-template overhead."))
+    unified_reserve_ratio: float = Field(default=0.15, gt=0.0, le=1.0, description=(
+        "Share of total memory held back on a unified-memory machine."))
+    cache_ram_ratio: float = Field(default=0.40, gt=0.0, le=1.0, description=(
+        "Share of available RAM minus host-resident weights given to llama.cpp's prompt cache."))
+    cache_ram_ceiling_ratio: float = Field(default=0.50, gt=0.0, le=1.0, description=(
+        "The prompt cache's ceiling as a share of total RAM."))
+    notify_ratio: float = Field(default=0.25, gt=0.0, le=1.0, description=(
+        "`start` reports the window when the served window falls short of the fit by more than "
+        "this share."))
+    model_roots: list[str] = Field(
+        default_factory=lambda: ["~/models", "~/.cache/huggingface"],
+        description="The folders searched for GGUF files.",
+    )
+
+
+class EffortBudgetConfig(BaseModel):
+    """What share of a reply's output headroom each reasoning level may spend. Machine-level only,
+    like `autosense`. Ratios, never levels; each is bounded to (0, 1]."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    low_ratio: float = Field(default=0.125, gt=0.0, le=1.0, description=(
+        "The reasoning share of a request's output headroom at effort low."))
+    high_ratio: float = Field(default=0.5, gt=0.0, le=1.0, description=(
+        "The reasoning share of a request's output headroom at effort high."))
+
+
 class HarnessConfig(BaseModel):
     """Root harness configuration. Stored at ~/.localharness/config.yaml."""
     model_config = ConfigDict(frozen=False, extra="forbid")
@@ -2055,6 +2100,18 @@ class HarnessConfig(BaseModel):
     server: Optional[ManagedServerConfig] = Field(
         default=None,
         description="Harness-managed model server (written by init guided setup). None = user-managed.",
+    )
+    autosense: AutosenseConfig = Field(
+        default_factory=AutosenseConfig,
+        description=(
+            "How the harness sizes the window and prompt cache of a server it launches (memory "
+            "margins, the folders searched for model files). Machine-level only."),
+    )
+    effort_budget: EffortBudgetConfig = Field(
+        default_factory=EffortBudgetConfig,
+        description=(
+            "The share of a reply's output headroom each reasoning level may spend. "
+            "Machine-level only."),
     )
     proposer: Optional[ProposerConfig] = None
     sentinel: SentinelConfig = Field(
