@@ -1863,7 +1863,8 @@ class ManagedServerConfig(BaseModel):
         "that it is a regular file and never reads it at launch."))
     env: Optional[dict[str, str]] = Field(default=None, description=(
         "llama.cpp only: LLAMA_ARG_* variables set in the server's environment at launch, for "
-        "settings no record field holds. Never a key, host/port, download or TLS option."))
+        "settings no record field holds. Never a key, host/port, download or TLS option. Numbers "
+        "and booleans are written as text (99 -> \"99\", true -> \"true\"); quote any other value."))
     config_ini: Optional[str] = Field(default=None, description=(
         "llama.cpp only: the text of a llama.cpp config.ini carried on the record. It may not set "
         "the options `env` refuses."))
@@ -1888,6 +1889,28 @@ class ManagedServerConfig(BaseModel):
         if v is not None and not os.path.isabs(os.path.expanduser(v)):
             raise ValueError("api_key_file must be an absolute path (~ allowed)")
         return v
+
+    @field_validator("env", mode="before")
+    @classmethod
+    def _env_scalars_to_text(cls, v: Any) -> Any:
+        """An environment value is text, but YAML writes `99` and `true` as an int and a bool: those
+        become `"99"` and `"true"` so the natural spelling loads. Anything that is not a scalar
+        (empty, a list, a mapping) is refused with the quoting rule, naming the variable."""
+        if not isinstance(v, dict):
+            return v
+        coerced: dict[Any, Any] = {}
+        for name, value in v.items():
+            if isinstance(value, bool):
+                coerced[name] = "true" if value else "false"
+            elif isinstance(value, (int, float)):
+                coerced[name] = str(value)
+            elif isinstance(value, str):
+                coerced[name] = value
+            else:
+                raise ValueError(
+                    f"env value for {name} must be text or a number; quote it (\"...\") "
+                    "if it is neither")
+        return coerced
 
     @field_validator("env")
     @classmethod

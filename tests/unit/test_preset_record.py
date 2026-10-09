@@ -471,6 +471,39 @@ def test_ordinary_llama_arg_env_validates():
     assert srv.env["LLAMA_ARG_NO_HOST"] == "1"
 
 
+def test_env_scalars_as_yaml_writes_them_become_text():
+    import yaml
+
+    record = yaml.safe_load("""
+env:
+  LLAMA_ARG_N_GPU_LAYERS: 99
+  LLAMA_ARG_NO_MMAP: true
+  LLAMA_ARG_NO_WARMUP: false
+  LLAMA_ARG_ROPE_FREQ_SCALE: 0.5
+  LLAMA_ARG_THREADS: "8"
+""")
+    srv = _llama(**record)
+    assert srv.env == {
+        "LLAMA_ARG_N_GPU_LAYERS": "99", "LLAMA_ARG_NO_MMAP": "true", "LLAMA_ARG_NO_WARMUP": "false",
+        "LLAMA_ARG_ROPE_FREQ_SCALE": "0.5", "LLAMA_ARG_THREADS": "8"}
+    assert all(isinstance(v, str) for v in srv.env.values())
+
+
+@pytest.mark.parametrize("value", [None, [1], {"a": 1}])
+def test_env_value_that_is_not_a_scalar_says_to_quote_it(value):
+    with pytest.raises(ValueError, match=r"LLAMA_ARG_N_GPU_LAYERS must be text or a number; quote it"):
+        _llama(env={"LLAMA_ARG_N_GPU_LAYERS": value})
+
+
+def test_coerced_env_values_keep_every_other_refusal():
+    with pytest.raises(ValueError, match="env refuses LLAMA_ARG_HOST"):
+        _llama(env={"LLAMA_ARG_HOST": 1})
+    with pytest.raises(ValueError, match="env refuses FOO"):
+        _llama(env={"FOO": 1})
+    with pytest.raises(ValueError, match="NUL byte or newline"):
+        _llama(env={"LLAMA_ARG_N_GPU_LAYERS": "9\n9"})
+
+
 @pytest.mark.parametrize("name", sorted(EXCLUDED_ENV_CATEGORY))
 def test_excluded_env_name_is_refused_with_its_category(name):
     with pytest.raises(ValueError) as exc:
