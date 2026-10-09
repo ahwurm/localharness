@@ -1971,10 +1971,14 @@ class OrchestratorREPL:
 
     @staticmethod
     def _cold_served_name(ep) -> str:
-        """The model id a cold lifecycle peer will serve — the llama.cpp ``-a``/``--alias`` (or vLLM
+        """The model id a cold lifecycle peer will serve — the record's ``served_name`` (the ``-a``
+        alias; read first, D-05), else the llama.cpp ``-a``/``--alias`` (or vLLM
         ``--served-model-name``) from its launch args, falling back to the endpoint label. A
         pre-launch MENU LABEL only; the client binds to the real ``live_ep.served_models[0]`` the
         peer reports after it comes up, so a mislabel here can never mis-dispatch."""
+        served_name = getattr(ep.lifecycle, "served_name", None) if ep.lifecycle is not None else None
+        if served_name:
+            return served_name
         args = ep.lifecycle.extra_args if ep.lifecycle is not None else []
         for flag in ("-a", "--alias", "--served-model-name"):
             if flag in args:
