@@ -510,7 +510,8 @@ def test_env_refusal_lists_every_offender_in_sorted_order_whatever_the_dict_orde
         _llama(env=b)
     m1, m2 = str(e1.value), str(e2.value)
     assert m1.index("LLAMA_ARG_API_KEY") < m1.index("LLAMA_ARG_HOST")
-    assert m1.split("Value error, ")[-1] == m2.split("Value error, ")[-1]
+    refusal = lambda m: m[m.index("env refuses"):m.index(" [type=")]  # noqa: E731 - drop the input echo
+    assert refusal(m1) == refusal(m2)
 
 
 def test_config_ini_with_ordinary_options_validates():

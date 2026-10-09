@@ -1881,6 +1881,57 @@ class ManagedServerConfig(BaseModel):
             raise ValueError("api_key_file must be an absolute path (~ allowed)")
         return v
 
+    @field_validator("env")
+    @classmethod
+    def _env_names_admitted(cls, v: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+        """Only `LLAMA_ARG_*` names, none of the key, host/port, download or TLS options (the one
+        table in provider/server.py), and no NUL byte or newline in a value. Every offender is
+        named, in sorted order, so the message is the same for any dict order."""
+        # Function-local: provider/server.py imports this module at module level.
+        from localharness.provider.server import excluded_option
+
+        if v is None:
+            return v
+        offences = []
+        for name in sorted(v):
+            reasons = []
+            if not re.fullmatch(r"LLAMA_ARG_[A-Z0-9_]+", name):
+                reasons.append("not a LLAMA_ARG_ name")
+            category = excluded_option(name)
+            if category is not None:
+                reasons.append(f"a {category} option")
+            if "\x00" in v[name] or "\n" in v[name] or "\r" in v[name]:
+                reasons.append("value contains a NUL byte or newline")
+            if reasons:
+                offences.append(f"{name} ({', '.join(reasons)})")
+        if offences:
+            raise ValueError("env refuses " + "; ".join(offences))
+        return v
+
+    @field_validator("config_ini")
+    @classmethod
+    def _config_ini_keys_admitted(cls, v: Optional[str]) -> Optional[str]:
+        """The INI text may not set an option `env` refuses, by env name or by flag name with its
+        dashes stripped, in any section and any letter case. Comments, blank lines and section
+        headers are skipped; a line without `=` is left to llama-server's own parser."""
+        # Function-local: provider/server.py imports this module at module level.
+        from localharness.provider.server import excluded_option
+
+        if v is None:
+            return v
+        offences = []
+        for raw in v.splitlines():
+            line = raw.strip()
+            if not line or line[0] in ";#[" or "=" not in line:
+                continue
+            key = line.split("=", 1)[0].strip()
+            category = excluded_option(key)
+            if category is not None:
+                offences.append(f"config_ini refuses {key} (a {category} option)")
+        if offences:
+            raise ValueError("; ".join(offences))
+        return v
+
     def entry_for(self, name: str) -> Optional[LocalModelEntry]:
         return next((e for e in self.local_models if e.name == name), None)
 
