@@ -224,10 +224,15 @@ global config, a project's whole `proposer:` section is ignored. These are all o
 - `active_endpoint`
 - `server` (the whole section: what the harness launches, with which arguments and on which
   address)
+- `autosense` (the whole section: the memory margins a launched server's window and prompt cache
+  are sized by, and the folders searched for model files)
+- `effort_budget` (the whole section: the share of a reply's output headroom each reasoning level
+  may spend)
 - `org.audit_log_path`
 - `org.hooks`
 - `org.enforce_capability_floor`
 - `org.web_fetch_allow_private`
+- `org.default_effort`
 - `channels.remote_unattended`
 - `proposer.base_url`
 - `proposer.api_key`
