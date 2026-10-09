@@ -341,3 +341,97 @@ async def test_a_failed_swap_back_reports_why_the_peer_was_not_restored(
     assert ("Could not restore it: no llama-server — set extra_endpoints[flash-next]"
             ".lifecycle.binary") in last
     assert "NO model serving" not in last
+
+
+# --- the cold peer's menu name, and --host last on paths 2-4 ------------------------------------- #
+
+
+def _with_lifecycle(**record) -> EndpointRef:
+    """A peer whose record is built from `record`; it names nothing but what a test sets."""
+    return EndpointRef(
+        name="flash", base_url=PEER_URL, provider_type="llamacpp", gpu=True,
+        lifecycle=ManagedServerConfig(
+            runtime="llamacpp", binary="/x/llama-server", model="/x/m.gguf", port=8080, gpu=True,
+            **record))
+
+
+def _name_of(ep) -> str:
+    from localharness.cli.repl import OrchestratorREPL
+    return OrchestratorREPL._cold_served_name(ep)
+
+
+def test_served_name_is_read_before_any_alias_flag():
+    assert _name_of(_with_lifecycle(served_name="flash-next", extra_args=["-a", "other"])) == "flash-next"
+
+
+@pytest.mark.parametrize("args,expected", [
+    (["-a", "x"], "x"),
+    (["--alias", "y"], "y"),
+    (["--served-model-name", "z"], "z"),
+])
+def test_without_a_served_name_the_alias_flags_are_read(args, expected):
+    assert _name_of(_with_lifecycle(extra_args=args)) == expected
+
+
+def test_with_neither_the_endpoint_name_is_the_served_name():
+    assert _name_of(_with_lifecycle()) == "flash"
+    assert _name_of(_with_lifecycle(served_name=None, extra_args=["-ngl", "99"])) == "flash"
+
+
+def test_a_peer_with_no_lifecycle_gives_the_endpoint_name():
+    attach = EndpointRef(name="ollama-local", base_url="http://localhost:11434/v1",
+                         provider_type="ollama")
+    assert _name_of(attach) == "ollama-local"
+
+
+@pytest.mark.asyncio
+async def test_a_non_ascii_served_name_is_returned_and_matched_verbatim(tmp_path, boundaries):
+    name = "qwen-äö"
+    peer = _with_lifecycle(served_name=name)
+    assert _name_of(peer) == name
+    _, repl, channel, _ = _session(tmp_path, peer)
+    assert repl._cold_lifecycle_targets(["model-a"], {}) == {name: peer}
+
+    await repl._handle_slash(f"/model {name}")
+
+    assert boundaries.cmds, channel.messages
+    assert any(m.startswith("Launching flash") for m in channel.messages)
+
+
+@pytest.mark.asyncio
+async def test_launch_path_2_cold_branch_host_is_last(tmp_path, boundaries):
+    peer = _launchable_peer()
+    peer.lifecycle.extra_args = ["--host", "0.0.0.0", "-a", "qwen-gguf"]
+    assert peer.lifecycle.bind_all is False
+    _, repl, _, _ = _session(tmp_path, peer)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert boundaries.cmds
+    assert boundaries.cmds[0][-2:] == ["--host", "127.0.0.1"]
+
+
+@pytest.mark.asyncio
+async def test_launch_path_3_swap_back_host_is_last(tmp_path, boundaries, monkeypatch):
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    peer = _launchable_peer()
+    primary = _llama_primary(extra_args=["--host", "0.0.0.0"])
+    _, repl, _, agent = _session(tmp_path, peer, server=primary)
+    _on_the_cold_peer(repl, agent, peer)
+
+    await repl._handle_slash("/model cached-b")
+
+    assert boundaries.cmds
+    assert boundaries.cmds[-1][-2:] == ["--host", "127.0.0.1"]
+    assert repl._active_heavy == (primary, PRIMARY_URL)
+
+
+@pytest.mark.asyncio
+async def test_launch_path_4_restore_host_is_last(tmp_path, boundaries):
+    primary = _llama_primary(extra_args=["--host", "0.0.0.0"])
+    _, repl, _, _ = _session(tmp_path, _launchable_peer(), server=primary)
+
+    label, _ = await repl._restore_incumbent((primary, PRIMARY_URL))
+
+    assert label == primary.model
+    assert boundaries.cmds and boundaries.cmds[-1][-2:] == ["--host", "127.0.0.1"]
