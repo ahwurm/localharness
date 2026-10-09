@@ -531,9 +531,20 @@ def start_server(
         start_new_session=True,
         env=env,
     )
+    start = _proc_start_time(proc.pid)
     touch_private(pid_path(config_dir))
-    pid_path(config_dir).write_text(str(proc.pid), encoding="utf-8")
+    pid_path(config_dir).write_text(
+        f"{proc.pid} {start}" if start is not None else str(proc.pid), encoding="utf-8")
     return proc.pid
+
+
+def _read_proc_stat(pid: int) -> bytes | None:
+    """The raw `/proc/<pid>/stat`, or None when it cannot be read. The seam tests patch."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
 
 
 def _is_zombie(pid: int) -> bool:
@@ -541,12 +552,63 @@ def _is_zombie(pid: int) -> bool:
     a crashed `docker run --rm` client sits unreaped under the REPL (nothing wait()s it),
     which defeated wait_ready's fail-fast until the full timeout (#99). Non-Linux: False
     (managed-server lifecycle is POSIX-only; /proc is the cheap authoritative check)."""
-    try:
-        with open(f"/proc/{pid}/stat", "rb") as fh:
-            # field 3 (after the parenthesised comm, which may itself contain parens)
-            return fh.read().rsplit(b")", 1)[1].split()[0] == b"Z"
-    except (OSError, IndexError):
+    raw = _read_proc_stat(pid)
+    if raw is None:
         return False
+    try:
+        # field 3 (after the parenthesised comm, which may itself contain parens)
+        return raw.rsplit(b")", 1)[1].split()[0] == b"Z"
+    except IndexError:
+        return False
+
+
+def _proc_start_time(pid: int) -> int | None:
+    """Field 22 of `/proc/<pid>/stat` (clock ticks since boot): the process's start time.
+
+    The comm field may contain spaces and parentheses, so the parse starts after the LAST ")":
+    the tokens that follow begin at field 3 (the state), which puts field 22 at index 19.
+    None when /proc has no such entry or the line is not shaped like a stat line."""
+    raw = _read_proc_stat(pid)
+    if raw is None:
+        return None
+    try:
+        return int(raw.rsplit(b")", 1)[1].split()[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def _parse_pidfile(text: str) -> tuple[int, int | None]:
+    """`<pid> <starttime>` -> (pid, start); a bare `<pid>` (the 0.17 format) -> (pid, None), which
+    means "match by pid only" (D-26). Anything else raises ValueError."""
+    tokens = text.split()
+    if len(tokens) == 1:
+        return int(tokens[0]), None
+    if len(tokens) == 2:
+        return int(tokens[0]), int(tokens[1])
+    raise ValueError(f"pidfile holds {len(tokens)} tokens")
+
+
+def _read_pidfile(config_dir: Path) -> tuple[int, int | None] | None:
+    """The pidfile's (pid, start), or None when it is missing or malformed."""
+    try:
+        return _parse_pidfile(pid_path(config_dir).read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _same_process(pid: int, start: int | None) -> bool:
+    """True when `pid` is the process the harness launched (D-17): its /proc start time equals the
+    recorded one. `start is None` (a 0.17 bare-pid pidfile) matches by pid alone and reads no /proc.
+    A missing /proc entry is False, never an exception."""
+    if start is None:
+        return True
+    return _proc_start_time(pid) == start
+
+
+def _start_kw(start: int | None) -> dict[str, int]:
+    """`{"start": start}` when a start time is recorded, else `{}`: splatting it keeps the suite's
+    one-argument `_alive` fakes valid for bare-pid pidfiles."""
+    return {"start": start} if start is not None else {}
 
 
 def server_pid(config_dir: Path) -> int | None:
@@ -554,16 +616,20 @@ def server_pid(config_dir: Path) -> int | None:
 
     A zombie counts as dead (#99): reap it opportunistically if it's ours, drop the
     pidfile, report None — so wait_ready fails fast with the crash log tail instead of
-    polling a corpse for half an hour."""
+    polling a corpse for half an hour. A pid whose start time differs from the recorded one
+    was reused by an unrelated process: the harness's own is gone, so the pidfile is dropped."""
     path = pid_path(config_dir)
     try:
-        pid = int(path.read_text(encoding="utf-8").strip())
+        pid, start = _parse_pidfile(path.read_text(encoding="utf-8"))
         os.kill(pid, 0)
         if _is_zombie(pid):
             try:
                 os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:
                 pass
+            path.unlink(missing_ok=True)
+            return None
+        if not _same_process(pid, start):
             path.unlink(missing_ok=True)
             return None
         return pid
@@ -580,27 +646,30 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
     Returns True if something was stopped — and ONLY once death is confirmed: raises
     RuntimeError (naming the surviving pid / container) rather than report a false free."""
     pid = server_pid(config_dir)
+    recorded = _read_pidfile(config_dir)
+    start = recorded[1] if recorded is not None and recorded[0] == pid else None
     stopped = False
-    if pid is not None:
+    if pid is not None and _same_process(pid, start):
         try:
             os.killpg(pid, signal.SIGTERM)  # start_new_session=True → pid == pgid
         except (ProcessLookupError, PermissionError):
             pass
         deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline and _alive(pid):
+        while time.monotonic() < deadline and _alive(pid, **_start_kw(start)):
             time.sleep(0.2)
-        if _alive(pid):
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+        if _alive(pid, **_start_kw(start)):
+            if _same_process(pid, start):  # the pid may have been reused during the grace
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
             # VERIFIED death, same contract as the docker branch below: SIGKILL delivery is
             # ASYNCHRONOUS — a process unmapping tens of GiB of weights, or blocked in
             # uninterruptible I/O, stays resident for seconds after the signal. Returning True
             # here told free_accelerator the accelerator was free while the old model still held
             # its pages (two heavies on unified memory), and unlinking the pidfile made the
             # strategies' liveness report "no daemon" for a live process. Fail explicit instead.
-            if not _wait_dead(pid, attempts=20):  # 10s at the 0.5s poll
+            if not _wait_dead(pid, attempts=20, **_start_kw(start)):  # 10s at the 0.5s poll
                 raise RuntimeError(
                     f"pid {pid} still alive after SIGTERM+SIGKILL — refusing to report the "
                     "accelerator free while the process still holds it"
@@ -631,11 +700,12 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
     return stopped
 
 
-def _wait_dead(pid: int, attempts: int, poll_seconds: float = 0.5) -> bool:
+def _wait_dead(pid: int, attempts: int, poll_seconds: float = 0.5, *, start: int | None = None) -> bool:
     """Poll until the pid is gone (post-SIGKILL confirmation). Attempt-counted so tests stay
-    deterministic with sleep patched out — mirrors _wait_name_free's contract."""
+    deterministic with sleep patched out — mirrors _wait_name_free's contract. A pid reused by
+    another process counts as gone: `start` is the recorded start time."""
     for _ in range(max(1, attempts)):
-        if not _alive(pid):
+        if not _alive(pid, **_start_kw(start)):
             return True
         time.sleep(poll_seconds)
     return False
@@ -670,8 +740,12 @@ def docker_container_running(name: str = DOCKER_CONTAINER_NAME) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() == b"true"
 
 
-def _alive(pid: int) -> bool:
+def _alive(pid: int, start: int | None = None) -> bool:
+    """True while `pid` is a live, non-zombie process — and, when a start time was recorded, the
+    SAME process (a reused pid is not the harness's server)."""
     if _is_zombie(pid):  # #99: a zombie can't be signalled down — don't stall stop on it
+        return False
+    if not _same_process(pid, start):
         return False
     try:
         os.kill(pid, 0)
