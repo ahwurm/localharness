@@ -594,13 +594,21 @@ def _proc_start_time(pid: int) -> int | None:
 
 def _parse_pidfile(text: str) -> tuple[int, int | None]:
     """`<pid> <starttime>` -> (pid, start); a bare `<pid>` (the 0.17 format) -> (pid, None), which
-    means "match by pid only" (D-26). Anything else raises ValueError."""
+    means "match by pid only" (D-26). Anything else, and any pid <= 1, raises ValueError."""
     tokens = text.split()
     if len(tokens) == 1:
-        return int(tokens[0]), None
-    if len(tokens) == 2:
-        return int(tokens[0]), int(tokens[1])
-    raise ValueError(f"pidfile holds {len(tokens)} tokens")
+        start = None
+    elif len(tokens) == 2:
+        start = int(tokens[1])
+    else:
+        raise ValueError(f"pidfile holds {len(tokens)} tokens")
+    pid = int(tokens[0])
+    if pid <= 1:
+        # 0 and negatives are not a process: os.kill(0, 0) succeeds and os.killpg(0, SIGTERM) would
+        # signal the harness's own process group. 1 is init. Read as malformed, the pidfile is
+        # dropped as stale and nothing is ever signalled.
+        raise ValueError(f"pidfile holds pid {pid}, which is not a process the harness launched")
+    return pid, start
 
 
 def _read_pidfile(config_dir: Path) -> tuple[int, int | None] | None:
