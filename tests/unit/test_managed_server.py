@@ -72,12 +72,12 @@ def test_launch_target_validated():
         ManagedServerConfig(launch="docker", model="m")  # no image
 
 
-def test_llamacpp_requires_binary():
-    """0.11 Phase B: runtime=llamacpp needs a `binary` (the llama-server path) — the validator
-    stays honest for the new runtime. A well-formed llamacpp spec (launch defaults to binary)
-    constructs fine."""
-    with pytest.raises(ValueError, match="llamacpp"):
-        ManagedServerConfig(runtime="llamacpp", model="/x/model.gguf")  # no binary
+def test_llamacpp_binary_is_optional():
+    """A runtime=llamacpp record with no `binary` is declared, not launchable: it validates and
+    loads, and whether it can launch is the one launch decision's call. A well-formed llamacpp
+    spec (launch defaults to binary) constructs fine."""
+    declared = ManagedServerConfig(runtime="llamacpp", model="/x/model.gguf")  # no binary
+    assert declared.binary is None
     srv = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/model.gguf")
     assert srv.runtime == "llamacpp"
     assert srv.launch == "binary"  # unchanged default; runtime drives the command builder

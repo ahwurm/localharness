@@ -427,12 +427,13 @@ def test_managed_server_lmstudio_rejects_gpu_in_extra_args():
 
 
 @pytest.mark.parametrize("kw", [
-    dict(runtime="llamacpp", model="/x/m.gguf"),               # llamacpp needs binary
+    # (runtime=llamacpp no longer needs a binary: a binary-less record is declared, not
+    # launchable; see test_preset_record.py::test_binary_less_llamacpp_record_validates)
     dict(runtime="vllm", launch="binary", model="m"),          # binary launch needs binary
     dict(runtime="vllm", launch="docker", model="m"),          # docker launch needs docker_image
 ])
 def test_managed_server_non_ollama_launch_validators_unchanged(kw):
-    """Regression: the ollama exemption is scoped — vLLM/llama.cpp still require their launch target."""
+    """Regression: the ollama exemption is scoped — vLLM still requires its launch target."""
     from localharness.config.models import ManagedServerConfig
     with pytest.raises(ValidationError):
         ManagedServerConfig(**kw)

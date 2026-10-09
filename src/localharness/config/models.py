@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 import re
 from dataclasses import fields as dataclass_fields
 from typing import Any, Literal, Optional
@@ -1407,6 +1408,17 @@ class DivisionConfig(BaseModel):
         return v
 
 
+EffortLevel = Literal["off", "low", "high", "max"]
+"""The four reasoning-effort levels a preset, an agent or the machine default may name."""
+
+LLAMACPP_ONLY_FIELDS: tuple[str, ...] = (
+    "mmproj", "served_name", "cache_type_k", "cache_type_v", "cache_ram", "api_key_file", "env",
+    "config_ini",
+)
+"""The `ManagedServerConfig` fields refused on every runtime but llamacpp (vllm, ollama and
+lmstudio alike); `context` and `effort` are accepted everywhere."""
+
+
 class OrgConfig(BaseModel):
     """
     Organization-level defaults.
@@ -1774,11 +1786,16 @@ class ManagedServerConfig(BaseModel):
         default="binary",
         description="binary = a vllm executable (system or harness venv); docker = foreground `docker run` (DGX Spark route).",
     )
-    binary: Optional[str] = Field(default=None, description="Path to the vllm executable (launch=binary).")
+    binary: Optional[str] = Field(default=None, description=(
+        "The server executable: `vllm` (launch=binary) or `llama-server` (runtime=llamacpp). "
+        "Optional on llamacpp, where a record without one is declared, not launchable."))
     docker_image: Optional[str] = Field(default=None, description="Image to run (launch=docker).")
-    model: str = Field(description="HF repo id or local checkpoint path passed to `vllm serve`.")
+    model: str = Field(description=(
+        "What the server loads: an HF repo id or checkpoint for vLLM, the GGUF path for llama.cpp "
+        "(`-m`), the tag for Ollama, the model key for LM Studio."))
     port: int = Field(default=8081, description="Host port the OpenAI API is served on.")
-    extra_args: list[str] = Field(default_factory=list, description="Extra `vllm serve` args (from the reference architecture).")
+    extra_args: list[str] = Field(default_factory=list, description=(
+        "Extra server arguments, placed after the harness's own flags."))
     refarch: Optional[str] = Field(default=None, description="Reference-architecture key this setup came from.")
     local_models: list[LocalModelEntry] = Field(
         default_factory=list,
@@ -1798,9 +1815,10 @@ class ManagedServerConfig(BaseModel):
     bind_all: bool = Field(
         default=False,
         description=(
-            "vLLM only: listen on every network interface (how 0.16 launched it) instead of this "
-            "machine only. False (new installs) launches on 127.0.0.1: docker publishes "
-            "`-p 127.0.0.1:<port>:8000`, a binary gets `--host 127.0.0.1`. A config written before "
+            "vLLM and llama.cpp: listen on every network interface (how 0.16 launched it) instead "
+            "of this machine only. False (new installs) launches on 127.0.0.1: docker publishes "
+            "`-p 127.0.0.1:<port>:8000`, a binary gets `--host 127.0.0.1` as its last argument, so "
+            "a `--host` in `extra_args` cannot widen the launch. A config written before "
             "this setting existed is given `bind_all: true` by the config migration, so another "
             "machine using this server keeps working. Machine-level only, like all of `server`."
         ),
@@ -1808,7 +1826,7 @@ class ManagedServerConfig(BaseModel):
     require_api_key: bool = Field(
         default=False,
         description=(
-            "vLLM only: launch the server requiring the API key the harness sends it "
+            "vLLM and llama.cpp: launch the server requiring the API key the harness sends it "
             "(provider.api_key, or the peer endpoint's api_key for a launched peer), passed in its "
             "environment and never on its command line; the harness's own readiness and "
             "model-list checks then send the key too. False (the default) launches it with no key, "
@@ -1816,12 +1834,67 @@ class ManagedServerConfig(BaseModel):
             "all of `server`."
         ),
     )
+    mmproj: Optional[str] = Field(default=None, description=(
+        "llama.cpp only: the multimodal projector GGUF passed as `--mmproj`; `~` is expanded at "
+        "launch."))
+    served_name: Optional[str] = Field(default=None, description=(
+        "llama.cpp only: the alias the server answers to (`-a`); `/model` and `localharness "
+        "model` match it while `model` stays the GGUF path."))
+    context: Optional[int] = Field(default=None, ge=1, description=(
+        "The window to serve; on llama.cpp it becomes `-c`. Unset means the harness computes it."))
+    cache_type_k: Optional[str] = Field(default=None, description=(
+        "llama.cpp only: the K cache type (`--cache-type-k`), e.g. q8_0."))
+    cache_type_v: Optional[str] = Field(default=None, description=(
+        "llama.cpp only: the V cache type (`--cache-type-v`), e.g. q8_0."))
+    cache_ram: Optional[int] = Field(default=None, ge=0, description=(
+        "llama.cpp only: host prompt-cache size in MiB (`--cache-ram`); 0 turns it off. Unset "
+        "means the harness computes it."))
+    api_key_file: Optional[str] = Field(default=None, description=(
+        "llama.cpp only: an absolute path (`~` allowed) to the file holding the server's API key, "
+        "passed as `--api-key-file`. Requires `require_api_key: true`. The harness checks only "
+        "that it is a regular file and never reads it at launch."))
+    env: Optional[dict[str, str]] = Field(default=None, description=(
+        "llama.cpp only: LLAMA_ARG_* variables set in the server's environment at launch, for "
+        "settings no record field holds. Never a key, host/port, download or TLS option."))
+    config_ini: Optional[str] = Field(default=None, description=(
+        "llama.cpp only: the text of a llama.cpp config.ini carried on the record. It may not set "
+        "the options `env` refuses."))
+    effort: Optional[EffortLevel] = Field(default=None, description=(
+        "The default reasoning effort while this preset serves."))
+
+    @field_validator("served_name", "mmproj", "cache_type_k", "cache_type_v", "api_key_file")
+    @classmethod
+    def _argv_text_clean(cls, v: Optional[str], info: Any) -> Optional[str]:
+        """These strings reach argv: a blank, NUL-bearing or multi-line one would crash `Popen` at
+        launch or smuggle a second argument, so it is refused at load instead."""
+        if v is None:
+            return v
+        if not v.strip() or "\x00" in v or "\n" in v or "\r" in v:
+            raise ValueError(f"{info.field_name} must be a non-empty single line with no NUL byte")
+        return v
+
+    @field_validator("api_key_file")
+    @classmethod
+    def _api_key_file_absolute(cls, v: Optional[str]) -> Optional[str]:
+        """The key file is named by an absolute path (after `~`), so no launch depends on the cwd."""
+        if v is not None and not os.path.isabs(os.path.expanduser(v)):
+            raise ValueError("api_key_file must be an absolute path (~ allowed)")
+        return v
 
     def entry_for(self, name: str) -> Optional[LocalModelEntry]:
         return next((e for e in self.local_models if e.name == name), None)
 
     @model_validator(mode="after")
     def _launch_target_present(self) -> "ManagedServerConfig":
+        if self.runtime != "llamacpp":
+            set_names = [n for n in LLAMACPP_ONLY_FIELDS if getattr(self, n) is not None]
+            if set_names:
+                verb = "is" if len(set_names) == 1 else "are"
+                raise ValueError(
+                    f"runtime={self.runtime}: {', '.join(set_names)} {verb} llama.cpp-only "
+                    "(runtime: llamacpp)")
+        if self.api_key_file is not None and self.require_api_key is not True:
+            raise ValueError("api_key_file requires require_api_key: true")
         if self.runtime in ("ollama", "lmstudio"):
             # ollama / lmstudio: the harness drives a PATH CLI (`ollama serve` / `lms`), not a
             # checkpoint or image — `binary` defaults to that command and `model` is a pulled tag /
@@ -1837,8 +1910,11 @@ class ManagedServerConfig(BaseModel):
                     "`gpu` (--gpu max when gpu=True, --gpu off when False)."
                 )
             return self
-        if self.runtime == "llamacpp" and not self.binary:
-            raise ValueError("runtime=llamacpp requires `binary` (path to the llama-server executable)")
+        if self.runtime == "llamacpp":
+            # A llama.cpp record with no binary is declared, not launchable: whether it can launch
+            # is the one launch decision's call, so the schema accepts it (and must return before
+            # the `launch == "binary"` check below, which `launch`'s default would trip).
+            return self
         if self.launch == "binary" and not self.binary:
             raise ValueError("launch=binary requires `binary` (path to the vllm executable)")
         if self.launch == "docker" and not self.docker_image:
@@ -1933,3 +2009,18 @@ class HarnessConfig(BaseModel):
     sentinel: SentinelConfig = Field(
         default_factory=SentinelConfig,
         description="Eval-sentinel thresholds (REP-03/04). Addressable via `sentinel.{overfit_gap_threshold,duplicate_similarity,duplicate_consecutive_k,saturation_k,saturation_ceiling}`.")
+
+    @model_validator(mode="after")
+    def _peer_inherits_primary_binary(self) -> "HarnessConfig":
+        """A llama.cpp peer with no binary takes the primary's, decided once here at load and never
+        at launch. The primary must be llama.cpp with a binary; a vLLM or declared-only primary
+        lends nothing. The assignment is in place so the peer's lifecycle object keeps its identity
+        (`_active_heavy` compares by it) and the YAML file is untouched."""
+        primary = self.server
+        if primary is None or primary.runtime != "llamacpp" or not primary.binary:
+            return self
+        for ep in self.extra_endpoints:
+            life = ep.lifecycle
+            if life is not None and life.runtime == "llamacpp" and not life.binary:
+                life.binary = primary.binary
+        return self
