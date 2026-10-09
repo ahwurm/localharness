@@ -61,6 +61,52 @@ def required_key_kwargs(spec: Any, api_key: Any) -> dict[str, str]:
     return key_kwargs(api_key) if getattr(spec, "require_api_key", False) is True else {}
 
 
+LLAMA_EXCLUDED_OPTIONS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("key", ("--api-key",), "LLAMA_API_KEY"),
+    ("key", ("--api-key-file",), "LLAMA_ARG_API_KEY_FILE"),
+    ("key", (), "LLAMA_ARG_API_KEY"),
+    ("host/port", ("--host",), "LLAMA_ARG_HOST"),
+    ("host/port", ("--port",), "LLAMA_ARG_PORT"),
+    ("download", ("-mu", "--model-url"), "LLAMA_ARG_MODEL_URL"),
+    ("download", ("-mmu", "--mmproj-url"), "LLAMA_ARG_MMPROJ_URL"),
+    ("download", ("-dr", "--docker-repo"), "LLAMA_ARG_DOCKER_REPO"),
+    ("download", ("-hf", "-hfr", "--hf-repo"), "LLAMA_ARG_HF_REPO"),
+    ("download", ("-hff", "--hf-file"), "LLAMA_ARG_HF_FILE"),
+    ("download", ("--spec-draft-hf", "-hfd", "-hfrd", "--hf-repo-draft"),
+     "LLAMA_ARG_SPEC_DRAFT_HF_REPO"),
+    ("tls", ("--ssl-key-file",), "LLAMA_ARG_SSL_KEY_FILE"),
+    ("tls", ("--ssl-cert-file",), "LLAMA_ARG_SSL_CERT_FILE"),
+)
+"""The llama-server options a record may not carry through `env` or `config_ini`: rows of
+(category, flag spellings, env name). The key, host/port, download-identity and TLS options are
+owned by other record fields and by the launch decision, so a record never smuggles one in by a
+second door. The rows come from the owner's llama.cpp checkout (/home/awurm/src/llama.cpp HEAD
+43fe9c642, common/arg.cpp `set_env` bindings). The `env` validator, the `config_ini` validator and
+the later process import all read this one table, so no second list can drift.
+`LLAMA_ARG_NO_HOST` (`--no-host`) is a host-buffer compute switch, not a bind option, and is
+deliberately absent. `LLAMA_ARG_API_KEY` is read by nothing; it is listed so it is stripped with
+the key names."""
+
+LLAMA_EXCLUDED_ENV: frozenset[str] = frozenset(env for _, _, env in LLAMA_EXCLUDED_OPTIONS)
+"""The env names of `LLAMA_EXCLUDED_OPTIONS`."""
+
+LLAMA_EXCLUDED_INI_KEYS: frozenset[str] = frozenset(
+    {env.lower() for _, _, env in LLAMA_EXCLUDED_OPTIONS}
+    | {flag.lstrip("-").lower() for _, flags, _ in LLAMA_EXCLUDED_OPTIONS for flag in flags})
+"""The config.ini keys of `LLAMA_EXCLUDED_OPTIONS`: llama-server resolves a key as an env name
+verbatim or as a flag name with its leading dashes removed, in any section, in any letter case."""
+
+
+def excluded_option(name: str) -> str | None:
+    """The category ("key", "host/port", "download" or "tls") of the excluded option `name` spells,
+    as an env name or a dash-stripped flag name in any letter case, or None. Pure, no I/O."""
+    key = name.strip().lower()
+    for category, flags, env in LLAMA_EXCLUDED_OPTIONS:
+        if key == env.lower() or key in {f.lstrip("-").lower() for f in flags}:
+            return category
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
