@@ -98,21 +98,28 @@ the key names."""
 LLAMA_EXCLUDED_ENV: frozenset[str] = frozenset(env for _, _, env in LLAMA_EXCLUDED_OPTIONS)
 """The env names of `LLAMA_EXCLUDED_OPTIONS`."""
 
-LLAMA_EXCLUDED_INI_KEYS: frozenset[str] = frozenset(
-    {env.lower() for _, _, env in LLAMA_EXCLUDED_OPTIONS}
-    | {flag.lstrip("-").lower() for _, flags, _ in LLAMA_EXCLUDED_OPTIONS for flag in flags})
+def _excluded_by_key() -> dict[str, str]:
+    """Lower-cased env name or dash-stripped flag name -> category, built once from the table. The
+    first row wins a key two rows spell."""
+    by_key: dict[str, str] = {}
+    for category, flags, env in LLAMA_EXCLUDED_OPTIONS:
+        for key in (env.lower(), *(flag.lstrip("-").lower() for flag in flags)):
+            by_key.setdefault(key, category)
+    return by_key
+
+
+_EXCLUDED_BY_KEY: dict[str, str] = _excluded_by_key()
+
+LLAMA_EXCLUDED_INI_KEYS: frozenset[str] = frozenset(_EXCLUDED_BY_KEY)
 """The config.ini keys of `LLAMA_EXCLUDED_OPTIONS`: llama-server resolves a key as an env name
 verbatim or as a flag name with its leading dashes removed, in any section, in any letter case."""
 
 
 def excluded_option(name: str) -> str | None:
     """The category ("key", "host/port", "download" or "tls") of the excluded option `name` spells,
-    as an env name or a dash-stripped flag name in any letter case, or None. Pure, no I/O."""
-    key = name.strip().lower()
-    for category, flags, env in LLAMA_EXCLUDED_OPTIONS:
-        if key == env.lower() or key in {f.lstrip("-").lower() for f in flags}:
-            return category
-    return None
+    as an env name or a dash-stripped flag name in any letter case, or None. Pure, no I/O. Reads
+    the same index `LLAMA_EXCLUDED_INI_KEYS` is built from, so the set and the function cannot drift."""
+    return _EXCLUDED_BY_KEY.get(name.strip().lower())
 
 
 @dataclass(frozen=True)
