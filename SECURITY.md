@@ -965,35 +965,51 @@ different machine than the model" in the README.
 
 ### A model server LocalHarness launches
 
-When your config has a `server:` section, `localharness start` (and `/model`) can launch vLLM for
-you. That server listens on 127.0.0.1 only — a docker launch publishes `-p 127.0.0.1:<port>:8000`,
-a binary launch gets `--host 127.0.0.1` — unless `server.bind_all: true`, which keeps the old
-behaviour of listening on every interface, for a LAN or tailnet you serve on purpose. A config from
-an earlier release that launches one has `bind_all: true` written for it at the first start (see
-"What `localharness start` writes without asking"), so nothing that used it from another machine
-breaks; a new install's config says `bind_all: false`. Launches of llama.cpp, Ollama and LM Studio
-were on 127.0.0.1 already. Both settings are machine-level only.
+When your config has a `server:` section, `localharness start` (and `/model`) can launch vLLM or
+llama.cpp for you. That server listens on 127.0.0.1 only — a docker launch publishes
+`-p 127.0.0.1:<port>:8000`, and a vLLM binary or `llama-server` gets `--host 127.0.0.1` as its last
+argument, so a `--host` in `server.extra_args` cannot open a server the record keeps on this machine
+— unless `server.bind_all: true`, which listens on every interface (`llama-server` gets
+`--host 0.0.0.0`), for a LAN or tailnet you serve on purpose. A config from an earlier release that
+launches vLLM has `bind_all: true` written for it at the first start (see "What `localharness start`
+writes without asking"), so nothing that used it from another machine breaks; a new install's config
+says `bind_all: false`. Ollama and LM Studio launches always listen on 127.0.0.1. Both settings are
+machine-level only.
 
 With `server.require_api_key: true`, the server is launched requiring your `provider.api_key`. The
-key goes in the server's environment (`VLLM_API_KEY`; for docker, `-e VLLM_API_KEY`), never on its
-command line, so it is not in `ps` or in `vllm/serve.log`, and every request the harness makes to
-that server's `/v1/` routes — the readiness wait, model lists, the context-window probe, a `/model`
-switch, `localharness model` and `doctor` — sends it. **It is off by default.** A launched server
-without it answers any program
-that can reach its port: on this machine any process, including one the agent starts, and with
-`bind_all` any device on your network. `localharness doctor` shows a row when `provider.api_key` is
-set and the launched server does not require it, and a row while a launched server is reachable
-from other machines. An `extra_endpoints` entry whose `lifecycle` launches a server follows the same
-rules with its own `lifecycle.bind_all`, `lifecycle.require_api_key` and `api_key`.
+key goes in the server's environment — `VLLM_API_KEY` (for docker, `-e VLLM_API_KEY`), or
+`LLAMA_API_KEY` for llama.cpp — never on its command line, so it is not in `ps` or in
+`vllm/serve.log`, and every request the harness makes to that server's `/v1/` routes — the readiness
+wait, model lists, the context-window probe, a `/model` switch, `localharness model` and `doctor` —
+sends it. **It is off by default.** A launched server without it answers any program that can reach
+its port: on this machine any process, including one the agent starts, and with `bind_all` any device
+on your network. A `server.api_key_file` is passed as `--api-key-file` only when it is a regular file
+and the harness holds the key; otherwise that launch stays on 127.0.0.1, with one line saying why.
+`localharness doctor` shows a row when `provider.api_key` is set and the launched server does not
+require it, and a row while a launched server is reachable from other machines. An `extra_endpoints`
+entry whose `lifecycle` launches a server follows the same rules with its own `lifecycle.bind_all`,
+`lifecycle.require_api_key` and `api_key`.
+
+The launched server's environment is your shell's with the runtime's own settings dropped, so a
+variable you exported for some other run cannot reconfigure it: every `LLAMA_ARG_*`, `LLAMA_API_KEY`
+and `MTMD_BACKEND_DEVICE` for llama.cpp, and `VLLM_API_KEY` for vLLM. What it gets is that environment,
+the record's own `env:` entries and, when a key is required, the one key variable. The dropped names
+are logged, never their values. Stopping or replacing a launched server acts only on the process the
+harness started: the pidfile records its start time, so a process id since reused by another program
+is never signalled.
 
 **What this does NOT cover.** As vLLM's source reads, its key guards the `/v1/` routes only, so
 its `/tokenize` answers without a key, and the harness's token counter and doctor's tokenizer
 probes call it that way. `localharness init` sends no key when it looks for a server, so a re-run of `init` does not find
-a server that requires its key. Doctor's network row reads `bind_all` only: a `--host` in
-`server.extra_args` that opens the server is not named. And these launch rules were checked against
+a server that requires its key. Doctor's rows read the arguments the launch would use, for vLLM and
+llama.cpp alike, so a `--host` in `server.extra_args` is counted in what they report; they say
+`every interface, no key` when an open launch has no key with it, and doctor never opens a key file.
+And these launch rules were checked against
 a stand-in that behaves the way vLLM's source says vLLM does, not against vLLM itself: that a binary
 launch listens on every interface without `--host`, that it reads `VLLM_API_KEY`, and which routes
-its key guards are vLLM's behaviour as read from its source, not measured here.
+its key guards are vLLM's behaviour as read from its source, not measured here. The same holds for
+`llama-server`: that it keeps the last `--host` it is given and reads `LLAMA_API_KEY` is its
+behaviour as read from its source.
 
 ### `localharness mobile`
 
