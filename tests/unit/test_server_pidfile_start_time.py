@@ -56,7 +56,7 @@ def test_a_pidfile_is_a_bare_pid_or_a_pid_and_a_start_time(text, expected):
     assert server._parse_pidfile(text) == expected
 
 
-@pytest.mark.parametrize("text", ["", "   ", "4242 x", "x", "1 2 3"])
+@pytest.mark.parametrize("text", ["", "   ", "4242 x", "x", "1 2 3", "0", "-1", "1", "0 777", "-5 777", "1 777"])
 def test_a_malformed_pidfile_does_not_parse(text):
     with pytest.raises(ValueError):
         server._parse_pidfile(text)
@@ -125,7 +125,7 @@ def test_a_bare_pid_pidfile_from_0_17_stays_valid(tmp_path, monkeypatch):
     assert server.pid_path(tmp_path).exists()
 
 
-@pytest.mark.parametrize("text", ["", "4242 x", "1 2 3"])
+@pytest.mark.parametrize("text", ["", "4242 x", "1 2 3", "0", "-1", "1", "0 777", "x"])
 def test_a_malformed_pidfile_is_removed_and_reads_as_no_server(tmp_path, monkeypatch, text):
     monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)
     pidfile(tmp_path, text)
@@ -277,4 +277,16 @@ def test_start_server_closes_its_log_handle_and_raises_runtimeerror_when_popen_f
         server.start_server(tmp_path, ["/x/llama-server", "-m", "/x/m.gguf"], runtime="llamacpp")
 
     assert len(opened) == 1 and opened[0].closed
+    assert not server.pid_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("text", ["0", "-1", "1", "0 777", "x"])
+def test_stop_server_signals_nothing_for_a_pidfile_that_is_not_a_process(tmp_path, monkeypatch, text):
+    # pid 0 would make killpg signal the harness's own process group; none of these may reach a signal
+    monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)
+    signalled: list[tuple] = []
+    monkeypatch.setattr(server.os, "killpg", lambda pid, sig: signalled.append((pid, sig)))
+    pidfile(tmp_path, text)
+    assert server.stop_server(tmp_path) is False
+    assert signalled == []
     assert not server.pid_path(tmp_path).exists()
