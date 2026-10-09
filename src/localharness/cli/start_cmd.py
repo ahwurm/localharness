@@ -19,6 +19,7 @@ from rich.text import Text
 from localharness.cli.theme import entity, entity_text
 from localharness.cli.workspace import NO_INPUT_HELP
 from localharness.core.private_files import touch_private
+from localharness.core.which import which_outside_cwd
 from localharness.plugins.channels import (OWN_COMMAND, accepted_channels, channel_names,
                                            plugin_channel_names)
 
@@ -204,6 +205,42 @@ def _managed_server_running(strategy: Any, srv: Any, global_dir: Path) -> bool:
     pre-existing-server fail-fast then raised on the server that was in fact already up.
     Called inside the autostart try, so an OSError from the pid path degrades as before."""
     return strategy.liveness(srv, global_dir).alive
+
+
+async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launch_key: dict[str, str],
+                                *, path_binary: str | None = None) -> str | None:
+    """Launch path 1 of the five: `start`'s down-server branch. Wait for a server that is already
+    loading, or ask the launch decision BEFORE announcing anything and launch through the lifecycle
+    strategy. Returns the decision's refusal line when the launch is refused (nothing stopped,
+    nothing announced, nothing started) and None otherwise; raises what `activate` and `wait_ready`
+    raise. ``path_binary`` is a `llama-server` found on PATH: it only reaches the refusal text.
+
+    The posture phrase comes from the effective argv (`effective_posture`), never from the flags,
+    and only on a launch this start makes — a start that only waits for a loading server attaches."""
+    from localharness.provider import server as managed_server
+    from localharness.provider.lifecycle import strategy_for
+    strategy = strategy_for(srv)
+    label = managed_server.RUNTIME_LABELS.get(srv.runtime, srv.runtime)
+    if _managed_server_running(strategy, srv, global_dir):
+        console.print(f"Managed {label} is still loading — waiting...")
+        # Already launched (a live pidfile / running container) — only wait for readiness.
+        await managed_server.wait_ready(base_url, config_dir=global_dir, **launch_key)
+        return None
+    keyed = bool(launch_key)
+    decision = managed_server.launch_decision(srv, keyed)
+    if decision.refusal is not None:
+        found = f" (PATH has {path_binary})" if path_binary and srv.runtime == "llamacpp" else ""
+        return decision.refusal + found
+    _, posture = managed_server.effective_posture(srv, keyed=keyed, decision=decision)
+    detail = f"{posture}; " if posture else ""
+    console.print(f"Managed {label} is not running — starting it ({detail}model load can take several minutes)...",
+                  markup=False)
+    if decision.note:
+        err_console.print(decision.note, markup=False, soft_wrap=True)
+    # activate = serve_command → start_server → wait_ready (launch + readiness) via the lifecycle
+    # strategy. The off-loop verified-stop wrapper lives in the strategy, not this launch path.
+    await strategy.activate(srv, global_dir, base_url, **launch_key)
+    return None
 
 
 def _route_memory_logs_to_file(agent_dir: Path) -> Path:
@@ -691,6 +728,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     can_ask = channel_mode == "terminal" and not no_input and _stdin_is_a_terminal()
     project_trust = ProjectTrust(True) if list_models else decide_project_trust(
         workspace, ask=can_ask, trust_flag=trust_flag, channel_mode=channel_mode)
+    # Sensed once per start, before the machine-trust decision; this release uses it only in the
+    # declared-only refusal text (D-09).
+    path_llama_server = None if list_models else which_outside_cwd("llama-server")
     machine_trust = MachineTrust() if list_models else decide_machine_trust(cfg_path, ask=can_ask)
     if machine_trust.line:
         err_console.print(machine_trust.line, markup=False, soft_wrap=True)
@@ -954,26 +994,25 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     if not probe_ok and harness.server is not None:
         # Harness-managed server (init guided setup) — start it instead of erroring
         # (covers reboots). If a pid is alive, it's mid-load: just wait.
-        from localharness.provider import server as managed_server
-        from localharness.provider.lifecycle import strategy_for
-        strategy = strategy_for(harness.server)
+        refusal: str | None = None
         try:
-            if not _managed_server_running(strategy, harness.server, server_cfg_path):
-                console.print("Managed vLLM is not running — starting it (model load can take several minutes)...")
-                # activate = serve_command → start_server → wait_ready (launch + readiness) via the
-                # lifecycle strategy. Byte-equivalent to the old start_server+wait_ready pair; the
-                # off-loop verified-stop wrapper lives in the strategy, not this launch path.
-                await strategy.activate(harness.server, server_cfg_path, provider.base_url, **launch_key)
-            else:
-                console.print("Managed vLLM is still loading — waiting...")
-                # Already launched (a live pidfile / running container) — only wait for readiness.
-                await managed_server.wait_ready(provider.base_url, config_dir=server_cfg_path, **launch_key)
-            probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
+            refusal = await _start_managed_server(
+                harness.server, server_cfg_path, provider.base_url, launch_key,
+                path_binary=path_llama_server)
+            if refusal is None:
+                probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
         except (RuntimeError, TimeoutError, OSError) as exc:
             # OSError: server_pid()'s os.kill(pid, 0) liveness probe is POSIX-only semantics —
             # on Windows a stale pidfile raises a plain OSError instead of ProcessLookupError.
             # Managed-server lifecycle is POSIX-only for now; degrade to a message, not a traceback.
-            err_console.print(f"[bold red]Error:[/bold red] managed vLLM failed to start: {exc}")
+            from localharness.provider.server import RUNTIME_LABELS
+            label = RUNTIME_LABELS.get(harness.server.runtime, harness.server.runtime)
+            err_console.print(f"[bold red]Error:[/bold red] managed {label} failed to start: {exc}")
+        if refusal is not None:
+            # The one refusal line is the whole answer: no `Error:` line, no `doctor` pointer.
+            err_console.print(refusal, markup=False, soft_wrap=True)
+            await _probe_client.aclose()
+            raise typer.Exit(1)
     # The probe client has done its job — the session's real client is rebuilt below with the
     # probe-derived mode — so release its httpx pool here (#154), ahead of the `typer.Exit(1)`
     # failure paths just after, which would else leave the sockets to GC on the way out.

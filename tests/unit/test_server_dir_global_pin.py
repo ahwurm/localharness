@@ -81,15 +81,17 @@ def test_start_cmd_lifecycle_sites_name_the_global_pin():
     """start's three lifecycle calls read a name derived from the RAW --config-dir."""
     text = (SRC / "start_cmd.py").read_text(encoding="utf-8")
     assert "server_cfg_path = global_config_dir(config_dir)" in text
-    # Named in full: the bare substring "harness.server, server_cfg_path" is ALSO satisfied by the
-    # activate line below it, so reverting liveness alone left this test green (caught by the
-    # mutation check — the reason that check is mandatory before trusting a structural assertion).
-    assert "_managed_server_running(strategy, harness.server, server_cfg_path)" in text
+    # The down-server branch hands the PINNED dir to the one launch-or-wait helper (launch path 1),
+    # and the helper's own liveness, launch and wait calls all name the dir it was handed. Named in
+    # full so reverting the call site to the raw cfg_path (or the helper's liveness alone) fails.
+    assert "harness.server, server_cfg_path, provider.base_url, launch_key," in text
+    assert "harness.server, cfg_path, provider.base_url" not in text
+    assert "_managed_server_running(strategy, srv, global_dir)" in text
     assert "_managed_server_running(strategy, harness.server, cfg_path)" not in text
     # The two launch calls carry the key the launched server requires (`**launch_key`, which is {}
-    # unless server.require_api_key is on) — the pin is unchanged: both still name server_cfg_path.
-    assert "activate(harness.server, server_cfg_path, provider.base_url, **launch_key)" in text  # launch
-    assert "wait_ready(provider.base_url, config_dir=server_cfg_path, **launch_key)" in text
+    # unless server.require_api_key is on) — the pin is unchanged: both still name the handed dir.
+    assert "activate(srv, global_dir, base_url, **launch_key)" in text  # launch
+    assert "wait_ready(base_url, config_dir=global_dir, **launch_key)" in text
     assert "wait_ready(provider.base_url, config_dir=cfg_path)" not in text
     # The helper states which layer it expects, so a caller cannot hand it a workspace by accident.
     assert "def _managed_server_running(strategy: Any, srv: Any, global_dir: Path)" in text
