@@ -24,6 +24,7 @@ from pydantic import SecretStr
 
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import lifecycle, server
+from tests.unit.launch_support import PopenRecorder, popen, record_chain, record_opens  # noqa: F401
 
 KEY = "sk-K"
 
@@ -114,24 +115,7 @@ def test_llama_cpp_and_ollama_argv_are_unchanged(bind_all):
 # ------------------------------------------------------------------------------- the launch
 
 
-class _Popen:
-    """Records what start_server hands subprocess.Popen; starts nothing."""
-
-    calls: list[dict] = []
-
-    def __init__(self, cmd, **kwargs):
-        type(self).calls.append({"cmd": cmd, **kwargs})
-        self.pid = 4242
-
-
-@pytest.fixture
-def popen(monkeypatch):
-    _Popen.calls = []
-    monkeypatch.setattr(server.subprocess, "Popen", _Popen)
-    return _Popen.calls
-
-
-def test_a_required_key_travels_in_the_environment_not_in_argv_or_the_log(tmp_path, popen):
+def test_a_required_key_travels_in_the_environment_not_in_argv_or_the_log(tmp_path, popen):  # noqa: F811
     assert server.start_server(tmp_path, ["true"], api_key=KEY) == 4242
     (call,) = popen
     assert call["cmd"] == ["true"]
@@ -141,7 +125,7 @@ def test_a_required_key_travels_in_the_environment_not_in_argv_or_the_log(tmp_pa
     assert "=== launch: true ===" in log and KEY not in log
 
 
-def test_without_a_key_the_launch_inherits_the_environment(tmp_path, popen):
+def test_without_a_key_the_launch_inherits_the_environment(tmp_path, popen):  # noqa: F811
     server.start_server(tmp_path, ["true"])
     assert popen[0]["env"] is None
 
@@ -198,29 +182,8 @@ def test_a_key_is_required_only_when_the_server_is_set_to_require_it():
 # ------------------------------------------------------------------------------- the strategies
 
 
-def _record_chain(monkeypatch) -> dict:
-    calls: dict = {}
-
-    def serve_command(spec, **kw):
-        calls["serve_command"] = kw
-        return ["CMD"]
-
-    def start_server(config_dir, cmd, **kw):
-        calls["start_server"] = kw
-        return 7
-
-    async def wait_ready(base_url, **kw):
-        calls["wait_ready"] = {k: v for k, v in kw.items() if k == "api_key"}
-        return ["m"]
-
-    monkeypatch.setattr(server, "serve_command", serve_command)
-    monkeypatch.setattr(server, "start_server", start_server)
-    monkeypatch.setattr(server, "wait_ready", wait_ready)
-    return calls
-
-
 async def test_a_keyed_vllm_activation_threads_the_key_through_launch_and_readiness(tmp_path, monkeypatch):
-    calls = _record_chain(monkeypatch)
+    calls = record_chain(monkeypatch)
     await lifecycle.ManagedVllmStrategy().activate(_docker(), tmp_path, "http://127.0.0.1:8081/v1",
                                                    api_key=KEY)
     assert calls == {"serve_command": {"keyed": True}, "start_server": {"api_key": KEY},
@@ -228,13 +191,13 @@ async def test_a_keyed_vllm_activation_threads_the_key_through_launch_and_readin
 
 
 async def test_a_keyless_vllm_activation_calls_everything_as_before(tmp_path, monkeypatch):
-    calls = _record_chain(monkeypatch)
+    calls = record_chain(monkeypatch)
     await lifecycle.ManagedVllmStrategy().activate(_docker(), tmp_path, "http://127.0.0.1:8081/v1")
     assert calls == {"serve_command": {}, "start_server": {}, "wait_ready": {}}
 
 
 async def test_a_spawned_server_gets_the_key_on_its_readiness_probe_only(tmp_path, monkeypatch):
-    calls = _record_chain(monkeypatch)
+    calls = record_chain(monkeypatch)
     spec = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/m.gguf", port=8080)
     await lifecycle.SpawnedProcessStrategy().activate(spec, tmp_path, "http://127.0.0.1:8080/v1",
                                                       api_key=KEY)
@@ -280,3 +243,20 @@ def test_the_window_probe_sends_a_key_only_when_given_one(monkeypatch):
     assert probe_served_window("http://127.0.0.1:8081/v1", "m", "vllm", api_key=KEY) == 4096
     assert probe_served_window("http://127.0.0.1:8081/v1", "m", "vllm") == 4096
     assert sent == [{"Authorization": f"Bearer {KEY}"}, {}]
+
+
+# ------------------------------------------------------------------------------- the recorders
+
+
+def test_record_opens_sees_an_open_and_not_a_stat(tmp_path):
+    statted, opened_file, after = tmp_path / "statted", tmp_path / "opened", tmp_path / "after"
+    for p in (statted, opened_file, after):
+        p.write_text("x", encoding="utf-8")
+    with record_opens() as seen:
+        os.stat(statted)
+        open(opened_file, encoding="utf-8").close()
+    assert str(opened_file) in seen
+    assert str(statted) not in seen
+    recorded = list(seen)
+    open(after, encoding="utf-8").close()  # the hook stays installed, but it records nothing now
+    assert seen == recorded and str(after) not in seen
