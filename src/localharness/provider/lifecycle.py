@@ -53,10 +53,14 @@ class LiveEndpoint:
     """A serving endpoint a strategy brought up: its `base_url`, the model ids it actually
     serves (`served_models`), and an opaque stop `handle` the SAME strategy understands
     (docker: the container name; binary/spawned: the pid). The handle carries a strategy's
-    teardown target forward to later phases; Phase A populates it but stops via the config."""
+    teardown target forward to later phases; Phase A populates it but stops via the config.
+
+    `note` is the launch decision's one-line note when it withheld a widening (a key file it could
+    not hand to the server), else None; the caller shows it instead of reporting nothing."""
     base_url: str
     served_models: list[str]
     handle: Any
+    note: str | None = None
 
 
 @dataclass
@@ -79,6 +83,10 @@ class LifecycleStrategy(Protocol):
     `api_key` is the key the launched server requires, or None. A strategy never decides that:
     callers pass one only through `server.required_key_kwargs` (machine-level
     `require_api_key`, default off), so a keyless activation calls everything as it always did.
+
+    `peer` is the `EndpointRef.name` when `spec` is a peer's lifecycle, None for the primary; it is
+    used only for the wording of a launch refusal. A strategy whose runtime has no binary to refuse
+    (a PATH CLI) accepts it and ignores it.
     """
 
     async def activate(
@@ -90,6 +98,7 @@ class LifecycleStrategy(Protocol):
         timeout_seconds: float = 1800.0,
         on_poll: Callable[[float], None] | None = None,
         api_key: str | None = None,
+        peer: str | None = None,
     ) -> LiveEndpoint: ...
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None: ...
@@ -102,9 +111,12 @@ class ManagedVllmStrategy:
     REPL `/model` swap). A thin, ZERO-BEHAVIOR-CHANGE wrapper over `provider/server.py`, which
     both launch modes (`docker`, `binary`) already flow through:
 
-    - activate = `serve_command` → `start_server` → `wait_ready` (returns served ids); a required
-                 `api_key` reaches all three (the launch environment, never argv), keyword
-                 arguments passed only when there is one.
+    - activate = `launch_decision` → `serve_command` → `start_server` → `wait_ready` (returns served
+                 ids). The decision is asked once, here — activate is the one enforcement point:
+                 its refusal is raised as `LaunchRefused` before anything starts, and its
+                 loopback / key-file judgment and note ride the command and the `LiveEndpoint`. A
+                 required `api_key` reaches the launch and the probe (the launch environment, never
+                 argv), keyword arguments passed only when there is one.
     - stop     = `stop_server(config_dir, launch=spec.launch)` — the #100 VERIFIED stop
                  (docker: stop → poll name-free → `rm -f` fallback → raise if still stuck).
     - liveness = NAME-based for docker (`docker_container_running` via `docker inspect`), the
@@ -120,8 +132,15 @@ class ManagedVllmStrategy:
         timeout_seconds: float = 1800.0,
         on_poll: Callable[[float], None] | None = None,
         api_key: str | None = None,
+        peer: str | None = None,
     ) -> LiveEndpoint:
-        cmd = server.serve_command(spec, **({"keyed": True} if api_key else {}))
+        keyed = bool(api_key)
+        decision = server.launch_decision(spec, keyed, peer=peer)
+        if decision.refusal is not None:
+            raise server.LaunchRefused(decision.refusal)
+        cmd = server.serve_command(
+            spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
+            context=None, cache_ram=None)
         pid = server.start_server(config_dir, cmd, **server.key_kwargs(api_key))
         served = await server.wait_ready(
             base_url,
@@ -131,7 +150,7 @@ class ManagedVllmStrategy:
             **server.key_kwargs(api_key),
         )
         handle = server.DOCKER_CONTAINER_NAME if spec.launch == "docker" else pid
-        return LiveEndpoint(base_url=base_url, served_models=served, handle=handle)
+        return LiveEndpoint(base_url=base_url, served_models=served, handle=handle, note=decision.note)
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
         # OFF the event loop: the #100 verified docker stop can block ~90s worst-case (drain +
@@ -155,8 +174,10 @@ class SpawnedProcessStrategy:
     primitives `ManagedVllmStrategy` uses, so the proven detached-launch / pidfile / readiness /
     verified-stop recipe is REUSED, not reinvented:
 
-    - activate = `serve_command` → `start_server` → `wait_ready` (returns served ids); the stop
-                 handle is the launched PID.
+    - activate = `launch_decision` → `serve_command` → `start_server` → `wait_ready` (returns
+                 served ids); the stop handle is the launched PID. Like the vLLM strategy it is the
+                 one enforcement point of the decision: a declared-only record (no binary) is
+                 refused as `LaunchRefused` before anything starts.
     - stop     = `stop_server(config_dir, launch="binary")` — SIGTERM the process group, SIGKILL
                  on timeout. Always the pid-group teardown: a spawned server is a single tracked
                  process, never a `docker run` client, so `launch` is pinned to "binary" here.
@@ -177,8 +198,15 @@ class SpawnedProcessStrategy:
         timeout_seconds: float = 1800.0,
         on_poll: Callable[[float], None] | None = None,
         api_key: str | None = None,
+        peer: str | None = None,
     ) -> LiveEndpoint:
-        cmd = server.serve_command(spec)
+        keyed = bool(api_key)
+        decision = server.launch_decision(spec, keyed, peer=peer)
+        if decision.refusal is not None:
+            raise server.LaunchRefused(decision.refusal)
+        cmd = server.serve_command(
+            spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
+            context=None, cache_ram=None)
         pid = server.start_server(config_dir, cmd)
         served = await server.wait_ready(
             base_url,
@@ -187,7 +215,7 @@ class SpawnedProcessStrategy:
             on_poll=on_poll,
             **server.key_kwargs(api_key),
         )
-        return LiveEndpoint(base_url=base_url, served_models=served, handle=pid)
+        return LiveEndpoint(base_url=base_url, served_models=served, handle=pid, note=decision.note)
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
         # OFF the event loop (same reason as ManagedVllmStrategy.stop): a SIGTERM→SIGKILL grace
@@ -230,6 +258,7 @@ class DaemonStrategy:
         timeout_seconds: float = 1800.0,
         on_poll: Callable[[float], None] | None = None,
         api_key: str | None = None,
+        peer: str | None = None,
     ) -> LiveEndpoint:
         # CONTRACT: like every LifecycleStrategy.activate, this raises ONLY RuntimeError/TimeoutError
         # on failure — the /model swap callers catch exactly those to tear down + restore. _load
@@ -372,6 +401,7 @@ class LmsStrategy:
         timeout_seconds: float = 1800.0,
         on_poll: Callable[[float], None] | None = None,
         api_key: str | None = None,
+        peer: str | None = None,
     ) -> LiveEndpoint:
         v1 = self._v1(base_url)
         if await self._server_already_up(v1):

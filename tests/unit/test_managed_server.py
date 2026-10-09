@@ -106,9 +106,10 @@ def test_serve_command_docker():
 
 
 def test_serve_command_llamacpp_exact_argv():
-    """0.11 Phase B: runtime=llamacpp emits `llama-server -m <gguf> --host 127.0.0.1 --port <p>`
-    with the alias/context/offload flags appended verbatim from extra_args — no docker mount,
-    no --served-model-name registry indirection (a GGUF file IS the model). EXACT argv, in order."""
+    """0.11 Phase B: runtime=llamacpp emits `llama-server -m <gguf> --port <p>` with the
+    alias/context/offload flags appended verbatim from extra_args and `--host 127.0.0.1` LAST
+    (the server keeps the last `--host`, so `bind_all` is the only exposure switch) — no docker
+    mount, no --served-model-name registry indirection (a GGUF file IS the model). EXACT argv."""
     srv = ManagedServerConfig(
         runtime="llamacpp",
         binary="/home/u/llama.cpp/build/bin/llama-server",
@@ -119,8 +120,9 @@ def test_serve_command_llamacpp_exact_argv():
     assert server.serve_command(srv) == [
         "/home/u/llama.cpp/build/bin/llama-server",
         "-m", "/home/u/models/Qwen3.6-35B-A3B-GGUF/Qwen_Qwen3.6-35B-A3B-Q4_K_M.gguf",
-        "--host", "127.0.0.1", "--port", "8080",
+        "--port", "8080",
         "-c", "32768", "--parallel", "1", "-ngl", "99", "--jinja", "-a", "qwen3.6-35b-a3b",
+        "--host", "127.0.0.1",
     ]
 
 
