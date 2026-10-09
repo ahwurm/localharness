@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 import typer
 import yaml
 
@@ -172,3 +173,142 @@ async def test_the_helper_appends_the_path_only_for_llama_cpp(tmp_path, monkeypa
     spec = ManagedServerConfig(runtime="llamacpp", model="/x/m.gguf", port=8080)
     assert await _start_managed_server(spec, tmp_path, URL, {}, path_binary="/p/llama-server") == (
         f"{REFUSAL} (PATH has /p/llama-server)")
+
+
+# ------------------------------------------------------------------------------- the launch lines
+
+
+class _Launch:
+    """Console, error console and `start_server` recorders sharing one ordering log."""
+
+    def __init__(self, monkeypatch, *, pid=None):
+        self.log: list[str] = []
+        self.out: list[tuple[tuple, dict]] = []
+        self.err: list[tuple[tuple, dict]] = []
+        self.cmds: list[list[str]] = []
+        self.kw: list[dict] = []
+
+        def printer(sink, tag):
+            def _print(*a, **k):
+                sink.append((a, k))
+                self.log.append(f"{tag}:{a[0] if a else ''}")
+            return _print
+
+        def start(config_dir, cmd, **kw):
+            self.cmds.append(list(cmd))
+            self.kw.append(kw)
+            self.log.append("start_server")
+            return 4321
+
+        async def wait_ready(base_url, **kw):
+            self.log.append("wait_ready")
+            return ["m"]
+
+        monkeypatch.setattr(start_cmd.console, "print", printer(self.out, "out"))
+        monkeypatch.setattr(start_cmd.err_console, "print", printer(self.err, "err"))
+        monkeypatch.setattr(server, "server_pid", lambda _d: pid)
+        monkeypatch.setattr(server, "docker_container_running", lambda _n: False)
+        monkeypatch.setattr(server, "start_server", start)
+        monkeypatch.setattr(server, "wait_ready", wait_ready)
+
+    @property
+    def lines(self) -> list[str]:
+        return [" ".join(str(x) for x in a) for a, _ in self.out]
+
+    @property
+    def err_lines(self) -> list[str]:
+        return [" ".join(str(x) for x in a) for a, _ in self.err]
+
+
+async def test_an_extra_args_host_never_widens_the_launch_and_the_line_names_llama_cpp(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    spec = _llama(extra_args=["--host", "0.0.0.0"])
+    assert await _start_managed_server(spec, tmp_path, URL, {}) is None
+    assert seen.cmds[0][-2:] == ["--host", "127.0.0.1"]
+    assert seen.lines == ["Managed llama.cpp is not running — starting it (model load can take several minutes)..."]
+
+
+async def test_every_interface_no_key_rides_the_announcement_once_and_before_the_launch(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    assert await _start_managed_server(_llama(bind_all=True), tmp_path, URL, {}) is None
+    assert seen.lines == [f"Managed llama.cpp is not running — starting it ({PHRASE}; "
+                          "model load can take several minutes)..."]
+    assert len([line for line in seen.lines if PHRASE in line]) == 1
+    assert seen.log.index(f"out:{seen.lines[0]}") < seen.log.index("start_server")
+    assert seen.cmds[0][-2:] != ["--host", "127.0.0.1"] and "0.0.0.0" in seen.cmds[0]
+
+
+async def test_a_held_key_means_the_line_carries_no_exposure_phrase(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    spec = _llama(bind_all=True, require_api_key=True)
+    assert await _start_managed_server(spec, tmp_path, URL, {"api_key": "K"}) is None
+    assert not [line for line in seen.lines if PHRASE in line]
+    assert seen.lines == ["Managed llama.cpp is not running — starting it (model load can take several minutes)..."]
+
+
+async def test_a_vllm_docker_record_keeps_its_0_17_line_byte_for_byte(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    spec = ManagedServerConfig(launch="docker", docker_image="img:tag", model="org/repo", port=8080,
+                               bind_all=False)
+    assert await _start_managed_server(spec, tmp_path, URL, {}) is None
+    assert seen.lines == ["Managed vLLM is not running — starting it (model load can take several minutes)..."]
+
+
+async def test_an_unreadable_key_file_prints_its_note_verbatim_and_launches_on_loopback(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    spec = _llama(bind_all=True, require_api_key=True, api_key_file=str(tmp_path))
+    assert await _start_managed_server(spec, tmp_path, URL, {}) is None
+    (args, kwargs), = seen.err
+    assert args == (f"--api-key-file {tmp_path} unreadable: not a regular file — "
+                    "launched on 127.0.0.1 for this run",)
+    assert kwargs.get("markup") is False and kwargs.get("soft_wrap") is True
+    assert seen.cmds[0][-2:] == ["--host", "127.0.0.1"] and "--api-key-file" not in seen.cmds[0]
+    assert PHRASE not in seen.lines[0]
+
+
+async def test_a_bracketed_note_path_reaches_the_error_console_verbatim(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    bad = tmp_path / "[bold]keys"
+    bad.mkdir()
+    spec = _llama(bind_all=True, require_api_key=True, api_key_file=str(bad))
+    assert await _start_managed_server(spec, tmp_path, URL, {}) is None
+    assert f"--api-key-file {bad} unreadable" in seen.err_lines[0]
+
+
+async def test_a_server_already_loading_is_waited_for_with_no_decision_and_no_posture(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch, pid=4321)
+
+    def boom(*a, **k):
+        raise AssertionError("a start that only waits asks no launch decision")
+
+    monkeypatch.setattr(server, "launch_decision", boom)
+    assert await _start_managed_server(_llama(bind_all=True), tmp_path, URL, {}) is None
+    assert seen.lines == ["Managed llama.cpp is still loading — waiting..."]
+    assert seen.cmds == [] and seen.log == ["out:Managed llama.cpp is still loading — waiting...", "wait_ready"]
+
+
+async def test_a_vllm_record_that_is_loading_keeps_its_0_17_wait_line(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch, pid=4321)
+    spec = ManagedServerConfig(launch="binary", binary="/opt/vllm", model="org/repo", port=8080)
+    assert await _start_managed_server(spec, tmp_path, URL, {}) is None
+    assert seen.lines == ["Managed vLLM is still loading — waiting..."]
+
+
+@pytest.mark.parametrize(("runtime", "label"), [("vllm", "vLLM"), ("llamacpp", "llama.cpp"),
+                                                 ("ollama", "Ollama"), ("lmstudio", "LM Studio")])
+def test_the_runtime_label_comes_from_the_one_table(runtime, label):
+    assert server.RUNTIME_LABELS[runtime] == label
+
+
+async def test_a_failed_launch_names_the_runtime_in_the_error_line(tmp_path, monkeypatch):
+    seen = _boot(tmp_path, monkeypatch, server_block={"runtime": "llamacpp", "binary": "/x/llama-server",
+                                                      "model": "/x/m.gguf", "port": 8080})
+
+    def boom(config_dir, cmd, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(server, "start_server", boom)
+    assert await _drive(tmp_path) == 1
+    assert [line for line in _err_text(seen.err) if "Error:" in line][0] == (
+        "[bold red]Error:[/bold red] managed llama.cpp failed to start: boom")
+    assert not [line for line in _err_text(seen.err) if REFUSAL in line]
