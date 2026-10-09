@@ -468,3 +468,51 @@ async def test_a_cold_launch_with_a_missing_binary_restores_the_incumbent_in_one
     assert "\n" not in last and "NO model serving" not in last
     assert repl._active_heavy is not None and repl._active_heavy[0] is primary
     assert agent._llm.rebinds == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restore_launch_returns_its_cause_not_nothing(tmp_path, boundaries, monkeypatch):
+    peer = _launchable_peer()
+    _, repl, _, _ = _session(tmp_path, peer)
+    repl._active_heavy = None
+
+    async def never_ready(base_url, config_dir=None, **kw):
+        raise TimeoutError("llama-server never became ready")
+
+    monkeypatch.setattr(managed_server, "wait_ready", never_ready)
+
+    assert await repl._restore_incumbent((peer.lifecycle, PEER_URL)) == (
+        None, "llama-server never became ready")
+    assert repl._active_heavy is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restore_that_is_not_a_launch_error_keeps_its_type_name(
+        tmp_path, boundaries, monkeypatch):
+    peer = _launchable_peer()
+    _, repl, _, _ = _session(tmp_path, peer)
+    repl._active_heavy = None
+
+    async def broken(base_url, config_dir=None, **kw):
+        raise KeyError("served")
+
+    monkeypatch.setattr(managed_server, "wait_ready", broken)
+
+    assert await repl._restore_incumbent((peer.lifecycle, PEER_URL)) == (None, "KeyError: 'served'")
+
+
+@pytest.mark.asyncio
+async def test_a_cold_launch_whose_restore_fails_names_the_cause_in_the_one_failure_line(
+        tmp_path, boundaries, monkeypatch):
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer())
+
+    async def never_ready(base_url, config_dir=None, **kw):
+        raise TimeoutError("llama-server never became ready")
+
+    monkeypatch.setattr(managed_server, "wait_ready", never_ready)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    last = channel.messages[-1]
+    assert "Could not restore it: llama-server never became ready" in last
+    assert "NO model serving" not in last

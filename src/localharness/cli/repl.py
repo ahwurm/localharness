@@ -2022,9 +2022,9 @@ class OrchestratorREPL:
         is never left with nothing serving. ``stopped`` is the ``(spec, base_url)`` free_accelerator
         returned, or None. Returns ``(label, note)`` on success (and restores ``_active_heavy``) —
         ``note`` is the launch decision's one line when it withheld a widening — and
-        ``(None, refusal)`` when the decision refuses the relaunch, so the caller reports the cause
-        instead of "nothing serving" (D-08). ``(None, None)`` is nothing to restore or a failed
-        launch: the caller then reports the box needs manual attention."""
+        ``(None, why)`` when the decision refuses the relaunch or the launch itself fails, so the caller
+        reports the cause instead of "nothing serving" (D-08). ``(None, None)`` is nothing to restore:
+        the caller then reports the box needs manual attention."""
         if stopped is None:
             return None, None
         spec, base_url = stopped
@@ -2042,8 +2042,15 @@ class OrchestratorREPL:
             return spec.model, getattr(live, "note", None)
         except LaunchRefused as exc:
             return None, str(exc)
-        except Exception:  # noqa: BLE001 — restore is best-effort; the caller surfaces the failure
-            return None, None
+        except Exception as exc:  # noqa: BLE001 — restore is best-effort; the caller surfaces the failure
+            # The same (None, why) shape as a refusal, so the caller's "Could not restore it: <why>"
+            # names the cause (a bad binary, a timeout, a port clash) instead of hiding it. The
+            # activate contract's own failures (RuntimeError / TimeoutError) are already one readable
+            # line; anything else keeps its type name so it is not an empty or cryptic string.
+            text = str(exc)
+            if isinstance(exc, (RuntimeError, TimeoutError)) and text:
+                return None, text
+            return None, f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
     def _provider_type_for_base_url(self, base_url: str) -> str | None:
         """Resolve the runtime ``provider_type`` for ``base_url`` against the CURRENT session config
