@@ -249,3 +249,32 @@ def test_a_real_child_records_its_real_start_time_and_stops(tmp_path):
     finally:
         assert server.stop_server(tmp_path) is True
     assert not server._alive(pid)
+
+
+# ------------------------------------------------------------------------------- a launch that fails
+
+
+def test_start_server_closes_its_log_handle_and_raises_runtimeerror_when_popen_fails(
+        tmp_path, monkeypatch):
+    # A binary that is set but missing passes the launch decision and fails only at Popen. The
+    # failure must be the RuntimeError every activate caller prints and restores from, and the
+    # serve.log handle opened just before must not leak.
+    opened: list = []
+    real_open = open
+
+    def recording_open(*args, **kwargs):
+        handle = real_open(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    def popen_fails(cmd, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", cmd[0])
+
+    monkeypatch.setattr(server, "open", recording_open, raising=False)
+    monkeypatch.setattr(server.subprocess, "Popen", popen_fails)
+
+    with pytest.raises(RuntimeError, match=r"could not launch /x/llama-server: No such file or directory"):
+        server.start_server(tmp_path, ["/x/llama-server", "-m", "/x/m.gguf"], runtime="llamacpp")
+
+    assert len(opened) == 1 and opened[0].closed
+    assert not server.pid_path(tmp_path).exists()

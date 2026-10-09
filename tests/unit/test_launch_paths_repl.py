@@ -435,3 +435,36 @@ async def test_launch_path_4_restore_host_is_last(tmp_path, boundaries):
 
     assert label == primary.model
     assert boundaries.cmds and boundaries.cmds[-1][-2:] == ["--host", "127.0.0.1"]
+
+
+# --- a binary that is set but missing: the failure every activate caller restores from ----------- #
+
+_REAL_START_SERVER = managed_server.start_server  # the `boundaries` fixture replaces it per test
+
+
+@pytest.mark.asyncio
+async def test_a_cold_launch_with_a_missing_binary_restores_the_incumbent_in_one_failure_line(
+        tmp_path, boundaries, monkeypatch):
+    class _Child:
+        pid = 4242
+
+    def popen(cmd, **kw):
+        if cmd[0] == "/x/llama-server":
+            raise FileNotFoundError(2, "No such file or directory", cmd[0])
+        return _Child()
+
+    # the real start_server, so the Popen failure travels the real activate path
+    monkeypatch.setattr(managed_server, "start_server", _REAL_START_SERVER)
+    monkeypatch.setattr(managed_server.subprocess, "Popen", popen)
+    harness, repl, channel, agent = _session(tmp_path, _launchable_peer())
+    primary = harness.server
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    last = channel.messages[-1]
+    assert last.startswith("Launch of llamacpp-local failed: could not launch /x/llama-server: "
+                           "No such file or directory")
+    assert f"Restored {primary.model}." in last
+    assert "\n" not in last and "NO model serving" not in last
+    assert repl._active_heavy is not None and repl._active_heavy[0] is primary
+    assert agent._llm.rebinds == []

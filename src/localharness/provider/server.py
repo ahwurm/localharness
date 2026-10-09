@@ -523,14 +523,22 @@ def start_server(
     log = open(log_path(config_dir), "ab", opener=private_opener)
     log.write(f"\n=== launch: {' '.join(cmd)} ===\n".encode())
     log.flush()
-    proc = subprocess.Popen(
-        cmd,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-        env=env,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env=env,
+        )
+    except OSError as exc:
+        # A binary that is set but missing or not executable passes `launch_decision` (it never
+        # checks the disk) and fails only here. Raise the failure every `activate` caller already
+        # prints and restores the incumbent from (RuntimeError), not a bare OSError that escapes
+        # them after the incumbent was stopped; and do not leak the serve.log handle.
+        log.close()
+        raise RuntimeError(f"could not launch {cmd[0]}: {exc.strerror or exc}") from exc
     start = _proc_start_time(proc.pid)
     touch_private(pid_path(config_dir))
     pid_path(config_dir).write_text(
