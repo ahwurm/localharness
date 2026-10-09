@@ -1634,8 +1634,20 @@ class OrchestratorREPL:
             # the box is never left with two heavies or nothing serving. The lock governs servers the
             # harness LAUNCHED; it can't stop an unmanaged/attach-only one (see __init__ seeding note).
             from localharness.provider import lifecycle as _lifecycle
-            from localharness.provider.server import required_key_kwargs
+            from localharness.provider.server import (
+                effective_posture,
+                launch_decision,
+                required_key_kwargs,
+            )
             ep = cold_target[target]
+            # The one launch decision, asked BEFORE anything is stopped or announced (D-08): a launch
+            # that cannot happen answers in one line and leaves the incumbent exactly as it was.
+            launch_kw = required_key_kwargs(ep.lifecycle, ep.api_key)
+            keyed = bool(launch_kw)
+            decision = launch_decision(ep.lifecycle, keyed, peer=ep.name)
+            if decision.refusal is not None:
+                await self._channel.send_message(decision.refusal, metadata={"style": "system.error"})
+                return
             box_note = getattr(self._channel, "box_activity", None)
 
             def _cold_progress(elapsed: float) -> None:
@@ -1658,15 +1670,19 @@ class OrchestratorREPL:
             if stopped is not None:
                 self._active_heavy = None
             tradeoff = self._swap_tradeoff_note(cur_ptype, current, ep.provider_type, target)
+            _, posture = effective_posture(ep.lifecycle, keyed=keyed, decision=decision)
             await self._send_info(
-                f"Launching {ep.name} — the swap can take several minutes...{tradeoff}",
+                f"Launching {ep.name}{f' ({posture})' if posture else ''} — "
+                f"the swap can take several minutes...{tradeoff}",
                 colorize=True,
             )
+            if decision.note:
+                await self._send_info(decision.note)
             try:
                 # the peer's own key, only when its lifecycle is set to require one (default off)
                 live_ep = await _lifecycle.strategy_for(ep.lifecycle).activate(
                     ep.lifecycle, self._server_config_dir, ep.base_url, on_poll=_cold_progress,
-                    **required_key_kwargs(ep.lifecycle, ep.api_key),
+                    peer=ep.name, **launch_kw,
                 )
             except (RuntimeError, TimeoutError) as exc:
                 # The peer half-started (a TimeoutError means its process is still ALIVE, per
