@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
@@ -201,29 +200,16 @@ def _size_llamacpp_launch(
     fit gives no `-c` (llama-server's own `--fit` sizes the window, mode "fit-by-server"); a header
     that cannot be read, a missing key or an unknown memory is "not computed", never a guess. Reads
     the header, the free memory and `/proc/meminfo`; starts nothing."""
-    from localharness.agent.gguf_header import GgufHeaderError, read_header
     from localharness.provider import autosense as _auto
 
     extra = list(spec.extra_args or [])
-    has_c = any(t in ("-c", "--ctx-size") or t.startswith("--ctx-size=") for t in extra)
-    try:
-        header = _auto.fit_header(read_header(os.path.expanduser(spec.model), _auto.FIT_KEYS))
-    except (GgufHeaderError, OSError):
-        header = {}
-    n_layer = header.get("block_count")
-    offload = _auto.offload_kind(extra, n_layer) if n_layer else "unknown"
-    mem = _auto.free_memory(autosense)
-    weights = _auto.weights_bytes(spec.model, spec.mmproj)
-    mi = _auto._read_meminfo()
-    fits = _auto.fit(
-        header, mem.free_bytes if mem else None, autosense, None,
-        cache_type_k=spec.cache_type_k, cache_type_v=spec.cache_type_v,
-        weights=weights, offload=offload, runtime=spec.runtime)
-    cache_set = spec.cache_ram is not None or any(
-        t in ("--cache-ram", "-cram") or t.startswith("--cache-ram=") for t in extra)
+    fi = _auto.compute_fit(spec, autosense, meminfo=True)
+    header, mem, weights, mi, fits = fi.header, fi.memory, fi.weights, fi.meminfo, fi.fits
+    has_c = _auto.has_ctx_arg(extra)
+    cache_set = spec.cache_ram is not None or _auto.has_cache_ram_arg(extra)
     cache_kw = None if cache_set else _auto.cache_ram_mib(
         mi["MemAvailable"] if mi else None, mi["MemTotal"] if mi else None,
-        weights, offload, extra, autosense)
+        weights, fi.offload, extra, autosense)
     if spec.context is not None:
         mode, asked, ctx_kw = "record", spec.context, None
     elif has_c:

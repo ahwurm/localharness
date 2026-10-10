@@ -111,26 +111,12 @@ def _doctor_fit(
     server = harness.server
     if server is None or server.runtime != "llamacpp" or not server.model:
         return None, trained
-    from localharness.agent.gguf_header import read_header
     from localharness.provider import autosense as _auto
 
-    try:
-        header = _auto.fit_header(read_header(os.path.expanduser(server.model), _auto.FIT_KEYS))
-    except (OSError, ValueError):  # GgufHeaderError is a ValueError; NotRegularFile an OSError
-        header = {}
-    trained = trained or header.get("context_length")
-    if not served:
-        return None, trained
-    extra = list(server.extra_args or [])
-    block_count = header.get("block_count")
-    offload = _auto.offload_kind(extra, block_count) if block_count else "unknown"
-    mem = _auto.free_memory(harness.autosense)
-    fits = _auto.fit(
-        header, mem.free_bytes if mem else None, harness.autosense, served,
-        cache_type_k=server.cache_type_k, cache_type_v=server.cache_type_v,
-        weights=_auto.weights_bytes(server.model, server.mmproj), offload=offload,
-        runtime="llamacpp")
-    return fits, trained
+    # No served window to add to means no memory probe: only the header (for `trained`) is read.
+    fi = _auto.compute_fit(server, harness.autosense, attached_served=served, size=bool(served))
+    trained = trained or fi.header.get("context_length")
+    return (fi.fits if served else None), trained
 
 
 def _print_overridden_keys(cfg_path: Path, workspace: Path, loader) -> None:

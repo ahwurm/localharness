@@ -21,9 +21,12 @@ from localharness.provider.autosense import (
     FreeMemory,
     WindowReport,
     cache_ram_mib,
+    compute_fit,
     fit,
     fit_header,
     free_memory,
+    has_cache_ram_arg,
+    has_ctx_arg,
     kv_bytes_per_token,
     offload_kind,
     weights_bytes,
@@ -66,6 +69,69 @@ def test_fit_header_filters_a_per_layer_head_count_kv_list():
     assert fit_header({"head_count_kv": [8, "x", 4, False]}) == {"head_count_kv": [8, 4]}
     assert fit_header({"head_count_kv": ["x"]}) == {}
     assert fit_header({"head_count_kv": "8"}) == {}
+
+
+# ---- compute_fit: the one place the fit inputs are assembled (IN-01) ---------------------------------
+
+def _record(tmp_path, header=None, **over):
+    from localharness.config.models import ManagedServerConfig
+
+    gguf = write_gguf(tmp_path / "m.gguf", header or {
+        "general.architecture": "qwen3", "qwen3.block_count": 64, "qwen3.attention.head_count_kv": 8,
+        "qwen3.attention.key_length": 128, "qwen3.context_length": 262144})
+    return ManagedServerConfig(**{"runtime": "llamacpp", "binary": "/x/llama-server",
+                                  "model": str(gguf), "port": 8080, **over})
+
+
+@pytest.fixture
+def host(monkeypatch):
+    calls = []
+
+    def free(ratios):
+        calls.append("free_memory")
+        return FreeMemory(24 * GIB, 32 * GIB, "nvidia-smi")
+
+    monkeypatch.setattr(autosense, "free_memory", free)
+    monkeypatch.setattr(autosense, "weights_bytes", lambda model, mmproj=None: WEIGHTS_A)
+    monkeypatch.setattr(autosense, "_read_meminfo",
+                        lambda: calls.append("meminfo") or {"MemTotal": 64 * GIB, "MemAvailable": 60 * GIB})
+    return calls
+
+
+def test_compute_fit_gathers_the_inputs_and_the_fit(tmp_path, host):
+    fi = compute_fit(_record(tmp_path), RATIOS)
+    assert fi.fits == 14950 and fi.weights == WEIGHTS_A and fi.offload == "gpu"
+    assert fi.memory == FreeMemory(24 * GIB, 32 * GIB, "nvidia-smi")
+    assert fi.header["context_length"] == 262144 and fi.meminfo is None
+    assert host == ["free_memory"]  # /proc/meminfo only when asked for
+
+
+def test_compute_fit_reads_meminfo_when_asked_and_counts_the_served_window_when_attached(tmp_path, host):
+    fi = compute_fit(_record(tmp_path), RATIOS, attached_served=65536, meminfo=True)
+    assert fi.meminfo == {"MemTotal": 64 * GIB, "MemAvailable": 60 * GIB}
+    assert fi.fits == min(262144, 65536 + 24 * GIB // 262144)
+
+
+def test_compute_fit_without_sizing_reads_only_the_header(tmp_path, host):
+    fi = compute_fit(_record(tmp_path, extra_args=["-ngl", "20"]), RATIOS, size=False)
+    assert host == [] and fi.fits is None and fi.memory is None and fi.weights is None
+    assert fi.header["context_length"] == 262144 and fi.offload == "partial"
+
+
+def test_compute_fit_types_the_header_and_never_raises_on_a_bad_file(tmp_path, host):
+    bad = _record(tmp_path, {"general.architecture": "qwen3", "qwen3.block_count": "abc",
+                             "qwen3.context_length": [1]}, extra_args=["-ngl", "10"])
+    fi = compute_fit(bad, RATIOS)
+    assert fi.header == {} and fi.offload == "unknown" and fi.fits is None
+    (tmp_path / "m.gguf").write_bytes(b"not a gguf")
+    assert compute_fit(bad, RATIOS).header == {}
+
+
+def test_the_argv_detectors_agree_with_the_forms_llama_server_takes():
+    assert all(has_ctx_arg(a) for a in (["-c", "1"], ["--ctx-size", "1"], ["--ctx-size=1"]))
+    assert not has_ctx_arg(["-ngl", "1", "--cache-ram", "0"])
+    assert all(has_cache_ram_arg(a) for a in (["--cache-ram", "0"], ["-cram", "0"], ["--cache-ram=0"]))
+    assert not has_cache_ram_arg(["-c", "4096"])
 
 
 # ---- the fit: three synthetic headers, hand-computed ------------------------------------------------

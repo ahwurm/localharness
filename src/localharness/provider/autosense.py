@@ -245,6 +245,61 @@ def cache_ram_mib(mem_available: int | None, mem_total: int | None, weights: int
     return mib if mib > 0 else None
 
 
+def has_ctx_arg(extra_args: Sequence[str]) -> bool:
+    """Whether `extra_args` already carry a context size (`-c`, `--ctx-size`, `--ctx-size=N`)."""
+    return any(t in ("-c", "--ctx-size") or t.startswith("--ctx-size=") for t in extra_args)
+
+
+def has_cache_ram_arg(extra_args: Sequence[str]) -> bool:
+    """Whether `extra_args` already carry `--cache-ram` / `-cram` (also the `=` form)."""
+    return any(t in ("--cache-ram", "-cram") or t.startswith("--cache-ram=") for t in extra_args)
+
+
+@dataclass(frozen=True)
+class FitInputs:
+    """What `compute_fit` gathered for one llama.cpp record: the typed header, the GPU residency, the
+    memory probes and the fit they give. Every field is None (or `{}`) when it could not be known."""
+
+    header: dict[str, Any]
+    offload: str
+    memory: FreeMemory | None
+    weights: int | None
+    meminfo: dict[str, int] | None
+    fits: int | None
+
+
+def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None, size: bool = True,
+                meminfo: bool = False) -> FitInputs:
+    """The fit for a llama.cpp `server:` record, in one place for every caller (D-04): `activate`
+    sizes a launch with it, `start` reports an attach and `doctor` prints its row.
+
+    Reads the GGUF header (through `fit_header`, so every value is an int or absent), works out the
+    GPU residency from `extra_args`, probes free memory and stats the weights, then calls `fit` with
+    the record's KV cache types. `attached_served` is the window an already-running server serves.
+    `size=False` stops after the header and the offload (no memory probe: a caller that has no served
+    window to add to wants only the header); `meminfo=True` also reads `/proc/meminfo` for
+    `--cache-ram`. Starts nothing and writes nothing."""
+    from localharness.agent.gguf_header import read_header
+
+    extra = list(server.extra_args or [])
+    try:
+        header = fit_header(read_header(os.path.expanduser(server.model), FIT_KEYS))
+    except (OSError, ValueError):  # GgufHeaderError is a ValueError; NotRegularFile an OSError
+        header = {}
+    n_layer = header.get("block_count")
+    offload = offload_kind(extra, n_layer) if n_layer else "unknown"
+    if not size:
+        return FitInputs(header, offload, None, None, None, None)
+    mem = free_memory(ratios)
+    weights = weights_bytes(server.model, server.mmproj)
+    mi = _read_meminfo() if meminfo else None
+    fits = fit(
+        header, mem.free_bytes if mem else None, ratios, attached_served,
+        cache_type_k=server.cache_type_k, cache_type_v=server.cache_type_v,
+        weights=weights, offload=offload, runtime=server.runtime)
+    return FitInputs(header, offload, mem, weights, mi, fits)
+
+
 @dataclass(frozen=True)
 class WindowReport:
     """What a launch or an attach learned about the window, handed to `window_lines`."""

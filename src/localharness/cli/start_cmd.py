@@ -264,7 +264,6 @@ def _attach_window_report(harness: Any, provider_type: str, served: int | None, 
     The undo, by precedence (D-38): `"record"` when the record sets `context`; `"extra_args"` when a
     `-c` rides `extra_args`; `None` when the harness launched the incumbent and `context` is unset
     (nothing to undo); else `"hand"`, a foreign incumbent that the next harness launch replaces."""
-    from localharness.agent.gguf_header import GgufHeaderError, read_header
     from localharness.provider import autosense as _auto
 
     srv = harness.server
@@ -272,26 +271,14 @@ def _attach_window_report(harness: Any, provider_type: str, served: int | None, 
     undo: str | None = None
     mode = "not-computed"
     if srv is not None and srv.runtime == "llamacpp" and srv.model:
-        extra = list(srv.extra_args or [])
-        try:
-            header = _auto.fit_header(read_header(os.path.expanduser(srv.model), _auto.FIT_KEYS))
-        except (GgufHeaderError, OSError):
-            header = {}
-        n_layer = header.get("block_count")
-        offload = _auto.offload_kind(extra, n_layer) if n_layer else "unknown"
-        mem = _auto.free_memory(harness.autosense)
-        weights = _auto.weights_bytes(srv.model, srv.mmproj)
-        if mem is not None:
-            free, total = mem.free_bytes, mem.total_bytes
-        fits = _auto.fit(
-            header, free, harness.autosense, served,
-            cache_type_k=srv.cache_type_k, cache_type_v=srv.cache_type_v,
-            weights=weights, offload=offload, runtime=srv.runtime)
-        trained = trained or header.get("context_length")
-        has_c = any(t in ("-c", "--ctx-size") or t.startswith("--ctx-size=") for t in extra)
+        fi = _auto.compute_fit(srv, harness.autosense, attached_served=served)
+        fits, weights = fi.fits, fi.weights
+        if fi.memory is not None:
+            free, total = fi.memory.free_bytes, fi.memory.total_bytes
+        trained = trained or fi.header.get("context_length")
         if srv.context is not None:
             undo, mode = "record", "record"
-        elif has_c:
+        elif _auto.has_ctx_arg(srv.extra_args or []):
             undo, mode = "extra_args", "extra_args"
         elif harness_launched:
             undo, mode = None, "fit"
