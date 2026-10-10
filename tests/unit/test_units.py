@@ -365,3 +365,170 @@ def test_unit_record_the_journal_skip_wins_when_it_names_a_model(fake_systemd, t
     frag = _unit_file(tmp_path, _service("ExecStart=/home/u/bin/run-active.sh"))
     skip = units.unit_record(_state(fragment=frag))
     assert isinstance(skip, units.Skip) and "relative path (rel/a.gguf)" in skip.reason
+
+
+# ------------------------------------------------------------------------------- user_units
+
+
+LIST_ARGV = ("systemctl", "--user", "list-unit-files", "--type=service", "--plain", "--no-legend",
+             "--no-pager")
+
+
+def _block(unit: str, state: str = "loaded", frag: str = "", enabled: str = "disabled",
+           drop: str = "") -> str:
+    return (f"Id={unit}\nLoadState={state}\nFragmentPath={frag}\nUnitFileState={enabled}\n"
+            f"DropInPaths={drop}\n")
+
+
+def test_user_units_filters_sorts_and_reads_in_one_batched_show(fake_systemd):
+    fake_systemd.answer(LIST_ARGV, "\n".join([
+        "zz.service enabled enabled", "a@.service static -", "gen.service generated -",
+        "t.service transient -", "al.service alias -", "m.service masked enabled",
+        "b.service bad -", "llm.service disabled enabled", "pipewire.service static -", ""]))
+    names = ("llm.service", "pipewire.service", "zz.service")
+    fake_systemd.answer(["systemctl", "--user", "show", "-p", SHOW, "--", *names],
+                        "\n".join(_block(n, frag=f"/u/{n}") for n in (names[2], names[0], names[1])))
+    states = units.user_units()
+    assert [s.unit for s in states] == list(names)
+    assert states[0] == units.UnitState("llm.service", "loaded", "/u/llm.service", "disabled", "")
+    assert fake_systemd.calls == [LIST_ARGV, ("systemctl", "--user", "show", "-p", SHOW, "--", *names)]
+
+
+def test_user_units_scans_at_most_the_cap_alphabetically(fake_systemd):
+    assert units.UNITS_SCANNED_CAP == 64
+    all_names = [f"u{i:03d}.service" for i in range(70)]
+    fake_systemd.answer(LIST_ARGV, "".join(f"{n} disabled -\n" for n in reversed(all_names)))
+    fake_systemd.answer_prefix("systemctl", "--user", "show", stdout="")
+    units.user_units()
+    show = fake_systemd.calls[1]
+    assert list(show[show.index("--") + 1:]) == all_names[:64]
+
+
+def test_user_units_is_empty_when_not_checked(fake_systemd):
+    assert units.user_units() == []  # list-unit-files answered None
+    fake_systemd.answer(LIST_ARGV, "llm.service disabled -\n")
+    assert units.user_units() == []  # show answered None
+    assert len(fake_systemd.calls_of("systemctl")) == 3
+
+
+def test_user_units_with_nothing_left_after_filtering_runs_no_show(fake_systemd):
+    fake_systemd.answer(LIST_ARGV, "a@.service static -\nm.service masked -\n")
+    assert units.user_units() == []
+    assert fake_systemd.calls == [LIST_ARGV]
+
+
+def test_user_units_names_a_leading_dash_only_after_the_separator(fake_systemd):
+    fake_systemd.answer(LIST_ARGV, "-evil.service disabled -\n")
+    fake_systemd.answer_prefix("systemctl", "--user", "show", stdout="")
+    units.user_units()
+    show = fake_systemd.calls[1]
+    assert show.index("--") < show.index("-evil.service")
+
+
+def test_the_list_command_is_list_unit_files_never_list_units():
+    src = Path(units.__file__).read_text(encoding="utf-8")
+    assert '"list-unit-files"' in src and '"list-units"' not in src
+
+
+# ------------------------------------------------------------------------------ the real _run
+
+
+class _Done:
+    def __init__(self, stdout: bytes, returncode: int = 0) -> None:
+        self.stdout, self.returncode = stdout, returncode
+
+
+@pytest.fixture
+def real_run(monkeypatch):
+    """The real `_run` over a fake `which_outside_cwd` and `subprocess.run`."""
+    calls: list[tuple[list[str], dict]] = []
+    state: dict = {"which": "/usr/bin/journalctl", "outcome": _Done(b"ok\n")}
+
+    def which(cmd):
+        calls.append(([cmd], {"which": True}))
+        return state["which"]
+
+    def run(argv, **kw):
+        calls.append((argv, kw))
+        outcome = state["outcome"]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(units, "which_outside_cwd", which)
+    monkeypatch.setattr(units.subprocess, "run", run)
+    return state, calls
+
+
+def test_run_resolves_the_program_and_closes_stdin(real_run):
+    _state, calls = real_run
+    assert units._run(["journalctl", "--user", "-n", "1"], timeout=3, cap=100) == "ok\n"
+    argv, kw = calls[-1]
+    assert argv == ["/usr/bin/journalctl", "--user", "-n", "1"]
+    assert kw["stdin"] == subprocess.DEVNULL and kw["timeout"] == 3
+    assert kw["capture_output"] is True and not kw.get("shell")
+
+
+def test_run_without_a_resolved_path_runs_no_subprocess(real_run):
+    state, calls = real_run
+    state["which"] = None
+    assert units._run(["journalctl", "x"], timeout=1, cap=10) is None
+    assert all(kw.get("which") for _argv, kw in calls)  # only the lookup happened
+
+
+@pytest.mark.parametrize("outcome", [subprocess.TimeoutExpired("j", 1), FileNotFoundError("gone"),
+                                     PermissionError("no"), _Done(b"x", 1), _Done(b"", 127)])
+def test_run_refuses_every_failure_shape(real_run, outcome):
+    state, _calls = real_run
+    state["outcome"] = outcome
+    assert units._run(["journalctl"], timeout=1, cap=10) is None
+
+
+def test_run_enforces_the_output_cap(real_run):
+    state, _calls = real_run
+    state["outcome"] = _Done(b"x" * 11)
+    assert units._run(["journalctl"], timeout=1, cap=10) is None
+    state["outcome"] = _Done(b"x" * 10)
+    assert units._run(["journalctl"], timeout=1, cap=10) == "x" * 10
+
+
+def test_run_decodes_with_replacement(real_run):
+    state, _calls = real_run
+    state["outcome"] = _Done(b"a\xffb")
+    assert units._run(["journalctl"], timeout=1, cap=10) == "a�b"
+
+
+# ------------------------------------------------------------------ the journal's hostile shapes
+
+
+def test_journal_entries_with_null_byte_array_or_missing_fields_are_skipped(fake_systemd, tmp_path):
+    fake_systemd.journal([
+        {"_EXE": "/b/llama-server", "_CMDLINE": None},
+        {"_EXE": "/b/llama-server", "_CMDLINE": [108, 108]},
+        {"_CMDLINE": "llama-server -m /m/a.gguf"},
+        {"_EXE": ["/b/llama-server"], "_CMDLINE": "llama-server -m /m/a.gguf"},
+        "this is not json", "[1, 2]", "",
+    ])
+    assert units.read_journal("u.service") == units.Skip("has no llama-server in its journal",
+                                                         names_model=False)
+
+
+def test_a_hostile_last_entry_does_not_hide_an_earlier_good_one(fake_systemd, tmp_path):
+    model = _model(tmp_path)
+    fake_systemd.journal([
+        {"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model}"},
+        {"_EXE": "/b/llama-server", "_CMDLINE": None},
+        "not json",
+        {"_EXE": "/b/llama-server", "_CMDLINE": "llama-server -m 'unterminated"},
+    ])
+    rec = units.read_journal("u.service")
+    assert isinstance(rec, ProcRecord) and rec.argv[2] == model
+
+
+def test_a_non_llama_last_entry_does_not_replace_the_last_llama_one(fake_systemd, tmp_path):
+    model = _model(tmp_path)
+    fake_systemd.journal([
+        {"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model}"},
+        {"_EXE": "/usr/bin/python3", "_CMDLINE": "python3 x.py"},
+    ])
+    assert isinstance(units.read_journal("u.service"), ProcRecord)
