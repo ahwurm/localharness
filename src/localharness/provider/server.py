@@ -512,14 +512,18 @@ def start_server(
     runtime: str = "vllm",
     api_key: str | None = None,
     record_env: Mapping[str, str] | None = None,
+    dropped_out: list[str] | None = None,
 ) -> int:
     """Launch detached (new session), append stdout+stderr to serve.log, write pidfile.
 
     `api_key` (a server set to require one) goes into the child's copied environment as
     `KEY_ENV[runtime]` — never into `cmd`, so it is in neither the process list nor the launch line
     logged here. `child_environment` scrubs the launched runtime's own namespace first and adds
-    `record_env` (the record's `env:`); the dropped names are logged, names only."""
+    `record_env` (the record's `env:`); the dropped names are logged, names only. A caller that
+    wants them for the ledger and the start summary passes `dropped_out`, which they extend."""
     env, dropped = child_environment(runtime, os.environ, record_env=record_env, api_key=api_key)
+    if dropped_out is not None:
+        dropped_out.extend(dropped)
     if dropped:
         logger.info("launch environment scrubbed", runtime=runtime, dropped=dropped)
     if runtime == "vllm":

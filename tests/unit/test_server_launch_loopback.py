@@ -362,6 +362,14 @@ def test_every_strategy_accepts_a_peer(cls):
     assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default is None
 
 
+@pytest.mark.parametrize("cls", [lifecycle.LifecycleStrategy, lifecycle.ManagedVllmStrategy,
+                                 lifecycle.SpawnedProcessStrategy, lifecycle.DaemonStrategy,
+                                 lifecycle.LmsStrategy])
+def test_every_strategy_accepts_autosense(cls):
+    param = inspect.signature(cls.activate).parameters["autosense"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default is None
+
+
 # ------------------------------------------------------------------------------- the other probes
 
 
