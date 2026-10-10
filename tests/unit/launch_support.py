@@ -11,6 +11,11 @@ pytest collects nothing from it. A test module imports what it needs by name:
   serve_command -> start_server -> wait_ready chain.
 - `record_opens()`: record every file the code under test opens, to prove a file is stat-ed but never
   opened.
+- `stub_liveness(monkeypatch, alive)` / the `harness_launched` fixture (Phase 5, D-62): answer every
+  strategy's `liveness` without touching docker, a pidfile or an HTTP endpoint. The REPL seeds its
+  accelerator lock through that liveness, so a test that builds a gpu-primary `OrchestratorREPL`
+  stubs it; `harness_launched` is the "the harness launched this primary" answer
+  (`Liveness(True, "pid 4321")`).
 """
 from __future__ import annotations
 
@@ -20,7 +25,7 @@ from contextlib import contextmanager
 
 import pytest
 
-from localharness.provider import server
+from localharness.provider import lifecycle, server
 
 
 class PopenRecorder:
@@ -64,6 +69,24 @@ def record_chain(monkeypatch) -> dict:
     monkeypatch.setattr(server, "start_server", start_server)
     monkeypatch.setattr(server, "wait_ready", wait_ready)
     return calls
+
+
+def stub_liveness(monkeypatch, alive) -> None:
+    """Replace `liveness` on the four strategy classes. `alive` is a bool, or a zero-argument
+    callable read at each call (a test that counts the asks, or that follows another seam)."""
+    def _liveness(self, spec, config_dir, **kw):
+        up = bool(alive() if callable(alive) else alive)
+        return lifecycle.Liveness(up, "pid 4321" if up else None)
+
+    for cls in (lifecycle.SpawnedProcessStrategy, lifecycle.ManagedVllmStrategy,
+                lifecycle.DaemonStrategy, lifecycle.LmsStrategy):
+        monkeypatch.setattr(cls, "liveness", _liveness)
+
+
+@pytest.fixture
+def harness_launched(monkeypatch) -> None:
+    """The harness launched the primary: every strategy's liveness is `Liveness(True, "pid 4321")`."""
+    stub_liveness(monkeypatch, True)
 
 
 # The audit hook is installed once per process: an audit hook cannot be removed. Between

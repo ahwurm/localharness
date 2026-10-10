@@ -573,6 +573,44 @@ def incumbent_subject(holder: Holder, *, port: int) -> str:
     return f"uid {visible_text(holder.uid)}'s process on :{port}"
 
 
+def holder_of(rec: Any) -> Holder:
+    """A Holder from one `procfs.ProcRecord`: its unit, pid and uid, the command from `argv[0]`'s
+    basename (the executable's when argv is empty), and what systemd says about the unit (None when
+    it could not be asked, or there is no unit)."""
+    from localharness.provider import units
+
+    argv = getattr(rec, "argv", ()) or ()
+    command = os.path.basename(argv[0]) if argv else ""
+    if not command and getattr(rec, "exe", None):
+        command = os.path.basename(rec.exe)
+    unit = getattr(rec, "unit", None)
+    state = units.unit_file_state(unit) if unit else None
+    return Holder(unit, rec.pid, command or None, rec.uid, state)
+
+
+def port_holder(port: int) -> Optional[Holder]:
+    """Who holds the LISTEN socket on `port`, or None when nobody does. A listener of this user is
+    followed to its process (a refused read still names the unit the cgroup gave); one of another
+    uid is known by that uid alone; one whose process is not visible by our uid alone."""
+    from localharness.provider import procfs, units
+
+    found = procfs.listeners(port)
+    if not found:
+        return None
+    me = os.getuid()
+    mine = [lst for lst in found if lst.uid == me]
+    if not mine:
+        return Holder(None, None, None, found[0].uid)
+    pid = procfs.pid_for_inode(mine[0].inode)
+    if pid is None:
+        return Holder(None, None, None, me)
+    rec = procfs.read_process(pid)
+    if isinstance(rec, procfs.ProcRefusal):
+        state = units.unit_file_state(rec.unit) if rec.unit else None
+        return Holder(rec.unit, pid, None, me, state)
+    return holder_of(rec)
+
+
 def window_clause(ctx: int, fit: Optional[int], *, running: bool) -> str:
     """The clause that makes the attach sentence the window line too: what the incumbent runs with,
     what the harness launches with, and the setting that keeps the incumbent's number."""
