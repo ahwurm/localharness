@@ -302,6 +302,14 @@ def test_na_falls_to_meminfo_less_the_unified_reserve(monkeypatch):
     assert free_memory(RATIOS) == FreeMemory(int(avail - 0.15 * total), total, "meminfo")
 
 
+def test_na_never_reports_negative_free_memory(monkeypatch):
+    """IN-05: less available than the unified reserve is zero free, not a negative size in the line."""
+    total = 64 * GIB
+    monkeypatch.setattr(autosense, "_run_nvidia_smi", lambda: "[N/A], [N/A]\n")
+    monkeypatch.setattr(autosense, "_read_meminfo", lambda: {"MemTotal": total, "MemAvailable": 2 * GIB})
+    assert free_memory(RATIOS) == FreeMemory(0, total, "meminfo")
+
+
 def test_na_with_unreadable_meminfo_is_none(monkeypatch):
     monkeypatch.setattr(autosense, "_run_nvidia_smi", lambda: "[N/A], [N/A]\n")
     monkeypatch.setattr(autosense, "_read_meminfo", lambda: None)

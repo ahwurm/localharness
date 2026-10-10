@@ -424,6 +424,38 @@ async def test_two_dead_processes_stop_twice_launch_twice_and_surface_the_tail(t
     assert box.events.count("probe_window") == 0
 
 
+async def test_a_failing_second_stop_keeps_the_second_death_tail_as_the_message(tmp_path, box, monkeypatch):
+    """IN-05: `stop_server` raises RuntimeError when a pid survives SIGKILL; that must not replace the
+    log tail the user needs."""
+    _launches(box, monkeypatch)
+    box.ready_script = [RuntimeError(DEAD), RuntimeError(DEAD)]
+    stops: list[int] = []
+
+    def stop_server(config_dir, launch="binary", timeout_seconds=30.0):
+        stops.append(1)
+        if len(stops) == 2:
+            raise RuntimeError("pid 4242 survived SIGKILL")
+        return True
+
+    monkeypatch.setattr(server, "stop_server", stop_server)
+    with pytest.raises(RuntimeError, match="Log tail:"):
+        await _activate(tmp_path, _spec(tmp_path))
+    assert len(stops) == 2
+
+
+async def test_a_failing_first_stop_surfaces_the_original_death_and_does_not_relaunch(tmp_path, box, monkeypatch):
+    calls = _launches(box, monkeypatch)
+    box.ready_script = [RuntimeError(DEAD)]
+
+    def stop_server(config_dir, launch="binary", timeout_seconds=30.0):
+        raise RuntimeError("pid 4242 survived SIGKILL")
+
+    monkeypatch.setattr(server, "stop_server", stop_server)
+    with pytest.raises(RuntimeError, match="Log tail:"):
+        await _activate(tmp_path, _spec(tmp_path))
+    assert len(calls) == 1  # an unstopped survivor makes a second launch unsafe
+
+
 async def test_a_timeout_is_never_retried(tmp_path, box, monkeypatch):
     calls = _launches(box, monkeypatch)
     box.ready_script = [TimeoutError("llama.cpp not ready after 1800s.")]

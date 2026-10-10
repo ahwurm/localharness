@@ -315,19 +315,26 @@ class SpawnedProcessStrategy:
         pid, dropped = launch(command(ctx_kw))
         try:
             served = await ready()
-        except RuntimeError:
+        except RuntimeError as died:
             # A dead process on a -c the harness chose is the one case worth a second try; a record
             # or extra_args -c, no -c at all and autosense=None re-raise at once (D-18). A
             # TimeoutError is not a RuntimeError and is never caught here.
             if report is None or report.mode != "fit" or not ctx_kw:
                 raise
-            await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
+            try:
+                await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
+            except RuntimeError:
+                # A pid that survived SIGKILL makes a relaunch unsafe; the load failure with its log
+                # tail is the message the user needs, not the stop's.
+                raise died from None
             halved = max(1, ctx_kw // 2)
             pid, dropped = launch(command(halved))
             try:
                 served = await ready()
             except RuntimeError:
-                await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
+                # Best-effort: the second death's log tail stays the message even when the stop fails.
+                with contextlib.suppress(RuntimeError):
+                    await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
                 raise
             report = dataclasses.replace(report, asked=halved, retried=True)
         if report is not None:
