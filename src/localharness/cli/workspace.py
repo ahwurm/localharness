@@ -606,6 +606,10 @@ class MachineTrust:
     """What start withheld from the machine's own files: {file: {(kind, name), …}} and one line."""
     withheld: Mapping[str, frozenset[tuple[str, str]]] = field(default_factory=dict)
     line: str = ""
+    quiet: frozenset[tuple[str, str, str]] = frozenset()
+    """The (file, kind, name) of entries withheld silently: no line names them and none is recorded."""
+    posture_notes: tuple[str, ...] = ()
+    """The lines `start` composes for a launch about what was narrowed or declined (D-15..D-17)."""
 
 
 def machine_diff(old: list[dict], new: list[dict], *, removed: bool = True) -> str:

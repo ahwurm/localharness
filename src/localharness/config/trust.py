@@ -228,6 +228,13 @@ def _canonical(entry: Any) -> str:
     return json.dumps(entry, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _entry_key(entry: dict) -> tuple[str, str, str, str]:
+    """The order a machine record keeps its entries in: (file, kind, name, canonical JSON). One
+    key for `machine_snapshot` and `adopt_entries`, so an adopted record sorts as a snapshot does
+    and the fingerprints agree."""
+    return (entry["file"], entry["kind"], entry["name"], _canonical(entry))
+
+
 def _read_yaml(path: Path) -> Any:
     """A file's YAML, or None when it cannot be read or parsed — the loader names that file and
     loads nothing from it, so there is nothing in it to start."""
@@ -659,7 +666,7 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
     if (root / "org.yaml").is_file():
         out += loosenings("org.yaml", _read_yaml(root / "org.yaml"))
     out += tool_script_entries(global_dir)
-    return sorted(out, key=lambda e: (e["file"], e["kind"], e["name"], _canonical(e)))
+    return sorted(out, key=_entry_key)
 
 
 def confirmed_at_upgrade(snap: list[dict]) -> list[dict]:
@@ -699,19 +706,50 @@ def record_machine(global_dir: Path, entries: list[dict],
     atomic_write_overlay(trust_store_path(), data)
 
 
-def offer_was_declined(workspace_dir: Path) -> bool:
-    """Has the user already said no to creating THIS workspace?
+def adopt_entries(global_dir: Path, entries: list[dict]) -> None:
+    """Re-record an act's own write from the values it wrote: each of ``entries`` replaces the
+    recorded entry with the same (file, kind, name) or is added; `kinds` is kept; the list is
+    re-sorted as `machine_snapshot` sorts and re-fingerprinted; the write is `record_machine`'s
+    0600 atomic one. A no-op when this machine has no record yet (the first start adopts the whole
+    disk anyway).
+
+    It never calls `machine_snapshot`. A re-snapshot would adopt whatever else is on disk at that
+    moment — an agent's write made in the meantime — and the record must change by exactly what
+    the act wrote."""
+    rec = recorded_machine(global_dir)
+    if rec is None:
+        return
+    written = {(n["file"], n["kind"], n["name"]) for n in entries}
+    keep = [e for e in rec["entries"] if (e.get("file"), e.get("kind"), e.get("name")) not in written]
+    record_machine(global_dir, sorted([*keep, *entries], key=_entry_key),
+                   kinds=frozenset(rec["kinds"]))
+
+
+def decline_key(kind: str, *parts: str) -> str:
+    """The key of a remembered No that is not about a workspace directory: ``kind`` followed by
+    ``parts`` verbatim. The three variants: `decline_key("<binary>", <resolved path>)` for a No on
+    a `PATH`-found binary, `decline_key("<peer>", <entry name>, <shown>)` for a peer's posture No
+    (a changed value is a new question), `decline_key("<config.ini>", <digest>)` for a sensed
+    `config.ini` No."""
+    return kind + "".join(parts)
+
+
+def offer_was_declined(target: Path | str) -> bool:
+    """Has the user already said no to creating THIS workspace (a ``Path``), or to the question
+    named by a `decline_key` (a ``str``, used verbatim)?
 
     False when unreadable, missing or corrupt — the fail-open direction here, deliberately, and
     the opposite of `is_trusted`'s: the worst case is one repeated question, never config loaded
-    without consent. Nothing else reads this file, so it can only ever cost a prompt.
+    without consent. Nothing else reads this file, so it can only ever cost a prompt. A remembered
+    No can suppress a question; it never causes a launch.
     """
-    entry = _load(declined_offers_path()).get(_key(workspace_dir))
+    entry = _load(declined_offers_path()).get(target if isinstance(target, str) else _key(target))
     return isinstance(entry, dict) and entry.get("declined") is True
 
 
-def record_offer_decline(workspace_dir: Path) -> None:
-    """Remember a "no" so the offer is asked once per directory, ever.
+def record_offer_decline(target: Path | str) -> None:
+    """Remember a "no" so the offer is asked once per directory (a ``Path``) or once per
+    `decline_key` (a ``str``), ever.
 
     Only a person answering the prompt gets here — EOF and every non-interactive path record
     nothing, exactly as an unanswered trust prompt does. Undo it by deleting the entry (or the
@@ -719,5 +757,5 @@ def record_offer_decline(workspace_dir: Path) -> None:
     recorded "no" can never stand between a user and a workspace they went and asked for.
     """
     data = _load(declined_offers_path())
-    data[_key(workspace_dir)] = {"declined": True}
+    data[target if isinstance(target, str) else _key(target)] = {"declined": True}
     atomic_write_overlay(declined_offers_path(), data)
