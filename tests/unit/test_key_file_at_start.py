@@ -6,6 +6,7 @@ Every file here is a tmp file; no server starts and no port is dialled.
 """
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import os
 import threading
@@ -15,7 +16,7 @@ import pytest
 from localharness.core.private_files import NotRegularFile, open_regular
 from localharness.provider import server
 from localharness.provider.server import KEY_FILE_CAP, KeyFileError, read_key_file
-from tests.unit.launch_support import record_opens
+from tests.unit.launch_support import popen, record_opens  # noqa: F401
 
 
 def _fd_count() -> int:
@@ -233,3 +234,80 @@ def test_an_environment_key_is_replaced_by_the_files_key_and_kept_when_the_file_
     bad.provider.api_key = SecretStr("FROM-ENV")
     assert "no key" in _read_session_key(bad)
     assert bad.provider.api_key.get_secret_value() == "FROM-ENV"
+
+
+# --- doctor and the launch agree (WR-01) ------------------------------------------------------------
+
+LLAMA_RECORD = {"runtime": "llamacpp", "binary": "/x/llama-server", "model": "/x/m.gguf", "port": 8080,
+                "bind_all": True, "require_api_key": True}
+
+
+async def _launch_argv(tmp_path, monkeypatch, popen, key_path) -> list[str]:
+    """The argv `start` would launch a `bind_all: true` llama.cpp record with: the key file read by
+    `_read_session_key`, the launch key built from the session's bearer, the real `start_server`
+    handing a recorded Popen. No process starts and no port is dialled."""
+    from types import SimpleNamespace
+
+    from pydantic import SecretStr
+
+    from localharness.cli import start_cmd
+    from localharness.config.models import ManagedServerConfig
+    from localharness.provider import autosense
+
+    async def wait_ready(base_url, **kw):
+        return ["m"]
+
+    monkeypatch.setattr(server, "wait_ready", wait_ready)
+    monkeypatch.setattr(server, "server_pid", lambda _d: None)
+    monkeypatch.setattr(server, "docker_container_running", lambda _n: False)
+    monkeypatch.setattr(autosense, "_run_nvidia_smi", lambda: None)
+    monkeypatch.setattr(start_cmd.console, "print", lambda *a, **k: None)
+    monkeypatch.setattr(start_cmd.err_console, "print", lambda *a, **k: None)
+    spec = ManagedServerConfig(**LLAMA_RECORD, api_key_file=str(key_path))
+    harness = SimpleNamespace(server=spec, provider=SimpleNamespace(api_key=SecretStr("none")))
+    start_cmd._read_session_key(harness)
+    launch_key = server.required_key_kwargs(harness.server, harness.provider.api_key)
+    assert await start_cmd._start_managed_server(
+        spec, tmp_path, "http://127.0.0.1:8080/v1", launch_key) is None
+    (call,) = popen
+    return call["cmd"]
+
+
+def _doctor_text(tmp_path, monkeypatch, fake_home, key_path) -> str:
+    from tests.unit.test_doctor_exposure_rows import _doctor
+    return _doctor(tmp_path, monkeypatch, fake_home, key="none",
+                   server={**LLAMA_RECORD, "api_key_file": str(key_path)})
+
+
+def test_a_valid_key_file_reads_keyed_and_exposed_in_doctor_and_launches_so(
+        tmp_path, monkeypatch, fake_home, popen):
+    from tests.unit.test_doctor_exposure_rows import EVERY_INTERFACE, LLAMA_NETWORK_ROW
+    key = _write(tmp_path, b"K\n")
+    out = _doctor_text(tmp_path, monkeypatch, fake_home, key)
+    assert LLAMA_NETWORK_ROW in out and EVERY_INTERFACE not in out
+    argv = asyncio.run(_launch_argv(tmp_path, monkeypatch, popen, key))
+    assert "--api-key-file" in argv and "0.0.0.0" in argv
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_a_missing_or_non_regular_key_file_reads_loopback_in_doctor_and_launches_so(
+        tmp_path, monkeypatch, fake_home, popen, kind):
+    key = tmp_path / "absent"
+    if kind == "directory":
+        key.mkdir()
+    out = _doctor_text(tmp_path, monkeypatch, fake_home, key)
+    assert "reachable from other machines" not in out
+    argv = asyncio.run(_launch_argv(tmp_path, monkeypatch, popen, key))
+    assert "--api-key-file" not in argv and argv[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_the_wr01_residual_a_refused_regular_file_reads_keyed_in_doctor_but_launches_loopback(
+        tmp_path, monkeypatch, fake_home, popen):
+    """Recorded, not closed (DOCTOR-03: doctor stats the key file and never opens it): a regular file
+    the byte rule refuses still reads keyed in doctor, while `start` prints the one line and
+    launches on loopback."""
+    from tests.unit.test_doctor_exposure_rows import LLAMA_NETWORK_ROW
+    key = _write(tmp_path, b"K\r\n")
+    assert LLAMA_NETWORK_ROW in _doctor_text(tmp_path, monkeypatch, fake_home, key)
+    argv = asyncio.run(_launch_argv(tmp_path, monkeypatch, popen, key))
+    assert "--api-key-file" not in argv and argv[-2:] == ["--host", "127.0.0.1"]
