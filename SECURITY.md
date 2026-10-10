@@ -512,7 +512,9 @@ the shipped default in one of your agent files or in the `agent:` section of you
 (any of the launch keys listed in the paragraph after this one), takes effect only after you confirm
 it once at the next `localharness start` on a terminal (a start without a terminal leaves it off and
 says so; a launch command left off withholds the whole `server:` section, so that start launches no
-server and uses one already answering); and a script added to or changed in the tools folder
+server and uses one already answering, except `bind_all` and `require_api_key`, which are narrowed
+instead: a `bind_all: true` left off launches on 127.0.0.1 for that run and a `require_api_key: false`
+left off launches keyed, each with one line from the launch that says so); and a script added to or changed in the tools folder
 since you last confirmed your scripts — a symlink there included, judged by its own name and what
 it points to — is treated as an unconfirmed shell command: it gets what any shell command gets in
 the mode you are in: `guarded` asks before it runs (an earlier "always" on `python3` or `node` does
@@ -531,14 +533,31 @@ changed model is not a changed command. A model you switch yourself with `/model
 asks nothing; one switched from a remote channel, or by a command the agent ran in the shell
 tool or from `python_exec`, is not, and asks at the next start. (Both tools mark the commands they
 run; agent code that deliberately clears the marker is not caught, which is no more than
-`python_exec` can already do to the files themselves.) `effort` is in neither list: it is a request setting, not
-a launch decision, and a peer's `api_key` and headers are never written to the record. The
+`python_exec` can already do to the files themselves.) `effort` is in neither list: it is a request
+setting, not a launch decision, and a peer's `api_key` and headers are never written to the record. The
 `config_ini` key names llama-server's own config file, so a relaunch acts on nothing the record
 did not fingerprint. A No to a peer's `bind_all: true` is written as `lifecycle.bind_all: false` into
 `overrides.yaml`, and because lists replace on merge that copies `config.yaml`'s whole
 `extra_endpoints` list there; the start prints one line saying so, and from then on the peers are
-edited in `overrides.yaml`, since its list wins. **What this does NOT cover:** the root-owned `/etc/llama.cpp/config.ini` that
-llama-server still reads on its own is outside the record, and a change there asks nothing.
+edited in `overrides.yaml`, since its list wins. **What this does NOT cover:** the root-owned
+`/etc/llama.cpp/config.ini` that llama-server still reads on its own is outside the record, and a
+change there asks nothing.
+
+A `server.api_key_file` is the one launch key `start` itself opens, and only after the record covers
+it: once per start, when you have confirmed the entry (a start that finds it unconfirmed and cannot ask
+drops `server:` and reads nothing), and never in `doctor`. The file must be one line of printable ASCII (no spaces,
+commas or quotes), no `#` lines, at most 4096 bytes, and a regular file (a pipe is refused unopened);
+a CRLF file is refused because llama-server would take the carriage return as part of the key. The key
+is held in memory for that session, never written, printed or logged, and is sent only to an endpoint
+that is this machine (`provider.base_url`, or the peer's `base_url`): the question names the real
+host when it is not, and the file is then not opened. A file that fails any of this is not used: one
+line says why, the session sends no key (or keeps sending the key it already held, and says so), the
+file stays off the launch command and the launch binds 127.0.0.1 for that run. Two other launch
+changes are answered once at a terminal and never adopted unasked: a llama.cpp `bind_all: true`,
+which 0.17 ignored (asked at the first start that is about to launch it; a No writes
+`bind_all: false`), and a 0.17 `server.extra_args` `--host`, which is converted to `bind_all: true` at
+the upgrade start when it was exactly `0.0.0.0` and offered with its source when it was another
+address.
 
 The files that hold the harness's own settings have a rule of their own: the agent's write and edit
 tools, and the shell commands the gate reads as writing them, cannot change `config.yaml` or
@@ -1006,8 +1025,9 @@ key goes in the server's environment — `VLLM_API_KEY` (for docker, `-e VLLM_AP
 wait, model lists, the context-window probe, a `/model` switch, `localharness model` and `doctor` —
 sends it. **It is off by default.** A launched server without it answers any program that can reach
 its port: on this machine any process, including one the agent starts, and with `bind_all` any device
-on your network. A `server.api_key_file` is passed as `--api-key-file` only when it is a regular file
-and the harness holds the key; otherwise that launch stays on 127.0.0.1, with one line saying why.
+on your network. A `server.api_key_file` is passed as `--api-key-file` only when it is a regular file,
+the harness holds the key and the session's own read of it was not refused; otherwise that launch
+stays on 127.0.0.1, with one line saying why.
 `localharness doctor` shows a row when `provider.api_key` is set and the launched server does not
 require it, and a row while a launched server is reachable from other machines. An `extra_endpoints`
 entry whose `lifecycle` launches a server follows the same rules with its own `lifecycle.bind_all`,
@@ -1026,7 +1046,7 @@ its `/tokenize` answers without a key, and the harness's token counter and docto
 probes call it that way. `localharness init` sends no key when it looks for a server, so a re-run of `init` does not find
 a server that requires its key. Doctor's rows read the arguments the launch would use, for vLLM and
 llama.cpp alike, so a `--host` in `server.extra_args` is counted in what they report; they say
-`every interface, no key` when an open launch has no key with it, and doctor never opens a key file.
+`every interface, no key` when an open launch has no key with it, and doctor never opens a key file (`start` does, once, after you confirmed it).
 And these launch rules were checked against
 a stand-in that behaves the way vLLM's source says vLLM does, not against vLLM itself: that a binary
 launch listens on every interface without `--host`, that it reads `VLLM_API_KEY`, and which routes
