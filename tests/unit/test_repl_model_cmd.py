@@ -20,6 +20,19 @@ from localharness.config.overlay import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_machine_probes(monkeypatch):
+    """A launch through the real `activate` now sizes its window (Phase 2): the fit asks
+    nvidia-smi for free memory and the post-launch probe reads the served window back over HTTP.
+    No test here makes either call; the window itself is pinned in test_window_lines_repl.py."""
+    from localharness.agent import context as agent_context
+    from localharness.provider import autosense
+
+    monkeypatch.setattr(autosense, "_run_nvidia_smi", lambda: None)
+    monkeypatch.setattr(agent_context, "probe_window",
+                        lambda *a, **k: agent_context.WindowProbe(None, None))
+
+
 class FakeChannel:
     def __init__(self):
         self.messages: list[str] = []

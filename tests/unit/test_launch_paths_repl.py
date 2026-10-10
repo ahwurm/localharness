@@ -23,6 +23,19 @@ NO_LLAMA_PEER = "no llama-server — set extra_endpoints[llamacpp-local].lifecyc
 NO_LLAMA_PRIMARY = "no llama-server — set server.binary"
 
 
+@pytest.fixture(autouse=True)
+def _no_machine_probes(monkeypatch):
+    """A launch through the real `activate` now sizes its window (Phase 2): the fit asks
+    nvidia-smi for free memory and the post-launch probe reads the served window back over HTTP.
+    No test here makes either call; the window itself is pinned in test_window_lines_repl.py."""
+    from localharness.agent import context as agent_context
+    from localharness.provider import autosense
+
+    monkeypatch.setattr(autosense, "_run_nvidia_smi", lambda: None)
+    monkeypatch.setattr(agent_context, "probe_window",
+                        lambda *a, **k: agent_context.WindowProbe(None, None))
+
+
 class Boundaries:
     """Recorders for the three process boundaries a launch crosses."""
 
@@ -175,6 +188,24 @@ async def test_the_cold_launch_passes_the_peer_name_to_activate(tmp_path, bounda
     # the REPL's own decision and the strategy's enforcement both name the peer
     assert seen and set(seen) == {"llamacpp-local"}
     assert len(seen) >= 2
+
+
+@pytest.mark.asyncio
+async def test_the_cold_launch_passes_the_harness_autosense_to_activate(
+        tmp_path, boundaries, monkeypatch):
+    harness, repl, _, _ = _session(tmp_path, _launchable_peer())
+    seen: list[dict] = []
+    real = lifecycle.SpawnedProcessStrategy.activate
+
+    async def spy(self, spec, config_dir, base_url, **kw):
+        seen.append(kw)
+        return await real(self, spec, config_dir, base_url, **kw)
+
+    monkeypatch.setattr(lifecycle.SpawnedProcessStrategy, "activate", spy)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert seen and seen[-1]["autosense"] is harness.autosense
 
 
 # --- path 3: the managed restart / swap-back --------------------------------------------------- #
