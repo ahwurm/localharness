@@ -201,8 +201,29 @@ class ProviderDegenerateError(ProviderError):
         self.chars = chars
 
 
+class ProviderReasoningBudgetError(ProviderError):
+    """Streamed reasoning passed the effort budget on a runtime that cannot bound it server-side
+    (EFFORT_BUDGET_KEY is None for it) and was aborted client-side (the disconnect ends engine-side
+    generation). `budget` is the asked-for TOKENS, `spent` the reasoning CHARACTERS seen when it
+    crossed; the loop owns the reaction (03-CONTEXT D-22)."""
+
+    def __init__(self, budget: int, spent: int, cause: Exception | None = None) -> None:
+        super().__init__(
+            f"reasoning passed its budget: {spent} chars streamed against a budget of {budget} tokens",
+            cause,
+        )
+        self.budget = budget
+        self.spent = spent
+
+
+# A rough per-token character estimate for the client-side cut (quality only, spec 16 §7.4 (1)): the
+# stream is counted in characters, the budget is asked for in tokens.
+REASONING_CHARS_PER_TOKEN = 4
+
 # Errors the client raises from a stream it already opened (the server accepted the request).
-_STREAM_GUARD_ERRORS: tuple[type[ProviderError], ...] = (ProviderDegenerateError,)
+_STREAM_GUARD_ERRORS: tuple[type[ProviderError], ...] = (
+    ProviderDegenerateError, ProviderReasoningBudgetError,
+)
 
 
 class MalformedResponseError(ProviderError):
@@ -589,6 +610,17 @@ def _reasoning_text(obj: Any) -> str | None:
         if value is not None:
             return value
     return None
+
+
+async def _close_response(response: Any) -> None:
+    """Close a streaming response so the server sees the disconnect and stops generating; the
+    fake streams in tests have no close() and that is fine. Teardown never masks the real error."""
+    close = getattr(response, "close", None) or getattr(response, "aclose", None)
+    if close is not None:
+        try:
+            await close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def _aclose_quietly(client: AsyncOpenAI) -> None:
@@ -1139,10 +1171,13 @@ class LLMClient:
         """
         kwargs, name_unmap = self._native_kwargs(
             messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget)
+        cut = self._reasoning_cut_chars(reasoning_budget)   # None where the server enforces (D-21)
         try:
             async with _inference_gate(self.config):
                 return await self._consume_bounded(
-                    self._create_and_consume(kwargs, stream, on_token, name_unmap=name_unmap),
+                    self._create_and_consume(
+                        kwargs, stream, on_token, name_unmap=name_unmap,
+                        reasoning_budget_chars=cut, reasoning_budget_tokens=reasoning_budget),
                     gen_timeout,
                 )
         except openai.BadRequestError as exc:
@@ -1163,7 +1198,9 @@ class LLMClient:
                 try:
                     async with _inference_gate(self.config):
                         return await self._consume_bounded(
-                            self._create_and_consume(kwargs, stream, on_token, name_unmap=name_unmap),
+                            self._create_and_consume(
+                        kwargs, stream, on_token, name_unmap=name_unmap,
+                        reasoning_budget_chars=cut, reasoning_budget_tokens=reasoning_budget),
                             gen_timeout,
                         )
                 except Exception as retry_exc:
@@ -1177,7 +1214,9 @@ class LLMClient:
                 retry_kwargs, retry_unmap = built
                 async with _inference_gate(self.config):
                     return await self._consume_bounded(
-                        self._create_and_consume(retry_kwargs, stream, on_token, name_unmap=retry_unmap),
+                        self._create_and_consume(
+                            retry_kwargs, stream, on_token, name_unmap=retry_unmap,
+                            reasoning_budget_chars=cut, reasoning_budget_tokens=reasoning_budget),
                         gen_timeout,
                     )
 
@@ -1240,6 +1279,14 @@ class LLMClient:
         for key in kwargs.get("extra_body") or ():
             if key in EFFORT_KEYS:
                 self._accepted_effort_keys.add(key)
+
+    def _reasoning_cut_chars(self, reasoning_budget: int | None) -> int | None:
+        """The client-side cut, in characters (D-21): set only when a budget was asked for AND this
+        runtime has no budget key to hand the server (llama.cpp enforces server-side; the client
+        never double-enforces). `off`/`max` carry no budget, so they never cut."""
+        if reasoning_budget is None or EFFORT_BUDGET_KEY.get(self.config.provider_type) is not None:
+            return None
+        return reasoning_budget * REASONING_CHARS_PER_TOKEN
 
     def _classify_400(
         self, exc: openai.BadRequestError, sent_kwargs: dict[str, Any], *, check_tools: bool = True
@@ -1320,6 +1367,9 @@ class LLMClient:
         stream: bool,
         on_token: Callable[[str], Awaitable[None]] | None = None,
         name_unmap: dict[str, str] | None = None,
+        *,
+        reasoning_budget_chars: int | None = None,
+        reasoning_budget_tokens: int | None = None,
     ) -> tuple[Any, Any]:
         """Issue the completion request and normalize to (message, usage). stream=True uses
         TRUE HTTP streaming — the read-timeout applies BETWEEN chunks and a client disconnect
@@ -1342,6 +1392,8 @@ class LLMClient:
                 self._note_effort_accepted(kwargs)
                 message, usage = await self._consume_native_stream(
                     response, on_token, progress, on_reasoning=self.on_reasoning,
+                    reasoning_budget_chars=reasoning_budget_chars,
+                    reasoning_budget_tokens=reasoning_budget_tokens,
                 )
             finally:
                 self._stream_progress = None
@@ -1521,8 +1573,17 @@ class LLMClient:
         on_token: Callable[[str], Awaitable[None]] | None,
         progress: dict | None = None,
         on_reasoning: Callable[[str], Awaitable[None]] | None = None,
+        *,
+        reasoning_budget_chars: int | None = None,
+        reasoning_budget_tokens: int | None = None,
     ) -> tuple[Any, Any]:
         """Assemble a chat-completions chunk stream into (message, usage).
+
+        `reasoning_budget_chars` (D-21): when set, the stream is aborted with
+        ProviderReasoningBudgetError(reasoning_budget_tokens, chars seen) as soon as the reasoning
+        streamed so far exceeds it. Only the request paths set it, and only on a runtime with no
+        server-side budget key; the counter is local to this call, so concurrent streams on one
+        client never share it.
 
         Tool calls are accumulated as plain dicts (index-keyed deltas: id/name arrive
         on the first fragment, arguments accrete across fragments) — dicts re-serialize
@@ -1550,16 +1611,19 @@ class LLMClient:
             for key, default in _PROGRESS_TALLY_DEFAULTS.items():
                 progress.setdefault(key, default)
         watch = _RepetitionWatch()
+        reasoning_chars = 0
+
+        async def _abort_budget() -> None:
+            await _close_response(response)   # first, so the server stops generating
+            log.warning(
+                "Aborting over-budget reasoning after %d chars (budget %s tokens)",
+                reasoning_chars, reasoning_budget_tokens,
+            )
+            raise ProviderReasoningBudgetError(reasoning_budget_tokens or 0, reasoning_chars)
 
         async def _abort(hit: tuple[str, int]) -> None:
-            # Close the HTTP stream first so the server sees the disconnect and stops
-            # generating; the fake streams in tests have no close() and that is fine.
-            close = getattr(response, "close", None) or getattr(response, "aclose", None)
-            if close is not None:
-                try:
-                    await close()
-                except Exception:  # noqa: BLE001 — teardown must not mask the real error
-                    pass
+            # Close the HTTP stream first so the server sees the disconnect and stops generating.
+            await _close_response(response)
             unit, repeats = hit
             log.warning(
                 "Aborting degenerate generation after %d chars: %r repeated %d times",
@@ -1612,6 +1676,9 @@ class LLMClient:
                     await on_reasoning(reasoning)
                 if (hit := watch.feed(reasoning)) is not None:
                     await _abort(hit)
+                reasoning_chars += len(reasoning)
+                if reasoning_budget_chars is not None and reasoning_chars > reasoning_budget_chars:
+                    await _abort_budget()
             piece = getattr(delta, "content", None)
             if piece:
                 content_parts.append(piece)
@@ -1691,6 +1758,7 @@ class LLMClient:
             kwargs["stop"] = self.config.stop_sequences
         if (eb := self._extra_body(disable_thinking, reasoning_budget)) is not None:
             kwargs["extra_body"] = eb
+        cut = self._reasoning_cut_chars(reasoning_budget)   # None where the server enforces (D-21)
         try:
             # #18: honor `stream` — a dead param here silently made XML mode non-streaming
             # for the whole loop. Gate held across create + stream consumption; on
@@ -1698,7 +1766,10 @@ class LLMClient:
             # _complete_xml_fallback safely takes its own turn (no re-entrant deadlock).
             async with _inference_gate(self.config):
                 return await self._consume_bounded(
-                    self._create_and_consume(kwargs, stream, name_unmap=name_unmap), gen_timeout,
+                    self._create_and_consume(
+                        kwargs, stream, name_unmap=name_unmap,
+                        reasoning_budget_chars=cut, reasoning_budget_tokens=reasoning_budget),
+                    gen_timeout,
                 )
         except openai.BadRequestError as exc:
             verdict, keys = self._classify_400(exc, kwargs)
@@ -1708,7 +1779,9 @@ class LLMClient:
                 async def send(retry_kwargs: dict[str, Any]) -> tuple[Any, Any]:
                     async with _inference_gate(self.config):
                         return await self._consume_bounded(
-                            self._create_and_consume(retry_kwargs, stream, name_unmap=name_unmap),
+                            self._create_and_consume(
+                                retry_kwargs, stream, name_unmap=name_unmap,
+                                reasoning_budget_chars=cut, reasoning_budget_tokens=reasoning_budget),
                             gen_timeout,
                         )
 
@@ -1762,9 +1835,14 @@ class LLMClient:
             kwargs["stop"] = self.config.stop_sequences
         if (eb := self._extra_body(disable_thinking, reasoning_budget)) is not None:
             kwargs["extra_body"] = eb
+        cut = self._reasoning_cut_chars(reasoning_budget)   # None where the server enforces (D-21)
         try:
             async with _inference_gate(self.config):  # #18: honor stream here too
-                return await self._consume_bounded(self._create_and_consume(kwargs, stream), gen_timeout)
+                return await self._consume_bounded(
+                    self._create_and_consume(
+                        kwargs, stream,
+                        reasoning_budget_chars=cut, reasoning_budget_tokens=reasoning_budget),
+                    gen_timeout)
         except openai.BadRequestError as exc:
             # No further fallback here (D-32): overflow and an unnamed 400 surface as today; a 400
             # naming a sent effort key gets the one per-key retry.
@@ -1775,7 +1853,10 @@ class LLMClient:
             async def send(retry_kwargs: dict[str, Any]) -> tuple[Any, Any]:
                 async with _inference_gate(self.config):
                     return await self._consume_bounded(
-                        self._create_and_consume(retry_kwargs, stream), gen_timeout,
+                        self._create_and_consume(
+                            retry_kwargs, stream,
+                            reasoning_budget_chars=cut, reasoning_budget_tokens=reasoning_budget),
+                        gen_timeout,
                     )
 
             return await self._retry_without(
