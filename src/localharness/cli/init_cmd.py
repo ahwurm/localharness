@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shlex
 import shutil
@@ -28,6 +29,7 @@ from localharness.agent.gguf_header import (
 )
 from localharness.cli.errors import _HANDLED, report_filesystem_error
 from localharness.cli.workspace import shown_path, visible_text
+from localharness.config import trust
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.migrate import BACKUP_STAMP_FORMAT
@@ -562,7 +564,8 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
             outcome = picked
         elif isinstance(picked, InitRecords):  # a record: shown, written, launched by the first start
             _show_records(picked)
-            config_file = _write_records(config_path, picked, force=force)
+            config_file = _write_records(config_path, picked, force=force,
+                                        adopt=_adopts(interactive))
             _receipt(config_file, starting)
             outcome = SetupResult(config_file, picked.serving or picked.launchable)
         else:
@@ -1145,6 +1148,43 @@ def _record_dicts(harness: HarnessConfig) -> tuple[dict | None, list[dict]]:
     return _record_dicts_of(harness.server, harness.extra_endpoints)
 
 
+def _adopts(interactive: bool) -> bool:
+    """Does this run adopt what it writes? Only a person at a terminal does (D-37): not `--no-input`,
+    not a run without a tty, not a command the shell tool started (it carries LOCALHARNESS_COMMIT),
+    so an agent running `init` cannot approve a launch for the next start."""
+    return interactive and "LOCALHARNESS_COMMIT" not in os.environ
+
+
+def _adopt_written(global_dir: Path, file: str, server: dict | None, peers: Sequence[dict]) -> None:
+    """Record, as already approved, the launch entries init just wrote and showed (D-37, INIT-12):
+    the primary's `server.` keys and each peer's `lifecycle.` keys, built from the dicts that went
+    into ``file`` (never a re-read of the launch keys), and the posture entries (`bind_all`,
+    `require_api_key`) the machine's files give under exactly those prefixes — those, only while
+    they still say what was written (a value another file or a concurrent write changed is left for
+    the next start to ask about). With no machine record the first one is made, of the launch kinds
+    only; with one, these entries are added or replaced and nothing else changes (`adopt_entries`
+    never re-snapshots). No key is ever an entry."""
+    written: dict[str, dict] = {}  # entry-name prefix -> the dict written under it
+    if server is not None:
+        written["server."] = server
+    for peer in peers:
+        if isinstance(peer.get("lifecycle"), dict):
+            written[f"extra_endpoints.{peer['name']}.lifecycle."] = peer["lifecycle"]
+    entries = [e for prefix, mapping in written.items()
+               for e in trust._launch_entries(file, prefix, mapping)]
+    posture = {prefix + key: json.dumps(mapping.get(key))
+               for prefix, mapping in written.items() for key in trust._POSTURE_KEYS}
+    # `shown` is `<runtime>:<true|false>:<keyed|open>`: the middle part is the value in effect.
+    entries += [e for e in trust.machine_snapshot(global_dir)
+                if e["kind"] == trust.LAUNCH_KIND and e["name"] in posture
+                and str(e.get("shown", "")).split(":")[1:2] == [posture[e["name"]]]]
+    if trust.recorded_machine(global_dir) is not None:
+        trust.adopt_entries(global_dir, entries)
+    else:
+        trust.record_machine(global_dir, sorted(entries, key=trust._entry_key),
+                             kinds=frozenset({trust.LAUNCH_KIND, trust.LAUNCH_MODEL_KIND}))
+
+
 def _result_from_record(recs: InitRecords) -> DetectorResult:
     """The detection-shaped answer for a record: nothing was probed, so the address is the one the
     record will serve on and the one model is the name it will be served under."""
@@ -1158,7 +1198,8 @@ def _result_from_record(recs: InitRecords) -> DetectorResult:
     )
 
 
-def _write_records(config_path: Path, recs: InitRecords, *, force: bool = False) -> Path:
+def _write_records(config_path: Path, recs: InitRecords, *, force: bool = False,
+                   adopt: bool = False) -> Path:
     """A fresh config.yaml from a record: the provider points at the address the record will serve
     on and names the served model; no capability probe and no context budget (a server that is not
     up cannot be asked — the first `start` probes it and fits the window). Memory and host tools
@@ -1190,6 +1231,8 @@ def _write_records(config_path: Path, recs: InitRecords, *, force: bool = False)
                              records=(server_dict, peer_dicts))
     for thunk in recs.deferred:  # only now that the config is on disk
         thunk()
+    if adopt:  # D-59: exactly the dicts that were written, not a fresh look at the disk
+        _adopt_written(global_config_dir(config_path), "config.yaml", server_dict, peer_dicts)
     return written
 
 
