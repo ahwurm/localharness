@@ -6,6 +6,7 @@ import contextlib
 import logging
 import os
 import socket
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Annotated, Any
@@ -20,8 +21,8 @@ from rich.table import Table
 from rich.text import Text
 
 from localharness.cli.theme import entity, entity_text
-from localharness.cli.workspace import (NO_INPUT_HELP, _key_file_port, _raw_settings, _uncovered,
-                                        _visible, _write_overlay_validated)
+from localharness.cli.workspace import (NO_INPUT_HELP, MachineTrust, _key_file_port, _raw_settings,
+                                        _uncovered, _visible, _write_overlay_validated)
 from localharness.config.effort import EFFORT_UNENFORCED_LINE
 from localharness.core.private_files import touch_private
 from localharness.core.which import which_outside_cwd
@@ -507,6 +508,24 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     if endpoint_out is not None:
         endpoint_out.append(live)
     return None
+
+
+_BIND_ALL_ASKS = "{subject}: true not applied — launched on 127.0.0.1 for this run; a terminal start asks"
+
+
+def _posture_lines(machine_trust: MachineTrust,
+                   snap_shown: Mapping[tuple[str, str, str], str]) -> list[str]:
+    """The withheld-posture lines `start` composes from the decision's result (D-15, TRUST-04), for a
+    launch to print once. A withheld `server.bind_all: true` is launched on 127.0.0.1 and says so.
+    ``snap_shown`` maps `(file, kind, name)` to the entry's `shown` (`<runtime>:<value>:<keyed|open>`)."""
+    lines: list[str] = []
+    for file, entries in sorted(machine_trust.withheld.items()):
+        for kind, name in sorted(entries):
+            shown = snap_shown.get((file, kind, name))
+            if (kind, name) == ("launch", "server.bind_all") and shown is not None \
+                    and shown.split(":")[1:2] == ["true"] and (file, kind, name) not in machine_trust.quiet:
+                lines.append(_BIND_ALL_ASKS.format(subject="server.bind_all"))
+    return lines
 
 
 def _attach_window_report(harness: Any, provider_type: str, served: int | None, trained: int | None,
@@ -1047,6 +1066,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     if (sensed.path_written and can_ask
             and ("launch", "server.binary") in machine_trust.withheld.get("overrides.yaml", ())):
         _after_no_remove_path_binary(cfg_path, sensed.path_written)  # a terminal No on the PATH binary
+    # What the first launch of this session prints (D-15, D-17): the withheld-posture lines and the
+    # undo line. Start's own down-server launch prints them; a start that only attaches (or waits, or
+    # is refused) hands them to the REPL's first launch instead (D-26).
+    from localharness.config import trust as _trust_mod
+    _snap_shown = {} if not machine_trust.withheld else {
+        (e["file"], e["kind"], e["name"]): e["shown"]
+        for e in _trust_mod.machine_snapshot(cfg_path)}
+    pending = [*_posture_lines(machine_trust, _snap_shown),
+               *([sensed.undo_line] if sensed.undo_line else [])]
+    launch_notes = LaunchNotes(list(pending), sensed.converted)
     if machine_trust.line:
         err_console.print(machine_trust.line, markup=False, soft_wrap=True)
     loader = ConfigLoader(config_dir=cfg_path, local_config_dir=workspace,
@@ -1325,7 +1354,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             refusal = await _start_managed_server(
                 harness.server, server_cfg_path, provider.base_url, launch_key,
                 path_binary=path_llama_server, autosense=harness.autosense, endpoint_out=_launched,
-                notes=LaunchNotes([sensed.undo_line] if sensed.undo_line else [], sensed.converted))
+                notes=launch_notes)
             if refusal is None:
                 probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
         except (RuntimeError, TimeoutError, OSError) as exc:
@@ -2292,6 +2321,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             )
             return
 
+        if launch_notes.printed:
+            pending = []  # start's own launch said it all; the REPL has nothing to add
         repl = OrchestratorREPL(
             orchestrator=orchestrator,
             agent_loop=agent_loop,
@@ -2311,6 +2342,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # can_switch_plugins decides); the web and ACP paths never get the hook.
             on_plugin_switch=_plugin_switch if mobile_channel is None and acp_channel is None else None,
             queued=resume.queued if resume is not None else (),
+            launch_lines=tuple(pending),
         )
 
         await repl.run()

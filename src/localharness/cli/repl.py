@@ -288,6 +288,7 @@ class OrchestratorREPL:
         on_plugin_switch: Any = None,
         mcp_manager: Any = None,
         queued: Sequence[str] = (),
+        launch_lines: Sequence[str] = (),
     ) -> None:
         self._orchestrator = orchestrator
         self._agent = agent_loop
@@ -327,6 +328,9 @@ class OrchestratorREPL:
         self._mcp_manager = mcp_manager
         # Lines typed ahead of a /plugins restart, carried into the rebuilt session: played first.
         self._resume_queue: list[str] = list(queued)
+        # The withheld-posture / conversion lines `start` composed but did not print itself (D-15,
+        # D-17, D-26): the session's FIRST launch announcement prints them once and clears the list.
+        self._pending_launch_lines: list[str] = list(launch_lines)
         # (verb, plugin name) once /plugins asked for a restart; start_cmd reads it after run().
         self.restart_request: tuple[str, str] | None = None
         # --- Type-anytime input box (box mode); inert on the classic path ---
@@ -1899,6 +1903,7 @@ class OrchestratorREPL:
                 self._active_heavy = None
             tradeoff = self._swap_tradeoff_note(cur_ptype, current, ep.provider_type, target)
             _, posture = effective_posture(ep.lifecycle, keyed=keyed, decision=decision)
+            await self._flush_launch_lines()
             await self._send_info(
                 f"Launching {ep.name}{f' ({posture})' if posture else ''} — "
                 f"the swap can take several minutes...{tradeoff}",
@@ -2654,6 +2659,14 @@ class OrchestratorREPL:
             lines += [f"  - {name} (pinned to {pin!r})" for name, pin in pinned]
             await self._send_info("\n".join(lines))
         return True
+
+    async def _flush_launch_lines(self) -> None:
+        """Print the pending launch lines (D-15, D-17) as one info message each, then clear them, so the
+        session's first launch says what it narrowed or converted and no later launch repeats it. Called
+        once the launch decision has no refusal and before the announcement."""
+        pending, self._pending_launch_lines = self._pending_launch_lines, []
+        for line in pending:
+            await self._send_info(line)
 
     async def _send_info(self, text: str, colorize: bool = False) -> None:
         meta: dict = {"style": "system.info"}

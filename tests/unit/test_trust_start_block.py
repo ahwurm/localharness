@@ -694,3 +694,118 @@ def test_a_path_binary_and_a_conversion_in_one_start_are_two_audited_writes(g):
     assert sensed.path_written == PATH_BIN and sensed.converted == HOST_CONVERTED
     assert [e["path"] for e in _audit(g)] == ["server.binary", "server.bind_all"]
     assert _overrides(g) == {"server": {"binary": PATH_BIN, "bind_all": True}}
+
+
+# ------------------------------------------------------------------ the withheld-posture lines (D-15, D-26)
+
+BIND_ALL_LINE = ("server.bind_all: true not applied — launched on 127.0.0.1 for this run; "
+                 "a terminal start asks")
+SERVER_LLAMACPP = {"runtime": "llamacpp", "binary": "/x/llama-server", "model": "/m/a.gguf", "port": 8080}
+SERVER_VLLM = {"runtime": "vllm", "binary": "/v/vllm", "model": "org/m", "port": 8080}
+
+
+def _withheld(entries, *, quiet=()):
+    return MachineTrust({"config.yaml": frozenset(entries)}, quiet=frozenset(quiet))
+
+
+def test_a_withheld_primary_bind_all_is_one_line_naming_loopback_and_the_next_terminal_start():
+    trust_result = _withheld({("launch", "server.bind_all")})
+    shown = {("config.yaml", "launch", "server.bind_all"): "llamacpp:true:open"}
+
+    assert start_cmd._posture_lines(trust_result, shown) == [BIND_ALL_LINE]
+
+
+def test_nothing_withheld_yields_no_lines():
+    assert start_cmd._posture_lines(MachineTrust(), {}) == []
+
+
+class _Session:
+    """Drives the real `_start_async` to its REPL (whose `run` the start-cmd stubs make a no-op) and
+    records what the REPL was built with; the server is down until the first launch, then answers."""
+
+    def __init__(self, tmp_path, monkeypatch, *, server_block, was, up=False):
+        from localharness.cli.repl import OrchestratorREPL
+
+        self.tmp_path = tmp_path
+        self.seen = _boot(tmp_path, monkeypatch, server_block={**server_block, "bind_all": was})
+        _record(tmp_path)  # the machine knows `bind_all: was`; the files then say true
+        from tests.unit.test_launch_paths_start import _write_config
+        _write_config(tmp_path, server_block={**server_block, "bind_all": True})
+        self.err: list[tuple[str, int]] = []
+        monkeypatch.setattr(start_cmd.err_console, "print",
+                            lambda *a, **k: self.err.append((" ".join(map(str, a)), len(self.seen.started))))
+        self.built: list[dict] = []
+        real_init = OrchestratorREPL.__init__
+
+        def init(repl, *a, **kw):
+            self.built.append(kw)
+            real_init(repl, *a, **kw)
+
+        monkeypatch.setattr(OrchestratorREPL, "__init__", init)
+        probes = iter([up])
+
+        async def probe(llm, max_retries=3, delay=2.0):
+            ok = next(probes, True)
+            return (True, "native", 262_144, None) if ok else (False, None, None, "Connection error.")
+
+        monkeypatch.setattr(start_cmd, "_probe_llm", probe)
+
+        async def wait_ready(base_url, **kw):
+            return ["m"]
+
+        monkeypatch.setattr(server, "wait_ready", wait_ready)
+
+    async def run(self):
+        assert await _drive(self.tmp_path) is None
+        (kw,) = self.built
+        return kw["launch_lines"]
+
+    @property
+    def printed(self) -> list[str]:
+        return [text for text, _ in self.err]
+
+
+async def test_start_prints_the_line_once_on_its_own_launch_and_hands_the_repl_nothing(tmp_path, monkeypatch):
+    session = _Session(tmp_path, monkeypatch, server_block=SERVER_LLAMACPP, was=False)
+
+    handed = await session.run()
+
+    assert session.printed.count(BIND_ALL_LINE) == 1
+    assert [started for text, started in session.err if text == BIND_ALL_LINE] == [0]  # before activate
+    assert len(session.seen.started) == 1 and "0.0.0.0" not in session.seen.started[0][0]
+    assert handed == ()
+
+
+async def test_an_attaching_start_prints_nothing_and_hands_the_repl_the_line(tmp_path, monkeypatch):
+    session = _Session(tmp_path, monkeypatch, server_block=SERVER_VLLM, was=False, up=True)
+
+    handed = await session.run()
+
+    assert BIND_ALL_LINE not in session.printed
+    assert session.seen.started == []
+    assert handed == (BIND_ALL_LINE,)
+
+
+async def test_a_start_that_only_waited_hands_the_repl_the_line(tmp_path, monkeypatch):
+    session = _Session(tmp_path, monkeypatch, server_block=SERVER_LLAMACPP, was=False)
+
+    async def waited(srv, global_dir, base_url, launch_key, **kw):
+        return None  # a loading server: waited for, nothing announced, notes.printed untouched
+
+    monkeypatch.setattr(start_cmd, "_start_managed_server", waited)
+
+    assert await session.run() == (BIND_ALL_LINE,)
+    assert BIND_ALL_LINE not in session.printed
+
+
+async def test_a_start_with_nothing_withheld_hands_the_repl_an_empty_tuple(tmp_path, monkeypatch):
+    _boot(tmp_path, monkeypatch, server_block=SERVER_VLLM, probe_ok=True)
+    from localharness.cli.repl import OrchestratorREPL
+    built: list[dict] = []
+    real_init = OrchestratorREPL.__init__
+    monkeypatch.setattr(OrchestratorREPL, "__init__",
+                        lambda repl, *a, **kw: (built.append(kw), real_init(repl, *a, **kw))[1])
+
+    assert await _drive(tmp_path) is None
+
+    assert built[0]["launch_lines"] == ()
