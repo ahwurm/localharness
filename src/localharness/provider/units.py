@@ -34,7 +34,7 @@ from localharness.provider.procfs import ProcRecord
 __all__ = [
     "JOURNAL_LINES", "JOURNAL_TIMEOUT_S", "JOURNAL_OUTPUT_CAP", "SYSTEMCTL_TIMEOUT_S",
     "SYSTEMCTL_OUTPUT_CAP", "UNIT_FILE_CAP", "UNIT_LINE_CAP", "UNIT_TOKEN_CAP", "UNITS_SCANNED_CAP",
-    "Skip", "UnitState", "unit_file_state", "read_journal",
+    "Skip", "UnitState", "unit_file_state", "user_units", "read_journal",
     "read_unit", "unit_record",
 ]
 
@@ -119,6 +119,40 @@ def unit_file_state(unit: str) -> UnitState | None:
         return None
     return state if state.unit else UnitState(unit, state.load_state, state.fragment_path,
                                                state.unit_file_state, state.drop_in_paths)
+
+
+_SKIPPED_FILE_STATES = frozenset({"generated", "transient", "alias", "masked", "bad"})
+
+
+def user_units() -> list[UnitState]:
+    """The user's own service units, stopped and disabled ones included (`list-units` shows only
+    loaded ones, `list-unit-files` all of them): names holding `@` (templates) and units generated,
+    transient, alias, masked or bad are dropped, the first `UNITS_SCANNED_CAP` in alphabetical order
+    are kept, and one batched `systemctl show` reads them. Empty when systemd could not be asked."""
+    out = _run(["systemctl", "--user", "list-unit-files", "--type=service", "--plain",
+                "--no-legend", "--no-pager"], timeout=SYSTEMCTL_TIMEOUT_S, cap=SYSTEMCTL_OUTPUT_CAP)
+    if out is None:
+        return []
+    names: set[str] = set()
+    for row in out.splitlines():
+        cols = row.split()
+        if not cols or "@" in cols[0]:
+            continue
+        if len(cols) > 1 and cols[1] in _SKIPPED_FILE_STATES:
+            continue
+        names.add(cols[0])
+    kept = sorted(names)[:UNITS_SCANNED_CAP]
+    if not kept:
+        return []
+    shown = _run(_show_argv(*kept), timeout=SYSTEMCTL_TIMEOUT_S, cap=SYSTEMCTL_OUTPUT_CAP)
+    if shown is None:
+        return []
+    by_name: dict[str, UnitState] = {}
+    for block in shown.replace("\r\n", "\n").split("\n\n"):
+        state = _parse_state(block)
+        if state is not None and state.unit:
+            by_name.setdefault(state.unit, state)
+    return [by_name[name] for name in kept if name in by_name]
 
 
 # ---------------------------------------------------------------------------------- the journal
