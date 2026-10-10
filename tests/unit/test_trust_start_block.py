@@ -298,7 +298,10 @@ def test_the_question_lists_the_path_binary_and_a_yes_records_it(g, monkeypatch)
     assert loaded.server is not None and loaded.server.binary == PATH_BIN
 
 
-def test_a_start_that_cannot_ask_withholds_it_and_the_server_is_dropped(g, monkeypatch):
+def test_a_start_that_cannot_ask_writes_nothing_and_withholds_nothing(g, monkeypatch):
+    """WR-01: a headless start has no question to put, so it neither rewrites overrides.yaml for a
+    binary it cannot get confirmed nor drops `server:` for one; the declared-only record keeps its
+    refusal text (`... (PATH has <path>)`)."""
     _config(g, server=DECLARED)
     _record(g)
     sensed = _sense_before_trust(g, can_ask=False, path_binary=PATH_BIN)
@@ -306,11 +309,39 @@ def test_a_start_that_cannot_ask_withholds_it_and_the_server_is_dropped(g, monke
 
     got = decide_machine_trust(g, ask=False, launching=sensed.launching, annotations=sensed.annotations)
 
-    assert got.withheld == {"overrides.yaml": frozenset({BINARY})}
-    assert "server.binary (overrides.yaml)" in got.line
+    assert sensed.path_written is None and got == MachineTrust()
+    assert not (g / "overrides.yaml").exists() and _audit(g) == []
     loaded = ConfigLoader(config_dir=g, machine_withheld=got.withheld).load_harness()
-    assert loaded.server is None
-    assert "server.binary" not in {e["name"] for e in trust.recorded_machine(g)["entries"]}
+    assert loaded.server is not None and loaded.server.binary is None
+
+
+def test_wr01_a_start_that_only_attaches_writes_nothing_and_asks_nothing(g, monkeypatch):
+    _config(g, server=DECLARED)
+    _record(g)
+    monkeypatch.setattr(server, "server_pid", lambda _d: 4321)  # a harness server is already up
+    err = _err_lines(monkeypatch)
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=PATH_BIN)
+    never_asked(monkeypatch)
+    got = decide_machine_trust(g, ask=True, launching=sensed.launching, annotations=sensed.annotations)
+
+    assert sensed.launching is False and sensed.path_written is None
+    assert not (g / "overrides.yaml").exists() and _audit(g) == [] and err == []
+    assert got == MachineTrust()
+
+
+def test_wr01_the_write_still_precedes_the_question_on_a_launching_terminal_start(g, monkeypatch):
+    _config(g, server=DECLARED)
+    _record(g)
+    seen: list[dict] = []
+    real = decide_machine_trust
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=PATH_BIN)
+    seen.append(_overrides(g))  # on disk before decide_machine_trust is called at all
+    answers(monkeypatch, True)
+    real(g, ask=True, launching=sensed.launching, annotations=sensed.annotations)
+
+    assert sensed.launching is True and seen == [{"server": {"binary": PATH_BIN}}]
 
 
 def test_a_no_removes_the_line_audits_it_and_remembers_the_path(g, monkeypatch):
@@ -385,15 +416,17 @@ def test_a_no_keeps_the_rest_of_the_servers_overlay(g):
 # ------------------------------------------------------------------ through the real start
 
 
-async def test_a_headless_start_withholds_the_path_binary_and_launches_nothing(tmp_path, monkeypatch):
+async def test_a_headless_start_writes_nothing_and_launches_nothing(tmp_path, monkeypatch):
+    """WR-01: no question can be put, so overrides.yaml is untouched and the refusal keeps its
+    `(PATH has ...)` suffix."""
     seen = _boot(tmp_path, monkeypatch, server_block=DECLARED_ONLY, path_binary=PATH_BIN)
     _record(tmp_path)
 
     assert await _drive(tmp_path) == 1
 
     assert seen.started == []
-    assert _overrides(tmp_path) == {"server": {"binary": PATH_BIN}}  # shown to the next terminal start
-    assert any("server.binary (overrides.yaml)" in line for line in
+    assert _overrides(tmp_path) == {} and _audit(tmp_path) == []
+    assert any(f"(PATH has {PATH_BIN})" in line for line in
                (" ".join(map(str, a)) for a, _ in seen.err))
 
 

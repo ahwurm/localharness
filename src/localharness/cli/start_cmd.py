@@ -458,9 +458,16 @@ def _sense_before_trust(global_dir: Path, *, can_ask: bool, path_binary: str | N
     from localharness.config import trust
 
     rec = trust.recorded_machine(global_dir)
-    path_written = _write_path_binary(global_dir, rec, path_binary)
+    launching = _sensed_launching(global_dir, rec)
+    # The PATH binary is written only for a start that is about to launch AND can put the question
+    # that follows (WR-01): an attach-only or a headless start would otherwise rewrite overrides.yaml
+    # for a binary nothing will launch, and leave a line no answer ever cleans up. The write still
+    # precedes the question (D-20).
+    path_written = _write_path_binary(global_dir, rec, path_binary) if launching and can_ask else None
     annotations, converted, undo_line = _convert_extra_args_host(global_dir, rec, can_ask=can_ask)
-    return SensedStart(_sensed_launching(global_dir, rec), annotations, converted, path_written, undo_line)
+    if annotations:  # the conversion wrote `bind_all: true`: it is an uncovered entry now, so sense again
+        launching = _sensed_launching(global_dir, rec)
+    return SensedStart(launching, annotations, converted, path_written, undo_line)
 
 
 async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launch_key: dict[str, str],
