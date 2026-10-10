@@ -208,7 +208,8 @@ def _managed_server_running(strategy: Any, srv: Any, global_dir: Path) -> bool:
 
 
 async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launch_key: dict[str, str],
-                                *, path_binary: str | None = None) -> str | None:
+                                *, path_binary: str | None = None, autosense: Any = None,
+                                endpoint_out: list | None = None) -> str | None:
     """Launch path 1 of the five: `start`'s down-server branch. Wait for a server that is already
     loading, or ask the launch decision BEFORE announcing anything and launch through the lifecycle
     strategy. Returns the decision's refusal line when the launch is refused (nothing stopped,
@@ -216,7 +217,12 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     raise. ``path_binary`` is a `llama-server` found on PATH: it only reaches the refusal text.
 
     The posture phrase comes from the effective argv (`effective_posture`), never from the flags,
-    and only on a launch this start makes — a start that only waits for a loading server attaches."""
+    and only on a launch this start makes — a start that only waits for a loading server attaches.
+
+    ``autosense`` is the machine's `AutosenseConfig`, handed to `activate` so a llama.cpp launch sizes
+    its window; ``endpoint_out`` collects the `LiveEndpoint` of a launch this start made (nothing is
+    appended on the wait-for-a-loading-server path), which is where the caller reads the window the
+    launch got and the environment names it dropped."""
     from localharness.provider import server as managed_server
     from localharness.provider.lifecycle import strategy_for
     strategy = strategy_for(srv)
@@ -239,7 +245,9 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
         err_console.print(decision.note, markup=False, soft_wrap=True)
     # activate = serve_command → start_server → wait_ready (launch + readiness) via the lifecycle
     # strategy. The off-loop verified-stop wrapper lives in the strategy, not this launch path.
-    await strategy.activate(srv, global_dir, base_url, **launch_key)
+    live = await strategy.activate(srv, global_dir, base_url, autosense=autosense, **launch_key)
+    if endpoint_out is not None:
+        endpoint_out.append(live)
     return None
 
 
@@ -1044,6 +1052,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # Startup probe — local LLMs may need warm-up; probe returns the real tool_call_mode (FIDEL-04)
     # AND the served context window (single source of truth for the budget).
     probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
+    # What a launch THIS start makes hands back (its LiveEndpoint: the window it got, the environment
+    # names it dropped); empty when the server was already up or only loading — that start attaches.
+    _launched: list = []
+    _pending_warnings: list[str] = []
     if not probe_ok and harness.server is not None:
         # Harness-managed server (init guided setup) — start it instead of erroring
         # (covers reboots). If a pid is alive, it's mid-load: just wait.
@@ -1051,7 +1063,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         try:
             refusal = await _start_managed_server(
                 harness.server, server_cfg_path, provider.base_url, launch_key,
-                path_binary=path_llama_server)
+                path_binary=path_llama_server, autosense=harness.autosense, endpoint_out=_launched)
             if refusal is None:
                 probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
         except (RuntimeError, TimeoutError, OSError) as exc:
@@ -1130,16 +1142,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # unchanged, it is the harness's own default and must never drive a fail-loud guard (it aborted
     # every llama.cpp/Ollama/LM Studio/unknown start on a window no server ever served).
     _probe_window = served_window if served_window != _seed_window else None
-    # Was this server launched by the harness (a live pidfile)? Only the undo sentence of an
-    # attach report asks (D-38), and only a llama.cpp record has one; a failure reads as "no".
-    _harness_launched = False
-    if harness.server is not None and harness.server.runtime == "llamacpp":
-        try:
-            from localharness.provider.lifecycle import strategy_for
-            _harness_launched = _managed_server_running(
-                strategy_for(harness.server), harness.server, server_cfg_path)
-        except Exception:  # noqa: BLE001 — wording only: degrade to a foreign incumbent
-            _harness_launched = False
     _probe = await asyncio.to_thread(
         probe_window, provider.base_url, resolved_model, provider.provider_type, **launch_key
     )
@@ -1155,9 +1157,24 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     )
     _ledger = default_speed_stats_path(cfg_path)
     last = last_window_report(_ledger, provider.provider_type, resolved_model)
-    report, undo = _attach_window_report(
-        harness, provider.provider_type, _served, _probe.trained, harness_launched=_harness_launched)
-    launched_here = False
+    if _launched and _launched[0].window is not None:
+        # This start launched the server: the report is what `activate` asked and the probe saw (a
+        # launch carries no undo, D-36). A launch with no window (vLLM) falls to the attach report.
+        report, undo, launched_here = _launched[0].window, None, True
+    else:
+        # Was the serving process launched by the harness (a live pidfile)? Only the undo sentence of
+        # an attach report asks (D-38), and only a llama.cpp record has one; a failure reads "no".
+        _harness_launched = False
+        if harness.server is not None and harness.server.runtime == "llamacpp":
+            try:
+                from localharness.provider.lifecycle import strategy_for
+                _harness_launched = _managed_server_running(
+                    strategy_for(harness.server), harness.server, server_cfg_path)
+            except Exception:  # noqa: BLE001 — wording only: degrade to a foreign incumbent
+                _harness_launched = False
+        report, undo = _attach_window_report(
+            harness, provider.provider_type, _served, _probe.trained, harness_launched=_harness_launched)
+        launched_here = False
     changed = window_changed(last, report, harness.autosense.notify_ratio)
     # An attach to a runtime that reported nothing (no served, trained or fit number) has nothing to say.
     _nothing_known = report.served is None and report.trained is None and report.fits is None
@@ -1169,6 +1186,20 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             _ledger, provider.provider_type, resolved_model, report.served, report.trained, report.fits)
     except OSError:
         pass  # the ledger is a convenience: a start never fails on it
+    # D-25: the names the launch scrubbed from the server's environment, said again only when the
+    # list changed. Names only, never values.
+    if _launched and _launched[0].dropped_env and harness.server is not None:
+        from localharness.provider.speed_stats import last_dropped_env, record_dropped_env
+        _runtime = harness.server.runtime
+        _names = sorted(set(_launched[0].dropped_env))
+        if _names != (last_dropped_env(_ledger, _runtime) or []):
+            _pending_warnings.append(
+                f"launch environment dropped {', '.join(_names)}"
+                + (" — set server.env: for what llama-server should see" if _runtime == "llamacpp" else ""))
+            try:
+                record_dropped_env(_ledger, _runtime, _names)
+            except OSError:
+                pass
     # #145: a served window that cannot hold a reply reserve cannot run AT ALL — history is
     # allowed to fill the whole thing, so prompt + max_tokens overruns it on the first real turn
     # whatever the config says, and clamp_response_tokens has no reserve to fit the reply into.
@@ -1260,6 +1291,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.config.cleartext import cleartext_warnings
     # a key headed over plain http to another machine: named, never refused
     warnings.extend(cleartext_warnings(harness))
+    warnings.extend(_pending_warnings)
     plugins_loaded = 0
     mcp_connected = 0
     mcp_failed = 0
@@ -1710,6 +1742,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # prompt's memory section.
             memory_slot=memory_slot,
             task_context=task_state,
+            template_margin_ratio=harness.autosense.template_margin_ratio,
         )
         if resume is not None:  # the next turn carries the earlier conversation, byte for byte
             agent_loop.resume(list(resume.conversation), resume.prior_context)

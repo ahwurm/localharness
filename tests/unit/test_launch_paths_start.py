@@ -333,3 +333,59 @@ async def test_a_failed_launch_message_with_brackets_reaches_the_error_console_v
     monkeypatch.setattr(server, "start_server", boom)
     assert await _drive(tmp_path) == 1
     assert f"Error: managed llama.cpp failed to start: {message}" in buf.getvalue()
+
+
+# ------------------------------------------------------------------------------- autosense / endpoint_out
+
+
+class _Recording:
+    """A lifecycle strategy stand-in: records the keywords `activate` was called with."""
+
+    def __init__(self, endpoint=None):
+        self.calls: list[dict] = []
+        self.endpoint = endpoint
+
+    async def activate(self, spec, config_dir, base_url, **kw):
+        self.calls.append(kw)
+        return self.endpoint
+
+
+async def test_the_helper_hands_autosense_to_activate_and_collects_the_endpoint(tmp_path, monkeypatch):
+    from localharness.config.models import AutosenseConfig
+    from localharness.provider import lifecycle
+    from localharness.provider.lifecycle import LiveEndpoint
+
+    _Launch(monkeypatch)
+    live = LiveEndpoint(base_url=URL, served_models=["m"], handle=4321, dropped_env=("A",))
+    fake = _Recording(live)
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: type(
+        "S", (), {"liveness": lambda self, s, d: lifecycle.Liveness(False), "activate": fake.activate})())
+    cfg, out = AutosenseConfig(), []
+    assert await _start_managed_server(_llama(), tmp_path, URL, {}, autosense=cfg, endpoint_out=out) is None
+    assert fake.calls == [{"autosense": cfg}]
+    assert out == [live]
+
+
+async def test_the_new_keywords_default_to_none(tmp_path, monkeypatch):
+    from localharness.provider import lifecycle
+
+    _Launch(monkeypatch)
+    fake = _Recording()
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: type(
+        "S", (), {"liveness": lambda self, s, d: lifecycle.Liveness(False), "activate": fake.activate})())
+    assert await _start_managed_server(_llama(), tmp_path, URL, {}) is None
+    assert fake.calls == [{"autosense": None}]
+
+
+async def test_a_server_already_loading_collects_no_endpoint_and_never_activates(tmp_path, monkeypatch):
+    from localharness.provider import lifecycle
+
+    _Launch(monkeypatch, pid=4321)
+
+    async def activate(self, *a, **k):
+        raise AssertionError("a start that only waits does not activate")
+
+    monkeypatch.setattr(lifecycle.SpawnedProcessStrategy, "activate", activate)
+    out: list = []
+    assert await _start_managed_server(_llama(), tmp_path, URL, {}, endpoint_out=out) is None
+    assert out == []
