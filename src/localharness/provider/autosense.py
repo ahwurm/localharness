@@ -255,6 +255,25 @@ def has_cache_ram_arg(extra_args: Sequence[str]) -> bool:
     return any(t in ("--cache-ram", "-cram") or t.startswith("--cache-ram=") for t in extra_args)
 
 
+def _flag_value(extra_args: Sequence[str], flags: Sequence[str]) -> str | None:
+    """The value of the last of `flags` in `extra_args` (two-token or `=` form), or None."""
+    found: str | None = None
+    for i, token in enumerate(extra_args):
+        for flag in flags:
+            if token == flag and i + 1 < len(extra_args):
+                found = extra_args[i + 1]
+            elif token.startswith(f"{flag}="):
+                found = token[len(flag) + 1:]
+    return found
+
+
+def extra_cache_types(extra_args: Sequence[str]) -> tuple[str | None, str | None]:
+    """The KV cache types `extra_args` set: `(-ctk | --cache-type-k, -ctv | --cache-type-v)`, each
+    None when absent. The record's own `cache_type_k` / `cache_type_v` win over these."""
+    return (_flag_value(extra_args, ("-ctk", "--cache-type-k")),
+            _flag_value(extra_args, ("-ctv", "--cache-type-v")))
+
+
 @dataclass(frozen=True)
 class FitInputs:
     """What `compute_fit` gathered for one llama.cpp record: the typed header, the GPU residency, the
@@ -275,7 +294,8 @@ def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None,
 
     Reads the GGUF header (through `fit_header`, so every value is an int or absent), works out the
     GPU residency from `extra_args`, probes free memory and stats the weights, then calls `fit` with
-    the record's KV cache types. `attached_served` is the window an already-running server serves.
+    the KV cache types (the record's, else the ones `extra_args` set with `-ctk` / `-ctv`; unset is
+    f16). `attached_served` is the window an already-running server serves.
     `size=False` stops after the header and the offload (no memory probe: a caller that has no served
     window to add to wants only the header); `meminfo=True` also reads `/proc/meminfo` for
     `--cache-ram`. Starts nothing and writes nothing."""
@@ -293,9 +313,10 @@ def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None,
     mem = free_memory(ratios)
     weights = weights_bytes(server.model, server.mmproj)
     mi = _read_meminfo() if meminfo else None
+    extra_k, extra_v = extra_cache_types(extra)
     fits = fit(
         header, mem.free_bytes if mem else None, ratios, attached_served,
-        cache_type_k=server.cache_type_k, cache_type_v=server.cache_type_v,
+        cache_type_k=server.cache_type_k or extra_k, cache_type_v=server.cache_type_v or extra_v,
         weights=weights, offload=offload, runtime=server.runtime)
     return FitInputs(header, offload, mem, weights, mi, fits)
 

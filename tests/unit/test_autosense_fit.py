@@ -22,6 +22,7 @@ from localharness.provider.autosense import (
     WindowReport,
     cache_ram_mib,
     compute_fit,
+    extra_cache_types,
     fit,
     fit_header,
     fmt_count,
@@ -126,6 +127,31 @@ def test_compute_fit_types_the_header_and_never_raises_on_a_bad_file(tmp_path, h
     assert fi.header == {} and fi.offload == "unknown" and fi.fits is None
     (tmp_path / "m.gguf").write_bytes(b"not a gguf")
     assert compute_fit(bad, RATIOS).header == {}
+
+
+@pytest.mark.parametrize("extra", [["-ctk", "q8_0", "-ctv", "q8_0"],
+                                   ["--cache-type-k", "q8_0", "--cache-type-v=q8_0"],
+                                   ["--cache-type-k=q8_0", "-ctv", "q8_0"]])
+def test_compute_fit_reads_the_cache_types_from_extra_args(tmp_path, host, extra):
+    """IN-04: `-ctk q8_0 -ctv q8_0` halves the KV cost (262144 -> 139264 bytes/token), so the fit is larger."""
+    fi = compute_fit(_record(tmp_path, extra_args=extra), RATIOS)
+    # usable 3919157658 // (64 * 8 * 128 * 2 * 34/32 = 139264) = 28141
+    assert fi.fits == 28141 and fi.fits > 14950
+
+
+def test_the_records_cache_types_win_over_extra_args(tmp_path, host):
+    rec = _record(tmp_path, extra_args=["-ctk", "q8_0", "-ctv", "q8_0"], cache_type_k="f16", cache_type_v="f16")
+    assert compute_fit(rec, RATIOS).fits == 14950
+
+
+def test_an_unknown_cache_type_in_extra_args_is_not_computed(tmp_path, host):
+    assert compute_fit(_record(tmp_path, extra_args=["-ctk", "mystery"]), RATIOS).fits is None
+
+
+def test_extra_cache_types_takes_the_last_setting_and_none_when_absent():
+    assert extra_cache_types(["-c", "4096"]) == (None, None)
+    assert extra_cache_types(["-ctk", "f16", "--cache-type-k=q4_0"]) == ("q4_0", None)
+    assert extra_cache_types(["-ctv"]) == (None, None)  # a flag with no value names nothing
 
 
 def test_the_argv_detectors_agree_with_the_forms_llama_server_takes():
