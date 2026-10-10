@@ -15,7 +15,12 @@ import typer
 import yaml
 
 from localharness.cli import start_cmd
-from localharness.cli.start_cmd import _start_async, _start_managed_server
+from localharness.cli.start_cmd import (
+    HOST_CONVERTED,
+    LaunchNotes,
+    _start_async,
+    _start_managed_server,
+)
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import autosense, server
 from tests.unit.launch_support import popen  # noqa: F401
@@ -308,6 +313,126 @@ async def test_a_vllm_record_that_is_loading_keeps_its_0_17_wait_line(tmp_path, 
     spec = ManagedServerConfig(launch="binary", binary="/opt/vllm", model="org/repo", port=8080)
     assert await _start_managed_server(spec, tmp_path, URL, {}) is None
     assert seen.lines == ["Managed vLLM is still loading — waiting..."]
+
+
+# ------------------------------------------------------------------------------- the conversion's notes (D-16/D-17)
+
+UNDO = ("server.extra_args --host 192.168.1.5 is not applied — launched on 127.0.0.1 — "
+        "server.bind_all: true restores it (asks once)")
+CONVERTED_LINE = (f"Managed llama.cpp is not running — starting it ({PHRASE} — {HOST_CONVERTED}; "
+                  "model load can take several minutes)...")
+
+
+async def test_the_first_launch_after_a_conversion_carries_the_suffix_and_the_next_does_not(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    spec = _llama(bind_all=True, extra_args=["--host", "0.0.0.0"])
+    notes = LaunchNotes([], HOST_CONVERTED)
+    assert await _start_managed_server(spec, tmp_path, URL, {}, notes=notes) is None
+    assert seen.lines == [CONVERTED_LINE] and notes.printed is True
+    assert "0.0.0.0" in seen.cmds[0] and seen.cmds[0][-2:] != ["--host", "127.0.0.1"]
+    later = _Launch(monkeypatch)
+    assert await _start_managed_server(spec, tmp_path, URL, {}) is None
+    assert later.lines == [f"Managed llama.cpp is not running — starting it ({PHRASE}; "
+                           "model load can take several minutes)..."]
+
+
+async def test_a_keyed_conversion_reads_every_interface_with_no_no_key(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    spec = _llama(bind_all=True, require_api_key=True, extra_args=["--host", "0.0.0.0"])
+    assert await _start_managed_server(spec, tmp_path, URL, {"api_key": "K"},
+                                       notes=LaunchNotes([], HOST_CONVERTED)) is None
+    assert seen.lines == ["Managed llama.cpp is not running — starting it (every interface — "
+                          f"{HOST_CONVERTED}; model load can take several minutes)..."]
+    assert "no key" not in seen.lines[0]
+
+
+async def test_the_suffix_is_not_claimed_by_a_launch_that_did_not_bind_beyond_loopback(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    spec = _llama(bind_all=True, require_api_key=True, api_key_file=str(tmp_path))  # unreadable: loopback
+    notes = LaunchNotes([], HOST_CONVERTED)
+    assert await _start_managed_server(spec, tmp_path, URL, {}, notes=notes) is None
+    assert HOST_CONVERTED not in seen.lines[0] and notes.printed is True
+
+
+async def test_the_undo_line_is_printed_once_right_after_the_announcement_and_before_the_launch(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    spec = _llama(extra_args=["--host", "192.168.1.5"])
+    notes = LaunchNotes([UNDO])
+    assert await _start_managed_server(spec, tmp_path, URL, {}, notes=notes) is None
+    assert seen.err_lines == [UNDO] and notes.printed is True
+    (args, kwargs), = seen.err
+    assert kwargs.get("markup") is False and kwargs.get("soft_wrap") is True
+    announced = f"out:{seen.lines[0]}"
+    assert seen.log.index(announced) < seen.log.index(f"err:{UNDO}") < seen.log.index("start_server")
+    assert seen.cmds[0][-2:] == ["--host", "127.0.0.1"]
+
+
+async def test_the_waiting_branch_prints_neither_the_suffix_nor_the_lines(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch, pid=4321)
+    notes = LaunchNotes([UNDO], HOST_CONVERTED)
+    spec = _llama(bind_all=True)
+    assert await _start_managed_server(spec, tmp_path, URL, {}, notes=notes) is None
+    assert seen.lines == ["Managed llama.cpp is still loading — waiting..."]
+    assert seen.err_lines == [] and notes.printed is False
+
+
+async def test_a_refusal_prints_neither_the_suffix_nor_the_lines(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    notes = LaunchNotes([UNDO], HOST_CONVERTED)
+    spec = ManagedServerConfig(runtime="llamacpp", model="/x/m.gguf", port=8080)
+    assert await _start_managed_server(spec, tmp_path, URL, {}, notes=notes) == REFUSAL
+    assert seen.lines == [] and seen.err_lines == [] and notes.printed is False
+
+
+async def test_a_start_with_empty_notes_announces_exactly_as_before(tmp_path, monkeypatch):
+    seen = _Launch(monkeypatch)
+    notes = LaunchNotes()
+    assert await _start_managed_server(_llama(bind_all=True), tmp_path, URL, {}, notes=notes) is None
+    assert seen.lines == [f"Managed llama.cpp is not running — starting it ({PHRASE}; "
+                          "model load can take several minutes)..."]
+    assert seen.err_lines == [] and notes.printed is True
+
+
+def _record_pre_upgrade(tmp_path) -> None:
+    from localharness.config import trust
+
+    old = ("binary", "docker_image", "extra_args")
+    snap = trust.machine_snapshot(tmp_path)
+    trust.record_machine(tmp_path, [e for e in snap if e["kind"] != trust.LAUNCH_MODEL_KIND and (
+        e["kind"] != trust.LAUNCH_KIND or e["name"].rsplit(".", 1)[-1] in old)],
+        kinds=trust.MACHINE_KINDS - {trust.LAUNCH_MODEL_KIND})
+
+
+async def test_start_launches_a_converted_0_17_host_with_its_first_line_and_the_next_start_is_plain(tmp_path, monkeypatch):
+    block = {"runtime": "llamacpp", "binary": "/x/llama-server", "model": "/x/m.gguf", "port": 8080,
+             "extra_args": ["--host", "0.0.0.0"]}
+    seen = _boot(tmp_path, monkeypatch, server_block=block)
+    _record_pre_upgrade(tmp_path)
+
+    assert await _drive(tmp_path) == 1  # the probe never answers; the launch is what is under test
+
+    starting = [line for line in seen.out if "starting it" in line]
+    assert starting == [CONVERTED_LINE]
+    cmd, _ = seen.started[0]
+    assert "0.0.0.0" in cmd and cmd[-2:] != ["--host", "127.0.0.1"]
+    assert not [pair for pair in seen.err if "restores it" in str(pair[0])]
+    assert await _drive(tmp_path) == 1
+    starting = [line for line in seen.out if "starting it" in line]
+    assert starting[1:] == [f"Managed llama.cpp is not running — starting it ({PHRASE}; "
+                            "model load can take several minutes)..."]
+
+
+async def test_start_launches_an_unconverted_host_on_loopback_and_prints_the_undo_line(tmp_path, monkeypatch):
+    block = {"runtime": "llamacpp", "binary": "/x/llama-server", "model": "/x/m.gguf", "port": 8080,
+             "extra_args": ["--host", "192.168.1.5"]}
+    seen = _boot(tmp_path, monkeypatch, server_block=block)
+    _record_pre_upgrade(tmp_path)
+
+    assert await _drive(tmp_path) == 1  # headless: another address is not offered
+
+    assert [text for text in _err_text(seen.err) if "restores it" in text] == [UNDO]
+    cmd, _ = seen.started[0]
+    assert cmd[-2:] == ["--host", "127.0.0.1"]
 
 
 @pytest.mark.parametrize(("runtime", "label"), [("vllm", "vLLM"), ("llamacpp", "llama.cpp"),
