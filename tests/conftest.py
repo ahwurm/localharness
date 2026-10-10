@@ -99,6 +99,31 @@ def _disable_inference_probe():
         _client._INFERENCE_PROBE_ENABLED = saved
 
 
+@pytest.fixture(scope="session")
+def _empty_proc_root(tmp_path_factory):
+    """One empty directory the whole session points `procfs.PROC_ROOT` at."""
+    root = tmp_path_factory.mktemp("empty-proc")
+    return str(root)
+
+
+@pytest.fixture(autouse=True)
+def _no_box_processes(request, monkeypatch, _empty_proc_root):
+    """D-60: the owner's box serves `llm.service` on :8080, so without this the init, start and
+    `/model` tests would import that real process: they would read its `/proc/<pid>/environ`, its
+    journal and its unit. For every test of the suite `procfs.PROC_ROOT` is an existing empty
+    directory (no listener, no process), `units._run` answers None ("not checked") without running
+    anything, and `XDG_CONFIG_HOME` is unset so llama-server's `config.ini` path resolves under the
+    faked HOME, never a developer's real one (a test that needs it sets it). test_units opts out of
+    the `_run` half only, to test the real seam through its own fakes."""
+    from localharness.provider import procfs, units
+
+    monkeypatch.setattr(procfs, "PROC_ROOT", _empty_proc_root)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    if not request.module.__name__.endswith("test_units"):
+        monkeypatch.setattr(units, "_run", lambda argv, *, timeout, cap: None)
+    yield
+
+
 @pytest.fixture
 def minimal_agent_config() -> AgentConfig:
     return AgentConfig(name="test-agent", role="Test agent for unit tests.")
