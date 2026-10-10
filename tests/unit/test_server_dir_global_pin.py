@@ -27,6 +27,27 @@ from localharness.config.paths import global_config_dir
 SRC = Path(__file__).resolve().parents[2] / "src" / "localharness" / "cli"
 
 
+def _where(text: str, needle: str) -> str:
+    """Name the methods `needle` occurs in, so a failing count says what moved, not just that it did.
+
+    The counts below stay exact (that is the assertion); this only makes the failure readable:
+    "self._config_dir: _announce_window x1, persist ... x2" instead of "16 != 15"."""
+    import ast
+    import collections
+
+    tree = ast.parse(text)
+    spans = sorted(
+        (node.lineno, node.end_lineno or node.lineno, node.name)
+        for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    )
+    seen: collections.Counter[str] = collections.Counter()
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        for _ in range(line.count(needle)):
+            inner = [n for start, end, n in spans if start <= lineno <= end]
+            seen[inner[-1] if inner else "<module>"] += 1
+    return f"{needle!r} occurs in: " + ", ".join(f"{n} x{c}" for n, c in sorted(seen.items()))
+
+
 def _repl(config_dir):
     """The minimal OrchestratorREPL the property needs — it only reads self._config_dir."""
     from localharness.cli.repl import OrchestratorREPL
@@ -104,7 +125,7 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     call on the raw attribute) changes one of them.
     """
     text = (SRC / "repl.py").read_text(encoding="utf-8")
-    assert text.count("self._server_config_dir") == 7
+    assert text.count("self._server_config_dir") == 7, _where(text, "self._server_config_dir")
     # assignment + the property's own two reads on one line + 6 deliberately-untouched uses,
     # + 1 from phase 41's `_audit_base_dir` property, which reads `self._config_dir` as its
     # FALLBACK when the session has no workspace layer, + 1 from Phase 2's `_announce_window`,
@@ -112,7 +133,7 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     # (`persist_effort`'s overlay dir, `agents_with_effort`'s agent dir, and the rejected-key ledger
     # opened by `_announce_rejected_effort_keys` and `_rebind_effort_ledger`): none starts or stops
     # a server. MEASURED at 15, not assumed.
-    assert text.count("self._config_dir") == 15
+    assert text.count("self._config_dir") == 15, _where(text, "self._config_dir")
     for raw in (
         "free_accelerator(self._active_heavy, ep.lifecycle, self._config_dir)",
         "strategy.stop(managed, self._config_dir)",
@@ -125,7 +146,7 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     # `self._server_config_dir` is still 7 because the GPU daemon did not move either. 4 after Phase 3:
     # `/effort`'s `persist_effort` is a fourth overlay write and takes the session's config dir the
     # same way `persist_default_model` does.
-    assert text.count("config_dir=self._config_dir") == 4
+    assert text.count("config_dir=self._config_dir") == 4, _where(text, "config_dir=self._config_dir")
 
 
 def test_init_guided_setup_names_the_global_pin():
