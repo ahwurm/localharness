@@ -672,19 +672,26 @@ def _is_zombie(pid: int) -> bool:
         return False
 
 
-def _proc_start_time(pid: int) -> int | None:
-    """Field 22 of `/proc/<pid>/stat` (clock ticks since boot): the process's start time.
+def start_time_from_stat(raw: bytes) -> int | None:
+    """Field 22 of a `/proc/<pid>/stat` line (clock ticks since boot): the process's start time.
 
     The comm field may contain spaces and parentheses, so the parse starts after the LAST ")":
     the tokens that follow begin at field 3 (the state), which puts field 22 at index 19.
-    None when /proc has no such entry or the line is not shaped like a stat line."""
-    raw = _read_proc_stat(pid)
-    if raw is None:
-        return None
+    None when the bytes are not shaped like a stat line. The one parser the pidfile code and
+    `provider.procfs` share."""
     try:
         return int(raw.rsplit(b")", 1)[1].split()[19])
     except (IndexError, ValueError):
         return None
+
+
+def _proc_start_time(pid: int) -> int | None:
+    """Field 22 of `/proc/<pid>/stat`: the process's start time, or None when /proc has no such
+    entry or the line is not shaped like a stat line (see `start_time_from_stat`)."""
+    raw = _read_proc_stat(pid)
+    if raw is None:
+        return None
+    return start_time_from_stat(raw)
 
 
 def _parse_pidfile(text: str) -> tuple[int, int | None]:
