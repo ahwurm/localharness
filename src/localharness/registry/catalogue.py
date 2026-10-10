@@ -183,6 +183,20 @@ def _get_default(model_cls: type, path: str) -> Any:
     return None
 
 
+AGENT_PATHS_NOT_ADDRESSABLE: dict[str, str] = {
+    "agent.effort": (
+        "agent.effort is not settable here: the `agent:` overlay does not carry effort (it is the "
+        "agent FILE's own rung of the ladder). Set it in agents/<name>.yaml, or pick the session's "
+        "level with /effort."
+    ),
+}
+"""AgentConfig fields the loader does not read back from the `agent:` overlay, mapped to why.
+
+They stay out of the catalogue, so `components list` does not advertise them and `components set`
+cannot store a value the loader would then ignore; `components set` names the reason instead of
+saying only "Unknown path"."""
+
+
 def build_catalogue(
     cfg: HarnessConfig,
     *,
@@ -245,6 +259,8 @@ def build_catalogue(
 
     for path, ann in walk_model_fields(AgentConfig):
         agent_path = f"agent.{path}"
+        if agent_path in AGENT_PATHS_NOT_ADDRESSABLE:
+            continue
         current = None
         if agent_cfg is not None:
             try:

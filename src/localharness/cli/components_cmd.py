@@ -44,7 +44,11 @@ from localharness.registry import (
     set_value_in_dict,
     walk_model_fields,
 )
-from localharness.registry.catalogue import PluginRows, plugin_catalogue_rows
+from localharness.registry.catalogue import (
+    AGENT_PATHS_NOT_ADDRESSABLE,
+    PluginRows,
+    plugin_catalogue_rows,
+)
 from localharness.registry.provenance import display_note, layered_catalogue
 
 components_app = typer.Typer(
@@ -410,7 +414,8 @@ def components_get(
     if entry is None:
         _err(
             json_output,
-            f"Unknown path: {path!r}. Run `localharness components list` to see valid paths.",
+            AGENT_PATHS_NOT_ADDRESSABLE.get(path)
+            or f"Unknown path: {path!r}. Run `localharness components list` to see valid paths.",
             exit_code=2,
         )
         return
@@ -505,7 +510,8 @@ def components_set(
     )
     entry = catalogue.get(path)
     if entry is None:
-        _err(json_output, f"Unknown path: {path!r}", exit_code=2)
+        _err(json_output, AGENT_PATHS_NOT_ADDRESSABLE.get(path) or f"Unknown path: {path!r}",
+             exit_code=2)
         return
     secret = is_secret(entry.annotation)
     if secret and value == "-":  # read without echo: never in shell history or `ps`

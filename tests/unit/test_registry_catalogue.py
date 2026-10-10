@@ -281,8 +281,8 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 208, (
-        "catalogue should be 208 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 207, (
+        "catalogue should be 207 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -298,8 +298,9 @@ def test_self_check_leaves_enumerate(components_home):
         "plus the ten server.* preset fields (mmproj, served_name, context, cache_type_k, "
         "cache_type_v, cache_ram, api_key_file, env, config_ini, effort) "
         "plus autosense.* x7, effort_budget.* x2 and org.default_effort (the machine-level "
-        "sizing and effort sections) plus agent.effort and active_endpoint.effort x2 (the "
-        "reasoning-effort enum on an agent file and on the persisted endpoint selection). "
+        "sizing and effort sections) plus active_endpoint.effort x1 (the "
+        "reasoning-effort enum on the persisted endpoint selection; agent.effort is withheld, the "
+        "`agent:` overlay does not carry it, D-08). "
         f"got {len(entries)}"
     )
 
@@ -382,8 +383,8 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 208, (
-        "catalogue should be 208 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 207, (
+        "catalogue should be 207 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -399,8 +400,9 @@ def test_role_sections_leaves_enumerate(components_home):
         "plus the ten server.* preset fields (mmproj, served_name, context, cache_type_k, "
         "cache_type_v, cache_ram, api_key_file, env, config_ini, effort) "
         "plus autosense.* x7, effort_budget.* x2 and org.default_effort (the machine-level "
-        "sizing and effort sections) plus agent.effort and active_endpoint.effort x2 (the "
-        "reasoning-effort enum on an agent file and on the persisted endpoint selection). "
+        "sizing and effort sections) plus active_endpoint.effort x1 (the "
+        "reasoning-effort enum on the persisted endpoint selection; agent.effort is withheld, the "
+        "`agent:` overlay does not carry it, D-08). "
         f"got {len(entries)}"
     )
 
@@ -502,3 +504,17 @@ def test_absent_workspace_overlay_changes_nothing():
         "org.log_level", {catalogue.LAYER_GLOBAL_CONFIG: {"org": {"log_level": "info"}}}
     ) == catalogue.LAYER_GLOBAL_CONFIG
     assert catalogue._detect_layer("org.log_level", {}) == catalogue.LAYER_DEFAULT
+
+
+def test_agent_effort_is_not_a_catalogue_path():
+    """D-08: the `agent:` overlay does not carry effort, so the registry does not advertise it
+    (the loader would read the stored value back and ignore it). The other effort rows stay."""
+    from localharness.config.models import AgentConfig
+    from localharness.registry.catalogue import AGENT_PATHS_NOT_ADDRESSABLE, build_catalogue
+
+    entries = build_catalogue(_make_minimal_harness_cfg(), overlays={},
+                              agent_cfg=AgentConfig(name="x", role="y"))
+    assert "agent.effort" not in entries
+    assert "agent.effort" in AGENT_PATHS_NOT_ADDRESSABLE
+    for kept in ("org.default_effort", "server.effort", "active_endpoint.effort"):
+        assert kept in entries

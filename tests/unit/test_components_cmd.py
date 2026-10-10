@@ -438,3 +438,22 @@ def test_list_missing_config_points_at_init(tmp_path, monkeypatch):
     flat = " ".join((r.output + (r.stderr or "")).split())
     assert "Failed to load config" in flat
     assert "Run 'localharness init' to create it." in flat
+
+
+def test_set_agent_effort_is_refused_and_says_where_effort_lives(components_home):
+    """D-08: `agent.effort` is not addressable through the registry, because the `agent:` overlay
+    does not carry effort; the refusal names agents/<name>.yaml and /effort, and writes nothing."""
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    before = _read_overlay_bytes(components_home)
+    result = runner.invoke(app, ["components", "set", "agent.effort", "low"])
+    assert result.exit_code == 2, result.output
+    assert "agents/<name>.yaml" in result.output
+    assert "/effort" in result.output
+    assert _read_overlay_bytes(components_home) == before
+
+
+def test_get_agent_effort_says_the_same(components_home):
+    _write_project_yaml(components_home, org={"audit_log_path": str(components_home / "audit.jsonl")})
+    result = runner.invoke(app, ["components", "get", "agent.effort"])
+    assert result.exit_code == 2, result.output
+    assert "agents/<name>.yaml" in result.output
