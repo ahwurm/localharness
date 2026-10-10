@@ -35,6 +35,9 @@ OWN_COMMAND_ERROR = ("the {name} channel is served by its own command, because {
 FIRST_START_LEAD = "LocalHarness is not set up yet. Setting up the model server first:"
 
 RESTARTED_LINE = "Restarted with {name} {state}. Your conversation continues."
+# The two start-summary lines for a server that refused an effort request key (spec 16 §7.4, D-19, D-22).
+EFFORT_UNENFORCED_LINE = "effort unenforced on this server: {key} rejected"
+EFFORT_CUT_OFF_LINE = "effort: thinking-off rejected by this server; the reasoning cut is off"
 RESUMED_LINE = "Awake again, continuing the conversation that went to sleep (sitting {previous})."
 WAKING_DETAIL = "waking the chat you left"
 
@@ -1196,6 +1199,23 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 record_dropped_env(_ledger, _runtime, _names)
             except OSError:
                 pass
+    # D-19/D-22: a request key this server refused in an earlier session, said again at start (the
+    # probe sends no effort key, so the live set is empty here — the ledger is what remembers).
+    from localharness.provider.client import EFFORT_BUDGET_KEY
+    from localharness.provider.speed_stats import last_rejected_effort_keys
+    try:
+        _rejected_keys = last_rejected_effort_keys(_ledger, provider.provider_type, resolved_model) or []
+    except OSError:
+        _rejected_keys = []  # the ledger is a convenience: a start never fails on it
+    for _key in _rejected_keys:
+        _pending_warnings.append(EFFORT_UNENFORCED_LINE.format(key=_key))
+    if "chat_template_kwargs" in _rejected_keys and EFFORT_BUDGET_KEY.get(provider.provider_type) is None:
+        _pending_warnings.append(EFFORT_CUT_OFF_LINE)
+    # The session agent's level: `start` runs on the primary and never reads `active_endpoint`
+    # (spec 16 §7.2), so the endpoint rung is the primary's own `server.effort`.
+    from localharness.config.effort import resolve_effort
+    _effort_level, _effort_rung = resolve_effort(None, agent_config.effort, harness, provider.base_url)
+    _effort_ratios = (harness.effort_budget.low_ratio, harness.effort_budget.high_ratio)
     # #145: a served window that cannot hold a reply reserve cannot run AT ALL — history is
     # allowed to fill the whole thing, so prompt + max_tokens overruns it on the first real turn
     # whatever the config says, and clamp_response_tokens has no reserve to fit the reply into.
@@ -1692,6 +1712,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # the box), and only compact.md follows `state_dir` into the workspace.
             config_dir=cfg_path,
             state_dir=state_dir,
+            # D-11: the callable, read at each dispatch — a /effort between two delegations reaches
+            # the second child (and, through the nested runner, a grandchild).
+            effort_fn=lambda: (agent_loop.effective_effort, agent_loop.effort_rung),
+            effort_ratios=_effort_ratios,
+            # D-34: the value the session loop below is built with (the loop does not exist yet).
+            template_margin_ratio=harness.autosense.template_margin_ratio,
         )
 
         agent_tool = AgentTool(
@@ -1739,6 +1765,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             memory_slot=memory_slot,
             task_context=task_state,
             template_margin_ratio=harness.autosense.template_margin_ratio,
+            effort=(_effort_level, _effort_rung),
+            effort_ratios=_effort_ratios,
         )
         if resume is not None:  # the next turn carries the earlier conversation, byte for byte
             agent_loop.resume(list(resume.conversation), resume.prior_context)
