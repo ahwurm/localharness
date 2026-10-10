@@ -364,11 +364,16 @@ async def test_without_a_yes_org_loosenings_and_a_launch_command_are_held_back(m
     assert "evil" not in (root.permissions.ask.mcp_trusted_servers or [])
     assert seen and all(h.server is None or h.server.binary != "/tmp/evil-server" for h in seen)
     err = _err(capsys)
-    assert "Not applying 6 change(s)" in err, (
-        "two org loosenings, server.runtime/.binary/.model, and the bind_all: true the config "
-        "migration writes into a launched vLLM section that predates the setting")
+    # Six changes: two org loosenings, server.runtime/.binary/.model, and the bind_all: true the
+    # config migration writes into a launched vLLM section that predates the setting. A No on a
+    # terminal remembers that exposure entry instead of leaving it to ask again (D-10, D-11): it is
+    # written `false` to overrides.yaml, so the line names the other five.
+    assert f"Not applying {5 if terminal else 6} change(s)" in err
     assert "org.permissions.mode (overrides.yaml)" in err and "server.binary (config.yaml)" in err
-    assert "server.model (config.yaml)" in err and "server.bind_all (config.yaml)" in err
+    assert "server.model (config.yaml)" in err
+    assert ("server.bind_all (config.yaml)" in err) is (not terminal)
+    overrides = yaml.safe_load((machine.g / "overrides.yaml").read_text(encoding="utf-8")) or {}
+    assert (overrides.get("server") or {}).get("bind_all") is (False if terminal else None)
 
 
 async def test_org_settings_and_a_launch_command_there_before_the_upgrade_are_adopted(machine):
