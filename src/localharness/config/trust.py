@@ -482,6 +482,85 @@ def _script_pending(global_dir: Path, file: str, real: Path) -> Optional[str]:
     return f"sha256:{digest[:12]}"
 
 
+_NOT_A_PEER: Any = object()
+"""`_key_state`'s marker for the primary: a peer with no `api_key` is a peer, not the primary."""
+
+
+def _key_state(mapping: Any, raws: dict, runtime: str, *, peer_key: Any = _NOT_A_PEER) -> str:
+    """`keyed` or `open`, from DECLARED key sources only: `require_api_key` is true and one of
+    `api_key_file` is set (any string — whether it is a regular file is `doctor`'s and
+    `launch_decision`'s business), the runtime's key variable (`KEY_ENV`) is in the environment,
+    for the primary a `provider.api_key` other than `none` in either settings file, or for a peer
+    its own `api_key` other than `none`. No file is ever opened here: a FIFO named as the key file
+    must not be able to stall a start."""
+    from localharness.provider.server import KEY_ENV  # lazy: config must not import provider at import
+
+    def real(value: Any) -> bool:
+        return isinstance(value, str) and value not in ("", "none")
+
+    if not isinstance(mapping, dict) or mapping.get("require_api_key") is not True:
+        return "open"
+    if mapping.get("api_key_file"):
+        return "keyed"
+    if os.environ.get(KEY_ENV.get(runtime, "")):
+        return "keyed"
+    if peer_key is _NOT_A_PEER:
+        for raw in raws.values():
+            provider = raw.get("provider") if isinstance(raw, dict) else None
+            if isinstance(provider, dict) and real(provider.get("api_key")):
+                return "keyed"
+        return "open"
+    return "keyed" if real(peer_key) else "open"
+
+
+def _posture_entries(raws: dict) -> list[dict]:
+    """The `bind_all` / `require_api_key` entries, once per record, from the MERGED view of the two
+    settings files (the one exception to per-file emission: a posture is the product of both files,
+    and a planted `runtime: vllm` or `bind_all: false` in one file changes what the other means).
+    `file` is the file whose value wins (overrides.yaml beats config.yaml), `shown` is
+    `<runtime>:<true|false>:<keyed|open>`. Only for a vllm or llamacpp runtime — Ollama and LM
+    Studio's `bind_all` is inert. Peers: the `extra_endpoints` list of overrides.yaml when it has one
+    (lists replace wholesale), else config.yaml's; each peer is judged by its own `lifecycle`."""
+    from localharness.config.overlay import deep_merge
+
+    def section(raw: Any, key: str) -> dict:
+        value = raw.get(key) if isinstance(raw, dict) else None
+        return value if isinstance(value, dict) else {}
+
+    def entry(file: str, prefix: str, key: str, view: dict, keyed: Any) -> list[dict]:
+        runtime = view.get("runtime", "vllm")
+        if runtime not in ("vllm", "llamacpp") or view.get(key) is None:
+            return []
+        return [{"file": file, "kind": LAUNCH_KIND, "name": prefix + key,
+                 "shown": f"{runtime}:{json.dumps(view[key])}:{keyed(runtime)}"}]
+
+    cfg, over = raws.get("config.yaml"), raws.get("overrides.yaml")
+    over_server = section(over, "server")
+    merged = deep_merge(section(cfg, "server"), over_server)
+    out: list[dict] = []
+    for key in _POSTURE_KEYS:
+        file = "overrides.yaml" if key in over_server else "config.yaml"
+        out += entry(file, "server.", key, merged, lambda rt: _key_state(merged, raws, rt))
+    over_peers = over.get("extra_endpoints") if isinstance(over, dict) else None
+    if isinstance(over_peers, list):
+        peers, pfile = over_peers, "overrides.yaml"
+    else:
+        cfg_peers = cfg.get("extra_endpoints") if isinstance(cfg, dict) else None
+        peers, pfile = (cfg_peers if isinstance(cfg_peers, list) else []), "config.yaml"
+    seen: set[str] = set()
+    for peer in peers:
+        if not (isinstance(peer, dict) and peer.get("name") is not None
+                and isinstance(peer.get("lifecycle"), dict)) or str(peer["name"]) in seen:
+            continue
+        seen.add(str(peer["name"]))
+        life = peer["lifecycle"]
+        for key in _POSTURE_KEYS:
+            out += entry(pfile, f"extra_endpoints.{peer['name']}.lifecycle.", key, life,
+                         lambda rt, life=life, peer=peer: _key_state(
+                             life, raws, rt, peer_key=peer.get("api_key")))
+    return out
+
+
 def _launch_entries(file: str, prefix: str, mapping: Any) -> list[dict]:
     """One entry per launch key present (and not None) in ``mapping``: `launch`-kind for
     LAUNCH_KEYS, `launch_model`-kind for LAUNCH_MODEL_KEYS, named ``prefix + key``, ``shown`` the
@@ -519,7 +598,8 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
     {kind: "launch_model", name: "server.model" …} for LAUNCH_MODEL_KEYS) and of every
     `extra_endpoints` peer's `lifecycle:` ({name: "extra_endpoints.<peer name>.lifecycle.<key>"} —
     by name, never by index; the peer's `api_key` and `extra_headers` are siblings of `lifecycle` and
-    contribute no entry by construction).
+    contribute no entry by construction). `bind_all` and `require_api_key` are the exception to
+    per-file emission: one entry each per record from the merged view (`_posture_entries`).
     Sorted by (file, kind, name, canonical JSON); unparsable files skipped; never an env or header
     value."""
     from localharness.config.loader import layer_files, org_deny_loosenings, permission_loosenings
@@ -557,8 +637,9 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
     # the `server:` section names what start executes when the model server is down. Code the
     # agent runs can write either file, so a loosening or a new launch command there waits for the
     # same one Yes. (A shorter org deny list removes nothing — the shipped list is unioned in.)
-    for file in ("config.yaml", "overrides.yaml"):
-        raw = _read_yaml(root / file) if (root / file).is_file() else None
+    raws = {file: _read_yaml(root / file) if (root / file).is_file() else None
+            for file in ("config.yaml", "overrides.yaml")}
+    for file, raw in raws.items():
         org = raw.get("org") if isinstance(raw, dict) else None
         out += [{"file": file, "kind": ORG_PERMISSION_KIND, "name": f"org.{key}", "shown": shown}
                 for key, shown in permission_loosenings(
@@ -572,12 +653,29 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
                     and isinstance(peer.get("lifecycle"), dict)):
                 out += _launch_entries(
                     file, f"extra_endpoints.{peer['name']}.lifecycle.", peer["lifecycle"])
+    out += _posture_entries(raws)
     for path in layer_files(root, "divisions"):
         out += loosenings(f"divisions/{path.name}", _read_yaml(path))
     if (root / "org.yaml").is_file():
         out += loosenings("org.yaml", _read_yaml(root / "org.yaml"))
     out += tool_script_entries(global_dir)
     return sorted(out, key=lambda e: (e["file"], e["kind"], e["name"], _canonical(e)))
+
+
+def confirmed_at_upgrade(snap: list[dict]) -> list[dict]:
+    """The entries of ``snap`` that governed what 0.17 launched and exposed, and so are confirmed
+    ONCE at the first start that knows them: the `launch`-kind entries whose key (the part after
+    the last `.`) is `runtime`, `launch`, `bind_all`, `require_api_key` or `local_models` — the
+    primary's and every peer's — except a llama.cpp `bind_all: true` posture entry (`shown` starts
+    `llamacpp:true:`), which 0.17 ignored entirely and so cannot have been relied on.
+
+    A pure filter over the snapshot the caller already holds: no second snapshot function, no disk
+    read. Entries are compared whole afterwards (`_uncovered`)."""
+    governing = ("runtime", "launch", "bind_all", "require_api_key", "local_models")
+    return [e for e in snap
+            if e.get("kind") == LAUNCH_KIND and str(e.get("name", "")).rsplit(".", 1)[-1] in governing
+            and not (str(e.get("name", "")).rsplit(".", 1)[-1] == "bind_all"
+                     and str(e.get("shown", "")).startswith("llamacpp:true:"))]
 
 
 def recorded_machine(global_dir: Path) -> Optional[dict]:
