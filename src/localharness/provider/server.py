@@ -12,12 +12,14 @@ covers both.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import os
 import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -390,6 +392,42 @@ def server_dir(config_dir: Path) -> Path:
     return Path(config_dir) / "vllm"
 
 
+def config_ini_home(config_dir: Path, port: int) -> Path:
+    """The `XDG_CONFIG_HOME` a llama.cpp launch on `port` is given (D-30, D-59): one harness-owned
+    directory per port under the GLOBAL config dir `activate` receives, never under `vllm/`."""
+    return Path(config_dir) / "xdg" / str(port)
+
+
+def prepare_config_ini_home(config_dir: Path, port: int, config_ini: str | None) -> Path:
+    """Make `config_ini_home(config_dir, port)` hold exactly `config_ini` as `llama.cpp/config.ini`
+    (or no file when `config_ini` is None) and return the home.
+
+    llama-server reads `$XDG_CONFIG_HOME/llama.cpp/config.ini` before argv and env can say anything,
+    so a relaunch must read only the bytes its record carries (the ones the trust snapshot
+    fingerprinted), never the person's own file and never one somebody planted. Directories are
+    0o700; the file goes through a temporary file in the same directory (0600) and `os.replace`."""
+    home = config_ini_home(config_dir, port)
+    target_dir = home / "llama.cpp"
+    for path in (home.parent, home, target_dir):
+        path.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(path, 0o700)
+    target = target_dir / "config.ini"
+    if config_ini is None:
+        if os.path.lexists(target):
+            os.unlink(target)
+        return home
+    fd, tmp = tempfile.mkstemp(dir=target_dir, prefix=".config.ini.")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(config_ini.encode("utf-8"))
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    return home
+
+
 def log_path(config_dir: Path) -> Path:
     return server_dir(config_dir) / "serve.log"
 
@@ -635,6 +673,7 @@ def child_environment(
     *,
     record_env: Mapping[str, str] | None = None,
     api_key: str | None = None,
+    xdg_config_home: str | None = None,
 ) -> tuple[dict[str, str] | None, list[str]]:
     """The environment a launched server inherits, and the sorted names dropped from `base`.
 
@@ -643,13 +682,19 @@ def child_environment(
     can replace the key the harness holds. The scrub is a blocklist, never an allowlist:
     CUDA_VISIBLE_DEVICES, LD_LIBRARY_PATH, PATH and HF_HOME must survive. Pure over `base`.
 
-    With nothing dropped, no record env and no key it returns `(None, [])`: Popen inherits the
-    environment unchanged, byte for byte as 0.17 did."""
+    `xdg_config_home` (a llama.cpp launch's harness-owned config directory, D-30) is set after the
+    scrub and the record env, before the key, so nothing inherited or recorded can point the server
+    at another `config.ini`. It is not in the scrub list: it is added, never dropped.
+
+    With nothing dropped, no record env, no key and no `xdg_config_home` it returns `(None, [])`:
+    Popen inherits the environment unchanged, byte for byte as 0.17 did."""
     dropped = sorted(name for name in base if _scrubbed(runtime, name))
-    if not dropped and not record_env and not api_key:
+    if not dropped and not record_env and not api_key and xdg_config_home is None:
         return None, []
     env = {name: value for name, value in base.items() if name not in dropped}
     env.update(record_env or {})
+    if xdg_config_home is not None:
+        env["XDG_CONFIG_HOME"] = xdg_config_home
     if api_key:
         if runtime not in KEY_ENV:
             raise ValueError(f"runtime {runtime!r} launches with no key variable")
@@ -665,6 +710,7 @@ def start_server(
     api_key: str | None = None,
     record_env: Mapping[str, str] | None = None,
     dropped_out: list[str] | None = None,
+    xdg_config_home: str | None = None,
 ) -> int:
     """Launch detached (new session), append stdout+stderr to serve.log, write pidfile.
 
@@ -672,8 +718,11 @@ def start_server(
     `KEY_ENV[runtime]` — never into `cmd`, so it is in neither the process list nor the launch line
     logged here. `child_environment` scrubs the launched runtime's own namespace first and adds
     `record_env` (the record's `env:`); the dropped names are logged, names only. A caller that
-    wants them for the ledger and the start summary passes `dropped_out`, which they extend."""
-    env, dropped = child_environment(runtime, os.environ, record_env=record_env, api_key=api_key)
+    wants them for the ledger and the start summary passes `dropped_out`, which they extend.
+    `xdg_config_home` is the llama.cpp config directory `prepare_config_ini_home` made for this
+    launch; it rides the child environment only, so argv and the logged launch line are unchanged."""
+    env, dropped = child_environment(
+        runtime, os.environ, record_env=record_env, api_key=api_key, xdg_config_home=xdg_config_home)
     if dropped_out is not None:
         dropped_out.extend(dropped)
     if dropped:
