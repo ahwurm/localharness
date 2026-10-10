@@ -1261,6 +1261,10 @@ class ConfigLoader:
             _overlay_default(overlay_agent, "model", "inherit"),
         )
 
+        # Effort: agent > division only. The loader never sees the harness, so the endpoint and org
+        # rungs live in config/effort.py::resolve_effort; the overlay does not carry this field.
+        merged["effort"] = _resolve_scalar("effort", raw.get("effort"), division.effort if division else None, None, "inherit")
+
         # `model_fields_set`: OrgConfig's temperature/max_tokens carry SCHEMA defaults (0.6, 4096),
         # never None — so reading them straight made the org layer "set" on every install and the
         # rung below it (the overlay, and the shipped default it stands on) unreachable. Only a

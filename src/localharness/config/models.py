@@ -61,6 +61,13 @@ ASK_TO_GATE_FIELD: dict[str, str] = {
 }
 
 
+EffortLevel = Literal["off", "low", "high", "max"]
+"""The four reasoning-effort levels a preset, an agent or the machine default may name."""
+
+LEVELS: tuple[str, ...] = ("off", "low", "high", "max")
+"""The EffortLevel members in order, for the picker and `/effort` to validate against."""
+
+
 class ToolConfig(BaseModel):
     """
     Tool access specification for an agent or division.
@@ -1172,6 +1179,16 @@ class AgentConfig(BaseModel):
         ),
     )
 
+    # The FILE's own rung of the effort ladder (config/effort.py is the only spelling of the order).
+    # Never overwritten by the loop or a session: a /effort choice is the session rung above it.
+    effort: Literal["off", "low", "high", "max", "inherit"] = Field(
+        default="inherit",
+        description=(
+            "Reasoning effort this agent asks for; 'inherit' takes the division's, then the "
+            "serving endpoint's, then org.default_effort, then high."
+        ),
+    )
+
     temperature: float = Field(
         default=0.6,
         ge=0.0,
@@ -1368,6 +1385,13 @@ class DivisionConfig(BaseModel):
         description="Default model for all agents in this division. 'inherit' uses org default.",
     )
 
+    # None, not a level, for the same reason max_tokens is None: a default here would shadow the
+    # rungs below the division (the serving endpoint's, the org's).
+    effort: Optional[EffortLevel] = Field(
+        default=None,
+        description="Default reasoning effort for the division's agents; None passes through.",
+    )
+
     temperature: float = Field(default=0.6, ge=0.0, le=2.0)
     # None, not 4096: a schema default here SHADOWS the org rung below it for every agent in the
     # division — the same bug the org comment in loader.py describes, one level down. "Not set"
@@ -1407,9 +1431,6 @@ class DivisionConfig(BaseModel):
             raise ValueError(f"Division name {v!r} is invalid. Same rules as agent name.")
         return v
 
-
-EffortLevel = Literal["off", "low", "high", "max"]
-"""The four reasoning-effort levels a preset, an agent or the machine default may name."""
 
 LLAMACPP_ONLY_FIELDS: tuple[str, ...] = (
     "mmproj", "served_name", "cache_type_k", "cache_type_v", "cache_ram", "api_key_file", "env",
@@ -1646,6 +1667,8 @@ class ActiveSelection(BaseModel):
     model: str = Field(description="Active model id served by that endpoint.")
     api_key: SecretStr = Field(default=SecretStr("none"), description=(
         "Active endpoint API key; shown as **********."))
+    effort: Optional[EffortLevel] = Field(default=None, description=(
+        "The effort persisted for this peer by /effort; cleared on a switch."))
 
 
 class ProviderConfig(BaseModel):
