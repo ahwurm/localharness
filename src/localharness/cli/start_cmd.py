@@ -243,6 +243,59 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     return None
 
 
+def _attach_window_report(harness: Any, provider_type: str, served: int | None, trained: int | None,
+                          *, harness_launched: bool) -> "tuple[Any, str | None]":
+    """The window report for a start that ATTACHES to a server, and the undo kind its second line names.
+
+    A llama.cpp record with a model file gets the fit computed beside the running server (the window
+    already served counts as served plus what the free memory adds) and `trained` falls back to the
+    file's own header. No record, or any other runtime, gets no fit (`mode "not-computed"`): for
+    llama.cpp `window_lines` then says nothing (the no-record pointer is Phase 5's, D-34) and the
+    Ollama / LM Studio single lines come from `runtime=provider_type`.
+
+    The undo, by precedence (D-38): `"record"` when the record sets `context`; `"extra_args"` when a
+    `-c` rides `extra_args`; `None` when the harness launched the incumbent and `context` is unset
+    (nothing to undo); else `"hand"`, a foreign incumbent that the next harness launch replaces."""
+    from localharness.agent.gguf_header import GgufHeaderError, read_header
+    from localharness.provider import autosense as _auto
+
+    srv = harness.server
+    fits = free = total = weights = None
+    undo: str | None = None
+    mode = "not-computed"
+    if srv is not None and srv.runtime == "llamacpp" and srv.model:
+        extra = list(srv.extra_args or [])
+        try:
+            header = read_header(os.path.expanduser(srv.model), _auto.FIT_KEYS)
+        except (GgufHeaderError, OSError):
+            header = {}
+        n_layer = header.get("block_count")
+        offload = _auto.offload_kind(extra, n_layer) if n_layer else "unknown"
+        mem = _auto.free_memory(harness.autosense)
+        weights = _auto.weights_bytes(srv.model, srv.mmproj)
+        if mem is not None:
+            free, total = mem.free_bytes, mem.total_bytes
+        fits = _auto.fit(
+            header, free, harness.autosense, served,
+            cache_type_k=srv.cache_type_k, cache_type_v=srv.cache_type_v,
+            weights=weights, offload=offload, runtime=srv.runtime)
+        trained = trained or header.get("context_length")
+        has_c = any(t in ("-c", "--ctx-size") or t.startswith("--ctx-size=") for t in extra)
+        if srv.context is not None:
+            undo, mode = "record", "record"
+        elif has_c:
+            undo, mode = "extra_args", "extra_args"
+        elif harness_launched:
+            undo, mode = None, "fit"
+        else:
+            undo, mode = "hand", "fit"
+    report = _auto.WindowReport(
+        served=served, trained=trained, fits=fits, free_bytes=free, total_bytes=total,
+        weights_bytes=weights, asked=None, mode=mode, attached=True,
+        verified=served is not None, runtime=provider_type)
+    return report, undo
+
+
 def _route_memory_logs_to_file(agent_dir: Path) -> Path:
     """Interactive REPL only: send the memory subsystem's stdlib logs to a file instead of
     the terminal (#20). consolidation.py + mining.py log via `logging.getLogger(__name__)`
@@ -1051,11 +1104,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # which kills the 61,440-in-a-131,072-world bug). We do NOT silently override it — we
     # VALIDATE against the served window and FAIL LOUD if it would 400 mid-session, so the
     # value the user sees in config.yaml is exactly what the agent runs on.
-    from localharness.agent.context import (
-        clamp_response_tokens,
-        probe_served_window,
-        response_reserve,
-    )
+    from localharness.agent.context import clamp_response_tokens, response_reserve, probe_window
     # #132: a per-model pin IS this model's budget. Apply it BEFORE the guard so the check and the
     # session that follows run on the same number (exact name match; no map ⇒ the scalar, unchanged).
     # #137: resolve_budget is the ONE resolution `doctor` reads too — and CONFIRM an applied pin
@@ -1071,18 +1120,55 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # PROVIDER-AWARE served-window discovery for the guard. _probe_llm's window comes from
     # detect_capabilities' vLLM-shape /v1/models probe (max_model_len) — None for llama.cpp/
     # LM Studio/Ollama, so this fail-loud guard used to silently NO-OP for them (_effective_max_context
-    # returns cfg unchanged on a None window). probe_served_window reads each runtime's real window
+    # returns cfg unchanged on a None window). probe_window reads each runtime's real window
     # (llama.cpp /props, Ollama /api/ps, LM Studio /api/v0/models), so the guard FIRES when the
-    # window is discoverable and cleanly discloses (config wins) when it isn't. Blocking httpx → off
-    # the event loop (#32); falls back to the probe's window (vLLM parity / a flaked provider probe).
+    # window is discoverable and cleanly discloses (config wins) when it isn't. ONE probe_window call
+    # per start (D-03) feeds both this guard (its served window) and the window report below (its
+    # served + trained). Blocking httpx → off the
+    # event loop (#32); falls back to the probe's window (vLLM parity / a flaked provider probe).
     # The capability probe's window is only SERVER-REPORTED when it changed from the seed above;
     # unchanged, it is the harness's own default and must never drive a fail-loud guard (it aborted
     # every llama.cpp/Ollama/LM Studio/unknown start on a window no server ever served).
     _probe_window = served_window if served_window != _seed_window else None
-    _served = await asyncio.to_thread(
-        probe_served_window, provider.base_url, resolved_model, provider.provider_type, **launch_key
-    ) or _probe_window
+    # Was this server launched by the harness (a live pidfile)? Only the undo sentence of an
+    # attach report asks (D-38), and only a llama.cpp record has one; a failure reads as "no".
+    _harness_launched = False
+    if harness.server is not None and harness.server.runtime == "llamacpp":
+        try:
+            from localharness.provider.lifecycle import strategy_for
+            _harness_launched = _managed_server_running(
+                strategy_for(harness.server), harness.server, server_cfg_path)
+        except Exception:  # noqa: BLE001 — wording only: degrade to a foreign incumbent
+            _harness_launched = False
+    _probe = await asyncio.to_thread(
+        probe_window, provider.base_url, resolved_model, provider.provider_type, **launch_key
+    )
+    _served = _probe.served or _probe_window
     _bound = _effective_max_context(_served, _cfg_window)
+    # The window block (AUTO-02). `last` is read ONCE, before anything this start records, and one
+    # verdict (`changed`) gates both the block and the #127 line below (D-35).
+    from localharness.provider.autosense import window_changed, window_lines
+    from localharness.provider.speed_stats import (
+        default_speed_stats_path,
+        last_window_report,
+        record_window_report,
+    )
+    _ledger = default_speed_stats_path(cfg_path)
+    last = last_window_report(_ledger, provider.provider_type, resolved_model)
+    report, undo = _attach_window_report(
+        harness, provider.provider_type, _served, _probe.trained, harness_launched=_harness_launched)
+    launched_here = False
+    changed = window_changed(last, report, harness.autosense.notify_ratio)
+    # An attach to a runtime that reported nothing (no served, trained or fit number) has nothing to say.
+    _nothing_known = report.served is None and report.trained is None and report.fits is None
+    if launched_here or (changed and not _nothing_known):
+        for line in window_lines(report, harness.autosense, undo):
+            console.print(line, markup=False, soft_wrap=True)
+    try:
+        record_window_report(
+            _ledger, provider.provider_type, resolved_model, report.served, report.trained, report.fits)
+    except OSError:
+        pass  # the ledger is a convenience: a start never fails on it
     # #145: a served window that cannot hold a reply reserve cannot run AT ALL — history is
     # allowed to fill the whole thing, so prompt + max_tokens overruns it on the first real turn
     # whatever the config says, and clamp_response_tokens has no reserve to fit the reply into.
@@ -1101,11 +1187,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             and _bound >= MIN_CONFIGURABLE_CONTEXT_TOKENS
             and not _unrunnable  # never auto-fit onto a window that cannot run
         ):
-            console.print(
-                f"Context budget fitted to {_bound:,}: the factory default ({_cfg_window:,}) "
-                f"exceeds the window this server serves ({_served}). "
-                f"Set context.max_context_tokens to pin it explicitly."
-            )
+            if changed:  # D-23: said once per (runtime, model), again when the window moved
+                console.print(
+                    f"Context budget fitted to {_bound:,}: the factory default ({_cfg_window:,}) "
+                    f"exceeds the window this server serves ({_served}). "
+                    f"Set context.max_context_tokens to pin it explicitly."
+                )
             agent_config.context.max_context_tokens = _bound
             _cfg_window = _bound
     # `or _unrunnable`: an explicit budget EQUAL to a too-small served window agrees with the

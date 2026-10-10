@@ -9,6 +9,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+from localharness.agent.context import WindowProbe
 from localharness.cli.app import app
 from localharness.cli.start_cmd import _reconcile_sole_served_model
 
@@ -1120,7 +1121,7 @@ async def test_start_guard_fires_for_discoverable_nonvllm_window(tmp_path, monke
     """Fix C: for a non-vLLM runtime whose window detect_capabilities can't see (llama.cpp/
     LM Studio/Ollama → _probe_llm's served_window is None), the fail-loud window guard used to
     silently NO-OP (_effective_max_context returns cfg unchanged on None). It must now consult the
-    provider-aware probe_served_window and ABORT (typer.Exit) when the discovered window is below
+    provider-aware probe_window and ABORT (typer.Exit) when the discovered window is below
     the configured budget — instead of passing a config that would 400 mid-session."""
     import typer
     from localharness.cli.start_cmd import _start_async
@@ -1145,8 +1146,8 @@ async def test_start_guard_fires_for_discoverable_nonvllm_window(tmp_path, monke
 
     # The provider-aware probe DOES discover a small served window (8192 « the 131072 default budget).
     monkeypatch.setattr(
-        "localharness.agent.context.probe_served_window",
-        lambda base_url, model, provider_type=None: 8192,
+        "localharness.agent.context.probe_window",
+        lambda base_url, model, provider_type=None, **kw: WindowProbe(8192, None),
     )
 
     with pytest.raises(typer.Exit):
@@ -1170,8 +1171,8 @@ def _stub_nonvllm_start(tmp_path, monkeypatch, *, served, probe_window):
         return (True, "native", probe_window, None)
     monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
     monkeypatch.setattr(
-        "localharness.agent.context.probe_served_window",
-        lambda base_url, model, provider_type=None: served,
+        "localharness.agent.context.probe_window",
+        lambda base_url, model, provider_type=None, **kw: WindowProbe(served, None),
     )
 
 
@@ -2669,8 +2670,8 @@ async def test_window_guard_errors_name_the_model(tmp_path, monkeypatch, served,
         return (True, "native", None, None)
     monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
     monkeypatch.setattr(
-        "localharness.agent.context.probe_served_window",
-        lambda base_url, model, provider_type=None: served,
+        "localharness.agent.context.probe_window",
+        lambda base_url, model, provider_type=None, **kw: WindowProbe(served, None),
     )
     # A wide capture console: rich's 80-col default would wrap the name mid-assertion.
     buf = io.StringIO()
@@ -2725,8 +2726,8 @@ async def test_start_guard_honors_a_per_model_context_pin(tmp_path, monkeypatch)
         return (True, "native", None, None)
     monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
     monkeypatch.setattr(
-        "localharness.agent.context.probe_served_window",
-        lambda base_url, model, provider_type=None: 16_384,
+        "localharness.agent.context.probe_window",
+        lambda base_url, model, provider_type=None, **kw: WindowProbe(16_384, None),
     )
 
     await _start_async(None, False, False, str(tmp_path))   # must NOT raise
@@ -2752,8 +2753,8 @@ async def test_start_guard_without_a_matching_pin_is_unchanged(tmp_path, monkeyp
         return (True, "native", None, None)
     monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
     monkeypatch.setattr(
-        "localharness.agent.context.probe_served_window",
-        lambda base_url, model, provider_type=None: 16_384,
+        "localharness.agent.context.probe_window",
+        lambda base_url, model, provider_type=None, **kw: WindowProbe(16_384, None),
     )
 
     with pytest.raises(typer.Exit):
@@ -2777,8 +2778,8 @@ async def test_start_confirms_an_active_context_pin_on_the_happy_path(tmp_path, 
         return (True, "native", None, None)
     monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
     monkeypatch.setattr(
-        "localharness.agent.context.probe_served_window",
-        lambda base_url, model, provider_type=None: 16_384,
+        "localharness.agent.context.probe_window",
+        lambda base_url, model, provider_type=None, **kw: WindowProbe(16_384, None),
     )
 
     await _start_async(None, False, False, str(tmp_path))
@@ -2804,8 +2805,8 @@ async def test_start_without_a_matching_pin_prints_nothing_about_pins(tmp_path, 
         return (True, "native", None, None)
     monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
     monkeypatch.setattr(
-        "localharness.agent.context.probe_served_window",
-        lambda base_url, model, provider_type=None: 262_144,
+        "localharness.agent.context.probe_window",
+        lambda base_url, model, provider_type=None, **kw: WindowProbe(262_144, None),
     )
 
     await _start_async(None, False, False, str(tmp_path))
@@ -2832,8 +2833,8 @@ async def test_start_guard_error_names_the_pin_that_actually_governs(tmp_path, m
         return (True, "native", None, None)
     monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", _probe)
     monkeypatch.setattr(
-        "localharness.agent.context.probe_served_window",
-        lambda base_url, model, provider_type=None: 16_384,
+        "localharness.agent.context.probe_window",
+        lambda base_url, model, provider_type=None, **kw: WindowProbe(16_384, None),
     )
 
     with pytest.raises(typer.Exit):
