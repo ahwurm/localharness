@@ -435,7 +435,7 @@ async def test_the_bare_extra_body_text_no_longer_classifies_a_rejection():
 
 
 async def test_a_failed_retry_restores_the_set_and_surfaces_the_original_400():
-    retry_error = ConnectionError("server went away")
+    retry_error = _bad("messages: roles must alternate")   # a 400 of its own: the original wins (D-18)
     client, server = make(
         "native", "llamacpp", Server(_bad("unknown field reasoning_budget_tokens"), retry_error)
     )
@@ -471,6 +471,57 @@ async def test_a_cancelled_retry_leaves_the_set_as_it_was():
     with pytest.raises(asyncio.CancelledError):
         await client.stream_complete(MSGS, reasoning_budget=1200)
     assert client.rejected_effort_keys == frozenset()
+
+
+def _request() -> MagicMock:
+    return MagicMock()
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_a_retry_that_fails_on_the_connection_surfaces_that_failure_not_the_400(mode):
+    """IN-05: a dropped connection on the retry is a connection failure (the loop's retry handler
+    keys on it), and the rejection set is still put back."""
+    from localharness.provider.client import ProviderConnectionError
+
+    dropped = openai.APIConnectionError(request=_request())
+    client, server = make(
+        mode, "llamacpp", Server(_bad("unknown field reasoning_budget_tokens"), dropped)
+    )
+    with pytest.raises(ProviderConnectionError) as info:
+        await client.stream_complete(MSGS, reasoning_budget=1200)
+    assert info.value.__cause__ is dropped
+    assert client.rejected_effort_keys == frozenset()
+    assert len(server.calls) == 2
+
+
+async def test_a_retry_that_times_out_surfaces_the_timeout_not_the_400():
+    from localharness.provider.client import ProviderTimeoutError
+
+    slow = ProviderTimeoutError("generation timed out")   # what _consume_bounded raises past gen_timeout
+    client, _ = make(
+        "native", "llamacpp", Server(_bad("unknown field reasoning_budget_tokens"), slow)
+    )
+    client._rejected_effort_keys = {"chat_template_kwargs"}
+    with pytest.raises(ProviderTimeoutError) as info:
+        await client.stream_complete(MSGS, reasoning_budget=1200)
+    assert info.value is slow
+    assert client.rejected_effort_keys == frozenset({"chat_template_kwargs"})
+
+
+async def test_a_failed_retry_takes_back_only_the_keys_it_added():
+    """IN-05: the client is shared by concurrent children. A key a sibling recorded while this
+    retry was in flight survives this retry's failure; the snapshot assignment used to wipe it."""
+    def sibling_records_a_key_then_400s(_kw):
+        client._rejected_effort_keys.add("chat_template_kwargs")   # a sibling's evidence, mid-retry
+        raise _bad("messages: roles must alternate")
+
+    client, _ = make(
+        "native", "llamacpp",
+        Server(_bad("unknown field reasoning_budget_tokens"), sibling_records_a_key_then_400s),
+    )
+    with pytest.raises(ProviderAPIError):
+        await client.stream_complete(MSGS, reasoning_budget=1200)
+    assert client.rejected_effort_keys == frozenset({"chat_template_kwargs"})
 
 
 @pytest.mark.parametrize("text", [
@@ -582,7 +633,7 @@ async def test_xml_named_key_retries_the_xml_request_with_tools_kept(mode):
 
 
 async def test_xml_named_key_failed_retry_restores_and_surfaces_the_original_400():
-    client, server = make("xml", "llamacpp", Server(_bad("enable_thinking is not allowed"), ConnectionError("x")))
+    client, server = make("xml", "llamacpp", Server(_bad("enable_thinking is not allowed"), _bad("bad roles")))
     with pytest.raises(ProviderAPIError) as info:
         await client.stream_complete(MSGS, [TOOL], disable_thinking=True)
     assert "enable_thinking" in str(info.value) and info.value.status_code == 400
@@ -633,7 +684,7 @@ async def test_fallback_400_overflow_or_unnamed_surfaces_at_once(text):
 async def test_fallback_failed_retry_restores_and_surfaces_the_original():
     client, _ = make(
         "xml", "llamacpp",
-        Server(_bad("tools unsupported"), _bad("reasoning_budget_tokens unknown"), ConnectionError("x")),
+        Server(_bad("tools unsupported"), _bad("reasoning_budget_tokens unknown"), _bad("bad roles")),
     )
     with pytest.raises(ProviderAPIError) as info:
         await client.stream_complete(MSGS, [TOOL], reasoning_budget=9)

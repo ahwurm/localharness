@@ -1329,11 +1329,16 @@ class LLMClient:
     ) -> tuple[Any, Any]:
         """Retry ONCE without the effort `keys`, recording them as rejected only when the retry
         succeeds (D-18). The set is provisionally extended so `build()` omits the keys; if the retry
-        fails too the set is restored and the ORIGINAL 400 surfaces (retry's error as __cause__) —
-        a request that was bad for another reason must not switch the budget off for the session.
-        A retry cut by the client's own stream guards (degenerate / reasoning budget) DID reach the
+        fails too the provisional keys are taken back out and, when the retry was refused with a 400
+        of its own, the ORIGINAL 400 surfaces (retry's error as __cause__) — a request that was bad
+        for another reason must not switch the budget off for the session. A retry that failed for
+        an unrelated reason (a timeout, a dropped connection) surfaces as itself, so the caller's
+        connection and timeout handling sees the real failure, not a 400 the request never earned.
+        Only the keys this call added are taken back out (not a snapshot assigned over the set), so a
+        sibling request sharing the client that recorded or provisionally added a key meanwhile keeps
+        it. A retry cut by the client's own stream guards (degenerate / reasoning budget) DID reach the
         server and stream, so the rest of the request is proven fine and the rejection stands."""
-        saved = set(self._rejected_effort_keys)
+        added = set(keys) - self._rejected_effort_keys
         self._rejected_effort_keys |= set(keys)
         log.warning(
             "Server rejected effort key(s) %s (400) — retrying once without them", ", ".join(keys)
@@ -1344,9 +1349,11 @@ class LLMClient:
             self._accepted_effort_keys -= set(keys)
             raise
         except BaseException as retry_exc:
-            self._rejected_effort_keys = saved
-            if isinstance(retry_exc, Exception):
+            self._rejected_effort_keys = self._rejected_effort_keys - added
+            if isinstance(retry_exc, openai.BadRequestError):
                 raise self._wrap_error(exc) from retry_exc
+            if isinstance(retry_exc, Exception):
+                raise self._wrap_error(retry_exc) from retry_exc
             raise
         self._accepted_effort_keys -= set(keys)   # a key is rejected or accepted, never both (D-29)
         return result
