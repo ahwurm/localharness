@@ -243,6 +243,11 @@ LLAMA_RECORD = {"runtime": "llamacpp", "binary": "/x/llama-server", "model": "/x
 
 
 async def _launch_argv(tmp_path, monkeypatch, popen, key_path) -> list[str]:
+    call, _ = await _launch_call(tmp_path, monkeypatch, popen, key_path)
+    return call["cmd"]
+
+
+async def _launch_call(tmp_path, monkeypatch, popen, key_path, provider_key="none"):
     """The argv `start` would launch a `bind_all: true` llama.cpp record with: the key file read by
     `_read_session_key`, the launch key built from the session's bearer, the real `start_server`
     handing a recorded Popen. No process starts and no port is dialled."""
@@ -264,13 +269,13 @@ async def _launch_argv(tmp_path, monkeypatch, popen, key_path) -> list[str]:
     monkeypatch.setattr(start_cmd.console, "print", lambda *a, **k: None)
     monkeypatch.setattr(start_cmd.err_console, "print", lambda *a, **k: None)
     spec = ManagedServerConfig(**LLAMA_RECORD, api_key_file=str(key_path))
-    harness = SimpleNamespace(server=spec, provider=SimpleNamespace(api_key=SecretStr("none")))
-    start_cmd._read_session_key(harness)
+    harness = SimpleNamespace(server=spec, provider=SimpleNamespace(api_key=SecretStr(provider_key)))
+    line = start_cmd._read_session_key(harness)
     launch_key = server.required_key_kwargs(harness.server, harness.provider.api_key)
     assert await start_cmd._start_managed_server(
         spec, tmp_path, "http://127.0.0.1:8080/v1", launch_key) is None
     (call,) = popen
-    return call["cmd"]
+    return call, line
 
 
 def _doctor_text(tmp_path, monkeypatch, fake_home, key_path) -> str:
@@ -311,3 +316,55 @@ def test_the_wr01_residual_a_refused_regular_file_reads_keyed_in_doctor_but_laun
     assert LLAMA_NETWORK_ROW in _doctor_text(tmp_path, monkeypatch, fake_home, key)
     argv = asyncio.run(_launch_argv(tmp_path, monkeypatch, popen, key))
     assert "--api-key-file" not in argv and argv[-2:] == ["--host", "127.0.0.1"]
+
+
+def test_cr01_a_refused_file_with_another_key_held_stays_off_argv_and_launches_loopback(
+        tmp_path, monkeypatch, popen):
+    """The decision, the argv and the printed line agree: the harness holds a configured key, the byte
+    rule refuses the CRLF file, so the file never rides argv, the launch is loopback even though
+    `bind_all` is true, the other key still reaches the child, and the line says the file is not used
+    (never `sends no key`)."""
+    key = _write(tmp_path, b"K\r\n")
+    call, line = asyncio.run(_launch_call(tmp_path, monkeypatch, popen, key, provider_key="CONFIGURED"))
+    argv = call["cmd"]
+    assert "--api-key-file" not in argv and str(key) not in argv
+    assert "0.0.0.0" not in argv and argv[-2:] == ["--host", "127.0.0.1"]
+    assert call["env"]["LLAMA_API_KEY"] == "CONFIGURED"
+    assert line == (f"server.api_key_file {key}: byte outside printable ASCII — the file is not used; "
+                    "this session keeps sending the key it already holds")
+    assert "sends no key" not in line and "CONFIGURED" not in line
+
+
+def test_cr01_a_refused_file_with_no_other_key_keeps_the_sends_no_key_line_and_loopback(
+        tmp_path, monkeypatch, popen):
+    key = _write(tmp_path, b"K\r\n")
+    call, line = asyncio.run(_launch_call(tmp_path, monkeypatch, popen, key))
+    argv = call["cmd"]
+    assert "--api-key-file" not in argv and argv[-2:] == ["--host", "127.0.0.1"]
+    assert "LLAMA_API_KEY" not in (call["env"] or {})
+    assert line.endswith("— this session sends no key")
+
+
+def test_cr01_the_decision_follows_the_refusal_even_when_the_harness_is_keyed(tmp_path):
+    from localharness.config.models import ManagedServerConfig
+    key = _write(tmp_path, b"K\n")
+    spec = ManagedServerConfig(**LLAMA_RECORD, api_key_file=str(key))
+    ok = server.launch_decision(spec, True)
+    assert (ok.loopback, ok.key_file_ok, ok.note) == (False, True, None)
+    server.mark_key_file(spec, True)
+    refused = server.launch_decision(spec, True)
+    assert (refused.loopback, refused.key_file_ok) == (True, False)
+    assert refused.note == f"--api-key-file {key} unreadable: refused by the key-file rule — launched on 127.0.0.1 for this run"
+    assert "--api-key-file" not in server.serve_command(
+        spec, keyed=True, loopback=refused.loopback, key_file_ok=refused.key_file_ok)
+    assert server.effective_posture(spec, keyed=True, decision=refused) == (False, None)
+    server.mark_key_file(spec, False)  # a later successful read clears it
+    assert server.launch_decision(spec, True).key_file_ok is True
+
+
+def test_cr01_the_refusal_is_session_state_not_configuration(tmp_path):
+    from localharness.config.models import ManagedServerConfig
+    spec = ManagedServerConfig(**LLAMA_RECORD, api_key_file=str(_write(tmp_path, b"K\n")))
+    before = spec.model_dump()
+    server.mark_key_file(spec, True)
+    assert spec.key_file_refused is True and spec.model_dump() == before

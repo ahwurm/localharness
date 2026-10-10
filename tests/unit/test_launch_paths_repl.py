@@ -268,6 +268,82 @@ async def test_a_refused_peer_key_file_is_one_line_and_the_peer_launches_as_phas
 
 
 @pytest.mark.asyncio
+async def test_cr01_a_refused_peer_key_file_with_a_configured_key_stays_off_argv_and_launches_loopback(
+        tmp_path, boundaries, monkeypatch):
+    """The peer holds its own configured `api_key`; the byte rule refuses the CRLF file. Decision, argv
+    and the printed line agree: the file is not on argv, the launch is loopback although `bind_all` is
+    true, the configured key still reaches the child and the rebind, and the line says the file is not
+    used (never `sends no key`)."""
+    key = tmp_path / "peer.key"
+    key.write_bytes(SENTINEL.encode() + b"\r\n")
+    peer = _launchable_peer(api_key="CONFIGURED", bind_all=True, require_api_key=True,
+                            api_key_file=str(key))
+    _, repl, channel, agent = _session(tmp_path, peer)
+    started = _capture_start_kw(monkeypatch)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    line = (f"extra_endpoints[llamacpp-local].lifecycle.api_key_file {key}: "
+            "byte outside printable ASCII — the file is not used; "
+            "this peer keeps sending the key it is configured with")
+    assert channel.messages.count(line) == 1
+    assert not any("sends no key" in m for m in channel.messages)
+    (call,) = started
+    assert call["api_key"] == "CONFIGURED"
+    assert "--api-key-file" not in call["cmd"] and "0.0.0.0" not in call["cmd"]
+    assert call["cmd"][-2:] == ["--host", "127.0.0.1"]
+    (rebind,) = [r for r in agent._llm.rebinds if r[0] == PEER_URL]
+    assert rebind[1].get_secret_value() == "CONFIGURED"
+    assert not any(SENTINEL in m for m in channel.messages)
+
+
+def test_cr01_an_earlier_launchs_file_key_does_not_survive_a_later_refusal(tmp_path):
+    """A peer's first cold launch reads a good file (its key is held on the endpoint); the file is then
+    replaced by one the byte rule refuses. The second launch must hold the CONFIGURED key again, keep
+    the refused file off argv and on loopback, and say so."""
+    from localharness.cli.repl import _hold_peer_session_key, _peer_session_key
+    key = tmp_path / "peer.key"
+    key.write_text("EARLIER-FILE-KEY\n", encoding="utf-8")
+    peer = _launchable_peer(api_key="CONFIGURED", bind_all=True, require_api_key=True,
+                            api_key_file=str(key))
+
+    first, first_line = _peer_session_key(peer)
+    _hold_peer_session_key(peer, first)
+    assert first_line is None and peer.api_key.get_secret_value() == "EARLIER-FILE-KEY"
+    assert managed_server.launch_decision(peer.lifecycle, True, peer=peer.name).key_file_ok is True
+
+    key.write_bytes(b"EARLIER-FILE-KEY\r\n")
+    second, second_line = _peer_session_key(peer)
+    _hold_peer_session_key(peer, second)
+    assert second is None and "the file is not used" in second_line
+    assert peer.api_key.get_secret_value() == "CONFIGURED"
+    decision = managed_server.launch_decision(peer.lifecycle, True, peer=peer.name)
+    assert (decision.loopback, decision.key_file_ok) == (True, False)
+    assert "--api-key-file" not in managed_server.serve_command(
+        peer.lifecycle, keyed=True, loopback=decision.loopback, key_file_ok=decision.key_file_ok)
+
+    key.write_text("LATER-GOOD\n", encoding="utf-8")  # a later good read lifts the refusal
+    third, _ = _peer_session_key(peer)
+    _hold_peer_session_key(peer, third)
+    assert peer.api_key.get_secret_value() == "LATER-GOOD"
+    assert managed_server.launch_decision(peer.lifecycle, True, peer=peer.name).key_file_ok is True
+
+
+def test_cr01_a_peer_with_no_configured_key_falls_back_to_none_after_a_refusal(tmp_path):
+    from localharness.cli.repl import _hold_peer_session_key, _peer_session_key
+    key = tmp_path / "peer.key"
+    key.write_text("EARLIER-FILE-KEY\n", encoding="utf-8")
+    peer = _launchable_peer(bind_all=True, require_api_key=True, api_key_file=str(key))
+    first, _ = _peer_session_key(peer)
+    _hold_peer_session_key(peer, first)
+    key.write_bytes(b"a,b\n")
+    second, line = _peer_session_key(peer)
+    _hold_peer_session_key(peer, second)
+    assert line.endswith("— this session sends no key")
+    assert peer.api_key.get_secret_value() == "none"
+
+
+@pytest.mark.asyncio
 async def test_a_refused_launch_decision_still_reads_nothing_it_has_to_print(tmp_path, boundaries):
     key = tmp_path / "peer.key"
     key.write_bytes(b"a,b\n")
