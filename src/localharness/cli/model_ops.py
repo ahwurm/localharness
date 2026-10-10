@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from localharness.config.models import LEVELS, HarnessConfig
+from localharness.config.models import LEVELS, HarnessConfig, coerce_yaml_effort
 from localharness.config.overlay import (
     _resolve_user_overlay_path,
     atomic_write_overlay,
@@ -457,10 +457,14 @@ def agents_with_effort(
             continue
         if not isinstance(raw, dict):
             continue
-        level = raw.get("effort")
+        # An unquoted `off` is the boolean False to YAML 1.1; the loader reads it as `off`, so this
+        # listing does too (one coercion, shared). `on` is not a level and the loader refuses it.
+        try:
+            level = coerce_yaml_effort(raw.get("effort"))
+        except ValueError:
+            continue
         # Only a level the loader would accept: absent and "inherit" set nothing, and anything else
-        # (a typo, or an unquoted `off` that YAML 1.1 reads as the boolean False) is a file the
-        # loader refuses, which is reported there, not here.
+        # (a typo) is a file the loader refuses, which is reported there, not here.
         if not isinstance(level, str) or level not in LEVELS:
             continue
         out.append((raw.get("name") or stem, level))
