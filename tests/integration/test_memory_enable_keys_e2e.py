@@ -248,13 +248,16 @@ def test_a_fresh_init_starts_with_no_deprecation_line(tmp_path, monkeypatch, fak
     fake_sys.stdin.isatty.return_value = True
     monkeypatch.setattr(init_cmd, "sys", fake_sys)
     fake_confirm = MagicMock()
-    fake_confirm.ask.side_effect = [False, True, memory_on]  # usual settings: no; host tools; memory
+    fake_confirm.ask.side_effect = AssertionError("init asks no settings question (D-38)")
     monkeypatch.setattr(init_cmd, "Confirm", fake_confirm)
     result = runner.invoke(app, ["init", "--config-dir", str(global_dir), "--force"])
     assert result.exit_code == 0, result.output
     written = (global_dir / "config.yaml").read_text()
     assert written != stub_cfg and "memory_enabled" not in written, written
-    assert ("memory:\n  enabled: false\n" in written) is (not memory_on), written
+    assert "memory:" not in written, written  # memory on is the default: init writes no key
+    if not memory_on:  # turned off by the one key the receipt names, as a person would
+        with (global_dir / "config.yaml").open("a", encoding="utf-8") as fh:
+            fh.write("memory:\n  enabled: false\n")
 
     seen = _start(monkeypatch)
     assert seen["deprecations"] == 0, seen["printed"]
