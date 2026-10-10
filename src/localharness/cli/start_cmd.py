@@ -283,8 +283,6 @@ PATH_BINARY_LINE = ("llama-server found on PATH at {path} — written to overrid
 CONFIG_INI_WRITTEN_LINE = ("config.ini ({dir}) differs from server.config_ini — written to overrides.yaml as "
                            "server.config_ini; nothing launches it until it is confirmed")
 CONFIG_INI_REFUSED_LINE = "config.ini ({dir}) sets {key} (a {category} option) — not carried; a harness launch does not see it"
-CONFIG_INI_SOURCE_KEY = "<config.ini>"
-"""The decline-store key prefix under which a No on the sensed `config.ini` remembers its text's digest."""
 HOST_SOURCE_KEY = "<extra_args-host>"
 """The decline-store key prefix under which a converted `--host` offer remembers its source (WR-03)."""
 HOST_UNDO_LINE = ("server.extra_args --host {host} is not applied — launched on 127.0.0.1 — "
@@ -444,7 +442,7 @@ def _write_config_ini(global_dir: Path, rec: dict | None) -> str | None:
         return None
     kept = read.ini.kept
     digest = hashlib.sha256(kept.encode("utf-8")).hexdigest()
-    if trust.offer_was_declined(trust.decline_key(CONFIG_INI_SOURCE_KEY, digest)):
+    if trust.offer_was_declined(trust.decline_key("<config.ini>", digest)):
         return None
     before = merged.get("config_ini")
     if kept == before:
@@ -486,7 +484,7 @@ def _after_no_remove_config_ini(global_dir: Path, kept: str) -> None:
             global_dir, mutate, [("server.config_ini", kept, None)],
             actor_detail="localharness start: a No on the sensed config.ini, line removed")
     trust.record_offer_decline(
-        trust.decline_key(CONFIG_INI_SOURCE_KEY, hashlib.sha256(kept.encode("utf-8")).hexdigest()))
+        trust.decline_key("<config.ini>", hashlib.sha256(kept.encode("utf-8")).hexdigest()))
 
 
 def _after_no_on_config_ini(global_dir: Path, machine_trust: MachineTrust, *, can_ask: bool,
