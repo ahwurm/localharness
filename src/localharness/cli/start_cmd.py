@@ -282,6 +282,7 @@ PATH_BINARY_LINE = ("llama-server found on PATH at {path} — written to overrid
                     "nothing launches it until it is confirmed")
 CONFIG_INI_WRITTEN_LINE = ("config.ini ({dir}) differs from server.config_ini — written to overrides.yaml as "
                            "server.config_ini; nothing launches it until it is confirmed")
+CONFIG_INI_REFUSED_LINE = "config.ini ({dir}) sets {key} (a {category} option) — not carried; a harness launch does not see it"
 CONFIG_INI_SOURCE_KEY = "<config.ini>"
 """The decline-store key prefix under which a No on the sensed `config.ini` remembers its text's digest."""
 HOST_SOURCE_KEY = "<extra_args-host>"
@@ -428,9 +429,18 @@ def _write_config_ini(global_dir: Path, rec: dict | None) -> str | None:
     if read.line:
         err_console.print(read.line, markup=False, soft_wrap=True)
         return None
-    if read.ini is None or not read.ini.kept:
+    if read.ini is None:
         return None
-    if read.ini.refused:
+    if read.ini.refused:  # a download-identity or TLS key: nothing of the file is carried (D-56)
+        from localharness.provider import server as managed_server
+
+        key = read.ini.refused
+        err_console.print(
+            CONFIG_INI_REFUSED_LINE.format(dir=read.dir, key=visible_text(key),
+                                           category=managed_server.excluded_option(key)),
+            markup=False, soft_wrap=True)
+        return None
+    if not read.ini.kept:
         return None
     kept = read.ini.kept
     digest = hashlib.sha256(kept.encode("utf-8")).hexdigest()
@@ -438,7 +448,11 @@ def _write_config_ini(global_dir: Path, rec: dict | None) -> str | None:
         return None
     before = merged.get("config_ini")
     if kept == before:
-        return None
+        # Already merged. If overrides.yaml holds it unconfirmed (an earlier start wrote it and its
+        # question was never answered) it is still this start's pending entry: a No must reach it (WR-02).
+        held = any(e.get("file") == "overrides.yaml" and e.get("name") == "server.config_ini"
+                   for e in rec["entries"])
+        return kept if _server_section(over).get("config_ini") == kept and not held else None
     if not write_overlay_validated(
             global_dir, lambda d: set_value_in_dict(d, "server.config_ini", kept),
             [("server.config_ini", before, kept)],
@@ -446,6 +460,42 @@ def _write_config_ini(global_dir: Path, rec: dict | None) -> str | None:
         return None
     err_console.print(CONFIG_INI_WRITTEN_LINE.format(dir=read.dir), markup=False, soft_wrap=True)
     return kept
+
+
+def _after_no_remove_config_ini(global_dir: Path, kept: str) -> None:
+    """A terminal No on the sensed `config.ini`: its `server.config_ini` line leaves overrides.yaml, but
+    only while it still equals the text the harness sensed (a value someone changed stays) and the
+    record holds no `server.config_ini` for overrides.yaml (the line is an addition the harness never
+    saw confirmed, not an edit of a value the person had); the No is remembered for that text's digest
+    so only a changed file asks again (D-31)."""
+    from localharness.config import trust
+
+    _, over = raw_settings(global_dir)
+    rec = trust.recorded_machine(global_dir)
+    recorded = rec is not None and any(
+        e.get("file") == "overrides.yaml" and e.get("name") == "server.config_ini" for e in rec["entries"])
+    if not recorded and _server_section(over).get("config_ini") == kept:
+        def mutate(overlay: dict) -> None:
+            section = overlay.get("server")
+            if isinstance(section, dict):
+                section.pop("config_ini", None)
+                if not section:
+                    del overlay["server"]
+
+        write_overlay_validated(
+            global_dir, mutate, [("server.config_ini", kept, None)],
+            actor_detail="localharness start: a No on the sensed config.ini, line removed")
+    trust.record_offer_decline(
+        trust.decline_key(CONFIG_INI_SOURCE_KEY, hashlib.sha256(kept.encode("utf-8")).hexdigest()))
+
+
+def _after_no_on_config_ini(global_dir: Path, machine_trust: MachineTrust, *, can_ask: bool,
+                            ini_written: str | None) -> None:
+    """A terminal start whose question left `server.config_ini` of overrides.yaml withheld was answered
+    No (a start that cannot ask never gets here): drop the sensed line and remember the file's digest."""
+    if (ini_written and can_ask
+            and ("launch", "server.config_ini") in machine_trust.withheld.get("overrides.yaml", ())):
+        _after_no_remove_config_ini(global_dir, ini_written)
 
 
 def _adopt_written_bind_all(global_dir: Path) -> None:
@@ -1282,6 +1332,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     machine_trust = MachineTrust() if list_models else decide_machine_trust(cfg_path, ask=can_ask,
         launching=sensed.launching, annotations=sensed.annotations)
     _after_no_on_path_binary(cfg_path, machine_trust, can_ask=can_ask, path_binary=path_llama_server)
+    _after_no_on_config_ini(cfg_path, machine_trust, can_ask=can_ask, ini_written=sensed.ini_written)
     # What the first launch of this session prints (D-15, D-17): the withheld-posture lines and the
     # undo line. Start's own down-server launch prints them; a start that only attaches (or waits, or
     # is refused) hands them to the REPL's first launch instead (D-26).
