@@ -18,7 +18,7 @@ from tests.unit.test_floor_machine_level import _layers, _warnings
 
 AUTOSENSE_DEFAULTS = {
     "compute_margin_ratio": 0.10,
-    "template_margin_ratio": 0.0156,
+    "template_margin_ratio": 1 / 64,
     "unified_reserve_ratio": 0.15,
     "cache_ram_ratio": 0.40,
     "cache_ram_ceiling_ratio": 0.50,
