@@ -1612,12 +1612,25 @@ class ConfigLoader:
         overrides.yaml — an MCP server by name (every server of that name in the file: two may share
         one, and over-withholding is the safe side), `memory.embedding_model`, a dotted
         `permissions.…` or `org.permissions.…` key — is absent from every read of that file this
-        run, baselines included (a withheld `server.…` launch key drops the whole section, in
-        `_raw_config_sources`). Never mutates `raw`."""
-        withheld = self._machine_withheld.get(self._machine_file(path) or "") if (
-            self._machine_withheld) else None
-        if not withheld or not isinstance(raw, dict):
+        run, baselines included (a withheld `server.…` launch key narrows or drops the section, in
+        `_apply_launch_withholds`). Never mutates `raw`.
+
+        The per-peer rule (kind `launch` or `launch_model`, the grammar
+        `extra_endpoints.<peer>.lifecycle.<key>`): the peer name is recovered by stripping the
+        `extra_endpoints.` prefix and then `rpartition(".lifecycle.")` — never `split(".")`, which
+        would read `qwen3.6` as `qwen3` and let that peer's lifecycle launch. Like an MCP server, it
+        applies to every peer of that name, in both settings files (a name filed under one file
+        still names the peer in the other: lists replace wholesale, so the one that loads is the
+        winner's, and over-withholding is the safe side). A withheld `bind_all` / `require_api_key`
+        narrows that key inside the lifecycle of every peer of the name (`false` / `true`); any
+        other key removes the lifecycle (`lifecycle: None`, the peer stays attachable and
+        validates). The peer list is rebuilt, never `_put`: `_put` has no way into a list."""
+        machine_file = self._machine_file(path) or ""
+        withheld = self._machine_withheld.get(machine_file) if self._machine_withheld else None
+        peer_withheld = self._peer_withholds(machine_file)
+        if not isinstance(raw, dict) or not (withheld or peer_withheld):
             return raw
+        withheld = withheld or frozenset()
         servers = {name for kind, name in withheld if kind == "mcp_server"}
         tools = raw.get("tools")
         if servers and isinstance(tools, dict) and isinstance(tools.get("mcp_servers"), list):
@@ -1627,7 +1640,44 @@ class ConfigLoader:
         for kind, name in sorted(withheld):
             if kind in ("embedding_model", "permission", "org_permission"):
                 raw = _put(raw, name.split("."), _UNSET)
+        peers = raw.get("extra_endpoints")
+        if peer_withheld and isinstance(peers, list):
+            raw = {**raw, "extra_endpoints": [
+                self._without_withheld_lifecycle(p, peer_withheld) for p in peers]}
         return raw
+
+    def _peer_withholds(self, machine_file: str) -> list[tuple[str, str]]:
+        """The `(peer, lifecycle key)` pairs withheld for `machine_file`: from config.yaml AND
+        overrides.yaml when it is either (see `_without_withheld`), else from its own entries (which
+        name no peer). Names that do not carry the `.lifecycle.` marker name nothing and are skipped."""
+        from localharness.config.trust import LAUNCH_KIND, LAUNCH_MODEL_KIND
+
+        files = ("config.yaml", "overrides.yaml") if machine_file in (
+            "config.yaml", "overrides.yaml") else (machine_file,)
+        pairs: list[tuple[str, str]] = []
+        for file in files:
+            for kind, name in sorted((self._machine_withheld or {}).get(file, ())):
+                if kind not in (LAUNCH_KIND, LAUNCH_MODEL_KIND) or not name.startswith("extra_endpoints."):
+                    continue
+                peer, sep, key = name[len("extra_endpoints."):].rpartition(".lifecycle.")
+                if sep:
+                    pairs.append((peer, key))
+        return pairs
+
+    @staticmethod
+    def _without_withheld_lifecycle(peer: Any, peer_withheld: list[tuple[str, str]]) -> Any:
+        """`peer` with each withheld lifecycle key applied by name; `peer` itself when it is not a
+        named peer with a lifecycle. Never mutates."""
+        if not isinstance(peer, dict) or not isinstance(peer.get("lifecycle"), dict):
+            return peer
+        for name, key in peer_withheld:
+            if str(peer.get("name") or "") != name or peer.get("lifecycle") is None:
+                continue
+            if key in ("bind_all", "require_api_key"):
+                peer = {**peer, "lifecycle": {**peer["lifecycle"], key: key == "require_api_key"}}
+            else:
+                peer = {**peer, "lifecycle": None}
+        return peer
 
     def _narrow_agent_global_only(self, sections: dict, path: Path) -> dict:
         """A plugin-section key in AGENT_GLOBAL_ONLY_FIELDS that a WORKSPACE agent file sets: the

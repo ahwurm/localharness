@@ -197,3 +197,116 @@ def test_nothing_withheld_leaves_the_record_as_written(g):
     cfg = _load(g, {})
 
     assert cfg.server is not None and cfg.server.bind_all is True
+
+
+# ------------------------------------------------------------------ per-peer lifecycle (D-13)
+
+
+def test_a_withheld_peer_model_removes_exactly_that_peers_lifecycle(g):
+    write_yaml(g / "overrides.yaml", {"extra_endpoints": [
+        _peer("qwen3.6", "http://127.0.0.1:8081/v1"), _peer("qwen3", "http://127.0.0.1:8082/v1")]})
+    write_yaml(g / "config.yaml", _cfg(dict(SERVER)))
+
+    cfg = _load(g, {"overrides.yaml": {("launch_model", "extra_endpoints.qwen3.6.lifecycle.model")}})
+
+    (dotted,) = _by_name(cfg, "qwen3.6")
+    (plain,) = _by_name(cfg, "qwen3")
+    assert dotted.lifecycle is None and dotted.gpu is True
+    assert plain.lifecycle is not None and plain.lifecycle.model == "/m/b.gguf"
+    assert cfg.server is not None, "a peer entry never drops the primary's server:"
+
+
+def test_two_peers_sharing_a_name_both_lose_their_lifecycle(g):
+    write_yaml(g / "config.yaml", _cfg(extra_endpoints=[
+        _peer("p", "http://127.0.0.1:8081/v1"), _peer("p", "http://127.0.0.1:8082/v1")]))
+
+    cfg = _load(g, {"config.yaml": {("launch", "extra_endpoints.p.lifecycle.binary")}})
+
+    assert [p.lifecycle for p in cfg.extra_endpoints] == [None, None]
+
+
+@pytest.mark.parametrize("key,value", [("bind_all", False), ("require_api_key", True)])
+def test_a_withheld_peer_posture_key_is_narrowed_by_name_and_the_lifecycle_survives(g, key, value):
+    write_yaml(g / "config.yaml", _cfg(extra_endpoints=[
+        _peer("p", "http://127.0.0.1:8081/v1", bind_all=True, require_api_key=False),
+        _peer("p", "http://127.0.0.1:8082/v1", bind_all=True, require_api_key=False),
+        _peer("other", "http://127.0.0.1:8083/v1", bind_all=True, require_api_key=False)]))
+
+    cfg = _load(g, {"config.yaml": {("launch", f"extra_endpoints.p.lifecycle.{key}")}})
+
+    for peer in _by_name(cfg, "p"):
+        assert peer.lifecycle is not None and getattr(peer.lifecycle, key) is value
+        assert peer.lifecycle.binary == "/x/b"
+    (other,) = _by_name(cfg, "other")
+    assert other.lifecycle is not None
+    assert other.lifecycle.bind_all is True and other.lifecycle.require_api_key is False
+
+
+def test_a_peer_withheld_under_the_shadowed_file_still_applies_to_the_winning_list(g):
+    write_yaml(g / "config.yaml", _cfg(extra_endpoints=[_peer("p")]))
+    write_yaml(g / "overrides.yaml", {"extra_endpoints": [
+        _peer("p", "http://127.0.0.1:9000/v1", bind_all=True), _peer("q", "http://127.0.0.1:9001/v1")]})
+
+    cfg = _load(g, {"config.yaml": {("launch_model", "extra_endpoints.p.lifecycle.model"),
+                                    ("launch", "extra_endpoints.q.lifecycle.bind_all")}})
+
+    (p,) = _by_name(cfg, "p")
+    (q,) = _by_name(cfg, "q")
+    assert p.base_url == "http://127.0.0.1:9000/v1", "the overrides list is the one that loaded"
+    assert p.lifecycle is None
+    assert q.lifecycle is not None and q.lifecycle.bind_all is False
+
+
+def test_a_peer_name_holding_dot_lifecycle_dot_is_recovered_from_the_last_occurrence(g):
+    write_yaml(g / "config.yaml", _cfg(extra_endpoints=[
+        _peer("a.lifecycle.b", "http://127.0.0.1:8081/v1"), _peer("a", "http://127.0.0.1:8082/v1")]))
+
+    cfg = _load(g, {"config.yaml": {("launch_model", "extra_endpoints.a.lifecycle.b.lifecycle.model")}})
+
+    (odd,) = _by_name(cfg, "a.lifecycle.b")
+    (plain,) = _by_name(cfg, "a")
+    assert odd.lifecycle is None
+    assert plain.lifecycle is not None
+
+
+def test_a_withheld_peer_entry_does_not_drop_the_primary_server(g):
+    write_yaml(g / "config.yaml", _cfg(dict(SERVER), extra_endpoints=[_peer("p")]))
+
+    cfg = _load(g, {"config.yaml": {("launch", "extra_endpoints.p.lifecycle.extra_args")}})
+
+    assert cfg.server is not None and cfg.server.bind_all is True
+    assert cfg.extra_endpoints[0].lifecycle is None
+
+
+def test_a_withheld_peer_that_is_absent_changes_nothing(g):
+    write_yaml(g / "config.yaml", _cfg(extra_endpoints=[_peer("p")]))
+
+    cfg = _load(g, {"config.yaml": {("launch", "extra_endpoints.gone.lifecycle.binary")}})
+
+    assert cfg.extra_endpoints[0].lifecycle is not None
+
+
+def test_a_malformed_peer_name_without_the_lifecycle_marker_is_ignored(g):
+    write_yaml(g / "config.yaml", _cfg(dict(SERVER), extra_endpoints=[_peer("p")]))
+
+    cfg = _load(g, {"config.yaml": {("launch", "extra_endpoints.p")}})
+
+    assert cfg.server is not None
+    assert cfg.extra_endpoints[0].lifecycle is not None
+
+
+def test_peer_withholding_never_mutates_the_dicts_the_yaml_reader_returned(g, monkeypatch):
+    path = write_yaml(g / "config.yaml", _cfg(extra_endpoints=[_peer("p", bind_all=True)]))
+    cache: dict[str, dict] = {}
+    real = loader_mod._load_yaml_file
+
+    def cached(p):
+        return cache.setdefault(str(p), real(p))
+
+    monkeypatch.setattr(loader_mod, "_load_yaml_file", cached)
+    before = copy.deepcopy(real(path))
+
+    _load(g, {"config.yaml": {("launch", "extra_endpoints.p.lifecycle.bind_all"),
+                              ("launch_model", "extra_endpoints.p.lifecycle.model")}})
+
+    assert cache[str(path)] == before
