@@ -188,6 +188,28 @@ def _launch_key(harness: Any, base_url: str, spec: Any = None) -> dict[str, str]
                                getattr(ep, "api_key", None))
 
 
+def _peer_session_key(ep: Any) -> "tuple[Any, str | None]":
+    """The key a cold peer's ``lifecycle.api_key_file`` holds, read once at its launch: ``(SecretStr,
+    None)`` on success; ``(None, line)`` when the file fails the byte rule, with the one line to
+    show (``extra_endpoints[<name>].lifecycle.api_key_file <path>: <reason> — this session sends no
+    key``); ``(None, None)`` when the lifecycle names no file or does not require a key. The caller
+    runs it only for a lifecycle the loader kept (a withheld one is already None), so the file is
+    opened only once the record covers the entry. The key stays in memory: it is never written,
+    printed or logged, and the line carries the reason, never any of the file's content."""
+    from pydantic import SecretStr
+
+    from localharness.provider.server import KeyFileError, read_key_file
+    lifecycle = getattr(ep, "lifecycle", None)
+    path = getattr(lifecycle, "api_key_file", None)
+    if not path or getattr(lifecycle, "require_api_key", False) is not True:
+        return None, None
+    try:
+        return SecretStr(read_key_file(path)), None
+    except KeyFileError as exc:
+        return None, (f"extra_endpoints[{ep.name}].lifecycle.api_key_file {path}: {exc} — "
+                      "this session sends no key")
+
+
 def _endpoint_host(base_url: str) -> str:
     """host:port of a base_url for compact headers/meta (strip scheme + /v1 path). Best-effort:
     a display helper must never raise into the /model listing, so a parse slip falls back raw."""
@@ -1837,6 +1859,13 @@ class OrchestratorREPL:
                 required_key_kwargs,
             )
             ep = cold_target[target]
+            # The peer's key file is read here, at its cold launch and from a lifecycle the loader
+            # kept (D-23). On success the key is held in memory on the endpoint, so the launch, the
+            # rebind and every later probe of this peer carry it; a refused file leaves the peer as
+            # Phase 1 would launch it (keyless: loopback, no file on argv) after one line.
+            peer_key, key_line = _peer_session_key(ep)
+            if peer_key is not None:
+                ep.api_key = peer_key
             # The one launch decision, asked BEFORE anything is stopped or announced (D-08): a launch
             # that cannot happen answers in one line and leaves the incumbent exactly as it was.
             launch_kw = required_key_kwargs(ep.lifecycle, ep.api_key)
@@ -1845,6 +1874,8 @@ class OrchestratorREPL:
             if decision.refusal is not None:
                 await self._channel.send_message(decision.refusal, metadata={"style": "system.error"})
                 return
+            if key_line:
+                await self._send_info(key_line)
             box_note = getattr(self._channel, "box_activity", None)
 
             def _cold_progress(elapsed: float) -> None:

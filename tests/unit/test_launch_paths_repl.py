@@ -208,6 +208,102 @@ async def test_the_cold_launch_passes_the_harness_autosense_to_activate(
     assert seen and seen[-1]["autosense"] is harness.autosense
 
 
+SENTINEL = "KEY-SENTINEL-peer-1"
+
+
+def _capture_start_kw(monkeypatch) -> list[dict]:
+    """What `start_server` was handed besides the command: the key reaches the child's environment
+    through `api_key=`."""
+    seen: list[dict] = []
+    monkeypatch.setattr(managed_server, "start_server",
+                        lambda cfg, cmd, **kw: seen.append({"cmd": list(cmd), **kw}) or 4321)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_file_keyed_cold_peer_launches_keyed_and_rebinds_with_the_files_key(
+        tmp_path, boundaries, monkeypatch):
+    key = tmp_path / "peer.key"
+    key.write_text(SENTINEL + "\n", encoding="utf-8")
+    peer = _launchable_peer(bind_all=True, require_api_key=True, api_key_file=str(key))
+    _, repl, channel, agent = _session(tmp_path, peer)
+    started = _capture_start_kw(monkeypatch)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    (call,) = started
+    assert call["api_key"] == SENTINEL
+    assert call["cmd"][call["cmd"].index("--api-key-file") + 1] == str(key)
+    assert "0.0.0.0" in call["cmd"] and SENTINEL not in " ".join(call["cmd"])
+    (rebind,) = [r for r in agent._llm.rebinds if r[0] == PEER_URL]
+    assert rebind[1].get_secret_value() == SENTINEL
+    assert not any("every interface, no key" in m for m in channel.messages)
+    assert not any("this session sends no key" in m for m in channel.messages)
+    assert not any(SENTINEL in m for m in channel.messages)
+    # the key is held for this peer in memory, so a later probe of it carries it too
+    from localharness.cli.repl import _launch_key
+    assert _launch_key(repl._harness, PEER_URL) == {"api_key": SENTINEL}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_peer_key_file_is_one_line_and_the_peer_launches_as_phase_1_would(
+        tmp_path, boundaries, monkeypatch):
+    key = tmp_path / "peer.key"
+    key.write_bytes(SENTINEL.encode() + b"\r\n")
+    peer = _launchable_peer(bind_all=True, require_api_key=True, api_key_file=str(key))
+    _, repl, channel, agent = _session(tmp_path, peer)
+    started = _capture_start_kw(monkeypatch)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    line = (f"extra_endpoints[llamacpp-local].lifecycle.api_key_file {key}: "
+            "byte outside printable ASCII — this session sends no key")
+    assert channel.messages.count(line) == 1
+    (call,) = started
+    assert "api_key" not in call
+    assert "--api-key-file" not in call["cmd"] and call["cmd"][-2:] == ["--host", "127.0.0.1"]
+    (rebind,) = [r for r in agent._llm.rebinds if r[0] == PEER_URL]
+    assert rebind[1].get_secret_value() == "none"
+    assert not any(SENTINEL in m for m in channel.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_launch_decision_still_reads_nothing_it_has_to_print(tmp_path, boundaries):
+    key = tmp_path / "peer.key"
+    key.write_bytes(b"a,b\n")
+    peer = EndpointRef(
+        name="llamacpp-local", base_url=PEER_URL, provider_type="llamacpp", gpu=True,
+        lifecycle=ManagedServerConfig(runtime="llamacpp", model="/x/m.gguf", port=8080, gpu=True,
+                                      extra_args=["-a", "qwen-gguf"], require_api_key=True,
+                                      api_key_file=str(key)))
+    _, repl, channel, _ = _session(tmp_path, peer)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert channel.messages[-1] == NO_LLAMA_PEER
+    assert not any("this session sends no key" in m for m in channel.messages)
+
+
+@pytest.mark.asyncio
+async def test_restoring_a_file_keyed_primary_reuses_the_sessions_key_with_no_second_read(
+        tmp_path, boundaries, monkeypatch):
+    from pydantic import SecretStr
+    from tests.unit.launch_support import record_opens
+    key = tmp_path / "primary.key"
+    key.write_text("NOT-READ-AGAIN\n", encoding="utf-8")
+    primary = _llama_primary(bind_all=True, require_api_key=True, api_key_file=str(key))
+    harness = _harness(server=primary, extra_endpoints=[])
+    harness.provider.api_key = SecretStr(SENTINEL)  # what `start` read into the session
+    repl, _, _, _ = _xrepl(tmp_path, harness, {PRIMARY_URL: ["model-a"]})
+    started = _capture_start_kw(monkeypatch)
+
+    with record_opens() as opened:
+        await repl._restore_incumbent((primary, harness.provider.base_url))
+
+    assert started and started[0]["api_key"] == SENTINEL
+    assert str(key) not in opened
+
+
 # --- path 3: the managed restart / swap-back --------------------------------------------------- #
 
 
