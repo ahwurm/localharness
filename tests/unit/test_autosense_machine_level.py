@@ -231,3 +231,10 @@ def test_three_warnings_from_one_file_come_out_in_sorted_path_order(tmp_path):
 
 def test_the_three_are_in_the_code_set_of_machine_only_settings():
     assert {"autosense", "effort_budget", "org.default_effort"} <= machine_only_code_set()
+
+
+def test_the_template_margin_description_says_who_it_applies_to():
+    """IN-02: the setting reaches the root loop only (D-28); the field says so rather than letting a
+    user expect one margin across the session."""
+    text = M.AutosenseConfig.model_fields["template_margin_ratio"].description
+    assert "main agent" in text and "subagents" in text and "1/64" in text
