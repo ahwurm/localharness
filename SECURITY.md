@@ -534,7 +534,10 @@ run; agent code that deliberately clears the marker is not caught, which is no m
 `python_exec` can already do to the files themselves.) `effort` is in neither list: it is a request setting, not
 a launch decision, and a peer's `api_key` and headers are never written to the record. The
 `config_ini` key names llama-server's own config file, so a relaunch acts on nothing the record
-did not fingerprint. **What this does NOT cover:** the root-owned `/etc/llama.cpp/config.ini` that
+did not fingerprint. A No to a peer's `bind_all: true` is written as `lifecycle.bind_all: false` into
+`overrides.yaml`, and because lists replace on merge that copies `config.yaml`'s whole
+`extra_endpoints` list there; the start prints one line saying so, and from then on the peers are
+edited in `overrides.yaml`, since its list wins. **What this does NOT cover:** the root-owned `/etc/llama.cpp/config.ini` that
 llama-server still reads on its own is outside the record, and a change there asks nothing.
 
 The files that hold the harness's own settings have a rule of their own: the agent's write and edit

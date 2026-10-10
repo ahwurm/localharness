@@ -797,3 +797,32 @@ def test_wr06_a_peer_endpoint_that_is_not_this_machine_is_named_in_the_suffix(g)
                           "require_api_key": True, "api_key_file": "/pk", "port": 8090}}
     _config(g, extra_endpoints=[peer])
     assert ws_mod._key_file_destination(g, "extra_endpoints.qwen3.6.lifecycle.api_key_file") == "10.0.0.7:8090"
+
+
+def test_wr07_a_peer_no_that_forks_the_peer_list_says_so_once(g, monkeypatch):
+    _config(g, extra_endpoints=_peers())
+    _pre_upgrade(g)
+    answers(monkeypatch, False)
+    said: list[str] = []
+    monkeypatch.setattr(ws_mod._notice_console, "print", lambda *a, **k: said.append(str(a[0])))
+
+    decide_machine_trust(g, ask=True, launching=True)
+
+    assert said == [ws_mod.PEER_LIST_COPIED]
+    assert "overrides.yaml" in said[0] and "extra_endpoints" in said[0]
+    from pathlib import Path
+    assert "copies `config.yaml`'s whole\n`extra_endpoints` list there" in (
+        Path(ws_mod.__file__).parents[3] / "SECURITY.md").read_text(encoding="utf-8")
+
+
+def test_wr07_a_peer_no_in_an_existing_override_list_says_nothing(g, monkeypatch):
+    _config(g, extra_endpoints=_peers())
+    write_yaml(g / "overrides.yaml", {"extra_endpoints": _peers()})
+    _pre_upgrade(g)
+    answers(monkeypatch, False)
+    said: list[str] = []
+    monkeypatch.setattr(ws_mod._notice_console, "print", lambda *a, **k: said.append(str(a[0])))
+
+    decide_machine_trust(g, ask=True, launching=True)
+
+    assert said == []
