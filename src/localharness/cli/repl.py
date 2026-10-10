@@ -528,6 +528,7 @@ class OrchestratorREPL:
                     # Co-author consent (spec 14): if the git hook flagged a first
                     # commit for an undecided project, ask now (after the turn).
                     await self._settle_pending_coauthor()
+                    await self._announce_rejected_effort_keys()
                     # NOTE: Do NOT send_message here. The TaskComplete event handler
                     # in TerminalChannel.on_task_complete() handles output.
                     # Sending here would produce duplicate output.
@@ -734,6 +735,7 @@ class OrchestratorREPL:
                 self._turn_task = None
                 self._channel.box_notify_working(False)
                 await self._settle_pending_coauthor()
+                await self._announce_rejected_effort_keys()
                 await self._play_next_from_fifo()
                 return True
             if kind in PENDING_HOTKEYS:
@@ -1282,6 +1284,71 @@ class OrchestratorREPL:
             return
         if note:
             await self._send_info(note)
+
+    def _effort_ledger_key(self) -> Optional[tuple[str, str]]:
+        """`(provider_type, model)` of the live client — the one ledger key the after-turn hook and
+        the rebind clear share. None when the client is a double without them."""
+        config = getattr(getattr(self._agent, "_llm", None), "config", None)
+        ptype, model = getattr(config, "provider_type", None), getattr(config, "model", None)
+        return (ptype, model) if isinstance(ptype, str) and isinstance(model, str) else None
+
+    def _rebind_effort_ledger(self, base_url: str) -> None:
+        """A switch to a DIFFERENT endpoint clears the target's rejected-key entry and this session's
+        announced set (D-29): a rejection belongs to the server that made it, and two servers can share
+        a `(provider_type, model)` key. A same-endpoint refresh leaves both alone. Best-effort."""
+        target = base_url.rstrip("/")
+        previous = self._effort_endpoint
+        self._effort_endpoint = target
+        if previous is None or previous == target:
+            return
+        self._announced_effort_keys.clear()
+        key = self._effort_ledger_key()
+        if key is None:
+            return
+        from localharness.provider.speed_stats import default_speed_stats_path, record_rejected_effort_keys
+        try:
+            record_rejected_effort_keys(default_speed_stats_path(self._config_dir), *key, [])
+        except Exception:  # noqa: BLE001 — a ledger error never breaks a swap
+            log.warning("could not clear the rejected-effort-key ledger entry", exc_info=True)
+
+    async def _announce_rejected_effort_keys(self) -> None:
+        """After a turn: say once, on the channel, each effort key this server refused, and keep the
+        ledger's record of them honest (D-29). Never raises.
+
+        The entry GROWS by `live - recorded` (each such key is announced, then the union written) and
+        SHRINKS by `(recorded & accepted) - live` — a recorded key this session re-sent and the server
+        took. When neither changes nothing is written, so a turn that never re-sent a key (`max`,
+        `off`, a first turn with an empty live set) leaves the record as it was.
+        """
+        try:
+            key = self._effort_ledger_key()
+            if key is None:
+                return
+            llm = self._agent._llm
+            live = frozenset(getattr(llm, "rejected_effort_keys", None) or ())
+            accepted = frozenset(getattr(llm, "accepted_effort_keys", None) or ())
+            if self._effort_endpoint is None:
+                self._effort_endpoint = self._llm_base_url()
+            from localharness.provider.speed_stats import (
+                default_speed_stats_path,
+                last_rejected_effort_keys,
+                record_rejected_effort_keys,
+            )
+            ledger = default_speed_stats_path(self._config_dir)
+            recorded = set(last_rejected_effort_keys(ledger, *key) or [])
+            grown = live - recorded
+            shrunk = (recorded & accepted) - live
+            for k in sorted(grown - self._announced_effort_keys):
+                await self._send_info(EFFORT_UNENFORCED_TEMPLATE.format(key=k))
+                self._announced_effort_keys.add(k)
+            self._announced_effort_keys -= shrunk  # an accepted key is news again if refused later
+            if grown or shrunk:
+                try:
+                    record_rejected_effort_keys(ledger, *key, sorted((recorded | grown) - shrunk))
+                except OSError:
+                    log.warning("could not record the rejected effort keys", exc_info=True)
+        except Exception:  # noqa: BLE001 — a notice must never cost the session
+            log.warning("could not announce rejected effort keys", exc_info=True)
 
     def _turn_running(self) -> bool:
         """Is a turn in flight right now? (The box coordinator's own test, in one place.)
@@ -2379,6 +2446,17 @@ class OrchestratorREPL:
                     f"token counting could not rebind to {model} and still uses the previous "
                     "model, so counts may not match — re-run /model to retry."
                 )
+
+        # The one post-switch point all four /model branches reach (spec §7.2): the level is re-resolved
+        # for the TARGET endpoint, so a peer whose lifecycle says `effort: max` moves the loop while
+        # the agent file's own rung (AgentConfig.effort) stays what the file says.
+        try:
+            resolved = self._resolve_effort_now(base_url=base_url)
+            if resolved is not None and hasattr(self._agent, "set_effort"):
+                self._agent.set_effort(*resolved)
+        except Exception:  # noqa: BLE001 — never let an effort refresh strand a completed swap
+            log.warning("effort re-resolve after /model swap failed", exc_info=True)
+        self._rebind_effort_ledger(base_url)
         return (" " + " ".join(notes)) if notes else ""
 
     async def _live_models(self, base_url: str) -> tuple[list[str], bool]:
