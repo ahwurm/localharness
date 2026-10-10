@@ -349,3 +349,44 @@ def test_effort_shaped_writes_leave_the_snapshot_and_the_overlay_key_free(g):
     assert trust.machine_snapshot(g) == before
     assert "api_key" not in (g / "overrides.yaml").read_text(encoding="utf-8")
     assert "effort" not in {k for k in trust.LAUNCH_KEYS} | set(trust.LAUNCH_MODEL_KEYS)
+
+
+def test_wr04_a_trust_store_write_failure_is_a_secondary_note_not_a_failed_persist(g, monkeypatch):
+    """The overlay write and the in-memory update are durable before `adopt_entries` runs; an OSError
+    from the trust store must come back as a warning (like the audit emit's), never escape and read as
+    a failed switch."""
+    harness = _home(g)
+
+    def boom(*_a, **_kw):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(trust, "adopt_entries", boom)
+
+    warning = _persist(harness, g, local_operator=True)
+
+    assert load_overlay(g / "overrides.yaml")["server"]["model"] == "m2"
+    assert harness.server.model == "m2" and harness.provider.default_model == "m2"
+    assert warning is not None and "could not be re-recorded" in warning
+    assert "Permission denied" in warning and "the next start asks" in warning
+
+
+def test_wr04_both_post_write_steps_failing_report_both(g, monkeypatch):
+    harness = _home(g)
+    monkeypatch.setattr(trust, "adopt_entries", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+
+    class _Bus:
+        def __init__(self, *a, **k): ...
+
+        async def publish(self, *_a, **_k):
+            raise RuntimeError("audit log unwritable")
+
+    monkeypatch.setattr(model_ops, "EventBus", _Bus)
+
+    warning = _persist(harness, g, local_operator=True)
+
+    assert "disk full" in warning and "audit log unwritable" in warning
+    assert load_overlay(g / "overrides.yaml")["server"]["model"] == "m2"
+
+
+def test_wr04_a_clean_local_switch_still_returns_none(g):
+    assert _persist(_home(g), g, local_operator=True) is None

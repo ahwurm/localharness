@@ -152,9 +152,10 @@ async def persist_default_model(
     made since the last start still asks. False (the default) records nothing: the next terminal
     start asks about ``server.model (overrides.yaml)``.
 
-    Returns None on clean success, or a warning string (#37) when ONLY the post-write audit
-    emit failed — the durable overlay write already succeeded, so callers surface this as a
-    secondary note and still report the switch as done (never as a persist failure).
+    Returns None on clean success, or a warning string (#37) when ONLY a post-write step failed
+    (the audit emit, or the ``local_operator`` re-record in the machine record) — the durable
+    overlay write already succeeded, so callers surface this as a secondary note and still report
+    the switch as done (never as a persist failure).
     """
     before_provider = harness.provider.default_model
     before_org = harness.org.default_model
@@ -198,12 +199,19 @@ async def persist_default_model(
     # D-19: a person's own switch re-records exactly the one entry it wrote. After the durable write
     # (a failed write adopts nothing) and before the audit emit (an audit failure still leaves the
     # entry adopted). A no-op when this machine has no record yet.
+    # The switch is durable by here, so a trust-store write that fails (read-only dir, full disk) is a
+    # secondary note like the audit emit's, never a failed persist: the next start simply asks (WR-04).
+    adopt_warning: str | None = None
     if local_operator and wrote_server_model:
-        trust.adopt_entries(
-            global_config_dir(config_dir),
-            [{"file": "overrides.yaml", "kind": trust.LAUNCH_MODEL_KIND,
-              "name": "server.model", "shown": model}],
-        )
+        try:
+            trust.adopt_entries(
+                global_config_dir(config_dir),
+                [{"file": "overrides.yaml", "kind": trust.LAUNCH_MODEL_KIND,
+                  "name": "server.model", "shown": model}],
+            )
+        except OSError as exc:
+            adopt_warning = (f"persisted, but server.model could not be re-recorded in the machine "
+                             f"record (the next start asks about it): {exc}")
 
     # Audit trail (mirrors components_cmd): one ComponentMutated per path written. A bare default
     # 'audit.jsonl' lands under the base dir given here (#35).
@@ -236,8 +244,9 @@ async def persist_default_model(
                 )
             )
     except Exception as exc:  # noqa: BLE001 — the durable overlay write already succeeded
-        return f"persisted, but the audit log could not be written: {exc}"
-    return None
+        audit_warning = f"persisted, but the audit log could not be written: {exc}"
+        return f"{adopt_warning}; {audit_warning}" if adopt_warning else audit_warning
+    return adopt_warning
 
 
 async def persist_active_endpoint(
