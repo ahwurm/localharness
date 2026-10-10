@@ -272,7 +272,17 @@ def test_agents_with_effort_with_no_agents_dir_or_no_config_dir_is_empty(tmp_pat
 def test_agents_with_effort_lists_only_values_the_loader_would_accept(tmp_path):
     glob = tmp_path / "global"
     _agent(glob, "typo", "name: typo\neffort: turbo\n")
-    _agent(glob, "unquoted", "name: unquoted\neffort: off\n")  # YAML 1.1 reads this as False
+    _agent(glob, "on", "name: on\neffort: on\n")  # YAML 1.1 reads this as True: not a level
     _agent(glob, "fine", "name: fine\neffort: high\n")
 
     assert model_ops.agents_with_effort(glob) == [("fine", "high")]
+
+
+def test_agents_with_effort_lists_an_agent_whose_file_says_a_bare_off(tmp_path):
+    # YAML 1.1 reads an unquoted `off` as False. The loader takes that as the level `off`
+    # (coerce_yaml_effort), so the listing has to show it too, from literal text, not yaml.dump.
+    glob = tmp_path / "global"
+    _agent(glob, "quiet", "name: quiet\neffort: off\n")
+    _agent(glob, "loud", "name: loud\neffort: max\n")
+
+    assert model_ops.agents_with_effort(glob) == [("loud", "max"), ("quiet", "off")]

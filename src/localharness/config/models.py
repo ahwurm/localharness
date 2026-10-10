@@ -68,6 +68,27 @@ LEVELS: tuple[str, ...] = ("off", "low", "high", "max")
 """The EffortLevel members in order, for the picker and `/effort` to validate against."""
 
 
+def coerce_yaml_effort(value: Any) -> Any:
+    """Read a hand-typed bare `off` the way the person meant it.
+
+    YAML 1.1 reads an unquoted `off` / `no` as the boolean False and `on` / `yes` / `true` as True,
+    so `effort: off` reaches a validator as ``False``. `off` is a level: False maps to it. True
+    names no level and says how to write one. Everything else passes through for the field's own
+    Literal check, so a typo still gets the usual "Input should be ..." message. Every effort-typed
+    field runs this in a `mode="before"` validator, and the `/effort show` listing of per-agent
+    levels calls it too, so a file the loader accepts is a file the listing shows. The
+    `EffortLevel` alias itself stays a plain Literal: the registry catalogue reads its arguments.
+    """
+    if value is False:
+        return "off"
+    if value is True:
+        raise ValueError(
+            "effort: a bare on/yes/true reads as a YAML boolean and is not a level; write one of "
+            "off, low, high, max, quoted: effort: 'off'"
+        )
+    return value
+
+
 class ToolConfig(BaseModel):
     """
     Tool access specification for an agent or division.
@@ -1189,6 +1210,11 @@ class AgentConfig(BaseModel):
         ),
     )
 
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _effort_yaml_bool(cls, v: Any) -> Any:
+        return coerce_yaml_effort(v)
+
     temperature: float = Field(
         default=0.6,
         ge=0.0,
@@ -1392,6 +1418,11 @@ class DivisionConfig(BaseModel):
         description="Default reasoning effort for the division's agents; None passes through.",
     )
 
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _effort_yaml_bool(cls, v: Any) -> Any:
+        return coerce_yaml_effort(v)
+
     temperature: float = Field(default=0.6, ge=0.0, le=2.0)
     # None, not 4096: a schema default here SHADOWS the org rung below it for every agent in the
     # division — the same bug the org comment in loader.py describes, one level down. "Not set"
@@ -1472,6 +1503,12 @@ class OrgConfig(BaseModel):
             "Machine-level only: a project's value is ignored."
         ),
     )
+
+    @field_validator("default_effort", mode="before")
+    @classmethod
+    def _effort_yaml_bool(cls, v: Any) -> Any:
+        return coerce_yaml_effort(v)
+
     default_max_tokens: Optional[int] = Field(
         default=None,
         ge=1,
@@ -1669,6 +1706,11 @@ class ActiveSelection(BaseModel):
         "Active endpoint API key; shown as **********."))
     effort: Optional[EffortLevel] = Field(default=None, description=(
         "The effort persisted for this peer by /effort; cleared on a switch."))
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _effort_yaml_bool(cls, v: Any) -> Any:
+        return coerce_yaml_effort(v)
 
 
 class ProviderConfig(BaseModel):
@@ -1893,6 +1935,11 @@ class ManagedServerConfig(BaseModel):
         "the options `env` refuses."))
     effort: Optional[EffortLevel] = Field(default=None, description=(
         "The default reasoning effort while this preset serves."))
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _effort_yaml_bool(cls, v: Any) -> Any:
+        return coerce_yaml_effort(v)
 
     @field_validator("served_name", "mmproj", "cache_type_k", "cache_type_v", "api_key_file")
     @classmethod
