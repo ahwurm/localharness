@@ -260,6 +260,9 @@ def doctor_offline(monkeypatch):
     resp = MagicMock()
     resp.status_code = 200
     resp.json.return_value = {"data": [{"id": "test-model", "max_model_len": 131072}]}
+    # doctor reads the served window through `probe_window` (its own httpx import, which the
+    # patch below does not reach), so the window the body above reports is faked at that seam.
+    monkeypatch.setattr(_ctx, "probe_window", lambda *a, **kw: _ctx.WindowProbe(131072, 131072))
     with patch("localharness.cli.doctor_cmd.httpx") as mock_httpx:
         mock_httpx.get.return_value = resp
         mock_httpx.post.return_value = resp
