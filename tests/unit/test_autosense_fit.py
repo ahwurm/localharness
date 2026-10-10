@@ -376,3 +376,122 @@ def test_the_module_imports_only_stdlib_and_localharness():
     roots |= {n.module.split(".")[0] for n in ast.walk(tree)
               if isinstance(n, ast.ImportFrom) and n.module and n.level == 0}
     assert roots <= set(sys.stdlib_module_names) | {"localharness"}, roots
+
+
+# ---- edge probes (Task 2) -------------------------------------------------------------------------------
+
+def test_the_attach_gate_is_strict_at_the_boundary():
+    on_edge = report(served=100000, fits=125000)
+    assert window_lines(on_edge, RATIOS, "record") == []
+    assert len(window_lines(report(served=100000, fits=125001), RATIOS, "record")) == 2
+    assert window_lines(report(served=100000, fits=75000), RATIOS, "record") == []
+    assert len(window_lines(report(served=100000, fits=74999), RATIOS, "record")) == 2
+
+
+@pytest.mark.parametrize("fits", [125000, 125001])
+def test_a_launch_report_prints_at_both_sides_of_the_boundary(fits):
+    launch = report(attached=False, served=100000, fits=fits, asked=100000, mode="record")
+    assert len(window_lines(launch, RATIOS)) == 1
+
+
+def test_window_changed_is_strict_at_the_boundary():
+    assert not window_changed(rec(fits=100000), report(fits=125000), 0.25)
+    assert window_changed(rec(fits=100000), report(fits=125001), 0.25)
+    assert not window_changed(rec(fits=100000), report(fits=75000), 0.25)
+    assert window_changed(rec(fits=100000), report(fits=74999), 0.25)
+
+
+def test_window_changed_does_not_divide_by_a_zero_fit():
+    assert window_changed(rec(fits=0), report(fits=1), 0.25)
+    assert not window_changed(rec(fits=0), report(fits=0), 0.25)
+
+
+def test_a_shard_sum_takes_only_its_own_set(tmp_path):
+    first = _file(tmp_path / "m-00001-of-00003.gguf", 10)
+    _file(tmp_path / "m-00002-of-00003.gguf", 20)
+    _file(tmp_path / "m-00003-of-00003.gguf", 30)
+    _file(tmp_path / "m-00001-of-00004.gguf", 1000)  # another split of the same prefix
+    _file(tmp_path / "other-00002-of-00003.gguf", 2000)  # another model
+    _file(tmp_path / "m.gguf", 4000)
+    _file(tmp_path / "m-00002-of-00003.gguf.part", 8000)
+    assert weights_bytes(str(first)) == 60
+
+
+def test_a_plain_name_beside_a_shard_set_is_only_itself(tmp_path):
+    model = _file(tmp_path / "m.gguf", 7)
+    _file(tmp_path / "m-00001-of-00002.gguf", 100)
+    _file(tmp_path / "m-00002-of-00002.gguf", 200)
+    assert weights_bytes(str(model)) == 7
+
+
+def test_a_missing_shard_sibling_directory_entry_is_not_counted(tmp_path):
+    (tmp_path / "m-00002-of-00002.gguf").mkdir()  # a directory with a shard-shaped name
+    first = _file(tmp_path / "m-00001-of-00002.gguf", 10)
+    assert weights_bytes(str(first)) is None
+
+
+def test_a_model_path_is_expanded(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _file(tmp_path / "m.gguf", 9)
+    assert weights_bytes("~/m.gguf") == 9
+
+
+def test_mixed_cache_types_sum_their_own_bytes():
+    assert kv_bytes_per_token(HEADER_A, "q8_0", "q4_0") == 64 * 8 * 128 * (34 / 32 + 18 / 32)
+    assert kv_bytes_per_token(HEADER_A, None, None) == 262144  # unset is f16
+
+
+def test_an_unknown_value_type_is_none_even_with_a_known_key_type():
+    assert kv_bytes_per_token(HEADER_A, "q8_0", "q4_K") is None
+    assert kv_bytes_per_token(HEADER_A, "q4_K", "q8_0") is None
+
+
+def test_a_head_count_kv_list_takes_the_maximum():
+    assert kv_bytes_per_token(HEADER_C, "f16", "f16") == 48 * 8 * 128 * 4
+    zeros = {**HEADER_C, "head_count_kv": [0, 0, 4]}
+    assert kv_bytes_per_token(zeros, "f16", "f16") == 48 * 4 * 128 * 4
+    assert kv_bytes_per_token({**HEADER_C, "head_count_kv": []}, "f16", "f16") is None
+    assert kv_bytes_per_token({**HEADER_C, "head_count_kv": [0, 0]}, "f16", "f16") is None
+
+
+@pytest.mark.parametrize("args", [["-ngl"], ["--n-gpu-layers=abc"], ["-ngl", "--cpu-moe"], ["--gpu-layers", ""]])
+def test_an_unreadable_ngl_is_unknown(args):
+    assert offload_kind(args, 48) == "unknown"
+
+
+def test_the_last_ngl_wins_and_a_hand_placement_wins_over_it():
+    assert offload_kind(["-ngl", "10", "-ngl", "99"], 48) == "gpu"
+    assert offload_kind(["-ngl", "99", "-ngl", "10"], 48) == "partial"
+    assert offload_kind(["-ngl", "99", "--cpu-moe"], 48) == "unknown"
+
+
+def test_the_parenthesis_is_omitted_unless_all_three_byte_counts_are_known():
+    expect = ["window: served 65,536 · trained 262,144 · fits 114,688"]
+    for gap in ("free_bytes", "total_bytes", "weights_bytes"):
+        assert window_lines(report(**{gap: None}), RATIOS) == expect
+    assert window_lines(report(free_bytes=None, total_bytes=None, weights_bytes=None), RATIOS) == expect
+
+
+def test_window_lines_and_window_changed_are_pure(monkeypatch, tmp_path):
+    monkeypatch.setattr(autosense, "_run_nvidia_smi", lambda: pytest.fail("a subprocess was run"))
+    monkeypatch.setattr(autosense, "_read_meminfo", lambda: pytest.fail("meminfo was read"))
+    r = report()
+    with record_opens() as opened:
+        first = window_lines(r, RATIOS, "record")
+        again = window_lines(r, RATIOS, "record")
+        assert window_changed(rec(), r, 0.25) is window_changed(rec(), r, 0.25)
+    assert first == again
+    assert opened == []
+
+
+def test_fit_and_the_rest_do_not_open_files_either(tmp_path):
+    with record_opens() as opened:
+        fit(HEADER_A, 24 * GIB, RATIOS, weights=WEIGHTS_A)
+        offload_kind(["-ngl", "20"], 48)
+        cache_ram_mib(AVAIL, TOTAL, WEIGHTS_A, "gpu", [], RATIOS)
+    assert opened == []
+
+
+def test_the_report_is_frozen():
+    with pytest.raises(AttributeError):
+        report().served = 1  # type: ignore[misc]
