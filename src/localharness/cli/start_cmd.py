@@ -10,6 +10,7 @@ from typing import Annotated, Any
 
 import typer
 import yaml
+from pydantic import SecretStr
 from rich.console import Console
 from rich.markup import escape
 from rich.prompt import IntPrompt
@@ -209,6 +210,31 @@ def _managed_server_running(strategy: Any, srv: Any, global_dir: Path) -> bool:
     pre-existing-server fail-fast then raised on the server that was in fact already up.
     Called inside the autostart try, so an OSError from the pid path degrades as before."""
     return strategy.liveness(srv, global_dir).alive
+
+
+def _read_session_key(harness: Any) -> str | None:
+    """Read `server.api_key_file` into this session's bearer, or return the one line to print.
+
+    Called once, after `decide_machine_trust` and `load_harness`: a withheld entry has already lost
+    its `server:` section by then, and an entry the user just answered Yes (or the record already
+    covers) is in it, so the file is opened only once the record covers it. Success sets
+    `harness.provider.api_key` to the key — in memory only, never written, printed or logged — so
+    `required_key_kwargs` yields it, both probes and every request carry it and the file rides argv
+    beside the environment key. A file the byte rule refuses returns
+    `server.api_key_file <path>: <reason> — this session sends no key` and changes nothing: the
+    session stays keyless, `launch_decision` then withholds any widening, and the launch binds
+    loopback without the file on argv. Never raises for the file's sake. No server or no file: None."""
+    from localharness.provider.server import KeyFileError, read_key_file
+    spec = getattr(harness, "server", None)
+    path = getattr(spec, "api_key_file", None) if spec is not None else None
+    if not path:
+        return None
+    try:
+        key = read_key_file(path)
+    except KeyFileError as exc:
+        return f"server.api_key_file {path}: {exc} — this session sends no key"
+    harness.provider.api_key = SecretStr(key)
+    return None
 
 
 async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launch_key: dict[str, str],
@@ -826,6 +852,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         except Exception:  # noqa: BLE001 — a record that cannot be written never stops a start
             log.debug("the config dir tighten was not recorded", exc_info=True)
     from localharness.provider.server import required_key_kwargs
+    # The key file is opened here and nowhere earlier: after decide_machine_trust (a withheld entry
+    # has already dropped `server:`) and load_harness. `--list-models` runs no trust decision, so it
+    # never opens the file. The key stays in memory (harness.provider.api_key) for this session.
+    if not list_models:
+        key_file_line = _read_session_key(harness)
+        if key_file_line:
+            err_console.print(key_file_line, markup=False, soft_wrap=True)
     # The key the launched server requires, or {} — server.require_api_key is opt-in (default off).
     launch_key = required_key_kwargs(harness.server, harness.provider.api_key)
     from localharness.tools.builtin.netguard import set_private_allowlist

@@ -178,3 +178,58 @@ def test_a_tilde_path_is_expanded(tmp_path, monkeypatch):
     _write(tmp_path, b"K\n")
     monkeypatch.setenv("HOME", str(tmp_path))
     assert read_key_file("~/key") == "K"
+
+
+# --- _read_session_key: the harness's in-memory bearer ----------------------------------------------
+
+def _harness(path, **over):
+    from types import SimpleNamespace
+
+    from pydantic import SecretStr
+
+    from localharness.config.models import ManagedServerConfig
+    spec = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/m.gguf", port=8080,
+                               require_api_key=True, api_key_file=str(path), **over)
+    return SimpleNamespace(server=spec, provider=SimpleNamespace(api_key=SecretStr("none")))
+
+
+def test_a_valid_file_becomes_the_sessions_secret_and_returns_no_line(tmp_path):
+    from pydantic import SecretStr
+
+    from localharness.cli.start_cmd import _read_session_key
+    harness = _harness(_write(tmp_path, b"KEY-SENTINEL-1\n"))
+    assert _read_session_key(harness) is None
+    assert isinstance(harness.provider.api_key, SecretStr)
+    assert harness.provider.api_key.get_secret_value() == "KEY-SENTINEL-1"
+    assert "KEY-SENTINEL-1" not in repr(harness.provider.api_key)
+    assert server.required_key_kwargs(harness.server, harness.provider.api_key) == {"api_key": "KEY-SENTINEL-1"}
+
+
+def test_a_refused_file_returns_the_one_line_and_keeps_the_session_keyless(tmp_path):
+    from localharness.cli.start_cmd import _read_session_key
+    path = _write(tmp_path, b"a,b\n")
+    harness = _harness(path)
+    assert _read_session_key(harness) == (
+        f"server.api_key_file {path}: comma or quote — this session sends no key")
+    assert harness.provider.api_key.get_secret_value() == "none"
+    assert server.required_key_kwargs(harness.server, harness.provider.api_key) == {}
+
+
+def test_a_refused_file_never_leaks_its_content_into_the_line(tmp_path):
+    from localharness.cli.start_cmd import _read_session_key
+    path = _write(tmp_path, b"KEY-SENTINEL-2,x\n")
+    assert "KEY-SENTINEL-2" not in _read_session_key(_harness(path))
+
+
+def test_an_environment_key_is_replaced_by_the_files_key_and_kept_when_the_file_fails(tmp_path):
+    from pydantic import SecretStr
+
+    from localharness.cli.start_cmd import _read_session_key
+    good = _harness(_write(tmp_path, b"FROM-FILE\n"))
+    good.provider.api_key = SecretStr("FROM-ENV")
+    assert _read_session_key(good) is None
+    assert good.provider.api_key.get_secret_value() == "FROM-FILE"
+    bad = _harness(_write(tmp_path, b"", "empty"))
+    bad.provider.api_key = SecretStr("FROM-ENV")
+    assert "no key" in _read_session_key(bad)
+    assert bad.provider.api_key.get_secret_value() == "FROM-ENV"
