@@ -777,7 +777,7 @@ def _bind_all_annotations(entries: list[dict]) -> dict[tuple[str, str, str], str
     return out
 
 
-KEY_FILE_NOTE = "(read at start and sent as the bearer to :{port})"
+KEY_FILE_NOTE = "(read at start and sent as the bearer to {destination})"
 
 
 def _key_file_port(global_dir: Path, entry_name: str) -> int:
@@ -806,11 +806,36 @@ def _key_file_port(global_dir: Path, entry_name: str) -> int:
     return port if isinstance(port, int) and not isinstance(port, bool) else default
 
 
+def _key_file_destination(global_dir: Path, entry_name: str) -> str:
+    """Where a key file's bearer is sent, as the question names it: `:<port>` of the record's own
+    server when the endpoint is this machine (`provider.base_url` for the primary, the peer's
+    `base_url` for a peer), else the endpoint's real `host[:port]` - the key goes to the endpoint's
+    URL, which nothing ties to the server's port (WR-06), and a start refuses to read the file for
+    such a destination."""
+    from localharness.config.overlay import deep_merge
+    from localharness.provider.server import key_destination
+
+    cfg, over = _raw_settings(global_dir)
+    base_url: Any = None
+    if entry_name.startswith("server."):
+        base_url = deep_merge(cfg["provider"] if isinstance(cfg.get("provider"), dict) else {},
+                              over["provider"] if isinstance(over.get("provider"), dict) else {}
+                              ).get("base_url")
+    elif entry_name.startswith("extra_endpoints."):
+        peer = entry_name[len("extra_endpoints."):].rpartition(".lifecycle.")[0]
+        peers = over.get("extra_endpoints") if isinstance(over.get("extra_endpoints"), list) \
+            else cfg.get("extra_endpoints")
+        base_url = next((c.get("base_url") for c in (peers if isinstance(peers, list) else [])
+                         if isinstance(c, dict) and str(c.get("name")) == peer), None)
+    here, shown = key_destination(base_url) if isinstance(base_url, str) else (True, "")
+    return f":{_key_file_port(global_dir, entry_name)}" if here else _visible(shown)
+
+
 def _key_file_annotations(global_dir: Path, entries: list[dict]) -> dict[tuple[str, str, str], str]:
     """Wherever a `*.api_key_file` line is put, it says the file is read at start and where its
     content is sent (the path itself is the entry's own `shown`; the content is never read here)."""
     return {(e["file"], e["kind"], e["name"]):
-            KEY_FILE_NOTE.format(port=_key_file_port(global_dir, str(e["name"])))
+            KEY_FILE_NOTE.format(destination=_key_file_destination(global_dir, str(e["name"])))
             for e in entries if str(e.get("name", "")).endswith(".api_key_file")}
 
 

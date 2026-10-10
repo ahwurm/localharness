@@ -850,3 +850,28 @@ async def test_a_launch_with_no_pending_lines_sends_no_extra_message(tmp_path, b
 
     first = next(i for i, m in enumerate(channel.messages) if m.startswith("Launching llamacpp-local"))
     assert first == 0
+
+
+@pytest.mark.asyncio
+async def test_wr06_a_peer_whose_base_url_is_not_this_machine_never_has_its_key_file_read(
+        tmp_path, boundaries, monkeypatch):
+    from tests.unit.launch_support import record_opens
+    key = tmp_path / "peer.key"
+    key.write_text(SENTINEL + "\n", encoding="utf-8")
+    peer = _launchable_peer(bind_all=True, require_api_key=True, api_key_file=str(key))
+    peer.base_url = "http://192.168.1.50:8080/v1"
+    _, repl, channel, agent = _session(tmp_path, peer)
+    started = _capture_start_kw(monkeypatch)
+
+    with record_opens() as opened:
+        await repl._handle_slash("/model qwen-gguf")
+
+    assert str(key) not in opened
+    line = (f"extra_endpoints[llamacpp-local].lifecycle.api_key_file {key}: "
+            "base_url 192.168.1.50:8080 is not this machine, so the file is not read — "
+            "this session sends no key")
+    assert channel.messages.count(line) == 1
+    (call,) = started
+    assert "api_key" not in call
+    assert "--api-key-file" not in call["cmd"] and call["cmd"][-2:] == ["--host", "127.0.0.1"]
+    assert not any(SENTINEL in m for m in channel.messages)

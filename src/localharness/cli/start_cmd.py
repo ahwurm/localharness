@@ -229,21 +229,39 @@ def _read_session_key(harness: Any) -> str | None:
     launch path of the session, whatever other key the harness holds, and the returned line says
     which of the two is true: `server.api_key_file <path>: <reason> — this session sends no key` when
     no other key is held, or `... — the file is not used; this session keeps sending the key it
-    already holds` when a configured or environment key keeps the session keyed. Never raises for
-    the file's sake. No server or no file: None."""
-    from localharness.provider.server import KeyFileError, key_kwargs, mark_key_file, read_key_file
+    already holds` when a configured or environment key keeps the session keyed. The file is opened
+    only when `provider.base_url` is this machine (literally loopback, no DNS): the key is sent to that
+    URL, which nothing ties to `server.port`, so any other destination is refused the same way with
+    the reason `provider.base_url <host:port> is not this machine, so the file is not read` (WR-06).
+    Never raises for the file's sake. No server or no file: None."""
+    from localharness.provider.server import (
+        KeyFileError,
+        key_destination,
+        key_kwargs,
+        mark_key_file,
+        read_key_file,
+    )
     spec = getattr(harness, "server", None)
     path = getattr(spec, "api_key_file", None) if spec is not None else None
     if not path:
         return None
+
+    def refused(reason: object) -> str:
+        mark_key_file(spec, True)
+        if key_kwargs(harness.provider.api_key):
+            return (f"server.api_key_file {path}: {reason} — the file is not used; "
+                    "this session keeps sending the key it already holds")
+        return f"server.api_key_file {path}: {reason} — this session sends no key"
+
+    # The key goes to provider.base_url, which nothing ties to server.port or to the host the person
+    # confirmed: a destination that is not this machine never gets a key out of a file (WR-06).
+    here, shown = key_destination(harness.provider.base_url)
+    if not here:
+        return refused(f"provider.base_url {_visible(shown)} is not this machine, so the file is not read")
     try:
         key = read_key_file(path)
     except KeyFileError as exc:
-        mark_key_file(spec, True)
-        if key_kwargs(harness.provider.api_key):
-            return (f"server.api_key_file {path}: {exc} — the file is not used; "
-                    "this session keeps sending the key it already holds")
-        return f"server.api_key_file {path}: {exc} — this session sends no key"
+        return refused(exc)
     mark_key_file(spec, False)
     harness.provider.api_key = SecretStr(key)
     return None
