@@ -82,13 +82,14 @@ class FakeProc:
             lines = [f"7f00{i:08x}-7f01{i:08x} r--s 00000000 08:01 {1000 + i}"
                      f"                      {path}\n" for i, path in enumerate(maps)]
             (d / "maps").write_text("".join(lines), encoding="utf-8")
-        if exe is not None:
-            (d / "exe").symlink_to(exe)
-        if cwd is not None:
-            (d / "cwd").symlink_to(cwd)
+        for name, target in (("exe", exe), ("cwd", cwd)):
+            (d / name).unlink(missing_ok=True)
+            if target is not None:
+                (d / name).symlink_to(target)
         if fds:
             (d / "fd").mkdir(exist_ok=True)
             for number, inode in fds.items():
+                (d / "fd" / str(number)).unlink(missing_ok=True)
                 (d / "fd" / str(number)).symlink_to(f"socket:[{inode}]")
         return d
 
