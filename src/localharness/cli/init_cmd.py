@@ -734,7 +734,12 @@ def _machine_autosense(config_path: Path) -> AutosenseConfig:
     else the defaults; a config that cannot be read never stops discovery (D-51)."""
     try:
         return ConfigLoader(config_dir=config_path).load_harness().autosense
-    except Exception:  # noqa: BLE001 — an unreadable config falls back to the defaults, never a traceback
+    except Exception:  # noqa: BLE001 — no config yet, or an unreadable one: never a traceback
+        pass
+    try:  # a fresh machine has no config.yaml, but may already have an overrides.yaml saying where
+        raw = load_overlay(config_path / "overrides.yaml").get("autosense")
+        return AutosenseConfig.model_validate(raw) if isinstance(raw, dict) else AutosenseConfig()
+    except Exception:  # noqa: BLE001 — whatever stops that read leaves the defaults
         return AutosenseConfig()
 
 
@@ -834,12 +839,14 @@ def _no_binary_line(models: Sequence[DiscoveredModel], roots: Sequence[str]) -> 
 
 def _daemon_lines() -> list[str]:
     """D-41, D-54: an Ollama or LM Studio that answers holds models of its own; say how many and
-    which (the first three), that they stay there and that no preset was written for them."""
+    which (the first three), that they stay there and that no preset was written for them. Each
+    daemon is asked on its own port: `detect_provider(timeout_seconds=1.0, ports=[11434])`, then
+    `ports=[1234]`."""
     lines: list[str] = []
-    for port in (11434, 1234):
+    for ports in ([11434], [1234]):
         try:
-            found = asyncio.run(detect_provider(timeout_seconds=1.0, ports=[port]))
-        except Exception:  # noqa: BLE001 — a probe that fails says nothing
+            found = asyncio.run(detect_provider(timeout_seconds=1.0, ports=ports))
+        except Exception:  # noqa: BLE001, S112 — a probe that fails says nothing
             continue
         if not found.found or found.provider_type not in ("ollama", "lmstudio") or not found.models:
             continue
