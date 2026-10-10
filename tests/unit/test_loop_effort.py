@@ -654,6 +654,58 @@ async def test_a_second_empty_length_reply_ends_the_turn_naming_the_window(bus, 
     assert len(llm.calls) == 2
 
 
+async def test_at_effort_off_an_empty_length_reply_takes_the_nudge_not_a_blind_re_send(bus, sessions):
+    """WR-04: thinking is already off in the first request, so the one retry must change something."""
+    llm = _Scripted([_empty(), _answer("Here it is.")])
+    summary = await _loop(llm, bus, effort=("off", "agent")).run_turn("write the report")
+
+    assert summary == "Here it is."
+    assert len(llm.calls) == 2
+    assert llm.calls[0]["disable_thinking"] is True
+    assert len(_nudges(llm.sent[1])) == 1, "the retry asks for an answer instead of repeating itself"
+    assert llm.sent[1] != llm.sent[0]
+    assert sessions[0].act_nudge_used is True
+
+
+async def test_at_effort_off_the_final_notice_does_not_say_lower_effort(bus):
+    from localharness.agent.loop import (
+        _EMPTY_TURN_NOTICE_NO_CAP,
+        _EMPTY_TURN_NOTICE_NO_CAP_THINKING_OFF,
+    )
+
+    llm = _Scripted([_empty(), _empty()])
+    summary = await _loop(llm, bus, effort=("off", "agent")).run_turn("write the report")
+
+    assert summary == _EMPTY_TURN_NOTICE_NO_CAP_THINKING_OFF
+    assert summary != _EMPTY_TURN_NOTICE_NO_CAP
+    assert "/effort" not in summary
+    assert "served window" in summary and "finish_reason=length" in summary
+    assert len(llm.calls) == 2
+
+
+async def test_a_refused_thinking_off_key_takes_the_nudge_and_the_plain_notice(bus):
+    from localharness.agent.loop import _EMPTY_TURN_NOTICE_NO_CAP_THINKING_OFF
+
+    llm = _Scripted([_empty(), _answer("ok")], rejected=("chat_template_kwargs",))
+    assert await _loop(llm, bus, effort=("high", "agent")).run_turn("write the report") == "ok"
+    assert len(_nudges(llm.sent[1])) == 1
+    assert llm.sent[1] != llm.sent[0]
+
+    llm = _Scripted([_empty(), _empty()], rejected=("chat_template_kwargs",))
+    summary = await _loop(llm, bus, effort=("high", "agent")).run_turn("write the report")
+    assert summary == _EMPTY_TURN_NOTICE_NO_CAP_THINKING_OFF
+
+
+async def test_after_a_cut_has_armed_thinking_off_an_empty_length_reply_takes_the_nudge(bus, sessions):
+    llm = _Scripted([_cut(), _empty(), _answer("ok")], provider_type="vllm")
+    assert await _loop(llm, bus, effort=("high", "agent")).run_turn("explain") == "ok"
+
+    assert len(llm.calls) == 3
+    assert llm.calls[1]["disable_thinking"] is True
+    assert len(_nudges(llm.sent[2])) == 1
+    assert sessions[0].act_nudge_used is True
+
+
 async def test_with_a_cap_sent_the_nudge_runs_exactly_as_before(bus, sessions):
     llm = _Scripted([_empty(), _answer("ok")])
     llm.config.max_tokens = 2048
