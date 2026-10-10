@@ -23,7 +23,9 @@ from localharness.provider import autosense
 from localharness.provider.autosense import FreeMemory, WindowReport
 from localharness.provider.speed_stats import (
     default_speed_stats_path,
+    last_dropped_env,
     last_window_report,
+    record_dropped_env,
     record_window_report,
 )
 from tests.unit.gguf_support import write_gguf
@@ -52,6 +54,7 @@ class World:
         self.free = FreeMemory(6 * GIB, int(32.6 * GIB), "nvidia-smi")
         self.alive = False
         self.budgets: list[int] = []
+        self.starts_begun = 0
         self.ledger = default_speed_stats_path(tmp_path)
 
         def probe_window(base_url, model, provider_type=None, *, api_key=None):
@@ -88,6 +91,7 @@ class World:
 
     async def start(self) -> list[str]:
         """Run one `start`; the lines it printed (this start only)."""
+        self.starts_begun += 1
         before = len(self.out)
         await _start_async(None, False, False, str(self.tmp_path))
         return self.out[before:]
@@ -300,3 +304,197 @@ def test_the_window_report_type_start_builds_is_the_one_the_lines_read():
         harness_launched=False)
     assert isinstance(report, WindowReport) and undo is None
     assert report.attached and report.mode == "not-computed" and report.fits is None
+
+
+# ------------------------------------------------------------------------------- the launching start
+
+
+def _launch_report(**over) -> WindowReport:
+    kw = dict(served=14950, trained=262144, fits=14950, free_bytes=None, total_bytes=None,
+              weights_bytes=None, asked=14950, mode="fit", attached=False, retried=False,
+              verified=True, runtime="llamacpp")
+    kw.update(over)
+    return WindowReport(**kw)
+
+
+class Launching:
+    """A start that finds the server down and launches it: the first capability probe fails, the
+    strategy's `activate` returns the LiveEndpoint the test scripts, the second probe succeeds."""
+
+    def __init__(self, world: World, window: WindowReport | None, dropped: tuple[str, ...] = ()):
+        from localharness.provider import lifecycle
+        from localharness.provider.lifecycle import LiveEndpoint
+
+        self.activations: list[dict] = []
+        self.loop_kwargs: list[dict] = []
+        live = LiveEndpoint(base_url=URL, served_models=["qwen"], handle=1, window=window, dropped_env=dropped)
+        owner = self
+
+        class Strategy:
+            def liveness(self, spec, d):
+                return lifecycle.Liveness(False)
+
+            async def activate(self, spec, d, base_url, **kw):
+                owner.activations.append(kw)
+                return live
+
+        world.monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: Strategy())
+        async def probe(llm, max_retries=3, delay=2.0):
+            # down until this start's launch has happened, then up
+            if len(owner.activations) < world.starts_begun:
+                return (False, None, None, "Connection error.")
+            return (True, "native", 262_144, None)
+
+        world.monkeypatch.setattr(start_cmd, "_probe_llm", probe)
+        world.monkeypatch.setattr(start_cmd, "which_outside_cwd", lambda name: None)
+        import localharness.agent.loop as loop_mod
+        real_init = loop_mod.AgentLoop.__init__
+
+        def wrapped(self, *a, **kw):
+            owner.loop_kwargs.append(kw)
+            return real_init(self, *a, **kw)
+
+        world.monkeypatch.setattr("localharness.agent.loop.AgentLoop.__init__", wrapped)
+        self.world = world
+
+
+def _summary(lines: list[str]) -> str:
+    (line,) = [x for x in lines if " -- " in x]
+    return line
+
+
+async def test_a_launching_start_prints_its_one_line_always_even_when_the_triple_is_unchanged(world):
+    record_window_report(world.ledger, "llamacpp", "qwen", 14950, 262144, 14950)
+    Launching(world, _launch_report())
+    lines = await world.start()
+    assert world.window(lines) == ["window: served 14,950 · trained 262,144 · fits 14,950"]
+    rec = world.last()
+    assert (rec.served, rec.trained, rec.fits) == (14950, 262144, 14950)
+
+
+async def test_the_window_line_lands_after_the_launch_announcement_and_before_the_summary(world):
+    Launching(world, _launch_report())
+    lines = await world.start()
+    starting = next(i for i, x in enumerate(lines) if x.startswith("Managed llama.cpp is not running"))
+    block = next(i for i, x in enumerate(lines) if x.startswith("window:"))
+    assert starting < block < lines.index(_summary(lines))
+
+
+async def test_a_launch_report_has_one_line_even_with_a_record_context(world):
+    world.config(context=14950)
+    Launching(world, _launch_report(mode="record", asked=14950))
+    assert world.window(await world.start()) == ["window: served 14,950 · trained 262,144 · fits 14,950"]
+
+
+async def test_the_launch_hands_activate_the_machine_ratios(world):
+    launch = Launching(world, _launch_report())
+    await world.start()
+    (kw,) = launch.activations
+    assert kw["autosense"].notify_ratio == 0.25
+
+
+@pytest.mark.parametrize("ledger,fitted", [
+    ((14950, 262144, 14950), False),     # the identical triple: the launch line prints, the budget line does not
+    (None, True),                        # no record
+    ((32768, 262144, 14950), True),      # the recorded served window differs
+])
+async def test_the_fitted_budget_line_follows_the_post_launch_verdict(world, ledger, fitted):
+    if ledger:
+        record_window_report(world.ledger, "llamacpp", "qwen", *ledger)
+    Launching(world, _launch_report())
+    lines = await world.start()
+    assert bool([x for x in lines if x.startswith("Context budget fitted")]) is fitted
+    assert world.window(lines)  # the launch's own line prints either way
+    assert world.budgets == [65536]  # and the budget is fitted to the served window every time
+
+
+async def test_a_launch_with_no_window_takes_the_attach_report_for_the_verdict(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    w.config(provider_type="vllm", record=False)
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+        "version": "1",
+        "provider": {"provider_type": "vllm", "base_url": URL, "api_key": "none", "default_model": "qwen"},
+        "server": {"launch": "binary", "binary": "/opt/vllm", "model": "org/repo", "port": 8080}}))
+    w.probe = WindowProbe(32768, 32768)
+    Launching(w, None)
+    first = await w.start()
+    assert w.window(first) == []
+    assert [x for x in first if x.startswith("Context budget fitted")]
+    second = await w.start()
+    assert not [x for x in second if x.startswith("Context budget fitted")]
+
+
+@pytest.mark.parametrize("report,line", [
+    (_launch_report(mode="fit-by-server", served=65536, asked=None, fits=None),
+     "window: served by llama-server's --fit · served 65,536"),
+    (_launch_report(served=8192, asked=14950), "window: served 8,192 · trained 262,144 · fits 14,950 (asked 14,950)"),
+    (_launch_report(verified=False, served=None),
+     "window: served — · trained 262,144 · fits 14,950 (not verified)"),
+    (_launch_report(retried=True, asked=7475, served=7475, fits=14950),
+     "window: served 7,475 · trained 262,144 · fits 14,950 (after one retry at -c 7,475)"),
+])
+async def test_the_launch_line_carries_its_fragments_and_never_fails_the_start(world, report, line):
+    Launching(world, report)
+    assert world.window(await world.start()) == [line]
+
+
+# ------------------------------------------------------------------------------- D-25 the dropped environment
+
+
+async def test_dropped_environment_names_ride_the_summary_warnings_once(world):
+    Launching(world, _launch_report(), dropped=("LLAMA_ARG_HOST", "LLAMA_ARG_CTX_SIZE"))
+    first = await world.start()
+    want = ("launch environment dropped LLAMA_ARG_CTX_SIZE, LLAMA_ARG_HOST — "
+            "set server.env: for what llama-server should see")
+    assert want in _summary(first)
+    assert last_dropped_env(world.ledger, "llamacpp") == ["LLAMA_ARG_CTX_SIZE", "LLAMA_ARG_HOST"]
+    second = await world.start()
+    assert "launch environment dropped" not in "\n".join(second)
+
+
+async def test_a_changed_dropped_list_is_said_again(world):
+    record_dropped_env(world.ledger, "llamacpp", ["LLAMA_ARG_HOST"])
+    Launching(world, _launch_report(), dropped=("LLAMA_ARG_HOST", "LLAMA_ARG_PORT"))
+    assert "launch environment dropped LLAMA_ARG_HOST, LLAMA_ARG_PORT" in _summary(await world.start())
+
+
+async def test_the_dropped_line_names_never_values(world):
+    world.monkeypatch.setenv("LLAMA_ARG_HOST", "secret-value-123")
+    Launching(world, _launch_report(), dropped=("LLAMA_ARG_HOST",))
+    line = [x for x in await world.start() if "launch environment dropped" in x][0]
+    assert "secret-value-123" not in line
+    assert "=" not in line.split("dropped", 1)[1]
+
+
+async def test_a_vllm_launch_omits_the_server_env_clause(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+        "version": "1",
+        "provider": {"provider_type": "vllm", "base_url": URL, "api_key": "none", "default_model": "qwen"},
+        "server": {"launch": "binary", "binary": "/opt/vllm", "model": "org/repo", "port": 8080}}))
+    Launching(w, None, dropped=("VLLM_X",))
+    line = _summary(await w.start())
+    assert "launch environment dropped VLLM_X" in line
+    assert "set server.env" not in line
+    assert last_dropped_env(w.ledger, "vllm") == ["VLLM_X"]
+
+
+async def test_an_attaching_start_never_reports_dropped_environment(world):
+    record_dropped_env(world.ledger, "llamacpp", ["LLAMA_ARG_HOST"])
+    lines = await world.start()
+    assert "launch environment dropped" not in "\n".join(lines)
+    assert last_dropped_env(world.ledger, "llamacpp") == ["LLAMA_ARG_HOST"]
+
+
+# ------------------------------------------------------------------------------- D-28 the margin ratio
+
+
+async def test_the_loop_is_built_with_the_machine_template_margin_ratio(world):
+    (world.tmp_path / "config.yaml").write_text(yaml.safe_dump({
+        "version": "1",
+        "provider": {"provider_type": "llamacpp", "base_url": URL, "api_key": "none", "default_model": "qwen"},
+        "server": {"runtime": "llamacpp", "binary": "/x/llama-server", "model": str(world.gguf), "port": 8080},
+        "autosense": {"template_margin_ratio": 0.05}}))
+    launch = Launching(world, _launch_report())
+    await world.start()
+    assert [kw["template_margin_ratio"] for kw in launch.loop_kwargs] == [0.05]
