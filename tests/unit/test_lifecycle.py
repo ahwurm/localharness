@@ -250,7 +250,7 @@ async def test_spawned_activate_delegates_and_handle_is_pid(tmp_path, monkeypatc
         calls["start_server"] = (config_dir, cmd)
         return 5555
 
-    async def fake_wait_ready(base_url, config_dir=None, timeout_seconds=1800.0, poll_seconds=3.0, on_poll=None):
+    async def fake_wait_ready(base_url, config_dir=None, timeout_seconds=1800.0, poll_seconds=3.0, on_poll=None, **kw):
         calls["wait_ready"] = (base_url, config_dir, timeout_seconds)
         if on_poll is not None:
             on_poll(2.0)

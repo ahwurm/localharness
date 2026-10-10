@@ -791,6 +791,7 @@ async def wait_ready(
     on_poll: "Callable[[float], None] | None" = None,
     *,
     api_key: str | None = None,
+    runtime: str | None = None,
 ) -> list[str]:
     """Poll {base_url}/models until the server answers; return served model ids.
 
@@ -799,8 +800,10 @@ async def wait_ready(
     `on_poll(elapsed_seconds)` fires after each unready poll — the REPL renders it as a
     live loading line so a minutes-long swap never looks frozen. Must never block.
     `api_key` (a server that requires one) is sent as a bearer on every poll; without it the
-    poll is exactly the keyless request it always was.
+    poll is exactly the keyless request it always was. `runtime` names the server in the failure
+    messages ("llama.cpp exited during startup"); unset, they read "vLLM" as they always did.
     """
+    label = RUNTIME_LABELS.get(runtime, "vLLM") if runtime else "vLLM"
     start = time.monotonic()
     deadline = start + timeout_seconds
     headers = auth_headers(api_key)
@@ -808,7 +811,7 @@ async def wait_ready(
         while time.monotonic() < deadline:
             if config_dir is not None and server_pid(config_dir) is None:
                 raise RuntimeError(
-                    "vLLM exited during startup. Log tail:\n" + log_tail(config_dir)
+                    f"{label} exited during startup. Log tail:\n" + log_tail(config_dir)
                 )
             try:
                 resp = await client.get(f"{base_url.rstrip('/')}/models", timeout=3.0,
@@ -821,7 +824,7 @@ async def wait_ready(
                 on_poll(time.monotonic() - start)
             await asyncio.sleep(poll_seconds)
     tail = f" Log tail:\n{log_tail(config_dir)}" if config_dir is not None else ""
-    raise TimeoutError(f"vLLM not ready after {timeout_seconds:.0f}s.{tail}")
+    raise TimeoutError(f"{label} not ready after {timeout_seconds:.0f}s.{tail}")
 
 
 def log_tail(config_dir: Path, lines: int = 15) -> str:

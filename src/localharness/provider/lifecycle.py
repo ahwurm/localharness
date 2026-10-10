@@ -281,7 +281,19 @@ class SpawnedProcessStrategy:
         `cache_ram` unset, `serve_command` gets the fit as `-c` and the formula as `--cache-ram`;
         after readiness the served window is read back (`probe_window`) into `LiveEndpoint.window`,
         and a window smaller than asked is a mismatch to report, never a failure. With
-        `autosense=None` the Phase 1 behaviour is unchanged: no probe, no fit keyword."""
+        `autosense=None` the Phase 1 behaviour is unchanged: no probe, no fit keyword, no retry.
+
+        A wrong fit costs exactly one retry. When the launch carried a fit `-c` and the process died
+        before it answered, the stale process is stopped (verified, by `stop_server`), the server is
+        relaunched once at half the window (`max(1, fit // 2)`), and a second death is raised with
+        the server's log tail after stopping again so no half-started process is left. A dead
+        process is the only trigger: a `TimeoutError` is never retried, and nothing is halved
+        without a fit keyword (a record `context`, an `extra_args` `-c`, an unknown fit).
+
+        "A dead process or a load failure in the log's last lines" (AUTO-05, ROADMAP SC4) is one
+        trigger (D-37): llama-server exits on a load failure, so the load failure IS the dead
+        process `wait_ready` already detects (the pidfile pid and its start time are gone). No log
+        text is parsed; the abandon message quotes `log_tail`."""
         keyed = bool(api_key)
         decision = server.launch_decision(spec, keyed, peer=peer)
         if decision.refusal is not None:
@@ -308,11 +320,28 @@ class SpawnedProcessStrategy:
                 config_dir=config_dir,
                 timeout_seconds=timeout_seconds,
                 on_poll=on_poll,
+                runtime=spec.runtime,
                 **server.key_kwargs(api_key),
             )
 
         pid, dropped = launch(command(ctx_kw))
-        served = await ready()
+        try:
+            served = await ready()
+        except RuntimeError:
+            # A dead process on a -c the harness chose is the one case worth a second try; a record
+            # or extra_args -c, no -c at all and autosense=None re-raise at once (D-18). A
+            # TimeoutError is not a RuntimeError and is never caught here.
+            if report is None or report.mode != "fit" or not ctx_kw:
+                raise
+            await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
+            halved = max(1, ctx_kw // 2)
+            pid, dropped = launch(command(halved))
+            try:
+                served = await ready()
+            except RuntimeError:
+                await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
+                raise
+            report = dataclasses.replace(report, asked=halved, retried=True)
         if report is not None:
             from localharness.agent.context import probe_window
 
