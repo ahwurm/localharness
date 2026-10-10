@@ -100,6 +100,10 @@ class Session:
     # the ContextManager learns the window first, so the retry is a smaller request, not the
     # same one again.
     overflow_retry_used: bool = False
+    # One re-issue after a connection error, until a call succeeds. The re-issue goes back through
+    # the loop (not an inline second call) so a reasoning cut or a degenerate abort on it is handled
+    # exactly as on a first attempt; a second connection error in a row ends the turn.
+    connection_retry_used: bool = False
 
     @property
     def baton_nudge_used(self) -> bool:
@@ -1780,17 +1784,12 @@ class AgentLoop:
                     session.iteration,
                     exc,
                 )
-                await asyncio.sleep(2.0)
-                try:
-                    response_message, usage = await self._llm.stream_complete(
-                        messages=request_messages,
-                        tools=tool_schemas if tool_call_mode != "text" else None,
-                        on_token=on_token,
-                        **_cap_kwargs,
-                    )
-                except ProviderConnectionError as exc2:
+                if session.connection_retry_used:
                     session.terminated_reason = "error"
-                    return _format_error_summary(session, exc2)
+                    return _format_error_summary(session, exc)
+                session.connection_retry_used = True
+                await asyncio.sleep(2.0)
+                continue
             except ProviderTimeoutError as exc:
                 log.error(
                     "LLM timeout in %s (iter %d): %s",
@@ -1825,6 +1824,8 @@ class AgentLoop:
                     )
                 session.terminated_reason = "error"
                 return _format_error_summary(session, exc)
+
+            session.connection_retry_used = False  # a call went through: the next outage retries again
 
             # Accumulate per-turn token usage (TELEM-02)
             if usage is not None:
