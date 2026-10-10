@@ -74,6 +74,17 @@ async def test_subject_turn_keeps_thinking():
     assert "extra_body" not in rec.kwargs[0]
 
 
+async def test_a_rejected_thinking_off_is_not_re_sent_on_the_next_internal_call():
+    """The per-server rejection (now the per-key set, spec 16 D-18) keeps an internal call's
+    thinking-off from being re-sent once a server 400'd it."""
+    c = LLMClient(_cfg())
+    rec = _wire(c)
+    c._rejected_effort_keys.add("chat_template_kwargs")
+    await c.complete([{"role": "user", "content": "hi"}], disable_thinking=True)
+    assert "extra_body" not in rec.kwargs[0]
+    assert c.rejected_effort_keys == frozenset({"chat_template_kwargs"})
+
+
 async def test_llm_text_adapter_disables_thinking():
     """(i) The idle bridge — EVERY Phase-36 model-look (mining/chapter-writer/
     reconciliation) routes through LLMTextAdapter — opts in: bounded idle completion

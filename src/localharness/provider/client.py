@@ -440,6 +440,22 @@ async def _inference_gate(config: LLMConfig):
 _TOOL_NAME_UNSAFE = re.compile(r"[^a-zA-Z0-9_-]")
 
 
+# The per-runtime capability table for the reasoning budget (spec 16 §7.4 (1)): the request field a
+# runtime takes to bound its reasoning, or None where it takes none (the loop then cuts the stream
+# client-side). vLLM stays None until Phase 6 verifies a field; `None` keys a client with no type.
+EFFORT_BUDGET_KEY: dict[str | None, str | None] = {
+    "llamacpp": "reasoning_budget_tokens",
+    "vllm": None,
+    "ollama": None,
+    "lmstudio": None,
+    "unknown": None,
+    None: None,
+}
+
+# The two extra_body keys a server may reject (and the rejection set may therefore hold).
+EFFORT_KEYS: frozenset[str] = frozenset({"chat_template_kwargs", "reasoning_budget_tokens"})
+
+
 def _presence_penalty_kwarg(value: float | None) -> dict[str, float]:
     """`{"presence_penalty": value}` — or nothing. Set by the loop for the retry after a
     degenerate (repeating) generation; never sent otherwise, so the common request is
@@ -602,9 +618,14 @@ class LLMClient:
         # `tools=`, eats another 400 round-trip, and falls back again. Per-SERVER state:
         # rebind_endpoint() resets it because a different server may accept `tools`.
         self._tools_param_rejected = False
-        # Native-mode twin (audit Fix E): a server that 400s the disable_thinking
-        # extra_body={"chat_template_kwargs": ...} param. Same sticky/per-server contract.
-        self._extra_body_rejected = False
+        # Native-mode twin (audit Fix E), now per KEY: the effort keys of extra_body this server
+        # 400'd on ("chat_template_kwargs" for thinking-off, "reasoning_budget_tokens" for the
+        # budget). Same sticky/per-server contract; a key lands here only once its retry succeeded.
+        self._rejected_effort_keys: set[str] = set()
+        # The effort keys this client sent in a request the server answered without a 400 since the
+        # last rebind (never overlapping the rejected set). The REPL's ledger shrinks only on this
+        # evidence (03-CONTEXT D-29).
+        self._accepted_effort_keys: set[str] = set()
         self._client = self._build_client()
         # #154: the AsyncOpenAI owns an httpx pool (sockets + fds). `_closed` makes aclose()
         # idempotent; `_closing` holds the background closes of clients replaced by
@@ -641,6 +662,22 @@ class LLMClient:
                 )
         except Exception:  # a ledger miss must never block constructing a client
             self._tokens_per_chunk = None
+
+    @property
+    def rejected_effort_keys(self) -> frozenset[str]:
+        """The effort keys this server 400'd on (read-only view of the sticky per-server set)."""
+        return frozenset(self._rejected_effort_keys)
+
+    @property
+    def accepted_effort_keys(self) -> frozenset[str]:
+        """The effort keys sent in a request this server answered without a 400, since the last
+        rebind. Read-only; never overlaps `rejected_effort_keys`."""
+        return frozenset(self._accepted_effort_keys)
+
+    @property
+    def effort_budget_key(self) -> str | None:
+        """The request field this runtime takes for a reasoning budget, or None (EFFORT_BUDGET_KEY)."""
+        return EFFORT_BUDGET_KEY.get(self.config.provider_type)
 
     def _build_client(self) -> AsyncOpenAI:
         """Construct the AsyncOpenAI bound to the CURRENT self.config (base_url/api_key/headers/
@@ -708,7 +745,7 @@ class LLMClient:
     ) -> None:
         """Re-point this client at a DIFFERENT server (a cross-endpoint /model swap). The
         AsyncOpenAI bakes base_url in at construction, so re-pointing REBUILDS it, and resets the
-        per-server sticky `_tools_param_rejected` (the new server may accept the `tools` param).
+        per-server sticky `_tools_param_rejected` and effort-key sets (the new server may accept them).
 
         The caller then sets `config.model` and MUST call `detect_capabilities()` — which
         re-derives `tool_call_mode` AND refreshes `_fn_converter` (created for xml/text, cleared
@@ -725,8 +762,9 @@ class LLMClient:
             self.config.extra_headers,
             self._client,
             self._tools_param_rejected,
-            self._extra_body_rejected,
+            set(self._rejected_effort_keys),
             self.config.provider_type,
+            set(self._accepted_effort_keys),
         )
         self.config.base_url = base_url
         if api_key is not None:
@@ -747,8 +785,9 @@ class LLMClient:
                 self.config.extra_headers,
                 self._client,
                 self._tools_param_rejected,
-                self._extra_body_rejected,
+                self._rejected_effort_keys,
                 self.config.provider_type,
+                self._accepted_effort_keys,
             ) = prev
             raise
         # #154: the rebuild took, so the endpoint we just left is unreachable through this client —
@@ -756,7 +795,8 @@ class LLMClient:
         self._schedule_close(prev[3])
         self._closed = False  # a fresh pool: a later aclose() must still close something
         self._tools_param_rejected = False
-        self._extra_body_rejected = False
+        self._rejected_effort_keys = set()
+        self._accepted_effort_keys = set()
         # Success only (a failed rebind still serves the OLD endpoint, whose rate is still true):
         # the previous server's verified decode rate says nothing about the new one.
         self.last_gen_tps = None
@@ -995,6 +1035,8 @@ class LLMClient:
         gen_timeout: float | None = None,
         max_tokens: int | None = None,
         presence_penalty: float | None = None,
+        *,
+        reasoning_budget: int | None = None,
     ) -> tuple[Any, Any]:
         """Single-turn completion. Routes to native or XML based on tool_call_mode.
 
@@ -1018,18 +1060,26 @@ class LLMClient:
         extra_body={"chat_template_kwargs": {"enable_thinking": false}} so their
         bounded completion budgets aren't spent on hidden chain-of-thought under a
         reasoning parser. Subject/user-facing turns must NOT set it (#11 — thinking
-        stays on; this is deliberately per-call, never an is_local blanket). A
-        documented no-op for chat templates without the flag — model-agnostic.
+        stays on; this is deliberately per-call, never an is_local blanket) — superseded for
+        one use: `/effort off` and the loop's thinking-off retry (spec 16 §7.4 (2)) send it on
+        agent turns. A documented no-op for chat templates without the flag — model-agnostic.
+
+        reasoning_budget: per-call cap on reasoning TOKENS (spec 16 §7.4 (1)). On a runtime whose
+        EFFORT_BUDGET_KEY names a field (llama.cpp) it rides extra_body and the server enforces;
+        elsewhere it is not sent and a streamed call is cut client-side by
+        ProviderReasoningBudgetError. None = no budget (nothing is sent).
         """
         if self.config.tool_call_mode == "native":
             return await self._complete_native(messages, tools, stream,
                                                disable_thinking=disable_thinking, gen_timeout=gen_timeout,
                                         max_tokens=max_tokens,
-                                        presence_penalty=presence_penalty)
+                                        presence_penalty=presence_penalty,
+                                        reasoning_budget=reasoning_budget)
         return await self._complete_xml(messages, tools, stream,
                                         disable_thinking=disable_thinking, gen_timeout=gen_timeout,
                                         max_tokens=max_tokens,
-                                        presence_penalty=presence_penalty)
+                                        presence_penalty=presence_penalty,
+                                        reasoning_budget=reasoning_budget)
 
     async def stream_complete(
         self,
@@ -1040,21 +1090,26 @@ class LLMClient:
         gen_timeout: float | None = None,
         max_tokens: int | None = None,
         presence_penalty: float | None = None,
+        *,
+        reasoning_budget: int | None = None,
     ) -> tuple[Any, Any]:
         """Streaming completion with per-token callback. Returns (message, usage).
 
-        disable_thinking / gen_timeout thread through for INTERNAL harness calls exactly as
-        complete() documents them — never set on subject/user-facing turns (#11)."""
+        disable_thinking / gen_timeout / reasoning_budget thread through exactly as complete()
+        documents them. disable_thinking is for INTERNAL harness calls and, superseding #11 for
+        one use, `/effort off` and the loop's thinking-off retry (spec 16 §7.4 (2))."""
         if self.config.tool_call_mode == "native":
             return await self._complete_native(
                 messages, tools, stream=True, on_token=on_token,
                 disable_thinking=disable_thinking, gen_timeout=gen_timeout,
                                         max_tokens=max_tokens, presence_penalty=presence_penalty,
+                reasoning_budget=reasoning_budget,
             )
         return await self._complete_xml(messages, tools, stream=True,
                                         disable_thinking=disable_thinking, gen_timeout=gen_timeout,
                                         max_tokens=max_tokens,
-                                        presence_penalty=presence_penalty)
+                                        presence_penalty=presence_penalty,
+                                        reasoning_budget=reasoning_budget)
 
     async def _complete_native(
         self,
@@ -1066,6 +1121,7 @@ class LLMClient:
         gen_timeout: float | None = None,
         max_tokens: int | None = None,
         presence_penalty: float | None = None,
+        reasoning_budget: int | None = None,
     ) -> tuple[Any, Any]:
         """Call OpenAI-compat API with tool_calls parameter. Returns (message, usage).
 
@@ -1077,7 +1133,8 @@ class LLMClient:
         read-timeout applies BETWEEN chunks, so a healthy generation can run as long
         as the budget allows, and a client disconnect aborts engine-side generation.
         """
-        kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking, max_tokens, presence_penalty)
+        kwargs, name_unmap = self._native_kwargs(
+            messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget)
         try:
             async with _inference_gate(self.config):
                 return await self._consume_bounded(
@@ -1094,7 +1151,8 @@ class LLMClient:
             if dropped is None:
                 raise self._wrap_error(exc) from exc
             log.warning("Server rejected native `%s` param (400) — retrying once without it", dropped)
-            kwargs, name_unmap = self._native_kwargs(messages, tools, disable_thinking, max_tokens, presence_penalty)  # sticky → omitted
+            kwargs, name_unmap = self._native_kwargs(
+                messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget)  # sticky → omitted
             try:
                 async with _inference_gate(self.config):
                     return await self._consume_bounded(
@@ -1110,6 +1168,7 @@ class LLMClient:
         self, messages: list[Message], tools: list[ToolSchema] | None, disable_thinking: bool,
         max_tokens: int | None = None,
         presence_penalty: float | None = None,
+        reasoning_budget: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, str] | None]:
         """Build native-mode request kwargs, HONORING the per-server sticky rejections so a param a
         prior turn 400'd on is never re-sent (mirrors _complete_xml's `not self._tools_param_rejected`
@@ -1117,9 +1176,11 @@ class LLMClient:
 
         Thinking is deliberately left ON for local subjects (#11): reasoning quality wins over
         latency, the loop strips <think> before history/parse, and the kwarg is silently dropped by
-        Ollama / type-checked by llama.cpp anyway. Sole scoped exception: INTERNAL calls opt in via
+        Ollama / type-checked by llama.cpp anyway. Scoped exceptions: INTERNAL calls opt in via
         disable_thinking (mining/summarizer budgets starved by hidden CoT under --reasoning-parser) —
-        never an is_local blanket; a server that 400s it is caught by the _extra_body_rejected flag."""
+        never an is_local blanket — and, superseding #11 for one use, `/effort off` and the loop's
+        thinking-off retry (spec 16 §7.4 (2)); a server that 400s a key is caught by the per-key
+        `_rejected_effort_keys` set."""
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": provider_messages(messages),
@@ -1132,9 +1193,32 @@ class LLMClient:
             kwargs["tools"], name_unmap = _tools_to_api_format(tools)
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences
-        if disable_thinking and not self._extra_body_rejected:
-            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        if (eb := self._extra_body(disable_thinking, reasoning_budget)) is not None:
+            kwargs["extra_body"] = eb
         return kwargs, name_unmap
+
+    def _extra_body(
+        self, disable_thinking: bool, reasoning_budget: int | None
+    ) -> dict[str, Any] | None:
+        """The one assembler of the request's effort `extra_body` (all three request paths): the
+        thinking-off flag unless the server rejected it, and the runtime's budget field when the
+        runtime has one, the server has not rejected it and a budget was asked for. One merged dict,
+        or None — no `extra_body` key at all — when nothing applies (the request is then
+        byte-identical to a call that set neither)."""
+        body: dict[str, Any] = {}
+        if disable_thinking and "chat_template_kwargs" not in self._rejected_effort_keys:
+            body.update({"chat_template_kwargs": {"enable_thinking": False}})
+        key = EFFORT_BUDGET_KEY.get(self.config.provider_type)
+        if reasoning_budget is not None and key and key not in self._rejected_effort_keys:
+            body[key] = reasoning_budget
+        return body or None
+
+    def _note_effort_accepted(self, kwargs: dict[str, Any]) -> None:
+        """Record the effort keys of `kwargs` as accepted: `create()` returned, so the server took
+        the request's parameters (a 400 raises from create(); a later stream error does not undo it)."""
+        for key in kwargs.get("extra_body") or ():
+            if key in EFFORT_KEYS:
+                self._accepted_effort_keys.add(key)
 
     def _remember_native_rejection(
         self, exc: openai.BadRequestError, sent_kwargs: dict[str, Any]
@@ -1144,10 +1228,16 @@ class LLMClient:
         genuinely malformed request → surface it, never blanket-retry). Matches only a param we
         ACTUALLY sent whose name the server's own error text implicates."""
         text = str(exc).lower()
-        if "extra_body" in sent_kwargs and any(
-            s in text for s in ("chat_template_kwargs", "enable_thinking", "extra_body")
-        ):
-            self._extra_body_rejected = True
+        eb = sent_kwargs.get("extra_body") or {}
+        named = {
+            k for k in eb
+            if k in EFFORT_KEYS and (
+                k in text or (k == "chat_template_kwargs" and "enable_thinking" in text)
+            )
+        }
+        if named:
+            self._rejected_effort_keys |= named
+            self._accepted_effort_keys -= named
             return "extra_body"
         if "tools" in sent_kwargs and "tool" in text:
             self._tools_param_rejected = True
@@ -1179,6 +1269,7 @@ class LLMClient:
             self._stream_progress = progress
             try:
                 response = await self._client.chat.completions.create(**kwargs)
+                self._note_effort_accepted(kwargs)
                 message, usage = await self._consume_native_stream(
                     response, on_token, progress, on_reasoning=self.on_reasoning,
                 )
@@ -1188,6 +1279,7 @@ class LLMClient:
             self._note_gen_speed(progress, usage)
         else:
             response = await self._client.chat.completions.create(**kwargs)
+            self._note_effort_accepted(kwargs)
             message = response.choices[0].message
             # Surface finish_reason on the message so the loop's truncation guard sees it on the
             # non-streaming path too (#77). Best-effort: the SDK message is a pydantic model that
@@ -1498,6 +1590,7 @@ class LLMClient:
         gen_timeout: float | None = None,
         max_tokens: int | None = None,
         presence_penalty: float | None = None,
+        reasoning_budget: int | None = None,
     ) -> tuple[Any, Any]:
         """Send tools via API for chat-template injection AND fold the XML tool syntax into the
         system prompt, then parse tool calls from text.
@@ -1526,8 +1619,8 @@ class LLMClient:
             kwargs["tools"], name_unmap = _tools_to_api_format(tools)
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences
-        if disable_thinking:  # internal-call opt-in — see complete()
-            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        if (eb := self._extra_body(disable_thinking, reasoning_budget)) is not None:
+            kwargs["extra_body"] = eb
         try:
             # #18: honor `stream` — a dead param here silently made XML mode non-streaming
             # for the whole loop. Gate held across create + stream consumption; on
@@ -1548,6 +1641,7 @@ class LLMClient:
                 injected_messages, tools, stream,
                 disable_thinking=disable_thinking, gen_timeout=gen_timeout,
                                         max_tokens=max_tokens, presence_penalty=presence_penalty,
+                reasoning_budget=reasoning_budget,
             )
         except Exception as exc:
             raise self._wrap_error(exc) from exc
@@ -1561,6 +1655,7 @@ class LLMClient:
         gen_timeout: float | None = None,
         max_tokens: int | None = None,
         presence_penalty: float | None = None,
+        reasoning_budget: int | None = None,
     ) -> tuple[Any, Any]:
         """Legacy fallback: retry without the `tools` param, tool schemas carried purely via the
         system-prompt XML injection (a no-op if `messages` already carries it — see
@@ -1578,8 +1673,8 @@ class LLMClient:
         }
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences
-        if disable_thinking:  # internal-call opt-in — see complete()
-            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        if (eb := self._extra_body(disable_thinking, reasoning_budget)) is not None:
+            kwargs["extra_body"] = eb
         try:
             async with _inference_gate(self.config):  # #18: honor stream here too
                 return await self._consume_bounded(self._create_and_consume(kwargs, stream), gen_timeout)

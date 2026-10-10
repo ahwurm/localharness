@@ -763,8 +763,15 @@ async def test_complete_native_retries_dropping_rejected_extra_body():
     assert len(calls) == 2
     assert "extra_body" in calls[0]
     assert "extra_body" not in calls[1]
-    assert client._extra_body_rejected is True
+    assert client.rejected_effort_keys == frozenset({"chat_template_kwargs"})
     assert msg.content == "ok"
+    # Sticky: the next thinking-off call does not re-send the rejected key (no second 400).
+    calls.clear()
+    await client._complete_native(
+        messages=[{"role": "user", "content": "again"}], tools=None, stream=False,
+        disable_thinking=True,
+    )
+    assert len(calls) == 1 and "extra_body" not in calls[0]
 
 
 @pytest.mark.asyncio
