@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from localharness.config.models import HarnessConfig
+from localharness.config.models import LEVELS, HarnessConfig
 from localharness.config.overlay import (
     _resolve_user_overlay_path,
     atomic_write_overlay,
@@ -30,6 +30,10 @@ from localharness.core.events import ComponentMutated
 from localharness.registry import set_value_in_dict
 
 _AGENT_KEY = "agent"
+
+EFFORT_SESSION_ONLY_NOTE = (
+    "effort applies to this session only (no active_endpoint record to persist it to)"
+)
 
 
 def _validated(harness: Any, harness_overlay: dict) -> None:
@@ -250,9 +254,12 @@ async def persist_active_endpoint(
     # No key in this record: the key stays with the endpoint it belongs to, `active_endpoint` is not
     # read back at start, and a SecretStr cannot be written to YAML. A key an earlier version wrote
     # here would now sit beside another endpoint's address, so it goes.
+    # Nor an `effort`: the level belongs to the endpoint it was chosen on, so a switch drops the
+    # previous one and the new endpoint starts from its own record's default (spec §7.2).
     if isinstance(new_overlay.get("active_endpoint"), dict):
         new_overlay["active_endpoint"] = {
-            k: v for k, v in new_overlay["active_endpoint"].items() if k != "api_key"}
+            k: v for k, v in new_overlay["active_endpoint"].items()
+            if k not in ("api_key", "effort")}
     set_value_in_dict(new_overlay, "active_endpoint.name", getattr(endpoint, "name", ""))
     set_value_in_dict(new_overlay, "active_endpoint.base_url", endpoint.base_url)
     set_value_in_dict(new_overlay, "active_endpoint.provider_type", endpoint.provider_type)
@@ -270,7 +277,95 @@ async def persist_active_endpoint(
         provider_type=endpoint.provider_type,
         model=model,
         api_key=getattr(endpoint, "api_key", "none"),
+        effort=None,
     )
+    return None
+
+
+async def persist_effort(
+    harness: Any,
+    level: str,
+    *,
+    base_url: str,
+    channel_id: str,
+    config_dir: Any = None,
+    audit_base_dir: Any = None,
+) -> str | None:
+    """Persist a ``/effort`` choice for the endpoint serving ``base_url`` through the audited user
+    overlay, and return None on clean success, ``EFFORT_SESSION_ONLY_NOTE`` when there is nowhere
+    to record it, or a warning string when ONLY the post-write audit emit failed.
+
+    Exactly ONE dict path is written, chosen by who serves ``base_url``:
+
+    - the primary with a ``server:`` block -> ``server.effort``;
+    - the active peer (``active_endpoint.base_url`` matches) -> ``active_endpoint.effort``;
+    - the primary run by hand (no ``server:``) -> ``org.default_effort``;
+    - any other peer -> nothing is written (it has no record of its own to carry the level).
+
+    Never ``extra_endpoints`` and never a whole record: a peer's list entry holds its ``api_key`` /
+    ``extra_headers``, and rewriting it would copy those into ``overrides.yaml`` (spec §7.2). Setting
+    one dict path leaves every other key as the overlay already had it. ``effort`` is not a
+    fingerprinted key (spec §9), so the machine trust snapshot is untouched by this write.
+
+    The audit row is actor ``channel`` with the channel id as ``actor_detail``: the level was
+    chosen by a person on a channel (terminal, phone or Discord), not by ``components set``. As in
+    ``persist_default_model`` the row is emitted even when the level is unchanged
+    (``before_value == after_value``). ``config_dir`` / ``audit_base_dir`` are the same two inputs
+    as there: the overlay is machine-wide truth, the audit record follows the work.
+    """
+    if level not in LEVELS:
+        raise ValueError(f"effort must be one of {', '.join(LEVELS)}; got {level!r}")
+
+    def norm(url: Any) -> str:
+        return (url or "").rstrip("/")
+
+    primary = norm(base_url) == norm(harness.provider.base_url)
+    active = getattr(harness, "active_endpoint", None)
+    if primary and harness.server is not None:
+        path, before = "server.effort", harness.server.effort
+
+        def apply() -> None:
+            harness.server.effort = level
+    elif active is not None and norm(active.base_url) == norm(base_url):
+        path, before = "active_endpoint.effort", active.effort
+
+        def apply() -> None:
+            active.effort = level
+    elif primary:
+        path, before = "org.default_effort", harness.org.default_effort
+
+        def apply() -> None:
+            harness.org.default_effort = level
+    else:
+        return EFFORT_SESSION_ONLY_NOTE
+
+    overlay_path = _resolve_user_overlay_path(global_config_dir(config_dir))
+    new_overlay = dict(load_overlay(overlay_path))
+    set_value_in_dict(new_overlay, path, level)
+    _validated(harness, {k: v for k, v in new_overlay.items() if k != _AGENT_KEY})
+    atomic_write_overlay(overlay_path, new_overlay)
+    apply()
+
+    # The emit has its own try/except (#37): it runs after the durable write, so an unwritable
+    # audit log is a warning to show, never a persist failure.
+    try:
+        _audit_base = audit_base_dir if audit_base_dir is not None else config_dir
+        audit_path = harness.org.audit_log_path
+        bus = EventBus(
+            persist_path=resolve_runtime_path(audit_path, _audit_base) if audit_path else None
+        )
+        await bus.publish(
+            ComponentMutated(
+                path=path,
+                before_value=before,
+                after_value=level,
+                layer="user",
+                actor="channel",
+                actor_detail=channel_id,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — the durable overlay write already succeeded
+        return f"persisted, but the audit log could not be written: {exc}"
     return None
 
 
