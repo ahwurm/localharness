@@ -249,6 +249,51 @@ async def persist_default_model(
     return adopt_warning
 
 
+_SERVED_NAME_FLAGS = ("-a", "--alias", "--served-model-name")
+
+
+def _alias_in_args(args: Any) -> str | None:
+    """The value after the first of llama.cpp ``-a``/``--alias`` or vLLM ``--served-model-name``
+    present in a launch-arg list, else None (a flag with no value after it counts as absent)."""
+    args = list(args or [])
+    for flag in _SERVED_NAME_FLAGS:
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 < len(args):
+                return args[i + 1]
+    return None
+
+
+def peer_served_name(ep: Any) -> str:
+    """The model id a lifecycle peer serves: its record's ``served_name`` (the ``-a`` alias), else
+    the alias in its launch ``extra_args``, else the peer's name. The same rule as the REPL's
+    cold-peer label; the client still binds to what the peer reports once it is up."""
+    lifecycle = getattr(ep, "lifecycle", None)
+    if lifecycle is not None:
+        served = getattr(lifecycle, "served_name", None)
+        if served:
+            return served
+        alias = _alias_in_args(getattr(lifecycle, "extra_args", None))
+        if alias:
+            return alias
+    return ep.name
+
+
+def primary_served_name(server: Any, provider: Any) -> str | None:
+    """The model id the primary answers to: ``server.served_name``, else the alias in
+    ``server.extra_args``, else ``provider.default_model``. None when there is no managed server
+    (an attach-only primary has no served-name identity to match a preset against)."""
+    if server is None:
+        return None
+    served = getattr(server, "served_name", None)
+    if served:
+        return served
+    alias = _alias_in_args(getattr(server, "extra_args", None))
+    if alias:
+        return alias
+    return getattr(provider, "default_model", None)
+
+
 async def persist_active_endpoint(
     harness: Any, endpoint: Any, model: str, *, config_dir: Any = None
 ) -> str | None:

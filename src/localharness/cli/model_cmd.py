@@ -197,6 +197,30 @@ def model(
         err_console.print("[bold red]Error:[/bold red] model name cannot be empty.")
         raise typer.Exit(2)
 
+    # D-35: a preset name resolves before today's served/downloaded resolution. A lifecycle peer is
+    # selected by its name or served name (the persisted `active_endpoint`, as `/model` does).
+    for ep in harness.extra_endpoints:
+        if ep.lifecycle is None:
+            continue
+        served = model_ops.peer_served_name(ep)
+        if name != ep.name and name != served:
+            continue
+        try:
+            asyncio.run(
+                model_ops.persist_active_endpoint(
+                    harness, ep, served, config_dir=loader._config_dir)
+            )
+        except Exception as exc:
+            err_console.print(
+                "[bold red]Error:[/bold red] " + escape(f"failed to persist {served!r}: {exc}"),
+                soft_wrap=True,
+            )
+            raise typer.Exit(2)
+        console.print(
+            f"Selected {served} on {ep.name} ({ep.base_url})", markup=False, soft_wrap=True
+        )
+        return
+
     target: Optional[str] = None
     if name.isdigit() and 1 <= int(name) <= len(choices):
         target = choices[int(name) - 1]
