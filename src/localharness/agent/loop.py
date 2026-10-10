@@ -449,6 +449,13 @@ _EMPTY_TURN_NOTICE_NO_CAP = (
     "(finish_reason=length). The reply reached the served window, usually on hidden reasoning — "
     "lower /effort or shorten the task."
 )
+# The same shape for someone who has nothing left to lower: effort is already off, or the server
+# refused the thinking-off key, so "lower /effort" would send them to where they already are.
+_EMPTY_TURN_NOTICE_NO_CAP_THINKING_OFF = (
+    "No answer was produced this turn: the model returned an empty reply twice "
+    "(finish_reason=length). The reply reached the served window with thinking already off — "
+    "shorten the task or serve a larger window."
+)
 # #152: NOT a member of _is_harness_nudge's exact-match set — it is a template (it names the
 # repeat count), and unlike the act-guard/self-check nudges it never asks for the CONFIRMED
 # sentinel, so it can never be half of a nudge->sentinel pair that wants stripping.
@@ -2026,10 +2033,14 @@ class AgentLoop:
                     # always on hidden reasoning. Asking for a shorter reply is the wrong remedy;
                     # the one retry is spent on the identical request with thinking off. Decided
                     # BEFORE the cap-growing call below, which reports the same shape but changes nothing.
+                    # Only worth the retry when it CHANGES the request: with thinking already off (effort
+                    # off, a cut earlier this turn, or the server refused the key) the re-send would
+                    # be byte-identical, so those cases take the nudge below instead.
                     no_cap_length = (
                         finish_reason == "length"
                         and self._no_cap_sent(request_cap)
                         and self._llm_takes_disable_thinking
+                        and not self._thinking_already_off()
                     )
                     if finish_reason == "length":
                         self._grow_output_cap(request_cap, usage, ctx_budget)
@@ -2072,6 +2083,8 @@ class AgentLoop:
                     session.terminated_reason = "error"
                     self._conversation = _strip_sentinel_exchanges(session.messages)
                     if finish_reason == "length" and self._no_cap_sent(request_cap):
+                        if self._effort == "off" or self._thinking_key_refused():
+                            return _EMPTY_TURN_NOTICE_NO_CAP_THINKING_OFF
                         return _EMPTY_TURN_NOTICE_NO_CAP
                     return _EMPTY_TURN_NOTICE.format(finish_reason=finish_reason or "unknown")
 
@@ -2621,6 +2634,15 @@ class AgentLoop:
             getattr(getattr(self._llm, "config", None), "max_tokens", None)
             or self._config.max_tokens
         )
+
+    def _thinking_key_refused(self) -> bool:
+        """True once the server refused the thinking-off key, so the client no longer sends it."""
+        return "chat_template_kwargs" in (getattr(self._llm, "rejected_effort_keys", None) or ())
+
+    def _thinking_already_off(self) -> bool:
+        """True when the next request already carries thinking off, or cannot: effort `off`, the flag
+        a reasoning cut or an earlier empty reply armed, or a server that refused the key."""
+        return self._effort == "off" or self._thinking_off_next or self._thinking_key_refused()
 
     def _no_cap_sent(self, request_cap: int | None) -> bool:
         """True when this request carried no max_tokens at all: the per-request override is absent
