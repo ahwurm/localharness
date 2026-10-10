@@ -180,6 +180,20 @@ async def test_an_unreadable_header_is_not_computed_not_a_failure(tmp_path, pope
     assert live.window.mode == "fit-by-server" and live.window.fits is None
 
 
+async def test_ill_typed_header_values_are_not_computed_and_never_crash_the_launch(tmp_path, popen, box):
+    """WR-01: a GGUF that declares `block_count` as a string and `context_length` as a list must not
+    reach `offload_kind` / `window_lines` as such (a TypeError there escaped `activate` after the
+    incumbent was stopped)."""
+    bad = {**HEADER_A, "qwen3.block_count": "abc", "qwen3.context_length": [1]}
+    spec = _spec(tmp_path, context=4096, extra_args=["-ngl", "10"])
+    write_gguf(Path(spec.model), bad)
+    box.probe_result = WindowProbe(4096, None)
+    live = await _activate(tmp_path, spec)
+    assert live.window.trained is None and live.window.fits is None
+    (line,) = autosense.window_lines(live.window, RATIOS)
+    assert line.startswith("window: served 4,096 · trained — · fits —")
+
+
 async def test_a_missing_model_file_is_not_computed_not_a_failure(tmp_path, popen, box):
     spec = _spec(tmp_path)
     Path(spec.model).unlink()

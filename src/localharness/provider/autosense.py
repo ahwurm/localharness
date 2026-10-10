@@ -103,6 +103,22 @@ def _pos_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
+def fit_header(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """The header values a caller may rely on: only well-typed positive ints survive, and
+    `head_count_kv` may stay a list of them. A GGUF declares its own types, so a value that is a
+    string, a bool or a list where an int belongs is dropped here, once, right after `read_header`;
+    `offload_kind`, `WindowReport` and `window_lines` then only ever see an int or nothing."""
+    out = {k: v for k, v in raw.items() if k != "head_count_kv" and _pos_int(v) is not None}
+    kv = raw.get("head_count_kv")
+    if isinstance(kv, list):
+        ints = [x for x in kv if _pos_int(x) is not None]
+        if ints:
+            out["head_count_kv"] = ints
+    elif _pos_int(kv) is not None:
+        out["head_count_kv"] = kv
+    return out
+
+
 def head_dim(header: Mapping[str, Any]) -> int | None:
     """`key_length`, else `embedding_length // head_count`."""
     key_length = _pos_int(header.get("key_length"))

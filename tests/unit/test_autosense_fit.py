@@ -22,6 +22,7 @@ from localharness.provider.autosense import (
     WindowReport,
     cache_ram_mib,
     fit,
+    fit_header,
     free_memory,
     kv_bytes_per_token,
     offload_kind,
@@ -49,6 +50,22 @@ def report(**kw) -> WindowReport:
                 total_bytes=35004153856, weights_bytes=WEIGHTS_A, asked=None, mode="fit",
                 attached=True)
     return WindowReport(**{**base, **kw})
+
+
+# ---- fit_header: a GGUF declares its own types, so only well-typed positive ints survive (WR-01) ---
+
+def test_fit_header_keeps_well_typed_values_and_drops_the_rest():
+    raw = {"block_count": "abc", "context_length": [1], "key_length": True, "embedding_length": 0,
+           "head_count": -3, "head_count_kv": 8}
+    assert fit_header(raw) == {"head_count_kv": 8}
+    assert fit_header(HEADER_A) == HEADER_A
+    assert fit_header({}) == {}
+
+
+def test_fit_header_filters_a_per_layer_head_count_kv_list():
+    assert fit_header({"head_count_kv": [8, "x", 4, False]}) == {"head_count_kv": [8, 4]}
+    assert fit_header({"head_count_kv": ["x"]}) == {}
+    assert fit_header({"head_count_kv": "8"}) == {}
 
 
 # ---- the fit: three synthetic headers, hand-computed ------------------------------------------------

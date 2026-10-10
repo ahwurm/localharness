@@ -274,7 +274,7 @@ def _attach_window_report(harness: Any, provider_type: str, served: int | None, 
     if srv is not None and srv.runtime == "llamacpp" and srv.model:
         extra = list(srv.extra_args or [])
         try:
-            header = read_header(os.path.expanduser(srv.model), _auto.FIT_KEYS)
+            header = _auto.fit_header(read_header(os.path.expanduser(srv.model), _auto.FIT_KEYS))
         except (GgufHeaderError, OSError):
             header = {}
         n_layer = header.get("block_count")
