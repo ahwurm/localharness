@@ -489,6 +489,24 @@ def _script_pending(global_dir: Path, file: str, real: Path) -> Optional[str]:
     return f"sha256:{digest[:12]}"
 
 
+@functools.lru_cache(maxsize=1)
+def _bool_adapter() -> Any:
+    from pydantic import TypeAdapter
+    return TypeAdapter(bool)
+
+
+def coerce_bool(value: Any) -> Optional[bool]:
+    """``value`` read the way the config model reads a `bool` field (pydantic's lax coercion: `True`,
+    `1`, `"1"`, `"true"`, `"True"`, `"yes"`, `"on"` and the false spellings), or None when it is not
+    one. The posture entries are built from the raw files, and the model, not the YAML spelling, decides
+    what a launch does with `bind_all: 1`; a spelling the model reads as true must be recorded, shown
+    and withheld as `true`, never as a string that only looks different."""
+    try:
+        return _bool_adapter().validate_python(value)
+    except ValueError:
+        return None
+
+
 _NOT_A_PEER: Any = object()
 """`_key_state`'s marker for the primary: a peer with no `api_key` is a peer, not the primary."""
 
@@ -505,7 +523,7 @@ def _key_state(mapping: Any, raws: dict, runtime: str, *, peer_key: Any = _NOT_A
     def real(value: Any) -> bool:
         return isinstance(value, str) and value not in ("", "none")
 
-    if not isinstance(mapping, dict) or mapping.get("require_api_key") is not True:
+    if not isinstance(mapping, dict) or coerce_bool(mapping.get("require_api_key")) is not True:
         return "open"
     if mapping.get("api_key_file"):
         return "keyed"
@@ -538,8 +556,10 @@ def _posture_entries(raws: dict) -> list[dict]:
         runtime = view.get("runtime", "vllm")
         if runtime not in ("vllm", "llamacpp") or view.get(key) is None:
             return []
+        value = coerce_bool(view[key])  # the model's reading: `1`, "yes", "on" are `true` (CR-02)
+        spelled = json.dumps(value if value is not None else view[key])
         return [{"file": file, "kind": LAUNCH_KIND, "name": prefix + key,
-                 "shown": f"{runtime}:{json.dumps(view[key])}:{keyed(runtime)}"}]
+                 "shown": f"{runtime}:{spelled}:{keyed(runtime)}"}]
 
     cfg, over = raws.get("config.yaml"), raws.get("overrides.yaml")
     over_server = section(over, "server")
@@ -673,8 +693,10 @@ def confirmed_at_upgrade(snap: list[dict]) -> list[dict]:
     """The entries of ``snap`` that governed what 0.17 launched and exposed, and so are confirmed
     ONCE at the first start that knows them: the `launch`-kind entries whose key (the part after
     the last `.`) is `runtime`, `launch`, `bind_all`, `require_api_key` or `local_models` — the
-    primary's and every peer's — except a llama.cpp `bind_all: true` posture entry (`shown` starts
-    `llamacpp:true:`), which 0.17 ignored entirely and so cannot have been relied on.
+    primary's and every peer's — except a llama.cpp `bind_all` posture entry that is not exactly
+    `false` (`shown` starts `llamacpp:true:`, or any spelling the posture entry could not normalise):
+    0.17 ignored it entirely, so it cannot have been relied on and is never adopted unasked. The test
+    fails closed: only `llamacpp:false:` is confirmed.
 
     A pure filter over the snapshot the caller already holds: no second snapshot function, no disk
     read. Entries are compared whole afterwards (`_uncovered`)."""
@@ -682,7 +704,8 @@ def confirmed_at_upgrade(snap: list[dict]) -> list[dict]:
     return [e for e in snap
             if e.get("kind") == LAUNCH_KIND and str(e.get("name", "")).rsplit(".", 1)[-1] in governing
             and not (str(e.get("name", "")).rsplit(".", 1)[-1] == "bind_all"
-                     and str(e.get("shown", "")).startswith("llamacpp:true:"))]
+                     and str(e.get("shown", "")).startswith("llamacpp:")
+                     and not str(e.get("shown", "")).startswith("llamacpp:false:"))]
 
 
 def recorded_machine(global_dir: Path) -> Optional[dict]:
