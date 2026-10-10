@@ -93,6 +93,9 @@ class Session:
     # One bounded retry per turn after the provider aborted a generation that degenerated
     # into repetition mid-stream; the second such abort ends the turn as a failure.
     degenerate_reprompt_used: bool = False
+    # One identical re-send per turn, thinking off, after the provider cut a generation whose
+    # reasoning passed its budget; the second such cut ends the turn as a failure.
+    reasoning_cut_used: bool = False
     # One rebuild-and-retry per turn after the server refuses a request as over its window —
     # the ContextManager learns the window first, so the retry is a smaller request, not the
     # same one again.
@@ -420,6 +423,10 @@ _DEGENERATE_TURN_NOTICE = (
 # thinking-mode repetition is a presence_penalty of 1.5 (range 0-2); it is applied only to
 # that retry and the rest of the turn, never as an ambient default.
 _DEGENERATE_RETRY_PRESENCE_PENALTY = 1.5
+_REASONING_CUT_TURN_NOTICE = (
+    "No answer was produced this turn: the model's reasoning passed its budget twice (/effort). "
+    "Lower the effort, shorten the task, or set /effort off."
+)
 _EMPTY_REPLY_NUDGE = (
     "Your last reply was empty: no text and no tool call reached the user. If you were "
     "reasoning, the output budget ran out before the answer. Reply now with your answer "
@@ -1439,6 +1446,7 @@ class AgentLoop:
         from localharness.provider.client import (
             ProviderConnectionError,
             ProviderDegenerateError,
+            ProviderReasoningBudgetError,
             ProviderTimeoutError,
             ProviderAPIError,
             context_overflow_limit,
@@ -1726,6 +1734,37 @@ class AgentLoop:
                 session.terminated_reason = "error"
                 self._conversation = _strip_sentinel_exchanges(session.messages)
                 return _DEGENERATE_TURN_NOTICE.format(unit=exc.unit[:40], repeats=exc.repeats)
+            except ProviderReasoningBudgetError as exc:
+                # The client cut a generation whose reasoning passed the level's budget (a runtime
+                # with no server-side budget key; llama.cpp enforces its own). Record it where the
+                # reply would have been, then send the IDENTICAL request once more with thinking off
+                # — nothing pushed, no partial assistant prefix, no nudge — so the second attempt
+                # spends the window on an answer. A second cut ends the turn honestly.
+                await self._bus.publish(Action(
+                    agent_id=session.agent_id,
+                    session_id=session.session_id,
+                    action_type="llm_response",
+                    content="",
+                    has_tool_calls=False,
+                    finish_reason="reasoning_cut",
+                    reasoning_chars=exc.spent,
+                    output_cap=request_cap,
+                ))
+                if not session.reasoning_cut_used:
+                    session.reasoning_cut_used = True
+                    self._thinking_off_next = True
+                    log.warning(
+                        "Reasoning passed its budget for %s (%d tokens, %d chars) — re-sending "
+                        "once with thinking off", self._config.name, exc.budget, exc.spent,
+                    )
+                    continue
+                log.error(
+                    "Reasoning passed its budget twice for %s — ending the turn without an answer",
+                    self._config.name,
+                )
+                session.terminated_reason = "error"
+                self._conversation = _strip_sentinel_exchanges(session.messages)
+                return _REASONING_CUT_TURN_NOTICE
             except ProviderConnectionError as exc:
                 log.warning(
                     "LLM connection error in %s (iter %d): %s",
