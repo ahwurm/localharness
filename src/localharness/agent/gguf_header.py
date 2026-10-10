@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import struct
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -316,7 +317,8 @@ def discover(paths: Iterable[str | os.PathLike[str]],
                 "context_length": _int(header.get("context_length"))}
         if kind == "mmproj" or arch == "clip":
             projectors.append(item)
-        elif kind is None or kind == "model":
+        elif (kind is None or kind == "model") and _admitted(
+                raw, _int(header.get("split.no")), _int(header.get("split.count"))):
             models.append(item)
     paired = _pair(models, projectors)
     found = tuple(
@@ -328,17 +330,95 @@ def discover(paths: Iterable[str | os.PathLike[str]],
     return Discovery(found, tuple(p["path"] for p in projectors if p["path"] not in claimed))
 
 
+def _admitted(path: str, split_no: int | None, split_count: int | None) -> bool:
+    """D-03: a model without split keys is admitted as itself; `split.no` above zero is a later shard,
+    never a preset; `split.no == 0` only when every `-0000k-of-N` sibling is a regular file (stat only,
+    never opened). A count of one is a whole model."""
+    if split_no is None:
+        return True
+    if split_no != 0:
+        return False
+    if split_count is None or split_count < 1:
+        return False
+    if split_count == 1:
+        return True
+    name = os.path.basename(path)
+    if not name.lower().endswith(".gguf"):
+        return False
+    stem = _SHARD_STEM.search(name[:-len(".gguf")])
+    if stem is None or int(stem.group(2)) != split_count or int(stem.group(1)) != 1:
+        return False
+    prefix, ext = name[:stem.start()], name[-len(".gguf"):]
+    directory = os.path.dirname(path)
+    for k in range(1, split_count + 1):
+        sibling = os.path.join(directory, f"{prefix}-{k:05d}-of-{split_count:05d}{ext}")
+        try:
+            if not stat.S_ISREG(os.stat(sibling).st_mode):
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def _lcp(a: str, b: str) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
 def _pair(models: list[dict[str, Any]], projectors: list[dict[str, Any]]) -> dict[Path, Path]:
-    """model path -> projector path. Dimension match first; Task 2 adds the prefix tie-break."""
+    """model path -> projector path, per directory (D-04, D-48): the dimension must match
+    (`clip.vision.projection_dim == embedding_length`); a projector claims the one model its
+    mmproj-stripped stem shares the strictly longest prefix with (LCP > 0), a model claimed twice goes
+    to the strictly longer prefix and a tie pairs neither; then, repeated until stable, the last unpaired
+    projector and model of one dimension pair. Sorted throughout, so the input order never matters."""
+    by_dir: dict[Path, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
+    for m in sorted(models, key=lambda m: str(m["path"])):
+        by_dir.setdefault(m["path"].parent, ([], []))[0].append(m)
+    for p in sorted(projectors, key=lambda p: str(p["path"])):
+        if p["dim"] is not None and p["path"].parent in by_dir:
+            by_dir[p["path"].parent][1].append(p)
     paired: dict[Path, Path] = {}
-    for proj in projectors:
-        same = [m for m in models if m["path"].parent == proj["path"].parent
-                and proj["dim"] is not None and m["embedding"] == proj["dim"]
-                and m["path"] not in paired]
-        if len(same) == 1 and sum(1 for p in projectors if p["dim"] == proj["dim"]
-                                  and p["path"].parent == proj["path"].parent) == 1:
-            paired[same[0]["path"]] = proj["path"]
+    for dir_models, dir_projectors in by_dir.values():
+        paired.update(_pair_directory(dir_models, dir_projectors))
     return paired
+
+
+def _pair_directory(models: list[dict[str, Any]], projectors: list[dict[str, Any]]) -> dict[Path, Path]:
+    def stem_of(p: dict[str, Any]) -> str:
+        return _PROJECTOR_LEAD.sub("", _stem(p["path"]), count=1)
+
+    def fits(p: dict[str, Any], m: dict[str, Any]) -> bool:
+        return m["embedding"] is not None and m["embedding"] == p["dim"]
+
+    claims: dict[Path, list[tuple[int, Path]]] = {}  # model path -> [(lcp, projector path)]
+    for p in projectors:
+        scored = [(_lcp(stem_of(p), _stem(m["path"])), m["path"]) for m in models if fits(p, m)]
+        top = max((n for n, _ in scored), default=0)
+        winners = [path for n, path in scored if n == top]
+        if top > 0 and len(winners) == 1:
+            claims.setdefault(winners[0], []).append((top, p["path"]))
+    result: dict[Path, Path] = {}
+    for model_path, claimants in claims.items():
+        best = max(n for n, _ in claimants)
+        leaders = [path for n, path in claimants if n == best]
+        if len(leaders) == 1:
+            result[model_path] = leaders[0]
+    while True:
+        free_models = [m for m in models if m["path"] not in result]
+        free_projectors = [p for p in projectors if p["path"] not in set(result.values())]
+        added = False
+        for dim in sorted({p["dim"] for p in free_projectors}):
+            ps = [p for p in free_projectors if p["dim"] == dim]
+            ms = [m for m in free_models if m["embedding"] == dim]
+            if len(ps) == 1 and len(ms) == 1:
+                result[ms[0]["path"]] = ps[0]["path"]
+                added = True
+        if not added:
+            return result
 
 
 def rank_models(models: Iterable[DiscoveredModel], *, unit_model: str | None,
