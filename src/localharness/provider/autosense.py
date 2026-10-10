@@ -94,7 +94,8 @@ def free_memory(ratios: Any) -> FreeMemory | None:
         mi = _read_meminfo()
         if mi is None:
             return None
-        free = int(mi["MemAvailable"] - ratios.unified_reserve_ratio * mi["MemTotal"])
+        # Clamped: with less available than the reserve there is nothing free, not a negative amount.
+        free = max(0, int(mi["MemAvailable"] - ratios.unified_reserve_ratio * mi["MemTotal"]))
         return FreeMemory(free, mi["MemTotal"], "meminfo")
     return FreeMemory(free_mib * _MIB, total_mib * _MIB, "nvidia-smi")
 
