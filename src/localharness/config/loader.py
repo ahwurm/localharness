@@ -975,6 +975,13 @@ class ConfigLoader:
         # and a log record would reach the terminal a second time through logging.lastResort.
         ws_files = self.plugin_layer_files()[2:]
         merged, self.harness_warnings = _narrow_harness_global_only(merged, sources, ws_files)
+        # An overrides.yaml `extra_endpoints` REPLACES config.yaml's list wholesale (lists do not
+        # merge), so the peers config.yaml names vanish without a word. Say so once — only over a
+        # non-empty list: the `[]` an `init`-written config.yaml holds shadows nothing.
+        config_peers = sources[0].get("extra_endpoints")
+        if "extra_endpoints" in sources[1] and isinstance(config_peers, list) and config_peers:
+            self.harness_warnings.append(
+                f"overrides.yaml extra_endpoints replaces the {len(config_peers)} peers in config.yaml")
         # The one refusal: the global layers set no provider and the workspace's gave way whole,
         # so there is nothing to run against. One line naming the file to set it in — never a field
         # report, which would show the project's address back.
