@@ -824,14 +824,10 @@ class ConfigLoader:
         global_overlay = load_overlay(global_overlay_path)
         global_overlay = self._without_withheld(
             {k: v for k, v in global_overlay.items() if k != "agent"}, global_overlay_path)
-        # A withheld launch command (`server.binary`, `docker_image`, `extra_args`) withholds the
-        # whole `server:` section of both files: the session attaches to whatever answers and
-        # launches nothing this run. Dropping one key would leave a section that no longer
-        # validates (a binary launch needs its binary), and the start would fail instead.
-        if any(kind == "launch" for f in ("config.yaml", "overrides.yaml")
-               for kind, _name in (self._machine_withheld or {}).get(f, ())):
-            global_cfg = {k: v for k, v in global_cfg.items() if k != "server"}
-            global_overlay = {k: v for k, v in global_overlay.items() if k != "server"}
+        # What start withheld from `server:` (any launch or launch_model entry) is enforced by the
+        # entry's name: see `_apply_launch_withholds` for the two posture keys that narrow and the
+        # rest that drop the section.
+        global_cfg, global_overlay = self._apply_launch_withholds(global_cfg, global_overlay)
 
         ws_cfg: dict = {}
         ws_overlay: dict = {}
@@ -844,6 +840,57 @@ class ConfigLoader:
 
         self._raw_sources_cache = (global_cfg, global_overlay, ws_cfg, ws_overlay)
         return self._raw_sources_cache
+
+    def _apply_launch_withholds(self, global_cfg: dict, global_overlay: dict) -> tuple[dict, dict]:
+        """Enforce the withheld `server.*` entries (kind `launch` and `launch_model`) by NAME.
+
+        - `server.bind_all` is put to `false` and `server.require_api_key` to `true` in the withheld
+          file's raw dict: the launch is narrowed (loopback, keyed), never prevented, and `server:`
+          survives. The put also adds the key where the file's section lacks it. When
+          `require_api_key` is narrowed to true and the merged record declares no key source (the
+          same declared-sources test as the fingerprint's `keyed|open`), `bind_all` is narrowed to
+          `false` in both files in the same pass: keyed with no key must not open every interface.
+          Narrowing runs here, before validation, so that record still loads.
+        - Any other `server.*` name (binary, docker_image, extra_args, env, api_key_file, runtime,
+          launch, local_models, config_ini, and every launch_model key) withholds the whole `server:`
+          section of both files: the session attaches to whatever answers and launches nothing this
+          run. There is no safe value to substitute for them, and dropping one key would leave a
+          section that no longer validates (a binary launch needs its binary).
+        - `extra_endpoints.<peer>.lifecycle.<key>` names are the per-peer rule of
+          `_without_withheld` and say nothing about `server:`.
+
+        Never mutates its arguments."""
+        from localharness.config.overlay import deep_merge
+        from localharness.config.trust import LAUNCH_KIND, LAUNCH_MODEL_KIND, _key_state
+
+        files = {"config.yaml": global_cfg, "overrides.yaml": global_overlay}
+        drop_server = False
+        narrow_require_key = False
+        for file in files:
+            for kind, name in sorted((self._machine_withheld or {}).get(file, ())):
+                if kind not in (LAUNCH_KIND, LAUNCH_MODEL_KIND) or name.startswith("extra_endpoints."):
+                    continue
+                if name == "server.bind_all":
+                    files[file] = _put(files[file], ["server", "bind_all"], False)
+                elif name == "server.require_api_key":
+                    files[file] = _put(files[file], ["server", "require_api_key"], True)
+                    narrow_require_key = True
+                else:
+                    drop_server = True
+        if drop_server:
+            return ({k: v for k, v in files["config.yaml"].items() if k != "server"},
+                    {k: v for k, v in files["overrides.yaml"].items() if k != "server"})
+        if narrow_require_key:
+            def section(raw: dict) -> dict:
+                value = raw.get("server")
+                return value if isinstance(value, dict) else {}
+
+            merged = {**deep_merge(section(files["config.yaml"]), section(files["overrides.yaml"])),
+                      "require_api_key": True}
+            if _key_state(merged, files, merged.get("runtime", "vllm")) == "open":
+                for file in files:  # _put creates no section: a file without `server:` is untouched
+                    files[file] = _put(files[file], ["server", "bind_all"], False)
+        return files["config.yaml"], files["overrides.yaml"]
 
     def _layered_org_deny(self) -> list[str]:
         """`org.permissions.deny_patterns` unioned across all four config sources.
