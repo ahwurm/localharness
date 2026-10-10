@@ -687,6 +687,62 @@ def test_a_no_on_another_address_writes_false_and_remembers_it(g, monkeypatch):
     assert decide_machine_trust(g, ask=True, launching=True) == MachineTrust()
 
 
+def test_wr03_a_deferred_offer_keeps_its_source_when_it_is_finally_asked(g, monkeypatch):
+    """The converting start finds a server up (a pidfile): the offer is quiet and its note is never
+    shown. The next launching terminal start has `bind_all: true` already in overrides.yaml, converts
+    nothing, and used to ask without the source. It now rebuilds the same note from what the converting
+    start remembered."""
+    _with_extra_args(g, ["--host", "192.168.1.5"])
+    monkeypatch.setattr(server, "server_pid", lambda _d: 4321)
+    first = _sense_before_trust(g, can_ask=True, path_binary=None)
+    never_asked(monkeypatch)
+    quiet = decide_machine_trust(g, ask=True, launching=first.launching, annotations=first.annotations)
+    assert first.launching is False and quiet.quiet == frozenset({BIND_ALL})
+    ws_mod._DECLINED.clear()  # the next process, the server now down
+    monkeypatch.setattr(server, "server_pid", lambda _d: None)
+
+    later = _sense_before_trust(g, can_ask=True, path_binary=None)
+    asked = answers(monkeypatch, True)
+    decide_machine_trust(g, ask=True, launching=later.launching, annotations=later.annotations)
+
+    note = "(from server.extra_args --host 192.168.1.5, which 0.17 applied)"
+    assert later.launching is True and later.converted is None and later.undo_line is None
+    assert later.annotations == {BIND_ALL: note}
+    (line,) = [ln for ln in asked[0].splitlines() if "server.bind_all" in ln]
+    assert line.endswith(f" {note}")
+    assert _audit_bind_all(g) and len(_audit_bind_all(g)) == 1  # only the first start wrote
+
+
+def test_wr03_a_source_after_the_upgrade_start_stays_plain(g, monkeypatch):
+    _with_extra_args(g, ["--host", "192.168.1.5"], upgrade=False)
+    monkeypatch.setattr(server, "server_pid", lambda _d: 4321)
+    _sense_before_trust(g, can_ask=True, path_binary=None)
+    monkeypatch.setattr(server, "server_pid", lambda _d: None)
+
+    later = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert later.annotations == {BIND_ALL: "(from server.extra_args --host 192.168.1.5)"}
+
+
+def test_wr03_a_bind_all_true_nobody_converted_claims_no_source(g):
+    """The same `extra_args` and a `bind_all: true` the harness never converted (an agent or the
+    person wrote it): no remembered fact, so no note."""
+    _with_extra_args(g, ["--host", "192.168.1.5"])
+    write_yaml(g / "overrides.yaml", {"server": {"bind_all": True}})
+
+    assert _sense_before_trust(g, can_ask=True, path_binary=None).annotations == {}
+
+
+def test_wr03_a_remembered_source_dies_with_a_no_or_an_edited_extra_args(g, monkeypatch):
+    _with_extra_args(g, ["--host", "192.168.1.5"])
+    _sense_before_trust(g, can_ask=True, path_binary=None)  # converts and remembers
+    write_yaml(g / "overrides.yaml", {"server": {"bind_all": True,
+                                                   "extra_args": ["--host", "10.9.9.9"]}})
+    assert _sense_before_trust(g, can_ask=True, path_binary=None).annotations == {}  # uncovered edit
+    write_yaml(g / "overrides.yaml", {"server": {"bind_all": False}})
+    assert _sense_before_trust(g, can_ask=True, path_binary=None).annotations == {}  # after a No
+
+
 def test_another_address_after_the_upgrade_start_has_no_which_0_17_applied(g):
     _with_extra_args(g, ["--host", "192.168.1.5"], upgrade=False)
 
