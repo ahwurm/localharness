@@ -710,3 +710,57 @@ def test_an_empty_local_models_list_is_no_entry_and_the_upgrade_asks_nothing(g, 
 
     assert decide_machine_trust(g, ask=True) == MachineTrust()
     assert "server.local_models" not in _recorded_names(g)
+
+
+# ------------------------------------------------------------------ CR-02: every spelling the model reads as true
+
+
+TRUTHY = [True, 1, "1", "true", "True", "yes", "on"]
+
+
+@pytest.mark.parametrize("spelling", TRUTHY)
+def test_cr02_every_truthy_spelling_is_recorded_as_true(g, spelling):
+    _config(g, server={**LLAMACPP, "bind_all": spelling})
+    assert by_name(trust.machine_snapshot(g), "server.bind_all")["shown"] == "llamacpp:true:open"
+
+
+@pytest.mark.parametrize("spelling", [False, 0, "0", "false", "no", "off"])
+def test_cr02_every_falsy_spelling_is_recorded_as_false(g, spelling):
+    _config(g, server={**LLAMACPP, "bind_all": spelling})
+    assert by_name(trust.machine_snapshot(g), "server.bind_all")["shown"] == "llamacpp:false:open"
+
+
+@pytest.mark.parametrize("spelling", TRUTHY)
+def test_cr02_a_non_true_spelling_of_true_is_asked_at_the_upgrade_start_not_adopted(g, monkeypatch, spelling):
+    got, asked = _upgrade_asking(g, monkeypatch, False, server={**LLAMACPP, "bind_all": spelling})
+
+    assert len(asked) == 1 and "server.bind_all: true was never applied to llama.cpp" in asked[0]
+    # the No wrote `bind_all: false` and recorded that; the `true` was never recorded
+    assert by_name(trust.recorded_machine(g)["entries"], "server.bind_all")["shown"] == "llamacpp:false:open"
+    assert got.withheld == {"config.yaml": frozenset({("launch", "server.bind_all")})}  # narrowed this run
+
+
+@pytest.mark.parametrize("spelling", TRUTHY)
+def test_cr02_it_is_quiet_while_nothing_launches_like_the_literal_true(g, monkeypatch, spelling):
+    _config(g, server={**LLAMACPP, "bind_all": spelling})
+    _pre_upgrade(g)
+    never_asked(monkeypatch)
+
+    got = decide_machine_trust(g, ask=True, launching=False)
+
+    assert got.quiet == frozenset({BIND_ALL}) and got.line == ""
+    assert "server.bind_all" not in _recorded_names(g)
+
+
+@pytest.mark.parametrize("shown", ["llamacpp:true:open", 'llamacpp:"yes":open', "llamacpp:1:open",
+                                   "llamacpp:[]:open", "llamacpp::open"])
+def test_cr02_confirmed_at_upgrade_fails_closed_for_anything_but_a_llamacpp_false(shown):
+    entry = {"file": "config.yaml", "kind": "launch", "name": "server.bind_all", "shown": shown}
+    assert trust.confirmed_at_upgrade([entry]) == []
+    assert trust.confirmed_at_upgrade([{**entry, "shown": "llamacpp:false:open"}]) != []
+    assert trust.confirmed_at_upgrade([{**entry, "shown": shown.replace("llamacpp", "vllm", 1)}]) != []
+
+
+def test_cr02_a_truthy_require_api_key_spelling_reads_keyed(g):
+    _config(g, server={**LLAMACPP, "require_api_key": "yes", "api_key_file": "/k"})
+    assert by_name(trust.machine_snapshot(g), "server.bind_all")["shown"] == "llamacpp:true:keyed"

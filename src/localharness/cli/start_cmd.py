@@ -437,7 +437,7 @@ def _sensed_launching(global_dir: Path, rec: dict | None) -> bool:
         return True
     cfg, over = _raw_settings(global_dir)
     merged = _merged_server(cfg, over)
-    if merged.get("runtime") != "llamacpp" or merged.get("bind_all") is not True:
+    if merged.get("runtime") != "llamacpp" or trust.coerce_bool(merged.get("bind_all")) is not True:
         return True
     posture = next((e for e in trust._posture_entries({"config.yaml": cfg, "overrides.yaml": over})
                     if e["name"] == "server.bind_all"), None)
