@@ -7,9 +7,12 @@ the record by construction.
 from __future__ import annotations
 
 import json
+import shutil
+
+import pytest
 
 from localharness.config import trust
-
+from tests.unit.launch_support import record_opens
 from tests.unit.trust_support import by_name, g, names, write_yaml  # noqa: F401 — g is a fixture
 
 SERVER = {"runtime": "llamacpp", "binary": "/x/llama-server", "model": "/m/a.gguf",
@@ -154,3 +157,225 @@ def test_the_snapshot_is_sorted_and_its_fingerprint_is_stable(g):
 
     assert first == second and trust.fingerprint(first) == trust.fingerprint(second)
     assert names(first) == sorted(names(first)), "sorted by (file, kind, name)"
+
+
+# ------------------------------------------------------------------ posture entries (D-03, D-04)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_key(monkeypatch):
+    for var in ("LLAMA_API_KEY", "VLLM_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _posture(snap: list[dict], key: str) -> list[dict]:
+    return [e for e in snap if e["name"] == f"server.{key}"]
+
+
+def test_a_posture_entry_is_emitted_once_from_the_merged_view(g):
+    write_yaml(g / "config.yaml", {"server": {"runtime": "llamacpp", "binary": "/x", "model": "/m",
+                                              "bind_all": True}})
+    write_yaml(g / "overrides.yaml", {"server": {"model": "/m2"}})
+
+    entry = by_name(trust.machine_snapshot(g), "server.bind_all")
+
+    assert entry == {"file": "config.yaml", "kind": "launch", "name": "server.bind_all",
+                     "shown": "llamacpp:true:open"}
+
+
+def test_the_file_whose_value_wins_owns_the_posture_entry(g):
+    write_yaml(g / "config.yaml", {"server": {"runtime": "llamacpp", "bind_all": True}})
+    write_yaml(g / "overrides.yaml", {"server": {"bind_all": False}})
+
+    entry = by_name(trust.machine_snapshot(g), "server.bind_all")
+
+    assert entry["file"] == "overrides.yaml" and entry["shown"] == "llamacpp:false:open"
+
+
+def test_the_merged_runtime_is_the_one_shown(g):
+    write_yaml(g / "config.yaml", {"server": {"runtime": "llamacpp", "bind_all": True}})
+    write_yaml(g / "overrides.yaml", {"server": {"runtime": "vllm"}})
+
+    entry = by_name(trust.machine_snapshot(g), "server.bind_all")
+
+    assert entry["file"] == "config.yaml" and entry["shown"] == "vllm:true:open"
+
+
+def test_the_runtime_defaults_to_vllm(g):
+    write_yaml(g / "config.yaml", {"server": {"bind_all": True}})
+
+    assert by_name(trust.machine_snapshot(g), "server.bind_all")["shown"] == "vllm:true:open"
+
+
+@pytest.mark.parametrize("runtime", ["ollama", "lmstudio"])
+def test_an_ollama_or_lmstudio_bind_all_is_no_posture_entry(g, runtime):
+    write_yaml(g / "config.yaml", {"server": {"runtime": runtime, "binary": "/x", "bind_all": True,
+                                              "require_api_key": True}})
+
+    got = [e["name"] for e in trust.machine_snapshot(g)]
+
+    assert got == ["server.binary", "server.runtime"]
+
+
+def test_require_api_key_is_its_own_posture_entry_with_the_same_state(g):
+    write_yaml(g / "config.yaml", {"server": {"runtime": "vllm", "bind_all": True,
+                                              "require_api_key": True, "api_key_file": "/k"}})
+
+    snap = trust.machine_snapshot(g)
+
+    assert by_name(snap, "server.require_api_key")["shown"] == "vllm:true:keyed"
+    assert by_name(snap, "server.bind_all")["shown"] == "vllm:true:keyed"
+    assert by_name(snap, "server.api_key_file")["shown"] == "/k"
+
+
+def test_a_provider_key_in_either_file_makes_it_keyed(g):
+    write_yaml(g / "config.yaml", {"server": {"runtime": "llamacpp", "require_api_key": True}})
+    write_yaml(g / "overrides.yaml", {"provider": {"api_key": "abc"}})
+
+    assert by_name(trust.machine_snapshot(g), "server.require_api_key")["shown"] == "llamacpp:true:keyed"
+
+    write_yaml(g / "overrides.yaml", {})
+    write_yaml(g / "config.yaml", {"provider": {"api_key": "abc"},
+                                   "server": {"runtime": "llamacpp", "require_api_key": True}})
+
+    assert by_name(trust.machine_snapshot(g), "server.require_api_key")["shown"] == "llamacpp:true:keyed"
+
+
+def test_a_provider_key_of_none_is_open(g):
+    write_yaml(g / "config.yaml", {"provider": {"api_key": "none"},
+                                   "server": {"runtime": "llamacpp", "require_api_key": True}})
+
+    assert by_name(trust.machine_snapshot(g), "server.require_api_key")["shown"] == "llamacpp:true:open"
+
+
+def test_the_runtimes_key_variable_in_the_environment_makes_it_keyed(g, monkeypatch):
+    write_yaml(g / "config.yaml", {"server": {"runtime": "llamacpp", "require_api_key": True}})
+
+    monkeypatch.setenv("LLAMA_API_KEY", "k")
+    assert by_name(trust.machine_snapshot(g), "server.require_api_key")["shown"] == "llamacpp:true:keyed"
+
+    monkeypatch.delenv("LLAMA_API_KEY")
+    assert by_name(trust.machine_snapshot(g), "server.require_api_key")["shown"] == "llamacpp:true:open"
+
+
+def test_a_key_source_without_require_api_key_is_still_open(g):
+    write_yaml(g / "config.yaml", {"server": {"runtime": "llamacpp", "bind_all": True,
+                                              "require_api_key": False, "api_key_file": "/k"},
+                                   "provider": {"api_key": "abc"}})
+
+    assert by_name(trust.machine_snapshot(g), "server.bind_all")["shown"] == "llamacpp:true:open"
+
+
+def test_the_snapshot_never_opens_a_key_file(g, tmp_path):
+    key = tmp_path / "key"
+    key.write_text("topsecret", encoding="utf-8")
+    write_yaml(g / "config.yaml", {"server": {"runtime": "llamacpp", "bind_all": True,
+                                              "require_api_key": True, "api_key_file": str(key)}})
+
+    with record_opens() as opened:
+        snap = trust.machine_snapshot(g)
+
+    assert str(key) not in opened
+    assert by_name(snap, "server.bind_all")["shown"] == "llamacpp:true:keyed"
+    assert "topsecret" not in json.dumps(snap)
+
+
+def _lifecycle_peer(name="p", api_key=None, **lifecycle) -> dict:
+    peer = {"name": name, "base_url": "http://127.0.0.1:8081/v1", "gpu": True,
+            "lifecycle": {"runtime": "vllm", **lifecycle}}
+    if api_key is not None:
+        peer["api_key"] = api_key
+    return peer
+
+
+def test_a_peers_posture_comes_from_the_list_that_wins(g):
+    write_yaml(g / "config.yaml", {"extra_endpoints": [_lifecycle_peer(bind_all=False)]})
+    write_yaml(g / "overrides.yaml", {"extra_endpoints": [
+        _lifecycle_peer(api_key="k", bind_all=True, require_api_key=True)]})
+
+    snap = trust.machine_snapshot(g)
+
+    entry = by_name(snap, "extra_endpoints.p.lifecycle.bind_all")
+    assert entry == {"file": "overrides.yaml", "kind": "launch",
+                     "name": "extra_endpoints.p.lifecycle.bind_all", "shown": "vllm:true:keyed"}
+    assert "k" not in entry["shown"].split(":")
+
+
+def test_a_peers_posture_falls_back_to_the_config_list(g):
+    write_yaml(g / "config.yaml", {"extra_endpoints": [_lifecycle_peer(bind_all=True)]})
+    write_yaml(g / "overrides.yaml", {"server": {"runtime": "ollama"}})
+
+    entry = by_name(trust.machine_snapshot(g), "extra_endpoints.p.lifecycle.bind_all")
+
+    assert entry["file"] == "config.yaml" and entry["shown"] == "vllm:true:open"
+
+
+def test_a_peer_with_the_default_key_and_no_key_file_is_open(g):
+    write_yaml(g / "overrides.yaml", {"extra_endpoints": [
+        _lifecycle_peer(api_key="none", bind_all=True, require_api_key=True)]})
+
+    assert by_name(trust.machine_snapshot(g),
+                   "extra_endpoints.p.lifecycle.bind_all")["shown"] == "vllm:true:open"
+
+
+def test_a_peer_does_not_borrow_the_primarys_provider_key(g):
+    write_yaml(g / "config.yaml", {"provider": {"api_key": "abc"}})
+    write_yaml(g / "overrides.yaml", {"extra_endpoints": [
+        _lifecycle_peer(bind_all=True, require_api_key=True)]})
+
+    assert by_name(trust.machine_snapshot(g),
+                   "extra_endpoints.p.lifecycle.bind_all")["shown"] == "vllm:true:open"
+
+
+def test_a_peer_with_a_key_file_is_keyed(g):
+    write_yaml(g / "overrides.yaml", {"extra_endpoints": [
+        _lifecycle_peer(bind_all=True, require_api_key=True, api_key_file="/k")]})
+
+    assert by_name(trust.machine_snapshot(g),
+                   "extra_endpoints.p.lifecycle.bind_all")["shown"] == "vllm:true:keyed"
+
+
+def test_an_ollama_peer_emits_no_posture_entry(g):
+    write_yaml(g / "overrides.yaml", {"extra_endpoints": [
+        _lifecycle_peer(runtime="ollama", bind_all=True)]})
+
+    assert [e["name"] for e in trust.machine_snapshot(g)] == [
+        "extra_endpoints.p.lifecycle.runtime"]
+
+
+# ------------------------------------------------------------------ confirmed_at_upgrade (D-05)
+
+
+def _entry(name: str, shown: str = "x", kind: str = "launch") -> dict:
+    return {"file": "config.yaml", "kind": kind, "name": name, "shown": shown}
+
+
+def test_confirmed_at_upgrade_selects_exactly_the_governing_launch_entries():
+    snap = [
+        _entry("server.runtime", "vllm"), _entry("server.launch", "docker"),
+        _entry("server.bind_all", "vllm:true:keyed"), _entry("server.require_api_key", "vllm:true:keyed"),
+        _entry("server.local_models", "[]"), _entry("server.binary", "/b"),
+        _entry("server.model", "/m", kind="launch_model"),
+        _entry("extra_endpoints.p.lifecycle.runtime", "llamacpp"),
+        _entry("extra_endpoints.p.lifecycle.bind_all", "llamacpp:true:open"),
+        _entry("server.env", "{}"), {"file": "x", "kind": "mcp_server", "name": "runtime", "shown": "r"},
+    ]
+
+    got = [e["name"] for e in trust.confirmed_at_upgrade(snap)]
+
+    assert got == ["server.runtime", "server.launch", "server.bind_all", "server.require_api_key",
+                   "server.local_models", "extra_endpoints.p.lifecycle.runtime"]
+
+
+def test_a_llamacpp_bind_all_false_is_still_confirmed():
+    got = trust.confirmed_at_upgrade([_entry("server.bind_all", "llamacpp:false:open")])
+
+    assert [e["name"] for e in got] == ["server.bind_all"]
+
+
+def test_confirmed_at_upgrade_is_pure_and_reads_no_disk(g):
+    snap = [_entry("server.runtime", "vllm"), _entry("server.bind_all", "vllm:true:open")]
+    shutil.rmtree(g)
+
+    assert trust.confirmed_at_upgrade(snap) == trust.confirmed_at_upgrade(snap) == snap
+    assert not g.exists()
