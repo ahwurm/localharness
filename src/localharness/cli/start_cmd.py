@@ -21,8 +21,15 @@ from rich.table import Table
 from rich.text import Text
 
 from localharness.cli.theme import entity, entity_text
-from localharness.cli.workspace import (NO_INPUT_HELP, MachineTrust, _key_file_port, _raw_settings,
-                                        _uncovered, _visible, _write_overlay_validated)
+from localharness.cli.workspace import (
+    NO_INPUT_HELP,
+    MachineTrust,
+    primary_server_port,
+    raw_settings,
+    uncovered,
+    visible_text,
+    write_overlay_validated,
+)
 from localharness.config.effort import EFFORT_UNENFORCED_LINE
 from localharness.core.private_files import touch_private
 from localharness.core.which import which_outside_cwd
@@ -248,8 +255,8 @@ def _read_session_key(harness: Any) -> str | None:
 
     def refused(reason: object) -> str:
         mark_key_file(spec, True)
-        # the path comes from a settings file: shown through _visible like every file-supplied value
-        head = f"server.api_key_file {_visible(path)}: {_visible(reason)} — "
+        # the path comes from a settings file: shown through visible_text like every file-supplied value
+        head = f"server.api_key_file {visible_text(path)}: {visible_text(reason)} — "
         if key_kwargs(harness.provider.api_key):
             return head + "the file is not used; this session keeps sending the key it already holds"
         return head + "this session sends no key"
@@ -340,18 +347,18 @@ def _write_path_binary(global_dir: Path, rec: dict | None, path_binary: str | No
 
     if not path_binary or rec is None:
         return None
-    cfg, over = _raw_settings(global_dir)
+    cfg, over = raw_settings(global_dir)
     merged = _merged_server(cfg, over)
     if merged.get("runtime") != "llamacpp" or merged.get("binary"):
         return None
     if trust.offer_was_declined(trust.decline_key("<binary>", path_binary)):
         return None
-    if not _write_overlay_validated(
+    if not write_overlay_validated(
             global_dir, lambda d: set_value_in_dict(d, "server.binary", path_binary),
             [("server.binary", None, path_binary)],
             actor_detail="localharness start: llama-server found on PATH, written before the machine question"):
         return None
-    err_console.print(PATH_BINARY_LINE.format(path=_visible(path_binary)), markup=False, soft_wrap=True)
+    err_console.print(PATH_BINARY_LINE.format(path=visible_text(path_binary)), markup=False, soft_wrap=True)
     return path_binary
 
 
@@ -364,7 +371,7 @@ def _after_no_remove_path_binary(global_dir: Path, path: str) -> None:
     the line (WR-02): an earlier start may have written it, and the question returns until answered."""
     from localharness.config import trust
 
-    _, over = _raw_settings(global_dir)
+    _, over = raw_settings(global_dir)
     rec = trust.recorded_machine(global_dir)
     recorded = rec is not None and any(
         e.get("file") == "overrides.yaml" and e.get("name") == "server.binary" for e in rec["entries"])
@@ -376,7 +383,7 @@ def _after_no_remove_path_binary(global_dir: Path, path: str) -> None:
                 if not section:
                     del overlay["server"]
 
-        _write_overlay_validated(
+        write_overlay_validated(
             global_dir, mutate, [("server.binary", path, None)],
             actor_detail="localharness start: a No on the PATH-found llama-server, line removed")
     trust.record_offer_decline(trust.decline_key("<binary>", path))
@@ -396,7 +403,7 @@ def _adopt_written_bind_all(global_dir: Path) -> None:
     """Adopt `server.bind_all: true` from a read of the files just written, nothing else on disk."""
     from localharness.config import trust
 
-    cfg, over = _raw_settings(global_dir)
+    cfg, over = raw_settings(global_dir)
     now = next((e for e in trust._posture_entries({"config.yaml": cfg, "overrides.yaml": over})
                 if e["name"] == "server.bind_all"), None)
     if now is not None and now["shown"].split(":")[1] == "true":
@@ -420,7 +427,7 @@ def _convert_extra_args_host(global_dir: Path, rec: dict | None, *, can_ask: boo
     from localharness.provider import server as managed_server
     from localharness.registry import set_value_in_dict
 
-    cfg, over = _raw_settings(global_dir)
+    cfg, over = raw_settings(global_dir)
     merged = _merged_server(cfg, over)
     runtime = merged.get("runtime", "vllm")
     if not (runtime == "llamacpp" or (runtime == "vllm" and merged.get("launch", "binary") == "binary")):
@@ -436,8 +443,8 @@ def _convert_extra_args_host(global_dir: Path, rec: dict | None, *, can_ask: boo
         return _remembered_source(over, rec, winner_file, extra_args, host, kind), None, None
     if kind == "loopback":
         return {}, None, None
-    undo = HOST_UNDO_LINE.format(host=_visible(host))
-    if rec is None or kind != "address" or _uncovered(
+    undo = HOST_UNDO_LINE.format(host=visible_text(host))
+    if rec is None or kind != "address" or uncovered(
             rec["entries"], trust._launch_entries(winner_file, "server.", {"extra_args": extra_args})):
         return {}, None, undo
     upgrade = trust.LAUNCH_MODEL_KIND not in rec["kinds"]
@@ -446,10 +453,10 @@ def _convert_extra_args_host(global_dir: Path, rec: dict | None, *, can_ask: boo
         return {}, None, undo
     if not every_interface and not can_ask:  # another address is offered only where it can be asked
         return {}, None, undo
-    if not _write_overlay_validated(
+    if not write_overlay_validated(
             global_dir, lambda d: set_value_in_dict(d, "server.bind_all", True),
             [("server.bind_all", None, True)],
-            actor_detail=f"localharness start: server.extra_args --host {_visible(host)} converted to "
+            actor_detail=f"localharness start: server.extra_args --host {visible_text(host)} converted to "
                          "server.bind_all: true"):
         return {}, None, undo
     if every_interface:
@@ -474,7 +481,7 @@ def _remembered_source(over: dict, rec: dict | None, winner_file: str, extra_arg
 
     if (rec is None or host is None or kind != "address"
             or trust.coerce_bool(_server_section(over).get("bind_all")) is not True
-            or _uncovered(rec["entries"], trust._launch_entries(winner_file, "server.", {"extra_args": extra_args}))):
+            or uncovered(rec["entries"], trust._launch_entries(winner_file, "server.", {"extra_args": extra_args}))):
         return {}
     for state in ("upgrade", "later"):
         if trust.offer_was_declined(trust.decline_key(HOST_SOURCE_KEY, host, state)):
@@ -499,15 +506,15 @@ def _sensed_launching(global_dir: Path, rec: dict | None) -> bool:
         pass
     if rec is None:
         return True
-    cfg, over = _raw_settings(global_dir)
+    cfg, over = raw_settings(global_dir)
     merged = _merged_server(cfg, over)
     if merged.get("runtime") != "llamacpp" or trust.coerce_bool(merged.get("bind_all")) is not True:
         return True
     posture = next((e for e in trust._posture_entries({"config.yaml": cfg, "overrides.yaml": over})
                     if e["name"] == "server.bind_all"), None)
-    if posture is None or posture["kind"] not in rec["kinds"] or not _uncovered(rec["entries"], [posture]):
+    if posture is None or posture["kind"] not in rec["kinds"] or not uncovered(rec["entries"], [posture]):
         return True
-    port = _key_file_port(global_dir, "server.bind_all")
+    port = primary_server_port(global_dir)
     try:
         with contextlib.closing(socket.create_connection(("127.0.0.1", port), timeout=PROBE_TIMEOUT_SECONDS)):
             return False
@@ -518,7 +525,7 @@ def _sensed_launching(global_dir: Path, rec: dict | None) -> bool:
 def _sense_before_trust(global_dir: Path, *, can_ask: bool, path_binary: str | None) -> SensedStart:
     """Everything `start` senses, and the pre-question writes it makes, before `decide_machine_trust`:
     the PATH-found binary (D-20), the 0.17 `--host` conversion (D-16) and whether this start is about
-    to launch (D-08). Every overlay write goes through `workspace._write_overlay_validated`."""
+    to launch (D-08). Every overlay write goes through `workspace.write_overlay_validated`."""
     from localharness.config import trust
 
     rec = trust.recorded_machine(global_dir)

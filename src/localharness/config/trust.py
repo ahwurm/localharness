@@ -699,7 +699,7 @@ def confirmed_at_upgrade(snap: list[dict]) -> list[dict]:
     fails closed: only `llamacpp:false:` is confirmed.
 
     A pure filter over the snapshot the caller already holds: no second snapshot function, no disk
-    read. Entries are compared whole afterwards (`_uncovered`)."""
+    read. Entries are compared whole afterwards (`uncovered`)."""
     governing = ("runtime", "launch", "bind_all", "require_api_key", "local_models")
     return [e for e in snap
             if e.get("kind") == LAUNCH_KIND and str(e.get("name", "")).rsplit(".", 1)[-1] in governing

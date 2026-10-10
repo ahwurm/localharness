@@ -532,7 +532,7 @@ def test_an_emit_that_fails_never_undoes_the_write(g, monkeypatch):
 async def test_the_audit_line_is_written_from_inside_a_running_loop(g):
     _config(g, server=LLAMACPP)
 
-    ok = ws_mod._write_overlay_validated(
+    ok = ws_mod.write_overlay_validated(
         g, lambda overlay: overlay.setdefault("server", {}).update(bind_all=False),
         [("server.bind_all", None, False)], actor_detail="test")
 
@@ -636,7 +636,7 @@ def test_the_overrides_port_wins_in_the_suffix(g):
     _config(g, server=KEYED)
     write_yaml(g / "overrides.yaml", {"server": {"port": 9191}})
 
-    assert ws_mod._key_file_port(g, "server.api_key_file") == 9191
+    assert ws_mod.launch_port(g, "server.api_key_file") == 9191
 
 
 def test_a_peer_key_file_is_the_same_exception_with_its_own_port(g, monkeypatch):
@@ -826,3 +826,20 @@ def test_wr07_a_peer_no_in_an_existing_override_list_says_nothing(g, monkeypatch
     decide_machine_trust(g, ask=True, launching=True)
 
     assert said == []
+
+
+def test_in02_the_helpers_start_uses_are_public_names_of_workspace():
+    import localharness.cli.start_cmd as start_cmd
+    for name in ("raw_settings", "uncovered", "visible_text", "write_overlay_validated",
+                 "launch_port", "primary_server_port"):
+        assert callable(getattr(ws_mod, name)), name
+    source = open(start_cmd.__file__, encoding="utf-8").read()
+    imported = source[source.index("from localharness.cli.workspace import ("):].split(")", 1)[0]
+    assert not [n for n in imported.replace(",", " ").split() if n.startswith("_")]
+
+
+def test_in02_the_primary_port_is_the_merged_server_port(g):
+    _config(g, server=KEYED)
+    assert ws_mod.primary_server_port(g) == 8080
+    write_yaml(g / "overrides.yaml", {"server": {"port": 9191}})
+    assert ws_mod.primary_server_port(g) == 9191
