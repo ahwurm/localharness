@@ -114,8 +114,29 @@ def test_an_entry_with_none_of_the_fields_is_unknown(monkeypatch, ptype):
 
 
 def test_a_model_the_endpoint_does_not_serve_is_unknown(monkeypatch):
-    _serve(monkeypatch, {"http://h:8000/v1/models": {"data": [{"id": "x", "max_model_len": 8192}]}})
+    _serve(monkeypatch, {"http://h:8000/v1/models": {"data": [
+        {"id": "x", "max_model_len": 8192}, {"id": "y", "max_model_len": 4096}]}})
     assert probe_window("http://h:8000/v1", "absent", "vllm") == WindowProbe(None, None)
+
+
+@pytest.mark.parametrize("ptype", ["vllm", "unknown", None])
+def test_a_single_entry_that_does_not_match_the_id_is_still_the_window(monkeypatch, ptype):
+    """WR-07: doctor's old derivation matched `id == model or len(entries) == 1`; a single-model server
+    whose id is an alias or a path keeps reporting its window, as the llama.cpp branch does."""
+    _serve(monkeypatch, {"http://h:8000/v1/models": {"data": [{"id": "/models/x.gguf", "max_model_len": 8192}]}})
+    assert probe_window("http://h:8000/v1", "alias", ptype) == WindowProbe(8192, 8192)
+
+
+def test_a_single_non_matching_entry_keeps_the_meta_fallback(monkeypatch):
+    _serve(monkeypatch, {"http://h:8080/v1/models": {"data": [
+        {"id": "path-style-id", "meta": {"n_ctx": 65536, "n_ctx_train": 262144}}]}})
+    assert probe_window("http://h:8080/v1", "alias", "unknown") == WindowProbe(65536, 262144)
+
+
+def test_two_entries_none_matching_stay_unknown_for_the_generic_branch(monkeypatch):
+    _serve(monkeypatch, {"http://h:8000/v1/models": {"data": [
+        {"id": "a", "max_model_len": 1000}, {"id": "b", "max_model_len": 2000}]}})
+    assert probe_window("http://h:8000/v1", "c", None) == WindowProbe(None, None)
 
 
 def test_hostile_numbers_become_none(monkeypatch):

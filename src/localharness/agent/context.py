@@ -1140,13 +1140,17 @@ def probe_window(
         return WindowProbe(served, _gguf_trained(model, ptype))
     try:
         data = httpx.get(f"{root}/models", timeout=3.0, **hk).json()
-        for m in (data.get("data") or []):
-            if m.get("id") == model:
-                val = m.get("max_model_len") or m.get("context_length")
-                if val:
-                    return WindowProbe(_int(val), _int(val))
-                meta = m.get("meta") or {}  # D-39: a llama-server behind a non-llamacpp provider_type
-                return WindowProbe(_int(meta.get("n_ctx")), _int(meta.get("n_ctx_train")))
+        items = [e for e in (data.get("data") or []) if isinstance(e, dict)]
+        # The id-matched entry, else the only one: a single-model server (vLLM, a llama-server behind
+        # the wrong provider_type) whose id is an alias or a path still reports its window, as the
+        # llama.cpp branch and doctor's old derivation both did (D-02, WR-07).
+        m = next((e for e in items if e.get("id") == model), items[0] if len(items) == 1 else None)
+        if m is not None:
+            val = m.get("max_model_len") or m.get("context_length")
+            if val:
+                return WindowProbe(_int(val), _int(val))
+            meta = m.get("meta") or {}  # D-39: a llama-server behind a non-llamacpp provider_type
+            return WindowProbe(_int(meta.get("n_ctx")), _int(meta.get("n_ctx_train")))
     except Exception:
         return WindowProbe(None, None)
     return WindowProbe(None, None)
