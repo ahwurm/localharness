@@ -8,6 +8,7 @@ another account owns is left as it is and the call raises nothing — tightening
 stop the harness from working (orchestrator ruling R16); doctor reports what is still open."""
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -16,6 +17,31 @@ from typing import Optional
 PRIVATE_FILE_MODE = 0o600
 PRIVATE_DIR_MODE = 0o700
 OPEN_TO_OTHERS = 0o077  # any permission bit for the group or for other accounts
+
+
+class NotRegularFile(OSError):
+    """The path names something other than a regular file (a FIFO, a device, a directory)."""
+
+
+def open_regular(path: str | os.PathLike[str]) -> int:
+    """The one opener for a file the harness will READ and whose type it does not trust.
+
+    A plain `open()` on a FIFO blocks before any check can run, and a symlink to a device hands back
+    a stream with no end. `O_NONBLOCK` makes the open of a FIFO return at once (a regular file
+    ignores the flag, so reads stay ordinary), `O_NOCTTY` keeps a terminal device from becoming the
+    controlling terminal, and `fstat` on the descriptor — not a `stat` of the name, which could be
+    swapped between the check and the open — decides: anything but a regular file is closed and
+    refused with `NotRegularFile`. Callers wrap the returned descriptor with `os.fdopen(fd, "rb")`.
+    A missing or unreadable path raises its own OSError, left as it is."""
+    if os.name == "nt":  # no FIFOs, no controlling terminal: only the type check below applies
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    else:
+        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+    fd = os.open(path, flags)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise NotRegularFile(errno.EINVAL, "not a regular file", str(path))
+    return fd
 
 
 def private_opener(path: str, flags: int) -> int:
