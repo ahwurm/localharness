@@ -201,3 +201,124 @@ def test_a_symlink_to_a_device_is_refused(tmp_path):
 def test_a_directory_is_refused(tmp_path):
     with pytest.raises(NotRegularFile):
         read_header(tmp_path, FIT_KEYS)
+
+
+# ------------------------------------------------- budget, stop-early and error texts (Task 2)
+
+
+class _CountingFile:
+    """Wraps the file object read_header opens: records every read and seek and the furthest offset."""
+
+    def __init__(self, inner) -> None:
+        self._inner, self.reads, self.seeks, self.furthest = inner, 0, 0, 0
+
+    def __enter__(self):
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._inner.__exit__(*exc)
+
+    def read(self, n=-1):
+        self.reads += 1
+        data = self._inner.read(n)
+        self.furthest = max(self.furthest, self._inner.tell())
+        return data
+
+    def seek(self, offset, whence=0):
+        self.seeks += 1
+        pos = self._inner.seek(offset, whence)
+        self.furthest = max(self.furthest, pos)
+        return pos
+
+
+@pytest.fixture
+def counted(monkeypatch):
+    """The _CountingFile of each read_header call, in order."""
+    files: list[_CountingFile] = []
+    real = os.fdopen
+
+    def fdopen(fd, mode="r", *a, **kw):
+        files.append(_CountingFile(real(fd, mode, *a, **kw)))
+        return files[-1]
+
+    monkeypatch.setattr(os, "fdopen", fdopen)
+    return files
+
+
+def test_the_reader_stops_at_the_second_value_of_fifty_pairs(tmp_path, counted):
+    head = {"general.architecture": "qwen3", "qwen3.context_length": 262144}
+    rest = {f"pad.key_{i:02d}": i for i in range(48)}
+    full = write_gguf(tmp_path / "full.gguf", {**head, **rest})
+    assert read_header(full, {"context_length"}) == {"context_length": 262144}
+    assert counted[0].furthest == len(gguf_bytes(head))  # not one byte of the other 48 pairs
+    only_head = write_gguf(tmp_path / "head.gguf", head)
+    assert read_header(only_head, {"context_length"}) == {"context_length": 262144}
+    assert counted[0].reads == counted[1].reads  # the same reads as a file that ends after the 2nd pair
+
+
+def test_an_unwanted_numeric_array_is_skipped_with_one_seek(tmp_path, counted):
+    kv = {"general.architecture": "qwen3", "qwen3.rope.dimension_sections": [1, 2, 3, 4],
+          "qwen3.block_count": 48}
+    assert read_header(write_gguf(tmp_path / "m.gguf", kv), {"block_count"}) == {"block_count": 48}
+    assert counted[0].seeks == 1
+
+
+def test_an_unwanted_numeric_array_is_charged_to_the_budget(tmp_path, monkeypatch):
+    big = Raw(9, struct.pack("<I", 4) + struct.pack("<Q", 1_000_000))
+    path = write_gguf(tmp_path / "m.gguf", {"general.architecture": "qwen3", "tokenizer.ggml.token_type": big})
+    monkeypatch.setattr(gguf_header, "HEADER_BYTE_BUDGET", 3_000_000)  # the 4,000,000 bytes skipped exceed it
+    with pytest.raises(GgufHeaderError) as raised:
+        read_header(path, {"block_count"})
+    assert str(raised.value) == "header exceeds byte budget"
+
+
+def test_the_same_array_within_the_budget_is_skipped_unread(tmp_path, counted):
+    big = Raw(9, struct.pack("<I", 4) + struct.pack("<Q", 1_000_000))
+    path = write_gguf(tmp_path / "m.gguf", {"general.architecture": "qwen3", "x.token_type": big})
+    assert read_header(path, {"block_count"}) == {}  # a truncated array body is not read, so not noticed
+    assert counted[0].seeks == 1
+
+
+def test_a_wanted_string_array_comes_back_as_a_list(tmp_path):
+    kv = {"general.architecture": "qwen3", "qwen3.layer_names": ["a", "bb", "Qwén"]}
+    assert read_header(write_gguf(tmp_path / "m.gguf", kv), {"layer_names"}) == {
+        "layer_names": ["a", "bb", "Qwén"]}
+
+
+def _expect(tmp_path, data: bytes, message: str, want=("block_count",)) -> None:
+    path = tmp_path / "bad.gguf"
+    path.write_bytes(data)
+    with pytest.raises(GgufHeaderError) as raised:
+        read_header(path, set(want))
+    assert str(raised.value) == message
+
+
+def test_the_error_texts_are_exact(tmp_path):
+    _expect(tmp_path, gguf_bytes(QWEN, magic=b"GGUX"), "bad magic")
+    _expect(tmp_path, gguf_bytes(QWEN, version=1), "unsupported GGUF version 1")
+    _expect(tmp_path, gguf_bytes(QWEN, version=4), "unsupported GGUF version 4")
+    _expect(tmp_path, gguf_bytes({}, n_kv=4097), "too many KV pairs")
+    _expect(tmp_path, gguf_bytes({"general.architecture": Raw(8, struct.pack("<Q", (1 << 20) + 1))}),
+            "string too long")
+    _expect(tmp_path, gguf_bytes({"general.architecture": "qwen3", "k.block_count": _string_array_header(2_000_000)}),
+            "array too large")
+    _expect(tmp_path, gguf_bytes(QWEN)[:-7], "truncated", want=FIT_KEYS)
+    _expect(tmp_path, gguf_bytes({"general.architecture": Raw(99, b"")}), "unknown value type")
+
+
+def test_an_array_of_an_unknown_element_type_is_refused(tmp_path):
+    bad = Raw(9, struct.pack("<I", 9) + struct.pack("<Q", 1))  # an array of arrays
+    _expect(tmp_path, gguf_bytes({"general.architecture": "qwen3", "qwen3.block_count": bad}),
+            "unknown value type")
+
+
+def test_a_string_key_past_the_cap_is_refused(tmp_path):
+    data = gguf_bytes({}, n_kv=1) + struct.pack("<Q", (1 << 20) + 1)
+    _expect(tmp_path, data, "string too long")
+
+
+def test_a_key_under_neither_general_nor_the_architecture_is_ignored(tmp_path):
+    kv = {"other.block_count": 99, "general.architecture": "qwen3", "qwen3.block_count": 48,
+          "qwen3.other.block_count": 7}
+    assert read_header(write_gguf(tmp_path / "m.gguf", kv), {"block_count"}) == {"block_count": 48}
