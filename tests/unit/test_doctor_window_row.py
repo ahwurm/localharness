@@ -319,3 +319,66 @@ def test_doctor_twice_prints_the_row_twice_and_leaves_no_ledger(tmp_path, mock_h
         second = _doctor(tmp_path)
     assert _row(first.output) == _row(second.output) == ("65,536", "262,144", "90,112")
     assert not ledger.exists()
+
+
+# --- more edges: what makes the fit "not computed" without making doctor fail --------------------
+
+
+def test_a_directory_as_the_model_path_is_not_computed(tmp_path, mock_httpx):
+    folder = tmp_path / "model.gguf"
+    folder.mkdir()
+    _config(tmp_path, server=_llamacpp_server(folder))
+    with _probe(65536, 262144), _memory():
+        result = _doctor(tmp_path)
+    assert _row(result.output) == ("65,536", "262,144", "—")
+
+
+def test_a_partial_offload_is_not_computed(tmp_path, mock_httpx):
+    _config(tmp_path, server=_llamacpp_server(
+        _gguf_a(tmp_path), extra="  extra_args:\n    - -ngl\n    - '20'\n"))
+    with _probe(65536, 262144), _memory():
+        result = _doctor(tmp_path)
+    assert _row(result.output) == ("65,536", "262,144", "—")
+
+
+def test_hand_placed_tensors_are_not_computed(tmp_path, mock_httpx):
+    _config(tmp_path, server=_llamacpp_server(
+        _gguf_a(tmp_path), extra="  extra_args:\n    - -ot\n    - 'exps=CPU'\n"))
+    with _probe(65536, 262144), _memory():
+        result = _doctor(tmp_path)
+    assert _row(result.output) == ("65,536", "262,144", "—")
+
+
+def test_a_header_without_its_head_dimension_is_not_computed(tmp_path, mock_httpx):
+    header = {k: v for k, v in HEADER_A.items() if not k.endswith("key_length")}
+    _config(tmp_path, server=_llamacpp_server(write_gguf(tmp_path / "b.gguf", header)))
+    with _probe(65536, 262144), _memory():
+        result = _doctor(tmp_path)
+    assert _row(result.output) == ("65,536", "262,144", "—")
+
+
+def test_unknown_free_memory_is_not_computed(tmp_path, mock_httpx):
+    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)))
+    with _probe(65536, 262144), patch("localharness.provider.autosense.free_memory", return_value=None):
+        result = _doctor(tmp_path)
+    assert _row(result.output) == ("65,536", "262,144", "—")
+
+
+def test_an_existing_ledger_is_left_byte_for_byte_and_mtime_for_mtime(tmp_path, mock_httpx):
+    ledger = default_speed_stats_path(tmp_path)
+    ledger.write_text('{"keep": "me"}\n', encoding="utf-8")
+    os.utime(ledger, (1_700_000_000, 1_700_000_000))
+    before = (ledger.read_bytes(), ledger.stat().st_mtime_ns)
+    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)))
+    with _probe(65536, 262144), _memory(6.0):
+        _doctor(tmp_path)
+        _doctor(tmp_path)
+    assert (ledger.read_bytes(), ledger.stat().st_mtime_ns) == before
+
+
+def test_the_row_comes_before_the_reconciliation_verdict(tmp_path, mock_httpx):
+    _config(tmp_path)
+    _write_orchestrator(tmp_path, 1_000)
+    with _probe(65536, 262144):
+        result = _doctor(tmp_path)
+    assert result.output.index("Window: served") < result.output.index("far BELOW")
