@@ -265,7 +265,7 @@ def test_a_change_that_does_not_validate_writes_nothing(tmp_path, monkeypatch):
     _detect(monkeypatch, "new-model")
     _terminal(monkeypatch)
     _answers(monkeypatch, False)
-    monkeypatch.setattr(init_cmd, "_served_window", lambda result: 4_000_000)
+    monkeypatch.setattr(init_cmd, "_served_window", lambda result, **_: 4_000_000)
     text = OLD_CONFIG
     cfg = _seed(tmp_path, text)
 

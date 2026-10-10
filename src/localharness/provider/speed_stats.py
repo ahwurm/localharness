@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from math import isfinite
 from pathlib import Path
 from statistics import median
+from typing import NamedTuple
 from uuid import uuid4
 
 from localharness.core.private_files import touch_private
@@ -99,6 +101,39 @@ def _load(path: Path) -> dict:
         return {}
 
 
+def _write(path: Path, data: dict) -> None:
+    """The ledger's one write recipe: a PER-WRITER tmp, then os.replace.
+
+    os.replace is atomic, but open+truncate+write into a name SHARED by every session is not —
+    concurrent harnesses either published a byte-mix (unreadable ledger, every model's history
+    dropped) or lost the race entirely (the other writer's replace already consumed the file →
+    FileNotFoundError). Unique name ⇒ genuine last-writer-wins."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}-{uuid4().hex[:8]}.tmp")
+    try:
+        touch_private(tmp)  # the replaced ledger keeps this one's mode
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)  # no-op after a successful replace; no litter on failure
+
+
+def _update_entry(path: Path, key: str, **fields) -> None:
+    """UPDATE one model's entry with `fields`, never replace it (AUTO-08).
+
+    A wholesale `data[key] = {...}` drops every other field on that entry — it silently ate the
+    `tokens_per_chunk` written microseconds earlier in the same _note_gen_speed call, so the ratio
+    never survived to seed the next session. Every writer of a model's entry goes through here."""
+    data = _load(path)
+    entry = data.get(key)
+    entry = entry if isinstance(entry, dict) else {}
+    entry.update(fields)
+    entry.setdefault("samples", [])
+    entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+    data[key] = entry
+    _write(path, data)
+
+
 def record_tps(path: Path, provider_type: str, model: str, tps: float) -> None:
     """Append one verified sample, keeping the newest SAMPLE_CAP per model.
 
@@ -116,22 +151,7 @@ def record_tps(path: Path, provider_type: str, model: str, tps: float) -> None:
     # UPDATE the entry, never replace it. A wholesale `data[key] = {...}` drops every other
     # field on that entry — it silently ate the `tokens_per_chunk` written microseconds earlier
     # in the same _note_gen_speed call, so the ratio never survived to seed the next session.
-    entry = entry if isinstance(entry, dict) else {}
-    entry["samples"] = samples
-    entry["updated_at"] = datetime.now(timezone.utc).isoformat()
-    data[key] = entry
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Per-writer temp name: os.replace is atomic, but open+truncate+write into a name SHARED by
-    # every session is not — concurrent harnesses either published a byte-mix (unreadable ledger,
-    # every model's history dropped) or lost the race entirely (the other writer's replace already
-    # consumed the file → FileNotFoundError). Unique name ⇒ genuine last-writer-wins.
-    tmp = path.with_name(f"{path.name}.{os.getpid()}-{uuid4().hex[:8]}.tmp")
-    try:
-        touch_private(tmp)  # the replaced ledger keeps this one's mode
-        tmp.write_text(json.dumps(data))
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)  # no-op after a successful replace; no litter on failure
+    _update_entry(path, key, samples=samples)
 
 
 def record_tokens_per_chunk(path: Path, provider_type: str, model: str, ratio: float) -> None:
@@ -146,21 +166,7 @@ def record_tokens_per_chunk(path: Path, provider_type: str, model: str, ratio: f
     """
     if not isfinite(ratio) or ratio < 1.0:
         return
-    data = _load(path)
-    key = speed_key(provider_type, model)
-    entry = data.get(key) if isinstance(data.get(key), dict) else {}
-    entry["tokens_per_chunk"] = round(float(ratio), 3)
-    entry.setdefault("samples", [])
-    entry["updated_at"] = datetime.now(timezone.utc).isoformat()
-    data[key] = entry
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}-{uuid4().hex[:8]}.tmp")
-    try:
-        touch_private(tmp)  # the replaced ledger keeps this one's mode
-        tmp.write_text(json.dumps(data))
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    _update_entry(path, speed_key(provider_type, model), tokens_per_chunk=round(float(ratio), 3))
 
 
 def tokens_per_chunk(path: Path, provider_type: str, model: str) -> float | None:
@@ -174,6 +180,41 @@ def tokens_per_chunk(path: Path, provider_type: str, model: str) -> float | None
         return None
     r = entry.get("tokens_per_chunk")
     return float(r) if isinstance(r, (int, float)) and isfinite(r) and r >= 1.0 else None
+
+
+class WindowRecord(NamedTuple):
+    """The last window the harness saw for one model: what was served, what it was trained for,
+    and what the fit settled on (each None when it was never known), and when it was recorded."""
+
+    served: int | None
+    trained: int | None
+    fits: int | None
+    recorded_at: str
+
+
+def record_window_report(
+    path: Path, provider_type: str, model: str,
+    served: int | None, trained: int | None, fits: int | None,
+) -> None:
+    """Record the window triple on this model's entry (idempotent: the same triple again only
+    moves `recorded_at`). `start` compares the next probe against it to print a change once."""
+    _update_entry(path, speed_key(provider_type, model), window_report={
+        "served": served, "trained": trained, "fits": fits,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def last_window_report(path: Path, provider_type: str, model: str) -> WindowRecord | None:
+    """The recorded window triple, or None when never recorded or hand-edited out of shape."""
+    entry = _load(path).get(speed_key(provider_type, model))
+    rep = entry.get("window_report") if isinstance(entry, dict) else None
+    if not isinstance(rep, dict):
+        return None
+    nums = [rep.get(k) for k in ("served", "trained", "fits")]
+    if any(n is not None and (isinstance(n, bool) or not isinstance(n, int)) for n in nums):
+        return None
+    at = rep.get("recorded_at")
+    return WindowRecord(nums[0], nums[1], nums[2], at) if isinstance(at, str) else None
 
 
 def median_tps(path: Path, provider_type: str, model: str) -> float | None:
