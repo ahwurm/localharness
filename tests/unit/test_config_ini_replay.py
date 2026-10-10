@@ -155,3 +155,121 @@ def test_no_config_ini_leaves_the_directory_with_none(tmp_path):
     server.prepare_config_ini_home(tmp_path, 8080, "a = 1\n")
     server.prepare_config_ini_home(tmp_path, 8080, None)
     assert not _ini(tmp_path).exists()
+
+
+# ------------------------------------------------------------------------------- planted components (T-5-37)
+
+
+def _elsewhere(tmp_path: Path) -> Path:
+    """A directory outside the harness's, holding a config.ini a planted link would redirect to."""
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "config.ini").write_text("tools = all")
+    return target
+
+
+def _gdir(tmp_path: Path) -> Path:
+    g = tmp_path / "g"
+    g.mkdir()
+    return g
+
+
+@pytest.mark.parametrize("component", ["xdg", "xdg/8080", "xdg/8080/llama.cpp"])
+def test_a_symlinked_component_is_replaced_and_its_target_left_alone(tmp_path, component):
+    g = _gdir(tmp_path)
+    target = _elsewhere(tmp_path)
+    planted = g / component
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.symlink_to(target, target_is_directory=True)
+    server.prepare_config_ini_home(g, 8080, "ctx-size = 8192\n")
+    assert (target / "config.ini").read_text() == "tools = all"
+    assert [p.name for p in target.iterdir()] == ["config.ini"]
+    assert not planted.is_symlink() and planted.is_dir() and _mode(planted) == 0o700
+    assert _ini(g).read_text() == "ctx-size = 8192\n"
+
+
+@pytest.mark.parametrize("component", ["xdg", "xdg/8080", "xdg/8080/llama.cpp"])
+def test_a_regular_file_in_the_place_of_a_component_is_replaced(tmp_path, component):
+    g = _gdir(tmp_path)
+    planted = g / component
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("not a directory")
+    server.prepare_config_ini_home(g, 8080, "ctx-size = 8192\n")
+    assert planted.is_dir() and not planted.is_symlink() and _mode(planted) == 0o700
+    assert _ini(g).read_text() == "ctx-size = 8192\n"
+
+
+def test_a_dangling_symlink_component_is_replaced(tmp_path):
+    g = _gdir(tmp_path)
+    (g / "xdg").symlink_to(tmp_path / "nowhere", target_is_directory=True)
+    server.prepare_config_ini_home(g, 8080, "a = 1\n")
+    assert (g / "xdg").is_dir() and not (g / "xdg").is_symlink() and not (tmp_path / "nowhere").exists()
+
+
+def test_a_directory_that_is_too_open_is_tightened(tmp_path):
+    g = _gdir(tmp_path)
+    server.prepare_config_ini_home(g, 8080, "a = 1\n")
+    for path in (g / "xdg", g / "xdg" / "8080", g / "xdg" / "8080" / "llama.cpp"):
+        os.chmod(path, 0o755)
+    server.prepare_config_ini_home(g, 8080, "a = 1\n")
+    for path in (g / "xdg", g / "xdg" / "8080", g / "xdg" / "8080" / "llama.cpp"):
+        assert _mode(path) == 0o700
+
+
+def test_a_symlinked_config_ini_is_replaced_by_a_rewrite_and_its_target_is_untouched(tmp_path):
+    g = _gdir(tmp_path)
+    secret = tmp_path / "secret"
+    secret.write_text("do not touch")
+    server.prepare_config_ini_home(g, 8080, "a = 1\n")
+    _ini(g).unlink()
+    _ini(g).symlink_to(secret)
+    server.prepare_config_ini_home(g, 8080, "ctx-size = 8192\n")
+    assert secret.read_text() == "do not touch"
+    assert not _ini(g).is_symlink() and _ini(g).read_text() == "ctx-size = 8192\n"
+
+
+def test_a_symlinked_config_ini_is_removed_when_the_record_has_none(tmp_path):
+    g = _gdir(tmp_path)
+    secret = tmp_path / "secret"
+    secret.write_text("do not touch")
+    server.prepare_config_ini_home(g, 8080, None)
+    _ini(g).symlink_to(secret)
+    server.prepare_config_ini_home(g, 8080, None)
+    assert secret.read_text() == "do not touch" and not os.path.lexists(_ini(g))
+
+
+def test_a_directory_named_config_ini_is_removed(tmp_path):
+    g = _gdir(tmp_path)
+    server.prepare_config_ini_home(g, 8080, None)
+    _ini(g).mkdir()
+    (_ini(g) / "inside").write_text("x")
+    server.prepare_config_ini_home(g, 8080, None)
+    assert not os.path.lexists(_ini(g))
+    _ini(g).mkdir()
+    server.prepare_config_ini_home(g, 8080, "a = 1\n")
+    assert _ini(g).is_file() and _ini(g).read_text() == "a = 1\n"
+
+
+def test_a_directory_named_config_ini_holding_a_link_is_removed_without_following_it(tmp_path):
+    g = _gdir(tmp_path)
+    target = _elsewhere(tmp_path)
+    server.prepare_config_ini_home(g, 8080, None)
+    _ini(g).mkdir()
+    (_ini(g) / "link").symlink_to(target, target_is_directory=True)
+    server.prepare_config_ini_home(g, 8080, None)
+    assert (target / "config.ini").read_text() == "tools = all"
+
+
+def test_a_failed_write_leaves_no_temporary_file_and_keeps_the_old_bytes(tmp_path, monkeypatch):
+    g = _gdir(tmp_path)
+    server.prepare_config_ini_home(g, 8080, "old = 1\n")
+
+    def refuse(src, dst):
+        raise OSError(28, "no space left")
+
+    monkeypatch.setattr(server.os, "replace", refuse)
+    with pytest.raises(OSError):
+        server.prepare_config_ini_home(g, 8080, "new = 2\n")
+    monkeypatch.undo()
+    assert [p.name for p in _ini(g).parent.iterdir()] == ["config.ini"]
+    assert _ini(g).read_text() == "old = 1\n"

@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import ipaddress
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -398,22 +399,57 @@ def config_ini_home(config_dir: Path, port: int) -> Path:
     return Path(config_dir) / "xdg" / str(port)
 
 
+def _own_directory(path: Path) -> None:
+    """Leave `path` a real directory, 0o700, that nothing planted can redirect.
+
+    A symlink or any non-directory in its place is unlinked (never followed) and the directory
+    created; an existing real directory is opened `O_NOFOLLOW | O_DIRECTORY` and `fchmod`-ed through
+    that descriptor, so the mode change cannot land on a link swapped in after the check."""
+    try:
+        planted = not stat.S_ISDIR(os.lstat(path).st_mode)
+        missing = False
+    except FileNotFoundError:
+        planted, missing = False, True
+    if planted:
+        os.unlink(path)
+        missing = True
+    if missing:
+        os.mkdir(path, 0o700)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_CLOEXEC", 0))
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+
+
 def prepare_config_ini_home(config_dir: Path, port: int, config_ini: str | None) -> Path:
     """Make `config_ini_home(config_dir, port)` hold exactly `config_ini` as `llama.cpp/config.ini`
     (or no file when `config_ini` is None) and return the home.
 
     llama-server reads `$XDG_CONFIG_HOME/llama.cpp/config.ini` before argv and env can say anything,
     so a relaunch must read only the bytes its record carries (the ones the trust snapshot
-    fingerprinted), never the person's own file and never one somebody planted. Directories are
-    0o700; the file goes through a temporary file in the same directory (0600) and `os.replace`."""
+    fingerprinted), never the person's own file and never one somebody planted. Every component
+    under `<config dir>/xdg` is `lstat`-ed: a symlink or non-directory is removed and recreated, a
+    real directory is tightened to 0o700, and nothing is opened through a path that was a link. The
+    file goes through a temporary file in the same directory (0600) and `os.replace`, which replaces
+    a planted link rather than writing through it; a planted directory named `config.ini` is removed
+    with `shutil.rmtree`, which does not follow links."""
     home = config_ini_home(config_dir, port)
     target_dir = home / "llama.cpp"
     for path in (home.parent, home, target_dir):
-        path.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(path, 0o700)
+        _own_directory(path)
     target = target_dir / "config.ini"
+    try:
+        is_dir = stat.S_ISDIR(os.lstat(target).st_mode)
+        present = True
+    except FileNotFoundError:
+        is_dir = present = False
+    if is_dir:
+        shutil.rmtree(target)
     if config_ini is None:
-        if os.path.lexists(target):
+        if present and not is_dir:
             os.unlink(target)
         return home
     fd, tmp = tempfile.mkstemp(dir=target_dir, prefix=".config.ini.")
