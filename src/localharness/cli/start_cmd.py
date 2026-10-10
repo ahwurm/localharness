@@ -1183,11 +1183,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     if launched_here or (changed and not _nothing_known):
         for line in window_lines(report, harness.autosense, undo):
             console.print(line, markup=False, soft_wrap=True)
-    try:
-        record_window_report(
-            _ledger, provider.provider_type, resolved_model, report.served, report.trained, report.fits)
-    except OSError:
-        pass  # the ledger is a convenience: a start never fails on it
+    # Recorded whether or not it printed (D-22) — but a report that knows nothing (a probe that flaked
+    # on a server still loading) must not replace a good baseline with Nones: the next healthy start
+    # would see a change and say the whole block again.
+    if not _nothing_known:
+        try:
+            record_window_report(
+                _ledger, provider.provider_type, resolved_model, report.served, report.trained, report.fits)
+        except OSError:
+            pass  # the ledger is a convenience: a start never fails on it
     # D-25: the names the launch scrubbed from the server's environment, said again only when the
     # list changed. Names only, never values.
     # Every launch this start made records its list, an empty one included: a launch that dropped

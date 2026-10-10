@@ -2039,6 +2039,8 @@ class OrchestratorREPL:
         ratios = getattr(self._harness, "autosense", None) or AutosenseConfig()
         for line in window_lines(report, ratios):
             await self._send_info(line)
+        if report.served is None and report.trained is None and report.fits is None:
+            return  # a launch that learned nothing must not overwrite a good recorded baseline with Nones
         try:
             record_window_report(default_speed_stats_path(self._config_dir), provider_type, model_id,
                                  report.served, report.trained, report.fits)
