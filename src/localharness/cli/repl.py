@@ -17,6 +17,7 @@ from rich.protocol import is_renderable
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.slash_commands import SlashCommand, find_row, help_text
+from localharness.config.effort import LEVELS, resolve_effort
 from localharness.core.content import ImageError, describe, fit_all, fit_to_tokens
 from localharness.core.events import (
     PENDING_APPROVED_NUDGE,
@@ -54,6 +55,18 @@ table rather than typed out, so a mode added there can never go missing here."""
 
 MODE_STATUS_TEMPLATE = "Permission mode: {mode}. Switch with /mode <name> — {settable}."
 MODE_CHANGED_TEMPLATE = "Permission mode: {mode} — {effect}."
+
+# /effort (spec 16 §7.1): every line a person reads is a constant, so tests pin the text by import.
+EFFORT_SET_TEMPLATE = "effort: {level} ({rung})"
+EFFORT_NONE_LINE = "effort: none (no effort keys are sent)"
+EFFORT_LIST_TEMPLATE = "effort: {levels} — /effort <level> sets it, /effort show names the rung"
+EFFORT_UNKNOWN_TEMPLATE = (
+    "Unknown effort '{arg}'. Levels: off, low, high, max — /effort show reports the current level."
+)
+EFFORT_AGENT_LINE = "  {name}: {level}"
+EFFORT_UNENFORCED_TEMPLATE = "effort unenforced on this server: {key} rejected"
+EFFORT_PERSIST_FAILED_TEMPLATE = "Effort set for this session, but persisting it failed: {exc}"
+EFFORT_PICKER_PROMPT = "Reasoning effort for this session (/effort). This question holds no tool call."
 
 NOTHING_PENDING = "Nothing pending."
 PENDING_HEADER = "{total} waiting on you — /approve N or /deny N:"
@@ -269,6 +282,15 @@ class OrchestratorREPL:
         # discovers anything itself; the answer arrives here as an argument.
         self._workspace = workspace
         self._harness = harness_config  # HarnessConfig — needed by /model to persist swaps
+        # /effort: the session rung of the ladder (None until the person picks one). The REPL sets the
+        # LOOP's level only — AgentConfig.effort is the agent file's own rung and is never written here.
+        self._session_effort: Optional[str] = None
+        # Rejected effort keys already said on the channel this session (D-29): a failed ledger write
+        # must not re-announce every turn. Cleared when the session moves to a different server.
+        self._announced_effort_keys: set[str] = set()
+        # The normalized base_url of the endpoint the ledger entry is being tracked for; None until a
+        # live client answers (a test double without one stays None).
+        self._effort_endpoint: Optional[str] = self._llm_base_url()
         # #58: called with the deployed agent's name after a successful in-session creation,
         # to register it into the LIVE session (card registry + AgentTool advertisement) so
         # /agents lists it and the model can delegate to it without a restart. None in tests
@@ -1157,6 +1179,110 @@ class OrchestratorREPL:
             metadata={"style": "system.info"},
         )
 
+    def _llm_base_url(self) -> Optional[str]:
+        """The normalized base_url of the agent's live client, or None when the agent has none (a
+        test double) or it is not a string."""
+        url = getattr(getattr(getattr(self._agent, "_llm", None), "config", None), "base_url", None)
+        return url.rstrip("/") if isinstance(url, str) else None
+
+    def _current_effort(self) -> Optional[str]:
+        """The level the loop is sending right now, or None when it sends none (or is a double)."""
+        level = getattr(self._agent, "effective_effort", None)
+        return level if level in LEVELS else None
+
+    def _resolve_effort_now(self, *, base_url: Optional[str] = None) -> Optional[tuple[str, str]]:
+        """`resolve_effort` over this session's inputs: the session rung, the agent FILE's rung (read,
+        never written), the harness, and `base_url` (the live client's when omitted). None when there
+        is no harness, agent or answerable level — a test double — so callers skip silently."""
+        agent = self._agent
+        if self._harness is None or agent is None:
+            return None
+        url = base_url if base_url is not None else self._llm_base_url()
+        if not isinstance(url, str):
+            return None
+        file_rung = getattr(getattr(agent, "_config", None), "effort", None)
+        level, rung = resolve_effort(
+            self._session_effort, file_rung if isinstance(file_rung, str) else None,
+            self._harness, url,
+        )
+        return (level, rung) if level in LEVELS else None
+
+    def _effort_show_lines(self) -> list[str]:
+        """`/effort show` (D-05): the loop's level and rung, each agent file that sets its own level,
+        and every effort key this server rejected, named verbatim."""
+        from localharness.cli import model_ops
+
+        level = getattr(self._agent, "effective_effort", None)
+        if level in LEVELS:
+            lines = [EFFORT_SET_TEMPLATE.format(
+                level=level, rung=getattr(self._agent, "effort_rung", None) or "default")]
+        else:
+            lines = [EFFORT_NONE_LINE]
+        for name, own in model_ops.agents_with_effort(self._config_dir, local_config_dir=self._workspace):
+            lines.append(EFFORT_AGENT_LINE.format(name=name, level=own))
+        rejected = getattr(getattr(self._agent, "_llm", None), "rejected_effort_keys", None) or ()
+        lines += [EFFORT_UNENFORCED_TEMPLATE.format(key=key) for key in sorted(rejected)]
+        return lines
+
+    async def _handle_effort_cmd(self, arg: str) -> None:
+        """`/effort [off|low|high|max|show]` — set or read the session's reasoning effort.
+
+        Never starts a model turn and never raises. Bare `/effort` opens a picker where one can be
+        drawn (the terminal's input box, the phone with a client attached) and otherwise prints the
+        levels on one line. An answer from a picker is applied exactly like a typed level.
+        """
+        if arg == "show":
+            await self._send_info("\n".join(self._effort_show_lines()))
+            return
+        if not arg:
+            current = self._current_effort()
+            channel = self._channel
+            can_pick = getattr(channel, "can_run_picker", None)
+            if self._use_input_box() and hasattr(channel, "run_picker"):
+                choice = await channel.run_picker(list(LEVELS), current)
+            elif callable(can_pick) and can_pick():
+                choice = await channel.run_picker(list(LEVELS), current, prompt=EFFORT_PICKER_PROMPT)
+            else:
+                shown = "  ".join(f"[{lv}]" if lv == current else lv for lv in LEVELS)
+                await self._send_info(EFFORT_LIST_TEMPLATE.format(levels=shown))
+                return
+            if choice is None:
+                return  # Esc, expiry or nobody attached: nothing changes and nothing is said
+            arg = str(choice)
+        if arg not in LEVELS:
+            await self._channel.send_message(
+                EFFORT_UNKNOWN_TEMPLATE.format(arg=arg), metadata={"style": "system.error"},
+            )
+            return
+        await self._apply_effort(arg)
+
+    async def _apply_effort(self, level: str) -> None:
+        """Make `level` the session rung: re-resolve, set the loop, say so, then persist. The session
+        change comes first and stands whatever persisting does (D-14)."""
+        self._session_effort = level
+        resolved = self._resolve_effort_now()
+        if resolved is not None and hasattr(self._agent, "set_effort"):
+            self._agent.set_effort(*resolved)
+            await self._send_info(EFFORT_SET_TEMPLATE.format(level=resolved[0], rung=resolved[1]))
+        else:
+            await self._send_info(EFFORT_SET_TEMPLATE.format(level=level, rung="session"))
+        if self._harness is None:
+            return  # nothing to persist into (a session built without a harness config)
+        from localharness.cli import model_ops
+        try:
+            note = await model_ops.persist_effort(
+                self._harness, level, base_url=self._agent._llm.config.base_url,
+                channel_id=self._channel.channel_id,
+                config_dir=self._config_dir, audit_base_dir=self._audit_base_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 — the session change already happened
+            await self._channel.send_message(
+                EFFORT_PERSIST_FAILED_TEMPLATE.format(exc=exc), metadata={"style": "system.error"},
+            )
+            return
+        if note:
+            await self._send_info(note)
+
     def _turn_running(self) -> bool:
         """Is a turn in flight right now? (The box coordinator's own test, in one place.)
 
@@ -1304,6 +1430,9 @@ class OrchestratorREPL:
 
     async def _slash_reasoning(self, args: str, args_lower: str) -> None:
         await self._handle_reasoning_cmd(args_lower.strip())
+
+    async def _slash_effort(self, args: str, args_lower: str) -> None:
+        await self._handle_effort_cmd(args_lower.strip())
 
     async def _slash_verbose(self, args: str, args_lower: str) -> None:
         await self._handle_verbose_cmd(args_lower.strip())

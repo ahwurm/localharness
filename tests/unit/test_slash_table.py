@@ -37,6 +37,7 @@ CORE = [
     ("/agents", "List configured agents"),
     ("/model", "List available models; /model <name|number> to switch"),
     ("/reasoning", "Stream the model's reasoning while it thinks; /reasoning on|off"),
+    ("/effort", "Reasoning effort for this session; /effort off|low|high|max, /effort show"),
     ("/verbose", "Show reasoning and every tool call with its arguments; /verbose on|off"),
     ("/mode", "Permission mode for this session; /mode guarded|trusted|read-only"),
     ("/pending", "Tool calls parked for you to answer"),
@@ -59,6 +60,7 @@ HELP_BEFORE = (
     "  /agents     List configured agents\n"
     "  /model      List available models; /model <name|number> to switch\n"
     "  /reasoning  Stream the model's reasoning while it thinks; /reasoning on|off\n"
+    "  /effort     Reasoning effort for this session; /effort off|low|high|max, /effort show\n"
     "  /verbose    Show reasoning and every tool call with its arguments; /verbose on|off\n"
     "  /mode       Permission mode for this session; /mode guarded|trusted|read-only\n"
     "  /pending    Tool calls parked for you to answer\n"
@@ -107,7 +109,7 @@ async def _phone_menu(tmp_path) -> list[dict]:
 
 # ------------------------------------------------------------ no plugin rows: nothing moved
 
-def test_the_core_table_is_thirteen_rows_in_order():
+def test_the_core_table_is_sixteen_rows_in_order():
     assert [tuple(row) for row in SLASH_COMMANDS] == CORE  # a row unpacks as (name, description)
     assert all_rows() == SLASH_COMMANDS
 
@@ -122,7 +124,7 @@ def test_the_completer_offers_the_same_menu():
     assert _completions("/M") == _completions("/m")
 
 
-async def test_the_phone_menu_is_the_same_eleven_rows_in_order(tmp_path):
+async def test_the_phone_menu_is_the_same_thirteen_rows_in_order(tmp_path):
     assert await _phone_menu(tmp_path) == [{"name": n, "description": d} for n, d in PHONE]
 
 
@@ -133,6 +135,7 @@ PARITY = [
     ("  /model   Qwen-X  ", "_handle_model_cmd", ("Qwen-X",), {}),
     ("/model", "_handle_model_cmd", ("",), {}),
     ("/Reasoning ON", "_handle_reasoning_cmd", ("on",), {}),         # lowered + stripped
+    ("/Effort LOW", "_handle_effort_cmd", ("low",), {}),             # lowered + stripped
     ("/verbose off", "_handle_verbose_cmd", ("off",), {}),
     ("/mode guarded", "_handle_mode_cmd", ("guarded",), {}),
     ("/mode", "_handle_mode_cmd", ("",), {}),
@@ -231,7 +234,8 @@ async def test_a_plugin_row_reaches_every_surface(rows, tmp_path):
     assert all_rows()[:-1] == SLASH_COMMANDS and all_rows()[-1].name == "/example"
     assert help_text() == HELP_BEFORE.replace(
         "\n\nEverything", f"\n  /example    {EXAMPLE_HELP}\n\nEverything")
-    assert _completions("/e", completer) == [("/exit", "Exit LocalHarness"), ("/example", EXAMPLE_HELP)]
+    assert _completions("/e", completer) == [
+        *(row for row in CORE if row[0].startswith("/e")), ("/example", EXAMPLE_HELP)]
     channel = RecordingChannel([])
     repl, _, _ = _build_repl(channel)  # the REPL module was imported long before the row existed
     assert await repl._handle_slash("/help") is True

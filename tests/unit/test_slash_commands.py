@@ -45,7 +45,7 @@ def test_table_matches_the_dispatcher_command_set():
     # The dispatcher looks every command up in the table: each row resolves to itself and each
     # core row names a real coroutine on the REPL, so the table and the dispatcher cannot drift.
     # /memory is the memory plugin's row, not core's (it reaches the table only via set_plugin_rows).
-    dispatched = {"/help", "/agents", "/model", "/reasoning", "/verbose", "/mode",
+    dispatched = {"/help", "/agents", "/model", "/reasoning", "/effort", "/verbose", "/mode",
                   "/pending", "/approve", "/deny", "/task", "/image", "/plugins", "/mcp",
                   "/quit", "/exit"}
     table = {name for name, _ in SLASH_COMMANDS}
