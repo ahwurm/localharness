@@ -207,7 +207,7 @@ def _size_llamacpp_launch(
     extra = list(spec.extra_args or [])
     has_c = any(t in ("-c", "--ctx-size") or t.startswith("--ctx-size=") for t in extra)
     try:
-        header = read_header(os.path.expanduser(spec.model), _auto.FIT_KEYS)
+        header = _auto.fit_header(read_header(os.path.expanduser(spec.model), _auto.FIT_KEYS))
     except (GgufHeaderError, OSError):
         header = {}
     n_layer = header.get("block_count")

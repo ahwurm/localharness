@@ -349,6 +349,18 @@ def test_hand_placed_tensors_are_not_computed(tmp_path, mock_httpx):
     assert _row(result.output) == ("65,536", "262,144", "—")
 
 
+def test_ill_typed_header_values_are_not_computed_and_not_an_unreachable_endpoint(tmp_path, mock_httpx):
+    """WR-01: `block_count` declared as a string with `-ngl` in `extra_args` raised a TypeError that the
+    endpoint `except` reported as an unreachable endpoint."""
+    header = {**HEADER_A, "qwen3.block_count": "abc", "qwen3.context_length": [1]}
+    _config(tmp_path, server=_llamacpp_server(
+        write_gguf(tmp_path / "bad.gguf", header), extra="  extra_args:\n    - -ngl\n    - '20'\n"))
+    with _probe(65536, None), _memory():
+        result = _doctor(tmp_path)
+    assert _row(result.output) == ("65,536", "\u2014", "\u2014")
+    assert "unreachable" not in result.output.lower()
+
+
 def test_a_header_without_its_head_dimension_is_not_computed(tmp_path, mock_httpx):
     header = {k: v for k, v in HEADER_A.items() if not k.endswith("key_length")}
     _config(tmp_path, server=_llamacpp_server(write_gguf(tmp_path / "b.gguf", header)))

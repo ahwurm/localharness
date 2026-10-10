@@ -231,6 +231,16 @@ async def test_a_probe_that_returns_nothing_is_not_a_failed_start_and_records_wh
     assert rec.served is None and rec.trained == 262144  # the file's own header names the trained window
 
 
+async def test_an_ill_typed_header_trained_is_never_recorded_or_printed(world):
+    """WR-01: `context_length` declared as a string must not reach the ledger as a trained window."""
+    world.probe = WindowProbe(None, None)
+    world.capability_probe_sees_no_window()
+    write_gguf(world.gguf, {**HEADER_A, "qwen3.context_length": "abc", "qwen3.block_count": [64]})
+    lines = await world.start()  # must not raise
+    assert world.window(lines) == []
+    assert world.last().trained is None
+
+
 # ------------------------------------------------------------------------------- D-23 the #127 line
 
 

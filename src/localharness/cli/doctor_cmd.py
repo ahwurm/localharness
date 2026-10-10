@@ -115,7 +115,7 @@ def _doctor_fit(
     from localharness.provider import autosense as _auto
 
     try:
-        header = read_header(os.path.expanduser(server.model), _auto.FIT_KEYS)
+        header = _auto.fit_header(read_header(os.path.expanduser(server.model), _auto.FIT_KEYS))
     except (OSError, ValueError):  # GgufHeaderError is a ValueError; NotRegularFile an OSError
         header = {}
     trained = trained or header.get("context_length")
