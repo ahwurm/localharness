@@ -39,6 +39,10 @@ def _stub(ctxcfg: ContextConfig, live_budget: int):
         _agent=agent,
         _channel=SimpleNamespace(),
         _provider_type_for_base_url=lambda _url: "vllm",
+        # the effort re-resolve and the rejected-key rebind clear the refresh ends with (Phase 3):
+        # neither is under test here, so each answers "nothing to do"
+        _resolve_effort_now=lambda **kw: None,
+        _rebind_effort_ledger=lambda *a, **kw: None,
     ), ctx
 
 
