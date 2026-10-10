@@ -10,7 +10,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
 from localharness.core.types import Message, provider_messages
@@ -1031,37 +1031,79 @@ class TokenCounter:
         return total
 
 
-def probe_served_window(
+class WindowProbe(NamedTuple):
+    """What a runtime reports about `model`'s window: `served` (what a request is checked against
+    now) and `trained` (what the weights were trained for). None is "the runtime did not say"."""
+
+    served: int | None
+    trained: int | None
+
+
+def _int(v: Any) -> int | None:
+    """`v` as a positive int, or None: a server body steers numbers only, never types."""
+    try:
+        n = int(v) if v else 0
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return n if n > 0 else None
+
+
+def _gguf_trained(model: str, ptype: str) -> int | None:
+    """The trained window from the model's own GGUF header (Ollama / LM Studio: their APIs report
+    the served window, not the ceiling), or None when no local file resolves or it cannot be read."""
+    try:
+        from localharness.agent.gguf_header import read_header
+        from localharness.agent.gguf_tokenizer import resolve_gguf_path
+
+        path = resolve_gguf_path(model, ptype)
+        return _int(read_header(path, {"context_length"}).get("context_length")) if path else None
+    except Exception:  # GgufHeaderError, OSError (NotRegularFile too), a malformed value
+        return None
+
+
+def probe_window(
     base_url: str | None, model: str | None, provider_type: str | None = None, *,
     api_key: str | None = None,
-) -> int | None:
-    """Served context window for `model`, or None when the runtime doesn't expose it (#31).
+) -> WindowProbe:
+    """`model`'s served and trained context window, from whatever the runtime exposes (AUTO-01).
 
-    The honest signal the /model refit needs: an int means "refit the budget to this", None
-    means "unknowable — disclose, don't guess". Blocking (httpx); callers run it OFF the event
-    loop (#32). vLLM/OpenAI-compat: the /v1/models entry whose id==model, field
-    max_model_len|context_length (id-matched, so a multi-model endpoint returns the TARGET
-    model's window, not data[0]). llama.cpp: GET /props n_ctx. Ollama: GET /api/ps context_length of the LOADED
-    model (the served window, NOT /api/show's model ceiling, which over-reports). LM Studio: GET /api/v0/models loaded_context_length (the
-    LOADED window, NOT max_context_length — over-reporting would let the start guard pass a config
-    that then 400s). Where a runtime genuinely doesn't expose it (not-loaded / older builds) →
-    None (disclose, never fabricate a default). Never raises. `api_key` (a launched vLLM set to
-    require its key) is sent on the /v1/models GET only — the one route here vLLM's key guards."""
+    Disclose, never fabricate: every number the runtime did not report is None, and this never
+    raises (blocking httpx with 3 s timeouts, so callers run it OFF the event loop, #32).
+    llama.cpp: ONE GET /v1/models, the id-matched (or only) entry's meta.n_ctx (served) and
+    meta.n_ctx_train (trained); GET /props n_ctx is the fallback for served. vLLM / OpenAI-compat:
+    the id-matched entry's max_model_len|context_length is both. Any other provider type (unknown,
+    None) takes that route and falls back to the same entry's llama.cpp-shaped `meta`, so a
+    llama-server behind the wrong provider_type keeps its window. Ollama: GET /api/ps context_length
+    of the LOADED model (the served window, NOT /api/show's ceiling). LM Studio: GET /api/v0/models
+    loaded_context_length (the LOADED window, NOT max_context_length). For both, trained is the
+    model GGUF's `context_length` when a local file resolves. `api_key` rides every llama.cpp and
+    vLLM GET (a launched server set to require its key)."""
     if not (base_url and model):
-        return None
+        return WindowProbe(None, None)
     import httpx
 
     from localharness.provider.server import auth_headers
     root = base_url.rstrip("/")
     ptype = (provider_type or "").lower()
+    headers = auth_headers(api_key)
+    hk: dict[str, Any] = {"headers": headers} if headers else {}
     if ptype == "llamacpp":
+        served = trained = None
         try:
-            native = root.removesuffix("/v1")
-            props = httpx.get(f"{native}/props", timeout=3.0).json()
-            val = props.get("default_generation_settings", {}).get("n_ctx") or props.get("n_ctx")
-            return int(val) if val else None
+            items = [e for e in (httpx.get(f"{root}/models", timeout=3.0, **hk).json().get("data") or [])
+                     if isinstance(e, dict)]
+            entry = next((e for e in items if e.get("id") == model), items[0] if len(items) == 1 else None)
+            meta = (entry or {}).get("meta") or {}
+            served, trained = _int(meta.get("n_ctx")), _int(meta.get("n_ctx_train"))
         except Exception:
-            return None
+            served = trained = None
+        if served is None:
+            try:
+                props = httpx.get(f"{root.removesuffix('/v1')}/props", timeout=3.0, **hk).json()
+                served = _int(props.get("default_generation_settings", {}).get("n_ctx") or props.get("n_ctx"))
+            except Exception:
+                served = None
+        return WindowProbe(served, trained)
     if ptype == "ollama":
         # Ollama's SERVED window is num_ctx (default 4096), NOT the model's trained max. /api/ps
         # reports the LOADED model's context_length = the actual served window (what truncates /
@@ -1069,41 +1111,57 @@ def probe_served_window(
         # it OVER-reports and causes silent prompt truncation (the same unsafe direction we avoid
         # for LM Studio below). Read the served window only; not-loaded (Ollama lazy-loads on
         # first request) or older builds → None (disclose, never fabricate).
+        served = None
         try:
             native = root.removesuffix("/v1")
             data = httpx.get(f"{native}/api/ps", timeout=3.0).json()
             for m in (data.get("models") or []):
                 if model in (m.get("model"), m.get("name")):
-                    val = m.get("context_length")
-                    return int(val) if val else None
+                    served = _int(m.get("context_length"))
+                    break
         except Exception:
-            return None
-        return None
+            served = None
+        return WindowProbe(served, _gguf_trained(model, ptype))
     if ptype == "lmstudio":
         # LM Studio's native REST list reports loaded_context_length — the window the model was
         # actually LOADED with (≤ its max_context_length), i.e. what 400s mid-session. Read the
         # loaded window ONLY (never max_context_length: over-reporting would let the guard PASS a
         # too-big config). Not-loaded / older builds omit it → None.
+        served = None
         try:
             native = root.removesuffix("/v1")
             data = httpx.get(f"{native}/api/v0/models", timeout=3.0).json()
             for m in (data.get("data") or []):
                 if m.get("id") == model:
-                    val = m.get("loaded_context_length")
-                    return int(val) if val else None
+                    served = _int(m.get("loaded_context_length"))
+                    break
         except Exception:
-            return None
-        return None
-    headers = auth_headers(api_key)
+            served = None
+        return WindowProbe(served, _gguf_trained(model, ptype))
     try:
-        data = httpx.get(f"{root}/models", timeout=3.0, **({"headers": headers} if headers else {})).json()
+        data = httpx.get(f"{root}/models", timeout=3.0, **hk).json()
         for m in (data.get("data") or []):
             if m.get("id") == model:
                 val = m.get("max_model_len") or m.get("context_length")
-                return int(val) if val else None
+                if val:
+                    return WindowProbe(_int(val), _int(val))
+                meta = m.get("meta") or {}  # D-39: a llama-server behind a non-llamacpp provider_type
+                return WindowProbe(_int(meta.get("n_ctx")), _int(meta.get("n_ctx_train")))
     except Exception:
-        return None
-    return None
+        return WindowProbe(None, None)
+    return WindowProbe(None, None)
+
+
+def probe_served_window(
+    base_url: str | None, model: str | None, provider_type: str | None = None, *,
+    api_key: str | None = None,
+) -> int | None:
+    """Served context window for `model`, or None when the runtime doesn't expose it (#31).
+
+    The honest signal the /model refit needs: an int means "refit the budget to this", None
+    means "unknowable — disclose, don't guess". Delegates to `probe_window` (per-runtime sources
+    documented there) and returns its served half. Never raises."""
+    return probe_window(base_url, model, provider_type, api_key=api_key).served
 
 
 @dataclass

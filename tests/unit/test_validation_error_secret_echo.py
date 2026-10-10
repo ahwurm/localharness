@@ -184,7 +184,7 @@ def test_init_change_refusal_never_echoes_the_key(tmp_path, monkeypatch) -> None
     g = _home(tmp_path, {"org": {"log_level": "info"},
                          "proposer": {"base_url": "http://p/v1", "model": "p-old", "api_key": KEY}})
     buf = _init_errors(monkeypatch)
-    monkeypatch.setattr(init_cmd, "_served_window", lambda result: 4_000_000)
+    monkeypatch.setattr(init_cmd, "_served_window", lambda result, **_: 4_000_000)
     found = SimpleNamespace(provider_type="vllm", base_url="http://127.0.0.1:9/v1", models=["p-new"])
     with pytest.raises(click.exceptions.Exit):
         init_cmd._write_change(g, found, "p-new", SimpleNamespace(tool_call_mode="native"))

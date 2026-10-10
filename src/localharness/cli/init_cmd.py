@@ -86,23 +86,6 @@ def _list_endpoint_models(base_url: str) -> list[str] | None:
         return None
 
 
-def _detect_llamacpp_nctx(base_url: str) -> int | None:
-    """llama.cpp's /props exposes the served context window (n_ctx).
-
-    base_url is OpenAI-compat (…/v1); /props lives at the server root.
-    Returns None on any error. (Ollama is handled by the safe default — its
-    /v1/models reports no window and /api/show gives the model's trained max,
-    not the served num_ctx, so clamping to it would overshoot.)"""
-    try:
-        import httpx
-        native = base_url.removesuffix("/v1")
-        props = httpx.get(f"{native}/props", timeout=2.0).json()
-        val = props.get("default_generation_settings", {}).get("n_ctx") or props.get("n_ctx")
-        return int(val) if val else None
-    except Exception:
-        return None
-
-
 def _detect_lmstudio_ctx(base_url: str) -> int | None:
     """LM Studio's /api/v0/models exposes the served window: the loaded model's
     loaded_context_length, falling back to the largest max_context_length.
@@ -804,17 +787,32 @@ def _choose_toggles(interactive: bool) -> tuple[bool, bool]:
     return host_tools_on, memory_on
 
 
-def _served_window(result: DetectorResult) -> int | None:
+def _served_window(result: DetectorResult, *, cfg_dir: Path | None = None) -> int | None:
     """The served context window to write as the context budget, or None — saying which, and why.
 
     Fit the context budget to the served window when the provider reports it — a budget above
-    the real window disables compaction and kills long turns."""
+    the real window disables compaction and kills long turns. llama.cpp's served and trained
+    windows come from `probe_window`; LM Studio keeps `_detect_lmstudio_ctx` (the model-free route
+    its identification takes) and the rest keep `_detect_max_model_len` (D-33). The probed triple
+    is recorded under `cfg_dir` so the first `start` compares against it; the window line with the
+    fit and its undo arrives with the import (Phase 5)."""
+    trained: int | None = None
     if result.provider_type == "llamacpp":
-        max_len = _detect_llamacpp_nctx(result.base_url)
+        from localharness.agent.context import probe_window
+        probe = probe_window(result.base_url, result.suggested_model, "llamacpp")
+        max_len, trained = probe.served, probe.trained
     elif result.provider_type == "lmstudio":
         max_len = _detect_lmstudio_ctx(result.base_url)
     else:
         max_len = _detect_max_model_len(result.base_url)
+        trained = max_len if result.provider_type == "vllm" else None
+    if cfg_dir is not None and result.suggested_model and (max_len is not None or trained is not None):
+        from localharness.provider.speed_stats import default_speed_stats_path, record_window_report
+        try:
+            record_window_report(default_speed_stats_path(cfg_dir), result.provider_type,
+                                 result.suggested_model, max_len, trained, None)
+        except OSError:
+            pass  # a read-only config dir must not break init
     # max_context_tokens IS the served window: the harness subtracts the reply reserve at runtime
     # (agent.context.response_reserve), so subtracting it here too would reserve it twice.
     # Two independent floors: ContextConfig rejects anything under 1_000, and a window that
@@ -1005,7 +1003,7 @@ def _write_config(
             **({} if host_tools_on else {"mode": "read-only"}),
         ),
     }
-    window = _served_window(result)
+    window = _served_window(result, cfg_dir=config_path)
     if window:
         org_kwargs["context"] = ContextConfig(max_context_tokens=window)
     harness = HarnessConfig(
@@ -1045,7 +1043,7 @@ def _write_change(config_path: Path, result: DetectorResult, selected_model: str
         ("org.default_model", selected_model),
     ):
         set_value_in_dict(overlay, path, value)
-    window = _served_window(result)
+    window = _served_window(result, cfg_dir=config_path)
     if window:
         set_value_in_dict(overlay, "org.context.max_context_tokens", window)
     try:

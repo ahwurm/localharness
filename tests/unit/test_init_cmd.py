@@ -116,30 +116,86 @@ def test_init_skips_a_window_too_small_to_hold_a_reply(
         assert "too small" in _flat(result), _flat(result)
 
 
-def test_detect_llamacpp_nctx_parses_props(monkeypatch):
-    """llama.cpp /props.default_generation_settings.n_ctx is read as the served window."""
-    import httpx
+def _result(ptype: str, model: str = "qwen") -> DetectorResult:
+    return DetectorResult(
+        found=True, provider_type=ptype, base_url="http://localhost:8080/v1",
+        models=[model], suggested_model=model, probe_duration_ms=1.0,
+    )
+
+
+def test_served_window_probes_and_records_the_triple(tmp_path, monkeypatch):
+    """D-33: the llama.cpp branch calls probe_window (served AND trained) and records the triple
+    under the config dir being initialised, so the first `start` has a record to compare against."""
+    from localharness.agent.context import WindowProbe
+    from localharness.cli import init_cmd
+    from localharness.provider.speed_stats import (
+        WindowRecord, default_speed_stats_path, last_window_report,
+    )
+
+    seen = {}
+
+    def _probe(base_url, model, provider_type=None, **kw):
+        seen["args"] = (base_url, model, provider_type)
+        return WindowProbe(65536, 262144)
+
+    monkeypatch.setattr("localharness.agent.context.probe_window", _probe)
+    assert init_cmd._served_window(_result("llamacpp"), cfg_dir=tmp_path) == 65536
+    assert seen["args"] == ("http://localhost:8080/v1", "qwen", "llamacpp")
+    rec = last_window_report(default_speed_stats_path(tmp_path), "llamacpp", "qwen")
+    assert rec == WindowRecord(65536, 262144, None, rec.recorded_at)
+    assert rec.recorded_at.startswith("20")  # an ISO timestamp
+
+
+def test_served_window_keeps_the_lmstudio_and_vllm_routes(tmp_path, monkeypatch):
+    """D-33: LM Studio reads _detect_lmstudio_ctx (probe_window is never called), vLLM reads the
+    _detect_max_model_len seam and serves its trained window."""
+    from localharness.cli import init_cmd
+    from localharness.provider.speed_stats import default_speed_stats_path, last_window_report
+
+    def _no_probe(*a, **k):
+        raise AssertionError("probe_window must not be called for this runtime")
+
+    monkeypatch.setattr("localharness.agent.context.probe_window", _no_probe)
+    monkeypatch.setattr(init_cmd, "_detect_lmstudio_ctx", lambda *_: 16384)
+    assert init_cmd._served_window(_result("lmstudio", "lm"), cfg_dir=tmp_path) == 16384
+    monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: 32768)
+    assert init_cmd._served_window(_result("vllm", "vl"), cfg_dir=tmp_path) == 32768
+    path = default_speed_stats_path(tmp_path)
+    lm, vl = last_window_report(path, "lmstudio", "lm"), last_window_report(path, "vllm", "vl")
+    assert (lm.served, lm.trained, lm.fits) == (16384, None, None)
+    assert (vl.served, vl.trained, vl.fits) == (32768, 32768, None)
+
+
+def test_served_window_records_nothing_when_nothing_was_probed(tmp_path):
+    """D-33: the fixtures stub _detect_max_model_len with None; no ledger file appears, and a call
+    without a config dir records nowhere."""
+    from localharness.cli import init_cmd
+    from localharness.provider.speed_stats import default_speed_stats_path
+
+    assert init_cmd._served_window(_result("ollama", "o"), cfg_dir=tmp_path) is None
+    assert not default_speed_stats_path(tmp_path).exists()
+    assert init_cmd._served_window(_result("ollama", "o")) is None
+
+
+def test_served_window_survives_a_read_only_config_dir(tmp_path, monkeypatch):
+    """A ledger that cannot be written must not break init."""
     from localharness.cli import init_cmd
 
-    class _Resp:
-        def json(self):
-            return {"default_generation_settings": {"n_ctx": 65536}}
+    def _deny(*a, **k):
+        raise PermissionError("read-only")
 
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
-    # base_url carries the /v1 suffix; /props lives at the server root
-    assert init_cmd._detect_llamacpp_nctx("http://localhost:8080/v1") == 65536
+    monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: 32768)
+    monkeypatch.setattr("localharness.provider.speed_stats.record_window_report", _deny)
+    assert init_cmd._served_window(_result("vllm", "vl"), cfg_dir=tmp_path) == 32768
 
 
-def test_detect_llamacpp_nctx_returns_none_on_error(monkeypatch):
-    """A llama.cpp probe failure falls back to None (→ safe context default)."""
-    import httpx
+def test_init_has_no_llamacpp_nctx_and_keeps_the_other_two_seams():
+    """D-33: only the llama.cpp /props detector is gone; the identification route and the fixtures' seam stay."""
     from localharness.cli import init_cmd
 
-    def _boom(*a, **k):
-        raise httpx.ConnectError("refused")
-
-    monkeypatch.setattr(httpx, "get", _boom)
-    assert init_cmd._detect_llamacpp_nctx("http://localhost:8080/v1") is None
+    assert not hasattr(init_cmd, "_detect_llamacpp_" + "nctx")
+    assert callable(init_cmd._detect_lmstudio_ctx)
+    assert callable(init_cmd._detect_max_model_len)
 
 
 def test_detect_lmstudio_ctx_prefers_loaded(monkeypatch):
