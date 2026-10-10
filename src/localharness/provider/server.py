@@ -30,7 +30,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from localharness.config.models import ManagedServerConfig
-from localharness.core.private_files import private_opener, touch_private
+from localharness.core.private_files import NotRegularFile, open_regular, private_opener, touch_private
 from localharness.core.which import which_outside_cwd
 
 logger = structlog.get_logger(__name__)
@@ -183,6 +183,58 @@ def launch_decision(spec: Any, keyed: bool, *, peer: str | None = None) -> Launc
             None, True, False,
             f"--api-key-file {path} unreadable: {reason} — launched on 127.0.0.1 for this run")
     return LaunchDecision(None, loopback, True, None)
+
+
+KEY_FILE_CAP = 4096
+"""The most bytes a key file may hold. One byte more is read to tell "exactly the cap" from "over it"."""
+
+
+class KeyFileError(RuntimeError):
+    """A key file the byte rule refuses. `str(exc)` is the reason, worded for the one line `start`
+    prints (`server.api_key_file <path>: <reason> — this session sends no key`)."""
+
+
+def read_key_file(path: str | os.PathLike[str]) -> str:
+    r"""The key a `server.api_key_file` holds, or `KeyFileError(reason)`.
+
+    The one place the key file is OPENED (`launch_decision` and `doctor` only stat it), and only
+    after the trust decision covers the entry. The open is `open_regular`: a FIFO or a device is
+    refused without blocking. The rule is stricter than llama-server's own `getline` read, which
+    skips `#` lines and keeps a trailing `\r`, so a CRLF file would be sent to the server as `K\r`
+    while the harness sent `K`; and llama-server splits `LLAMA_API_KEY` on commas, so a comma in the
+    key would make the server accept two keys. Hence: at most `KEY_FILE_CAP` bytes; split on `\n`
+    only; empty lines dropped; a `#` line refuses; exactly one line must remain; every byte in
+    0x21-0x7E and none of `,` or `"`. The key is that line exactly, never trimmed or normalised.
+    Reading is idempotent and writes nothing."""
+    target = Path(path).expanduser()
+    try:
+        fd = open_regular(target)
+    except NotRegularFile:
+        raise KeyFileError("not a regular file") from None
+    except FileNotFoundError:
+        raise KeyFileError("no such file") from None
+    except (OSError, ValueError) as exc:
+        raise KeyFileError(getattr(exc, "strerror", None) or type(exc).__name__) from None
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(KEY_FILE_CAP + 1)
+    except OSError as exc:
+        raise KeyFileError(exc.strerror or type(exc).__name__) from None
+    if len(data) > KEY_FILE_CAP:
+        raise KeyFileError(f"over {KEY_FILE_CAP} bytes")
+    lines = [line for line in data.split(b"\n") if line]
+    if any(line.startswith(b"#") for line in lines):
+        raise KeyFileError("comment line")
+    if not lines:
+        raise KeyFileError("no key")
+    if len(lines) > 1:
+        raise KeyFileError("more than one line")
+    line = lines[0]
+    if any(not 0x21 <= byte <= 0x7E for byte in line):
+        raise KeyFileError("byte outside printable ASCII")
+    if b"," in line or b'"' in line:
+        raise KeyFileError("comma or quote")
+    return line.decode("ascii")
 
 
 KEY_ENV: Mapping[str, str] = MappingProxyType({"vllm": "VLLM_API_KEY", "llamacpp": "LLAMA_API_KEY"})
