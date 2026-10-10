@@ -1682,7 +1682,7 @@ class OrchestratorREPL:
                 # the peer's own key, only when its lifecycle is set to require one (default off)
                 live_ep = await _lifecycle.strategy_for(ep.lifecycle).activate(
                     ep.lifecycle, self._server_config_dir, ep.base_url, on_poll=_cold_progress,
-                    peer=ep.name, **launch_kw,
+                    peer=ep.name, autosense=getattr(self._harness, "autosense", None), **launch_kw,
                 )
             except (RuntimeError, TimeoutError) as exc:
                 # The peer half-started (a TimeoutError means its process is still ALIVE, per
@@ -1705,6 +1705,9 @@ class OrchestratorREPL:
                     box_note(None)
             self._active_heavy = (ep.lifecycle, ep.base_url)
             served = live_ep.served_models[0] if live_ep.served_models else target
+            # the launch's window line, on the success path and OUTSIDE the try above: a reporting
+            # fault must never read as a failed launch and tear a healthy server down (D-22, D-36)
+            await self._announce_window(live_ep, ep.provider_type, served)
             # #3: pass ep.extra_headers directly (see the cross-endpoint branch above) — never None,
             # which would leave the previous endpoint's headers on the client.
             llm.rebind_endpoint(ep.base_url, api_key=ep.api_key, extra_headers=ep.extra_headers,
@@ -2016,6 +2019,29 @@ class OrchestratorREPL:
             await _lifecycle.strategy_for(spec).stop(spec, self._server_config_dir)
         except Exception:  # noqa: BLE001 — cleanup is best-effort
             pass
+
+    async def _announce_window(self, live: Any, provider_type: str, model_id: str) -> None:
+        """The swap report names the window a launch got — what ``activate`` asked and the probe
+        verified (``LiveEndpoint.window``), never a recomputation — always (no change gate), as one
+        line with no undo because a launch report never carries line 2, and records the triple under
+        ``(provider_type, model_id)`` in the ledger (D-22, D-36). A launch with no window (a stand-in
+        harness without ``autosense``, vLLM) says and records nothing; a probe that found nothing or
+        a smaller window than asked is a completed swap with a longer line, never a failure (D-19).
+        A ledger write failure never breaks a swap."""
+        report = getattr(live, "window", None)
+        if report is None:
+            return
+        from localharness.config.models import AutosenseConfig
+        from localharness.provider.autosense import window_lines
+        from localharness.provider.speed_stats import default_speed_stats_path, record_window_report
+        ratios = getattr(self._harness, "autosense", None) or AutosenseConfig()
+        for line in window_lines(report, ratios):
+            await self._send_info(line)
+        try:
+            record_window_report(default_speed_stats_path(self._config_dir), provider_type, model_id,
+                                 report.served, report.trained, report.fits)
+        except OSError:
+            log.debug("window ledger write failed", exc_info=True)
 
     async def _restore_incumbent(self, stopped) -> tuple[str | None, str | None]:
         """Best-effort re-launch of a heavy incumbent stopped for a swap that then FAILED, so the box
