@@ -1992,6 +1992,7 @@ class OrchestratorREPL:
         strategy = strategy_for(managed)
         label = RUNTIME_LABELS.get(managed.runtime, managed.runtime)
         _, posture = effective_posture(managed, keyed=bool(launch_kw), decision=decision)
+        await self._flush_launch_lines()
         await self._send_info(
             f"Restarting managed {label} with {target}{f' ({posture})' if posture else ''}"
             f" — model load can take several minutes...{tradeoff}", colorize=True,
@@ -2292,16 +2293,19 @@ class OrchestratorREPL:
             return None, None
         spec, base_url = stopped
         from localharness.provider import lifecycle as _lifecycle
-        from localharness.provider.server import LaunchRefused
+        from localharness.provider.server import LaunchRefused, launch_decision
         peer_ep = self._peer_by_base_url(base_url)
         # the peer's name only when the spec IS that peer's own lifecycle (identity, not equality), so
         # a refusal names `extra_endpoints[<name>]` exactly for a peer and `server` for the primary
         peer = peer_ep.name if peer_ep is not None and getattr(peer_ep, "lifecycle", None) is spec else None
         try:
+            launch_kw = _launch_key(self._harness, base_url, spec)
+            if self._pending_launch_lines and launch_decision(
+                    spec, bool(launch_kw), peer=peer).refusal is None:
+                await self._flush_launch_lines()  # a restore that is the session's first launch
             live = await _lifecycle.strategy_for(spec).activate(
                 spec, self._server_config_dir, base_url, peer=peer,
-                autosense=getattr(self._harness, "autosense", None),
-                **_launch_key(self._harness, base_url, spec))
+                autosense=getattr(self._harness, "autosense", None), **launch_kw)
             self._active_heavy = (spec, base_url)
             return spec.model, getattr(live, "note", None)
         except LaunchRefused as exc:
