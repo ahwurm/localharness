@@ -17,7 +17,7 @@ import yaml
 from localharness.cli import start_cmd
 from localharness.cli.start_cmd import _start_async, _start_managed_server
 from localharness.config.models import ManagedServerConfig
-from localharness.provider import server
+from localharness.provider import autosense, server
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries  # noqa: F401
 
 URL = "http://127.0.0.1:8080/v1"
@@ -67,6 +67,10 @@ def _boot(tmp_path, monkeypatch, *, server_block, path_binary=None, probe_ok=Fal
 
     monkeypatch.setattr(server, "start_server", start_server)
     monkeypatch.setattr(server, "server_pid", lambda _d: None)
+    # D-31: a launch through the real `activate` sizes the window, which asks for free memory. Fake the
+    # two seams so no test in this file shells out to the driver or reads the host (WR-04).
+    monkeypatch.setattr(autosense, "_run_nvidia_smi", lambda: "24576, 32768\n")
+    monkeypatch.setattr(autosense, "_read_meminfo", lambda: {"MemTotal": 64 * 2**30, "MemAvailable": 60 * 2**30})
     return SimpleNamespace(started=started, err=_record_err(monkeypatch),
                            out=_capture_start_console(monkeypatch))
 
@@ -312,6 +316,26 @@ async def test_a_failed_launch_names_the_runtime_in_the_error_line(tmp_path, mon
     assert [line for line in _err_text(seen.err) if "Error:" in line][0] == (
         "[bold red]Error:[/bold red] managed llama.cpp failed to start: boom")
     assert not [line for line in _err_text(seen.err) if REFUSAL in line]
+
+
+async def test_a_failed_launch_never_reaches_a_real_nvidia_smi(tmp_path, monkeypatch):
+    """WR-04 (D-31): the unit suite is hermetic. Were the real `_run_nvidia_smi` reached, the resolved
+    executable would run and this `subprocess.run` would fail the test, on any box."""
+    seen = _boot(tmp_path, monkeypatch, server_block={"runtime": "llamacpp", "binary": "/x/llama-server",
+                                                      "model": "/x/m.gguf", "port": 8080})
+
+    def no_subprocess(*a, **k):
+        raise AssertionError("a unit test ran a real subprocess for free memory")
+
+    monkeypatch.setattr(autosense, "which_outside_cwd", lambda name: "/fake/nvidia-smi")
+    monkeypatch.setattr(autosense.subprocess, "run", no_subprocess)
+
+    def boom(config_dir, cmd, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(server, "start_server", boom)
+    assert await _drive(tmp_path) == 1
+    assert [line for line in _err_text(seen.err) if "Error:" in line]
 
 
 async def test_a_failed_launch_message_with_brackets_reaches_the_error_console_verbatim(tmp_path, monkeypatch):
