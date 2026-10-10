@@ -20,11 +20,12 @@ import yaml
 from localharness.cli import start_cmd
 from localharness.cli import workspace as ws_mod
 from localharness.cli.start_cmd import (
+    HOST_CONVERTED,
     SensedStart,
     _after_no_remove_path_binary,
     _sense_before_trust,
 )
-from localharness.cli.workspace import decide_machine_trust
+from localharness.cli.workspace import MachineTrust, decide_machine_trust
 from localharness.config import trust
 from localharness.config.loader import ConfigLoader
 from localharness.provider import server
@@ -41,6 +42,7 @@ def _fresh(monkeypatch):
     monkeypatch.delenv("LOCALHARNESS_DIR", raising=False)
     ws_mod._DECLINED.clear()
     monkeypatch.setattr(server, "server_pid", lambda _d: None)
+    _Connect(monkeypatch, accepts=False)  # no test dials the port; one that cares replaces this
     yield
     ws_mod._DECLINED.clear()
 
@@ -420,3 +422,275 @@ async def test_a_terminal_no_removes_the_line_remembers_it_and_launches_nothing(
     assert "server" not in _overrides(tmp_path)
     assert trust.offer_was_declined(trust.decline_key("<binary>", PATH_BIN))
     assert [e["after_value"] for e in _audit(tmp_path)] == [PATH_BIN, None]
+
+
+# ------------------------------------------------------------------ a 0.17 extra_args --host (D-16)
+
+LLAMACPP = {"runtime": "llamacpp", "binary": "/x/llama-server", "model": "/m/a.gguf", "port": 8123}
+VLLM_BINARY = {"runtime": "vllm", "binary": "/v/vllm", "model": "org/m", "port": 8123}
+OLD_LAUNCH_KEYS = ("binary", "docker_image", "extra_args")
+BIND_ALL = ("overrides.yaml", "launch", "server.bind_all")
+
+
+def _pre_upgrade(g) -> None:
+    """The record 0.17 wrote: every entry the old tables knew, and no `launch_model` kind."""
+    snap = trust.machine_snapshot(g)
+    old = [e for e in snap if e["kind"] != trust.LAUNCH_MODEL_KIND
+           and (e["kind"] != trust.LAUNCH_KIND or e["name"].rsplit(".", 1)[-1] in OLD_LAUNCH_KEYS)]
+    trust.record_machine(g, old, kinds=trust.MACHINE_KINDS - {trust.LAUNCH_MODEL_KIND})
+
+
+def _with_extra_args(g, extra_args, *, base=LLAMACPP, upgrade=True, **more) -> None:
+    """A recorded machine whose server section carries ``extra_args`` (the record covers them)."""
+    _config(g, server={**base, "extra_args": extra_args, **more})
+    _pre_upgrade(g) if upgrade else _record(g)
+
+
+def _audit_bind_all(g) -> list[dict]:
+    return [e for e in _audit(g) if e["path"] == "server.bind_all"]
+
+
+@pytest.mark.parametrize(("base", "extra_args"), [
+    (LLAMACPP, ["--host", "0.0.0.0", "-ngl", "99"]),
+    (LLAMACPP, ["--host=0.0.0.0"]),
+    (LLAMACPP, ["--host", "127.0.0.1", "--host", "0.0.0.0"]),
+    (LLAMACPP, ["--host", "0.0.0.0,0.0.0.0"]),
+    (VLLM_BINARY, ["--host", "0.0.0.0"]),
+], ids=["spaced", "equals-form", "last-wins", "list-of-the-same", "vllm-binary"])
+@pytest.mark.parametrize("can_ask", [True, False], ids=["terminal", "headless"])
+def test_a_0_17_all_interfaces_host_converts_at_the_upgrade_start_with_no_question(
+        g, monkeypatch, base, extra_args, can_ask):
+    _with_extra_args(g, extra_args, base=base)
+
+    sensed = _sense_before_trust(g, can_ask=can_ask, path_binary=None)
+
+    assert sensed.converted == HOST_CONVERTED == (
+        "server.bind_all: true, from server.extra_args --host 0.0.0.0, which 0.17 applied")
+    assert sensed.undo_line is None and sensed.annotations == {}
+    assert _overrides(g) == {"server": {"bind_all": True}}
+    runtime = base["runtime"]
+    assert by_name(trust.recorded_machine(g)["entries"], "server.bind_all") == {
+        "file": "overrides.yaml", "kind": "launch", "name": "server.bind_all",
+        "shown": f"{runtime}:true:open"}
+    never_asked(monkeypatch)
+    assert decide_machine_trust(g, ask=can_ask, launching=sensed.launching,
+                                annotations=sensed.annotations) == MachineTrust()
+    assert trust.LAUNCH_MODEL_KIND in trust.recorded_machine(g)["kinds"]
+
+
+def test_the_conversion_is_audited_once_by_the_one_writer(g):
+    _with_extra_args(g, ["--host", "0.0.0.0"])
+
+    _sense_before_trust(g, can_ask=False, path_binary=None)
+
+    (event,) = _audit(g)
+    assert event["path"] == "server.bind_all" and event["before_value"] is None
+    assert event["after_value"] is True and event["layer"] == "user" and event["actor"] == "cli"
+    assert "--host 0.0.0.0" in event["actor_detail"]
+
+
+def test_a_second_start_finds_the_conversion_recorded_and_converts_nothing_again(g):
+    _with_extra_args(g, ["--host", "0.0.0.0"])
+    _sense_before_trust(g, can_ask=True, path_binary=None)
+    ws_mod._DECLINED.clear()
+    decide_machine_trust(g, ask=True)
+
+    again = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert again.converted is None and again.undo_line is None and again.annotations == {}
+    assert len(_audit_bind_all(g)) == 1
+
+
+def test_a_last_host_of_loopback_converts_nothing_and_says_nothing(g):
+    _with_extra_args(g, ["--host", "0.0.0.0", "--host", "127.0.0.1"])
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert (sensed.converted, sensed.undo_line, sensed.annotations) == (None, None, {})
+    assert not (g / "overrides.yaml").exists() and _audit(g) == []
+
+
+def test_no_host_and_no_extra_args_convert_nothing(g):
+    _with_extra_args(g, ["-ngl", "99"])
+    assert _sense_before_trust(g, can_ask=True, path_binary=None) == SensedStart(True, {})
+    _config(g, server=LLAMACPP)
+    _pre_upgrade(g)
+    assert _sense_before_trust(g, can_ask=True, path_binary=None) == SensedStart(True, {})
+    assert _audit(g) == []
+
+
+@pytest.mark.parametrize("bind_all", [True, False])
+def test_a_bind_all_already_in_either_file_converts_nothing(g, bind_all):
+    _with_extra_args(g, ["--host", "0.0.0.0"], bind_all=bind_all)
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert (sensed.converted, sensed.undo_line) == (None, None) and _audit(g) == []
+    _with_extra_args(g, ["--host", "0.0.0.0"])
+    write_yaml(g / "overrides.yaml", {"server": {"bind_all": bind_all}})
+    assert _sense_before_trust(g, can_ask=True, path_binary=None).converted is None
+    assert _audit(g) == []
+
+
+def test_a_record_that_already_knows_launch_model_converts_nothing_even_with_the_same_files(g):
+    _with_extra_args(g, ["--host", "0.0.0.0"], upgrade=False)
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert sensed.converted is None and sensed.annotations == {}
+    assert sensed.undo_line is not None and "--host 0.0.0.0" in sensed.undo_line
+    assert not (g / "overrides.yaml").exists() and _audit(g) == []
+
+
+def test_the_overrides_files_extra_args_win_over_config_yamls(g):
+    _config(g, server=LLAMACPP)
+    write_yaml(g / "overrides.yaml", {"server": {"extra_args": ["--host", "0.0.0.0"]}})
+    _pre_upgrade(g)
+
+    sensed = _sense_before_trust(g, can_ask=False, path_binary=None)
+
+    assert sensed.converted == HOST_CONVERTED
+    assert _overrides(g)["server"]["bind_all"] is True
+
+
+# another address: offered once, on a terminal
+
+
+def test_another_address_is_written_and_offered_with_its_source_at_the_upgrade_start(g, monkeypatch):
+    _with_extra_args(g, ["--host", "192.168.1.5"])
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    note = "(from server.extra_args --host 192.168.1.5, which 0.17 applied)"
+    assert sensed.annotations == {BIND_ALL: note}
+    assert sensed.converted is None and sensed.undo_line is None
+    assert _overrides(g) == {"server": {"bind_all": True}}
+    (event,) = _audit(g)
+    assert (event["path"], event["before_value"], event["after_value"], event["actor"]) == (
+        "server.bind_all", None, True, "cli")
+    asked = answers(monkeypatch, True)
+    got = decide_machine_trust(g, ask=True, launching=sensed.launching, annotations=sensed.annotations)
+    assert len(asked) == 1 and got == MachineTrust()
+    (line,) = [ln for ln in asked[0].splitlines() if "server.bind_all" in ln]
+    assert line.endswith(f" {note}") and "never applied to llama.cpp" in line
+
+
+def test_a_no_on_another_address_writes_false_and_remembers_it(g, monkeypatch):
+    _with_extra_args(g, ["--host", "192.168.1.5"])
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+    answers(monkeypatch, False)
+
+    decide_machine_trust(g, ask=True, launching=True, annotations=sensed.annotations)
+
+    assert _overrides(g) == {"server": {"bind_all": False}}
+    assert [e["after_value"] for e in _audit_bind_all(g)] == [True, False]
+    ws_mod._DECLINED.clear()
+    never_asked(monkeypatch)
+    again = _sense_before_trust(g, can_ask=True, path_binary=None)
+    assert again.annotations == {} and again.converted is None and again.undo_line is None
+    assert decide_machine_trust(g, ask=True, launching=True) == MachineTrust()
+
+
+def test_another_address_after_the_upgrade_start_has_no_which_0_17_applied(g):
+    _with_extra_args(g, ["--host", "192.168.1.5"], upgrade=False)
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert sensed.annotations == {BIND_ALL: "(from server.extra_args --host 192.168.1.5)"}
+
+
+def test_another_address_on_a_headless_start_is_not_written_and_the_launch_says_how_to_restore_it(g):
+    _with_extra_args(g, ["--host", "192.168.1.5"])
+
+    sensed = _sense_before_trust(g, can_ask=False, path_binary=None)
+
+    assert sensed.converted is None and sensed.annotations == {}
+    assert sensed.undo_line == ("server.extra_args --host 192.168.1.5 is not applied — launched on "
+                                "127.0.0.1 — server.bind_all: true restores it (asks once)")
+    assert not (g / "overrides.yaml").exists() and _audit(g) == []
+
+
+def test_a_vllm_binary_with_another_address_is_offered_like_a_llamacpp_one(g):
+    _with_extra_args(g, ["--host", "10.0.0.7"], base=VLLM_BINARY, upgrade=False)
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert sensed.annotations == {BIND_ALL: "(from server.extra_args --host 10.0.0.7)"}
+    assert _overrides(g) == {"server": {"bind_all": True}}
+
+
+# everything else: loopback and the undo line
+
+
+@pytest.mark.parametrize("host", ["ip6-localhost", "/run/llama.sock", "my-box.lan"])
+def test_a_hostname_or_a_socket_path_converts_nothing_and_the_launch_says_how_to_restore_it(g, monkeypatch, host):
+    resolved: list = []
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: resolved.append(a) or (_ for _ in ()).throw(
+        AssertionError("a --host value was resolved through DNS")))
+    _with_extra_args(g, ["--host", host])
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert sensed.converted is None and sensed.annotations == {} and resolved == []
+    assert sensed.undo_line.endswith("launched on 127.0.0.1 — server.bind_all: true restores it (asks once)")
+    assert f"--host {host}" in sensed.undo_line
+    assert not (g / "overrides.yaml").exists() and _audit(g) == []
+
+
+def test_an_extra_args_entry_the_record_does_not_cover_is_never_converted(g):
+    _config(g, server={**LLAMACPP, "extra_args": ["--host", "127.0.0.1"]})
+    _pre_upgrade(g)  # the record covers ["--host", "127.0.0.1"] ...
+    _config(g, server={**LLAMACPP, "extra_args": ["--host", "0.0.0.0"]})  # ... an agent then edited it
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert sensed.converted is None and sensed.annotations == {}
+    assert sensed.undo_line is not None and "--host 0.0.0.0" in sensed.undo_line
+    assert not (g / "overrides.yaml").exists() and _audit(g) == []
+
+
+def test_a_machine_with_no_record_converts_nothing(g):
+    _config(g, server={**LLAMACPP, "extra_args": ["--host", "0.0.0.0"]})
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert sensed.converted is None and sensed.undo_line is not None
+    assert not (g / "overrides.yaml").exists() and _audit(g) == []
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.5"])
+def test_a_vllm_docker_record_converts_nothing_and_says_nothing(g, host):
+    docker = {"runtime": "vllm", "launch": "docker", "docker_image": "img:tag", "model": "org/m"}
+    _with_extra_args(g, ["--host", host], base=docker)
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert sensed == SensedStart(True, {}) and sensed.undo_line is None
+    assert not (g / "overrides.yaml").exists() and _audit(g) == []
+
+
+def test_an_ollama_record_converts_nothing_and_says_nothing(g):
+    _with_extra_args(g, ["--host", "0.0.0.0"], base={"runtime": "ollama", "model": "m"})
+
+    assert _sense_before_trust(g, can_ask=True, path_binary=None) == SensedStart(True, {})
+
+
+def test_a_write_that_would_not_load_converts_nothing_and_the_launch_is_on_loopback(g):
+    write_yaml(g / "config.yaml", {"server": {**LLAMACPP, "extra_args": ["--host", "0.0.0.0"]}})  # no provider
+    _pre_upgrade(g)
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert sensed.converted is None and sensed.undo_line is not None
+    assert not (g / "overrides.yaml").exists() and _audit(g) == []
+
+
+def test_a_path_binary_and_a_conversion_in_one_start_are_two_audited_writes(g):
+    _config(g, server={"runtime": "llamacpp", "model": "/m/a.gguf", "extra_args": ["--host", "0.0.0.0"]})
+    _pre_upgrade(g)
+
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=PATH_BIN)
+
+    assert sensed.path_written == PATH_BIN and sensed.converted == HOST_CONVERTED
+    assert [e["path"] for e in _audit(g)] == ["server.binary", "server.bind_all"]
+    assert _overrides(g) == {"server": {"binary": PATH_BIN, "bind_all": True}}

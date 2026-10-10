@@ -244,6 +244,9 @@ def _read_session_key(harness: Any) -> str | None:
 
 PATH_BINARY_LINE = ("llama-server found on PATH at {path} — written to overrides.yaml as server.binary; "
                     "nothing launches it until it is confirmed")
+HOST_UNDO_LINE = ("server.extra_args --host {host} is not applied — launched on 127.0.0.1 — "
+                  "server.bind_all: true restores it (asks once)")
+HOST_CONVERTED = "server.bind_all: true, from server.extra_args --host 0.0.0.0, which 0.17 applied"
 PROBE_TIMEOUT_SECONDS = 0.5
 
 
@@ -252,14 +255,24 @@ class SensedStart:
     """What `start` learned before `decide_machine_trust` (D-08, D-16, D-17, D-20): whether this start
     is about to launch the primary, the display-only annotations for the one question, the D-17 suffix
     of an upgrade conversion (`converted`), the PATH binary this start wrote (`path_written`) and the
-    undo line of a `--host` that was not converted (`undo_line`). The last three beyond `path_written`
-    are filled by the `--host` conversion."""
+    undo line of a `--host` that was not converted (`undo_line`)."""
 
     launching: bool
     annotations: dict = field(default_factory=dict)
     converted: str | None = None
     path_written: str | None = None
     undo_line: str | None = None
+
+
+@dataclass
+class LaunchNotes:
+    """What start's own launch prints beside its announcement: the posture ``suffix`` appended to the
+    announcement's phrase and the ``lines`` printed once right after it. ``printed`` is set by a launch
+    that carried them, so the caller can hand the REPL only what was not printed."""
+
+    lines: list[str] = field(default_factory=list)
+    suffix: str | None = None
+    printed: bool = False
 
 
 def _server_section(raw: dict) -> dict:
@@ -271,6 +284,18 @@ def _merged_server(cfg: dict, over: dict) -> dict:
     from localharness.config.overlay import deep_merge
 
     return deep_merge(_server_section(cfg), _server_section(over))
+
+
+def _host_of(extra_args: list) -> str | None:
+    """The value of the LAST `--host X` / `--host=X` in ``extra_args``, as llama-server resolves it."""
+    tokens = [str(t) for t in extra_args]
+    host: str | None = None
+    for i, token in enumerate(tokens):
+        if token == "--host" and i + 1 < len(tokens):
+            host = tokens[i + 1]
+        elif token.startswith("--host="):
+            host = token[len("--host="):]
+    return host
 
 
 def _write_path_binary(global_dir: Path, rec: dict | None, path_binary: str | None) -> str | None:
@@ -321,6 +346,70 @@ def _after_no_remove_path_binary(global_dir: Path, path: str) -> None:
     trust.record_offer_decline(trust.decline_key("<binary>", path))
 
 
+def _adopt_written_bind_all(global_dir: Path) -> None:
+    """Adopt `server.bind_all: true` from a read of the files just written, nothing else on disk."""
+    from localharness.config import trust
+
+    cfg, over = _raw_settings(global_dir)
+    now = next((e for e in trust._posture_entries({"config.yaml": cfg, "overrides.yaml": over})
+                if e["name"] == "server.bind_all"), None)
+    if now is not None and now["shown"].split(":")[1] == "true":
+        trust.adopt_entries(global_dir, [now])
+
+
+def _convert_extra_args_host(global_dir: Path, rec: dict | None, *, can_ask: bool
+                            ) -> tuple[dict, str | None, str | None]:
+    """D-16: what a 0.17 `server.extra_args --host` becomes. Returns `(annotations, converted,
+    undo_line)`. Acts only for a merged llama.cpp or vLLM-binary record with no `bind_all` set, and
+    only when the winning file's `server.extra_args` entry is covered BY VALUE by the record:
+
+    - exactly `0.0.0.0` at the upgrade start (`launch_model` not in the record's kinds), on any
+      channel: `server.bind_all: true` is written and adopted, no question, and the launch says so;
+    - any other address on a terminal start: `server.bind_all: true` is written so the one question
+      shows it, with its source as an annotation;
+    - everything else that 0.17 would have bound beyond loopback (a hostname, a `.sock`, an uncovered
+      entry, a headless start, a `0.0.0.0` after the upgrade start) writes nothing and the launch is
+      on loopback with the undo line. A docker record converts nothing and says nothing."""
+    from localharness.config import trust
+    from localharness.provider import server as managed_server
+    from localharness.registry import set_value_in_dict
+
+    cfg, over = _raw_settings(global_dir)
+    merged = _merged_server(cfg, over)
+    runtime = merged.get("runtime", "vllm")
+    if merged.get("bind_all") is not None or not (
+            runtime == "llamacpp" or (runtime == "vllm" and merged.get("launch", "binary") == "binary")):
+        return {}, None, None
+    winner_file, winner = ("overrides.yaml", over) if "extra_args" in _server_section(over) \
+        else ("config.yaml", cfg)
+    extra_args = _server_section(winner).get("extra_args")
+    host = _host_of(extra_args) if isinstance(extra_args, list) else None
+    kind = managed_server.classify_hosts(host) if host is not None else "loopback"
+    if kind == "loopback":
+        return {}, None, None
+    undo = HOST_UNDO_LINE.format(host=_visible(host))
+    if rec is None or kind != "address" or _uncovered(
+            rec["entries"], trust._launch_entries(winner_file, "server.", {"extra_args": extra_args})):
+        return {}, None, undo
+    upgrade = trust.LAUNCH_MODEL_KIND not in rec["kinds"]
+    every_interface = {part.strip() for part in host.split(",") if part.strip()} == {"0.0.0.0"}
+    if every_interface and not upgrade:  # a 0.0.0.0 that 0.17 did not apply: never converted
+        return {}, None, undo
+    if not every_interface and not can_ask:  # another address is offered only where it can be asked
+        return {}, None, undo
+    if not _write_overlay_validated(
+            global_dir, lambda d: set_value_in_dict(d, "server.bind_all", True),
+            [("server.bind_all", None, True)],
+            actor_detail=f"localharness start: server.extra_args --host {_visible(host)} converted to "
+                         "server.bind_all: true"):
+        return {}, None, undo
+    if every_interface:
+        _adopt_written_bind_all(global_dir)
+        return {}, HOST_CONVERTED, None
+    note = f"(from server.extra_args --host {host}{', which 0.17 applied' if upgrade else ''})"
+    return {("overrides.yaml", trust.LAUNCH_KIND, "server.bind_all"): note}, None, None
+
+
 def _sensed_launching(global_dir: Path, rec: dict | None) -> bool:
     """D-08/D-27: is this start about to launch the primary? A live pidfile says a harness-launched
     server is up (False, and no connect is made). With no pidfile, only a llama.cpp record whose
@@ -355,18 +444,20 @@ def _sensed_launching(global_dir: Path, rec: dict | None) -> bool:
 
 def _sense_before_trust(global_dir: Path, *, can_ask: bool, path_binary: str | None) -> SensedStart:
     """Everything `start` senses, and the pre-question writes it makes, before `decide_machine_trust`:
-    the PATH-found binary (D-20) and whether this start is about to launch (D-08). Every overlay write
-    goes through `workspace._write_overlay_validated`."""
+    the PATH-found binary (D-20), the 0.17 `--host` conversion (D-16) and whether this start is about
+    to launch (D-08). Every overlay write goes through `workspace._write_overlay_validated`."""
     from localharness.config import trust
 
     rec = trust.recorded_machine(global_dir)
     path_written = _write_path_binary(global_dir, rec, path_binary)
-    return SensedStart(_sensed_launching(global_dir, rec), {}, None, path_written, None)
+    annotations, converted, undo_line = _convert_extra_args_host(global_dir, rec, can_ask=can_ask)
+    return SensedStart(_sensed_launching(global_dir, rec), annotations, converted, path_written, undo_line)
 
 
 async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launch_key: dict[str, str],
                                 *, path_binary: str | None = None, autosense: Any = None,
-                                endpoint_out: list | None = None) -> str | None:
+                                endpoint_out: list | None = None,
+                                notes: LaunchNotes | None = None) -> str | None:
     """Launch path 1 of the five: `start`'s down-server branch. Wait for a server that is already
     loading, or ask the launch decision BEFORE announcing anything and launch through the lifecycle
     strategy. Returns the decision's refusal line when the launch is refused (nothing stopped,
@@ -379,7 +470,11 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     ``autosense`` is the machine's `AutosenseConfig`, handed to `activate` so a llama.cpp launch sizes
     its window; ``endpoint_out`` collects the `LiveEndpoint` of a launch this start made (nothing is
     appended on the wait-for-a-loading-server path), which is where the caller reads the window the
-    launch got and the environment names it dropped."""
+    launch got and the environment names it dropped.
+
+    ``notes`` is what start's own launch prints beside the announcement (D-17, D-16): its ``suffix``
+    joins the posture phrase when the launch really binds beyond loopback, its ``lines`` follow the
+    announcement once, and ``printed`` is set. The waiting and refused branches print none of it."""
     from localharness.provider import server as managed_server
     from localharness.provider.lifecycle import strategy_for
     strategy = strategy_for(srv)
@@ -394,10 +489,16 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     if decision.refusal is not None:
         found = f" (PATH has {path_binary})" if path_binary and srv.runtime == "llamacpp" else ""
         return decision.refusal + found
-    _, posture = managed_server.effective_posture(srv, keyed=keyed, decision=decision)
+    exposed, posture = managed_server.effective_posture(srv, keyed=keyed, decision=decision)
+    if notes is not None and notes.suffix and exposed:
+        posture = f"{posture or 'every interface'} — {notes.suffix}"
     detail = f"{posture}; " if posture else ""
     console.print(f"Managed {label} is not running — starting it ({detail}model load can take several minutes)...",
                   markup=False)
+    if notes is not None:
+        for line in notes.lines:
+            err_console.print(line, markup=False, soft_wrap=True)
+        notes.printed = True
     if decision.note:
         err_console.print(decision.note, markup=False, soft_wrap=True)
     # activate = serve_command → start_server → wait_ready (launch + readiness) via the lifecycle
@@ -1223,7 +1324,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         try:
             refusal = await _start_managed_server(
                 harness.server, server_cfg_path, provider.base_url, launch_key,
-                path_binary=path_llama_server, autosense=harness.autosense, endpoint_out=_launched)
+                path_binary=path_llama_server, autosense=harness.autosense, endpoint_out=_launched,
+                notes=LaunchNotes([sensed.undo_line] if sensed.undo_line else [], sensed.converted))
             if refusal is None:
                 probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
         except (RuntimeError, TimeoutError, OSError) as exc:
