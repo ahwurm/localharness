@@ -15,7 +15,9 @@ QOL stat.
 
 The same entry also carries additive fields written by other call sites (window_report,
 model_path), and a reserved top-level `_dropped_env` map holds per-runtime dropped env names. They
-share this one file and this one write recipe; no second file exists (AUTO-08).
+share this one file and this one write recipe; no second file exists (AUTO-08). `rejected_effort_keys`
+is the AUTO-08 rejected-effort-key field 02-CONTEXT D-24 deferred: the reasoning-effort request keys a
+server answered with a 400, per (provider_type, model).
 """
 
 from __future__ import annotations
@@ -222,6 +224,26 @@ def last_window_report(path: Path, provider_type: str, model: str) -> WindowReco
         return None
     at = rep.get("recorded_at")
     return WindowRecord(nums[0], nums[1], nums[2], at) if isinstance(at, str) else None
+
+
+REJECTED_EFFORT_KEYS_FIELD = "rejected_effort_keys"
+
+
+def record_rejected_effort_keys(
+    path: Path, provider_type: str, model: str, keys: Iterable[str],
+) -> None:
+    """Record, on this model's entry, the effort request keys its server rejected (sorted,
+    de-duplicated). Replaces the list; an empty `keys` stores `[]`. Idempotent: the same keys again
+    only moves `updated_at`. I/O errors propagate — the caller decides whether to swallow them."""
+    _update_entry(path, speed_key(provider_type, model),
+                  **{REJECTED_EFFORT_KEYS_FIELD: sorted(set(keys))})
+
+
+def last_rejected_effort_keys(path: Path, provider_type: str, model: str) -> list[str] | None:
+    """The recorded rejected effort keys, or None when never recorded (or hand-edited out of shape)."""
+    entry = _load(path).get(speed_key(provider_type, model))
+    keys = entry.get(REJECTED_EFFORT_KEYS_FIELD) if isinstance(entry, dict) else None
+    return list(keys) if isinstance(keys, list) and all(isinstance(k, str) for k in keys) else None
 
 
 def record_model_path(path: Path, provider_type: str, model: str, model_path: str) -> None:

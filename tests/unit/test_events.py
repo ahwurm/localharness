@@ -707,3 +707,20 @@ def test_a_staged_call_survives_the_session_log_roundtrip():
     assert restored.pending.id == 1
     assert restored.pending.request.tool_params == {"command": "rm -rf ~/old-notes"}
     assert restored.total == 1
+
+
+def test_component_mutated_accepts_the_channel_actor_and_still_rejects_others():
+    """actor='channel' is a person's /effort on a channel; actor_detail is the channel id."""
+    from pydantic import ValidationError
+    ev = ComponentMutated(
+        path="server.effort", before_value=None, after_value="low", layer="user",
+        actor="channel", actor_detail="terminal",
+    )
+    dumped = ev.model_dump()
+    assert dumped["actor"] == "channel" and dumped["actor_detail"] == "terminal"
+    restored = deserialize_event(ev.model_dump_json())
+    assert isinstance(restored, ComponentMutated) and restored.actor == "channel"
+    for actor in ("cli", "experiment", "proposer", "orchestrator"):
+        ComponentMutated(path="p", before_value=1, after_value=2, layer="user", actor=actor)
+    with pytest.raises(ValidationError):
+        ComponentMutated(path="p", before_value=1, after_value=2, layer="user", actor="bogus")

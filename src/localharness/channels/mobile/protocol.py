@@ -87,6 +87,7 @@ never arrive, and never find out.
 
 FINISH_REASONS_KNOWN: tuple[str, ...] = (
     "stop", "length", "tool_calls", "content_filter", "function_call", "degenerate",
+    "reasoning_cut",  # the reasoning budget ended the turn's thinking (spec 16 §7.4 (3))
 )
 """The `Action.finish_reason` values seen in practice, for a client that wants to branch on them.
 

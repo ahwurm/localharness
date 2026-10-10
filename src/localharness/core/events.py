@@ -514,6 +514,8 @@ class ComponentMutated(BaseEvent):
     actor='orchestrator' is the autoresearch loop's adoption write to the LIVE
     project-local overlay (layer='user'), distinct from actor='experiment' (the
     gate's throwaway worktree overlay) and actor='cli' (a human `components set`).
+    actor='channel' is a person's `/effort` on a channel (terminal, phone, Discord); `actor_detail`
+    is the channel id.
 
     Fields are kept JSON-serializable (Any restricted to YAML-primitive types by
     coerce-on-set in the registry CLI; see Pitfall 6 in 14-RESEARCH.md).
@@ -524,7 +526,7 @@ class ComponentMutated(BaseEvent):
     before_value: Any  # int|float|str|bool|list|dict|None — JSON-primitive only
     after_value: Any
     layer: Literal["user", "experiment"]  # which overlay was written
-    actor: Literal["cli", "experiment", "proposer", "orchestrator"]
+    actor: Literal["cli", "experiment", "proposer", "orchestrator", "channel"]
     actor_detail: Optional[str] = None  # proposal_id, experiment_id, etc.
 
 
