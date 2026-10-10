@@ -535,6 +535,40 @@ def test_launch_keys_doc_bites():
     assert check_launch_keys_doc("## Nothing\n") != []
 
 
+def check_key_file_doc(security_text: str, cap: int | None = None) -> list[str]:
+    """SECURITY.md says what `start` does with `server.api_key_file`: that it opens it, the byte rule
+    with the code's own `KEY_FILE_CAP`, what a refused file does, where the key may go, and that
+    `doctor` still never opens it. The cap is read from the code, never typed here (IN-05)."""
+    from localharness.provider.server import KEY_FILE_CAP
+
+    cap = KEY_FILE_CAP if cap is None else cap
+    text = " ".join(security_text.split())
+    needles = {
+        "that start opens the key file": "`server.api_key_file` is the one launch key `start` itself opens",
+        "the byte rule": "one line of printable ASCII",
+        "the size cap": f"at most {cap} bytes",
+        "the refused-file outcome": "the session sends no key",
+        "the destination rule": "an endpoint that is this machine",
+        "doctor never opens it": "doctor never opens a key file",
+        "the narrowing exceptions": "except `bind_all` and `require_api_key`, which are narrowed",
+    }
+    return [f"SECURITY.md does not say {what}" for what, needle in needles.items() if needle not in text]
+
+
+def test_key_file_doc_live():
+    assert check_key_file_doc(_read("SECURITY.md")) == []
+
+
+def test_key_file_doc_bites():
+    text = _read("SECURITY.md")
+    assert check_key_file_doc(text.replace("at most 4096 bytes", "at most 1 bytes")) == [
+        "SECURITY.md does not say the size cap"]
+    assert check_key_file_doc(text, cap=99) == ["SECURITY.md does not say the size cap"]
+    assert check_key_file_doc(text.replace("doctor never opens a key file", "doctor opens")) == [
+        "SECURITY.md does not say doctor never opens it"]
+    assert len(check_key_file_doc("## Nothing\n")) == 7
+
+
 # ---------------------------------------------------------------- check 4: three declaration readers
 
 READERS = {"tools/capabilities.py": None, "agent/gate.py": "gate_family",
