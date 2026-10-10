@@ -1,0 +1,307 @@
+"""The window autosense: what the fit is, what it needs, and what the harness says about it.
+
+Three numbers describe a context window. `served` is what the running server answers with,
+`trained` is what the model was trained for (its GGUF header), and `fits` is what the free
+memory beside the weights could hold: the largest window whose KV cache still fits after the
+weights and a compute margin. The fit is one function, `fit`, used by every launch (through
+`SpawnedProcessStrategy.activate`), by the attach report `start` makes and by `doctor`.
+
+Everything here is pure except `free_memory` (the only subprocess: `nvidia-smi`, or
+`/proc/meminfo` on a unified-memory machine) and `weights_bytes` (a stat of the model files, never
+an open). A number that cannot be known is `None`, never a guess, and a fit at or below zero is
+`None` too: the caller then launches without `-c` and llama-server's own `--fit` sizes the
+window. Lines are returned by `window_lines`, never printed; nothing in this module launches
+anything or writes a file.
+"""
+from __future__ import annotations
+
+import os
+import re
+import stat
+import subprocess
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
+
+from localharness.core.which import which_outside_cwd
+from localharness.provider.speed_stats import WindowRecord
+
+# What callers hand to `agent.gguf_header.read_header` so the header holds exactly the fit's inputs.
+FIT_KEYS = frozenset({
+    "block_count", "head_count_kv", "key_length", "embedding_length", "head_count", "context_length",
+})
+
+# Bytes per element of a KV cache type, from ggml's block sizes (bytes per block / elements per block).
+KV_BYTES: Mapping[str, float] = MappingProxyType({
+    "f32": 4.0, "f16": 2.0, "bf16": 2.0, "q8_0": 34 / 32, "q4_0": 18 / 32, "q4_1": 20 / 32,
+    "q5_0": 22 / 32, "q5_1": 24 / 32, "iq4_nl": 18 / 32,
+})
+
+FIT_BY_SERVER_LINE = "window: served by llama-server's --fit"
+
+_MIB = 2**20
+_SMI_TIMEOUT = 5.0
+
+
+@dataclass(frozen=True)
+class FreeMemory:
+    """Memory the weights and the KV cache can still use: free and total bytes, and where they came from."""
+
+    free_bytes: int
+    total_bytes: int
+    source: str  # "nvidia-smi" or "meminfo"
+
+
+def _run_nvidia_smi() -> str | None:
+    """nvidia-smi's CSV (MiB, one line per GPU), or None when it is absent, fails or hangs."""
+    exe = which_outside_cwd("nvidia-smi")
+    if exe is None:
+        return None
+    try:
+        done = subprocess.run(
+            [exe, "--query-gpu=memory.free,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=_SMI_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def _read_meminfo() -> dict[str, int] | None:
+    """MemTotal and MemAvailable of /proc/meminfo in bytes, or None when unreadable."""
+    try:
+        text = Path("/proc/meminfo").read_text(encoding="ascii", errors="replace")
+        found: dict[str, int] = {}
+        for line in text.splitlines():
+            name, _, rest = line.partition(":")
+            if name in ("MemTotal", "MemAvailable"):
+                found[name] = int(rest.split()[0]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return found if len(found) == 2 else None
+
+
+def free_memory(ratios: Any) -> FreeMemory | None:
+    """Free and total bytes of the first GPU; on a unified-memory machine (`[N/A]`) the available
+    RAM less `unified_reserve_ratio` of the total. None when nvidia-smi is absent, fails or hangs."""
+    out = _run_nvidia_smi()
+    if out is None or not out.strip():
+        return None
+    try:
+        free_mib, total_mib = (int(field.strip()) for field in out.strip().splitlines()[0].split(","))
+    except ValueError:
+        mi = _read_meminfo()
+        if mi is None:
+            return None
+        free = int(mi["MemAvailable"] - ratios.unified_reserve_ratio * mi["MemTotal"])
+        return FreeMemory(free, mi["MemTotal"], "meminfo")
+    return FreeMemory(free_mib * _MIB, total_mib * _MIB, "nvidia-smi")
+
+
+def _pos_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def head_dim(header: Mapping[str, Any]) -> int | None:
+    """`key_length`, else `embedding_length // head_count`."""
+    key_length = _pos_int(header.get("key_length"))
+    if key_length is not None:
+        return key_length
+    embedding, heads = _pos_int(header.get("embedding_length")), _pos_int(header.get("head_count"))
+    return embedding // heads if embedding is not None and heads is not None else None
+
+
+def kv_heads(header: Mapping[str, Any]) -> int | None:
+    """`head_count_kv` as an int; a per-layer list takes its maximum."""
+    value = header.get("head_count_kv")
+    if isinstance(value, list):
+        ints = [v for v in value if _pos_int(v) is not None]
+        return max(ints) if ints else None
+    return _pos_int(value)
+
+
+def kv_bytes_per_token(header: Mapping[str, Any], cache_type_k: str | None,
+                       cache_type_v: str | None) -> float | None:
+    """KV cache bytes per token: layers x KV heads x head dim x (bytes of K + bytes of V). An unset
+    type is f16; an unknown type, or any header value that is missing, gives None."""
+    k = KV_BYTES.get((cache_type_k or "f16").lower())
+    v = KV_BYTES.get((cache_type_v or "f16").lower())
+    n_layer, heads, dim = _pos_int(header.get("block_count")), kv_heads(header), head_dim(header)
+    if k is None or v is None or n_layer is None or heads is None or dim is None:
+        return None
+    return n_layer * heads * dim * (k + v)
+
+
+# Flags that place tensors by hand: how many layers sit on the GPU cannot be read from them.
+_OFFLOAD_UNKNOWN = ("-ot", "--override-tensor", "--n-cpu-moe", "-ncmoe", "--cpu-moe")
+_NGL = ("-ngl", "--n-gpu-layers", "--gpu-layers")
+
+
+def offload_kind(extra_args: Sequence[str], n_layer: int | None) -> str:
+    """"gpu" (weights fully GPU-resident), "partial" (`-ngl` below the layer count) or "unknown"
+    (tensors placed by hand, or an `-ngl` that cannot be read). The fit is computed only for "gpu"."""
+    kind = "gpu"
+    for i, token in enumerate(extra_args):
+        if any(token == flag or token.startswith(f"{flag}=") for flag in _OFFLOAD_UNKNOWN):
+            return "unknown"
+        for flag in _NGL:
+            if token == flag:
+                raw = extra_args[i + 1] if i + 1 < len(extra_args) else ""
+            elif token.startswith(f"{flag}="):
+                raw = token[len(flag) + 1:]
+            else:
+                continue
+            try:
+                n = int(raw)
+            except ValueError:
+                return "unknown"
+            if n_layer is None:
+                return "unknown"
+            kind = "partial" if 0 <= n < n_layer else "gpu"
+    return kind
+
+
+_SHARD = re.compile(r"^(?P<prefix>.*)-(?P<i>\d{5})-of-(?P<n>\d{5})\.gguf$")
+
+
+def _size(path: Path) -> int:
+    st = os.stat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise OSError(f"{path} is not a regular file")
+    return st.st_size
+
+
+def weights_bytes(model: str, mmproj: str | None = None) -> int | None:
+    """Bytes of the GGUF, of its split shards (siblings named `<prefix>-0000N-of-0000M.gguf` when
+    the model's own name has that shape) and of `mmproj`. Stat only, never an open. None when any
+    of them is missing."""
+    try:
+        path = Path(os.path.expanduser(model))
+        total = _size(path)
+        shard = _SHARD.match(path.name)
+        if shard:
+            siblings = re.compile(
+                rf"^{re.escape(shard['prefix'])}-\d{{5}}-of-{shard['n']}\.gguf$")
+            total = sum(_size(p) for p in path.parent.iterdir() if siblings.match(p.name))
+        if mmproj:
+            total += _size(Path(os.path.expanduser(mmproj)))
+    except (OSError, ValueError):
+        return None
+    return total
+
+
+def fit(header: Mapping[str, Any], free_bytes: int | None, ratios: Any,
+        attached_served: int | None = None, *, cache_type_k: str | None = None,
+        cache_type_v: str | None = None, weights: int | None = None, offload: str = "gpu",
+        runtime: str = "llamacpp") -> int | None:
+    """The largest window the free memory holds, capped at the trained window; None when it cannot
+    be known or is not above zero. Beside a running server (`attached_served`) the window already
+    served is counted as served plus what the free memory adds; otherwise the weights and a
+    `compute_margin_ratio` of them come off the free bytes first."""
+    kv = kv_bytes_per_token(header, cache_type_k, cache_type_v)
+    trained = _pos_int(header.get("context_length"))
+    if runtime != "llamacpp" or offload != "gpu" or free_bytes is None or kv is None or trained is None:
+        return None
+    if attached_served is not None:
+        window = attached_served + int(free_bytes // kv)
+    else:
+        if weights is None:
+            return None
+        usable = free_bytes - weights - int(ratios.compute_margin_ratio * weights)
+        if usable <= 0:
+            return None
+        window = int(usable // kv)
+    window = min(trained, window)
+    return window if window > 0 else None
+
+
+def cache_ram_mib(mem_available: int | None, mem_total: int | None, weights: int | None,
+                  offload: str, extra_args: Sequence[str], ratios: Any) -> int | None:
+    """`--cache-ram` in MiB: `cache_ram_ratio` of the available RAM less host-resident weights,
+    clamped at `cache_ram_ceiling_ratio` of the total. Weights are host-resident unless fully
+    GPU-resident and mmapped. None when memory is unknown or the result is not above zero."""
+    if mem_available is None or mem_total is None:
+        return None
+    host = (weights or 0) if offload != "gpu" or "--no-mmap" in extra_args else 0
+    ram = ratios.cache_ram_ratio * (mem_available - host)
+    mib = int(min(ram, ratios.cache_ram_ceiling_ratio * mem_total) // _MIB)
+    return mib if mib > 0 else None
+
+
+@dataclass(frozen=True)
+class WindowReport:
+    """What a launch or an attach learned about the window, handed to `window_lines`."""
+
+    served: int | None
+    trained: int | None
+    fits: int | None
+    free_bytes: int | None
+    total_bytes: int | None
+    weights_bytes: int | None
+    asked: int | None  # the -c sent, or None
+    mode: str  # "fit", "record", "extra_args", "fit-by-server" or "not-computed"
+    attached: bool = False  # attached_served was used: this is a report on a running server
+    retried: bool = False
+    verified: bool = True  # the probe answered
+    runtime: str = "llamacpp"
+
+
+def gib(n: float) -> str:
+    return f"{n / 2**30:.1f}"
+
+
+def _n(value: int | None) -> str:
+    return f"{value:,}" if value is not None else "—"
+
+
+_UNDO = {
+    "record": "  → unset `server.context` to relaunch with -c {fits}",
+    "extra_args": "  → drop the -c from `server.extra_args` to relaunch with -c {fits}",
+    "hand": "  → the next harness launch uses -c {fits}",
+    "no-record": "  → run `localharness init` to let the harness size the window",
+}
+
+
+def window_lines(report: WindowReport, ratios: Any, undo: str | None = None) -> list[str]:
+    """The window line(s) for one report; empty when there is nothing worth saying.
+
+    A launch report (`attached=False`) is always exactly one line and never gets a second, whatever
+    `undo` says; a launch is printed always, so the on-change gate does not apply to it. Line 2
+    (how to undo the harness's choice) exists only for an attach report given an `undo` in
+    {"record", "extra_args", "hand", "no-record"}; an attach report with `undo=None` is line 1
+    alone. An attach report with a fit or served window unknown, or whose fit is within
+    `notify_ratio` of what is served, says nothing."""
+    r = report
+    if r.runtime in ("ollama", "lmstudio"):
+        extra = " · Ollama decides the window" if r.runtime == "ollama" else ""
+        return [f"window: served {_n(r.served)} · trained {_n(r.trained)}{extra}"]
+    if r.mode == "fit-by-server":
+        return [FIT_BY_SERVER_LINE + (f" · served {r.served:,}" if r.served and r.verified else "")]
+    if r.attached and (r.fits is None or r.served is None
+                       or abs(r.fits - r.served) <= ratios.notify_ratio * r.served):
+        return []
+    line = f"window: served {_n(r.served)} · trained {_n(r.trained)} · fits {_n(r.fits)}"
+    if r.free_bytes is not None and r.total_bytes is not None and r.weights_bytes is not None:
+        beside = " beside the served model" if r.attached else ""
+        line += f" (free {gib(r.free_bytes)} GiB of {gib(r.total_bytes)}{beside}; weights {gib(r.weights_bytes)} GiB)"
+    if r.asked and r.served and r.served < r.asked:
+        line += f" (asked {r.asked:,})"
+    if not r.verified:
+        line += " (not verified)"
+    if r.retried and r.asked:
+        line += f" (after one retry at -c {r.asked:,})"
+    if r.attached and undo in _UNDO:
+        return [line, _UNDO[undo].format(fits=r.fits)]
+    return [line]
+
+
+def window_changed(last: WindowRecord | None, report: WindowReport, notify_ratio: float) -> bool:
+    """Whether the window differs from the last recorded one: no record, a served or trained
+    difference, a fit known against unknown, or a fit that moved by more than `notify_ratio` of
+    the recorded fit."""
+    if last is None or last.served != report.served or last.trained != report.trained:
+        return True
+    if last.fits is None or report.fits is None:
+        return last.fits is not report.fits
+    return abs(report.fits - last.fits) > notify_ratio * last.fits
