@@ -295,11 +295,20 @@ class SpawnedProcessStrategy:
                 spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
                 context=context, cache_ram=cache_kw)
 
+        # Once per activate (the halve-once retry reuses it): the llama.cpp config the child reads is
+        # the record's bytes in a harness-owned directory, never the person's real file (D-30).
+        try:
+            home = server.prepare_config_ini_home(config_dir, spec.port, getattr(spec, "config_ini", None))
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not prepare {server.config_ini_home(config_dir, spec.port)}: {exc.strerror or exc}"
+            ) from exc
+
         def launch(cmd: list[str]) -> tuple[int, list[str]]:
             names: list[str] = []
             pid = server.start_server(
                 config_dir, cmd, runtime=spec.runtime, record_env=getattr(spec, "env", None),
-                dropped_out=names, **server.key_kwargs(api_key))
+                dropped_out=names, xdg_config_home=str(home), **server.key_kwargs(api_key))
             return pid, names
 
         async def ready() -> list[str]:
