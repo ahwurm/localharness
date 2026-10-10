@@ -67,6 +67,11 @@ EffortLevel = Literal["off", "low", "high", "max"]
 LEVELS: tuple[str, ...] = ("off", "low", "high", "max")
 """The EffortLevel members in order, for the picker and `/effort` to validate against."""
 
+Rung = Literal["session", "agent", "endpoint", "org", "default"]
+"""The rungs of the effort ladder a level can come from. config/effort.py's `resolve_effort` is the
+only place the order is written down; the name lives here, beside the levels, so the loop (which only
+records which rung won, and must not import the resolver) takes the names from the same place."""
+
 
 def coerce_yaml_effort(value: Any) -> Any:
     """Read a hand-typed bare `off` the way the person meant it.

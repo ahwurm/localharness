@@ -17,7 +17,7 @@ from rich.protocol import is_renderable
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
 from localharness.cli.slash_commands import SlashCommand, find_row, help_text
-from localharness.config.effort import LEVELS, resolve_effort
+from localharness.config.effort import EFFORT_UNENFORCED_LINE, LEVELS, resolve_effort
 from localharness.core.content import ImageError, describe, fit_all, fit_to_tokens
 from localharness.core.events import (
     PENDING_APPROVED_NUDGE,
@@ -64,7 +64,8 @@ EFFORT_UNKNOWN_TEMPLATE = (
     "Unknown effort '{arg}'. Levels: off, low, high, max — /effort show reports the current level."
 )
 EFFORT_AGENT_LINE = "  {name}: {level}"
-EFFORT_UNENFORCED_TEMPLATE = "effort unenforced on this server: {key} rejected"
+# One text with start's summary line: defined in config/effort.py, named here for this module's callers.
+EFFORT_UNENFORCED_TEMPLATE = EFFORT_UNENFORCED_LINE
 EFFORT_PERSIST_FAILED_TEMPLATE = "Effort set for this session, but persisting it failed: {exc}"
 EFFORT_PICKER_PROMPT = "Reasoning effort for this session (/effort). This question holds no tool call."
 

@@ -18,6 +18,7 @@ from rich.text import Text
 
 from localharness.cli.theme import entity, entity_text
 from localharness.cli.workspace import NO_INPUT_HELP
+from localharness.config.effort import EFFORT_UNENFORCED_LINE
 from localharness.core.private_files import touch_private
 from localharness.core.which import which_outside_cwd
 from localharness.plugins.channels import (OWN_COMMAND, accepted_channels, channel_names,
@@ -35,8 +36,8 @@ OWN_COMMAND_ERROR = ("the {name} channel is served by its own command, because {
 FIRST_START_LEAD = "LocalHarness is not set up yet. Setting up the model server first:"
 
 RESTARTED_LINE = "Restarted with {name} {state}. Your conversation continues."
-# The two start-summary lines for a server that refused an effort request key (spec 16 §7.4, D-19, D-22).
-EFFORT_UNENFORCED_LINE = "effort unenforced on this server: {key} rejected"
+# The two start-summary lines for a server that refused an effort request key (spec 16 §7.4, D-19, D-22);
+# the first is spelled once in config/effort.py (imported above), shared with /effort show.
 EFFORT_CUT_OFF_LINE = "effort: thinking-off rejected by this server; the reasoning cut is off"
 RESUMED_LINE = "Awake again, continuing the conversation that went to sleep (sitting {previous})."
 WAKING_DETAIL = "waking the chat you left"

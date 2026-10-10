@@ -6,6 +6,8 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import localharness.config.effort as effort_mod
 from localharness.config.effort import LEVELS, endpoint_effort, resolve_effort
 from localharness.config.models import ProviderConfig
@@ -167,3 +169,29 @@ def test_recording_llm_key_sets_are_settable_frozensets() -> None:
         {"reasoning_budget_tokens"})
     llm.rejected_effort_keys = frozenset({"chat_template_kwargs"})
     assert llm.rejected_effort_keys == frozenset({"chat_template_kwargs"})
+
+
+# --- one spelling (IN-04) ---------------------------------------------------------------------
+
+
+def test_the_unenforced_line_is_one_text_for_start_and_the_repl() -> None:
+    from localharness.cli import repl, start_cmd
+    from localharness.config import effort
+
+    assert start_cmd.EFFORT_UNENFORCED_LINE is effort.EFFORT_UNENFORCED_LINE
+    assert repl.EFFORT_UNENFORCED_TEMPLATE is effort.EFFORT_UNENFORCED_LINE
+
+
+def test_the_loop_takes_its_rung_names_from_the_one_rung_type() -> None:
+    from typing import get_args
+
+    from localharness.agent import loop
+    from localharness.config.effort import Rung
+    from localharness.config.models import Rung as ModelsRung
+
+    assert Rung is ModelsRung  # the resolver re-exports the one definition
+    assert not hasattr(loop, "_EFFORT_RUNGS")
+    for rung in get_args(Rung):
+        loop._check_effort("high", rung)
+    with pytest.raises(ValueError, match="rung"):
+        loop._check_effort("high", "nowhere")

@@ -899,21 +899,21 @@ _TRUNCATED_TOOL_CALL_FEEDBACK = (
 )
 
 
-# The rungs of the effort ladder a level can come from (the config package resolves them; the loop
-# only records which one won, so it can name it).
-_EFFORT_RUNGS: tuple[str, ...] = ("session", "agent", "endpoint", "org", "default")
-
-
 def _check_effort(level: str, rung: str) -> None:
     """Raise ValueError naming a level outside LEVELS or a rung outside the ladder."""
     # Imported here, not at module level: config.models imports agent.gate_types, which loads the
     # agent package (and this module) first.
-    from localharness.config.models import LEVELS
+    # The rungs are config/effort.py's `Rung` (the only spelling of the ladder): the loop only
+    # records which one won, so it can name it, and takes the names from there.
+    from typing import get_args
 
+    from localharness.config.models import LEVELS, Rung
+
+    rungs = get_args(Rung)
     if level not in LEVELS:
         raise ValueError(f"unknown effort level {level!r}; expected one of {', '.join(LEVELS)}")
-    if rung not in _EFFORT_RUNGS:
-        raise ValueError(f"unknown effort rung {rung!r}; expected one of {', '.join(_EFFORT_RUNGS)}")
+    if rung not in rungs:
+        raise ValueError(f"unknown effort rung {rung!r}; expected one of {', '.join(rungs)}")
 
 
 def _accepts_kwarg(fn: Any, name: str) -> bool:
