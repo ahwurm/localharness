@@ -364,8 +364,9 @@ async def test_without_a_yes_org_loosenings_and_a_launch_command_are_held_back(m
     assert "evil" not in (root.permissions.ask.mcp_trusted_servers or [])
     assert seen and all(h.server is None or h.server.binary != "/tmp/evil-server" for h in seen)
     err = _err(capsys)
-    assert "Not applying 3 change(s)" in err
+    assert "Not applying 5 change(s)" in err, "two org loosenings, server.runtime, .binary and .model"
     assert "org.permissions.mode (overrides.yaml)" in err and "server.binary (config.yaml)" in err
+    assert "server.model (config.yaml)" in err
 
 
 async def test_org_settings_and_a_launch_command_there_before_the_upgrade_are_adopted(machine):

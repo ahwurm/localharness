@@ -186,12 +186,28 @@ TOOL_SCRIPT_KIND = "tool_script"
 
 ORG_PERMISSION_KIND = "org_permission"
 LAUNCH_KIND = "launch"
-LAUNCH_KEYS: tuple[str, ...] = ("binary", "docker_image", "extra_args")
-"""The `server:` keys that name what the harness executes when it launches the model server."""
+LAUNCH_KEYS: tuple[str, ...] = (
+    "binary", "docker_image", "extra_args", "runtime", "launch", "bind_all", "require_api_key",
+    "api_key_file", "env", "local_models", "config_ini")
+"""The one key table: the `server:` keys (and every peer `lifecycle:` key) that decide what the
+harness executes, how it is exposed or what it is given when it launches a model server.
+`machine_snapshot`, `init`'s adoption and `SECURITY.md` all read this tuple, so no list is kept by
+hand. `effort` is never a fingerprinted key: it is a request parameter, not a launch decision."""
+
+_POSTURE_KEYS: tuple[str, ...] = ("bind_all", "require_api_key")
+"""The two LAUNCH_KEYS emitted once per record from the merged view of both files, not per file."""
+
+LAUNCH_MODEL_KIND = "launch_model"
+LAUNCH_MODEL_KEYS: tuple[str, ...] = (
+    "model", "mmproj", "served_name", "context", "cache_type_k", "cache_type_v", "cache_ram")
+"""The model keys of `server:` and of every peer `lifecycle:`. They are their own kind because a
+changed model is not a changed command: the first start that knows this kind adopts the current
+values once with no question (a record made before a kind existed adopts that kind silently), and
+a later change is a change like any other entry."""
 
 MACHINE_KINDS: frozenset[str] = frozenset(
     {"mcp_server", "embedding_model", "permission", TOOL_SCRIPT_KIND, ORG_PERMISSION_KIND,
-     LAUNCH_KIND})
+     LAUNCH_KIND, LAUNCH_MODEL_KIND})
 """Kinds of entry machine_snapshot() produces. A record made before a kind existed adopts that
 kind's current entries silently once — they predate the rule. That is how the first start that knows
 tool scripts adopts every script already in the tools folder."""
@@ -466,6 +482,26 @@ def _script_pending(global_dir: Path, file: str, real: Path) -> Optional[str]:
     return f"sha256:{digest[:12]}"
 
 
+def _launch_entries(file: str, prefix: str, mapping: Any) -> list[dict]:
+    """One entry per launch key present (and not None) in ``mapping``: `launch`-kind for
+    LAUNCH_KEYS, `launch_model`-kind for LAUNCH_MODEL_KEYS, named ``prefix + key``, ``shown`` the
+    value when it is a string, else compact JSON (so `false` and `0` are entries; an absent key is
+    not). An empty `local_models` list is no entry. `bind_all` and `require_api_key` are emitted
+    from the merged view by `machine_snapshot`, never here."""
+    if not isinstance(mapping, dict):
+        return []
+    out: list[dict] = []
+    for kind, keys in ((LAUNCH_KIND, LAUNCH_KEYS), (LAUNCH_MODEL_KIND, LAUNCH_MODEL_KEYS)):
+        for key in keys:
+            value = mapping.get(key)
+            if value is None or key in _POSTURE_KEYS or (key == "local_models" and value == []):
+                continue
+            out.append({"file": file, "kind": kind, "name": prefix + key,
+                        "shown": value if isinstance(value, str) else json.dumps(
+                            value, separators=(",", ":"), default=str)})
+    return out
+
+
 def machine_snapshot(global_dir: Path) -> list[dict]:
     """What your machine's own files would start, load or loosen: for every `<global>/agents/*.yaml`
     each `tools.mcp_servers` entry ({kind: "mcp_server", file: "agents/<f>", name, shown: command +
@@ -479,7 +515,11 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
     `<global>/overrides.yaml` — every agent's default layer — read like an agent file (file
     "overrides.yaml"); and in `<global>/config.yaml` and `overrides.yaml` each loosening of the
     `org:` section's permissions ({kind: "org_permission", name: "org.permissions.<key>"}) and each
-    launch-command key of the `server:` section ({kind: "launch", name: "server.binary" …}).
+    launch key of the `server:` section ({kind: "launch", name: "server.binary" …} for LAUNCH_KEYS,
+    {kind: "launch_model", name: "server.model" …} for LAUNCH_MODEL_KEYS) and of every
+    `extra_endpoints` peer's `lifecycle:` ({name: "extra_endpoints.<peer name>.lifecycle.<key>"} —
+    by name, never by index; the peer's `api_key` and `extra_headers` are siblings of `lifecycle` and
+    contribute no entry by construction).
     Sorted by (file, kind, name, canonical JSON); unparsable files skipped; never an env or header
     value."""
     from localharness.config.loader import layer_files, org_deny_loosenings, permission_loosenings
@@ -523,11 +563,15 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
         out += [{"file": file, "kind": ORG_PERMISSION_KIND, "name": f"org.{key}", "shown": shown}
                 for key, shown in permission_loosenings(
                     org.get("permissions") if isinstance(org, dict) else None)]
-        server = raw.get("server") if isinstance(raw, dict) else None
-        out += [{"file": file, "kind": LAUNCH_KIND, "name": f"server.{key}",
-                 "shown": server[key] if isinstance(server[key], str) else json.dumps(
-                     server[key], separators=(",", ":"), default=str)}
-                for key in LAUNCH_KEYS if isinstance(server, dict) and server.get(key) is not None]
+        out += _launch_entries(file, "server.", raw.get("server") if isinstance(raw, dict) else None)
+        # A peer endpoint's `lifecycle:` is the same launch decision as the primary's, named by the
+        # peer's `name` (never its list position). Its `api_key` and `extra_headers` are siblings
+        # of `lifecycle`, so no secret can reach an entry: they are never read here.
+        for peer in (raw.get("extra_endpoints") if isinstance(raw, dict) else None) or []:
+            if (isinstance(peer, dict) and peer.get("name") is not None
+                    and isinstance(peer.get("lifecycle"), dict)):
+                out += _launch_entries(
+                    file, f"extra_endpoints.{peer['name']}.lifecycle.", peer["lifecycle"])
     for path in layer_files(root, "divisions"):
         out += loosenings(f"divisions/{path.name}", _read_yaml(path))
     if (root / "org.yaml").is_file():
