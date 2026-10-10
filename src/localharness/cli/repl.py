@@ -1698,6 +1698,59 @@ class OrchestratorREPL:
     # /model — list and swap models
     # ------------------------------------------------------------------ #
 
+    def _foreign_incumbent(self, managed: Any, target: str) -> str | None:
+        """The imperative sentence when a process the harness did not launch holds the primary's
+        port, else None (D-32, D-33, D-58, D-69).
+
+        The port is `server.port`, else `provider.base_url`'s (when that names this machine). The
+        listener is looked up FIRST: a free port costs no docker, pidfile or HTTP probe. Only with a
+        listener is the strategy's liveness asked — a listener it claims is the harness's own.
+        Reads and decides only: nothing here stops, launches or signals anything."""
+        from urllib.parse import urlparse
+
+        from localharness.cli import model_ops, workspace
+        from localharness.provider import procfs
+
+        provider = getattr(self._harness, "provider", None)
+        base_url = getattr(provider, "base_url", None)
+        if managed is not None:
+            port = getattr(managed, "port", None)
+        else:
+            try:
+                parsed = urlparse(base_url or "")
+                port = parsed.port
+                local = (parsed.hostname or "") in (
+                    "localhost", "127.0.0.1", "::1", "0.0.0.0", "::")
+            except ValueError:
+                return None
+            if not local:
+                return None  # a remote primary: a listener here says nothing about it
+        if not isinstance(port, int) or not procfs.listeners(port):
+            return None
+        claimed = False
+        if managed is not None:
+            try:
+                from localharness.provider.lifecycle import strategy_for
+                claimed = bool(
+                    strategy_for(managed).liveness(managed, self._server_config_dir).alive)
+            except Exception:  # noqa: BLE001 — a liveness that cannot be asked claims nothing
+                claimed = False
+        if claimed:
+            return None
+        holder = workspace.port_holder(port)
+        if holder is None:
+            return None
+        llm = getattr(self._agent, "_llm", None)
+        served = None
+        if llm is not None and base_url and \
+                str(llm.config.base_url).rstrip("/") == str(base_url).rstrip("/"):
+            served = llm.config.model
+        if not served:
+            served = model_ops.primary_served_name(managed, provider) or getattr(
+                provider, "default_model", None)
+        return workspace.incumbent_sentence(
+            holder, port=port, form="imperative", served=served, target=target)
+
     async def _handle_model_cmd(self, arg: str) -> None:
         """List models or switch. A model already served by the endpoint hot-swaps
         (Ollama serves many); a different downloaded model on a harness-managed
@@ -1888,6 +1941,13 @@ class OrchestratorREPL:
             return
 
         if target in cold_target:
+            # A process the harness did not launch holds the primary's port: say so in one sentence
+            # and touch nothing — before any key read, launch decision, stop or announcement (D-33).
+            # Off the loop: it reads /proc and may ask systemd or an LM Studio endpoint.
+            incumbent = await asyncio.to_thread(self._foreign_incumbent, managed, target)
+            if incumbent is not None:
+                await self._send_info(incumbent)
+                return
             # Cold lifecycle peer (always GPU-heavy — EndpointRef validator) → free the accelerator of
             # any DIFFERENT heavy incumbent the harness MANAGES (the GPU-lock — at most one launched
             # heavy up, so the single per-config pidfile always tracks the sole live launched server),
