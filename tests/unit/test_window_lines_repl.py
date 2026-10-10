@@ -172,6 +172,22 @@ async def test_a_launch_without_a_window_sends_no_line_and_writes_no_ledger(tmp_
 
 
 @pytest.mark.asyncio
+async def test_a_launch_that_learned_nothing_keeps_the_recorded_baseline(tmp_path, fake):
+    """WR-06: an all-unknown report must not overwrite a good record with Nones."""
+    from localharness.provider.speed_stats import record_window_report
+
+    record_window_report(default_speed_stats_path(tmp_path), "llamacpp", "qwen", 65536, 262144, 114688)
+    fake.live = _live(_report(served=None, trained=None, fits=None, verified=False))
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer())
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    rec = _ledger(tmp_path, "llamacpp", "qwen")
+    assert (rec.served, rec.trained, rec.fits) == (65536, 262144, 114688)
+    assert any(m.startswith("Switched to qwen") for m in channel.messages)
+
+
+@pytest.mark.asyncio
 async def test_a_ledger_write_error_never_breaks_the_swap(tmp_path, fake, monkeypatch):
     from localharness.provider import speed_stats
 

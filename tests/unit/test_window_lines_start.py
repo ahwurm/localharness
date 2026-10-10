@@ -238,7 +238,7 @@ async def test_an_ill_typed_header_trained_is_never_recorded_or_printed(world):
     write_gguf(world.gguf, {**HEADER_A, "qwen3.context_length": "abc", "qwen3.block_count": [64]})
     lines = await world.start()  # must not raise
     assert world.window(lines) == []
-    assert world.last().trained is None
+    assert world.last() is None  # nothing well-typed was learned, so nothing is recorded (WR-06)
 
 
 async def test_the_attach_report_is_sized_off_the_event_loop(world):
@@ -255,6 +255,18 @@ async def test_the_attach_report_is_sized_off_the_event_loop(world):
     world.monkeypatch.setattr(autosense, "free_memory", free_memory)
     await world.start()
     assert seen and all(t != loop_thread for t in seen)
+
+
+async def test_a_flaked_probe_keeps_the_recorded_baseline_so_the_next_healthy_start_stays_quiet(world):
+    """WR-06: a probe that answers nothing (server busy loading) must not overwrite a good record
+    with Nones, or the next healthy start reads it as a change and says the block again."""
+    world.config(record=False)  # no model file: a silent probe leaves the report knowing nothing
+    world.capability_probe_sees_no_window()
+    record_window_report(world.ledger, "llamacpp", "qwen", 65536, 262144, 90112)
+    world.probe = WindowProbe(None, None)
+    assert world.window(await world.start()) == []
+    rec = world.last()
+    assert (rec.served, rec.trained, rec.fits) == (65536, 262144, 90112)
 
 
 # ------------------------------------------------------------------------------- D-23 the #127 line
