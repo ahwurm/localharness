@@ -10,8 +10,10 @@ reader behind `gguf_header.served_model`. A key file a process names is recorded
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from pydantic import SecretStr, ValidationError
@@ -19,6 +21,7 @@ from pydantic import SecretStr, ValidationError
 from localharness.agent.gguf_header import preset_name, served_model
 from localharness.cli.workspace import shown_path, visible_text
 from localharness.config.models import ManagedServerConfig
+from localharness.core.private_files import open_regular
 from localharness.provider.procfs import ProcRecord
 from localharness.provider.server import (
     RUNTIME_LABELS,
@@ -48,6 +51,9 @@ KEY_FILE_LINE = "key file: {path} (read at start, never by init)"
 
 BIND_ALL_LINE = "server.bind_all: true (--host {host})"
 """The shown line for a widened bind the exposure phrase does not cover (a keyed or key-filed record)."""
+
+CONFIG_INI_CAP = 65536
+"""The most bytes of `config.ini` the import reads (D-28); one byte more is read to tell the cap from over it."""
 
 DEFAULT_PORT = 8080
 """llama-server's own default: a process that names no port serves there."""
@@ -115,6 +121,30 @@ class AttachOnly:
     `<who> <reason>` + `ATTACH_ONLY_SUFFIX` carries (D-25)."""
 
     reason: str
+
+
+@dataclass(frozen=True)
+class IniImport:
+    """`config.ini` after masking (D-28). `kept` is the text a record may carry (no key, key file,
+    Hugging Face token, host or port line); `keys` holds the values that are routed to the import's own
+    key and bind handling, under the key as written (`api-key`, `LLAMA_API_KEY`, `api-key-file`,
+    `LLAMA_ARG_API_KEY_FILE`, `host`, `port`, ...); `refused` is the first download-identity or TLS key as
+    written, which makes the import attach-only."""
+
+    kept: str
+    keys: dict[str, str]
+    refused: str | None
+
+
+@dataclass(frozen=True)
+class IniRead:
+    """The outcome of reading `config.ini`: `dir` is its directory as shown, `ini` the masked content
+    (None when absent, unreadable, over the cap or not text) and `line` the one line to show when it was
+    present but not carried (D-56)."""
+
+    dir: str
+    ini: IniImport | None
+    line: str | None
 
 
 def _basename(path: str | None) -> str:
@@ -250,6 +280,111 @@ def _cannot_carry(field: str) -> AttachOnly:
     return AttachOnly(f"holds a value a record cannot carry ({visible_text(field)})")
 
 
+# ------------------------------------------------------------------------------- config.ini
+#
+# llama.cpp's own grammar (common/preset.cpp): `[section]` headers, `key = value`, whole-line and trailing
+# `;`/`#` comments (a comment starts at whitespace then `;`/`#`), CRLF / CR / LF all newlines; a key is an
+# env name or a flag with its dashes removed. Only the `*` and `default` sections (and the lines before any
+# header) apply to a plain llama-server.
+
+_INI_NEWLINE = re.compile(r"\r\n|\r|\n")
+_INI_HEADER = re.compile(r"[ \t]*\[([^\]]*)\]")
+_INI_KV = re.compile(r"[ \t]*([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=[ \t]*((?:(?![ \t]*[;#]).)*)")
+_INI_ACTIVE_SECTIONS = frozenset({"", "*", "default"})
+_INI_INLINE_KEYS = frozenset({"api-key", "llama_api_key"})
+_INI_KEY_FILE_KEYS = frozenset({"api-key-file", "llama_arg_api_key_file"})
+_INI_TOKEN_KEYS = frozenset({"hf-token", "hft"})
+
+
+def mask_config_ini(data: bytes) -> IniImport:
+    """Mask `config.ini` text (D-28). The `api-key`, `api-key-file` and Hugging Face token lines (env and
+    flag spellings, any letter case) leave `kept` and every shown line: the first two route their value
+    through `keys`, the token is dropped. `host` and `port` lines leave `kept` too (the record owns the
+    bind, and the `config_ini` field refuses them) and ride `keys` to the host and port resolution. A
+    download-identity or TLS key is named in `refused`. Everything else is kept verbatim. Text that is not
+    UTF-8 masks to nothing."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return IniImport("", {}, None)
+    kept: list[str] = []
+    keys: dict[str, str] = {}
+    refused: str | None = None
+    section = ""
+    for raw in _INI_NEWLINE.split(text):
+        header = _INI_HEADER.match(raw)
+        if header is not None:
+            section = header.group(1).strip()
+            kept.append(raw)
+            continue
+        kv = _INI_KV.match(raw)
+        if kv is not None:
+            key, value = kv.group(1), kv.group(2)
+            lowered = key.lower()
+            category = excluded_option(key)
+            dashed = lowered.replace("_", "-")
+            if category == "key":
+                if section in _INI_ACTIVE_SECTIONS and (lowered in _INI_INLINE_KEYS
+                                                         or lowered in _INI_KEY_FILE_KEYS):
+                    keys[key] = value
+                continue  # LLAMA_ARG_API_KEY is read by nothing: dropped
+            if category == "host/port":
+                if section in _INI_ACTIVE_SECTIONS:
+                    keys[key] = value
+                continue
+            if category in ("download", "tls"):
+                refused = refused or key
+                continue
+            if dashed in _INI_TOKEN_KEYS or "api-key" in dashed:
+                continue  # a credential llama-server would not read from this spelling: still never kept
+        kept.append(raw)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return IniImport("\n".join(kept) + "\n" if any(line.strip() for line in kept) else "", keys, refused)
+
+
+def user_config_ini() -> Path:
+    """`${XDG_CONFIG_HOME:-~/.config}/llama.cpp/config.ini`, the file llama-server applies before its
+    environment and arguments."""
+    base = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(base) if base else Path(os.path.expanduser("~")) / ".config"
+    return root / "llama.cpp" / "config.ini"
+
+
+def read_config_ini(path: str | os.PathLike[str]) -> IniRead:
+    """Read `path` through `open_regular` (a FIFO or device is treated as absent without blocking), under
+    `CONFIG_INI_CAP`. Absent or unreadable is `IniRead(dir, None, None)`: nothing shown, nothing recorded.
+    Over the cap or not UTF-8 text is not carried, with the one line that says so (D-56)."""
+    target = Path(path)
+    shown_dir = shown_path(target.parent)
+    try:
+        fd = open_regular(target)
+    except OSError:
+        return IniRead(shown_dir, None, None)
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(CONFIG_INI_CAP + 1)
+    except OSError:
+        return IniRead(shown_dir, None, None)
+    if len(data) > CONFIG_INI_CAP:
+        return IniRead(shown_dir, None, f"config.ini ({shown_dir}) is over {CONFIG_INI_CAP} bytes — not carried")
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return IniRead(shown_dir, None, f"config.ini ({shown_dir}) is not UTF-8 text — not carried")
+    return IniRead(shown_dir, mask_config_ini(data), None)
+
+
+def _ini_pairs(kept: str) -> list[tuple[str, str]]:
+    """The `key=value` pairs of masked `config.ini` text, for the one shown line."""
+    pairs = []
+    for line in _INI_NEWLINE.split(kept):
+        kv = _INI_KV.match(line)
+        if kv is not None and _INI_HEADER.match(line) is None:
+            pairs.append((kv.group(1), kv.group(2)))
+    return pairs
+
+
 def _split_keys(value: str) -> list[str]:
     """llama-server splits an `--api-key` / `LLAMA_API_KEY` value on commas; empty entries are no key."""
     return [part for part in (piece.strip() for piece in value.split(",")) if part]
@@ -265,11 +400,12 @@ def import_record(
     source: str,
     binary_resolver: Callable[[str], str | None],
     port: int | None = None,
-    ini: object | None = None,
+    ini: IniRead | None = None,
 ) -> Imported | AttachOnly:
     """Translate `rec` (a live process, a journal entry or a unit file, named by `source`) into a
     record, or into the one reason it is attached to only. `port` is the listener port the caller found
-    the process on, used when the process names none.
+    the process on, used when the process names none; `ini` is `config.ini` read and masked by
+    `read_config_ini`, whose keys join the key, host and port resolution at the lowest precedence.
 
     Order (D-19), all before validation: TLS; download identity or no local `-m`; keys; hosts; the
     field table; the `--verbose` family. The key a process holds goes into `Imported.api_key` and
@@ -321,12 +457,31 @@ def import_record(
         elif category is None:
             env[name] = value
 
+    # config.ini applies before the environment and argv: its keys fill what neither named
+    ini_masked = ini.ini if ini is not None else None
+    ini_tls = ini_download = False
+    ini_keys: list[str] = []
+    ini_key_files: list[tuple[str, str]] = []
+    if ini_masked is not None:
+        category = excluded_option(ini_masked.refused) if ini_masked.refused else None
+        ini_tls, ini_download = category == "tls", category == "download"
+        for key, value in ini_masked.keys.items():
+            lowered = key.lower()
+            if lowered in _INI_INLINE_KEYS:
+                ini_keys.extend(_split_keys(value))
+            elif lowered in _INI_KEY_FILE_KEYS and value:
+                ini_key_files.append((key, value))
+            elif value:  # the only other routed keys are host and port, in either spelling
+                fields.setdefault("host" if lowered.endswith("host") else "port", value)
+
     # (1) TLS, then the download identity or a missing local -m
     tls = walk.tls[0] if walk.tls else (env_tls[0] if env_tls else None)
+    if tls is None and ini_tls:
+        tls = ini_masked.refused
     if tls is not None:
         return AttachOnly(f"serves TLS ({visible_text(tls)})")
     hf_file = walk.hf_file or hf_file_env
-    if walk.downloads or env_download or "model" not in fields:
+    if walk.downloads or env_download or ini_download or "model" not in fields:
         model = served_model(rec.mapped_ggufs)
         if model is None:
             return AttachOnly("a record needs a local path; none mapped under " + HF_CACHE_SHOWN
@@ -339,8 +494,8 @@ def import_record(
         default_name = preset_name(model)
 
     # (2) keys
-    inline = list(dict.fromkeys(_split_keys(",".join(walk.api_keys)) + env_keys))
-    key_files = [*walk.key_files, *env_key_files]
+    inline = list(dict.fromkeys(_split_keys(",".join(walk.api_keys)) + env_keys + ini_keys))
+    key_files = [*walk.key_files, *env_key_files, *ini_key_files]
     if len(inline) > 1:
         return AttachOnly("holds more than one --api-key")
     resolved_files: list[tuple[str, str]] = []
@@ -431,6 +586,8 @@ def import_record(
         mapping["extra_args"] = extra
     if env:
         mapping["env"] = env
+    if ini_masked is not None and ini_masked.kept:
+        mapping["config_ini"] = ini_masked.kept
     try:
         spec = ManagedServerConfig.model_validate(mapping)
     except ValidationError as exc:
@@ -456,6 +613,14 @@ def import_record(
             suffix = llama_annotation(name, keyed=keyed)
             items.append(_annotated(f"{visible_text(name)}={visible_text(value)}", suffix))
         shown.append("env: " + ", ".join(items))
+    if ini is not None and ini.line is not None:
+        shown.append(visible_text(ini.line))
+    if spec.config_ini:
+        pairs = []
+        for key, value in _ini_pairs(spec.config_ini):
+            pairs.append(_annotated(f"{visible_text(key)}={visible_text(value)}", llama_annotation(key, keyed=keyed)))
+        if pairs:
+            shown.append(f"config.ini ({visible_text(ini.dir)}): " + ", ".join(pairs))
     if key_file is not None:
         shown.append(KEY_FILE_LINE.format(path=shown_path(key_file)))
     if verbose_dropped:
