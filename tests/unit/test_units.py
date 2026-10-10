@@ -146,3 +146,222 @@ def test_read_journal_a_model_that_is_not_a_regular_file_is_a_skip(fake_systemd,
                 f"llama-server -m {fifo}", "llama-server --port 8080"):
         fake_systemd.journal([{"_EXE": "/b/llama-server", "_CMDLINE": cmd}])
         assert units.read_journal("u.service") == units.Skip("names no regular -m file"), cmd
+
+
+# --------------------------------------------------------------------------------- read_unit
+
+
+def _unit_file(tmp_path: Path, body: str, name: str = "llm.service") -> str:
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+def _service(*lines: str) -> str:
+    return "[Unit]\nDescription=llama %n\n\n[Service]\n" + "\n".join(lines) + "\n\n[Install]\nWantedBy=default.target\n"
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch) -> str:
+    h = tmp_path / "home"
+    h.mkdir()
+    monkeypatch.setenv("HOME", str(h))
+    return str(h)
+
+
+def test_read_unit_joins_continuations_expands_and_collects_environment(tmp_path, home):
+    path = _unit_file(tmp_path, _service(
+        "WorkingDirectory=%h/srv",
+        'Environment="LLAMA_ARG_N_GPU_LAYERS=99" LLAMA_ARG_FLASH_ATTN=on',
+        "ExecStart=/opt/llama/llama-server \\",
+        "  -m %h/models/a.gguf \\",
+        "  --port 8080"))
+    rec = units.read_unit(path, unit="llm.service")
+    assert rec == ProcRecord(
+        pid=0, uid=os.getuid(),
+        argv=("/opt/llama/llama-server", "-m", f"{home}/models/a.gguf", "--port", "8080"),
+        exe=None, cwd=f"{home}/srv",
+        environ={"LLAMA_ARG_N_GPU_LAYERS": "99", "LLAMA_ARG_FLASH_ATTN": "on"},
+        start_time=0, unit="llm.service", mapped_ggufs=())
+
+
+def test_read_unit_defaults_the_working_directory_to_home(tmp_path, home):
+    path = _unit_file(tmp_path, _service("ExecStart=/b/llama-server -m /m/a.gguf"))
+    rec = units.read_unit(path, unit="u.service")
+    assert isinstance(rec, ProcRecord) and rec.cwd == home and dict(rec.environ) == {}
+
+
+def test_read_unit_a_dash_working_directory_drops_the_dash(tmp_path, home):
+    path = _unit_file(tmp_path, _service("WorkingDirectory=-/srv/x", "ExecStart=/b/llama-server"))
+    assert units.read_unit(path, unit="u.service").cwd == "/srv/x"
+
+
+def test_read_unit_at_prefix_shifts_argv0(tmp_path, home):
+    path = _unit_file(tmp_path, _service("ExecStart=-@/opt/llama/llama-server llama-server -m /m/a.gguf"))
+    rec = units.read_unit(path, unit="u.service")
+    assert rec.exe == "/opt/llama/llama-server"
+    assert rec.argv == ("llama-server", "-m", "/m/a.gguf")
+
+
+def test_read_unit_a_pipe_in_the_prefix_run_is_a_shell(tmp_path, home):
+    path = _unit_file(tmp_path, _service("ExecStart=|/opt/llama/llama-server -m /m/a.gguf"))
+    assert units.read_unit(path, unit="u.service") == units.Skip("runs through a shell")
+
+
+def test_read_unit_percent_specifiers(tmp_path, home):
+    import pwd
+    path = _unit_file(tmp_path, _service("ExecStart=/b/llama-server --alias 100%% --api-key-file /k/%u"))
+    rec = units.read_unit(path, unit="u.service")
+    assert rec.argv[2] == "100%"
+    assert rec.argv[-1] == "/k/" + pwd.getpwuid(os.getuid()).pw_name
+    bad = units.read_unit(_unit_file(tmp_path, _service("ExecStart=/b/llama-server --alias %n"),
+                                     "bad.service"), unit="bad.service")
+    assert isinstance(bad, units.Skip) and "%n" in bad.reason
+    # a specifier in a directive nobody reads does not skip
+    ok = _unit_file(tmp_path, _service("ExecStart=/b/llama-server"), "ok.service")
+    assert isinstance(units.read_unit(ok, unit="ok.service"), ProcRecord)
+
+
+def test_read_unit_a_specifier_in_the_environment_or_working_directory_skips(tmp_path, home):
+    for lines in (("Environment=X=%t", "ExecStart=/b/llama-server"),
+                  ("WorkingDirectory=%t", "ExecStart=/b/llama-server")):
+        skip = units.read_unit(_unit_file(tmp_path, _service(*lines)), unit="u.service")
+        assert isinstance(skip, units.Skip) and "%t" in skip.reason
+
+
+@pytest.mark.parametrize("lines, fragment", [
+    (("ExecStart=/b/llama-server -m $HOME/a.gguf",), "$"),
+    (("Environment=A=$B", "ExecStart=/b/llama-server"), "$"),
+    (("EnvironmentFile=/etc/llama.env", "ExecStart=/b/llama-server -m /m/a.gguf"), "EnvironmentFile"),
+    (("ExecStart=/b/llama-server -m /m/a.gguf", "ExecStart=/b/llama-server -m /m/b.gguf"), "ExecStart"),
+    (("Description=x",), "ExecStart"),
+    (("ExecStart=bin/llama-server -m /m/a.gguf",), "relative"),
+    (("ExecStart=/b/llama-server -m '/m/a.gguf",), "unparseable"),
+    (("ExecStart=/b/llama-server --alias a\\x20b",), "backslash"),
+    (("ExecStart=/b/llama-server", "WorkingDirectory=srv"), "WorkingDirectory"),
+])
+def test_read_unit_skips_with_a_named_reason(tmp_path, home, lines, fragment):
+    skip = units.read_unit(_unit_file(tmp_path, _service(*lines)), unit="u.service")
+    assert isinstance(skip, units.Skip) and fragment in skip.reason, skip
+
+
+def test_read_unit_an_empty_assignment_resets_exec_start(tmp_path, home):
+    path = _unit_file(tmp_path, _service("ExecStart=/b/other -x", "ExecStart=",
+                                         "ExecStart=/b/llama-server -m /m/a.gguf"))
+    rec = units.read_unit(path, unit="u.service")
+    assert isinstance(rec, ProcRecord) and rec.argv[0] == "/b/llama-server"
+
+
+def test_read_unit_only_the_service_section_is_read(tmp_path, home):
+    path = _unit_file(tmp_path, "[Unit]\nExecStart=/b/other\n[Service]\nExecStart=/b/llama-server\n"
+                                "# ExecStart=/b/commented\n; ExecStart=/b/semi\n[Install]\nExecStart=/x\n")
+    assert isinstance(units.read_unit(path, unit="u.service"), ProcRecord)
+
+
+def test_read_unit_env_wrapper_names_the_model(tmp_path, home):
+    path = _unit_file(tmp_path, _service("ExecStart=/usr/bin/env llama-server -m /m/a.gguf"))
+    assert units.read_unit(path, unit="u.service") == units.Skip("runs env", names_model=True)
+
+
+def test_read_unit_a_script_without_a_model_token_names_none(tmp_path, home):
+    path = _unit_file(tmp_path, _service("ExecStart=/home/u/bin/run-active.sh"))
+    assert units.read_unit(path, unit="u.service") == units.Skip("runs run-active.sh",
+                                                                 names_model=False)
+
+
+def test_read_unit_an_unrelated_dollar_unit_reads_runs_program(tmp_path, home):
+    path = _unit_file(tmp_path, _service('ExecStart=/usr/bin/sleep $DELAY'))
+    assert units.read_unit(path, unit="u.service") == units.Skip("runs sleep", names_model=False)
+
+
+def test_read_unit_caps(tmp_path, home):
+    long_line = "ExecStart=/b/llama-server " + "-x " * (units.UNIT_LINE_CAP // 3 + 10)
+    skip = units.read_unit(_unit_file(tmp_path, _service(long_line)), unit="u.service")
+    assert isinstance(skip, units.Skip) and str(units.UNIT_LINE_CAP) in skip.reason
+    many = "ExecStart=/b/llama-server " + " ".join(["a"] * (units.UNIT_TOKEN_CAP + 1))
+    skip = units.read_unit(_unit_file(tmp_path, _service(many), "tok.service"), unit="u.service")
+    assert isinstance(skip, units.Skip) and str(units.UNIT_TOKEN_CAP) in skip.reason
+    big = _service("ExecStart=/b/llama-server") + "# " + "x" * units.UNIT_FILE_CAP
+    skip = units.read_unit(_unit_file(tmp_path, big, "big.service"), unit="u.service")
+    assert isinstance(skip, units.Skip) and str(units.UNIT_FILE_CAP) in skip.reason
+
+
+def test_read_unit_a_continuation_chain_over_the_line_cap_skips(tmp_path, home):
+    body = "ExecStart=/b/llama-server \\\n" + "".join("  -x " + "y" * 100 + " \\\n" for _ in range(200)) + "  -z"
+    skip = units.read_unit(_unit_file(tmp_path, _service(body)), unit="u.service")
+    assert isinstance(skip, units.Skip) and str(units.UNIT_LINE_CAP) in skip.reason
+
+
+def test_read_unit_a_fifo_is_a_skip_and_never_blocks(tmp_path, home):
+    fifo = tmp_path / "pipe.service"
+    os.mkfifo(fifo)
+    assert units.read_unit(str(fifo), unit="u.service") == units.Skip("has an unreadable unit file",
+                                                                       names_model=False)
+
+
+def test_read_unit_missing_and_non_utf8_files(tmp_path, home):
+    assert isinstance(units.read_unit(str(tmp_path / "nope.service"), unit="u"), units.Skip)
+    bad = tmp_path / "bad.service"
+    bad.write_bytes(b"[Service]\nExecStart=/b/llama-server \xff\n")
+    assert isinstance(units.read_unit(str(bad), unit="u"), units.Skip)
+
+
+def test_read_unit_never_opens_through_a_plain_open(tmp_path, home, monkeypatch):
+    from localharness.provider import units as mod
+    seen: list[str] = []
+    real = mod.open_regular
+    monkeypatch.setattr(mod, "open_regular", lambda p: seen.append(str(p)) or real(p))
+    path = _unit_file(tmp_path, _service("ExecStart=/b/llama-server"))
+    units.read_unit(path, unit="u.service")
+    assert seen == [path]
+
+
+# -------------------------------------------------------------------------------- unit_record
+
+
+def _state(unit="llm.service", fragment="", drop_ins="") -> units.UnitState:
+    return units.UnitState(unit, "loaded", fragment, "disabled", drop_ins)
+
+
+def test_unit_record_prefers_the_journal(fake_systemd, tmp_path, home):
+    model = _model(tmp_path)
+    fake_systemd.journal([{"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model}"}])
+    frag = _unit_file(tmp_path, _service("ExecStart=/b/llama-server -m /m/other.gguf"))
+    source, rec = units.unit_record(_state(fragment=frag))
+    assert source == "journal" and rec.argv[2] == model
+
+
+def test_unit_record_falls_back_to_the_unit_file(fake_systemd, tmp_path, home):
+    frag = _unit_file(tmp_path, _service("ExecStart=/b/llama-server -m /m/other.gguf"))
+    source, rec = units.unit_record(_state(fragment=frag))
+    assert source == "unit" and rec.unit == "llm.service" and rec.argv[2] == "/m/other.gguf"
+
+
+def test_unit_record_drop_ins_skip_the_unit_file(fake_systemd, tmp_path, home):
+    frag = _unit_file(tmp_path, _service("ExecStart=/b/llama-server -m /m/other.gguf"))
+    skip = units.unit_record(_state(fragment=frag, drop_ins="/h/llm.service.d/o.conf"))
+    assert isinstance(skip, units.Skip)
+    assert skip.reason == "has drop-ins (/h/llm.service.d/o.conf)" and skip.names_model
+
+
+def test_unit_record_drop_ins_on_an_unrelated_unit_name_no_model(fake_systemd, tmp_path, home):
+    frag = _unit_file(tmp_path, _service("ExecStart=/usr/bin/pipewire"))
+    skip = units.unit_record(_state("pw.service", fragment=frag, drop_ins="/h/pw.service.d/o.conf"))
+    assert isinstance(skip, units.Skip) and not skip.names_model
+
+
+def test_unit_record_no_unit_file(fake_systemd):
+    assert units.unit_record(_state()) == units.Skip("has no unit file", names_model=False)
+
+
+def test_unit_record_the_unit_file_skip_when_the_journal_names_nothing(fake_systemd, tmp_path, home):
+    frag = _unit_file(tmp_path, _service("ExecStart=/home/u/bin/run-active.sh"))
+    assert units.unit_record(_state(fragment=frag)) == units.Skip("runs run-active.sh",
+                                                                  names_model=False)
+
+
+def test_unit_record_the_journal_skip_wins_when_it_names_a_model(fake_systemd, tmp_path, home):
+    fake_systemd.journal([{"_EXE": "/b/llama-server", "_CMDLINE": "llama-server -m rel/a.gguf"}])
+    frag = _unit_file(tmp_path, _service("ExecStart=/home/u/bin/run-active.sh"))
+    skip = units.unit_record(_state(fragment=frag))
+    assert isinstance(skip, units.Skip) and "relative path (rel/a.gguf)" in skip.reason
