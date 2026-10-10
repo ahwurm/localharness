@@ -372,3 +372,169 @@ def test_loop_never_spells_the_default_ratios():
     src = Path(inspect.getsourcefile(AgentLoop)).read_text(encoding="utf-8")
     code = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
     assert "0.125" not in code
+
+
+# ---------------------------------------------------------------------------
+# The reasoning cut: one identical re-send with thinking off, then the turn ends (D-22)
+# ---------------------------------------------------------------------------
+
+
+class _Scripted(RecordingLLM):
+    """A RecordingLLM that also records the message list of every call, and whose script may hold
+    exceptions to raise (a ProviderReasoningBudgetError) as well as responses to return."""
+
+    def __init__(self, script: list[Any], **kw: Any) -> None:
+        super().__init__(**kw)
+        self.script = list(script)
+        self.sent: list[list[Any]] = []
+
+    async def stream_complete(self, messages, tools=None, on_token=None, **kw):
+        import copy
+
+        self.calls.append(dict(kw))
+        self.sent.append(copy.deepcopy(list(messages)))
+        item = self.script.pop(0) if len(self.script) > 1 else self.script[0]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+def _cut(budget: int = 100, spent: int = 450) -> Exception:
+    from localharness.provider.client import ProviderReasoningBudgetError
+
+    return ProviderReasoningBudgetError(budget, spent)
+
+
+@pytest.fixture
+def sessions(monkeypatch):
+    """Every Session run_turn builds, in order."""
+    built: list[Session] = []
+
+    class Recording(Session):
+        def __init__(self, *args: Any, **kw: Any) -> None:
+            super().__init__(*args, **kw)
+            built.append(self)
+
+    monkeypatch.setattr("localharness.agent.loop.Session", Recording)
+    return built
+
+
+def _replies(bus) -> list[Any]:
+    from localharness.core.events import Action
+
+    return [e for e in bus.history(event_types=[Action]) if e.action_type == "llm_response"]
+
+
+async def test_a_cut_is_re_sent_once_with_thinking_off(bus, sessions):
+    llm = _Scripted([_cut(100, 450), _answer("Here it is.")], provider_type="vllm")
+    loop = _loop(llm, bus, effort=("high", "agent"))
+    assert await loop.run_turn("explain") == "Here it is."
+
+    assert len(llm.calls) == 2
+    assert "disable_thinking" not in llm.calls[0]
+    assert llm.calls[1]["disable_thinking"] is True
+    cuts = [e for e in _replies(bus) if e.finish_reason == "reasoning_cut"]
+    assert len(cuts) == 1 and cuts[0].reasoning_chars == 450
+    assert cuts[0].content == "" and cuts[0].has_tool_calls is False
+    assert sessions[0].reasoning_cut_used is True
+
+
+async def test_the_re_send_is_the_identical_message_list(bus):
+    llm = _Scripted([_cut(), _answer()], provider_type="vllm")
+    await _loop(llm, bus, effort=("high", "agent")).run_turn("explain")
+    assert llm.sent[1] == llm.sent[0]
+    assert not any(
+        isinstance(m, dict) and m.get("role") == "assistant" for m in llm.sent[1]
+    ), "no partial assistant prefix rides the retry"
+
+
+async def test_no_harness_message_is_pushed_by_the_cut(bus, sessions):
+    from localharness.core.types import is_harness_message
+
+    llm = _Scripted([_cut(), _answer()], provider_type="vllm")
+    await _loop(llm, bus, effort=("high", "agent")).run_turn("explain")
+    assert not any(is_harness_message(m) for m in sessions[0].messages)
+
+
+async def test_a_cut_retry_keeps_the_budget_off_the_second_request_only_by_the_flag(bus):
+    """Thinking-off and the budget are separate keys: the client drops the budget when thinking is
+    off; the loop's job is only to arm the flag."""
+    llm = _Scripted([_cut(), _answer()], provider_type="vllm")
+    await _loop(llm, bus, effort=("low", "agent")).run_turn("explain")
+    assert llm.calls[1]["disable_thinking"] is True
+
+
+async def test_two_cuts_end_the_turn_with_the_notice(bus, sessions):
+    from localharness.agent.loop import _REASONING_CUT_TURN_NOTICE
+    from localharness.core.events import TaskComplete
+
+    llm = _Scripted([_cut(100, 450), _cut(100, 460), _answer("never reached")], provider_type="vllm")
+    loop = _loop(llm, bus, effort=("high", "agent"))
+    summary = await loop.run_turn("explain")
+
+    assert summary == _REASONING_CUT_TURN_NOTICE
+    assert "/effort" in summary
+    assert len(llm.calls) == 2
+    assert sessions[0].terminated_reason == "error"
+    assert loop.last_terminated_reason == "error"
+    assert not [e for e in bus.history(event_types=[TaskComplete]) if e.success]
+    assert [e.finish_reason for e in _replies(bus)] == ["reasoning_cut", "reasoning_cut"]
+
+
+async def test_a_cut_never_silences_thinking_in_the_next_turn(bus):
+    llm = _Scripted([_cut(), _answer("one"), _answer("two")], provider_type="vllm")
+    loop = _loop(llm, bus, effort=("high", "agent"))
+    assert await loop.run_turn("first") == "one"
+    assert loop._thinking_off_next is True
+    assert await loop.run_turn("second") == "two"
+    assert "disable_thinking" not in llm.calls[2]
+
+
+async def test_the_flag_resets_at_the_turn_start(bus):
+    loop = _loop(_llm(), bus, effort=("high", "agent"))
+    loop._thinking_off_next = True
+    await loop.run_turn("go")
+    assert loop._thinking_off_next is False
+
+
+async def test_the_thinking_off_flag_lasts_the_rest_of_the_turn(bus):
+    tool_call = SimpleNamespace(
+        id="c1", function=SimpleNamespace(name="no_such_tool", arguments="{}"), type="function"
+    )
+    llm = _Scripted(
+        [
+            _cut(),
+            (SimpleNamespace(content="", tool_calls=[tool_call], finish_reason="tool_calls"), None),
+            _answer("done"),
+        ],
+        provider_type="vllm",
+    )
+    await _loop(llm, bus, effort=("high", "agent")).run_turn("go")
+    assert len(llm.calls) >= 3
+    assert all(c.get("disable_thinking") is True for c in llm.calls[1:])
+
+
+async def test_a_cut_on_a_client_that_cannot_turn_thinking_off_still_re_sends_once(bus):
+    class NoOff(_Scripted):
+        async def stream_complete(self, messages, tools=None, on_token=None, reasoning_budget=None):
+            return await super().stream_complete(messages, tools, on_token)
+
+    llm = NoOff([_cut(), _answer("ok")], provider_type="vllm")
+    loop = _loop(llm, bus, effort=("high", "agent"))
+    assert await loop.run_turn("explain") == "ok"
+    assert llm.calls == [{}, {}]
+
+
+async def test_the_degenerate_path_is_not_touched_by_the_cut_handler(bus, sessions):
+    from localharness.provider.client import ProviderDegenerateError
+
+    llm = _Scripted(
+        [ProviderDegenerateError("looped", unit="1, ", repeats=80, chars=1_500), _answer("fine")],
+        provider_type="vllm",
+    )
+    loop = _loop(llm, bus, effort=("high", "agent"))
+    assert await loop.run_turn("explain") == "fine"
+    assert llm.calls[1]["presence_penalty"] == 1.5
+    assert "disable_thinking" not in llm.calls[1]
+    assert sessions[0].reasoning_cut_used is False
+    assert sessions[0].degenerate_reprompt_used is True
