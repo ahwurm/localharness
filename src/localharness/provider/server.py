@@ -122,6 +122,67 @@ def excluded_option(name: str) -> str | None:
     return _EXCLUDED_BY_KEY.get(name.strip().lower())
 
 
+SHELL_EXEC_NOTE = "(serves a shell-exec tool on the port)"
+EXEC_DIR_NOTE = "(a directory the server runs executables from)"
+SERVED_DIR_NOTE = "(served to anyone who reaches the port)"
+
+LLAMA_ANNOTATIONS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
+    (SHELL_EXEC_NOTE,
+     ("--tools", "LLAMA_ARG_TOOLS", "tools",
+      "-ag", "--agent", "LLAMA_ARG_AGENT", "agent",
+      "--tools-runtime", "LLAMA_ARG_TOOLS_RUNTIME", "tools-runtime",
+      "--mcp-servers-config", "LLAMA_ARG_MCP_SERVERS_CONFIG", "mcp-servers-config",
+      "--mcp-servers-json", "LLAMA_ARG_MCP_SERVERS_JSON", "mcp-servers-json",
+      "--ui-mcp-proxy", "--webui-mcp-proxy", "LLAMA_ARG_UI_MCP_PROXY", "ui-mcp-proxy"),
+     False),
+    (EXEC_DIR_NOTE,
+     ("--video-ffmpeg-dir", "LLAMA_ARG_VIDEO_FFMPEG_DIR", "video-ffmpeg-dir"),
+     False),
+    (SERVED_DIR_NOTE,
+     ("--path", "LLAMA_ARG_STATIC_PATH", "path"),
+     True),
+)
+"""Display only, nothing is refused for it: rows of (suffix shown after the option, the spellings of
+the options it marks, whether it is shown on an unkeyed record only). A spelling is a flag
+(leading dash), a `LLAMA_ARG_*` env name, or a `config.ini` key (the flag name without its dashes).
+The options are the ones that make a server hand out a shell, run executables from a directory, or
+serve a directory to whoever reaches the port. A separate table from `LLAMA_EXCLUDED_OPTIONS`,
+which stays 13 rows: nothing here is stripped or refused. The rows come from the owner's llama.cpp
+checkout (HEAD 43fe9c642, common/arg.cpp), including the `--webui-mcp-proxy` spelling and `--path`."""
+
+
+def _annotation_key(name: str) -> str:
+    """The lookup key of an option spelling: a `LLAMA_ARG_*` name compares upper-cased, anything
+    else has its leading dashes removed, `_` read as `-` (llama.cpp's own rule) and is lower-cased."""
+    name = name.strip()
+    if name.upper().startswith("LLAMA_ARG_"):
+        return name.upper()
+    return name.lstrip("-").replace("_", "-").lower()
+
+
+def _annotations_by_key() -> dict[str, tuple[str, bool]]:
+    """Option key -> (suffix, unkeyed_only), built once from the table. The first row wins."""
+    by_key: dict[str, tuple[str, bool]] = {}
+    for suffix, names, unkeyed_only in LLAMA_ANNOTATIONS:
+        for name in names:
+            by_key.setdefault(_annotation_key(name), (suffix, unkeyed_only))
+    return by_key
+
+
+_ANNOTATION_BY_KEY: dict[str, tuple[str, bool]] = _annotations_by_key()
+
+
+def llama_annotation(name: str, *, keyed: bool) -> str | None:
+    """The suffix to show after the option `name` (a flag, a `LLAMA_ARG_*` name or a config.ini key,
+    any letter case, `_` or `-`), or None. `keyed` is whether the record carries an API key: the
+    served-directory suffix is for an unkeyed record only. Pure, no I/O, display only."""
+    hit = _ANNOTATION_BY_KEY.get(_annotation_key(name))
+    if hit is None:
+        return None
+    suffix, unkeyed_only = hit
+    return None if (unkeyed_only and keyed) else suffix
+
+
 @dataclass(frozen=True)
 class LaunchDecision:
     """The one launch decision every path meets: `refusal` (why nothing may start, or None),
