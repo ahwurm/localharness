@@ -279,6 +279,46 @@ def test_a_change_that_does_not_validate_writes_nothing(tmp_path, monkeypatch):
     assert cfg.read_text(encoding="utf-8") == text
 
 
+def _two_models():
+    return _make_detector_result(models=["suggested", "picked"])
+
+
+def test_a_change_records_the_window_under_the_model_it_writes_not_the_suggestion(tmp_path, monkeypatch):
+    """WR-05: on a multi-model endpoint the ledger key is the model `start` will resolve."""
+    from localharness.provider.speed_stats import default_speed_stats_path, last_window_report
+
+    monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: 16384)
+    _seed(tmp_path)
+    init_cmd._write_change(tmp_path, _two_models(), "picked", _make_capability_result())
+    path = default_speed_stats_path(tmp_path)
+    assert last_window_report(path, "ollama", "picked").served == 16384
+    assert last_window_report(path, "ollama", "suggested") is None
+
+
+def test_a_fresh_config_records_the_window_under_the_model_it_writes(tmp_path, monkeypatch):
+    from localharness.provider.speed_stats import default_speed_stats_path, last_window_report
+
+    monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: 16384)
+    init_cmd._write_config(tmp_path, _two_models(), "picked", _make_capability_result(), None, True, True)
+    path = default_speed_stats_path(tmp_path)
+    assert last_window_report(path, "ollama", "picked").served == 16384
+    assert last_window_report(path, "ollama", "suggested") is None
+
+
+def test_a_change_that_does_not_validate_records_no_window(tmp_path, monkeypatch):
+    """WR-05: "writes nothing" includes the ledger — the record comes after the write succeeds."""
+    import typer
+
+    from localharness.provider.speed_stats import default_speed_stats_path
+
+    monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: 4_000_000)  # above the ceiling
+    _seed(tmp_path)
+    with pytest.raises(typer.Exit):
+        init_cmd._write_change(tmp_path, _two_models(), "picked", _make_capability_result())
+    assert not default_speed_stats_path(tmp_path).exists()
+    assert not (tmp_path / "overrides.yaml").exists()
+
+
 @pytest.mark.parametrize("text, reason", [
     ("version: '1'\nprovider: [\n", "while parsing"),
     ("version: '1'\nold: true\n", "provider: Field required"),
