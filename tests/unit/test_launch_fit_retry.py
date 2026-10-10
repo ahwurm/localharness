@@ -334,3 +334,180 @@ def test_the_live_endpoint_defaults_are_the_phase_1_shape():
     live = lifecycle.LiveEndpoint(base_url="u", served_models=[], handle=None)
     assert live.window is None and live.dropped_env == ()
     assert inspect.signature(server.start_server).parameters["dropped_out"].default is None
+
+
+# ------------------------------------------------------------------------------- the halve-once retry
+
+DEAD = "llama.cpp exited during startup. Log tail:\nsrv: exiting"
+_REAL_WAIT_READY = server.wait_ready  # captured before any fixture replaces it
+
+
+def _launches(box, monkeypatch):
+    """Popen as a recorder that also logs each launch into the box's ordered events."""
+    class EventPopen(PopenRecorder):
+        def __init__(self, cmd, **kw):
+            box.events.append("popen")
+            super().__init__(cmd, **kw)
+
+    PopenRecorder.calls = []
+    monkeypatch.setattr(server.subprocess, "Popen", EventPopen)
+    return PopenRecorder.calls
+
+
+async def test_a_dead_process_on_a_fit_c_is_stopped_then_relaunched_at_half(tmp_path, box, monkeypatch):
+    calls = _launches(box, monkeypatch)
+    box.ready_script = [RuntimeError(DEAD), ["qwen"]]
+    live = await _activate(tmp_path, _spec(tmp_path))
+    assert len(calls) == 2
+    assert _has_pair(_argv(calls, 0), "-c", "14950") and _has_pair(_argv(calls, 1), "-c", "7475")
+    assert box.stops == [(tmp_path, "binary")]
+    assert live.window.retried is True and live.window.asked == 7475
+    assert live.window.mode == "fit"
+
+
+async def test_the_stop_comes_between_the_two_launches_and_no_probe_before_the_first(tmp_path, box, monkeypatch):
+    _launches(box, monkeypatch)
+    box.ready_script = [RuntimeError(DEAD), ["qwen"]]
+    await _activate(tmp_path, _spec(tmp_path))
+    assert box.events == ["free_memory", "popen", "wait_ready", "stop_server", "popen", "wait_ready",
+                          "probe_window"]
+
+
+async def test_the_cache_ram_and_the_rest_of_the_argv_survive_the_halving(tmp_path, box, monkeypatch):
+    calls = _launches(box, monkeypatch)
+    box.ready_script = [RuntimeError(DEAD), ["qwen"]]
+    await _activate(tmp_path, _spec(tmp_path))
+    first, second = _argv(calls, 0), _argv(calls, 1)
+    strip = lambda argv: [t for t in argv if t not in ("14950", "7475")]  # noqa: E731
+    assert strip(first) == strip(second) and _has_pair(second, "--cache-ram", str(CACHE_RAM))
+
+
+async def test_two_dead_processes_stop_twice_launch_twice_and_surface_the_tail(tmp_path, box, monkeypatch):
+    calls = _launches(box, monkeypatch)
+    box.ready_script = [RuntimeError(DEAD), RuntimeError(DEAD)]
+    with pytest.raises(RuntimeError, match="Log tail:"):
+        await _activate(tmp_path, _spec(tmp_path))
+    assert len(calls) == 2  # exactly one retry, never three
+    assert len(box.stops) == 2
+    assert box.events.count("probe_window") == 0
+
+
+async def test_a_timeout_is_never_retried(tmp_path, box, monkeypatch):
+    calls = _launches(box, monkeypatch)
+    box.ready_script = [TimeoutError("llama.cpp not ready after 1800s.")]
+    with pytest.raises(TimeoutError):
+        await _activate(tmp_path, _spec(tmp_path))
+    assert len(calls) == 1 and box.stops == []
+
+
+@pytest.mark.parametrize("over", [
+    {"context": 4096},  # mode "record"
+    {"extra_args": ["-c", "8192"]},  # mode "extra_args"
+])
+async def test_nothing_is_halved_without_a_fit_keyword(tmp_path, box, monkeypatch, over):
+    calls = _launches(box, monkeypatch)
+    box.ready_script = [RuntimeError(DEAD)]
+    with pytest.raises(RuntimeError, match="Log tail:"):
+        await _activate(tmp_path, _spec(tmp_path, **over))
+    assert len(calls) == 1 and box.stops == []
+
+
+async def test_a_launch_the_server_sized_itself_is_not_retried(tmp_path, box, monkeypatch):
+    calls = _launches(box, monkeypatch)
+    box.mem = None
+    box.ready_script = [RuntimeError(DEAD)]
+    with pytest.raises(RuntimeError):
+        await _activate(tmp_path, _spec(tmp_path))
+    assert len(calls) == 1 and box.stops == [] and "-c" not in _argv(calls)
+
+
+async def test_a_fit_of_one_halves_to_one_not_zero(tmp_path, box, monkeypatch):
+    calls = _launches(box, monkeypatch)
+    monkeypatch.setattr(autosense, "fit", lambda *a, **k: 1)
+    box.ready_script = [RuntimeError(DEAD), ["qwen"]]
+    live = await _activate(tmp_path, _spec(tmp_path))
+    assert _has_pair(_argv(calls, 1), "-c", "1") and live.window.asked == 1 and live.window.retried
+
+
+async def test_the_retried_launch_reports_the_dropped_names_once(tmp_path, box, monkeypatch):
+    monkeypatch.setenv("LLAMA_ARG_HOST", "0.0.0.0")
+    _launches(box, monkeypatch)
+    box.ready_script = [RuntimeError(DEAD), ["qwen"]]
+    live = await _activate(tmp_path, _spec(tmp_path))
+    assert live.dropped_env == ("LLAMA_ARG_HOST",)
+
+
+# ------------------------------------------------------------------------------- the runtime in the messages
+
+
+async def test_wait_ready_names_the_runtime_that_died(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "server_pid", lambda config_dir: None)
+    monkeypatch.setattr(server, "log_tail", lambda config_dir, lines=15: "the tail")
+    with pytest.raises(RuntimeError) as named:
+        await _REAL_WAIT_READY(BASE, config_dir=tmp_path, runtime="llamacpp")
+    assert str(named.value) == "llama.cpp exited during startup. Log tail:\nthe tail"
+    with pytest.raises(RuntimeError) as bare:
+        await _REAL_WAIT_READY(BASE, config_dir=tmp_path)
+    assert str(bare.value) == "vLLM exited during startup. Log tail:\nthe tail"
+
+
+async def test_wait_ready_names_the_runtime_that_timed_out(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "server_pid", lambda config_dir: 1)
+    monkeypatch.setattr(server, "log_tail", lambda config_dir, lines=15: "the tail")
+    with pytest.raises(TimeoutError, match=r"^llama\.cpp not ready after 0s"):
+        await _REAL_WAIT_READY(BASE, config_dir=tmp_path, timeout_seconds=0, runtime="llamacpp")
+    with pytest.raises(TimeoutError, match=r"^vLLM not ready after 0s"):
+        await _REAL_WAIT_READY(BASE, config_dir=tmp_path, timeout_seconds=0)
+
+
+# ------------------------------------------------------------------------------- D-37: the load failure IS the death
+
+LOAD_FAILURE = (
+    "ggml_backend_cuda_buffer_type_alloc_buffer: allocating 16384.00 MiB on device 0: cudaMalloc failed: out of memory\n"
+    "llama_init_from_model: failed to initialize the context: failed to allocate buffer for kv cache\n")
+
+
+def _dying_popen(monkeypatch, *, write_failure: bool) -> list[dict]:
+    """A process stand-in that records its argv, writes (or not) a load failure into the serve.log
+    handle `start_server` gave it, and is gone by the time anyone asks (server_pid -> None)."""
+    launched: list[dict] = []
+
+    class DyingPopen:
+        def __init__(self, cmd, **kwargs):
+            launched.append({"cmd": cmd})
+            self.pid = 4242
+            if write_failure:
+                kwargs["stdout"].write(LOAD_FAILURE.encode())
+                kwargs["stdout"].flush()
+
+    monkeypatch.setattr(server.subprocess, "Popen", DyingPopen)
+    monkeypatch.setattr(server, "server_pid", lambda config_dir: None)
+    return launched
+
+
+@pytest.mark.parametrize("write_failure", [True, False],
+                         ids=["load-failure-in-the-log", "no-line-in-the-log"])
+async def test_the_death_not_the_log_text_triggers_the_retry(tmp_path, box, monkeypatch, write_failure):
+    monkeypatch.setattr(server, "wait_ready", _REAL_WAIT_READY)  # the real dead-process detection
+    launched = _dying_popen(monkeypatch, write_failure=write_failure)
+    with pytest.raises(RuntimeError) as dead:
+        await _activate(tmp_path, _spec(tmp_path))
+    assert len(launched) == 2
+    assert _has_pair(launched[0]["cmd"], "-c", "14950") and _has_pair(launched[1]["cmd"], "-c", "7475")
+    assert len(box.stops) == 2
+    assert str(dead.value).startswith("llama.cpp exited during startup. Log tail:")
+    # the abandon quotes the log's last lines: the failure when there was one, otherwise the launch line
+    assert ("failed to initialize the context" in str(dead.value)) is write_failure
+    assert "=== launch:" in str(dead.value)
+
+
+async def test_load_failure_in_the_log_is_the_dead_process(tmp_path, box, monkeypatch):
+    monkeypatch.setattr(server, "wait_ready", _REAL_WAIT_READY)
+    launched = _dying_popen(monkeypatch, write_failure=True)
+    with pytest.raises(RuntimeError) as dead:
+        await _activate(tmp_path, _spec(tmp_path))
+    text = str(dead.value)
+    assert text.startswith("llama.cpp exited during startup. Log tail:")
+    assert "failed to initialize the context" in text and "cudaMalloc failed" in text
+    assert len(launched) == 2 and _has_pair(launched[1]["cmd"], "-c", "7475")
+    assert [call[1] for call in box.stops] == ["binary", "binary"]
