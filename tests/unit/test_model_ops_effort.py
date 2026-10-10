@@ -228,3 +228,42 @@ def test_persist_active_endpoint_drops_api_key_and_effort_from_the_previous_reco
                       "model": "new-m"}
     assert h.active_endpoint.effort is None
     assert h.active_endpoint.model == "new-m"
+
+
+# ── agents_with_effort: the raw-yaml list `/effort show` prints (D-05) ─────────────────────────
+
+def _agent(base: Path, stem: str, body: str) -> None:
+    (base / "agents").mkdir(parents=True, exist_ok=True)
+    (base / "agents" / f"{stem}.yaml").write_text(body, encoding="utf-8")
+
+
+def test_agents_with_effort_lists_levels_from_both_layers_sorted_by_name(tmp_path):
+    glob, ws = tmp_path / "global", tmp_path / "proj" / ".localharness"
+    _agent(glob, "a", "name: a\neffort: low\n")
+    _agent(glob, "b", "name: b\neffort: inherit\n")
+    _agent(glob, "c", "name: c\n")
+    _agent(ws, "d", "name: d\neffort: max\n")
+
+    assert model_ops.agents_with_effort(glob, local_config_dir=ws) == [("a", "low"), ("d", "max")]
+
+
+def test_agents_with_effort_without_a_workspace_reads_only_the_global_layer(tmp_path):
+    glob, ws = tmp_path / "global", tmp_path / "proj" / ".localharness"
+    _agent(glob, "a", "name: a\neffort: low\n")
+    _agent(ws, "d", "name: d\neffort: max\n")
+
+    assert model_ops.agents_with_effort(glob) == [("a", "low")]
+
+
+def test_agents_with_effort_skips_a_yaml_that_does_not_parse(tmp_path):
+    glob = tmp_path / "global"
+    _agent(glob, "broken", "name: [unclosed\neffort: high\n")
+    _agent(glob, "ok", "name: ok\neffort: off\n")
+    _agent(glob, "scalar", "just a string\n")
+
+    assert model_ops.agents_with_effort(glob) == [("ok", "off")]
+
+
+def test_agents_with_effort_with_no_agents_dir_or_no_config_dir_is_empty(tmp_path):
+    assert model_ops.agents_with_effort(tmp_path / "nothing") == []
+    assert model_ops.agents_with_effort(None) == []
