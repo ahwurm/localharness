@@ -665,3 +665,45 @@ def test_readable_by_others_stops_at_its_limit(tmp_path):
         os.chmod(tmp_path / f"f{i}", 0o644)
     assert len(readable_by_others(tmp_path, limit=3)) == 3
     assert len(readable_by_others(tmp_path)) == 5
+
+
+def test_open_regular_returns_a_cloexec_nonblocking_fd(tmp_path):
+    import fcntl
+
+    from localharness.core.private_files import open_regular
+
+    path = tmp_path / "m.gguf"
+    path.write_bytes(b"GGUF")
+    fd = open_regular(path)
+    try:
+        assert stat.S_ISREG(os.fstat(fd).st_mode)
+        assert fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+        assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK
+        assert os.read(fd, 4) == b"GGUF"
+    finally:
+        os.close(fd)
+
+
+def test_open_regular_refuses_fifo_directory_and_device_symlink(tmp_path):
+    import threading
+
+    from localharness.core.private_files import NotRegularFile, open_regular
+
+    os.mkfifo(tmp_path / "fifo")
+    os.symlink("/dev/null", tmp_path / "dev")
+    for name in ("fifo", "dev", ""):
+        outcome: list[BaseException] = []
+
+        def attempt(target=tmp_path / name) -> None:
+            try:
+                os.close(open_regular(target))
+            except BaseException as exc:  # noqa: BLE001 - the thread reports whatever came out
+                outcome.append(exc)
+
+        worker = threading.Thread(target=attempt, daemon=True)
+        worker.start()
+        worker.join(5)
+        assert not worker.is_alive(), f"open_regular blocked on {name or 'a directory'}"
+        assert len(outcome) == 1 and isinstance(outcome[0], NotRegularFile)
+    with pytest.raises(FileNotFoundError):
+        open_regular(tmp_path / "absent")
