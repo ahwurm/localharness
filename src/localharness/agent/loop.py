@@ -873,6 +873,23 @@ _TRUNCATED_TOOL_CALL_FEEDBACK = (
 )
 
 
+# The rungs of the effort ladder a level can come from (the config package resolves them; the loop
+# only records which one won, so it can name it).
+_EFFORT_RUNGS: tuple[str, ...] = ("session", "agent", "endpoint", "org", "default")
+
+
+def _check_effort(level: str, rung: str) -> None:
+    """Raise ValueError naming a level outside LEVELS or a rung outside the ladder."""
+    # Imported here, not at module level: config.models imports agent.gate_types, which loads the
+    # agent package (and this module) first.
+    from localharness.config.models import LEVELS
+
+    if level not in LEVELS:
+        raise ValueError(f"unknown effort level {level!r}; expected one of {', '.join(LEVELS)}")
+    if rung not in _EFFORT_RUNGS:
+        raise ValueError(f"unknown effort rung {rung!r}; expected one of {', '.join(_EFFORT_RUNGS)}")
+
+
 def _accepts_kwarg(fn: Any, name: str) -> bool:
     """True when `fn` can take keyword `name` — a named parameter or **kwargs. False for None or
     an unsignaturable callable, so a client without the parameter is never called with it: the
@@ -928,6 +945,8 @@ class AgentLoop:
         memory_slot: Any = None,  # plugins.slot.MemorySlot
         task_context: TaskContext | TaskState | None = None,
         template_margin_ratio: float | None = None,
+        effort: tuple[str, str] | None = None,
+        effort_ratios: tuple[float, float] | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
@@ -963,6 +982,36 @@ class AgentLoop:
         # Sampling penalty for the rest of the current turn after a degenerate generation
         # (None = not sent). Reset at every turn start.
         self._presence_penalty_next: float | None = None
+        # The effective reasoning effort and the rung it came from, as (level, rung) — or None for a
+        # loop nobody configured, which sends no effort keys at all (its requests are byte-identical
+        # to a loop that predates /effort). The loop never resolves the ladder and never reads the
+        # harness config: `start` and the REPL hand it the answer through set_effort. The file's own
+        # rung, AgentConfig.effort, is never written here.
+        self._effort: str | None = None
+        self._effort_rung: str | None = None
+        if effort is not None:
+            _check_effort(*effort)
+            self._effort, self._effort_rung = effort
+        # (low_ratio, high_ratio): the share of the request's output headroom `low` / `high` may
+        # spend on reasoning. The config model is the one source of the defaults; `start` passes the
+        # configured ones.
+        if effort_ratios is not None:
+            self._effort_ratios: tuple[float, float] = effort_ratios
+        else:
+            from localharness.config.models import EffortBudgetConfig  # lazy: see _check_effort
+
+            _defaults = EffortBudgetConfig()
+            self._effort_ratios = (_defaults.low_ratio, _defaults.high_ratio)
+        self._llm_takes_reasoning_budget = _accepts_kwarg(
+            getattr(llm, "stream_complete", None), "reasoning_budget"
+        )
+        self._llm_takes_disable_thinking = _accepts_kwarg(
+            getattr(llm, "stream_complete", None), "disable_thinking"
+        )
+        # Armed for the rest of the current turn after a reasoning cut or an empty reply at the
+        # served window: every later request of the turn carries disable_thinking. Reset at every
+        # turn start, so a cut in one turn never silences thinking in the next.
+        self._thinking_off_next = False
         self._tools = tool_registry
         self._permissions = permission_evaluator
         # The human-approval gate (PRD §3.1-§3.5). Every tool call of every agent goes through
@@ -1055,6 +1104,44 @@ class AgentLoop:
         if self._compact_md_path is not None:
             return self._compact_md_path
         return self._config_dir / "agents" / self._config.name / "compact.md"
+
+    @property
+    def effective_effort(self) -> str | None:
+        """The reasoning level this loop sends (off, low, high or max); None when never configured."""
+        return self._effort
+
+    @property
+    def effort_rung(self) -> str | None:
+        """The ladder rung `effective_effort` came from (session, agent, endpoint, org, default)."""
+        return self._effort_rung
+
+    def set_effort(self, level: str, rung: str) -> None:
+        """Take a new effective level and the rung it won on. The loop never resolves the ladder:
+        the caller hands it the answer. `AgentConfig.effort` is the agent file's own rung and is
+        never written here. Raises ValueError for a level outside LEVELS or a rung outside the ladder."""
+        _check_effort(level, rung)
+        self._effort, self._effort_rung = level, rung
+
+    def _effort_budget(self, ctx_budget: Any) -> int | None:
+        """The reasoning budget in tokens for THIS request, or None to send none.
+
+        `low` and `high` spend their ratio of the window's headroom (the same headroom the output
+        cap is fitted to); `max` is unbounded and `off` is the thinking-off flag, so both give
+        None, as does an unknown or non-positive headroom."""
+        if self._effort not in ("low", "high"):
+            return None
+        headroom = self._window_headroom(ctx_budget)
+        if headroom is None or headroom <= 0:
+            return None
+        low, high = self._effort_ratios
+        return max(1, int((low if self._effort == "low" else high) * headroom))
+
+    def _skip_budget(self) -> bool:
+        """True when a budget would only drive the client-side cut and that cut cannot work: the
+        runtime has no server-side budget key and rejected thinking-off, which is the cut's retry."""
+        return getattr(self._llm, "effort_budget_key", None) is None and (
+            "chat_template_kwargs" in (getattr(self._llm, "rejected_effort_keys", None) or ())
+        )
 
     @property
     def current_session_id(self) -> str | None:
@@ -1360,6 +1447,7 @@ class AgentLoop:
         from localharness.core.events import Action, ArtifactRef, Observation, Escalation, Heartbeat, TaskComplete, ParseFailed, StuckRecovered
         from pydantic import ValidationError
         self._presence_penalty_next = None  # a degenerate retry's penalty lasts one turn
+        self._thinking_off_next = False  # so does a reasoning cut's thinking-off retry
 
         budget = BudgetTracker(
             max_actions=self._config.permissions.budget.max_actions,
@@ -1584,6 +1672,20 @@ class AgentLoop:
             _cap_kwargs = {"max_tokens": request_cap} if request_cap is not None else {}
             if self._presence_penalty_next is not None and self._llm_takes_presence_penalty:
                 _cap_kwargs["presence_penalty"] = self._presence_penalty_next
+            # Effort: a number derived from the level and the window, or the thinking-off flag.
+            # Each key rides only to a client that takes it, and a loop with no effort adds neither.
+            effort_budget = self._effort_budget(ctx_budget)
+            if (
+                effort_budget is not None
+                and self._llm_takes_reasoning_budget
+                and not self._skip_budget()
+            ):
+                _cap_kwargs["reasoning_budget"] = effort_budget
+            if (
+                (self._effort == "off" or self._thinking_off_next)
+                and self._llm_takes_disable_thinking
+            ):
+                _cap_kwargs["disable_thinking"] = True
             try:
                 response_message, usage = await self._llm.stream_complete(
                     messages=request_messages,
