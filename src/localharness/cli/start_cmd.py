@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 import socket
@@ -279,6 +280,10 @@ def _read_session_key(harness: Any) -> str | None:
 
 PATH_BINARY_LINE = ("llama-server found on PATH at {path} — written to overrides.yaml as server.binary; "
                     "nothing launches it until it is confirmed")
+CONFIG_INI_WRITTEN_LINE = ("config.ini ({dir}) differs from server.config_ini — written to overrides.yaml as "
+                           "server.config_ini; nothing launches it until it is confirmed")
+CONFIG_INI_SOURCE_KEY = "<config.ini>"
+"""The decline-store key prefix under which a No on the sensed `config.ini` remembers its text's digest."""
 HOST_SOURCE_KEY = "<extra_args-host>"
 """The decline-store key prefix under which a converted `--host` offer remembers its source (WR-03)."""
 HOST_UNDO_LINE = ("server.extra_args --host {host} is not applied — launched on 127.0.0.1 — "
@@ -291,14 +296,16 @@ PROBE_TIMEOUT_SECONDS = 0.5
 class SensedStart:
     """What `start` learned before `decide_machine_trust` (D-08, D-16, D-17, D-20): whether this start
     is about to launch the primary, the display-only annotations for the one question, the D-17 suffix
-    of an upgrade conversion (`converted`), the PATH binary this start wrote (`path_written`) and the
-    undo line of a `--host` that was not converted (`undo_line`)."""
+    of an upgrade conversion (`converted`), the PATH binary this start wrote (`path_written`), the undo
+    line of a `--host` that was not converted (`undo_line`) and the masked `config.ini` text this start
+    wrote as `server.config_ini` (`ini_written`, D-31)."""
 
     launching: bool
     annotations: dict = field(default_factory=dict)
     converted: str | None = None
     path_written: str | None = None
     undo_line: str | None = None
+    ini_written: str | None = None
 
 
 @dataclass
@@ -397,6 +404,48 @@ def _after_no_on_path_binary(global_dir: Path, machine_trust: MachineTrust, *, c
     if (path_binary and can_ask
             and ("launch", "server.binary") in machine_trust.withheld.get("overrides.yaml", ())):
         _after_no_remove_path_binary(global_dir, path_binary)
+
+
+def _write_config_ini(global_dir: Path, rec: dict | None) -> str | None:
+    """D-31, D-57: llama-server's own `${XDG_CONFIG_HOME:-~/.config}/llama.cpp/config.ini`, masked by
+    the one function `init` also uses, is written to overrides.yaml as `server.config_ini` BEFORE the
+    machine question when it differs from the merged record's value (an existing value is overwritten,
+    unlike the PATH binary: the file on disk is what a launch of this binary would have read). Only a
+    merged llama.cpp primary, only a machine with a record, and only when the text was not declined
+    (keyed on its digest, so a changed file asks again). A file that cannot be carried says so in one
+    line and writes nothing. Returns the text written, or None."""
+    from localharness.cli import init_import
+    from localharness.config import trust
+    from localharness.registry import set_value_in_dict
+
+    if rec is None:
+        return None
+    cfg, over = raw_settings(global_dir)
+    merged = _merged_server(cfg, over)
+    if merged.get("runtime") != "llamacpp":
+        return None
+    read = init_import.read_config_ini(init_import.user_config_ini())
+    if read.line:
+        err_console.print(read.line, markup=False, soft_wrap=True)
+        return None
+    if read.ini is None or not read.ini.kept:
+        return None
+    if read.ini.refused:
+        return None
+    kept = read.ini.kept
+    digest = hashlib.sha256(kept.encode("utf-8")).hexdigest()
+    if trust.offer_was_declined(trust.decline_key(CONFIG_INI_SOURCE_KEY, digest)):
+        return None
+    before = merged.get("config_ini")
+    if kept == before:
+        return None
+    if not write_overlay_validated(
+            global_dir, lambda d: set_value_in_dict(d, "server.config_ini", kept),
+            [("server.config_ini", before, kept)],
+            actor_detail="localharness start: llama.cpp config.ini sensed, written before the machine question"):
+        return None
+    err_console.print(CONFIG_INI_WRITTEN_LINE.format(dir=read.dir), markup=False, soft_wrap=True)
+    return kept
 
 
 def _adopt_written_bind_all(global_dir: Path) -> None:
@@ -535,10 +584,13 @@ def _sense_before_trust(global_dir: Path, *, can_ask: bool, path_binary: str | N
     # for a binary nothing will launch, and leave a line no answer ever cleans up. The write still
     # precedes the question (D-20).
     path_written = _write_path_binary(global_dir, rec, path_binary) if launching and can_ask else None
+    # llama-server's own config.ini is sensed the same way (D-31, D-57): written only by a start that is
+    # about to launch and can ask, shown as an ordinary uncovered launch entry, removed on a No.
+    ini_written = _write_config_ini(global_dir, rec) if launching and can_ask else None
     annotations, converted, undo_line = _convert_extra_args_host(global_dir, rec, can_ask=can_ask)
     if annotations:  # the conversion wrote `bind_all: true`: it is an uncovered entry now, so sense again
         launching = _sensed_launching(global_dir, rec)
-    return SensedStart(launching, annotations, converted, path_written, undo_line)
+    return SensedStart(launching, annotations, converted, path_written, undo_line, ini_written)
 
 
 async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launch_key: dict[str, str],
