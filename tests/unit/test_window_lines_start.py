@@ -354,6 +354,7 @@ class Launching:
         self.activations: list[dict] = []
         self.loop_kwargs: list[dict] = []
         live = LiveEndpoint(base_url=URL, served_models=["qwen"], handle=1, window=window, dropped_env=dropped)
+        self.live = live  # a test may change `dropped_env` between two starts
         owner = self
 
         class Strategy:
@@ -482,6 +483,18 @@ async def test_a_changed_dropped_list_is_said_again(world):
     record_dropped_env(world.ledger, "llamacpp", ["LLAMA_ARG_HOST"])
     Launching(world, _launch_report(), dropped=("LLAMA_ARG_HOST", "LLAMA_ARG_PORT"))
     assert "launch environment dropped LLAMA_ARG_HOST, LLAMA_ARG_PORT" in _summary(await world.start())
+
+
+async def test_a_launch_that_drops_nothing_resets_the_record_so_a_later_repeat_is_said_again(world):
+    """WR-03: drop, then nothing, then the same drop again, is two changes."""
+    launching = Launching(world, _launch_report(), dropped=("LLAMA_ARG_CTX_SIZE",))
+    assert "launch environment dropped LLAMA_ARG_CTX_SIZE" in _summary(await world.start())
+    launching.live.dropped_env = ()
+    clean = await world.start()
+    assert "launch environment dropped" not in "\n".join(clean)
+    assert last_dropped_env(world.ledger, "llamacpp") == []
+    launching.live.dropped_env = ("LLAMA_ARG_CTX_SIZE",)
+    assert "launch environment dropped LLAMA_ARG_CTX_SIZE" in _summary(await world.start())
 
 
 async def test_the_dropped_line_names_never_values(world):
