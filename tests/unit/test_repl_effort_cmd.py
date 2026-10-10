@@ -6,7 +6,8 @@ process boundaries: the persistence call is replaced by a recorder, the picker i
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -21,7 +22,9 @@ from localharness.cli.repl import (
     EFFORT_UNENFORCED_TEMPLATE,
     EFFORT_UNKNOWN_TEMPLATE,
 )
+from localharness.cli.repl import OrchestratorREPL
 from localharness.config.models import LEVELS
+from localharness.provider import speed_stats
 from tests.unit.effort_support import PRIMARY_URL, RecordingLLM, harness_with
 from tests.unit.test_repl_unknown_slash import RecordingChannel, _build_repl
 
@@ -300,3 +303,262 @@ def test_the_module_still_exports_the_effort_templates():
                  "EFFORT_UNKNOWN_TEMPLATE", "EFFORT_AGENT_LINE", "EFFORT_UNENFORCED_TEMPLATE",
                  "EFFORT_PERSIST_FAILED_TEMPLATE", "EFFORT_PICKER_PROMPT"):
         assert isinstance(getattr(repl_mod, name), str), name
+
+
+# ============================================================================ /model re-resolution
+
+class FakeLoop:
+    """The slice of an AgentLoop `_refresh_token_counter` and `/effort` read, with `set_effort` recorded.
+    No context manager and no counter, so the refresh touches nothing but the effort and the ledger."""
+
+    def __init__(self, llm, file_rung="inherit"):
+        self._llm = llm
+        self._ctx = None
+        self._config = SimpleNamespace(
+            effort=file_rung, context=None, max_tokens=None, name="orchestrator")
+        self.set_calls: list[tuple[str, str]] = []
+        self.effective_effort = None
+        self.effort_rung = None
+
+    def set_effort(self, level, rung):
+        self.set_calls.append((level, rung))
+        self.effective_effort, self.effort_rung = level, rung
+
+
+def _loop_repl(tmp_path, *, harness, llm=None, file_rung="inherit"):
+    loop = FakeLoop(llm or RecordingLLM(), file_rung)
+    channel = Chan([])
+    repl = OrchestratorREPL(
+        orchestrator=MagicMock(), agent_loop=loop, channel=channel, bus=AsyncMock(),
+        config_dir=tmp_path, harness_config=harness,
+    )
+    return repl, loop, channel
+
+
+def test_a_model_switch_to_a_peer_with_its_own_effort_moves_the_loop_and_not_the_file(tmp_path):
+    harness = harness_with(server_effort="high", peer=PEER_URL, peer_effort="max")
+    repl, loop, _ = _loop_repl(tmp_path, harness=harness)
+    run(repl._refresh_token_counter("m", base_url=PEER_URL, provider_type="llamacpp"))
+    assert loop.set_calls == [("max", "endpoint")]
+    run(repl._refresh_token_counter("m", base_url=PRIMARY_URL))
+    assert loop.set_calls == [("max", "endpoint"), ("high", "endpoint")]
+    assert loop._config.effort == "inherit"
+
+
+def test_a_session_level_survives_both_switches(tmp_path):
+    harness = harness_with(server_effort="high", peer=PEER_URL, peer_effort="max")
+    repl, loop, _ = _loop_repl(tmp_path, harness=harness)
+    repl._session_effort = "low"
+    run(repl._refresh_token_counter("m", base_url=PEER_URL, provider_type="llamacpp"))
+    run(repl._refresh_token_counter("m", base_url=PRIMARY_URL))
+    assert loop.set_calls == [("low", "session"), ("low", "session")]
+
+
+def test_an_agent_file_level_outranks_the_endpoint_after_a_switch(tmp_path):
+    harness = harness_with(server_effort="high", peer=PEER_URL, peer_effort="max")
+    repl, loop, _ = _loop_repl(tmp_path, harness=harness, file_rung="low")
+    run(repl._refresh_token_counter("m", base_url=PEER_URL, provider_type="llamacpp"))
+    assert loop.set_calls == [("low", "agent")] and loop._config.effort == "low"
+
+
+def test_no_harness_means_no_re_resolve_and_no_error(tmp_path):
+    repl, loop, _ = _loop_repl(tmp_path, harness=None)
+    assert run(repl._refresh_token_counter("m", base_url=PEER_URL, provider_type="llamacpp")) == ""
+    assert loop.set_calls == []
+
+
+# ============================================================================ the rejected-key ledger
+
+KEY = ("llamacpp", "m")
+RBT = "reasoning_budget_tokens"
+CTK = "chat_template_kwargs"
+
+
+def _ledger(tmp_path):
+    return speed_stats.default_speed_stats_path(tmp_path)
+
+
+def _seed(tmp_path, keys):
+    speed_stats.record_rejected_effort_keys(_ledger(tmp_path), *KEY, keys)
+
+
+def _recorded(tmp_path):
+    return speed_stats.last_rejected_effort_keys(_ledger(tmp_path), *KEY)
+
+
+@pytest.fixture
+def writes(monkeypatch):
+    """Counts every record_rejected_effort_keys call (and passes it through)."""
+    calls: list[list[str]] = []
+    real = speed_stats.record_rejected_effort_keys
+
+    def counting(path, provider_type, model, keys):
+        calls.append(sorted(keys))
+        return real(path, provider_type, model, keys)
+
+    monkeypatch.setattr(speed_stats, "record_rejected_effort_keys", counting)
+    return calls
+
+
+def _session(tmp_path, turns, *, llm=None):
+    """Drive repl.run() through `len(turns)` ordinary user turns. `turns` is a list of
+    (rejected, accepted) pairs the client holds AFTER that turn."""
+    llm = llm or RecordingLLM()
+    script = list(turns)
+
+    async def run_turn(**kw):
+        rejected, accepted = script.pop(0)
+        llm.rejected_effort_keys = frozenset(rejected)
+        llm.accepted_effort_keys = frozenset(accepted)
+
+    channel = Chan(["hello"] * len(turns))
+    repl, agent, _ = _build_repl(channel, run_turn=run_turn)
+    agent._llm = llm
+    repl._config_dir = tmp_path
+    asyncio.run(repl.run())
+    return channel, repl
+
+
+def _said(channel, key=RBT):
+    return [t for t, _ in channel.sent if t == EFFORT_UNENFORCED_TEMPLATE.format(key=key)]
+
+
+def _unenforced(channel):
+    return [t for t, _ in channel.sent if t.startswith("effort unenforced")]
+
+
+def test_a_first_turn_with_an_empty_live_set_leaves_a_pre_seeded_ledger_alone(tmp_path, writes):
+    _seed(tmp_path, [RBT])
+    del writes[:]
+    channel, _ = _session(tmp_path, [((), ())])
+    assert _recorded(tmp_path) == [RBT]
+    assert _unenforced(channel) == [] and writes == []
+
+
+def test_ten_max_or_off_turns_write_nothing_and_say_nothing(tmp_path, writes):
+    _seed(tmp_path, [RBT])
+    del writes[:]
+    channel, _ = _session(tmp_path, [((), ())] * 10)
+    assert _recorded(tmp_path) == [RBT]
+    assert _unenforced(channel) == [] and writes == []
+
+
+def test_a_new_rejection_is_said_once_and_recorded(tmp_path, writes):
+    channel, _ = _session(tmp_path, [({RBT}, ()), ({RBT}, ())])
+    assert _said(channel) == [EFFORT_UNENFORCED_TEMPLATE.format(key=RBT)]
+    assert EFFORT_UNENFORCED_TEMPLATE.format(key=RBT) == (
+        "effort unenforced on this server: reasoning_budget_tokens rejected")
+    assert _recorded(tmp_path) == [RBT]
+    assert writes == [[RBT]]
+    assert ([m for t, m in channel.sent if t.startswith("effort unenforced")]
+            == [INFO])
+
+
+def test_the_same_rejected_key_over_ten_turns_prints_once_and_writes_once(tmp_path, writes):
+    channel, _ = _session(tmp_path, [({RBT}, ())] * 10)
+    assert len(_said(channel)) == 1 and writes == [[RBT]]
+
+
+def test_a_new_key_joins_the_recorded_ones_and_only_it_is_said(tmp_path, writes):
+    _seed(tmp_path, [CTK])
+    del writes[:]
+    channel, _ = _session(tmp_path, [({RBT}, ())])
+    assert _unenforced(channel) == [EFFORT_UNENFORCED_TEMPLATE.format(key=RBT)]
+    assert _recorded(tmp_path) == [CTK, RBT]
+
+
+def test_a_key_the_ledger_already_holds_is_not_said_again_after_a_restart(tmp_path, writes):
+    _seed(tmp_path, [RBT])
+    del writes[:]
+    channel, _ = _session(tmp_path, [({RBT}, ())])
+    assert _unenforced(channel) == [] and writes == []
+    assert _recorded(tmp_path) == [RBT]
+
+
+def test_a_key_the_server_accepted_leaves_the_ledger_and_is_said_again_if_refused_later(
+        tmp_path, writes):
+    _seed(tmp_path, [CTK, RBT])
+    del writes[:]
+    channel, _ = _session(tmp_path, [((), {RBT})])
+    assert _recorded(tmp_path) == [CTK] and _unenforced(channel) == []
+    channel, _ = _session(tmp_path, [({RBT}, ())])
+    assert _said(channel) == [EFFORT_UNENFORCED_TEMPLATE.format(key=RBT)]
+    assert _recorded(tmp_path) == [CTK, RBT]
+
+
+def test_an_accepted_key_that_was_never_recorded_changes_nothing(tmp_path, writes):
+    channel, _ = _session(tmp_path, [((), {RBT})] * 3)
+    assert writes == [] and _recorded(tmp_path) is None and _unenforced(channel) == []
+
+
+def test_a_ledger_write_error_is_swallowed_and_the_key_is_not_said_twice(tmp_path, monkeypatch):
+    attempts: list[int] = []
+
+    def refuse(*a, **k):
+        attempts.append(1)
+        raise OSError("read-only")
+
+    monkeypatch.setattr(speed_stats, "record_rejected_effort_keys", refuse)
+    channel, _ = _session(tmp_path, [({RBT}, ())] * 3)
+    assert len(_said(channel)) == 1
+    assert attempts  # the write was tried; the turns still completed
+    assert sum(1 for t, _ in channel.sent if t == "hello") == 0
+
+
+def test_a_client_without_a_key_is_skipped_quietly(tmp_path, writes):
+    llm = RecordingLLM()
+    del llm.config
+    channel, _ = _session(tmp_path, [({RBT}, ())], llm=llm)
+    assert writes == [] and _unenforced(channel) == []
+
+
+# ---------------------------------------------------------------------------- rebind
+
+def test_a_switch_to_a_different_endpoint_clears_the_targets_entry_and_the_announced_set(
+        tmp_path, writes):
+    _seed(tmp_path, [RBT])
+    del writes[:]
+    repl, loop, _ = _loop_repl(tmp_path, harness=harness_with(server_effort="high", peer=PEER_URL))
+    repl._announced_effort_keys.add(RBT)
+    loop._llm.config.base_url = PEER_URL  # the client was rebound before the refresh runs
+    run(repl._refresh_token_counter("m", base_url=PEER_URL, provider_type="llamacpp"))
+    assert _recorded(tmp_path) == [] and repl._announced_effort_keys == set()
+    assert writes == [[]]
+    assert repl._effort_endpoint == PEER_URL
+
+
+def test_a_same_endpoint_refresh_leaves_the_entry_and_the_announced_set_alone(tmp_path, writes):
+    _seed(tmp_path, [RBT])
+    del writes[:]
+    repl, loop, _ = _loop_repl(tmp_path, harness=harness_with(server_effort="high"))
+    repl._announced_effort_keys.add(RBT)
+    run(repl._refresh_token_counter("m", base_url=PRIMARY_URL + "/", provider_type="llamacpp"))
+    assert _recorded(tmp_path) == [RBT] and repl._announced_effort_keys == {RBT}
+    assert writes == []
+
+
+def test_a_failed_clear_never_breaks_the_swap(tmp_path, monkeypatch):
+    def refuse(*a, **k):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(speed_stats, "record_rejected_effort_keys", refuse)
+    repl, loop, _ = _loop_repl(tmp_path, harness=harness_with(server_effort="high", peer=PEER_URL))
+    loop._llm.config.base_url = PEER_URL
+    assert run(repl._refresh_token_counter("m", base_url=PEER_URL, provider_type="llamacpp")) == ""
+    assert repl._effort_endpoint == PEER_URL
+
+
+def test_the_announce_after_a_rebind_says_a_refusal_by_the_new_server(tmp_path, writes):
+    """A rejection belongs to the server that made it: after the clear the same key is news again."""
+    _seed(tmp_path, [RBT])
+    repl, loop, channel = _loop_repl(
+        tmp_path, harness=harness_with(server_effort="high", peer=PEER_URL))
+    loop._llm.rejected_effort_keys = frozenset({RBT})
+    run(repl._announce_rejected_effort_keys())
+    assert _unenforced(channel) == []  # the old server's ledger already has it
+    loop._llm.config.base_url = PEER_URL
+    run(repl._refresh_token_counter("m", base_url=PEER_URL, provider_type="llamacpp"))
+    assert _recorded(tmp_path) == []
+    run(repl._announce_rejected_effort_keys())  # the new server refuses it too
+    assert _said(channel) == [EFFORT_UNENFORCED_TEMPLATE.format(key=RBT)]
+    assert _recorded(tmp_path) == [RBT]
