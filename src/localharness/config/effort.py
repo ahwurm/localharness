@@ -7,13 +7,17 @@ reads the harness with `getattr` so a plain object answers as well as a `Harness
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
-from localharness.config.models import LEVELS, EffortLevel
+from localharness.config.models import LEVELS, EffortLevel, Rung
 
-__all__ = ["EffortLevel", "LEVELS", "Rung", "endpoint_effort", "resolve_effort"]
+__all__ = [
+    "EFFORT_UNENFORCED_LINE", "EffortLevel", "LEVELS", "Rung", "endpoint_effort", "resolve_effort",
+]
 
-Rung = Literal["session", "agent", "endpoint", "org", "default"]
+EFFORT_UNENFORCED_LINE = "effort unenforced on this server: {key} rejected"
+"""What `start`'s summary, `/effort show` and the channel say for a key the server refused: one
+text, so the three places cannot drift."""
 
 
 def _norm(url: str | None) -> str:
