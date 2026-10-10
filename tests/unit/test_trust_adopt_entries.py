@@ -5,12 +5,17 @@ re-snapshots the disk, so an agent's write made in the meantime is not adopted w
 """
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 
 import pytest
+import yaml
 
+from localharness.cli import model_ops
 from localharness.cli.workspace import MachineTrust, decide_machine_trust
 from localharness.config import trust
+from localharness.config.loader import ConfigLoader
+from localharness.config.overlay import load_overlay
 from tests.unit.trust_support import g, never_asked, write_yaml  # noqa: F401 — g is a fixture
 
 
@@ -178,3 +183,169 @@ def test_machine_trust_field_order_keeps_existing_positional_calls_valid():
     assert [f.name for f in dataclasses.fields(MachineTrust)] == [
         "withheld", "line", "quiet", "posture_notes"]
     assert MachineTrust({}, "line").line == "line"
+
+
+# ------------------------------------------------------------------ /model adopts its one entry (D-19)
+
+_BASE = {
+    "version": "1",
+    "provider": {"provider_type": "vllm", "base_url": "http://localhost:8081/v1",
+                 "default_model": "m1", "available_models": ["m1"]},
+    "org": {"default_model": "m1"},
+}
+_VLLM = {"runtime": "vllm", "launch": "binary", "binary": "/x/vllm", "model": "m1",
+         "extra_args": ["--a"]}
+_LLAMACPP = {"runtime": "llamacpp", "launch": "binary", "binary": "/x/llama-server",
+             "model": "/x/m.gguf"}
+_SERVER_MODEL = ("overrides.yaml", "launch_model", "server.model")
+
+
+def _home(g, server=_VLLM, record=True):
+    write_yaml(g / "config.yaml", {**_BASE, **({"server": server} if server else {})})
+    if record:
+        trust.record_machine(g, trust.machine_snapshot(g), kinds=KINDS)
+    return ConfigLoader(config_dir=g).load_harness()
+
+
+def _persist(harness, g, model="m2", **kw):
+    return asyncio.run(model_ops.persist_default_model(harness, model, config_dir=g, **kw))
+
+
+def _recorded(g):
+    return {(e["file"], e["kind"], e["name"]): e["shown"] for e in trust.recorded_machine(g)["entries"]}
+
+
+def _asked_prompts(monkeypatch):
+    asked: list[str] = []
+    monkeypatch.setattr("rich.prompt.Confirm.ask",
+                        lambda prompt, *a, **kw: asked.append(str(prompt)) or False)
+    return asked
+
+
+def test_a_local_operators_model_switch_re_records_exactly_its_one_entry(g, monkeypatch):
+    harness = _home(g)
+    before = trust.recorded_machine(g)
+
+    _persist(harness, g, local_operator=True)
+
+    rec = trust.recorded_machine(g)
+    assert _recorded(g)[_SERVER_MODEL] == "m2"
+    assert [e for e in rec["entries"] if e not in before["entries"]] == [
+        {"file": "overrides.yaml", "kind": "launch_model", "name": "server.model", "shown": "m2"}]
+    assert rec["fingerprint"] == trust.fingerprint(rec["entries"])
+    assert set(rec["kinds"]) == set(before["kinds"])
+    never_asked(monkeypatch)
+    assert decide_machine_trust(g, ask=True) == MachineTrust()
+
+
+def test_a_hand_edit_made_since_the_start_still_asks_after_a_local_switch(g, monkeypatch):
+    harness = _home(g)
+    write_yaml(g / "config.yaml", {**_BASE, "server": {**_VLLM, "extra_args": ["--evil"]}})
+
+    _persist(harness, g, local_operator=True)
+    asked = _asked_prompts(monkeypatch)
+    decide_machine_trust(g, ask=True)
+
+    assert len(asked) == 1
+    assert "server.extra_args" in asked[0] and "server.model" not in asked[0]
+
+
+def test_a_switch_that_is_not_a_local_operators_records_nothing(g, monkeypatch):
+    harness = _home(g)
+    before = trust.recorded_machine(g)
+
+    _persist(harness, g)  # the default is False: a remote channel, a shell tool, a pipe
+
+    assert trust.recorded_machine(g) == before
+    assert load_overlay(g / "overrides.yaml")["server"]["model"] == "m2"
+    asked = _asked_prompts(monkeypatch)
+    decide_machine_trust(g, ask=True)
+    assert len(asked) == 1 and "server.model" in asked[0] and "overrides.yaml" in asked[0]
+
+
+def test_a_llama_cpp_switch_writes_no_server_model_and_adopts_nothing(g):
+    harness = _home(g, server=_LLAMACPP)
+    before = trust.recorded_machine(g)
+
+    _persist(harness, g, "alias", local_operator=True)
+
+    assert "server" not in load_overlay(g / "overrides.yaml")
+    assert trust.recorded_machine(g) == before
+
+
+def test_a_switch_with_no_server_block_adopts_nothing(g):
+    harness = _home(g, server=None)
+    before = trust.recorded_machine(g)
+
+    _persist(harness, g, local_operator=True)
+
+    assert trust.recorded_machine(g) == before
+
+
+def test_with_no_machine_record_a_local_switch_writes_the_model_and_records_nothing(g):
+    harness = _home(g, record=False)
+
+    _persist(harness, g, local_operator=True)
+
+    assert load_overlay(g / "overrides.yaml")["server"]["model"] == "m2"
+    assert trust.recorded_machine(g) is None
+
+
+def test_switching_to_the_model_already_recorded_leaves_the_fingerprint_alone(g):
+    harness = _home(g)
+    _persist(harness, g, local_operator=True)
+    first = trust.recorded_machine(g)
+
+    _persist(harness, g, local_operator=True)
+
+    assert trust.recorded_machine(g) == first
+
+
+def test_the_entry_is_adopted_even_when_the_audit_emit_fails(g, monkeypatch):
+    harness = _home(g)
+
+    class _Broken:
+        def __init__(self, *a, **kw):
+            raise OSError("audit path is not writable")
+
+    monkeypatch.setattr(model_ops, "EventBus", _Broken)
+    warning = _persist(harness, g, local_operator=True)
+
+    assert warning and "audit log could not be written" in warning
+    assert _recorded(g)[_SERVER_MODEL] == "m2"
+
+
+def test_a_failed_overlay_write_adopts_nothing(g, monkeypatch):
+    harness = _home(g)
+    before = trust.recorded_machine(g)
+
+    def _boom(*a, **kw):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(model_ops, "atomic_write_overlay", _boom)
+    with pytest.raises(OSError):
+        _persist(harness, g, local_operator=True)
+
+    assert trust.recorded_machine(g) == before
+
+
+# ------------------------------------------------------------------ effort is never fingerprinted (D-01)
+
+
+def test_effort_shaped_writes_leave_the_snapshot_and_the_overlay_key_free(g):
+    write_yaml(g / "config.yaml", {
+        **_BASE, "server": _VLLM,
+        "extra_endpoints": [{"name": "p", "base_url": "http://localhost:9000/v1",
+                             "lifecycle": {"runtime": "vllm", "launch": "binary",
+                                           "binary": "/x/vllm", "model": "pm"}}]})
+    before = trust.machine_snapshot(g)
+    assert before, "the fixture must fingerprint something for the equality below to mean anything"
+
+    write_yaml(g / "overrides.yaml", {
+        "server": {"effort": "high"},
+        "active_endpoint": {"name": "p", "effort": "low"},
+        "extra_endpoints": [{"name": "p", "lifecycle": {"effort": "max"}}]})
+
+    assert trust.machine_snapshot(g) == before
+    assert "api_key" not in (g / "overrides.yaml").read_text(encoding="utf-8")
+    assert "effort" not in {k for k in trust.LAUNCH_KEYS} | set(trust.LAUNCH_MODEL_KEYS)

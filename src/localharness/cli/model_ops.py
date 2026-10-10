@@ -22,6 +22,7 @@ from localharness.config.overlay import (
     deep_merge,
     load_overlay,
 )
+from localharness.config import trust
 from localharness.config.paths import global_config_dir, resolve_runtime_path
 from localharness.config.plugin_sections import core_harness_view
 from localharness.config.redact import secret_values, validation_text
@@ -112,6 +113,7 @@ async def persist_default_model(
     actor: str = "cli",
     config_dir: Any = None,
     audit_base_dir: Any = None,
+    local_operator: bool = False,
 ) -> str | None:
     """Persist ``model`` as the org + provider default via the atomic USER OVERLAY — the same
     crash-safe, audited path ``components set`` uses (issue #22), replacing the prior full,
@@ -142,6 +144,14 @@ async def persist_default_model(
     guard about a DIFFERENT parameter. ``audit_base_dir`` is also the more accurate name: the value
     is the BASE ``resolve_runtime_path`` roots a bare name under, not the audit file itself.
 
+    ``local_operator`` (D-19, TRUST-09): True only when a person at this machine made the switch.
+    The origin signal is ``ChannelAdapter.local_operator`` (the REPL) or the CLI's tty-without-
+    ``LOCALHARNESS_COMMIT`` rule — never ``actor`` and never message content. When True and
+    ``server.model`` was actually written, the one ``launch_model`` entry is re-recorded in the
+    machine record, built from the value written here and never re-snapshotted, so a hand edit
+    made since the last start still asks. False (the default) records nothing: the next terminal
+    start asks about ``server.model (overrides.yaml)``.
+
     Returns None on clean success, or a warning string (#37) when ONLY the post-write audit
     emit failed — the durable overlay write already succeeded, so callers surface this as a
     secondary note and still report the switch as done (never as a persist failure).
@@ -167,7 +177,8 @@ async def persist_default_model(
     # cold start relaunches the chosen model. For llama.cpp server.model is the GGUF path and the
     # alias is `served_name`, so the alias must never reach `-m`: it is written to neither the
     # overlay (here) nor the in-memory record (below).
-    if harness.server is not None and harness.server.runtime != "llamacpp":
+    wrote_server_model = harness.server is not None and harness.server.runtime != "llamacpp"
+    if wrote_server_model:
         set_value_in_dict(new_overlay, "server.model", model)
 
     # Validate the SAME cascade the next `start` sees: current config ⊕ new overlay. Exclude the
@@ -181,8 +192,18 @@ async def persist_default_model(
     harness.provider.default_model = model
     harness.org.default_model = model
     harness.provider.available_models = merged_avail
-    if harness.server is not None and harness.server.runtime != "llamacpp":
+    if wrote_server_model:
         harness.server.model = model
+
+    # D-19: a person's own switch re-records exactly the one entry it wrote. After the durable write
+    # (a failed write adopts nothing) and before the audit emit (an audit failure still leaves the
+    # entry adopted). A no-op when this machine has no record yet.
+    if local_operator and wrote_server_model:
+        trust.adopt_entries(
+            global_config_dir(config_dir),
+            [{"file": "overrides.yaml", "kind": trust.LAUNCH_MODEL_KIND,
+              "name": "server.model", "shown": model}],
+        )
 
     # Audit trail (mirrors components_cmd): one ComponentMutated per path written. A bare default
     # 'audit.jsonl' lands under the base dir given here (#35).

@@ -473,3 +473,83 @@ def test_model_download_failure_reported_not_swallowed(monkeypatch):
 
     assert result.exit_code == 2, result.output
     assert "repo not found" in result.output
+
+
+# ------------------------------------------------------------------ who may adopt (D-19, TRUST-09)
+
+
+class _Stdin:
+    def __init__(self, tty: bool):
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+@pytest.mark.parametrize(
+    ("tty", "marker", "expected"),
+    [(True, False, True), (True, True, False), (False, False, False), (False, True, False)],
+)
+def test_only_a_tty_without_the_shell_tools_marker_is_a_local_operator(
+        monkeypatch, tty, marker, expected):
+    from localharness.cli import model_cmd
+
+    monkeypatch.setattr("sys.stdin", _Stdin(tty))
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    if marker:
+        monkeypatch.setenv("LOCALHARNESS_COMMIT", "1")
+
+    assert model_cmd._is_local_operator() is expected
+
+
+def test_a_stdin_that_cannot_say_is_not_a_local_operator(monkeypatch):
+    from localharness.cli import model_cmd
+
+    class _Broken:
+        def isatty(self):
+            raise ValueError("I/O operation on closed file")
+
+    monkeypatch.setattr("sys.stdin", _Broken())
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    assert model_cmd._is_local_operator() is False
+    monkeypatch.setattr("sys.stdin", None)
+    assert model_cmd._is_local_operator() is False
+
+
+@pytest.mark.parametrize("operator", [True, False])
+def test_model_switch_hands_the_operator_signal_to_persist(components_home, monkeypatch, operator):
+    from localharness.cli import model_cmd
+
+    _seed_config(components_home)
+    monkeypatch.setattr(model_ops, "list_live_models", _fake_live(["model-a", "model-b"]), raising=False)
+    monkeypatch.setattr(model_cmd, "_is_local_operator", lambda: operator)
+    seen: list[dict] = []
+    real = model_ops.persist_default_model
+
+    async def _recorder(harness, model, **kw):
+        seen.append(kw)
+        return await real(harness, model, **kw)
+
+    monkeypatch.setattr(model_ops, "persist_default_model", _recorder)
+
+    result = runner.invoke(app, ["model", "model-b"])
+
+    assert result.exit_code == 0, result.output
+    assert [kw["local_operator"] for kw in seen] == [operator]
+
+
+def test_model_switch_under_a_runner_without_a_tty_is_not_a_local_operator(components_home, monkeypatch):
+    _seed_config(components_home)
+    monkeypatch.setattr(model_ops, "list_live_models", _fake_live(["model-a", "model-b"]), raising=False)
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    seen: list[dict] = []
+    real = model_ops.persist_default_model
+
+    async def _recorder(harness, model, **kw):
+        seen.append(kw)
+        return await real(harness, model, **kw)
+
+    monkeypatch.setattr(model_ops, "persist_default_model", _recorder)
+
+    assert runner.invoke(app, ["model", "model-b"]).exit_code == 0
+    assert seen[0]["local_operator"] is False  # CliRunner's stdin is not a tty

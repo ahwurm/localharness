@@ -9,6 +9,8 @@ launches (or relaunches the managed server on) the persisted model.
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +23,19 @@ from localharness.config.loader import ConfigLoader
 
 console = Console()
 err_console = Console(stderr=True)
+
+
+def _is_local_operator() -> bool:
+    """Is a person at this terminal making the switch (D-19, TRUST-09)? True only on a tty without
+    the shell tool's ``LOCALHARNESS_COMMIT`` marker: `bash_tool` sets it in every agent command's
+    environment, so an agent running `localharness model` is never a local operator, and a pipe
+    or a script has no tty. The one signal is the environment, never an argument or a message."""
+    if "LOCALHARNESS_COMMIT" in os.environ:
+        return False
+    try:
+        return sys.stdin is not None and bool(sys.stdin.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
 
 
 def _download(repo_id: str, filename: Optional[str]) -> None:
@@ -231,7 +246,8 @@ def model(
     try:
         audit_warning = asyncio.run(
             model_ops.persist_default_model(
-                harness, target, config_dir=loader._config_dir, audit_base_dir=_audit_dir
+                harness, target, config_dir=loader._config_dir, audit_base_dir=_audit_dir,
+                local_operator=_is_local_operator(),
             )
         )
     except Exception as exc:
