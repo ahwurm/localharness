@@ -114,13 +114,20 @@ def _no_box_processes(request, monkeypatch, _empty_proc_root):
     directory (no listener, no process), `units._run` answers None ("not checked") without running
     anything, and `XDG_CONFIG_HOME` is unset so llama-server's `config.ini` path resolves under the
     faked HOME, never a developer's real one (a test that needs it sets it). test_units opts out of
-    the `_run` half only, to test the real seam through its own fakes."""
+    the `_run` half only, to test the real seam through its own fakes. Plan 05-10 (D-08): `start` reads
+    llama-server's `/props` at a llama.cpp attach, so `start_cmd._props_model_path` answers None for
+    every test (no test dials a port for it); test_start_props_model_path holds the real function by
+    its own import and drives it through a faked `httpx.get`."""
+    import sys
+
     from localharness.provider import procfs, units
 
     monkeypatch.setattr(procfs, "PROC_ROOT", _empty_proc_root)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     if not request.module.__name__.endswith("test_units"):
         monkeypatch.setattr(units, "_run", lambda argv, *, timeout, cap: None)
+    if "localharness.cli.start_cmd" in sys.modules:
+        monkeypatch.setattr("localharness.cli.start_cmd._props_model_path", lambda base_url, launch_key: None)
     yield
 
 
