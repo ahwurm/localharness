@@ -729,7 +729,7 @@ async def test_refresh_token_counter_runs_off_loop(tmp_path, monkeypatch):
 # --- 0.10.0 model tree: cross-endpoint /model switch (switch to a peer server) --- #
 
 
-def _xrepl(tmp_path, harness, models_by_url):
+def _xrepl(tmp_path, harness, models_by_url, **repl_kw):
     """A REPL whose /model discovery is endpoint-aware: `models_by_url` maps a base_url to either
     a list of served model ids (reachable) OR the string 'unreachable'/'malformed' to exercise the
     graceful-skip paths. No real HTTP — the shared list_live_models probe is stubbed per endpoint."""
@@ -739,7 +739,7 @@ def _xrepl(tmp_path, harness, models_by_url):
     agent = SimpleNamespace(_llm=FakeLLM())
     repl = OrchestratorREPL(
         orchestrator=SimpleNamespace(), agent_loop=agent, channel=channel,
-        bus=SimpleNamespace(), config_dir=tmp_path, harness_config=harness,
+        bus=SimpleNamespace(), config_dir=tmp_path, harness_config=harness, **repl_kw,
     )
     probed: list[str] = []
 

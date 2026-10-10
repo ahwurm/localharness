@@ -84,11 +84,11 @@ def _launchable_peer(name="llamacpp-local", served="qwen-gguf", api_key="none", 
     )
 
 
-def _session(tmp_path, peer, server=None):
+def _session(tmp_path, peer, server=None, **repl_kw):
     harness = _harness(server=server if server is not None else _heavy_primary(),
                        extra_endpoints=[peer])
     repl, channel, agent, _ = _xrepl(
-        tmp_path, harness, {PRIMARY_URL: ["model-a"], PEER_URL: "unreachable"})
+        tmp_path, harness, {PRIMARY_URL: ["model-a"], PEER_URL: "unreachable"}, **repl_kw)
 
     async def _refresh(model, *, base_url=None, provider_type=None):
         return ""
@@ -643,3 +643,48 @@ async def test_a_cold_launch_whose_restore_fails_names_the_cause_in_the_one_fail
     last = channel.messages[-1]
     assert "Could not restore it: llama-server never became ready" in last
     assert "NO model serving" not in last
+
+
+# --- the pending launch lines `start` hands over (D-15, D-26) ---------------------------------- #
+
+LINE = ("server.bind_all: true not applied — launched on 127.0.0.1 for this run; "
+        "a terminal start asks")
+
+
+def _when_sent(channel, boundaries) -> list[tuple[str, int]]:
+    """Each message with the number of processes started when it went out."""
+    seen: list[tuple[str, int]] = []
+    send = channel.send_message
+
+    async def recording(text, metadata=None):
+        seen.append((text, len(boundaries.cmds)))
+        await send(text, metadata=metadata)
+
+    channel.send_message = recording
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_the_first_cold_launch_prints_the_pending_line_once_before_its_announcement(
+        tmp_path, boundaries):
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer(), launch_lines=(LINE,))
+    sent = _when_sent(channel, boundaries)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert [m for m in channel.messages if m == LINE] == [LINE]
+    assert channel.messages.index(LINE) < next(
+        i for i, m in enumerate(channel.messages) if m.startswith("Launching llamacpp-local"))
+    assert [started for text, started in sent if text == LINE] == [0]  # before activate
+    assert repl._pending_launch_lines == []
+
+
+@pytest.mark.asyncio
+async def test_a_repl_built_without_the_keyword_prints_nothing_extra(tmp_path, boundaries):
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer())
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert repl._pending_launch_lines == []
+    assert not any("not applied" in m for m in channel.messages)
+    assert any(m.startswith("Launching llamacpp-local") for m in channel.messages)
