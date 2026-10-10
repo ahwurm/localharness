@@ -28,7 +28,7 @@ import json
 import secrets
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
@@ -143,6 +143,24 @@ unlike every other ask, this one is called directly by `resolve_workspace_layer`
 the gate, so there is no `permissions.ask.timeout_s` to inherit and nothing else would ever end
 the wait. The wait is visible (`BringUpStage`) and abortable while it runs.
 """
+
+PICKER_KLASS = "picker"
+"""The AskClass a picker frame carries. Not a permission class: no gate, no grant key, no tool call
+stands behind it, so no answer to it can reach a grant path (D-33)."""
+
+PICKER_ASK_TEXT = "Choose one. This question holds no tool call."
+"""The frame text when the caller names none: the person must be able to tell this dialog from a
+permission question, and the page draws `display || reason`."""
+
+PICKER_LEGEND_TEMPLATE = "current: {current}"
+
+PICKER_ASK_TIMEOUT_S = 120.0
+"""How long a picker waits for the phone before leaving the choice unchanged. Bounded because the
+REPL awaits the answer, unlike a permission ask whose deadline is the gate's."""
+
+PICKER_EXPIRED_DECISION = "unchanged"
+"""What an expired or cancelled picker announces in its `AskExpired`: nothing was chosen."""
+
 
 TRUST_OPTION_NAMES: dict[str, str] = {
     "allow_always": "Trust this workspace",
@@ -1084,6 +1102,68 @@ class MobileChannel(ChannelAdapter):
             # carries no `request_id` — so if this line is not exhaustive, nothing else is.
             if policy is not None:
                 policy.resolved(self.session_id, request_id=request_id)
+
+    def can_run_picker(self) -> bool:
+        """True while a client is attached. A picker asked into an empty room would hold the REPL
+        until the deadline, so with nobody attached the REPL prints the one-line list instead."""
+        return self.client_count > 0
+
+    async def run_picker(
+        self, options: Sequence[str], current: str | None, *, prompt: str | None = None
+    ) -> str | None:
+        """The phone's picker (spec 16 7.1, D-33): one option per button, the existing ask frame.
+
+        The same shape as `TerminalChannel.run_picker`: the chosen option comes back, or `None`
+        when nobody chose (no client attached, the wait ran out, the task was cancelled, a
+        shutdown settled the ask). It is a `BlockingAsk` whose options are the levels, registered
+        in `_open_asks` with no `PermissionRequest` behind it, so `answer_ask` refuses any kind not
+        offered, `GET /api/permissions` lists it, and no grant path is reachable from it. No push
+        notification fires: the person is holding the phone that sent the command.
+        """
+        opts = list(options)
+        if not opts:
+            raise ValueError("picker needs at least one option")
+        if self.client_count == 0:
+            return None
+        request_id = uuid.uuid4().hex
+        text = sanitize_for_display(prompt or PICKER_ASK_TEXT)
+        frame = BlockingAsk(
+            session_id=self.session_id,
+            request_id=request_id,
+            tool_name="",
+            tool_params={},
+            klass=PICKER_KLASS,
+            key=None,
+            grantable=False,
+            reason=text,
+            display=text,
+            options_legend=PICKER_LEGEND_TEMPLATE.format(current=current or "none"),
+            options=[AskOption(kind=o, name=o) for o in opts],
+        )
+        ask = _OpenAsk(request_id, None, frame)
+        self._open_asks[request_id] = ask
+        self.push(frame)
+
+        def _expire() -> None:
+            ask.outcome = PICKER_EXPIRED_DECISION
+            self.push(AskExpired(
+                session_id=self.session_id,
+                request_id=request_id,
+                decision=PICKER_EXPIRED_DECISION,
+                waited_s=time.monotonic() - ask.asked_at,
+            ))
+
+        try:
+            kind = await asyncio.wait_for(ask.future, PICKER_ASK_TIMEOUT_S)
+            return kind if kind in opts else None  # a shutdown settles with a non-level
+        except asyncio.TimeoutError:
+            _expire()
+            return None
+        except asyncio.CancelledError:
+            _expire()
+            raise
+        finally:
+            self._open_asks.pop(request_id, None)
 
     @staticmethod
     def ask_options(klass: str, grantable: bool) -> list[AskOption]:
