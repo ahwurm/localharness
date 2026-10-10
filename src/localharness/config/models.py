@@ -2065,7 +2065,8 @@ class AutosenseConfig(BaseModel):
         "Share of the weights' bytes held back for compute buffers when the harness sizes a "
         "window."))
     template_margin_ratio: float = Field(default=1 / 64, gt=0.0, le=1.0, description=(
-        "Share of the window held back for chat-template overhead (default 1/64 of the window)."))
+        "Share of the window held back for chat-template overhead (default 1/64 of the window). "
+        "Applies to the main agent's loop; subagents and the bench keep 1/64."))
     unified_reserve_ratio: float = Field(default=0.15, gt=0.0, le=1.0, description=(
         "Share of total memory held back on a unified-memory machine."))
     cache_ram_ratio: float = Field(default=0.40, gt=0.0, le=1.0, description=(
