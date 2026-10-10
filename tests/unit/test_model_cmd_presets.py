@@ -135,3 +135,153 @@ def test_primary_served_name_rule():
     assert model_ops.primary_served_name(NS(served_name="s", extra_args=[]), prov) == "s"
     assert model_ops.primary_served_name(NS(served_name=None, extra_args=["-a", "al"]), prov) == "al"
     assert model_ops.primary_served_name(NS(served_name=None, extra_args=[]), prov) == "dm"
+
+
+# --- the primary's served name clears the selection (D-35, D-58) ---
+
+def _select_peer_overlay(home, **extra) -> None:
+    body = {"active_endpoint": {
+        "name": "flash-next", "base_url": "http://127.0.0.1:8082/v1",
+        "provider_type": "llamacpp", "model": "flash-next"}}
+    body.update(extra)
+    (home / "overrides.yaml").write_text(yaml.safe_dump(body), encoding="utf-8")
+
+
+def _record_persist_default(monkeypatch) -> list[dict]:
+    """Wrap persist_default_model, recording the keywords it is called with."""
+    calls: list[dict] = []
+    real = model_ops.persist_default_model
+
+    async def spy(harness, model, **kw):
+        calls.append({"model": model, **kw})
+        return await real(harness, model, **kw)
+
+    monkeypatch.setattr(model_ops, "persist_default_model", spy)
+    return calls
+
+
+def test_primary_served_name_clears_selection_and_sets_default(components_home, monkeypatch):
+    _seed(components_home, provider={
+        "provider_type": "llamacpp", "base_url": "http://localhost:8081/v1",
+        "default_model": "stale-default", "available_models": ["stale-default"]})
+    _unreachable(monkeypatch)
+    _select_peer_overlay(components_home)
+    result = runner.invoke(app, ["model", PRIMARY_SERVED, "--config-dir", str(components_home)])
+    assert result.exit_code == 0, result.output
+    overlay = _overlay(components_home)
+    assert "active_endpoint" not in overlay
+    assert overlay["provider"]["default_model"] == PRIMARY_SERVED
+    # a llama.cpp primary: the alias would become `-m`, so server.model is never written
+    assert "server" not in overlay
+
+
+def test_primary_switch_back_with_default_already_served_name(components_home, monkeypatch):
+    _seed(components_home)
+    _unreachable(monkeypatch)
+    _select_peer_overlay(components_home)
+    result = runner.invoke(app, ["model", PRIMARY_SERVED, "--config-dir", str(components_home)])
+    assert result.exit_code == 0, result.output
+    overlay = _overlay(components_home)
+    assert "active_endpoint" not in overlay
+    assert "server" not in overlay
+
+
+def test_primary_served_name_passes_local_operator_both_ways(components_home, monkeypatch):
+    for value in (True, False):
+        _seed(components_home, provider={
+            "provider_type": "llamacpp", "base_url": "http://localhost:8081/v1",
+            "default_model": "stale-default", "available_models": ["stale-default"]})
+        (components_home / "overrides.yaml").unlink(missing_ok=True)
+        _unreachable(monkeypatch)
+        calls = _record_persist_default(monkeypatch)
+        monkeypatch.setattr(model_cmd, "_is_local_operator", lambda v=value: v)
+        result = runner.invoke(app, ["model", PRIMARY_SERVED, "--config-dir", str(components_home)])
+        assert result.exit_code == 0, result.output
+        assert [c["local_operator"] for c in calls] == [value]
+
+
+def test_primary_served_name_already_default_does_not_rewrite(components_home, monkeypatch):
+    _seed(components_home)
+    _unreachable(monkeypatch)
+    calls = _record_persist_default(monkeypatch)
+    result = runner.invoke(app, ["model", PRIMARY_SERVED, "--config-dir", str(components_home)])
+    assert result.exit_code == 0, result.output
+    assert "already the default" in result.output.replace("\n", " ")
+    assert not (components_home / "overrides.yaml").exists()
+    assert calls == []
+
+    # and with an overlay present its bytes and mtime stay untouched
+    path = components_home / "overrides.yaml"
+    path.write_text(yaml.safe_dump({"org": {"default_model": PRIMARY_SERVED}}), encoding="utf-8")
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    result = runner.invoke(app, ["model", PRIMARY_SERVED, "--config-dir", str(components_home)])
+    assert result.exit_code == 0, result.output
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+def test_clear_active_endpoint_without_the_key_writes_nothing(tmp_path):
+    from localharness.config.loader import ConfigLoader
+
+    _seed(tmp_path)
+    harness = ConfigLoader(config_dir=str(tmp_path)).load_harness()
+    path = tmp_path / "overrides.yaml"
+    path.write_text(yaml.safe_dump({"org": {"default_model": "x"}}), encoding="utf-8")
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    model_ops.clear_active_endpoint(harness, config_dir=tmp_path)
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+def test_clear_active_endpoint_removes_only_that_key(tmp_path):
+    from localharness.config.loader import ConfigLoader
+
+    _seed(tmp_path)
+    agent = {"agent": {"researcher": {"model": "m-1"}}}
+    _select_peer_overlay(tmp_path, org={"default_model": PRIMARY_SERVED}, **agent)
+    harness = ConfigLoader(config_dir=str(tmp_path)).load_harness()
+    assert harness.active_endpoint is not None
+    model_ops.clear_active_endpoint(harness, config_dir=tmp_path)
+    overlay = load_overlay(tmp_path / "overrides.yaml")
+    assert overlay == {"org": {"default_model": PRIMARY_SERVED}, **agent}
+    assert harness.active_endpoint is None
+
+
+def _seed_vllm(home) -> None:
+    data = {
+        "version": "1",
+        "provider": {"provider_type": "vllm", "base_url": "http://localhost:8081/v1",
+                     "default_model": "org/m", "available_models": ["org/m"]},
+        "org": {"default_model": "org/m", "audit_log_path": str(home / "audit.jsonl")},
+        "server": {"runtime": "vllm", "binary": "/x/vllm", "model": "org/m", "port": 8081},
+        "extra_endpoints": [_peer(lifecycle=False)],
+    }
+    (home / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+
+
+def test_vllm_primary_default_name_keeps_todays_path(components_home, monkeypatch):
+    _seed_vllm(components_home)
+    monkeypatch.setattr(model_ops, "list_live_models",
+                        lambda *a, **k: (["org/m"], True), raising=False)
+    result = runner.invoke(app, ["model", "org/m", "--config-dir", str(components_home)])
+    assert result.exit_code == 0, result.output
+    assert "already the default" in result.output.replace("\n", " ")
+    assert "active_endpoint" not in _overlay(components_home)
+
+
+def test_unknown_name_with_reachable_server_still_errors(components_home, monkeypatch):
+    _seed_vllm(components_home)
+    monkeypatch.setattr(model_ops, "list_live_models",
+                        lambda *a, **k: (["org/m"], True), raising=False)
+    result = runner.invoke(app, ["model", "ghost", "--config-dir", str(components_home)])
+    assert result.exit_code == 2, result.output
+    assert "ghost" in result.output and "org/m" in result.output
+    assert not (components_home / "overrides.yaml").exists()
+
+
+def test_lifecycle_less_peer_name_is_not_a_preset(components_home, monkeypatch):
+    _seed_vllm(components_home)
+    monkeypatch.setattr(model_ops, "list_live_models",
+                        lambda *a, **k: (["org/m"], True), raising=False)
+    result = runner.invoke(app, ["model", "flash-next", "--config-dir", str(components_home)])
+    assert result.exit_code == 2, result.output
+    assert "unknown model" in result.output
+    assert "active_endpoint" not in _overlay(components_home)

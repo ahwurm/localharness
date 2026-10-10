@@ -221,8 +221,30 @@ def model(
         )
         return
 
+    # D-35/D-58: the primary's served name swaps back to the primary: it clears a persisted peer
+    # selection, then the ordinary default persistence below sets the default (on a llama.cpp
+    # primary `persist_default_model` never writes `server.model`, so an alias cannot become `-m`).
+    # A primary already selected and already the default has nothing to switch, so that name falls
+    # through to today's path unchanged.
     target: Optional[str] = None
-    if name.isdigit() and 1 <= int(name) <= len(choices):
+    if (
+        harness.server is not None
+        and name == model_ops.primary_served_name(harness.server, provider)
+        and (harness.active_endpoint is not None or name != current)
+    ):
+        if harness.active_endpoint is not None:
+            try:
+                model_ops.clear_active_endpoint(harness, config_dir=loader._config_dir)
+            except Exception as exc:
+                err_console.print(
+                    "[bold red]Error:[/bold red] "
+                    + escape(f"failed to clear the peer selection: {exc}"),
+                    soft_wrap=True,
+                )
+                raise typer.Exit(2)
+            console.print("Cleared the peer selection.", markup=False, soft_wrap=True)
+        target = name
+    elif name.isdigit() and 1 <= int(name) <= len(choices):
         target = choices[int(name) - 1]
     elif name in choices:
         target = name
