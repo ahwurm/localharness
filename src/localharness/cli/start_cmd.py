@@ -253,6 +253,8 @@ def _read_session_key(harness: Any) -> str | None:
 
 PATH_BINARY_LINE = ("llama-server found on PATH at {path} — written to overrides.yaml as server.binary; "
                     "nothing launches it until it is confirmed")
+HOST_SOURCE_KEY = "<extra_args-host>"
+"""The decline-store key prefix under which a converted `--host` offer remembers its source (WR-03)."""
 HOST_UNDO_LINE = ("server.extra_args --host {host} is not applied — launched on 127.0.0.1 — "
                   "server.bind_all: true restores it (asks once)")
 HOST_CONVERTED = "server.bind_all: true, from server.extra_args --host 0.0.0.0, which 0.17 applied"
@@ -402,14 +404,17 @@ def _convert_extra_args_host(global_dir: Path, rec: dict | None, *, can_ask: boo
     cfg, over = _raw_settings(global_dir)
     merged = _merged_server(cfg, over)
     runtime = merged.get("runtime", "vllm")
-    if merged.get("bind_all") is not None or not (
-            runtime == "llamacpp" or (runtime == "vllm" and merged.get("launch", "binary") == "binary")):
+    if not (runtime == "llamacpp" or (runtime == "vllm" and merged.get("launch", "binary") == "binary")):
         return {}, None, None
     winner_file, winner = ("overrides.yaml", over) if "extra_args" in _server_section(over) \
         else ("config.yaml", cfg)
     extra_args = _server_section(winner).get("extra_args")
     host = _host_of(extra_args) if isinstance(extra_args, list) else None
     kind = managed_server.classify_hosts(host) if host is not None else "loopback"
+    if merged.get("bind_all") is not None:
+        # Nothing to convert: a `bind_all` is set. But an offer this start's predecessor converted and
+        # deferred (the server was up, so the question was quiet) still has its source (WR-03).
+        return _remembered_source(over, rec, winner_file, extra_args, host, kind), None, None
     if kind == "loopback":
         return {}, None, None
     undo = HOST_UNDO_LINE.format(host=_visible(host))
@@ -431,8 +436,32 @@ def _convert_extra_args_host(global_dir: Path, rec: dict | None, *, can_ask: boo
     if every_interface:
         _adopt_written_bind_all(global_dir)
         return {}, HOST_CONVERTED, None
+    # The source of this offer is remembered beside the decline store (display only: it can suppress
+    # nothing and launch nothing), so a question deferred to the moment of use shows it too (WR-03).
+    trust.record_offer_decline(trust.decline_key(HOST_SOURCE_KEY, host, "upgrade" if upgrade else "later"))
     note = f"(from server.extra_args --host {host}{', which 0.17 applied' if upgrade else ''})"
     return {("overrides.yaml", trust.LAUNCH_KIND, "server.bind_all"): note}, None, None
+
+
+def _remembered_source(over: dict, rec: dict | None, winner_file: str, extra_args: Any,
+                       host: str | None, kind: str) -> dict:
+    """The diff-line source of a `server.bind_all: true` this harness converted from an
+    `extra_args --host` at an earlier start and has not been asked about yet (WR-03): the same
+    `(from server.extra_args --host H[, which 0.17 applied])` note the converting start made, rebuilt
+    from the fact it remembered. Only while overrides.yaml still holds `bind_all: true` (a No writes
+    `false`), the host is still an address, and the record still covers that `extra_args` entry by
+    value; otherwise nothing is claimed about where the `true` came from."""
+    from localharness.config import trust
+
+    if (rec is None or host is None or kind != "address"
+            or trust.coerce_bool(_server_section(over).get("bind_all")) is not True
+            or _uncovered(rec["entries"], trust._launch_entries(winner_file, "server.", {"extra_args": extra_args}))):
+        return {}
+    for state in ("upgrade", "later"):
+        if trust.offer_was_declined(trust.decline_key(HOST_SOURCE_KEY, host, state)):
+            note = f"(from server.extra_args --host {host}{', which 0.17 applied' if state == 'upgrade' else ''})"
+            return {("overrides.yaml", trust.LAUNCH_KIND, "server.bind_all"): note}
+    return {}
 
 
 def _sensed_launching(global_dir: Path, rec: dict | None) -> bool:
