@@ -24,6 +24,7 @@ from localharness.provider.autosense import (
     compute_fit,
     fit,
     fit_header,
+    fmt_count,
     free_memory,
     has_cache_ram_arg,
     has_ctx_arg,
@@ -578,3 +579,11 @@ def test_fit_and_the_rest_do_not_open_files_either(tmp_path):
 def test_the_report_is_frozen():
     with pytest.raises(AttributeError):
         report().served = 1  # type: ignore[misc]
+
+
+def test_fmt_count_is_the_one_window_figure_formatter():
+    """IN-03: autosense owns it and doctor imports it; a non-int or a bool is an em dash."""
+    assert fmt_count(262144) == "262,144" and fmt_count(None) == "—" and fmt_count(True) == "—"
+    from localharness.cli import doctor_cmd
+
+    assert not hasattr(doctor_cmd, "_n")
