@@ -12,6 +12,10 @@ Storage: one small JSON file in the harness state dir, written atomically (a PER
 + os.replace — a shared tmp name is not atomic across processes). A corrupt or missing file
 reads as empty. Concurrent sessions may race the file — last writer wins, acceptable for a
 QOL stat.
+
+The same entry also carries additive fields written by other call sites (window_report,
+model_path), and a reserved top-level `_dropped_env` map holds per-runtime dropped env names. They
+share this one file and this one write recipe; no second file exists (AUTO-08).
 """
 
 from __future__ import annotations
@@ -46,6 +50,9 @@ GREEN_ABOVE_TPS = 30.0
 YELLOW_FROM_TPS = 20.0
 
 _LEDGER_NAME = "speed_stats.json"
+# Reserved top-level key (leading underscore): a per-runtime map of the env names a launch dropped.
+# It holds no samples, so the speed readers skip it; model entries are keyed "provider:model".
+DROPPED_ENV_KEY = "_dropped_env"
 
 
 def default_speed_stats_path(config_dir: "str | Path | None" = None) -> Path:
@@ -217,6 +224,38 @@ def last_window_report(path: Path, provider_type: str, model: str) -> WindowReco
     return WindowRecord(nums[0], nums[1], nums[2], at) if isinstance(at, str) else None
 
 
+def record_model_path(path: Path, provider_type: str, model: str, model_path: str) -> None:
+    """Record the weights file this model was last launched or measured from."""
+    _update_entry(path, speed_key(provider_type, model), model_path=str(model_path))
+
+
+def model_path(path: Path, provider_type: str, model: str) -> str | None:
+    """The recorded weights path, or None when never recorded (or not a string)."""
+    entry = _load(path).get(speed_key(provider_type, model))
+    value = entry.get("model_path") if isinstance(entry, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def record_dropped_env(path: Path, runtime: str, names: Iterable[str]) -> None:
+    """Record, per runtime, the env names the last launch dropped (sorted, de-duplicated).
+
+    Lives under the reserved top-level DROPPED_ENV_KEY, not on a model entry: a dropped name is a
+    property of the launch environment. Other runtimes' lists and every model entry are kept."""
+    data = _load(path)
+    dropped = data.get(DROPPED_ENV_KEY)
+    dropped = dropped if isinstance(dropped, dict) else {}
+    dropped[runtime] = sorted(set(names))
+    data[DROPPED_ENV_KEY] = dropped
+    _write(path, data)
+
+
+def last_dropped_env(path: Path, runtime: str) -> list[str] | None:
+    """The env names the last launch of `runtime` dropped, or None when never recorded."""
+    dropped = _load(path).get(DROPPED_ENV_KEY)
+    names = dropped.get(runtime) if isinstance(dropped, dict) else None
+    return list(names) if isinstance(names, list) and all(isinstance(n, str) for n in names) else None
+
+
 def median_tps(path: Path, provider_type: str, model: str) -> float | None:
     """Median of the recorded samples for one model, or None if none exist."""
     entry = _load(path).get(speed_key(provider_type, model))
@@ -226,7 +265,10 @@ def median_tps(path: Path, provider_type: str, model: str) -> float | None:
 
 
 def all_median_tps(path: Path) -> dict[str, float]:
-    """{speed_key: median tok/s} for every model with at least one sample."""
+    """{speed_key: median tok/s} for every model with at least one sample.
+
+    Reserved keys (leading underscore, e.g. DROPPED_ENV_KEY) hold no samples and fall out of the
+    same `samples` check as any entry without one."""
     out: dict[str, float] = {}
     for key, entry in _load(path).items():
         samples = entry.get("samples", []) if isinstance(entry, dict) else []
