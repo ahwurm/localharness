@@ -517,6 +517,25 @@ def format_child_findings(agent_name: str, task: str, summary: str, tool_calls_u
     return _format_subagent_result(agent_name, task, summary, tool_calls_used)
 
 
+def child_effort(
+    parent: tuple[str | None, str | None] | None, own: str | None
+) -> tuple[str, str] | None:
+    """The `(level, rung)` a child is built with (D-11).
+
+    The parent's session rung wins (a person's `/effort` outranks every agent file, so a project
+    file at `max` cannot outspend a session at `low`); else the child's own file level when it is a
+    level (not None / "inherit"); else the parent's pair. None when there is no parent level.
+    """
+    if parent is None or parent[0] is None:
+        return None
+    level, rung = parent
+    if rung == "session":
+        return (level, rung)
+    if own not in (None, "inherit"):
+        return (own, "agent")
+    return (level, rung if rung is not None else "default")
+
+
 async def dispatch_config_subagent(
     task: str,
     *,
@@ -532,6 +551,9 @@ async def dispatch_config_subagent(
     max_subagent_depth: int = MAX_DEPTH,
     config_dir: Any = None,
     state_dir: Any = None,
+    effort: tuple[str, str] | None = None,
+    effort_ratios: tuple[float, float] | None = None,
+    template_margin_ratio: float | None = None,
 ) -> DelegationResult:
     """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
 
@@ -573,6 +595,8 @@ async def dispatch_config_subagent(
         gate=gate,
         kill_file_path=_kill,
         compact_md_path=_compact,
+        effort=effort, effort_ratios=effort_ratios,
+        template_margin_ratio=template_margin_ratio,
     )
 
     summary = await child_loop.run_turn(task)
@@ -599,6 +623,9 @@ async def dispatch_explore_subagent(
     config_override: AgentConfig | None = None,
     config_dir: Any = None,
     state_dir: Any = None,
+    effort: tuple[str, str] | None = None,
+    effort_ratios: tuple[float, float] | None = None,
+    template_margin_ratio: float | None = None,
 ) -> DelegationResult:
     """Spawn a read-only explore child, run one turn on `task`, return structured findings.
 
@@ -652,6 +679,8 @@ async def dispatch_explore_subagent(
         gate=gate,
         kill_file_path=_kill,
         compact_md_path=_compact,
+        effort=effort, effort_ratios=effort_ratios,
+        template_margin_ratio=template_margin_ratio,
     )
 
     summary = await child_loop.run_turn(task)
@@ -682,6 +711,9 @@ async def dispatch_web_subagent(
     config_override: AgentConfig | None = None,
     config_dir: Any = None,
     state_dir: Any = None,
+    effort: tuple[str, str] | None = None,
+    effort_ratios: tuple[float, float] | None = None,
+    template_margin_ratio: float | None = None,
 ) -> DelegationResult:
     """Spawn a web-research child (web_search/web_fetch[/web_page_query] only), run one turn, return findings.
 
@@ -730,6 +762,8 @@ async def dispatch_web_subagent(
             gate=gate,
             kill_file_path=_kill,
             compact_md_path=_compact,
+            effort=effort, effort_ratios=effort_ratios,
+            template_margin_ratio=template_margin_ratio,
         )
         brief = task if attempt == 0 else ZERO_CALL_RETRY_PREFIX + task
         summary = await child_loop.run_turn(brief)
@@ -873,6 +907,9 @@ async def dispatch_search_verifier_subagent(
     config_override: AgentConfig | None = None,
     config_dir: Any = None,
     state_dir: Any = None,
+    effort: tuple[str, str] | None = None,
+    effort_ratios: tuple[float, float] | None = None,
+    template_margin_ratio: float | None = None,
 ) -> DelegationResult:
     """Spawn a BLIND search-verifier (web_search/web_fetch/web_page_query), run one turn, write a
     keep-flag ledger row, and return a COMPACT verdict flag (never the transcript).
@@ -907,6 +944,8 @@ async def dispatch_search_verifier_subagent(
         gate=gate,
         kill_file_path=_kill,
         compact_md_path=_compact,
+        effort=effort, effort_ratios=effort_ratios,
+        template_margin_ratio=template_margin_ratio,
     )
 
     summary = await child_loop.run_turn(task)
@@ -1037,6 +1076,9 @@ async def _run_chunk_summarizer(
     max_context_tokens: int | None, depth: int, max_subagent_depth: int, section_label: str = "",
     config_dir: Any = None,
     state_dir: Any = None,
+    effort: tuple[str, str] | None = None,
+    effort_ratios: tuple[float, float] | None = None,
+    template_margin_ratio: float | None = None,
 ) -> str:
     """Run ONE leaf over a single granted chunk in a FRESH bounded window; return its extract (or '').
     The leaf's store is granted ONLY this chunk (parent=cruncher_store), so it reads exactly one
@@ -1078,6 +1120,8 @@ async def _run_chunk_summarizer(
             permission_evaluator=permission_evaluator,
             gate=gate,
             kill_file_path=_kill, compact_md_path=_compact,
+            effort=effort, effort_ratios=effort_ratios,
+            template_margin_ratio=template_margin_ratio,
         )
         answer = await leaf_loop.run_turn(leaf_task)  # raw extract (no findings-wrapper to mis-parse)
     except Exception as exc:  # noqa: BLE001 - one bad leaf must not abort the whole reduce
@@ -1091,6 +1135,9 @@ async def _cruncher_combine_turn(
     permission_evaluator: Any, gate: Any = None, ctx: Any, exec_seed: Any = None, exec_cfg: Any = None,
     config_dir: Any = None,
     state_dir: Any = None,
+    effort: tuple[str, str] | None = None,
+    effort_ratios: tuple[float, float] | None = None,
+    template_margin_ratio: float | None = None,
 ) -> str:
     """One bounded cruncher reduce turn over `items` (section-extracts, or partial-summaries on a
     higher level). Tool-less (pure reasoning over inline text) unless a clean-origin exec_seed is
@@ -1107,7 +1154,9 @@ async def _cruncher_combine_turn(
     _kill, _compact = _child_runtime_paths(cfg, config_dir, state_dir=state_dir)
     loop = AgentLoop(config=cfg, llm=llm, bus=child_bus, context_manager=ctx,
                      tool_registry=reg, permission_evaluator=permission_evaluator, gate=gate,
-                     kill_file_path=_kill, compact_md_path=_compact)
+                     kill_file_path=_kill, compact_md_path=_compact,
+                     effort=effort, effort_ratios=effort_ratios,
+                     template_margin_ratio=template_margin_ratio)
     label = "PARTIAL group of section-extracts" if partial else "EXTRACTS from the document's sections"
     goal = ("a faithful partial summary that preserves ALL question-relevant facts verbatim"
             if partial else "one accurate, grounded answer to the question")
@@ -1183,6 +1232,9 @@ async def dispatch_cruncher_subagent(
     memory_handle: Callable[[], MemoryWriteHandle | None] | None = None,
     config_dir: Any = None,
     state_dir: Any = None,
+    effort: tuple[str, str] | None = None,
+    effort_ratios: tuple[float, float] | None = None,
+    template_margin_ratio: float | None = None,
 ) -> str:
     """J3 cruncher: faithful over-window reduce (Plan α). Reads the GRANTED over-window body(ies) by
     handle (read-through), splits each (harness-orchestrated map), summarizes each chunk in a fresh
@@ -1237,6 +1289,8 @@ async def dispatch_cruncher_subagent(
                               f"ONE section, not the whole document",
                 config_dir=config_dir,
                 state_dir=state_dir,
+                effort=effort, effort_ratios=effort_ratios,
+                template_margin_ratio=template_margin_ratio,
             )
     raw = await asyncio.gather(*[_summarize(i, ph) for i, ph in enumerate(piece_handles)])
     extracts = [f"[section {i + 1}]\n{e.strip()}" for i, e in enumerate(raw) if e and e.strip().upper() != "NONE"]
@@ -1283,6 +1337,8 @@ async def dispatch_cruncher_subagent(
             permission_evaluator=permission_evaluator, gate=gate, ctx=ContextManager(**combine_ctx_kwargs),
             config_dir=config_dir,
             state_dir=state_dir,
+            effort=effort, effort_ratios=effort_ratios,
+            template_margin_ratio=template_margin_ratio,
         )
 
     items, level, reduce_trace = await hierarchical_reduce(
@@ -1305,6 +1361,8 @@ async def dispatch_cruncher_subagent(
         question, items, partial=False, llm=llm, child_bus=child_bus, base_registry=base_registry,
         permission_evaluator=permission_evaluator, gate=gate, ctx=ContextManager(**combine_ctx_kwargs),
         exec_seed=exec_seed, exec_cfg=cruncher_config, config_dir=config_dir, state_dir=state_dir,
+        effort=effort, effort_ratios=effort_ratios,
+        template_margin_ratio=template_margin_ratio,
     )
     log.info("cruncher reduced %d section(s) over %d granted handle(s)", n_sections, len(handles))
     # R2: only a BROAD query (level>=1) inserted lossy partial nodes; on a TARGETED query the final
@@ -1343,6 +1401,9 @@ def make_explore_agent_runner(
     memory_handle: Callable[[], MemoryWriteHandle | None] | None = None,
     config_dir: Any = None,
     state_dir: Any = None,
+    effort_fn: Callable[[], tuple[str | None, str | None]] | None = None,
+    effort_ratios: tuple[float, float] | None = None,
+    template_margin_ratio: float | None = None,
 ) -> Callable[..., Awaitable[Any]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
 
@@ -1355,6 +1416,19 @@ def make_explore_agent_runner(
     else the same value as `config_dir` (the default, so omitting it changes nothing). Children's
     compact.md follows the work; their kill file does not — it is a machine-global control artifact
     and stays on `config_dir`.
+
+    `effort_fn`: returns the PARENT's live `(level, rung)` (start passes
+    `lambda: (agent_loop.effective_effort, agent_loop.effort_rung)`). It is CALLED at each dispatch and
+    never stored as a value, so a mid-session `/effort` reaches the next child; `_build_child_agent_tool`
+    re-threads the callable so a grandchild reads the live level too. `child_effort` turns the parent's
+    pair and the child's own file level into the child's `(level, rung)`. None keeps every child at
+    effort None (today's behavior). `effort_ratios` is the parent's `(low_ratio, high_ratio)`.
+
+    `template_margin_ratio`: the PARENT loop's `_template_margin_ratio` (D-34), a machine-level
+    constant for the session — a value, not a callable. It is passed into every child `AgentLoop` (and
+    the nested runner) so a child sizes its output headroom with the margin the person set; None
+    leaves children on the 1/64 default. Bench/eval loops are non-interactive and keep that default
+    (`bench/runner.py` does not pass it).
 
     `parent_store`: the PARENT agent's ContentStore. When the model delegates with grant_handles,
     the child is built with ContentStore(parent=parent_store, granted=frozenset(grant_handles)) so
@@ -1430,6 +1504,10 @@ def make_explore_agent_runner(
             memory_handle=memory_handle,
             config_dir=config_dir,
             state_dir=state_dir,
+            # A grandchild reads the live level too: the callable is re-threaded, never its value.
+            effort_fn=effort_fn,
+            effort_ratios=effort_ratios,
+            template_margin_ratio=template_margin_ratio,
         )
         return AgentTool(agent_runner=child_runner, available_agents=delegatees)
 
@@ -1453,6 +1531,9 @@ def make_explore_agent_runner(
                 )
         child_agent_tool = _build_child_agent_tool(name)
         child_ctx = _make_child_ctx(grant_handles)
+        # D-11: the parent's level is read NOW, at this dispatch — never captured when the runner
+        # was built — so a /effort between two dispatches reaches the second child.
+        parent_effort = effort_fn() if effort_fn is not None else None
         if name == "cruncher":
             # J3: harness-orchestrated over-window reduce. child_ctx carries the granted read-through
             # store; grant_handles names which over-window bodies to crunch.
@@ -1462,6 +1543,8 @@ def make_explore_agent_runner(
                 context_manager=child_ctx, depth=depth, max_subagent_depth=max_subagent_depth,
                 cruncher_config=cruncher_config, memory_handle=memory_handle, config_dir=config_dir,
                 state_dir=state_dir,
+                effort=child_effort(parent_effort, None), effort_ratios=effort_ratios,
+                template_margin_ratio=template_margin_ratio,
             )
             return r if isinstance(r, DelegationResult) else DelegationResult(str(r))
         if name == "explore":
@@ -1499,6 +1582,9 @@ def make_explore_agent_runner(
                 max_subagent_depth=max_subagent_depth,
                 config_dir=config_dir,
                 state_dir=state_dir,
+                effort=child_effort(parent_effort, getattr(cfg, "effort", None)),
+                effort_ratios=effort_ratios,
+                template_margin_ratio=template_margin_ratio,
             )
         # Built-in subagents are TUNABLE via an optional agents/<name>.yaml overlay (the real
         # budget knob): base = the code-defined default config, overlaid per-field by the yaml
@@ -1525,6 +1611,10 @@ def make_explore_agent_runner(
             config_override=config_override,
             config_dir=config_dir,
             state_dir=state_dir,
+            # A built-in's own level is its agents/<name>.yaml overlay's, when one sets it.
+            effort=child_effort(parent_effort, getattr(config_override, "effort", None)),
+            effort_ratios=effort_ratios,
+            template_margin_ratio=template_margin_ratio,
         )
 
     return _run_agent
