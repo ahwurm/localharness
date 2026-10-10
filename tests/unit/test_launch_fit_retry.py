@@ -130,6 +130,24 @@ async def test_the_first_launch_comes_before_any_probe(tmp_path, popen, box):
     assert box.probe_calls == [(BASE, "qwen", "llamacpp", None)]
 
 
+async def test_the_sizing_runs_off_the_event_loop(tmp_path, popen, box, monkeypatch):
+    """WR-02: free memory (nvidia-smi, up to 5 s), the header read and the weights stat are blocking
+    work; they must not run on the loop's thread, and the module-attribute seams still fire."""
+    import threading
+
+    loop_thread = threading.get_ident()
+    seen: list[int] = []
+
+    def free_memory(ratios):
+        seen.append(threading.get_ident())
+        return box.mem
+
+    monkeypatch.setattr(autosense, "free_memory", free_memory)
+    live = await _activate(tmp_path, _spec(tmp_path))
+    assert seen and all(t != loop_thread for t in seen)
+    assert live.window.fits == 14950  # the faked memory was the one used
+
+
 async def test_the_key_reaches_the_probe_and_nothing_else_does(tmp_path, popen, box):
     await _activate(tmp_path, _spec(tmp_path), api_key="sk-secret")
     assert box.probe_calls == [(BASE, "qwen", "llamacpp", "sk-secret")]

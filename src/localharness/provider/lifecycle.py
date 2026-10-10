@@ -298,8 +298,10 @@ class SpawnedProcessStrategy:
         decision = server.launch_decision(spec, keyed, peer=peer)
         if decision.refusal is not None:
             raise server.LaunchRefused(decision.refusal)
+        # OFF the event loop: the sizing reads the header, stats the weights and shells out to
+        # nvidia-smi (up to 5 s on a wedged driver), none of which may freeze the REPL's loop.
         report, ctx_kw, cache_kw = (
-            _size_llamacpp_launch(spec, autosense)
+            await asyncio.to_thread(_size_llamacpp_launch, spec, autosense)
             if autosense is not None and spec.runtime == "llamacpp" else (None, None, None))
 
         def command(context: int | None) -> list[str]:

@@ -241,6 +241,22 @@ async def test_an_ill_typed_header_trained_is_never_recorded_or_printed(world):
     assert world.last().trained is None
 
 
+async def test_the_attach_report_is_sized_off_the_event_loop(world):
+    """WR-02: the header read, the weights stat and nvidia-smi must not run on the loop's thread."""
+    import threading
+
+    loop_thread = threading.get_ident()
+    seen: list[int] = []
+
+    def free_memory(ratios):
+        seen.append(threading.get_ident())
+        return world.free
+
+    world.monkeypatch.setattr(autosense, "free_memory", free_memory)
+    await world.start()
+    assert seen and all(t != loop_thread for t in seen)
+
+
 # ------------------------------------------------------------------------------- D-23 the #127 line
 
 

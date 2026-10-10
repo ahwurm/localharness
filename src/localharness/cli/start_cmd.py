@@ -1172,7 +1172,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                     strategy_for(harness.server), harness.server, server_cfg_path)
             except Exception:  # noqa: BLE001 — wording only: degrade to a foreign incumbent
                 _harness_launched = False
-        report, undo = _attach_window_report(
+        # Off the event loop: the attach report reads the header, stats the weights and runs nvidia-smi.
+        report, undo = await asyncio.to_thread(
+            _attach_window_report,
             harness, provider.provider_type, _served, _probe.trained, harness_launched=_harness_launched)
         launched_here = False
     changed = window_changed(last, report, harness.autosense.notify_ratio)
