@@ -150,17 +150,16 @@ def test_repl_lifecycle_sites_name_the_global_pin():
 
 
 def test_init_guided_setup_names_the_global_pin():
-    """The guided vLLM install/launch names the global layer at all six of its sites."""
+    """The guided vLLM install names the global layer at its install and lookup sites, and init
+    neither launches a server nor waits for one (D-39): the record is written, `start` launches."""
     text = (SRC / "init_cmd.py").read_text(encoding="utf-8")
     assert "server_config_path = global_config_dir(config_path)" in text
     for pinned in (
         "managed_server.find_vllm(server_config_path)",
         "managed_server.server_dir(server_config_path)",
         "managed_server.install_vllm_venv(server_config_path",
-        "managed_server.log_path(server_config_path)",
-        "managed_server.start_server(server_config_path, cmd, runtime=\"vllm\")",
-        "wait_ready(base_url, config_dir=server_config_path)",
     ):
         assert pinned in text, f"guided setup lost its pin: {pinned}"
-    assert "managed_server.start_server(config_path" not in text
+    assert "managed_server.start_server(" not in text
+    assert "wait_ready(" not in text
     assert "managed_server.find_vllm(config_path)" not in text

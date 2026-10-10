@@ -201,9 +201,10 @@ def test_init_receipt_names_the_config_it_wrote(hostile_project, tmp_path, monke
     assert str(cfg_dir / "config.yaml") in result.output
 
 
-def test_init_guided_setup_names_the_launch_command_and_log(hostile_project, tmp_path, monkeypatch):
-    """Guided setup prints the launch command and the server log path — both derived from the
-    config dir, so both died on a markup-named one, after the model had already been downloaded."""
+def test_init_guided_setup_names_the_vllm_path_under_a_markup_named_dir(
+        hostile_project, tmp_path, monkeypatch):
+    """Guided setup prints the vllm path it found, derived from the config dir — it died on a
+    markup-named one after the model had already been downloaded. It launches nothing (D-39)."""
     import io
     import sys
 
@@ -221,19 +222,14 @@ def test_init_guided_setup_names_the_launch_command_and_log(hostile_project, tmp
     monkeypatch.setattr(init_cmd.IntPrompt, "ask", staticmethod(lambda *a, **k: 1))
     # An existing local path as the model: skips the HF-cache/download branch entirely.
     monkeypatch.setattr(init_cmd.Prompt, "ask", staticmethod(lambda *a, **k: str(tmp_path)))
-    # The one real path that matters is log_path(); find_vllm is stubbed only to skip the install.
+    # find_vllm is stubbed only to skip the install.
     monkeypatch.setattr(managed_server, "find_vllm", lambda d: str(d / "server" / "venv" / "vllm"))
-    monkeypatch.setattr(managed_server, "start_server", lambda d, cmd, **kw: None)
 
-    async def _ready(base_url, config_dir=None):
-        return ["m"]
-    monkeypatch.setattr(managed_server, "wait_ready", _ready)
+    recs = init_cmd._guided_setup(cfg_dir)
 
-    init_cmd._guided_setup(cfg_dir)
-
-    printed = buf.getvalue()
-    assert str(managed_server.log_path(cfg_dir)) in printed, printed
-    assert str(cfg_dir / "server" / "venv" / "vllm") in printed, printed
+    assert recs is not None and recs.launchable
+    assert str(cfg_dir / "server" / "venv" / "vllm") in "\n".join(recs.lines), recs.lines
+    assert buf.getvalue()  # the install and model questions printed through the markup-safe console
 
 
 def test_agent_list_names_an_unparseable_workspace_config(hostile_project, monkeypatch):

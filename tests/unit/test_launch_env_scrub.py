@@ -171,7 +171,7 @@ def test_the_launch_line_never_holds_the_key(tmp_path, popen):  # noqa: F811
 
 def test_every_start_server_call_in_src_passes_runtime():
     """D-14, D-30: a call that omits `runtime=` would silently launch with the vLLM scrub, so every
-    call in src names its runtime (init's guided launch passes "vllm" until Phase 5)."""
+    call in src names its runtime (lifecycle.py's three; init writes records and launches nothing)."""
     src = Path(__file__).resolve().parents[2] / "src" / "localharness"
     calls: list[tuple[str, int, bool]] = []
     for path in sorted(src.rglob("*.py")):
@@ -186,4 +186,4 @@ def test_every_start_server_call_in_src_passes_runtime():
                               any(kw.arg == "runtime" for kw in node.keywords)))
     missing = [where for where, _, has in calls if not has]
     assert not missing, f"start_server called without runtime= at {missing}"
-    assert len(calls) >= 4, f"expected lifecycle.py's three and init_cmd.py's one, found {calls}"
+    assert len(calls) >= 3, f"expected lifecycle.py's three, found {calls}"

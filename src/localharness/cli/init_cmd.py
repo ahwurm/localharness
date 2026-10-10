@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import shutil
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
@@ -18,6 +19,7 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 
 from localharness.agent.context import response_reserve
 from localharness.cli.errors import _HANDLED, report_filesystem_error
+from localharness.cli.workspace import shown_path, visible_text
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.migrate import BACKUP_STAMP_FORMAT
@@ -28,6 +30,7 @@ from localharness.core.private_files import ensure_private_dir, touch_private, w
 from localharness.core.which import which_outside_cwd
 from localharness.config.models import (
     ContextConfig,
+    EndpointRef,
     HarnessConfig,
     ManagedServerConfig,
     OrgConfig,
@@ -35,6 +38,7 @@ from localharness.config.models import (
     ProviderConfig,
 )
 from localharness.provider import server as managed_server
+from localharness.provider.server import RUNTIME_LABELS
 from localharness.provider.client import CapabilityResult, LLMClient, LLMConfig
 from localharness.provider.detector import (
     DEFAULT_PORTS,
@@ -428,6 +432,25 @@ class SetupResult:
     server_ready: bool
 
 
+@dataclass
+class InitRecords:
+    """A model server init writes as a record instead of finding it running: the primary launch
+    record, its peers, the block shown before the write, and what the write needs besides. The
+    guided setup returns one; discovery and the imports build the same carrier."""
+    server: ManagedServerConfig
+    served: str
+    peers: list[EndpointRef] = field(default_factory=list)
+    lines: list[str] = field(default_factory=list)  # the shown block, printed before the write
+    api_key: str | None = None  # an inline key bound for provider.api_key
+    deferred: list[Callable[[], None]] = field(default_factory=list)  # ledger writes, after the write
+    base_url: str | None = None  # None: http://127.0.0.1:<server.port>/v1
+    serving: bool = False  # a server already answers for it
+
+    @property
+    def launchable(self) -> bool:
+        return bool(self.server.binary or self.server.docker_image)
+
+
 def init_app(
     endpoint: Annotated[
         str | None,
@@ -527,6 +550,12 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
         picked = _pick_server(config_path, endpoint, model, interactive, force=force)
         if isinstance(picked, SetupResult):  # skipped for now: saved unchecked, or nothing saved
             outcome = picked
+        elif isinstance(picked, InitRecords):  # a record: shown, written, launched by the first start
+            for line in picked.lines:
+                console.print(line, markup=False, soft_wrap=True)
+            config_file = _write_records(config_path, picked, force=force)
+            _receipt(config_file, starting)
+            outcome = SetupResult(config_file, picked.serving or picked.launchable)
         else:
             result, selected_model, server_config = picked
             cap = _probe_capabilities(result, selected_model)
@@ -579,7 +608,7 @@ def _existing_config(config_path: Path, config_file: Path, interactive: bool, *,
 def _pick_server(
     config_path: Path, endpoint: str | None, model: str | None, interactive: bool, *,
     changing: bool = False, force: bool = False,
-) -> tuple[DetectorResult, str, ManagedServerConfig | None] | SetupResult:
+) -> tuple[DetectorResult, str, ManagedServerConfig | None] | SetupResult | InitRecords:
     """The model server and the model: the explicit --endpoint, else detection — and, finding
     nothing on a terminal, the guided vLLM setup, then "skip for now" (whose SetupResult comes
     back as is). A change (`changing`) never sets a server up: finding nothing keeps the config
@@ -641,17 +670,14 @@ def _pick_server(
     console.print("Probing for local LLM...")
     result = asyncio.run(detect_provider(timeout_seconds=1.0))
     if not result.found:
-        console.print("\n[bold red]✗ No local LLM detected.[/bold red]\n")
-        console.print("Checked:")
-        for port in DEFAULT_PORTS:
-            name = _PORT_LABELS.get(port, "unknown")
-            console.print(f"  http://localhost:{port}  ({name})  — connection refused")
         if changing:  # guided setup would write a fresh config.yaml — a change never does
+            _say_not_detected()
             console.print("\n" + escape(f"Nothing changed: {config_path / 'config.yaml'} is kept."),
                           soft_wrap=True)
             raise typer.Exit(1)
         guided = _guided_setup(config_path) if interactive else None
         if guided is None:
+            _say_not_detected()  # D-13: only an outcome that writes no record says nothing was found
             if interactive:
                 return _skip_for_now(config_path, model, force=force)
             console.print(
@@ -672,6 +698,16 @@ def _pick_server(
         return result, result.models[0], None
     # Multiple models — the one --model named, Ollama's hot model, a question, or the first
     return result, _select_model(result, model, interactive), None
+
+
+def _say_not_detected() -> None:
+    """The red line and the list of ports probed: said only when nothing was found AND no record
+    is about to be written (a guided setup that writes one never says it)."""
+    console.print("\n[bold red]✗ No local LLM detected.[/bold red]\n")
+    console.print("Checked:")
+    for port in DEFAULT_PORTS:
+        name = _PORT_LABELS.get(port, "unknown")
+        console.print(f"  http://localhost:{port}  ({name})  — connection refused")
 
 
 def _skip_for_now(config_path: Path, model: str | None, *, force: bool = False) -> SetupResult:
@@ -950,6 +986,59 @@ def _overlay_shadows(config_path: Path) -> None:
         )
 
 
+def _record_dicts(harness: HarnessConfig) -> tuple[dict | None, list[dict]]:
+    """The server record and every peer as written to config.yaml: exclude_none dumps with the keys
+    as typed, so no `null` preset field and no invented `effort` lands in a record init writes."""
+    server = (reveal(harness.server.model_dump(mode="python", exclude_none=True))
+              if harness.server is not None else None)
+    peers = [reveal(peer.model_dump(mode="python", exclude_none=True))
+             for peer in harness.extra_endpoints]
+    return server, peers
+
+
+def _result_from_record(recs: InitRecords) -> DetectorResult:
+    """The detection-shaped answer for a record: nothing was probed, so the address is the one the
+    record will serve on and the one model is the name it will be served under."""
+    return DetectorResult(
+        found=True,
+        provider_type=recs.server.runtime,
+        base_url=recs.base_url or f"http://127.0.0.1:{recs.server.port}/v1",
+        models=[recs.served],
+        suggested_model=recs.served,
+        probe_duration_ms=0.0,
+    )
+
+
+def _write_records(config_path: Path, recs: InitRecords, *, force: bool = False) -> Path:
+    """A fresh config.yaml from a record: the provider points at the address the record will serve
+    on and names the served model; no capability probe and no context budget (a server that is not
+    up cannot be asked — the first `start` probes it and fits the window). Memory and host tools
+    are on. The record's deferred writes run only once the file is on disk."""
+    result = _result_from_record(recs)
+    harness = HarnessConfig(
+        version="1",
+        provider=ProviderConfig(
+            provider_type=result.provider_type,
+            base_url=result.base_url,
+            api_key=recs.api_key or "none",
+            default_model=recs.served,
+            available_models=[recs.served],
+            supports_function_calling=None,
+            timeout_seconds=600.0,
+        ),
+        org=OrgConfig(
+            default_model=recs.served,
+            permissions=PermissionConfig(defaults_revision=CURRENT_DEFAULTS_REVISION),
+        ),
+        server=recs.server,
+        extra_endpoints=list(recs.peers),
+    )
+    written = _write_harness(config_path, harness, True, force=force)
+    for thunk in recs.deferred:  # only now that the config is on disk
+        thunk()
+    return written
+
+
 def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *,
                    force: bool = False) -> Path:
     """Write config.yaml (owner-only), the agents/ folder and plugins/README.md beside it. With
@@ -970,8 +1059,12 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
     # memory.enabled is the memory plugin's key (MEMP-06); the deprecated org.memory_enabled is
     # never written, so a fresh install has nothing to warn about. On is the default: no key.
     # Keys are written as typed (`reveal`): a JSON-mode dump would write the mask in their place.
-    text = yaml.safe_dump(reveal(harness.model_dump(mode="python", exclude={"org": {"memory_enabled"}})),
-                          default_flow_style=False, sort_keys=False, allow_unicode=True)
+    data = reveal(harness.model_dump(mode="python", exclude={"org": {"memory_enabled"}}))
+    server_dict, peer_dicts = _record_dicts(harness)  # D-12: no null preset field in a record
+    if server_dict is not None:
+        data["server"] = server_dict
+    data["extra_endpoints"] = peer_dicts
+    text = yaml.safe_dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
     # Owner-only from its first byte: this file carries `provider.api_key` and the deny/ask policy
     # every session on this machine is gated by (a re-init over an older, wider file tightens it).
     write_private_bytes(config_file,
@@ -1121,13 +1214,11 @@ def _plugin_lines(config_path: Path) -> list[str]:
         for e in entries] + [PLUGINS_IN_SESSION]
 
 
-def _guided_setup(
-    config_path: Path,
-) -> tuple[DetectorResult, str, ManagedServerConfig] | None:
-    """No server detected: install vLLM, download a reference model, launch, wait ready.
+def _guided_setup(config_path: Path) -> InitRecords | None:
+    """No server detected: install vLLM and fetch a reference model — and write the record. The
+    first `start` launches it, after its own trust decision; init launches and waits for nothing.
 
-    Returns (detection-equivalent result, served model, server config) so the caller
-    falls into the normal capability-probe/config-write path, or None if declined or
+    Returns the record (the shown preset and flags lines inside) or None if declined or
     non-interactive (caller keeps the manual-instructions exit)."""
     # The managed vLLM install/pidfile/log/venv are machine-wide (C2 single-pidfile invariant):
     # always the global layer, never a workspace one. `init` never discovers a workspace, so this
@@ -1208,7 +1299,7 @@ def _guided_setup(
                 raise typer.Exit(1)
             console.print("  [green]✓[/green] Download complete.")
 
-    # --- Launch + readiness --------------------------------------------------#
+    # --- The record ----------------------------------------------------------#
     srv = ManagedServerConfig(
         launch=launch,
         binary=binary,
@@ -1218,35 +1309,14 @@ def _guided_setup(
         extra_args=list(ra.serve_extra_args),
         refarch=ra.key,
     )
-    cmd = managed_server.serve_command(srv)
-    base_url = f"http://localhost:{srv.port}/v1"
-    # escape(): both lines print paths derived from the config dir — the managed venv's vllm
-    # binary and the server log — so a markup-named config dir killed guided setup at the launch
-    # step. The [dim] tag stays outside the escaped data, as everywhere else in cli/.
-    console.print("\n  Launching: [dim]" + escape(" ".join(cmd)) + "[/dim]", soft_wrap=True)
-    console.print("  " + escape(f"Log: {managed_server.log_path(server_config_path)}"), soft_wrap=True)
-    managed_server.start_server(server_config_path, cmd, runtime="vllm")
-    console.print("  Waiting for the server — model load can take several minutes...")
-    try:
-        models = asyncio.run(managed_server.wait_ready(base_url, config_dir=server_config_path))
-    except (RuntimeError, TimeoutError) as exc:
-        err_console.print("[bold red]Error:[/bold red] " + escape(str(exc)), soft_wrap=True)
-        raise typer.Exit(1)
-    served = models[0] if models else model
-    console.print(
-        "  [green]✓[/green] vLLM serving [bold]" + escape(served) + "[/bold] "
-        + f"on :{srv.port} (managed — `localharness start` restarts it after reboots)",
-        soft_wrap=True,
-    )
-    result = DetectorResult(
-        found=True,
-        provider_type="vllm",
-        base_url=base_url,
-        models=models or [model],
-        suggested_model=served,
-        probe_duration_ms=0.0,
-    )
-    return result, served, srv
+    # The preset block (D-14), every value through visible_text: the binary was just found or
+    # installed in front of the person, so its clause carries no provenance.
+    how = f"binary: {shown_path(binary)}" if binary else f"docker_image: {visible_text(image)}"
+    lines = [f"serving {visible_text(model)} ({RUNTIME_LABELS['vllm']}) "
+             f"\u2190 {shown_path(model)} \u00b7 {how}"]
+    if srv.extra_args:  # D-68: the flags the record launches with are shown before they are adopted
+        lines.append("flags: " + visible_text(shlex.join(srv.extra_args)))
+    return InitRecords(server=srv, served=model, lines=lines)
 
 
 def _select_model(result: DetectorResult, model: str | None, interactive: bool) -> str:
