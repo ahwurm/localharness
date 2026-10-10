@@ -1097,12 +1097,47 @@ async def test_the_undo_line_and_a_withheld_line_travel_together_in_order(tmp_pa
     session = _Session(tmp_path, monkeypatch, up=True,
                        server_block={**LLAMACPP_8080, "extra_args": ["--host", "myhost"]})
     config = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
-    config["extra_endpoints"] = [{
-        "name": "qwen3.6", "base_url": "http://127.0.0.1:8090/v1", "provider_type": "vllm", "gpu": True,
-        "lifecycle": {"runtime": "vllm", "binary": "/v/vllm", "model": "org/m", "port": 8090,
-                      "bind_all": True}}]
+    peer = {"name": "qwen3.6", "base_url": "http://127.0.0.1:8090/v1", "provider_type": "vllm", "gpu": True,
+            "lifecycle": {"runtime": "vllm", "binary": "/v/vllm", "model": "org/m", "port": 8090,
+                          "bind_all": False}}
+    config["extra_endpoints"] = [peer]
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    _record(tmp_path)  # the machine knows the peer, with `bind_all: false` (IN-04: a peer that is new
+    # to the record is dropped whole, and promises no launch)
+    peer["lifecycle"]["bind_all"] = True
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
 
     handed = await session.run()
 
     assert handed == (PEER_ASKS, UNDO_LINE)
+
+
+# ------------------------------------------------------------------ IN-04: a dropped launch promises nothing
+
+
+@pytest.mark.parametrize("other", [("launch", "server.binary"), ("launch", "server.extra_args"),
+                                   ("launch_model", "server.model"), ("launch", "server.runtime")])
+def test_in04_a_primary_whose_server_section_is_dropped_prints_no_posture_line(other):
+    """Another withheld `server.*` entry drops `server:` for the run (D-14), so nothing launches and
+    "launched on 127.0.0.1" would promise a launch that does not happen."""
+    assert _lines({("launch", "server.bind_all"), other}, {PRIMARY: "vllm:true:open"}) == []
+    assert _lines({("launch", "server.bind_all")}, {PRIMARY: "vllm:true:open"}) == [BIND_ALL_LINE]
+
+
+def test_in04_the_two_posture_keys_together_are_still_both_narrowed():
+    shown = {PRIMARY: "vllm:true:open", ("config.yaml", "launch", "server.require_api_key"): "vllm:false:open"}
+    assert _lines({("launch", "server.bind_all"), ("launch", "server.require_api_key")}, shown) == [
+        BIND_ALL_LINE, KEYED]
+
+
+def test_in04_a_peer_whose_lifecycle_is_dropped_prints_nothing_but_another_peer_still_does():
+    other_peer = ("launch", "extra_endpoints.qwen3.6.lifecycle.binary")
+    assert _lines({("launch", PEER_NAME), other_peer}, {PEER: "vllm:true:open"}) == []
+    elsewhere = ("config.yaml", "launch", "extra_endpoints.other.lifecycle.bind_all")
+    got = _lines({("launch", "extra_endpoints.other.lifecycle.bind_all"), other_peer},
+                 {elsewhere: "vllm:true:open"})
+    assert got == [PEER_ASKS.replace("qwen3.6", "other")]
+
+
+def test_in04_a_dropped_primary_does_not_silence_a_peer_line():
+    assert _lines({("launch", "server.binary"), ("launch", PEER_NAME)}, {PEER: "vllm:true:open"}) == [PEER_ASKS]
