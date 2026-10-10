@@ -17,9 +17,13 @@ import pytest
 from localharness.provider.client import (
     EFFORT_BUDGET_KEY,
     EFFORT_KEYS,
+    REASONING_CHARS_PER_TOKEN,
     LLMClient,
     LLMConfig,
     ProviderAPIError,
+    ProviderDegenerateError,
+    ProviderError,
+    ProviderReasoningBudgetError,
 )
 
 MSGS = [{"role": "user", "content": "hi"}]
@@ -635,3 +639,124 @@ async def test_fallback_failed_retry_restores_and_surfaces_the_original():
         await client.stream_complete(MSGS, [TOOL], reasoning_budget=9)
     assert "reasoning_budget_tokens" in str(info.value)
     assert client.rejected_effort_keys == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# The client-side cut (D-21, D-31): only where the runtime has no budget key
+# ---------------------------------------------------------------------------
+
+OVER = ["a" * 20, "b" * 21]          # 41 reasoning chars: past a 10-token budget (40 chars)
+AT_LIMIT = ["a" * 20, "b" * 20]       # exactly 40: not past it
+
+
+def test_the_cut_error_and_its_constant():
+    assert REASONING_CHARS_PER_TOKEN == 4
+    err = ProviderReasoningBudgetError(10, 41)
+    assert issubclass(ProviderReasoningBudgetError, ProviderError)
+    assert (err.budget, err.spent) == (10, 41)
+    assert "10" in str(err) and "41" in str(err)
+
+
+async def test_consumer_raises_with_budget_and_spent_and_closes_the_response_first():
+    stream = _Stream(OVER)
+    with pytest.raises(ProviderReasoningBudgetError) as info:
+        await LLMClient._consume_native_stream(
+            stream, None, reasoning_budget_chars=40, reasoning_budget_tokens=10,
+        )
+    assert info.value.budget == 10 and info.value.spent == 41
+    assert "41" in str(info.value) and "10" in str(info.value)
+    assert stream.closed is True
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_vllm_stream_over_budget_is_cut(mode):
+    client, server = make(mode, "vllm", Server(reasoning=OVER))
+    with pytest.raises(ProviderReasoningBudgetError) as info:
+        await client.stream_complete(MSGS, reasoning_budget=10)
+    assert (info.value.budget, info.value.spent) == (10, 41)
+    assert server.streams[0].closed is True
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_vllm_stream_within_budget_completes(mode):
+    client, _ = make(mode, "vllm", Server(reasoning=AT_LIMIT))
+    msg, _usage = await client.stream_complete(MSGS, reasoning_budget=10)
+    assert msg.content == "ok"
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_llamacpp_is_never_cut_by_the_client(mode):
+    client, _ = make(mode, "llamacpp", Server(reasoning=OVER))
+    msg, _usage = await client.stream_complete(MSGS, reasoning_budget=10)
+    assert msg.content == "ok"
+
+
+@pytest.mark.parametrize("ptype", [p for p in PROVIDERS if p != "llamacpp"])
+async def test_no_budget_never_cuts_however_long_the_reasoning(ptype):
+    client, _ = make("native", ptype, Server(reasoning=[f"step {i}: consider item {i * 7 % 13}. " for i in range(300)]))
+    msg, _usage = await client.stream_complete(MSGS, reasoning_budget=None)
+    assert msg.content == "ok"
+
+
+async def test_complete_non_stream_never_cuts():
+    client, _ = make("native", "vllm", Server(reasoning=OVER))
+    msg, _usage = await client.complete(MSGS, reasoning_budget=10)
+    assert msg.content == "ok"
+
+
+@pytest.mark.parametrize("mode", ("xml", "text"))
+async def test_the_fallback_path_stream_passes_the_cut(mode):
+    client, server = make(mode, "vllm", Server(_bad("tools unsupported"), "ok", reasoning=OVER))
+    with pytest.raises(ProviderReasoningBudgetError):
+        await client.stream_complete(MSGS, [TOOL], reasoning_budget=10)
+    assert len(server.calls) == 2 and "tools" not in server.calls[1]
+
+
+async def test_the_native_retry_send_passes_the_cut_and_the_rejection_stands():
+    client, server = make(
+        "native", "vllm", Server(_bad("enable_thinking is not allowed"), "ok", reasoning=OVER)
+    )
+    with pytest.raises(ProviderReasoningBudgetError):
+        await client.stream_complete(MSGS, disable_thinking=True, reasoning_budget=10)
+    assert len(server.calls) == 2 and "extra_body" not in server.calls[1]
+    # the retry reached the server and streamed: the rest of the request is fine, the key is out
+    assert client.rejected_effort_keys == frozenset({"chat_template_kwargs"})
+
+
+async def test_the_native_tools_retry_passes_the_cut():
+    client, _ = make("native", "vllm", Server(_bad("tools unsupported"), "ok", reasoning=OVER))
+    with pytest.raises(ProviderReasoningBudgetError):
+        await client.stream_complete(MSGS, [TOOL], reasoning_budget=10)
+
+
+async def test_the_xml_retry_send_passes_the_cut():
+    client, _ = make(
+        "xml", "vllm", Server(_bad("enable_thinking is not allowed"), "ok", reasoning=OVER)
+    )
+    with pytest.raises(ProviderReasoningBudgetError):
+        await client.stream_complete(MSGS, [TOOL], disable_thinking=True, reasoning_budget=10)
+
+
+async def test_two_concurrent_streams_each_count_only_their_own_reasoning():
+    def long_run(_kw):
+        return _Stream(["a" * 20] * 3)     # 60 chars: crosses 40
+
+    def short_run(_kw):
+        return _Stream(["b" * 10] * 3)     # 30 chars: never crosses on its own
+
+    client, _ = make("native", "vllm", Server(long_run, short_run))
+    results = await asyncio.gather(
+        client.stream_complete(MSGS, reasoning_budget=10),
+        client.stream_complete(MSGS, reasoning_budget=10),
+        return_exceptions=True,
+    )
+    cut = [r for r in results if isinstance(r, ProviderReasoningBudgetError)]
+    done = [r for r in results if isinstance(r, tuple)]
+    assert len(cut) == 1 and len(done) == 1
+    assert cut[0].spent == 60   # its own three 20-char chunks, not the other stream's
+
+
+async def test_the_degenerate_watch_still_works_beside_the_budget_counter():
+    client, _ = make("native", "vllm", Server(reasoning=["413, 313, 213, "] * 500))
+    with pytest.raises(ProviderDegenerateError):
+        await client.stream_complete(MSGS, reasoning_budget=1_000_000)
