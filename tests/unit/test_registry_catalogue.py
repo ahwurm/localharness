@@ -281,8 +281,8 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 206, (
-        "catalogue should be 206 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 208, (
+        "catalogue should be 208 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -298,7 +298,8 @@ def test_self_check_leaves_enumerate(components_home):
         "plus the ten server.* preset fields (mmproj, served_name, context, cache_type_k, "
         "cache_type_v, cache_ram, api_key_file, env, config_ini, effort) "
         "plus autosense.* x7, effort_budget.* x2 and org.default_effort (the machine-level "
-        "sizing and effort sections). "
+        "sizing and effort sections) plus agent.effort and active_endpoint.effort x2 (the "
+        "reasoning-effort enum on an agent file and on the persisted endpoint selection). "
         f"got {len(entries)}"
     )
 
@@ -381,8 +382,8 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 206, (
-        "catalogue should be 206 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 208, (
+        "catalogue should be 208 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -398,7 +399,8 @@ def test_role_sections_leaves_enumerate(components_home):
         "plus the ten server.* preset fields (mmproj, served_name, context, cache_type_k, "
         "cache_type_v, cache_ram, api_key_file, env, config_ini, effort) "
         "plus autosense.* x7, effort_budget.* x2 and org.default_effort (the machine-level "
-        "sizing and effort sections). "
+        "sizing and effort sections) plus agent.effort and active_endpoint.effort x2 (the "
+        "reasoning-effort enum on an agent file and on the persisted endpoint selection). "
         f"got {len(entries)}"
     )
 
