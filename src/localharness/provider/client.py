@@ -201,6 +201,10 @@ class ProviderDegenerateError(ProviderError):
         self.chars = chars
 
 
+# Errors the client raises from a stream it already opened (the server accepted the request).
+_STREAM_GUARD_ERRORS: tuple[type[ProviderError], ...] = (ProviderDegenerateError,)
+
+
 class MalformedResponseError(ProviderError):
     """Model returned a response that could not be parsed."""
 
@@ -1144,23 +1148,40 @@ class LLMClient:
         except openai.BadRequestError as exc:
             # Symmetry with _complete_xml (audit Fix E): the XML path self-heals a rejected `tools`
             # param; native used to hard-error on the same 400. Scope the retry to the KNOWN optional
-            # params (tools, extra_body/chat_template_kwargs) — a genuinely malformed 400 must still
-            # surface, never a blanket retry. Remember the rejection (sticky, per-server) so we don't
-            # re-eat it every turn, then retry ONCE with the offending param dropped.
-            dropped = self._remember_native_rejection(exc, kwargs)
-            if dropped is None:
+            # params (tools, the effort keys of extra_body) — a genuinely malformed 400 must still
+            # surface, never a blanket retry. One classifier order on every path (D-32): overflow
+            # surfaces at once; `tools` takes the tools retry only; a named effort key is retried
+            # once without it; a 400 naming neither drops every effort key that was sent.
+            verdict, keys = self._classify_400(exc, kwargs, check_tools="tools" in kwargs)
+            if verdict == "overflow" or (verdict == "neither" and not keys):
                 raise self._wrap_error(exc) from exc
-            log.warning("Server rejected native `%s` param (400) — retrying once without it", dropped)
-            kwargs, name_unmap = self._native_kwargs(
-                messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget)  # sticky → omitted
-            try:
+            if verdict == "tools":
+                self._tools_param_rejected = True   # sticky, per-server: don't re-eat it every turn
+                log.warning("Server rejected native `tools` param (400) — retrying once without it")
+                kwargs, name_unmap = self._native_kwargs(
+                    messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget)  # sticky → omitted
+                try:
+                    async with _inference_gate(self.config):
+                        return await self._consume_bounded(
+                            self._create_and_consume(kwargs, stream, on_token, name_unmap=name_unmap),
+                            gen_timeout,
+                        )
+                except Exception as retry_exc:
+                    raise self._wrap_error(retry_exc) from retry_exc
+
+            def build() -> tuple[dict[str, Any], dict[str, str] | None]:
+                return self._native_kwargs(
+                    messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget)
+
+            async def send(built: tuple[dict[str, Any], dict[str, str] | None]) -> tuple[Any, Any]:
+                retry_kwargs, retry_unmap = built
                 async with _inference_gate(self.config):
                     return await self._consume_bounded(
-                        self._create_and_consume(kwargs, stream, on_token, name_unmap=name_unmap),
+                        self._create_and_consume(retry_kwargs, stream, on_token, name_unmap=retry_unmap),
                         gen_timeout,
                     )
-            except Exception as retry_exc:
-                raise self._wrap_error(retry_exc) from retry_exc
+
+            return await self._retry_without(keys, build, send, exc)
         except Exception as exc:
             raise self._wrap_error(exc) from exc
 
@@ -1220,29 +1241,78 @@ class LLMClient:
             if key in EFFORT_KEYS:
                 self._accepted_effort_keys.add(key)
 
-    def _remember_native_rejection(
-        self, exc: openai.BadRequestError, sent_kwargs: dict[str, Any]
-    ) -> str | None:
-        """Map a native 400 to a KNOWN rejected optional param, set its per-server sticky flag, and
-        return the param name to drop — or None when the error isn't a recognized param rejection (a
-        genuinely malformed request → surface it, never blanket-retry). Matches only a param we
-        ACTUALLY sent whose name the server's own error text implicates."""
+    def _classify_400(
+        self, exc: openai.BadRequestError, sent_kwargs: dict[str, Any], *, check_tools: bool = True
+    ) -> tuple[str, tuple[str, ...]]:
+        """Classify a 400 in the one order every request path uses (03-CONTEXT D-32). Returns
+        (verdict, effort keys it concerns) and records NOTHING:
+
+          1. "overflow" — the text carries `exceed_context_size_error` (llama.cpp's answer for a
+             prompt that no longer fits; its body can also name request fields, so the type wins):
+             surface at once, no retry;
+          2. "tools"   — the text implicates `tool` (tools/tool_choice): the tools path only, the
+             effort keys untouched (`check_tools=False` skips this rule, for a request that sent
+             no `tools`);
+          3. "effort"  — the text names an effort key that was SENT (`chat_template_kwargs` or
+             `enable_thinking` -> chat_template_kwargs; `reasoning_budget_tokens`): drop that key;
+          4. "neither" — none of the above; the keys are every effort key that was sent.
+
+        Matching is on the server's own error text, lower-cased, against a key we actually sent —
+        a key present only in the kwargs is never implicated by absence."""
         text = str(exc).lower()
-        eb = sent_kwargs.get("extra_body") or {}
-        named = {
-            k for k in eb
-            if k in EFFORT_KEYS and (
-                k in text or (k == "chat_template_kwargs" and "enable_thinking" in text)
-            )
-        }
+        if "exceed_context_size_error" in text:
+            return "overflow", ()
+        if check_tools and "tool" in text:
+            return "tools", ()
+        sent = tuple(k for k in (sent_kwargs.get("extra_body") or {}) if k in EFFORT_KEYS)
+        named = tuple(
+            k for k in sent
+            if k in text or (k == "chat_template_kwargs" and "enable_thinking" in text)
+        )
         if named:
-            self._rejected_effort_keys |= named
-            self._accepted_effort_keys -= named
-            return "extra_body"
-        if "tools" in sent_kwargs and "tool" in text:
-            self._tools_param_rejected = True
-            return "tools"
-        return None
+            return "effort", named
+        return "neither", sent
+
+    async def _retry_without(
+        self,
+        keys: tuple[str, ...],
+        build: Callable[[], Any],
+        send: Callable[[Any], Awaitable[tuple[Any, Any]]],
+        exc: openai.BadRequestError,
+    ) -> tuple[Any, Any]:
+        """Retry ONCE without the effort `keys`, recording them as rejected only when the retry
+        succeeds (D-18). The set is provisionally extended so `build()` omits the keys; if the retry
+        fails too the set is restored and the ORIGINAL 400 surfaces (retry's error as __cause__) —
+        a request that was bad for another reason must not switch the budget off for the session.
+        A retry cut by the client's own stream guards (degenerate / reasoning budget) DID reach the
+        server and stream, so the rest of the request is proven fine and the rejection stands."""
+        saved = set(self._rejected_effort_keys)
+        self._rejected_effort_keys |= set(keys)
+        log.warning(
+            "Server rejected effort key(s) %s (400) — retrying once without them", ", ".join(keys)
+        )
+        try:
+            result = await send(build())
+        except _STREAM_GUARD_ERRORS:
+            self._accepted_effort_keys -= set(keys)
+            raise
+        except BaseException as retry_exc:
+            self._rejected_effort_keys = saved
+            if isinstance(retry_exc, Exception):
+                raise self._wrap_error(exc) from retry_exc
+            raise
+        self._accepted_effort_keys -= set(keys)   # a key is rejected or accepted, never both (D-29)
+        return result
+
+    def _rebuild_extra_body(
+        self, kwargs: dict[str, Any], disable_thinking: bool, reasoning_budget: int | None
+    ) -> dict[str, Any]:
+        """A copy of an XML request's kwargs with `extra_body` re-assembled from the CURRENT
+        rejection set (everything else — messages, tools, caps — exactly as first sent)."""
+        rebuilt = {k: v for k, v in kwargs.items() if k != "extra_body"}
+        if (eb := self._extra_body(disable_thinking, reasoning_budget)) is not None:
+            rebuilt["extra_body"] = eb
+        return rebuilt
 
     async def _create_and_consume(
         self,
@@ -1630,7 +1700,24 @@ class LLMClient:
                 return await self._consume_bounded(
                     self._create_and_consume(kwargs, stream, name_unmap=name_unmap), gen_timeout,
                 )
-        except openai.BadRequestError:
+        except openai.BadRequestError as exc:
+            verdict, keys = self._classify_400(exc, kwargs)
+            if verdict == "overflow":   # D-32 (1): no fallback, no retry — the prompt does not fit
+                raise self._wrap_error(exc) from exc
+            if verdict == "effort":     # D-32 (3): the named key, once, with `tools` still sent
+                async def send(retry_kwargs: dict[str, Any]) -> tuple[Any, Any]:
+                    async with _inference_gate(self.config):
+                        return await self._consume_bounded(
+                            self._create_and_consume(retry_kwargs, stream, name_unmap=name_unmap),
+                            gen_timeout,
+                        )
+
+                return await self._retry_without(
+                    keys,
+                    lambda: self._rebuild_extra_body(kwargs, disable_thinking, reasoning_budget),
+                    send, exc,
+                )
+            # D-32 (2) and (4): today's tools fallback, which records no effort key.
             # Server rejected the request (e.g. tools param) — retry without it. injected_messages
             # already carries the system-prompt injection folded in above, so the fallback's own
             # injection is a no-op (marker-guarded in _fold_tool_injection — never double-injects).
@@ -1678,6 +1765,24 @@ class LLMClient:
         try:
             async with _inference_gate(self.config):  # #18: honor stream here too
                 return await self._consume_bounded(self._create_and_consume(kwargs, stream), gen_timeout)
+        except openai.BadRequestError as exc:
+            # No further fallback here (D-32): overflow and an unnamed 400 surface as today; a 400
+            # naming a sent effort key gets the one per-key retry.
+            verdict, keys = self._classify_400(exc, kwargs, check_tools=False)
+            if verdict != "effort":
+                raise self._wrap_error(exc) from exc
+
+            async def send(retry_kwargs: dict[str, Any]) -> tuple[Any, Any]:
+                async with _inference_gate(self.config):
+                    return await self._consume_bounded(
+                        self._create_and_consume(retry_kwargs, stream), gen_timeout,
+                    )
+
+            return await self._retry_without(
+                keys,
+                lambda: self._rebuild_extra_body(kwargs, disable_thinking, reasoning_budget),
+                send, exc,
+            )
         except Exception as exc:
             raise self._wrap_error(exc) from exc
 

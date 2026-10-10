@@ -19,6 +19,7 @@ from localharness.provider.client import (
     EFFORT_KEYS,
     LLMClient,
     LLMConfig,
+    ProviderAPIError,
 )
 
 MSGS = [{"role": "user", "content": "hi"}]
@@ -339,3 +340,298 @@ def test_a_failed_rebind_restores_both_sets_and_reraises(monkeypatch):
         client.rebind_endpoint("http://127.0.0.1:1/v1")
     assert client.rejected_effort_keys == frozenset({"chat_template_kwargs"})
     assert client.accepted_effort_keys == frozenset({"reasoning_budget_tokens"})
+
+
+# ---------------------------------------------------------------------------
+# The classifier (D-32): pure, one fixed order
+# ---------------------------------------------------------------------------
+
+BOTH = {"extra_body": {**THINK_OFF, "reasoning_budget_tokens": 5}}
+
+
+def _classify(client, text, sent=BOTH, **kw):
+    return client._classify_400(_bad(text), sent, **kw)
+
+
+def test_classifier_order_overflow_then_tools_then_named_then_neither():
+    client, _ = make()
+    assert _classify(client, "exceed_context_size_error tool reasoning_budget_tokens") == ("overflow", ())
+    assert _classify(client, "tool reasoning_budget_tokens") == ("tools", ())
+    assert _classify(client, "tool reasoning_budget_tokens", check_tools=False) == (
+        "effort", ("reasoning_budget_tokens",),
+    )
+    assert _classify(client, "bad enable_thinking") == ("effort", ("chat_template_kwargs",))
+    assert _classify(client, "unknown field 'foo'") == (
+        "neither", ("chat_template_kwargs", "reasoning_budget_tokens"),
+    )
+    assert _classify(client, "unknown field 'foo'", sent={"model": "m"}) == ("neither", ())
+
+
+def test_classifier_is_case_insensitive_and_records_nothing():
+    client, _ = make()
+    assert _classify(client, "EXCEED_CONTEXT_SIZE_ERROR") == ("overflow", ())
+    assert _classify(client, "Reasoning_Budget_Tokens is not allowed") == (
+        "effort", ("reasoning_budget_tokens",),
+    )
+    assert client.rejected_effort_keys == frozenset() and client._tools_param_rejected is False
+
+
+def test_a_key_only_in_the_sent_kwargs_is_not_named_by_the_error_text():
+    client, _ = make()
+    sent = {"extra_body": dict(THINK_OFF)}   # only thinking-off was sent
+    # the text names the budget key, which was NOT sent -> it names no SENT key
+    assert _classify(client, "reasoning_budget_tokens is unknown", sent=sent) == (
+        "neither", ("chat_template_kwargs",),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Native: retry once without the key, record only when the retry succeeds
+# ---------------------------------------------------------------------------
+
+
+async def test_a_400_naming_the_budget_drops_only_the_budget_and_records_it():
+    client, server = make("native", "llamacpp", Server(_bad("unknown field reasoning_budget_tokens"), "ok"))
+    msg, _ = await client.stream_complete(MSGS, disable_thinking=True, reasoning_budget=1200)
+    assert len(server.calls) == 2
+    assert server.calls[0]["extra_body"] == {**THINK_OFF, "reasoning_budget_tokens": 1200}
+    assert server.calls[1]["extra_body"] == THINK_OFF
+    assert client.rejected_effort_keys == frozenset({"reasoning_budget_tokens"})
+    assert msg.content == "ok"
+
+
+async def test_a_400_naming_enable_thinking_drops_only_thinking_off():
+    client, server = make("native", "llamacpp", Server(_bad("Unexpected key: enable_thinking"), "ok"))
+    await client.stream_complete(MSGS, disable_thinking=True, reasoning_budget=1200)
+    assert server.calls[1]["extra_body"] == {"reasoning_budget_tokens": 1200}
+    assert client.rejected_effort_keys == frozenset({"chat_template_kwargs"})
+
+
+async def test_a_400_naming_neither_key_drops_every_effort_key_sent():
+    client, server = make("native", "llamacpp", Server(_bad("unknown field 'foo'"), "ok"))
+    await client.stream_complete(MSGS, disable_thinking=True, reasoning_budget=1200)
+    assert "extra_body" not in server.calls[1]
+    assert client.rejected_effort_keys == frozenset({"chat_template_kwargs", "reasoning_budget_tokens"})
+
+
+async def test_a_400_naming_neither_key_with_no_effort_key_sent_surfaces_at_once():
+    client, server = make("native", "llamacpp", Server(_bad("unknown field 'foo'")))
+    with pytest.raises(ProviderAPIError):
+        await client.stream_complete(MSGS)
+    assert len(server.calls) == 1
+    assert client.rejected_effort_keys == frozenset()
+
+
+async def test_the_bare_extra_body_text_no_longer_classifies_a_rejection():
+    # Only the budget was sent. The old bare-"extra_body" rule would have flagged thinking-off too.
+    client, server = make("native", "llamacpp", Server(_bad("extra_body: invalid"), "ok"))
+    await client.stream_complete(MSGS, reasoning_budget=40)
+    assert client.rejected_effort_keys == frozenset({"reasoning_budget_tokens"})
+    assert "extra_body" not in server.calls[1]
+
+
+async def test_a_failed_retry_restores_the_set_and_surfaces_the_original_400():
+    retry_error = ConnectionError("server went away")
+    client, server = make(
+        "native", "llamacpp", Server(_bad("unknown field reasoning_budget_tokens"), retry_error)
+    )
+    client._rejected_effort_keys = {"chat_template_kwargs"}   # the pre-request value
+    with pytest.raises(ProviderAPIError) as info:
+        await client.stream_complete(MSGS, reasoning_budget=1200)
+    assert "reasoning_budget_tokens" in str(info.value)       # the ORIGINAL 400's text
+    assert info.value.status_code == 400
+    assert info.value.__cause__ is retry_error
+    assert client.rejected_effort_keys == frozenset({"chat_template_kwargs"})
+    assert len(server.calls) == 2
+
+
+async def test_a_retry_that_400s_again_surfaces_the_original_and_records_nothing():
+    client, server = make(
+        "native", "llamacpp",
+        Server(_bad("unknown field reasoning_budget_tokens"), _bad("messages: roles must alternate")),
+    )
+    with pytest.raises(ProviderAPIError) as info:
+        await client.stream_complete(MSGS, reasoning_budget=1200)
+    assert "reasoning_budget_tokens" in str(info.value)
+    assert client.rejected_effort_keys == frozenset()
+    assert len(server.calls) == 2
+
+
+async def test_a_cancelled_retry_leaves_the_set_as_it_was():
+    def cancel(_kw):
+        raise asyncio.CancelledError()
+
+    client, _ = make(
+        "native", "llamacpp", Server(_bad("unknown field reasoning_budget_tokens"), cancel)
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await client.stream_complete(MSGS, reasoning_budget=1200)
+    assert client.rejected_effort_keys == frozenset()
+
+
+@pytest.mark.parametrize("text", [
+    "exceed_context_size_error: prompt is too long",
+    "Error: EXCEED_CONTEXT_SIZE_ERROR (n_ctx=4096)",
+    "exceed_context_size_error, tools and reasoning_budget_tokens and enable_thinking are fine",
+])
+async def test_an_overflow_surfaces_at_once_with_the_set_untouched(text):
+    client, server = make("native", "llamacpp", Server(_bad(text), "ok"))
+    with pytest.raises(ProviderAPIError):
+        await client.stream_complete(MSGS, [TOOL], disable_thinking=True, reasoning_budget=1200)
+    assert len(server.calls) == 1
+    assert client.rejected_effort_keys == frozenset()
+    assert client._tools_param_rejected is False
+    assert client.accepted_effort_keys == frozenset()
+
+
+async def test_a_tools_400_retries_without_tools_and_keeps_every_effort_key():
+    client, server = make("native", "llamacpp", Server(_bad('"tools" is not supported'), "ok"))
+    await client.stream_complete(MSGS, [TOOL], disable_thinking=True, reasoning_budget=1200)
+    first, second = server.calls
+    assert "tools" in first and "tools" not in second
+    assert first["extra_body"] == second["extra_body"] == {**THINK_OFF, "reasoning_budget_tokens": 1200}
+    assert client.rejected_effort_keys == frozenset()
+    assert client._tools_param_rejected is True
+
+
+async def test_a_key_error_text_naming_a_tool_word_is_a_tools_error_first():
+    # D-32 rule 2 before rule 3: the "tool" word wins even beside a key name.
+    client, server = make("native", "llamacpp", Server(_bad("tool_choice with reasoning_budget_tokens"), "ok"))
+    await client.stream_complete(MSGS, [TOOL], reasoning_budget=9)
+    assert "tools" not in server.calls[1] and server.calls[1]["extra_body"] == {"reasoning_budget_tokens": 9}
+    assert client.rejected_effort_keys == frozenset()
+
+
+async def test_a_rejection_after_a_tools_400_without_tools_sent_falls_through_to_the_keys():
+    client, server = make("native", "llamacpp", Server(_bad("tool parser: reasoning_budget_tokens"), "ok"))
+    await client.stream_complete(MSGS, reasoning_budget=9)    # no tools were sent
+    assert client.rejected_effort_keys == frozenset({"reasoning_budget_tokens"})
+    assert client._tools_param_rejected is False
+
+
+async def test_a_recorded_rejection_leaves_the_accepted_set():
+    client, _ = make("native", "llamacpp", Server(_bad("unknown field reasoning_budget_tokens"), "ok"))
+    client._accepted_effort_keys = {"chat_template_kwargs", "reasoning_budget_tokens"}
+    await client.stream_complete(MSGS, reasoning_budget=1200)   # the retry sends no effort key
+    assert client.rejected_effort_keys == frozenset({"reasoning_budget_tokens"})
+    assert client.accepted_effort_keys == frozenset({"chat_template_kwargs"})
+    assert not (client.accepted_effort_keys & client.rejected_effort_keys)
+
+
+async def test_a_second_request_after_a_recorded_rejection_carries_no_such_key():
+    client, server = make("native", "llamacpp", Server(_bad("unknown field reasoning_budget_tokens"), "ok"))
+    await client.stream_complete(MSGS, reasoning_budget=1200)
+    server.calls.clear()
+    await client.stream_complete(MSGS, reasoning_budget=1200)
+    assert len(server.calls) == 1 and "extra_body" not in server.calls[0]
+
+
+# ---------------------------------------------------------------------------
+# XML path: tools fallback as today; a named key retries the XML request
+# ---------------------------------------------------------------------------
+
+
+class _Spy:
+    def __init__(self, client):
+        self.n = 0
+        real = client._complete_xml_fallback
+
+        async def wrapped(*a, **kw):
+            self.n += 1
+            return await real(*a, **kw)
+
+        client._complete_xml_fallback = wrapped
+
+
+@pytest.mark.parametrize("mode", ("xml", "text"))
+async def test_xml_overflow_surfaces_at_once_without_the_fallback(mode):
+    client, server = make(mode, "llamacpp", Server(_bad("exceed_context_size_error tools")))
+    spy = _Spy(client)
+    with pytest.raises(ProviderAPIError):
+        await client.stream_complete(MSGS, [TOOL], disable_thinking=True, reasoning_budget=9)
+    assert len(server.calls) == 1 and spy.n == 0
+    assert client.rejected_effort_keys == frozenset() and client.accepted_effort_keys == frozenset()
+    assert client._tools_param_rejected is False
+
+
+@pytest.mark.parametrize("mode", ("xml", "text"))
+async def test_xml_tools_400_runs_the_fallback_and_keeps_the_effort_keys(mode):
+    client, server = make(mode, "llamacpp", Server(_bad("tools not supported"), "ok"))
+    spy = _Spy(client)
+    await client.stream_complete(MSGS, [TOOL], disable_thinking=True, reasoning_budget=9)
+    assert spy.n == 1 and client._tools_param_rejected is True
+    assert "tools" not in server.calls[1]
+    assert server.calls[1]["extra_body"] == {**THINK_OFF, "reasoning_budget_tokens": 9}
+    assert client.rejected_effort_keys == frozenset()
+
+
+@pytest.mark.parametrize("mode", ("xml", "text"))
+async def test_xml_named_key_retries_the_xml_request_with_tools_kept(mode):
+    client, server = make(mode, "llamacpp", Server(_bad("enable_thinking is not allowed"), "ok"))
+    spy = _Spy(client)
+    await client.stream_complete(MSGS, [TOOL], disable_thinking=True, reasoning_budget=9)
+    assert spy.n == 0 and len(server.calls) == 2
+    assert "tools" in server.calls[1]
+    assert server.calls[1]["extra_body"] == {"reasoning_budget_tokens": 9}
+    assert client.rejected_effort_keys == frozenset({"chat_template_kwargs"})
+    assert client._tools_param_rejected is False
+
+
+async def test_xml_named_key_failed_retry_restores_and_surfaces_the_original_400():
+    client, server = make("xml", "llamacpp", Server(_bad("enable_thinking is not allowed"), ConnectionError("x")))
+    with pytest.raises(ProviderAPIError) as info:
+        await client.stream_complete(MSGS, [TOOL], disable_thinking=True)
+    assert "enable_thinking" in str(info.value) and info.value.status_code == 400
+    assert client.rejected_effort_keys == frozenset() and len(server.calls) == 2
+
+
+@pytest.mark.parametrize("mode", ("xml", "text"))
+async def test_xml_unnamed_400_runs_the_fallback_and_records_no_effort_key(mode):
+    client, server = make(mode, "llamacpp", Server(_bad("unknown field 'foo'"), "ok"))
+    spy = _Spy(client)
+    await client.stream_complete(MSGS, [TOOL], disable_thinking=True, reasoning_budget=9)
+    assert spy.n == 1 and "tools" not in server.calls[1]
+    assert server.calls[1]["extra_body"] == {**THINK_OFF, "reasoning_budget_tokens": 9}
+    assert client.rejected_effort_keys == frozenset()
+
+
+async def test_xml_bare_extra_body_text_records_nothing():
+    client, _ = make("xml", "llamacpp", Server(_bad("extra_body: invalid"), "ok"))
+    await client.stream_complete(MSGS, [TOOL], disable_thinking=True)
+    assert client.rejected_effort_keys == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# XML fallback path: overflow and named keys only
+# ---------------------------------------------------------------------------
+
+
+async def test_fallback_400_naming_the_budget_retries_once_and_records_on_success():
+    client, server = make(
+        "xml", "llamacpp", Server(_bad("tools unsupported"), _bad("reasoning_budget_tokens unknown"), "ok")
+    )
+    await client.stream_complete(MSGS, [TOOL], reasoning_budget=9)
+    assert len(server.calls) == 3
+    assert "tools" not in server.calls[1] and "tools" not in server.calls[2]
+    assert "extra_body" not in server.calls[2]
+    assert client.rejected_effort_keys == frozenset({"reasoning_budget_tokens"})
+
+
+@pytest.mark.parametrize("text", ["exceed_context_size_error", "unknown field 'foo'", "messages: bad roles"])
+async def test_fallback_400_overflow_or_unnamed_surfaces_at_once(text):
+    client, server = make("xml", "llamacpp", Server(_bad("tools unsupported"), _bad(text), "ok"))
+    with pytest.raises(ProviderAPIError):
+        await client.stream_complete(MSGS, [TOOL], disable_thinking=True, reasoning_budget=9)
+    assert len(server.calls) == 2
+    assert client.rejected_effort_keys == frozenset()
+
+
+async def test_fallback_failed_retry_restores_and_surfaces_the_original():
+    client, _ = make(
+        "xml", "llamacpp",
+        Server(_bad("tools unsupported"), _bad("reasoning_budget_tokens unknown"), ConnectionError("x")),
+    )
+    with pytest.raises(ProviderAPIError) as info:
+        await client.stream_complete(MSGS, [TOOL], reasoning_budget=9)
+    assert "reasoning_budget_tokens" in str(info.value)
+    assert client.rejected_effort_keys == frozenset()
