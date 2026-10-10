@@ -12,10 +12,43 @@ runs arbitrary shell on the host). Run an isolated VM/container if that matters.
 import asyncio
 import contextlib
 import io
+import os
+import threading
 import traceback
 from typing import Any
 
 from localharness.tools.base import Tool, ToolResult, ToolSchema
+
+AGENT_COMMAND_MARKER = "LOCALHARNESS_COMMIT"
+"""The environment variable every command the harness runs for the agent carries (`bash_exec` sets it
+on each child). `localharness model` reads it: with it set, a switch is never a local operator's."""
+
+_marker_lock = threading.Lock()
+_marker_depth = 0
+_marker_set_by_us = False
+
+
+@contextlib.contextmanager
+def _agent_command_marker():
+    """While agent code runs in this process, `os.environ` carries the agent-command marker, so a
+    child it spawns (`subprocess.run(["localharness", "model", ...])`) inherits it exactly as a
+    `bash_exec` child does (WR-05). Counted, so overlapping calls neither drop it early nor leave it
+    behind, and a marker that was already set (the harness itself ran under one) is never removed.
+    Not a sandbox: code that clears the variable or passes its own `env=` defeats it, which is no
+    wider than what `python_exec` can already do to the machine's files (SECURITY.md)."""
+    global _marker_depth, _marker_set_by_us
+    with _marker_lock:
+        if _marker_depth == 0:
+            _marker_set_by_us = AGENT_COMMAND_MARKER not in os.environ
+            os.environ[AGENT_COMMAND_MARKER] = os.environ.get(AGENT_COMMAND_MARKER, "1")
+        _marker_depth += 1
+    try:
+        yield
+    finally:
+        with _marker_lock:
+            _marker_depth -= 1
+            if _marker_depth == 0 and _marker_set_by_us:
+                os.environ.pop(AGENT_COMMAND_MARKER, None)
 
 
 class PythonExecTool(Tool):
@@ -56,7 +89,7 @@ class PythonExecTool(Tool):
         buf = io.StringIO()
 
         def _run() -> None:
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            with _agent_command_marker(), contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 try:
                     exec(compile(code, "<python_exec>", "exec"), self._ns)  # noqa: S102
                 except BaseException:  # noqa: BLE001 - surface ANY error to the model, like a REPL

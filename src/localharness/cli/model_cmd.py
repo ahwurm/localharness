@@ -27,9 +27,13 @@ err_console = Console(stderr=True)
 
 def _is_local_operator() -> bool:
     """Is a person at this terminal making the switch (D-19, TRUST-09)? True only on a tty without
-    the shell tool's ``LOCALHARNESS_COMMIT`` marker: `bash_tool` sets it in every agent command's
-    environment, so an agent running `localharness model` is never a local operator, and a pipe
-    or a script has no tty. The one signal is the environment, never an argument or a message."""
+    the agent-command ``LOCALHARNESS_COMMIT`` marker: `bash_tool` sets it in every agent command's
+    environment and `python_exec` sets it in the process environment for the length of each call (so
+    a child it spawns inherits it), hence an agent running `localharness model` from either tool is
+    never a local operator, and a pipe or a script has no tty. The one signal is the environment,
+    never an argument or a message. Not a sandbox: agent code that deliberately clears the variable
+    or spawns with its own ``env=`` is outside what this can see (`python_exec` can already rewrite
+    the trust file, which SECURITY.md accepts)."""
     if "LOCALHARNESS_COMMIT" in os.environ:
         return False
     try:

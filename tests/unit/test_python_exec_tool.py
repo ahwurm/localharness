@@ -65,3 +65,67 @@ async def test_two_instances_have_isolated_namespaces():
     await a.run(code="secret = 1")
     r = await b.run(code="print('secret' in dir())")
     assert "False" in r.output
+
+
+# --- WR-05: a child python_exec spawns carries the agent-command marker ---------------------------
+
+_PROBE = "import subprocess, sys; print(subprocess.run([sys.executable, '-c', " \
+         "'import os; print(os.environ.get(\"LOCALHARNESS_COMMIT\"))'], capture_output=True, text=True).stdout.strip())"
+
+
+@pytest.mark.asyncio
+async def test_wr05_a_child_python_exec_spawns_inherits_the_marker_and_the_process_is_left_clean(monkeypatch):
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    import os
+    r = await PythonExecTool().run(code=_PROBE)
+    assert r.success is True and r.output.strip() == "1"
+    assert "LOCALHARNESS_COMMIT" not in os.environ
+
+
+@pytest.mark.asyncio
+async def test_wr05_a_child_makes_the_cli_say_not_a_local_operator(monkeypatch):
+    """The CLI's own question, asked in a child python_exec spawned: the marker alone decides it
+    (a tty cannot be faked here, so the tty half is patched in the child's code)."""
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    code = (
+        "import subprocess, sys\n"
+        "src = ('import sys\\n'\n"
+        "       'class T:\\n'\n"
+        "       '    def isatty(self): return True\\n'\n"
+        "       'sys.stdin = T()\\n'\n"
+        "       'from localharness.cli.model_cmd import _is_local_operator\\n'\n"
+        "       'print(_is_local_operator())')\n"
+        "print(subprocess.run([sys.executable, '-c', src], capture_output=True, text=True).stdout.strip())\n"
+    )
+    assert (await PythonExecTool().run(code=code)).output.strip() == "False"
+    import subprocess
+    import sys
+    bare = subprocess.run(
+        [sys.executable, "-c",
+         "import sys\nclass T:\n    def isatty(self): return True\nsys.stdin = T()\n"
+         "from localharness.cli.model_cmd import _is_local_operator\nprint(_is_local_operator())"],
+        capture_output=True, text=True).stdout.strip()
+    assert bare == "True"  # the same child without the marker is a local operator: the marker is what matters
+
+
+@pytest.mark.asyncio
+async def test_wr05_a_marker_that_was_already_set_is_never_removed(monkeypatch):
+    monkeypatch.setenv("LOCALHARNESS_COMMIT", "1")
+    import os
+    await PythonExecTool().run(code="pass")
+    assert os.environ["LOCALHARNESS_COMMIT"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_wr05_overlapping_calls_keep_the_marker_until_the_last_one_ends(monkeypatch):
+    import asyncio
+    import os
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    slow = PythonExecTool()
+    quick = PythonExecTool()
+    both = asyncio.gather(
+        slow.run(code="import time, os; time.sleep(0.4); print(os.environ.get('LOCALHARNESS_COMMIT'))"),
+        quick.run(code="pass"))
+    r_slow, _ = await both
+    assert r_slow.output.strip() == "1"
+    assert "LOCALHARNESS_COMMIT" not in os.environ

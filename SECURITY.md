@@ -529,7 +529,9 @@ next start on a terminal. The model keys are an entry kind of their own, `launch
 changed model is not a changed command. A model you switch yourself with `/model` on a terminal
 (or in Zed), or with `localharness model` typed at a terminal, is re-recorded as you set it and
 asks nothing; one switched from a remote channel, or by a command the agent ran in the shell
-tool, is not, and asks at the next start. `effort` is in neither list: it is a request setting, not
+tool or from `python_exec`, is not, and asks at the next start. (Both tools mark the commands they
+run; agent code that deliberately clears the marker is not caught, which is no more than
+`python_exec` can already do to the files themselves.) `effort` is in neither list: it is a request setting, not
 a launch decision, and a peer's `api_key` and headers are never written to the record. The
 `config_ini` key names llama-server's own config file, so a relaunch acts on nothing the record
 did not fingerprint. **What this does NOT cover:** the root-owned `/etc/llama.cpp/config.ini` that
