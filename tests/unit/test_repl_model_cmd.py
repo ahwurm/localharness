@@ -1452,3 +1452,52 @@ async def test_model_hotswap_refit_unchanged_when_no_pin_matches(tmp_path, monke
 
     assert ctx.max_context_tokens == 32_768
     assert "pinned to" not in "\n".join(channel.messages)
+
+
+# ------------------------------------------------------------------ who may adopt (D-19, TRUST-09)
+
+
+class _LocalChannel(FakeChannel):
+    local_operator = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("channel", "expected"),
+                         [(_LocalChannel(), True), (FakeChannel(), False)])
+async def test_the_repl_hands_its_channels_origin_signal_to_persist(
+        tmp_path, monkeypatch, channel, expected):
+    from localharness.cli import model_ops
+
+    seen: list[dict] = []
+
+    async def _recorder(harness, model, **kw):
+        seen.append(kw)
+
+    monkeypatch.setattr(model_ops, "persist_default_model", _recorder)
+    repl, _, _ = _repl(tmp_path, _harness(), live=["model-a", "model-b"], channel=channel)
+
+    await repl._persist_default_model("model-b")
+
+    assert [kw["local_operator"] for kw in seen] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_switch_is_re_recorded_and_a_remote_one_is_not(tmp_path, monkeypatch):
+    from localharness.cli import model_ops  # noqa: F401
+    from localharness.config import trust
+
+    monkeypatch.setenv("LOCALHARNESS_HOME", str(tmp_path))
+    kinds = frozenset(trust.MACHINE_KINDS)
+    srv = ManagedServerConfig(binary="/x/vllm", model="model-a")
+
+    for channel, adopted in ((FakeChannel(), False), (_LocalChannel(), True)):
+        trust.record_machine(tmp_path, [], kinds=kinds)
+        repl, _, _ = _repl(tmp_path, _harness(srv), live=["model-a"], channel=channel)
+
+        assert await repl._persist_default_model("model-b") is True
+
+        entries = trust.recorded_machine(tmp_path)["entries"]
+        assert bool(entries) is adopted
+        if adopted:
+            assert entries == [{"file": "overrides.yaml", "kind": "launch_model",
+                                "name": "server.model", "shown": "model-b"}]

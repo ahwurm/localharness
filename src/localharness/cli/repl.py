@@ -2634,6 +2634,7 @@ class OrchestratorREPL:
             audit_warning = await model_ops.persist_default_model(
                 self._harness, model,
                 config_dir=self._config_dir, audit_base_dir=self._audit_base_dir,
+                local_operator=getattr(self._channel, "local_operator", False),
             )
         except Exception as exc:  # noqa: BLE001 — the in-session swap already succeeded
             await self._channel.send_message(
