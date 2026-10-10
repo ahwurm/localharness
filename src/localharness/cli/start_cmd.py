@@ -224,11 +224,14 @@ def _read_session_key(harness: Any) -> str | None:
     covers) is in it, so the file is opened only once the record covers it. Success sets
     `harness.provider.api_key` to the key — in memory only, never written, printed or logged — so
     `required_key_kwargs` yields it, both probes and every request carry it and the file rides argv
-    beside the environment key. A file the byte rule refuses returns
-    `server.api_key_file <path>: <reason> — this session sends no key` and changes nothing: the
-    session stays keyless, `launch_decision` then withholds any widening, and the launch binds
-    loopback without the file on argv. Never raises for the file's sake. No server or no file: None."""
-    from localharness.provider.server import KeyFileError, read_key_file
+    beside the environment key. A file the byte rule refuses is recorded on the spec
+    (`mark_key_file`), so the launch decision keeps the file off argv and binds loopback on every
+    launch path of the session, whatever other key the harness holds, and the returned line says
+    which of the two is true: `server.api_key_file <path>: <reason> — this session sends no key` when
+    no other key is held, or `... — the file is not used; this session keeps sending the key it
+    already holds` when a configured or environment key keeps the session keyed. Never raises for
+    the file's sake. No server or no file: None."""
+    from localharness.provider.server import KeyFileError, key_kwargs, mark_key_file, read_key_file
     spec = getattr(harness, "server", None)
     path = getattr(spec, "api_key_file", None) if spec is not None else None
     if not path:
@@ -236,7 +239,12 @@ def _read_session_key(harness: Any) -> str | None:
     try:
         key = read_key_file(path)
     except KeyFileError as exc:
+        mark_key_file(spec, True)
+        if key_kwargs(harness.provider.api_key):
+            return (f"server.api_key_file {path}: {exc} — the file is not used; "
+                    "this session keeps sending the key it already holds")
         return f"server.api_key_file {path}: {exc} — this session sends no key"
+    mark_key_file(spec, False)
     harness.provider.api_key = SecretStr(key)
     return None
 

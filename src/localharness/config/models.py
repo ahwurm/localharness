@@ -1654,6 +1654,21 @@ class EndpointRef(BaseModel):
         ),
     )
 
+    _configured_api_key: Optional[SecretStr] = PrivateAttr(default=None)
+
+    @property
+    def configured_api_key(self) -> SecretStr:
+        """The key this peer is CONFIGURED with: `api_key` as loaded, whatever a session read of its
+        `lifecycle.api_key_file` has put into `api_key` since."""
+        return self._configured_api_key if self._configured_api_key is not None else self.api_key
+
+    def set_session_key(self, key: Optional[SecretStr]) -> None:
+        """Hold ``key`` (a key file's content, in memory only) as this peer's `api_key`; None puts the
+        configured key back, so an earlier launch's file key never outlives a later refusal."""
+        if self._configured_api_key is None:
+            self._configured_api_key = self.api_key
+        self.api_key = key if key is not None else self._configured_api_key
+
     @field_validator("base_url")
     @classmethod
     def validate_base_url(cls, v: str) -> str:
@@ -2040,6 +2055,19 @@ class ManagedServerConfig(BaseModel):
 
     def entry_for(self, name: str) -> Optional[LocalModelEntry]:
         return next((e for e in self.local_models if e.name == name), None)
+
+    _key_file_refused: bool = PrivateAttr(default=False)
+
+    @property
+    def key_file_refused(self) -> bool:
+        """True when this session read `api_key_file` and the byte rule refused it. Session state, not
+        configuration: it is never loaded, dumped, fingerprinted or compared, and it rides the spec
+        object itself (the launch decision is never given a narrowed copy), so every launch path that
+        meets this spec - `start`, a cold peer, the managed restart, a restore - sees the same answer."""
+        return self._key_file_refused
+
+    def set_key_file_refused(self, refused: bool) -> None:
+        self._key_file_refused = bool(refused)
 
     @model_validator(mode="after")
     def _launch_target_present(self) -> "ManagedServerConfig":

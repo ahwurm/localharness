@@ -192,22 +192,43 @@ def _peer_session_key(ep: Any) -> "tuple[Any, str | None]":
     """The key a cold peer's ``lifecycle.api_key_file`` holds, read once at its launch: ``(SecretStr,
     None)`` on success; ``(None, line)`` when the file fails the byte rule, with the one line to
     show (``extra_endpoints[<name>].lifecycle.api_key_file <path>: <reason> — this session sends no
-    key``); ``(None, None)`` when the lifecycle names no file or does not require a key. The caller
-    runs it only for a lifecycle the loader kept (a withheld one is already None), so the file is
-    opened only once the record covers the entry. The key stays in memory: it is never written,
-    printed or logged, and the line carries the reason, never any of the file's content."""
+    key``, or ``— the file is not used; this peer keeps sending the key it is configured with`` when
+    the peer is configured with one); ``(None, None)`` when the lifecycle names no file or does not
+    require a key. The caller runs it only for a lifecycle the loader kept (a withheld one is already
+    None), so the file is opened only once the record covers the entry. The key stays in memory: it is
+    never written, printed or logged, and the line carries the reason, never any of the file's content.
+
+    The outcome is also recorded on the lifecycle (``mark_key_file``), so the launch decision keeps a
+    refused file off argv and on loopback; a read that succeeds, or names no file, clears it."""
     from pydantic import SecretStr
 
-    from localharness.provider.server import KeyFileError, read_key_file
+    from localharness.provider.server import KeyFileError, key_kwargs, mark_key_file, read_key_file
     lifecycle = getattr(ep, "lifecycle", None)
     path = getattr(lifecycle, "api_key_file", None)
     if not path or getattr(lifecycle, "require_api_key", False) is not True:
+        mark_key_file(lifecycle, False)
         return None, None
     try:
-        return SecretStr(read_key_file(path)), None
+        key = SecretStr(read_key_file(path))
     except KeyFileError as exc:
-        return None, (f"extra_endpoints[{ep.name}].lifecycle.api_key_file {path}: {exc} — "
-                      "this session sends no key")
+        mark_key_file(lifecycle, True)
+        head = f"extra_endpoints[{ep.name}].lifecycle.api_key_file {path}: {exc} — "
+        configured = getattr(ep, "configured_api_key", getattr(ep, "api_key", None))
+        if key_kwargs(configured):
+            return None, head + "the file is not used; this peer keeps sending the key it is configured with"
+        return None, head + "this session sends no key"
+    mark_key_file(lifecycle, False)
+    return key, None
+
+
+def _hold_peer_session_key(ep: Any, peer_key: Any) -> None:
+    """Put this launch's key on the peer: the file's key when it was read, else the key the peer is
+    CONFIGURED with - never the key an earlier launch's file left behind."""
+    setter = getattr(ep, "set_session_key", None)
+    if callable(setter):
+        setter(peer_key)
+    elif peer_key is not None:
+        ep.api_key = peer_key
 
 
 def _endpoint_host(base_url: str) -> str:
@@ -1868,8 +1889,7 @@ class OrchestratorREPL:
             # rebind and every later probe of this peer carry it; a refused file leaves the peer as
             # Phase 1 would launch it (keyless: loopback, no file on argv) after one line.
             peer_key, key_line = _peer_session_key(ep)
-            if peer_key is not None:
-                ep.api_key = peer_key
+            _hold_peer_session_key(ep, peer_key)
             # The one launch decision, asked BEFORE anything is stopped or announced (D-08): a launch
             # that cannot happen answers in one line and leaves the incumbent exactly as it was.
             launch_kw = required_key_kwargs(ep.lifecycle, ep.api_key)

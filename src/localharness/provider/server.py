@@ -154,7 +154,9 @@ def launch_decision(spec: Any, keyed: bool, *, peer: str | None = None) -> Launc
     - With one, `key_file_ok` is `keyed and the path is a regular file`, judged by `os.stat` alone —
       the file is NEVER opened here, so a FIFO or a swapped file can neither block nor leak through
       the decision. Anything else withholds the widening, not the launch: loopback for this run,
-      the file left off argv, and a note saying why.
+      the file left off argv, and a note saying why. A file the session's own read refused
+      (`spec.key_file_refused`, set by `mark_key_file`) is one of those: even when another key keeps
+      the launch keyed, the file stays off argv and the launch binds loopback.
 
     Pure with respect to the spec (it is read, never copied or changed)."""
     runtime = getattr(spec, "runtime", "vllm")
@@ -178,11 +180,25 @@ def launch_decision(spec: Any, keyed: bool, *, peer: str | None = None) -> Launc
         reason = getattr(exc, "strerror", None) or type(exc).__name__
     if reason is None and not keyed:
         reason = "the harness holds no key for it"
+    if reason is None and getattr(spec, "key_file_refused", False) is True:
+        # The session read this file and the byte rule refused it (`start` / a cold peer say so in one
+        # line). The harness holds a key from another source, but the file must not reach argv: a
+        # server started with it would take a key the harness never validated.
+        reason = "refused by the key-file rule"
     if reason is not None:
         return LaunchDecision(
             None, True, False,
             f"--api-key-file {path} unreadable: {reason} — launched on 127.0.0.1 for this run")
     return LaunchDecision(None, loopback, True, None)
+
+
+def mark_key_file(spec: Any, refused: bool) -> None:
+    """Record on ``spec`` whether this session's read of its `api_key_file` was refused, so the one
+    launch decision (and so the argv and the exposure phrase built from it) agrees with the line `start`
+    printed. A stand-in without the setter is left alone."""
+    setter = getattr(spec, "set_key_file_refused", None)
+    if callable(setter):
+        setter(refused)
 
 
 KEY_FILE_CAP = 4096
