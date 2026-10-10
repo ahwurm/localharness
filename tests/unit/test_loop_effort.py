@@ -481,6 +481,74 @@ async def test_two_cuts_end_the_turn_with_the_notice(bus, sessions):
     assert [e.finish_reason for e in _replies(bus)] == ["reasoning_cut", "reasoning_cut"]
 
 
+async def _no_sleep(*_a: Any, **_k: Any) -> None:
+    return None
+
+
+async def test_a_cut_on_the_connection_retry_takes_the_thinking_off_re_send(bus, sessions, monkeypatch):
+    """WR-03: the connection-error re-issue is a first attempt as far as the handlers are
+    concerned, so a reasoning cut on it is re-sent once with thinking off, not raised out of run_turn."""
+    from localharness.provider.client import ProviderConnectionError
+
+    monkeypatch.setattr("localharness.agent.loop.asyncio.sleep", _no_sleep)
+    llm = _Scripted(
+        [ProviderConnectionError("refused"), _cut(100, 450), _answer("Here it is.")],
+        provider_type="vllm",
+    )
+    assert await _loop(llm, bus, effort=("high", "agent")).run_turn("explain") == "Here it is."
+
+    assert len(llm.calls) == 3
+    assert "disable_thinking" not in llm.calls[1]
+    assert llm.calls[2]["disable_thinking"] is True
+    assert sessions[0].reasoning_cut_used is True
+
+
+async def test_a_second_cut_after_a_connection_retry_ends_the_turn_with_the_notice(
+    bus, sessions, monkeypatch,
+):
+    from localharness.agent.loop import _REASONING_CUT_TURN_NOTICE
+    from localharness.provider.client import ProviderConnectionError
+
+    monkeypatch.setattr("localharness.agent.loop.asyncio.sleep", _no_sleep)
+    llm = _Scripted(
+        [ProviderConnectionError("refused"), _cut(), _cut(), _answer("never reached")],
+        provider_type="vllm",
+    )
+    summary = await _loop(llm, bus, effort=("high", "agent")).run_turn("explain")
+
+    assert summary == _REASONING_CUT_TURN_NOTICE
+    assert len(llm.calls) == 3
+    assert sessions[0].terminated_reason == "error"
+
+
+async def test_two_connection_errors_in_a_row_still_end_the_turn(bus, sessions, monkeypatch):
+    from localharness.provider.client import ProviderConnectionError
+
+    monkeypatch.setattr("localharness.agent.loop.asyncio.sleep", _no_sleep)
+    llm = _Scripted(
+        [ProviderConnectionError("refused"), ProviderConnectionError("refused again")],
+        provider_type="vllm",
+    )
+    summary = await _loop(llm, bus, effort=("high", "agent")).run_turn("explain")
+
+    assert "refused again" in summary
+    assert len(llm.calls) == 2
+    assert sessions[0].terminated_reason == "error"
+
+
+async def test_a_call_that_goes_through_re_arms_the_connection_retry(bus, sessions, monkeypatch):
+    """The retry is per outage, not per turn: an answer in between resets it."""
+    from localharness.provider.client import ProviderConnectionError
+
+    monkeypatch.setattr("localharness.agent.loop.asyncio.sleep", _no_sleep)
+    llm = _Scripted(
+        [ProviderConnectionError("one"), _answer("ok")], provider_type="vllm",
+    )
+    loop = _loop(llm, bus, effort=("high", "agent"))
+    assert await loop.run_turn("first") == "ok"
+    assert sessions[0].connection_retry_used is False
+
+
 async def test_a_cut_never_silences_thinking_in_the_next_turn(bus):
     llm = _Scripted([_cut(), _answer("one"), _answer("two")], provider_type="vllm")
     loop = _loop(llm, bus, effort=("high", "agent"))
