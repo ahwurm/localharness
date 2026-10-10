@@ -125,3 +125,179 @@ def test_the_widget_imports_nothing_from_the_repl_or_a_channel():
     assert all(not m.startswith("localharness.channels") for m in imported), imported
     assert "localharness.cli.repl" not in imported, imported
     assert any(m.startswith("prompt_toolkit") for m in imported)
+
+
+# ------------------------------------------------------------ TerminalChannel.run_picker (D-04)
+
+from io import StringIO  # noqa: E402
+
+from prompt_toolkit.application import create_app_session  # noqa: E402
+from prompt_toolkit.history import InMemoryHistory  # noqa: E402
+
+from localharness.channels import terminal as terminal_mod  # noqa: E402
+from localharness.channels.terminal import (  # noqa: E402
+    ERASE_APPLICATIONS_WHEN_DONE,
+    INPUT_STYLE,
+    TERMINAL_THEME,
+    TerminalChannel,
+)
+from localharness.core.bus import EventBus  # noqa: E402
+
+
+def _channel() -> TerminalChannel:
+    from rich.console import Console
+
+    ch = TerminalChannel(EventBus(), {})
+    ch._console = Console(
+        file=StringIO(), force_terminal=True, width=120, theme=TERMINAL_THEME, highlight=False
+    )
+    return ch
+
+
+@pytest.fixture
+def can_draw(monkeypatch):
+    monkeypatch.setattr(terminal_mod, "cannot_ask_reason", lambda: None)
+
+
+def _fake_box(ch: TerminalChannel, calls: list[str]) -> None:
+    ch._box_active = True
+    ch._box_restart_args = ("queue", "interrupt")
+
+    async def _stop():
+        calls.append("stop")
+        ch._box_active = False
+
+    async def _start(*args):
+        calls.append(f"start{args}")
+        ch._box_active = True
+
+    ch.stop_input_box = _stop
+    ch.start_input_box = _start
+
+
+async def test_run_picker_suspends_the_box_then_restarts_it(monkeypatch, can_draw):
+    ch = _channel()
+    calls: list[str] = []
+    _fake_box(ch, calls)
+
+    async def _pick(options, current, **kw):
+        calls.append(f"pick{tuple(options)}{current}")
+        return "off"
+
+    monkeypatch.setattr("localharness.cli.picker.pick", _pick)
+    assert await ch.run_picker(("off", "low"), "low") == "off"
+    assert calls == ["stop", "pick('off', 'low')low", "start('queue', 'interrupt')"]
+
+
+async def test_run_picker_restarts_the_box_when_the_picker_raises(monkeypatch, can_draw):
+    ch = _channel()
+    calls: list[str] = []
+    _fake_box(ch, calls)
+
+    async def _pick(options, current, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("localharness.cli.picker.pick", _pick)
+    with pytest.raises(RuntimeError, match="boom"):
+        await ch.run_picker(("off", "low"), "low")
+    assert calls == ["stop", "start('queue', 'interrupt')"]
+
+
+async def test_run_picker_never_overlaps_the_box_application(monkeypatch, can_draw):
+    ch = _channel()
+    calls: list[str] = []
+    _fake_box(ch, calls)
+    seen: list[bool] = []
+
+    async def _pick(options, current, **kw):
+        seen.append(ch._box_active)
+        return None
+
+    monkeypatch.setattr("localharness.cli.picker.pick", _pick)
+    assert await ch.run_picker(("off",), None) is None
+    assert seen == [False]
+
+
+async def test_run_picker_leaves_an_inactive_box_alone(monkeypatch, can_draw):
+    ch = _channel()
+    calls: list[str] = []
+    _fake_box(ch, calls)
+    ch._box_active = False
+
+    async def _pick(options, current, **kw):
+        return "low"
+
+    monkeypatch.setattr("localharness.cli.picker.pick", _pick)
+    assert await ch.run_picker(("off", "low"), "off") == "low"
+    assert calls == []
+
+
+async def test_run_picker_is_a_no_op_without_a_terminal(monkeypatch):
+    ch = _channel()
+    calls: list[str] = []
+    _fake_box(ch, calls)
+    monkeypatch.setattr(terminal_mod, "cannot_ask_reason", lambda: "no tty")
+
+    async def _pick(*a, **kw):
+        calls.append("pick")
+        return "off"
+
+    monkeypatch.setattr("localharness.cli.picker.pick", _pick)
+    assert await ch.run_picker(("off", "low"), "low") is None
+    assert calls == []
+
+
+async def test_run_picker_draws_on_the_tty_when_stdout_is_redirected(monkeypatch, can_draw):
+    ch = _channel()
+    monkeypatch.setattr(ch, "can_run_input_box", lambda: False)
+    got: dict = {}
+
+    async def _pick(options, current, **kw):
+        got.update(kw)
+        return "low"
+
+    class _Out:
+        pass
+
+    sentinel = _Out()
+    monkeypatch.setattr(
+        "prompt_toolkit.output.defaults.create_output", lambda **kw: sentinel
+    )
+    monkeypatch.setattr("localharness.cli.picker.pick", _pick)
+    assert await ch.run_picker(("off", "low"), "off") == "low"
+    assert got["output"] is sentinel
+
+
+async def test_run_picker_passes_a_style_that_keeps_the_selected_rule(monkeypatch, can_draw):
+    ch = _channel()
+    got: dict = {}
+
+    async def _pick(options, current, **kw):
+        got.update(kw)
+        return None
+
+    monkeypatch.setattr("localharness.cli.picker.pick", _pick)
+    await ch.run_picker(("off", "low"), "off")
+    assert got["erase_when_done"] is ERASE_APPLICATIONS_WHEN_DONE
+    rules = got["style"].style_rules
+    assert any(cls == "selected" for cls, _ in rules)
+    # INPUT_STYLE goes last, so the terminal's own hint/frame colours win over the picker's blanks.
+    hint_rules = [fmt for cls, fmt in rules if cls == "hint"]
+    assert hint_rules[-1] == dict(INPUT_STYLE.style_rules)["hint"]
+    frame_rules = [fmt for cls, fmt in rules if cls == "frame"]
+    assert frame_rules[-1] == dict(INPUT_STYLE.style_rules)["frame"]
+
+
+async def test_run_picker_with_a_real_box_takes_real_keystrokes(can_draw):
+    ch = _channel()
+    ch._history = InMemoryHistory()
+    queue: asyncio.Queue = asyncio.Queue()
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        await ch.start_input_box(queue, on_interrupt=lambda: None)
+        try:
+            inp.send_text("\x1b[C\r")
+            got = await asyncio.wait_for(ch.run_picker(("off", "low", "high", "max"), "high"), 10.0)
+            assert got == "max"
+            assert ch._box_active is True, "the input box was not restarted"
+        finally:
+            await ch.stop_input_box()

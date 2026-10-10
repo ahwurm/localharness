@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Sequence
 
 import structlog
 from prompt_toolkit.application import Application
@@ -25,7 +25,7 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import (
     AfterInput, AppendAutoSuggestion, BeforeInput, ConditionalProcessor,
 )
-from prompt_toolkit.styles import Style
+from prompt_toolkit.styles import Style, merge_styles
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -1640,6 +1640,54 @@ class TerminalChannel(ChannelAdapter):
                 async with self._output_lock:
                     console.print(f"[system.info]{lines[kind]}[/system.info]")
             return Decision(kind=kind)
+        finally:
+            if restart is not None:
+                await self.start_input_box(*restart)
+
+    async def run_picker(self, options: Sequence[str], current: str | None) -> str | None:
+        """The one-line arrow-key picker, drawn where a permission legend is drawn (spec 16 7.1).
+
+        Same suspension as :meth:`ask_permission`: the persistent box is stopped for the
+        keystrokes and restarted afterwards, even when the picker raises, because two live
+        applications cannot share one terminal. The chosen option comes back, or ``None`` when the
+        person pressed Esc or Ctrl+C, or when no terminal could draw the picker at all. Nothing is
+        printed either way: the caller says what it did with the answer.
+
+        The picker's style is :data:`~localharness.cli.picker.PICKER_STYLE` merged under
+        :data:`INPUT_STYLE`: ``INPUT_STYLE`` has no ``selected`` class, so without the merge the
+        highlight would only be "not dim" on a real terminal, and listing it last keeps this
+        channel's own ``hint`` and ``frame`` colours.
+        """
+        from contextlib import nullcontext
+
+        from prompt_toolkit.patch_stdout import patch_stdout
+
+        from localharness.cli.picker import PICKER_STYLE, pick
+
+        if cannot_ask_reason() is not None:
+            return None
+        restart = self._box_restart_args if self._box_active else None
+        if restart is not None:
+            await self.stop_input_box()
+        try:
+            async with self._output_lock:
+                self._stop_thinking()
+                self._close_burst()
+            on_stdout = self.can_run_input_box()
+            output = None
+            if not on_stdout:
+                from prompt_toolkit.output.defaults import create_output
+
+                output = create_output(always_prefer_tty=True)
+            with (patch_stdout(raw=True) if on_stdout else nullcontext()):
+                try:
+                    return await pick(
+                        list(options), current, output=output,
+                        style=merge_styles([PICKER_STYLE, INPUT_STYLE]),
+                        erase_when_done=ERASE_APPLICATIONS_WHEN_DONE,
+                    )
+                except (KeyboardInterrupt, EOFError):
+                    return None
         finally:
             if restart is not None:
                 await self.start_input_box(*restart)
