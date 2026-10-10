@@ -43,6 +43,8 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/model", "List available models; /model <name|number> to switch", "_slash_model", True),
     SlashCommand("/reasoning", "Stream the model's reasoning while it thinks; /reasoning on|off",
                  "_slash_reasoning", True),
+    SlashCommand("/effort", "Reasoning effort for this session; /effort off|low|high|max, /effort show",
+                 "_slash_effort", True),
     SlashCommand("/verbose", "Show reasoning and every tool call with its arguments; /verbose on|off",
                  "_slash_verbose", True),
     SlashCommand("/mode", "Permission mode for this session; /mode guarded|trusted|read-only",
