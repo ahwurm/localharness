@@ -153,33 +153,50 @@ def test_several_models_without_a_question_take_the_first_or_the_named_one(flags
         assert "localharness init --endpoint http://localhost:11434 --model <name>" in flat, flat
 
 
-def test_the_quick_path_is_one_question(tmp_path, monkeypatch):
+def test_a_terminal_init_asks_no_settings_question(tmp_path, monkeypatch):
+    """D-38: the two defaults are not a question. A terminal run with a detected server asks
+    nothing at all (every prompt raises) and writes both defaults."""
     _detect(monkeypatch)
     _terminal(monkeypatch)
-    confirm = _answers(monkeypatch, True)
+    _silent(monkeypatch)
 
     result = _init(tmp_path)
 
     _exited(result, 0)
-    assert confirm.ask.call_count == 1
-    assert confirm.ask.call_args_list[0].args[0].strip().startswith("Keep the usual settings")
     cfg = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     assert "memory" not in cfg and cfg["org"]["permissions"].get("mode") != "read-only"
 
 
-def test_no_to_the_usual_settings_asks_the_two_posture_questions(tmp_path, monkeypatch):
+@pytest.mark.parametrize("starting", [True, False], ids=["starting", "init"])
+def test_the_receipt_row_names_the_two_defaults_and_how_to_turn_each_off(starting, tmp_path, monkeypatch):
+    _detect(monkeypatch)
+    _silent(monkeypatch)
+    buf = io.StringIO()
+    monkeypatch.setattr(init_cmd, "console", Console(file=buf, width=400))
+
+    init_cmd.core_setup(str(tmp_path), endpoint=None, model=None, force=False,
+                        interactive=False, starting=starting)
+
+    lines = buf.getvalue().splitlines()
+    configured = next(i for i, ln in enumerate(lines) if "LocalHarness configured at" in ln)
+    assert lines[configured + 1] == (
+        "The agent can edit files, run commands and remember across sessions \u2014 "
+        "org.permissions.mode: read-only or memory.enabled: false turns either off.")
+    assert init_cmd.RECEIPT_ROW == lines[configured + 1]
+
+
+def test_no_input_writes_the_same_file_as_a_terminal_run(tmp_path, monkeypatch):
     _detect(monkeypatch)
     _terminal(monkeypatch)
-    confirm = _answers(monkeypatch, False, False, True)  # usual: no; host tools: no; memory: yes
+    _silent(monkeypatch)
+    terminal = tmp_path / "terminal"
+    scripted = tmp_path / "scripted"
 
-    result = _init(tmp_path)
+    _exited(_init(terminal), 0)
+    _exited(_init(scripted, "--no-input"), 0)
 
-    _exited(result, 0)
-    asked = [c.args[0] for c in confirm.ask.call_args_list]
-    assert len(asked) == 3, asked
-    assert "write/edit files" in asked[1] and "persistent memory" in asked[2], asked
-    cfg = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
-    assert cfg["org"]["permissions"]["mode"] == "read-only" and "memory" not in cfg
+    assert (terminal / "config.yaml").read_text(encoding="utf-8") == (
+        scripted / "config.yaml").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("starting", [True, False], ids=["starting", "init"])

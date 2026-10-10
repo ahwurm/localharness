@@ -559,9 +559,8 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
         else:
             result, selected_model, server_config = picked
             cap = _probe_capabilities(result, selected_model)
-            host_tools_on, memory_on = _choose_toggles(interactive)
-            _write_config(config_path, result, selected_model, cap, server_config, host_tools_on,
-                          memory_on, force=force)
+            _write_config(config_path, result, selected_model, cap, server_config, True, True,
+                          force=force)
             _receipt(config_file, starting)
             outcome = SetupResult(config_file, True)
     if outcome.config_file is not None:  # fresh, kept, changed or saved unchecked
@@ -786,42 +785,6 @@ def _probe_capabilities(result: DetectorResult, selected_model: str) -> Capabili
     else:
         console.print("  [yellow]⚠[/yellow]  Tool calling: XML fallback (less reliable than native)")
     return cap
-
-
-def _choose_toggles(interactive: bool) -> tuple[bool, bool]:
-    """(host tools on, memory on). #151: the two most-asked posture choices. With nobody to ask,
-    today's defaults (both on) and no output; on a terminal ONE question keeps the usual settings,
-    and only a "no" asks the two. Both are ordinary layered keys (org.permissions.mode,
-    memory.enabled), so a project can flip either per-workspace in .localharness/config.yaml (the
-    scaffold template shows both)."""
-    if not interactive:
-        return True, True
-    console.print()
-    if Confirm.ask(
-        "  Keep the usual settings — the agent can change files and run commands, and remembers "
-        "things between sessions?",
-        default=True,
-    ):
-        return True, True
-    host_tools_on = Confirm.ask(
-        "  Allow the agent to change this machine — write/edit files, run shell commands?",
-        default=True,
-    )
-    memory_on = Confirm.ask(
-        "  Enable persistent memory — facts saved and recalled across sessions?",
-        default=True,
-    )
-    if not host_tools_on:
-        console.print(
-            "  [green]✓[/green] Read-only sessions (org.permissions.mode: read-only — "
-            "flip it there any time)"
-        )
-    if not memory_on:
-        console.print(
-            "  [green]✓[/green] Memory off (memory.enabled: false — existing memory "
-            "files stay on disk, untouched)"
-        )
-    return host_tools_on, memory_on
 
 
 def _served_window(result: DetectorResult, *, cfg_dir: Path | None = None, model: str | None = None,
@@ -1180,12 +1143,17 @@ def _write_change(config_path: Path, result: DetectorResult, selected_model: str
     return loader.user_overlay_path
 
 
+RECEIPT_ROW = ("The agent can edit files, run commands and remember across sessions \u2014 "
+               "org.permissions.mode: read-only or memory.enabled: false turns either off.")
+
+
 def _receipt(config_file: Path, starting: bool) -> None:
     """The last lines of a fresh setup. A first `start` goes straight on into the session, so it
     is not told to run `start`."""
     # escape(): the receipt runs AFTER config.yaml is on disk, so an unescaped markup-named config
     # dir crashed here and exited 1 — init reporting failure for a setup that had just succeeded.
     console.print("\n[green]✓[/green] " + escape(f"LocalHarness configured at {config_file}."), soft_wrap=True)
+    console.print(RECEIPT_ROW, markup=False, soft_wrap=True)  # D-38: the defaults, and the undo
     if not starting:
         console.print("  Run 'localharness start' to begin.")
         console.print(

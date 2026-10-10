@@ -137,7 +137,7 @@ def test_a_first_start_on_a_terminal_sets_up_the_core_and_goes_on_into_the_sessi
     sessions = _machine(tmp_path, monkeypatch)
     detect, _ = _server(monkeypatch)
     _terminal(monkeypatch)
-    confirm = _questions(monkeypatch, confirms=[True])  # "Keep the usual settings?" — the one question
+    confirm = _questions(monkeypatch, confirms=[])  # init asks no settings question (D-38)
 
     result = _start(tmp_path)
 
@@ -146,7 +146,7 @@ def test_a_first_start_on_a_terminal_sets_up_the_core_and_goes_on_into_the_sessi
     marks = [flat.find(s) for s in (LEAD, "LocalHarness configured at", init_cmd.PLUGINS_HEADER, "startup)")]
     assert -1 not in marks and marks == sorted(marks), flat
     assert "Run 'localharness start' to begin." not in flat, flat
-    assert confirm.ask.call_count == 1
+    assert confirm.ask.call_count == 0
     detect.assert_awaited_once()
     assert len(sessions) == 1
     assert ConfigLoader(config_dir=tmp_path).load_harness().provider.base_url == DISCARD
@@ -273,7 +273,7 @@ def test_a_first_start_collects_the_setup_s_open_clients_before_the_session_s_lo
     _server(monkeypatch)
     monkeypatch.setattr(init_cmd, "LLMClient", _OpenProbeClient)
     _terminal(monkeypatch)
-    _questions(monkeypatch, confirms=[True])
+    _questions(monkeypatch, confirms=[])
 
     _exited(_start(tmp_path))
     assert len(sessions) == 1
