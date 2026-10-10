@@ -1143,8 +1143,7 @@ def _write_change(config_path: Path, result: DetectorResult, selected_model: str
     return loader.user_overlay_path
 
 
-RECEIPT_ROW = ("The agent can edit files, run commands and remember across sessions \u2014 "
-               "org.permissions.mode: read-only or memory.enabled: false turns either off.")
+RECEIPT_ROW = "The agent can edit files, run commands and remember across sessions — org.permissions.mode: read-only or memory.enabled: false turns either off."  # noqa: E501
 
 
 def _receipt(config_file: Path, starting: bool) -> None:
