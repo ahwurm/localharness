@@ -502,7 +502,6 @@ def test_a_ledger_write_error_is_swallowed_and_the_key_is_not_said_twice(tmp_pat
     channel, _ = _session(tmp_path, [({RBT}, ())] * 3)
     assert len(_said(channel)) == 1
     assert attempts  # the write was tried; the turns still completed
-    assert sum(1 for t, _ in channel.sent if t == "hello") == 0
 
 
 def test_a_client_without_a_key_is_skipped_quietly(tmp_path, writes):

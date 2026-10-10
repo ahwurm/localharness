@@ -108,8 +108,11 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     # assignment + the property's own two reads on one line + 6 deliberately-untouched uses,
     # + 1 from phase 41's `_audit_base_dir` property, which reads `self._config_dir` as its
     # FALLBACK when the session has no workspace layer, + 1 from Phase 2's `_announce_window`,
-    # which opens the speed ledger under the session config dir. MEASURED at 11, not assumed.
-    assert text.count("self._config_dir") == 11
+    # which opens the speed ledger under the session config dir, + 4 from Phase 3's /effort
+    # (`persist_effort`'s overlay dir, `agents_with_effort`'s agent dir, and the rejected-key ledger
+    # opened by `_announce_rejected_effort_keys` and `_rebind_effort_ledger`): none starts or stops
+    # a server. MEASURED at 15, not assumed.
+    assert text.count("self._config_dir") == 15
     for raw in (
         "free_accelerator(self._active_heavy, ep.lifecycle, self._config_dir)",
         "strategy.stop(managed, self._config_dir)",
@@ -119,8 +122,10 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     # ...and the non-lifecycle writes are untouched: agent creation, endpoint + default-model
     # persistence keep handing the OVERLAY the session's config dir. Still 3 after phase 41: the
     # audit log moved to its own `audit_base_dir=` argument rather than re-pointing this one, and
-    # `self._server_config_dir` is still 7 because the GPU daemon did not move either.
-    assert text.count("config_dir=self._config_dir") == 3
+    # `self._server_config_dir` is still 7 because the GPU daemon did not move either. 4 after Phase 3:
+    # `/effort`'s `persist_effort` is a fourth overlay write and takes the session's config dir the
+    # same way `persist_default_model` does.
+    assert text.count("config_dir=self._config_dir") == 4
 
 
 def test_init_guided_setup_names_the_global_pin():
