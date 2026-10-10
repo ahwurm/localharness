@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
-from dataclasses import replace
+import socket
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -18,7 +20,8 @@ from rich.table import Table
 from rich.text import Text
 
 from localharness.cli.theme import entity, entity_text
-from localharness.cli.workspace import NO_INPUT_HELP
+from localharness.cli.workspace import (NO_INPUT_HELP, _key_file_port, _raw_settings, _uncovered,
+                                        _visible, _write_overlay_validated)
 from localharness.config.effort import EFFORT_UNENFORCED_LINE
 from localharness.core.private_files import touch_private
 from localharness.core.which import which_outside_cwd
@@ -235,6 +238,130 @@ def _read_session_key(harness: Any) -> str | None:
         return f"server.api_key_file {path}: {exc} — this session sends no key"
     harness.provider.api_key = SecretStr(key)
     return None
+
+
+# ------------------------------------------------------------------ what start senses before the decision
+
+PATH_BINARY_LINE = ("llama-server found on PATH at {path} — written to overrides.yaml as server.binary; "
+                    "nothing launches it until it is confirmed")
+PROBE_TIMEOUT_SECONDS = 0.5
+
+
+@dataclass(frozen=True)
+class SensedStart:
+    """What `start` learned before `decide_machine_trust` (D-08, D-16, D-17, D-20): whether this start
+    is about to launch the primary, the display-only annotations for the one question, the D-17 suffix
+    of an upgrade conversion (`converted`), the PATH binary this start wrote (`path_written`) and the
+    undo line of a `--host` that was not converted (`undo_line`). The last three beyond `path_written`
+    are filled by the `--host` conversion."""
+
+    launching: bool
+    annotations: dict = field(default_factory=dict)
+    converted: str | None = None
+    path_written: str | None = None
+    undo_line: str | None = None
+
+
+def _server_section(raw: dict) -> dict:
+    value = raw.get("server")
+    return value if isinstance(value, dict) else {}
+
+
+def _merged_server(cfg: dict, over: dict) -> dict:
+    from localharness.config.overlay import deep_merge
+
+    return deep_merge(_server_section(cfg), _server_section(over))
+
+
+def _write_path_binary(global_dir: Path, rec: dict | None, path_binary: str | None) -> str | None:
+    """D-20: a PATH-found `llama-server` for a declared-only primary (merged `runtime: llamacpp`, no
+    `binary` in either file, no remembered No for this path) is written to overrides.yaml as
+    `server.binary` BEFORE the machine question, so it is shown as an ordinary uncovered entry and
+    launched only on Yes. Never overwrites a binary. A machine with no record yet is never written to:
+    its first start adopts the disk unasked, and a binary the harness found must not be adopted that
+    way. Returns the path written, or None."""
+    from localharness.config import trust
+    from localharness.registry import set_value_in_dict
+
+    if not path_binary or rec is None:
+        return None
+    cfg, over = _raw_settings(global_dir)
+    merged = _merged_server(cfg, over)
+    if merged.get("runtime") != "llamacpp" or merged.get("binary"):
+        return None
+    if trust.offer_was_declined(trust.decline_key("<binary>", path_binary)):
+        return None
+    if not _write_overlay_validated(
+            global_dir, lambda d: set_value_in_dict(d, "server.binary", path_binary),
+            [("server.binary", None, path_binary)],
+            actor_detail="localharness start: llama-server found on PATH, written before the machine question"):
+        return None
+    err_console.print(PATH_BINARY_LINE.format(path=_visible(path_binary)), markup=False, soft_wrap=True)
+    return path_binary
+
+
+def _after_no_remove_path_binary(global_dir: Path, path: str) -> None:
+    """A terminal No on the PATH-found binary: its `server.binary` line leaves overrides.yaml, but only
+    while it still equals the path the harness wrote (a value someone changed stays), and the No is
+    remembered for that path so only a newly found path asks again."""
+    from localharness.config import trust
+
+    _, over = _raw_settings(global_dir)
+    if _server_section(over).get("binary") == path:
+        def mutate(overlay: dict) -> None:
+            section = overlay.get("server")
+            if isinstance(section, dict):
+                section.pop("binary", None)
+                if not section:
+                    del overlay["server"]
+
+        _write_overlay_validated(
+            global_dir, mutate, [("server.binary", path, None)],
+            actor_detail="localharness start: a No on the PATH-found llama-server, line removed")
+    trust.record_offer_decline(trust.decline_key("<binary>", path))
+
+
+def _sensed_launching(global_dir: Path, rec: dict | None) -> bool:
+    """D-08/D-27: is this start about to launch the primary? A live pidfile says a harness-launched
+    server is up (False, and no connect is made). With no pidfile, only a llama.cpp record whose
+    merged `bind_all` is true and uncovered needs to know, and asks ONE loopback connect (0.5 s): an
+    accepted connect means a server is serving (False); refused or timed out, True. Anything else is
+    True with no connect."""
+    from localharness.config import trust
+    from localharness.provider import server as managed_server
+
+    try:
+        if managed_server.server_pid(global_dir) is not None:
+            return False
+    except OSError:  # server_pid's liveness probe is POSIX-only; an unreadable pid path is "no pidfile"
+        pass
+    if rec is None:
+        return True
+    cfg, over = _raw_settings(global_dir)
+    merged = _merged_server(cfg, over)
+    if merged.get("runtime") != "llamacpp" or merged.get("bind_all") is not True:
+        return True
+    posture = next((e for e in trust._posture_entries({"config.yaml": cfg, "overrides.yaml": over})
+                    if e["name"] == "server.bind_all"), None)
+    if posture is None or posture["kind"] not in rec["kinds"] or not _uncovered(rec["entries"], [posture]):
+        return True
+    port = _key_file_port(global_dir, "server.bind_all")
+    try:
+        with contextlib.closing(socket.create_connection(("127.0.0.1", port), timeout=PROBE_TIMEOUT_SECONDS)):
+            return False
+    except OSError:
+        return True
+
+
+def _sense_before_trust(global_dir: Path, *, can_ask: bool, path_binary: str | None) -> SensedStart:
+    """Everything `start` senses, and the pre-question writes it makes, before `decide_machine_trust`:
+    the PATH-found binary (D-20) and whether this start is about to launch (D-08). Every overlay write
+    goes through `workspace._write_overlay_validated`."""
+    from localharness.config import trust
+
+    rec = trust.recorded_machine(global_dir)
+    path_written = _write_path_binary(global_dir, rec, path_binary)
+    return SensedStart(_sensed_launching(global_dir, rec), {}, None, path_written, None)
 
 
 async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launch_key: dict[str, str],
@@ -809,7 +936,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # Sensed once per start, before the machine-trust decision; this release uses it only in the
     # declared-only refusal text (D-09).
     path_llama_server = None if list_models else which_outside_cwd("llama-server")
-    machine_trust = MachineTrust() if list_models else decide_machine_trust(cfg_path, ask=can_ask)
+    # Then what the start can tell before it decides (D-08, D-16, D-20): is it about to launch, is a
+    # PATH binary to be shown, does a 0.17 `--host` need converting. Its writes are made here, before
+    # the one question, so the question shows them as ordinary uncovered entries.
+    sensed = SensedStart(True, {}) if list_models else _sense_before_trust(
+        cfg_path, can_ask=can_ask, path_binary=path_llama_server)
+    machine_trust = MachineTrust() if list_models else decide_machine_trust(cfg_path, ask=can_ask,
+        launching=sensed.launching, annotations=sensed.annotations)
+    if (sensed.path_written and can_ask
+            and ("launch", "server.binary") in machine_trust.withheld.get("overrides.yaml", ())):
+        _after_no_remove_path_binary(cfg_path, sensed.path_written)  # a terminal No on the PATH binary
     if machine_trust.line:
         err_console.print(machine_trust.line, markup=False, soft_wrap=True)
     loader = ConfigLoader(config_dir=cfg_path, local_config_dir=workspace,
