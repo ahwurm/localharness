@@ -437,6 +437,14 @@ _EMPTY_TURN_NOTICE = (
     "(finish_reason={finish_reason}). 'length' means the output token budget was spent, "
     "usually on hidden reasoning — raise the model's max output tokens or shorten the task."
 )
+# The exhausted-retry notice for the shape with no output cap to raise: finish_reason="length" there
+# can only mean the reply reached the served window, so it names the window and the lever (the
+# capped variant above keeps its text).
+_EMPTY_TURN_NOTICE_NO_CAP = (
+    "No answer was produced this turn: the model returned an empty reply twice "
+    "(finish_reason=length). The reply reached the served window, usually on hidden reasoning — "
+    "lower /effort or shorten the task."
+)
 # #152: NOT a member of _is_harness_nudge's exact-match set — it is a template (it names the
 # repeat count), and unlike the act-guard/self-check nudges it never asks for the CONFIRMED
 # sentinel, so it can never be half of a nudge->sentinel pair that wants stripping.
@@ -2013,8 +2021,37 @@ class AgentLoop:
                 # second empty reply ends the turn through the same honest-failure pathway
                 # the parse-retry exhaustion and the #152 guard use.
                 if not content:
+                    # No cap was sent and the reply was cut: it reached the served window, almost
+                    # always on hidden reasoning. Asking for a shorter reply is the wrong remedy;
+                    # the one retry is spent on the identical request with thinking off. Decided
+                    # BEFORE the cap-growing call below, which reports the same shape but changes nothing.
+                    no_cap_length = (
+                        finish_reason == "length"
+                        and self._no_cap_sent(request_cap)
+                        and self._llm_takes_disable_thinking
+                    )
                     if finish_reason == "length":
                         self._grow_output_cap(request_cap, usage, ctx_budget)
+                    if not session.empty_reprompt_used and no_cap_length:
+                        session.empty_reprompt_used = True
+                        self._thinking_off_next = True
+                        # The empty reply was already appended to the history above. Take it back
+                        # off so the re-send is the IDENTICAL request: a trailing empty assistant
+                        # message would make it a continuation of that message on servers that
+                        # prefill from a final assistant turn.
+                        last = session.messages[-1] if session.messages else None
+                        if (
+                            isinstance(last, dict)
+                            and last.get("role") == "assistant"
+                            and not last.get("content")
+                            and not last.get("tool_calls")
+                        ):
+                            session.messages.pop()
+                        log.warning(
+                            "Empty completion at the served window for %s — re-sending once with "
+                            "thinking off", self._config.name,
+                        )
+                        continue
                     if not session.empty_reprompt_used:
                         session.empty_reprompt_used = True
                         # This re-prompt already asks for an answer OR a tool call; spending
@@ -2033,6 +2070,8 @@ class AgentLoop:
                     )
                     session.terminated_reason = "error"
                     self._conversation = _strip_sentinel_exchanges(session.messages)
+                    if finish_reason == "length" and self._no_cap_sent(request_cap):
+                        return _EMPTY_TURN_NOTICE_NO_CAP
                     return _EMPTY_TURN_NOTICE.format(finish_reason=finish_reason or "unknown")
 
                 # 9a-bis. A FINAL answer cut at the output ceiling (text, no tool calls,
@@ -2581,6 +2620,13 @@ class AgentLoop:
             getattr(getattr(self._llm, "config", None), "max_tokens", None)
             or self._config.max_tokens
         )
+
+    def _no_cap_sent(self, request_cap: int | None) -> bool:
+        """True when this request carried no max_tokens at all: the per-request override is absent
+        AND nobody configured a cap — the same test the cap-growing method makes before reporting that
+        there is nothing to raise. (`request_cap` alone is None whenever the cap sent equals the
+        configured one, so it cannot answer this by itself.)"""
+        return request_cap is None and self._configured_output_cap() is None
 
     def _window_headroom(self, ctx_budget: Any) -> int | None:
         """Tokens left in the served window for THIS request's output, or None when unknown.

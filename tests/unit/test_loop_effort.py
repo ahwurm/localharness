@@ -538,3 +538,152 @@ async def test_the_degenerate_path_is_not_touched_by_the_cut_handler(bus, sessio
     assert "disable_thinking" not in llm.calls[1]
     assert sessions[0].reasoning_cut_used is False
     assert sessions[0].degenerate_reprompt_used is True
+
+
+# ---------------------------------------------------------------------------
+# The no-cap `length` retry: thinking off instead of the nudge (D-23)
+# ---------------------------------------------------------------------------
+
+
+def _empty(finish_reason: str = "length") -> tuple[Any, Any]:
+    return _answer("", finish_reason)
+
+
+def _nudges(messages: list[Any]) -> list[Any]:
+    from localharness.agent.loop import _EMPTY_REPLY_NUDGE
+
+    return [m for m in messages if isinstance(m, dict) and m.get("content") == _EMPTY_REPLY_NUDGE]
+
+
+async def test_an_empty_length_reply_with_no_cap_is_re_sent_with_thinking_off(bus, sessions):
+    llm = _Scripted([_empty(), _answer("Here it is.")])
+    summary = await _loop(llm, bus).run_turn("write the report")
+
+    assert summary == "Here it is."
+    assert len(llm.calls) == 2
+    assert "disable_thinking" not in llm.calls[0]
+    assert llm.calls[1]["disable_thinking"] is True
+    assert llm.sent[1] == llm.sent[0]
+    assert not _nudges(llm.sent[1])
+    assert sessions[0].empty_reprompt_used is True
+    assert sessions[0].act_nudge_used is False
+
+
+async def test_a_second_empty_length_reply_ends_the_turn_naming_the_window(bus, sessions):
+    from localharness.agent.loop import _EMPTY_TURN_NOTICE_NO_CAP
+    from localharness.core.events import TaskComplete
+
+    llm = _Scripted([_empty(), _empty()])
+    loop = _loop(llm, bus)
+    summary = await loop.run_turn("write the report")
+
+    assert summary == _EMPTY_TURN_NOTICE_NO_CAP
+    assert "served window" in summary and "/effort" in summary
+    assert "max output tokens" not in summary
+    assert "finish_reason=length" in summary
+    assert sessions[0].terminated_reason == "error"
+    assert not [e for e in bus.history(event_types=[TaskComplete]) if e.success]
+    assert len(llm.calls) == 2
+
+
+async def test_with_a_cap_sent_the_nudge_runs_exactly_as_before(bus, sessions):
+    llm = _Scripted([_empty(), _answer("ok")])
+    llm.config.max_tokens = 2048
+    summary = await _loop(llm, bus).run_turn("write the report")
+
+    assert summary == "ok"
+    assert len(_nudges(llm.sent[1])) == 1
+    assert all("disable_thinking" not in c for c in llm.calls)
+    assert sessions[0].act_nudge_used is True
+
+
+async def test_with_a_cap_the_second_empty_reply_keeps_the_old_notice_byte_for_byte(bus):
+    from localharness.agent.loop import _EMPTY_TURN_NOTICE
+
+    llm = _Scripted([_empty(), _empty()])
+    llm.config.max_tokens = 2048
+    summary = await _loop(llm, bus).run_turn("write the report")
+
+    assert summary == _EMPTY_TURN_NOTICE.format(finish_reason="length")
+    assert "raise the model's max output tokens" in summary
+
+
+async def test_an_agent_level_cap_counts_as_a_cap(bus):
+    from localharness.agent.loop import _EMPTY_TURN_NOTICE
+
+    llm = _Scripted([_empty(), _empty()])
+    summary = await _loop(llm, bus, config=_config(max_tokens=4096)).run_turn("write the report")
+    assert summary == _EMPTY_TURN_NOTICE.format(finish_reason="length")
+    assert all("disable_thinking" not in c for c in llm.calls)
+
+
+@pytest.mark.parametrize("capped", [False, True])
+async def test_an_empty_stop_reply_keeps_the_nudge(bus, sessions, capped):
+    from localharness.agent.loop import _EMPTY_TURN_NOTICE
+
+    llm = _Scripted([_empty("stop"), _answer("ok")])
+    if capped:
+        llm.config.max_tokens = 2048
+    assert await _loop(llm, bus).run_turn("write the report") == "ok"
+    assert len(_nudges(llm.sent[1])) == 1
+    assert all("disable_thinking" not in c for c in llm.calls)
+
+    llm = _Scripted([_empty("stop"), _empty("stop")])
+    if capped:
+        llm.config.max_tokens = 2048
+    summary = await _loop(llm, bus).run_turn("write the report")
+    assert summary == _EMPTY_TURN_NOTICE.format(finish_reason="stop")
+
+
+async def test_a_loop_with_no_effort_takes_the_thinking_off_retry_too(bus):
+    llm = _Scripted([_empty(), _answer("ok")])
+    loop = _loop(llm, bus)
+    assert loop.effective_effort is None
+    assert await loop.run_turn("write the report") == "ok"
+    assert llm.calls[1]["disable_thinking"] is True
+
+
+async def test_a_client_that_cannot_turn_thinking_off_gets_the_nudge(bus):
+    class NoOff(_Scripted):
+        async def stream_complete(self, messages, tools=None, on_token=None, max_tokens=None):
+            return await super().stream_complete(messages, tools, on_token)
+
+    llm = NoOff([_empty(), _answer("ok")])
+    loop = _loop(llm, bus)
+    assert loop._llm_takes_disable_thinking is False
+    assert await loop.run_turn("write the report") == "ok"
+    assert len(_nudges(llm.sent[1])) == 1
+    assert llm.calls == [{}, {}]
+
+
+async def test_the_retry_and_the_nudge_are_never_both_spent_in_one_turn(bus):
+    """Ordering: the no-cap length retry is chosen before the nudge branch. The single
+    empty_reprompt_used is spent on thinking-off, so the nudge never follows it."""
+    llm = _Scripted([_empty(), _empty("stop"), _answer("never reached")])
+    summary = await _loop(llm, bus).run_turn("write the report")
+    assert len(llm.calls) == 2
+    assert not _nudges(llm.sent[1])
+    assert "empty reply twice" in summary
+
+
+async def test_an_effort_off_loop_that_hits_the_window_still_ends_honestly(bus):
+    llm = _Scripted([_empty(), _empty()])
+    summary = await _loop(llm, bus, effort=("off", "session")).run_turn("write the report")
+    assert "served window" in summary
+    assert all(c.get("disable_thinking") is True for c in llm.calls)
+
+
+async def test_the_length_retry_flag_resets_for_the_next_turn(bus):
+    llm = _Scripted([_empty(), _answer("one"), _answer("two")])
+    loop = _loop(llm, bus)
+    assert await loop.run_turn("first") == "one"
+    assert await loop.run_turn("second") == "two"
+    assert "disable_thinking" not in llm.calls[2]
+
+
+async def test_a_final_answer_cut_at_the_ceiling_is_untouched(bus):
+    """9a-bis: a non-empty reply cut at the window ships as before; no thinking-off retry."""
+    llm = _Scripted([_answer("The draft begins and then", "length")])
+    summary = await _loop(llm, bus).run_turn("write the report")
+    assert summary == "The draft begins and then"
+    assert len(llm.calls) == 1
