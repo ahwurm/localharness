@@ -47,6 +47,30 @@ def _stub_token_counter(monkeypatch):
     yield _StubCounter
     _StubCounter.mode_override = None
 
+@pytest.fixture(autouse=True)
+def _route_the_window_probe(monkeypatch):
+    """Autouse: doctor reads the served window through `probe_window`, which does its own
+    `import httpx` in agent/context.py and so never sees `@patch("localharness.cli.doctor_cmd.httpx")`
+    (that patch replaces only doctor_cmd's module attribute). Without this the probe would make a
+    real HTTP call. `httpx.get` becomes a router: when doctor_cmd's `httpx` is patched the call goes
+    to that mock (so each test's `mock_httpx` bodies keep answering the wire shape unchanged), else
+    to the real `get` captured here (no recursion). The Ollama / LM Studio trained lookup is
+    stubbed so it never reads this box's model folders."""
+    import httpx as _real_httpx
+
+    import localharness.agent.gguf_tokenizer as _tok
+    import localharness.cli.doctor_cmd as _doctor
+
+    real_get = _real_httpx.get
+
+    def _router(*args, **kwargs):
+        patched = _doctor.httpx
+        return (patched.get if patched is not _real_httpx else real_get)(*args, **kwargs)
+
+    monkeypatch.setattr(_real_httpx, "get", _router)
+    monkeypatch.setattr(_tok, "resolve_gguf_path", lambda *a, **kw: None)
+
+
 _VALID_CONFIG = """\
 version: "1"
 provider:
@@ -389,7 +413,10 @@ def test_doctor_llamacpp_warns_on_parallel_slot_split(mock_httpx, tmp_path):
             return _models_resp(
                 {"total_slots": 4, "default_generation_settings": {"n_ctx": 8192}}
             )
-        return _models_resp({"data": [{"id": "m"}]})
+        # The server's whole window (32k) is on /v1/models, as llama-server reports it. The probe
+        # falls back to /props' per-slot 8192 only when /v1/models names none, and a served window
+        # of 8192 would turn this advisory into a budget failure.
+        return _models_resp({"data": [{"id": "m", "meta": {"n_ctx": 32_768}}]})
 
     mock_httpx.get.side_effect = _get
     tok = MagicMock()

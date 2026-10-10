@@ -95,6 +95,44 @@ def _strip_v1(base_url: str) -> str:
     return root
 
 
+def _n(value: int | None) -> str:
+    """A window figure with thousands separators, or an em dash for one that is not known."""
+    return f"{value:,}" if isinstance(value, int) else "\u2014"
+
+
+def _doctor_fit(
+    harness: HarnessConfig, served: int | None, trained: int | None,
+) -> tuple[int | None, int | None]:
+    """`(fits, trained)` for doctor's Window row. `fits` is the attached form of the fit (what the
+    free memory adds to the window the running server already serves) and only for a llama.cpp
+    `server:` record whose GGUF header can be read; anything else is None, never a guess. `trained`
+    falls back to the header's `context_length` when the probe did not report it. Reads one header
+    and the memory probe; writes nothing (doctor never records the ledger, D-09, D-26)."""
+    server = harness.server
+    if server is None or server.runtime != "llamacpp" or not server.model:
+        return None, trained
+    from localharness.agent.gguf_header import read_header
+    from localharness.provider import autosense as _auto
+
+    try:
+        header = read_header(os.path.expanduser(server.model), _auto.FIT_KEYS)
+    except (OSError, ValueError):  # GgufHeaderError is a ValueError; NotRegularFile an OSError
+        header = {}
+    trained = trained or header.get("context_length")
+    if not served:
+        return None, trained
+    extra = list(server.extra_args or [])
+    block_count = header.get("block_count")
+    offload = _auto.offload_kind(extra, block_count) if block_count else "unknown"
+    mem = _auto.free_memory(harness.autosense)
+    fits = _auto.fit(
+        header, mem.free_bytes if mem else None, harness.autosense, served,
+        cache_type_k=server.cache_type_k, cache_type_v=server.cache_type_v,
+        weights=_auto.weights_bytes(server.model, server.mmproj), offload=offload,
+        runtime="llamacpp")
+    return fits, trained
+
+
 def _print_overridden_keys(cfg_path: Path, workspace: Path, loader) -> None:
     """Name the winning layer for every key this workspace actually CHANGES.
 
@@ -574,46 +612,24 @@ def doctor(
                 except Exception:
                     continue
 
-            served = None
-            try:
-                entries = data.get("data", []) if isinstance(data, dict) else []
-                for m in entries:
-                    if m.get("id") == budget_model or len(entries) == 1:
-                        # #9: llama.cpp reports its served window as meta.n_ctx (no max_model_len).
-                        served = (
-                            m.get("max_model_len")
-                            or m.get("context_length")
-                            or (m.get("meta") or {}).get("n_ctx")
-                        )
-                        break
-            except Exception:
-                served = None
-
-            # #13: LM Studio serves its window at /api/v0/models (not /v1/models). Query it the
-            # same way `init` fits the budget: the loaded model's loaded_context_length, else the
-            # largest max_context_length. Keeps doctor's reconciliation from false-reporting
-            # 'max_model_len not reported' on a healthy LM Studio.
-            if served is None and harness.provider.provider_type == "lmstudio":
-                try:
-                    lm = httpx.get(f"{root}/api/v0/models", timeout=5.0).json()
-                    lm_entries = [e for e in (lm.get("data") or []) if isinstance(e, dict)]
-                    loaded = next(
-                        (e for e in lm_entries
-                         if e.get("state") == "loaded" and e.get("loaded_context_length")),
-                        None,
-                    )
-                    if loaded:
-                        served = int(loaded["loaded_context_length"])
-                    else:
-                        caps = [e["max_context_length"] for e in lm_entries if e.get("max_context_length")]
-                        served = max(caps) if caps else None
-                except Exception:
-                    served = None
+            # ONE probe owns the served and trained window for every runtime (D-03, D-26): the
+            # /v1/models read (with its llama.cpp-shaped meta fallback, D-39), Ollama's /api/ps and
+            # LM Studio's native model list all live in `probe_window`, so doctor and `start` read a
+            # window the same way. The key rides only when the launched server requires it.
+            from localharness.agent.context import probe_window, response_reserve
+            _key = (required_key_kwargs(harness.server, harness.provider.api_key)
+                    if harness.server is not None else {})
+            probe = probe_window(
+                harness.provider.base_url, budget_model, harness.provider.provider_type, **_key)
+            served, trained = probe.served, probe.trained
+            fits, trained = _doctor_fit(harness, served, trained)
+            console.print(
+                f"{_INFO}  Window: served {_n(served)} \u00b7 trained {_n(trained)} \u00b7 fits {_n(fits)}")
 
             # The effective budget (#137) was resolved above, before the served-window lookup,
             # so both halves of this check speak about the SAME model.
             if served and cfg_ctx:
-                reserve = 4_096
+                reserve = response_reserve(served)
                 # Name the value actually checked — a pinned number and the scalar are different
                 # settings, and the fix for each lives in a different place.
                 attr = f" (pinned for {pinned_for})" if pinned_for else ""
@@ -622,7 +638,6 @@ def doctor(
                     # served window for the session (#127) — and the window it fits to is the
                     # served window itself, not served-minus-reserve (#145). Doctor says what
                     # start will do; a different number here was a stale prediction.
-                    from localharness.agent.context import response_reserve
                     from localharness.cli.start_cmd import MIN_CONFIGURABLE_CONTEXT_TOKENS
                     from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
                     auto_fit = (cfg_ctx == DEFAULT_MAX_CONTEXT_TOKENS
@@ -642,7 +657,7 @@ def doctor(
                             f"or raise the window at the server."
                         )
                         failures.append("context-budget-too-high")
-                elif cfg_ctx < (served - reserve) * 0.75:
+                elif cfg_ctx < (served - reserve) * (1 - harness.autosense.notify_ratio):
                     fix = (
                         f"Raise context.model_context_overrides['{pinned_for}']"
                         if pinned_for
@@ -650,7 +665,7 @@ def doctor(
                     )
                     console.print(
                         f"{_FAIL} Context budget {cfg_ctx:,}{attr} is far BELOW served window "
-                        f"{served:,} — wasting >25% of the window. {fix} "
+                        f"{served:,} — wasting more than {harness.autosense.notify_ratio:.0%} of the window. {fix} "
                         f"(e.g. {served - reserve:,})."
                     )
                     failures.append("context-budget-too-low")
