@@ -927,9 +927,13 @@ class AgentLoop:
         guardrails_path: Path | None = None,
         memory_slot: Any = None,  # plugins.slot.MemorySlot
         task_context: TaskContext | TaskState | None = None,
+        template_margin_ratio: float | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
+        # Share of the window held back for chat-template overhead (autosense.template_margin_ratio);
+        # None keeps 1/64, the number this loop always used (_window_headroom).
+        self._template_margin_ratio = template_margin_ratio
         self._bus = bus
         self._ctx = context_manager
         self._task_context = task_context
@@ -2443,8 +2447,9 @@ class AgentLoop:
         prompt = the larger of the counter's estimate for the request just built and the exact
         prompt_tokens the server reported one request ago (a lower bound: history only grows
         between requests unless compaction ran, in which case the stale count over-estimates and
-        the cap comes out smaller — the safe direction). A window/64 margin absorbs chat-template
-        overhead the estimate cannot see (2,048 on a 131K window, 128 on 8K)."""
+        the cap comes out smaller — the safe direction). A margin of `autosense.template_margin_ratio`
+        of the window (default 1/64: 2,048 on a 131K window, 128 on 8K) absorbs chat-template
+        overhead the estimate cannot see."""
         window = getattr(self._ctx, "max_context_tokens", None)
         if not window or window <= 0:
             return None
@@ -2454,7 +2459,8 @@ class AgentLoop:
                 getattr(ctx_budget, "tool_schema_tokens", 0) or 0
             )
         prompt = max(estimate, self._last_prompt_tokens or 0)
-        return window - prompt - max(1, window // 64)
+        ratio = self._template_margin_ratio if self._template_margin_ratio is not None else 1 / 64
+        return window - prompt - max(1, int(window * ratio))
 
     def _request_output_cap(self, ctx_budget: Any) -> int | None:
         """The max_tokens THIS request should carry, or None to leave the client's cap alone.

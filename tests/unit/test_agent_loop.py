@@ -321,7 +321,7 @@ from localharness.core.events import TurnStarted, TurnCompleted, TurnFailed, Act
 
 
 def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_registry=None,
-                     session_id=None, context_manager=None):
+                     session_id=None, context_manager=None, **kw):
     """Helper to construct an AgentLoop with mock dependencies."""
     from localharness.config.models import AgentConfig
     # Unattended by default: these tests drive fake registries that expose no tool schema, so
@@ -344,6 +344,7 @@ def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_
         tool_registry=tool_registry,
         permission_evaluator=perm,
         **extra,
+        **kw,
     )
 
 
@@ -2749,6 +2750,36 @@ async def test_cap_growth_is_bounded_by_the_window_headroom(mock_llm_client, bus
     fitted = loop._llm.calls[1]["max_tokens"]
     assert fitted == 12_288 - 9_000 - (12_288 // 64)  # window - exact prompt - margin
     assert 9_000 + fitted <= 12_288
+
+
+@pytest.mark.asyncio
+async def test_window_headroom_follows_the_template_margin_ratio(mock_llm_client, bus):
+    """D-28: the template margin is autosense.template_margin_ratio of the window."""
+    Response, Usage = mock_llm_client.Response, mock_llm_client.Usage
+    ctx = ContextManager(max_context_tokens=12_288)
+    responses = [
+        Response(content="", finish_reason="length",
+                 usage=Usage(prompt_tokens=9_000, completion_tokens=2_000, total_tokens=11_000)),
+        Response(content="Short answer.", finish_reason="stop"),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, config=_capped_config(),
+                            context_manager=ctx, template_margin_ratio=0.05)
+    assert await loop.run_turn("write the report") == "Short answer."
+    assert loop._llm.calls[1]["max_tokens"] == 12_288 - 9_000 - int(12_288 * 0.05)
+
+
+@pytest.mark.parametrize("window", [1, 63, 64, 1000, 8192, 131072, 262144])
+def test_default_margin_is_identical_to_window_div_64(window):
+    """D-28: 1/64 as a ratio reproduces the hard-coded `window // 64` margin for every window."""
+    assert max(1, int(window * (1 / 64))) == max(1, window // 64)
+
+
+def test_a_loop_without_a_ratio_uses_one_sixty_fourth(mock_llm_client, bus):
+    ctx = ContextManager(max_context_tokens=131_072)
+    loop = _make_agent_loop(mock_llm_client, [], bus, context_manager=ctx)
+    assert loop._window_headroom(None) == 131_072 - 2_048
+    loop = _make_agent_loop(mock_llm_client, [], bus, context_manager=ctx, template_margin_ratio=0.5)
+    assert loop._window_headroom(None) == 131_072 - 65_536
 
 
 @pytest.mark.asyncio
