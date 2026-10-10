@@ -357,6 +357,23 @@ async def persist_active_endpoint(
     return None
 
 
+def clear_active_endpoint(harness: Any, *, config_dir: Any = None) -> None:
+    """Drop the persisted cross-endpoint selection, so the next ``start`` and this process are back
+    on the primary (D-58). Touches ONLY the ``active_endpoint`` key of the GLOBAL overlay, the same
+    layer ``persist_active_endpoint`` writes (one physical GPU daemon, so never a workspace layer);
+    an ``agent:`` slice and every other key stay as they were. Nothing is written when the overlay
+    holds no ``active_endpoint`` (the harness is left as it was). Same crash-safe contract: validate the merged config before
+    ``atomic_write_overlay``. Synchronous, it awaits nothing."""
+    overlay_path = _resolve_user_overlay_path(global_config_dir(config_dir))
+    existing = load_overlay(overlay_path)
+    if "active_endpoint" not in existing:
+        return
+    new_overlay = {k: v for k, v in existing.items() if k != "active_endpoint"}
+    _validated(harness, {k: v for k, v in new_overlay.items() if k != _AGENT_KEY})
+    atomic_write_overlay(overlay_path, new_overlay)
+    harness.active_endpoint = None
+
+
 async def persist_effort(
     harness: Any,
     level: str,
