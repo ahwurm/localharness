@@ -20,9 +20,11 @@ from localharness.agent.gguf_header import (
     DISCOVERY_MAX_ENTRIES,
     DISCOVERY_MAX_FILES,
     DiscoveredModel,
+    GgufHeaderError,
     discover,
     preset_name,
     rank_models,
+    served_model,
     unique_preset_name,
     walk_ggufs,
 )
@@ -337,3 +339,216 @@ def test_unique_preset_name_appends_the_first_free_counter():
     assert unique_preset_name("x", {"x", "x-2"}) == "x-3"
     assert unique_preset_name("x", set()) == "x"
     assert unique_preset_name("x", {"y"}) == "x"
+
+
+# ---- the walk: symlinks, special files and caps (D-02, D-51; T-5-06..08) -----------------------------
+
+def names(paths, root: Path) -> list[str]:
+    return [str(p.relative_to(root)) for p in paths]
+
+
+def test_the_walk_lists_regular_gguf_files_of_any_case_in_name_order(tmp_path):
+    root = tmp_path / "models"
+    for rel in ("b/z.gguf", "a.GGUF", "a2.txt", "b/y.Gguf", "c/d/e.gguf"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(b"")
+    assert names(walk_ggufs([root]), root.resolve()) == ["a.GGUF", "b/y.Gguf", "b/z.gguf", "c/d/e.gguf"]
+
+
+def test_a_missing_root_is_skipped_and_two_names_for_one_root_are_walked_once(tmp_path):
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "a.gguf").write_bytes(b"")
+    alias = tmp_path / "alias"
+    alias.symlink_to(root)
+    assert len(walk_ggufs([tmp_path / "nope", root, alias, str(root) + "/../models"])) == 1
+
+
+def test_a_nested_root_does_not_list_a_file_twice(tmp_path):
+    root = tmp_path / "models"
+    (root / "inner").mkdir(parents=True)
+    (root / "inner" / "a.gguf").write_bytes(b"")
+    assert len(walk_ggufs([root, root / "inner"])) == 1
+
+
+def test_the_root_is_user_expanded(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "a.gguf").write_bytes(b"")
+    assert len(walk_ggufs(["~/models"])) == 1
+
+
+def test_a_symlinked_directory_is_never_descended(tmp_path):
+    one, other = tmp_path / "one", tmp_path / "other"
+    other.mkdir()
+    (other / "hidden.gguf").write_bytes(b"")
+    one.mkdir()
+    (one / "linkdir").symlink_to(other, target_is_directory=True)
+    (one / "plain.gguf").write_bytes(b"")
+    assert names(walk_ggufs([one]), one.resolve()) == ["plain.gguf"]
+
+
+def test_a_symlinked_gguf_inside_a_root_is_a_candidate_under_the_symlink_path(tmp_path):
+    root = tmp_path / "hub"
+    (root / "blobs").mkdir(parents=True)
+    (root / "snapshots" / "c").mkdir(parents=True)
+    (root / "blobs" / "abc").write_bytes(b"")
+    link = root / "snapshots" / "c" / "model.gguf"
+    link.symlink_to("../../blobs/abc")
+    assert walk_ggufs([root]) == [Path(os.path.realpath(root)) / "snapshots" / "c" / "model.gguf"]
+
+
+def test_a_symlinked_gguf_pointing_outside_every_root_is_not_a_candidate(tmp_path):
+    root, outside = tmp_path / "models", tmp_path / "elsewhere"
+    root.mkdir()
+    outside.mkdir()
+    (outside / "real.gguf").write_bytes(b"")
+    (root / "x.gguf").symlink_to(outside / "real.gguf")
+    (root / "dangling.gguf").symlink_to(outside / "missing.gguf")
+    assert walk_ggufs([root]) == []
+
+
+def test_a_symlink_into_a_sibling_root_is_a_candidate(tmp_path):
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    (two / "real.gguf").write_bytes(b"")
+    (one / "link.gguf").symlink_to(two / "real.gguf")
+    assert names(walk_ggufs([one, two]), tmp_path.resolve()) == ["one/link.gguf", "two/real.gguf"]
+
+
+def test_a_fifo_named_gguf_is_never_listed_and_never_blocks(tmp_path):
+    root = tmp_path / "models"
+    root.mkdir()
+    os.mkfifo(root / "trap.gguf")
+    signal.alarm(5)
+    try:
+        assert walk_ggufs([root]) == []
+    finally:
+        signal.alarm(0)
+
+
+def test_a_symlink_to_a_fifo_inside_the_root_reaches_discover_and_is_skipped_without_blocking(tmp_path):
+    root = tmp_path / "models"
+    root.mkdir()
+    os.mkfifo(root / "pipe")
+    (root / "trap.gguf").symlink_to(root / "pipe")
+    model_file(root / "good.gguf")
+    signal.alarm(5)
+    try:
+        listed = walk_ggufs([root])
+        found = discover(listed)
+    finally:
+        signal.alarm(0)
+    assert any(p.name == "trap.gguf" for p in listed)
+    assert [m.name for m in found.models] == ["good"]
+
+
+def test_a_tree_deeper_than_max_depth_yields_nothing_below_it(tmp_path):
+    root = tmp_path / "models"
+    deep = root / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    for rel in ("top.gguf", "a/one.gguf", "a/b/two.gguf", "a/b/c/three.gguf"):
+        (root / rel).write_bytes(b"")
+    assert names(walk_ggufs([root], max_depth=2), root.resolve()) == ["a/b/two.gguf", "a/one.gguf", "top.gguf"]
+    assert names(walk_ggufs([root], max_depth=0), root.resolve()) == ["top.gguf"]
+    assert len(walk_ggufs([root])) == 4  # the default depth of six reaches all of them
+
+
+def test_max_files_keeps_what_was_found(tmp_path):
+    root = tmp_path / "models"
+    root.mkdir()
+    for n in range(5):
+        (root / f"m{n}.gguf").write_bytes(b"")
+    assert names(walk_ggufs([root], max_files=2), root.resolve()) == ["m0.gguf", "m1.gguf"]
+
+
+def test_max_entries_stops_the_walk_keeping_what_was_found(tmp_path):
+    root = tmp_path / "models"
+    root.mkdir()
+    for n in range(6):
+        (root / f"m{n}.gguf").write_bytes(b"")
+    assert names(walk_ggufs([root], max_entries=3), root.resolve()) == ["m0.gguf", "m1.gguf", "m2.gguf"]
+    assert names(walk_ggufs([root], max_entries=0), root.resolve()) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_an_unreadable_directory_is_skipped_silently(tmp_path):
+    root = tmp_path / "models"
+    (root / "locked").mkdir(parents=True)
+    (root / "locked" / "hidden.gguf").write_bytes(b"")
+    (root / "ok.gguf").write_bytes(b"")
+    (root / "locked").chmod(0)
+    try:
+        assert names(walk_ggufs([root]), root.resolve()) == ["ok.gguf"]
+    finally:
+        (root / "locked").chmod(0o700)
+
+
+def test_the_stores_resolve_gguf_path_knows_are_not_walked(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for rel in (".lmstudio/models/pub/repo/lm.gguf", ".ollama/models/blobs/ol.gguf"):
+        (tmp_path / rel).parent.mkdir(parents=True)
+        (tmp_path / rel).write_bytes(b"")
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "mine.gguf").write_bytes(b"")
+    assert [p.name for p in walk_ggufs(["~/models"])] == ["mine.gguf"]
+
+
+# ---- served_model: the mapped path the import types (D-52) -------------------------------------------
+
+def fake_reader(table: dict[str, object]):
+    calls: list[str] = []
+
+    def read(path, want):
+        calls.append(os.fspath(path))
+        value = table.get(os.fspath(path), GgufHeaderError("bad magic"))
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    read.calls = calls
+    return read
+
+
+def test_served_model_returns_a_blob_that_types_as_a_model():
+    read = fake_reader({"/x/blobs/abc": {"type": "model", "architecture": "llama"}})
+    assert served_model(["/x/blobs/abc"], read=read) == "/x/blobs/abc"
+
+
+def test_served_model_rewrites_a_shard_name_to_its_first_shard():
+    read = fake_reader({"/x/m-00001-of-00002.gguf": {"architecture": "llama", "split.no": 0}})
+    assert served_model(["/x/m-00002-of-00002.gguf"], read=read) == "/x/m-00001-of-00002.gguf"
+    assert read.calls == ["/x/m-00001-of-00002.gguf"]
+
+
+@pytest.mark.parametrize("header", [
+    {"type": "mmproj", "architecture": "clip"},
+    {"architecture": "clip"},
+    {"type": "adapter", "architecture": "llama"},
+    {"type": "model", "architecture": "llama", "split.no": 1},
+    GgufHeaderError("bad magic"),
+    OSError("gone"),
+])
+def test_served_model_skips_what_is_not_the_served_model(header):
+    read = fake_reader({"/x/first.gguf": header, "/x/second.gguf": {"architecture": "llama"}})
+    assert served_model(["/x/first.gguf", "/x/second.gguf"], read=read) == "/x/second.gguf"
+
+
+def test_served_model_stops_at_the_first_qualifying_path_and_none_when_nothing_qualifies():
+    read = fake_reader({"/x/a.gguf": {"architecture": "llama"}, "/x/b.gguf": {"architecture": "llama"}})
+    assert served_model(["/x/a.gguf", "/x/b.gguf"], read=read) == "/x/a.gguf"
+    assert read.calls == ["/x/a.gguf"]
+    assert served_model([], read=read) is None
+    assert served_model(["/x/nope"], read=read) is None
+
+
+def test_served_model_with_the_real_reader_refuses_a_non_gguf_and_a_fifo(tmp_path):
+    (tmp_path / "text").write_text("hello")
+    os.mkfifo(tmp_path / "pipe")
+    real = model_file(tmp_path / "blobs" / "abc")
+    signal.alarm(5)
+    try:
+        assert served_model([tmp_path / "text", tmp_path / "pipe", real]) == str(real)
+    finally:
+        signal.alarm(0)

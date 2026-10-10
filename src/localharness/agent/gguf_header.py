@@ -435,3 +435,28 @@ def rank_models(models: Iterable[DiscoveredModel], *, unit_model: str | None,
                 -m.mtime, str(m.path))
 
     return sorted(models, key=key)
+
+
+_SHARD_FILE = re.compile(r"^(?P<head>.*)-\d{5}(?P<of>-of-\d{5}\.gguf)$", re.IGNORECASE)
+
+
+def served_model(paths: Iterable[str | os.PathLike[str]],
+                 read: Callable[..., Mapping[str, Any]] = read_header) -> str | None:
+    """D-52: the first of `paths` that types as a model, or None. A model is a GGUF (the reader checks
+    the magic) whose `general.type` is absent or `model`, whose architecture is not `clip` and whose
+    `split.no` is absent or 0. A shard-pattern name is read as its `-00001-of-` sibling and that is the
+    path returned; a header the reader refuses skips the candidate. The import (Plan 07) types
+    `procfs.ProcRecord.mapped_ggufs` with it; `procfs` itself parses no GGUF."""
+    for raw in paths:
+        path = os.fspath(raw)
+        shard = _SHARD_FILE.match(os.path.basename(path))
+        if shard:
+            path = os.path.join(os.path.dirname(path), f"{shard['head']}-00001{shard['of']}")
+        try:
+            header = read(path, {"type", "architecture", "split.no"})
+        except (GgufHeaderError, OSError):
+            continue
+        if (header.get("type") in (None, "model") and header.get("architecture") != "clip"
+                and header.get("split.no") in (None, 0)):
+            return path
+    return None
