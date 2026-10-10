@@ -95,11 +95,6 @@ def _strip_v1(base_url: str) -> str:
     return root
 
 
-def _n(value: int | None) -> str:
-    """A window figure with thousands separators, or an em dash for one that is not known."""
-    return f"{value:,}" if isinstance(value, int) else "\u2014"
-
-
 def _doctor_fit(
     harness: HarnessConfig, served: int | None, trained: int | None,
 ) -> tuple[int | None, int | None]:
@@ -603,6 +598,7 @@ def doctor(
             # LM Studio's native model list all live in `probe_window`, so doctor and `start` read a
             # window the same way. The key rides only when the launched server requires it.
             from localharness.agent.context import probe_window, response_reserve
+            from localharness.provider.autosense import fmt_count
             _key = (required_key_kwargs(harness.server, harness.provider.api_key)
                     if harness.server is not None else {})
             probe = probe_window(
@@ -610,7 +606,7 @@ def doctor(
             served, trained = probe.served, probe.trained
             fits, trained = _doctor_fit(harness, served, trained)
             console.print(
-                f"{_INFO}  Window: served {_n(served)} \u00b7 trained {_n(trained)} \u00b7 fits {_n(fits)}")
+                f"{_INFO}  Window: served {fmt_count(served)} \u00b7 trained {fmt_count(trained)} \u00b7 fits {fmt_count(fits)}")
 
             # The effective budget (#137) was resolved above, before the served-window lookup,
             # so both halves of this check speak about the SAME model.

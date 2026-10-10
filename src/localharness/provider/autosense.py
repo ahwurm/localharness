@@ -322,8 +322,9 @@ def gib(n: float) -> str:
     return f"{n / 2**30:.1f}"
 
 
-def _n(value: int | None) -> str:
-    return f"{value:,}" if value is not None else "—"
+def fmt_count(value: int | None) -> str:
+    """A window figure with thousands separators, or an em dash for one that is not known."""
+    return f"{value:,}" if isinstance(value, int) and not isinstance(value, bool) else "—"
 
 
 _UNDO = {
@@ -346,13 +347,13 @@ def window_lines(report: WindowReport, ratios: Any, undo: str | None = None) -> 
     r = report
     if r.runtime in ("ollama", "lmstudio"):
         extra = " · Ollama decides the window" if r.runtime == "ollama" else ""
-        return [f"window: served {_n(r.served)} · trained {_n(r.trained)}{extra}"]
+        return [f"window: served {fmt_count(r.served)} · trained {fmt_count(r.trained)}{extra}"]
     if r.mode == "fit-by-server":
         return [FIT_BY_SERVER_LINE + (f" · served {r.served:,}" if r.served and r.verified else "")]
     if r.attached and (r.fits is None or r.served is None
                        or abs(r.fits - r.served) <= ratios.notify_ratio * r.served):
         return []
-    line = f"window: served {_n(r.served)} · trained {_n(r.trained)} · fits {_n(r.fits)}"
+    line = f"window: served {fmt_count(r.served)} · trained {fmt_count(r.trained)} · fits {fmt_count(r.fits)}"
     if r.free_bytes is not None and r.total_bytes is not None and r.weights_bytes is not None:
         beside = " beside the served model" if r.attached else ""
         line += f" (free {gib(r.free_bytes)} GiB of {gib(r.total_bytes)}{beside}; weights {gib(r.weights_bytes)} GiB)"
