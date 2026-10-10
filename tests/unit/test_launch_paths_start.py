@@ -18,6 +18,7 @@ from localharness.cli import start_cmd
 from localharness.cli.start_cmd import _start_async, _start_managed_server
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import autosense, server
+from tests.unit.launch_support import popen  # noqa: F401
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries  # noqa: F401
 
 URL = "http://127.0.0.1:8080/v1"
@@ -413,3 +414,127 @@ async def test_a_server_already_loading_collects_no_endpoint_and_never_activates
     out: list = []
     assert await _start_managed_server(_llama(), tmp_path, URL, {}, endpoint_out=out) is None
     assert out == []
+
+
+# ------------------------------------------------------------------------------- the key file (D-21)
+
+SENTINEL = "KEY-SENTINEL-7f3a"
+NO_KEY_LINE = "this session sends no key"
+
+
+def _file_keyed(key_path, **over) -> dict:
+    return {"runtime": "llamacpp", "binary": "/x/llama-server", "model": "/x/m.gguf", "port": 8080,
+            "require_api_key": True, "api_key_file": str(key_path), "bind_all": True, **over}
+
+
+def _covered(monkeypatch) -> None:
+    """The machine record covers the entry: the trust decision is not what these tests are about."""
+    from localharness.cli import workspace
+    monkeypatch.setattr(workspace, "decide_machine_trust", lambda *a, **k: workspace.MachineTrust())
+
+
+def test_the_key_file_is_read_after_load_harness_and_before_the_launch_key_is_built():
+    text = open(start_cmd.__file__, encoding="utf-8").read()
+    loaded = text.index("harness = loader.load_harness()")
+    read = text.index("_read_session_key(harness)", loaded)
+    built = text.index("launch_key = required_key_kwargs(harness.server", loaded)
+    assert text.index("decide_machine_trust(cfg_path") < loaded < read < built
+
+
+async def test_a_valid_key_file_keys_the_launch_and_rides_argv(tmp_path, monkeypatch):
+    key = tmp_path / "key"
+    key.write_text(SENTINEL + "\n", encoding="utf-8")
+    seen = _boot(tmp_path, monkeypatch, server_block=_file_keyed(key))
+    _covered(monkeypatch)
+    assert await _drive(tmp_path) == 1  # the stubbed probe fails after the launch
+    (cmd, kw), = seen.started
+    assert kw["api_key"] == SENTINEL
+    assert cmd[cmd.index("--api-key-file") + 1] == str(key)
+    assert "0.0.0.0" in cmd and cmd[-2:] != ["--host", "127.0.0.1"]
+    assert not [line for line in _err_text(seen.err) if NO_KEY_LINE in line]
+
+
+async def test_a_crlf_key_file_is_one_line_a_keyless_session_and_a_loopback_launch(tmp_path, monkeypatch):
+    key = tmp_path / "key"
+    key.write_bytes(SENTINEL.encode() + b"\r\n")
+    seen = _boot(tmp_path, monkeypatch, server_block=_file_keyed(key))
+    _covered(monkeypatch)
+    assert await _drive(tmp_path) == 1
+    (cmd, kw), = seen.started
+    assert "api_key" not in kw
+    assert "--api-key-file" not in cmd and cmd[-2:] == ["--host", "127.0.0.1"]
+    lines = _err_text(seen.err)
+    assert [line for line in lines if NO_KEY_LINE in line] == [
+        f"server.api_key_file {key}: byte outside printable ASCII — {NO_KEY_LINE}"]
+    assert [line for line in lines if "unreadable" in line] == [
+        f"--api-key-file {key} unreadable: the harness holds no key for it — launched on 127.0.0.1 for this run"]
+    assert not [line for line in lines if "Cannot load config" in line]
+    assert not [line for line in lines if SENTINEL in line]
+
+
+async def test_a_missing_key_file_never_exits_and_launches_on_loopback(tmp_path, monkeypatch):
+    seen = _boot(tmp_path, monkeypatch, server_block=_file_keyed(tmp_path / "absent"))
+    _covered(monkeypatch)
+    assert await _drive(tmp_path) == 1
+    (cmd, kw), = seen.started
+    assert "api_key" not in kw and "--api-key-file" not in cmd and cmd[-2:] == ["--host", "127.0.0.1"]
+    assert [line for line in _err_text(seen.err) if NO_KEY_LINE in line] == [
+        f"server.api_key_file {tmp_path / 'absent'}: no such file — {NO_KEY_LINE}"]
+
+
+async def test_a_withheld_server_entry_never_opens_its_key_file(tmp_path, monkeypatch):
+    """The record does not cover the entry: the loader dropped `server:`, so there is nothing to read."""
+    from localharness.cli import workspace
+    from tests.unit.launch_support import record_opens
+    key = tmp_path / "key"
+    key.write_text("K\n", encoding="utf-8")
+    seen = _boot(tmp_path, monkeypatch, server_block=_file_keyed(key))
+    monkeypatch.setattr(workspace, "decide_machine_trust",
+                        lambda *a, **k: workspace.MachineTrust(
+                            withheld={"config.yaml": frozenset({("launch", "server.binary")})}, line="held"))
+    with record_opens() as opened:
+        await _drive(tmp_path)
+    assert str(key) not in opened
+    assert not [line for line in _err_text(seen.err) if NO_KEY_LINE in line]
+
+
+def test_a_harness_without_a_server_or_a_key_file_is_untouched():
+    provider = SimpleNamespace(api_key="untouched")
+    assert start_cmd._read_session_key(SimpleNamespace(server=None, provider=provider)) is None
+    assert start_cmd._read_session_key(
+        SimpleNamespace(server=_llama(), provider=provider)) is None
+    assert provider.api_key == "untouched"
+
+
+async def test_the_helper_launch_carries_the_key_in_the_child_env_and_never_in_the_log(
+        tmp_path, monkeypatch, popen):
+    key = tmp_path / "key"
+    key.write_text(SENTINEL + "\n", encoding="utf-8")
+    out = _capture_start_console(monkeypatch)
+    err = _record_err(monkeypatch)
+
+    async def wait_ready(base_url, **kw):
+        return ["m"]
+
+    monkeypatch.setattr(server, "wait_ready", wait_ready)
+    monkeypatch.setattr(server, "server_pid", lambda _d: None)
+    monkeypatch.setattr(server, "docker_container_running", lambda _n: False)
+    monkeypatch.setattr(autosense, "_run_nvidia_smi", lambda: "24576, 32768\n")
+    monkeypatch.setattr(autosense, "_read_meminfo",
+                        lambda: {"MemTotal": 64 * 2**30, "MemAvailable": 60 * 2**30})
+    spec = _llama(bind_all=True, require_api_key=True, api_key_file=str(key))
+    harness = SimpleNamespace(server=spec, provider=SimpleNamespace(api_key=server.SecretStr("none")))
+    assert start_cmd._read_session_key(harness) is None
+    launch_key = server.required_key_kwargs(harness.server, harness.provider.api_key)
+    assert launch_key == {"api_key": SENTINEL}
+    assert await _start_managed_server(spec, tmp_path, URL, launch_key) is None
+    (call,) = popen
+    assert call["env"]["LLAMA_API_KEY"] == SENTINEL
+    assert call["cmd"][call["cmd"].index("--api-key-file") + 1] == str(key)
+    assert SENTINEL not in " ".join(call["cmd"])
+    assert "0.0.0.0" in call["cmd"]
+    log = (tmp_path / "server" / "serve.log")
+    if log.exists():
+        assert SENTINEL not in log.read_text(encoding="utf-8")
+    assert SENTINEL not in " ".join(list(map(str, out)) + _err_text(err))
+    assert SENTINEL not in repr(harness.provider.api_key)
