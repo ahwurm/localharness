@@ -616,6 +616,29 @@ def _posture_owner(name: str) -> "tuple[str | None, str] | None":
     return None
 
 
+def _dropped_launches(machine_trust: MachineTrust) -> "tuple[bool, set[str]]":
+    """`(primary, peers)`: whether a withheld entry other than the two posture keys drops the primary's
+    `server:` section for this run (CONTEXT D-14), and the names of the peers whose `lifecycle` a
+    withheld entry other than the posture keys removes (D-13). The loader narrows a posture entry
+    only when nothing else of its record is withheld, so for these a "launched on 127.0.0.1" line
+    would promise a launch that does not happen."""
+    from localharness.config import trust
+
+    primary = False
+    peers: set[str] = set()
+    for entries in machine_trust.withheld.values():
+        for kind, name in entries:
+            if kind not in (trust.LAUNCH_KIND, trust.LAUNCH_MODEL_KIND):
+                continue
+            if name.startswith("server."):
+                primary = primary or name[len("server."):] not in _POSTURE_KEYS
+            elif name.startswith("extra_endpoints."):
+                peer, sep, key = name[len("extra_endpoints."):].rpartition(".lifecycle.")
+                if sep and peer and key not in _POSTURE_KEYS:
+                    peers.add(peer)
+    return primary, peers
+
+
 def _posture_lines(machine_trust: MachineTrust,
                    snap_shown: Mapping[tuple[str, str, str], str]) -> list[str]:
     """The withheld-posture lines `start` composes from the decision's result (D-15, TRUST-04,
@@ -630,6 +653,7 @@ def _posture_lines(machine_trust: MachineTrust,
     from localharness.config import trust
 
     quiet = machine_trust.quiet
+    dropped_primary, dropped_peers = _dropped_launches(machine_trust)
     lines: list[str] = []
     for file, entries in sorted(machine_trust.withheld.items()):
         for kind, name in sorted(entries):
@@ -638,6 +662,8 @@ def _posture_lines(machine_trust: MachineTrust,
             if owner is None or shown is None:
                 continue
             peer, key = owner
+            if (dropped_primary if peer is None else peer in dropped_peers):
+                continue  # another withheld entry dropped this launch: nothing launches, nothing is narrowed
             runtime, _, rest = shown.partition(":")
             value = rest.partition(":")[0]
             subject = f"extra_endpoints[{peer}].lifecycle.{key}" if peer is not None else f"server.{key}"
