@@ -1190,14 +1190,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         pass  # the ledger is a convenience: a start never fails on it
     # D-25: the names the launch scrubbed from the server's environment, said again only when the
     # list changed. Names only, never values.
-    if _launched and _launched[0].dropped_env and harness.server is not None:
+    # Every launch this start made records its list, an empty one included: a launch that dropped
+    # nothing must reset the record, or a later repeat of an earlier drop goes unannounced.
+    if _launched and harness.server is not None:
         from localharness.provider.speed_stats import last_dropped_env, record_dropped_env
         _runtime = harness.server.runtime
         _names = sorted(set(_launched[0].dropped_env))
         if _names != (last_dropped_env(_ledger, _runtime) or []):
-            _pending_warnings.append(
-                f"launch environment dropped {', '.join(_names)}"
-                + (" — set server.env: for what llama-server should see" if _runtime == "llamacpp" else ""))
+            if _names:
+                _pending_warnings.append(
+                    f"launch environment dropped {', '.join(_names)}"
+                    + (" — set server.env: for what llama-server should see" if _runtime == "llamacpp" else ""))
             try:
                 record_dropped_env(_ledger, _runtime, _names)
             except OSError:
