@@ -688,3 +688,89 @@ async def test_a_repl_built_without_the_keyword_prints_nothing_extra(tmp_path, b
     assert repl._pending_launch_lines == []
     assert not any("not applied" in m for m in channel.messages)
     assert any(m.startswith("Launching llamacpp-local") for m in channel.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_swap_back_that_is_the_sessions_first_launch_prints_the_line_once_before_its_announcement(
+        tmp_path, boundaries, monkeypatch):
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=_llama_primary(),
+                                   launch_lines=(LINE,))
+    sent = _when_sent(channel, boundaries)
+
+    await repl._handle_slash("/model cached-b")
+
+    assert channel.messages.count(LINE) == 1
+    assert channel.messages.index(LINE) < next(
+        i for i, m in enumerate(channel.messages) if m.startswith("Restarting managed llama.cpp"))
+    assert [started for text, started in sent if text == LINE] == [0]
+    assert repl._pending_launch_lines == []
+
+
+@pytest.mark.asyncio
+async def test_a_restore_that_is_the_sessions_first_launch_prints_the_line(tmp_path, boundaries):
+    primary = _llama_primary()
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=primary, launch_lines=(LINE,))
+    sent = _when_sent(channel, boundaries)
+
+    label, _ = await repl._restore_incumbent((primary, PRIMARY_URL))
+
+    assert label == primary.model
+    assert channel.messages == [LINE] and [started for _, started in sent] == [0]
+    assert repl._pending_launch_lines == []
+
+
+@pytest.mark.asyncio
+async def test_the_sessions_second_launch_prints_none_of_the_lines(tmp_path, boundaries, monkeypatch):
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    peer = _launchable_peer()
+    primary = _llama_primary()
+    _, repl, channel, agent = _session(tmp_path, peer, server=primary, launch_lines=(LINE,))
+
+    await repl._handle_slash("/model qwen-gguf")  # the cold launch: the first
+    await repl._handle_slash("/model cached-b")   # the swap-back: the second
+    await repl._restore_incumbent((primary, PRIMARY_URL))  # and a restore: the third
+
+    assert channel.messages.count(LINE) == 1
+    assert any(m.startswith("Restarting managed llama.cpp") for m in channel.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_cold_launch_prints_none_of_the_lines_and_keeps_them_for_the_next_launch(
+        tmp_path, boundaries, monkeypatch):
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    _, repl, channel, _ = _session(tmp_path, _declared_only_peer(), launch_lines=(LINE,))
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert channel.messages[-1] == NO_LLAMA_PEER and LINE not in channel.messages
+    assert repl._pending_launch_lines == [LINE]
+
+    await repl._handle_slash("/model cached-b")
+
+    assert channel.messages.count(LINE) == 1 and repl._pending_launch_lines == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_swap_back_and_a_refused_restore_keep_the_lines(tmp_path, boundaries, monkeypatch):
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    peer = _launchable_peer()
+    declared = _llama_primary(binary=None)
+    _, repl, channel, agent = _session(tmp_path, peer, server=declared, launch_lines=(LINE,))
+    _on_the_cold_peer(repl, agent, peer)
+
+    await repl._handle_slash("/model cached-b")
+    restored = await repl._restore_incumbent((declared, PRIMARY_URL))
+
+    assert channel.messages == [NO_LLAMA_PRIMARY] and restored[0] is None
+    assert repl._pending_launch_lines == [LINE]
+
+
+@pytest.mark.asyncio
+async def test_a_launch_with_no_pending_lines_sends_no_extra_message(tmp_path, boundaries):
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer(), launch_lines=())
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    first = next(i for i, m in enumerate(channel.messages) if m.startswith("Launching llamacpp-local"))
+    assert first == 0

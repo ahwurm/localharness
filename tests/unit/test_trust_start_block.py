@@ -723,14 +723,18 @@ class _Session:
     """Drives the real `_start_async` to its REPL (whose `run` the start-cmd stubs make a no-op) and
     records what the REPL was built with; the server is down until the first launch, then answers."""
 
-    def __init__(self, tmp_path, monkeypatch, *, server_block, was, up=False):
+    def __init__(self, tmp_path, monkeypatch, *, server_block, was=None, up=False, upgrade=False):
         from localharness.cli.repl import OrchestratorREPL
 
         self.tmp_path = tmp_path
-        self.seen = _boot(tmp_path, monkeypatch, server_block={**server_block, "bind_all": was})
-        _record(tmp_path)  # the machine knows `bind_all: was`; the files then say true
-        from tests.unit.test_launch_paths_start import _write_config
-        _write_config(tmp_path, server_block={**server_block, "bind_all": True})
+        if was is None:  # the files as they are are what the record covers
+            self.seen = _boot(tmp_path, monkeypatch, server_block=server_block)
+            _pre_upgrade(tmp_path) if upgrade else _record(tmp_path)
+        else:
+            self.seen = _boot(tmp_path, monkeypatch, server_block={**server_block, "bind_all": was})
+            _record(tmp_path)  # the machine knows `bind_all: was`; the files then say true
+            from tests.unit.test_launch_paths_start import _write_config
+            _write_config(tmp_path, server_block={**server_block, "bind_all": True})
         self.err: list[tuple[str, int]] = []
         monkeypatch.setattr(start_cmd.err_console, "print",
                             lambda *a, **k: self.err.append((" ".join(map(str, a)), len(self.seen.started))))
@@ -809,3 +813,144 @@ async def test_a_start_with_nothing_withheld_hands_the_repl_an_empty_tuple(tmp_p
     assert await _drive(tmp_path) is None
 
     assert built[0]["launch_lines"] == ()
+
+
+# ------------------------------------------------------------------ the full line matrix (D-15)
+
+PRIMARY = ("config.yaml", "launch", "server.bind_all")
+PEER_NAME = "extra_endpoints.qwen3.6.lifecycle.bind_all"
+PEER = ("config.yaml", "launch", PEER_NAME)
+DEFERRED = ("server.bind_all: true not applied — launched on 127.0.0.1 for this run; "
+            "the next terminal start that launches it asks")
+PEER_DEFERRED = ("extra_endpoints[qwen3.6].lifecycle.bind_all: true not applied — launched on "
+                 "127.0.0.1 for this run; the next terminal start that launches it asks")
+PEER_ASKS = ("extra_endpoints[qwen3.6].lifecycle.bind_all: true not applied — launched on "
+             "127.0.0.1 for this run; a terminal start asks")
+KEYED = "server.require_api_key: false not applied — launched keyed for this run; a terminal start asks"
+PEER_KEYED = ("extra_endpoints[qwen3.6].lifecycle.require_api_key: false not applied — launched keyed "
+              "for this run; a terminal start asks")
+
+
+def _lines(withheld, shown, *, quiet=()):
+    return start_cmd._posture_lines(
+        MachineTrust({"config.yaml": frozenset(withheld)}, quiet=frozenset(quiet)), shown)
+
+
+def test_a_deferred_llamacpp_entry_says_the_next_launching_terminal_start_asks():
+    assert _lines({("launch", "server.bind_all")}, {PRIMARY: "llamacpp:true:open"},
+                  quiet={PRIMARY}) == [DEFERRED]
+
+
+def test_a_remembered_no_that_the_file_now_holds_as_false_prints_nothing():
+    """04-03's hand-off: the primary's remembered No is in `quiet` but the file holds `false` now."""
+    assert _lines({("launch", "server.bind_all")}, {PRIMARY: "llamacpp:false:open"}, quiet={PRIMARY}) == []
+
+
+def test_a_withheld_peer_bind_all_names_the_peer_whole_even_with_a_dot_in_its_name():
+    assert _lines({("launch", PEER_NAME)}, {PEER: "vllm:true:open"}) == [PEER_ASKS]
+
+
+def test_a_deferred_peer_llamacpp_entry_reads_like_the_primarys(g):
+    assert _lines({("launch", PEER_NAME)}, {PEER: "llamacpp:true:open"}, quiet={PEER}) == [PEER_DEFERRED]
+
+
+def test_a_peer_entry_quieted_by_its_remembered_no_prints_nothing(g):
+    trust.record_offer_decline(trust.decline_key("<peer>", PEER_NAME, "llamacpp:true:open"))
+
+    assert _lines({("launch", PEER_NAME)}, {PEER: "llamacpp:true:open"}, quiet={PEER}) == []
+
+
+def test_a_different_value_than_the_remembered_no_is_not_silenced(g):
+    trust.record_offer_decline(trust.decline_key("<peer>", PEER_NAME, "llamacpp:true:open"))
+
+    assert _lines({("launch", PEER_NAME)}, {PEER: "llamacpp:true:keyed"}, quiet={PEER}) == [PEER_DEFERRED]
+
+
+def test_a_withheld_require_api_key_false_says_the_launch_is_keyed():
+    key = ("config.yaml", "launch", "server.require_api_key")
+    peer_key = ("config.yaml", "launch", "extra_endpoints.qwen3.6.lifecycle.require_api_key")
+
+    assert _lines({("launch", "server.require_api_key")}, {key: "vllm:false:open"}) == [KEYED]
+    assert _lines({("launch", "extra_endpoints.qwen3.6.lifecycle.require_api_key")},
+                  {peer_key: "vllm:false:open"}) == [PEER_KEYED]
+    assert _lines({("launch", "server.require_api_key")}, {key: "vllm:false:open"}, quiet={key}) == []
+
+
+def test_any_other_withheld_entry_prints_no_line_of_its_own():
+    shown = {("config.yaml", "launch", "server.binary"): "/x/b",
+             ("config.yaml", "launch_model", "server.model"): "/m/a.gguf",
+             ("config.yaml", "launch", "extra_endpoints.p.lifecycle.binary"): "/x/b"}
+    withheld = {("launch", "server.binary"), ("launch_model", "server.model"),
+                ("launch", "extra_endpoints.p.lifecycle.binary")}
+
+    assert _lines(withheld, shown) == []
+
+
+def test_an_entry_the_files_no_longer_hold_prints_no_line():
+    assert _lines({("launch", "server.bind_all")}, {}) == []
+
+
+def test_a_withheld_bind_all_that_is_not_true_prints_no_line():
+    assert _lines({("launch", "server.bind_all")}, {PRIMARY: "vllm:false:open"}) == []
+
+
+def test_several_entries_give_one_line_each_in_a_stable_order():
+    shown = {PRIMARY: "vllm:true:open", PEER: "vllm:true:open"}
+
+    assert _lines({("launch", "server.bind_all"), ("launch", PEER_NAME)}, shown) == [
+        PEER_ASKS, BIND_ALL_LINE]
+
+
+# ------------------------------------------------------------------ the conversion's lines reach the REPL (D-17)
+
+LLAMACPP_8080 = {"runtime": "llamacpp", "binary": "/x/llama-server", "model": "/m/a.gguf", "port": 8080}
+CONVERTED_FIRST_LINE = f"every interface, no key — {HOST_CONVERTED}"
+UNDO_LINE = ("server.extra_args --host myhost is not applied — launched on 127.0.0.1 — "
+             "server.bind_all: true restores it (asks once)")
+
+
+async def test_an_attaching_start_after_a_conversion_hands_the_repl_the_first_launch_line(tmp_path, monkeypatch):
+    session = _Session(tmp_path, monkeypatch, up=True, upgrade=True,
+                       server_block={**LLAMACPP_8080, "extra_args": ["--host", "0.0.0.0"]})
+
+    handed = await session.run()
+
+    assert handed == (CONVERTED_FIRST_LINE,)
+    assert CONVERTED_FIRST_LINE not in session.printed and session.seen.started == []
+
+
+async def test_an_attaching_start_with_an_undo_line_hands_it_on(tmp_path, monkeypatch):
+    session = _Session(tmp_path, monkeypatch, up=True, upgrade=True,
+                       server_block={**LLAMACPP_8080, "extra_args": ["--host", "myhost"]})
+
+    handed = await session.run()
+
+    assert handed == (UNDO_LINE,)
+    assert UNDO_LINE not in session.printed
+
+
+async def test_a_start_that_launches_prints_the_conversion_itself_and_hands_the_repl_nothing(
+        tmp_path, monkeypatch):
+    session = _Session(tmp_path, monkeypatch, upgrade=True,
+                       server_block={**LLAMACPP_8080, "extra_args": ["--host", "0.0.0.0"]})
+
+    handed = await session.run()
+
+    assert handed == ()
+    assert len(session.seen.started) == 1
+    assert any(HOST_CONVERTED in line for line in session.seen.out)  # on start's own announcement
+
+
+async def test_the_undo_line_and_a_withheld_line_travel_together_in_order(tmp_path, monkeypatch):
+    session = _Session(tmp_path, monkeypatch, up=True,
+                       server_block={**LLAMACPP_8080, "extra_args": ["--host", "myhost"]})
+    config = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    config["extra_endpoints"] = [{
+        "name": "qwen3.6", "base_url": "http://127.0.0.1:8090/v1", "provider_type": "vllm", "gpu": True,
+        "lifecycle": {"runtime": "vllm", "binary": "/v/vllm", "model": "org/m", "port": 8090,
+                      "bind_all": True}}]
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    handed = await session.run()
+
+    assert handed == (PEER_ASKS, UNDO_LINE)

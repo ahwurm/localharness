@@ -510,22 +510,76 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     return None
 
 
+_POSTURE_KEYS = ("bind_all", "require_api_key")
 _BIND_ALL_ASKS = "{subject}: true not applied — launched on 127.0.0.1 for this run; a terminal start asks"
+_BIND_ALL_DEFERRED = ("{subject}: true not applied — launched on 127.0.0.1 for this run; "
+                      "the next terminal start that launches it asks")
+_REQUIRE_KEY_ASKS = "{subject}: false not applied — launched keyed for this run; a terminal start asks"
+
+
+def _posture_owner(name: str) -> "tuple[str | None, str] | None":
+    """`(peer, key)` for a posture entry name: `server.<key>` is the primary (`peer` None),
+    `extra_endpoints.<peer>.lifecycle.<key>` a peer (the peer is recovered by stripping the fixed
+    prefix and splitting on the LAST `.lifecycle.`, so `qwen3.6` reads whole). None for any other name."""
+    if name.startswith("server.") and name[len("server."):] in _POSTURE_KEYS:
+        return None, name[len("server."):]
+    if name.startswith("extra_endpoints."):
+        peer, sep, key = name[len("extra_endpoints."):].rpartition(".lifecycle.")
+        if sep and peer and key in _POSTURE_KEYS:
+            return peer, key
+    return None
 
 
 def _posture_lines(machine_trust: MachineTrust,
                    snap_shown: Mapping[tuple[str, str, str], str]) -> list[str]:
-    """The withheld-posture lines `start` composes from the decision's result (D-15, TRUST-04), for a
-    launch to print once. A withheld `server.bind_all: true` is launched on 127.0.0.1 and says so.
-    ``snap_shown`` maps `(file, kind, name)` to the entry's `shown` (`<runtime>:<value>:<keyed|open>`)."""
+    """The withheld-posture lines `start` composes from the decision's result (D-15, TRUST-04,
+    TRUST-08), for a launch to print once. A withheld `bind_all: true` is launched on 127.0.0.1 and a
+    withheld `require_api_key: false` keyed, each saying the key is `not applied`, for the primary
+    (`server.<key>`) and for a peer (`extra_endpoints[<name>].lifecycle.<key>`). ``snap_shown`` maps
+    `(file, kind, name)` to the entry's `shown` (`<runtime>:<value>:<keyed|open>`) as the files hold it
+    now. A QUIET entry is silent unless it is a llama.cpp `bind_all: true` deferred to the moment of
+    use (the deferred wording): a primary entry the person's No
+    remembered now holds `false`, and a peer entry quieted by its remembered No is their own answer.
+    Any other withheld entry dropped `server:` and `MACHINE_WITHHELD_LINE` already named it."""
+    from localharness.config import trust
+
+    quiet = machine_trust.quiet
     lines: list[str] = []
     for file, entries in sorted(machine_trust.withheld.items()):
         for kind, name in sorted(entries):
+            owner = _posture_owner(name) if kind == trust.LAUNCH_KIND else None
             shown = snap_shown.get((file, kind, name))
-            if (kind, name) == ("launch", "server.bind_all") and shown is not None \
-                    and shown.split(":")[1:2] == ["true"] and (file, kind, name) not in machine_trust.quiet:
-                lines.append(_BIND_ALL_ASKS.format(subject="server.bind_all"))
+            if owner is None or shown is None:
+                continue
+            peer, key = owner
+            runtime, _, rest = shown.partition(":")
+            value = rest.partition(":")[0]
+            subject = f"extra_endpoints[{peer}].lifecycle.{key}" if peer is not None else f"server.{key}"
+            if (file, kind, name) in quiet:
+                declined = peer is not None and trust.offer_was_declined(
+                    trust.decline_key("<peer>", name, shown))
+                if key == "bind_all" and runtime == "llamacpp" and value == "true" and not declined:
+                    lines.append(_BIND_ALL_DEFERRED.format(subject=subject))
+            elif key == "bind_all" and value == "true":
+                lines.append(_BIND_ALL_ASKS.format(subject=subject))
+            elif key == "require_api_key" and value == "false":
+                lines.append(_REQUIRE_KEY_ASKS.format(subject=subject))
     return lines
+
+
+def _conversion_launch_line(harness: Any, launch_key: dict, suffix: str | None) -> str | None:
+    """The D-17 line a start that did not launch hands the REPL: the posture the first launch will
+    have, then the conversion's suffix. Only when that launch really binds beyond loopback (the same
+    rule `_start_managed_server` applies to its announcement), else None."""
+    srv = getattr(harness, "server", None)
+    if srv is None or not suffix:
+        return None
+    from localharness.provider import server as managed_server
+
+    keyed = bool(launch_key)
+    exposed, posture = managed_server.effective_posture(
+        srv, keyed=keyed, decision=managed_server.launch_decision(srv, keyed))
+    return f"{posture or 'every interface'} — {suffix}" if exposed else None
 
 
 def _attach_window_report(harness: Any, provider_type: str, served: int | None, trained: int | None,
@@ -2323,6 +2377,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
         if launch_notes.printed:
             pending = []  # start's own launch said it all; the REPL has nothing to add
+        elif (conversion := _conversion_launch_line(harness, launch_key, sensed.converted)):
+            pending.insert(0, conversion)  # D-17: the conversion's line leads the first launch
         repl = OrchestratorREPL(
             orchestrator=orchestrator,
             agent_loop=agent_loop,
