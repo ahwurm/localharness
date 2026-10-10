@@ -693,8 +693,18 @@ def decide_machine_trust(global_dir: Path, *, ask: bool, launching: bool = False
     snap = trust.machine_snapshot(global_dir)
     rec = trust.recorded_machine(global_dir)
     if rec is None:
-        trust.record_machine(global_dir, snap)  # the first start after the upgrade: adopted
-        return MachineTrust()
+        key_files = [e for e in snap if str(e.get("name", "")).endswith(".api_key_file")]
+        if not key_files:
+            trust.record_machine(global_dir, snap)  # the first start after the upgrade: adopted
+            return MachineTrust()
+        # D-24: a snapshot that names a key file is never adopted unasked. A start that cannot ask
+        # records everything but the launch entries — with EVERY kind, so the next terminal start
+        # sees them as plain uncovered entries and puts the question — and withholds those.
+        launch_entries = [e for e in snap if e.get("kind") in (trust.LAUNCH_KIND, trust.LAUNCH_MODEL_KIND)]
+        if not ask:
+            trust.record_machine(global_dir, _minus(snap, launch_entries), trust.MACHINE_KINDS)
+            return _withhold(launch_entries, global_dir, MACHINE_UNASKED)
+        rec = {"fingerprint": "", "entries": [], "kinds": sorted(trust.MACHINE_KINDS)}  # all of it is the diff
     upgrade = trust.LAUNCH_MODEL_KIND not in rec["kinds"]
     # Counted, never keyed on (file, kind, name): two MCP servers in one file may share a name. A
     # kind the record predates is adopted once — its entries were there before the rule.
@@ -722,7 +732,9 @@ def decide_machine_trust(global_dir: Path, *, ask: bool, launching: bool = False
         return withheld(MACHINE_DECLINED_EARLIER)
     if not ask:
         return withheld(MACHINE_UNASKED)
-    notes = _merged_annotations(_bind_all_annotations(asked_about), annotations)
+    notes = _merged_annotations(
+        {**_bind_all_annotations(asked_about), **_key_file_annotations(global_dir, asked_about)},
+        annotations)
     if _confirm_or_no(MACHINE_CHANGED_QUESTION.format(
             global_dir=global_dir, diff=machine_diff(confirmed, visible, annotations=notes))):
         trust.record_machine(global_dir, visible)
@@ -763,6 +775,43 @@ def _bind_all_annotations(entries: list[dict]) -> dict[tuple[str, str, str], str
             out[(e["file"], e["kind"], e["name"])] = (
                 NEVER_APPLIED.format(name=e["name"]) + (", no key" if shown.endswith(":open") else ""))
     return out
+
+
+KEY_FILE_NOTE = "(read at start and sent as the bearer to :{port})"
+
+
+def _key_file_port(global_dir: Path, entry_name: str) -> int:
+    """The port a key file's bearer is sent to: the primary's merged `server.port`, or the first
+    peer of that name's `lifecycle.port` in the list that wins (name recovered by prefix strip and
+    `rpartition(".lifecycle.")`, so `qwen3.6` reads whole). Absent or not an int: the field's default."""
+    from localharness.config.models import ManagedServerConfig
+    from localharness.config.overlay import deep_merge
+
+    default = ManagedServerConfig.model_fields["port"].default
+    cfg, over = _raw_settings(global_dir)
+    port: Any = None
+    if entry_name.startswith("server."):
+        merged = deep_merge(cfg["server"] if isinstance(cfg.get("server"), dict) else {},
+                            over["server"] if isinstance(over.get("server"), dict) else {})
+        port = merged.get("port")
+    elif entry_name.startswith("extra_endpoints."):
+        peer = entry_name[len("extra_endpoints."):].rpartition(".lifecycle.")[0]
+        peers = over.get("extra_endpoints") if isinstance(over.get("extra_endpoints"), list) \
+            else cfg.get("extra_endpoints")
+        for candidate in peers if isinstance(peers, list) else []:
+            if (isinstance(candidate, dict) and str(candidate.get("name")) == peer
+                    and isinstance(candidate.get("lifecycle"), dict)):
+                port = candidate["lifecycle"].get("port")
+                break
+    return port if isinstance(port, int) and not isinstance(port, bool) else default
+
+
+def _key_file_annotations(global_dir: Path, entries: list[dict]) -> dict[tuple[str, str, str], str]:
+    """Wherever a `*.api_key_file` line is put, it says the file is read at start and where its
+    content is sent (the path itself is the entry's own `shown`; the content is never read here)."""
+    return {(e["file"], e["kind"], e["name"]):
+            KEY_FILE_NOTE.format(port=_key_file_port(global_dir, str(e["name"])))
+            for e in entries if str(e.get("name", "")).endswith(".api_key_file")}
 
 
 def _merged_annotations(mine: dict, theirs: Optional[Mapping]) -> dict:

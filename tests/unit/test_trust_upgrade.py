@@ -539,3 +539,174 @@ async def test_the_audit_line_is_written_from_inside_a_running_loop(g):
     assert ok is True
     (event,) = _audit(g)
     assert event["path"] == "server.bind_all" and event["actor_detail"] == "test"
+
+
+# ------------------------------------------------------------------ the fresh-install exception (D-24)
+
+KEYED = {"runtime": "llamacpp", "binary": "/x/llama-server", "model": "/m/a.gguf",
+         "require_api_key": True, "api_key_file": "/k", "port": 8080}
+SUFFIX = "(read at start and sent as the bearer to :{port})"
+MCP = {"name": "g1", "transport": "stdio", "command": "/bin/echo", "args": ["hi"]}
+
+
+def _with_mcp(g) -> None:
+    write_yaml(g / "agents" / "orchestrator.yaml", {"name": "orchestrator", "role": "R",
+                                                     "tools": {"mcp_servers": [MCP]}})
+
+
+def _launch_names(snapshot_or_set) -> set[str]:
+    return {n for k, n in snapshot_or_set if k in ("launch", "launch_model")}
+
+
+def test_a_headless_first_start_withholds_the_launch_entries_and_records_the_kinds(g, monkeypatch):
+    _config(g, server=KEYED)
+    _with_mcp(g)
+    never_asked(monkeypatch)
+
+    got = decide_machine_trust(g, ask=False)
+
+    held = got.withheld["config.yaml"]
+    assert {"server.binary", "server.model", "server.api_key_file", "server.runtime"} <= {n for _, n in held}
+    assert all(k in ("launch", "launch_model") for k, _ in held) and "agents/orchestrator.yaml" not in got.withheld
+    assert MACHINE_UNASKED in got.line
+    rec = trust.recorded_machine(g)
+    assert rec["kinds"] == sorted(trust.MACHINE_KINDS)
+    assert {(e["kind"], e["name"]) for e in rec["entries"]} == {("mcp_server", "g1")}
+    before = _record_bytes()
+
+    again = decide_machine_trust(g, ask=False)
+
+    assert again.withheld == got.withheld and _record_bytes() == before
+
+
+def test_the_next_terminal_start_asks_with_the_key_file_line_explained(g, monkeypatch):
+    _config(g, server=KEYED)
+    _with_mcp(g)
+    decide_machine_trust(g, ask=False)
+    asked = answers(monkeypatch, True)
+
+    got = decide_machine_trust(g, ask=True, launching=True)
+
+    assert got == MachineTrust() and len(asked) == 1
+    assert f"+ server.api_key_file (config.yaml): /k {SUFFIX.format(port=8080)}" in asked[0]
+    assert "g1" not in asked[0]
+    assert "server.binary" in asked[0] and "server.model" in asked[0]
+    assert {"server.binary", "server.api_key_file", "server.model"} <= _recorded_names(g)
+    never_asked(monkeypatch)
+    assert decide_machine_trust(g, ask=True, launching=True) == MachineTrust()
+
+
+def test_a_terminal_first_start_asks_over_the_whole_snapshot(g, monkeypatch):
+    _config(g, server=KEYED)
+    _with_mcp(g)
+    asked = answers(monkeypatch, True)
+
+    got = decide_machine_trust(g, ask=True, launching=True)
+
+    assert got == MachineTrust() and len(asked) == 1
+    assert SUFFIX.format(port=8080) in asked[0] and "g1" in asked[0]
+    assert "g1" in {e["name"] for e in trust.recorded_machine(g)["entries"]}
+    assert trust.recorded_machine(g)["kinds"] == sorted(trust.MACHINE_KINDS)
+
+
+def test_a_no_at_a_terminal_first_start_records_nothing_and_withholds_all(g, monkeypatch):
+    _config(g, server=KEYED)
+    _with_mcp(g)
+    answers(monkeypatch, False)
+
+    got = decide_machine_trust(g, ask=True, launching=True)
+
+    assert trust.recorded_machine(g) is None
+    assert "agents/orchestrator.yaml" in got.withheld and "config.yaml" in got.withheld
+
+
+def test_a_server_without_a_port_names_the_default_port(g, monkeypatch):
+    from localharness.config.models import ManagedServerConfig
+
+    _config(g, server={k: v for k, v in KEYED.items() if k != "port"})
+    asked = answers(monkeypatch, True)
+
+    decide_machine_trust(g, ask=True, launching=True)
+
+    port = ManagedServerConfig.model_fields["port"].default
+    assert SUFFIX.format(port=port) in asked[0]
+
+
+def test_the_overrides_port_wins_in_the_suffix(g):
+    _config(g, server=KEYED)
+    write_yaml(g / "overrides.yaml", {"server": {"port": 9191}})
+
+    assert ws_mod._key_file_port(g, "server.api_key_file") == 9191
+
+
+def test_a_peer_key_file_is_the_same_exception_with_its_own_port(g, monkeypatch):
+    peer = {"name": "qwen3.6", "base_url": "http://127.0.0.1:8090/v1", "gpu": True,
+            "lifecycle": {"runtime": "llamacpp", "binary": "/x/b", "model": "/m/b.gguf",
+                          "require_api_key": True, "api_key_file": "/pk", "port": 8090}}
+    _config(g, extra_endpoints=[peer])
+    never_asked(monkeypatch)
+
+    got = decide_machine_trust(g, ask=False)
+
+    assert ("launch", "extra_endpoints.qwen3.6.lifecycle.api_key_file") in got.withheld["config.yaml"]
+    assert trust.recorded_machine(g)["entries"] == []
+    asked = answers(monkeypatch, True)
+    decide_machine_trust(g, ask=True, launching=True)
+    assert f"/pk {SUFFIX.format(port=8090)}" in asked[0]
+
+
+def test_a_first_start_with_no_key_file_is_adopted_silently(g, monkeypatch):
+    _config(g, server={k: v for k, v in LLAMACPP.items()})
+    never_asked(monkeypatch)
+
+    assert decide_machine_trust(g, ask=False) == MachineTrust()
+    assert "server.binary" in _recorded_names(g)
+
+
+# ------------------------------------------------------------------ planted runtime, deleted key, empty list
+
+
+def test_a_planted_vllm_runtime_does_not_launder_the_llamacpp_true(g, monkeypatch):
+    _config(g, server={"binary": "/x/llama-server", "model": "/m/a.gguf", "runtime": "llamacpp",
+                       "bind_all": True})
+    write_yaml(g / "overrides.yaml", {"server": {"runtime": "vllm"}})
+    _pre_upgrade(g)
+    never_asked(monkeypatch)
+
+    assert decide_machine_trust(g, ask=True, launching=True) == MachineTrust()
+    assert by_name(trust.recorded_machine(g)["entries"], "server.bind_all")["shown"] == "vllm:true:open"
+
+    (g / "overrides.yaml").unlink()
+    asked = answers(monkeypatch, False)
+    decide_machine_trust(g, ask=True, launching=True)
+
+    assert len(asked) == 1 and "server.bind_all (config.yaml): llamacpp:true:open" in asked[0]
+
+
+def test_a_deleted_require_api_key_is_a_diff_of_the_keyed_field(g, monkeypatch):
+    _config(g, server={**LLAMACPP, "require_api_key": True, "api_key_file": "/k"})
+    asked = answers(monkeypatch, True)
+    trust.record_machine(g, [e for e in trust.machine_snapshot(g) if e["name"] != "server.bind_all"])
+    decide_machine_trust(g, ask=True, launching=True)  # a Yes to the keyed true
+    assert by_name(trust.recorded_machine(g)["entries"], "server.bind_all")["shown"] == "llamacpp:true:keyed"
+    assert len(asked) == 1
+
+    _config(g, server=LLAMACPP)  # require_api_key and api_key_file deleted
+    answers_2 = answers(monkeypatch, False)
+    got = decide_machine_trust(g, ask=True, launching=True)
+    assert "~ server.bind_all (config.yaml): llamacpp:true:open" in answers_2[0]
+    assert got.line == ""
+
+    ws_mod._DECLINED.clear()
+    (g / "overrides.yaml").unlink()  # the remembered No gone: the same diff, now with nobody to ask
+    headless = decide_machine_trust(g, ask=False, launching=True)
+    assert "server.bind_all (config.yaml)" in headless.line
+
+
+def test_an_empty_local_models_list_is_no_entry_and_the_upgrade_asks_nothing(g, monkeypatch):
+    _config(g, server=VLLM)
+    _pre_upgrade(g)
+    never_asked(monkeypatch)
+
+    assert decide_machine_trust(g, ask=True) == MachineTrust()
+    assert "server.local_models" not in _recorded_names(g)
