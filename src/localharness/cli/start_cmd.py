@@ -796,6 +796,26 @@ def _conversion_launch_line(harness: Any, launch_key: dict, suffix: str | None) 
     return f"{posture or 'every interface'} — {suffix}" if exposed else None
 
 
+def _props_model_path(base_url: str, launch_key: Mapping[str, str]) -> str | None:
+    """D-08: the weights path a llama.cpp server reports at `GET /props` (`model_path`), read with the
+    same bearer `probe_window` uses. Blocking httpx with a 3 s timeout: the caller runs it OFF the event
+    loop. Silent on every failure (a timeout, an HTTP error, a body that is not JSON, a missing or
+    non-string field all read None), and only a `str` is returned: it is stored as a path string the
+    ranking compares to discovered files and never opens."""
+    import httpx
+
+    from localharness.provider.server import auth_headers
+
+    try:
+        headers = auth_headers(launch_key.get("api_key")) or None
+        body = httpx.get(f"{base_url.rstrip('/').removesuffix('/v1')}/props", timeout=3.0,
+                         headers=headers).json()
+        value = body.get("model_path") if isinstance(body, dict) else None
+    except Exception:  # noqa: BLE001 — a ledger convenience: any failure is "not recorded"
+        return None
+    return value if isinstance(value, str) and value else None
+
+
 def _attach_window_report(harness: Any, provider_type: str, served: int | None, trained: int | None,
                           *, harness_launched: bool) -> "tuple[Any, str | None]":
     """The window report for a start that ATTACHES to a server, and the undo kind its second line names.
@@ -1711,6 +1731,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.provider.speed_stats import (
         default_speed_stats_path,
         last_window_report,
+        record_model_path,
         record_window_report,
     )
     _ledger = default_speed_stats_path(cfg_path)
@@ -1735,6 +1756,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             _attach_window_report,
             harness, provider.provider_type, _served, _probe.trained, harness_launched=_harness_launched)
         launched_here = False
+        # D-08: every llama.cpp attach stores the weights path the server reports beside the alias it
+        # serves, so a later `init` ranks the model that served before. Silent on any failure; a
+        # launch (above), another runtime and a server that reports no path record nothing. start adds
+        # no pointer to `init` here (D-42).
+        if provider.provider_type == "llamacpp" and resolved_model:
+            _weights = await asyncio.to_thread(_props_model_path, provider.base_url, launch_key)
+            if _weights:
+                try:
+                    record_model_path(_ledger, "llamacpp", resolved_model, _weights)
+                except OSError:
+                    pass  # the ledger is a convenience: a start never fails on it
     changed = window_changed(last, report, harness.autosense.notify_ratio)
     # An attach to a runtime that reported nothing (no served, trained or fit number) has nothing to say.
     _nothing_known = report.served is None and report.trained is None and report.fits is None
