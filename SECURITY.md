@@ -508,8 +508,8 @@ something the harness already provides (web search, fetch, files, delegation). W
 is held back until you have seen it: an MCP server, an embedding model or a permission looser than
 the shipped default in one of your agent files or in the `agent:` section of your `overrides.yaml`
 (every agent's default layer), a looser permission in a division file or `org.yaml` or in the
-`org:` section of your `config.yaml` or `overrides.yaml`, or a model-server launch command there
-(`server.binary`, `server.docker_image`, `server.extra_args`), takes effect only after you confirm
+`org:` section of your `config.yaml` or `overrides.yaml`, or a model-server launch setting there
+(any of the launch keys listed in the paragraph after this one), takes effect only after you confirm
 it once at the next `localharness start` on a terminal (a start without a terminal leaves it off and
 says so; a launch command left off withholds the whole `server:` section, so that start launches no
 server and uses one already answering); and a script added to or changed in the tools folder
@@ -519,6 +519,21 @@ the mode you are in: `guarded` asks before it runs (an earlier "always" on `pyth
 not cover it, and an "always" you give it covers that exact content only), while `auto`, `trusted`
 and `unattended` run it as they run any command — and it is listed for you at that start (what was
 already there the first time you start this version is adopted without a question).
+
+**What the record holds of a launch.** For the `server:` section and for every `extra_endpoints`
+entry's `lifecycle:`, the record a start checks holds eleven launch keys: `binary`, `docker_image`,
+`extra_args`, `runtime`, `launch`, `bind_all`, `require_api_key`, `api_key_file`, `env`,
+`local_models` and `config_ini`, each by name and per file, so a change to any of them asks at the
+next start on a terminal. The model keys are an entry kind of their own, `launch_model`: `model`,
+`mmproj`, `served_name`, `context`, `cache_type_k`, `cache_type_v` and `cache_ram`, because a
+changed model is not a changed command. A model you switch yourself with `/model` on a terminal
+(or in Zed), or with `localharness model` typed at a terminal, is re-recorded as you set it and
+asks nothing; one switched from a remote channel, or by a command the agent ran in the shell
+tool, is not, and asks at the next start. `effort` is in neither list: it is a request setting, not
+a launch decision, and a peer's `api_key` and headers are never written to the record. The
+`config_ini` key names llama-server's own config file, so a relaunch acts on nothing the record
+did not fingerprint. **What this does NOT cover:** the root-owned `/etc/llama.cpp/config.ini` that
+llama-server still reads on its own is outside the record, and a change there asks nothing.
 
 The files that hold the harness's own settings have a rule of their own: the agent's write and edit
 tools, and the shell commands the gate reads as writing them, cannot change `config.yaml` or
@@ -553,9 +568,12 @@ files below a dependency or cache folder in the tools folder (`node_modules`, a 
 environment, `.git`) are not tracked — that is where `npm install` and a virtual environment put
 thousands of files; the scripts and files a confirmed command reads are not hashed; of
 `config.yaml` and `overrides.yaml`, the record a start checks holds the looser `org:` permissions,
-three `server:` keys (`binary`, `docker_image`, `extra_args`) and `overrides.yaml`'s `agent:`
-section, nothing else, so code the agent runs can change any other setting in those files, other
-launch settings included, and the change takes effect at the next start without a question; and
+eleven `server:` launch keys (`binary`, `docker_image`, `extra_args`, `runtime`, `launch`,
+`bind_all`, `require_api_key`, `api_key_file`, `env`, `local_models`, `config_ini`) with the seven
+`launch_model` keys (`model`, `mmproj`, `served_name`, `context`, `cache_type_k`, `cache_type_v`,
+`cache_ram`) and the same keys of each peer's `lifecycle:`, and `overrides.yaml`'s `agent:`
+section, nothing else, so code the agent runs can change any other setting in those files, such as
+`effort`, and the change takes effect at the next start without a question; and
 the record itself is an ordinary file that code the agent runs can
 rewrite (see trust boundaries). What runs is gated — that is the control, not a promise that the
 agent cannot touch its own files.

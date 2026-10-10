@@ -35,6 +35,7 @@ from localharness.config.loader import (
     AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
 )
 from localharness.config.plugin_sections import CORE_HARNESS_KEYS, global_only_paths
+from localharness.config.trust import LAUNCH_KEYS, LAUNCH_MODEL_KEYS, LAUNCH_MODEL_KIND
 from localharness.plugins import api
 from localharness.plugins.api import (
     Check, MemoryBrowse, MemorySlotPlugin, Plugin, PluginContext, PluginManifest, PluginPaths,
@@ -480,6 +481,58 @@ def test_machine_only_list_bites():
     assert check_machine_only_list(good + "- `org`\n", code) == [
         "listed in SECURITY.md, not machine-level only in code: org"]
     assert check_machine_only_list("## Something else\n", code)
+
+
+# ---------------------------------------------------------------- check: the launch keys the record holds
+
+LLAMA_CONFIG_INI = "/etc/llama.cpp/config.ini"
+
+
+def check_launch_keys_doc(security_text: str, launch_keys: Iterable[str] | None = None,
+                          model_keys: Iterable[str] | None = None) -> list[str]:
+    """SECURITY.md names every key of `trust.LAUNCH_KEYS` and `trust.LAUNCH_MODEL_KEYS`, the
+    `launch_model` kind, and the root-owned llama.cpp `config.ini` the record cannot cover. The
+    names are the backticked tokens of the paragraphs that mention the kind, so a key that only
+    appears elsewhere in the file does not count."""
+    launch = tuple(LAUNCH_KEYS if launch_keys is None else launch_keys)
+    model = tuple(LAUNCH_MODEL_KEYS if model_keys is None else model_keys)
+    named = {t for para in paragraphs(security_text) if f"`{LAUNCH_MODEL_KIND}`" in para
+             for t in ticks(para)}
+    out = [f"launch key not named in SECURITY.md: {k}" for k in (*launch, *model) if k not in named]
+    if LAUNCH_MODEL_KIND not in named:
+        out.append("the launch_model kind is not named")
+    if LLAMA_CONFIG_INI not in named:
+        out.append(f"{LLAMA_CONFIG_INI} is not named")
+    return out
+
+
+def test_launch_keys_doc_live():
+    """SECURITY.md names all eleven launch keys, the seven model keys, the kind and the gap."""
+    assert check_launch_keys_doc(_read("SECURITY.md")) == []
+
+
+def test_launch_keys_doc_bites():
+    keys, model = LAUNCH_KEYS, LAUNCH_MODEL_KEYS
+    good = ("The record holds " + ", ".join(f"`{k}`" for k in keys) + ". The kind `launch_model` holds "
+            + ", ".join(f"`{k}`" for k in model) + f". `{LLAMA_CONFIG_INI}` is outside it.\n")
+    assert check_launch_keys_doc(good) == []
+    assert check_launch_keys_doc(good) == check_launch_keys_doc(good), "stable across two runs"
+    assert check_launch_keys_doc(good.replace("`config_ini`", "config_ini")) == [
+        "launch key not named in SECURITY.md: config_ini"]
+    assert check_launch_keys_doc(good.replace("`cache_ram`", "")) == [
+        "launch key not named in SECURITY.md: cache_ram"]
+    # without the kind no paragraph is the launch paragraph, so nothing else counts as named either
+    unkinded = check_launch_keys_doc(good.replace("`launch_model`", "`launch-model`"))
+    assert "the launch_model kind is not named" in unkinded
+    assert {f"launch key not named in SECURITY.md: {k}" for k in (*keys, *model)} <= set(unkinded)
+    assert check_launch_keys_doc(good.replace(f"`{LLAMA_CONFIG_INI}`", "the root-owned file")) == [
+        f"{LLAMA_CONFIG_INI} is not named"]
+    assert check_launch_keys_doc(good, [*keys, "brand_new_key"]) == [
+        "launch key not named in SECURITY.md: brand_new_key"]
+    # a key named only outside the paragraphs that carry the kind does not count
+    assert check_launch_keys_doc(good.replace("`binary`", "binary") + "\n\nElsewhere: `binary`.\n") == [
+        "launch key not named in SECURITY.md: binary"]
+    assert check_launch_keys_doc("## Nothing\n") != []
 
 
 # ---------------------------------------------------------------- check 4: three declaration readers
