@@ -875,3 +875,18 @@ async def test_wr06_a_peer_whose_base_url_is_not_this_machine_never_has_its_key_
     assert "api_key" not in call
     assert "--api-key-file" not in call["cmd"] and call["cmd"][-2:] == ["--host", "127.0.0.1"]
     assert not any(SENTINEL in m for m in channel.messages)
+
+
+@pytest.mark.asyncio
+async def test_in01_an_escape_sequence_in_a_peers_name_and_key_path_prints_escaped(
+        tmp_path, boundaries, monkeypatch):
+    key = tmp_path / "\x1b[2Jkey"
+    peer = _launchable_peer(name="p\x1b[1;1H", bind_all=True, require_api_key=True, api_key_file=str(key))
+    _, repl, channel, _ = _session(tmp_path, peer)
+    _capture_start_kw(monkeypatch)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    (line,) = [m for m in channel.messages if "api_key_file" in m and "sends no key" in m]
+    assert "\x1b" not in line
+    assert line.startswith("extra_endpoints[p\\x1b[1;1H].lifecycle.api_key_file ") and "\\x1b[2Jkey" in line

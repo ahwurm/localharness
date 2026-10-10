@@ -455,3 +455,14 @@ def test_wr06_the_launch_for_a_moved_endpoint_is_loopback_without_the_file(tmp_p
     asyncio.run(go())
     (call,) = popen
     assert "--api-key-file" not in call["cmd"] and call["cmd"][-2:] == ["--host", "127.0.0.1"]
+
+
+# --- IN-01: file-supplied text in the key-file lines is shown escaped ----------------------------------
+
+
+def test_in01_an_escape_sequence_in_the_configured_path_prints_escaped(tmp_path):
+    from localharness.cli.start_cmd import _read_session_key
+    path = tmp_path / "\x1b[31mred\x1b[0m"
+    line = _read_session_key(_harness(path))
+    assert "\x1b" not in line and "\\x1b[31mred\\x1b[0m" in line
+    assert line.endswith("no such file — this session sends no key")
