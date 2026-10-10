@@ -153,6 +153,17 @@ def test_the_path_is_sensed_before_the_machine_trust_decision():
     assert text.index('which_outside_cwd("llama-server")') < text.index("decide_machine_trust(cfg_path")
 
 
+def test_the_path_write_and_the_launching_sense_sit_between_the_path_lookup_and_the_decision():
+    """D-20/D-08: PATH is asked, then the sensing (the PATH write, the conversion, the launching
+    sense) runs, then the one decision is made with what was sensed."""
+    text = open(start_cmd.__file__, encoding="utf-8").read()
+    asked = text.index('which_outside_cwd("llama-server")')
+    sensed = text.index("sensed = SensedStart(True, {}) if list_models else _sense_before_trust(")
+    decided = text.index("decide_machine_trust(cfg_path")
+    assert asked < sensed < decided
+    assert "launching=sensed.launching" in text[decided:decided + 200]
+
+
 # ------------------------------------------------------------------------------- the helper
 
 
