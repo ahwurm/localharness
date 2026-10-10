@@ -942,6 +942,8 @@ def _write_overlay_validated(global_dir: Path, mutate: Callable[[dict], None],
 
 
 NO_DETAIL = "localharness start: a No on the machine question, remembered"
+PEER_LIST_COPIED = ("extra_endpoints copied from config.yaml into overrides.yaml (a peer's No is written there, "
+                    "and lists replace on merge); edit your peers in overrides.yaml from now on")
 
 
 def _posture_names(name: str) -> Optional[tuple[Optional[str], str]]:
@@ -1010,6 +1012,10 @@ def _remember_posture_no(global_dir: Path, asked_about: list[dict],
         adopt = [now] if now is not None and now["shown"].split(":")[1] == json.dumps(safe) else []
         if peer is not None and not had_list:
             adopt += _copied_peer_entries(raws, covered, skip=name)
+            if config_raw.get("extra_endpoints"):
+                # Lists replace wholesale on merge, so this No forked the peer list: say so once, or
+                # a later edit of config.yaml's peers is silently ignored (WR-07).
+                _notice_console.print(PEER_LIST_COPIED, style="dim", markup=False)
         if adopt:
             trust.adopt_entries(global_dir, adopt)
         if peer is not None:
