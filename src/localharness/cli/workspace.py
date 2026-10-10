@@ -55,6 +55,7 @@ import asyncio
 import copy
 import json
 import logging
+import os
 import re
 import shlex
 import sys
@@ -523,6 +524,85 @@ def visible_text(text: object) -> str:
     name or argument can neither redraw the line nor fake a second one."""
     return _UNSHOWABLE.sub(lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 0x100
                            else f"\\u{ord(m.group()):04x}", str(text))
+
+
+def shown_path(path: object) -> str:
+    """A path for a printed line: the home directory shown as `~`, every control character escaped."""
+    text = str(path)
+    home = os.path.expanduser("~")
+    if home and home != "~" and (text == home or text.startswith(home.rstrip(os.sep) + os.sep)):
+        text = "~" + text[len(home.rstrip(os.sep)):]
+    return visible_text(text)
+
+
+# ------------------------------------------------------------------ the incumbent sentence
+#
+# One builder for every line that says "something else already holds the model server's port": the
+# attach form `init` prints and the imperative form `/model` answers. Formatting only — the caller
+# fills a Holder from procfs and units — so the wording is said once and every value shown passes
+# through visible_text (an ESC or LF in a unit or command name cannot repaint a real line).
+
+@dataclass(frozen=True)
+class Holder:
+    """Who holds a port: the unit (None when no unit owns it), the pid and command (None when not
+    visible), the uid, and `state` — a `units.UnitState`, or None for "unit file not checked"."""
+    unit: Optional[str]
+    pid: Optional[int]
+    command: Optional[str]
+    uid: Optional[int]
+    state: Any = None
+
+
+def incumbent_subject(holder: Holder, *, port: int) -> str:
+    """Who the sentence is about: the unit with one suffix naming what systemd did or did not say
+    about it, else `pid <pid> (<command>)`, else `uid <uid>'s process on :<port>`."""
+    if holder.unit:
+        subject = visible_text(holder.unit)
+        state = holder.state
+        if state is None:
+            return subject + " (unit file not checked)"
+        if getattr(state, "load_state", None) == "not-found":
+            return subject + " (no unit file by that name)"
+        if getattr(state, "unit_file_state", None) == "transient":
+            return subject + " (transient)"
+        return subject
+    if holder.pid is not None:
+        if holder.command is None:
+            return f"pid {holder.pid}"
+        return f"pid {holder.pid} ({visible_text(holder.command)})"
+    return f"uid {visible_text(holder.uid)}'s process on :{port}"
+
+
+def window_clause(ctx: int, fit: Optional[int], *, running: bool) -> str:
+    """The clause that makes the attach sentence the window line too: what the incumbent runs with,
+    what the harness launches with, and the setting that keeps the incumbent's number."""
+    launch = f"-c {fit}" if fit is not None else "with no -c"
+    if running:
+        return (f"serves -c {ctx}; the harness launches {launch} once it stops "
+                f"· server.context: {ctx} keeps it")
+    return f"sets -c {ctx}; the first start launches {launch} · server.context: {ctx} keeps it"
+
+
+def incumbent_sentence(holder: Holder, *, port: int, form: str, served: Optional[str] = None,
+                       target: Optional[str] = None, window: Optional[str] = None) -> str:
+    """The one sentence about an incumbent. `form="attach"`: `<who> holds :<port>; the harness
+    attaches` (or `<who> <window>` when a window clause rides along). `form="imperative"`:
+    `<served> is served by <who>, not by the harness; <how to stop it>, then /model <target>`."""
+    subject = incumbent_subject(holder, port=port)
+    if form == "attach":
+        if window:
+            return f"{subject} {window}"
+        return f"{subject} holds :{port}; the harness attaches"
+    if form != "imperative":
+        raise ValueError(f"unknown incumbent sentence form: {form!r}")
+    now = f"/model {visible_text(target)}"
+    if holder.unit:
+        pid_part = f" (pid {holder.pid})" if holder.pid is not None else ""
+        verb = "disable --now" if getattr(holder.state, "unit_file_state", None) == "enabled" else "stop"
+        stop = f"systemctl --user {verb} {shlex.quote(visible_text(holder.unit))}"
+        return (f"{visible_text(served)} is served by {subject}{pid_part}, not by the harness; "
+                f"{stop}, then {now}")
+    return f"{visible_text(served)} is served by {subject}, not by the harness; stop it, then {now}"
 
 
 def uncovered(old: list[dict], new: list[dict]) -> list[dict]:
