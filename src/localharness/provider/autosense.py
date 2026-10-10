@@ -275,6 +275,9 @@ def extra_cache_types(extra_args: Sequence[str]) -> tuple[str | None, str | None
             _flag_value(extra_args, ("-ctv", "--cache-type-v")))
 
 
+_UNSET: Any = object()  # compute_fit's `memory=` default: probe free memory as before
+
+
 @dataclass(frozen=True)
 class FitInputs:
     """What `compute_fit` gathered for one llama.cpp record: the typed header, the GPU residency, the
@@ -289,7 +292,7 @@ class FitInputs:
 
 
 def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None, size: bool = True,
-                meminfo: bool = False) -> FitInputs:
+                meminfo: bool = False, memory: FreeMemory | None = _UNSET) -> FitInputs:
     """The fit for a llama.cpp `server:` record, in one place for every caller (D-04): `activate`
     sizes a launch with it, `start` reports an attach and `doctor` prints its row.
 
@@ -299,7 +302,9 @@ def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None,
     f16). `attached_served` is the window an already-running server serves.
     `size=False` stops after the header and the offload (no memory probe: a caller that has no served
     window to add to wants only the header); `meminfo=True` also reads `/proc/meminfo` for
-    `--cache-ram`. Starts nothing and writes nothing."""
+    `--cache-ram`. `memory=` replaces the probe (D-49): `init` runs `free_memory` once and passes that
+    one result for every model it ranks; a `FreeMemory` or None is used as given and `free_memory` is
+    never called. Starts nothing and writes nothing."""
     from localharness.agent.gguf_header import read_header
 
     extra = list(server.extra_args or [])
@@ -311,7 +316,7 @@ def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None,
     offload = offload_kind(extra, n_layer) if n_layer else "unknown"
     if not size:
         return FitInputs(header, offload, None, None, None, None)
-    mem = free_memory(ratios)
+    mem = free_memory(ratios) if memory is _UNSET else memory
     weights = weights_bytes(server.model, server.mmproj)
     mi = _read_meminfo() if meminfo else None
     extra_k, extra_v = extra_cache_types(extra)

@@ -322,3 +322,47 @@ def test_a_key_under_neither_general_nor_the_architecture_is_ignored(tmp_path):
     kv = {"other.block_count": 99, "general.architecture": "qwen3", "qwen3.block_count": 48,
           "qwen3.other.block_count": 7}
     assert read_header(write_gguf(tmp_path / "m.gguf", kv), {"block_count"}) == {"block_count": 48}
+
+
+# ---- D-47: a dotted wanted name is an exact key -------------------------------------------------------
+
+SPLIT_WANT = {"split.no", "split.count", "clip.vision.projection_dim"}
+
+
+def u16(n: int) -> Raw:
+    return Raw(2, struct.pack("<H", n))
+
+
+def test_dotted_names_are_exact_keys_whatever_the_architecture(tmp_path):
+    p = write_gguf(tmp_path / "m.gguf", {"general.architecture": "qwen4exp", "qwen4exp.embedding_length": 2560,
+                                          "split.no": u16(0), "split.count": u16(2)})
+    assert read_header(p, SPLIT_WANT) == {"split.no": 0, "split.count": 2}
+
+
+def test_dotted_names_resolve_with_no_architecture_key_at_all(tmp_path):
+    p = write_gguf(tmp_path / "shard2.gguf", {"split.no": u16(1), "split.count": u16(2)})
+    assert read_header(p, SPLIT_WANT) == {"split.no": 1, "split.count": 2}
+
+
+def test_a_dotted_name_before_the_architecture_key_is_still_found(tmp_path):
+    p = write_gguf(tmp_path / "m.gguf", {"clip.vision.projection_dim": 5120, "general.architecture": "clip",
+                                          "general.type": "mmproj"})
+    assert read_header(p, {"type", "clip.vision.projection_dim"}) == {"type": "mmproj",
+                                                                       "clip.vision.projection_dim": 5120}
+
+
+def test_a_mixed_want_returns_suffix_names_and_full_dotted_names(tmp_path):
+    p = write_gguf(tmp_path / "m.gguf", {"general.architecture": "qwen3", "general.type": "model",
+                                          "qwen3.block_count": 48, "split.no": u16(0)})
+    assert read_header(p, {"type", "block_count", "split.no"}) == {"type": "model", "block_count": 48,
+                                                                    "split.no": 0}
+
+
+def test_an_exact_name_is_not_a_suffix_match(tmp_path):
+    p = write_gguf(tmp_path / "m.gguf", {"general.architecture": "llama", "other.split.no": u16(3)})
+    assert read_header(p, {"split.no"}) == {}
+
+
+def test_an_absent_dotted_name_is_simply_missing(tmp_path):
+    p = write_gguf(tmp_path / "m.gguf", {"general.architecture": "llama", "llama.block_count": 8})
+    assert read_header(p, {"split.no", "block_count"}) == {"block_count": 8}

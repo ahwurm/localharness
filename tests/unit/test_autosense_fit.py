@@ -621,3 +621,34 @@ def test_fmt_count_is_the_one_window_figure_formatter():
     from localharness.cli import doctor_cmd
 
     assert not hasattr(doctor_cmd, "_n")
+
+
+# ---- D-49: compute_fit(memory=) takes the one probe `init` ran ----------------------------------------
+
+def test_compute_fit_uses_the_memory_it_is_given_and_never_probes(tmp_path, host, monkeypatch):
+    def explode(ratios):
+        raise AssertionError("free_memory must not be called when memory= is given")
+
+    monkeypatch.setattr(autosense, "free_memory", explode)
+    given = FreeMemory(8 * GIB, 32 * GIB, "nvidia-smi")
+    fi = compute_fit(_record(tmp_path), RATIOS, memory=given)
+    assert fi.memory is given and fi.fits is None  # 18.5 GiB of weights do not fit 8 GiB free
+
+
+def test_compute_fit_given_free_bytes_changes_the_fit(tmp_path, host):
+    big = compute_fit(_record(tmp_path), RATIOS, memory=FreeMemory(24 * GIB, 32 * GIB, "nvidia-smi"))
+    small = compute_fit(_record(tmp_path), RATIOS, memory=FreeMemory(22 * GIB, 32 * GIB, "nvidia-smi"))
+    assert big.fits == compute_fit(_record(tmp_path), RATIOS).fits  # the same bytes as the probe gave
+    assert small.fits is not None and small.fits < big.fits
+    assert host == ["free_memory"]  # only the un-given call probed
+
+
+def test_compute_fit_memory_none_computes_with_unknown_memory(tmp_path, host):
+    fi = compute_fit(_record(tmp_path), RATIOS, memory=None)
+    assert fi.memory is None and fi.fits is None and fi.weights == WEIGHTS_A
+    assert host == []
+
+
+def test_compute_fit_without_memory_still_probes_once(tmp_path, host):
+    compute_fit(_record(tmp_path), RATIOS)
+    assert host == ["free_memory"]

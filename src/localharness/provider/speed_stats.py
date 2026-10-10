@@ -258,6 +258,17 @@ def model_path(path: Path, provider_type: str, model: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def model_paths(path: Path) -> set[str]:
+    """Every weights path the ledger recorded, across all entries (INIT-02 ranks on these). The
+    reserved `_dropped_env` map and any entry without a string `model_path` are skipped."""
+    found: set[str] = set()
+    for key, entry in _load(path).items():
+        value = entry.get("model_path") if key != DROPPED_ENV_KEY and isinstance(entry, dict) else None
+        if isinstance(value, str):
+            found.add(value)
+    return found
+
+
 def record_dropped_env(path: Path, runtime: str, names: Iterable[str]) -> None:
     """Record, per runtime, the env names the last launch dropped (sorted, de-duplicated).
 
