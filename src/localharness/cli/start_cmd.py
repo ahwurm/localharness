@@ -248,16 +248,17 @@ def _read_session_key(harness: Any) -> str | None:
 
     def refused(reason: object) -> str:
         mark_key_file(spec, True)
+        # the path comes from a settings file: shown through _visible like every file-supplied value
+        head = f"server.api_key_file {_visible(path)}: {_visible(reason)} — "
         if key_kwargs(harness.provider.api_key):
-            return (f"server.api_key_file {path}: {reason} — the file is not used; "
-                    "this session keeps sending the key it already holds")
-        return f"server.api_key_file {path}: {reason} — this session sends no key"
+            return head + "the file is not used; this session keeps sending the key it already holds"
+        return head + "this session sends no key"
 
     # The key goes to provider.base_url, which nothing ties to server.port or to the host the person
     # confirmed: a destination that is not this machine never gets a key out of a file (WR-06).
     here, shown = key_destination(harness.provider.base_url)
     if not here:
-        return refused(f"provider.base_url {_visible(shown)} is not this machine, so the file is not read")
+        return refused(f"provider.base_url {shown} is not this machine, so the file is not read")
     try:
         key = read_key_file(path)
     except KeyFileError as exc:
