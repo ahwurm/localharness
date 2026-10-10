@@ -258,3 +258,284 @@ def test_the_declined_set_is_keyed_on_the_visible_snapshot(g, monkeypatch):
     assert MACHINE_DECLINED in first.line
     assert MACHINE_DECLINED_EARLIER in second.line
     assert second.quiet == frozenset({BIND_ALL})
+
+
+# ------------------------------------------------------------------ annotations on diff lines
+
+
+def test_an_annotation_is_appended_to_its_line_only(g):
+    new = [{"file": "config.yaml", "kind": "launch", "name": "server.bind_all", "shown": "llamacpp:true:open"},
+           {"file": "config.yaml", "kind": "launch", "name": "server.binary", "shown": "/x"}]
+    before = [dict(e) for e in new]
+
+    plain = ws_mod.machine_diff([], new)
+    dashed = ws_mod.machine_diff([], new, annotations={BIND_ALL: "X"})
+    bracket = ws_mod.machine_diff([], new, annotations={BIND_ALL: "(from Y)"})
+
+    assert dashed.splitlines()[0] == "  + server.bind_all (config.yaml): llamacpp:true:open — X"
+    assert bracket.splitlines()[0] == "  + server.bind_all (config.yaml): llamacpp:true:open (from Y)"
+    assert dashed.splitlines()[1:] == plain.splitlines()[1:]
+    assert new == before
+
+
+# ------------------------------------------------------------------ the question and a remembered No
+
+
+def _audit(g) -> list[dict]:
+    import json
+
+    path = g / "audit.jsonl"
+    if not path.exists():
+        return []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [r for r in rows if r.get("event_type") == "ComponentMutated"]
+
+
+def _overrides(g) -> dict:
+    import yaml
+
+    path = g / "overrides.yaml"
+    return yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _peers(*, bind_all=True, keyed=False) -> list[dict]:
+    peer = {"name": "p", "base_url": "http://127.0.0.1:8082/v1", "gpu": True, "api_key": "SECRET-KEY",
+            "lifecycle": {"runtime": "llamacpp", "binary": "/x/b", "model": "/m/b.gguf",
+                          "bind_all": bind_all, "port": 8082}}
+    if keyed:
+        peer["lifecycle"]["require_api_key"] = True
+    other = {"name": "q", "base_url": "http://127.0.0.1:8083/v1", "gpu": True,
+             "lifecycle": {"runtime": "llamacpp", "binary": "/x/c", "model": "/m/c.gguf",
+                           "bind_all": False, "port": 8083}}
+    return [peer, other]
+
+
+def _upgrade_asking(g, monkeypatch, *replies, **config) -> tuple[MachineTrust, list[str]]:
+    _config(g, **config)
+    _pre_upgrade(g)
+    asked = answers(monkeypatch, *replies)
+    return decide_machine_trust(g, ask=True, launching=True), asked
+
+
+def test_the_question_says_what_yes_does_to_a_llamacpp_true(g, monkeypatch):
+    got, asked = _upgrade_asking(g, monkeypatch, True, server=LLAMACPP)
+
+    assert got == MachineTrust()
+    assert ("server.bind_all: true was never applied to llama.cpp; Yes binds every interface, no key"
+            in asked[0])
+    assert "server.bind_all" in _recorded_names(g)
+
+
+def test_the_no_key_clause_goes_when_a_key_is_required(g, monkeypatch):
+    _, asked = _upgrade_asking(g, monkeypatch, True, server={
+        **LLAMACPP, "require_api_key": True, "api_key_file": "/k"})
+
+    assert asked[0].count("Yes binds every interface") == 1
+    assert "Yes binds every interface, no key" not in asked[0]
+    assert "llamacpp:true:keyed" in asked[0]
+
+
+def test_the_peer_form_names_the_peers_lifecycle(g, monkeypatch):
+    _, asked = _upgrade_asking(g, monkeypatch, True, extra_endpoints=_peers())
+
+    assert ("extra_endpoints.p.lifecycle.bind_all: true was never applied to llama.cpp; "
+            "Yes binds every interface, no key") in asked[0]
+
+
+def test_a_no_writes_false_adopts_it_and_is_never_asked_again(g, monkeypatch):
+    _config(g, server=LLAMACPP)
+    _pre_upgrade(g)
+    asked = answers(monkeypatch, False)
+
+    got = decide_machine_trust(g, ask=True, launching=True)
+
+    assert len(asked) == 1
+    assert _overrides(g) == {"server": {"bind_all": False}}
+    shown = {(e["file"], e["name"]): e["shown"] for e in trust.recorded_machine(g)["entries"]}
+    assert shown[("overrides.yaml", "server.bind_all")] == "llamacpp:false:open"
+    assert not any(v.startswith("llamacpp:true") for v in shown.values())
+    assert got.withheld == {"config.yaml": frozenset({("launch", "server.bind_all")})}
+    assert got.line == "" and MACHINE_DECLINED not in got.line
+    never_asked(monkeypatch)
+    for ask, launching in ((True, True), (False, False), (True, False)):
+        assert decide_machine_trust(g, ask=ask, launching=launching) == MachineTrust()
+
+
+def test_deleting_the_override_asks_again_and_never_widens(g, monkeypatch):
+    _config(g, server=LLAMACPP)
+    _pre_upgrade(g)
+    answers(monkeypatch, False)
+    decide_machine_trust(g, ask=True, launching=True)
+    (g / "overrides.yaml").unlink()
+    ws_mod._DECLINED.clear()  # the next process: the in-session No is not what is under test
+    asked = answers(monkeypatch, False)
+
+    got = decide_machine_trust(g, ask=True, launching=True)
+
+    assert len(asked) == 1 and "server.bind_all: true was never applied" in asked[0]
+    assert _overrides(g) == {"server": {"bind_all": False}}
+    assert got.line == ""
+
+
+def test_a_no_beside_an_mcp_server_declines_it_and_remembers_the_posture(g, monkeypatch):
+    server = {"name": "g2", "transport": "stdio", "command": "/bin/sh", "args": ["-c", "id"]}
+    write_yaml(g / "agents" / "orchestrator.yaml", {"name": "orchestrator", "role": "R",
+                                                     "tools": {"mcp_servers": []}})
+    _config(g, server=LLAMACPP)
+    _pre_upgrade(g)
+    write_yaml(g / "agents" / "orchestrator.yaml", {"name": "orchestrator", "role": "R",
+                                                     "tools": {"mcp_servers": [server]}})
+    answers(monkeypatch, False)
+
+    got = decide_machine_trust(g, ask=True, launching=True)
+
+    assert "g2 (agents/orchestrator.yaml)" in got.line and MACHINE_DECLINED in got.line
+    assert "bind_all" not in got.line and "1 change(s)" in got.line
+    assert _overrides(g)["server"]["bind_all"] is False
+    answers(monkeypatch, False)
+    again = decide_machine_trust(g, ask=True, launching=True)
+    assert "g2" in again.line and "bind_all" not in again.line
+
+
+def test_a_peer_no_writes_the_peers_false_by_name_and_remembers_it(g, monkeypatch):
+    _config(g, extra_endpoints=_peers())
+    _pre_upgrade(g)
+    answers(monkeypatch, False)
+    name = "extra_endpoints.p.lifecycle.bind_all"
+
+    got = decide_machine_trust(g, ask=True, launching=True)
+
+    listed = {p["name"]: p for p in _overrides(g)["extra_endpoints"]}
+    assert listed["p"]["lifecycle"]["bind_all"] is False and listed["q"]["lifecycle"]["bind_all"] is False
+    assert listed["p"]["lifecycle"]["binary"] == "/x/b" and listed["p"]["api_key"] == "SECRET-KEY"
+    shown = {(e["file"], e["name"]): e["shown"] for e in trust.recorded_machine(g)["entries"]}
+    assert shown[("overrides.yaml", name)] == "llamacpp:false:open"
+    assert trust.offer_was_declined(trust.decline_key("<peer>", name, "llamacpp:true:open"))
+    assert got.line == ""
+    never_asked(monkeypatch)
+    for ask, launching in ((True, True), (False, False), (True, False)):
+        assert decide_machine_trust(g, ask=ask, launching=launching) == MachineTrust()
+
+
+# ------------------------------------------------------------------ the writer: validated, audited
+
+
+def test_a_refused_validation_leaves_the_overlay_and_the_audit_log_alone(g, monkeypatch):
+    _config(g, server=LLAMACPP)
+    _pre_upgrade(g)
+    write_yaml(g / "overrides.yaml", {"org": {"default_model": "m"}})
+    before = (g / "overrides.yaml").read_bytes()
+
+    def refuse(*_a, **_kw):
+        raise ValueError("would not load")
+
+    monkeypatch.setattr("localharness.config.models.HarnessConfig.model_validate", refuse)
+    answers(monkeypatch, False)
+
+    got = decide_machine_trust(g, ask=True, launching=True)
+
+    assert (g / "overrides.yaml").read_bytes() == before and _audit(g) == []
+    assert "server.bind_all (config.yaml)" in got.line and MACHINE_DECLINED in got.line
+
+
+def test_a_config_without_a_provider_is_refused_by_design(g, monkeypatch):
+    write_yaml(g / "config.yaml", {"server": LLAMACPP})
+    _pre_upgrade(g)
+    answers(monkeypatch, False)
+
+    got = decide_machine_trust(g, ask=True, launching=True)
+
+    assert not (g / "overrides.yaml").exists() and _audit(g) == []
+    assert "server.bind_all (config.yaml)" in got.line
+
+
+def test_an_unparseable_overlay_is_not_written_over(g, monkeypatch):
+    _config(g, server=LLAMACPP)
+    _pre_upgrade(g)
+    (g / "overrides.yaml").write_text("server: [unclosed\n", encoding="utf-8")
+    answers(monkeypatch, False)
+
+    decide_machine_trust(g, ask=True, launching=True)
+
+    assert (g / "overrides.yaml").read_text(encoding="utf-8") == "server: [unclosed\n"
+    assert _audit(g) == []
+
+
+def test_the_primary_no_is_audited_once(g, monkeypatch):
+    _config(g, server=LLAMACPP)
+    _pre_upgrade(g)
+    answers(monkeypatch, False)
+
+    decide_machine_trust(g, ask=True, launching=True)
+
+    (event,) = _audit(g)
+    assert event["path"] == "server.bind_all" and event["before_value"] is None
+    assert event["after_value"] is False and event["layer"] == "user" and event["actor"] == "cli"
+    assert event["actor_detail"]
+
+
+def test_the_primary_audit_records_the_value_the_overlay_held(g, monkeypatch):
+    _config(g, server={**LLAMACPP, "bind_all": False})
+    write_yaml(g / "overrides.yaml", {"server": {"bind_all": True}})
+    _pre_upgrade(g)
+    answers(monkeypatch, False)
+
+    decide_machine_trust(g, ask=True, launching=True)
+
+    (event,) = _audit(g)
+    assert event["before_value"] is True and event["after_value"] is False
+
+
+def test_the_peer_no_is_audited_by_name_and_never_leaks_the_peers_key(g, monkeypatch):
+    _config(g, extra_endpoints=_peers())
+    _pre_upgrade(g)
+    answers(monkeypatch, False)
+
+    decide_machine_trust(g, ask=True, launching=True)
+
+    (event,) = _audit(g)
+    assert event["path"] == "extra_endpoints.p.lifecycle.bind_all"
+    assert event["before_value"] is True and event["after_value"] is False and event["actor"] == "cli"
+    assert "SECRET-KEY" not in (g / "audit.jsonl").read_text(encoding="utf-8")
+
+
+def test_a_null_audit_path_still_writes_and_adopts(g, monkeypatch):
+    _config(g, server=LLAMACPP, org={"audit_log_path": None})
+    _pre_upgrade(g)
+    answers(monkeypatch, False)
+
+    decide_machine_trust(g, ask=True, launching=True)
+
+    assert _overrides(g) == {"server": {"bind_all": False}}
+    assert not (g / "audit.jsonl").exists()
+    never_asked(monkeypatch)
+    assert decide_machine_trust(g, ask=True, launching=True) == MachineTrust()
+
+
+def test_an_emit_that_fails_never_undoes_the_write(g, monkeypatch):
+    _config(g, server=LLAMACPP)
+    _pre_upgrade(g)
+
+    async def boom(*_a, **_kw):
+        raise OSError("audit log unwritable")
+
+    monkeypatch.setattr("localharness.core.bus.EventBus.publish", boom)
+    answers(monkeypatch, False)
+
+    got = decide_machine_trust(g, ask=True, launching=True)
+
+    assert _overrides(g) == {"server": {"bind_all": False}} and got.line == ""
+    never_asked(monkeypatch)
+    assert decide_machine_trust(g, ask=True, launching=True) == MachineTrust()
+
+
+async def test_the_audit_line_is_written_from_inside_a_running_loop(g):
+    _config(g, server=LLAMACPP)
+
+    ok = ws_mod._write_overlay_validated(
+        g, lambda overlay: overlay.setdefault("server", {}).update(bind_all=False),
+        [("server.bind_all", None, False)], actor_detail="test")
+
+    assert ok is True
+    (event,) = _audit(g)
+    assert event["path"] == "server.bind_all" and event["actor_detail"] == "test"

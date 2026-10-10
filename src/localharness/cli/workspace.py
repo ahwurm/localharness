@@ -51,6 +51,9 @@ varies with CWD).
 """
 from __future__ import annotations
 
+import asyncio
+import copy
+import json
 import logging
 import re
 import shlex
@@ -58,7 +61,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Mapping, Optional, Union
+from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
 from rich.console import Console
 
@@ -538,10 +541,12 @@ def _uncovered(old: list[dict], new: list[dict]) -> list[dict]:
 
 
 def _diff(old: list[dict], new: list[dict], *, pair: Callable[[dict], tuple], target: Callable[[dict], str],
-          counted: bool, removed: bool) -> str:
+          counted: bool, removed: bool, annotations: Optional[Mapping[tuple, str]] = None) -> str:
     """One two-space-indented line per entry of `new` not covered by `old` ("+", or "~" when it
     pairs — display only — with a gone entry of the same `pair` key, each pairing once), then one
-    "-" line per gone entry left unpaired when `removed`; env and header NAMES on a line under."""
+    "-" line per gone entry left unpaired when `removed`; env and header NAMES on a line under.
+    ``annotations`` maps an entry's ``pair`` key to display-only text appended to its line: after
+    " — ", or after one space when the text begins with "(" (a parenthetical suffix)."""
     if counted:
         added, gone = _uncovered(old, new), _uncovered(new, old)
     else:
@@ -551,8 +556,11 @@ def _diff(old: list[dict], new: list[dict], *, pair: Callable[[dict], tuple], ta
         twin = next((g for g in gone if pair(g) == pair(entry)), None)
         if twin is not None:
             gone.remove(twin)
+        note = (annotations or {}).get(pair(entry))
+        suffix = "" if not note else (f" {_visible(note)}" if str(note).startswith("(")
+                                      else f" — {_visible(note)}")
         lines.append(f"  {'~' if twin is not None else '+'} {_visible(entry.get('name'))} "
-                     f"({_visible(entry.get('file'))}): {_visible(target(entry))}")
+                     f"({_visible(entry.get('file'))}): {_visible(target(entry))}{suffix}")
         lines += [f"      {label}: {', '.join(map(_visible, entry[label]))}"
                   for label in ("env", "headers") if entry.get(label)]
     if removed:
@@ -612,14 +620,18 @@ class MachineTrust:
     """The lines `start` composes for a launch about what was narrowed or declined (D-15..D-17)."""
 
 
-def machine_diff(old: list[dict], new: list[dict], *, removed: bool = True) -> str:
+def machine_diff(old: list[dict], new: list[dict], *, removed: bool = True,
+                 annotations: Optional[Mapping[tuple[str, str, str], str]] = None) -> str:
     """One line per entry of `new` not covered verbatim by `old`, counted as decide_machine_trust
     counts: "+ g2 (agents/orchestrator.yaml): /bin/sh -c id" for an added one, "~ …" when it pairs
     with a no-longer-present entry of the same (file, kind, name) — that pairing is display only —
     and "- …" for a removed one (only when `removed`), plus "  env: A, B" under an MCP server that
-    names env vars. Never a value of env or headers."""
+    names env vars. Never a value of env or headers. ``annotations`` maps `(file, kind, name)` to text
+    appended to that line (` — text`, or ` text` when it begins with `(`): display only, it never
+    enters an entry, so the whole-entry compare is untouched."""
     return _diff(old, new, pair=lambda e: (e.get("file"), e.get("kind"), e.get("name")),
-                 target=lambda e: str(e.get("shown") or ""), counted=True, removed=removed)
+                 target=lambda e: str(e.get("shown") or ""), counted=True, removed=removed,
+                 annotations=annotations)
 
 
 def _minus(entries: list[dict], remove: list[dict]) -> list[dict]:
@@ -654,7 +666,9 @@ def _quiet_entries(changed: list[dict], launching: bool) -> list[dict]:
     return [e for e in changed if is_quiet(e)]
 
 
-def decide_machine_trust(global_dir: Path, *, ask: bool, launching: bool = False) -> MachineTrust:
+def decide_machine_trust(global_dir: Path, *, ask: bool, launching: bool = False,
+                         annotations: Optional[Mapping[tuple[str, str, str], str]] = None
+                         ) -> MachineTrust:
     """Decided once at start, before anything loads (orchestrator ruling R12a). The agent may write
     the machine's agent files; what they start, load or loosen applies only after one Yes here.
 
@@ -667,7 +681,13 @@ def decide_machine_trust(global_dir: Path, *, ask: bool, launching: bool = False
     Some uncovered entries are QUIET (:func:`_quiet_entries`): withheld without a word and never
     recorded, so a Yes to another change cannot adopt a `bind_all: true` nobody was shown. Every
     record call writes the snapshot minus the quiet entries. `launching` says whether this start is
-    about to launch the primary (default False: nothing is launching, the llama.cpp question waits)."""
+    about to launch the primary (default False: nothing is launching, the llama.cpp question waits).
+
+    On a terminal start that is about to launch, a llama.cpp `bind_all: true` is put inside the one
+    question worded for what it does (:func:`_bind_all_annotations`). A No on the question remembers
+    its posture entries: each is written narrow to overrides.yaml through :func:`_remember_posture_no`
+    and adopted from the written value, after the No's own record. ``annotations`` is display-only
+    text per `(file, kind, name)` for the caller's own sources (see :func:`machine_diff`)."""
     from localharness.config import trust
 
     snap = trust.machine_snapshot(global_dir)
@@ -690,23 +710,25 @@ def decide_machine_trust(global_dir: Path, *, ask: bool, launching: bool = False
             trust.record_machine(global_dir, visible)  # removals, tightenings, a newly known kind
         return still_quiet
 
-    def withheld(why: str) -> MachineTrust:
-        result = _withhold(asked_about, global_dir, why, quiet)
+    def withheld(why: str, *, remember: bool = False) -> MachineTrust:
         if upgrade:  # D-07: the test is not re-run at every later start
             trust.record_machine(global_dir, _minus(visible, asked_about), trust.MACHINE_KINDS)
-        return result
+        # After the record above, so an adopted entry is not overwritten by it (D-10).
+        remembered = _remember_posture_no(global_dir, asked_about, confirmed) if remember else []
+        return _withhold(_minus(asked_about, remembered), global_dir, why, [*quiet, *remembered])
 
     declined = (trust.machine_key(global_dir), trust.fingerprint(visible))
     if declined in _DECLINED:
         return withheld(MACHINE_DECLINED_EARLIER)
     if not ask:
         return withheld(MACHINE_UNASKED)
-    if _confirm_or_no(MACHINE_CHANGED_QUESTION.format(global_dir=global_dir,
-                                                      diff=machine_diff(confirmed, visible))):
+    notes = _merged_annotations(_bind_all_annotations(asked_about), annotations)
+    if _confirm_or_no(MACHINE_CHANGED_QUESTION.format(
+            global_dir=global_dir, diff=machine_diff(confirmed, visible, annotations=notes))):
         trust.record_machine(global_dir, visible)
         return still_quiet
     _DECLINED.add(declined)
-    return withheld(MACHINE_DECLINED)
+    return withheld(MACHINE_DECLINED, remember=True)
 
 
 def _by_file(entries: list[dict]) -> dict[str, frozenset[tuple[str, str]]]:
@@ -720,5 +742,228 @@ def _withhold(changed: list[dict], global_dir: Path, why: str,
               quiet: list[dict] = ()) -> MachineTrust:
     """Withhold ``changed`` (named in the one line) and ``quiet`` (named nowhere)."""
     names = ", ".join(f"{_visible(e['name'])} ({_visible(e['file'])})" for e in changed)
-    return MachineTrust(_by_file([*changed, *quiet]), MACHINE_WITHHELD_LINE.format(
-        n=len(changed), global_dir=global_dir, names=names, why=why), quiet=_triples(list(quiet)))
+    line = MACHINE_WITHHELD_LINE.format(
+        n=len(changed), global_dir=global_dir, names=names, why=why) if changed else ""
+    return MachineTrust(_by_file([*changed, *quiet]), line, quiet=_triples(list(quiet)))
+
+
+# ------------------------------------------------------------------ the llama.cpp question
+
+NEVER_APPLIED = "{name}: true was never applied to llama.cpp; Yes binds every interface"
+
+
+def _bind_all_annotations(entries: list[dict]) -> dict[tuple[str, str, str], str]:
+    """The D-10 wording for each llama.cpp `bind_all: true` posture entry among ``entries``: what
+    0.17 never did and what Yes now does, `, no key` when nothing requires one (`shown` ends `:open`)."""
+    out: dict[tuple[str, str, str], str] = {}
+    for e in entries:
+        shown = str(e.get("shown", ""))
+        if (e.get("kind") == "launch" and str(e.get("name", "")).endswith(".bind_all")
+                and shown.startswith("llamacpp:true:")):
+            out[(e["file"], e["kind"], e["name"])] = (
+                NEVER_APPLIED.format(name=e["name"]) + (", no key" if shown.endswith(":open") else ""))
+    return out
+
+
+def _merged_annotations(mine: dict, theirs: Optional[Mapping]) -> dict:
+    """``mine`` under the caller's ``theirs``: a caller's parenthetical rides after ours on the same
+    line, any other caller text replaces it."""
+    out = dict(mine)
+    for key, text in (theirs or {}).items():
+        out[key] = f"{out[key]} {text}" if key in out and str(text).startswith("(") else text
+    return out
+
+
+# ------------------------------------------------------------------ the one overlay writer
+
+
+def _raw_settings(global_dir: Path) -> tuple[dict, dict]:
+    """`(config.yaml, overrides.yaml)` as parsed, each `{}` when missing, unparsable or not a
+    mapping. The raw two-file read that start's sensing and the No-writes share — never a merged
+    or validated view."""
+    from localharness.config import trust
+    from localharness.config.overlay import _resolve_user_overlay_path
+
+    def read(path: Path) -> dict:
+        raw = trust._read_yaml(path) if path.is_file() else None
+        return raw if isinstance(raw, dict) else {}
+
+    return read(Path(global_dir) / "config.yaml"), read(_resolve_user_overlay_path(global_dir))
+
+
+def _run_sync(coro) -> None:
+    """Async-from-sync bridge (the shape of `autoresearch_cmd._run`): `asyncio.run` when no loop is
+    running on this thread; otherwise — `_start_async` is a running loop — on a fresh loop in a
+    worker thread, joined before returning."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(coro)
+        return
+    import threading
+
+    failure: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001 — handed back to the caller's thread
+            failure.append(exc)
+
+    thread = threading.Thread(target=work)
+    thread.start()
+    thread.join()
+    if failure:
+        raise failure[0]
+
+
+def _write_overlay_validated(global_dir: Path, mutate: Callable[[dict], None],
+                             audit: Sequence[tuple[str, Any, Any]], *, actor_detail: str) -> bool:
+    """The one writer of overrides.yaml for the machine-trust acts (D-28): ``mutate`` a deep copy of
+    the overlay, validate the config the next start would read (config.yaml raw merged with the new
+    overlay minus its `agent:` section, as `persist_default_model` does), write it atomically, then
+    publish one `ComponentMutated` (`layer="user"`, `actor="cli"`) per ``audit`` triple
+    `(dotted path, before, after)` to the configured `org.audit_log_path`.
+
+    Returns False — nothing written, nothing emitted — when the overlay will not parse, the result
+    will not validate (no `provider:` block in config.yaml is one such case) or the file cannot be
+    written. An emit that fails is logged at debug and never undoes the write. Callers adopt only
+    after True. Paths are entry names, never a whole list, so a peer's `api_key` stays out of the
+    audit log."""
+    from localharness.config.loader import ConfigParseError
+    from localharness.config.models import HarnessConfig
+    from localharness.config.overlay import (
+        _resolve_user_overlay_path, atomic_write_overlay, deep_merge, load_overlay)
+    from localharness.config.paths import resolve_runtime_path
+    from localharness.config.plugin_sections import core_harness_view
+
+    overlay_path = _resolve_user_overlay_path(global_dir)
+    config_raw, _ = _raw_settings(global_dir)
+    try:
+        new = copy.deepcopy(load_overlay(overlay_path))
+        mutate(new)
+        cfg = HarnessConfig.model_validate(core_harness_view(
+            deep_merge(config_raw, {k: v for k, v in new.items() if k != "agent"})))
+        atomic_write_overlay(overlay_path, new)
+    except (ConfigParseError, ValueError, TypeError, AttributeError, OSError):
+        log.debug("the overlay write was refused or failed; nothing was written", exc_info=True)
+        return False
+    audit_path = cfg.org.audit_log_path
+    if audit_path and audit:
+        async def emit() -> None:
+            from localharness.core.bus import EventBus
+            from localharness.core.events import ComponentMutated
+
+            bus = EventBus(persist_path=resolve_runtime_path(audit_path, global_dir))
+            for path, before, after in audit:
+                await bus.publish(ComponentMutated(
+                    path=path, before_value=before, after_value=after, layer="user", actor="cli",
+                    actor_detail=actor_detail))
+
+        try:
+            _run_sync(emit())
+        except Exception:  # noqa: BLE001 — a record that cannot be written never undoes the write
+            log.debug("the overlay write was not recorded in the audit log", exc_info=True)
+    return True
+
+
+NO_DETAIL = "localharness start: a No on the machine question, remembered"
+
+
+def _posture_names(name: str) -> Optional[tuple[Optional[str], str]]:
+    """`(peer, key)` of a posture entry name — `(None, "bind_all")` for `server.bind_all` — or None."""
+    key = name.rsplit(".", 1)[-1]
+    if key not in ("bind_all", "require_api_key"):
+        return None
+    if name == f"server.{key}":
+        return None, key
+    if name.startswith("extra_endpoints.") and ".lifecycle." in name:
+        return name[len("extra_endpoints."):].rpartition(".lifecycle.")[0], key
+    return None
+
+
+def _remember_posture_no(global_dir: Path, asked_about: list[dict],
+                         confirmed: list[dict]) -> list[dict]:
+    """A No on the machine question costs nothing and is remembered for the exposure entries among
+    ``asked_about`` (D-10, D-11): each uncovered `bind_all: true` is written `false` and each
+    `require_api_key: false` is written `true` into overrides.yaml (the primary's `server:` key, or
+    the named peer's `lifecycle:` in the list that wins) through :func:`_write_overlay_validated`,
+    and only after that returns True the entry is adopted from the written values
+    (`trust.adopt_entries`) — never the config.yaml value that was declined. A peer's No is also
+    put in the decline store under `decline_key("<peer>", name, shown)`. Returns the entries
+    remembered; every other entry is left to ask again next time."""
+    from localharness.config import trust
+    from localharness.registry import set_value_in_dict
+
+    covered = {trust._canonical(e) for e in confirmed}
+    remembered: list[dict] = []
+    for entry in asked_about:
+        name, shown = str(entry.get("name", "")), str(entry.get("shown", ""))
+        form = _posture_names(name)
+        if entry.get("kind") != trust.LAUNCH_KIND or form is None:
+            continue
+        peer, key = form
+        value = shown.split(":")[1] if shown.count(":") >= 2 else ""
+        safe = {("bind_all", "true"): False, ("require_api_key", "false"): True}.get((key, value))
+        if safe is None:
+            continue
+        config_raw, overlay_raw = _raw_settings(global_dir)
+        had_list = isinstance(overlay_raw.get("extra_endpoints"), list)
+        if peer is None:
+            before = (overlay_raw.get("server") or {}).get(key) if isinstance(
+                overlay_raw.get("server"), dict) else None
+
+            def mutate(overlay: dict, name=name, safe=safe) -> None:
+                set_value_in_dict(overlay, name, safe)
+        else:
+            before = value == "true"
+
+            def mutate(overlay: dict, peer=peer, key=key, safe=safe) -> None:
+                peers = overlay.get("extra_endpoints")
+                if not isinstance(peers, list):  # lists replace wholesale: start from config.yaml's
+                    peers = copy.deepcopy(config_raw.get("extra_endpoints") or [])
+                    overlay["extra_endpoints"] = peers
+                for p in peers:
+                    if (isinstance(p, dict) and str(p.get("name")) == peer
+                            and isinstance(p.get("lifecycle"), dict)):
+                        p["lifecycle"][key] = safe
+
+        if not _write_overlay_validated(global_dir, mutate, [(name, before, safe)],
+                                        actor_detail=NO_DETAIL):
+            continue
+        raws = dict(zip(("config.yaml", "overrides.yaml"), _raw_settings(global_dir)))
+        now = {e["name"]: e for e in trust._posture_entries(raws)}.get(name)
+        adopt = [now] if now is not None and now["shown"].split(":")[1] == json.dumps(safe) else []
+        if peer is not None and not had_list:
+            adopt += _copied_peer_entries(raws, covered, skip=name)
+        if adopt:
+            trust.adopt_entries(global_dir, adopt)
+        if peer is not None:
+            trust.record_offer_decline(trust.decline_key("<peer>", name, shown))
+        remembered.append(entry)
+    return remembered
+
+
+def _copied_peer_entries(raws: dict, covered: set[str], *, skip: str) -> list[dict]:
+    """After a peer's No copied config.yaml's `extra_endpoints` into overrides.yaml, every peer's
+    entries exist a second time under the new file. Those whose config.yaml twin was already
+    confirmed are adopted too (same content, new file); one that was not stays uncovered and asks."""
+    from localharness.config import trust
+
+    def twin_covered(entry: dict) -> bool:
+        return trust._canonical({**entry, "file": "config.yaml"}) in covered
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for peer in raws["overrides.yaml"].get("extra_endpoints") or []:
+        if not (isinstance(peer, dict) and peer.get("name") is not None
+                and isinstance(peer.get("lifecycle"), dict)) or str(peer["name"]) in seen:
+            continue
+        seen.add(str(peer["name"]))
+        out += [e for e in trust._launch_entries(
+            "overrides.yaml", f"extra_endpoints.{peer['name']}.lifecycle.", peer["lifecycle"])
+            if twin_covered(e)]
+    out += [e for e in trust._posture_entries(raws)
+            if e["name"].startswith("extra_endpoints.") and e["name"] != skip
+            and e["file"] == "overrides.yaml" and twin_covered(e)]
+    return out
