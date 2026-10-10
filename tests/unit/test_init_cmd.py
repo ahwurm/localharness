@@ -146,6 +146,51 @@ def test_served_window_probes_and_records_the_triple(tmp_path, monkeypatch):
     assert rec.recorded_at.startswith("20")  # an ISO timestamp
 
 
+def test_served_window_probes_and_records_the_model_it_is_given(tmp_path, monkeypatch):
+    """WR-05: `model` (the one the config will name) overrides the detector's suggestion."""
+    from localharness.agent.context import WindowProbe
+    from localharness.cli import init_cmd
+    from localharness.provider.speed_stats import default_speed_stats_path, last_window_report
+
+    seen = []
+    monkeypatch.setattr("localharness.agent.context.probe_window",
+                        lambda base_url, model, ptype=None, **kw: seen.append(model) or WindowProbe(65536, 262144))
+    result = DetectorResult(found=True, provider_type="llamacpp", base_url="http://localhost:8080/v1",
+                            models=["first", "second"], suggested_model="first", probe_duration_ms=1.0)
+    assert init_cmd._served_window(result, cfg_dir=tmp_path, model="second") == 65536
+    assert seen == ["second"]
+    path = default_speed_stats_path(tmp_path)
+    assert last_window_report(path, "llamacpp", "second").served == 65536
+    assert last_window_report(path, "llamacpp", "first") is None
+
+
+def test_served_window_defers_the_record_to_the_caller(tmp_path, monkeypatch):
+    from localharness.agent.context import WindowProbe
+    from localharness.cli import init_cmd
+    from localharness.provider.speed_stats import default_speed_stats_path, last_window_report
+
+    monkeypatch.setattr("localharness.agent.context.probe_window", lambda *a, **k: WindowProbe(65536, 262144))
+    deferred = []
+    assert init_cmd._served_window(_result("llamacpp"), cfg_dir=tmp_path, deferred=deferred) == 65536
+    assert len(deferred) == 1 and not default_speed_stats_path(tmp_path).exists()
+    deferred[0]()
+    assert last_window_report(default_speed_stats_path(tmp_path), "llamacpp", "qwen").trained == 262144
+
+
+def test_a_llamacpp_endpoint_that_lists_nothing_still_probes_props_and_records_nothing(tmp_path, monkeypatch):
+    """WR-05: an empty model id made probe_window answer (None, None); `-` reaches the model-free /props."""
+    from localharness.agent.context import WindowProbe
+    from localharness.cli import init_cmd
+    from localharness.provider.speed_stats import default_speed_stats_path
+
+    seen = []
+    monkeypatch.setattr("localharness.agent.context.probe_window",
+                        lambda base_url, model, ptype=None, **kw: seen.append(model) or WindowProbe(8192, None))
+    assert init_cmd._served_window(_result("llamacpp", ""), cfg_dir=tmp_path) == 8192
+    assert seen == ["-"]
+    assert not default_speed_stats_path(tmp_path).exists()  # no model id to key the record on
+
+
 def test_served_window_keeps_the_lmstudio_and_vllm_routes(tmp_path, monkeypatch):
     """D-33: LM Studio reads _detect_lmstudio_ctx (probe_window is never called), vLLM reads the
     _detect_max_model_len seam and serves its trained window."""

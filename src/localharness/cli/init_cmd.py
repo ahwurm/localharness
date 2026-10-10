@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -787,32 +788,45 @@ def _choose_toggles(interactive: bool) -> tuple[bool, bool]:
     return host_tools_on, memory_on
 
 
-def _served_window(result: DetectorResult, *, cfg_dir: Path | None = None) -> int | None:
+def _served_window(result: DetectorResult, *, cfg_dir: Path | None = None, model: str | None = None,
+                   deferred: "list[Callable[[], None]] | None" = None) -> int | None:
     """The served context window to write as the context budget, or None — saying which, and why.
 
     Fit the context budget to the served window when the provider reports it — a budget above
     the real window disables compaction and kills long turns. llama.cpp's served and trained
     windows come from `probe_window`; LM Studio keeps `_detect_lmstudio_ctx` (the model-free route
-    its identification takes) and the rest keep `_detect_max_model_len` (D-33). The probed triple
-    is recorded under `cfg_dir` so the first `start` compares against it; the window line with the
-    fit and its undo arrives with the import (Phase 5)."""
+    its identification takes) and the rest keep `_detect_max_model_len` (D-33). `model` is the model
+    the config will name (default: the detector's suggestion); the probe and the ledger key are for
+    that model, the one `start` will resolve. The probed triple is recorded under `cfg_dir` so the
+    first `start` compares against it; with `deferred` the record is appended there as a thunk for
+    the caller to run once its write has succeeded, so a write that fails leaves no entry. The window
+    line with the fit and its undo arrives with the import (Phase 5)."""
+    model = model or result.suggested_model
     trained: int | None = None
     if result.provider_type == "llamacpp":
         from localharness.agent.context import probe_window
-        probe = probe_window(result.base_url, result.suggested_model, "llamacpp")
+        # "-" when the endpoint listed nothing: the /props fallback needs no id, and probe_window
+        # answers (None, None) for an empty model.
+        probe = probe_window(result.base_url, model or "-", "llamacpp")
         max_len, trained = probe.served, probe.trained
     elif result.provider_type == "lmstudio":
         max_len = _detect_lmstudio_ctx(result.base_url)
     else:
         max_len = _detect_max_model_len(result.base_url)
         trained = max_len if result.provider_type == "vllm" else None
-    if cfg_dir is not None and result.suggested_model and (max_len is not None or trained is not None):
-        from localharness.provider.speed_stats import default_speed_stats_path, record_window_report
-        try:
-            record_window_report(default_speed_stats_path(cfg_dir), result.provider_type,
-                                 result.suggested_model, max_len, trained, None)
-        except OSError:
-            pass  # a read-only config dir must not break init
+    if cfg_dir is not None and model and (max_len is not None or trained is not None):
+        def _record(served: int | None = max_len, trained: int | None = trained) -> None:
+            from localharness.provider.speed_stats import default_speed_stats_path, record_window_report
+            try:
+                record_window_report(default_speed_stats_path(cfg_dir), result.provider_type,
+                                     model, served, trained, None)
+            except OSError:
+                pass  # a read-only config dir must not break init
+
+        if deferred is not None:
+            deferred.append(_record)
+        else:
+            _record()
     # max_context_tokens IS the served window: the harness subtracts the reply reserve at runtime
     # (agent.context.response_reserve), so subtracting it here too would reserve it twice.
     # Two independent floors: ContextConfig rejects anything under 1_000, and a window that
@@ -1003,7 +1017,8 @@ def _write_config(
             **({} if host_tools_on else {"mode": "read-only"}),
         ),
     }
-    window = _served_window(result, cfg_dir=config_path)
+    records: list[Callable[[], None]] = []
+    window = _served_window(result, cfg_dir=config_path, model=selected_model, deferred=records)
     if window:
         org_kwargs["context"] = ContextConfig(max_context_tokens=window)
     harness = HarnessConfig(
@@ -1020,7 +1035,10 @@ def _write_config(
         org=OrgConfig(**org_kwargs),
         server=server_config,
     )
-    return _write_harness(config_path, harness, memory_on, force=force)
+    written = _write_harness(config_path, harness, memory_on, force=force)
+    for record in records:  # only now that the config is on disk (WR-05)
+        record()
+    return written
 
 
 def _write_change(config_path: Path, result: DetectorResult, selected_model: str,
@@ -1043,7 +1061,8 @@ def _write_change(config_path: Path, result: DetectorResult, selected_model: str
         ("org.default_model", selected_model),
     ):
         set_value_in_dict(overlay, path, value)
-    window = _served_window(result, cfg_dir=config_path)
+    records: list[Callable[[], None]] = []
+    window = _served_window(result, cfg_dir=config_path, model=selected_model, deferred=records)
     if window:
         set_value_in_dict(overlay, "org.context.max_context_tokens", window)
     try:
@@ -1058,6 +1077,8 @@ def _write_change(config_path: Path, result: DetectorResult, selected_model: str
         )
         raise typer.Exit(1)
     atomic_write_overlay(loader.user_overlay_path, overlay)
+    for record in records:  # a change that did not validate wrote nothing, and records nothing (WR-05)
+        record()
     console.print(
         "[green]✓[/green] "
         + escape(f"Updated {loader.user_overlay_path} — your config.yaml is unchanged."),
