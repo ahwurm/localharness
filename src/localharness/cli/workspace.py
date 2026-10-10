@@ -622,9 +622,52 @@ def machine_diff(old: list[dict], new: list[dict], *, removed: bool = True) -> s
                  target=lambda e: str(e.get("shown") or ""), counted=True, removed=removed)
 
 
-def decide_machine_trust(global_dir: Path, *, ask: bool) -> MachineTrust:
+def _minus(entries: list[dict], remove: list[dict]) -> list[dict]:
+    """``entries`` without every entry whose whole-entry canonical form is in ``remove`` (a set
+    compare: two identical entries are both gone, as both were quiet or asked about together)."""
+    from localharness.config.trust import _canonical
+
+    gone = {_canonical(e) for e in remove}
+    return [e for e in entries if _canonical(e) not in gone]
+
+
+def _triples(entries: list[dict]) -> frozenset[tuple[str, str, str]]:
+    return frozenset((e["file"], e["kind"], e["name"]) for e in entries)
+
+
+def _quiet_entries(changed: list[dict], launching: bool) -> list[dict]:
+    """The uncovered entries withheld silently (D-08): a llama.cpp `bind_all: true` posture entry
+    (primary or peer) while this start is not about to launch it — the question is deferred to the
+    moment of use — and a peer posture entry whose No is remembered for exactly this value."""
+    from localharness.config import trust
+
+    def is_quiet(entry: dict) -> bool:
+        name, shown = str(entry.get("name", "")), str(entry.get("shown", ""))
+        if entry.get("kind") != trust.LAUNCH_KIND:
+            return False
+        if name.endswith(".bind_all") and shown.startswith("llamacpp:true:") and not launching:
+            return True
+        return (name.startswith("extra_endpoints.") and name.rsplit(".", 1)[-1] in
+                ("bind_all", "require_api_key")
+                and trust.offer_was_declined(trust.decline_key("<peer>", name, shown)))
+
+    return [e for e in changed if is_quiet(e)]
+
+
+def decide_machine_trust(global_dir: Path, *, ask: bool, launching: bool = False) -> MachineTrust:
     """Decided once at start, before anything loads (orchestrator ruling R12a). The agent may write
-    the machine's agent files; what they start, load or loosen applies only after one Yes here."""
+    the machine's agent files; what they start, load or loosen applies only after one Yes here.
+
+    The one UPGRADE start is the first that finds a record without `launch_model` in its `kinds`:
+    there, besides the kinds the record predates, `trust.confirmed_at_upgrade` counts as confirmed
+    (what governed 0.17's launches; a llama.cpp `bind_all: true` never does). A record that already
+    knows `launch_model` confirms nothing unasked. When that start withholds, `launch_model` is
+    recorded in `kinds` anyway (with the withheld entries left out) so the test is not run again.
+
+    Some uncovered entries are QUIET (:func:`_quiet_entries`): withheld without a word and never
+    recorded, so a Yes to another change cannot adopt a `bind_all: true` nobody was shown. Every
+    record call writes the snapshot minus the quiet entries. `launching` says whether this start is
+    about to launch the primary (default False: nothing is launching, the llama.cpp question waits)."""
     from localharness.config import trust
 
     snap = trust.machine_snapshot(global_dir)
@@ -632,31 +675,50 @@ def decide_machine_trust(global_dir: Path, *, ask: bool) -> MachineTrust:
     if rec is None:
         trust.record_machine(global_dir, snap)  # the first start after the upgrade: adopted
         return MachineTrust()
+    upgrade = trust.LAUNCH_MODEL_KIND not in rec["kinds"]
     # Counted, never keyed on (file, kind, name): two MCP servers in one file may share a name. A
     # kind the record predates is adopted once — its entries were there before the rule.
-    confirmed = [*rec["entries"], *(e for e in snap if e.get("kind") not in rec["kinds"])]
+    confirmed = [*rec["entries"], *(e for e in snap if e.get("kind") not in rec["kinds"]),
+                 *(trust.confirmed_at_upgrade(snap) if upgrade else [])]
     changed = _uncovered(confirmed, snap)
-    if not changed:
-        if rec["fingerprint"] != trust.fingerprint(snap) or set(rec["kinds"]) != trust.MACHINE_KINDS:
-            trust.record_machine(global_dir, snap)  # removals, tightenings, a newly known kind
-        return MachineTrust()
-    declined = (trust.machine_key(global_dir), trust.fingerprint(snap))
+    quiet = _quiet_entries(changed, launching)
+    asked_about = _minus(changed, quiet)
+    visible = _minus(snap, quiet)
+    still_quiet = MachineTrust(_by_file(quiet), "", quiet=_triples(quiet))
+    if not asked_about:
+        if rec["fingerprint"] != trust.fingerprint(visible) or set(rec["kinds"]) != trust.MACHINE_KINDS:
+            trust.record_machine(global_dir, visible)  # removals, tightenings, a newly known kind
+        return still_quiet
+
+    def withheld(why: str) -> MachineTrust:
+        result = _withhold(asked_about, global_dir, why, quiet)
+        if upgrade:  # D-07: the test is not re-run at every later start
+            trust.record_machine(global_dir, _minus(visible, asked_about), trust.MACHINE_KINDS)
+        return result
+
+    declined = (trust.machine_key(global_dir), trust.fingerprint(visible))
     if declined in _DECLINED:
-        return _withhold(changed, global_dir, MACHINE_DECLINED_EARLIER)
+        return withheld(MACHINE_DECLINED_EARLIER)
     if not ask:
-        return _withhold(changed, global_dir, MACHINE_UNASKED)
+        return withheld(MACHINE_UNASKED)
     if _confirm_or_no(MACHINE_CHANGED_QUESTION.format(global_dir=global_dir,
-                                                      diff=machine_diff(confirmed, snap))):
-        trust.record_machine(global_dir, snap)
-        return MachineTrust()
+                                                      diff=machine_diff(confirmed, visible))):
+        trust.record_machine(global_dir, visible)
+        return still_quiet
     _DECLINED.add(declined)
-    return _withhold(changed, global_dir, MACHINE_DECLINED)
+    return withheld(MACHINE_DECLINED)
 
 
-def _withhold(changed: list[dict], global_dir: Path, why: str) -> MachineTrust:
+def _by_file(entries: list[dict]) -> dict[str, frozenset[tuple[str, str]]]:
     by_file: dict[str, set[tuple[str, str]]] = {}
-    for entry in changed:
+    for entry in entries:
         by_file.setdefault(entry["file"], set()).add((entry["kind"], entry["name"]))
+    return {f: frozenset(v) for f, v in by_file.items()}
+
+
+def _withhold(changed: list[dict], global_dir: Path, why: str,
+              quiet: list[dict] = ()) -> MachineTrust:
+    """Withhold ``changed`` (named in the one line) and ``quiet`` (named nowhere)."""
     names = ", ".join(f"{_visible(e['name'])} ({_visible(e['file'])})" for e in changed)
-    return MachineTrust({f: frozenset(v) for f, v in by_file.items()}, MACHINE_WITHHELD_LINE.format(
-        n=len(changed), global_dir=global_dir, names=names, why=why))
+    return MachineTrust(_by_file([*changed, *quiet]), MACHINE_WITHHELD_LINE.format(
+        n=len(changed), global_dir=global_dir, names=names, why=why), quiet=_triples(list(quiet)))
