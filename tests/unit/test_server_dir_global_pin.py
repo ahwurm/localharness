@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from localharness.config.paths import global_config_dir
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "localharness" / "cli"
+PROVIDER = SRC.parent / "provider"
 
 
 def _where(text: str, needle: str) -> str:
@@ -163,3 +164,16 @@ def test_init_guided_setup_names_the_global_pin():
     assert "managed_server.start_server(" not in text
     assert "wait_ready(" not in text
     assert "managed_server.find_vllm(config_path)" not in text
+
+
+def test_the_llamacpp_activation_prepares_its_config_dir_under_the_global_dir_it_was_handed():
+    """The harness-owned `XDG_CONFIG_HOME` (D-30, D-59) hangs off the `config_dir` `activate`
+    receives, which is the GLOBAL layer on every path, and not off `server_dir` (`vllm/`).
+
+    Mutation-checked: replacing `config_dir` in the call (or the helper's own `Path(config_dir)`)
+    makes this fail."""
+    text = (PROVIDER / "lifecycle.py").read_text(encoding="utf-8")
+    assert "prepare_config_ini_home(config_dir, spec.port" in text
+    assert "xdg_config_home=str(home)" in text
+    helper = (PROVIDER / "server.py").read_text(encoding="utf-8")
+    assert 'return Path(config_dir) / "xdg" / str(port)' in helper
