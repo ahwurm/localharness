@@ -22,6 +22,7 @@ from localharness.cli import workspace as ws_mod
 from localharness.cli.start_cmd import (
     HOST_CONVERTED,
     SensedStart,
+    _after_no_on_path_binary,
     _after_no_remove_path_binary,
     _sense_before_trust,
 )
@@ -344,6 +345,54 @@ def test_wr01_the_write_still_precedes_the_question_on_a_launching_terminal_star
     assert sensed.launching is True and seen == [{"server": {"binary": PATH_BIN}}]
 
 
+def test_wr02_a_no_removes_and_remembers_a_line_an_earlier_start_wrote(g, monkeypatch):
+    """The line is in overrides.yaml from an earlier start (this start writes nothing, `path_written`
+    is None); a terminal No at the question still removes it and records the decline."""
+    _config(g, server=DECLARED)
+    _record(g)
+    write_yaml(g / "overrides.yaml", {"server": {"binary": PATH_BIN}})  # left by an earlier start
+    sensed = _sense_before_trust(g, can_ask=True, path_binary=PATH_BIN)
+    assert sensed.path_written is None
+    answers(monkeypatch, False)
+    got = decide_machine_trust(g, ask=True, launching=sensed.launching, annotations=sensed.annotations)
+    assert BINARY in got.withheld["overrides.yaml"]
+
+    _after_no_on_path_binary(g, got, can_ask=True, path_binary=PATH_BIN)
+
+    assert "server" not in _overrides(g)
+    assert trust.offer_was_declined(trust.decline_key("<binary>", PATH_BIN))
+    ws_mod._DECLINED.clear()  # the next process: nothing is written and nothing is asked
+    never_asked(monkeypatch)
+    again = _sense_before_trust(g, can_ask=True, path_binary=PATH_BIN)
+    assert again.path_written is None and decide_machine_trust(
+        g, ask=True, launching=again.launching, annotations=again.annotations).withheld == {}
+
+
+def test_wr02_a_start_that_cannot_ask_removes_and_declines_nothing(g):
+    _config(g, server=DECLARED)
+    _record(g)
+    write_yaml(g / "overrides.yaml", {"server": {"binary": PATH_BIN}})
+    withheld = decide_machine_trust(g, ask=False, launching=True)
+    assert BINARY in withheld.withheld["overrides.yaml"]
+
+    _after_no_on_path_binary(g, withheld, can_ask=False, path_binary=PATH_BIN)
+
+    assert _overrides(g) == {"server": {"binary": PATH_BIN}}
+    assert not trust.offer_was_declined(trust.decline_key("<binary>", PATH_BIN))
+
+
+def test_wr02_a_binary_the_record_already_holds_is_never_removed(g):
+    """A `server.binary` the record holds for overrides.yaml is the person's, not an addition."""
+    _config(g, server=DECLARED)
+    write_yaml(g / "overrides.yaml", {"server": {"binary": "/mine/llama-server"}})
+    _record(g)
+    write_yaml(g / "overrides.yaml", {"server": {"binary": PATH_BIN}})  # edited after it was recorded
+
+    _after_no_remove_path_binary(g, PATH_BIN)
+
+    assert _overrides(g) == {"server": {"binary": PATH_BIN}}
+
+
 def test_a_no_removes_the_line_audits_it_and_remembers_the_path(g, monkeypatch):
     _config(g, server=DECLARED)
     _record(g)
@@ -428,6 +477,20 @@ async def test_a_headless_start_writes_nothing_and_launches_nothing(tmp_path, mo
     assert _overrides(tmp_path) == {} and _audit(tmp_path) == []
     assert any(f"(PATH has {PATH_BIN})" in line for line in
                (" ".join(map(str, a)) for a, _ in seen.err))
+
+
+async def test_wr02_a_terminal_no_removes_a_line_left_by_an_earlier_start(tmp_path, monkeypatch):
+    seen = _boot(tmp_path, monkeypatch, server_block=DECLARED_ONLY, path_binary=PATH_BIN)
+    _record(tmp_path)
+    write_yaml(tmp_path / "overrides.yaml", {"server": {"binary": PATH_BIN}})  # an earlier start's
+    monkeypatch.setattr(ws_mod, "_stdin_is_a_terminal", lambda: True)
+    answers(monkeypatch, False)
+
+    assert await _drive(tmp_path) == 1
+
+    assert seen.started == []
+    assert "server" not in _overrides(tmp_path)
+    assert trust.offer_was_declined(trust.decline_key("<binary>", PATH_BIN))
 
 
 async def test_a_terminal_yes_records_the_path_binary_and_launches_it(tmp_path, monkeypatch):

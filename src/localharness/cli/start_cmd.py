@@ -336,12 +336,18 @@ def _write_path_binary(global_dir: Path, rec: dict | None, path_binary: str | No
 
 def _after_no_remove_path_binary(global_dir: Path, path: str) -> None:
     """A terminal No on the PATH-found binary: its `server.binary` line leaves overrides.yaml, but only
-    while it still equals the path the harness wrote (a value someone changed stays), and the No is
-    remembered for that path so only a newly found path asks again."""
+    while it still equals the path the harness found (a value someone changed stays) and the record
+    holds no `server.binary` for overrides.yaml (the line is an addition the harness never saw
+    confirmed, not an edit of a binary the person had), and the No is remembered for that path so only
+    a newly found path asks again. Keyed on the file and the path, not on this process having written
+    the line (WR-02): an earlier start may have written it, and the question returns until answered."""
     from localharness.config import trust
 
     _, over = _raw_settings(global_dir)
-    if _server_section(over).get("binary") == path:
+    rec = trust.recorded_machine(global_dir)
+    recorded = rec is not None and any(
+        e.get("file") == "overrides.yaml" and e.get("name") == "server.binary" for e in rec["entries"])
+    if not recorded and _server_section(over).get("binary") == path:
         def mutate(overlay: dict) -> None:
             section = overlay.get("server")
             if isinstance(section, dict):
@@ -353,6 +359,16 @@ def _after_no_remove_path_binary(global_dir: Path, path: str) -> None:
             global_dir, mutate, [("server.binary", path, None)],
             actor_detail="localharness start: a No on the PATH-found llama-server, line removed")
     trust.record_offer_decline(trust.decline_key("<binary>", path))
+
+
+def _after_no_on_path_binary(global_dir: Path, machine_trust: MachineTrust, *, can_ask: bool,
+                             path_binary: str | None) -> None:
+    """A terminal start whose question left `server.binary` of overrides.yaml withheld was answered No
+    (a start that cannot ask never gets here): drop the PATH binary's line and remember the path. It
+    does not matter which start wrote the line (WR-02)."""
+    if (path_binary and can_ask
+            and ("launch", "server.binary") in machine_trust.withheld.get("overrides.yaml", ())):
+        _after_no_remove_path_binary(global_dir, path_binary)
 
 
 def _adopt_written_bind_all(global_dir: Path) -> None:
@@ -1132,9 +1148,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         cfg_path, can_ask=can_ask, path_binary=path_llama_server)
     machine_trust = MachineTrust() if list_models else decide_machine_trust(cfg_path, ask=can_ask,
         launching=sensed.launching, annotations=sensed.annotations)
-    if (sensed.path_written and can_ask
-            and ("launch", "server.binary") in machine_trust.withheld.get("overrides.yaml", ())):
-        _after_no_remove_path_binary(cfg_path, sensed.path_written)  # a terminal No on the PATH binary
+    _after_no_on_path_binary(cfg_path, machine_trust, can_ask=can_ask, path_binary=path_llama_server)
     # What the first launch of this session prints (D-15, D-17): the withheld-posture lines and the
     # undo line. Start's own down-server launch prints them; a start that only attaches (or waits, or
     # is refused) hands them to the REPL's first launch instead (D-26).
