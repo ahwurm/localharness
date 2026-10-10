@@ -659,7 +659,7 @@ async def test_the_helper_launch_carries_the_key_in_the_child_env_and_never_in_t
     monkeypatch.setattr(autosense, "_read_meminfo",
                         lambda: {"MemTotal": 64 * 2**30, "MemAvailable": 60 * 2**30})
     spec = _llama(bind_all=True, require_api_key=True, api_key_file=str(key))
-    harness = SimpleNamespace(server=spec, provider=SimpleNamespace(api_key=server.SecretStr("none")))
+    harness = SimpleNamespace(server=spec, provider=SimpleNamespace(api_key=server.SecretStr("none"), base_url="http://127.0.0.1:8080/v1"))
     assert start_cmd._read_session_key(harness) is None
     launch_key = server.required_key_kwargs(harness.server, harness.provider.api_key)
     assert launch_key == {"api_key": SENTINEL}

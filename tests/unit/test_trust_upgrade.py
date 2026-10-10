@@ -764,3 +764,36 @@ def test_cr02_confirmed_at_upgrade_fails_closed_for_anything_but_a_llamacpp_fals
 def test_cr02_a_truthy_require_api_key_spelling_reads_keyed(g):
     _config(g, server={**LLAMACPP, "require_api_key": "yes", "api_key_file": "/k"})
     assert by_name(trust.machine_snapshot(g), "server.bind_all")["shown"] == "llamacpp:true:keyed"
+
+
+# ------------------------------------------------------------------ WR-06: the question names where the bearer goes
+
+
+def test_wr06_a_loopback_endpoint_keeps_the_servers_port_in_the_suffix(g, monkeypatch):
+    _config(g, server=KEYED)
+    asked = answers(monkeypatch, True)
+    decide_machine_trust(g, ask=True, launching=True)
+    assert SUFFIX.format(port=8080) in asked[0]
+
+
+def test_wr06_a_primary_endpoint_that_is_not_this_machine_is_named_in_the_suffix(g, monkeypatch):
+    write_yaml(g / "config.yaml", {"provider": {**PROVIDER, "base_url": "http://192.168.1.50:9000/v1"},
+                                   "server": KEYED})
+    asked = answers(monkeypatch, True)
+    decide_machine_trust(g, ask=True, launching=True)
+    assert "(read at start and sent as the bearer to 192.168.1.50:9000)" in asked[0]
+    assert ":8080)" not in asked[0]
+
+
+def test_wr06_an_override_of_provider_base_url_wins_in_the_suffix(g):
+    _config(g, server=KEYED)
+    write_yaml(g / "overrides.yaml", {"provider": {"base_url": "http://evil.example:443/v1"}})
+    assert ws_mod._key_file_destination(g, "server.api_key_file") == "evil.example:443"
+
+
+def test_wr06_a_peer_endpoint_that_is_not_this_machine_is_named_in_the_suffix(g):
+    peer = {"name": "qwen3.6", "base_url": "http://10.0.0.7:8090/v1", "gpu": True,
+            "lifecycle": {"runtime": "llamacpp", "binary": "/x/b", "model": "/m/b.gguf",
+                          "require_api_key": True, "api_key_file": "/pk", "port": 8090}}
+    _config(g, extra_endpoints=[peer])
+    assert ws_mod._key_file_destination(g, "extra_endpoints.qwen3.6.lifecycle.api_key_file") == "10.0.0.7:8090"

@@ -23,6 +23,9 @@ def _fd_count() -> int:
     return len(os.listdir("/proc/self/fd"))
 
 
+BASE = "http://127.0.0.1:8080/v1"
+
+
 def _write(tmp_path, data: bytes, name: str = "key"):
     path = tmp_path / name
     path.write_bytes(data)
@@ -191,7 +194,7 @@ def _harness(path, **over):
     from localharness.config.models import ManagedServerConfig
     spec = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/m.gguf", port=8080,
                                require_api_key=True, api_key_file=str(path), **over)
-    return SimpleNamespace(server=spec, provider=SimpleNamespace(api_key=SecretStr("none")))
+    return SimpleNamespace(server=spec, provider=SimpleNamespace(api_key=SecretStr("none"), base_url=BASE))
 
 
 def test_a_valid_file_becomes_the_sessions_secret_and_returns_no_line(tmp_path):
@@ -269,7 +272,7 @@ async def _launch_call(tmp_path, monkeypatch, popen, key_path, provider_key="non
     monkeypatch.setattr(start_cmd.console, "print", lambda *a, **k: None)
     monkeypatch.setattr(start_cmd.err_console, "print", lambda *a, **k: None)
     spec = ManagedServerConfig(**LLAMA_RECORD, api_key_file=str(key_path))
-    harness = SimpleNamespace(server=spec, provider=SimpleNamespace(api_key=SecretStr(provider_key)))
+    harness = SimpleNamespace(server=spec, provider=SimpleNamespace(api_key=SecretStr(provider_key), base_url=BASE))
     line = start_cmd._read_session_key(harness)
     launch_key = server.required_key_kwargs(harness.server, harness.provider.api_key)
     assert await start_cmd._start_managed_server(
@@ -368,3 +371,87 @@ def test_cr01_the_refusal_is_session_state_not_configuration(tmp_path):
     before = spec.model_dump()
     server.mark_key_file(spec, True)
     assert spec.key_file_refused is True and spec.model_dump() == before
+
+
+# --- WR-06: the key goes to provider.base_url, so only this machine gets one out of a file --------------
+
+
+@pytest.mark.parametrize("base_url", [
+    "http://127.0.0.1:8080/v1", "http://localhost:8080/v1", "http://[::1]:8080/v1", "http://127.0.0.2/v1"])
+def test_wr06_a_loopback_endpoint_gets_the_files_key(tmp_path, base_url):
+    from localharness.cli.start_cmd import _read_session_key
+    harness = _harness(_write(tmp_path, b"FILE-KEY\n"))
+    harness.provider.base_url = base_url
+    assert _read_session_key(harness) is None
+    assert harness.provider.api_key.get_secret_value() == "FILE-KEY"
+
+
+@pytest.mark.parametrize("base_url", [
+    "http://192.168.1.50:8080/v1", "http://attacker.example/v1", "https://203.0.113.9:9/v1", "not a url"])
+def test_wr06_any_other_endpoint_never_has_the_file_opened_or_its_key_sent(tmp_path, base_url):
+    from localharness.cli.start_cmd import _read_session_key
+    from tests.unit.launch_support import record_opens
+    key = _write(tmp_path, b"FILE-KEY\n")
+    harness = _harness(key)
+    harness.provider.base_url = base_url
+    with record_opens() as opened:
+        line = _read_session_key(harness)
+    assert str(key) not in opened
+    assert harness.provider.api_key.get_secret_value() == "none"
+    assert line.startswith(f"server.api_key_file {key}: ") and "is not this machine" in line
+    assert line.endswith("— this session sends no key") and "FILE-KEY" not in line
+    assert harness.server.key_file_refused is True  # the launch keeps the file off argv too
+
+
+def test_wr06_a_configured_key_is_kept_and_said_so_when_the_endpoint_moved(tmp_path):
+    from pydantic import SecretStr
+
+    from localharness.cli.start_cmd import _read_session_key
+    harness = _harness(_write(tmp_path, b"FILE-KEY\n"))
+    harness.provider.base_url = "http://192.168.1.50:8080/v1"
+    harness.provider.api_key = SecretStr("CONFIGURED")
+    line = _read_session_key(harness)
+    assert "the file is not used; this session keeps sending the key it already holds" in line
+    assert harness.provider.api_key.get_secret_value() == "CONFIGURED"
+
+
+def test_wr06_a_url_with_userinfo_prints_only_host_and_port(tmp_path):
+    from localharness.cli.start_cmd import _read_session_key
+    harness = _harness(_write(tmp_path, b"FILE-KEY\n"))
+    harness.provider.base_url = "http://user:SECRET-PW@192.168.1.50:8080/v1?token=SECRET-TOK"
+    line = _read_session_key(harness)
+    assert "192.168.1.50:8080" in line and "SECRET" not in line
+
+
+def test_wr06_the_launch_for_a_moved_endpoint_is_loopback_without_the_file(tmp_path, monkeypatch, popen):
+    key = _write(tmp_path, b"K\n")
+
+    async def go():
+        from types import SimpleNamespace
+
+        from pydantic import SecretStr
+
+        from localharness.cli import start_cmd
+        from localharness.config.models import ManagedServerConfig
+        from localharness.provider import autosense
+
+        async def wait_ready(base_url, **kw):
+            return ["m"]
+
+        monkeypatch.setattr(server, "wait_ready", wait_ready)
+        monkeypatch.setattr(server, "server_pid", lambda _d: None)
+        monkeypatch.setattr(server, "docker_container_running", lambda _n: False)
+        monkeypatch.setattr(autosense, "_run_nvidia_smi", lambda: None)
+        monkeypatch.setattr(start_cmd.console, "print", lambda *a, **k: None)
+        monkeypatch.setattr(start_cmd.err_console, "print", lambda *a, **k: None)
+        spec = ManagedServerConfig(**LLAMA_RECORD, api_key_file=str(key))
+        harness = SimpleNamespace(server=spec, provider=SimpleNamespace(
+            api_key=SecretStr("none"), base_url="http://192.168.1.50:8080/v1"))
+        start_cmd._read_session_key(harness)
+        launch_key = server.required_key_kwargs(harness.server, harness.provider.api_key)
+        assert await start_cmd._start_managed_server(
+            spec, tmp_path, "http://192.168.1.50:8080/v1", launch_key) is None
+
+    asyncio.run(go())
+    (call,) = popen
+    assert "--api-key-file" not in call["cmd"] and call["cmd"][-2:] == ["--host", "127.0.0.1"]

@@ -297,6 +297,29 @@ def classify_hosts(value: str) -> str:
     return "address" if "address" in kinds else "loopback"
 
 
+def key_destination(base_url: Any) -> tuple[bool, str]:
+    """`(this_machine, shown)` for the endpoint a session's bearer is sent to: ``this_machine`` is true
+    only when the host of ``base_url`` is literally loopback (`classify_hosts`, no DNS), ``shown`` is
+    `host[:port]` for a line (userinfo, path and query are left out, so a URL's secret never prints).
+    An unparseable URL is not this machine and is shown as written. A key read from a key file is
+    sent to `provider.base_url` (or a peer's `base_url`), which nothing ties to the managed server's
+    own port, so the read is allowed only for a destination that is this machine and a question about
+    the file names the destination when it is not."""
+    from urllib.parse import urlparse
+
+    text = str(base_url)
+    try:
+        parsed = urlparse(text)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False, text
+    if not host:
+        return False, text
+    shown = f"{host}:{port}" if port else host
+    return classify_hosts(host) == "loopback", shown
+
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------

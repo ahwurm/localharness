@@ -202,21 +202,36 @@ def _peer_session_key(ep: Any) -> "tuple[Any, str | None]":
     refused file off argv and on loopback; a read that succeeds, or names no file, clears it."""
     from pydantic import SecretStr
 
-    from localharness.provider.server import KeyFileError, key_kwargs, mark_key_file, read_key_file
+    from localharness.provider.server import (
+        KeyFileError,
+        key_destination,
+        key_kwargs,
+        mark_key_file,
+        read_key_file,
+    )
     lifecycle = getattr(ep, "lifecycle", None)
     path = getattr(lifecycle, "api_key_file", None)
     if not path or getattr(lifecycle, "require_api_key", False) is not True:
         mark_key_file(lifecycle, False)
         return None, None
-    try:
-        key = SecretStr(read_key_file(path))
-    except KeyFileError as exc:
+
+    def refused(reason: object) -> "tuple[None, str]":
         mark_key_file(lifecycle, True)
-        head = f"extra_endpoints[{ep.name}].lifecycle.api_key_file {path}: {exc} — "
+        head = f"extra_endpoints[{ep.name}].lifecycle.api_key_file {path}: {reason} — "
         configured = getattr(ep, "configured_api_key", getattr(ep, "api_key", None))
         if key_kwargs(configured):
             return None, head + "the file is not used; this peer keeps sending the key it is configured with"
         return None, head + "this session sends no key"
+
+    # The key goes to the peer's base_url; only a destination that is this machine gets one out of a
+    # file (WR-06).
+    here, shown = key_destination(getattr(ep, "base_url", ""))
+    if not here:
+        return refused(f"base_url {shown} is not this machine, so the file is not read")
+    try:
+        key = SecretStr(read_key_file(path))
+    except KeyFileError as exc:
+        return refused(exc)
     mark_key_file(lifecycle, False)
     return key, None
 
