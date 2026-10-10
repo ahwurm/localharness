@@ -1153,12 +1153,19 @@ class AgentLoop:
 
         `low` and `high` spend their ratio of the window's headroom (the same headroom the output
         cap is fitted to); `max` is unbounded and `off` is the thinking-off flag, so both give
-        None, as does an unknown or non-positive headroom."""
+        None, as does an unknown or non-positive headroom. When a `max_tokens` cap is configured the
+        output headroom is that cap (the window's headroom still bounds it), so a budget is never
+        asked for beyond what the cap will let the model write — spec 16 §7.3, "output headroom"."""
         if self._effort not in ("low", "high"):
             return None
         headroom = self._window_headroom(ctx_budget)
         if headroom is None or headroom <= 0:
             return None
+        cap = (
+            self._request_output_cap(ctx_budget) if self._llm_takes_max_tokens else None
+        ) or self._configured_output_cap()
+        if cap is not None:
+            headroom = min(headroom, cap)
         low, high = self._effort_ratios
         return max(1, int((low if self._effort == "low" else high) * headroom))
 

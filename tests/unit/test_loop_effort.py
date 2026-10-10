@@ -197,6 +197,31 @@ async def test_configured_ratios_change_both_levels(bus):
     assert high.calls[0]["reasoning_budget"] == max(1, int(0.6 * seen_high[0]))
 
 
+async def test_a_configured_output_cap_bounds_the_budget(bus):
+    """IN-01: with max_tokens configured the output headroom is the cap, not the whole window."""
+    llm = _llm()
+    llm.config.max_tokens = 4_096
+    loop, seen = await _run_once(llm, bus, effort=("high", "agent"))
+    defaults = EffortBudgetConfig()
+    assert seen[0] > 4_096, "the window alone would have allowed far more"
+    assert llm.calls[0]["reasoning_budget"] == int(defaults.high_ratio * 4_096)
+    assert llm.calls[0]["reasoning_budget"] < 4_096
+
+
+async def test_a_cap_larger_than_the_headroom_leaves_the_window_the_bound(bus):
+    llm = _llm()
+    llm.config.max_tokens = 10_000_000
+    loop, seen = await _run_once(llm, bus, effort=("low", "agent"))
+    defaults = EffortBudgetConfig()
+    assert llm.calls[0]["reasoning_budget"] == max(1, int(defaults.low_ratio * seen[0]))
+
+
+async def test_an_agent_level_cap_bounds_the_budget_too(bus):
+    llm = _llm()
+    loop, _ = await _run_once(llm, bus, effort=("high", "agent"), config=_config(max_tokens=2_048))
+    assert llm.calls[0]["reasoning_budget"] == int(EffortBudgetConfig().high_ratio * 2_048)
+
+
 async def test_max_sends_no_budget_and_does_not_turn_thinking_off(bus):
     llm = _llm()
     await _run_once(llm, bus, effort=("max", "agent"))
