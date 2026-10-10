@@ -202,7 +202,7 @@ def _peer_session_key(ep: Any) -> "tuple[Any, str | None]":
     refused file off argv and on loopback; a read that succeeds, or names no file, clears it."""
     from pydantic import SecretStr
 
-    from localharness.cli.workspace import _visible
+    from localharness.cli.workspace import visible_text
     from localharness.provider.server import (
         KeyFileError,
         key_destination,
@@ -218,9 +218,9 @@ def _peer_session_key(ep: Any) -> "tuple[Any, str | None]":
 
     def refused(reason: object) -> "tuple[None, str]":
         mark_key_file(lifecycle, True)
-        # the peer's name, its path and a reason come from settings files: shown through _visible
-        head = (f"extra_endpoints[{_visible(ep.name)}].lifecycle.api_key_file "
-                f"{_visible(path)}: {_visible(reason)} — ")
+        # the peer's name, its path and a reason come from settings files: shown through visible_text
+        head = (f"extra_endpoints[{visible_text(ep.name)}].lifecycle.api_key_file "
+                f"{visible_text(path)}: {visible_text(reason)} — ")
         configured = getattr(ep, "configured_api_key", getattr(ep, "api_key", None))
         if key_kwargs(configured):
             return None, head + "the file is not used; this peer keeps sending the key it is configured with"

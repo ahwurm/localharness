@@ -3,7 +3,7 @@
 `_sense_before_trust` runs before `decide_machine_trust`: it says whether this start is about to
 launch the primary (D-08, D-27), writes a `PATH`-found `llama-server` for a declared-only primary into
 overrides.yaml so the question can show it (D-20), and converts a 0.17 `extra_args --host` (D-16).
-Every write is one `workspace._write_overlay_validated` call, so each leaves one `ComponentMutated`
+Every write is one `workspace.write_overlay_validated` call, so each leaves one `ComponentMutated`
 line (`actor="cli"`) in the audit log and a refused write leaves nothing (D-28).
 
 The global dir is conftest's hermetic LOCALHARNESS_HOME; answers are `rich.prompt.Confirm.ask`; no
