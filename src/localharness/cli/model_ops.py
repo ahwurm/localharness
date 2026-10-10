@@ -424,3 +424,44 @@ def pinned_agents(
         if division.model and division.model != "inherit":
             out.append((f"{label} (via division {div_name})", division.model))
     return out
+
+
+def agents_with_effort(
+    config_dir: Path | None, local_config_dir: Path | None = None
+) -> list[tuple[str, str]]:
+    """Agents whose own yaml sets a reasoning level, as ``[(agent_label, level), ...]`` sorted by
+    name — the list ``/effort show`` prints so a person can see which agents a session's ``/effort``
+    does not move on its own (D-05: a session choice is a rung above the agent file, but the file's
+    value is still what that agent asks for).
+
+    Reads RAW yaml through the loader's own reader, exactly as ``pinned_agents`` does, and for the
+    same reason: a resolved ``AgentConfig.effort`` already has the division's rung collapsed in
+    (spec §7.2), so every agent in a division that sets a level would look like it set one itself.
+    An agent whose ``effort`` is absent, ``inherit`` or not a level is not listed; a yaml that will not parse is
+    skipped, as ``pinned_agents`` skips it. ``local_config_dir`` is the session's workspace layer or
+    None, with the same meaning as there.
+    """
+    out: list[tuple[str, str]] = []
+    if config_dir is None:
+        return out
+    from localharness.config.loader import ConfigLoader, _load_yaml_file
+
+    loader = ConfigLoader(config_dir=Path(config_dir), local_config_dir=local_config_dir)
+    for stem in loader.list_agents():
+        path = loader._find_file("agents", stem)
+        if path is None:
+            continue
+        try:
+            raw = _load_yaml_file(path)
+        except Exception:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        level = raw.get("effort")
+        # Only a level the loader would accept: absent and "inherit" set nothing, and anything else
+        # (a typo, or an unquoted `off` that YAML 1.1 reads as the boolean False) is a file the
+        # loader refuses, which is reported there, not here.
+        if not isinstance(level, str) or level not in LEVELS:
+            continue
+        out.append((raw.get("name") or stem, level))
+    return sorted(out)

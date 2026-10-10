@@ -258,7 +258,7 @@ def test_agents_with_effort_without_a_workspace_reads_only_the_global_layer(tmp_
 def test_agents_with_effort_skips_a_yaml_that_does_not_parse(tmp_path):
     glob = tmp_path / "global"
     _agent(glob, "broken", "name: [unclosed\neffort: high\n")
-    _agent(glob, "ok", "name: ok\neffort: off\n")
+    _agent(glob, "ok", "name: ok\neffort: 'off'\n")
     _agent(glob, "scalar", "just a string\n")
 
     assert model_ops.agents_with_effort(glob) == [("ok", "off")]
@@ -267,3 +267,12 @@ def test_agents_with_effort_skips_a_yaml_that_does_not_parse(tmp_path):
 def test_agents_with_effort_with_no_agents_dir_or_no_config_dir_is_empty(tmp_path):
     assert model_ops.agents_with_effort(tmp_path / "nothing") == []
     assert model_ops.agents_with_effort(None) == []
+
+
+def test_agents_with_effort_lists_only_values_the_loader_would_accept(tmp_path):
+    glob = tmp_path / "global"
+    _agent(glob, "typo", "name: typo\neffort: turbo\n")
+    _agent(glob, "unquoted", "name: unquoted\neffort: off\n")  # YAML 1.1 reads this as False
+    _agent(glob, "fine", "name: fine\neffort: high\n")
+
+    assert model_ops.agents_with_effort(glob) == [("fine", "high")]
