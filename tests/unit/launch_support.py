@@ -51,7 +51,9 @@ def record_chain(monkeypatch) -> dict:
         return ["CMD"]
 
     def start_server(config_dir, cmd, **kw):
-        calls["start_server"] = kw
+        # `dropped_out` is the collector activate hands every launch (D-25), not part of the launch
+        # the tests pin: keep it out of the recorded keywords.
+        calls["start_server"] = {k: v for k, v in kw.items() if k != "dropped_out"}
         return 7
 
     async def wait_ready(base_url, **kw):

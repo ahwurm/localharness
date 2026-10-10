@@ -22,12 +22,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import server
+
+if TYPE_CHECKING:  # annotations only: autosense imports nothing from here, but the dataclass stays import-light
+    from localharness.config.models import AutosenseConfig
+    from localharness.provider.autosense import WindowReport
 
 
 async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
@@ -56,11 +62,17 @@ class LiveEndpoint:
     teardown target forward to later phases; Phase A populates it but stops via the config.
 
     `note` is the launch decision's one-line note when it withheld a widening (a key file it could
-    not hand to the server), else None; the caller shows it instead of reporting nothing."""
+    not hand to the server), else None; the caller shows it instead of reporting nothing.
+
+    `window` is the launch's window report (served / trained / fits / asked, D-20) for the caller to
+    print, None when no fit was asked for or the runtime has none (vLLM, a daemon); `dropped_env` is
+    the environment names scrubbed from the launched server's environment (D-25)."""
     base_url: str
     served_models: list[str]
     handle: Any
     note: str | None = None
+    window: "WindowReport | None" = None
+    dropped_env: tuple[str, ...] = ()
 
 
 @dataclass
@@ -87,6 +99,10 @@ class LifecycleStrategy(Protocol):
     `peer` is the `EndpointRef.name` when `spec` is a peer's lifecycle, None for the primary; it is
     used only for the wording of a launch refusal. A strategy whose runtime has no binary to refuse
     (a PATH CLI) accepts it and ignores it.
+
+    `autosense` is the machine's window-autosense ratios, or None. The fit and `--cache-ram` are
+    computed inside `activate` because every launch path goes through it (five paths, one place);
+    with None nothing is sized and `activate` behaves exactly as it did before the autosense.
     """
 
     async def activate(
@@ -99,6 +115,7 @@ class LifecycleStrategy(Protocol):
         on_poll: Callable[[float], None] | None = None,
         api_key: str | None = None,
         peer: str | None = None,
+        autosense: "AutosenseConfig | None" = None,
     ) -> LiveEndpoint: ...
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None: ...
@@ -133,6 +150,7 @@ class ManagedVllmStrategy:
         on_poll: Callable[[float], None] | None = None,
         api_key: str | None = None,
         peer: str | None = None,
+        autosense: "AutosenseConfig | None" = None,
     ) -> LiveEndpoint:
         keyed = bool(api_key)
         decision = server.launch_decision(spec, keyed, peer=peer)
@@ -141,9 +159,10 @@ class ManagedVllmStrategy:
         cmd = server.serve_command(
             spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
             context=None, cache_ram=None)
+        dropped: list[str] = []
         pid = server.start_server(
             config_dir, cmd, runtime=spec.runtime, record_env=getattr(spec, "env", None),
-            **server.key_kwargs(api_key))
+            dropped_out=dropped, **server.key_kwargs(api_key))
         served = await server.wait_ready(
             base_url,
             config_dir=config_dir,
@@ -152,7 +171,9 @@ class ManagedVllmStrategy:
             **server.key_kwargs(api_key),
         )
         handle = server.DOCKER_CONTAINER_NAME if spec.launch == "docker" else pid
-        return LiveEndpoint(base_url=base_url, served_models=served, handle=handle, note=decision.note)
+        # No fit for vLLM (D-10): `autosense` is accepted and unused, `window` stays None.
+        return LiveEndpoint(base_url=base_url, served_models=served, handle=handle, note=decision.note,
+                            dropped_env=tuple(dropped))
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
         # OFF the event loop: the #100 verified docker stop can block ~90s worst-case (drain +
@@ -167,6 +188,56 @@ class ManagedVllmStrategy:
             return Liveness(alive=server.docker_container_running(name), detail=f"container {name}")
         pid = server.server_pid(config_dir)
         return Liveness(alive=pid is not None, detail=f"pid {pid}" if pid is not None else "no live pidfile")
+
+
+def _size_llamacpp_launch(
+    spec: ManagedServerConfig, autosense: "AutosenseConfig",
+) -> "tuple[WindowReport, int | None, int | None]":
+    """What a llama.cpp launch asks for: `(report, context, cache_ram)`.
+
+    `context` and `cache_ram` are the fit keywords for `serve_command`: the fit's `-c` only when
+    the record sets no `context` and `extra_args` carry no `-c` / `--ctx-size`, and the formula's
+    `--cache-ram` only when neither the record nor `extra_args` set one. An unknown or non-positive
+    fit gives no `-c` (llama-server's own `--fit` sizes the window, mode "fit-by-server"); a header
+    that cannot be read, a missing key or an unknown memory is "not computed", never a guess. Reads
+    the header, the free memory and `/proc/meminfo`; starts nothing."""
+    from localharness.agent.gguf_header import GgufHeaderError, read_header
+    from localharness.provider import autosense as _auto
+
+    extra = list(spec.extra_args or [])
+    has_c = any(t in ("-c", "--ctx-size") or t.startswith("--ctx-size=") for t in extra)
+    try:
+        header = read_header(os.path.expanduser(spec.model), _auto.FIT_KEYS)
+    except (GgufHeaderError, OSError):
+        header = {}
+    n_layer = header.get("block_count")
+    offload = _auto.offload_kind(extra, n_layer) if n_layer else "unknown"
+    mem = _auto.free_memory(autosense)
+    weights = _auto.weights_bytes(spec.model, spec.mmproj)
+    mi = _auto._read_meminfo()
+    fits = _auto.fit(
+        header, mem.free_bytes if mem else None, autosense, None,
+        cache_type_k=spec.cache_type_k, cache_type_v=spec.cache_type_v,
+        weights=weights, offload=offload, runtime=spec.runtime)
+    cache_set = spec.cache_ram is not None or any(
+        t in ("--cache-ram", "-cram") or t.startswith("--cache-ram=") for t in extra)
+    cache_kw = None if cache_set else _auto.cache_ram_mib(
+        mi["MemAvailable"] if mi else None, mi["MemTotal"] if mi else None,
+        weights, offload, extra, autosense)
+    if spec.context is not None:
+        mode, asked, ctx_kw = "record", spec.context, None
+    elif has_c:
+        mode, asked, ctx_kw = "extra_args", None, None
+    elif fits:
+        mode, asked, ctx_kw = "fit", fits, fits
+    else:
+        mode, asked, ctx_kw = "fit-by-server", None, None
+    report = _auto.WindowReport(
+        served=None, trained=header.get("context_length"), fits=fits,
+        free_bytes=mem.free_bytes if mem else None, total_bytes=mem.total_bytes if mem else None,
+        weights_bytes=weights, asked=asked, mode=mode, attached=False, retried=False,
+        verified=False, runtime="llamacpp")
+    return report, ctx_kw, cache_kw
 
 
 class SpawnedProcessStrategy:
@@ -201,25 +272,57 @@ class SpawnedProcessStrategy:
         on_poll: Callable[[float], None] | None = None,
         api_key: str | None = None,
         peer: str | None = None,
+        autosense: "AutosenseConfig | None" = None,
     ) -> LiveEndpoint:
+        """Bring the spawned server up and return its endpoint.
+
+        This is where the fit and `--cache-ram` are computed, because every launch path goes through
+        `activate` (five paths, one place). With `autosense` set and the record leaving `context` and
+        `cache_ram` unset, `serve_command` gets the fit as `-c` and the formula as `--cache-ram`;
+        after readiness the served window is read back (`probe_window`) into `LiveEndpoint.window`,
+        and a window smaller than asked is a mismatch to report, never a failure. With
+        `autosense=None` the Phase 1 behaviour is unchanged: no probe, no fit keyword."""
         keyed = bool(api_key)
         decision = server.launch_decision(spec, keyed, peer=peer)
         if decision.refusal is not None:
             raise server.LaunchRefused(decision.refusal)
-        cmd = server.serve_command(
-            spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
-            context=None, cache_ram=None)
-        pid = server.start_server(
-            config_dir, cmd, runtime=spec.runtime, record_env=getattr(spec, "env", None),
-            **server.key_kwargs(api_key))
-        served = await server.wait_ready(
-            base_url,
-            config_dir=config_dir,
-            timeout_seconds=timeout_seconds,
-            on_poll=on_poll,
-            **server.key_kwargs(api_key),
-        )
-        return LiveEndpoint(base_url=base_url, served_models=served, handle=pid, note=decision.note)
+        report, ctx_kw, cache_kw = (
+            _size_llamacpp_launch(spec, autosense)
+            if autosense is not None and spec.runtime == "llamacpp" else (None, None, None))
+
+        def command(context: int | None) -> list[str]:
+            return server.serve_command(
+                spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
+                context=context, cache_ram=cache_kw)
+
+        def launch(cmd: list[str]) -> tuple[int, list[str]]:
+            names: list[str] = []
+            pid = server.start_server(
+                config_dir, cmd, runtime=spec.runtime, record_env=getattr(spec, "env", None),
+                dropped_out=names, **server.key_kwargs(api_key))
+            return pid, names
+
+        async def ready() -> list[str]:
+            return await server.wait_ready(
+                base_url,
+                config_dir=config_dir,
+                timeout_seconds=timeout_seconds,
+                on_poll=on_poll,
+                **server.key_kwargs(api_key),
+            )
+
+        pid, dropped = launch(command(ctx_kw))
+        served = await ready()
+        if report is not None:
+            from localharness.agent.context import probe_window
+
+            model_id = served[0] if served else spec.served_name
+            probe = await asyncio.to_thread(probe_window, base_url, model_id, "llamacpp", api_key=api_key)
+            report = dataclasses.replace(
+                report, served=probe.served, trained=probe.trained or report.trained,
+                verified=probe.served is not None)
+        return LiveEndpoint(base_url=base_url, served_models=served, handle=pid, note=decision.note,
+                            window=report, dropped_env=tuple(dropped))
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
         # OFF the event loop (same reason as ManagedVllmStrategy.stop): a SIGTERM→SIGKILL grace
@@ -263,6 +366,7 @@ class DaemonStrategy:
         on_poll: Callable[[float], None] | None = None,
         api_key: str | None = None,
         peer: str | None = None,
+        autosense: "AutosenseConfig | None" = None,
     ) -> LiveEndpoint:
         # CONTRACT: like every LifecycleStrategy.activate, this raises ONLY RuntimeError/TimeoutError
         # on failure — the /model swap callers catch exactly those to tear down + restore. _load
@@ -406,6 +510,7 @@ class LmsStrategy:
         on_poll: Callable[[float], None] | None = None,
         api_key: str | None = None,
         peer: str | None = None,
+        autosense: "AutosenseConfig | None" = None,
     ) -> LiveEndpoint:
         v1 = self._v1(base_url)
         if await self._server_already_up(v1):
