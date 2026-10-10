@@ -107,8 +107,9 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     assert text.count("self._server_config_dir") == 7
     # assignment + the property's own two reads on one line + 6 deliberately-untouched uses,
     # + 1 from phase 41's `_audit_base_dir` property, which reads `self._config_dir` as its
-    # FALLBACK when the session has no workspace layer. MEASURED at 10, not assumed.
-    assert text.count("self._config_dir") == 10
+    # FALLBACK when the session has no workspace layer, + 1 from Phase 2's `_announce_window`,
+    # which opens the speed ledger under the session config dir. MEASURED at 11, not assumed.
+    assert text.count("self._config_dir") == 11
     for raw in (
         "free_accelerator(self._active_heavy, ep.lifecycle, self._config_dir)",
         "strategy.stop(managed, self._config_dir)",

@@ -1799,7 +1799,7 @@ class OrchestratorREPL:
             # the provider's key, only when the managed server is set to require one (default off)
             ep = await strategy.activate(
                 managed, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress,
-                **launch_kw,
+                autosense=getattr(self._harness, "autosense", None), **launch_kw,
             )
             models = ep.served_models
         except (RuntimeError, TimeoutError) as exc:
@@ -1822,6 +1822,8 @@ class OrchestratorREPL:
                 box_note(None)
         self._active_heavy = (managed, llm.config.base_url)
         served = models[0] if models else target
+        # the restart's window line, after the try/except above (D-22, D-36)
+        await self._announce_window(ep, prim_ptype or managed.runtime, served)
         llm.config.model = served
         cap = await llm.detect_capabilities()
         note = await self._refresh_token_counter(served)
@@ -2063,6 +2065,7 @@ class OrchestratorREPL:
         try:
             live = await _lifecycle.strategy_for(spec).activate(
                 spec, self._server_config_dir, base_url, peer=peer,
+                autosense=getattr(self._harness, "autosense", None),
                 **_launch_key(self._harness, base_url, spec))
             self._active_heavy = (spec, base_url)
             return spec.model, getattr(live, "note", None)
