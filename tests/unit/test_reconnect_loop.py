@@ -380,6 +380,43 @@ def test_a_missing_knob_or_a_non_string_address_reads_as_off(bus):
     assert _loop(no_config, bus)._reconnect_bound() == 0.0
 
 
+def _budgeted(minutes: float | None):
+    from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig, SelfCheckConfig
+
+    return AgentConfig(
+        name="child-agent", role="Child.", self_check=SelfCheckConfig(enabled=False),
+        permissions=PermissionConfig(budget=BudgetConfig(max_duration_minutes=minutes)),
+    )
+
+
+async def test_a_child_waits_no_longer_than_what_is_left_of_its_duration_budget(bus, sessions, sleeps):
+    """An explore child with a 3-minute budget never holds its parent for the whole 30-minute bound."""
+    pair = FakePair()
+    llm = _scripted([_pce(), _answer("ok")], wait=1800.0)
+    loop = _loop(llm, bus, config=_budgeted(3.0), server_recovery=lambda: pair)
+
+    assert await loop.run_turn("go") == "ok"
+
+    (call,) = pair.calls
+    assert 170.0 < call["wait_seconds"] <= 180.0
+
+
+async def test_a_child_past_its_budget_has_no_wait_left(bus, sessions, sleeps):
+    pair = FakePair()
+    llm = _scripted([_pce(), _answer("ok")], wait=1800.0)
+    loop = _loop(llm, bus, config=_budgeted(0.1), server_recovery=lambda: pair)
+    session = SimpleNamespace(elapsed_seconds=lambda: 7.0)  # 0.1 min = 6 s: already spent
+
+    assert loop._reconnect_bound(session) == 0.0
+    assert loop._reconnect_bound() == 1800.0  # without a session: the configured knob
+
+
+def test_an_unbounded_loop_keeps_the_whole_bound(bus):
+    loop = _loop(_scripted([_answer()], wait=1800.0), bus, config=_budgeted(None))
+    session = SimpleNamespace(elapsed_seconds=lambda: 10_000.0)
+    assert loop._reconnect_bound(session) == 1800.0
+
+
 def test_the_keyword_sits_directly_after_guardrails_path():
     names = list(inspect.signature(AgentLoop.__init__).parameters)
     assert names[names.index("guardrails_path") + 1] == "server_recovery"
