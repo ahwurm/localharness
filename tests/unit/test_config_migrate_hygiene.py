@@ -238,7 +238,9 @@ def test_a_failed_rewrite_leaves_the_original_file_whole_and_no_temp_file(tmp_pa
 
     assert cfg.read_bytes() == original
     assert not list(tmp_path.glob(".config.yaml.*.tmp"))
-    assert len(_backups(tmp_path)) == 1  # one backup per file, as before
+    # WR-20: the file is whole, so the backup is no undo; it is removed rather than left to pile
+    # up once per retry (the previous pin was one stray backup per failed attempt).
+    assert _backups(tmp_path) == []
 
 
 def test_a_rewrite_replaces_the_file_whole(tmp_path):
@@ -279,3 +281,4 @@ def test_a_read_only_file_is_refused_not_replaced_through_its_directory(tmp_path
     with pytest.raises(PermissionError):
         migrate._write_with_backup(agent, agent.read_bytes(), {"name": "other"})
     assert agent.read_text() == "name: scout\n"
+    assert _backups(tmp_path, "scout.yaml") == []  # WR-20: refused before any backup is made

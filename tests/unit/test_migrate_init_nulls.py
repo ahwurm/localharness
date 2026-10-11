@@ -351,10 +351,11 @@ def test_two_starts_make_one_backup_per_file_and_the_second_changes_nothing(tmp_
     assert len(agent_backups) == 1 and agent_backups[0].read_bytes() == agent_original
 
 
-def test_a_rewrite_that_fails_mid_write_leaves_the_original_bytes_in_a_backup(tmp_path, monkeypatch):
-    """The backup lands before the file is touched: a write that dies part-way still has an undo.
-    And since the rewrite became atomic (WR-01) the file itself is never left half-written: the
-    temp file dies, the original bytes stay where they were."""
+def test_a_rewrite_that_fails_mid_write_leaves_the_original_bytes_and_no_stray_backup(tmp_path, monkeypatch):
+    """The rewrite is atomic (WR-01), so a write that dies part-way leaves the original bytes where
+    they were and the temp file is gone. The backup made for it is removed again (WR-20): it is no
+    undo for an unchanged file, and kept it would pile up once per failed start. This used to pin
+    that the backup survived the failure."""
     import pytest
 
     cfg = _write(tmp_path, _v017())
@@ -369,8 +370,7 @@ def test_a_rewrite_that_fails_mid_write_leaves_the_original_bytes_in_a_backup(tm
         migrate.apply(cfg, raw, plan)
     assert caught.value.failed == cfg
 
-    (backup,) = tmp_path.glob("config.yaml.bak-*")
-    assert backup.read_bytes() == original
+    assert list(tmp_path.glob("config.yaml.bak-*")) == []
     assert cfg.read_bytes() == original
     assert not list(tmp_path.glob(".config.yaml.*.tmp"))
 
@@ -493,3 +493,33 @@ def test_config_migrate_dry_run_and_help_announce_the_init_nulls_step(tmp_path):
     assert " ".join(migrate.INIT_NULLS_STAMP_CLAUSE.split()) in " ".join(real.output.split())
     helped = runner.invoke(app, ["config", "migrate", "--help"])
     assert "init_nulls_revision" in " ".join(helped.output.split())
+
+
+# ------------------------------------------- WR-20: a file that keeps failing gains no backups
+
+
+@_not_root
+def test_a_sidecar_that_keeps_failing_gains_no_backup_however_often_it_is_tried(tmp_path):
+    import contextlib
+
+    cfg, _ok, locked = _locked_world(tmp_path)
+    for _ in range(3):  # three starts
+        with contextlib.redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            _auto_migrate_deny_defaults(cfg)
+    assert list(locked.parent.glob(f"{locked.name}{migrate.BACKUP_INFIX}*")) == []
+    assert _disk(locked)["permissions"]["budget"]["max_actions"] == 100
+
+
+@_not_root
+def test_an_unwritable_directory_is_refused_before_any_backup(tmp_path):
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    agent = agents / "scout.yaml"
+    agent.write_text("name: scout\n", encoding="utf-8")
+    agents.chmod(0o555)
+    try:
+        with pytest.raises(PermissionError):
+            migrate._write_with_backup(agent, agent.read_bytes(), {"name": "other"})
+        assert [p.name for p in agents.iterdir()] == ["scout.yaml"]
+    finally:
+        agents.chmod(0o755)
