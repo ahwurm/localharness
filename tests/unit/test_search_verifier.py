@@ -10,10 +10,9 @@ import pytest
 
 from localharness.agent.context import ContentStore, ContextManager
 from localharness.agent.permissions import PermissionEvaluator
+from localharness.config.models import ChildrenBudgetConfig
 from localharness.agent import subagent
 from localharness.agent.subagent import (
-    SEARCH_VERIFIER_MAX_ACTIONS,
-    SEARCH_VERIFIER_MAX_TOOL_CALLS,
     SEARCH_VERIFIER_TOOLS,
     build_search_verifier_config,
     dispatch_search_verifier_subagent,
@@ -107,8 +106,8 @@ def test_format_verifier_flag_is_compact():
 def test_search_verifier_config_is_leaf_budget():
     cfg = build_search_verifier_config()
     assert cfg.name == "search-verifier"
-    assert cfg.permissions.budget.max_actions == SEARCH_VERIFIER_MAX_ACTIONS == 12
-    assert SEARCH_VERIFIER_MAX_TOOL_CALLS == SEARCH_VERIFIER_MAX_ACTIONS + 1 == 13
+    assert cfg.permissions.budget.max_actions == ChildrenBudgetConfig().search_verifier.actions == 12
+    assert cfg.permissions.budget.max_tool_calls is None
     assert "STRICT JSON" in cfg.role and "BLIND" in cfg.role
 
 

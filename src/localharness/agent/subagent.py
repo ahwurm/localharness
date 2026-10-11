@@ -22,7 +22,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig, ToolConfig
+from localharness.config.models import (
+    AgentConfig, BudgetConfig, ChildBudget, ChildrenBudgetConfig, PermissionConfig, ToolConfig,
+)
 
 if TYPE_CHECKING:
     from localharness.plugins.api import MemoryWriteHandle
@@ -33,10 +35,9 @@ log = logging.getLogger("localharness.agent.subagent")
 # Read-only toolset for the explore child (bare builtin names; see tools/builtin/__init__.py).
 EXPLORE_TOOLS: list[str] = ["read", "glob", "grep"]
 
-# Child budget, distinct from the parent (BUDGET-POLICY.md invariant: max_tool_calls = max_actions + 1).
-EXPLORE_MAX_ACTIONS = 8
-EXPLORE_MAX_TOOL_CALLS = EXPLORE_MAX_ACTIONS + 1  # 9 — kept above the budget so max_actions binds
-EXPLORE_MAX_DURATION_MINUTES = 3.0
+# Every built-in child's budget (actions, minutes) lives in `org.children_budget`
+# (ChildrenBudgetConfig); the builders below take their entry as `budget=`. max_tool_calls is never
+# set, so nothing derives it from max_actions.
 
 # Recursion limit fallback when no AgentConfig.max_subagent_depth is threaded (the parent runs
 # at depth 0, a subagent at depth 1, ...). The real cap is config-driven (AgentConfig.max_subagent_depth)
@@ -63,11 +64,9 @@ EXPLORE_ROLE = (
 WEB_TOOLS: list[str] = ["web_search", "web_fetch", "web_page_query"]
 # Owner ruling 2026-07-15 (option B): the 28-cap era tripped 21% of the time with completions
 # clustering at 20-27 tool calls, so the built-in default is raised to 56 actions / 20 min to
-# give real headroom. This is the SHIPPED default; a user can tune it per-run via an optional
-# agents/web-researcher.yaml overlay (see ConfigLoader.overlay_builtin_config) — a real config knob.
-WEB_MAX_ACTIONS = 56
-WEB_MAX_TOOL_CALLS = WEB_MAX_ACTIONS + 1  # 57 — kept above the budget so max_actions binds
-WEB_MAX_DURATION_MINUTES = 20.0
+# give real headroom. That number is the SHIPPED default in ChildrenBudgetConfig.web_researcher; a
+# user can tune it via org.children_budget or an optional agents/web-researcher.yaml overlay (see
+# ConfigLoader.overlay_builtin_config).
 
 WEB_ZERO_CALL_RETRIES = 1
 """Fresh attempts granted a web-researcher whose run made ZERO tool calls.
@@ -139,9 +138,6 @@ WEB_RESEARCHER_ROLE = WEB_RESEARCHER_ROLE_BASE
 # Blind claim-verifier grandchild (P3): re-fetches the source itself, grounds in the full page via
 # web_page_query, checks entity + recency, emits a strict JSON verdict. Leaf (never delegates).
 SEARCH_VERIFIER_TOOLS: list[str] = ["web_search", "web_fetch", "web_page_query"]
-SEARCH_VERIFIER_MAX_ACTIONS = 12
-SEARCH_VERIFIER_MAX_TOOL_CALLS = SEARCH_VERIFIER_MAX_ACTIONS + 1  # 13
-SEARCH_VERIFIER_MAX_DURATION_MINUTES = 6.0
 
 SEARCH_VERIFIER_ROLE = (
     "You are a BLIND search-verifier. You are given exactly a claim, the entity it is supposedly "
@@ -217,23 +213,34 @@ def _child_ctx_with_store_tools(context_manager: Any, child_registry: Any) -> An
     return ctx
 
 
-def build_explore_config(name: str = "explore", kill_file: str | None = None) -> AgentConfig:
+def _child_budget_config(
+    entry: str, budget: ChildBudget | None, kill_file: str | None,
+) -> BudgetConfig:
+    """The BudgetConfig of a built-in child: the given budget, else the schema default of `entry`.
+
+    The builder alone owns the org rung (D-14): with no `budget` it reads
+    `ChildrenBudgetConfig().for_name(entry)`, keyed on the built-in (not on a renamed build's
+    `name`). `max_tool_calls` is never set.
+    """
+    b = budget if budget is not None else ChildrenBudgetConfig().for_name(entry)
+    return BudgetConfig(max_actions=b.actions, max_duration_minutes=b.minutes, kill_file=kill_file)
+
+
+def build_explore_config(
+    name: str = "explore", kill_file: str | None = None, *, budget: ChildBudget | None = None,
+) -> AgentConfig:
     """Build the read-only explore-child AgentConfig with its own bounded budget.
 
     `kill_file=None` leaves the child on the SESSION's default kill file (`<config-dir>/KILL`) —
     the same switch the root watches; its own short budget is the real bound.
     Pass a path to honor an external kill file.
+
+    `budget=None` builds the child on `ChildrenBudgetConfig().explore`.
     """
     return AgentConfig(
         name=_sanitize_agent_name(name),
         role=EXPLORE_ROLE,
-        permissions=PermissionConfig(
-            budget=BudgetConfig(
-                max_actions=EXPLORE_MAX_ACTIONS,
-                max_duration_minutes=EXPLORE_MAX_DURATION_MINUTES,
-                kill_file=kill_file,
-            ),
-        ),
+        permissions=PermissionConfig(budget=_child_budget_config("explore", budget, kill_file)),
     )
 
 
@@ -246,7 +253,9 @@ def _research_rigor() -> str:
     return os.environ.get("RESEARCH_RIGOR", "on-request").strip().lower()
 
 
-def build_web_researcher_config(name: str = "web-researcher", kill_file: str | None = None) -> AgentConfig:
+def build_web_researcher_config(
+    name: str = "web-researcher", kill_file: str | None = None, *, budget: ChildBudget | None = None,
+) -> AgentConfig:
     """Build the web-researcher-child AgentConfig. RESEARCH_RIGOR gates the role:
     `high` → auto-verify material claims; `fast` → plain research role; anything else
     (incl. the `on-request` default) → verify only when the task explicitly asks.
@@ -254,6 +263,8 @@ def build_web_researcher_config(name: str = "web-researcher", kill_file: str | N
     `kill_file=None` leaves the child on the SESSION's default kill file (`<config-dir>/KILL`) —
     the same switch the root watches; its own short budget is the real bound.
     Pass a path to honor an external kill file.
+
+    `budget=None` builds the child on `ChildrenBudgetConfig().web_researcher`.
     """
     rigor = _research_rigor()
     role = WEB_RESEARCHER_ROLE_BASE
@@ -265,29 +276,22 @@ def build_web_researcher_config(name: str = "web-researcher", kill_file: str | N
         tools_required=True,
         name=_sanitize_agent_name(name),
         role=role,
-        permissions=PermissionConfig(
-            budget=BudgetConfig(
-                max_actions=WEB_MAX_ACTIONS,
-                max_duration_minutes=WEB_MAX_DURATION_MINUTES,
-                kill_file=kill_file,
-            ),
-        ),
+        permissions=PermissionConfig(budget=_child_budget_config("web_researcher", budget, kill_file)),
     )
 
 
-def build_search_verifier_config(name: str = "search-verifier", kill_file: str | None = None) -> AgentConfig:
-    """Build the blind search-verifier child AgentConfig with its own bounded budget (leaf)."""
+def build_search_verifier_config(
+    name: str = "search-verifier", kill_file: str | None = None, *, budget: ChildBudget | None = None,
+) -> AgentConfig:
+    """Build the blind search-verifier child AgentConfig with its own bounded budget (leaf).
+
+    `budget=None` builds the child on `ChildrenBudgetConfig().search_verifier`.
+    """
     return AgentConfig(
         tools_required=True,
         name=_sanitize_agent_name(name),
         role=SEARCH_VERIFIER_ROLE,
-        permissions=PermissionConfig(
-            budget=BudgetConfig(
-                max_actions=SEARCH_VERIFIER_MAX_ACTIONS,
-                max_duration_minutes=SEARCH_VERIFIER_MAX_DURATION_MINUTES,
-                kill_file=kill_file,
-            ),
-        ),
+        permissions=PermissionConfig(budget=_child_budget_config("search_verifier", budget, kill_file)),
     )
 
 
@@ -428,12 +432,8 @@ def format_web_findings(task: str, summary: str, tool_calls_used: int) -> str:
 # chunk (every window bounded; each chunk fully read => faithful), then the cruncher's own tool-less
 # loop combines the per-chunk extracts (model does the reduce). The root makes ONE call (J5).
 CRUNCHER_TOOLS: list[str] = ["tool_result_get", "chunk"]   # declared capability (leaves + future β)
-CRUNCHER_MAX_ACTIONS = 6
-CRUNCHER_MAX_DURATION_MINUTES = 20.0
 
 CHUNK_SUMMARIZER_TOOLS: list[str] = ["tool_result_get"]
-CHUNK_SUMMARIZER_MAX_ACTIONS = 3
-CHUNK_SUMMARIZER_MAX_DURATION_MINUTES = 6.0
 
 CRUNCHER_ROLE = (
     "You are the cruncher: you produce a FAITHFUL answer over content far larger than your window. "
@@ -1025,32 +1025,30 @@ def _delegation_result(text: str, child_loop: Any, bus: Any, summary: str,
         child_session_id=sid, handoff=parse_handoff(summary))
 
 
-def build_cruncher_config(name: str = "cruncher", kill_file: str | None = None) -> AgentConfig:
+def build_cruncher_config(
+    name: str = "cruncher", kill_file: str | None = None, *, budget: ChildBudget | None = None,
+) -> AgentConfig:
     """The cruncher (J3 reducer): no host-dangerous, no ingest; combines per-section extracts of a
-    granted over-window document into a faithful answer."""
+    granted over-window document into a faithful answer. `budget=None` builds it on
+    `ChildrenBudgetConfig().cruncher`."""
     return AgentConfig(
         name=_sanitize_agent_name(name),
         role=CRUNCHER_ROLE,
         tools=ToolConfig(add=list(CRUNCHER_TOOLS)),
-        permissions=PermissionConfig(budget=BudgetConfig(
-            max_actions=CRUNCHER_MAX_ACTIONS,
-            max_duration_minutes=CRUNCHER_MAX_DURATION_MINUTES,
-            kill_file=kill_file,
-        )),
+        permissions=PermissionConfig(budget=_child_budget_config("cruncher", budget, kill_file)),
     )
 
 
-def build_chunk_summarizer_config(name: str = "chunk-summarizer", kill_file: str | None = None) -> AgentConfig:
-    """A leaf that reads ONE granted chunk (tool_result_get) and extracts question-relevant text."""
+def build_chunk_summarizer_config(
+    name: str = "chunk-summarizer", kill_file: str | None = None, *, budget: ChildBudget | None = None,
+) -> AgentConfig:
+    """A leaf that reads ONE granted chunk (tool_result_get) and extracts question-relevant text.
+    `budget=None` builds it on `ChildrenBudgetConfig().chunk_summarizer`."""
     return AgentConfig(
         name=_sanitize_agent_name(name),
         role=CHUNK_SUMMARIZER_ROLE,
         tools=ToolConfig(add=list(CHUNK_SUMMARIZER_TOOLS)),
-        permissions=PermissionConfig(budget=BudgetConfig(
-            max_actions=CHUNK_SUMMARIZER_MAX_ACTIONS,
-            max_duration_minutes=CHUNK_SUMMARIZER_MAX_DURATION_MINUTES,
-            kill_file=kill_file,
-        )),
+        permissions=PermissionConfig(budget=_child_budget_config("chunk_summarizer", budget, kill_file)),
     )
 
 
