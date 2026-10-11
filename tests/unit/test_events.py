@@ -1,4 +1,4 @@
-"""Tests for localharness.core.events — all 33 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
+"""Tests for localharness.core.events — all 34 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
 import json
 import pytest
 from localharness.core.events import (
@@ -24,6 +24,7 @@ from localharness.core.events import (
     PermissionResolved,
     PermissionStaged,
     ParseFailed,
+    ProviderLost,
     ScenarioCompleted,
     SentinelAlert,
     StuckRecovered,
@@ -140,8 +141,8 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 33 event types."""
-    assert len(EVENT_TYPE_MAP) == 33
+    """EVENT_TYPE_MAP has entries for all 34 event types."""
+    assert len(EVENT_TYPE_MAP) == 34
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
@@ -151,9 +152,36 @@ def test_event_type_map_complete():
         "ExpectationAttached", "OutcomeObserved", "SurpriseScored",
         "ConsolidationStarted", "ConsolidationFinished", "InputRouted",
         "TurnEndMicroPassCompleted", "PermissionAsked", "PermissionStaged",
-        "PermissionResolved",
+        "PermissionResolved", "ProviderLost",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
+
+
+def test_provider_lost_event():
+    """ProviderLost is the 34th event: frozen, registered in both tables, round-trips through
+    deserialize_event, validates with an empty detail and keeps a parent_id."""
+    import typing
+
+    ev = ProviderLost(
+        agent_id=AgentID("a"), session_id=SessionID("s"), detail="x", wait_seconds=1800.0,
+    )
+    assert ev.event_type == "ProviderLost"
+    with pytest.raises(Exception):  # frozen
+        ev.wait_seconds = 1.0  # type: ignore[misc]
+    assert EVENT_TYPE_MAP["ProviderLost"] is ProviderLost
+    assert ProviderLost in typing.get_args(AnyEvent)
+    restored = deserialize_event(ev.model_dump_json())
+    assert isinstance(restored, ProviderLost)
+    assert restored == ev
+    assert restored.detail == "x" and restored.wait_seconds == 1800.0
+
+    empty = ProviderLost(agent_id=AgentID("a"), session_id=SessionID("s"), detail="", wait_seconds=30.0)
+    assert empty.detail == ""
+    child = ProviderLost(
+        agent_id=AgentID("a"), session_id=SessionID("s"), detail="", wait_seconds=30.0,
+        parent_id=SessionID("p"),
+    )
+    assert child.parent_id == "p"
 
 
 def test_input_routed_event():
@@ -224,14 +252,14 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 33 event classes."""
+    """AnyEvent type contains all 34 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
     from localharness.core.events import (
         ConsolidationFinished, ConsolidationStarted, InputRouted, TurnEndMicroPassCompleted,
     )
     args = typing.get_args(AnyEvent)
-    assert len(args) == 33
+    assert len(args) == 34
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
@@ -241,6 +269,7 @@ def test_any_event_union():
         ExpectationAttached, OutcomeObserved, SurpriseScored,
         ConsolidationStarted, ConsolidationFinished, InputRouted,
         TurnEndMicroPassCompleted, PermissionAsked, PermissionStaged, PermissionResolved,
+        ProviderLost,
     }
     assert set(args) == expected
 

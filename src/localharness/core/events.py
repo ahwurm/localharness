@@ -1,4 +1,4 @@
-"""All 33 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 34 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name: the bus keys subscriptions
 and delivery by the class name, and deserialize_event resolves a logged line through EVENT_TYPE_MAP
@@ -410,6 +410,23 @@ class Heartbeat(BaseEvent):
     last_tool: Optional[str] = None
 
 
+class ProviderLost(BaseEvent):
+    """Published once per server death when a reconnect wait outlasts the visibility threshold.
+
+    Channels show the bound ("model server unreachable — waiting up to Ns") so a person watching
+    a stalled turn knows the harness is waiting for the model server rather than hung. A child
+    loop may publish it (it carries parent_id) and no channel filters on that. `detail` is the
+    publisher's redacted error text; the event never carries a key or URL credentials, and the
+    channel text never includes `detail`.
+    """
+
+    event_type: str = "ProviderLost"
+    agent_id: AgentID
+    session_id: SessionID
+    detail: str
+    wait_seconds: float
+
+
 class CompactionTriggered(BaseEvent):
     """Published by ContextManager.build_messages when CompactionPipeline modifies messages.
 
@@ -688,6 +705,7 @@ AnyEvent = Union[
     PermissionStaged,
     PermissionResolved,
     Heartbeat,
+    ProviderLost,
     CompactionTriggered,
     ScenarioCompleted,
     ParseFailed,
@@ -724,6 +742,7 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "PermissionStaged": PermissionStaged,
     "PermissionResolved": PermissionResolved,
     "Heartbeat": Heartbeat,
+    "ProviderLost": ProviderLost,
     "CompactionTriggered": CompactionTriggered,
     "ScenarioCompleted": ScenarioCompleted,
     "ParseFailed": ParseFailed,
