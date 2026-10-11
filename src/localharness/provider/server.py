@@ -395,8 +395,10 @@ def server_dir(config_dir: Path) -> Path:
 
 def config_ini_home(config_dir: Path, port: int) -> Path:
     """The `XDG_CONFIG_HOME` a llama.cpp launch on `port` is given (D-30, D-59): one harness-owned
-    directory per port under the GLOBAL config dir `activate` receives, never under `vllm/`."""
-    return Path(config_dir) / "xdg" / str(port)
+    directory per port under the GLOBAL config dir `activate` receives, never under `vllm/`. Always an
+    absolute path (the XDG base directory spec requires one): a relative `--config-dir` or
+    `LOCALHARNESS_DIR` is joined to the process cwd here, once (IN-53)."""
+    return Path(os.path.abspath(config_dir)) / "xdg" / str(port)
 
 
 def _own_directory(path: Path) -> None:

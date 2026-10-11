@@ -117,6 +117,18 @@ async def test_a_peer_gets_its_own_directory(tmp_path, popen):
     assert popen[-1]["env"]["XDG_CONFIG_HOME"] == str(tmp_path / "xdg" / "8082")
 
 
+async def test_a_relative_config_dir_still_gives_the_child_an_absolute_xdg_config_home(
+        tmp_path, popen, monkeypatch):
+    """IN-53: XDG requires an absolute path; the relative dir is joined to the cwd once."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cfg").mkdir()
+    await lifecycle.SpawnedProcessStrategy().activate(
+        _spec(config_ini="tools = all\n"), Path("cfg"), BASE)
+    xdg = popen[-1]["env"]["XDG_CONFIG_HOME"]
+    assert os.path.isabs(xdg) and xdg == str(tmp_path / "cfg" / "xdg" / "8080")
+    assert (tmp_path / "cfg" / "xdg" / "8080" / "llama.cpp" / "config.ini").read_text() == "tools = all\n"
+
+
 async def test_a_users_own_variable_never_reaches_the_child(tmp_path, popen, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", "/home/u/.config")
     await lifecycle.SpawnedProcessStrategy().activate(_spec(), tmp_path, BASE)
