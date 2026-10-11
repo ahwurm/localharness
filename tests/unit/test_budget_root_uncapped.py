@@ -739,3 +739,28 @@ async def test_start_with_no_input_builds_a_terminal_that_is_no_local_operator(t
     monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
     await _start_async(None, False, False, str(tmp_path), no_input=True)
     assert seen == {"channel": False, "gate": False}
+
+
+# --------------------------------------------------- WR-52: the resolvers apply _cap_limit itself
+
+
+def test_both_resolvers_cap_through_the_one_named_helper(mock_llm_client, bus, monkeypatch):
+    """The helper's own test only proves anything about the loop if the loop calls it: a spy
+    stands in for it and every cap the resolvers apply (fallback actions, knob, fallback minutes)
+    goes through it."""
+    import localharness.agent.loop as loop_mod
+    from localharness.config.models import ChildBudget
+
+    calls: list[tuple] = []
+    real = loop_mod._cap_limit
+
+    def spy(limit, cap):
+        calls.append((limit, cap))
+        return real(limit, cap)
+
+    monkeypatch.setattr(loop_mod, "_cap_limit", spy)
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, max_minutes=None, local=False,
+                 unattended_max_actions=5, budget_fallback=ChildBudget(actions=8, minutes=3.0))
+    assert loop._resolve_max_actions()[0] == 5
+    assert loop._resolve_max_minutes()[0] == 3.0
+    assert calls == [(0, 8), (8, 5), (0.0, 3.0)]
