@@ -352,26 +352,26 @@ def test_two_starts_make_one_backup_per_file_and_the_second_changes_nothing(tmp_
 
 
 def test_a_rewrite_that_fails_mid_write_leaves_the_original_bytes_in_a_backup(tmp_path, monkeypatch):
-    """The backup lands before the file is touched: a write that dies part-way still has an undo."""
+    """The backup lands before the file is touched: a write that dies part-way still has an undo.
+    And since the rewrite became atomic (WR-01) the file itself is never left half-written: the
+    temp file dies, the original bytes stay where they were."""
     import pytest
 
     cfg = _write(tmp_path, _v017())
     original = cfg.read_bytes()
-    real_write_text = Path.write_text
 
-    def dying_write(self, data, *a, **kw):
-        if self == cfg:
-            real_write_text(self, data[: len(data) // 2], *a, **kw)
-            raise OSError("disk full")
-        return real_write_text(self, data, *a, **kw)
+    def dying_fsync(_fd):
+        raise OSError("disk full")
 
-    monkeypatch.setattr(Path, "write_text", dying_write)
+    monkeypatch.setattr(migrate.os, "fsync", dying_fsync)
     raw, plan = migrate.load_plan(cfg)
     with pytest.raises(OSError):
         migrate.apply(cfg, raw, plan)
 
     (backup,) = tmp_path.glob("config.yaml.bak-*")
     assert backup.read_bytes() == original
+    assert cfg.read_bytes() == original
+    assert not list(tmp_path.glob(".config.yaml.*.tmp"))
 
 
 def test_a_migrated_config_that_fails_validation_writes_nothing(tmp_path):
