@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import shlex
@@ -459,6 +460,7 @@ class InitRecords:
     deferred: list[Callable[[], None]] = field(default_factory=list)  # ledger writes, after the write
     base_url: str | None = None  # None: http://127.0.0.1:<server.port>/v1
     serving: bool = False  # a server already answers for it
+    label: str = ""  # who it was imported from (the unit, or pid and command), for the audit detail
 
     @property
     def launchable(self) -> bool:
@@ -562,8 +564,27 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
     config_file = config_path / "config.yaml"
 
     if config_file.exists() and not force:
-        if _existing_config(config_path, config_file, interactive,
-                            changing=endpoint is not None or model is not None):
+        changing = endpoint is not None or model is not None
+        imported = None if changing else _imported_by_an_existing_install(config_path)
+        if isinstance(imported, InitRecords):  # D-36: the change is the import — overrides.yaml, no question
+            _show_records(imported)
+            if _write_overlay_records(config_path, imported, adopt=_adopts(interactive)):
+                overlay_file = ConfigLoader(config_dir=config_path).user_overlay_path
+                console.print("[green]✓[/green] "
+                              + escape(f"Updated {overlay_file} — your config.yaml is unchanged."),
+                              soft_wrap=True)
+            else:
+                err_console.print(
+                    "[bold red]Error:[/bold red] "
+                    + escape(f"the settings above do not validate, or {config_path / 'overrides.yaml'} "
+                             f"could not be written. Nothing was written; {config_file} is kept."),
+                    soft_wrap=True)
+            outcome = SetupResult(config_file, True)
+        elif isinstance(imported, Attached):  # attach-only: its one line, the config kept
+            console.print(imported.line, markup=False, soft_wrap=True)
+            console.print("[green]✓[/green] " + escape(f"Kept {config_file}."), soft_wrap=True)
+            outcome = SetupResult(config_file, False)
+        elif _existing_config(config_path, config_file, interactive, changing=changing):
             outcome = SetupResult(config_file, False)  # kept: no server was asked this run
         else:  # a change: overrides.yaml only, and the posture questions are not asked again
             result, selected_model, _ = _pick_server(config_path, endpoint, model, interactive,
@@ -632,6 +653,16 @@ def _existing_config(config_path: Path, config_file: Path, interactive: bool, *,
     if not interactive:
         console.print(escape("  To start over: localharness init --force"))
     return True
+
+
+def _imported_by_an_existing_install(config_path: Path) -> InitRecords | Attached | None:
+    """D-36: an existing config.yaml that sets no `server:` may import the unit or process behind its
+    provider. A config that cannot be read imports nothing — `_existing_config` reports it."""
+    try:
+        harness = ConfigLoader(config_dir=config_path).load_harness()
+    except Exception:  # noqa: BLE001 — whatever stops the read is _existing_config's to report
+        return None
+    return _existing_install_import(config_path, harness)
 
 
 def _pick_server(
@@ -1139,7 +1170,8 @@ def _records_from_import(config_path: Path, imp: init_import.Imported, holder: w
     return InitRecords(
         server=spec, served=served, peers=peers, lines=lines,
         api_key=imp.api_key.get_secret_value() if imp.api_key is not None else None,
-        deferred=deferred, base_url=base_url, serving=running)
+        deferred=deferred, base_url=base_url, serving=running,
+        label=workspace.incumbent_subject(holder, port=port))
 
 
 def _show_records(recs: InitRecords) -> None:
@@ -1491,6 +1523,88 @@ def _write_records(config_path: Path, recs: InitRecords, *, force: bool = False,
     if adopt:  # D-59: exactly the dicts that were written, not a fresh look at the disk
         _adopt_written(global_config_dir(config_path), "config.yaml", server_dict, peer_dicts)
     return written
+
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _existing_install_import(config_path: Path, harness: HarnessConfig) -> InitRecords | Attached | None:
+    """D-36, D-54: an install whose config.yaml sets no `server:` imports what runs behind its provider
+    address. An own-uid process on that port that answers detection (`found` required, so a process
+    that answers no HTTP is never imported) goes through the live import; with nothing listening there,
+    a stopped unit that names a model is the record. None keeps today's flow: a `server:` already set,
+    a provider on another machine, a port another uid holds, a listener the import has no business
+    with, no unit."""
+    if harness.server is not None:
+        return None
+    try:
+        parsed = urlparse(harness.provider.base_url)
+        port, host = parsed.port, parsed.hostname
+    except ValueError:
+        return None
+    if port is None or host not in _LOOPBACK_HOSTS:  # a provider elsewhere is not this machine's process
+        return None
+    found = procfs.listeners(port)
+    if not found:
+        return _unit_import(config_path)[0]
+    if not any(lst.uid == os.getuid() for lst in found):
+        return None
+    try:
+        result = asyncio.run(detect_provider(timeout_seconds=1.0, ports=[port]))
+    except Exception:  # noqa: BLE001 — a probe that fails imports nothing
+        return None
+    if not result.found:
+        return None
+    return _import_listener(config_path, result)
+
+
+def _write_overlay_records(config_path: Path, recs: InitRecords, *, adopt: bool) -> bool:
+    """D-36, D-37, D-60: an existing install's import goes to overrides.yaml through the one validated
+    overlay write: `server:` (exclude_none), discovery's peers only while the merged `extra_endpoints`
+    is still empty when the write happens (checked inside `mutate`, T-5-69), and an inline key as
+    `provider.api_key`. config.yaml is not touched. The audit triples name entries, never the key's
+    value. True: written — the ledger writes run and, when `adopt`, exactly the dicts written are
+    adopted (file `overrides.yaml`). False: nothing written."""
+    global_dir = global_config_dir(config_path)
+    server_dict, peer_dicts = _record_dicts_of(recs.server, recs.peers)
+    wrote: dict[str, list[dict]] = {"peers": []}
+    audit: list[tuple[str, object, object]] = []  # filled by mutate: what was written, not what was meant
+
+    def entries(prefix: str, mapping: dict) -> list[tuple[str, object, object]]:
+        found = [(e["name"], None, e["shown"]) for e in trust._launch_entries("overrides.yaml", prefix, mapping)]
+        found += [(prefix + key, None, json.dumps(mapping[key])) for key in trust._POSTURE_KEYS
+                  if key in mapping]
+        return found
+
+    def mutate(overlay: dict) -> None:
+        audit.clear()
+        wrote["peers"] = []
+        overlay["server"] = copy.deepcopy(server_dict)
+        audit.extend(entries("server.", server_dict or {}))
+        merged = (overlay["extra_endpoints"] if "extra_endpoints" in overlay
+                  else workspace.raw_settings(global_dir)[0].get("extra_endpoints"))
+        if peer_dicts and not merged:
+            overlay["extra_endpoints"] = copy.deepcopy(peer_dicts)
+            wrote["peers"] = peer_dicts
+            for peer in peer_dicts:
+                audit.extend(entries(f"extra_endpoints.{peer['name']}.lifecycle.", peer.get("lifecycle")
+                                     or {}))
+        if recs.api_key:
+            provider = overlay.get("provider")
+            overlay["provider"] = {**(provider if isinstance(provider, dict) else {}),
+                                   "api_key": recs.api_key}
+            audit.append(("provider.api_key", None, "(set)"))
+
+    ok = workspace.write_overlay_validated(
+        global_dir, mutate, audit,
+        actor_detail=f"localharness init: imported {recs.label or 'the model server'} into overrides.yaml")
+    if not ok:
+        return False
+    for thunk in recs.deferred:  # only now that overrides.yaml is on disk
+        thunk()
+    if adopt:  # D-37: exactly the dicts that were written, not a fresh look at the disk
+        _adopt_written(global_dir, "overrides.yaml", server_dict, wrote["peers"])
+    return True
 
 
 def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *,
