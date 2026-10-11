@@ -114,8 +114,9 @@ def test_unknown_exception_is_a_base_provider_error():
 
 def test_openai_connection_and_timeout_errors_stay_connection_errors():
     """The openai branches and their order are unchanged: APITimeoutError subclasses
-    APIConnectionError, so a connect-phase timeout is a connection error (and takes the reconnect
-    wait), while a mid-stream httpx timeout is a timeout."""
+    APIConnectionError, so any timeout before the response headers (connect, write, pool, or a read
+    while waiting for headers, not only the connect phase) is a connection error and takes the
+    reconnect wait, while a mid-stream httpx timeout (after the headers) is a timeout."""
     c = LLMClient(_cfg())
     assert type(c._wrap_error(openai.APIConnectionError(request=_req()))) is ProviderConnectionError
     assert type(c._wrap_error(openai.APITimeoutError(request=_req()))) is ProviderConnectionError

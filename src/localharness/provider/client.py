@@ -1967,6 +1967,11 @@ class LLMClient:
             return ProviderTimeoutError(str(exc), cause=exc)
         if isinstance(exc, httpx.TransportError):
             return ProviderConnectionError(str(exc), cause=exc)
+        # openai raises APITimeoutError for ANY httpx timeout before the response headers arrive
+        # (connect, write, pool, or a read while waiting for headers), and it subclasses
+        # APIConnectionError: every one of them lands here as a connection error and takes the
+        # reconnect wait, not only a connect timeout. The APITimeoutError branch below is therefore
+        # unreachable; the order is kept as ruled (D-42).
         if isinstance(exc, openai.APIConnectionError):
             return ProviderConnectionError(str(exc), cause=exc)
         if isinstance(exc, openai.APITimeoutError):
