@@ -734,3 +734,23 @@ def test_a_partial_receipt_names_every_change_config_yaml_got(tmp_path):
     assert "server.bind_all: true" in text and "reachable from other machines" in text
     assert "(agents/locked.yaml)" not in text
     assert "continuing; config.yaml was updated." in text
+
+
+@_not_root
+def test_an_unreadable_sidecar_is_neither_tried_nor_owed(tmp_path):
+    """IN-32: what the docstrings now say. A file migrate cannot read is not in the plan and not
+    recorded as owed; the stamp moves, so once readable it keeps init's value (a cap stays)."""
+    cfg = _write(tmp_path, _v017())
+    hidden = _sidecar(tmp_path, "agents", "hidden",
+                      {"name": "hidden", "permissions": {"budget": {"max_actions": 100}}})
+    hidden.chmod(0o000)
+    try:
+        original, plan = migrate.load_plan(cfg)
+        assert plan is not None and hidden not in [s.path for s in plan.sidecars]
+        migrate.apply(cfg, original, plan)
+        assert _disk(cfg)["org"]["permissions"]["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
+        assert migrate.read_init_nulls_pending(tmp_path) == ()
+    finally:
+        hidden.chmod(0o644)
+    assert _disk(hidden)["permissions"]["budget"]["max_actions"] == 100
+    assert migrate.load_plan(cfg)[1] is None
