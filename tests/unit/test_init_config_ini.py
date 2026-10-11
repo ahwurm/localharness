@@ -119,6 +119,16 @@ def test_a_credential_valued_key_is_never_kept_and_makes_the_import_attach_only(
     assert mask_config_ini(b"ctx-size = 3\n").keyshaped is None
 
 
+def test_trailing_blanks_are_not_part_of_a_value():
+    """WR-10: llama.cpp's grammar excludes them, so a key-file path must not carry them."""
+    masked = mask_config_ini(b"api-key-file = /home/x/key   \nport = 9000\t \nctx-size = 8192   \n")
+    assert masked.keys == {"api-key-file": "/home/x/key", "port": "9000"}
+    out = imported(proc(), ini_read(b"api-key-file = /home/x/key   \nctx-size = 8192  \n"))
+    assert out.spec.api_key_file == "/home/x/key"
+    assert "config.ini (/cfg/llama.cpp): ctx-size=8192" in out.shown
+    assert not any(line.endswith(" ") for line in out.shown)
+
+
 def test_text_that_is_not_utf8_masks_to_nothing():
     assert mask_config_ini(b"ctx-size = \xff\xfe\n") == IniImport("", {}, None)
 

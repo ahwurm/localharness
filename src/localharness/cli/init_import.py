@@ -389,7 +389,7 @@ def mask_config_ini(data: bytes) -> IniImport:
             continue
         kv = _INI_KV.match(raw)
         if kv is not None:
-            key, value = kv.group(1), kv.group(2)
+            key, value = kv.group(1), kv.group(2).rstrip(" \t")  # llama.cpp's value excludes trailing blanks
             lowered = key.lower()
             category = excluded_option(key)
             dashed = lowered.replace("_", "-")
@@ -455,7 +455,7 @@ def _ini_pairs(kept: str) -> list[tuple[str, str]]:
     for line in _INI_NEWLINE.split(kept):
         kv = _INI_KV.match(line)
         if kv is not None and _INI_HEADER.match(line) is None:
-            pairs.append((kv.group(1), kv.group(2)))
+            pairs.append((kv.group(1), kv.group(2).rstrip(" \t")))
     return pairs
 
 
