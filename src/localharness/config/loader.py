@@ -764,8 +764,9 @@ def _coerce_global(model: type[BaseModel], field: str, v: Any, **fill: Any) -> A
 def _refuse_invalid_global_budget(field: str, value: Any, file: Optional[Path], key_prefix: str) -> None:
     """Raise the ConfigValidationError the operator's own budget value earns, naming the global
     file that holds it (WR-22). Reached when that value is present but does not validate and a
-    workspace file declares the same key: the load fails as it fails with no workspace file over
-    it, never falls to the schema default (None, no limit)."""
+    workspace file is on the cascade, whether it declares the same key or omits it (WR-31): the
+    load fails as it fails with no workspace file over it, never falls to the schema default
+    (None, no limit)."""
     key = f"{key_prefix}permissions.budget.{field}"
     try:
         BudgetConfig.model_validate({field: value})
@@ -1889,18 +1890,16 @@ class ConfigLoader:
 
             # The global value as the model validates it (CR-01): a global `"50"` or `50.0` is the
             # operator's 50, never silence. One that is present and does not validate fails the
-            # load, as it does with no workspace file over it (WR-22): the operator's raw value is
-            # put back so AgentConfig's validation names it. Removing the field instead would load
-            # the schema default, None, which is no limit at all.
+            # load, as it does with no workspace file over it (WR-22), whether or not the
+            # workspace file declares the key (WR-31): a shadowing file that omits it would
+            # otherwise load the schema default, None, which is no limit at all.
             raw_global, g_file, g_key = self._global_layer_budget_source(path.stem, div_name, field)
             baseline = (raw_global if raw_global is None
                         else _coerce_global(BudgetConfig, field, raw_global))
             note = (f"ignoring permissions.budget.{field} in {str(src)!r}: "
                     "a project may only lower it")
             if baseline is _INVALID:
-                if decl is not _UNSET:
-                    _refuse_invalid_global_budget(field, raw_global, g_file, g_key)
-                continue
+                _refuse_invalid_global_budget(field, raw_global, g_file, g_key)
             if finite(baseline):
                 if decl is not _UNSET and finite(decl) and decl <= baseline:
                     result = decl
