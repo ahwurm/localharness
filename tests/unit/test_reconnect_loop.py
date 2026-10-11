@@ -627,8 +627,8 @@ async def test_the_bound_passing_ends_as_llm_error_with_the_sentence(bus, models
 
     failed = _failed(bus)
     assert [f.reason for f in failed] == ["llm_error"]
-    assert "did not come back within 0s" in failed[0].detail
-    assert "did not come back within 0s" in summary
+    assert "did not come back within 1s" in failed[0].detail  # 0.2 s, rounded up (IN-61)
+    assert "did not come back within 1s" in summary
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 

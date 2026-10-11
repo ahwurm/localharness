@@ -462,7 +462,7 @@ async def test_a_relaunch_that_outlasts_the_bound_is_cut_at_the_bound(models, tm
         await asyncio.wait_for(ServerRecovery(URL, tmp_path, relaunch).recover(
             base_url=URL, api_key="none", wait_seconds=0.3, on_lost=Announce()), 2.0)
     assert asyncio.get_running_loop().time() - started < 1.0
-    assert str(info.value).startswith("the model server did not come back within 0s")
+    assert str(info.value).startswith("the model server did not come back within 1s")
     assert relaunch.calls == 1 and cancelled == [1]
 
 
@@ -490,7 +490,7 @@ async def test_the_bound_with_no_config_dir_has_no_log_tail(models):
     with pytest.raises(TimeoutError) as info:
         await ServerRecovery(None, None, None).recover(
             base_url=URL, api_key="none", wait_seconds=0.1, on_lost=Announce())
-    assert str(info.value) == "the model server did not come back within 0s"
+    assert str(info.value) == "the model server did not come back within 1s"
     assert endpoint.calls >= 2
 
 
@@ -501,7 +501,7 @@ async def test_the_bound_with_a_config_dir_carries_the_log_tail(models, tmp_path
     with pytest.raises(TimeoutError) as info:
         await ServerRecovery(URL, tmp_path, None).recover(
             base_url=URL, api_key="none", wait_seconds=0.1, on_lost=Announce())
-    assert str(info.value) == "the model server did not come back within 0s. Log tail:\nloading weights 40%"
+    assert str(info.value) == "the model server did not come back within 1s. Log tail:\nloading weights 40%"
 
 
 async def test_a_config_dir_with_no_log_still_says_the_whole_sentence(models, tmp_path):
@@ -510,11 +510,12 @@ async def test_a_config_dir_with_no_log_still_says_the_whole_sentence(models, tm
     with pytest.raises(TimeoutError) as info:
         await ServerRecovery(URL, tmp_path, None).recover(
             base_url=URL, api_key="none", wait_seconds=0.1, on_lost=Announce())
-    assert str(info.value).startswith("the model server did not come back within 0s. Log tail:\n")
+    assert str(info.value).startswith("the model server did not come back within 1s. Log tail:\n")
     assert str(info.value).endswith("(no log)")
 
 
-@pytest.mark.parametrize(("seconds", "rendered"), [(30.0, "30s"), (1800.0, "1800s"), (0.4, "0s"), (0.6, "1s")])
+@pytest.mark.parametrize(("seconds", "rendered"), [(30.0, "30s"), (1800.0, "1800s"), (0.4, "1s"), (0.6, "1s"),
+                                                   (12.4, "13s"), (2.5, "3s")])
 async def test_the_bound_is_rendered_as_whole_seconds(monkeypatch, seconds, rendered):
     monkeypatch.setattr(server, "wait_ready", WaitReadyRecorder([TimeoutError("vLLM not ready")]))
     with pytest.raises(TimeoutError) as info:
@@ -530,7 +531,7 @@ async def test_a_bound_already_spent_after_the_relaunch_fails_without_polling_ag
     with pytest.raises(TimeoutError) as info:
         await ServerRecovery(URL, None, relaunch).recover(
             base_url=URL, api_key="none", wait_seconds=0.1, on_lost=Announce())
-    assert str(info.value) == "the model server did not come back within 0s"
+    assert str(info.value) == "the model server did not come back within 1s"
     assert len(recorder.calls) == 1
     assert relaunch.calls == 1
 
@@ -749,6 +750,27 @@ async def test_a_failed_outage_keeps_no_exception_frame_or_key_alive(models, tmp
         await pair.recover(base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
     assert again.value.__cause__ is None and again.value.__suppress_context__
     assert str(again.value) == record[1]
+
+
+@pytest.mark.parametrize("seconds", [12.4, 0.3, 2.5, 30.0])
+def test_the_bound_sentence_names_the_same_seconds_as_the_provider_lost_line(seconds):
+    """IN-61: the line said "waiting up to N s"; the ending must say "within N s", the same N."""
+    from localharness.channels.base import provider_lost_seconds
+
+    text = ServerRecovery(None, None, None)._bound_text(seconds)
+    assert text == f"the model server did not come back within {provider_lost_seconds(seconds)}s"
+
+
+async def test_a_later_loop_past_a_spent_bound_names_its_own_bound(models):
+    """IN-61: one look, then the bound sentence with THIS loop's seconds, never an earlier loop's."""
+    models(ModelsEndpoint(down=lambda: True))
+    pair = ServerRecovery(None, None, None)
+    with pytest.raises(TimeoutError, match="within 1s$"):
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=0.15, on_lost=Announce())
+    pair._flight.outage.started -= 60
+    with pytest.raises(TimeoutError) as info:
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=37, on_lost=Announce())
+    assert str(info.value) == "the model server did not come back within 37s"
 
 
 async def test_forgetting_the_outage_gives_the_next_drop_a_whole_new_flight(models, tmp_path):
