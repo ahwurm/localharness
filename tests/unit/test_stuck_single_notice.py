@@ -203,17 +203,20 @@ async def test_zed_sets_the_budget_error_line_apart_from_the_reply(tmp_path):
 @pytest.mark.asyncio
 async def test_a_real_budget_stop_reaches_a_channel_whole(mock_llm_client, bus):
     """End to end through the loop: the wrap-up the loop generated arrives whole, and the error
-    line carries the loop's notice."""
+    line carries the loop's notice. (IN-81: the wrap-up response is queued right after the two
+    tool-call responses, so the reply is real and checked; this used to pass with none.)"""
     from tests.unit.test_budget_root_uncapped import _calls, _loop, _Registry
 
     chan = _Recorder(bus)
     bus.subscribe(TurnFailed, chan.on_turn_failed)
-    loop = _loop(mock_llm_client, bus, _calls(mock_llm_client, 5), max_actions=2, local=True,
+    calls = _calls(mock_llm_client, 5)
+    responses = [*calls[:2], mock_llm_client.Response(content="found X, Y, Z"), *calls[2:]]
+    loop = _loop(mock_llm_client, bus, responses, max_actions=2, local=True,
                  registry=_Registry())
     await loop.run_turn("go")
     (error,) = chan.errors
     assert error[0] == "turn failed — budget_exceeded" and "maximum of 2 tool calls" in error[1]
-    assert all("[Budget limit reached" not in m for m in chan.sent)
+    assert chan.sent == ["found X, Y, Z"]
 
 
 @pytest.mark.asyncio
