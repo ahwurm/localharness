@@ -8,18 +8,26 @@ config dir. Everything the three process boundaries cross is stubbed; every conf
 """
 from __future__ import annotations
 
+import asyncio
+import fcntl
+import os
 from types import SimpleNamespace
 
 import pytest
 from pydantic import SecretStr
 
 from localharness.config.models import ManagedServerConfig
+from localharness.provider import client as provider_client
 from localharness.provider import lifecycle
 from localharness.provider import server as managed_server
 from tests.unit.test_launch_paths_repl import (
     PEER_URL,
+    PRIMARY_SERVED,
     PRIMARY_URL,
     SENTINEL,
+    _declared_only_peer,
+    _on_the_cold_peer,
+    _session,
     _capture_start_kw,
     _launchable_peer,
     _liveness_not_launched,
@@ -251,3 +259,184 @@ async def test_the_relaunch_activates_the_very_object_in_active_heavy(tmp_path, 
     assert spec is primary and spec is repl._active_heavy[0]
     assert (config_dir, base_url) == (repl._server_config_dir, PRIMARY_URL)
     assert kw["peer"] is None
+
+
+# --- the launch lock around every REPL swap (D-27, D-47) ------------------------------------------ #
+
+
+class LockWatch:
+    """What the launch lock saw during one test: how many times the REPL asked for it (`entries`,
+    nested asks included), how many times the lock file was actually opened (`opens`: a nested ask by
+    the holder opens nothing), and the held locks at each `start_server`."""
+
+    def __init__(self, monkeypatch, repl) -> None:
+        self.entries = 0
+        self.opens = 0
+        self.held_at_start: list[set] = []
+        lock = str(managed_server.lock_path(repl._server_config_dir))
+        real_open = os.open
+
+        def counting_open(path, *args, **kw):
+            if str(path) == lock:
+                self.opens += 1
+            return real_open(path, *args, **kw)
+
+        monkeypatch.setattr(lifecycle.os, "open", counting_open)
+        real_lock = repl._launch_lock
+
+        def counting_lock():
+            self.entries += 1
+            return real_lock()
+
+        repl._launch_lock = counting_lock
+        real_start = managed_server.start_server
+        monkeypatch.setattr(
+            managed_server, "start_server",
+            lambda cfg, cmd, **kw: (self.held_at_start.append(set(lifecycle._HELD)),
+                                    real_start(cfg, cmd, **kw))[1])
+        self.key = managed_server.lock_path(repl._server_config_dir).resolve()
+
+
+def _wait_ready_fails_at(monkeypatch, bad_url: str) -> None:
+    async def wait_ready(base_url, config_dir=None, **kw):
+        if base_url == bad_url:
+            raise TimeoutError("llama-server never became ready")
+        return ["qwen-gguf"]
+
+    monkeypatch.setattr(managed_server, "wait_ready", wait_ready)
+
+
+@pytest.mark.asyncio
+async def test_a_cold_launch_takes_the_lock_once_and_holds_it_while_the_server_starts(
+        tmp_path, boundaries, monkeypatch):
+    primary = _llama_primary()
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=primary)
+    repl._active_heavy = (primary, PRIMARY_URL)
+    watch = LockWatch(monkeypatch, repl)
+
+    await asyncio.wait_for(repl._handle_slash("/model qwen-gguf"), 5)
+
+    assert watch.entries == 1 and watch.opens == 1
+    assert watch.held_at_start == [{watch.key}]
+    assert lifecycle._HELD == {}
+    assert any(m.startswith("Switched to qwen-gguf on llamacpp-local") for m in channel.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_cold_launch_restores_inside_the_held_lock_without_deadlock(
+        tmp_path, boundaries, monkeypatch):
+    primary = _llama_primary()
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=primary)
+    repl._active_heavy = (primary, PRIMARY_URL)
+    _wait_ready_fails_at(monkeypatch, PEER_URL)
+    watch = LockWatch(monkeypatch, repl)
+
+    await asyncio.wait_for(repl._handle_slash("/model qwen-gguf"), 5)
+
+    assert watch.entries == 2  # the swap, and the nested ask of _restore_incumbent
+    assert watch.opens == 1    # ... which opened nothing
+    assert watch.held_at_start == [{watch.key}, {watch.key}]
+    assert "Launch of llamacpp-local failed" in channel.messages[-1] and "Restored" in channel.messages[-1]
+    assert repl._active_heavy == (primary, PRIMARY_URL)
+    assert lifecycle._HELD == {}
+
+
+@pytest.mark.asyncio
+async def test_the_managed_restart_that_is_the_swap_back_takes_the_lock_once(
+        tmp_path, boundaries, monkeypatch):
+    peer = _launchable_peer()
+    primary = _llama_primary()
+    _, repl, channel, agent = _session(tmp_path, peer, server=primary)
+    _on_the_cold_peer(repl, agent, peer)
+    watch = LockWatch(monkeypatch, repl)
+
+    await asyncio.wait_for(repl._handle_slash(f"/model {PRIMARY_SERVED}"), 5)
+
+    assert watch.entries == 1 and watch.opens == 1
+    assert watch.held_at_start == [{watch.key}]
+    assert repl._active_heavy == (primary, PRIMARY_URL)
+    assert lifecycle._HELD == {}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_swap_back_restores_the_peer_inside_the_held_lock(
+        tmp_path, boundaries, monkeypatch):
+    peer = _launchable_peer()
+    primary = _llama_primary()
+    _, repl, channel, agent = _session(tmp_path, peer, server=primary)
+    _on_the_cold_peer(repl, agent, peer)
+    _wait_ready_fails_at(monkeypatch, PRIMARY_URL)
+    watch = LockWatch(monkeypatch, repl)
+
+    await asyncio.wait_for(repl._handle_slash(f"/model {PRIMARY_SERVED}"), 5)
+
+    assert watch.entries == 2 and watch.opens == 1
+    assert channel.messages[-1].startswith("Model swap failed:") and "Restored" in channel.messages[-1]
+    assert repl._active_heavy == (peer.lifecycle, PEER_URL)
+    assert lifecycle._HELD == {}
+
+
+@pytest.mark.asyncio
+async def test_a_direct_restore_takes_its_own_lock(tmp_path, boundaries, monkeypatch):
+    peer = _launchable_peer()
+    _, repl, _, _ = _session(tmp_path, peer)
+    watch = LockWatch(monkeypatch, repl)
+
+    assert await repl._restore_incumbent((peer.lifecycle, PEER_URL)) == (peer.lifecycle.model, None)
+
+    assert watch.entries == 1 and watch.opens == 1
+    assert watch.held_at_start == [{watch.key}]
+    assert lifecycle._HELD == {}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_cold_launch_never_touches_the_lock(tmp_path, boundaries, monkeypatch):
+    _, repl, channel, _ = _session(tmp_path, _declared_only_peer())
+    watch = LockWatch(monkeypatch, repl)
+
+    await repl._handle_slash("/model qwen-gguf")
+
+    assert watch.entries == 0 and watch.opens == 0
+    assert not managed_server.lock_path(repl._server_config_dir).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_lock_held_by_another_process_makes_the_swap_wait_and_say_so_once(
+        tmp_path, boundaries, monkeypatch):
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer())
+    monkeypatch.setattr(provider_client, "_QUEUE_VISIBILITY_SECONDS", 0.05)
+    path = managed_server.lock_path(repl._server_config_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    foreign = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(foreign, fcntl.LOCK_EX)
+    asyncio.get_running_loop().call_later(0.3, os.close, foreign)
+
+    await asyncio.wait_for(repl._handle_slash("/model qwen-gguf"), 5)
+
+    assert channel.messages.count(lifecycle.LAUNCH_LOCK_WAIT_LINE) == 1
+    assert len(boundaries.cmds) == 1  # then the launch went ahead
+    assert any(m.startswith("Switched to qwen-gguf") for m in channel.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_session_with_no_config_dir_launches_with_no_lock_file_anywhere(tmp_path, monkeypatch):
+    """`/model` is unavailable without a config dir, but the restore and the relaunch can still be driven
+    on such a REPL (the model-swap tests build one): they take no lock and create no file."""
+    peer = _launchable_peer()
+    _, repl, _, _ = _session(tmp_path, peer)
+    repl._config_dir = None
+    calls: list = []
+
+    async def activate(self, spec, config_dir, base_url, **kw):
+        calls.append((config_dir, dict(lifecycle._HELD)))
+        return lifecycle.LiveEndpoint(base_url=base_url, served_models=["qwen-gguf"], handle=1)
+
+    monkeypatch.setattr(lifecycle.SpawnedProcessStrategy, "activate", activate)
+    before = sorted(str(p) for p in tmp_path.rglob("*"))
+
+    assert await asyncio.wait_for(repl._restore_incumbent((peer.lifecycle, PEER_URL)), 5) == (
+        peer.lifecycle.model, None)
+
+    assert calls == [(None, {})]
+    assert sorted(str(p) for p in tmp_path.rglob("*")) == before
+    assert not list(tmp_path.rglob("launch.lock"))
