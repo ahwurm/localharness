@@ -1395,7 +1395,13 @@ class AgentLoop:
             self._forget_outages(every=True)
         turn_depth = _TURN_DEPTH.set(_TURN_DEPTH.get() + 1)
         try:
-            summary = await self._execute_loop(session, task, on_token, images)
+            try:
+                summary = await self._execute_loop(session, task, on_token, images)
+            finally:
+                # Back at the caller's depth BEFORE the turn's ending is published: a TurnFailed or
+                # TurnCompleted handler (or a task it creates, which copies the context) that starts a
+                # root turn must be read as a root turn, not as a child of the turn that just ended.
+                _TURN_DEPTH.reset(turn_depth)
         except ProviderError as exc:
             # A provider failure escaping _execute_loop — e.g. the TokenCounter hitting a dead
             # endpoint in build_messages after the server was killed mid-session. A KNOWN
@@ -1436,8 +1442,6 @@ class AgentLoop:
                 tokens_estimated=session.tokens_estimated,
             ))
             return summary
-        finally:
-            _TURN_DEPTH.reset(turn_depth)
 
         session.summary = summary
         reason = session.terminated_reason or "complete"
