@@ -2492,6 +2492,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # D-21: the same supplier the runner hands every child; late-bound to the REPL below (ACP
             # never builds one, so its loop shares the poll-only pair).
             server_recovery=server_recovery_fn,
+            # BUDGET-02: the machine's cap for a remote unattended surface; the loop reads it live
+            # against the gate, so an attended terminal root stays unbounded.
+            unattended_max_actions=harness.channels.unattended_max_actions,
             # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
             # prompt's memory section.
             memory_slot=memory_slot,
