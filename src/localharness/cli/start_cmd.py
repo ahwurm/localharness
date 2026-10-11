@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import os
+import re
 import socket
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -815,24 +817,54 @@ def _conversion_launch_line(harness: Any, launch_key: dict, suffix: str | None) 
     return f"{posture or 'every interface'} — {suffix}" if exposed else None
 
 
+PROPS_READ_DEADLINE_SECONDS = 3.0
+PROPS_MAX_BYTES = 64 * 1024
+PROPS_PATH_MAX = 4096
+_PROPS_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
 def _props_model_path(base_url: str, launch_key: Mapping[str, str]) -> str | None:
-    """D-08: the weights path a llama.cpp server reports at `GET /props` (`model_path`), read with the
-    same bearer `probe_window` uses. Blocking httpx with a 3 s timeout: the caller runs it OFF the event
-    loop. Silent on every failure (a timeout, an HTTP error, a body that is not JSON, a missing or
-    non-string field all read None), and only a `str` is returned: it is stored as a path string the
-    ranking compares to discovered files and never opens."""
+    """D-08: the weights path a llama.cpp server on THIS machine reports at `GET /props`
+    (`model_path`), read with the same bearer `probe_window` uses. Blocking httpx: the caller runs it OFF
+    the event loop. Only a loopback `base_url` is asked (a remote server's path names a file on its own
+    machine and must not be filed under the key `init` uses for the local one); the read is one
+    streamed GET with no redirect followed, an overall deadline and a 64 KiB cap, and only a 200 counts.
+    The value must be an absolute path of at most 4096 characters with no control character. Silent on
+    every failure (a timeout, an HTTP error, a body that is not JSON, a missing or unfit field all read
+    None): it is stored as a path string the ranking compares to discovered files and never opens."""
+    import time
+    from urllib.parse import urlparse
+
     import httpx
 
     from localharness.provider.server import auth_headers
 
     try:
+        if (urlparse(base_url).hostname or "").lower() not in _LOOPBACK_HOSTS:
+            return None
         headers = auth_headers(launch_key.get("api_key")) or None
-        body = httpx.get(f"{base_url.rstrip('/').removesuffix('/v1')}/props", timeout=3.0,
-                         headers=headers).json()
+        deadline = time.monotonic() + PROPS_READ_DEADLINE_SECONDS
+        chunks: list[bytes] = []
+        size = 0
+        with httpx.stream("GET", f"{base_url.rstrip('/').removesuffix('/v1')}/props",
+                          timeout=PROPS_READ_DEADLINE_SECONDS, headers=headers,
+                          follow_redirects=False) as response:
+            if response.status_code != 200:
+                return None
+            for chunk in response.iter_bytes():
+                size += len(chunk)
+                if size > PROPS_MAX_BYTES or time.monotonic() > deadline:
+                    return None
+                chunks.append(chunk)
+        body = json.loads(b"".join(chunks))
         value = body.get("model_path") if isinstance(body, dict) else None
     except Exception:  # noqa: BLE001 — a ledger convenience: any failure is "not recorded"
         return None
-    return value if isinstance(value, str) and value else None
+    if (isinstance(value, str) and 0 < len(value) <= PROPS_PATH_MAX and os.path.isabs(value)
+            and not _PROPS_CONTROL.search(value)):
+        return value
+    return None
 
 
 def _attach_window_report(harness: Any, provider_type: str, served: int | None, trained: int | None,
@@ -1781,7 +1813,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # launch (above), another runtime and a server that reports no path record nothing. start adds
         # no pointer to `init` here (D-42).
         if provider.provider_type == "llamacpp" and resolved_model:
-            _weights = await asyncio.to_thread(_props_model_path, provider.base_url, launch_key)
+            try:
+                _weights = await asyncio.wait_for(
+                    asyncio.to_thread(_props_model_path, provider.base_url, launch_key),
+                    PROPS_READ_DEADLINE_SECONDS + 1)
+            except (asyncio.TimeoutError, TimeoutError):
+                _weights = None
             if _weights:
                 try:
                     record_model_path(_ledger, "llamacpp", resolved_model, _weights)

@@ -7,6 +7,9 @@ port: `httpx.get` is faked for the helper's own tests, and the start tests fake 
 """
 from __future__ import annotations
 
+import itertools
+import json
+
 import httpx
 import pytest
 
@@ -25,25 +28,37 @@ BASE = "http://127.0.0.1:8080/v1"
 
 
 class _Response:
-    def __init__(self, body=None, *, raises: Exception | None = None):
-        self._body, self._raises = body, raises
+    """A streamed reply: `body` is encoded as JSON unless `raw` bytes are given."""
 
-    def json(self):
-        if self._raises is not None:
-            raise self._raises
-        return self._body
+    def __init__(self, body=None, *, raw: bytes | None = None, status: int = 200, chunks: int = 1,
+                 on_chunk=None):
+        self._raw = raw if raw is not None else json.dumps(body).encode("utf-8")
+        self.status_code, self._chunks, self._on_chunk = status, chunks, on_chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_bytes(self):
+        step = max(1, -(-len(self._raw) // self._chunks))
+        for i in range(0, len(self._raw), step):
+            if self._on_chunk is not None:
+                self._on_chunk()
+            yield self._raw[i:i + step]
 
 
 def _fake_get(monkeypatch, response=None, *, raises: Exception | None = None) -> list[tuple]:
     calls: list[tuple] = []
 
-    def get(url, **kw):
+    def stream(method, url, **kw):
         calls.append((url, kw))
         if raises is not None:
             raise raises
         return response
 
-    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr(httpx, "stream", stream)
     return calls
 
 
@@ -58,6 +73,7 @@ def test_the_path_is_read_from_props_with_the_bearer_probe_window_uses(monkeypat
     ((url, kw),) = calls
     assert url == "http://127.0.0.1:8080/props"
     assert kw["headers"] == {"Authorization": "Bearer K"} and kw["timeout"] == 3.0
+    assert kw["follow_redirects"] is False
 
 
 def test_no_key_sends_no_header(monkeypatch):
@@ -97,9 +113,69 @@ def test_a_request_failure_reads_none(monkeypatch, failure):
 
 
 def test_a_non_json_body_reads_none(monkeypatch):
-    _fake_get(monkeypatch, _Response(raises=ValueError("not json")))
+    _fake_get(monkeypatch, _Response(raw=b"<html>not json</html>"))
 
     assert props_model_path(BASE, {}) is None
+
+
+# ------------------------------------------------------------------ WR-55: whose path, how much, how long
+
+
+@pytest.mark.parametrize("base", [
+    "http://gpu-box.lan:8080/v1", "http://192.168.1.5:8080/v1", "http://0.0.0.0:8080/v1",
+    "https://api.example.com/v1", "",
+])
+def test_only_a_loopback_server_is_asked(monkeypatch, base):
+    calls = _fake_get(monkeypatch, _Response({"model_path": "/remote/a.gguf"}))
+
+    assert props_model_path(base, {}) is None
+    assert calls == []
+
+
+@pytest.mark.parametrize("base", ["http://localhost:8080/v1", "http://[::1]:8080/v1", BASE])
+def test_a_loopback_server_is_asked(monkeypatch, base):
+    _fake_get(monkeypatch, _Response({"model_path": "/m/a.gguf"}))
+
+    assert props_model_path(base, {}) == "/m/a.gguf"
+
+
+@pytest.mark.parametrize("status", [201, 204, 301, 401, 404, 500])
+def test_only_a_200_counts(monkeypatch, status):
+    _fake_get(monkeypatch, _Response({"model_path": "/m/a.gguf"}, status=status))
+
+    assert props_model_path(BASE, {}) is None
+
+
+def test_a_body_over_the_cap_reads_none(monkeypatch):
+    big = {"model_path": "/m/a.gguf", "pad": "x" * (start_cmd.PROPS_MAX_BYTES + 1)}
+    _fake_get(monkeypatch, _Response(big, chunks=8))
+
+    assert props_model_path(BASE, {}) is None
+
+
+def test_a_server_that_drips_past_the_deadline_reads_none(monkeypatch):
+    ticks = itertools.count(0.0, 1.0)  # one second per look at the clock, without end
+    monkeypatch.setattr("time.monotonic", lambda: next(ticks))
+    _fake_get(monkeypatch, _Response({"model_path": "/m/a.gguf"}, chunks=20))
+
+    assert props_model_path(BASE, {}) is None
+
+
+@pytest.mark.parametrize("value", [
+    "relative/a.gguf", "a.gguf", "/m/a\n.gguf", "/m/a\x00.gguf", "/m/\x1b[31m.gguf", "/m/a\x7f.gguf",
+    "/" + "a" * start_cmd.PROPS_PATH_MAX,
+])
+def test_a_path_that_is_not_a_sane_absolute_path_reads_none(monkeypatch, value):
+    _fake_get(monkeypatch, _Response({"model_path": value}))
+
+    assert props_model_path(BASE, {}) is None
+
+
+def test_a_path_at_the_length_limit_is_kept(monkeypatch):
+    value = "/" + "a" * (start_cmd.PROPS_PATH_MAX - 1)
+    _fake_get(monkeypatch, _Response({"model_path": value}))
+
+    assert props_model_path(BASE, {}) == value
 
 
 # ------------------------------------------------------------------ through the real start
@@ -223,3 +299,23 @@ def test_the_no_record_undo_variant_stays_unused_by_start():
     import inspect
 
     assert "no-record" not in inspect.getsource(start_cmd._start_async)
+
+
+async def test_a_read_that_overruns_the_start_deadline_is_dropped_and_the_start_goes_on(world, monkeypatch):
+    import threading
+
+    release = threading.Event()
+
+    def helper(base_url, launch_key, **kw):
+        release.wait(5)
+        return "/m/a.gguf"
+
+    monkeypatch.setattr(start_cmd, "_props_model_path", helper)
+    monkeypatch.setattr(start_cmd, "PROPS_READ_DEADLINE_SECONDS", -0.9)  # wait_for gets 0.1 s
+    try:
+        await world.start()
+    finally:
+        release.set()
+
+    assert model_path(world.ledger, "llamacpp", "qwen") is None
+    assert world.last().served == 65536
