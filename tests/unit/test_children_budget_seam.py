@@ -394,3 +394,488 @@ def test_the_config_child_dispatcher_takes_children_budget():
     param = inspect.signature(sub.dispatch_config_subagent).parameters["children_budget"]
     assert param.kind is inspect.Parameter.KEYWORD_ONLY
     assert param.default is None
+
+
+# ---------------------------------------------------------------------------
+# The dispatch seam (08-09 Task 2, D-15, D-47)
+# ---------------------------------------------------------------------------
+
+from localharness.agent.loop import BudgetLabels  # noqa: E402
+from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig  # noqa: E402
+
+_DEFAULT = "org.children_budget.default"
+_LOOKUP = "org.children_budget.lookup_share"
+_REVIEW = "org.children_budget.review_share"
+
+
+def _child(name: str = "coder", *, actions=None, minutes=None, kept=(), tool_calls=None) -> AgentConfig:
+    cfg = AgentConfig(
+        name=name, role="test child",
+        permissions=PermissionConfig(budget=BudgetConfig(
+            max_actions=actions, max_duration_minutes=minutes, max_tool_calls=tool_calls)),
+    )
+    cfg._budget_kept_from_workspace = frozenset(kept)
+    return cfg
+
+
+def _seam(cfg, name="coder", *, parent=None, shape=None, block=None):
+    return sub._child_budget(
+        cfg, name, children_budget=block, shape=shape,
+        parent_remaining=None if parent is None else (lambda: parent))
+
+
+def _written(out: AgentConfig) -> tuple:
+    b = out.permissions.budget
+    return (b.max_actions, b.max_duration_minutes)
+
+
+def _fb(out_fb: ChildBudget) -> tuple:
+    return (out_fb.actions, out_fb.minutes)
+
+
+@pytest.mark.parametrize(
+    ("parent", "shape", "written", "fallback", "labels"),
+    [
+        # unconfigured child under a finite parent: a share, capped by the org default
+        ((20, 4.0), None, (5, 1.0), (5, 1.0), (_LOOKUP, _LOOKUP)),
+        ((20, 4.0), "lookup", (5, 1.0), (5, 1.0), (_LOOKUP, _LOOKUP)),
+        ((20, 4.0), "review", (8, 2.0), (8, 2.0), (_DEFAULT, _REVIEW)),
+        # the floors: never 0, never unbounded
+        ((1, 0.1), None, (1, 0.1), (1, 0.1), (_LOOKUP, _LOOKUP)),
+        ((1, 0.1), "review", (1, 0.1), (1, 0.1), (_REVIEW, _REVIEW)),
+        # an infinite parent: nothing written, the org rung handed to the loop
+        ((0, 0.0), None, (None, None), (8, 3.0), (None, None)),
+        (None, None, (None, None), (8, 3.0), (None, None)),
+        # one key finite, the other infinite: each key decides alone
+        ((20, 0.0), None, (5, None), (5, 3.0), (_LOOKUP, None)),
+        ((0, 4.0), None, (None, 1.0), (8, 1.0), (None, _LOOKUP)),
+    ],
+)
+def test_an_unconfigured_child_arithmetic(parent, shape, written, fallback, labels):
+    out, fb, lab = _seam(_child(), parent=parent, shape=shape)
+    assert _written(out) == written
+    assert _fb(fb) == fallback
+    assert (lab.actions, lab.minutes, lab.fallback) == (*labels, _DEFAULT)
+
+
+@pytest.mark.parametrize(
+    ("parent", "written", "fallback", "labels"),
+    [
+        ((0, 0.0), (16, 12.0), (16, 12.0), (None, None)),       # infinite: the configured value is the fallback
+        ((100, 60.0), (16, 12.0), (16, 12.0), (None, None)),    # finite: the ceiling is the configured value
+        ((20, 4.0), (5, 1.0), (5, 1.0), (_LOOKUP, _LOOKUP)),    # a small remainder still takes the share
+    ],
+)
+def test_a_configured_child_keeps_its_own_ceiling(parent, written, fallback, labels):
+    out, fb, lab = _seam(_child(actions=16, minutes=12.0), parent=parent)
+    assert _written(out) == written
+    assert _fb(fb) == fallback
+    assert (lab.actions, lab.minutes) == labels
+
+
+_KEPT = ("max_actions", "max_duration_minutes")
+
+
+@pytest.mark.parametrize(
+    ("parent", "written", "fallback", "labels"),
+    [
+        ((0, 0.0), (16, 12.0), (8, 3.0), (None, None)),         # nothing written; the rung is the fallback
+        ((100, 60.0), (8, 3.0), (8, 3.0), (_DEFAULT, _DEFAULT)),  # the rung is the ceiling too
+        ((20, 4.0), (5, 1.0), (5, 1.0), (_LOOKUP, _LOOKUP)),
+    ],
+)
+def test_a_workspace_kept_value_cannot_climb_above_the_org_rung(parent, written, fallback, labels):
+    out, fb, lab = _seam(_child(actions=16, minutes=12.0, kept=_KEPT), parent=parent)
+    assert _written(out) == written
+    assert _fb(fb) == fallback
+    assert (lab.actions, lab.minutes) == labels
+
+
+def test_one_workspace_kept_key_does_not_touch_the_other():
+    _, fb, _ = _seam(_child(actions=16, minutes=12.0, kept=("max_actions",)), parent=(0, 0.0))
+    assert _fb(fb) == (8, 12.0)
+
+
+def test_a_workspace_kept_value_below_the_rung_is_its_own_ceiling():
+    out, fb, lab = _seam(_child(actions=4, minutes=1.0, kept=_KEPT), parent=(100, 60.0))
+    assert _written(out) == (4, 1.0)
+    assert (lab.actions, lab.minutes) == (None, None)
+    assert _fb(_seam(_child(actions=4, minutes=1.0, kept=_KEPT), parent=(0, 0.0))[1]) == (8, 3.0)
+
+
+@pytest.mark.parametrize(
+    ("parent", "written", "fallback"),
+    [((20, 4.0), (5, 1.0), (5, 1.0)), ((0, 0.0), (8, 3.0), (8, 3.0))],
+)
+def test_a_built_in_child_under_the_seam(parent, written, fallback):
+    out, fb, lab = _seam(sub.build_explore_config("explore"), "explore", parent=parent)
+    assert _written(out) == written
+    assert _fb(fb) == fallback
+    assert lab.fallback == "org.children_budget.explore"
+
+
+def test_the_seam_reads_the_childs_own_entry_of_the_block():
+    block = ChildrenBudgetConfig(default=ChildBudget(actions=4, minutes=2.0),
+                                 lookup_share=0.5, review_share=1.0)
+    out, fb, lab = _seam(_child(), parent=(0, 0.0), block=block)
+    assert _fb(fb) == (4, 2.0) and _written(out) == (None, None)
+    out, fb, _ = _seam(_child(), parent=(6, 2.0), block=block)
+    assert _written(out) == (3, 1.0)
+    out, fb, _ = _seam(_child(), parent=(6, 2.0), shape="review", block=block)
+    assert _written(out) == (4, 2.0)  # the share of 6 is 6, the ceiling 4 wins
+
+
+def test_a_hyphenated_built_in_name_takes_its_own_entry():
+    _, _, lab = _seam(sub.build_web_researcher_config("web-researcher"), "web-researcher", parent=(0, 0.0))
+    assert lab.fallback == "org.children_budget.web_researcher"
+
+
+def test_the_seam_never_mutates_the_input_and_never_touches_max_tool_calls():
+    cfg = _child(tool_calls=7)
+    before = cfg.model_dump()
+    out, _, _ = _seam(cfg, parent=(20, 4.0))
+    assert cfg.model_dump() == before
+    assert out is not cfg and out.permissions.budget is not cfg.permissions.budget
+    assert out.permissions.budget.max_tool_calls == 7
+    assert out.budget_kept_from_workspace == cfg.budget_kept_from_workspace
+    out2, _, _ = _seam(_child(), parent=(20, 4.0))
+    assert out2.permissions.budget.max_tool_calls is None
+
+
+def test_the_seam_takes_no_gate():
+    params = inspect.signature(sub._child_budget).parameters
+    assert "gate" not in params
+    assert [n for n, p in params.items() if p.kind is inspect.Parameter.KEYWORD_ONLY] == [
+        "children_budget", "shape", "parent_remaining"]
+
+
+def test_a_written_share_always_validates():
+    """The floors are BudgetConfig's own lower bounds: the copy stays a valid config."""
+    out, _, _ = _seam(_child(), parent=(1, 0.1))
+    AgentConfig.model_validate(out.model_dump())
+
+
+# --- the runner: the parent's remainder is read at each dispatch ---------------------------------
+
+
+@pytest.mark.parametrize("hook", _HOOKS)
+async def test_parent_remaining_is_read_at_each_dispatch_not_captured(recorded_loops, bus, hook):
+    state = {"rem": (20, 4.0), "reads": 0}
+
+    def parent_remaining():
+        state["reads"] += 1
+        return state["rem"]
+
+    runner = await _runner(bus, parent_remaining_fn=parent_remaining, load_builtin_override=hook)
+    assert state["reads"] == 0  # building the runner reads nothing
+    await runner("explore", "find X")
+    assert state["reads"] == 1
+    state["rem"] = (8, 2.0)
+    await runner("explore", "find Y")
+    assert state["reads"] == 2
+    assert [_pair(c) for c in recorded_loops] == [(5, 1.0), (2, 0.5)]
+
+
+async def test_the_config_child_reads_the_parent_at_each_dispatch(recorded_loops, bus):
+    state = {"rem": (20, 4.0), "reads": 0}
+
+    def parent_remaining():
+        state["reads"] += 1
+        return state["rem"]
+
+    runner = await _runner(
+        bus, parent_remaining_fn=parent_remaining, load_agent=lambda n: _child(n))
+    await runner("coder", "write")
+    state["rem"] = (0, 0.0)
+    await runner("coder", "write again")
+    assert state["reads"] == 2
+    assert [_pair_or_none(c) for c in recorded_loops] == [(5, 1.0), (None, None)]
+
+
+def _pair_or_none(call: dict) -> tuple:
+    b = call["config"].permissions.budget
+    return (b.max_actions, b.max_duration_minutes)
+
+
+async def test_no_parent_remaining_is_an_infinite_parent(recorded_loops, bus):
+    runner = await _runner(bus, load_agent=lambda n: _child(n))
+    await runner("coder", "write")
+    call = recorded_loops[0]
+    assert _pair_or_none(call) == (None, None)
+    assert call["budget_fallback"] == ChildBudget(actions=8, minutes=3.0)
+    assert call["budget_labels"] == BudgetLabels(fallback=_DEFAULT)
+
+
+async def test_a_config_child_gets_the_seams_copy_not_the_cached_config(recorded_loops, bus):
+    cached = _child()
+    runner = await _runner(bus, parent_remaining_fn=lambda: (20, 4.0), load_agent=lambda n: cached)
+    await runner("coder", "write")
+    assert _pair_or_none(recorded_loops[0]) == (5, 1.0)
+    assert recorded_loops[0]["config"] is not cached
+    assert (cached.permissions.budget.max_actions, cached.permissions.budget.max_duration_minutes) == (None, None)
+
+
+@pytest.mark.parametrize("hook", _HOOKS)
+async def test_a_built_in_child_carries_its_fallback_and_labels(recorded_loops, bus, hook):
+    runner = await _runner(bus, load_builtin_override=hook)
+    await runner("explore", "find X")
+    call = recorded_loops[0]
+    assert call["budget_fallback"] == ChildBudget(actions=8, minutes=3.0)
+    assert call["budget_labels"] == BudgetLabels(fallback="org.children_budget.explore")
+    assert _pair(call) == (8, 3.0)
+
+
+@pytest.mark.parametrize("hook", _HOOKS)
+async def test_every_web_researcher_attempt_carries_the_seams_result(recorded_loops, bus, hook):
+    runner = await _runner(bus, parent_remaining_fn=lambda: (100, 60.0), load_builtin_override=hook)
+    await runner("web-researcher", "research X")
+    assert len(recorded_loops) == 1 + sub.WEB_ZERO_CALL_RETRIES >= 2
+    for call in recorded_loops:
+        assert _pair(call) == (25, 15.0)
+        assert call["budget_labels"].actions == _LOOKUP
+
+
+async def test_the_overlay_ceiling_is_the_ceiling_the_share_is_capped_by(recorded_loops, bus):
+    def hook(name, base):
+        base.permissions.budget.max_actions = 40
+        return base
+
+    runner = await _runner(bus, parent_remaining_fn=lambda: (400, 60.0), load_builtin_override=hook)
+    await runner("web-researcher", "research X")
+    assert _pair(recorded_loops[0]) == (40, 15.0)
+    assert recorded_loops[0]["budget_labels"].actions is None  # the overlay's own value bound it
+
+
+async def test_the_cruncher_leaves_and_combines_get_no_fallback_and_never_read_the_parent(
+    recorded_loops, bus
+):
+    from localharness.agent.context import ContentStore
+
+    store = ContentStore()
+    handle = store.put("a granted document")
+    reads: list[int] = []
+    runner = await _runner(
+        bus, parent_store=store, parent_remaining_fn=lambda: reads.append(1) or (20, 4.0))
+    await runner("cruncher", "what does it say?", [handle])
+    assert reads == []
+    assert {c["config"].name for c in recorded_loops} == {"chunk-summarizer", "cruncher"}
+    assert [c.get("budget_fallback") for c in recorded_loops] == [None] * len(recorded_loops)
+    assert {c["config"].name: _pair(c) for c in recorded_loops} == {
+        "chunk-summarizer": (3, 6.0), "cruncher": (6, 20.0)}
+
+
+# --- the nested runner reads the child loop's own remainder -----------------------------------------
+
+
+def _remaining_loop(monkeypatch, remaining):
+    """A recording loop whose `remaining_budget` is `remaining(index)`; returns the recorded kwargs."""
+    calls: list[dict] = []
+
+    class _Loop:
+        def __init__(self, **kwargs):
+            self.index = len(calls)
+            calls.append(kwargs)
+            self.current_session_id = None
+
+        async def run_turn(self, task, *a, **k):
+            return ""
+
+        def action_limit(self):
+            return 0
+
+        def time_limit(self):
+            return 0.0
+
+        def remaining_budget(self):
+            return remaining(self.index)
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", _Loop)
+    return calls
+
+
+async def test_the_nested_search_verifier_is_cut_from_the_web_researchers_own_remainder(
+    monkeypatch, bus
+):
+    calls = _remaining_loop(monkeypatch, lambda i: (40, 10.0))
+    runner = await _runner(bus, max_subagent_depth=3)
+    await runner("web-researcher", "research X")
+    agent_tool = calls[0]["tool_registry"]._tools["global"]["agent"]
+    await agent_tool._agent_runner("search-verifier", _VERIFY_TASK)
+    assert _pair(calls[-1]) == (10, 2.5)  # min(max(1, 0.25 x 40), 12), min(0.25 x 10, 6.0)
+    assert calls[-1]["config"].name == "search-verifier"
+    assert calls[-1]["budget_labels"].actions == _LOOKUP
+
+
+async def test_the_nested_runner_ignores_the_root_remainder(monkeypatch, bus):
+    calls = _remaining_loop(monkeypatch, lambda i: (40, 10.0))
+    runner = await _runner(bus, max_subagent_depth=3, parent_remaining_fn=lambda: (4, 1.0))
+    await runner("web-researcher", "research X")
+    assert _pair(calls[0]) == (1, 0.25)  # the root's share
+    agent_tool = calls[0]["tool_registry"]._tools["global"]["agent"]
+    await agent_tool._agent_runner("search-verifier", _VERIFY_TASK)
+    assert _pair(calls[-1]) == (10, 2.5)
+
+
+async def test_a_retry_rebinds_the_slot_to_the_loop_now_running(monkeypatch, bus):
+    calls = _remaining_loop(monkeypatch, lambda i: (40 + 4 * i, 10.0))
+    runner = await _runner(bus, max_subagent_depth=3)
+    await runner("web-researcher", "research X")
+    attempts = len(calls)
+    assert attempts == 1 + sub.WEB_ZERO_CALL_RETRIES >= 2
+    agent_tool = calls[0]["tool_registry"]._tools["global"]["agent"]
+    await agent_tool._agent_runner("search-verifier", _VERIFY_TASK)
+    assert _pair(calls[-1])[0] == min(int(0.25 * (40 + 4 * (attempts - 1))), 12)
+
+
+async def test_a_nested_runner_with_no_loop_yet_is_an_infinite_parent(monkeypatch, bus):
+    calls = _remaining_loop(monkeypatch, lambda i: (0, 0.0))
+    runner = await _runner(bus, max_subagent_depth=3)
+    await runner("web-researcher", "research X")
+    agent_tool = calls[0]["tool_registry"]._tools["global"]["agent"]
+    await agent_tool._agent_runner("search-verifier", _VERIFY_TASK)
+    assert _pair(calls[-1]) == (12, 6.0)
+    assert calls[-1]["budget_fallback"] == ChildBudget(actions=12, minutes=6.0)
+
+
+_FALLBACK_TAKERS = [sub.dispatch_explore_subagent, sub.dispatch_web_subagent,
+                    sub.dispatch_search_verifier_subagent]
+
+
+@pytest.mark.parametrize("fn", _FALLBACK_TAKERS, ids=lambda f: f.__name__)
+def test_the_built_in_dispatchers_take_the_seams_outputs_and_the_loop_hook(fn):
+    params = inspect.signature(fn).parameters
+    for name in ("budget_fallback", "budget_labels", "on_child_loop"):
+        assert params[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params[name].default is None
+        assert list(params).index(name) > list(params).index("children_budget")
+
+
+def test_parent_remaining_fn_is_keyword_only_with_default_none():
+    for fn in (sub.make_explore_agent_runner, sub.dispatch_config_subagent):
+        param = inspect.signature(fn).parameters["parent_remaining_fn"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default is None
+        names = list(inspect.signature(fn).parameters)
+        assert names.index("parent_remaining_fn") > names.index("children_budget")
+
+
+# --- BUDGET-05: the surface matrix through a real AgentLoop ---------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from localharness.agent.context import ContextManager  # noqa: E402
+from localharness.agent.loop import AgentLoop  # noqa: E402
+from localharness.core.events import TurnFailed  # noqa: E402
+
+_KNOB = 100
+
+
+def _channel(*, local: bool) -> SimpleNamespace:
+    return SimpleNamespace(channel_id="terminal" if local else "phone", local_operator=local, can_ask=False)
+
+
+class _CountingRegistry:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def get_tools_for_agent(self, agent_id, division_id, tool_config):
+        return {}
+
+    async def dispatch(self, name, arguments, agent_id, division_id, tool_config, **kw):
+        from localharness.tools.base import ToolResult
+
+        self.calls.append(dict(arguments))
+        return ToolResult(output=f"ran {arguments}", success=True)
+
+
+def _calls(mock_llm_client, n: int) -> list:
+    Response, ToolCall = mock_llm_client.Response, mock_llm_client.ToolCall
+    out = [Response(content=None, tool_calls=[ToolCall(id=f"tc-{i}", name="bash", arguments={"cmd": f"echo {i}"})])
+           for i in range(n)]
+    out.append(Response(content="all done"))
+    return out
+
+
+def _parent_gate(mock_llm_client, bus, *, local: bool):
+    """A real PermissionGate in `unattended` mode, with a local operator attached or not."""
+    parent = AgentLoop(
+        config=AgentConfig(name="root", role="root", permissions=PermissionConfig(
+            mode="unattended", deny_patterns=[], budget=BudgetConfig())),
+        llm=mock_llm_client([]), bus=bus, context_manager=ContextManager(),
+        tool_registry=_CountingRegistry(), permission_evaluator=PermissionEvaluator())
+    parent.gate.attach_channel(_channel(local=local))
+    return parent.gate
+
+
+def _seam_child(mock_llm_client, bus, cfg, *, local: bool, parent=(0, 0.0), responses=None):
+    """The way `dispatch_config_subagent` builds the child loop, from the seam's three outputs."""
+    out, fb, labels = _seam(cfg, parent=parent)
+    gate = _parent_gate(mock_llm_client, bus, local=local)
+    registry = _CountingRegistry()
+    loop = AgentLoop(
+        config=out, llm=mock_llm_client(responses or []), bus=bus, context_manager=ContextManager(),
+        tool_registry=registry, permission_evaluator=PermissionEvaluator(), gate=gate,
+        budget_fallback=fb, budget_labels=labels, unattended_max_actions=_KNOB)
+    return loop, gate, registry
+
+
+def test_an_unconfigured_child_has_no_action_limit_under_an_attended_root(mock_llm_client, bus):
+    loop, gate, _ = _seam_child(mock_llm_client, bus, _child(), local=True)
+    assert gate.mode == "unattended"
+    assert (loop.action_limit(), loop.time_limit()) == (0, 0.0)
+
+
+def test_an_unconfigured_child_runs_at_the_org_rung_remotely_and_follows_the_gate(mock_llm_client, bus):
+    loop, gate, _ = _seam_child(mock_llm_client, bus, _child(), local=False)
+    assert (loop.action_limit(), loop.time_limit()) == (8, 3.0)
+    gate.attach_channel(_channel(local=True))   # a person sits down after dispatch: uncapped at the next check
+    assert (loop.action_limit(), loop.time_limit()) == (0, 0.0)
+    gate.attach_channel(_channel(local=False))
+    assert loop.action_limit() == 8
+
+
+async def test_the_remote_failure_names_the_org_rung(mock_llm_client, bus):
+    loop, gate, registry = _seam_child(
+        mock_llm_client, bus, _child(), local=False, responses=_calls(mock_llm_client, 20))
+    summary = await loop.run_turn("go")
+    assert len(registry.calls) == 8
+    failed = [e for e in bus.history(event_types=[TurnFailed]) if e.reason == "budget_exceeded"]
+    assert failed
+    assert "Agent reached the maximum of 8 tool calls." in summary
+    assert "(org.children_budget.default)" in summary
+
+
+async def test_a_gate_leaving_unattended_after_dispatch_uncaps_the_child_mid_turn(mock_llm_client, bus):
+    loop, gate, registry = _seam_child(
+        mock_llm_client, bus, _child(), local=False, responses=_calls(mock_llm_client, 12))
+    original = registry.dispatch
+
+    async def dispatch(name, arguments, *a, **k):
+        if len(registry.calls) == 2:
+            gate.attach_channel(_channel(local=True))
+        return await original(name, arguments, *a, **k)
+
+    registry.dispatch = dispatch
+    summary = await loop.run_turn("go")
+    assert len(registry.calls) == 12
+    assert "all done" in summary
+
+
+@pytest.mark.parametrize(
+    ("cfg_kw", "attended", "remote"),
+    [
+        ({"actions": 16, "minutes": 12.0, "kept": _KEPT}, (16, 12.0), (8, 3.0)),   # workspace-kept
+        ({"actions": 16, "minutes": 12.0}, (16, 12.0), (16, 12.0)),                # operator-configured
+        ({"actions": 4, "minutes": 1.0, "kept": _KEPT}, (4, 1.0), (4, 1.0)),       # kept, but below the rung
+    ],
+    ids=["workspace-kept", "configured", "kept-below-rung"],
+)
+def test_the_surface_matrix_for_a_configured_child(mock_llm_client, bus, cfg_kw, attended, remote):
+    loop, gate, _ = _seam_child(mock_llm_client, bus, _child(**cfg_kw), local=True)
+    assert (loop.action_limit(), loop.time_limit()) == attended
+    gate.attach_channel(_channel(local=False))
+    assert (loop.action_limit(), loop.time_limit()) == remote
+
+
+def test_the_knob_still_caps_a_child_whose_own_limit_is_looser(mock_llm_client, bus):
+    loop, gate, _ = _seam_child(mock_llm_client, bus, _child(actions=500, minutes=12.0), local=False)
+    assert loop.action_limit() == _KNOB

@@ -231,6 +231,60 @@ def _children_budget(block: ChildrenBudgetConfig | None) -> ChildrenBudgetConfig
     return block if block is not None else ChildrenBudgetConfig()
 
 
+def _child_budget(
+    cfg: Any,
+    name: str,
+    *,
+    children_budget: ChildrenBudgetConfig | None,
+    shape: str | None,
+    parent_remaining: "Callable[[], tuple[int, float]] | None",
+) -> "tuple[Any, ChildBudget, BudgetLabels]":
+    """Choose one child's budget at dispatch: `(config copy, fallback, labels)` (spec 17 §7.1, §7.2).
+
+    Run once per child on a deep copy of `cfg` (the cached config is never written), per key
+    (actions and minutes independently). The key's ceiling is the child's configured value, or its
+    `org.children_budget` entry when unconfigured, or that entry when the loader marked the key as kept
+    from a workspace under a silent global and the entry is lower. Under a FINITE parent
+    (`parent_remaining()` non-zero for the key) the copy gets `min(max(floor, share x remaining), ceiling)`,
+    never 0 and never above the ceiling; `shape` picks only the share (`review_share`, else
+    `lookup_share`), never the ceiling. Under an INFINITE parent nothing is written: the loop is handed
+    the ceiling's org rung as `budget_fallback` and applies it only on a remote unattended gate, so an
+    unconfigured child under an attended terminal runs with no action limit. It reads no gate and
+    never touches `max_tool_calls`.
+    """
+    from localharness.agent.loop import BudgetLabels
+
+    cb = _children_budget(children_budget)
+    rung, entry = cb.for_name(name), cb.entry_name(name)
+    share = cb.review_share if shape == "review" else cb.lookup_share
+    rem = parent_remaining() if parent_remaining is not None else (0, 0.0)
+    out = cfg.model_copy(deep=True)
+    kept = out.budget_kept_from_workspace
+    rung_label = f"org.children_budget.{entry}"
+    share_label = f"org.children_budget.{shape or 'lookup'}_share"
+    fb: dict[str, Any] = {}
+    labels: dict[str, str | None] = {}
+    for key, field, floor, i in (("actions", "max_actions", 1, 0),
+                                 ("minutes", "max_duration_minutes", 0.1, 1)):
+        configured = getattr(out.permissions.budget, field)
+        r = getattr(rung, key)
+        if configured is None or (field in kept and r < configured):
+            ceiling, ceil_label = r, rung_label
+        else:
+            ceiling, ceil_label = configured, None
+        if rem[i]:  # a finite parent for this key
+            raw = share * rem[i]
+            v = max(floor, int(raw) if key == "actions" else raw)
+            value, label = (v, share_label) if v < ceiling else (ceiling, ceil_label)
+            setattr(out.permissions.budget, field, value)
+            fb[key], labels[key] = value, label
+        else:  # an infinite parent: write nothing, hand the loop the rung to apply remotely
+            fb[key] = r if (configured is None or field in kept) else configured
+            labels[key] = None
+    return (out, ChildBudget(actions=fb["actions"], minutes=fb["minutes"]),
+            BudgetLabels(actions=labels["actions"], minutes=labels["minutes"], fallback=rung_label))
+
+
 def build_explore_config(
     name: str = "explore", kill_file: str | None = None, *, budget: ChildBudget | None = None,
 ) -> AgentConfig:
@@ -563,6 +617,8 @@ async def dispatch_config_subagent(
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
     children_budget: ChildrenBudgetConfig | None = None,
     unattended_max_actions: int | None = None,
+    parent_remaining_fn: "Callable[[], tuple[int, float]] | None" = None,
+    shape: str | None = None,
 ) -> DelegationResult:
     """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
 
@@ -585,6 +641,10 @@ async def dispatch_config_subagent(
     allowed = _config_child_allowed(agent_config)
     child_registry = ToolRegistry.from_allowed(allowed, base_registry=base_registry)
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
+    # The child's budget is chosen once, here, from the parent's remainder as it stands NOW (D-32).
+    agent_config, budget_fallback, budget_labels = _child_budget(
+        agent_config, getattr(agent_config, "name", ""), children_budget=children_budget,
+        shape=shape, parent_remaining=parent_remaining_fn)
     _kill, _compact = _child_runtime_paths(agent_config, config_dir, state_dir=state_dir)
     child_loop = AgentLoop(
         config=agent_config,
@@ -600,6 +660,8 @@ async def dispatch_config_subagent(
         template_margin_ratio=template_margin_ratio,
         server_recovery=server_recovery,
         unattended_max_actions=unattended_max_actions,
+        budget_fallback=budget_fallback,
+        budget_labels=budget_labels,
     )
 
     # Make the limits and the toolset explicit in the brief — small models attend weakly to absent
@@ -643,6 +705,9 @@ async def dispatch_explore_subagent(
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
     children_budget: ChildrenBudgetConfig | None = None,
     unattended_max_actions: int | None = None,
+    budget_fallback: ChildBudget | None = None,
+    budget_labels: Any = None,
+    on_child_loop: Callable[[Any], None] | None = None,
 ) -> DelegationResult:
     """Spawn a read-only explore child, run one turn on `task`, return structured findings.
 
@@ -701,7 +766,11 @@ async def dispatch_explore_subagent(
         template_margin_ratio=template_margin_ratio,
         server_recovery=server_recovery,
         unattended_max_actions=unattended_max_actions,
+        budget_fallback=budget_fallback,
+        budget_labels=budget_labels,
     )
+    if on_child_loop is not None:
+        on_child_loop(child_loop)
 
     summary = await child_loop.run_turn(task)
 
@@ -737,6 +806,9 @@ async def dispatch_web_subagent(
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
     children_budget: ChildrenBudgetConfig | None = None,
     unattended_max_actions: int | None = None,
+    budget_fallback: ChildBudget | None = None,
+    budget_labels: Any = None,
+    on_child_loop: Callable[[Any], None] | None = None,
 ) -> DelegationResult:
     """Spawn a web-research child (web_search/web_fetch[/web_page_query] only), run one turn, return findings.
 
@@ -790,7 +862,11 @@ async def dispatch_web_subagent(
             template_margin_ratio=template_margin_ratio,
             server_recovery=server_recovery,
             unattended_max_actions=unattended_max_actions,
+            budget_fallback=budget_fallback,
+            budget_labels=budget_labels,
         )
+        if on_child_loop is not None:
+            on_child_loop(child_loop)  # every retry attempt rebinds the slot to the loop now running
         brief = task if attempt == 0 else ZERO_CALL_RETRY_PREFIX + task
         summary = await child_loop.run_turn(brief)
         tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
@@ -939,6 +1015,9 @@ async def dispatch_search_verifier_subagent(
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
     children_budget: ChildrenBudgetConfig | None = None,
     unattended_max_actions: int | None = None,
+    budget_fallback: ChildBudget | None = None,
+    budget_labels: Any = None,
+    on_child_loop: Callable[[Any], None] | None = None,
 ) -> DelegationResult:
     """Spawn a BLIND search-verifier (web_search/web_fetch/web_page_query), run one turn, write a
     keep-flag ledger row, and return a COMPACT verdict flag (never the transcript).
@@ -978,7 +1057,11 @@ async def dispatch_search_verifier_subagent(
         template_margin_ratio=template_margin_ratio,
         server_recovery=server_recovery,
         unattended_max_actions=unattended_max_actions,
+        budget_fallback=budget_fallback,
+        budget_labels=budget_labels,
     )
+    if on_child_loop is not None:
+        on_child_loop(child_loop)
 
     summary = await child_loop.run_turn(task)
     tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
@@ -1459,6 +1542,7 @@ def make_explore_agent_runner(
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
     children_budget: ChildrenBudgetConfig | None = None,
     unattended_max_actions: int | None = None,
+    parent_remaining_fn: Callable[[], tuple[int, float]] | None = None,
 ) -> Callable[..., Awaitable[Any]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
 
@@ -1502,6 +1586,13 @@ def make_explore_agent_runner(
     child loop (config children, the built-ins, every web-researcher retry, the cruncher's leaves and
     combine turns, the nested runner) as a ceiling on a remote unattended surface; None (bench loops,
     tests) leaves a child's own limits alone.
+
+    `parent_remaining_fn`: returns the PARENT loop's live `(actions, minutes)` remainder, 0 / 0.0 meaning
+    infinite for that key (start passes `lambda: agent_loop.remaining_budget()`, late-bound because the
+    runner is built before the loop). Like `effort_fn` it is CALLED at each dispatch and never stored as
+    a value, so a child's share is cut from what the parent has left NOW. A nested runner reads the
+    loop of the child that owns it (`_build_child_agent_tool`), not the root's. None reads as an
+    infinite parent: the child keeps its own ceiling and carries the org rung as its remote fallback.
 
     `parent_store`: the PARENT agent's ContentStore. When the model delegates with grant_handles,
     the child is built with ContentStore(parent=parent_store, granted=frozenset(grant_handles)) so
@@ -1547,8 +1638,12 @@ def make_explore_agent_runner(
             )
         return ContextManager(**kwargs)
 
-    def _build_child_agent_tool(name: str) -> Any:
-        """A fresh, depth+1 `agent` tool for a non-leaf child — or None (leaf / no room under cap)."""
+    def _build_child_agent_tool(name: str, slot: list) -> Any:
+        """A fresh, depth+1 `agent` tool for a non-leaf child — or None (leaf / no room under cap).
+
+        `slot` is the one-slot holder `_run_agent` fills with the child loop's own `remaining_budget`
+        once that loop exists (the tool is built before the loop). The nested runner reads it at each
+        of ITS dispatches, so a grandchild is cut from its parent child's live remainder (D-49)."""
         child_depth = depth + 1
         delegatees = NON_LEAF_AGENTS.get(name)
         if not delegatees or child_depth >= max_subagent_depth:
@@ -1584,11 +1679,13 @@ def make_explore_agent_runner(
             server_recovery=server_recovery,
             children_budget=children_budget,
             unattended_max_actions=unattended_max_actions,
+            parent_remaining_fn=lambda: slot[0]() if slot[0] else (0, 0.0),
         )
         return AgentTool(agent_runner=child_runner, available_agents=delegatees)
 
     async def _run_agent(agent_id: str, task: str,
-                         grant_handles: list[str] | None = None) -> DelegationResult:
+                         grant_handles: list[str] | None = None,
+                         shape: str | None = None) -> DelegationResult:
         name = _sanitize_agent_name(agent_id)
         # Grant-target safety (the keystone's structural floor): a granted handle is readable via
         # tool_result_get/chunk (NOT untrusted-ingest), so refuse handing one to a host-dangerous
@@ -1605,7 +1702,8 @@ def make_explore_agent_runner(
                      if (s := base_registry.schema_of(n)) is not None],
                     agent_id=name,
                 )
-        child_agent_tool = _build_child_agent_tool(name)
+        slot: list = [None]  # the built-in child's own remaining_budget, once its loop is built
+        child_agent_tool = _build_child_agent_tool(name, slot)
         child_ctx = _make_child_ctx(grant_handles)
         # D-11: the parent's level is read NOW, at this dispatch — never captured when the runner
         # was built — so a /effort between two dispatches reaches the second child.
@@ -1667,6 +1765,8 @@ def make_explore_agent_runner(
                 server_recovery=server_recovery,
                 children_budget=children_budget,
                 unattended_max_actions=unattended_max_actions,
+                parent_remaining_fn=parent_remaining_fn,
+                shape=shape,
             )
         # Built-in subagents are TUNABLE via an optional agents/<name>.yaml overlay (the real
         # budget knob): base = the code-defined default config, overlaid per-field by the yaml
@@ -1674,11 +1774,14 @@ def make_explore_agent_runner(
         # error surfaced to the model, never a silent fallback). No override hook wired (e.g.
         # the bench runner) => None => the dispatch builds its own default, unchanged. The
         # structural toolset stays fixed by the dispatcher — the overlay tunes AgentConfig fields.
+        # The overlay's result (or the bare builder result when no hook is wired) goes through the
+        # dispatch seam, and the seam's copy is what the child is built on (D-48).
         cb = _children_budget(children_budget)
-        config_override = (
-            load_builtin_override(name, base_builder(name, budget=cb.for_name(name)))
-            if load_builtin_override is not None else None
-        )
+        base = base_builder(name, budget=cb.for_name(name))
+        built = load_builtin_override(name, base) if load_builtin_override is not None else base
+        config_override, budget_fallback, budget_labels = _child_budget(
+            built, name, children_budget=children_budget, shape=shape,
+            parent_remaining=parent_remaining_fn)
         return await dispatch(
             task,
             llm=llm,
@@ -1701,6 +1804,9 @@ def make_explore_agent_runner(
             server_recovery=server_recovery,
             children_budget=children_budget,
             unattended_max_actions=unattended_max_actions,
+            budget_fallback=budget_fallback,
+            budget_labels=budget_labels,
+            on_child_loop=lambda loop: slot.__setitem__(0, getattr(loop, "remaining_budget", None)),
         )
 
     return _run_agent
