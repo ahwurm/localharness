@@ -77,6 +77,12 @@ def _lockable(config_dir) -> bool:
         os.close(fd)
 
 
+def _served_while_alive(config_dir) -> ModelsEndpoint:
+    """A `/models` endpoint that answers only while the pidfile names a live process: a dead server does
+    not answer, so the flight's look at the address before a relaunch finds nothing there."""
+    return ModelsEndpoint(down=lambda: server.server_pid(config_dir) is None)
+
+
 class WaitReadyRecorder:
     """Stands in for `server.wait_ready`: records the keywords of each call, optionally sleeps, then
     returns or raises the next scripted outcome (an exception instance is raised, anything else returns)."""
@@ -156,20 +162,26 @@ async def test_a_keyless_server_gets_no_authorization_header(models):
 
 async def test_wait_ready_gets_the_pairs_dir_and_runtime_and_the_remaining_bound(monkeypatch, tmp_path):
     dead = RuntimeError("llama.cpp exited during startup. Log tail:\nx")
-    recorder = WaitReadyRecorder([dead, ["m"]])
+    nothing_there = TimeoutError("llama.cpp not ready after 0s.")
+    recorder = WaitReadyRecorder([dead, nothing_there, ["m"]])
     monkeypatch.setattr(server, "wait_ready", recorder)
     relaunch = RecordingRelaunch()
     pair = ServerRecovery(URL, tmp_path, relaunch, "llamacpp")
     await pair.recover(base_url=URL, api_key=SecretStr(SENTINEL), wait_seconds=30, on_lost=Announce())
-    first, second = recorder.calls
-    for call in (first, second):
+    first, look, second = recorder.calls
+    for call in (first, look, second):
         assert call["base_url"] == URL
-        assert call["config_dir"] == tmp_path
         assert call["runtime"] == "llamacpp"
-        assert call["poll_seconds"] == 0.02  # the constant at call time, not a captured 2.0
         assert call["api_key"] == SENTINEL
+        assert call["liveness"] is True
+    for call in (first, second):
+        assert call["config_dir"] == tmp_path
+        assert call["poll_seconds"] == 0.02  # the constant at call time, not a captured 2.0
     assert first["timeout_seconds"] <= 30
     assert second["timeout_seconds"] < first["timeout_seconds"]
+    # the look at the address before the relaunch: no pidfile check, one poll long
+    assert look["config_dir"] is None
+    assert look["timeout_seconds"] == look["poll_seconds"] == 0.02
     assert relaunch.calls == 1
 
 
@@ -293,7 +305,7 @@ async def test_a_server_that_answers_is_never_relaunched(models, tmp_path):
 
 
 async def test_a_dead_process_is_relaunched_once_then_polled(models, tmp_path):
-    models(ModelsEndpoint())
+    models(_served_while_alive(tmp_path))
     relaunch = RecordingRelaunch(lambda: write_live_pidfile(tmp_path))
     await ServerRecovery(URL, tmp_path, relaunch, "llamacpp").recover(
         base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
@@ -301,7 +313,7 @@ async def test_a_dead_process_is_relaunched_once_then_polled(models, tmp_path):
 
 
 async def test_three_callers_on_one_dead_pair_relaunch_exactly_once(models, tmp_path):
-    models(ModelsEndpoint())
+    models(_served_while_alive(tmp_path))
     relaunch = RecordingRelaunch(lambda: write_live_pidfile(tmp_path))
     pair = ServerRecovery(URL, tmp_path, relaunch)
     await asyncio.gather(*(
@@ -311,7 +323,7 @@ async def test_three_callers_on_one_dead_pair_relaunch_exactly_once(models, tmp_
 
 
 async def test_a_second_death_after_the_one_relaunch_ends_with_the_log_tail(models, tmp_path):
-    models(ModelsEndpoint())
+    models(_served_while_alive(tmp_path))
     write_serve_log(tmp_path, "boot\nCUDA out of memory\n")
     relaunch = RecordingRelaunch(lambda: write_dead_pidfile(tmp_path))
     with pytest.raises(RuntimeError) as info:
@@ -333,7 +345,7 @@ async def test_a_dead_process_with_no_relaunch_fails_at_once_with_the_log_tail(m
 
 
 async def test_a_relaunch_that_fails_is_named_as_a_failed_restart(models, tmp_path):
-    models(ModelsEndpoint())
+    models(_served_while_alive(tmp_path))
     relaunch = RecordingRelaunch(RuntimeError("llama.cpp exited during startup. Log tail:\nboom"))
     with pytest.raises(RuntimeError) as info:
         await ServerRecovery(URL, tmp_path, relaunch).recover(
@@ -344,7 +356,7 @@ async def test_a_relaunch_that_fails_is_named_as_a_failed_restart(models, tmp_pa
 
 
 async def test_a_relaunch_that_times_out_is_named_as_a_failed_restart(models, tmp_path):
-    models(ModelsEndpoint())
+    models(_served_while_alive(tmp_path))
     relaunch = RecordingRelaunch(TimeoutError("llama.cpp not ready after 30s."))
     with pytest.raises(RuntimeError) as info:
         await ServerRecovery(URL, tmp_path, relaunch).recover(
@@ -358,7 +370,7 @@ async def test_a_relaunch_that_times_out_is_named_as_a_failed_restart(models, tm
 ])
 async def test_a_relaunch_that_cannot_start_the_binary_is_named_as_a_failed_restart(
         models, tmp_path, error):
-    models(ModelsEndpoint())
+    models(_served_while_alive(tmp_path))
     relaunch = RecordingRelaunch(error)
     with pytest.raises(RuntimeError) as info:
         await ServerRecovery(URL, tmp_path, relaunch).recover(
@@ -369,7 +381,7 @@ async def test_a_relaunch_that_cannot_start_the_binary_is_named_as_a_failed_rest
 
 
 async def test_a_refused_relaunch_reaches_the_caller_untouched(models, tmp_path):
-    models(ModelsEndpoint())
+    models(_served_while_alive(tmp_path))
     refusal = server.LaunchRefused("no llama-server — set server.binary")
     relaunch = RecordingRelaunch(refusal)
     with pytest.raises(server.LaunchRefused) as info:
@@ -378,8 +390,27 @@ async def test_a_refused_relaunch_reaches_the_caller_untouched(models, tmp_path)
     assert info.value is refusal
 
 
+async def test_a_dead_process_whose_address_already_answers_is_never_relaunched(models, tmp_path):
+    """The launched process is gone, but the person restarted the server by hand at the same address: the
+    flight looks at the address before relaunching, sees it answer, and ends the wait with no launch."""
+    endpoint = models(ModelsEndpoint())  # answers, although no live process is recorded
+    write_dead_pidfile(tmp_path)
+    relaunch = RecordingRelaunch()
+    await ServerRecovery(URL, tmp_path, relaunch).recover(
+        base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
+    assert relaunch.calls == 0
+    assert endpoint.calls == 1  # the look at the address; the pidfile check made no request
+
+
+async def test_a_look_at_the_address_carries_the_key(models, tmp_path):
+    endpoint = models(ModelsEndpoint())
+    await ServerRecovery(URL, tmp_path, RecordingRelaunch()).recover(
+        base_url=URL, api_key=SecretStr(SENTINEL), wait_seconds=5, on_lost=Announce())
+    assert endpoint.auth == ["Bearer " + SENTINEL]
+
+
 async def test_a_relaunch_that_found_another_holder_already_serving_just_keeps_polling(models, tmp_path):
-    models(ModelsEndpoint())
+    models(_served_while_alive(tmp_path))
     relaunch = RecordingRelaunch(lambda: write_live_pidfile(tmp_path), returns=None)
     await ServerRecovery(URL, tmp_path, relaunch).recover(
         base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
@@ -532,7 +563,7 @@ async def test_cancelling_one_of_two_awaiters_leaves_the_flight_for_the_other(mo
 async def test_cancelling_the_only_awaiter_mid_relaunch_cancels_the_flight_and_frees_the_lock(
     models, tmp_path
 ):
-    models(ModelsEndpoint())
+    models(_served_while_alive(tmp_path))
     inside = asyncio.Event()
     attempts = {"n": 0}
 
@@ -586,7 +617,7 @@ def test_the_budget_outside_a_flight_is_activates_own_default():
 
 
 async def test_the_budget_inside_a_flight_is_what_is_left_and_stays_in_the_flight(models, tmp_path):
-    models(ModelsEndpoint())
+    models(_served_while_alive(tmp_path))
     relaunch = RecordingRelaunch(lambda: write_live_pidfile(tmp_path))
     await ServerRecovery(URL, tmp_path, relaunch).recover(
         base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())

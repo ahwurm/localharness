@@ -1053,6 +1053,13 @@ class ServerRecovery:
                     if relaunched:
                         raise RuntimeError(EXITED_AGAIN_TEXT + self._tail()) from died
                     relaunched = True
+                # The launched process is gone, but something may already serve at the address (the
+                # person restarted the server by hand): the pidfile check runs before any request, so
+                # only a plain probe of the address sees it. Launching onto that port would fail to
+                # bind, or worse, pass activate's wait on the other server's answer.
+                if await self._answers(base_url, api_key, deadline):
+                    log.info("model server process exited, but the address answers; not relaunching")
+                    return
                 # Outside the try above: a LaunchRefused (itself a RuntimeError) must never be read as
                 # a poll failure.
                 log.info("model server process exited; relaunching it once")
@@ -1081,6 +1088,28 @@ class ServerRecovery:
         finally:
             timer.cancel()
             await asyncio.gather(timer, return_exceptions=True)
+
+    async def _answers(self, base_url: str, api_key: Any, deadline: float) -> bool:
+        """One look at the address with no pidfile check: True when anything there answers (the
+        flight's liveness rule), False when nothing does within one poll or the bound is spent."""
+        from localharness.provider import client as _client
+
+        look = min(_client._QUEUE_VISIBILITY_SECONDS, deadline - time.monotonic())
+        if look <= 0:
+            return False
+        try:
+            await server.wait_ready(
+                base_url,
+                config_dir=None,
+                timeout_seconds=look,
+                poll_seconds=look,
+                runtime=self.runtime,
+                liveness=True,
+                **server.key_kwargs(api_key),
+            )
+            return True
+        except (TimeoutError, RuntimeError):
+            return False
 
     def _tail(self) -> str:
         return server.log_tail(self.config_dir) if self.config_dir is not None else ""
