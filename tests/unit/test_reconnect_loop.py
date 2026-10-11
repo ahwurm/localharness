@@ -503,6 +503,23 @@ async def test_the_detail_is_redacted_and_capped(bus, models):
     assert 0 < len(_lost(bus2)[0].detail) <= 200
 
 
+@pytest.mark.parametrize(("text", "kept"), [
+    ("is the model server up at http://u:p@ss@host:8080/v1?", "is the model server up at http://host:8080/v1?"),
+    ("at https://user:p@ss:w@rd@10.0.0.2:9/v1 (refused)", "at https://10.0.0.2:9/v1 (refused)"),
+    ("at http://user:secret@127.0.0.1:9/tokenize", "at http://127.0.0.1:9/tokenize"),
+    ("at http://127.0.0.1:9/v1 for ops@example.com", "at http://127.0.0.1:9/v1 for ops@example.com"),
+    ("at http://127.0.0.1:9/v1?who=a@b", "at http://127.0.0.1:9/v1?who=a@b"),
+])
+def test_url_credentials_are_removed_up_to_the_last_at_of_the_authority(text, kept):
+    """WR-04: httpx splits the authority at its LAST "@", so a password with an unencoded "@" works and
+    must be removed whole; an "@" after the path, the query or a space is not userinfo."""
+    from localharness.agent.loop import _sanitize_provider_text
+
+    out = _sanitize_provider_text(text, 1500)
+    assert out == kept
+    assert "ss@" not in out.split("://", 1)[1].split("/", 1)[0]
+
+
 async def test_a_publish_failure_never_fails_the_wait(bus, models):
     models(ModelsEndpoint(down_for=4))
     llm = _scripted([_pce("refused"), _answer("ok")], wait=5.0)

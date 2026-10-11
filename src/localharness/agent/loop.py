@@ -695,7 +695,9 @@ def _sanitize_provider_text(text: str, cap: int) -> str:
     control characters dropped (newlines kept), at most `cap` characters."""
     import unicodedata
 
-    text = re.sub(r"(?<=://)[^/@\s]+@", "", text)
+    # Up to the LAST "@" of the authority, as httpx splits it: `http://u:p@ss@host` is a working URL whose
+    # password is "p@ss", and stopping at the first "@" would leave "ss@" behind.
+    text = re.sub(r"(?<=://)[^/\s?#]*@", "", text)
     text = "".join(ch for ch in text if ch == "\n" or unicodedata.category(ch) != "Cc")
     return text[:cap]
 
