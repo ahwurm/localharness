@@ -73,24 +73,24 @@ def test_stuck_compute_signature_order_independent():
 
 def test_stuck_clear_when_different_calls():
     sd = StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)
-    sd.record("bash", {"cmd": "ls"})
-    sd.record("bash", {"cmd": "pwd"})
-    sd.record("bash", {"cmd": "echo"})
+    sd.record("bash", {"cmd": "ls"}, (True, ""))
+    sd.record("bash", {"cmd": "pwd"}, (True, ""))
+    sd.record("bash", {"cmd": "echo"}, (True, ""))
     assert sd.check() == StuckState.CLEAR
 
 
 def test_stuck_recovering_at_two_identical():
     sd = StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)
-    sd.record("bash", {"cmd": "ls"})
-    sd.record("bash", {"cmd": "ls"})
+    sd.record("bash", {"cmd": "ls"}, (True, ""))
+    sd.record("bash", {"cmd": "ls"}, (True, ""))
     assert sd.check() == StuckState.RECOVERING
 
 
 def test_stuck_escalate_at_three_identical():
     sd = StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)
-    sd.record("bash", {"cmd": "ls"})
-    sd.record("bash", {"cmd": "ls"})
-    sd.record("bash", {"cmd": "ls"})
+    sd.record("bash", {"cmd": "ls"}, (True, ""))
+    sd.record("bash", {"cmd": "ls"}, (True, ""))
+    sd.record("bash", {"cmd": "ls"}, (True, ""))
     assert sd.check() == StuckState.ESCALATE
 
 
@@ -102,16 +102,16 @@ def test_stuck_recovery_message_nonempty():
 
 def test_stuck_most_repeated_signature():
     sd = StuckDetector(window_size=5)
-    sd.record("bash", {"cmd": "ls"})
-    sd.record("bash", {"cmd": "ls"})
-    sd.record("bash", {"cmd": "pwd"})
+    sd.record("bash", {"cmd": "ls"}, (True, ""))
+    sd.record("bash", {"cmd": "ls"}, (True, ""))
+    sd.record("bash", {"cmd": "pwd"}, (True, ""))
     sig_ls = sd.compute_signature("bash", {"cmd": "ls"})
     assert sd.most_repeated_signature() == sig_ls
 
 
 def test_stuck_clear_when_window_too_small():
     sd = StuckDetector(window_size=5, recovery_threshold=2, escalation_threshold=3)
-    sd.record("bash", {"cmd": "ls"})
+    sd.record("bash", {"cmd": "ls"}, (True, ""))
     assert sd.check() == StuckState.CLEAR
 
 
@@ -120,7 +120,7 @@ def test_stuck_clear_when_window_too_small():
 def _stuck_iter(sd, name):
     """One loop-iteration's worth of bookkeeping: record a single tool call, then ask
     the detector for its decision — mirrors loop.py's record-then-classify cadence."""
-    sd.record(name, {})
+    sd.record(name, {}, (True, ""))
     state, _sig = sd.classify()
     return state
 
@@ -1578,14 +1578,15 @@ async def test_agent_loop_instantiates_stuck_detector_from_config(mock_llm_clien
     real_init = loop_mod.StuckDetector.__init__
 
     def spy_init(self, window_size=5, recovery_threshold=2, escalation_threshold=3,
-                 max_nudges_per_turn=3):
+                 max_nudges_per_turn=3, **kw):
         captured["window_size"] = window_size
         captured["recovery_threshold"] = recovery_threshold
         captured["escalation_threshold"] = escalation_threshold
         captured["max_nudges_per_turn"] = max_nudges_per_turn
+        captured["call_only_multiplier"] = kw.get("call_only_multiplier")
         real_init(self, window_size=window_size, recovery_threshold=recovery_threshold,
                   escalation_threshold=escalation_threshold,
-                  max_nudges_per_turn=max_nudges_per_turn)
+                  max_nudges_per_turn=max_nudges_per_turn, **kw)
 
     monkeypatch.setattr(loop_mod.StuckDetector, "__init__", spy_init)
 
@@ -1593,14 +1594,16 @@ async def test_agent_loop_instantiates_stuck_detector_from_config(mock_llm_clien
         name="test-agent",
         role="t",
         stuck_detector={"window_size": 7, "recovery_threshold": 3,
-                        "escalation_threshold": 4, "max_nudges_per_turn": 5},
+                        "escalation_threshold": 4, "max_nudges_per_turn": 5,
+                        "call_only_multiplier": 4},
     )
     Response = mock_llm_client.Response
     loop = _make_agent_loop(mock_llm_client, [Response(content="Done.")], bus, config=cfg)
     await loop.run_turn("task")
 
     assert captured == {"window_size": 7, "recovery_threshold": 3,
-                        "escalation_threshold": 4, "max_nudges_per_turn": 5}
+                        "escalation_threshold": 4, "max_nudges_per_turn": 5,
+                        "call_only_multiplier": 4}
 
 
 @pytest.mark.asyncio
@@ -1613,14 +1616,15 @@ async def test_agent_loop_stuck_detector_defaults_preserved(mock_llm_client, bus
     real_init = loop_mod.StuckDetector.__init__
 
     def spy_init(self, window_size=5, recovery_threshold=2, escalation_threshold=3,
-                 max_nudges_per_turn=3):
+                 max_nudges_per_turn=3, **kw):
         captured["window_size"] = window_size
         captured["recovery_threshold"] = recovery_threshold
         captured["escalation_threshold"] = escalation_threshold
         captured["max_nudges_per_turn"] = max_nudges_per_turn
+        captured["call_only_multiplier"] = kw.get("call_only_multiplier")
         real_init(self, window_size=window_size, recovery_threshold=recovery_threshold,
                   escalation_threshold=escalation_threshold,
-                  max_nudges_per_turn=max_nudges_per_turn)
+                  max_nudges_per_turn=max_nudges_per_turn, **kw)
 
     monkeypatch.setattr(loop_mod.StuckDetector, "__init__", spy_init)
 
@@ -1630,7 +1634,8 @@ async def test_agent_loop_stuck_detector_defaults_preserved(mock_llm_client, bus
     await loop.run_turn("task")
 
     assert captured == {"window_size": 5, "recovery_threshold": 2,
-                        "escalation_threshold": 3, "max_nudges_per_turn": 3}
+                        "escalation_threshold": 3, "max_nudges_per_turn": 3,
+                        "call_only_multiplier": 3}
 
 
 def test_agent_loop_uses_config_recovery_message_not_hardcoded():

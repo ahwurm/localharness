@@ -927,6 +927,18 @@ class StuckDetectorConfig(BaseModel):
             "flailing with varied calls still escalates once it has burned this many nudges."
         ),
     )
+    call_only_multiplier: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description=(
+            "Per-turn ceiling on the same tool call regardless of its result: the turn "
+            "escalates once one call (same tool, same arguments) has been made "
+            "call_only_multiplier x escalation_threshold times. Bounds a loop whose "
+            "trusted-origin results keep changing (a poll that never finishes), which the "
+            "windowed ladder reads as progress."
+        ),
+    )
 
 
 class RecoveryInjectionConfig(BaseModel):

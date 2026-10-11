@@ -282,8 +282,8 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 225, (
-        "catalogue should be 225 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 226, (
+        "catalogue should be 226 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -306,6 +306,7 @@ def test_self_check_leaves_enumerate(components_home):
         "plus channels.unattended_max_actions x1, the two permissions.init_nulls_revision "
         "stamps (org and agent) x2 and the fourteen org.children_budget.* leaves (six entries "
         "of actions and minutes, lookup_share, review_share) x14 (the delegated-budget schema). "
+        "plus agent.stuck_detector.call_only_multiplier x1 (the per-turn call-only ceiling). "
         f"got {len(entries)}"
     )
 
@@ -389,8 +390,8 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 225, (
-        "catalogue should be 225 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 226, (
+        "catalogue should be 226 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -413,6 +414,7 @@ def test_role_sections_leaves_enumerate(components_home):
         "plus channels.unattended_max_actions x1, the two permissions.init_nulls_revision "
         "stamps (org and agent) x2 and the fourteen org.children_budget.* leaves (six entries "
         "of actions and minutes, lookup_share, review_share) x14 (the delegated-budget schema). "
+        "plus agent.stuck_detector.call_only_multiplier x1 (the per-turn call-only ceiling). "
         f"got {len(entries)}"
     )
 

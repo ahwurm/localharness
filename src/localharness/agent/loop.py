@@ -150,6 +150,9 @@ class StuckDetector:
         recovery_threshold: int = 2,
         escalation_threshold: int = 3,
         max_nudges_per_turn: int = 3,
+        *,
+        call_only_multiplier: int = 3,
+        result_origin: Callable[[str], str] | None = None,
     ) -> None:
         self.window_size = window_size
         self.recovery_threshold = recovery_threshold
@@ -160,13 +163,49 @@ class StuckDetector:
         # signatures we have already warned about, and how many warnings we have spent.
         self._warned: dict[str, int] = {}
         self._total_warnings = 0
+        # Per-turn call-only tally (never cleared by the nudge's window clear): the ceiling
+        # that bounds a loop whose trusted results keep changing (D-02, D-39).
+        self._call_counts: dict[str, int] = {}
+        self._ceiling = call_only_multiplier * escalation_threshold
+        self._result_origin = result_origin
+        # Set by classify() when the ceiling (not the window ladder) fired.
+        self.ceiling_hit: str | None = None
 
     def compute_signature(self, tool_name: str, args: dict) -> str:
         canonical = f"{tool_name}:{json.dumps(args, sort_keys=True, separators=(',', ':'))}"
         return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
-    def record(self, tool_name: str, args: dict) -> None:
-        self._window.append(self.compute_signature(tool_name, args))
+    def _trusted(self, tool_name: str) -> bool:
+        """True only when the injected lookup says exactly "trusted" for this tool.
+
+        Fails closed: no lookup, an exception, "untrusted" or an unknown tool all mean the
+        result is never folded into the signature (an untrusted page or server varying a
+        nonce must not buy an endless loop).
+        """
+        if self._result_origin is None:
+            return False
+        try:
+            return self._result_origin(tool_name) == "trusted"
+        except Exception:  # noqa: BLE001 — fail closed
+            return False
+
+    def record(self, tool_name: str, args: dict, result: tuple[bool, str]) -> None:
+        call_sig = self.compute_signature(tool_name, args)
+        self._call_counts[call_sig] = self._call_counts.get(call_sig, 0) + 1
+        if self._trusted(tool_name):
+            ok, content = result
+            result_hash = hashlib.sha256(
+                json.dumps([bool(ok), content], ensure_ascii=False, separators=(",", ":")).encode()
+            ).hexdigest()[:16]
+            self._window.append(
+                hashlib.sha256(f"{call_sig}:{result_hash}".encode()).hexdigest()[:16]
+            )
+        else:
+            self._window.append(call_sig)
+
+    def call_count(self, signature: str) -> int:
+        """How many times this call-only signature was recorded this turn."""
+        return self._call_counts.get(signature, 0)
 
     def check(self) -> StuckState:
         if len(self._window) < self.recovery_threshold:
@@ -194,6 +233,10 @@ class StuckDetector:
         One call == one decision (it mutates on a warn), so the loop calls it exactly once
         per iteration after recording that iteration's tool calls.
         """
+        for call_sig, n in self._call_counts.items():
+            if n >= self._ceiling:
+                self.ceiling_hit = call_sig
+                return StuckState.ESCALATE, call_sig
         raw = self.check()
         sig = self.most_repeated_signature()
         if raw != StuckState.RECOVERING:
@@ -1542,6 +1585,8 @@ class AgentLoop:
             recovery_threshold=sd_cfg.recovery_threshold,
             escalation_threshold=sd_cfg.escalation_threshold,
             max_nudges_per_turn=sd_cfg.max_nudges_per_turn,
+            call_only_multiplier=sd_cfg.call_only_multiplier,
+            result_origin=getattr(self._tools, "result_origin", None),
         )
         sc_cfg = self._config.self_check
         self_check_passes_used = 0
@@ -2327,16 +2372,17 @@ class AgentLoop:
                 # the same disallowed call is still caught by the stuck ladder.
                 if not budget.tool_call_allowed(session):
                     self._record_task_result(tool_call, success=False)
+                    refusal_text = (
+                        f"Tool call not executed: this task's tool-call budget "
+                        f"({budget.max_tool_calls} allowed) has been reached. Answer "
+                        f"directly without calling any more tools."
+                    )
                     session.push({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": (
-                            f"Tool call not executed: this task's tool-call budget "
-                            f"({budget.max_tool_calls} allowed) has been reached. Answer "
-                            f"directly without calling any more tools."
-                        ),
+                        "content": refusal_text,
                     })
-                    stuck_detector.record(tool_call.name, tool_call.arguments)
+                    stuck_detector.record(tool_call.name, tool_call.arguments, (False, refusal_text))
                     continue
 
                 # Publish tool_call action for terminal display
@@ -2360,10 +2406,11 @@ class AgentLoop:
                 perm_result = await self._gate_check(session, tool_call)
                 if not perm_result.allowed:
                     self._record_task_result(tool_call, success=False)
+                    denied_text = f"{DENIED_OBSERVATION_PREFIX}{perm_result.reason}"
                     session.push({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": f"{DENIED_OBSERVATION_PREFIX}{perm_result.reason}",
+                        "content": denied_text,
                     })
                     await self._bus.publish(Observation(
                         agent_id=session.agent_id,
@@ -2374,7 +2421,7 @@ class AgentLoop:
                         output="[DENIED]",
                         error=f"{DENIED_OBSERVATION_PREFIX}{perm_result.reason}",
                     ))
-                    stuck_detector.record(tool_call.name, tool_call.arguments)
+                    stuck_detector.record(tool_call.name, tool_call.arguments, (False, denied_text))
                     continue
 
                 # A live task record opens a "running" entry for an `agent` call before it runs.
@@ -2463,7 +2510,9 @@ class AgentLoop:
                     artifact=artifact,
                 ))
 
-                stuck_detector.record(tool_call.name, tool_call.arguments)
+                # Hash the local result_content: step 11b appends the per-iteration budget note
+                # to the message afterwards, which would make every result look new.
+                stuck_detector.record(tool_call.name, tool_call.arguments, (not is_error, result_content))
 
             # 11b. Append budget status to the iteration's last tool result
             note = _budget_note(session, budget)
@@ -2496,11 +2545,21 @@ class AgentLoop:
                 )
             elif stuck_state == StuckState.ESCALATE:
                 session.terminated_reason = "stuck"
+                if stuck_detector.ceiling_hit is not None:
+                    escalation_detail = (
+                        f"The same tool call {stuck_detector.call_count(stuck_detector.ceiling_hit)} "
+                        f"times this turn (stuck_detector.call_only_multiplier × "
+                        f"escalation_threshold) at iteration {session.iteration}"
+                    )
+                else:
+                    escalation_detail = (
+                        f"Repeated identical tool calls at iteration {session.iteration}"
+                    )
                 await self._bus.publish(Escalation(
                     agent_id=session.agent_id,
                     session_id=session.session_id,
                     reason="stuck_detected",
-                    detail=f"Repeated identical tool calls at iteration {session.iteration}",
+                    detail=escalation_detail,
                     stuck_signature=repeated_sig,
                     iteration_at_escalation=session.iteration,
                 ))
