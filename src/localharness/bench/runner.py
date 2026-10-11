@@ -455,9 +455,14 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
     bench_store = ContentStore()
 
     from localharness.agent.context import make_compaction_summarize_fn, summarizer_input_chars
+    from localharness.config.defaults import DEFAULT_TOOL_OUTPUT_CHARS
     bench_pipeline = CompactionPipeline(
         token_counter=token_counter,
-        tool_result_cap=cctx.max_tool_output_chars,
+        tool_result_cap=(
+            cctx.max_tool_output_chars
+            if cctx.max_tool_output_chars is not None
+            else DEFAULT_TOOL_OUTPUT_CHARS
+        ),
         preserve_first_n=cctx.preserve_first_n_messages,
         preserve_last_n=cctx.preserve_last_n_messages,
         llm_summarize_fn=make_compaction_summarize_fn(  # shared, tuple-unpack tested
