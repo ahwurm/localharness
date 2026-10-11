@@ -231,6 +231,52 @@ async def test_a_remote_primary_is_not_judged_by_a_local_listener_on_its_port(
     assert repl._foreign_incumbent(None, "flash-next") is None
 
 
+# --- the managed-restart branch is guarded the same way (WR-52) ------------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_a_typed_gguf_restart_is_one_sentence_while_a_foreign_unit_holds_the_port(
+        tmp_path, fake_proc, fake_systemd, spies, monkeypatch):
+    stub_liveness(monkeypatch, False)
+    fake_systemd.answer_prefix("systemctl", "--user", "show", stdout=_show())
+    _foreign(fake_proc, cgroup=_cgroup())
+    typed = tmp_path / "typed.gguf"
+    typed.write_bytes(b"GGUF")
+    repl, channel, agent = _build(tmp_path, _harness(_llama_primary()))
+    primary = repl._harness.server
+
+    await repl._handle_slash(f"/model {typed}")
+
+    assert channel.messages == [
+        "qwen-27b is served by llama-server.service (pid 1234), not by the harness; "
+        f"systemctl --user stop llama-server.service, then /model {typed}"]
+    assert spies.hits == [] and agent._llm.rebinds == []
+    assert primary.model == "/x/primary.gguf" and primary.served_name == "qwen-27b"
+
+
+@pytest.mark.asyncio
+async def test_swapping_back_to_the_primarys_name_is_one_sentence_while_a_foreign_unit_holds_the_port(
+        tmp_path, fake_proc, fake_systemd, spies, monkeypatch):
+    stub_liveness(monkeypatch, False)
+    fake_systemd.answer_prefix("systemctl", "--user", "show", stdout=_show())
+    _foreign(fake_proc, cgroup=_cgroup())
+    repl, channel, agent = _build(tmp_path, _harness(_llama_primary()), base_url=PEER_URL)
+    agent._llm.config.model = "flash-next"
+
+    async def _live_models(url):
+        return (["flash-next"], True) if url == PEER_URL else ([], False)
+
+    repl._live_models = _live_models
+
+    await repl._handle_slash("/model qwen-27b")
+
+    assert channel.messages == [
+        "qwen-27b is served by llama-server.service (pid 1234), not by the harness; "
+        "systemctl --user stop llama-server.service, then /model qwen-27b"]
+    assert spies.hits == [] and agent._llm.rebinds == []
+    assert agent._llm.config.base_url == PEER_URL
+
+
 # --- nothing foreign: the cold branch proceeds exactly as before --------------------------------- #
 
 
