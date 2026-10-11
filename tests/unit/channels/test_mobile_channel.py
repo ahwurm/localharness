@@ -500,6 +500,29 @@ async def test_the_channel_subscribes_to_every_declared_event_type(tmp_path):
     assert [r[0] for r in _drain(client)] == ["SurpriseScored"]
 
 
+async def test_a_published_provider_lost_reaches_the_phones_stream_with_no_channel_change(tmp_path):
+    """D-09 / D-33: the forwarder covers every EVENT_TYPE_MAP type, so the dropped-server event
+    needs no code in the channel. A child-stamped one (D-44) is forwarded like any other."""
+    from localharness.core.events import ProviderLost
+
+    bus = EventBus(persist_path=tmp_path / "e.jsonl")
+    channel = await _channel(bus)
+    client = channel.attach_client()
+
+    await bus.publish(ProviderLost(
+        agent_id="a", session_id="s", detail="connection refused", wait_seconds=1800.0,
+    ))
+    await bus.publish(ProviderLost(
+        agent_id="a", session_id="s", detail="", wait_seconds=30.0, parent_id="child-1",
+    ))
+    rows = _drain(client)
+
+    assert [r[0] for r in rows] == ["ProviderLost", "ProviderLost"]
+    assert rows[0][2]["event_type"] == "ProviderLost" and rows[0][2]["wait_seconds"] == 1800.0
+    assert rows[1][2]["parent_id"] == "child-1" and rows[1][2]["wait_seconds"] == 30.0
+    await channel.stop()
+
+
 async def test_stop_releases_every_subscription(tmp_path):
     bus = EventBus(persist_path=tmp_path / "e.jsonl")
     channel = await _channel(bus)
