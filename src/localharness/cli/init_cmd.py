@@ -593,7 +593,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
         elif _existing_config(config_path, config_file, interactive, changing=changing):
             outcome = SetupResult(config_file, False)  # kept: no server was asked this run
         else:  # a change: overrides.yaml only, and the posture questions are not asked again
-            result, selected_model, _ = _pick_server(config_path, endpoint, model, interactive,
+            result, selected_model = _pick_server(config_path, endpoint, model, interactive,
                                                      changing=True)
             _write_change(config_path, result, selected_model,
                           _probe_capabilities(result, selected_model))
@@ -614,9 +614,9 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
             _receipt(config_file, starting)
             outcome = SetupResult(config_file, picked.serving or picked.launchable)
         else:
-            result, selected_model, server_config = picked
+            result, selected_model = picked
             cap = _probe_capabilities(result, selected_model)
-            _write_config(config_path, result, selected_model, cap, server_config, True, True,
+            _write_config(config_path, result, selected_model, cap,
                           force=force)
             _receipt(config_file, starting)
             outcome = SetupResult(config_file, True)
@@ -674,7 +674,7 @@ def _imported_by_an_existing_install(config_path: Path) -> InitRecords | Attache
 def _pick_server(
     config_path: Path, endpoint: str | None, model: str | None, interactive: bool, *,
     changing: bool = False, force: bool = False,
-) -> tuple[DetectorResult, str, ManagedServerConfig | None] | SetupResult | InitRecords | Attached:
+) -> tuple[DetectorResult, str] | SetupResult | InitRecords | Attached:
     """The model server and the model: the explicit --endpoint, else detection — and, finding
     nothing on a terminal, the guided vLLM setup, then "skip for now" (whose SetupResult comes
     back as is). A change (`changing`) never sets a server up: finding nothing keeps the config
@@ -731,7 +731,7 @@ def _pick_server(
             suggested_model=model,
             probe_duration_ms=0.0,
         )
-        return result, model, None
+        return result, model
 
     console.print("Probing for local LLM...")
     result = asyncio.run(detect_provider(timeout_seconds=1.0))
@@ -768,9 +768,9 @@ def _pick_server(
         raise typer.Exit(1)
     if len(result.models) == 1:
         console.print(f"  Model: [bold]{result.models[0]}[/bold] (auto-selected)")
-        return result, result.models[0], None
+        return result, result.models[0]
     # Multiple models — the one --model named, Ollama's hot model, a question, or the first
-    return result, _select_model(result, model, interactive), None
+    return result, _select_model(result, model, interactive)
 
 
 def _say_not_detected() -> None:
@@ -1683,19 +1683,16 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
 
 def _write_config(
     config_path: Path, result: DetectorResult, selected_model: str, cap: CapabilityResult,
-    server_config: ManagedServerConfig | None, host_tools_on: bool, memory_on: bool, *,
-    force: bool = False,
+    *, force: bool = False,
 ) -> Path:
-    """A fresh config.yaml from the server found, the model chosen and the two posture answers."""
+    """A fresh config.yaml from the server found and the model chosen. Both defaults (the agent may
+    edit files and run commands, memory is on) apply, with a terminal or without (D-38)."""
     # Stamp fresh configs at the current shipped-defaults revision so the first `start` never
     # spuriously migrates and any later deliberate removal of a default is respected (the
     # revision gate in config/migrate.py only protects configs stamped current at birth).
     org_kwargs: dict = {
         "default_model": selected_model,
-        "permissions": PermissionConfig(
-            defaults_revision=CURRENT_DEFAULTS_REVISION,
-            **({} if host_tools_on else {"mode": "read-only"}),
-        ),
+        "permissions": PermissionConfig(defaults_revision=CURRENT_DEFAULTS_REVISION),
     }
     records: list[Callable[[], None]] = []
     window = _served_window(result, cfg_dir=config_path, model=selected_model, deferred=records)
@@ -1713,9 +1710,8 @@ def _write_config(
             timeout_seconds=600.0,
         ),
         org=OrgConfig(**org_kwargs),
-        server=server_config,
     )
-    written = _write_harness(config_path, harness, memory_on, force=force)
+    written = _write_harness(config_path, harness, True, force=force)
     for record in records:  # only now that the config is on disk (WR-05)
         record()
     return written

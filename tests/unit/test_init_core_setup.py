@@ -319,7 +319,7 @@ def test_a_fresh_config_records_the_window_under_the_model_it_writes(tmp_path, m
     from localharness.provider.speed_stats import default_speed_stats_path, last_window_report
 
     monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: 16384)
-    init_cmd._write_config(tmp_path, _two_models(), "picked", _make_capability_result(), None, True, True)
+    init_cmd._write_config(tmp_path, _two_models(), "picked", _make_capability_result())
     path = default_speed_stats_path(tmp_path)
     assert last_window_report(path, "ollama", "picked").served == 16384
     assert last_window_report(path, "ollama", "suggested") is None
