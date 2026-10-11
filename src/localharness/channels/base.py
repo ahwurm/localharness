@@ -13,6 +13,7 @@ from localharness.core.events import (
     Heartbeat,
     Observation,
     ParseFailed,
+    ProviderLost,
     TaskComplete,
     TurnFailed,
 )
@@ -471,3 +472,19 @@ class ChannelAdapter(ABC):
     async def on_heartbeat(self, event: Heartbeat) -> None:
         """Default handler for Heartbeat events. Default: no-op."""
         pass
+
+    async def on_provider_lost(self, event: ProviderLost) -> None:
+        """Default handler for ProviderLost: one system line that says the model server is gone
+        and for how long the harness will wait.
+
+        Concrete, so a plugin channel that shows system lines inherits it (PLUGIN_API_VERSION
+        does not move). It never filters on parent_id: a child loop may be the one that
+        publishes it, and a person watching a stalled turn must still be told. The text carries
+        the bound only, never `event.detail`, and never names a key (Esc belongs to the terminal's
+        own override; this surface may have none)."""
+        n = int(round(event.wait_seconds))
+        await self.send_message(
+            f"model server unreachable — waiting up to {n}s",
+            agent_id=event.agent_id,
+            metadata={"style": "system.info"},
+        )
