@@ -754,3 +754,38 @@ def test_a_global_minutes_or_share_spelled_as_a_string_is_the_harness_baseline(t
     assert _explore(loader) == (8, 10.0)
     assert loader.load_harness().org.children_budget.review_share == 0.7
     assert _warnings(loader) == []
+
+
+# ---------------------------------------------------------------------------
+# WR-04: a huge YAML integer is refused with a note at every door, never an OverflowError
+# ---------------------------------------------------------------------------
+
+_HUGE = int("9" * 400)
+
+
+def test_a_huge_integer_in_a_workspace_config_is_refused_not_a_crash(tmp_path):
+    loader, ws = _layers(tmp_path, ws_cfg=_budget(explore={"minutes": _HUGE}))
+    assert _explore(loader) == (8, 3.0)
+    assert _warnings(loader) == [_only_lower(ws / "config.yaml", "org.children_budget.explore.minutes")]
+
+
+def test_a_huge_integer_in_a_workspace_agent_file_is_refused_not_a_crash(tmp_path):
+    loader, ws = _world(tmp_path,
+                        g_agents={"worker": _agent(budget={"max_duration_minutes": 5.0})},
+                        ws_agents={"worker": _agent(budget={"max_duration_minutes": _HUGE})})
+    assert _loaded(loader)[1] == 5.0
+    assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_duration_minutes")]
+
+
+def test_a_huge_integer_in_a_workspace_builtin_overlay_is_refused_not_a_crash(tmp_path, caplog):
+    loader, _ = _world(tmp_path, ws_agents={"explore": {"permissions": {"budget": {
+        "max_duration_minutes": _HUGE}}}})
+    with caplog.at_level(logging.WARNING):
+        assert _overlay(loader).max_duration_minutes == 3.0
+    assert len(_budget_warnings(caplog)) == 1
+
+
+def test_finite_number_never_raises_on_a_huge_int():
+    assert L._finite_number(_HUGE) is True
+    assert L._finite_number(_HUGE, le=1440.0) is False
+    assert L._finite_number(math.inf) is False and L._finite_number(math.nan) is False
