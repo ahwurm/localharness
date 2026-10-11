@@ -316,11 +316,12 @@ class BudgetViolation:
     message: str
 
 
-def _cap_limit(limit: int, cap: int) -> int:
+def _cap_limit(limit: int | float, cap: int | float) -> int | float:
     """`limit` under `cap`, where a `limit` of 0 means no limit at all (the `> 0` idiom of
     `BudgetTracker.check`): 0 takes the cap, anything else takes the smaller of the two. A literal
     `min(limit, cap)` would return 0 (unbounded) for the default root on a remote unattended
-    surface, the case the machine knob exists for."""
+    surface, the case the machine knob exists for. The one place the loop applies a cap: both
+    resolvers call it, for actions and for minutes alike."""
     return cap if limit == 0 else min(limit, cap)
 
 
@@ -1340,11 +1341,15 @@ class AgentLoop:
         label = self._budget_labels.actions
         if self._remote_unattended():
             fallback = self._budget_fallback
-            if fallback is not None and (limit == 0 or fallback.actions < limit):
-                limit, label = fallback.actions, self._budget_labels.fallback
+            if fallback is not None:
+                capped = _cap_limit(limit, fallback.actions)
+                if capped != limit:  # an equal value keeps the earlier label
+                    limit, label = capped, self._budget_labels.fallback
             knob = self._unattended_max_actions
-            if knob is not None and (limit == 0 or knob < limit):
-                limit, label = knob, "channels.unattended_max_actions"
+            if knob is not None:
+                capped = _cap_limit(limit, knob)
+                if capped != limit:
+                    limit, label = capped, "channels.unattended_max_actions"
         return limit, label
 
     def _resolve_max_minutes(self) -> tuple[float, str | None]:
@@ -1354,8 +1359,10 @@ class AgentLoop:
         label = self._budget_labels.minutes
         if self._remote_unattended():
             fallback = self._budget_fallback
-            if fallback is not None and (limit == 0 or fallback.minutes < limit):
-                limit, label = fallback.minutes, self._budget_labels.fallback
+            if fallback is not None:
+                capped = _cap_limit(limit, fallback.minutes)
+                if capped != limit:
+                    limit, label = capped, self._budget_labels.fallback
         return limit, label
 
     def action_limit(self) -> int:
