@@ -515,13 +515,16 @@ def _confirm_or_no(question: str) -> bool:
         return False
 
 
-_UNSHOWABLE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+_UNSHOWABLE = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]")
 
 
 def visible_text(text: object) -> str:
     """A value from a file, safe to print inside one line of a question: every control character
-    (escape sequences, carriage returns, newlines, bidi overrides) shown as an escape, so a crafted
-    name or argument can neither redraw the line nor fake a second one."""
+    (escape sequences, carriage returns, newlines, the Unicode line and paragraph separators, bidi marks,
+    overrides and isolates, the Arabic letter mark, zero-width characters and the byte-order mark) shown
+    as an escape, so a crafted name or argument can neither redraw the line, fake a second one, reorder
+    its text nor hide part of it."""
     return _UNSHOWABLE.sub(lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 0x100
                            else f"\\u{ord(m.group()):04x}", str(text))
 

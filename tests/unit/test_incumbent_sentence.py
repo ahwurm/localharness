@@ -195,5 +195,15 @@ class TestShownPath:
         assert _no_control(out)
 
 
+def test_visible_text_escapes_every_character_that_reorders_or_hides_text():
+    """IN-05: line and paragraph separators, the Arabic letter mark, zero-width characters, the BOM."""
+    for ch, shown in (("\u2028", "\\u2028"), ("\u2029", "\\u2029"), ("\u061c", "\\u061c"),
+                      ("\u200b", "\\u200b"), ("\u200c", "\\u200c"), ("\u200d", "\\u200d"),
+                      ("\ufeff", "\\ufeff"), ("\u202e", "\\u202e"), ("\u2066", "\\u2066"),
+                      ("\x1b", "\\x1b"), ("\x85", "\\x85")):
+        assert workspace.visible_text(f"a{ch}b") == f"a{shown}b"
+    assert workspace.visible_text("naïve — ✓ 日本語") == "naïve — ✓ 日本語"
+
+
 def test_builder_lives_beside_visible_text():
     assert workspace.visible_text("a\x1b") == "a\\x1b"
