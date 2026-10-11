@@ -27,6 +27,7 @@ from localharness.agent.gguf_header import (
     unique_preset_name,
     walk_ggufs,
 )
+from localharness.cli import init_import, workspace
 from localharness.cli.errors import _HANDLED, report_filesystem_error
 from localharness.cli.workspace import shown_path, visible_text
 from localharness.config import trust
@@ -463,6 +464,16 @@ class InitRecords:
         return bool(self.server.binary or self.server.docker_image)
 
 
+@dataclass(frozen=True)
+class Attached:
+    """A model server init attaches to and writes no `server:` record for (D-25, INIT-10): the one
+    line that says why, the model the provider names, and whether `start` goes on into a session
+    (False when the server is keyed and its key is not ours to give)."""
+    line: str
+    default_model: str
+    server_ready: bool = True
+
+
 def init_app(
     endpoint: Annotated[
         str | None,
@@ -619,7 +630,7 @@ def _existing_config(config_path: Path, config_file: Path, interactive: bool, *,
 def _pick_server(
     config_path: Path, endpoint: str | None, model: str | None, interactive: bool, *,
     changing: bool = False, force: bool = False,
-) -> tuple[DetectorResult, str, ManagedServerConfig | None] | SetupResult | InitRecords:
+) -> tuple[DetectorResult, str, ManagedServerConfig | None] | SetupResult | InitRecords | Attached:
     """The model server and the model: the explicit --endpoint, else detection — and, finding
     nothing on a terminal, the guided vLLM setup, then "skip for now" (whose SetupResult comes
     back as is). A change (`changing`) never sets a server up: finding nothing keeps the config
@@ -704,6 +715,10 @@ def _pick_server(
         return guided
 
     console.print(f"  [green]✓[/green] {result.provider_type} found at {result.base_url}")
+    if not changing:  # D-26: the listener decides before the model list is judged (a 401 has none)
+        imported = _import_listener(config_path, result)
+        if imported is not None:
+            return imported
     if len(result.models) == 0:
         err_console.print("[bold red]Error:[/bold red] No models available at detected endpoint.")
         raise typer.Exit(1)
@@ -812,13 +827,14 @@ def _preset_clause(server: ManagedServerConfig) -> str:
 
 
 def _preset_lines(server: ManagedServerConfig, served: str, peers: Sequence[EndpointRef], *,
-                  binary_from: str) -> list[str]:
-    """D-14: the primary's line, with its binary and where it came from when one was found, then one
-    line per peer saying what `/model` switches to. Every value is escaped; printed `markup=False`."""
+                  binary_from: str, extras: Sequence[str] = ()) -> list[str]:
+    """D-14: the primary's line, with its binary and where it came from when one was found, then
+    the import's `extras` (already escaped lines), then one line per peer saying what `/model`
+    switches to. Every value is escaped; printed `markup=False`."""
     primary = f"serving {visible_text(served)} {_preset_clause(server)} ← {shown_path(server.model)}"
     if server.binary:
         primary += f" · binary: {shown_path(server.binary)} ({binary_from})"
-    lines = [primary]
+    lines = [primary, *extras]
     for peer in peers:
         life = peer.lifecycle
         if life is not None:
@@ -883,6 +899,117 @@ def _discover_presets(config_path: Path) -> InitRecords | None:
     if binary is None:
         lines.append(_no_binary_line(models, _machine_autosense(config_path).model_roots))
     return InitRecords(server=server, served=served, peers=peers, lines=lines)
+
+
+# ------------------------------------------------------------------ the server already running
+#
+# A llama-server already answers on the detected port: its process becomes the primary `server:`
+# record (D-26), shown with every value it took and one line saying who holds the port (D-29, D-32).
+
+_autosense_mod = autosense  # `_second_line` takes a keyword named `autosense`, which shadows the module
+
+
+def _import_listener(config_path: Path, result: DetectorResult) -> InitRecords | Attached | None:
+    """D-26, D-53: the process listening on the detected port, before the model list is judged.
+    An own-uid llama-server becomes records; None means "today's attach path" (nothing listens, or a
+    listener this import does not translate). Only a listener that answered HTTP gets here, so a
+    user-owned process that does not answer is never imported."""
+    try:
+        port = urlparse(result.base_url).port
+    except ValueError:
+        return None
+    if port is None:
+        return None
+    found = procfs.listeners(port)
+    if not found:
+        return None
+    mine = [lst for lst in found if lst.uid == os.getuid()]
+    if not mine:
+        return None
+    pid = procfs.pid_for_inode(mine[0].inode)
+    if pid is None:
+        return None
+    rec = procfs.read_process(pid)
+    if isinstance(rec, procfs.ProcRefusal) or init_import.runtime_of(rec) != "llamacpp":
+        return None
+    holder = workspace.holder_of(rec)
+    imp = init_import.import_record(
+        rec, source="live", binary_resolver=which_outside_cwd, port=port,
+        ini=init_import.read_config_ini(init_import.user_config_ini()))
+    if isinstance(imp, init_import.AttachOnly):
+        return None
+    return _records_from_import(config_path, imp, holder, port=port, running=True,
+                                base_url=result.base_url)
+
+
+def _second_line(imp: init_import.Imported, holder: workspace.Holder, *, port: int, running: bool,
+                 autosense: AutosenseConfig) -> tuple[str | None, int | None, int | None]:
+    """D-29, D-32: the one line about one fact, from the one builder that also says the attach
+    sentence. With a `-c` it is the window line (what the incumbent runs with, what the harness
+    launches, and the setting that keeps the incumbent's number); without one, the attach form while
+    the server runs and nothing once it is stopped. Returns (line, fit, trained): the triple's last
+    two members, for the ledger. `context` is never set from the import."""
+    if imp.ctx is None:
+        if not running:
+            return None, None, None
+        return workspace.incumbent_sentence(holder, port=port, form="attach"), None, None
+    fit: int | None = None
+    trained: int | None = None
+    try:
+        if running:  # Phase 2 D-09: the window the incumbent serves is added back to the free memory
+            fi = _autosense_mod.compute_fit(imp.spec, autosense, attached_served=imp.ctx)
+        else:
+            fi = _autosense_mod.compute_fit(imp.spec, autosense)
+        fit = fi.fits
+        trained = fi.header.get("context_length")
+    except Exception:  # noqa: BLE001 — a fit that cannot be computed reads "with no -c", never a traceback
+        pass
+    window = workspace.window_clause(imp.ctx, fit, running=running)
+    return workspace.incumbent_sentence(holder, port=port, form="attach", window=window), fit, trained
+
+
+def _records_from_import(config_path: Path, imp: init_import.Imported, holder: workspace.Holder, *,
+                         port: int, running: bool, base_url: str | None) -> InitRecords:
+    """D-08, D-10, D-14, D-29: an Imported record is the primary; the other models discovery finds are
+    its peers (next free ports above it, no binary or args of their own). The block is the primary
+    line, the import's extras, the second line, then the peers; the weights path and the window triple
+    are written to the ledger once the config is on disk."""
+    spec = imp.spec
+    real = os.path.realpath(os.path.expanduser(spec.model))
+    rest = [m for m in _found_models(config_path) if m.real != real]
+    peers = _peer_records(rest, start=spec.port + 1, taken_names={spec.served_name},
+                          taken_ports={spec.port})
+    if imp.binary_source == "process":
+        binary_from = "from " + workspace.incumbent_subject(holder, port=port)
+    else:
+        binary_from = "on PATH"
+    line, fit, trained = _second_line(imp, holder, port=port, running=running,
+                                      autosense=_machine_autosense(config_path))
+    extras = (*imp.shown, line) if line else imp.shown
+    lines = _preset_lines(spec, spec.served_name, peers, binary_from=binary_from, extras=extras)
+    ledger = speed_stats.default_speed_stats_path(config_path)
+    served = spec.served_name
+    deferred: list[Callable[[], None]] = []
+    if imp.ctx is not None:  # the triple that was printed, so the first start does not print it again
+        def _window() -> None:
+            try:
+                speed_stats.record_window_report(ledger, "llamacpp", served, imp.ctx, trained, fit)
+            except OSError:
+                pass  # a read-only config dir must not break init
+
+        deferred.append(_window)
+
+    def _weights() -> None:
+        try:
+            speed_stats.record_model_path(ledger, "llamacpp", served, spec.model)
+        except OSError:
+            pass  # a read-only config dir must not break init
+
+    deferred.append(_weights)
+    return InitRecords(
+        server=spec, served=served, peers=peers, lines=lines,
+        api_key=imp.api_key.get_secret_value() if imp.api_key is not None else None,
+        deferred=deferred, base_url=base_url, serving=running)
 
 
 def _show_records(recs: InitRecords) -> None:
