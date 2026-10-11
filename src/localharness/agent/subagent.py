@@ -740,6 +740,9 @@ async def dispatch_explore_subagent(
 
     # config_override (when present) is the built-in base with an agents/explore.yaml overlay
     # already applied by the runner; the structural read-only toolset stays EXPLORE_TOOLS.
+    # IN-56: without a config_override (a direct caller: tests) the builder's own rung is used and no
+    # dispatch seam runs, so no share and no fallback/labels. `_run_agent` always passes the seam's
+    # copy, so this branch is never taken in a session or the bench.
     child_config = config_override or build_explore_config(
         agent_name, budget=_children_budget(children_budget).for_name("explore"))
 
@@ -830,6 +833,9 @@ async def dispatch_web_subagent(
     # config_override (when present) is the built-in base with an agents/web-researcher.yaml
     # overlay already applied by the runner (the real budget knob); the structural web toolset
     # stays WEB_TOOLS regardless — the overlay tunes AgentConfig fields (budget/role/…), not tools.
+    # IN-56: without a config_override (a direct caller: tests) the builder's own rung is used and no
+    # dispatch seam runs, so no share and no fallback/labels. `_run_agent` always passes the seam's
+    # copy, so this branch is never taken in a session or the bench.
     child_config = config_override or build_web_researcher_config(
         agent_name, budget=_children_budget(children_budget).for_name("web-researcher"))
 
@@ -1036,6 +1042,9 @@ async def dispatch_search_verifier_subagent(
 
     # config_override (when present) is the built-in base with an agents/search-verifier.yaml
     # overlay already applied by the runner; the structural read-only web subset stays fixed.
+    # IN-56: without a config_override (a direct caller: tests) the builder's own rung is used and no
+    # dispatch seam runs, so no share and no fallback/labels. `_run_agent` always passes the seam's
+    # copy, so this branch is never taken in a session or the bench.
     child_config = config_override or build_search_verifier_config(
         agent_name, budget=_children_budget(children_budget).for_name("search-verifier"))
     # Read-only web subset — no write/bash/spawn, and (by contract) no `agent` tool: leaf.
