@@ -424,6 +424,10 @@ class OrchestratorREPL:
         # The loop's reconnect supplier (`server_recovery`) keeps its last pair here: (key, pair, the
         # active spec held so its id cannot be reused while the memo stands). None until first asked.
         self._recovery_memo: Optional[tuple[tuple, Any, Any]] = None
+        # Reports of relaunches that already returned (window lines, the decision's note), sent in the
+        # background so a slow channel never holds the recovery flight past its bound. Held here: asyncio
+        # keeps only weak references to tasks.
+        self._relaunch_reports: set[asyncio.Task] = set()
         # The spec object the managed restart actually launched, paired with the very `_active_heavy`
         # tuple it was launched under: a typed `.gguf` restart launches a COPY of the shared record
         # (the record keeps its own weights), and the relaunch must bring back that copy. Any later
@@ -2658,21 +2662,38 @@ class OrchestratorREPL:
                 live = await strategy.activate(
                     spec, cfg_dir, base_url, timeout_seconds=_lifecycle.relaunch_budget(), peer=peer,
                     autosense=getattr(self._harness, "autosense", None), **launch_key)
-            # The report is outside the lock and the launch, and guarded: this closure is what the
-            # recovery flight awaits, so a channel fault here (a Discord send error, a closed phone
-            # stream) would otherwise end the turn as a failed restart while the server is serving.
-            try:
-                await self._announce_window(
-                    live, provider_type or spec.runtime,
-                    live.served_models[0] if live.served_models else spec.model)
-                note = getattr(live, "note", None)
-                if note:
-                    await self._send_info(note)
-            except Exception:  # noqa: BLE001 - a report never fails a launch that succeeded
-                log.debug("relaunch: the launch report could not be sent", exc_info=True)
+            # The report runs in the background, outside the lock, the launch and the flight's bound:
+            # this closure is what the recovery flight awaits under its window, so a slow send (one
+            # Discord or phone line per window line) crossing the deadline would otherwise end the turn
+            # as "did not come back" while the relaunched server is serving. Returning right after
+            # activate leaves no await between a live endpoint and the flight.
+            task = asyncio.get_running_loop().create_task(
+                self._report_relaunch(live, spec, provider_type))
+            reports = self.__dict__.setdefault("_relaunch_reports", set())
+            reports.add(task)
+            task.add_done_callback(reports.discard)
             return live
 
         return relaunch
+
+    async def _report_relaunch(self, live: Any, spec: Any, provider_type: str | None) -> None:
+        """The relaunch's report: its window lines and ledger, then the decision's note. Best-effort and
+        guarded: a channel fault (a Discord send error, a closed phone stream) costs the lines only."""
+        try:
+            await self._announce_window(
+                live, provider_type or spec.runtime,
+                live.served_models[0] if live.served_models else spec.model)
+            note = getattr(live, "note", None)
+            if note:
+                await self._send_info(note)
+        except Exception:  # noqa: BLE001 - a report never fails a launch that succeeded
+            log.debug("relaunch: the launch report could not be sent", exc_info=True)
+
+    async def _drain_relaunch_reports(self) -> None:
+        """Wait for the background relaunch reports still being sent (tests, and a clean shutdown)."""
+        reports = list(self.__dict__.get("_relaunch_reports", ()))
+        if reports:
+            await asyncio.gather(*reports, return_exceptions=True)
 
     def _provider_type_for_base_url(self, base_url: str) -> str | None:
         """Resolve the runtime ``provider_type`` for ``base_url`` against the CURRENT session config
