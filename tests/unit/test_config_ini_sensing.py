@@ -360,6 +360,60 @@ def test_a_line_an_earlier_unanswered_start_left_is_still_the_pending_entry(g, x
     assert _overrides(g) == {} and _declined(KEPT)
 
 
+def _confirmed_then_edited(g, xdg, edited: str = "ctx-size = 16384\n") -> None:
+    """The record holds `KEPT` for overrides.yaml (the person confirmed it); the real file now says `edited`."""
+    _config(g, server=LLAMACPP)
+    write_yaml(g / "overrides.yaml", {"server": {"config_ini": KEPT}})
+    _record(g)
+    _ini(xdg, edited)
+
+
+def test_a_no_on_an_edited_file_restores_the_confirmed_text_and_withholds_nothing_later(g, xdg, monkeypatch):
+    """CR-51: the record confirmed X, the real file now says Y, the person answers No."""
+    edited = "ctx-size = 16384\n"
+    _confirmed_then_edited(g, xdg, edited)
+
+    sensed, got = _ask_no(g, monkeypatch)
+    assert sensed.ini_written == edited and sensed.ini_prior == KEPT
+    assert _overrides(g) == {"server": {"config_ini": edited}}
+    _after_no_on_config_ini(g, got, can_ask=True, ini_written=sensed.ini_written, ini_prior=sensed.ini_prior)
+
+    assert _overrides(g) == {"server": {"config_ini": KEPT}}
+    assert _declined(edited)
+    assert [e["after_value"] for e in _audit(g)] == [edited, KEPT]
+    ws_mod._DECLINED.clear()  # the next process
+    never_asked(monkeypatch)
+    again = _sense_before_trust(g, can_ask=True, path_binary=None)
+    assert again.ini_written is None
+    assert decide_machine_trust(g, ask=True, launching=again.launching,
+                                annotations=again.annotations).withheld == {}
+    assert decide_machine_trust(g, ask=False, launching=True, annotations={}).withheld == {}
+
+
+def test_a_value_the_overlay_held_comes_back_only_while_the_line_is_still_the_sensed_text(g):
+    _config(g, server=LLAMACPP)
+    _record(g)
+    write_yaml(g / "overrides.yaml", {"server": {"config_ini": "ctx-size = 1\n"}})
+
+    _after_no_remove_config_ini(g, KEPT, "ctx-size = 7\n")
+
+    assert _overrides(g) == {"server": {"config_ini": "ctx-size = 1\n"}} and _declined(KEPT)
+
+
+def test_an_earlier_unanswered_edit_is_still_pending_and_a_no_restores_the_confirmed_text(g, xdg, monkeypatch):
+    """CR-51: an earlier start overwrote the confirmed X with Y and was interrupted before the answer."""
+    edited = "ctx-size = 16384\n"
+    _confirmed_then_edited(g, xdg, edited)
+    _sense_before_trust(g, can_ask=True, path_binary=None)
+    audited = len(_audit(g))
+
+    sensed, got = _ask_no(g, monkeypatch)
+    assert sensed.ini_written == edited and sensed.ini_prior == KEPT and len(_audit(g)) == audited
+    _after_no_on_config_ini(g, got, can_ask=True, ini_written=sensed.ini_written, ini_prior=sensed.ini_prior)
+
+    assert _overrides(g) == {"server": {"config_ini": KEPT}} and _declined(edited)
+
+
 def test_a_start_that_cannot_ask_removes_and_declines_nothing(g):
     _config(g, server=LLAMACPP)
     _record(g)
