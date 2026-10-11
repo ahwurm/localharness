@@ -451,3 +451,39 @@ def test_an_agent_with_no_budget_registers_a_card_with_no_action_limit(tmp_path)
     assert card.budget_max_actions is None
     assert registry.get("helper").budget_max_actions is None
     assert card in registry.all_cards()
+
+
+# =========================================================================== the knob through start (Nyquist)
+# Every other test hands the knob to AgentLoop by hand. Without start passing it, a phone or Discord
+# session in `unattended` would run its root (max_actions None) with no ceiling at all.
+
+
+def _start_world(tmp_path, monkeypatch, channels: dict | None):
+    import yaml as _yaml
+
+    from tests.unit.test_start_server_recovery import DEAD_URL, _World
+
+    world = _World(tmp_path, monkeypatch)
+    data = {"version": "1",
+            "provider": {"provider_type": "ollama", "base_url": DEAD_URL, "api_key": "none",
+                         "default_model": "qwen"}}
+    if channels is not None:
+        data["channels"] = channels
+    (tmp_path / "config.yaml").write_text(_yaml.safe_dump(data), encoding="utf-8")
+    return world
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("channels", "expected"), [(None, 100), ({"unattended_max_actions": 37}, 37)])
+async def test_start_hands_the_machine_knob_to_the_root_loop_and_the_runner(
+    tmp_path, monkeypatch, channels, expected,
+):
+    world = _start_world(tmp_path, monkeypatch, channels)
+    await world.start()
+    loop = world.loop
+    assert loop.action_limit() == 0  # the terminal root: attended, uncapped
+    loop.gate.set_mode("unattended")
+    loop.gate.attach_channel(_channel(local=False))  # the same session reached from a phone
+    assert loop.action_limit() == expected
+    (kw,) = world.runner_kwargs
+    assert kw["unattended_max_actions"] == expected

@@ -599,3 +599,80 @@ async def test_the_chunk_summarizer_leaf_brief_names_only_held_tools(monkeypatch
     (task,) = seen
     assert task.startswith("(Your ONLY available tools: tool_result_get.")
     assert "nonexistent_tool" not in task
+
+
+# --------------------------------------------------------------------------- the real surfaces (Nyquist)
+# The fakes above set `local_operator` by hand. These attach the shipped channel classes themselves,
+# so a remote channel that ever declared itself local (or a new one that forgot the flag's default)
+# would let an unbounded root run unattended on it.
+
+from localharness.channels.acp import AcpChannel  # noqa: E402
+from localharness.channels.base import ChannelAdapter  # noqa: E402
+from localharness.channels.mobile.channel import MobileChannel  # noqa: E402
+from localharness.channels.terminal import TerminalChannel  # noqa: E402
+from localharness.dispatch.channel import DispatchChannel  # noqa: E402
+
+
+class _BareRemote(ChannelAdapter):
+    """A channel that says nothing about where its person sits."""
+
+    channel_id = "future-chat"
+
+
+_BareRemote.__abstractmethods__ = frozenset()  # never driven: only its declared flags are read
+
+
+def _bare(cls, channel_id: str):
+    """An instance of the real class without its I/O constructor; the gate reads class flags."""
+    ch = object.__new__(cls)
+    try:
+        ch.channel_id = channel_id
+    except AttributeError:
+        pass
+    return ch
+
+
+@pytest.mark.parametrize(
+    ("cls", "channel_id"),
+    [(MobileChannel, "mobile"), (DispatchChannel, "discord"), (_BareRemote, "future-chat")],
+)
+def test_an_unbounded_root_on_a_real_remote_channel_is_capped_when_unattended(
+    mock_llm_client, bus, cls, channel_id,
+):
+    assert cls.local_operator is False
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="unattended",
+                 unattended_max_actions=100)
+    loop.gate.attach_channel(_bare(cls, channel_id))
+    assert loop.gate.local_operator is False
+    assert loop.action_limit() == 100
+    assert loop._resolve_max_actions() == (100, "channels.unattended_max_actions")
+
+
+@pytest.mark.parametrize(("cls", "channel_id"), [(TerminalChannel, "terminal"), (AcpChannel, "acp")])
+def test_the_terminal_and_zed_are_local_operators_and_run_uncapped(mock_llm_client, bus, cls, channel_id):
+    assert cls.local_operator is True
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="unattended",
+                 unattended_max_actions=100)
+    loop.gate.attach_channel(_bare(cls, channel_id))
+    assert loop.gate.local_operator is True
+    assert loop.action_limit() == 0
+
+
+def test_an_unattended_loop_with_no_channel_attached_is_capped(mock_llm_client, bus):
+    """No channel at all (nothing attached yet) reads as remote: the knob holds."""
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="unattended",
+                 unattended_max_actions=100)
+    assert loop.gate.local_operator is False
+    assert loop.action_limit() == 100
+
+
+@pytest.mark.asyncio
+async def test_a_remote_unattended_root_stops_at_the_knob_on_a_real_mobile_channel(mock_llm_client, bus):
+    registry = _Registry()
+    loop = _loop(mock_llm_client, bus, _calls(mock_llm_client, 12), max_actions=None,
+                 mode="unattended", unattended_max_actions=5, registry=registry)
+    loop.gate.attach_channel(_bare(MobileChannel, "mobile"))
+    await loop.run_turn("go")
+    assert len(registry.calls) <= 5
+    failed = [e for e in bus.history(event_types=[TurnFailed]) if e.reason == "budget_exceeded"]
+    assert len(failed) == 1 and "channels.unattended_max_actions" in failed[0].detail

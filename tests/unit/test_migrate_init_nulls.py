@@ -283,3 +283,105 @@ def test_config_migrate_lists_the_nulled_keys_and_prints_the_per_file_clause(tmp
     assert "cleaned" not in plain
     again = runner.invoke(app, ["config", "migrate", "--config-dir", str(tmp_path)])
     assert "up to date" in again.output.lower()
+
+
+# ------------------------------------------------------------------- safety edges (Nyquist)
+
+
+def test_an_unparseable_or_non_mapping_sidecar_is_skipped_and_the_rest_still_migrates(tmp_path):
+    cfg = _write(tmp_path, _v017())
+    broken = tmp_path / "agents" / "broken.yaml"
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_bytes(b"name: broken\npermissions: {budget: {max_actions: 100\n  :: [")
+    listed = tmp_path / "agents" / "listed.yaml"
+    listed.write_bytes(b"- max_actions: 100\n")
+    good = _sidecar(tmp_path, "agents", NAME, {"name": NAME, "permissions": {"budget": {"max_actions": 100}}})
+    broken_before, listed_before = broken.read_bytes(), listed.read_bytes()
+
+    plan, _backups = _migrate(cfg)
+
+    assert [s.path for s in plan.sidecars] == [good]
+    assert broken.read_bytes() == broken_before and listed.read_bytes() == listed_before
+    assert list((tmp_path / "agents").glob("broken.yaml.bak-*")) == []
+    assert list((tmp_path / "agents").glob("listed.yaml.bak-*")) == []
+    assert _disk(good)["permissions"]["budget"]["max_actions"] is None
+    assert _disk(cfg)["org"]["permissions"]["budget"]["max_actions"] is None
+
+
+def test_an_unparseable_config_raises_and_writes_nothing(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_bytes(b"org: {permissions: {budget: {max_actions: 100\n  :: [")
+    before = cfg.read_bytes()
+    import pytest
+
+    with pytest.raises(migrate.MigrationError):
+        migrate.load_plan(cfg)
+    assert cfg.read_bytes() == before
+    assert list(tmp_path.glob("config.yaml.bak-*")) == []
+
+
+def test_an_owner_changed_sidecar_value_stays_while_inits_siblings_are_nulled(tmp_path):
+    cfg = _write(tmp_path, _v017())
+    agent = _sidecar(tmp_path, "agents", NAME, {
+        "name": NAME, "permissions": {"budget": {"max_actions": 150}},
+        "context": {"max_tool_output_chars": 32000, "tool_result_evict_threshold_chars": 9000}})
+
+    plan, _backups = _migrate(cfg)
+
+    (sidecar,) = plan.sidecars
+    assert sidecar.nulled == ("context.max_tool_output_chars",)
+    written = _disk(agent)
+    assert written["permissions"]["budget"]["max_actions"] == 150
+    assert written["context"] == {"max_tool_output_chars": None, "tool_result_evict_threshold_chars": 9000}
+
+
+def test_two_starts_make_one_backup_per_file_and_the_second_changes_nothing(tmp_path):
+    cfg = _write(tmp_path, _v017())
+    agent = _sidecar(tmp_path, "agents", NAME, _pre_v014_agent())
+    cfg_original, agent_original = cfg.read_bytes(), agent.read_bytes()
+
+    _start_receipt(cfg)
+    after_first = (cfg.read_bytes(), agent.read_bytes())
+    _start_receipt(cfg)
+
+    assert (cfg.read_bytes(), agent.read_bytes()) == after_first
+    cfg_backups = list(tmp_path.glob("config.yaml.bak-*"))
+    agent_backups = list((tmp_path / "agents").glob(f"{NAME}.yaml.bak-*"))
+    assert len(cfg_backups) == 1 and cfg_backups[0].read_bytes() == cfg_original
+    assert len(agent_backups) == 1 and agent_backups[0].read_bytes() == agent_original
+
+
+def test_a_rewrite_that_fails_mid_write_leaves_the_original_bytes_in_a_backup(tmp_path, monkeypatch):
+    """The backup lands before the file is touched: a write that dies part-way still has an undo."""
+    import pytest
+
+    cfg = _write(tmp_path, _v017())
+    original = cfg.read_bytes()
+    real_write_text = Path.write_text
+
+    def dying_write(self, data, *a, **kw):
+        if self == cfg:
+            real_write_text(self, data[: len(data) // 2], *a, **kw)
+            raise OSError("disk full")
+        return real_write_text(self, data, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", dying_write)
+    raw, plan = migrate.load_plan(cfg)
+    with pytest.raises(OSError):
+        migrate.apply(cfg, raw, plan)
+
+    (backup,) = tmp_path.glob("config.yaml.bak-*")
+    assert backup.read_bytes() == original
+
+
+def test_a_migrated_config_that_fails_validation_writes_nothing(tmp_path):
+    import pytest
+
+    data = _v017()
+    data["org"]["permissions"]["budget"]["max_duration_minutes"] = -5  # invalid before and after
+    cfg = _write(tmp_path, data)
+    before = cfg.read_bytes()
+    raw, plan = migrate.load_plan(cfg)
+    with pytest.raises(migrate.MigrationError):
+        migrate.apply(cfg, raw, plan)
+    assert cfg.read_bytes() == before and list(tmp_path.glob("config.yaml.bak-*")) == []
