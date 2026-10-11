@@ -1162,12 +1162,13 @@ class AcpChannel(ChannelAdapter):
             return
         await self.send_message(event.summary)
 
-    async def send_stuck_reply(self, event: TurnFailed) -> None:
-        """A stuck turn's wrap-up, on the same terms as `on_task_complete`: only when nothing
-        streamed this turn, since a streaming provider has already typed it into the panel."""
+    async def send_wrapup_reply(self, event: TurnFailed, text: str | None = None) -> None:
+        """A stuck or budget-stopped turn's wrap-up, on the same terms as `on_task_complete`: only
+        when nothing streamed this turn, since a streaming provider has already typed it into the
+        panel."""
         if self._streamed_this_turn:
             return
-        await super().send_stuck_reply(event)
+        await super().send_wrapup_reply(event, text)
 
     async def on_observation(self, event: Observation) -> None:
         """`Observation` → ACP `tool_call_update`, completed or failed with its output."""

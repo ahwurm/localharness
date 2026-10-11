@@ -113,6 +113,23 @@ def provider_lost_line(wait_seconds: float) -> str:
     return f"model server unreachable — waiting up to {provider_lost_seconds(wait_seconds)}s"
 
 
+_BUDGET_NOTE = "[Budget limit reached: "
+"""How the notice starts that the loop appends to a budget-stopped turn's reply
+(`agent/loop._final_summary_on_budget`, `_format_budget_summary`): what bound the turn and how far
+it got."""
+
+
+def _split_budget_note(detail: str) -> tuple[str, str | None]:
+    """A budget-stopped turn's detail as (the reply, the loop's trailing notice without its
+    brackets), or (detail, None) when it does not end in that notice. The LAST notice is the
+    loop's: a reply that quotes one earlier keeps it."""
+    start = detail.rfind(_BUDGET_NOTE)
+    if start == -1 or not detail.endswith("]"):
+        return detail, None
+    why = " ".join(detail[start + len(_BUDGET_NOTE):-1].split())
+    return detail[:start].strip(), why or None
+
+
 class ChannelAdapter(ABC):
     """
     Abstract base for all channel adapters.
@@ -438,7 +455,7 @@ class ChannelAdapter(ABC):
             # (D-04), which nothing else puts in front of the person (CR-51). A child's stays with
             # its parent, as a child's TaskComplete does.
             if not getattr(event, "parent_id", None):
-                await self.send_stuck_reply(event)
+                await self.send_wrapup_reply(event)
             return
         if getattr(event, "parent_id", None):
             await self.send_message(
@@ -448,19 +465,31 @@ class ChannelAdapter(ABC):
             )
             return
         detail = (event.detail or "").strip()
+        if event.reason == "budget_exceeded":
+            # IN-73: the budget wrap-up is a reply the loop spent a model call on, like the stuck
+            # one, and the knob makes it the normal end of a long remote turn. One error line
+            # names the bound (the loop's trailing "[Budget limit reached: …]" note); the reply
+            # goes out whole as a plain message, never cut to 400 characters.
+            reply, why = _split_budget_note(detail)
+            await self.send_error(error="turn failed — budget_exceeded", detail=why,
+                                  agent_id=event.agent_id)
+            await self.send_wrapup_reply(event, reply)
+            return
         await self.send_error(
             error=f"turn failed — {event.reason}",
             detail=detail[:400] or None,
             agent_id=event.agent_id,
         )
 
-    async def send_stuck_reply(self, event: TurnFailed) -> None:
-        """Deliver a root stuck turn's reply (`TurnFailed.detail`) as a plain message, the way a
+    async def send_wrapup_reply(self, event: TurnFailed, text: str | None = None) -> None:
+        """Deliver a root turn's wrap-up reply — a stuck turn's `TurnFailed.detail`, or `text` when
+        the caller has split a notice off it (a budget stop) — as a plain message, the way a
         TaskComplete summary is delivered. Nothing when it is empty. A channel that already
         streamed the answer's tokens overrides this so the reply is not printed twice."""
-        detail = (event.detail or "").strip()
-        if detail:
-            await self.send_message(content=detail, agent_id=event.agent_id)
+        reply = (event.detail if text is None else text) or ""
+        reply = reply.strip()
+        if reply:
+            await self.send_message(content=reply, agent_id=event.agent_id)
 
     async def on_parse_failed(self, event: ParseFailed) -> None:
         """Default handler for ParseFailed events. Same principle as on_turn_failed: silence
