@@ -24,7 +24,7 @@ import os
 import shlex
 import stat
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from localharness.core.private_files import open_regular
@@ -35,7 +35,7 @@ __all__ = [
     "JOURNAL_LINES", "JOURNAL_TIMEOUT_S", "JOURNAL_OUTPUT_CAP", "SYSTEMCTL_TIMEOUT_S",
     "SYSTEMCTL_OUTPUT_CAP", "UNIT_FILE_CAP", "UNIT_LINE_CAP", "UNIT_TOKEN_CAP", "UNITS_SCANNED_CAP",
     "Skip", "UnitState", "unit_file_state", "user_units", "read_journal",
-    "read_unit", "unit_record",
+    "read_unit", "unit_record", "journal_environment_gap",
 ]
 
 JOURNAL_LINES = 200
@@ -441,14 +441,9 @@ def _words(value: str) -> list[str]:
 # ---------------------------------------------------------------------------- per-unit sources
 
 
-def unit_record(state: UnitState) -> tuple[str, ProcRecord] | Skip:
-    """The first usable source for a stopped unit: ("journal", record), else ("unit", record), else
-    the `Skip` init folds into its one no-binary line. The journal is tried first; the unit file
-    only when the unit has no drop-ins (a drop-in can replace `ExecStart=`). When both skip, the
-    first skip in source order whose unit names a model wins; otherwise the unit file's."""
-    first = read_journal(state.unit)
-    if isinstance(first, ProcRecord):
-        return "journal", first
+def _unit_file_record(state: UnitState) -> ProcRecord | Skip:
+    """The unit file as a record, or why it cannot be one: no unit file, drop-ins (a drop-in can replace
+    `ExecStart=` and `Environment=`), or `read_unit`'s own skip."""
     if not state.fragment_path:
         second: ProcRecord | Skip = Skip("has no unit file", names_model=False)
     else:
@@ -456,6 +451,49 @@ def unit_record(state: UnitState) -> tuple[str, ProcRecord] | Skip:
     if state.drop_in_paths:
         names = isinstance(second, ProcRecord) or second.names_model
         second = Skip(f"has drop-ins ({state.drop_in_paths})", names_model=names)
+    return second
+
+
+def _journal_with_unit_file(journal: ProcRecord, state: UnitState) -> ProcRecord:
+    """The journal knows neither the unit's `Environment=` nor its `WorkingDirectory=`, and cannot tell
+    an argument with a space in it from two (WR-04, WR-02). When the unit file is readable and names the
+    SAME model, its `environ` and `cwd` complete the journal's record, and its argv replaces the journal's
+    when the two spell the same words (then the unit file's tokens are the exactly-quoted ones). A unit
+    file that names another model, or cannot be read, leaves the journal's record as it was."""
+    unit_rec = _unit_file_record(state)
+    if not isinstance(unit_rec, ProcRecord):
+        return journal
+    if _option_value(list(unit_rec.argv), "-m", "--model") != _option_value(list(journal.argv), "-m", "--model"):
+        return journal
+    same_words = " ".join(unit_rec.argv[1:]) == " ".join(journal.argv[1:])  # argv[0] is spelt per source
+    return replace(journal, environ=unit_rec.environ, cwd=unit_rec.cwd,
+                   argv=(journal.argv[:1] + unit_rec.argv[1:]) if same_words else journal.argv)
+
+
+def journal_environment_gap(state: UnitState, record: ProcRecord) -> str | None:
+    """Why the environment of a journal-sourced unit was not read, when it plausibly exists: the unit
+    has a unit file and it could not be turned into a record (an `EnvironmentFile=`, a `$` or `%`
+    expansion, drop-ins) or it names another model. None when `record` carries the unit's environment,
+    or the unit has no unit file to read. `init` shows it, so nothing is imported silently without the
+    unit's `LLAMA_ARG_*` and key."""
+    if record.environ is not None or not state.fragment_path:
+        return None
+    unit_rec = _unit_file_record(state)
+    if isinstance(unit_rec, Skip):
+        return unit_rec.reason if unit_rec.names_model else None  # an unreadable or unrelated file: no claim
+    return "names another model"
+
+
+def unit_record(state: UnitState) -> tuple[str, ProcRecord] | Skip:
+    """The first usable source for a stopped unit: ("journal", record), else ("unit", record), else
+    the `Skip` init folds into its one no-binary line. The journal is tried first (a journal record is
+    completed from a readable unit file that names the same model, see `_journal_with_unit_file`); the
+    unit file only when the unit has no drop-ins (a drop-in can replace `ExecStart=`). When both skip,
+    the first skip in source order whose unit names a model wins; otherwise the unit file's."""
+    first = read_journal(state.unit)
+    if isinstance(first, ProcRecord):
+        return "journal", _journal_with_unit_file(first, state)
+    second = _unit_file_record(state)
     if isinstance(second, ProcRecord):
         return "unit", second
     return first if first.names_model else second

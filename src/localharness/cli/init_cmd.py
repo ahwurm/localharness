@@ -9,7 +9,7 @@ import shlex
 import shutil
 import sys
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
@@ -942,6 +942,10 @@ def _unit_import(config_path: Path) -> tuple[InitRecords | None, tuple[str, str]
             if first_skip is None:
                 first_skip = (state.unit, imp.reason)
             continue
+        gap = units.journal_environment_gap(state, rec) if source == "journal" else None
+        if gap is not None:  # WR-04: the unit's own Environment= could not be read: say so, import nothing silently
+            imp = replace(imp, shown=(*imp.shown, f"environment of {visible_text(state.unit)} not read "
+                                      f"({visible_text(gap)})"))
         holder = workspace.Holder(state.unit, None, None, os.getuid(), state)
         recs = _records_from_import(config_path, imp, holder, port=imp.spec.port, running=False,
                                     base_url=None, unit_model=os.path.realpath(imp.spec.model))
