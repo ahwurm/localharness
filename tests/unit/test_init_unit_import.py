@@ -218,3 +218,167 @@ def test_a_machine_with_no_unit_keeps_the_discovery_path(flags, live):  # noqa: 
 
     _exited(result, 0)
     assert live.written()["server"]["port"] == 8081
+
+
+# ------------------------------------------------------------------ the unit file, and the skip reasons
+
+
+def _unit_file(live, *lines: str, name: str = UNIT) -> Path:  # noqa: F811
+    path = live.home / ".config" / "systemd" / "user" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[Unit]\nDescription=llama\n\n[Service]\n" + "\n".join(lines)
+                    + "\n\n[Install]\nWantedBy=default.target\n", encoding="utf-8")
+    return path
+
+
+def _third_model(live) -> None:  # noqa: F811
+    from tests.unit.test_init_live_import import gguf
+
+    gguf(live.home / "models" / "gguf" / "C.gguf")
+
+
+def test_the_unit_file_answers_when_the_journal_does_not_and_a_key_in_it_is_a_key(live):  # noqa: F811
+    _nothing_answers(live)
+    path = _unit_file(live, "WorkingDirectory=%h", "Environment=LLAMA_API_KEY=K LLAMA_ARG_N_GPU_LAYERS=99",
+                      "ExecStart=/opt/llama/llama-server \\", "  -m %h/models/gguf/A.gguf --host 0.0.0.0")
+    _systemd(live, (UNIT, "disabled", str(path), ""))  # no journal answer: "has an unreadable journal"
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    cfg = live.written()
+    server = cfg["server"]
+    assert server["binary"] == "/opt/llama/llama-server" and server["model"] == str(live.model_a)
+    assert server["bind_all"] is True and server["require_api_key"] is True
+    assert server["env"] == {"LLAMA_ARG_N_GPU_LAYERS": "99"}
+    assert server["served_name"] == "A" and server["port"] == 8080
+    assert cfg["provider"]["api_key"] == "K"
+    assert block_of(result)[0] == (
+        f"serving A (llama.cpp) ← ~/models/gguf/A.gguf · binary: /opt/llama/llama-server (from {UNIT})")
+    assert LOOPBACK_LINE not in lines_of(result)  # the key is the evidence for the bind
+    assert "K" not in [tok for line in lines_of(result) for tok in line.split()]
+    assert "LLAMA_API_KEY" not in result.output
+
+
+def test_a_unit_file_with_no_key_evidence_is_imported_on_loopback(live):  # noqa: F811
+    _nothing_answers(live)
+    path = _unit_file(live, "ExecStart=/opt/llama/llama-server -m %h/models/gguf/A.gguf --host 0.0.0.0")
+    _systemd(live, (UNIT, "disabled", str(path), ""))
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert live.written()["server"].get("bind_all", False) is False
+    assert LOOPBACK_LINE in lines_of(result)
+
+
+def _wrapper(live, *, name: str = UNIT, program: str = "run-active.sh") -> None:  # noqa: F811
+    _nothing_answers(live)
+    path = _unit_file(live, f"ExecStart=/home/u/bin/{program} -m /m/a.gguf", name=name)
+    _systemd(live, (name, "enabled", str(path), ""))
+    _third_model(live)
+
+
+def test_a_wrapper_unit_with_no_llama_server_on_path_is_named_in_the_one_line(live):  # noqa: F811
+    _wrapper(live)
+    live.bin.unlink()
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    skipped = f"{UNIT} runs run-active.sh; no llama-server found — set server.binary"
+    assert lines_of(result).count(skipped) == 1
+    assert result.output.count("no llama-server") == 1  # never also the GGUF count line
+    assert "found 3 GGUFs" not in result.output
+    cfg = live.written()
+    assert "binary" not in cfg["server"] and cfg["server"]["port"] == 8081  # discovery's records
+
+
+def test_the_skipped_unit_leaves_the_first_start_not_ready(live):  # noqa: F811
+    _wrapper(live)
+    live.bin.unlink()
+
+    out = init_cmd.core_setup(str(live.cfg), endpoint=None, model=None, force=False, interactive=False)
+
+    assert out == init_cmd.SetupResult(live.cfg / "config.yaml", False)
+
+
+def test_a_wrapper_unit_with_llama_server_on_path_says_nothing_about_the_unit(live):  # noqa: F811
+    _wrapper(live)
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert "run-active.sh" not in result.output and "no llama-server" not in result.output
+    assert live.written()["server"]["binary"] == str(live.bin)
+
+
+def test_a_unit_with_an_environment_file_gives_that_reason(live):  # noqa: F811
+    _nothing_answers(live)
+    path = _unit_file(live, "EnvironmentFile=/etc/llama.env",
+                      "ExecStart=/opt/llama/llama-server -m %h/models/gguf/A.gguf")
+    _systemd(live, (UNIT, "enabled", str(path), ""))
+    live.bin.unlink()
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert lines_of(result).count(
+        f"{UNIT} uses EnvironmentFile=; no llama-server found — set server.binary") == 1
+
+
+def test_a_unit_unrelated_to_llama_server_is_never_named(live):  # noqa: F811
+    _nothing_answers(live)
+    path = _unit_file(live, "ExecStart=/usr/bin/pipewire", name="pipewire.service")
+    _systemd(live, ("pipewire.service", "enabled", str(path), ""))
+    _third_model(live)
+    live.bin.unlink()
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert "pipewire" not in result.output
+    assert lines_of(result).count("found 3 GGUFs under ~/models; no llama-server — set server.binary") == 1
+
+
+def test_a_second_units_skip_prints_nothing_when_the_journal_supplied_the_record(live):  # noqa: F811
+    _nothing_answers(live)
+    wrapper = _unit_file(live, "ExecStart=/home/u/bin/run-active.sh -m /m/a.gguf", name="a-wrap.service")
+    _systemd(live, ("a-wrap.service", "enabled", str(wrapper), ""),
+             (UNIT, "disabled", str(live.home / ".config/systemd/user" / UNIT), ""))
+    _journal(live)  # llm.service's journal answers; a-wrap.service's does not
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert "run-active.sh" not in result.output and "no llama-server" not in result.output
+    assert live.written()["server"]["served_name"] == "qwen-27b"
+
+
+def test_a_unit_with_drop_ins_is_skipped_and_named(live):  # noqa: F811
+    _nothing_answers(live)
+    path = _unit_file(live, "ExecStart=/opt/llama/llama-server -m %h/models/gguf/A.gguf")
+    _systemd(live, (UNIT, "enabled", str(path), "/home/u/.config/systemd/user/llm.service.d/x.conf"))
+    live.bin.unlink()
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    [line] = [ln for ln in lines_of(result) if "no llama-server found" in ln]
+    assert line.startswith(f"{UNIT} has drop-ins (")
+
+
+def test_no_unit_and_no_gguf_still_reaches_the_not_detected_path(live):  # noqa: F811
+    _nothing_answers(live)
+    live.model_a.unlink()
+    live.model_b.unlink()
+
+    result = _init(live.cfg, "--no-input")
+
+    assert result.exit_code == 1, result.output
+    assert "No local LLM detected" in result.output
+
+
+def test_a_hostile_unit_name_is_shown_escaped(live):  # noqa: F811
+    assert init_cmd._unit_skip_line("a\x1b[2Jb.service", "runs x\ny") == (
+        "a\\x1b[2Jb.service runs x\\x0ay; no llama-server found — set server.binary")
