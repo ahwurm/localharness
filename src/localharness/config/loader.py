@@ -1841,8 +1841,8 @@ class ConfigLoader:
         Against a finite global baseline B the workspace may only lower: a value at or below B is
         kept, a higher or non-finite one becomes B with a note, a `null` or an omission becomes B
         silently. Where the global layer declares nothing a finite workspace value is kept as
-        written, no note, and its field is returned (the seam caps a marked value on a remote
-        unattended session); a non-finite one is removed with a note."""
+        written, no note, and its field is returned (the seam caps a marked value on a session
+        with no local operator, in any mode: WR-70); a non-finite one is removed with a note."""
         local = self._local_dir
         if local is None:
             return set()
