@@ -27,6 +27,7 @@ import dataclasses
 import errno
 import functools
 import logging
+import math
 import os
 import re
 import time
@@ -1153,6 +1154,9 @@ class ServerRecovery:
             # at the address (it may be back), never another whole wait or another relaunch.
             if await self._answers(base_url, api_key, time.monotonic() + poll):
                 return
+            if issubclass(outage.failed[0], TimeoutError):
+                # the bound passed: say THIS loop's bound, not the seconds an earlier loop was told
+                raise TimeoutError(self._bound_text(wait_seconds)) from None
             raise _again(outage.failed) from None
         # what the outage's one relaunch already came to, when an earlier loop spent it and failed
         earlier = outage.failed if outage.relaunched else None
@@ -1256,7 +1260,9 @@ class ServerRecovery:
         return server.log_tail(self.config_dir) if self.config_dir is not None else ""
 
     def _bound_text(self, wait_seconds: float) -> str:
-        text = BOUND_TEXT.format(seconds=int(round(wait_seconds)))
+        # rounded UP, as the ProviderLost line is (channels.base.provider_lost_seconds): a child with
+        # 12.4 s left is told "up to 13s" and must not end "within 12s", nor a 0.3 s clamp "within 0s"
+        text = BOUND_TEXT.format(seconds=math.ceil(wait_seconds))
         if self.config_dir is not None:
             text += ". Log tail:\n" + server.log_tail(self.config_dir)
         return text
