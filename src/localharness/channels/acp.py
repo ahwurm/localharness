@@ -1262,9 +1262,13 @@ class AcpChannel(ChannelAdapter):
         """A failed turn reaches the panel as text (PRD §4: `TurnFailed` streams its reason).
 
         Deliberately NOT `stop_reason="refusal"`: the model refused nothing, the turn broke, and
-        claiming a refusal would put words in its mouth."""
+        claiming a refusal would put words in its mouth.
+
+        Set off by blank lines, as `on_provider_lost` is (IN-80): ACP renders it as agent-message
+        text, so it would otherwise run on from streamed answer text before it and into the
+        wrap-up reply a budget stop sends right after it."""
         text = error if not detail else f"{error}\n{detail}"
-        await self.send_message(text)
+        await self.send_message(f"\n\n{text}\n\n")
 
     async def read_input(self, prompt: str = "> ") -> str:
         """ACP turns arrive as `session/prompt` requests, never by pulling a line: this channel

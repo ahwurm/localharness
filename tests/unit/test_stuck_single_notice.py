@@ -181,6 +181,26 @@ async def test_zed_gets_the_budget_wrapup_only_when_nothing_streamed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_zed_sets_the_budget_error_line_apart_from_the_reply(tmp_path):
+    """IN-80: the error line and the wrap-up are two chunks of one agent message in Zed; blank
+    lines keep them (and any streamed text before the line) from running together."""
+    failed = TurnFailed(agent_id="root", session_id="s", reason="budget_exceeded",
+                        detail=f"partial work\n\n{_KNOB_NOTE}", iterations=4, duration_seconds=1.0)
+    ch = _acp(tmp_path)
+    ch._streamed_this_turn = False
+    await ch.on_turn_failed(failed)
+    panel = "".join(ch._conn.texts)
+    assert panel.startswith("\n\nturn failed — budget_exceeded\n")
+    assert "in 12.0 minutes.\n\npartial work" in panel  # before IN-80: "minutes.partial work"
+
+    streamed = _acp(tmp_path)
+    streamed._streamed_this_turn = True
+    await streamed.on_turn_failed(failed)
+    (line,) = streamed._conn.texts
+    assert line.startswith("\n\nturn failed — budget_exceeded\n") and line.endswith("minutes.\n\n")
+
+
+@pytest.mark.asyncio
 async def test_a_real_budget_stop_reaches_a_channel_whole(mock_llm_client, bus):
     """End to end through the loop: the wrap-up the loop generated arrives whole, and the error
     line carries the loop's notice."""
