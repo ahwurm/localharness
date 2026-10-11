@@ -365,8 +365,9 @@ def test_a_rewrite_that_fails_mid_write_leaves_the_original_bytes_in_a_backup(tm
 
     monkeypatch.setattr(migrate.os, "fsync", dying_fsync)
     raw, plan = migrate.load_plan(cfg)
-    with pytest.raises(OSError):
+    with pytest.raises(migrate.PartialMigrationError) as caught:  # WR-02: names what failed
         migrate.apply(cfg, raw, plan)
+    assert caught.value.failed == cfg
 
     (backup,) = tmp_path.glob("config.yaml.bak-*")
     assert backup.read_bytes() == original
@@ -385,3 +386,84 @@ def test_a_migrated_config_that_fails_validation_writes_nothing(tmp_path):
     with pytest.raises(migrate.MigrationError):
         migrate.apply(cfg, raw, plan)
     assert cfg.read_bytes() == before and list(tmp_path.glob("config.yaml.bak-*")) == []
+
+
+# ------------------------------------------- WR-02: a partial failure never skips a file for good
+
+import os  # noqa: E402
+
+import pytest  # noqa: E402
+
+_not_root = pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                               reason="root writes a read-only file")
+
+
+def _locked_world(tmp_path: Path) -> tuple[Path, Path, Path]:
+    cfg = _write(tmp_path, _v017())
+    ok = _sidecar(tmp_path, "agents", "a_ok", {"name": "a_ok", "permissions": {"budget": {"max_actions": 100}}})
+    locked = _sidecar(tmp_path, "agents", "b_locked",
+                      {"name": "b_locked", "permissions": {"budget": {"max_actions": 100}}})
+    locked.chmod(0o444)
+    return cfg, ok, locked
+
+
+@_not_root
+def test_a_failed_sidecar_leaves_config_unstamped_so_the_step_runs_again(tmp_path):
+    cfg, ok, locked = _locked_world(tmp_path)
+    before = cfg.read_bytes()
+    original, plan = migrate.load_plan(cfg)
+
+    with pytest.raises(migrate.PartialMigrationError) as caught:
+        migrate.apply(cfg, original, plan)
+
+    assert caught.value.failed == locked and caught.value.written == (ok,)
+    assert len(caught.value.backups) == 1
+    assert cfg.read_bytes() == before  # the stamp-carrier is written last, so it did not move
+    assert _disk(ok)["permissions"]["budget"]["max_actions"] is None
+    assert _disk(locked)["permissions"]["budget"]["max_actions"] == 100
+
+    # The next run still sees the locked file; once it is writable it is nulled and stamped.
+    _, again = migrate.load_plan(cfg)
+    assert again is not None and [s.path for s in again.sidecars] == [locked]
+    locked.chmod(0o644)
+    _migrate(cfg)
+    assert _disk(locked)["permissions"]["budget"]["max_actions"] is None
+    assert _disk(cfg)["org"]["permissions"]["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
+    assert migrate.load_plan(cfg)[1] is None
+
+
+def test_config_yaml_is_written_after_every_sidecar(tmp_path):
+    cfg = _write(tmp_path, _v017())
+    side = _sidecar(tmp_path, "agents", NAME, {"name": NAME, "permissions": {"budget": {"max_actions": 100}}})
+    _, backups = _migrate(cfg)
+    assert [b.name.split(migrate.BACKUP_INFIX)[0] for b in backups] == [side.name, cfg.name]
+
+
+@_not_root
+def test_the_start_warning_names_what_was_rewritten_and_its_advice_holds(tmp_path):
+    import contextlib
+
+    cfg, ok, locked = _locked_world(tmp_path)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err), redirect_stdout(io.StringIO()):
+        _auto_migrate_deny_defaults(cfg)
+    plain = " ".join(err.getvalue().split())
+    assert "Could not finish updating the config" in plain
+    assert str(locked) in plain and f"rewrote {ok}" in plain
+    assert "Run 'localharness config migrate' to finish" in plain
+
+    locked.chmod(0o644)
+    result = runner.invoke(app, ["config", "migrate", "--config-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "up to date" not in result.output.lower()  # the advice is true: there was work left
+    assert _disk(locked)["permissions"]["budget"]["max_actions"] is None
+
+
+@_not_root
+def test_config_migrate_names_what_it_wrote_and_never_says_refusing(tmp_path):
+    _, ok, locked = _locked_world(tmp_path)
+    result = runner.invoke(app, ["config", "migrate", "--config-dir", str(tmp_path)])
+    plain = " ".join(result.output.split())
+    assert result.exit_code == 1
+    assert f"Rewrote {ok}" in plain and "Could not finish" in plain
+    assert "Refusing to write" not in plain
