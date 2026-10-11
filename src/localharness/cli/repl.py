@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import shlex
@@ -2499,10 +2500,9 @@ class OrchestratorREPL:
         spec, base_url = stopped
         from localharness.provider import lifecycle as _lifecycle
         from localharness.provider.server import LaunchRefused, launch_decision
-        peer_ep = self._peer_by_base_url(base_url)
         # the peer's name only when the spec IS that peer's own lifecycle (identity, not equality), so
         # a refusal names `extra_endpoints[<name>]` exactly for a peer and `server` for the primary
-        peer = peer_ep.name if peer_ep is not None and getattr(peer_ep, "lifecycle", None) is spec else None
+        peer = self._peer_name_for(spec, base_url)
         try:
             launch_kw = _launch_key(self._harness, base_url, spec)
             if self._pending_launch_lines and launch_decision(
@@ -2524,6 +2524,69 @@ class OrchestratorREPL:
             if isinstance(exc, (RuntimeError, TimeoutError)) and text:
                 return None, text
             return None, f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+    def _launch_lock(self):
+        """The launch lock for this session's global config dir (D-47): every REPL launch takes it, and
+        it is re-entrant for the task that holds it, so a swap that fails and restores its incumbent
+        nests without waiting on itself. When another LocalHarness holds it past the queue-visibility
+        threshold the person is told once. A REPL built with no config dir has nothing to lock."""
+        cfg = self._server_config_dir
+        if cfg is None:
+            return contextlib.nullcontext()
+        from localharness.provider.lifecycle import LAUNCH_LOCK_WAIT_LINE, launch_lock
+        return launch_lock(cfg, on_wait=lambda: self._send_info(LAUNCH_LOCK_WAIT_LINE))
+
+    def _peer_name_for(self, spec: Any, base_url: str) -> str | None:
+        """The configured peer's name for ``base_url``, only when ``spec`` IS that peer's own lifecycle
+        (identity, not equality); None for the primary or a spec that merely equals a peer's."""
+        peer_ep = self._peer_by_base_url(base_url)
+        if peer_ep is not None and getattr(peer_ep, "lifecycle", None) is spec:
+            return peer_ep.name
+        return None
+
+    def _build_relaunch(self, spec: Any, base_url: str, cfg_dir: Path | None,
+                        launch_key: dict[str, str], peer: str | None, provider_type: str | None):
+        """The zero-argument relaunch of the server the harness launched at ``base_url`` (D-22): the
+        REPL's sixth launch path. It activates ``spec`` itself (the object it was built from, never a
+        re-read of disk) through the same strategy, with the same ``peer=`` and ``autosense=`` the cold
+        branch passes and the key fixed when the pair was built. The launch decision, the loopback-last
+        argv and the key in the child's environment all come from ``activate``; a refusal or failure
+        propagates to the recovery flight (D-24). It takes the launch lock and, under it, asks again
+        whether a server is already up (another process may have brought one up while this waited): if
+        so it returns None and launches nothing."""
+
+        async def relaunch():
+            from localharness.provider import lifecycle as _lifecycle
+            from localharness.provider import server as managed_server
+            strategy = _lifecycle.strategy_for(spec)
+
+            def _already_up() -> bool:
+                try:
+                    if strategy.liveness(spec, cfg_dir).alive:
+                        return True
+                except Exception:  # noqa: BLE001 — a liveness that cannot be asked is "not up"
+                    pass
+                return managed_server.server_pid(cfg_dir) is not None
+
+            async with self._launch_lock():
+                if await asyncio.to_thread(_already_up):
+                    return None
+                if self._pending_launch_lines and managed_server.launch_decision(
+                        spec, bool(launch_key), peer=peer).refusal is None:
+                    await self._flush_launch_lines()  # a relaunch that is the session's first launch
+                live = await strategy.activate(
+                    spec, cfg_dir, base_url, timeout_seconds=_lifecycle.relaunch_budget(), peer=peer,
+                    autosense=getattr(self._harness, "autosense", None), **launch_key)
+            # the report is outside the lock and the launch: a reporting fault never reads as a failed launch
+            await self._announce_window(
+                live, provider_type or spec.runtime,
+                live.served_models[0] if live.served_models else spec.model)
+            note = getattr(live, "note", None)
+            if note:
+                await self._send_info(note)
+            return live
+
+        return relaunch
 
     def _provider_type_for_base_url(self, base_url: str) -> str | None:
         """Resolve the runtime ``provider_type`` for ``base_url`` against the CURRENT session config
