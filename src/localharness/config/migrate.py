@@ -120,8 +120,10 @@ class PartialMigrationError(MigrationError):
     is attempted, and config.yaml is written with all its changes (the shipped deny defaults and
     the init-nulls stamp included) after them. A file migrate could read but not write, that the
     init-nulls step clears, is recorded in :data:`INIT_NULLS_PENDING_FILE`, so the next start or
-    `config migrate` retries that file, and only that file. An unwritable agent file never holds
-    back config.yaml, and never re-arms the step for the files that were written."""
+    `config migrate` retries that file, and only that file: such a file is never skipped for good.
+    A file migrate cannot read or parse is never in the plan at all (:func:`scan_sidecars`), so it
+    is neither tried nor recorded (IN-32). An unwritable agent file never holds back config.yaml,
+    and never re-arms the step for the files that were written."""
 
     def __init__(self, failures: list[tuple[Path, OSError]], written: list[Path],
                  backups: list[Path]) -> None:
@@ -304,8 +306,11 @@ def scan_sidecars(config_dir: Path, *, init_nulls_due: bool = False,
 
     Read-only and forgiving: a file that will not parse, or that is not a mapping, is left alone
     rather than rewritten — migrate edits keys it understands, and a file it cannot read is
-    not a file it can safely edit. Sorted so the CLI's listing (and its backups) are in a stable
-    order. Nothing outside the global config dir is ever considered (review finding R10)."""
+    not a file it can safely edit. Such a file is not recorded as owed either (IN-32): once the
+    step's stamp has moved, a file that later becomes readable keeps init's values, the stricter
+    direction (a cap stays), until the owner clears them. Sorted so the CLI's listing (and its
+    backups) are in a stable order. Nothing outside the global config dir is ever considered
+    (review finding R10)."""
     found: list[SidecarPlan] = []
     for name in SIDECAR_DIRS:
         for path in sorted((config_dir / name).glob("*.yaml")):
