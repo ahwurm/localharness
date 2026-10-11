@@ -2624,7 +2624,10 @@ class AgentLoop:
                 "Reconnect to the model server failed in %s (iter %d): %s",
                 self._config.name, session.iteration, note,
             )
-            return False, _sanitize_provider_text(note, 1500)
+            note = _sanitize_provider_text(note, 1500)
+            # it is appended after a whole sentence ("... across 2 iterations." / the error's own text),
+            # so it starts one: the flight's sentences begin in lower case
+            return False, note[:1].upper() + note[1:]
         return True, ""
 
     async def _publish_provider_lost(self, session: Session, exc: Exception, bound: float) -> None:

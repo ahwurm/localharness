@@ -595,7 +595,7 @@ async def test_a_dead_server_with_no_relaunch_ends_at_once_with_its_log_tail(bus
 
     failed = _failed(bus)
     assert [f.reason for f in failed] == ["llm_error"]
-    assert "the model server exited. Log tail:" in failed[0].detail
+    assert "The model server exited. Log tail:" in failed[0].detail
     assert "boom-tail" in summary
     assert not [f for f in failed if f.reason == "internal_error"]
 
@@ -611,7 +611,22 @@ async def test_the_note_is_stripped_of_control_characters_and_capped(bus, sessio
     assert "\x1b" not in ending
     assert "\n" in ending
     assert len(ending) <= 1500
-    assert ending.startswith("xxx[31m\nline2")
+    assert ending.startswith("Xxx[31m\nline2")  # a sentence of its own: capitalised (IN-52)
+
+
+async def test_the_failure_sentence_starts_a_sentence_of_its_own_at_both_seams(bus, sessions, sleeps):
+    """IN-52: the flight's sentences begin in lower case; appended after "... across N iterations." or
+    after the error's own text, the note reads as a sentence: capitalised."""
+    pair = FakePair(error=TimeoutError("the model server did not come back within 30s"))
+    summary = await _loop(_scripted([_pce("refused")]), bus, server_recovery=lambda: pair).run_turn("go")
+    assert "iterations. The model server did not come back within 30s" in summary
+
+    bus2 = type(bus)()
+    loop = _loop(_scripted([_answer("never")]), bus2, server_recovery=lambda: pair)
+    _fail_first_build(loop)
+    await loop.run_turn("go")
+    (failed,) = _failed(bus2)
+    assert failed.detail.endswith(" The model server did not come back within 30s")
 
 
 async def test_one_failed_reconnect_publishes_exactly_one_llm_error(bus, sessions, sleeps):
