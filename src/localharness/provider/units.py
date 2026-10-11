@@ -234,6 +234,9 @@ def _is_regular_file(path: str) -> bool:
 # ------------------------------------------------------------------------------- the unit file
 
 _EXEC_PREFIX = "@-:+!|"
+"""The characters a systemd `ExecStart=` may start with, plus `|`. `|` is NOT a systemd prefix: it is kept
+on purpose (D-53) so that a command that starts with a pipe is refused as "runs through a shell" instead
+of being read as a program called `|...`; for any real unit file that skip is unreachable."""
 
 
 def _names_model(tokens: list[str]) -> bool:
