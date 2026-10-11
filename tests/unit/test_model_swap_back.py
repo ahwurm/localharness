@@ -297,6 +297,45 @@ async def test_the_original_name_still_swaps_back_after_a_typed_file_was_served(
 
 
 @pytest.mark.asyncio
+async def test_a_relaunch_after_a_typed_gguf_restart_brings_back_that_file(tmp_path, boundaries, monkeypatch):
+    """WR-51: the typed restart launched a copy of the record (the record keeps its own weights); if that
+    server dies, the reconnect's relaunch brings back the file that was serving, never the record's."""
+    path = _gguf(tmp_path)
+    primary = _llama(served_name="qwen-27b")
+    _, repl, _, agent, _ = _on_a_peer(tmp_path, primary)
+    _ready_as(monkeypatch, "Other-Q4")
+    await repl._handle_slash(f"/model {path}")
+    assert agent._llm.config.base_url == PRIMARY_URL
+    seen = _record_activations(monkeypatch)
+
+    pair = repl.server_recovery()
+    await pair.relaunch()
+
+    assert seen == [{"model": str(path), "served_name": "Other-Q4", "runtime": "llamacpp"}]
+    assert _flag_value(boundaries.cmds[-1], "-m") == str(path)
+    assert primary.model == "/x/primary.gguf"  # the record is still its own
+
+
+@pytest.mark.asyncio
+async def test_after_swapping_back_by_name_the_relaunch_is_the_record_again(tmp_path, boundaries, monkeypatch):
+    path = _gguf(tmp_path)
+    primary = _llama(served_name="qwen-27b")
+    _, repl, _, _, _ = _on_a_peer(tmp_path, primary)
+    _ready_as(monkeypatch, "Other-Q4")
+    await repl._handle_slash(f"/model {path}")
+    typed_pair = repl.server_recovery()
+    _ready_as(monkeypatch, "qwen-27b")
+    await repl._handle_slash("/model qwen-27b")
+    seen = _record_activations(monkeypatch)
+
+    pair = repl.server_recovery()
+    assert pair is not typed_pair  # what was launched changed, so the pair was rebuilt
+    await pair.relaunch()
+
+    assert seen == [{"model": "/x/primary.gguf", "served_name": "qwen-27b", "runtime": "llamacpp"}]
+
+
+@pytest.mark.asyncio
 async def test_a_failed_typed_restart_leaves_the_primary_record_as_it_was(tmp_path, boundaries, monkeypatch):
     """WR-53: the typed file never loads; the original weights stay reachable by their name."""
     path = _gguf(tmp_path)

@@ -423,6 +423,11 @@ class OrchestratorREPL:
         # The loop's reconnect supplier (`server_recovery`) keeps its last pair here: (key, pair, the
         # active spec held so its id cannot be reused while the memo stands). None until first asked.
         self._recovery_memo: Optional[tuple[tuple, Any, Any]] = None
+        # The spec object the managed restart actually launched, paired with the very `_active_heavy`
+        # tuple it was launched under: a typed `.gguf` restart launches a COPY of the shared record
+        # (the record keeps its own weights), and the relaunch must bring back that copy. Any later
+        # assignment of `_active_heavy` makes a new tuple, so a stale pairing is never used.
+        self._active_launch: Optional[tuple[Any, Any]] = None
         _srv = getattr(harness_config, "server", None)
         _prov = getattr(harness_config, "provider", None)
         # The lock tracks only what the harness LAUNCHED (D-33): a `server:` record alone proves
@@ -2269,6 +2274,7 @@ class OrchestratorREPL:
                 if box_note is not None:
                     box_note(None)
             self._active_heavy = (managed, llm.config.base_url)
+            self._active_launch = (self._active_heavy, spec)  # the copy for a typed .gguf, else managed
         served = models[0] if models else target
         # the restart's window line, after the try/except above (D-22, D-36)
         await self._announce_window(ep, prim_ptype or managed.runtime, served)
@@ -2541,7 +2547,8 @@ class OrchestratorREPL:
         the client is using, by exact string equality of ``_active_heavy[1]`` and the client's
         ``base_url``. A switch to an attach-only peer leaves ``_active_heavy`` at the primary, so this
         test is what stops the primary's spec being relaunched against the peer's address. The relaunch
-        is the spec object the harness launched (never a re-read of disk or a workspace layer) and its
+        is the spec object the harness launched (never a re-read of disk or a workspace layer; after a
+        typed ``.gguf`` restart, the copy that restart launched, not the shared record) and its
         key is that endpoint's own, fixed here (``_launch_key``): a keyed peer is relaunched with its
         key, a keyless primary lends a keyed peer nothing, and a ``require_api_key`` spec whose key
         resolves to nothing is polled, never relaunched (D-14). Its config dir is its strategy's own
@@ -2551,7 +2558,12 @@ class OrchestratorREPL:
         from localharness.provider.lifecycle import ServerRecovery, strategy_for
         client_base_url = self._agent._llm.config.base_url
         active = self._active_heavy
-        key = (client_base_url, id(active[0]) if active else None, active[1] if active else None)
+        # what was launched under this very `_active_heavy`: a typed .gguf restart's copy, else the record
+        launched = self._active_launch
+        launch_spec = (launched[1] if active is not None and launched is not None and launched[0] is active
+                       else active[0] if active else None)
+        key = (client_base_url, id(active[0]) if active else None, active[1] if active else None,
+               id(launch_spec) if launch_spec is not None else None)
         memo = self._recovery_memo
         if memo is not None and memo[0] == key:
             return memo[1]
@@ -2560,7 +2572,7 @@ class OrchestratorREPL:
         config_dir = None
         runtime = None
         if active is not None and active[1] == client_base_url:
-            spec = active[0]
+            spec = launch_spec
             runtime = getattr(spec, "runtime", None)
             if cfg_dir is not None:
                 config_dir = strategy_for(spec).recovery_config_dir(cfg_dir)
@@ -2579,7 +2591,8 @@ class OrchestratorREPL:
                 if cfg_dir is not None:
                     config_dir = strategy_for(managed).recovery_config_dir(cfg_dir)
         pair = ServerRecovery(client_base_url, config_dir, relaunch, runtime)
-        self._recovery_memo = (key, pair, active[0] if active else None)
+        # the active spec and the launched one are held so their ids cannot be reused while the memo stands
+        self._recovery_memo = (key, pair, (active[0] if active else None, launch_spec))
         return pair
 
     def _launch_lock(self):
