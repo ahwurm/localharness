@@ -226,6 +226,11 @@ def _child_budget_config(
     return BudgetConfig(max_actions=b.actions, max_duration_minutes=b.minutes, kill_file=kill_file)
 
 
+def _children_budget(block: ChildrenBudgetConfig | None) -> ChildrenBudgetConfig:
+    """The operator's `org.children_budget`, else the schema defaults (today's numbers)."""
+    return block if block is not None else ChildrenBudgetConfig()
+
+
 def build_explore_config(
     name: str = "explore", kill_file: str | None = None, *, budget: ChildBudget | None = None,
 ) -> AgentConfig:
@@ -630,6 +635,7 @@ async def dispatch_explore_subagent(
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
+    children_budget: ChildrenBudgetConfig | None = None,
 ) -> DelegationResult:
     """Spawn a read-only explore child, run one turn on `task`, return structured findings.
 
@@ -662,7 +668,8 @@ async def dispatch_explore_subagent(
 
     # config_override (when present) is the built-in base with an agents/explore.yaml overlay
     # already applied by the runner; the structural read-only toolset stays EXPLORE_TOOLS.
-    child_config = config_override or build_explore_config(agent_name)
+    child_config = config_override or build_explore_config(
+        agent_name, budget=_children_budget(children_budget).for_name("explore"))
 
     # Read-only registry: builtins {read, glob, grep} only — no write/bash/spawn.
     child_registry = ToolRegistry.from_allowed(EXPLORE_TOOLS, base_registry=base_registry)
@@ -720,6 +727,7 @@ async def dispatch_web_subagent(
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
+    children_budget: ChildrenBudgetConfig | None = None,
 ) -> DelegationResult:
     """Spawn a web-research child (web_search/web_fetch[/web_page_query] only), run one turn, return findings.
 
@@ -741,7 +749,8 @@ async def dispatch_web_subagent(
     # config_override (when present) is the built-in base with an agents/web-researcher.yaml
     # overlay already applied by the runner (the real budget knob); the structural web toolset
     # stays WEB_TOOLS regardless — the overlay tunes AgentConfig fields (budget/role/…), not tools.
-    child_config = config_override or build_web_researcher_config(agent_name)
+    child_config = config_override or build_web_researcher_config(
+        agent_name, budget=_children_budget(children_budget).for_name("web-researcher"))
 
     # Web-only registry: builtins {web_search, web_fetch, web_page_query} — no write/bash.
     child_registry = ToolRegistry.from_allowed(WEB_TOOLS, base_registry=base_registry)
@@ -918,6 +927,7 @@ async def dispatch_search_verifier_subagent(
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
+    children_budget: ChildrenBudgetConfig | None = None,
 ) -> DelegationResult:
     """Spawn a BLIND search-verifier (web_search/web_fetch/web_page_query), run one turn, write a
     keep-flag ledger row, and return a COMPACT verdict flag (never the transcript).
@@ -936,7 +946,8 @@ async def dispatch_search_verifier_subagent(
 
     # config_override (when present) is the built-in base with an agents/search-verifier.yaml
     # overlay already applied by the runner; the structural read-only web subset stays fixed.
-    child_config = config_override or build_search_verifier_config(agent_name)
+    child_config = config_override or build_search_verifier_config(
+        agent_name, budget=_children_budget(children_budget).for_name("search-verifier"))
     # Read-only web subset — no write/bash/spawn, and (by contract) no `agent` tool: leaf.
     child_registry = ToolRegistry.from_allowed(SEARCH_VERIFIER_TOOLS, base_registry=base_registry)
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
@@ -1087,6 +1098,7 @@ async def _run_chunk_summarizer(
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
+    children_budget: ChildrenBudgetConfig | None = None,
 ) -> str:
     """Run ONE leaf over a single granted chunk in a FRESH bounded window; return its extract (or '').
     The leaf's store is granted ONLY this chunk (parent=cruncher_store), so it reads exactly one
@@ -1119,7 +1131,7 @@ async def _run_chunk_summarizer(
         list(CHUNK_SUMMARIZER_TOOLS),
     )
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
-    chunk_cfg = build_chunk_summarizer_config()
+    chunk_cfg = build_chunk_summarizer_config(budget=_children_budget(children_budget).for_name("chunk-summarizer"))
     _kill, _compact = _child_runtime_paths(chunk_cfg, config_dir, state_dir=state_dir)
     try:
         leaf_loop = AgentLoop(
@@ -1148,6 +1160,7 @@ async def _cruncher_combine_turn(
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
+    children_budget: ChildrenBudgetConfig | None = None,
 ) -> str:
     """One bounded cruncher reduce turn over `items` (section-extracts, or partial-summaries on a
     higher level). Tool-less (pure reasoning over inline text) unless a clean-origin exec_seed is
@@ -1159,7 +1172,7 @@ async def _cruncher_combine_turn(
         from localharness.tools.builtin.cruncher_exec import CruncherExecTool
         await reg.register(CruncherExecTool(exec_seed, cell_timeout_s=exec_cfg.cell_timeout_s,
                                             mem_limit_mb=exec_cfg.mem_limit_mb), scope="global")
-    cfg = build_cruncher_config()
+    cfg = build_cruncher_config(budget=_children_budget(children_budget).for_name("cruncher"))
     cfg.tools = ToolConfig(add=[])  # reduce over inline text; exec (if any) resolves via inherited global
     _kill, _compact = _child_runtime_paths(cfg, config_dir, state_dir=state_dir)
     loop = AgentLoop(config=cfg, llm=llm, bus=child_bus, context_manager=ctx,
@@ -1247,6 +1260,7 @@ async def dispatch_cruncher_subagent(
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
+    children_budget: ChildrenBudgetConfig | None = None,
 ) -> str:
     """J3 cruncher: faithful over-window reduce (Plan α). Reads the GRANTED over-window body(ies) by
     handle (read-through), splits each (harness-orchestrated map), summarizes each chunk in a fresh
@@ -1304,6 +1318,7 @@ async def dispatch_cruncher_subagent(
                 effort=effort, effort_ratios=effort_ratios,
                 template_margin_ratio=template_margin_ratio,
                 server_recovery=server_recovery,
+                children_budget=children_budget,
             )
     raw = await asyncio.gather(*[_summarize(i, ph) for i, ph in enumerate(piece_handles)])
     extracts = [f"[section {i + 1}]\n{e.strip()}" for i, e in enumerate(raw) if e and e.strip().upper() != "NONE"]
@@ -1353,6 +1368,7 @@ async def dispatch_cruncher_subagent(
             effort=effort, effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
             server_recovery=server_recovery,
+            children_budget=children_budget,
         )
 
     items, level, reduce_trace = await hierarchical_reduce(
@@ -1378,6 +1394,7 @@ async def dispatch_cruncher_subagent(
         effort=effort, effort_ratios=effort_ratios,
         template_margin_ratio=template_margin_ratio,
         server_recovery=server_recovery,
+        children_budget=children_budget,
     )
     log.info("cruncher reduced %d section(s) over %d granted handle(s)", n_sections, len(handles))
     # R2: only a BROAD query (level>=1) inserted lossy partial nodes; on a TARGETED query the final
@@ -1420,6 +1437,7 @@ def make_explore_agent_runner(
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
+    children_budget: ChildrenBudgetConfig | None = None,
 ) -> Callable[..., Awaitable[Any]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
 
@@ -1450,6 +1468,13 @@ def make_explore_agent_runner(
     callable returning a `ServerRecovery` (or None). Every child loop, the cruncher leaf and combine
     loops and the nested runner receive the SAME object, so N children under one dead server await
     one relaunch. None (bench loops, tests) keeps every child on today's no-reconnect behavior.
+
+    `children_budget`: the operator's `org.children_budget` block (D-14), a value captured when the
+    runner is built (start passes `harness.org.children_budget`). Each built-in child, the cruncher's
+    chunk-summarizer leaves and combine turns, every web-researcher retry and the nested search-verifier
+    runner are built on their OWN entry of it (`for_name`, hyphenated names included); the nested runner
+    receives the same block. None means the schema defaults, which are the numbers children had before
+    the block existed (the bench passes nothing).
 
     `parent_store`: the PARENT agent's ContentStore. When the model delegates with grant_handles,
     the child is built with ContentStore(parent=parent_store, granted=frozenset(grant_handles)) so
@@ -1530,6 +1555,7 @@ def make_explore_agent_runner(
             effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
             server_recovery=server_recovery,
+            children_budget=children_budget,
         )
         return AgentTool(agent_runner=child_runner, available_agents=delegatees)
 
@@ -1568,6 +1594,7 @@ def make_explore_agent_runner(
                 effort=child_effort(parent_effort, None), effort_ratios=effort_ratios,
                 template_margin_ratio=template_margin_ratio,
                 server_recovery=server_recovery,
+                children_budget=children_budget,
             )
             return r if isinstance(r, DelegationResult) else DelegationResult(str(r))
         if name == "explore":
@@ -1616,8 +1643,9 @@ def make_explore_agent_runner(
         # error surfaced to the model, never a silent fallback). No override hook wired (e.g.
         # the bench runner) => None => the dispatch builds its own default, unchanged. The
         # structural toolset stays fixed by the dispatcher — the overlay tunes AgentConfig fields.
+        cb = _children_budget(children_budget)
         config_override = (
-            load_builtin_override(name, base_builder(name))
+            load_builtin_override(name, base_builder(name, budget=cb.for_name(name)))
             if load_builtin_override is not None else None
         )
         return await dispatch(
@@ -1640,6 +1668,7 @@ def make_explore_agent_runner(
             effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
             server_recovery=server_recovery,
+            children_budget=children_budget,
         )
 
     return _run_agent
