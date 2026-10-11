@@ -27,6 +27,7 @@ from localharness.cli import workspace as ws_mod
 from localharness.config import trust
 from localharness.config.loader import ConfigLoader
 from tests.integration.test_image_plugin_e2e import _machine, _record_dials
+from tests.unit.launch_support import stub_liveness
 
 G1 = {"name": "g1", "transport": "stdio", "command": "/bin/echo", "args": ["hi"]}
 G2 = {"name": "g2", "transport": "stdio", "command": "/bin/sh", "args": ["-c", "id"]}
@@ -383,6 +384,7 @@ async def test_org_settings_and_a_launch_command_there_before_the_upgrade_are_ad
                                              "model": "m"})
     machine.tty(True)
     machine.answers()
+    stub_liveness(machine.mp, False)  # the absent pidfile's answer, for start and for the REPL's seed
 
     await machine.start()
 

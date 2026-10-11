@@ -7,7 +7,8 @@ prints the block only when the triple moved (always on a launch it made itself),
 
 Nothing here touches a real server, `nvidia-smi` or the host: the probe, the free memory, the weights
 size and the harness-pidfile liveness are faked through their module seams, and the ledger lives in
-`tmp_path`.
+`tmp_path`. One `alive` fact answers both of the harness-pidfile questions: start's own autostart check
+and the REPL's `_active_heavy` seed (05-11), which asks the strategy's liveness.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from localharness.provider.speed_stats import (
     record_window_report,
 )
 from tests.unit.gguf_support import write_gguf
+from tests.unit.launch_support import stub_liveness
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
 
 GIB = 2**30
@@ -69,6 +71,7 @@ class World:
         monkeypatch.setattr(autosense, "free_memory", lambda ratios: self.free)
         monkeypatch.setattr(autosense, "weights_bytes", lambda model, mmproj=None: WEIGHTS_A)
         monkeypatch.setattr(start_cmd, "_managed_server_running", lambda strategy, srv, d: self.alive)
+        stub_liveness(monkeypatch, lambda: self.alive)
 
         async def capture_budget(repl):
             self.budgets.append(repl._agent._ctx.max_context_tokens)
