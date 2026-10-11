@@ -1053,6 +1053,7 @@ async def wait_ready(
     *,
     api_key: str | None = None,
     runtime: str | None = None,
+    liveness: bool = False,
 ) -> list[str]:
     """Poll {base_url}/models until the server answers; return served model ids.
 
@@ -1063,6 +1064,12 @@ async def wait_ready(
     `api_key` (a server that requires one) is sent as a bearer on every poll; without it the
     poll is exactly the keyless request it always was. `runtime` names the server in the failure
     messages ("llama.cpp exited during startup"); unset, they read "vLLM" as they always did.
+
+    `liveness=True` is for a reconnect wait only (`ServerRecovery`), never a launch: any HTTP answer
+    below 500 means the server is back (a 401 from a key that changed, a 404 or 403 from a proxy that
+    hides `/models`), and a 200 whose body is not the OpenAI shape still counts; the ids are then
+    best-effort (possibly empty). The re-sent request reports the server's real status. A 5xx (503
+    while a model loads) is still not ready. Launch-time callers keep requiring a well-formed 200.
     """
     label = RUNTIME_LABELS.get(runtime, "vLLM") if runtime else "vLLM"
     start = time.monotonic()
@@ -1077,8 +1084,13 @@ async def wait_ready(
             try:
                 resp = await client.get(f"{base_url.rstrip('/')}/models", timeout=3.0,
                                         **({"headers": headers} if headers else {}))
-                if resp.status_code == 200:
+                if resp.status_code == 200 and not liveness:
                     return [m["id"] for m in resp.json().get("data", [])]
+                if liveness and resp.status_code < 500:
+                    try:
+                        return [m["id"] for m in resp.json().get("data", [])]
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        return []  # it answered: alive, whatever the body says
             except httpx.HTTPError:
                 pass
             if on_poll is not None:

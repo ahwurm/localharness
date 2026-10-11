@@ -87,10 +87,10 @@ class WaitReadyRecorder:
         self.calls: list[dict] = []
 
     async def __call__(self, base_url, config_dir=None, timeout_seconds=1800.0, poll_seconds=3.0,
-                       on_poll=None, *, api_key=None, runtime=None):
+                       on_poll=None, *, api_key=None, runtime=None, liveness=False):
         self.calls.append({"base_url": base_url, "config_dir": config_dir,
                            "timeout_seconds": timeout_seconds, "poll_seconds": poll_seconds,
-                           "api_key": api_key, "runtime": runtime})
+                           "api_key": api_key, "runtime": runtime, "liveness": liveness})
         if self.delay:
             await asyncio.sleep(self.delay)
         outcome = self.outcomes.pop(0) if self.outcomes else ["m"]
@@ -171,6 +171,65 @@ async def test_wait_ready_gets_the_pairs_dir_and_runtime_and_the_remaining_bound
     assert first["timeout_seconds"] <= 30
     assert second["timeout_seconds"] < first["timeout_seconds"]
     assert relaunch.calls == 1
+
+
+class Answering:
+    """A `/models` handler that answers 503 for `down_for` calls, then `status` with `body` (raw bytes)."""
+
+    def __init__(self, status: int, body: bytes, down_for: int = 0) -> None:
+        self.status, self.body, self.down_for = status, body, down_for
+        self.calls = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        if self.calls <= self.down_for:
+            return httpx.Response(503, json={"error": "loading"})
+        return httpx.Response(self.status, content=self.body)
+
+
+@pytest.mark.parametrize(("status", "body"), [
+    (401, b'{"error": "invalid api key"}'),   # a hand-run server restarted with another key
+    (403, b"forbidden"),                       # a proxy that hides /models
+    (404, b"<html>not found</html>"),
+    (200, b"not json at all"),                 # a 200 that is not the OpenAI shape
+    (200, b"[1, 2, 3]"),
+    (200, b'{"data": [{"name": "no id"}]}'),
+])
+async def test_any_non_5xx_answer_ends_the_wait_at_once(monkeypatch, status, body):
+    """The server is back the moment it answers anything but a 5xx: the identical re-send then reports
+    its real status, instead of a 30-minute wait or a KeyError ending the turn."""
+    endpoint = Answering(status, body, down_for=1)
+    monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(endpoint))
+    announce = Announce()
+    await asyncio.wait_for(ServerRecovery(None, None, None).recover(
+        base_url=URL, api_key="none", wait_seconds=30, on_lost=announce), 2.0)
+    assert endpoint.calls == 2  # the 503, then the answer
+
+
+async def test_a_5xx_is_still_not_back(monkeypatch):
+    endpoint = Answering(500, b"internal error")
+    monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(endpoint))
+    with pytest.raises(TimeoutError, match="did not come back within"):
+        await ServerRecovery(None, None, None).recover(
+            base_url=URL, api_key="none", wait_seconds=0.1, on_lost=Announce())
+    assert endpoint.calls >= 2
+
+
+async def test_the_flight_asks_wait_ready_for_liveness(monkeypatch):
+    recorder = WaitReadyRecorder()
+    monkeypatch.setattr(server, "wait_ready", recorder)
+    await ServerRecovery(None, None, None).recover(
+        base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
+    assert recorder.calls[0]["liveness"] is True
+
+
+async def test_a_launch_time_wait_still_needs_a_200(monkeypatch):
+    """`liveness` is the flight's alone: `start` and `/model` (and `activate`) keep waiting for a 200."""
+    endpoint = Answering(401, b'{"error": "invalid api key"}')
+    monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(endpoint))
+    with pytest.raises(TimeoutError, match="not ready after"):
+        await server.wait_ready(URL, None, timeout_seconds=0.1, poll_seconds=0.02)
+    assert endpoint.calls >= 2
 
 
 async def test_poll_seconds_follows_the_constant_at_call_time(monkeypatch):

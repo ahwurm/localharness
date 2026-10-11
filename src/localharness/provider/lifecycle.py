@@ -1041,6 +1041,7 @@ class ServerRecovery:
                         timeout_seconds=remaining,
                         poll_seconds=poll,
                         runtime=self.runtime,
+                        liveness=True,  # any non-5xx answer is a server that is back (D-14 refined)
                         **server.key_kwargs(api_key),
                     )
                     return
