@@ -719,7 +719,8 @@ class BudgetConfig(BaseModel):
         ge=1,
         le=10_000,
         description=(
-            "Maximum number of tool calls in one turn. None means no configured limit and the "
+            "The most tool calls one turn may dispatch, checked before each model call (the calls "
+            "of the iteration in progress complete). None means no configured limit and the "
             "surface decides: an attended terminal runs unbounded, a remote unattended surface is "
             "capped by channels.unattended_max_actions."
         ),
@@ -1342,8 +1343,9 @@ class ChannelsConfig(BaseModel):
         default=100,
         ge=1,
         description=(
-            "The action ceiling for every loop while the session is `unattended` with no local "
-            "operator. Machine-level only."
+            "The most tool calls one turn of any loop may dispatch while the session is "
+            "`unattended` with no local operator, checked before each model call. Machine-level "
+            "only."
         ),
     )
 
@@ -1383,8 +1385,9 @@ and "always" from the phone and Discord, through the gate and each channel's `lo
 flag; the terminal and Zed are never limited.
 
 **`channels.unattended_max_actions`** (machine-level only, default `100`, at least 1): the most tool
-calls one turn may make while the session runs `unattended` with no one at this machine, whatever
-`permissions.budget.max_actions` says. An agent that configures a lower number keeps it; one that
+calls one turn may dispatch while the session runs `unattended` with no one at this machine,
+whatever `permissions.budget.max_actions` says. It is checked before each model call, so the calls
+of the iteration in progress complete and a parallel batch can end the turn a few calls past it. An agent that configures a lower number keeps it; one that
 configures a higher number, or none, runs under this one, and the stop names the key
 (`... Stopping to prevent runaway execution. (channels.unattended_max_actions)`). The interactive
 terminal (and Zed) is never capped by it: with `permissions.budget.max_actions` unset, the person at
@@ -1393,7 +1396,7 @@ limit is read at every check, so switching the session into or out of `unattende
 the next iteration while the calls already in flight finish.
 
 **`org.children_budget`** (default shown; a project may only lower it): each child agent's own
-ceiling of model round-trips and minutes, `explore` 8 / 3, `web_researcher` 56 / 20,
+ceiling of dispatched tool calls and minutes, `explore` 8 / 3, `web_researcher` 56 / 20,
 `search_verifier` 12 / 6, `cruncher` 6 / 20, `chunk_summarizer` 3 / 6 and `default` 8 / 3 (any
 child with no entry of its own), plus `lookup_share` (`0.25`) and `review_share` (`0.5`), the part
 of a finite parent's remaining budget a delegated lookup or review child takes. Write one key of
@@ -1443,7 +1446,7 @@ list — every field is declared there with its own description.
 | `permissions.ask.<rule set>` | list[string] or null | null | — | Override one of the gate rule sets in `agent/gate_types.py`; null = the shipped default |
 | `permissions.deny_patterns` | list[string] | 32 shipped defaults | format: `tool(arg_glob)` | Deny patterns. Unioned down the hierarchy — an agent can add, never remove |
 | `permissions.workspace_root` | string or null | `null` | abs or `~/…` path | Hard filesystem confinement for write/edit/bash_exec, enforced as `permission_denied`. Null (the default, workspace or not, since v0.14.1) = unconfined |
-| `permissions.budget.max_actions` | int or null | `null` | 1–10000 | Max tool calls in one turn; null = no configured limit (an attended terminal runs unbounded; a remote unattended surface is capped by `channels.unattended_max_actions`) |
+| `permissions.budget.max_actions` | int or null | `null` | 1–10000 | Max tool calls dispatched in one turn, checked before each model call; null = no configured limit (an attended terminal runs unbounded; a remote unattended surface is capped by `channels.unattended_max_actions`) |
 | `permissions.budget.max_duration_minutes` | float or null | `null` | 0.1–1440 | Max turn duration; null (the default since 0.13.3) = no time limit. A `config.yaml` written by an older `init` still carries `30.0` and still pins it |
 | `permissions.budget.max_tool_calls` | int or null | null | 0+ | Separate ceiling on dispatched tool calls; null = `max_actions` alone governs |
 | `stuck_detector.call_only_multiplier` | int | `3` | 1–10 | Per-turn ceiling on one identical call (same tool, same arguments) whatever its results: `call_only_multiplier` x `escalation_threshold` calls escalate. Machine-level only, with the whole `stuck_detector` section |
