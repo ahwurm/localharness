@@ -26,6 +26,7 @@ from localharness.config.models import AgentConfig, BudgetConfig, PermissionConf
 
 if TYPE_CHECKING:
     from localharness.plugins.api import MemoryWriteHandle
+    from localharness.provider.lifecycle import ServerRecovery
 
 log = logging.getLogger("localharness.agent.subagent")
 
@@ -554,6 +555,7 @@ async def dispatch_config_subagent(
     effort: tuple[str, str] | None = None,
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
+    server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
 ) -> DelegationResult:
     """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
 
@@ -597,6 +599,7 @@ async def dispatch_config_subagent(
         compact_md_path=_compact,
         effort=effort, effort_ratios=effort_ratios,
         template_margin_ratio=template_margin_ratio,
+        server_recovery=server_recovery,
     )
 
     summary = await child_loop.run_turn(task)
@@ -626,6 +629,7 @@ async def dispatch_explore_subagent(
     effort: tuple[str, str] | None = None,
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
+    server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
 ) -> DelegationResult:
     """Spawn a read-only explore child, run one turn on `task`, return structured findings.
 
@@ -681,6 +685,7 @@ async def dispatch_explore_subagent(
         compact_md_path=_compact,
         effort=effort, effort_ratios=effort_ratios,
         template_margin_ratio=template_margin_ratio,
+        server_recovery=server_recovery,
     )
 
     summary = await child_loop.run_turn(task)
@@ -714,6 +719,7 @@ async def dispatch_web_subagent(
     effort: tuple[str, str] | None = None,
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
+    server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
 ) -> DelegationResult:
     """Spawn a web-research child (web_search/web_fetch[/web_page_query] only), run one turn, return findings.
 
@@ -764,6 +770,7 @@ async def dispatch_web_subagent(
             compact_md_path=_compact,
             effort=effort, effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
+            server_recovery=server_recovery,
         )
         brief = task if attempt == 0 else ZERO_CALL_RETRY_PREFIX + task
         summary = await child_loop.run_turn(brief)
@@ -910,6 +917,7 @@ async def dispatch_search_verifier_subagent(
     effort: tuple[str, str] | None = None,
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
+    server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
 ) -> DelegationResult:
     """Spawn a BLIND search-verifier (web_search/web_fetch/web_page_query), run one turn, write a
     keep-flag ledger row, and return a COMPACT verdict flag (never the transcript).
@@ -946,6 +954,7 @@ async def dispatch_search_verifier_subagent(
         compact_md_path=_compact,
         effort=effort, effort_ratios=effort_ratios,
         template_margin_ratio=template_margin_ratio,
+        server_recovery=server_recovery,
     )
 
     summary = await child_loop.run_turn(task)
@@ -1079,6 +1088,7 @@ async def _run_chunk_summarizer(
     effort: tuple[str, str] | None = None,
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
+    server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
 ) -> str:
     """Run ONE leaf over a single granted chunk in a FRESH bounded window; return its extract (or '').
     The leaf's store is granted ONLY this chunk (parent=cruncher_store), so it reads exactly one
@@ -1122,6 +1132,7 @@ async def _run_chunk_summarizer(
             kill_file_path=_kill, compact_md_path=_compact,
             effort=effort, effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
+            server_recovery=server_recovery,
         )
         answer = await leaf_loop.run_turn(leaf_task)  # raw extract (no findings-wrapper to mis-parse)
     except Exception as exc:  # noqa: BLE001 - one bad leaf must not abort the whole reduce
@@ -1138,6 +1149,7 @@ async def _cruncher_combine_turn(
     effort: tuple[str, str] | None = None,
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
+    server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
 ) -> str:
     """One bounded cruncher reduce turn over `items` (section-extracts, or partial-summaries on a
     higher level). Tool-less (pure reasoning over inline text) unless a clean-origin exec_seed is
@@ -1156,7 +1168,8 @@ async def _cruncher_combine_turn(
                      tool_registry=reg, permission_evaluator=permission_evaluator, gate=gate,
                      kill_file_path=_kill, compact_md_path=_compact,
                      effort=effort, effort_ratios=effort_ratios,
-                     template_margin_ratio=template_margin_ratio)
+                     template_margin_ratio=template_margin_ratio,
+                     server_recovery=server_recovery)
     label = "PARTIAL group of section-extracts" if partial else "EXTRACTS from the document's sections"
     goal = ("a faithful partial summary that preserves ALL question-relevant facts verbatim"
             if partial else "one accurate, grounded answer to the question")
@@ -1235,6 +1248,7 @@ async def dispatch_cruncher_subagent(
     effort: tuple[str, str] | None = None,
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
+    server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
 ) -> str:
     """J3 cruncher: faithful over-window reduce (Plan α). Reads the GRANTED over-window body(ies) by
     handle (read-through), splits each (harness-orchestrated map), summarizes each chunk in a fresh
@@ -1291,6 +1305,7 @@ async def dispatch_cruncher_subagent(
                 state_dir=state_dir,
                 effort=effort, effort_ratios=effort_ratios,
                 template_margin_ratio=template_margin_ratio,
+                server_recovery=server_recovery,
             )
     raw = await asyncio.gather(*[_summarize(i, ph) for i, ph in enumerate(piece_handles)])
     extracts = [f"[section {i + 1}]\n{e.strip()}" for i, e in enumerate(raw) if e and e.strip().upper() != "NONE"]
@@ -1339,6 +1354,7 @@ async def dispatch_cruncher_subagent(
             state_dir=state_dir,
             effort=effort, effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
+            server_recovery=server_recovery,
         )
 
     items, level, reduce_trace = await hierarchical_reduce(
@@ -1363,6 +1379,7 @@ async def dispatch_cruncher_subagent(
         exec_seed=exec_seed, exec_cfg=cruncher_config, config_dir=config_dir, state_dir=state_dir,
         effort=effort, effort_ratios=effort_ratios,
         template_margin_ratio=template_margin_ratio,
+        server_recovery=server_recovery,
     )
     log.info("cruncher reduced %d section(s) over %d granted handle(s)", n_sections, len(handles))
     # R2: only a BROAD query (level>=1) inserted lossy partial nodes; on a TARGETED query the final
@@ -1404,6 +1421,7 @@ def make_explore_agent_runner(
     effort_fn: Callable[[], tuple[str | None, str | None]] | None = None,
     effort_ratios: tuple[float, float] | None = None,
     template_margin_ratio: float | None = None,
+    server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
 ) -> Callable[..., Awaitable[Any]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
 
@@ -1429,6 +1447,11 @@ def make_explore_agent_runner(
     the nested runner) so a child sizes its output headroom with the margin the person set; None
     leaves children on the 1/64 default. Bench/eval loops are non-interactive and keep that default
     (`bench/runner.py` does not pass it).
+
+    `server_recovery`: the parent session's late-bound reconnect supplier (D-21), a zero-argument
+    callable returning a `ServerRecovery` (or None). Every child loop, the cruncher leaf and combine
+    loops and the nested runner receive the SAME object, so N children under one dead server await
+    one relaunch. None (bench loops, tests) keeps every child on today's no-reconnect behavior.
 
     `parent_store`: the PARENT agent's ContentStore. When the model delegates with grant_handles,
     the child is built with ContentStore(parent=parent_store, granted=frozenset(grant_handles)) so
@@ -1508,6 +1531,7 @@ def make_explore_agent_runner(
             effort_fn=effort_fn,
             effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
+            server_recovery=server_recovery,
         )
         return AgentTool(agent_runner=child_runner, available_agents=delegatees)
 
@@ -1545,6 +1569,7 @@ def make_explore_agent_runner(
                 state_dir=state_dir,
                 effort=child_effort(parent_effort, None), effort_ratios=effort_ratios,
                 template_margin_ratio=template_margin_ratio,
+                server_recovery=server_recovery,
             )
             return r if isinstance(r, DelegationResult) else DelegationResult(str(r))
         if name == "explore":
@@ -1585,6 +1610,7 @@ def make_explore_agent_runner(
                 effort=child_effort(parent_effort, getattr(cfg, "effort", None)),
                 effort_ratios=effort_ratios,
                 template_margin_ratio=template_margin_ratio,
+                server_recovery=server_recovery,
             )
         # Built-in subagents are TUNABLE via an optional agents/<name>.yaml overlay (the real
         # budget knob): base = the code-defined default config, overlaid per-field by the yaml
@@ -1615,6 +1641,7 @@ def make_explore_agent_runner(
             effort=child_effort(parent_effort, getattr(config_override, "effort", None)),
             effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
+            server_recovery=server_recovery,
         )
 
     return _run_agent
