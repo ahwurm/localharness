@@ -122,6 +122,9 @@ def test_peer_served_name_rule():
     assert model_ops.peer_served_name(ep("p", extra_args=["-a", "al"])) == "al"
     assert model_ops.peer_served_name(ep("p", extra_args=["--alias", "al2"])) == "al2"
     assert model_ops.peer_served_name(ep("p", extra_args=["--served-model-name", "al3"])) == "al3"
+    assert model_ops.peer_served_name(ep("p", extra_args=["--alias=al4"])) == "al4"
+    assert model_ops.peer_served_name(ep("p", extra_args=["--served-model-name=al5"])) == "al5"
+    assert model_ops.peer_served_name(ep("p", extra_args=["--alias="])) == "p"
     assert model_ops.peer_served_name(ep("p", extra_args=["-a"])) == "p"
     assert model_ops.peer_served_name(ep("p")) == "p"
     assert model_ops.peer_served_name(NS(name="q", lifecycle=None)) == "q"
@@ -315,3 +318,17 @@ def test_a_plain_model_switch_on_a_vllm_primary_still_writes_server_model(compon
 
     assert result.exit_code == 0, result.output
     assert _overlay(components_home)["server"]["model"] == "org/n"
+
+
+def test_the_repls_cold_peer_label_is_the_same_rule():
+    """IN-55: one copy of the rule, so `--alias=NAME` matches in `/model` as in `localharness model`."""
+    from types import SimpleNamespace as NS
+
+    from localharness.cli.repl import OrchestratorREPL
+
+    for args, expected in ((["--alias=al4"], "al4"), (["-a", "al"], "al"),
+                           (["--served-model-name", "al3"], "al3"), ([], "p")):
+        ep = NS(name="p", lifecycle=NS(served_name=None, extra_args=args))
+        assert OrchestratorREPL._cold_served_name(ep) == expected
+    assert model_ops.primary_served_name(NS(served_name=None, extra_args=["--alias=al4"]),
+                                         NS(default_model="d")) == "al4"

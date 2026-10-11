@@ -2423,21 +2423,13 @@ class OrchestratorREPL:
 
     @staticmethod
     def _cold_served_name(ep) -> str:
-        """The model id a cold lifecycle peer will serve — the record's ``served_name`` (the ``-a``
-        alias; read first, D-05), else the llama.cpp ``-a``/``--alias`` (or vLLM
-        ``--served-model-name``) from its launch args, falling back to the endpoint label. A
-        pre-launch MENU LABEL only; the client binds to the real ``live_ep.served_models[0]`` the
-        peer reports after it comes up, so a mislabel here can never mis-dispatch."""
-        served_name = getattr(ep.lifecycle, "served_name", None) if ep.lifecycle is not None else None
-        if served_name:
-            return served_name
-        args = ep.lifecycle.extra_args if ep.lifecycle is not None else []
-        for flag in ("-a", "--alias", "--served-model-name"):
-            if flag in args:
-                i = args.index(flag)
-                if i + 1 < len(args):
-                    return args[i + 1]
-        return ep.name
+        """The model id a cold lifecycle peer will serve: ``model_ops.peer_served_name``, the one rule
+        the ``localharness model`` command shares (the record's ``served_name``, else the alias in its
+        launch args in either spelling, else the endpoint label). A pre-launch MENU LABEL only; the
+        client binds to the real ``live_ep.served_models[0]`` the peer reports after it comes up, so a
+        mislabel here can never mis-dispatch."""
+        from localharness.cli import model_ops
+        return model_ops.peer_served_name(ep)
 
     def _cold_lifecycle_targets(self, taken: list[str], peer_target: dict) -> dict:
         """Peer endpoints that carry a ``lifecycle`` launch spec and are NOT currently serving (cold)

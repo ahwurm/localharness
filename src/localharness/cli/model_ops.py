@@ -259,14 +259,21 @@ _SERVED_NAME_FLAGS = ("-a", "--alias", "--served-model-name")
 
 
 def _alias_in_args(args: Any) -> str | None:
-    """The value after the first of llama.cpp ``-a``/``--alias`` or vLLM ``--served-model-name``
-    present in a launch-arg list, else None (a flag with no value after it counts as absent)."""
-    args = list(args or [])
+    """The value of the first of llama.cpp ``-a``/``--alias`` or vLLM ``--served-model-name`` present
+    in a launch-arg list, in either spelling (``--alias NAME`` or ``--alias=NAME``), else None (a flag
+    with no value after it counts as absent)."""
+    args = [a for a in (args or []) if isinstance(a, str)]
     for flag in _SERVED_NAME_FLAGS:
-        if flag in args:
-            i = args.index(flag)
-            if i + 1 < len(args):
-                return args[i + 1]
+        for i, arg in enumerate(args):
+            if arg == flag:
+                if i + 1 < len(args):
+                    return args[i + 1]
+                break
+            if flag.startswith("--") and arg.startswith(flag + "="):
+                value = arg[len(flag) + 1:]
+                if value:
+                    return value
+                break
     return None
 
 
