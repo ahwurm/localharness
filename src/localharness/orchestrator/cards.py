@@ -49,7 +49,7 @@ class AgentCard(BaseModel):
 
     # Constraints declared by the agent
     max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS
-    budget_max_actions: int = 100
+    budget_max_actions: int | None = None
     budget_max_duration_minutes: float | None = None   # None = no turn time limit
 
     # Status
@@ -133,7 +133,7 @@ class AgentCardRegistry:
             budget_max_actions=(
                 config.permissions.budget.max_actions
                 if config.permissions and config.permissions.budget
-                else 100
+                else None
             ),
             budget_max_duration_minutes=(
                 config.permissions.budget.max_duration_minutes

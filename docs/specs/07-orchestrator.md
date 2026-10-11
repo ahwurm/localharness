@@ -303,7 +303,7 @@ class AgentCard(BaseModel):
 
     # Constraints declared by the agent
     max_context_tokens: int
-    budget_max_actions: int
+    budget_max_actions: int | None  # None = the agent configures no action limit; the surface decides
     budget_max_duration_minutes: int
 
     # Status
@@ -340,7 +340,7 @@ class AgentCard(BaseModel):
   "success_rate": 0.95,
   "last_session_at": 1748042400,
   "max_context_tokens": 131072,
-  "budget_max_actions": 100,
+  "budget_max_actions": null,
   "budget_max_duration_minutes": 30,
   "status": "active"
 }

@@ -1380,7 +1380,7 @@ class AgentLoop:
             session_id=session.session_id,
             task_summary=task[:200],
             budget=BudgetSpec(
-                max_actions=budget_cfg.max_actions,
+                max_actions=budget_cfg.max_actions or 0,  # None = unbounded
                 max_duration_minutes=budget_cfg.max_duration_minutes or 0.0,  # None = unbounded
                 max_context_tokens=self._config.context.max_context_tokens,
             ),
@@ -1532,7 +1532,7 @@ class AgentLoop:
         self._thinking_off_next = False  # so does a reasoning cut's thinking-off retry
 
         budget = BudgetTracker(
-            max_actions=self._config.permissions.budget.max_actions,
+            max_actions=self._config.permissions.budget.max_actions or 0,  # None = unbounded
             max_duration_minutes=self._config.permissions.budget.max_duration_minutes or 0.0,
             max_tool_calls=self._config.permissions.budget.max_tool_calls,
         )
@@ -2948,7 +2948,7 @@ class AgentLoop:
             return StepResult(action="kill")
 
         budget = BudgetTracker(
-            max_actions=self._config.permissions.budget.max_actions,
+            max_actions=self._config.permissions.budget.max_actions or 0,  # None = unbounded
             max_duration_minutes=self._config.permissions.budget.max_duration_minutes or 0.0,
         )
         violation = budget.check(session)
