@@ -22,13 +22,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
-from dataclasses import dataclass
+import logging
+import os
+import time
+import weakref
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX: the launch lock degrades to an in-process asyncio.Lock
+    fcntl = None  # type: ignore[assignment]
 
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import server
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # annotations only: autosense imports nothing from here, but the dataclass stays import-light
     from localharness.config.models import AutosenseConfig
@@ -740,3 +752,108 @@ async def free_accelerator(
     # tunable from live heavy-swap data and silenceable in tests.
     await asyncio.sleep(GPU_FREE_SETTLE_SECONDS if settle_seconds is None else settle_seconds)
     return incumbent
+
+
+# ---------------------------------------------------------------------------
+# The cross-process launch lock
+# ---------------------------------------------------------------------------
+LAUNCH_LOCK_WAIT_LINE = "another LocalHarness is launching the model server — waiting"
+"""What the person is told, once, when the launch lock is still held by someone else after the
+queue-visibility threshold. The REPL and `start` print it through `launch_lock(on_wait=...)`."""
+
+_HELD: dict[Path, list] = {}
+"""Resolved lock path -> [owning asyncio task, depth]. Re-entrancy is per TASK identity
+(`asyncio.current_task()`), never a ContextVar: `create_task` copies the context, so a task spawned
+inside the lock would otherwise believe it holds it. Entries exist only while a lock is held and are
+removed on every exit path."""
+
+_FALLBACK_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[Path, asyncio.Lock]]" = (
+    weakref.WeakKeyDictionary()
+)
+"""The in-process stand-in when the flock is unavailable, keyed by running loop because an
+`asyncio.Lock` binds to the loop it is first contended in (one loop per test, one per process)."""
+
+
+def _in_process_lock(key: Path, cause: str) -> asyncio.Lock:
+    """The in-process lock for `key`; the first use of it on this loop logs the one warning that names
+    why the cross-process lock is off."""
+    locks = _FALLBACK_LOCKS.setdefault(asyncio.get_running_loop(), {})
+    lock = locks.get(key)
+    if lock is None:
+        lock = locks[key] = asyncio.Lock()
+        log.warning("launch lock unavailable (%s) — cross-process launch exclusion disabled", cause)
+    return lock
+
+
+@contextlib.asynccontextmanager
+async def launch_lock(config_dir: Path, *, on_wait: Callable[[], Awaitable[None]] | None = None):
+    """Hold the cross-process launch lock for `config_dir` (D-26).
+
+    One advisory `flock(LOCK_EX | LOCK_NB)` on `server.lock_path(config_dir)`, an empty 0600 file
+    beside `server.pid`, polled every 50 ms with `asyncio.sleep` (never a thread parked on the lock:
+    see `_inference_gate` for how that wedged) and released by closing the fd. The kernel also releases
+    it when a holder process dies, so there is never a stale lock to clear (D-28). It has no timeout of
+    its own: a holder's `activate` is bounded by its own `timeout_seconds`, and `on_wait` tells the
+    person once, after `provider.client._QUEUE_VISIBILITY_SECONDS`, that someone else is launching.
+
+    Who takes it: every launch through `activate` from the harness's own code (a structural test pins
+    that). It is re-entrant per owning asyncio task (D-47): a nested acquire by the holder is free,
+    any other task waits. The fd is not inheritable, so the long-lived server spawned inside the lock
+    never holds it. With no `fcntl`, or a lock path that cannot be opened (a planted symlink is
+    refused by `O_NOFOLLOW`), launches serialise through an in-process lock and one warning names the
+    cause. The file is not a protected config-dir entry (D-29): a replaced file costs only the
+    exclusion, which the pidfile re-check still narrows.
+    """
+    from localharness.provider import client as _client
+
+    path = server.lock_path(config_dir)
+    key = path.resolve()
+    me = asyncio.current_task()
+    held = _HELD.get(key)
+    if held is not None and held[0] is me:  # nested acquire by the owner: nothing to take
+        held[1] += 1
+        try:
+            yield
+        finally:
+            held[1] -= 1
+        return
+
+    fd: int | None = None
+    cause = "no fcntl on this platform"
+    if fcntl is not None:
+        try:
+            server.server_dir(config_dir).mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        except OSError as exc:
+            cause = str(exc)
+    fallback: asyncio.Lock | None = None
+    got_fallback = False
+    try:
+        if fd is not None:
+            started = time.monotonic()
+            told = False
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    await asyncio.sleep(0.05)
+                    if (on_wait is not None and not told
+                            and time.monotonic() - started >= _client._QUEUE_VISIBILITY_SECONDS):
+                        told = True
+                        await on_wait()
+        else:
+            fallback = _in_process_lock(key, cause)
+            await fallback.acquire()
+            got_fallback = True
+        _HELD[key] = [me, 1]
+        try:
+            yield
+        finally:
+            if _HELD.get(key, [None])[0] is me:
+                _HELD.pop(key, None)
+    finally:
+        if got_fallback and fallback is not None:
+            fallback.release()
+        if fd is not None:
+            os.close(fd)  # releases the flock; the kernel also does when a holder dies
