@@ -33,7 +33,7 @@ __all__ = [
     "CMDLINE_CAP", "ENVIRON_CAP",
     "STAT_CAP", "CGROUP_CAP", "MAPS_LINE_CAP", "MAPPED_PATHS_CAP",
     "Listener", "ProcRecord", "ProcRefusal", "listeners", "reachable_first", "pid_for_inode",
-    "read_process",
+    "read_process", "parent_pid", "is_self_or_descendant",
 ]
 
 PROC_ROOT = "/proc"
@@ -213,6 +213,31 @@ def pid_for_inode(inode: int) -> int | None:
             except OSError:
                 continue
     return None
+
+
+def parent_pid(pid: int) -> int | None:
+    """The parent pid in `/proc/<pid>/stat` (field 4), or None when it cannot be read exactly."""
+    try:
+        with open(_proc_path(str(pid), "stat"), "rb") as fh:
+            raw = fh.read(STAT_CAP + 1)
+        if len(raw) > STAT_CAP:
+            return None
+        return int(raw.rsplit(b")", 1)[1].split()[1])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def is_self_or_descendant(pid: int, ancestor: int, *, depth: int = 16) -> bool:
+    """True when `pid` is `ancestor` or reaches it by at most `depth` parent links. A pid whose parent
+    cannot be read ends the walk with False."""
+    for _ in range(depth + 1):
+        if pid == ancestor:
+            return True
+        parent = parent_pid(pid)
+        if parent is None or parent <= 1 or parent == pid:
+            return False
+        pid = parent
+    return False
 
 
 # ------------------------------------------------------------------------------- one process

@@ -1047,6 +1047,12 @@ probes call it that way. `localharness init` sends no key when it looks for a se
 a server that requires its key. Doctor's rows read the arguments the launch would use, for vLLM and
 llama.cpp alike, so a `--host` in `server.extra_args` is counted in what they report; they say
 `every interface, no key` when an open launch has no key with it, and doctor never opens a key file (`start` does, once, after you confirmed it).
+What counts as "a server the harness launched" is what each runtime lets it prove. For llama.cpp
+it is the pidfile's process, and a process of yours holding the primary's port that is neither it nor
+one of its children is named in a sentence and never signalled. LM Studio has no pidfile, so the
+harness asks its endpoint on the configured port: an LM Studio server you started yourself counts as
+the harness's own, and a `/model` swap away from it runs `lms daemon down`. That check is a 2 second
+probe made when the session starts.
 And these launch rules were checked against
 a stand-in that behaves the way vLLM's source says vLLM does, not against vLLM itself: that a binary
 launch listens on every interface without `--host`, that it reads `VLLM_API_KEY`, and which routes

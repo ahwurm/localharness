@@ -1752,6 +1752,8 @@ class OrchestratorREPL:
                     strategy_for(managed).liveness(managed, self._server_config_dir).alive)
             except Exception:  # noqa: BLE001 — a liveness that cannot be asked claims nothing
                 claimed = False
+        if claimed and managed is not None and getattr(managed, "runtime", None) == "llamacpp":
+            claimed = self._pidfile_process_holds(port)
         if claimed:
             return None
         holder = workspace.port_holder(port)
@@ -1767,6 +1769,27 @@ class OrchestratorREPL:
                 provider, "default_model", None)
         return workspace.incumbent_sentence(
             holder, port=port, form="imperative", served=served, target=target)
+
+    def _pidfile_process_holds(self, port: int) -> bool:
+        """False only when the pidfile's live process is known and every listener of ``port`` whose owner
+        can be read is neither it nor one of its descendants: the pidfile is shared by the primary and
+        every peer, so a live peer must not make a foreign process on the primary's port "ours"
+        (IN-54). Anything that cannot be established (no pidfile, a listener of another uid, a capped
+        scan) keeps the strategy's answer."""
+        from localharness.provider import procfs
+        from localharness.provider import server as managed_server
+        try:
+            pid = managed_server.server_pid(self._server_config_dir)
+            if pid is None:
+                return True
+            owners = {procfs.pid_for_inode(row.inode)
+                      for row in procfs.listeners(port) if row.reachable_on_loopback}
+            owners.discard(None)
+            if not owners:
+                return True
+            return any(procfs.is_self_or_descendant(owner, pid) for owner in owners)
+        except Exception:  # noqa: BLE001 — what cannot be read claims nothing new
+            return True
 
     async def _primary_serves(self, llm: Any, name: str) -> bool:
         """True when the session is on another endpoint and the primary's own endpoint answers with
