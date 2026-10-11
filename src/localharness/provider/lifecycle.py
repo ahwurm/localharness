@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import contextvars
 import dataclasses
+import errno
 import logging
 import os
 import time
@@ -791,6 +792,10 @@ _HELD: dict[Path, list] = {}
 inside the lock would otherwise believe it holds it. Entries exist only while a lock is held and are
 removed on every exit path."""
 
+_CONTENDED = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
+"""The `flock(LOCK_NB)` errnos that mean "another holder has it". Any other errno is a filesystem that
+cannot lock at all, and the lock degrades to the in-process one instead of polling forever."""
+
 _FALLBACK_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[Path, asyncio.Lock]]" = (
     weakref.WeakKeyDictionary()
 )
@@ -823,9 +828,9 @@ async def launch_lock(config_dir: Path, *, on_wait: Callable[[], Awaitable[None]
     Who takes it: every launch through `activate` from the harness's own code (a structural test pins
     that). It is re-entrant per owning asyncio task (D-47): a nested acquire by the holder is free,
     any other task waits. The fd is not inheritable, so the long-lived server spawned inside the lock
-    never holds it. With no `fcntl`, or a lock path that cannot be opened (a planted symlink is
-    refused by `O_NOFOLLOW`), launches serialise through an in-process lock and one warning names the
-    cause. The file is not a protected config-dir entry (D-29): a replaced file costs only the
+    never holds it. With no `fcntl`, a lock path that cannot be opened (a planted symlink is
+    refused by `O_NOFOLLOW`), or a filesystem whose `flock` fails with anything but contention,
+    launches serialise through an in-process lock and one warning names the cause. The file is not a protected config-dir entry (D-29): a replaced file costs only the
     exclusion, which the pidfile re-check still narrows.
     """
     from localharness.provider import client as _client
@@ -860,13 +865,21 @@ async def launch_lock(config_dir: Path, *, on_wait: Callable[[], Awaitable[None]
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
-                except OSError:
+                except OSError as exc:
+                    if exc.errno not in _CONTENDED:
+                        # Not "someone else holds it": this filesystem cannot flock (NFS mounted
+                        # nolock, some FUSE or overlay mounts). Every retry would fail the same way,
+                        # so degrade exactly as an unopenable lock file does.
+                        os.close(fd)
+                        fd = None
+                        cause = f"flock failed: {exc}"
+                        break
                     await asyncio.sleep(0.05)
                     if (on_wait is not None and not told
                             and time.monotonic() - started >= _client._QUEUE_VISIBILITY_SECONDS):
                         told = True
                         await on_wait()
-        else:
+        if fd is None:
             fallback = _in_process_lock(key, cause)
             await fallback.acquire()
             got_fallback = True

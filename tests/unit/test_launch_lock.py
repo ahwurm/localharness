@@ -8,6 +8,7 @@ subprocess, no real server, nothing under the owner's `~/.localharness`.
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import stat
@@ -251,6 +252,58 @@ async def test_without_fcntl_launches_still_serialise_and_one_warning_names_the_
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1 and "launch lock" in warnings[0].getMessage()
     assert not server.lock_path(tmp_path).exists()  # no file was opened at all
+
+
+class _NoLockFcntl:
+    """An `fcntl` whose `flock` fails the way a filesystem that cannot lock does (NFS `nolock`)."""
+
+    LOCK_EX = fcntl.LOCK_EX
+    LOCK_NB = fcntl.LOCK_NB
+    LOCK_UN = fcntl.LOCK_UN
+
+    def __init__(self, code: int) -> None:
+        self.code = code
+        self.calls = 0
+
+    def flock(self, fd, op, **kw):
+        self.calls += 1
+        raise OSError(self.code, os.strerror(self.code))
+
+
+@pytest.mark.parametrize("code", [errno.ENOLCK, errno.EOPNOTSUPP, errno.EINVAL])
+async def test_a_flock_that_fails_without_contention_degrades_to_the_in_process_lock(
+    monkeypatch, tmp_path, caplog, code
+):
+    fake = _NoLockFcntl(code)
+    monkeypatch.setattr(lifecycle, "fcntl", fake)
+    caplog.set_level(logging.WARNING, logger=lifecycle.log.name)
+    told: list[int] = []
+
+    async def on_wait():
+        told.append(1)
+
+    order: list[str] = []
+
+    async def body(name):
+        async with lifecycle.launch_lock(tmp_path, on_wait=on_wait):
+            order.append(f"in:{name}")
+            await asyncio.sleep(0.05)
+            order.append(f"out:{name}")
+
+    await asyncio.wait_for(asyncio.gather(body("a"), body("b")), 2.0)  # never a poll that cannot end
+    assert order[1].startswith("out:") and order[3].startswith("out:")  # still serialised
+    assert fake.calls == 2  # one try each, never retried
+    assert told == []  # nobody is "launching": the person is not told so
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "flock failed" in warnings[0].getMessage()
+
+
+async def test_contention_still_waits_for_the_holder(monkeypatch, tmp_path):
+    """EWOULDBLOCK, EAGAIN and EACCES are another holder: the lock keeps polling, never degrades."""
+    for code in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+        monkeypatch.setattr(lifecycle, "fcntl", _NoLockFcntl(code))
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(_enter(tmp_path), 0.2)
 
 
 async def test_a_symlinked_lock_file_is_refused_and_never_written(tmp_path, caplog):
