@@ -16,6 +16,7 @@ from typing import Annotated, Optional
 from urllib.parse import urlparse
 
 import typer
+from pydantic import SecretStr
 from rich.console import Console
 from rich.markup import escape
 from rich.prompt import Confirm, IntPrompt, Prompt
@@ -456,11 +457,15 @@ class InitRecords:
     served: str
     peers: list[EndpointRef] = field(default_factory=list)
     lines: list[str] = field(default_factory=list)  # the shown block, printed before the write
-    api_key: str | None = None  # an inline key bound for provider.api_key
+    api_key: SecretStr | None = field(default=None, repr=False)  # an inline key bound for provider.api_key; unwrapped only where it is written
     deferred: list[Callable[[], None]] = field(default_factory=list)  # ledger writes, after the write
     base_url: str | None = None  # None: http://127.0.0.1:<server.port>/v1
     serving: bool = False  # a server already answers for it
     label: str = ""  # who it was imported from (the unit, or pid and command), for the audit detail
+
+    def __post_init__(self) -> None:
+        if isinstance(self.api_key, str):  # a caller that still hands the key over as text
+            self.api_key = SecretStr(self.api_key)
 
     @property
     def launchable(self) -> bool:
@@ -1179,7 +1184,7 @@ def _records_from_import(config_path: Path, imp: init_import.Imported, holder: w
     deferred.append(_weights)
     return InitRecords(
         server=spec, served=served, peers=peers, lines=lines,
-        api_key=imp.api_key.get_secret_value() if imp.api_key is not None else None,
+        api_key=imp.api_key,
         deferred=deferred, base_url=base_url, serving=running,
         label=workspace.incumbent_subject(holder, port=port))
 
@@ -1513,7 +1518,7 @@ def _write_records(config_path: Path, recs: InitRecords, *, force: bool = False,
         provider=ProviderConfig(
             provider_type=result.provider_type,
             base_url=result.base_url,
-            api_key=recs.api_key or "none",
+            api_key=recs.api_key.get_secret_value() if recs.api_key else "none",
             default_model=recs.served,
             available_models=[recs.served],
             supports_function_calling=None,
@@ -1604,7 +1609,7 @@ def _write_overlay_records(config_path: Path, recs: InitRecords, *, adopt: bool)
         if recs.api_key:
             provider = overlay.get("provider")
             overlay["provider"] = {**(provider if isinstance(provider, dict) else {}),
-                                   "api_key": recs.api_key}
+                                   "api_key": recs.api_key.get_secret_value()}
             audit.append(("provider.api_key", None, "(set)"))
 
     ok = workspace.write_overlay_validated(

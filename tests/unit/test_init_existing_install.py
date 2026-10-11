@@ -431,3 +431,16 @@ def test_an_overlay_write_that_fails_keeps_the_config_and_says_nothing_was_writt
     assert trust.recorded_machine(live.cfg) is None and not (live.cfg / "overrides.yaml").exists()
     assert config.read_text(encoding="utf-8") == CONFIG
     assert speed_stats.model_path(live.ledger(), "llamacpp", "qwen-27b") is None
+
+
+def test_the_carrier_of_an_inline_key_never_prints_it():
+    """IN-04: a traceback, a debug log or a repr of the InitRecords must not show the key."""
+    from pydantic import SecretStr
+
+    recs = init_cmd.InitRecords(
+        server=init_cmd.ManagedServerConfig(runtime="llamacpp", model="/m.gguf"), served="m",
+        api_key=SecretStr(SECRET))
+    assert SECRET not in repr(recs) and SECRET not in str(recs)
+    assert recs.api_key.get_secret_value() == SECRET
+    assert SECRET not in repr(init_cmd.InitRecords(
+        server=recs.server, served="m", api_key=SECRET)), "a key handed over as text is wrapped too"
