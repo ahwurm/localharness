@@ -429,6 +429,10 @@ class ChannelAdapter(ABC):
         the parent continues and still owes the real answer, so emit a one-line
         status note instead (child completions stay internal — see on_task_complete —
         but child failures surface; silence is indistinguishable from progress)."""
+        if event.reason == "stuck_detected":
+            # The escalation is delivered once, by on_escalation (root and child alike); the
+            # bus still carries both events, only this default handler stays quiet (D-40).
+            return
         if getattr(event, "parent_id", None):
             await self.send_message(
                 f"⚠️ subagent {event.agent_id} failed ({event.reason}) after "

@@ -595,6 +595,13 @@ function onEvent(name, data) {
     case "TurnFailed":
       if (!child) { S.turn = false; S.sent = false; restDials(); }
       paint();
+      if (!child && data.reason === "stuck_detected") {
+        // A stuck root turn is announced once, by its Escalation row. The TurnFailed detail is
+        // the reply summary (the partial work), so it shows as itself: no failure prefix, and
+        // no row at all when there is nothing to say.
+        if (data.detail) add(el("div", "row sys", data.detail));
+        break;
+      }
       add(el("div", "row " + (child ? "sys child" : "err"),
         (child ? "subagent failed — " : "turn failed — ") + data.reason + ": " + (data.detail || "") +
         (child ? "" : FAILED_HINT)));
@@ -1390,8 +1397,16 @@ function renderSpine(lines, container) {
     } else if (d.event_type === "TaskComplete") {
       r = el("div", "row answer");
       withCode(r, d.summary || "");
+    } else if (d.event_type === "Escalation") {
+      // The live reducer's row, so a stuck turn keeps its one notice in an ended chat.
+      r = el("div", "row err", "escalated — " + d.reason + ": " + (d.detail || ""));
     } else if (d.event_type === "TurnFailed") {
-      r = el("div", "row err", "turn failed — " + d.reason + ": " + (d.detail || "") + FAILED_HINT);
+      if (d.reason === "stuck_detected") {
+        // The escalation row above is the notice; this is the reply summary, shown as itself.
+        if (d.detail) r = el("div", "row sys", d.detail);
+      } else {
+        r = el("div", "row err", "turn failed — " + d.reason + ": " + (d.detail || "") + FAILED_HINT);
+      }
     }
     if (r) {
       container.appendChild(r);

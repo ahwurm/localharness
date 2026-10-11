@@ -345,12 +345,12 @@ def test_stuck_summary_never_splices_prior_turn():
 
     summary = _format_stuck_summary(_probe_session())
     assert "4." not in summary
-    assert summary.startswith("[Agent stuck:")
+    assert summary == ""   # no prior-turn splice, and no stuck notice in the reply
 
 
 def test_budget_and_stuck_summaries_keep_this_turns_answer():
     """The turn-scoping must not delete the prefix outright: an answer produced INSIDE the turn
-    is still surfaced ahead of the notice."""
+    is still surfaced (the stuck summary is that answer alone, with no notice)."""
     from localharness.agent.loop import BudgetViolation, _format_budget_summary, _format_stuck_summary
 
     s = _probe_session()
@@ -359,4 +359,4 @@ def test_budget_and_stuck_summaries_keep_this_turns_answer():
         s, BudgetViolation(reason="time", limit=1, current=2, message="Time limit reached.")
     )
     assert budget.startswith("THIS-TURN PARTIAL ANSWER.\n\n[Budget limit reached:")
-    assert _format_stuck_summary(s).startswith("THIS-TURN PARTIAL ANSWER.\n\n[Agent stuck:")
+    assert _format_stuck_summary(s) == "THIS-TURN PARTIAL ANSWER."
