@@ -114,6 +114,7 @@ async def persist_default_model(
     config_dir: Any = None,
     audit_base_dir: Any = None,
     local_operator: bool = False,
+    write_server_model: bool = True,
 ) -> str | None:
     """Persist ``model`` as the org + provider default via the atomic USER OVERLAY — the same
     crash-safe, audited path ``components set`` uses (issue #22), replacing the prior full,
@@ -152,6 +153,10 @@ async def persist_default_model(
     made since the last start still asks. False (the default) records nothing: the next terminal
     start asks about ``server.model (overrides.yaml)``.
 
+    ``write_server_model`` (WR-54): False when ``model`` is the primary's served-name alias (a vLLM
+    ``--served-model-name``), which is a default the record answers to and never the model it loads
+    (D-70): ``server.model`` is then left as written.
+
     Returns None on clean success, or a warning string (#37) when ONLY a post-write step failed
     (the audit emit, or the ``local_operator`` re-record in the machine record) — the durable
     overlay write already succeeded, so callers surface this as a secondary note and still report
@@ -178,7 +183,8 @@ async def persist_default_model(
     # cold start relaunches the chosen model. For llama.cpp server.model is the GGUF path and the
     # alias is `served_name`, so the alias must never reach `-m`: it is written to neither the
     # overlay (here) nor the in-memory record (below).
-    wrote_server_model = harness.server is not None and harness.server.runtime != "llamacpp"
+    wrote_server_model = (write_server_model and harness.server is not None
+                          and harness.server.runtime != "llamacpp")
     if wrote_server_model:
         set_value_in_dict(new_overlay, "server.model", model)
 

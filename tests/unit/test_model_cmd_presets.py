@@ -285,3 +285,33 @@ def test_lifecycle_less_peer_name_is_not_a_preset(components_home, monkeypatch):
     assert result.exit_code == 2, result.output
     assert "unknown model" in result.output
     assert "active_endpoint" not in _overlay(components_home)
+
+
+def test_a_vllm_alias_swap_back_never_becomes_the_vllm_model(components_home, monkeypatch):
+    """WR-54: `--served-model-name qwen` is the name the primary answers to, not what `vllm serve` loads."""
+    _seed_vllm(components_home)
+    path = components_home / "config.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["server"].update({"model": "other/m", "extra_args": ["--served-model-name", "qwen"]})
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    _unreachable(monkeypatch)
+    calls = _record_persist_default(monkeypatch)
+
+    result = runner.invoke(app, ["model", "qwen", "--config-dir", str(components_home)])
+
+    assert result.exit_code == 0, result.output
+    overlay = _overlay(components_home)
+    assert overlay["provider"]["default_model"] == "qwen" and overlay["org"]["default_model"] == "qwen"
+    assert "server" not in overlay
+    assert [c["write_server_model"] for c in calls] == [False]
+
+
+def test_a_plain_model_switch_on_a_vllm_primary_still_writes_server_model(components_home, monkeypatch):
+    _seed_vllm(components_home)
+    monkeypatch.setattr(model_ops, "list_live_models",
+                        lambda *a, **k: (["org/m", "org/n"], True), raising=False)
+
+    result = runner.invoke(app, ["model", "org/n", "--config-dir", str(components_home)])
+
+    assert result.exit_code == 0, result.output
+    assert _overlay(components_home)["server"]["model"] == "org/n"
