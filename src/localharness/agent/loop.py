@@ -2569,14 +2569,12 @@ class AgentLoop:
         session.connection_retry_used = True
         cfg = self._llm.config  # read now: a rebind since the loop was built is what the poll must use
 
-        async def _on_lost() -> None:
-            return None
-
         pair = self._recovery_pair(cfg.base_url)
         try:
             await pair.recover(
                 base_url=cfg.base_url, api_key=getattr(cfg, "api_key", None),
-                wait_seconds=bound, on_lost=_on_lost,
+                wait_seconds=bound,
+                on_lost=lambda: self._publish_provider_lost(session, exc, bound),
             )
         except Exception as failed:  # never BaseException: Esc's CancelledError must propagate
             text = str(failed)
@@ -2588,8 +2586,24 @@ class AgentLoop:
                 "Reconnect to the model server failed in %s (iter %d): %s",
                 self._config.name, session.iteration, note,
             )
-            return False, note
+            return False, _sanitize_provider_text(note, 1500)
         return True, ""
+
+    async def _publish_provider_lost(self, session: Session, exc: Exception, bound: float) -> None:
+        """Tell every channel the model server is gone and how long the harness will wait. Called once
+        per flight by the pair, after the visibility threshold. The detail is the error text with URL
+        credentials and control characters removed and capped; a publish that fails costs nothing."""
+        from localharness.core.events import ProviderLost
+
+        try:
+            await self._bus.publish(ProviderLost(
+                agent_id=session.agent_id,
+                session_id=session.session_id,
+                detail=_sanitize_provider_text(str(exc), 200),
+                wait_seconds=bound,
+            ))
+        except Exception:  # noqa: BLE001 - telling the person must never fail the wait
+            log.debug("could not publish ProviderLost", exc_info=True)
 
     async def _build_request(self, messages: list[Message], tools: list | None):
         # Re-snapshot and re-declare the active task's references (files may have changed; the
