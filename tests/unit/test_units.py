@@ -15,6 +15,8 @@ from localharness.provider import procfs, units
 from localharness.provider.procfs import ProcRecord
 from tests.unit.units_support import FakeSystemd, fake_systemd  # noqa: F401
 
+pytestmark = pytest.mark.real_units_seam  # tests/conftest.py leaves `units._run` real for this module
+
 SHOW = "Id,LoadState,FragmentPath,UnitFileState,DropInPaths"
 
 
