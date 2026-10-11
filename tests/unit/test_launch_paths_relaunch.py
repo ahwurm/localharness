@@ -168,6 +168,29 @@ async def test_the_window_is_announced_with_the_endpoint_and_served_model(tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [RuntimeError("discord send failed"), ConnectionResetError("phone gone"),
+                                   ValueError("bad window line")])
+async def test_a_report_that_fails_never_fails_the_relaunch_that_succeeded(tmp_path, boundaries, fault):
+    """WR-08/WR-53: the window lines, the decision's note and the first-launch lines are sent from inside
+    the closure the flight awaits; a channel that fails while saying them costs the lines, never the
+    launch: the relaunch still returns its live endpoint."""
+    primary = _llama_primary()
+    _, repl, _, _ = _session(tmp_path, _launchable_peer(), server=primary)
+    repl._pending_launch_lines = ["first-launch line"]
+
+    async def broken(*_a, **_k):
+        raise fault
+
+    repl._send_info = broken
+    repl._announce_window = broken
+
+    live = await _primary_relaunch(repl, primary)()
+
+    assert live is not None and live.served_models == ["qwen-gguf"]
+    assert len(boundaries.cmds) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_live_pidfile_under_the_lock_means_no_launch(tmp_path, boundaries):
     primary = _llama_primary()
     _, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=primary)
