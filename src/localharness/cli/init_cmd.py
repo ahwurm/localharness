@@ -1654,7 +1654,18 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
     # memory.enabled is the memory plugin's key (MEMP-06); the deprecated org.memory_enabled is
     # never written, so a fresh install has nothing to warn about. On is the default: no key.
     # Keys are written as typed (`reveal`): a JSON-mode dump would write the mask in their place.
-    data = reveal(harness.model_dump(mode="python", exclude={"org": {"memory_enabled"}}))
+    # WR-06: the child ceilings, the shares and the unattended action ceiling are written only
+    # where they differ from the shipped default. Dumped whole they would read as the operator's
+    # choice (`config show`, the lower-only baseline) and no later retune of a default would ever
+    # reach this install, the very init-dump problem the init-nulls migration undoes.
+    data = reveal(harness.model_dump(mode="python", exclude={
+        "org": {"memory_enabled", "children_budget"}, "channels": {"unattended_max_actions"}}))
+    children = harness.org.children_budget.model_dump(mode="python", exclude_defaults=True)
+    if children:
+        data["org"]["children_budget"] = children
+    knob = harness.channels.unattended_max_actions
+    if knob != type(harness.channels).model_fields["unattended_max_actions"].default:
+        data["channels"]["unattended_max_actions"] = knob
     # D-12: no null preset field in a record (`records` are dumps the caller made first)
     server_dict, peer_dicts = records if records is not None else _record_dicts(harness)
     if server_dict is not None:

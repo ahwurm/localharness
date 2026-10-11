@@ -855,3 +855,45 @@ def test_init_ollama_prints_window_guidance(mock_client_cls, mock_detect, tmp_pa
     result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
     assert result.exit_code == 0, result.output
     assert "OLLAMA_CONTEXT_LENGTH" in result.output
+
+
+# WR-06: init writes the phase-8 defaults only where they differ, so they keep following the
+# shipped defaults instead of reading as the operator's choice.
+
+_WR06_PROVIDER = {"provider_type": "ollama", "base_url": "http://localhost:11434",
+                  "default_model": "m"}
+
+
+def test_init_does_not_write_the_child_ceilings_shares_or_knob_as_chosen(tmp_path):
+    import yaml
+
+    from localharness.cli.init_cmd import _write_harness
+    from localharness.config.loader import ConfigLoader
+    from localharness.config.models import ChildrenBudgetConfig, HarnessConfig
+
+    _write_harness(tmp_path, HarnessConfig.model_validate(
+        {"version": "1", "provider": _WR06_PROVIDER}), True)
+
+    data = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert "children_budget" not in data["org"]
+    assert "unattended_max_actions" not in (data.get("channels") or {})
+    loaded = ConfigLoader(config_dir=tmp_path).load_harness()
+    assert loaded.org.children_budget == ChildrenBudgetConfig()
+    assert loaded.channels.unattended_max_actions == 100
+
+
+def test_init_keeps_a_child_ceiling_share_or_knob_that_differs(tmp_path):
+    import yaml
+
+    from localharness.cli.init_cmd import _write_harness
+    from localharness.config.models import HarnessConfig
+
+    _write_harness(tmp_path, HarnessConfig.model_validate({
+        "version": "1", "provider": _WR06_PROVIDER,
+        "org": {"children_budget": {"explore": {"actions": 4}, "review_share": 0.4}},
+        "channels": {"unattended_max_actions": 40}}), True)
+
+    data = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert data["org"]["children_budget"] == {"explore": {"actions": 4, "minutes": 3.0},
+                                              "review_share": 0.4}
+    assert data["channels"]["unattended_max_actions"] == 40
