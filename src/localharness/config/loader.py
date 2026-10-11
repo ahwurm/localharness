@@ -653,7 +653,8 @@ def _put(data: dict, parts: list[str], value: Any) -> dict:
 def _narrow_raw(merged: dict, sources: tuple[dict, ...], ws_files: tuple[str, str],
                 paths: Collection[str], *, baseline: Callable[[list[str], Any], Any],
                 accept: Callable[[Any, Any], bool],
-                note: Callable[[str, Any, Any], Optional[str]]) -> tuple[dict, list[str]]:
+                note: Callable[[str, Any, Any], Optional[str]],
+                keep_accepted: bool = False) -> tuple[dict, list[str]]:
     """Walk `paths` over the raw config sources and undo what a workspace source set that
     `accept` refuses; the one walker behind the machine-level-only drop and the lower-only rule.
 
@@ -663,8 +664,10 @@ def _narrow_raw(merged: dict, sources: tuple[dict, ...], ws_files: tuple[str, st
     refused, or None for a silent restore. One warning per such path and file. The global value
     goes back; when there is none the key goes, so the default applies; and when there is no
     baseline either, the workspace's whole section gives way to the global layers' (or to none).
-    Removing, never writing a default, keeps the result the same in any order of paths. Never
-    mutates."""
+    Removing, never writing a default, keeps the result the same in any order of paths. With
+    `keep_accepted` (the lower-only rule), a value another workspace source wrote that `accept`
+    takes wins over the global one: the highest-priority accepted workspace value goes back, so one
+    refused source never discards the other's valid lowering (WR-05). Never mutates."""
     global_view = deep_merge(sources[0], sources[1])
     warnings: list[str] = []
     for path in sorted(paths):
@@ -676,7 +679,11 @@ def _narrow_raw(merged: dict, sources: tuple[dict, ...], ws_files: tuple[str, st
         if not refused:
             continue
         warnings += [text for file, ws in refused if (text := note(path, file, ws)) is not None]
-        if machine is not _UNSET:
+        accepted = [ws for source in sources[2:] for ws in (_dig(source, parts),)
+                    if ws is not _UNSET and accept(ws, allowed)] if keep_accepted else []
+        if accepted:
+            merged = _put(merged, parts, accepted[-1])  # sources are in merge order
+        elif machine is not _UNSET:
             merged = _put(merged, parts, machine)
         elif allowed is not _UNSET:
             merged = _put(merged, parts, _UNSET)
@@ -1161,7 +1168,7 @@ class ConfigLoader:
             merged, sources, ws_files, HARNESS_LOWER_ONLY_FIELDS,
             baseline=_lower_only_baseline, accept=_accepted_lower,
             note=lambda path, file, ws: None if ws is None else
-            f"ignoring {path} in {file}: a project may only lower it")
+            f"ignoring {path} in {file}: a project may only lower it", keep_accepted=True)
         self.harness_warnings += section_notes + lower_notes
         # An overrides.yaml `extra_endpoints` REPLACES config.yaml's list wholesale (lists do not
         # merge), so the peers config.yaml names vanish without a word. Say so once — only over a
