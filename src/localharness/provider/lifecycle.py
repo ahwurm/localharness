@@ -786,6 +786,17 @@ LAUNCH_LOCK_WAIT_LINE = "another LocalHarness is launching the model server — 
 """What the person is told, once, when the launch lock is still held by someone else after the
 queue-visibility threshold. The REPL and `start` print it through `launch_lock(on_wait=...)`."""
 
+LAUNCH_LOCK_LOCAL_WAIT_LINE = "a model server launch in this session is still finishing — waiting"
+"""The same moment when the holder is a task of THIS process (a relaunch still unwinding after Esc, or
+running for another caller): "another LocalHarness" would be false."""
+
+
+def launch_lock_wait_line(config_dir: Path) -> str:
+    """The wait line for `config_dir`'s launch lock: the local line when a task of this process holds
+    it, the cross-process line otherwise."""
+    held = _HELD.get(server.lock_path(config_dir).resolve())
+    return LAUNCH_LOCK_LOCAL_WAIT_LINE if held is not None else LAUNCH_LOCK_WAIT_LINE
+
 _HELD: dict[Path, list] = {}
 """Resolved lock path -> [owning asyncio task, depth]. Re-entrancy is per TASK identity
 (`asyncio.current_task()`), never a ContextVar: `create_task` copies the context, so a task spawned
