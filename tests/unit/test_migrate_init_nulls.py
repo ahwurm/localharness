@@ -409,16 +409,20 @@ def _locked_world(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 @_not_root
 def test_a_failed_sidecar_leaves_config_unstamped_so_the_step_runs_again(tmp_path):
+    # CR-20 changed this pin: config.yaml used to be left byte-for-byte unwritten. It now gets every
+    # change but the init-nulls stamp, which stays due so the failed file is retried.
     cfg, ok, locked = _locked_world(tmp_path)
-    before = cfg.read_bytes()
     original, plan = migrate.load_plan(cfg)
 
     with pytest.raises(migrate.PartialMigrationError) as caught:
         migrate.apply(cfg, original, plan)
 
-    assert caught.value.failed == locked and caught.value.written == (ok,)
-    assert len(caught.value.backups) == 1
-    assert cfg.read_bytes() == before  # the stamp-carrier is written last, so it did not move
+    assert caught.value.failed == locked and caught.value.written == (ok, cfg)
+    assert [p for p, _ in caught.value.failures] == [locked]
+    assert len(caught.value.backups) == 2
+    on_disk = _disk(cfg)["org"]
+    assert "init_nulls_revision" not in on_disk["permissions"]  # the stamp did not move
+    assert on_disk["permissions"]["budget"]["max_actions"] is None  # config.yaml's own values did
     assert _disk(ok)["permissions"]["budget"]["max_actions"] is None
     assert _disk(locked)["permissions"]["budget"]["max_actions"] == 100
 
@@ -523,3 +527,92 @@ def test_an_unwritable_directory_is_refused_before_any_backup(tmp_path):
         assert [p.name for p in agents.iterdir()] == ["scout.yaml"]
     finally:
         agents.chmod(0o755)
+
+
+# ------------------------------------------- CR-20: an unwritable sidecar never holds config.yaml back
+
+
+def _behind_world(tmp_path: Path) -> tuple[Path, Path]:
+    """config.yaml at defaults revision 0 with 2 of the shipped deny patterns, plus a 0444 agent
+    file still holding init's `max_actions: 100`."""
+    shipped = list(PermissionConfig().deny_patterns)
+    data = _v017(deny=shipped[:2])
+    data["org"]["permissions"]["defaults_revision"] = 0
+    cfg = _write(tmp_path, data)
+    locked = _sidecar(tmp_path, "agents", "locked",
+                      {"name": "locked", "permissions": {"budget": {"max_actions": 100}}})
+    locked.chmod(0o444)
+    return cfg, locked
+
+
+@_not_root
+def test_an_unwritable_sidecar_never_holds_back_the_deny_defaults(tmp_path):
+    import contextlib
+
+    cfg, locked = _behind_world(tmp_path)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err), redirect_stdout(io.StringIO()):
+        _auto_migrate_deny_defaults(cfg)
+
+    perms = _disk(cfg)["org"]["permissions"]
+    assert perms["deny_patterns"] == list(PermissionConfig().deny_patterns)  # every default landed
+    assert perms["defaults_revision"] == CURRENT_DEFAULTS_REVISION
+    assert "init_nulls_revision" not in perms  # the step that clears `locked` stays due
+    assert "Could not finish updating the config" in " ".join(err.getvalue().split())
+
+    # The file is retried, not skipped: the next plan still names it, and once it is writable the
+    # step finishes and stamps.
+    _, again = migrate.load_plan(cfg)
+    assert again is not None and [s.path for s in again.sidecars] == [locked]
+    locked.chmod(0o644)
+    _migrate(cfg)
+    assert _disk(locked)["permissions"]["budget"]["max_actions"] is None
+    assert _disk(cfg)["org"]["permissions"]["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
+    assert migrate.load_plan(cfg)[1] is None
+
+
+@_not_root
+def test_a_sidecar_that_keeps_failing_costs_config_yaml_no_rewrite_per_start(tmp_path):
+    import contextlib
+
+    cfg, locked = _behind_world(tmp_path)
+    with contextlib.redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+        _auto_migrate_deny_defaults(cfg)
+    after_first = cfg.read_bytes()
+    for _ in range(2):
+        with contextlib.redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            _auto_migrate_deny_defaults(cfg)
+    assert cfg.read_bytes() == after_first
+    assert len(list(tmp_path.glob("config.yaml.bak-*"))) == 1
+    assert list((tmp_path / "agents").glob("locked.yaml.bak-*")) == []
+
+
+@_not_root
+def test_every_sidecar_is_tried_even_after_one_fails(tmp_path):
+    cfg = _write(tmp_path, _v017())
+    first = _sidecar(tmp_path, "agents", "a_locked",
+                     {"name": "a_locked", "permissions": {"budget": {"max_actions": 100}}})
+    first.chmod(0o444)
+    later = _sidecar(tmp_path, "divisions", "z_later",
+                     {"name": "z_later", "permissions": {"budget": {"max_actions": 100}}})
+    original, plan = migrate.load_plan(cfg)
+    with pytest.raises(migrate.PartialMigrationError) as caught:
+        migrate.apply(cfg, original, plan)
+    assert caught.value.written == (later, cfg)
+    assert _disk(later)["permissions"]["budget"]["max_actions"] is None
+
+
+@_not_root
+def test_a_failed_dead_key_only_sidecar_still_lets_the_init_nulls_stamp_move(tmp_path):
+    """Only a file the init-nulls step clears holds that stamp back; the dead key is found on
+    content alone, so a file failing only that repair is retried without holding anything."""
+    cfg = _write(tmp_path, _v017())
+    dead = _sidecar(tmp_path, "agents", "dead",
+                    {"name": "dead", "permissions": {"allow_patterns": []}})
+    dead.chmod(0o444)
+    original, plan = migrate.load_plan(cfg)
+    with pytest.raises(migrate.PartialMigrationError):
+        migrate.apply(cfg, original, plan)
+    assert _disk(cfg)["org"]["permissions"]["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
+    _, again = migrate.load_plan(cfg)
+    assert again is not None and [s.path for s in again.sidecars] == [dead]

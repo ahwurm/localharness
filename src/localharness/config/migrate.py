@@ -109,22 +109,25 @@ class MigrationError(Exception):
 
 
 class PartialMigrationError(MigrationError):
-    """A file could not be written after others already were (WR-02).
+    """Some files could not be written; every other file was (WR-02, CR-20).
 
-    `failed` is the file not written, `written` the files rewritten before it, in order, and
-    `backups` their backups. config.yaml, which carries the one-shot stamps, is always written
-    LAST, so a failure leaves its stamps where they were and the whole step runs again on the next
-    start or `config migrate`: a file is never skipped for good by a partial failure."""
+    `failures` is each file not written with its error, in the order tried, and `failed` the first
+    of them. `written` is every file rewritten, in order, and `backups` their backups. Every sidecar
+    is attempted, and config.yaml is written with all its other changes (the shipped deny defaults
+    included) after them; only the init-nulls stamp stays where it was while a file that step
+    clears was not written, so the next start or `config migrate` retries that file: a file is
+    never skipped for good, and an unwritable agent file never holds back config.yaml."""
 
-    def __init__(self, failed: Path, cause: OSError, written: list[Path],
+    def __init__(self, failures: list[tuple[Path, OSError]], written: list[Path],
                  backups: list[Path]) -> None:
-        self.failed = failed
+        self.failures = tuple(failures)
+        self.failed = failures[0][0]
         self.written = tuple(written)
         self.backups = tuple(backups)
-        reason = cause.strerror or str(cause) or type(cause).__name__
-        super().__init__(
-            f"could not write {failed}: {reason}; config.yaml keeps its stamps, so the files not "
-            "written are tried again next time")
+        reasons = "; ".join(
+            f"could not write {path}: {cause.strerror or str(cause) or type(cause).__name__}"
+            for path, cause in failures)
+        super().__init__(f"{reasons}; the files not written are tried again next time")
 
 
 DEAD_KEY = "allow_patterns"
@@ -432,10 +435,18 @@ def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> list[
     first.
 
     Returns the backup paths in write order. Raises MigrationError if the updated config fails
-    validation (nothing is written in that case), and PartialMigrationError when a file cannot be
-    written, naming the files written before it. config.yaml goes last because it carries the
-    stamps (`defaults_revision`, `init_nulls_revision`): written first, a sidecar that then failed
-    would never be looked at again and would keep init's values for good (WR-02).
+    validation (nothing is written in that case), and PartialMigrationError, after every file has
+    been tried, when any could not be written.
+
+    A file that cannot be written holds back nothing but the stamp that would skip it (CR-20).
+    Every sidecar is attempted. config.yaml then gets all its changes — the shipped deny defaults,
+    the dead key's removal, `bind_all`, its own init values — except that `init_nulls_revision`
+    keeps its old value while a sidecar the init-nulls step clears failed: that stamp gates the
+    sidecar walk, so moving it would leave the file with init's values for good (WR-02). The
+    other sidecar repair, the dead key, is found on content alone and needs no stamp held back.
+    config.yaml goes last so the stamp it records is only ever written knowing which files
+    failed; a config.yaml whose only change was that stamp is left untouched, so a file that
+    keeps failing costs config.yaml no rewrite and no backup per start.
 
     The sidecars are NOT model-validated: migrate is the only repair path for a file that cannot
     load, so refusing to delete the fatal key because something ELSE in the file is invalid would
@@ -453,20 +464,49 @@ def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> list[
             why = validation_text(exc, secret_values(HarnessConfig, migration.updated))
             raise MigrationError(f"migrated config fails validation: {why}") from None
     written: list[Path] = []
+    failures: list[tuple[Path, OSError]] = []
+    nulls_failed = False
     for sidecar in migration.sidecars:
         try:
             backups.append(
                 _write_with_backup(sidecar.path, sidecar.path.read_bytes(), sidecar.updated)
             )
         except OSError as exc:
-            raise PartialMigrationError(sidecar.path, exc, written, backups) from None
+            failures.append((sidecar.path, exc))
+            nulls_failed = nulls_failed or bool(sidecar.nulled)
+            continue
         written.append(sidecar.path)
     if not migration.config_unchanged:
-        try:
-            backups.append(_write_with_backup(config_file, original, migration.updated))
-        except OSError as exc:
-            raise PartialMigrationError(config_file, exc, written, backups) from None
+        before = yaml.safe_load(original.decode("utf-8"))
+        updated = (_keep_init_nulls_stamp(migration.updated, before) if nulls_failed
+                   else migration.updated)
+        if updated != before:
+            try:
+                backups.append(_write_with_backup(config_file, original, updated))
+                written.append(config_file)
+            except OSError as exc:
+                failures.append((config_file, exc))
+    if failures:
+        raise PartialMigrationError(failures, written, backups)
     return backups
+
+
+def _keep_init_nulls_stamp(updated: dict, before: object) -> dict:
+    """`updated` with `org.permissions.init_nulls_revision` put back as `before` had it (removed
+    when it had none), so the init-nulls step stays due. Nothing else of `updated` changes, and
+    neither input is mutated."""
+    def perms_of(data: object) -> dict:
+        org = data.get("org") if isinstance(data, dict) else None
+        perms = org.get("permissions") if isinstance(org, dict) else None
+        return perms if isinstance(perms, dict) else {}
+
+    old = perms_of(before)
+    perms = dict(perms_of(updated))
+    if "init_nulls_revision" in old:
+        perms["init_nulls_revision"] = old["init_nulls_revision"]
+    else:
+        perms.pop("init_nulls_revision", None)
+    return {**updated, "org": {**updated["org"], "permissions": perms}}
 
 
 def _write_with_backup(path: Path, original: bytes, updated: dict) -> Path:
