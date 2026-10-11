@@ -1297,6 +1297,10 @@ class ProviderConfig(BaseModel):
         default=300.0,
         description="HTTP timeout for LLM API calls. Extended for local models.",
     )
+    reconnect_wait_seconds: float = Field(
+        default=1800.0, ge=0.0, le=86400.0,
+        description="Longest wait for the model server to come back after a dropped connection; 0 = off.",
+    )
 
 
 class ManagedServerConfig(BaseModel):
@@ -2268,6 +2272,7 @@ provider:
   supports_function_calling: true
   timeout_seconds: 600.0
   inference_queue_wait_seconds: 600.0
+  reconnect_wait_seconds: 1800.0
 
 org:
   name: default
@@ -2282,7 +2287,8 @@ harness-managed runtime — not just the keys shown here. This example is the sh
 transcript. Two values above are the ones people most often expect to differ from what
 `init` actually writes: `timeout_seconds` is `600.0`, chosen for slow local single-stream
 decode, and `inference_queue_wait_seconds` bounds the wait for the local inference gate
-rather than generation itself.
+rather than generation itself. `reconnect_wait_seconds` bounds the wait for a model server that
+went away mid-turn, and `0` turns that wait off.
 
 ### 8.6 Multi-Agent Hierarchy Example
 

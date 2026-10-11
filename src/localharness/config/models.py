@@ -1776,6 +1776,19 @@ class ProviderConfig(BaseModel):
             "stuck wait, never a healthy one."
         ),
     )
+    reconnect_wait_seconds: float = Field(
+        default=1800.0,
+        ge=0.0,
+        le=86400.0,
+        description=(
+            "The longest (seconds) the agent loop waits for the model server to come back after a "
+            "dropped connection before it ends the turn. 0 turns the wait off and keeps one short "
+            "retry. A workspace may set it, like timeout_seconds, because it can only lengthen or "
+            "shorten a wait for a dead server and never reach a new address (liveness only). Not "
+            "inference_queue_wait_seconds: that one bounds the wait for a model slot, and its 0 or "
+            "null still means wait indefinitely."
+        ),
+    )
 
 
 class ProposerConfig(BaseModel):
