@@ -85,13 +85,27 @@ def test_an_offline_vocabulary_falls_back_and_is_not_retried(monkeypatch):
     assert asked == ["cl100k_base"], "one attempt, never one per count"
 
 
-@pytest.mark.real_sockets  # tiktoken fetches cl100k_base over HTTPS where it is not cached (CI)
+def _local_encoding(tiktoken):
+    """A real tiktoken `Encoding` built from ranks held in memory: byte-level tokens plus a few merges
+    and the `<|endoftext|>` special token. `tiktoken.get_encoding("cl100k_base")` would download its
+    vocabulary from an OpenAI-hosted URL wherever it is not cached (CI), and a unit test dials nothing;
+    the encoding's own encode() is the reference the counter must agree with."""
+    from tiktoken_ext.openai_public import r50k_pat_str
+
+    ranks = {bytes([i]): i for i in range(256)}
+    for merged in (b"th", b"the", b" t", b" th", b" the", b"qu", b"ok", b"en"):
+        ranks.setdefault(merged, len(ranks))
+    return tiktoken.Encoding(name="cl100k_base", pat_str=r50k_pat_str, mergeable_ranks=ranks,
+                             special_tokens={"<|endoftext|>": 1000})
+
+
 def test_with_tiktoken_the_first_count_builds_cl100k_once_and_counts_as_before(monkeypatch):
     tiktoken = pytest.importorskip("tiktoken")
-    real = tiktoken.get_encoding("cl100k_base")  # the old eager implementation's encoder
+    real = _local_encoding(tiktoken)  # stands in for cl100k_base, with no download (WR-56)
     sample = "The quick brown fox — 12345 tokens? <|endoftext|> fn(x) => x * 2"
     expected = len(real.encode(sample, disallowed_special=()))
-    asked = _fake_tiktoken(monkeypatch, tiktoken.get_encoding)
+    assert expected < len(sample.encode("utf-8"))  # the merges are applied: not a byte count
+    asked = _fake_tiktoken(monkeypatch, lambda name: real)
 
     counter = TokenCounter()
     assert asked == []
@@ -103,6 +117,13 @@ def test_with_tiktoken_the_first_count_builds_cl100k_once_and_counts_as_before(m
     approximate = TokenCounter(base_url="http://127.0.0.1:9/v1", model="m", provider_type="ollama")
     assert approximate.approximate
     assert approximate.count(sample) == math.ceil(expected * APPROX_TOKENIZE_SAFETY_FACTOR)
+
+
+def test_no_egress_test_turns_the_socket_guard_off():
+    """WR-56: these tests prove a start reaches nothing; none of them may reach the network itself (the
+    autouse `_no_real_sockets` guard stays on), whether or not tiktoken's vocabulary is cached."""
+    marker = "pytest.mark." + "real_sockets"
+    assert marker not in Path(__file__).read_text(encoding="utf-8")
 
 
 def test_an_ollama_counter_with_no_gguf_and_no_tiktoken_still_counts(monkeypatch):
