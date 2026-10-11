@@ -24,7 +24,7 @@ from tests.unit.procfs_support import fake_proc  # noqa: F401  (fixture)
 from tests.unit.test_init_cmd import _make_capability_result
 from tests.unit.test_init_core_setup import (
     _exited,
-    _hermetic,  # noqa: F401  (autouse fixture: no real HTTP)
+    _hermetic,  # noqa: F401  (autouse fixture; real sockets are refused by conftest)
     _init,
     _terminal,
 )

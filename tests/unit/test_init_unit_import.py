@@ -19,7 +19,7 @@ from localharness.provider import speed_stats
 from localharness.provider.detector import DetectorResult
 from tests.unit.test_init_core_setup import (
     _exited,
-    _hermetic,  # noqa: F401  (autouse fixture: no real HTTP)
+    _hermetic,  # noqa: F401  (autouse fixture; real sockets are refused by conftest)
     _init,
 )
 from tests.unit.test_init_live_import import (  # noqa: F401  (fixtures and helpers)
