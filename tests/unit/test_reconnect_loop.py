@@ -9,6 +9,7 @@ only in tests that run no real flight.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 from types import SimpleNamespace
 from typing import Any
@@ -702,6 +703,47 @@ async def test_a_kill_file_written_before_the_drop_ends_the_turn_without_waiting
     assert len(llm.calls) == 1
     assert sessions[0].terminated_reason == "kill_file"
     assert [f.reason for f in _failed(bus)] == ["kill_file"]
+
+
+async def test_the_kill_row_stops_a_flight_an_earlier_loop_left_running(bus, sessions, monkeypatch):
+    """WR-24: a child loop (turn depth 1, so no root turn end is involved) meets the KILL file at its
+    reconnect: the shared flight an earlier child left at its budget is cancelled there and then."""
+    import httpx
+
+    from localharness.agent import loop as loop_mod
+    from localharness.provider import lifecycle, server
+    from localharness.provider.lifecycle import ServerRecovery
+    from tests.unit.reconnect_support import ModelsEndpoint
+
+    monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(ModelsEndpoint(down=lambda: True)))
+    monkeypatch.setattr(client_mod, "_QUEUE_VISIBILITY_SECONDS", 0.02)  # real sleeps: a real flight runs
+    pair = ServerRecovery(None, None, None)
+
+    async def nobody() -> None:
+        return None
+
+    with pytest.raises(TimeoutError):  # the earlier child left at its own budget; the flight goes on
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=30, on_lost=nobody, leave_after=0.05)
+    flight = pair._flight.current.task
+    assert not flight.done()
+
+    loop = _loop(_scripted([_pce(), _answer("never")]), bus, server_recovery=lambda: pair)
+    reads = {"n": 0}
+
+    def killed() -> bool:
+        reads["n"] += 1
+        return reads["n"] > 1
+
+    loop._kill.is_killed = killed  # type: ignore[method-assign]
+    depth = loop_mod._TURN_DEPTH.set(1)
+    try:
+        await loop.run_turn("go")
+    finally:
+        loop_mod._TURN_DEPTH.reset(depth)
+    await asyncio.wait_for(asyncio.wait([flight]), 2.0)
+    assert flight.cancelled()
+    await asyncio.sleep(0)
+    assert lifecycle._UNWINDING == set()
 
 
 def test_the_knob_says_a_hang_before_headers_costs_the_timeout_twice():

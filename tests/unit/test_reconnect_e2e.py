@@ -474,10 +474,11 @@ class _Delegating:
     """A registry whose one tool is a delegation: the model server dies, then a child loop (on the same
     client and the same supplier) runs its own turn, and its ending is the tool's result."""
 
-    def __init__(self, rig: Rig, child_bound: float | None = None, on_death=None) -> None:
+    def __init__(self, rig: Rig, child_bound: float | None = None, on_death=None, after_child=None) -> None:
         self.rig = rig
         self.child_bound = child_bound  # a child with this much duration budget left
         self.on_death = on_death
+        self.after_child = after_child  # what happens in the root's turn once the child has returned
         self.child_summaries: list[str] = []
 
     def get_tools_for_agent(self, agent_id, division_id, tool_config):
@@ -497,6 +498,10 @@ class _Delegating:
             child._reconnect_bound = (  # type: ignore[method-assign]
                 lambda session=None: min(real(), self.child_bound) if session is not None else real())
         self.child_summaries.append(await child.run_turn("look it up"))
+        if self.after_child is not None:
+            then = self.after_child()
+            if then is not None:
+                await then
         return ToolResult(output=self.child_summaries[-1], success=True)
 
 
@@ -672,3 +677,81 @@ async def test_a_child_whose_budget_ends_before_the_relaunch_starts_leaves_it_to
     assert [e.wait_seconds for e in _lost(r.bus)] == [30.0]
     assert summary == "done"
     assert [f.reason for f in _failed(r.bus)] == ["llm_error"]  # the child only
+
+
+def _foreign_lock(r: Rig) -> list[int]:
+    """Hold the launch lock from a raw fd, as another LocalHarness's launch would; returns the fd holder."""
+    lock = server_mod.lock_path(r.cfg)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return [fd]
+
+
+def _lockable(r: Rig) -> bool:
+    fd = os.open(server_mod.lock_path(r.cfg), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+async def test_esc_after_a_child_left_its_wait_stops_the_shared_flight_before_any_relaunch(sessions, rig):
+    """WR-24 / WR-62: the child left at its budget while the shared relaunch waited behind another
+    launch's lock; the person presses Esc before the root rejoins. The root turn's end cancels the flight
+    nobody awaits: once the lock frees, no server is started and the launch lock is free."""
+    r = rig(chat_class=ToolThenDone, wait=30.0)
+    _serving(r)
+    held: list[int] = []
+    turn: list[asyncio.Task] = []
+
+    async def esc() -> None:  # Esc while the root is still handling the child's result
+        turn[0].cancel()
+        await asyncio.sleep(0)
+
+    delegating = _Delegating(r, child_bound=0.3, on_death=lambda: held.extend(_foreign_lock(r)),
+                             after_child=esc)
+    root = _tool_loop(r.llm, r.bus, delegating, server_recovery=r.repl.server_recovery)
+    try:
+        turn.append(asyncio.ensure_future(root.run_turn("go")))
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn[0], 10)
+        os.close(held.pop())  # the other launch finishes and lets go of the lock
+        await asyncio.sleep(0.5)  # a live flight would now take the lock and relaunch
+        await _until(lambda: not lifecycle._UNWINDING and lifecycle._HELD == {})
+    finally:
+        for fd in held:
+            os.close(fd)
+        await r.aclose()
+
+    assert "did not come back" in delegating.child_summaries[0]
+    assert r.starts == []  # no relaunch with no turn running
+    assert _lockable(r)
+
+
+async def test_a_kill_file_after_a_child_left_its_wait_stops_the_shared_flight(sessions, rig, tmp_path):
+    """WR-24 / WR-62: as above, but the root's turn ends at the KILL file: no relaunch after KILL."""
+    r = rig(chat_class=ToolThenDone, wait=30.0)
+    _serving(r)
+    held: list[int] = []
+    kill = tmp_path / "KILL"
+    delegating = _Delegating(r, child_bound=0.3, on_death=lambda: held.extend(_foreign_lock(r)),
+                             after_child=lambda: kill.write_text("stop", encoding="utf-8"))
+    root = _tool_loop(r.llm, r.bus, delegating, server_recovery=r.repl.server_recovery,
+                      kill_file_path=kill)
+    try:
+        await asyncio.wait_for(root.run_turn("go"), 10)
+        os.close(held.pop())
+        await asyncio.sleep(0.5)
+        await _until(lambda: not lifecycle._UNWINDING and lifecycle._HELD == {})
+    finally:
+        for fd in held:
+            os.close(fd)
+        await r.aclose()
+
+    assert sessions[0].terminated_reason == "kill_file"  # the root's session (the child's is next)
+    assert r.starts == []
+    assert _lockable(r)
