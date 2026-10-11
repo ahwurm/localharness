@@ -352,6 +352,22 @@ async def test_a_relaunch_that_times_out_is_named_as_a_failed_restart(models, tm
     assert "the restart failed: llama.cpp not ready after 30s." in str(info.value)
 
 
+@pytest.mark.parametrize("error", [
+    FileNotFoundError(2, "No such file or directory", "/opt/llama/llama-server"),
+    PermissionError(13, "Permission denied", "/opt/llama/llama-server"),
+])
+async def test_a_relaunch_that_cannot_start_the_binary_is_named_as_a_failed_restart(
+        models, tmp_path, error):
+    models(ModelsEndpoint())
+    relaunch = RecordingRelaunch(error)
+    with pytest.raises(RuntimeError) as info:
+        await ServerRecovery(URL, tmp_path, relaunch).recover(
+            base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
+    text = str(info.value)
+    assert text.startswith("the model server exited; it was restarted once and the restart failed: ")
+    assert "/opt/llama/llama-server" in text
+
+
 async def test_a_refused_relaunch_reaches_the_caller_untouched(models, tmp_path):
     models(ModelsEndpoint())
     refusal = server.LaunchRefused("no llama-server — set server.binary")
