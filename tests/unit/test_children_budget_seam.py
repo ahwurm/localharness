@@ -939,3 +939,30 @@ def test_the_shape_is_a_keyword_with_default_none_on_the_runner_and_the_config_d
     assert inspect.signature(sub.dispatch_config_subagent).parameters["shape"].default is None
     assert inspect.signature(sub.dispatch_config_subagent).parameters["shape"].kind is (
         inspect.Parameter.KEYWORD_ONLY)
+
+
+# --- the share is never 0 and never above the parent (Nyquist) ----------------------------------
+
+
+@pytest.mark.parametrize("shape", [None, "lookup", "review"])
+@pytest.mark.parametrize("share", [0.01, 0.1, 0.25, 0.5, 1.0])
+def test_a_finite_parent_never_hands_a_child_zero_or_more_than_it_has(shape, share):
+    block = ChildrenBudgetConfig(lookup_share=share, review_share=share)
+    for actions in range(1, 25):
+        for minutes in (0.1, 0.15, 0.7, 3.0):
+            out, fb, _ = _seam(_child(), parent=(actions, minutes), shape=shape, block=block)
+            a, m = _written(out)
+            assert a is not None and 1 <= a <= actions, (actions, share, a)
+            assert m is not None and 0.1 <= m <= max(minutes, 0.1), (minutes, share, m)
+            assert _fb(fb) == (a, m)
+            AgentConfig.model_validate(out.model_dump())
+
+
+@pytest.mark.parametrize("shape", [None, "lookup", "review"])
+def test_an_infinite_parent_writes_nothing_into_the_childs_budget(shape):
+    for cfg, name in ((_child(), "coder"), (sub.build_explore_config("explore"), "explore")):
+        before = _written(cfg)
+        out, fb, lab = _seam(cfg, name, parent=(0, 0.0), shape=shape)
+        assert _written(out) == before
+        assert (lab.actions, lab.minutes) == (None, None)
+        assert fb is not None

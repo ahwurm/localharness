@@ -277,3 +277,70 @@ def test_a_global_only_explore_file_and_a_workspace_less_overlay_are_untouched(l
 
     assert cfg.stuck_detector.escalation_threshold == 2
     assert _stuck_warnings(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# call_only_multiplier: the ceiling a workspace must never raise (Nyquist)
+# ---------------------------------------------------------------------------
+
+def test_a_workspace_agent_file_cannot_raise_the_call_only_multiplier(layers) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml", _agent(stuck_detector={"call_only_multiplier": 2}))
+    _write_yaml(ws / "agents" / "deployer.yaml", _agent(stuck_detector={"call_only_multiplier": 10}))
+
+    cfg, loader = _load(global_dir, ws)
+
+    assert cfg.stuck_detector.call_only_multiplier == 2
+    assert len(_notes(loader)) == 1
+
+
+def test_a_workspace_only_agent_cannot_raise_the_call_only_multiplier(layers) -> None:
+    global_dir, ws = layers
+    _write_yaml(ws / "agents" / "solo.yaml", _agent("solo", stuck_detector={"call_only_multiplier": 10}))
+
+    cfg, _ = _load(global_dir, ws, "solo")
+
+    assert cfg.stuck_detector.call_only_multiplier == DEFAULT.call_only_multiplier
+
+
+def test_a_workspace_overrides_agent_section_cannot_raise_the_call_only_multiplier(layers) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml", _agent())
+    _write_yaml(ws / "overrides.yaml", {"agent": {"stuck_detector": {"call_only_multiplier": 10,
+                                                                     "escalation_threshold": 50}}})
+
+    cfg, _ = _load(global_dir, ws)
+
+    assert cfg.stuck_detector.call_only_multiplier == DEFAULT.call_only_multiplier
+    assert cfg.stuck_detector.escalation_threshold == DEFAULT.escalation_threshold
+
+
+def test_a_workspace_overlay_cannot_raise_a_builtins_call_only_multiplier(layers, caplog) -> None:
+    global_dir, ws = layers
+    _write_yaml(ws / "agents" / "explore.yaml", {"stuck_detector": {"call_only_multiplier": 10}})
+
+    with caplog.at_level(logging.WARNING):
+        cfg = _builtin(global_dir, ws)
+
+    assert cfg.stuck_detector.call_only_multiplier == _builtin_base().stuck_detector.call_only_multiplier
+    assert len(_stuck_warnings(caplog)) == 1
+
+
+def test_the_loaded_multiplier_is_the_ceiling_the_running_detector_uses(layers) -> None:
+    """End to end from the files: the workspace's 10 never reaches the detector's ceiling."""
+    from localharness.agent.loop import StuckDetector
+
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml",
+                _agent(stuck_detector={"call_only_multiplier": 1, "escalation_threshold": 3}))
+    _write_yaml(ws / "agents" / "deployer.yaml", _agent(stuck_detector={"call_only_multiplier": 10}))
+    cfg, _ = _load(global_dir, ws)
+    sd_cfg = cfg.stuck_detector
+    sd = StuckDetector(window_size=sd_cfg.window_size, recovery_threshold=sd_cfg.recovery_threshold,
+                       escalation_threshold=sd_cfg.escalation_threshold,
+                       call_only_multiplier=sd_cfg.call_only_multiplier,
+                       result_origin=lambda _n: "trusted")
+    for i in range(3):
+        sd.record("bash_exec", {"cmd": "gh run list"}, (True, f"tick {i}"))
+        sd.classify()
+    assert sd.ceiling_hit == sd.compute_signature("bash_exec", {"cmd": "gh run list"})
