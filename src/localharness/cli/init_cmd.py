@@ -863,6 +863,12 @@ def _no_binary_line(models: Sequence[DiscoveredModel], roots: Sequence[str]) -> 
             "no llama-server — set server.binary")
 
 
+def _unit_skip_line(unit: str, reason: str) -> str:
+    """D-24, first form: a unit that names a model could not be imported and no llama-server is on
+    PATH either — the unit's own reason (a predicate from units.py) folded into the one line."""
+    return f"{visible_text(unit)} {visible_text(reason)}; no llama-server found — set server.binary"
+
+
 def _daemon_lines() -> list[str]:
     """D-41, D-54: an Ollama or LM Studio that answers holds models of its own; say how many and
     which (the first three), that they stay there and that no preset was written for them. Each
@@ -918,7 +924,7 @@ def _discover_presets(config_path: Path) -> InitRecords | None:
     ranked, port 8081, the llama-server found on PATH when there is one) and peers, written as
     records by the first start's machinery — init asks nothing and launches nothing. None when no
     GGUF model is found (the caller goes on to the guided setup)."""
-    from_unit, _skip = _unit_import(config_path)
+    from_unit, skipped = _unit_import(config_path)
     if from_unit is not None:
         return from_unit
     models = _found_models(config_path)
@@ -934,8 +940,9 @@ def _discover_presets(config_path: Path) -> InitRecords | None:
     peers = _peer_records(rest, start=PRIMARY_PORT + 1, taken_names={served},
                           taken_ports={PRIMARY_PORT})
     lines = _preset_lines(server, served, peers, binary_from="on PATH")
-    if binary is None:
-        lines.append(_no_binary_line(models, _machine_autosense(config_path).model_roots))
+    if binary is None:  # D-24: one line, naming the unit that could not be used when there is one
+        lines.append(_unit_skip_line(*skipped) if skipped is not None
+                     else _no_binary_line(models, _machine_autosense(config_path).model_roots))
     return InitRecords(server=server, served=served, peers=peers, lines=lines)
 
 
