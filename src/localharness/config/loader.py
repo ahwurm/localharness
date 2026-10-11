@@ -598,6 +598,24 @@ def leaves_layer(path: Path, layer_dir: Path) -> bool:
 _UNSET = object()
 
 
+def _section_tried(section: str, declared: Any, restored: Any) -> bool:
+    """Did a workspace file's `section` ask for anything the restored one does not hold? The one
+    predicate both doors note by (IN-01): the declared section merged over the restored one,
+    validated, against the restored one validated. A key equal to what is restored (a schema
+    default under a silent global included) changes nothing and earns no note; a different value,
+    an unknown key, or a section that is not a mapping does."""
+    if declared is _UNSET:
+        return False
+    if not isinstance(declared, dict):
+        return True
+    model = AgentConfig.model_fields[section].annotation
+    base = restored if isinstance(restored, dict) else {}
+    try:
+        return model.model_validate(deep_merge(base, declared)) != model.model_validate(base)
+    except ValidationError:
+        return True
+
+
 def _dig(data: Any, parts: list[str]) -> Any:
     for part in parts:
         if not isinstance(data, dict) or part not in data:
@@ -1694,8 +1712,7 @@ class ConfigLoader:
                     merged.pop(section, None)
                 else:
                     merged[section] = restored
-                if section in raw and raw[section] != (
-                        {} if restored is _UNSET else restored):
+                if _section_tried(section, raw.get(section, _UNSET), restored):
                     note = f"ignoring {section} in {str(path)!r}: only the global config may set it"
                     if note not in self.agent_warnings:
                         self.agent_warnings.append(note)
@@ -2474,20 +2491,12 @@ class ConfigLoader:
         # Before the permissions narrowing and its early return.
         for section in sorted(AGENT_CORE_GLOBAL_ONLY_SECTIONS):
             restored = self._global_agent_section(name, section, overlay=False)
-            from_base = restored is _UNSET
-            if from_base:
+            if restored is _UNSET:
                 restored = base.model_dump().get(section)
             merged[section] = restored
-            # The base's dump is complete, the file's raw section is not: a raw key that the
-            # restored section already holds changes nothing, so only a differing key is "tried".
-            declared_section = raw.get(section) if section in raw else _UNSET
-            if declared_section is _UNSET:
-                tried = False
-            elif from_base and isinstance(declared_section, dict) and isinstance(restored, dict):
-                tried = any(restored.get(k, _UNSET) != v for k, v in declared_section.items())
-            else:
-                tried = declared_section != restored
-            if tried:
+            # The one predicate both doors use (IN-01): only a declared key that changes what is
+            # restored is "tried".
+            if _section_tried(section, raw.get(section, _UNSET), restored):
                 log.warning(
                     "ignoring %s in %r: only the global config may set it",
                     section, str(self._local_dir / "agents" / f"{name}.yaml"))

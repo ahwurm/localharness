@@ -378,3 +378,59 @@ def test_the_loaded_multiplier_is_the_ceiling_the_running_detector_uses(layers) 
         sd.record("bash_exec", {"cmd": "gh run list"}, (True, f"tick {i}"))
         sd.classify()
     assert sd.ceiling_hit == sd.compute_signature("bash_exec", {"cmd": "gh run list"})
+
+
+# ---------------------------------------------------------------------------
+# IN-01: both doors note by one predicate, and a no-op declaration earns no note
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("declared", [{"window_size": DEFAULT.window_size}, {}])
+def test_a_no_op_section_under_a_silent_global_earns_no_note(layers, declared) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml", _agent())
+    _write_yaml(ws / "agents" / "deployer.yaml", _agent(stuck_detector=declared))
+
+    cfg, loader = _load(global_dir, ws)
+
+    assert cfg.stuck_detector == DEFAULT
+    assert _notes(loader) == []
+
+
+def test_an_empty_section_under_a_global_section_earns_no_note(layers) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml",
+                _agent(stuck_detector={"escalation_threshold": 2}))
+    _write_yaml(ws / "agents" / "deployer.yaml", _agent(stuck_detector={}))
+
+    cfg, loader = _load(global_dir, ws)
+
+    assert cfg.stuck_detector.escalation_threshold == 2
+    assert _notes(loader) == []
+
+
+def test_a_builtin_key_equal_to_what_a_global_file_restores_earns_no_note(layers, caplog) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "explore.yaml", {"stuck_detector": {"escalation_threshold": 2}})
+    _write_yaml(ws / "agents" / "explore.yaml", {"stuck_detector": {"window_size": 5}})
+
+    with caplog.at_level(logging.WARNING):
+        cfg = _builtin(global_dir, ws)
+
+    assert (cfg.stuck_detector.escalation_threshold, cfg.stuck_detector.window_size) == (2, 5)
+    assert _stuck_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("declared", [{"window_size": 3}, {"no_such_key": 1}, "loose"])
+def test_both_doors_note_a_section_that_would_change_something(layers, caplog, declared) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml", _agent())
+    _write_yaml(ws / "agents" / "deployer.yaml", _agent(stuck_detector=declared))
+    _write_yaml(ws / "agents" / "explore.yaml", {"stuck_detector": declared})
+
+    cfg, loader = _load(global_dir, ws)
+    with caplog.at_level(logging.WARNING):
+        builtin = _builtin(global_dir, ws)
+
+    assert cfg.stuck_detector == DEFAULT
+    assert builtin.stuck_detector == _builtin_base().stuck_detector
+    assert len(_notes(loader)) == 1 and len(_stuck_warnings(caplog)) == 1
