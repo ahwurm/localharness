@@ -1056,11 +1056,21 @@ class ServerRecovery:
                 # Outside the try above: a LaunchRefused (itself a RuntimeError) must never be read as
                 # a poll failure.
                 log.info("model server process exited; relaunching it once")
+                # The relaunch is held to the flight's bound as a whole: its launch-lock wait (the lock
+                # itself has no timeout, D-26), a liveness check that hangs, and activate's own readiness
+                # wait (whose clock starts later and never goes below 1 s) all end at the deadline.
+                # Cancelling it there is the same path Esc takes (D-17).
+                window = asyncio.timeout(max(0.0, deadline - time.monotonic()))
                 try:
-                    await self.relaunch()
+                    async with window:
+                        await self.relaunch()
                 except server.LaunchRefused:
                     raise
-                except (RuntimeError, TimeoutError) as failed:
+                except TimeoutError as failed:
+                    if window.expired():
+                        raise TimeoutError(self._bound_text(wait_seconds)) from failed
+                    raise RuntimeError(RESTART_FAILED_TEXT + str(failed)) from failed
+                except RuntimeError as failed:
                     raise RuntimeError(RESTART_FAILED_TEXT + str(failed)) from failed
         finally:
             timer.cancel()
