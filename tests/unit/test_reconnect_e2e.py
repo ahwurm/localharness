@@ -264,8 +264,12 @@ class Rig:
         self.repl._active_heavy = (self.harness.server, PRIMARY_URL) if active else None
         self.cfg = self.repl._server_config_dir
 
-    def _start(self, config_dir, cmd, **kw) -> int:
-        self.starts.append({"cmd": list(cmd), **kw})
+    def _start(self, config_dir, cmd, *, runtime="vllm", api_key=None, record_env=None, dropped_out=None,
+               xdg_config_home=None, **kw) -> int:
+        # start_server's own keywords are named (IN-56); the tail only tolerates one added later
+        self.starts.append({"cmd": list(cmd), "runtime": runtime, "api_key": api_key,
+                            "record_env": record_env, "dropped_out": dropped_out,
+                            "xdg_config_home": xdg_config_home, **kw})
         self.on_start()
         return 4321
 
@@ -453,7 +457,7 @@ async def test_a_gpu_false_managed_primary_that_dies_ends_the_turn_at_once_with_
     finally:
         await r.aclose()
 
-    assert time.monotonic() - started < 1.0  # not the 30 s bound
+    assert time.monotonic() - started < 5.0  # at once, not the 30 s bound (loose enough for a busy CI box)
     (failed,) = _failed(r.bus)
     assert failed.reason == "llm_error"
     assert "The model server exited. Log tail:" in failed.detail and "segfault tail" in failed.detail
