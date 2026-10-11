@@ -1400,7 +1400,8 @@ ceiling of dispatched tool calls and minutes, `explore` 8 / 3, `web_researcher` 
 `search_verifier` 12 / 6, `cruncher` 6 / 20, `chunk_summarizer` 3 / 6 and `default` 8 / 3 (any
 child with no entry of its own), plus `lookup_share` (`0.25`) and `review_share` (`0.5`), the part
 of a finite parent's remaining budget a delegated lookup or review child takes. Write one key of
-an entry (`explore: {actions: 4}`) and the other keeps its default. The brief a config
+an entry (`explore: {actions: 4}`) and the other keeps the value from your global config, else its
+default. The brief a config
 child receives states the limits its own loop enforces (`Budget: no action limit, no time limit.`
 when there are none) and lists only the tools it actually holds.
 
