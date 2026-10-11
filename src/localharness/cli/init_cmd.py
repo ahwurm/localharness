@@ -579,6 +579,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
                     + escape(f"the settings above do not validate, or {config_path / 'overrides.yaml'} "
                              f"could not be written. Nothing was written; {config_file} is kept."),
                     soft_wrap=True)
+                raise typer.Exit(1)  # a write that does not validate writes nothing and exits 1 (WR-06)
             outcome = SetupResult(config_file, True)
         elif isinstance(imported, Attached):  # attach-only: its one line, the config kept
             console.print(imported.line, markup=False, soft_wrap=True)
