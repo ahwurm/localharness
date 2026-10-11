@@ -419,6 +419,45 @@ async def test_a_lock_held_by_another_process_makes_the_swap_wait_and_say_so_onc
 
 
 @pytest.mark.asyncio
+async def test_a_lock_held_by_this_sessions_own_launch_never_says_another_localharness(
+        tmp_path, monkeypatch):
+    """A relaunch still unwinding after Esc (or running for another caller) holds the lock from a task of
+    this very process: the person waiting is told it is this session's launch, not another process's."""
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer())
+    monkeypatch.setattr(provider_client, "_QUEUE_VISIBILITY_SECONDS", 0.05)
+    inside, release = asyncio.Event(), asyncio.Event()
+
+    async def own_launch():
+        async with lifecycle.launch_lock(repl._server_config_dir):
+            inside.set()
+            await release.wait()
+
+    holder = asyncio.create_task(own_launch())
+    await inside.wait()
+    asyncio.get_running_loop().call_later(0.3, release.set)
+
+    async def waiter():
+        async with repl._launch_lock():
+            pass
+
+    await asyncio.wait_for(waiter(), 5)
+    await holder
+
+    assert channel.messages.count(lifecycle.LAUNCH_LOCK_LOCAL_WAIT_LINE) == 1
+    assert lifecycle.LAUNCH_LOCK_WAIT_LINE not in channel.messages
+
+
+def test_the_wait_line_names_the_holder_by_process(tmp_path):
+    assert lifecycle.launch_lock_wait_line(tmp_path) == lifecycle.LAUNCH_LOCK_WAIT_LINE
+    key = managed_server.lock_path(tmp_path).resolve()
+    lifecycle._HELD[key] = [object(), 1]
+    try:
+        assert lifecycle.launch_lock_wait_line(tmp_path) == lifecycle.LAUNCH_LOCK_LOCAL_WAIT_LINE
+    finally:
+        lifecycle._HELD.pop(key, None)
+
+
+@pytest.mark.asyncio
 async def test_a_session_with_no_config_dir_launches_with_no_lock_file_anywhere(tmp_path, monkeypatch):
     """`/model` is unavailable without a config dir, but the restore and the relaunch can still be driven
     on such a REPL (the model-swap tests build one): they take no lock and create no file."""

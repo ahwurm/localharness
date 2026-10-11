@@ -2586,12 +2586,14 @@ class OrchestratorREPL:
         """The launch lock for this session's global config dir (D-47): every REPL launch takes it, and
         it is re-entrant for the task that holds it, so a swap that fails and restores its incumbent
         nests without waiting on itself. When another LocalHarness holds it past the queue-visibility
-        threshold the person is told once. A REPL built with no config dir has nothing to lock."""
+        threshold the person is told once (in words that say whether the holder is this session's own
+        launch or another process's). A REPL built with no config dir has nothing to lock."""
         cfg = self._server_config_dir
         if cfg is None:
             return contextlib.nullcontext()
-        from localharness.provider.lifecycle import LAUNCH_LOCK_WAIT_LINE, launch_lock
-        return launch_lock(cfg, on_wait=lambda: self._send_info(LAUNCH_LOCK_WAIT_LINE))
+        from localharness.provider.lifecycle import launch_lock, launch_lock_wait_line
+        # the line is chosen when it is said: a holder in this very process is not "another LocalHarness"
+        return launch_lock(cfg, on_wait=lambda: self._send_info(launch_lock_wait_line(cfg)))
 
     def _peer_name_for(self, spec: Any, base_url: str) -> str | None:
         """The configured peer's name for ``base_url``, only when ``spec`` IS that peer's own lifecycle
