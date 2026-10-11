@@ -205,7 +205,8 @@ def test_recovery_injection_default_matches_loop_string():
         "You have attempted the same tool call multiple times with identical arguments "
         "and received the same result. That approach is not working. "
         "Consider a fundamentally different strategy: try different arguments, "
-        "use a different tool, or conclude that the information is not available this way."
+        "use a different tool, or conclude that the information is not available this way. "
+        "If you are waiting on something external, say so and stop; do not poll."
     )
     assert cfg.recovery_injection.message == expected
 
