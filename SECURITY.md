@@ -830,8 +830,8 @@ from `init --force`), `overrides.yaml`, `grants.yaml`, `trusted_workspaces.yaml`
 the push key and the push subscriptions, `audit.jsonl`, each agent's `bus-events.jsonl`, session
 logs, the phone session's `sessions/asleep.json` while it sleeps, `history.jsonl`, `memory.db`
 (and its `-wal` and `-shm` files), `MEMORY.md`, `compact.md` and
-`memory.log`, `.repl_history`, the speed ledger, the live-session files, `vllm/serve.log` and
-`vllm/server.pid`, agent files written by `agent create`, by a start (the root agent) or by the
+`memory.log`, `.repl_history`, the speed ledger, the live-session files, `vllm/serve.log`,
+`vllm/server.pid` and `vllm/launch.lock` (empty, never read), agent files written by `agent create`, by a start (the root agent) or by the
 in-session creation workflow, autoresearch's archive, run journals and budget file, and
 `plugins/README.md`. The same writers make the same files owner-only in a project's
 `.localharness/` (its sessions, history and memory). The one script `start` installs,
@@ -1004,6 +1004,41 @@ start the server with an API key and set `provider.api_key` to match; for access
 beyond your LAN use a private overlay network (Tailscale/WireGuard). Never port-forward
 a bare, unauthenticated endpoint to the internet. See "Running the harness on a
 different machine than the model" in the README.
+
+### When the model server goes away mid-turn
+
+When the connection to the model server drops during a turn, the harness waits for the server and
+sends the same request again, for up to `provider.reconnect_wait_seconds` (default 1800 seconds;
+`0` turns the wait off and keeps one short retry; at most 86400). The wait is liveness only: it asks
+the server's `/models` route, at the address the request being sent again goes to and with the key
+that request carries, and at no other address. Nothing it does prints or logs the key. The event the
+channels show says only that the server is unreachable and for how long the harness will wait; it
+carries no key and no credentials from a URL, and the text a channel prints never includes the
+server's error message.
+
+If the server is one LocalHarness launched and its process has died, the harness starts it again
+once. That is the same launch every other path makes: the same launch decision (loopback unless
+`bind_all` is set, the key in the server's environment and never on its command line, a key file
+only when the earlier rules allow it), taken under the same lock, so a second LocalHarness
+launching at the same moment does not start a second server. A server you started yourself, or a
+peer the harness did not launch, is only waited for, never started. Only one restart is made for a
+server's death; if the restarted server dies too, or fails to come up, the turn ends with the
+server's log tail.
+
+The request that is sent again is identical to the one that was dropped, and a tool call is never
+run twice: a call that was cut off before the harness had the model's answer had nothing to run,
+and a call that had an answer runs once. Text the model had already streamed when the connection
+dropped can be shown a second time when the answer is sent again.
+
+A project's configuration may set `provider.reconnect_wait_seconds`, because it cannot send the
+harness anywhere new: it can only make the harness wait longer or shorter for a server that is
+already down, at the address the session already uses. The wait counts against the turn's time
+limit, and Esc ends it at once.
+
+`vllm/launch.lock`, beside `vllm/server.pid`, is an empty owner-only (0600) file the launches take
+a lock on; it is never read. The kernel releases the lock when the process holding it exits, so a
+holder that dies leaves nothing to clear. A holder that dies after starting a server and before
+recording it leaves the same unrecorded server the launch has always left in that gap.
 
 ### A model server LocalHarness launches
 

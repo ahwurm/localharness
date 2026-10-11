@@ -665,6 +665,7 @@ The terminal channel subscribes to events after `start()` is called. The bus del
 | `TaskComplete` | `on_task_complete` | `send_message(result.summary, agent_id)` |
 | `Escalation` | `on_escalation` | `send_error(reason, detail, agent_id)` |
 | `Heartbeat` | `on_heartbeat` | spinner update if elapsed > 10s |
+| `ProviderLost` | `on_provider_lost` | status line "model server unreachable — waiting up to Ns; Esc stops"; other channels send "model server unreachable — waiting up to Ns" as a system line |
 
 The channel does NOT subscribe to:
 - `UserMessage` (channel publishes these, it doesn't receive its own)
