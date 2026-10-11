@@ -17,7 +17,7 @@ from collections import Counter, deque
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Callable, Literal, NamedTuple
 
 from localharness.agent.gate import (
     DENIED_OBSERVATION_PREFIX,
@@ -34,6 +34,9 @@ from localharness.agent.task_context import TaskContext
 from localharness.agent.task_record import TaskState
 from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
+
+if TYPE_CHECKING:
+    from localharness.provider.lifecycle import ServerRecovery
 
 log = logging.getLogger("localharness.agent.loop")
 
@@ -100,9 +103,14 @@ class Session:
     # the ContextManager learns the window first, so the retry is a smaller request, not the
     # same one again.
     overflow_retry_used: bool = False
-    # One re-issue after a connection error, until a call succeeds. The re-issue goes back through
-    # the loop (not an inline second call) so a reasoning cut or a degenerate abort on it is handled
-    # exactly as on a first attempt; a second connection error in a row ends the turn.
+    # The turn has spent its one bounded reconnect wait for a dropped model server. Reset only by a
+    # new turn (a new Session); a call that goes through never re-arms it, so a second outage later in
+    # the same turn takes the single fallback retry instead of another wait.
+    reconnect_used: bool = False
+    # The current outage has had its retry: the single fallback retry when the wait is off or already
+    # spent, or the wait itself. The re-issue goes back through the loop (not an inline second call) so
+    # a reasoning cut or a degenerate abort on it is handled exactly as on a first attempt. Re-armed once
+    # a call goes through; a second connection error in a row ends the turn.
     connection_retry_used: bool = False
 
     @property
@@ -677,6 +685,16 @@ def _absorb_commit(session: Session, ctx: Any) -> None:
         session.turn_start_idx = max(start + 1, session.turn_start_idx - removed)
 
 
+def _sanitize_provider_text(text: str, cap: int) -> str:
+    """Server-side error text made safe to publish and print: URL credentials (userinfo) removed,
+    control characters dropped (newlines kept), at most `cap` characters."""
+    import unicodedata
+
+    text = re.sub(r"(?<=://)[^/@\s]+@", "", text)
+    text = "".join(ch for ch in text if ch == "\n" or unicodedata.category(ch) != "Cc")
+    return text[:cap]
+
+
 def _budget_note(session: Session, budget: BudgetTracker) -> str:
     """One-line budget status appended to each iteration's last tool result so the
     model can pace itself and summarize BEFORE the wall (Claude Code-style running
@@ -968,6 +986,7 @@ class AgentLoop:
         config_dir: Path | None = None,
         gate: Any = None,  # PermissionGate
         guardrails_path: Path | None = None,
+        server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
         memory_slot: Any = None,  # plugins.slot.MemorySlot
         task_context: TaskContext | TaskState | None = None,
         template_margin_ratio: float | None = None,
@@ -1054,6 +1073,10 @@ class AgentLoop:
         # on. start_cmd passes it; subagents and bench pass nothing and get none, exactly as before.
         self._guardrails_path = guardrails_path
         self._guardrails_warned = False
+        # The reconnect seam: a supplier of the shared ServerRecovery pair for this loop's server (None
+        # when the caller has none); a loop with no usable pair keeps one loop-local poll-only pair.
+        self._server_recovery = server_recovery
+        self._local_recovery: "ServerRecovery | None" = None
         # PAPI-04's consumer seam: the memory slot, asked for its per-turn section right after the
         # guardrails. It is the loop's ONLY memory path — the loop never holds a store; recall
         # scope, writes and traces are the occupant's. None or an empty slot adds no section.
@@ -1672,6 +1695,21 @@ class AgentLoop:
                 if self._task_context is not None:
                     self._task_context.status = "blocked"
                 return f"Active step blocked: {exc}"
+            except ProviderConnectionError as exc:
+                # build_messages may have committed a summary before the token count failed.
+                _absorb_commit(session, self._ctx)
+                log.warning(
+                    "LLM connection error in %s (iter %d): %s",
+                    self._config.name,
+                    session.iteration,
+                    exc,
+                )
+                retry, note = await self._reconnect(session, exc)
+                if retry:
+                    continue
+                if note:
+                    raise ProviderConnectionError(f"{exc} {note}", cause=exc) from exc
+                raise
             _absorb_commit(session, self._ctx)
 
             # 4. Publish heartbeat AFTER build_messages so utilization reflects post-compaction state (TELEM-01)
@@ -1798,12 +1836,11 @@ class AgentLoop:
                     session.iteration,
                     exc,
                 )
-                if session.connection_retry_used:
-                    session.terminated_reason = "error"
-                    return _format_error_summary(session, exc)
-                session.connection_retry_used = True
-                await asyncio.sleep(2.0)
-                continue
+                retry, note = await self._reconnect(session, exc)
+                if retry:
+                    continue
+                session.terminated_reason = "error"
+                return _format_error_summary(session, exc) + (f" {note}" if note else "")
             except ProviderTimeoutError as exc:
                 log.error(
                     "LLM timeout in %s (iter %d): %s",
@@ -2478,6 +2515,81 @@ class AgentLoop:
         args = call.arguments or {}
         begin(call.id, str(args.get("agent_id", "")),
               str(args.get("purpose") or args.get("task", ""))[:120])
+
+    def _reconnect_bound(self) -> float:
+        """The configured reconnect wait in seconds, or 0.0 (reconnect off). Honoured only when the
+        client's config carries a real positive number and a string address: a stand-in client, a
+        bool, a mock attribute or a negative value all read as off."""
+        cfg = getattr(self._llm, "config", None)
+        wait = getattr(cfg, "reconnect_wait_seconds", 0.0)
+        if (
+            isinstance(wait, (int, float))
+            and not isinstance(wait, bool)
+            and wait > 0
+            and isinstance(getattr(cfg, "base_url", None), str)
+        ):
+            return float(wait)
+        return 0.0
+
+    def _recovery_pair(self, base_url: str) -> "ServerRecovery":
+        """The ServerRecovery that waits for `base_url`: the supplier's pair when it is for this
+        address (or for any), else one loop-local poll-only pair kept for the loop's life. A pair
+        built for another address is never used, so the session's key is only ever sent to the
+        address the re-sent request goes to."""
+        if self._server_recovery is not None:
+            pair = self._server_recovery()
+            if pair is not None:
+                pair_url = getattr(pair, "base_url", None)
+                if pair_url is None or pair_url.rstrip("/") == base_url.rstrip("/"):
+                    return pair
+        if self._local_recovery is None:
+            from localharness.provider.lifecycle import ServerRecovery
+
+            self._local_recovery = ServerRecovery(None, None, None)
+        return self._local_recovery
+
+    async def _reconnect(self, session: Session, exc: Exception) -> tuple[bool, str]:
+        """What a ProviderConnectionError does, at either seam: (retry, note). retry True means the
+        caller `continue`s (the iteration is spent and the request rebuilt); False means the caller
+        ends the turn, appending `note` (possibly empty) to its ending.
+
+        Three rows: (1) reconnect on and the turn's one wait unspent: wait for the server through its
+        own address and key; (2) reconnect off or already spent: the single fallback retry after a
+        short pause; (3) the retry itself failed again before a call went through: end the turn."""
+        from localharness.provider import client as _client  # read at call time: tests patch it
+
+        if session.connection_retry_used:
+            return False, ""
+        bound = self._reconnect_bound()
+        if bound <= 0 or session.reconnect_used:
+            session.connection_retry_used = True
+            await asyncio.sleep(_client._QUEUE_VISIBILITY_SECONDS)
+            return True, ""
+        session.reconnect_used = True
+        session.connection_retry_used = True
+        cfg = self._llm.config  # read now: a rebind since the loop was built is what the poll must use
+
+        async def _on_lost() -> None:
+            return None
+
+        pair = self._recovery_pair(cfg.base_url)
+        try:
+            await pair.recover(
+                base_url=cfg.base_url, api_key=getattr(cfg, "api_key", None),
+                wait_seconds=bound, on_lost=_on_lost,
+            )
+        except Exception as failed:  # never BaseException: Esc's CancelledError must propagate
+            text = str(failed)
+            if isinstance(failed, (TimeoutError, RuntimeError, OSError)) and text:
+                note = text
+            else:
+                note = f"{type(failed).__name__}: {failed}"
+            log.warning(
+                "Reconnect to the model server failed in %s (iter %d): %s",
+                self._config.name, session.iteration, note,
+            )
+            return False, note
+        return True, ""
 
     async def _build_request(self, messages: list[Message], tools: list | None):
         # Re-snapshot and re-declare the active task's references (files may have changed; the
