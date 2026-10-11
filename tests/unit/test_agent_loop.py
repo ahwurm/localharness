@@ -376,19 +376,36 @@ async def test_run_turn_publishes_turn_completed(mock_llm_client, bus):
 
 
 @pytest.mark.asyncio
-async def test_run_turn_dead_provider_is_llm_error_not_traceback(mock_llm_client, bus, caplog):
+async def test_run_turn_dead_provider_is_llm_error_not_traceback(mock_llm_client, bus, caplog, monkeypatch):
     """The model server dying mid-session (killed/restarted underneath the REPL — live
     2026-08-10) is a KNOWN operational condition: a ProviderError escaping _execute_loop
     (e.g. the TokenCounter's dead-endpoint raise in build_messages) must surface as the
     calm llm_error TurnFailed — one WARNING line, NO internal_error, NO stack-trace spew
     that reads as failing harness behavior."""
     import logging
+    from localharness.agent.loop import Session
     from localharness.provider.client import ProviderConnectionError
+
+    async def no_sleep(*_a, **_k):
+        return None
+
+    # The fallback retry pauses before it rebuilds; the pause is not under test.
+    monkeypatch.setattr("localharness.agent.loop.asyncio.sleep", no_sleep)
+    built = []
+
+    class Recording(Session):
+        def __init__(self, *args, **kw):
+            super().__init__(*args, **kw)
+            built.append(self)
+
+    monkeypatch.setattr("localharness.agent.loop.Session", Recording)
 
     Response = mock_llm_client.Response
     loop = _make_agent_loop(mock_llm_client, [Response(content="never reached")], bus)
+    builds = []
 
     async def dead_build_messages(*a, **k):
+        builds.append(1)
         raise ProviderConnectionError(
             "model server unreachable at http://localhost:8000/tokenize (Connection refused)"
         )
@@ -405,6 +422,10 @@ async def test_run_turn_dead_provider_is_llm_error_not_traceback(mock_llm_client
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR], \
         "a dead provider must not log an ERROR/traceback — it is not an internal error"
     assert any("Provider failure" in r.getMessage() for r in caplog.records)
+    # The fallback retry rebuilt the request once; the second failure ended the turn.
+    assert len(builds) == 2
+    assert built[0].connection_retry_used is True
+    assert built[0].reconnect_used is False
 
 
 @pytest.mark.asyncio
@@ -705,9 +726,14 @@ async def test_stuck_escalation_falls_back_when_wrapup_raises(mock_llm_client, b
 
 
 @pytest.mark.asyncio
-async def test_run_turn_handles_provider_connection_error_with_retry(mock_llm_client, bus):
+async def test_run_turn_handles_provider_connection_error_with_retry(mock_llm_client, bus, monkeypatch):
     """ProviderConnectionError triggers one retry; if second also fails, returns summary."""
     from localharness.provider.client import ProviderConnectionError
+
+    async def no_sleep(*_a, **_k):
+        return None
+
+    monkeypatch.setattr("localharness.agent.loop.asyncio.sleep", no_sleep)
 
     class FailTwiceLLM:
         class config:

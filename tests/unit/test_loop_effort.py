@@ -526,6 +526,7 @@ async def test_a_cut_on_the_connection_retry_takes_the_thinking_off_re_send(bus,
     assert "disable_thinking" not in llm.calls[1]
     assert llm.calls[2]["disable_thinking"] is True
     assert sessions[0].reasoning_cut_used is True
+    assert sessions[0].reconnect_used is False
 
 
 async def test_a_second_cut_after_a_connection_retry_ends_the_turn_with_the_notice(
@@ -544,6 +545,7 @@ async def test_a_second_cut_after_a_connection_retry_ends_the_turn_with_the_noti
     assert summary == _REASONING_CUT_TURN_NOTICE
     assert len(llm.calls) == 3
     assert sessions[0].terminated_reason == "error"
+    assert sessions[0].reconnect_used is False
 
 
 async def test_two_connection_errors_in_a_row_still_end_the_turn(bus, sessions, monkeypatch):
@@ -559,6 +561,7 @@ async def test_two_connection_errors_in_a_row_still_end_the_turn(bus, sessions, 
     assert "refused again" in summary
     assert len(llm.calls) == 2
     assert sessions[0].terminated_reason == "error"
+    assert sessions[0].reconnect_used is False
 
 
 async def test_a_call_that_goes_through_re_arms_the_connection_retry(bus, sessions, monkeypatch):
@@ -572,6 +575,7 @@ async def test_a_call_that_goes_through_re_arms_the_connection_retry(bus, sessio
     loop = _loop(llm, bus, effort=("high", "agent"))
     assert await loop.run_turn("first") == "ok"
     assert sessions[0].connection_retry_used is False
+    assert sessions[0].reconnect_used is False
 
 
 async def test_a_cut_never_silences_thinking_in_the_next_turn(bus):
