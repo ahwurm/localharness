@@ -673,7 +673,7 @@ def test_an_unbounded_root_on_a_real_remote_channel_is_capped_when_unattended(
     assert loop._resolve_max_actions() == (100, "channels.unattended_max_actions")
 
 
-@pytest.mark.parametrize(("cls", "channel_id"), [(TerminalChannel, "terminal"), (AcpChannel, "acp")])
+@pytest.mark.parametrize(("cls", "channel_id"), [(TerminalChannel, "terminal")])
 def test_the_terminal_and_zed_are_local_operators_and_run_uncapped(mock_llm_client, bus, cls, channel_id):
     assert cls.local_operator is True
     loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="unattended",
@@ -681,6 +681,38 @@ def test_the_terminal_and_zed_are_local_operators_and_run_uncapped(mock_llm_clie
     loop.gate.attach_channel(_bare(cls, channel_id))
     assert loop.gate.local_operator is True
     assert loop.action_limit() == 0
+
+
+# IN-70: Zed is a local operator per instance; an ACP session the model launched is not. (The ACP
+# row above used to read the class constant, which production no longer uses.)
+
+
+def test_zed_is_a_local_operator_and_runs_uncapped(mock_llm_client, bus, monkeypatch):
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    channel = AcpChannel()
+    assert channel.local_operator is True
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="unattended",
+                 unattended_max_actions=100)
+    loop.gate.attach_channel(channel)
+    assert loop.gate.local_operator is True
+    assert loop.action_limit() == 0
+
+
+def test_a_model_launched_acp_session_is_no_local_operator(mock_llm_client, bus, monkeypatch):
+    monkeypatch.setenv("LOCALHARNESS_COMMIT", "abc123")
+    channel = AcpChannel()
+    assert channel.local_operator is False
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="unattended",
+                 unattended_max_actions=100)
+    loop.gate.attach_channel(channel)
+    assert loop.gate.local_operator is False
+    assert loop._resolve_max_actions() == (100, "channels.unattended_max_actions")
+
+
+def test_a_bare_acp_channel_reads_as_remote():
+    """The class default is the safe one: an instance built without __init__ is no operator."""
+    assert AcpChannel.local_operator is False
+    assert _bare(AcpChannel, "acp").local_operator is False
 
 
 def test_an_unattended_loop_with_no_channel_attached_is_capped(mock_llm_client, bus):

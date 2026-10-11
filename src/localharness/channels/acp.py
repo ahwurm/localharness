@@ -449,9 +449,12 @@ class AcpChannel(ChannelAdapter):
     can_ask = True
     """PRD §3.5: Zed renders an ASK as its own permission dialog, held open with no timeout."""
 
-    local_operator = True
-    """Zed speaks ACP over stdio, so its user is at this machine: `channels.remote_unattended`
-    never limits it, exactly like the terminal."""
+    local_operator = False
+    """Decided per instance in ``__init__``, never by this class default (the safe one: a channel
+    that says nothing is remote). Zed speaks ACP over stdio, so its user is at this machine and
+    `channels.remote_unattended` never limits it, exactly like an interactive terminal; an ACP
+    session the agent itself launched (the ``LOCALHARNESS_COMMIT`` marker its commands carry) is no
+    operator, by the same rule as the terminal's (CR-52, IN-70)."""
 
     ask_holds_dialog = True
     """The client holds the question open, so the gate must not put a deadline on it (PRD §3.5,
@@ -466,6 +469,9 @@ class AcpChannel(ChannelAdapter):
         # place it is set, so there is no window where a half-wired channel is subscribed.
         super().__init__(bus=None, config={})  # type: ignore[arg-type]
         self._config_dir = config_dir
+        # IN-70: a session the model launched through bash_exec / python_exec answers to nobody.
+        # No tty test: Zed always talks over pipes.
+        self.local_operator = "LOCALHARNESS_COMMIT" not in os.environ
 
         self._conn: Any = None
         self._client_can_read = False
