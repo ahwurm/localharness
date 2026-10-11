@@ -12,6 +12,7 @@ from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig, ToolConfig
 from localharness.tools.builtin.web_tool import WEB_INGEST_TOOLS
 from localharness.core.bus import EventBus
+from localharness.core.events import Escalation, TurnFailed
 from localharness.tools.builtin import register_builtin_tools
 from localharness.tools.registry import ToolRegistry
 
@@ -97,8 +98,9 @@ async def _make_loop(
     responses: list[dict],
     config: AgentConfig,
     registry: ToolRegistry,
+    bus: EventBus | None = None,
 ) -> AgentLoop:
-    bus = EventBus()
+    bus = bus if bus is not None else EventBus()
     llm = MockLLMClient(responses)
     ctx = ContextManager()
     perm = PermissionEvaluator()
@@ -188,7 +190,13 @@ async def test_validation_error_recovery(tmp_path):
 
 @pytest.mark.asyncio
 async def test_stuck_escalation(tmp_path):
-    """Mock LLM repeats same tool call 3+ times → stuck detector escalates."""
+    """Mock LLM repeats same tool call 3+ times → stuck detector escalates.
+
+    The stuck notice is the Escalation event's, delivered once (D-04/D-40/D-67): the turn's reply is
+    the wrap-up summary, else the last assistant content, else empty — never stuck text. The turn
+    still ends as TurnFailed(stuck_detected) whose detail is the reply, and stops well before the
+    scripted responses run out.
+    """
     registry = ToolRegistry()
     await register_builtin_tools(registry)
     config = _make_config(max_actions=50)
@@ -202,13 +210,27 @@ async def test_stuck_escalation(tmp_path):
         for i in range(10)
     ]
 
-    loop = await _make_loop(responses, config, registry)
+    bus = EventBus()
+    loop = await _make_loop(responses, config, registry, bus=bus)
     summary = await loop.run_turn("Find Python files over and over")
 
-    assert summary, "Summary should be non-empty"
-    # Summary should mention stuck/escalation
-    lower = summary.lower()
-    assert "stuck" in lower or "escalat" in lower or "repeated" in lower
+    # Exactly one Escalation carries the stuck notice
+    escalations = bus.history(event_types=[Escalation])
+    assert len(escalations) == 1
+    assert escalations[0].reason == "stuck_detected"
+    assert "repeated" in escalations[0].detail.lower() or "stuck" in escalations[0].detail.lower()
+
+    # The turn terminated as stuck, and its failure detail is exactly the returned reply
+    failed = [e for e in bus.history(event_types=[TurnFailed]) if e.reason == "stuck_detected"]
+    assert len(failed) == 1
+    assert failed[0].detail == summary
+
+    # The reply carries no stuck notice
+    assert "[Agent stuck" not in summary
+    assert "stuck" not in summary.lower() and "escalat" not in summary.lower()
+
+    # The loop stopped before exhausting the scripted responses
+    assert loop._llm._index < len(responses)
 
 
 # ---------------------------------------------------------------------------
