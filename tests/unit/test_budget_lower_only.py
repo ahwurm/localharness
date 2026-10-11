@@ -817,3 +817,40 @@ def test_the_builtin_doors_budget_warnings_name_the_key_and_the_file(tmp_path, c
     assert any(m.startswith("ignoring permissions.budget.max_actions 99 in " + path) for m in msgs)
     assert any(m.startswith("ignoring permissions.budget.max_tool_calls 50 in " + path)
                for m in msgs)
+
+
+# ---------------------------------------------------------------------------
+# WR-05: one refused workspace source never discards the other's accepted lowering
+# ---------------------------------------------------------------------------
+
+
+def test_a_refused_overrides_value_keeps_the_configs_accepted_lowering(tmp_path):
+    loader, ws = _layers(tmp_path, ws_cfg=_budget(explore={"actions": 4}),
+                         ws_over=_budget(explore={"actions": 99}))
+    assert _explore(loader) == (4, 3.0)
+    assert _warnings(loader) == [
+        _only_lower(ws / "overrides.yaml", "org.children_budget.explore.actions")]
+
+
+def test_a_refused_config_value_keeps_the_overrides_accepted_lowering(tmp_path):
+    loader, ws = _layers(tmp_path, ws_cfg=_budget(explore={"actions": 99}),
+                         ws_over=_budget(explore={"actions": 4}))
+    assert _explore(loader) == (4, 3.0)
+    assert _warnings(loader) == [
+        _only_lower(ws / "config.yaml", "org.children_budget.explore.actions")]
+
+
+def test_a_null_in_overrides_does_not_cancel_the_configs_lowering(tmp_path):
+    loader, _ = _layers(tmp_path, ws_cfg=_budget(explore={"actions": 4}, lookup_share=0.1),
+                        ws_over=_budget(explore={"actions": None}, lookup_share=None))
+    assert _explore(loader) == (4, 3.0)
+    assert loader.load_harness().org.children_budget.lookup_share == 0.1
+    assert _warnings(loader) == []
+
+
+def test_two_accepted_lowerings_take_the_merge_winner(tmp_path):
+    loader, _ = _layers(tmp_path, g_cfg=_budget(explore={"actions": 20}),
+                        ws_cfg=_budget(explore={"actions": 4}),
+                        ws_over=_budget(explore={"actions": 6, "minutes": None}))
+    assert _explore(loader) == (6, 3.0)
+    assert _warnings(loader) == []
