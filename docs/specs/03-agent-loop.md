@@ -181,8 +181,11 @@ class StuckDetector:
         Otherwise the window decides. A first repeat is a nudge: the window is cleared
         (a clean slate) and the signature recorded as warned. A repeat of a warned
         signature, or a nudge once max_nudges_per_turn are spent, is ESCALATE. A window
-        already holding escalation_threshold identical signatures (one iteration's batch
-        can) is ESCALATE at once, with no nudge first."""
+        already holding escalation_threshold identical signatures is ESCALATE at once, with
+        no nudge first; that needs escalation_threshold <= recovery_threshold (non-default
+        thresholds), because identical calls in one response are deduplicated before they
+        are recorded and classify runs once per iteration, so with the defaults a window
+        cannot reach escalation_threshold without passing RECOVERING first."""
 
     def compute_signature(self, tool_name: str, args: dict) -> str:
         """Return SHA-256 hex digest of tool_name + canonical JSON of args.
@@ -811,9 +814,10 @@ RECOVERING ──[a warned signature repeats, or the nudges are spent]──► 
     Return the model's own wrap-up of its partial work (no stuck text in the reply)
     (loop exits)
 
-CLEAR ──[escalation_threshold identical in one window]────────────► ESCALATE
-  The RECOVERING ──► ESCALATE action, with no nudge first: one iteration whose batch holds
-  escalation_threshold identical calls escalates straight away.
+CLEAR ──[escalation_threshold ≤ recovery_threshold and that many identical in the window]──► ESCALATE
+  The RECOVERING ──► ESCALATE action, with no nudge first. Only non-default thresholds reach it:
+  identical calls in one response are deduplicated before they are recorded, and classify runs
+  once per iteration, so with the defaults the window passes RECOVERING first.
 
 ANY ──[one identical call reaches call_only_multiplier x escalation_threshold]──► ESCALATE
   The same action as above, whatever the results were: a poll whose trusted result changes
