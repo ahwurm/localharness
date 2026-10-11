@@ -144,7 +144,12 @@ def _decode_ip(text: str) -> str:
     if len(raw) == 4:
         return str(ipaddress.IPv4Address(raw[::-1]))
     if len(raw) == 16:
-        return str(ipaddress.IPv6Address(b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4))))
+        addr = ipaddress.IPv6Address(b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4)))
+        if addr.ipv4_mapped is not None:
+            # Spelled the same on every Python: older 3.12 patch releases print `::ffff:7f00:1`,
+            # newer ones `::ffff:127.0.0.1`.
+            return f"::ffff:{addr.ipv4_mapped}"
+        return str(addr)
     return ""
 
 

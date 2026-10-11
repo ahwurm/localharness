@@ -85,6 +85,7 @@ def test_an_offline_vocabulary_falls_back_and_is_not_retried(monkeypatch):
     assert asked == ["cl100k_base"], "one attempt, never one per count"
 
 
+@pytest.mark.real_sockets  # tiktoken fetches cl100k_base over HTTPS where it is not cached (CI)
 def test_with_tiktoken_the_first_count_builds_cl100k_once_and_counts_as_before(monkeypatch):
     tiktoken = pytest.importorskip("tiktoken")
     real = tiktoken.get_encoding("cl100k_base")  # the old eager implementation's encoder
