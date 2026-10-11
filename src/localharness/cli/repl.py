@@ -1799,6 +1799,15 @@ class OrchestratorREPL:
             hf_cached = [m for m in managed_server.list_cached_models()
                          if m not in live and m not in registry]
             downloaded = registry + hf_cached
+        # The primary's own served name is the managed-restart target whenever the current endpoint
+        # does not serve it live (swapping back to it after a cold peer stopped it, D-34). It is
+        # matched against the list below; it is never free text written into `model`.
+        prim_served = (
+            model_ops.primary_served_name(managed, getattr(self._harness, "provider", None))
+            if managed is not None else None
+        )
+        if prim_served and prim_served not in live and prim_served not in downloaded:
+            downloaded.insert(0, prim_served)
         # Cross-endpoint discovery (0.10.0 model tree): probe the primary + each configured peer
         # endpoint, so a target NAME can resolve to a model served on a DIFFERENT server. Backward
         # compatible — with no `extra_endpoints`, peer_target is empty and every path below behaves
@@ -1830,6 +1839,11 @@ class OrchestratorREPL:
                 live, managed, current, peer_target,
                 medians=medians, live_ptype=cur_ptype, registry_ptype=prim_ptype,
             )
+            # The down primary's served name is pickable too: the swap-back target (D-34).
+            if prim_served and prim_served not in live and not any(
+                (e[0] if isinstance(e, tuple) else e) == prim_served for e in self._model_cache
+            ):
+                self._model_cache.append((prim_served, "swap"))
             # Phase C2: cold launchable peers are pickable too (the menu never fetches; these are
             # config-derived served-names).
             self._model_cache.extend(n for n in cold_target if n not in self._model_cache)
@@ -2138,7 +2152,12 @@ class OrchestratorREPL:
             # the old server drains. The model mutation MUST land strictly BETWEEN stop and activate:
             # activate's serve_command reads spec.model to build the launch command.
             await strategy.stop(managed, self._server_config_dir)
-            managed.model = target
+            # The record already names its weights: the primary's served name never replaces them
+            # (a llama.cpp alias never reaches -m; a vLLM --served-model-name alias never becomes
+            # the vLLM model, D-70). Only a name other than the primary's, on a non-llama.cpp
+            # runtime, changes the model.
+            if managed.runtime != "llamacpp" and target != prim_served:
+                managed.model = target
             # the provider's key, only when the managed server is set to require one (default off)
             ep = await strategy.activate(
                 managed, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress,
@@ -2170,7 +2189,11 @@ class OrchestratorREPL:
         llm.config.model = served
         cap = await llm.detect_capabilities()
         note = await self._refresh_token_counter(served)
-        saved = await self._persist_landed(llm.config.base_url, served)
+        # Swapping back to a non-llama.cpp primary by a served-model-name alias relaunched the record
+        # as written; persisting the alias would write it over server.model (D-70), so nothing is.
+        alias_swap_back = (managed.runtime != "llamacpp" and target == prim_served
+                           and managed.model != target)
+        saved = False if alias_swap_back else await self._persist_landed(llm.config.base_url, served)
         rate = self._measured_note(medians, prim_ptype, served)
         await self._send_info(
             f"Switched to {served} (tool calling: {cap.tool_call_mode}).{note}"
