@@ -503,28 +503,45 @@ def test_run_decodes_with_replacement(real_run):
 # ------------------------------------------------------------------ the journal's hostile shapes
 
 
-def test_journal_entries_with_null_byte_array_or_missing_fields_are_skipped(fake_systemd, tmp_path):
+def test_journal_entries_with_missing_or_foreign_fields_name_no_run(fake_systemd, tmp_path):
     fake_systemd.journal([
-        {"_EXE": "/b/llama-server", "_CMDLINE": None},
-        {"_EXE": "/b/llama-server", "_CMDLINE": [108, 108]},
         {"_CMDLINE": "llama-server -m /m/a.gguf"},
         {"_EXE": ["/b/llama-server"], "_CMDLINE": "llama-server -m /m/a.gguf"},
+        {"_EXE": "/usr/bin/python3", "_CMDLINE": None},
         "this is not json", "[1, 2]", "",
     ])
     assert units.read_journal("u.service") == units.Skip("has no llama-server in its journal",
                                                          names_model=False)
 
 
-def test_a_hostile_last_entry_does_not_hide_an_earlier_good_one(fake_systemd, tmp_path):
+@pytest.mark.parametrize("cmdline", [None, [108, 108]])
+def test_a_newest_run_whose_command_line_the_journal_cannot_show_is_a_skip(fake_systemd, tmp_path, cmdline):
+    model = _model(tmp_path)
+    fake_systemd.journal([
+        {"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model} --host 0.0.0.0 --api-key-file /k"},
+        {"_EXE": "/b/llama-server", "_CMDLINE": cmdline},
+    ])
+    assert units.read_journal("u.service") == units.Skip("has a command line the journal cannot show")
+
+
+def test_an_unusable_newest_run_does_not_hand_over_an_older_one(fake_systemd, tmp_path):
+    """WR-03: the owner moved the unit back to loopback; the older run bound every interface."""
+    model = _model(tmp_path)
+    fake_systemd.journal([
+        {"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model} --host 0.0.0.0 --api-key-file /k"},
+        "not json",
+        {"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model} --alias it's --host 127.0.0.1"},
+    ])
+    assert units.read_journal("u.service") == units.Skip("has an unparseable command line in its journal")
+
+
+def test_a_non_llama_newer_entry_does_not_hide_the_llama_run(fake_systemd, tmp_path):
     model = _model(tmp_path)
     fake_systemd.journal([
         {"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model}"},
-        {"_EXE": "/b/llama-server", "_CMDLINE": None},
-        "not json",
-        {"_EXE": "/b/llama-server", "_CMDLINE": "llama-server -m 'unterminated"},
+        {"_EXE": "/usr/bin/python3", "_CMDLINE": None},
     ])
-    rec = units.read_journal("u.service")
-    assert isinstance(rec, ProcRecord) and rec.argv[2] == model
+    assert isinstance(units.read_journal("u.service"), ProcRecord)
 
 
 def test_a_non_llama_last_entry_does_not_replace_the_last_llama_one(fake_systemd, tmp_path):
