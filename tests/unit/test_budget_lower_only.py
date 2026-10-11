@@ -678,3 +678,79 @@ def test_a_global_overlay_of_a_builtin_keeps_full_authority(tmp_path):
         "max_actions": 500, "max_tool_calls": 40}}}})
     budget = _overlay(loader)
     assert (budget.max_actions, budget.max_tool_calls) == (500, 40)
+
+
+# ---------------------------------------------------------------------------
+# CR-01: a global value pydantic accepts in another spelling is the operator's value, never
+# silence, at every door
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("spelled", ["50", 50.0])
+def test_a_global_budget_spelled_as_a_string_or_float_still_bounds_a_shadowing_file(
+        tmp_path, spelled):
+    loader, ws = _world(tmp_path,
+                        g_agents={"worker": _agent(budget={"max_actions": spelled})},
+                        ws_agents={"worker": _agent(budget={"max_actions": 9999})})
+    assert _loaded(loader) == (50, None, frozenset())
+    assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_actions")]
+
+
+@pytest.mark.parametrize("spelled", ["50", 50.0])
+def test_a_shadowing_file_may_still_lower_a_differently_spelled_global(tmp_path, spelled):
+    loader, _ = _world(tmp_path,
+                       g_agents={"worker": _agent(budget={"max_actions": spelled})},
+                       ws_agents={"worker": _agent(budget={"max_actions": 20})})
+    assert _loaded(loader) == (20, None, frozenset())
+    assert _notes(loader) == []
+
+
+def test_a_global_minutes_spelled_as_a_string_still_bounds_a_shadowing_file(tmp_path):
+    loader, ws = _world(tmp_path,
+                        g_agents={"worker": _agent(budget={"max_duration_minutes": "30"})},
+                        ws_agents={"worker": _agent(budget={"max_duration_minutes": 600.0})})
+    assert _loaded(loader) == (None, 30.0, frozenset())
+    assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_duration_minutes")]
+
+
+def test_a_global_budget_that_does_not_validate_is_never_read_as_silence(tmp_path):
+    # Present and unusable fails closed: the workspace value is refused, never kept and marked.
+    loader, ws = _world(tmp_path,
+                        g_agents={"worker": _agent(budget={"max_actions": "lots"})},
+                        ws_agents={"worker": _agent(budget={"max_actions": 9999})})
+    assert _loaded(loader) == (None, None, frozenset())
+    assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_actions")]
+
+
+@pytest.mark.parametrize("spelled", ["20", 20.0])
+def test_a_differently_spelled_operator_file_is_the_builtin_baseline(tmp_path, caplog, spelled):
+    loader, _ = _world(tmp_path,
+                       g_agents={"explore": {"permissions": {"budget": {"max_actions": spelled}}}},
+                       ws_agents={"explore": {"permissions": {"budget": {"max_actions": 15}}}})
+    with caplog.at_level(logging.WARNING):
+        assert _overlay(loader).max_actions == 15
+    assert _budget_warnings(caplog) == []
+    loader, _ = _world(tmp_path / "b",
+                       g_agents={"explore": {"permissions": {"budget": {"max_actions": spelled}}}},
+                       ws_agents={"explore": {"permissions": {"budget": {"max_actions": 25}}}})
+    assert _overlay(loader).max_actions == 20
+
+
+@pytest.mark.parametrize("spelled", ["20", 20.0])
+def test_a_differently_spelled_global_ceiling_is_the_harness_baseline(tmp_path, spelled):
+    loader, ws = _layers(tmp_path, g_cfg=_budget(explore={"actions": spelled}),
+                         ws_cfg=_budget(explore={"actions": 15}))
+    assert _explore(loader) == (15, 3.0)
+    assert _warnings(loader) == []
+    loader, ws = _layers(tmp_path / "b", g_cfg=_budget(explore={"actions": spelled}),
+                         ws_cfg=_budget(explore={"actions": 25}))
+    assert _explore(loader) == (20, 3.0)
+    assert _warnings(loader) == [_only_lower(ws / "config.yaml", "org.children_budget.explore.actions")]
+
+
+def test_a_global_minutes_or_share_spelled_as_a_string_is_the_harness_baseline(tmp_path):
+    loader, _ = _layers(tmp_path, g_cfg=_budget(explore={"minutes": "30"}, review_share="0.8"),
+                        ws_cfg=_budget(explore={"minutes": 10.0}, review_share=0.7))
+    assert _explore(loader) == (8, 10.0)
+    assert loader.load_harness().org.children_budget.review_share == 0.7
+    assert _warnings(loader) == []

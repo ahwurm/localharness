@@ -22,6 +22,7 @@ from .models import (
     LEGACY_MODE_ALIASES,
     AgentConfig,
     BudgetConfig,
+    ChildBudget,
     ChildrenBudgetConfig,
     DivisionConfig,
     HarnessConfig,
@@ -713,6 +714,23 @@ def _finite_number(v: Any, *, gt: Optional[float] = None, ge: Optional[float] = 
             and (gt is None or v > gt) and (ge is None or v >= ge) and (le is None or v <= le))
 
 
+_INVALID = object()
+"""A global-layer value that is present but does not validate: never read as silence."""
+
+
+def _coerce_global(model: type[BaseModel], field: str, v: Any, **fill: Any) -> Any:
+    """What `model`'s own validation makes of a GLOBAL layer's raw value at `field` (`"50"` and
+    `50.0` are 50, `"30"` is 30.0, as the loaded config would hold them), or _INVALID when it does
+    not validate. A lower-only rule compares against this, never against the raw YAML: a value
+    pydantic accepts is the operator's setting whatever its spelling, and reading a differently
+    typed one as "the global layer is silent" would let a project lift it (CR-01). `fill` supplies
+    the model's other required fields."""
+    try:
+        return getattr(model.model_validate({**fill, field: v}), field)
+    except (ValidationError, OverflowError, ValueError, TypeError):
+        return _INVALID
+
+
 def _budget_value_ok(parts: list[str], v: Any) -> bool:
     """Is `v` a usable value at this `org.children_budget` path, on the field's own bounds?"""
     if parts[-1] == "actions":
@@ -734,10 +752,17 @@ def _children_budget_default(parts: list[str]) -> int | float:
 
 
 def _lower_only_baseline(parts: list[str], machine: Any) -> int | float:
-    """What a project may not exceed at this path: the global layers' value when it is usable,
-    else the shipped default. Always a finite `int` (actions) or `float` (minutes, shares), so the
-    kind of a value to accept is read off it."""
-    allowed = machine if _budget_value_ok(parts, machine) else _children_budget_default(parts)
+    """What a project may not exceed at this path: the global layers' value as the model validates
+    it (a global `"20"` is 20), else the shipped default. Always a finite `int` (actions) or
+    `float` (minutes, shares), so the kind of a value to accept is read off it."""
+    allowed: Any = _INVALID
+    if machine is not _UNSET and machine is not None:
+        if parts[-1] in ("actions", "minutes"):
+            allowed = _coerce_global(ChildBudget, parts[-1], machine, actions=1, minutes=1.0)
+        else:
+            allowed = _coerce_global(ChildrenBudgetConfig, parts[-1], machine)
+    if allowed is _INVALID or not _budget_value_ok(parts, allowed):
+        allowed = _children_budget_default(parts)
     return allowed if parts[-1] == "actions" else float(allowed)
 
 
@@ -1813,9 +1838,20 @@ class ConfigLoader:
                 if d_val is not _UNSET and not _unset(d_val):
                     decl, src = d_val, div_path
 
+            # The global value as the model validates it (CR-01): a global `"50"` or `50.0` is the
+            # operator's 50, never silence. One that is present and does not validate is refused
+            # ground for the workspace too: its value is removed, never kept and never marked.
             baseline = self._global_layer_budget(path.stem, div_name, field)
+            if baseline is not None:
+                baseline = _coerce_global(BudgetConfig, field, baseline)
             note = (f"ignoring permissions.budget.{field} in {str(src)!r}: "
                     "a project may only lower it")
+            if baseline is _INVALID:
+                if decl is not _UNSET:
+                    budget.pop(field, None)
+                    if note not in self.agent_warnings:
+                        self.agent_warnings.append(note)
+                continue
             if finite(baseline):
                 if decl is not _UNSET and finite(decl) and decl <= baseline:
                     result = decl
@@ -2495,8 +2531,12 @@ class ConfigLoader:
             field = key_path.rsplit(".", 1)[-1]
             finite = ((lambda v: _finite_int(v, **_ACTIONS_BOUNDS)) if field == "max_actions"
                       else (lambda v: _finite_number(v, ge=0.1, le=1440.0)))
+            # The operator's value as the model validates it (CR-01: a global `"20"` is 20), else
+            # the built-in's own number.
             baseline = self._global_layer_agent_budget(name, field)
-            if not finite(baseline):
+            if baseline is not None:
+                baseline = _coerce_global(BudgetConfig, field, baseline)
+            if baseline is _INVALID or not finite(baseline):
                 baseline = getattr(base_budget, field, None)
             value = declared_budget.get(field)
             if value is not None and finite(value) and (baseline is None or value <= baseline):
