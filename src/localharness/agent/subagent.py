@@ -248,8 +248,8 @@ def _child_budget(
     (`parent_remaining()` non-zero for the key) the copy gets `min(max(floor, share x remaining), ceiling)`,
     never 0 and never above the ceiling; `shape` picks only the share (`review_share`, else
     `lookup_share`), never the ceiling. Under an INFINITE parent nothing is written: the loop is handed
-    the ceiling's org rung as `budget_fallback` and applies it only on a remote unattended gate, so an
-    unconfigured child under an attended terminal runs with no action limit. It reads no gate and
+    the ceiling's org rung as `budget_fallback` and applies it only when no local operator is attached
+    (in any mode, WR-70), so an unconfigured child under an interactive terminal runs with no action limit. It reads no gate and
     never touches `max_tool_calls`.
     """
     from localharness.agent.loop import BudgetLabels
@@ -1619,7 +1619,7 @@ def make_explore_agent_runner(
     `unattended_max_actions`: the machine knob `channels.unattended_max_actions` (D-57), a value captured
     when the runner is built (start passes `harness.channels.unattended_max_actions`). It rides to every
     child loop (config children, the built-ins, every web-researcher retry, the cruncher's leaves and
-    combine turns, the nested runner) as a ceiling on a remote unattended surface; None (bench loops,
+    combine turns, the nested runner) as a ceiling whenever no local operator is attached; None (bench loops,
     tests) leaves a child's own limits alone.
 
     `parent_remaining_fn`: returns the PARENT loop's live `(actions, minutes)` remainder, 0 / 0.0 meaning

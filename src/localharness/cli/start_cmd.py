@@ -2464,8 +2464,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             server_recovery=server_recovery_fn,
             # D-09: the operator's per-child ceilings, a value (the block does not change mid-session).
             children_budget=harness.org.children_budget,
-            # D-57: the machine knob reaches every child loop, so a remote unattended surface has
-            # a ceiling on each of them, not only on the root.
+            # D-57: the machine knob reaches every child loop, so a session with no local operator
+            # (any mode, WR-70) has a ceiling on each of them, not only on the root.
             unattended_max_actions=harness.channels.unattended_max_actions,
             # D-32: the root loop's live remainder, read at each dispatch (late-bound like effort_fn:
             # the loop is built after this runner).
@@ -2515,8 +2515,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # D-21: the same supplier the runner hands every child; late-bound to the REPL below (ACP
             # never builds one, so its loop shares the poll-only pair).
             server_recovery=server_recovery_fn,
-            # BUDGET-02: the machine's cap for a remote unattended surface; the loop reads it live
-            # against the gate, so an attended terminal root stays unbounded.
+            # BUDGET-02: the machine's cap for a session with no local operator, in any mode (WR-70);
+            # the loop reads it live against the gate, so an interactive terminal root stays unbounded.
             unattended_max_actions=harness.channels.unattended_max_actions,
             # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
             # prompt's memory section.
@@ -2559,7 +2559,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # ~/.localharness/.repl_history). The transcript records what you typed while working in
             # THIS project, so it follows the work (ruled); the kill file above deliberately does not.
             # CR-52: `--no-input`, a piped stdin and a model-spawned start are no local operator,
-            # so `unattended` caps them at channels.unattended_max_actions.
+            # so every mode caps them at channels.unattended_max_actions (WR-70).
             channel = TerminalChannel(
                 bus=bus, config={}, history_file=str(resolve_runtime_path(".repl_history", state_dir)),
                 no_input=no_input,

@@ -230,8 +230,8 @@ class BudgetConfig(BaseModel):
             "Checked before each model call, so the calls of the iteration in progress complete "
             "and a parallel batch can end past it. Distinct from max_tool_calls, a per-call "
             "refusal that does not end the turn. None means no configured limit and the surface "
-            "decides: an attended terminal runs unbounded, a remote unattended surface is capped "
-            "by channels.unattended_max_actions."
+            "decides: an interactive terminal (or Zed) runs unbounded; a session with no local "
+            "operator, in any mode, is capped by channels.unattended_max_actions."
         ),
     )
 
@@ -2317,10 +2317,11 @@ class ChannelsConfig(BaseModel):
         default=100,
         ge=1,
         description=(
-            "The most tool calls one turn of any loop may dispatch while the session is "
-            "`unattended` with no local operator, checked before each model call (the calls of "
-            "the iteration in progress complete). 100 is the value the old cap had. "
-            "Machine-level only."
+            "The most tool calls one turn of any loop may dispatch while no local operator is "
+            "attached (anything but an interactive terminal or Zed: the phone, Discord, a "
+            "--no-input, piped or model-launched start), in every permission mode, checked before "
+            "each model call (the calls of the iteration in progress complete). 100 is the value "
+            "the old cap had. Machine-level only."
         ),
     )
 

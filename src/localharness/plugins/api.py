@@ -311,8 +311,8 @@ class SessionInfo:
     budget: dict[str, Any]
     """The agent's CONFIGURED `permissions.budget` as a dict (`max_actions`,
     `max_duration_minutes`, ...), not the limit the loop enforces. A `None` means "not configured,
-    the surface decides": an attended terminal runs with no limit, a remote unattended session
-    runs under `channels.unattended_max_actions`. Treat every value as optional."""
+    the surface decides": an interactive terminal runs with no limit, a session with no local
+    operator (in any mode) runs under `channels.unattended_max_actions`. Treat every value as optional."""
     exit_reason: str = "complete"
 
 
