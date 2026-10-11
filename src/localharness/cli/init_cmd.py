@@ -1646,10 +1646,19 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
     # IN-04: the stamp written below also gates the sidecar walk, so an agent/division file older
     # than it is cleared of init's values now (once; nothing when the step has already run).
     from localharness.config.migrate import INIT_NULLS_CLAUSE, clear_sidecars_before_restamp
-    for path, backup in clear_sidecars_before_restamp(config_path):
+    cleared, unwritten = clear_sidecars_before_restamp(config_path)
+    for path, backup in cleared:
         console.print("[cyan]i[/cyan]  " + escape(
             f"Updated {path.parent.name}/{path.name}{INIT_NULLS_CLAUSE} — backup at {backup}"),
             soft_wrap=True)
+    # WR-21: a file init cannot write is named and passed over, never a traceback; the stamp below
+    # then stays due, so `start` (or `config migrate`) tries the file again once it can be written.
+    for path, exc in unwritten:
+        reason = exc.strerror or str(exc) or type(exc).__name__
+        console.print("[yellow]⚠[/yellow]  " + escape(
+            f"Could not update {path}: {reason}. It keeps init's max_actions: 100 and tool-output "
+            "sizes for now; 'localharness start' or 'localharness config migrate' clears them once "
+            "the file can be written."), soft_wrap=True)
     if force and config_file.exists():
         # --force starts over; the config it replaces stays beside it, owner-only, so it can be
         # undone. A distinct infix: never counted or pruned as one of migrate's backups.
@@ -1673,6 +1682,8 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
     knob = harness.channels.unattended_max_actions
     if knob != type(harness.channels).model_fields["unattended_max_actions"].default:
         data["channels"]["unattended_max_actions"] = knob
+    if unwritten:  # WR-21: the step has not finished, so its stamp must not say it has
+        data["org"]["permissions"]["init_nulls_revision"] = 0
     # D-12: no null preset field in a record (`records` are dumps the caller made first)
     server_dict, peer_dicts = records if records is not None else _record_dicts(harness)
     if server_dict is not None:

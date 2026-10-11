@@ -952,3 +952,49 @@ def test_a_reinit_over_a_migrated_install_leaves_agent_files_alone(tmp_path):
     _write_harness(tmp_path, HarnessConfig.model_validate(
         {"version": "1", "provider": _WR06_PROVIDER}), True, force=True)
     assert agent.read_bytes() == before  # a hand-set 100 after the step ran is the person's
+
+
+# WR-21: an agent file init cannot write is passed over with a notice, never a traceback.
+
+
+@pytest.mark.skipif(hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
+                    reason="root writes a read-only file")
+def test_a_reinit_over_a_read_only_agent_file_warns_and_keeps_the_step_due(tmp_path):
+    import io
+
+    import yaml
+    from rich.console import Console
+
+    from localharness.cli import init_cmd
+    from localharness.config import migrate
+    from localharness.config.defaults import CURRENT_INIT_NULLS_REVISION
+    from localharness.config.models import HarnessConfig, OrgConfig, PermissionConfig
+
+    _old_config(tmp_path, None)
+    agent = _old_agent(tmp_path)
+    agent.chmod(0o444)
+    before = agent.read_bytes()
+    out = io.StringIO()
+    original_console = init_cmd.console
+    init_cmd.console = Console(file=out, width=400)
+    try:
+        init_cmd._write_harness(tmp_path, HarnessConfig.model_validate({
+            "version": "1", "provider": _WR06_PROVIDER,
+            "org": OrgConfig(permissions=PermissionConfig(
+                init_nulls_revision=CURRENT_INIT_NULLS_REVISION)).model_dump()}), True, force=True)
+    finally:
+        init_cmd.console = original_console
+
+    text = " ".join(out.getvalue().split())
+    assert f"Could not update {agent}" in text and "config migrate" in text
+    assert agent.read_bytes() == before
+    assert list(agent.parent.glob(f"scout.yaml{migrate.BACKUP_INFIX}*")) == []
+    written = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert written["org"]["permissions"]["init_nulls_revision"] == 0  # the step stays due
+
+    # ...so the start-time migration retries the file once it can be written.
+    agent.chmod(0o644)
+    original, plan = migrate.load_plan(tmp_path / "config.yaml")
+    assert plan is not None and [s.path for s in plan.sidecars] == [agent]
+    migrate.apply(tmp_path / "config.yaml", original, plan)
+    assert yaml.safe_load(agent.read_text(encoding="utf-8"))["permissions"]["budget"]["max_actions"] is None
