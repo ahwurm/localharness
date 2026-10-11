@@ -308,6 +308,15 @@ def test_read_unit_missing_and_non_utf8_files(tmp_path, home):
     assert isinstance(units.read_unit(str(bad), unit="u"), units.Skip)
 
 
+def test_read_unit_skips_a_second_command_after_systemds_separator(tmp_path, home):
+    """IN-07: `;` between two commands is not an argument of the first."""
+    path = _unit_file(tmp_path, _service("ExecStart=/usr/bin/llama-server -m /m.gguf ; /bin/echo hi"))
+    assert units.read_unit(path, unit="u.service") == units.Skip("has more than one command in ExecStart=")
+    quoted = _unit_file(tmp_path, _service('ExecStart=/usr/bin/llama-server -m /m.gguf --samplers "a;b"'),
+                        name="q.service")
+    assert isinstance(units.read_unit(quoted, unit="q.service"), ProcRecord)
+
+
 def test_read_unit_never_opens_through_a_plain_open(tmp_path, home, monkeypatch):
     from localharness.provider import units as mod
     seen: list[str] = []

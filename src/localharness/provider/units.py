@@ -384,6 +384,8 @@ def read_unit(path: str, *, unit: str) -> ProcRecord | Skip:
         return Skip(f"has more than {UNIT_TOKEN_CAP} ExecStart= tokens", names_model=names)
     if not tokens or ("@" in prefix and len(tokens) < 2):
         return Skip("has an empty ExecStart=", names_model=False)
+    if ";" in tokens:  # systemd's separator between two commands; the second is not llama-server's argument
+        return Skip("has more than one command in ExecStart=", names_model=names)
     # Who runs is judged before anything else, so an unrelated unit reads "runs <program>" and not
     # "uses a $ expansion": with `@` the executable is the first word, else argv[0].
     program = tokens[0]
