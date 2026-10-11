@@ -221,11 +221,16 @@ class BudgetConfig(BaseModel):
     """Execution budget constraints for one agent session."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    max_actions: int = Field(
+    max_actions: Optional[int] = Field(
         default=100,
         ge=1,
         le=10_000,
-        description="Maximum number of tool calls in one session.",
+        description=(
+            "The iteration ceiling for one turn: how many model round-trips the loop makes "
+            "before it stops. Distinct from max_tool_calls (a ceiling on dispatched tool calls). "
+            "None means no configured limit and the surface decides: an attended terminal runs "
+            "unbounded, a remote unattended surface is capped by channels.unattended_max_actions."
+        ),
     )
 
     max_tool_calls: Optional[int] = Field(
@@ -589,6 +594,17 @@ class PermissionConfig(BaseModel):
             "defaults, then bump this to current. Gating the sync on this stamp — not on 'is "
             "any default missing' — is what lets a user permanently delete a shipped default: "
             "once stamped current, the sync adds nothing (deliberate removals are respected)."
+        ),
+    )
+
+    init_nulls_revision: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Bookkeeping stamp: whether the one-shot step that clears the three values `init` "
+            "used to dump (config/defaults.py CURRENT_INIT_NULLS_REVISION) has run on this "
+            "config. Absent/0 = not yet. It is its own stamp and never moves defaults_revision, "
+            "so running it cannot re-run the deny-list sync."
         ),
     )
 
@@ -1146,6 +1162,17 @@ class AgentConfig(BaseModel):
     # (`agent_config.memory.recall_scope`) so the pre-plugin read path keeps working.
     _plugin_settings: dict[str, Any] = PrivateAttr(default_factory=dict)
 
+    # Set by the loader only, never a YAML key: the budget field names (`max_actions` /
+    # `max_duration_minutes`) kept from a workspace under a silent global. Read only by the
+    # delegation seam. A class-level property exposes it because __getattr__ above falls through
+    # to the plugin settings.
+    _budget_kept_from_workspace: frozenset[str] = PrivateAttr(default_factory=frozenset)
+
+    @property
+    def budget_kept_from_workspace(self) -> frozenset[str]:
+        """The budget fields the loader kept from a workspace (empty unless it set them)."""
+        return self._budget_kept_from_workspace
+
     def __getattr__(self, name: str) -> Any:
         try:
             return super().__getattr__(name)  # type: ignore[misc]  # pydantic's private-attr lookup
@@ -1476,6 +1503,92 @@ LLAMACPP_ONLY_FIELDS: tuple[str, ...] = (
 lmstudio alike); `context` and `effort` are accepted everywhere."""
 
 
+_CHILD_BUDGET_DEFAULTS: dict[str, tuple[int, float]] = {
+    "explore": (8, 3.0),
+    "web_researcher": (56, 20.0),
+    "search_verifier": (12, 6.0),
+    "cruncher": (6, 20.0),
+    "chunk_summarizer": (3, 6.0),
+    "default": (8, 3.0),
+}
+"""Entry name -> (actions, minutes). Both the entry fields' defaults and the partial-entry
+completion read this table, so the two cannot drift."""
+
+
+class ChildBudget(BaseModel):
+    """One child agent's own ceiling: model round-trips and wall-clock minutes."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    actions: int = Field(ge=1, le=10_000, description="Model round-trips the child may make.")
+    minutes: float = Field(gt=0, le=1440.0, description="Wall-clock minutes the child may run.")
+
+
+def _child_default(entry: str) -> ChildBudget:
+    actions, minutes = _CHILD_BUDGET_DEFAULTS[entry]
+    return ChildBudget(actions=actions, minutes=minutes)
+
+
+class ChildrenBudgetConfig(BaseModel):
+    """The budget of each built-in child agent, and the share a model-delegated child takes."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    explore: ChildBudget = Field(
+        default_factory=lambda: _child_default("explore"),
+        description="The explore child's own ceiling.")
+    web_researcher: ChildBudget = Field(
+        default_factory=lambda: _child_default("web_researcher"),
+        description="The web-researcher child's own ceiling.")
+    search_verifier: ChildBudget = Field(
+        default_factory=lambda: _child_default("search_verifier"),
+        description="The search-verifier child's own ceiling.")
+    cruncher: ChildBudget = Field(
+        default_factory=lambda: _child_default("cruncher"),
+        description="The cruncher child's own ceiling.")
+    chunk_summarizer: ChildBudget = Field(
+        default_factory=lambda: _child_default("chunk_summarizer"),
+        description="The chunk-summarizer child's own ceiling.")
+    default: ChildBudget = Field(
+        default_factory=lambda: _child_default("default"),
+        description="The ceiling of any child that has no entry of its own.")
+    lookup_share: float = Field(
+        default=0.25, gt=0, le=1,
+        description="Share of a finite parent's budget a lookup-style delegated child takes.")
+    review_share: float = Field(
+        default=0.5, gt=0, le=1,
+        description="Share of a finite parent's budget a review-style delegated child takes.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _complete_partial_entries(cls, data: Any) -> Any:
+        """Fill a missing `actions` or `minutes` of an entry from that entry's own default.
+
+        A project or global file may write one key of an entry (`explore: {actions: 4}`). A
+        sibling another layer wrote reaches this validator already merged by `deep_merge` and
+        wins, because only a key that is absent is filled. A value that is not a mapping passes
+        through untouched so pydantic still accepts or refuses it as before; the caller's dict is
+        never mutated.
+        """
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        for entry, (actions, minutes) in _CHILD_BUDGET_DEFAULTS.items():
+            value = out.get(entry)
+            if isinstance(value, dict) and ("actions" not in value or "minutes" not in value):
+                out[entry] = {"actions": actions, "minutes": minutes, **value}
+        return out
+
+    def entry_name(self, name: str) -> str:
+        """The field that governs the agent called `name`: its own entry, else `default`."""
+        field = name.replace("-", "_")
+        if field != "default" and field in _CHILD_BUDGET_DEFAULTS:
+            return field
+        return "default"
+
+    def for_name(self, name: str) -> ChildBudget:
+        """The budget of the agent called `name` (`web-researcher`, `explore`, ...)."""
+        return getattr(self, self.entry_name(name))
+
+
 class OrgConfig(BaseModel):
     """
     Organization-level defaults.
@@ -1562,6 +1675,14 @@ class OrgConfig(BaseModel):
             "untrusted-ingest tools. When False: those checks are skipped, with a startup "
             "warning. Machine-level only: only the global config.yaml or overrides.yaml may set "
             "it; a workspace value that differs is ignored with a startup warning."
+        ),
+    )
+
+    children_budget: ChildrenBudgetConfig = Field(
+        default_factory=ChildrenBudgetConfig,
+        description=(
+            "Each built-in child agent's own ceiling (actions and minutes) and the share a "
+            "model-delegated child takes of a finite parent. A project may only lower these."
         ),
     )
 
@@ -2169,6 +2290,15 @@ class ChannelsConfig(BaseModel):
             "phone or an allowlisted Discord account can do both. False refuses both from every "
             "remote channel with one line naming this setting; the terminal and Zed are never "
             "affected. Machine-level only."
+        ),
+    )
+
+    unattended_max_actions: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            "The action ceiling for every loop while the session is `unattended` with no local "
+            "operator. 100 is the value the old cap had. Machine-level only."
         ),
     )
 

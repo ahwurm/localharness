@@ -54,3 +54,9 @@ COAUTHOR_EMAIL: str = "localharness.agent@gmail.com"
 # A REMOVAL from the shipped list needs no bump: plan() only adds, and a config that already holds
 # the pattern keeps it (write(*/agents/*.yaml) left the defaults this way).
 CURRENT_DEFAULTS_REVISION: int = 3
+
+# Revision of the one-shot step that clears the three values `init` used to dump (the two context
+# sizes and `max_actions`). It is its own stamp, recorded in `org.permissions.init_nulls_revision`:
+# bumping CURRENT_DEFAULTS_REVISION instead would re-run the deny-list union and restore deny
+# defaults a person deleted.
+CURRENT_INIT_NULLS_REVISION: int = 1
