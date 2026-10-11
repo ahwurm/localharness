@@ -181,6 +181,15 @@ def migrate(
 
     try:
         backups = _migrate.apply(config_file, original, plan)
+    except _migrate.PartialMigrationError as exc:
+        # WR-02: files were written before one failed — say which, with their backups, and never
+        # "Refusing to write". config.yaml goes last, so re-running this command retries the rest.
+        for path, backup in zip(exc.written, exc.backups):
+            console.print("  Rewrote " + escape(str(path)) + " — backup: " + escape(str(backup)),
+                          soft_wrap=True)
+        err_console.print("[bold red]✗[/bold red] " + escape(f"Could not finish — {exc}"),
+                          soft_wrap=True)
+        raise typer.Exit(1)
     except Exception as exc:
         err_console.print(
             f"[bold red]✗[/bold red] Refusing to write — {exc}"

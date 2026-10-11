@@ -111,6 +111,25 @@ class MigrationError(Exception):
     """Config could not be read, parsed, or (post-merge) validated."""
 
 
+class PartialMigrationError(MigrationError):
+    """A file could not be written after others already were (WR-02).
+
+    `failed` is the file not written, `written` the files rewritten before it, in order, and
+    `backups` their backups. config.yaml, which carries the one-shot stamps, is always written
+    LAST, so a failure leaves its stamps where they were and the whole step runs again on the next
+    start or `config migrate`: a file is never skipped for good by a partial failure."""
+
+    def __init__(self, failed: Path, cause: OSError, written: list[Path],
+                 backups: list[Path]) -> None:
+        self.failed = failed
+        self.written = tuple(written)
+        self.backups = tuple(backups)
+        reason = cause.strerror or str(cause) or type(cause).__name__
+        super().__init__(
+            f"could not write {failed}: {reason}; config.yaml keeps its stamps, so the files not "
+            "written are tried again next time")
+
+
 DEAD_KEY = "allow_patterns"
 """`org.permissions.allow_patterns`, removed in v0.14 (PRD §3.3). Named here because migrate is
 the only writer allowed to delete a user's key, and the name it deletes should be readable at
@@ -380,10 +399,14 @@ def load_plan(config_file: Path) -> tuple[bytes, Optional[MigrationPlan]]:
 
 
 def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> list[Path]:
-    """Write the plan: config.yaml (when it changed) and every sidecar file, each backed up first.
+    """Write the plan: every sidecar file, then config.yaml (when it changed), each backed up
+    first.
 
     Returns the backup paths in write order. Raises MigrationError if the updated config fails
-    validation (nothing is written in that case).
+    validation (nothing is written in that case), and PartialMigrationError when a file cannot be
+    written, naming the files written before it. config.yaml goes last because it carries the
+    stamps (`defaults_revision`, `init_nulls_revision`): written first, a sidecar that then failed
+    would never be looked at again and would keep init's values for good (WR-02).
 
     The sidecars are NOT model-validated: migrate is the only repair path for a file that cannot
     load, so refusing to delete the fatal key because something ELSE in the file is invalid would
@@ -400,11 +423,20 @@ def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> list[
             # config with any key in it (R16); `from None` keeps it out of a traceback too.
             why = validation_text(exc, secret_values(HarnessConfig, migration.updated))
             raise MigrationError(f"migrated config fails validation: {why}") from None
-        backups.append(_write_with_backup(config_file, original, migration.updated))
+    written: list[Path] = []
     for sidecar in migration.sidecars:
-        backups.append(
-            _write_with_backup(sidecar.path, sidecar.path.read_bytes(), sidecar.updated)
-        )
+        try:
+            backups.append(
+                _write_with_backup(sidecar.path, sidecar.path.read_bytes(), sidecar.updated)
+            )
+        except OSError as exc:
+            raise PartialMigrationError(sidecar.path, exc, written, backups) from None
+        written.append(sidecar.path)
+    if not migration.config_unchanged:
+        try:
+            backups.append(_write_with_backup(config_file, original, migration.updated))
+        except OSError as exc:
+            raise PartialMigrationError(config_file, exc, written, backups) from None
     return backups
 
 
