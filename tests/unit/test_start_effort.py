@@ -17,6 +17,7 @@ from localharness.cli import start_cmd
 from localharness.cli.agent_cmd import _build_agent_yaml
 from localharness.cli.start_cmd import EFFORT_CUT_OFF_LINE, EFFORT_UNENFORCED_LINE, _start_async
 from localharness.provider.speed_stats import default_speed_stats_path, record_rejected_effort_keys
+from tests.unit.launch_support import stub_liveness
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
 
 URL = "http://127.0.0.1:9/v1"  # the discard port: a live :8080 would rename the model
@@ -35,6 +36,8 @@ class World:
             self.agents.append(repl._agent)
 
         _stub_start_boundaries(tmp_path, monkeypatch, repl_run=keep_agent)
+        # not alive: what the tmp config dir's absent pidfile answers, for start and for the REPL's seed
+        stub_liveness(monkeypatch, False)
         self.out = _capture_start_console(monkeypatch)
 
         import localharness.agent.subagent as subagent

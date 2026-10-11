@@ -26,7 +26,14 @@ from localharness.cli.repl import OrchestratorREPL
 from localharness.config.models import LEVELS
 from localharness.provider import speed_stats
 from tests.unit.effort_support import PRIMARY_URL, RecordingLLM, harness_with
+from tests.unit.launch_support import harness_launched  # noqa: F401
 from tests.unit.test_repl_unknown_slash import RecordingChannel, _build_repl
+
+# The /model re-resolution sessions build OrchestratorREPL with a gpu llama.cpp `server:` and a config dir,
+# so the constructor seeds the accelerator lock from the strategy's liveness (05-11, D-62). Nothing else
+# in this module asks a strategy's liveness: every test runs as if the harness launched the primary, the
+# lock seeded as it was before the seed read a pidfile, and none reads a real pidfile directory.
+pytestmark = pytest.mark.usefixtures("harness_launched")
 
 INFO = {"style": "system.info"}
 ERROR = {"style": "system.error"}
