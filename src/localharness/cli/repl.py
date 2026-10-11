@@ -420,6 +420,9 @@ class OrchestratorREPL:
         # an unmanaged primary (server=None) or an attach-only peer is the operator's to manage — the
         # lock cannot stop what it did not launch.
         self._active_heavy: Optional[tuple[Any, str]] = None
+        # The loop's reconnect supplier (`server_recovery`) keeps its last pair here: (key, pair, the
+        # active spec held so its id cannot be reused while the memo stands). None until first asked.
+        self._recovery_memo: Optional[tuple[tuple, Any, Any]] = None
         _srv = getattr(harness_config, "server", None)
         _prov = getattr(harness_config, "provider", None)
         # The lock tracks only what the harness LAUNCHED (D-33): a `server:` record alone proves
@@ -2524,6 +2527,57 @@ class OrchestratorREPL:
             if isinstance(exc, (RuntimeError, TimeoutError)) and text:
                 return None, text
             return None, f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+    def server_recovery(self):
+        """What the loop does when the model server it talks to drops (D-19): the supplier ``start``
+        late-binds into the root loop and the runner. Never None. One ``ServerRecovery`` per
+        ``(client address, active spec, active address)``, so callers of one pair share one flight;
+        any change of the three builds a new pair.
+
+        The ADDRESS rule: the pair is relaunchable only while ``_active_heavy`` names the very server
+        the client is using, by exact string equality of ``_active_heavy[1]`` and the client's
+        ``base_url``. A switch to an attach-only peer leaves ``_active_heavy`` at the primary, so this
+        test is what stops the primary's spec being relaunched against the peer's address. The relaunch
+        is the spec object the harness launched (never a re-read of disk or a workspace layer) and its
+        key is that endpoint's own, fixed here (``_launch_key``): a keyed peer is relaunched with its
+        key, a keyless primary lends a keyed peer nothing, and a ``require_api_key`` spec whose key
+        resolves to nothing is polled, never relaunched (D-14). Its config dir is its strategy's own
+        (``recovery_config_dir``: None for LM Studio). A ``gpu: false`` managed primary is not in
+        ``_active_heavy`` but is the harness's: polled with its dir, never relaunched. A hand-run
+        primary and an attach-only peer get a plain poll."""
+        from localharness.provider.lifecycle import ServerRecovery, strategy_for
+        client_base_url = self._agent._llm.config.base_url
+        active = self._active_heavy
+        key = (client_base_url, id(active[0]) if active else None, active[1] if active else None)
+        memo = self._recovery_memo
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        cfg_dir = self._server_config_dir
+        relaunch = None
+        config_dir = None
+        runtime = None
+        if active is not None and active[1] == client_base_url:
+            spec = active[0]
+            runtime = getattr(spec, "runtime", None)
+            if cfg_dir is not None:
+                config_dir = strategy_for(spec).recovery_config_dir(cfg_dir)
+                launch_key = _launch_key(self._harness, client_base_url, spec)
+                if not (getattr(spec, "require_api_key", False) is True and not launch_key):
+                    relaunch = self._build_relaunch(
+                        spec, client_base_url, cfg_dir, launch_key,
+                        self._peer_name_for(spec, client_base_url),
+                        self._provider_type_for_base_url(client_base_url))
+        else:
+            managed = getattr(self._harness, "server", None)
+            provider = getattr(self._harness, "provider", None)
+            if (managed is not None and not getattr(managed, "gpu", False) and provider is not None
+                    and provider.base_url == client_base_url):
+                runtime = getattr(managed, "runtime", None)
+                if cfg_dir is not None:
+                    config_dir = strategy_for(managed).recovery_config_dir(cfg_dir)
+        pair = ServerRecovery(client_base_url, config_dir, relaunch, runtime)
+        self._recovery_memo = (key, pair, active[0] if active else None)
+        return pair
 
     def _launch_lock(self):
         """The launch lock for this session's global config dir (D-47): every REPL launch takes it, and
