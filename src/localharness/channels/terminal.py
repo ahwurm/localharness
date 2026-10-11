@@ -1008,10 +1008,11 @@ class TerminalChannel(ChannelAdapter):
     """`/plugins enable|disable` restarts the session here: the step's questions are asked on this
     terminal after the input box has closed."""
 
-    local_operator = True
-    """The person at an interactive terminal is at this machine: `channels.remote_unattended`
-    never limits it. Each instance re-judges this when it is built (:func:`is_local_operator`):
-    a `--no-input`, piped-stdin or model-spawned run is not a local operator (CR-52)."""
+    local_operator = False
+    """Decided per instance in ``__init__`` (:func:`is_local_operator`), never by this class
+    default, which is the safe one (IN-71): an instance built without ``__init__`` reads as remote.
+    The person at an interactive terminal is at this machine, so `channels.remote_unattended` never
+    limits it; a `--no-input`, piped-stdin or model-spawned run is not a local operator (CR-52)."""
 
     @property
     def can_ask(self) -> bool:
