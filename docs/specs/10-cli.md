@@ -194,13 +194,17 @@ that is entirely comments — nothing set. It probes nothing, prompts for nothin
 you are standing in the machine's own global config directory.
 
 **Behavior.** `init` sets up the core only: it finds or names the model server and writes the
-config. It asks nothing about plugins; a plugin is set up when it is turned on. Without a terminal
-on stdin, or with `--no-input`, it asks nothing at all.
+config. It asks nothing about plugins, nothing about settings and nothing about what it imports
+from the machine (step 3); it never launches a server itself, the first `start` launches a record
+whose server is down. Its few questions are on a terminal only: "Keep it?" for a config that is
+already there, the model to pick when several are served, and the guided setup when nothing is
+found. Without a terminal on stdin, or with `--no-input`, it asks nothing at all.
 
 1. **A config that is already there is kept.** Without `--force`, a terminal asks
    "Config exists: <model> at <url>. Keep it?" and Enter keeps it ("✓ Kept <file>."); without a
    terminal it is kept and `init` adds "To start over: localharness init --force". Both exit 0
-   and probe nothing. Answering no, or giving `--endpoint` or `--model`, changes the server and
+   and probe nothing, except that a config with no `server:` block first tries the import of
+   step 3. Answering no, or giving `--endpoint` or `--model`, changes the server and
    the model in the global `overrides.yaml` after checking the merged config ("✓ Updated
    <overrides> — your config.yaml is unchanged."); `config.yaml` is never rewritten, and a change
    that does not validate, or finds no server, writes nothing and exits 1. A config that cannot be
@@ -216,16 +220,53 @@ on stdin, or with `--no-input`, it asks nothing at all.
    the server's model list and uses the only model served, else exits 1 naming the ids.
    Otherwise `detect_provider()` (`provider/detector.py`) probes the five ports above with a
    short timeout each.
-3. **The model.** One model served is used. With several, `init` uses the one `--model` names,
+3. **What `init` finds on the machine (llama.cpp).** `init` turns what is already there into the
+   `server:` record (and `extra_endpoints` peers) that `start` and `/model` use. It asks nothing and
+   launches nothing, and it prints one block: the primary first (`serving <name> (llama.cpp) ←
+   <model path> · binary: …`), then one `/model switches to <name> …` line per other model, with the
+   flags, environment and `config.ini` it carried beneath the primary.
+   - *A llama-server of yours already listening* on the detected port is imported from
+     `/proc/<pid>`: one directory handle, every read size-capped, another user's process never
+     read. Its model, alias, port, cache types, projector, other `LLAMA_ARG_*` variables and
+     remaining flags are carried; an inline key (`--api-key`, `LLAMA_API_KEY`) goes to
+     `provider.api_key` with `require_api_key: true`, a key file is recorded as a path and never
+     opened, a non-loopback `--host` becomes `bind_all: true` and says so, and `-c` is kept out of
+     the record (one line shows the window the harness will launch instead, and how to keep the
+     served one). llama-server's own `config.ini` is carried as `server.config_ini`. One line says
+     which unit holds the port ("llama-server.service holds :8080; the harness attaches").
+   - *Attach-only.* Anything the import cannot reproduce faithfully — a host name or UNIX-socket
+     host, TLS, more than one key, anything that reads as a credential it cannot place, a download
+     identity (`-hf`, `-mu`) with no mapped GGUF, a command line or environment over its cap or
+     unreadable, a keyed server owned by another user, a keyed Ollama or LM Studio — writes
+     `provider:` only, no `server:` record, and says why in one line ("<who> <reason> — attached
+     only, no server record written"). `init` exits 0.
+   - *Nothing listening.* A stopped user unit of yours that names a model is read from its journal
+     (the newest run), else its unit file; its model leads and the other GGUF files are the peers.
+     A unit that cannot be used is named in the one "no llama-server found — set server.binary"
+     line. Otherwise `init` walks `autosense.model_roots` (bounded, regular `.gguf` files only,
+     typed by their headers so a projector is never a preset and a split model counts once), ranks
+     the models (the unit's, then one the speed ledger knows, then the one that fits, then the
+     newest) and writes the first as the primary.
+   - *Ollama and LM Studio* that answer are listed ("<runtime> holds N models … left in <runtime>,
+     no preset written"), not duplicated.
+   - *A config that already exists with no `server:`* treats the same import as the change: the
+     record goes to the global `overrides.yaml` ("✓ Updated <overrides> — your config.yaml is
+     unchanged."), `config.yaml` stays byte-identical, nothing is asked, and an overlay that does
+     not validate writes nothing and exits 1.
+   - *Adoption.* On a terminal `init` records exactly what it showed as the machine's launch
+     answer, so the first `start` does not ask again; with `--no-input`, without a terminal or
+     from the shell tool it records nothing.
+4. **The model.** One model served is used. With several, `init` uses the one `--model` names,
    else Ollama's loaded model; otherwise a terminal shows a numbered list to pick from, and
    without a terminal `init` takes the first and prints the command that picks another.
-4. **The capability probe.** `init` asks the model for one tool call to learn its tool-calling
-   mode. If the server never answers, it exits 1 and writes nothing.
-5. **One question, on a terminal:** "Keep the usual settings — the agent can change files and run
-   commands, and remembers things between sessions?" Enter keeps both. Only a "no" asks the two
-   separately: may the agent change this machine, and should memory be on.
+5. **The capability probe.** `init` asks the model for one tool call to learn its tool-calling
+   mode. If the server never answers, it exits 1 and writes nothing. (A written `server:` record
+   skips it: the first `start` probes.)
 6. **The write:** `config.yaml` (owner-only), the `agents/` folder and `plugins/README.md`, then
-   `✓ LocalHarness configured at <file>.` and `Run 'localharness start' to begin.`
+   `✓ LocalHarness configured at <file>.` and one row naming the two defaults every `init`
+   applies, with a terminal or without — "The agent can edit files, run commands and remember
+   across sessions — org.permissions.mode: read-only or memory.enabled: false turns either off."
+   — and `Run 'localharness start' to begin.` There is no settings question.
 7. **The plugin list.** Every outcome that leaves a config (written, kept, changed or saved for
    later) ends with "Plugins — the command beside each one turns it on or sets it up:", one line
    per bundled plugin with its state and the exact `localharness plugins enable <name>` for it,
