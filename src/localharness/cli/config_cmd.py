@@ -133,6 +133,8 @@ def migrate(
     # file rewritten without a word on screen is a file the user cannot audit — so each one is
     # named, with its entries, exactly like the config.yaml removal above (review finding R10).
     for sidecar in plan.sidecars:
+        if sidecar.removed is None:
+            continue
         console.print(
             "  [red]-[/red] " + escape(f"permissions.{_migrate.DEAD_KEY}")
             + " in " + escape(str(sidecar.path))
@@ -143,6 +145,22 @@ def migrate(
             console.print(
                 "      [red]·[/red] " + escape(str(entry))
                 + " [dim]— never honored; removed[/dim]",
+                soft_wrap=True,
+            )
+
+    # init dumped three values as if they were chosen; they are cleared once, in config.yaml and in
+    # each agent/division file that carries them, so the new defaults reach this install.
+    for key in plan.nulled:
+        console.print(
+            "  [yellow]∅[/yellow] " + escape(f"{key} → null")
+            + " [dim](init's value; the default now follows the model)[/dim]",
+            soft_wrap=True,
+        )
+    for sidecar in plan.sidecars:
+        for key in sidecar.nulled:
+            console.print(
+                "  [yellow]∅[/yellow] " + escape(f"{key} → null in {sidecar.path}")
+                + " [dim](init's value; the default now follows the model)[/dim]",
                 soft_wrap=True,
             )
 
@@ -174,10 +192,17 @@ def migrate(
         if plan.removed_allow_patterns is not None
         else ""
     )
-    if plan.sidecars:
-        removed_note += (
-            f"; cleaned {len(plan.sidecars)} agent/division file(s)"
-        )
+    cleaned = sum(1 for sidecar in plan.sidecars if sidecar.removed is not None)
+    if cleaned:
+        removed_note += f"; cleaned {cleaned} agent/division file(s)"
+    if plan.nulled:
+        removed_note += _migrate.INIT_NULLS_CLAUSE + " (config.yaml)"
+    for sidecar in plan.sidecars:
+        if sidecar.nulled:
+            removed_note += (
+                _migrate.INIT_NULLS_CLAUSE
+                + " (" + escape(f"{sidecar.path.parent.name}/{sidecar.path.name}") + ")"
+            )
     if plan.bind_all_paths:
         removed_note += "; set " + escape(", ".join(f"{p}.bind_all: true" for p in plan.bind_all_paths))
     stamp_note = (
