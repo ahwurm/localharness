@@ -667,5 +667,8 @@ async def test_a_child_whose_budget_ends_before_the_relaunch_starts_leaves_it_to
 
     assert "did not come back" in delegating.child_summaries[0]  # the child left at its own bound
     assert len(r.starts) == 1  # the one relaunch happened, for the root
+    # one line for the one death, stating the configured bound (true for the root's wait), never the
+    # child's 0.3 s (WR-23)
+    assert [e.wait_seconds for e in _lost(r.bus)] == [30.0]
     assert summary == "done"
     assert [f.reason for f in _failed(r.bus)] == ["llm_error"]  # the child only

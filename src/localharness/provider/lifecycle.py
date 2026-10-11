@@ -971,7 +971,7 @@ class _Outage:
     def __init__(self, started: float) -> None:
         self.started = started
         self.relaunched = False
-        # the latest wait end any announcement of this outage has told the person about (monotonic)
+        # when the outage's one announcement said the wait ends (monotonic): its configured bound's end
         self.announced_until: float | None = None
         # how the last flight of this outage failed: its exception TYPE and its text with URL credentials
         # removed, never the exception itself (its traceback holds the flight's frame and the raw key)
@@ -1055,9 +1055,9 @@ class ServerRecovery:
     `recover` takes the key per call and stores nothing of it: an outage keeps only its failure's type
     and redacted text, never the exception (whose traceback would hold the flight's frame). Callers of one pair share one flight, and
     loops that call it one after another share one outage: a drop no flight could end is continued by
-    the next caller within the same bound (measured from the drop), never with a second relaunch; it is
-    announced again only when a caller waits longer than any line already said; once that bound is spent
-    a later caller gets one look at the address and the same failure. A call that goes through, or a new root turn, ends the outage (`forget_outages`).
+    the next caller within the same bound (measured from the drop), never with a second relaunch or a
+    second announcement (the one line carries the configured bound, true for the whole wait); once that
+    bound is spent a later caller gets one look at the address and the same failure. A call that goes through, or a new root turn, ends the outage (`forget_outages`).
     """
 
     base_url: str | None
@@ -1275,27 +1275,23 @@ def _retrieve(task: asyncio.Task) -> None:
 
 
 async def _announce(run: _Run, mine: float, on_lost: Callable[[], Awaitable[None]]) -> None:
-    """One caller's announcement: once the flight has been unresolved for the queue-visibility threshold
-    (a blip under it says nothing), tell the person, unless what was already said for this outage covers
-    this caller's wait. Once per outage for the same wait end, so callers that share a flight and a
-    deadline publish one line; again when this caller waits LONGER than any line so far said (a root
-    continuing an outage whose only line was a child's short, budget-clamped one), so the longer wait
-    never runs silently. A publish that fails costs nothing."""
+    """The outage's one announcement (D-15/D-16, RECON-03: one ProviderLost per death): once the flight
+    has been unresolved for the queue-visibility threshold (a blip under it says nothing), the first
+    caller still waiting tells the person, and nobody after it does, whatever loop of the turn waits
+    next. The line carries the CONFIGURED bound (the loop publishes it): the flight runs to that bound
+    from the drop whoever waits on it, so one line stays true for the whole wait, including a root that
+    continues a budget-clamped child's. `mine` is when this caller's wait ends: a caller whose wait is
+    already over (the one look past a spent bound) says nothing. A publish that fails costs nothing."""
     from localharness.provider import client as _client
 
     await asyncio.sleep(max(0.0, _client._QUEUE_VISIBILITY_SECONDS - (time.monotonic() - run.started)))
     outage = run.outage
     if run.task.done() or outage is None or mine <= time.monotonic():
         return
-    if outage.announced_until is not None and mine <= outage.announced_until + _ANNOUNCE_SLACK_SECONDS:
-        return
-    outage.announced_until = mine
+    if outage.announced_until is not None:
+        return  # this outage has been announced: one line per death
+    outage.announced_until = run.deadline  # the configured bound's end, which the line states
     try:
         await on_lost()
     except Exception:  # noqa: BLE001 - telling the person must never fail the recovery
         log.debug("could not announce the dropped model server", exc_info=True)
-
-
-_ANNOUNCE_SLACK_SECONDS = 1.0
-"""Wait ends this close to one already announced count as the same: callers that joined one flight a
-moment apart publish one line, not one each."""

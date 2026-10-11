@@ -2624,7 +2624,9 @@ class AgentLoop:
             await pair.recover(
                 base_url=cfg.base_url, api_key=getattr(cfg, "api_key", None),
                 wait_seconds=knob,
-                on_lost=lambda: self._publish_provider_lost(session, exc, bound),
+                # the one line per outage states the configured bound the shared flight runs to, not
+                # this loop's own (budget-clamped) wait, so it stays true for a root that continues it
+                on_lost=lambda: self._publish_provider_lost(session, exc, knob),
                 leave_after=bound if bound < knob else None,
             )
         except Exception as failed:  # never BaseException: Esc's CancelledError must propagate
