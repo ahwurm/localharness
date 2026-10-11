@@ -171,17 +171,21 @@ def _option_value(argv: list[str], short: str, long: str) -> str | None:
 
 
 def read_journal(unit: str) -> ProcRecord | Skip:
-    """The last llama-server run of the user's `unit` as the record a running process gives, with
+    """The newest llama-server run of the user's `unit` as the record a running process gives, with
     `pid=0`, `environ=None` and `cwd=None` (the journal knows neither). Queried by the trusted
-    `_SYSTEMD_USER_UNIT=` and `_UID=` fields, never `-u`, which matches the forgeable `USER_UNIT`."""
+    `_SYSTEMD_USER_UNIT=` and `_UID=` fields, never `-u`, which matches the forgeable `USER_UNIT`.
+
+    The NEWEST run decides: one the journal cannot show (a `_CMDLINE` journald nulled past 4096 bytes or
+    kept as a byte array, or one that does not parse) is a `Skip`, never a reason to import the run
+    before it, which may have bound otherwise."""
     uid = os.getuid()
     out = _run(["journalctl", "--user", "-o", "json", "-n", str(JOURNAL_LINES), "--all",
                 "--output-fields=_EXE,_CMDLINE", "--no-pager", f"_SYSTEMD_USER_UNIT={unit}",
                 f"_UID={uid}"], timeout=JOURNAL_TIMEOUT_S, cap=JOURNAL_OUTPUT_CAP)
     if out is None:
         return Skip("has an unreadable journal", names_model=False)
-    last: tuple[str, list[str]] | None = None
-    for line in out.splitlines():
+    newest: tuple[str, list[str]] | None = None
+    for line in reversed(out.splitlines()):
         try:
             entry = json.loads(line)
         except ValueError:
@@ -189,18 +193,25 @@ def read_journal(unit: str) -> ProcRecord | Skip:
         if not isinstance(entry, dict):
             continue
         exe, cmdline = entry.get("_EXE"), entry.get("_CMDLINE")
-        if not isinstance(exe, str) or not isinstance(cmdline, str):
-            continue  # null past 4096 bytes, a byte array for non-UTF-8, or absent
+        if not isinstance(exe, str):
+            continue  # an absent or byte-array _EXE names no program
+        if not isinstance(cmdline, str):
+            if os.path.basename(exe) == _LLAMA_SERVER:  # null past 4096 bytes, or a byte array
+                return Skip("has a command line the journal cannot show")
+            continue
         try:
             argv = shlex.split(cmdline)
         except ValueError:
+            if os.path.basename(exe) == _LLAMA_SERVER:
+                return Skip("has an unparseable command line in its journal")
             continue
         if os.path.basename(exe) == _LLAMA_SERVER or (
                 argv and os.path.basename(argv[0]) == _LLAMA_SERVER):
-            last = (exe, argv)
-    if last is None:
+            newest = (exe, argv)
+            break
+    if newest is None:
         return Skip("has no llama-server in its journal", names_model=False)
-    exe, argv = last
+    exe, argv = newest
     if not os.path.isabs(exe):
         return Skip(f"names a relative path ({exe})")
     model = _option_value(argv, "-m", "--model")
