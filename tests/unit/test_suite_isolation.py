@@ -1,4 +1,4 @@
-"""D-60: outside test_units every test sees an empty /proc and a systemd that answers "not checked".
+"""D-60: outside the `real_units_seam` modules (test_units) every test sees an empty /proc and a systemd that answers "not checked".
 WR-09: no test dials a real service socket."""
 from __future__ import annotations
 
@@ -90,3 +90,10 @@ def test_an_in_process_fake_server_on_a_port_the_kernel_chose_is_reachable():
 @pytest.mark.real_sockets
 def test_a_test_marked_real_sockets_keeps_the_real_connect():
     assert socket.socket.connect is _REAL_CONNECT
+
+
+def test_the_props_probe_is_stubbed_for_every_test_whatever_the_import_order():
+    from localharness.cli import start_cmd
+
+    assert start_cmd._props_model_path("http://127.0.0.1:8080/v1", None) is None
+    assert start_cmd._props_model_path.__name__ == "<lambda>"

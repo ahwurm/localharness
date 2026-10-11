@@ -116,21 +116,23 @@ def _no_box_processes(request, monkeypatch, _empty_proc_root):
     journal and its unit. For every test of the suite `procfs.PROC_ROOT` is an existing empty
     directory (no listener, no process), `units._run` answers None ("not checked") without running
     anything, and `XDG_CONFIG_HOME` is unset so llama-server's `config.ini` path resolves under the
-    faked HOME, never a developer's real one (a test that needs it sets it). test_units opts out of
-    the `_run` half only, to test the real seam through its own fakes. Plan 05-10 (D-08): `start` reads
+    faked HOME, never a developer's real one (a test that needs it sets it). A module that must reach
+    the real `units._run` seam through its own fake `subprocess.run` (test_units) carries
+    `pytest.mark.real_units_seam` and opts out of that half only. Plan 05-10 (D-08): `start` reads
     llama-server's `/props` at a llama.cpp attach, so `start_cmd._props_model_path` answers None for
-    every test (no test dials a port for it); test_start_props_model_path holds the real function by
-    its own import and drives it through a faked `httpx.get`."""
-    import sys
-
+    every test (no test dials a port for it; the socket guard below is the second line); the module is
+    imported here, not looked up in `sys.modules`, so the stub never depends on import order
+    (IN-02, IN-51). test_start_props_model_path holds the real function by its own import and drives it
+    through a faked `httpx.get`."""
+    import localharness.cli.start_cmd  # noqa: F401  (imported so the stub below can never be skipped)
     from localharness.provider import procfs, units
 
     monkeypatch.setattr(procfs, "PROC_ROOT", _empty_proc_root)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    if not request.module.__name__.endswith("test_units"):
+    if request.node.get_closest_marker("real_units_seam") is None:
         monkeypatch.setattr(units, "_run", lambda argv, *, timeout, cap: None)
-    if "localharness.cli.start_cmd" in sys.modules:
-        monkeypatch.setattr("localharness.cli.start_cmd._props_model_path", lambda base_url, launch_key: None)
+    monkeypatch.setattr("localharness.cli.start_cmd._props_model_path", lambda base_url, launch_key: None,
+                        raising=True)
     yield
 
 

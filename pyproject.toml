@@ -170,6 +170,7 @@ markers = [
     "live_llamacpp_lifecycle: opt-in test that the HARNESS SPAWNS llama.cpp itself (SpawnedProcessStrategy) — actually launches llama-server on the GPU; skipped by default unless LOCALHARNESS_LIVE_LLAMACPP_LIFECYCLE=1 is set",
     "live_lmstudio: opt-in real-model round-trip test hitting a live LM Studio endpoint; skipped by default unless LOCALHARNESS_LIVE_LMSTUDIO=1 is set",
     "real_sockets: opt out of tests/conftest.py's socket guard (no test dials a real service by default); for a test that must reach a real socket",
+    "real_units_seam: opt out of tests/conftest.py's stub of provider.units._run (the systemctl / journalctl seam), for a module that tests the real seam through its own fake subprocess.run",
 ]
 
 [tool.ruff.lint]
