@@ -579,6 +579,18 @@ async def test_the_budget_inside_a_flight_is_what_is_left_and_stays_in_the_fligh
     assert lifecycle.relaunch_budget() == 1800.0  # the caller of recover never saw the deadline
 
 
+async def test_a_relaunch_that_comes_up_on_the_bounds_edge_is_a_success(monkeypatch, tmp_path):
+    """activate returned a live endpoint (its own wait saw /models answer), but the flight's bound passed
+    while it did: the server is serving, so the wait ends well instead of "did not come back"."""
+    recorder = WaitReadyRecorder([RuntimeError("exited")], delay=0.15)
+    monkeypatch.setattr(server, "wait_ready", recorder)
+    relaunch = RecordingRelaunch()  # returns a LiveEndpoint
+    await ServerRecovery(URL, None, relaunch).recover(
+        base_url=URL, api_key="none", wait_seconds=0.1, on_lost=Announce())
+    assert relaunch.calls == 1
+    assert len(recorder.calls) == 1  # nothing polled after the bound
+
+
 async def test_the_budget_never_falls_below_one_second(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "wait_ready", WaitReadyRecorder([RuntimeError("exited")], delay=0.1))
     relaunch = RecordingRelaunch(returns=None)
