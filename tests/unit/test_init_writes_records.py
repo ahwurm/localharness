@@ -25,7 +25,7 @@ from tests.unit.test_init_core_setup import (
     _detect,
     _exited,
     _flat,
-    _hermetic,  # noqa: F401  (autouse fixture: no real HTTP)
+    _hermetic,  # noqa: F401  (autouse fixture; real sockets are refused by conftest)
     _init,
     _terminal,
 )

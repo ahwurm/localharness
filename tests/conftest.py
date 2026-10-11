@@ -6,7 +6,10 @@ import os
 
 os.environ.setdefault("_TYPER_FORCE_DISABLE_TERMINAL", "1")
 
+import errno
+import ipaddress
 import logging
+import socket
 import pytest
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -128,6 +131,63 @@ def _no_box_processes(request, monkeypatch, _empty_proc_root):
         monkeypatch.setattr(units, "_run", lambda argv, *, timeout, cap: None)
     if "localharness.cli.start_cmd" in sys.modules:
         monkeypatch.setattr("localharness.cli.start_cmd._props_model_path", lambda base_url, launch_key: None)
+    yield
+
+
+_REAL_CONNECT = socket.socket.connect
+_REAL_CONNECT_EX = socket.socket.connect_ex
+
+_EPHEMERAL_FLOOR = 32768
+"""A fake server a test starts binds port 0 and the kernel hands it a port from the ephemeral range, whose
+lowest bound on every platform is 32768. Everything below it is where real services live (:8080 a
+llama-server, :11434 Ollama, :1234 LM Studio, :8000 vLLM, the owner's box serves one on :8080)."""
+
+
+def _dial_is_refused(address) -> bool:
+    """True for a destination no test may dial: any host that is not loopback or the unspecified
+    address (the machine's network), and any loopback port below `_EPHEMERAL_FLOOR`. A UNIX socket path
+    and a port the kernel handed a test's own fake server are left alone."""
+    if not isinstance(address, tuple) or len(address) < 2:
+        return False  # AF_UNIX, or something connect() itself rejects
+    host, port = address[0], address[1]
+    if not isinstance(host, str) or not isinstance(port, int):
+        return False
+    if host != "localhost":
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return host != ""  # a name handed straight to connect(): not loopback, not a test's fake
+        if not (ip.is_loopback or ip.is_unspecified):
+            return True
+    return 0 < port < _EPHEMERAL_FLOOR
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sockets(request, monkeypatch):
+    """WR-09: no test dials a real service. `socket.socket.connect` / `connect_ex` (what `httpx`,
+    `asyncio` and `socket.create_connection` all end in) answer "connection refused" for a destination
+    `_dial_is_refused` names, so a probe of :8080, :11434, :1234 or :8000 reads "nothing is listening"
+    on every machine, including one whose llama-server, Ollama or LM Studio is up. A fake server a test
+    starts on a port it asked the kernel for (port 0) is reachable as before, and so is a UNIX socket.
+    A test that must reach a real socket carries `@pytest.mark.real_sockets`; every `live_*` marker
+    opts in too (those tests exist to talk to a real server and are skipped unless asked for)."""
+    if request.node.get_closest_marker("real_sockets") or any(
+            mark.name.startswith("live") for mark in request.node.iter_markers()):
+        yield
+        return
+
+    def connect(self, address):
+        if _dial_is_refused(address):
+            raise ConnectionRefusedError(errno.ECONNREFUSED, f"a test tried to dial {address!r}")
+        return _REAL_CONNECT(self, address)
+
+    def connect_ex(self, address):
+        if _dial_is_refused(address):
+            return errno.ECONNREFUSED
+        return _REAL_CONNECT_EX(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     yield
 
 

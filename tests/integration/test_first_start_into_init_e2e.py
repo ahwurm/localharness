@@ -54,7 +54,9 @@ def _boom(*_a, **_k):
 
 @pytest.fixture(autouse=True)
 def _hermetic(monkeypatch):
-    """No real HTTP from init: the served-window, runtime and Ollama hot-model probes are stubbed."""
+    """The runtime and Ollama hot-model probes are stubbed. The served-window probe and the daemon probe
+    are not: no test reaches a real service through them because tests/conftest.py's `_no_real_sockets`
+    makes every default service port read "nothing is listening" (WR-09)."""
     monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: None)
     monkeypatch.setattr(init_cmd, "_identify_endpoint_provider", lambda *_: "unknown")
     monkeypatch.setattr(init_cmd, "_get_ollama_hot_model", lambda *_: None)
