@@ -8,6 +8,7 @@ in 14-RESEARCH.md, cross-filesystem tempfile defeats atomicity on container/NFS 
 """
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import tempfile
@@ -118,41 +119,79 @@ def load_overlay(path: Path) -> dict:
     return data or {}
 
 
-def atomic_write_overlay(path: Path, data: dict) -> None:
-    """Write YAML atomically. Tempfile in same dir → fsync → os.replace.
-
-    POSIX + Windows compatible. NamedTemporaryFile(dir=path.parent) is required
-    to keep os.replace atomic across all filesystems.
-    """
+def refuse_unwritable(path: Path) -> None:
+    """Raise PermissionError when `path` (a symlink's target) exists and may not be written, or
+    its directory may not be entered and written, as `write_text` would refuse it. Replacing a
+    read-only file through its directory would quietly override a read-only bit the owner set, and
+    a caller that keeps an undo (migrate's backup) asks this BEFORE making one, so a file that will
+    be refused never leaves a copy behind."""
     path = Path(path).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    yaml_text = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
+    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    if target.exists() and not os.access(target, os.W_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(target))
+    parent = target.parent
+    if parent.exists() and not os.access(parent, os.W_OK | os.X_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(parent))
 
-    # Same-dir tempfile keeps os.replace atomic across filesystems
-    with tempfile.NamedTemporaryFile(
+
+def atomic_write_text(path: Path, text: str, *, refuse_read_only: bool = False) -> None:
+    """Replace the file `path` names with `text`, atomically. The one writer every config file
+    goes through (IN-21): a same-directory temp file (a cross-filesystem temp file would defeat
+    `os.replace`'s atomicity on container/NFS mounts), fsynced, restricted to
+    :data:`CONFIG_FILE_MODE` BEFORE the rename, then `os.replace`d over the target, and the
+    directory fsynced after it (best effort). A crash, Ctrl-C or a full disk leaves the old file or
+    the new one, never a truncated one, and never a stranded temp file.
+
+    A symlinked file keeps its link: the file it points at is the one replaced. The parent
+    directory is created when missing. `refuse_read_only` refuses a file (or directory) the caller
+    may not write (:func:`refuse_unwritable`) rather than replacing it through the directory."""
+    path = Path(path).expanduser()
+    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    if refuse_read_only:
+        refuse_unwritable(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
+        dir=str(target.parent),
+        prefix=f".{target.name}.",
         suffix=".tmp",
         delete=False,
-    ) as tmp:
-        tmp.write(yaml_text)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        tmp_path = tmp.name
-
-    # Tightened BEFORE the rename, so the file at `path` is never briefly group-readable — and
-    # stated rather than inherited: `NamedTemporaryFile` happens to create at 0600 today, which
-    # is not a guarantee this module should be resting an api_key on.
-    restrict_config_file(Path(tmp_path))
-
+    )
+    tmp_path = Path(tmp.name)
     try:
-        os.replace(tmp_path, str(path))
-    except Exception:
-        # Best-effort cleanup of stranded tempfile on replace failure
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        with tmp:
+            tmp.write(text)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        # Tightened BEFORE the rename, so the file at `path` is never briefly group-readable — and
+        # stated rather than inherited: `NamedTemporaryFile` happens to create at 0600 today, which
+        # is not a guarantee this module should be resting an api_key on.
+        restrict_config_file(tmp_path)
+        os.replace(str(tmp_path), str(target))
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
         raise
+    _fsync_dir(target.parent)
+
+
+def _fsync_dir(directory: Path) -> None:
+    """fsync `directory` so a rename into it survives a power cut. POSIX only, best effort: the
+    file itself is already whole, and some filesystems refuse a directory fsync."""
+    if os.name != "posix":
+        return
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        log.debug("could not fsync directory %s", directory, exc_info=True)
+    finally:
+        os.close(fd)
+
+
+def atomic_write_overlay(path: Path, data: dict) -> None:
+    """Write `data` as YAML through :func:`atomic_write_text`. POSIX + Windows compatible."""
+    atomic_write_text(path, yaml.safe_dump(data, default_flow_style=False, sort_keys=False))

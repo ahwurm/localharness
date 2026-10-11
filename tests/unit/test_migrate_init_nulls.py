@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 
 from localharness.cli.app import app
 from localharness.cli.start_cmd import _auto_migrate_deny_defaults
-from localharness.config import migrate, trust
+from localharness.config import migrate, overlay, trust
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION
 from localharness.config.models import HarnessConfig, PermissionConfig
 
@@ -363,7 +363,7 @@ def test_a_rewrite_that_fails_mid_write_leaves_the_original_bytes_in_a_backup(tm
     def dying_fsync(_fd):
         raise OSError("disk full")
 
-    monkeypatch.setattr(migrate.os, "fsync", dying_fsync)
+    monkeypatch.setattr(overlay.os, "fsync", dying_fsync)
     raw, plan = migrate.load_plan(cfg)
     with pytest.raises(migrate.PartialMigrationError) as caught:  # WR-02: names what failed
         migrate.apply(cfg, raw, plan)

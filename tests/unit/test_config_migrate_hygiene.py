@@ -223,7 +223,7 @@ def test_a_failed_rewrite_leaves_the_original_file_whole_and_no_temp_file(tmp_pa
     renamed over them."""
     import errno
 
-    from localharness.config import migrate
+    from localharness.config import migrate, overlay
 
     cfg = tmp_path / "config.yaml"
     original = b"version: '1'\norg:\n  name: kept\n"
@@ -232,7 +232,7 @@ def test_a_failed_rewrite_leaves_the_original_file_whole_and_no_temp_file(tmp_pa
     def disk_full(_fd):
         raise OSError(errno.ENOSPC, "No space left on device")
 
-    monkeypatch.setattr(migrate.os, "fsync", disk_full)
+    monkeypatch.setattr(overlay.os, "fsync", disk_full)
     with pytest.raises(OSError):
         migrate._write_with_backup(cfg, original, {"version": "1", "org": {"name": "new"}})
 

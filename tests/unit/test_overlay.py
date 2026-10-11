@@ -145,3 +145,58 @@ def test_atomic_write_cleans_tempfile_on_replace_failure(tmp_path, monkeypatch):
         overlay_mod.atomic_write_overlay(target, {"x": 1})
     leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(".out.yaml.")]
     assert leftovers == []
+
+
+# IN-21: one atomic writer for every config file (overlays and migrate's rewrites alike)
+
+
+def test_migrate_and_the_overlay_share_one_atomic_writer():
+    from localharness.config import migrate, overlay as overlay_mod
+    assert migrate.atomic_write_text is overlay_mod.atomic_write_text
+    assert not hasattr(migrate, "_atomic_write_text")
+
+
+def test_atomic_write_cleans_tempfile_when_the_write_itself_fails(tmp_path, monkeypatch):
+    """A failure before the rename (fsync here) no longer strands the temp file either."""
+    from localharness.config import overlay as overlay_mod
+    target = tmp_path / "out.yaml"
+    target.write_text("a: 1\n", encoding="utf-8")
+
+    def disk_full(_fd):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(overlay_mod.os, "fsync", disk_full)
+    with pytest.raises(OSError):
+        overlay_mod.atomic_write_overlay(target, {"x": 1})
+    assert target.read_text(encoding="utf-8") == "a: 1\n"
+    assert [p for p in tmp_path.iterdir() if p.name.startswith(".out.yaml.")] == []
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="symlinks")
+def test_an_overlay_write_keeps_a_symlinked_file_linked(tmp_path):
+    from localharness.config import overlay as overlay_mod
+    real = tmp_path / "dotfiles" / "overrides.yaml"
+    real.parent.mkdir()
+    real.write_text("{}\n", encoding="utf-8")
+    link = tmp_path / "home" / "overrides.yaml"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    overlay_mod.atomic_write_overlay(link, {"agent": {"temperature": 0.3}})
+    assert link.is_symlink() and link.resolve() == real.resolve()
+    assert overlay_mod.load_overlay(real) == {"agent": {"temperature": 0.3}}
+
+
+def test_the_shared_writer_refuses_a_read_only_file_only_when_asked(tmp_path):
+    import os
+
+    from localharness.config import overlay as overlay_mod
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root writes a read-only file")
+    target = tmp_path / "ro.yaml"
+    target.write_text("a: 1\n", encoding="utf-8")
+    target.chmod(0o444)
+    with pytest.raises(PermissionError):
+        overlay_mod.atomic_write_text(target, "a: 2\n", refuse_read_only=True)
+    assert target.read_text(encoding="utf-8") == "a: 1\n"
+    overlay_mod.atomic_write_text(target, "a: 2\n")  # the overlay's behaviour is unchanged
+    assert target.read_text(encoding="utf-8") == "a: 2\n"
