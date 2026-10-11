@@ -3131,7 +3131,20 @@ class AgentLoop:
         return new_cap
 
     async def step(self, session: Session, on_token: Callable | None = None) -> StepResult:
-        """Single iteration for testing/debugging."""
+        """Single iteration for testing/debugging (no caller in a session).
+
+        The step is the turn in progress while it runs (IN-55): a child dispatched from it reads
+        this loop's live remainder through `remaining_budget()`, as it would from `run_turn`, and
+        the previous value comes back afterwards. It keeps no stuck window: one iteration has
+        nothing to compare, so the stuck ladder and the call-only ceiling belong to `run_turn`."""
+        previous = self._live_turn
+        try:
+            return await self._step(session, on_token)
+        finally:
+            self._live_turn = previous
+
+    async def _step(self, session: Session, on_token: Callable | None = None) -> StepResult:
+        """`step`'s body."""
         # Guardrail checks
         if self._kill.is_killed():
             session.terminated_reason = "kill_file"
@@ -3147,6 +3160,7 @@ class AgentLoop:
         if violation is not None:
             session.terminated_reason = f"budget_{violation.reason}"
             return StepResult(action="budget")
+        self._live_turn = (session, budget)  # restored by `step`
 
         session.iteration += 1
         if hasattr(self._ctx, "set_iteration"):  # FIX 4: carry the real iteration into ctx (step path)
