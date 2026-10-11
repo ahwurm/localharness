@@ -1646,8 +1646,8 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
     # IN-04: the stamp written below also gates the sidecar walk, so an agent/division file older
     # than it is cleared of init's values now (once; nothing when the step has already run).
     from localharness.config.migrate import INIT_NULLS_CLAUSE, clear_sidecars_before_restamp
-    cleared, unwritten = clear_sidecars_before_restamp(config_path)
-    for path, backup in cleared:
+    cleared_sidecars, unwritten = clear_sidecars_before_restamp(config_path)
+    for path, backup in cleared_sidecars:
         console.print("[cyan]i[/cyan]  " + escape(
             f"Updated {path.parent.name}/{path.name}{INIT_NULLS_CLAUSE} — backup at {backup}"),
             soft_wrap=True)
