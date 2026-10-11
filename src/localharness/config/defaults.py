@@ -63,7 +63,7 @@ CURRENT_INIT_NULLS_REVISION: int = 1
 
 DEFAULT_TOOL_OUTPUT_CHARS: int = 32_000
 """The tool-result cap a `context.max_tool_output_chars` of None resolves to. Resolved at exactly
-three consumers (the root's CompactionPipeline in `start`, and the bench's); the window-ratio phase
+two consumers (the root's CompactionPipeline in `start`, and the bench's); the window-ratio phase
 replaces those expressions and leaves an explicit integer alone."""
 
 DEFAULT_TOOL_EVICT_THRESHOLD_CHARS: int = 8_000
