@@ -167,6 +167,29 @@ async def test_on_wait_is_awaited_once_when_the_lock_stays_held(monkeypatch, tmp
     assert told == [1]
 
 
+async def test_an_on_wait_that_raises_never_aborts_the_acquisition(monkeypatch, tmp_path, lock_file):
+    """A channel fault while saying "waiting" (a closed phone stream, a Discord send error) costs the
+    line, never the launch: the waiter still gets the lock once the holder lets go."""
+    monkeypatch.setattr(client_mod, "_QUEUE_VISIBILITY_SECONDS", 0.05)
+    holder = _hold(lock_file)
+    told: list[int] = []
+    entered: list[int] = []
+
+    async def on_wait():
+        told.append(1)
+        raise RuntimeError("the channel is gone")
+
+    async def waiter():
+        async with lifecycle.launch_lock(tmp_path, on_wait=on_wait):
+            entered.append(1)
+
+    task = asyncio.create_task(waiter())
+    await asyncio.sleep(0.3)
+    os.close(holder)
+    await asyncio.wait_for(task, 0.5)
+    assert told == [1] and entered == [1]
+
+
 async def _enter(config_dir, on_wait=None):
     async with lifecycle.launch_lock(config_dir, on_wait=on_wait):
         pass

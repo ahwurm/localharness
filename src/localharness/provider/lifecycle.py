@@ -878,7 +878,10 @@ async def launch_lock(config_dir: Path, *, on_wait: Callable[[], Awaitable[None]
                     if (on_wait is not None and not told
                             and time.monotonic() - started >= _client._QUEUE_VISIBILITY_SECONDS):
                         told = True
-                        await on_wait()
+                        try:
+                            await on_wait()
+                        except Exception:  # noqa: BLE001 - telling the person never aborts the launch
+                            log.debug("launch lock: the wait announcement failed", exc_info=True)
         if fd is None:
             fallback = _in_process_lock(key, cause)
             await fallback.acquire()
