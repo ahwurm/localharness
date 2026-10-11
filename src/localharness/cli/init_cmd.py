@@ -885,11 +885,42 @@ def _daemon_lines() -> list[str]:
     return lines
 
 
+def _unit_import(config_path: Path) -> tuple[InitRecords | None, tuple[str, str] | None]:
+    """D-21, D-23, D-50: nothing answers, so the user's own units are sensed (units.user_units). The
+    first unit whose journal, else unit file, yields a record is imported as `server:` (its model
+    leading the ranking, discovery's other models its peers). Returns (records, None), or
+    (None, the first skip that names a model as `(unit, reason)`, else None): an `AttachOnly` from a
+    stopped unit has nothing to attach to, so it is that unit's skip."""
+    first_skip: tuple[str, str] | None = None
+    ini = init_import.read_config_ini(init_import.user_config_ini())
+    for state in units.user_units():
+        res = units.unit_record(state)
+        if isinstance(res, units.Skip):
+            if res.names_model and first_skip is None:
+                first_skip = (state.unit, res.reason)
+            continue
+        source, rec = res
+        imp = init_import.import_record(rec, source=source, binary_resolver=which_outside_cwd, ini=ini)
+        if isinstance(imp, init_import.AttachOnly):
+            if first_skip is None:
+                first_skip = (state.unit, imp.reason)
+            continue
+        holder = workspace.Holder(state.unit, None, None, os.getuid(), state)
+        recs = _records_from_import(config_path, imp, holder, port=imp.spec.port, running=False,
+                                    base_url=None, unit_model=os.path.realpath(imp.spec.model))
+        return recs, None
+    return None, first_skip
+
+
 def _discover_presets(config_path: Path) -> InitRecords | None:
-    """Nothing is serving: the GGUFs under the model roots become a primary `server:` (the best
+    """Nothing is serving: the person's own stopped llama-server unit becomes the primary `server:`
+    when it can be read (D-21); else the GGUFs under the model roots become a primary (the best
     ranked, port 8081, the llama-server found on PATH when there is one) and peers, written as
     records by the first start's machinery — init asks nothing and launches nothing. None when no
     GGUF model is found (the caller goes on to the guided setup)."""
+    from_unit, _skip = _unit_import(config_path)
+    if from_unit is not None:
+        return from_unit
     models = _found_models(config_path)
     if not models:
         return None
@@ -1059,14 +1090,16 @@ def _second_line(imp: init_import.Imported, holder: workspace.Holder, *, port: i
 
 
 def _records_from_import(config_path: Path, imp: init_import.Imported, holder: workspace.Holder, *,
-                         port: int, running: bool, base_url: str | None) -> InitRecords:
+                         port: int, running: bool, base_url: str | None,
+                         unit_model: str | None = None) -> InitRecords:
     """D-08, D-10, D-14, D-29: an Imported record is the primary; the other models discovery finds are
     its peers (next free ports above it, no binary or args of their own). The block is the primary
     line, the import's extras, the second line, then the peers; the weights path and the window triple
-    are written to the ledger once the config is on disk."""
+    are written to the ledger once the config is on disk. `unit_model` (D-64) is the stopped unit's
+    model, which leads the ranking; None (a running process) ranks as discovery alone does."""
     spec = imp.spec
     real = os.path.realpath(os.path.expanduser(spec.model))
-    rest = [m for m in _found_models(config_path) if m.real != real]
+    rest = [m for m in _found_models(config_path, unit_model=unit_model) if m.real != real]
     peers = _peer_records(rest, start=spec.port + 1, taken_names={spec.served_name},
                           taken_ports={spec.port})
     if imp.binary_source == "process":
