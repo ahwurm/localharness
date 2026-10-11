@@ -2544,7 +2544,9 @@ class ConfigLoader:
             if baseline is _INVALID or not finite(baseline):
                 baseline = getattr(base_budget, field, None)
             value = declared_budget.get(field)
-            if value is not None and finite(value) and (baseline is None or value <= baseline):
+            # A base with no number of its own (none ships today) is no licence: the workspace
+            # value is refused and the base's stays (IN-06).
+            if value is not None and finite(value) and baseline is not None and value <= baseline:
                 budget[field] = value
                 continue
             if value is not None:

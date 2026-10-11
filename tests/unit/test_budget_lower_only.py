@@ -789,3 +789,17 @@ def test_finite_number_never_raises_on_a_huge_int():
     assert L._finite_number(_HUGE) is True
     assert L._finite_number(_HUGE, le=1440.0) is False
     assert L._finite_number(math.inf) is False and L._finite_number(math.nan) is False
+
+
+def test_an_uncapped_base_is_no_licence_for_a_workspace_value(tmp_path, caplog):
+    # IN-06: a future caller passing a base with no number of its own must not let a repository
+    # set any value up to the field's bound; the base's None stays, with the warning.
+    from localharness.agent.subagent import build_explore_config
+
+    loader, _ = _world(tmp_path, ws_agents={"explore": {"permissions": {"budget": {
+        "max_actions": 50}}}})
+    base = build_explore_config("explore")
+    base.permissions.budget.max_actions = None
+    with caplog.at_level(logging.WARNING):
+        assert loader.overlay_builtin_config("explore", base).permissions.budget.max_actions is None
+    assert len(_budget_warnings(caplog)) == 1 and "max_actions" in _budget_warnings(caplog)[0]
