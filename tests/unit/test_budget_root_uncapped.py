@@ -764,3 +764,24 @@ def test_both_resolvers_cap_through_the_one_named_helper(mock_llm_client, bus, m
     assert loop._resolve_max_actions()[0] == 5
     assert loop._resolve_max_minutes()[0] == 3.0
     assert calls == [(0, 8), (8, 5), (0.0, 3.0)]
+
+
+# --------------------------------------------------- IN-55: a step-driven iteration is a live turn
+
+
+@pytest.mark.asyncio
+async def test_a_child_dispatched_during_step_reads_the_finite_parent(mock_llm_client, bus):
+    from localharness.agent.loop import Session
+
+    seen: list[tuple[int, float]] = []
+    holder: dict = {}
+    registry = _Registry(on_call=lambda n: seen.append(holder["loop"].remaining_budget()))
+    loop = _loop(mock_llm_client, bus, _calls(mock_llm_client, 1), max_actions=10, max_minutes=5.0,
+                 local=True, registry=registry)
+    holder["loop"] = loop
+    session = Session(agent_id="budget-agent", session_id="s",
+                      messages=[{"role": "user", "content": "go"}])
+    await loop.step(session)
+    (actions, minutes), = seen
+    assert actions == 9 and 0.1 <= minutes <= 5.0
+    assert loop.remaining_budget() == (0, 0.0)  # cleared once the step returns
