@@ -2632,17 +2632,25 @@ class OrchestratorREPL:
                     return None
                 if self._pending_launch_lines and managed_server.launch_decision(
                         spec, bool(launch_key), peer=peer).refusal is None:
-                    await self._flush_launch_lines()  # a relaunch that is the session's first launch
+                    try:
+                        await self._flush_launch_lines()  # a relaunch that is the session's first launch
+                    except Exception:  # noqa: BLE001 - a report never stops the launch it describes
+                        log.debug("relaunch: the first-launch lines could not be sent", exc_info=True)
                 live = await strategy.activate(
                     spec, cfg_dir, base_url, timeout_seconds=_lifecycle.relaunch_budget(), peer=peer,
                     autosense=getattr(self._harness, "autosense", None), **launch_key)
-            # the report is outside the lock and the launch: a reporting fault never reads as a failed launch
-            await self._announce_window(
-                live, provider_type or spec.runtime,
-                live.served_models[0] if live.served_models else spec.model)
-            note = getattr(live, "note", None)
-            if note:
-                await self._send_info(note)
+            # The report is outside the lock and the launch, and guarded: this closure is what the
+            # recovery flight awaits, so a channel fault here (a Discord send error, a closed phone
+            # stream) would otherwise end the turn as a failed restart while the server is serving.
+            try:
+                await self._announce_window(
+                    live, provider_type or spec.runtime,
+                    live.served_models[0] if live.served_models else spec.model)
+                note = getattr(live, "note", None)
+                if note:
+                    await self._send_info(note)
+            except Exception:  # noqa: BLE001 - a report never fails a launch that succeeded
+                log.debug("relaunch: the launch report could not be sent", exc_info=True)
             return live
 
         return relaunch
