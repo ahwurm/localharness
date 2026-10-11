@@ -705,6 +705,29 @@ async def test_a_shorter_joiner_says_nothing_more(monkeypatch):
     assert said.lines == ["root"]  # "up to 30s" already covers the child's 0.2 s
 
 
+async def test_a_failed_outage_keeps_no_exception_frame_or_key_alive(models, tmp_path):
+    """IN-20: the record a failed flight leaves for the next loop is its failure's type and redacted
+    text. The exception, whose traceback holds the flight's frame and so the raw key, is not kept, and a
+    later loop's failure does not chain it."""
+    models(_served_while_alive(tmp_path))
+    relaunch = RecordingRelaunch(RuntimeError("bind failed at http://u:p@ss@127.0.0.1:9/v1"))
+    pair = ServerRecovery(URL, tmp_path, relaunch)
+    with pytest.raises(RuntimeError) as first:
+        await pair.recover(base_url=URL, api_key=SecretStr(SENTINEL), wait_seconds=5, on_lost=Announce())
+    record = pair._flight.outage.failed
+    assert record[0] is RuntimeError and isinstance(record[1], str)
+    assert not any(isinstance(part, BaseException) for part in record)
+    assert "p@ss" not in record[1] and "http://127.0.0.1:9/v1" in record[1]
+    assert SENTINEL not in repr(record)
+    del first
+
+    pair._flight.outage.started -= 60  # its bound is long spent: the next loop gets one look
+    with pytest.raises(RuntimeError) as again:
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
+    assert again.value.__cause__ is None and again.value.__suppress_context__
+    assert str(again.value) == record[1]
+
+
 async def test_forgetting_the_outage_gives_the_next_drop_a_whole_new_flight(models, tmp_path):
     models(_served_while_alive(tmp_path))
     relaunch = RecordingRelaunch(RuntimeError("boom"))

@@ -28,6 +28,7 @@ import errno
 import functools
 import logging
 import os
+import re
 import time
 import weakref
 from dataclasses import dataclass, field
@@ -971,7 +972,9 @@ class _Outage:
         self.relaunched = False
         # the latest wait end any announcement of this outage has told the person about (monotonic)
         self.announced_until: float | None = None
-        self.failed: BaseException | None = None
+        # how the last flight of this outage failed: its exception TYPE and its text with URL credentials
+        # removed, never the exception itself (its traceback holds the flight's frame and the raw key)
+        self.failed: tuple[type[BaseException], str] | None = None
 
 
 class _Flight:
@@ -1019,15 +1022,21 @@ def _settle(slot: _Flight, outage: _Outage, task: asyncio.Task) -> None:
             slot.outage = None
             _OPEN_OUTAGES.pop(slot, None)
     else:
-        outage.failed = failed
+        outage.failed = (type(failed), _without_credentials(str(failed)))
 
 
-def _again(failed: BaseException) -> BaseException:
-    """A fresh exception of the same type and text as an outage's earlier failure, raised to a later loop."""
+def _without_credentials(text: str) -> str:
+    """URL userinfo removed, up to the last "@" of the authority (as httpx splits it)."""
+    return re.sub(r"(?<=://)[^/\s?#]*@", "", text)
+
+
+def _again(failed: tuple[type[BaseException], str]) -> BaseException:
+    """A fresh exception of an outage's recorded failure type and text, raised to a later loop."""
+    kind, text = failed
     try:
-        return type(failed)(*failed.args)
+        return kind(text)
     except Exception:  # noqa: BLE001 - a type that cannot be rebuilt still reads as its text
-        return RuntimeError(str(failed))
+        return RuntimeError(text)
 
 
 @dataclass(frozen=True)
@@ -1042,7 +1051,8 @@ class ServerRecovery:
     REPL builds over the active spec, or None when nothing can be relaunched; it reads its time bound
     from `relaunch_budget()`. `runtime` names the server in `wait_ready`'s messages.
 
-    `recover` takes the key per call and stores nothing of it. Callers of one pair share one flight, and
+    `recover` takes the key per call and stores nothing of it: an outage keeps only its failure's type
+    and redacted text, never the exception (whose traceback would hold the flight's frame). Callers of one pair share one flight, and
     loops that call it one after another share one outage: a drop no flight could end is continued by
     the next caller within the same bound (measured from the drop), never with a second relaunch; it is
     announced again only when a caller waits longer than any line already said; once that bound is spent
@@ -1143,7 +1153,7 @@ class ServerRecovery:
             # at the address (it may be back), never another whole wait or another relaunch.
             if await self._answers(base_url, api_key, time.monotonic() + poll):
                 return
-            raise _again(outage.failed) from outage.failed
+            raise _again(outage.failed) from None
         # what the outage's one relaunch already came to, when an earlier loop spent it and failed
         earlier = outage.failed if outage.relaunched else None
         relaunched = outage.relaunched
@@ -1168,8 +1178,8 @@ class ServerRecovery:
                 if self.relaunch is None:
                     raise RuntimeError(EXITED_TEXT + self._tail()) from died
                 if relaunched:
-                    if earlier is not None and (isinstance(earlier, server.LaunchRefused) or str(
-                            earlier).startswith(RESTART_FAILED_TEXT)):
+                    if earlier is not None and (issubclass(earlier[0], server.LaunchRefused)
+                                                or earlier[1].startswith(RESTART_FAILED_TEXT)):
                         raise _again(earlier) from died  # the one relaunch was refused or failed
                     raise RuntimeError(EXITED_AGAIN_TEXT + self._tail()) from died
                 relaunched = True

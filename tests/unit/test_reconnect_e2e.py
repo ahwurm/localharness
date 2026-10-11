@@ -592,7 +592,7 @@ async def test_a_call_that_goes_through_ends_the_outage_for_every_loop_on_the_pa
     from localharness.provider.lifecycle import _Outage
 
     pair._flight.outage = _Outage(time.monotonic() - 60.0)  # an outage whose bound is long spent ...
-    pair._flight.outage.failed = TimeoutError("the model server did not come back within 5s")
+    pair._flight.outage.failed = (TimeoutError, "the model server did not come back within 5s")
     lifecycle._OPEN_OUTAGES[pair._flight] = pair.base_url
     from localharness.agent import loop as loop_mod
 
