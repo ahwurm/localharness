@@ -65,6 +65,10 @@ class LLMConfig:
     # generation itself. None or 0 disables the bound. Threaded from
     # ProviderConfig.inference_queue_wait_seconds by `start`.
     queue_wait_seconds: float | None = _DEFAULT_QUEUE_WAIT_SECONDS
+    # The longest the loop waits for the model server to come back after a dropped connection,
+    # threaded from ProviderConfig.reconnect_wait_seconds by `start`. 0.0 is off, so every caller
+    # that does not thread it (bench, probes, tests) is reconnect-off.
+    reconnect_wait_seconds: float = 0.0
     temperature: float = 0.6
     # None = NO cap: the request omits max_tokens and the model generates until it is done,
     # bounded only by the window the server serves. That is the default, and it is what a
