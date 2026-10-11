@@ -1765,6 +1765,20 @@ class OrchestratorREPL:
         return workspace.incumbent_sentence(
             holder, port=port, form="imperative", served=served, target=target)
 
+    async def _primary_serves(self, llm: Any, name: str) -> bool:
+        """True when the session is on another endpoint and the primary's own endpoint answers with
+        ``name`` right now: the name is then a plain rebind, never a restart (WR-51). A primary that is
+        the current endpoint, unreachable, or answers anything unusable reads as not serving."""
+        provider = getattr(self._harness, "provider", None)
+        base_url = getattr(provider, "base_url", None)
+        if not base_url or str(llm.config.base_url).rstrip("/") == str(base_url).rstrip("/"):
+            return False
+        try:
+            primary_live, reachable = await self._live_models(base_url)
+        except Exception:  # noqa: BLE001 — a primary that cannot be asked is down for this purpose
+            return False
+        return bool(reachable) and name in primary_live
+
     async def _handle_model_cmd(self, arg: str) -> None:
         """List models or switch. A model already served by the endpoint hot-swaps
         (Ollama serves many); a different downloaded model on a harness-managed
@@ -1809,7 +1823,13 @@ class OrchestratorREPL:
             model_ops.primary_served_name(managed, getattr(self._harness, "provider", None))
             if managed is not None else None
         )
-        if prim_served and prim_served not in live and prim_served not in downloaded:
+        # ... but only while the primary is not up. A session on a peer whose primary is still serving
+        # its name rebinds to it through the peer tree like any other served model; relaunching a
+        # healthy, loaded server would cost minutes and its KV cache (WR-51).
+        swap_back = bool(
+            prim_served and prim_served not in live and prim_served not in downloaded
+            and not await self._primary_serves(llm, prim_served))
+        if swap_back:
             downloaded.insert(0, prim_served)
         # Cross-endpoint discovery (0.10.0 model tree): probe the primary + each configured peer
         # endpoint, so a target NAME can resolve to a model served on a DIFFERENT server. Backward
@@ -1843,7 +1863,7 @@ class OrchestratorREPL:
                 medians=medians, live_ptype=cur_ptype, registry_ptype=prim_ptype,
             )
             # The down primary's served name is pickable too: the swap-back target (D-34).
-            if prim_served and prim_served not in live and not any(
+            if swap_back and not any(
                 (e[0] if isinstance(e, tuple) else e) == prim_served for e in self._model_cache
             ):
                 self._model_cache.append((prim_served, "swap"))
