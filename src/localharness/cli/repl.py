@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import re
 import shlex
@@ -2562,12 +2563,18 @@ class OrchestratorREPL:
         launched = self._active_launch
         launch_spec = (launched[1] if active is not None and launched is not None and launched[0] is active
                        else active[0] if active else None)
+        cfg_dir = self._server_config_dir
+        relaunchable = active is not None and active[1] == client_base_url and cfg_dir is not None
+        # the endpoint's own key as it is NOW (a cold peer launch re-reads its key file): a changed key
+        # builds a new pair. Only a digest enters the memo key, never the key itself.
+        launch_key = _launch_key(self._harness, client_base_url, launch_spec) if relaunchable else {}
+        key_digest = (hashlib.sha256(repr(sorted(launch_key.items())).encode("utf-8")).hexdigest()
+                      if launch_key else None)
         key = (client_base_url, id(active[0]) if active else None, active[1] if active else None,
-               id(launch_spec) if launch_spec is not None else None)
+               id(launch_spec) if launch_spec is not None else None, key_digest)
         memo = self._recovery_memo
         if memo is not None and memo[0] == key:
             return memo[1]
-        cfg_dir = self._server_config_dir
         relaunch = None
         config_dir = None
         runtime = None
@@ -2576,7 +2583,6 @@ class OrchestratorREPL:
             runtime = getattr(spec, "runtime", None)
             if cfg_dir is not None:
                 config_dir = strategy_for(spec).recovery_config_dir(cfg_dir)
-                launch_key = _launch_key(self._harness, client_base_url, spec)
                 if not (getattr(spec, "require_api_key", False) is True and not launch_key):
                     relaunch = self._build_relaunch(
                         spec, client_base_url, cfg_dir, launch_key,
