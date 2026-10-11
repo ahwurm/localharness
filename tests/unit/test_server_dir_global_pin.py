@@ -92,6 +92,7 @@ def test_server_paths_all_derive_from_server_dir(tmp_path):
         managed_server.pid_path(tmp_path),
         managed_server.log_path(tmp_path),
         managed_server.venv_vllm_bin(tmp_path),
+        managed_server.lock_path(tmp_path),
     ):
         assert root in path.parents, f"{path} escaped server_dir({tmp_path})"
 

@@ -483,6 +483,12 @@ def pid_path(config_dir: Path) -> Path:
     return server_dir(config_dir) / "server.pid"
 
 
+def lock_path(config_dir: Path) -> Path:
+    """The cross-process launch lock, beside `server.pid`: an empty advisory-flock file, never read or
+    written for content and deliberately not one of the protected config-dir entries."""
+    return server_dir(config_dir) / "launch.lock"
+
+
 def venv_vllm_bin(config_dir: Path) -> Path:
     return server_dir(config_dir) / "venv" / "bin" / "vllm"
 
