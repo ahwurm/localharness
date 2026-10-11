@@ -24,6 +24,7 @@ from localharness.config.models import ManagedServerConfig
 from localharness.core.private_files import open_regular
 from localharness.provider.procfs import ProcRecord
 from localharness.provider.server import (
+    LLAMA_EXCLUDED_OPTIONS,
     RUNTIME_LABELS,
     classify_hosts,
     effective_posture,
@@ -97,6 +98,18 @@ _SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|CRED", re.IGNORE
 `provider/server.py` names the credentials llama-server really reads; this is the net under it, so a
 name the table does not list is still never carried, shown or audited (D-19(2): anything key-shaped left
 makes the process attach-only)."""
+
+_DRAFT_DOWNLOAD_ENV = "LLAMA_ARG_SPEC_DRAFT_HF_REPO"
+_DRAFT_DOWNLOAD_FLAGS = frozenset(flag for _, flags, env in LLAMA_EXCLUDED_OPTIONS
+                                  if env == _DRAFT_DOWNLOAD_ENV for flag in flags)
+_DRAFT_DOWNLOAD_NAMES = frozenset({flag.lstrip("-").lower() for flag in _DRAFT_DOWNLOAD_FLAGS}
+                                  | {_DRAFT_DOWNLOAD_ENV.replace("_", "-").lower()})
+"""The server's own download rows for the draft model (`-hfd`, `--hf-repo-draft`, `--spec-draft-hf`...):
+read from the one table, not respelled; the second name is each spelling dash-stripped and lower-cased,
+the form a flag, an env name and a config.ini key are compared in."""
+
+_DRAFT_MODEL_FLAGS = frozenset({"-md", "--model-draft"})
+_DRAFT_MODEL_ENV = "LLAMA_ARG_MODEL_DRAFT"
 
 _CREDENTIAL_VALUED = frozenset({"mcp-servers-json"})
 """Options whose VALUE is a document that can embed credentials (`headers`, `env` of an MCP server
@@ -296,6 +309,35 @@ def _plain_ram(text: str) -> bool:
     return text.isascii() and text.isdigit() and len(text) <= 9
 
 
+def _is_draft_download(name: str) -> bool:
+    """`-hfd`, `--hf_repo_draft`, `LLAMA_ARG_SPEC_DRAFT_HF_REPO`, or the config.ini key of one."""
+    return name.lstrip("-").replace("_", "-").lower() in _DRAFT_DOWNLOAD_NAMES
+
+
+def _draft_paths(extra: list[str], environ: "dict[str, str] | object", cwd: str | None) -> set[str]:
+    """The local draft model a process names (`-md`, `--model-draft`, `LLAMA_ARG_MODEL_DRAFT`) as the paths
+    `/proc/<pid>/maps` would list it under, so the served-model search can pass it over (WR-07). Maps is
+    address ordered, a later mapping sits lower, and the draft is mapped after the main model."""
+    values: list[str] = []
+    for i, tok in enumerate(extra):
+        flag, eq, rest = tok.partition("=")
+        flag = flag.replace("_", "-") if flag.startswith("--") else flag
+        if flag in _DRAFT_MODEL_FLAGS:
+            if eq:
+                values.append(rest)
+            elif i + 1 < len(extra):
+                values.append(extra[i + 1])
+    named = environ.get(_DRAFT_MODEL_ENV) if hasattr(environ, "get") else None
+    if named:
+        values.append(named)
+    paths = set()
+    for value in values:
+        joined = _join_cwd(value, cwd)
+        if joined is not None:
+            paths.add(os.path.normpath(joined))
+    return paths
+
+
 def _int(text: str) -> int | None:
     try:
         return int(text.strip())
@@ -474,6 +516,7 @@ def _import_record(
     env: dict[str, str] = {}
     env_tls: list[str] = []
     env_download = False
+    env_draft_download = False
     env_keys: list[str] = []
     env_key_files: list[tuple[str, str]] = []
     env_keyshaped: str | None = None
@@ -499,7 +542,10 @@ def _import_record(
         if category == "tls":
             env_tls.append(name)
         elif category == "download":
-            env_download = True
+            if name == _DRAFT_DOWNLOAD_ENV:
+                env_draft_download = True
+            else:
+                env_download = True
             if name == _HF_FILE_ENV and value:
                 hf_file_env = value
         elif category == "key":
@@ -535,8 +581,18 @@ def _import_record(
     if tls is not None:
         return AttachOnly(f"serves TLS ({visible_text(tls)})")
     hf_file = walk.hf_file or hf_file_env
-    if walk.downloads or env_download or ini_download or "model" not in fields:
-        model = served_model(rec.mapped_ggufs)
+    ini_draft = ini_download and _is_draft_download(ini_masked.refused)
+    draft_download = env_draft_download or ini_draft or any(_is_draft_download(f) for f in walk.downloads)
+    main_download = (env_download or (ini_download and not ini_draft)
+                     or any(not _is_draft_download(f) for f in walk.downloads))
+    if main_download or "model" not in fields:
+        if draft_download:
+            # the draft is mapped after the main model, so maps lists it first: which file is the main one
+            # cannot be told (D-52's "first qualifying path" would pick the draft)
+            return AttachOnly("downloads a draft model beside the main one, so the mapped file cannot be "
+                              "told apart (a record needs the one local path)")
+        drafts = _draft_paths(walk.extra, environ, rec.cwd)
+        model = served_model([p for p in rec.mapped_ggufs if os.path.normpath(p) not in drafts])
         if model is None:
             return AttachOnly("a record needs a local path; none mapped under " + HF_CACHE_SHOWN
                               + (" (--no-mmap maps nothing)" if "--no-mmap" in rec.argv[1:] else ""))
