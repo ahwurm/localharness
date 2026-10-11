@@ -134,7 +134,8 @@ def refuse_unwritable(path: Path) -> None:
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(parent))
 
 
-def atomic_write_text(path: Path, text: str, *, refuse_read_only: bool = False) -> None:
+def atomic_write_text(path: Path, text: str, *, refuse_read_only: bool = False,
+                      follow_links: bool = False) -> None:
     """Replace the file `path` names with `text`, atomically. The one writer every config file
     goes through (IN-21): a same-directory temp file (a cross-filesystem temp file would defeat
     `os.replace`'s atomicity on container/NFS mounts), fsynced, restricted to
@@ -142,14 +143,24 @@ def atomic_write_text(path: Path, text: str, *, refuse_read_only: bool = False) 
     directory fsynced after it (best effort). A crash, Ctrl-C or a full disk leaves the old file or
     the new one, never a truncated one, and never a stranded temp file.
 
-    A symlinked file keeps its link: the file it points at is the one replaced. The parent
-    directory is created when missing. `refuse_read_only` refuses a file (or directory) the caller
-    may not write (:func:`refuse_unwritable`) rather than replacing it through the directory."""
+    By default a symlink at `path` is REPLACED in place by a regular file, and the file it pointed
+    at is never touched (CR-31). A project's `.localharness/` comes from a cloned repository, and
+    git keeps symlinks: following one would let a repository redirect a `--workspace` write into
+    the machine overlay, or into any file the user can write, and create directories wherever it
+    points. The temp file and the parent created when missing are `path`'s own directory, never a
+    link's. Only migrate passes `follow_links=True`: it rewrites files in the machine's own config
+    dir that it has just read, and a symlinked one keeps its link (the file it points at is the
+    one replaced, and no directory is created). `refuse_read_only` refuses a file (or directory)
+    the caller may not write (:func:`refuse_unwritable`) rather than replacing it through the
+    directory."""
     path = Path(path).expanduser()
-    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    if follow_links:
+        target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    else:
+        target = path
+        target.parent.mkdir(parents=True, exist_ok=True)
     if refuse_read_only:
         refuse_unwritable(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
     tmp = tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
