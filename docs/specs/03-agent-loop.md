@@ -180,7 +180,9 @@ class StuckDetector:
         ESCALATE, regardless of the window and of results. The tally is never cleared.
         Otherwise the window decides. A first repeat is a nudge: the window is cleared
         (a clean slate) and the signature recorded as warned. A repeat of a warned
-        signature, or a nudge once max_nudges_per_turn are spent, is ESCALATE."""
+        signature, or a nudge once max_nudges_per_turn are spent, is ESCALATE. A window
+        already holding escalation_threshold identical signatures (one iteration's batch
+        can) is ESCALATE at once, with no nudge first."""
 
     def compute_signature(self, tool_name: str, args: dict) -> str:
         """Return SHA-256 hex digest of tool_name + canonical JSON of args.
@@ -796,7 +798,8 @@ CLEAR ────────────────────────�
 
 CLEAR ──[2 identical in window]──────────────────────────────────► RECOVERING
   Action:
-    Set recovery_injection = stuck_detector.recovery_message(sig)
+    Push config.recovery_injection.message (the agent file's `recovery_injection`
+    key; StuckDetector.recovery_message is the source of its default text)
     Clear the window (a clean slate), remember sig as warned
     Log: "Stuck recovery triggered at iteration N"
     Continue loop normally (do NOT stop the agent)
@@ -807,6 +810,10 @@ RECOVERING ──[a warned signature repeats, or the nudges are spent]──► 
     Emit one Escalation event (reason "stuck_detected") to the bus
     Return the model's own wrap-up of its partial work (no stuck text in the reply)
     (loop exits)
+
+CLEAR ──[escalation_threshold identical in one window]────────────► ESCALATE
+  The RECOVERING ──► ESCALATE action, with no nudge first: one iteration whose batch holds
+  escalation_threshold identical calls escalates straight away.
 
 ANY ──[one identical call reaches call_only_multiplier x escalation_threshold]──► ESCALATE
   The same action as above, whatever the results were: a poll whose trusted result changes
