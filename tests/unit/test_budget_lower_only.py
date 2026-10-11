@@ -803,3 +803,17 @@ def test_an_uncapped_base_is_no_licence_for_a_workspace_value(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         assert loader.overlay_builtin_config("explore", base).permissions.budget.max_actions is None
     assert len(_budget_warnings(caplog)) == 1 and "max_actions" in _budget_warnings(caplog)[0]
+
+
+def test_the_builtin_doors_budget_warnings_name_the_key_and_the_file(tmp_path, caplog):
+    # IN-08: SECURITY.md promises "a warning naming the key and the file".
+    loader, ws = _world(tmp_path, ws_agents={"explore": {"permissions": {"budget": {
+        "max_actions": 99, "max_tool_calls": 50}}}})
+    with caplog.at_level(logging.WARNING):
+        _overlay(loader)
+    path = repr(str(ws / "agents" / "explore.yaml"))
+    msgs = _budget_warnings(caplog)
+    assert len(msgs) == 2
+    assert any(m.startswith("ignoring permissions.budget.max_actions 99 in " + path) for m in msgs)
+    assert any(m.startswith("ignoring permissions.budget.max_tool_calls 50 in " + path)
+               for m in msgs)
