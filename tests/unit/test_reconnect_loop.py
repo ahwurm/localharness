@@ -443,6 +443,30 @@ def test_an_unbounded_loop_keeps_the_whole_bound(bus):
     assert loop._reconnect_bound(session) == 1800.0
 
 
+async def test_the_turns_ending_is_published_back_at_the_callers_depth(bus, sessions, sleeps):
+    """IN-21: a root turn started from a TurnFailed or TurnCompleted handler (or a task it creates) must
+    read as a root turn, so the ending is published after the turn depth is back to the caller's."""
+    from localharness.agent import loop as loop_mod
+    from localharness.core.events import TurnCompleted
+
+    depths: list[tuple[str, int]] = []
+
+    async def record(event: Any) -> None:
+        depths.append((event.event_type, loop_mod._TURN_DEPTH.get()))
+
+    bus.subscribe(TurnFailed, record)
+    bus.subscribe(TurnCompleted, record)
+
+    pair = FakePair(error=TimeoutError("the model server did not come back within 30s"))
+    failing = _loop(_scripted([_answer("never")]), bus, server_recovery=lambda: pair)
+    _fail_first_build(failing)
+    await failing.run_turn("go")  # ends through run_turn's `except ProviderError`
+    await _loop(_scripted([_answer("ok")]), bus).run_turn("go")  # ends with TurnCompleted
+
+    assert depths == [("TurnFailed", 0), ("TurnCompleted", 0)]
+    assert loop_mod._TURN_DEPTH.get() == 0
+
+
 def test_the_keyword_sits_directly_after_guardrails_path():
     names = list(inspect.signature(AgentLoop.__init__).parameters)
     assert names[names.index("guardrails_path") + 1] == "server_recovery"
