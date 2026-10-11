@@ -338,6 +338,37 @@ def _draft_paths(extra: list[str], environ: "dict[str, str] | object", cwd: str 
     return paths
 
 
+_RELATIVE_PATH_WORDS = re.compile(r"[\s{}\"'<>|*?:=;,~]")
+_FILE_SUFFIX = re.compile(r"\.(gguf|jinja|json|gbnf|bin|txt|ya?ml|safetensors)$", re.IGNORECASE)
+
+
+def _is_relative_path(value: str) -> bool:
+    """A pass-through value that reads as a path relative to the process's working directory: no
+    spaces, quotes, braces, colons, `=` or commas (a JSON document, a URL, a tensor pattern or a list is
+    not a path), no leading `~`, and either a directory part or a file suffix llama.cpp reads
+    (`t.jinja`, `lora/x.gguf`, `./grammar.gbnf`)."""
+    if not value or os.path.isabs(value) or _RELATIVE_PATH_WORDS.search(value):
+        return False
+    return "/" in value or _FILE_SUFFIX.search(value) is not None
+
+
+def _rebase_extra(extra: list[str], cwd: str | None) -> tuple[list[str], str | None]:
+    """`extra` with every relative path joined to the process's working directory, as the process saw it
+    (a server launched elsewhere would not find `--chat-template-file t.jinja`); a relative path with no
+    known directory (a journal record) is returned as the second item and the import is attach-only."""
+    out: list[str] = []
+    for tok in extra:
+        flag, eq, value = tok.partition("=") if tok.startswith("-") else ("", "", tok)
+        candidate = value if eq or not tok.startswith("-") else ""
+        if candidate and _is_relative_path(candidate):
+            joined = _join_cwd(candidate, cwd)
+            if joined is None:
+                return extra, candidate
+            tok = f"{flag}={joined}" if eq else joined
+        out.append(tok)
+    return out, None
+
+
 def _int(text: str) -> int | None:
     try:
         return int(text.strip())
@@ -692,6 +723,9 @@ def _import_record(
         dropped = set(walk.verbose)
         extra = [tok for idx, tok in enumerate(extra) if idx not in dropped]
         verbose_dropped = True
+    extra, unplaced = _rebase_extra(extra, rec.cwd)
+    if unplaced is not None:
+        return AttachOnly(f"holds a relative path the import cannot place ({visible_text(unplaced)})")
     if extra:
         mapping["extra_args"] = extra
     if env:

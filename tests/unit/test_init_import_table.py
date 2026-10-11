@@ -401,6 +401,33 @@ def test_anything_else_key_shaped_is_attach_only():
         == "holds a key the import cannot place (LLAMA_ARG_API_KEY_BACKUP)"
 
 
+def test_a_relative_path_a_flag_names_is_joined_to_the_process_cwd():
+    """IN-07: the launched server runs elsewhere and would not find `t.jinja`."""
+    out = imported(llama("--chat-template-file", "t.jinja", "--lora=lora/x.gguf", "--grammar-file", "./g.gbnf",
+                         "-ngl", "9", cwd="/home/u/srv"))
+    assert out.spec.extra_args == ["--chat-template-file", "/home/u/srv/t.jinja",
+                                   "--lora=/home/u/srv/lora/x.gguf", "--grammar-file", "/home/u/srv/g.gbnf",
+                                   "-ngl", "9"]
+    assert "flags: --chat-template-file /home/u/srv/t.jinja" in out.shown[0]
+
+
+def test_values_that_are_not_paths_are_left_alone():
+    args = ["--chat-template-kwargs", '{"enable_thinking":false}', "-ot", ".ffn_.*_exps.=CPU",
+            "--override-kv", "tokenizer.ggml.add_bos_token=bool:false", "--api-prefix", "/v1",
+            "--chat-template-file", "/etc/t.jinja", "--samplers", "top_k;temp", "--tensor-split", "3,1",
+            "--rpc", "host:50052", "--webui-config", "~/w.json"]
+    assert imported(llama(*args, cwd="/home/u/srv")).spec.extra_args == args
+
+
+def test_a_relative_path_with_no_known_cwd_cannot_be_placed():
+    assert attach(llama("--chat-template-file", "t.jinja", cwd=None)) \
+        == "holds a relative path the import cannot place (t.jinja)"
+    assert attach(llama("--lora=lora/x.gguf", cwd=None)) \
+        == "holds a relative path the import cannot place (lora/x.gguf)"
+    assert imported(llama("--chat-template-file", "/abs/t.jinja", cwd=None)).spec.extra_args == [
+        "--chat-template-file", "/abs/t.jinja"]
+
+
 def test_a_value_that_merely_mentions_api_key_is_not_key_shaped():
     out = imported(llama("--chat-template-file", "/etc/api-key.jinja"))
     assert out.spec.extra_args == ["--chat-template-file", "/etc/api-key.jinja"]
