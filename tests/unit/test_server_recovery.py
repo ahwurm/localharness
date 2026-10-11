@@ -335,6 +335,29 @@ async def test_a_second_death_after_the_one_relaunch_ends_with_the_log_tail(mode
     assert relaunch.calls == 1
 
 
+async def test_a_server_restarted_by_hand_after_the_relaunch_died_is_seen(models, tmp_path):
+    """IN-22: the one relaunch died, but by then the person restarted the server by hand at the same
+    address (no pidfile of ours): the flight looks at the address before ending with "exited again"."""
+    relaunch = RecordingRelaunch(lambda: write_dead_pidfile(tmp_path))
+    models(ModelsEndpoint(down=lambda: relaunch.calls == 0))  # answers once someone restarted it
+    await asyncio.wait_for(ServerRecovery(URL, tmp_path, relaunch).recover(
+        base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce()), 2.0)
+    assert relaunch.calls == 1
+
+
+async def test_a_later_loop_after_the_relaunch_was_spent_still_sees_a_hand_restart(models, tmp_path):
+    state = {"up": False}
+    models(ModelsEndpoint(down=lambda: not state["up"]))
+    relaunch = RecordingRelaunch(RuntimeError("llama.cpp exited during startup. Log tail:\nboom"))
+    pair = ServerRecovery(URL, tmp_path, relaunch)
+    with pytest.raises(RuntimeError, match="the restart failed"):
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
+    state["up"] = True  # restarted by hand; still no pidfile of ours
+    await asyncio.wait_for(pair.recover(base_url=URL, api_key="none", wait_seconds=5,
+                                        on_lost=Announce()), 2.0)
+    assert relaunch.calls == 1
+
+
 async def test_a_dead_process_with_no_relaunch_fails_at_once_with_the_log_tail(models, tmp_path):
     models(ModelsEndpoint())
     write_serve_log(tmp_path, "it crashed\n")

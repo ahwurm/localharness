@@ -1178,6 +1178,11 @@ class ServerRecovery:
                 if self.relaunch is None:
                     raise RuntimeError(EXITED_TEXT + self._tail()) from died
                 if relaunched:
+                    # The one relaunch is spent (here, or by an earlier loop of the turn), but the person
+                    # may have restarted the server by hand: look at the address before giving up.
+                    if await self._answers(base_url, api_key, deadline):
+                        log.info("model server process exited again, but the address answers")
+                        return
                     if earlier is not None and (issubclass(earlier[0], server.LaunchRefused)
                                                 or earlier[1].startswith(RESTART_FAILED_TEXT)):
                         raise _again(earlier) from died  # the one relaunch was refused or failed
