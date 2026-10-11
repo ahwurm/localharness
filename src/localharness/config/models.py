@@ -748,12 +748,14 @@ class ContextConfig(BaseModel):
         ),
     )
 
-    max_tool_output_chars: int = Field(
-        default=32_000,
+    max_tool_output_chars: Optional[int] = Field(
+        default=None,
         ge=100,
         le=500_000,
         description=(
-            "Maximum characters of a single tool result kept in context. Consumed as the "
+            "Maximum characters of a single tool result kept in context. None (the default) means "
+            "today's size, 32000, until the window-ratio rule replaces it; an explicit integer is "
+            "honoured as written. Consumed as the "
             "compaction pipeline's tool_result_cap: on every over-threshold build the "
             "deterministic ToolResultCapStage head+tail truncates any tool result longer than this "
             "(keeping both ends, with an elision marker), before the LLM summary/compaction stages "
@@ -773,13 +775,15 @@ class ContextConfig(BaseModel):
         ),
     )
 
-    tool_result_evict_threshold_chars: int = Field(
-        default=8_000,
+    tool_result_evict_threshold_chars: Optional[int] = Field(
+        default=None,
         ge=500,
         le=500_000,
         description=(
             "Char size above which a tool result becomes eligible for eviction to a restorable "
-            "stub (see `tool_result_eviction`). Smaller results aren't worth stubbing."
+            "stub (see `tool_result_eviction`). Smaller results aren't worth stubbing. None (the "
+            "default) means today's size, 8000, until the window-ratio rule replaces it; an "
+            "explicit integer is honoured as written."
         ),
     )
 

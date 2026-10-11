@@ -60,3 +60,12 @@ CURRENT_DEFAULTS_REVISION: int = 3
 # bumping CURRENT_DEFAULTS_REVISION instead would re-run the deny-list union and restore deny
 # defaults a person deleted.
 CURRENT_INIT_NULLS_REVISION: int = 1
+
+DEFAULT_TOOL_OUTPUT_CHARS: int = 32_000
+"""The tool-result cap a `context.max_tool_output_chars` of None resolves to. Resolved at exactly
+three consumers (the root's CompactionPipeline in `start`, and the bench's); the window-ratio phase
+replaces those expressions and leaves an explicit integer alone."""
+
+DEFAULT_TOOL_EVICT_THRESHOLD_CHARS: int = 8_000
+"""The eviction threshold a `context.tool_result_evict_threshold_chars` of None resolves to, at the
+root's ContextManager in `start`; the window-ratio phase replaces that expression."""
