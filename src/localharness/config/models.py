@@ -1786,7 +1786,9 @@ class ProviderConfig(BaseModel):
             "retry. A workspace may set it, like timeout_seconds, because it can only lengthen or "
             "shorten a wait for a dead server and never reach a new address (liveness only). Not "
             "inference_queue_wait_seconds: that one bounds the wait for a model slot, and its 0 or "
-            "null still means wait indefinitely."
+            "null still means wait indefinitely. A server that accepts the request but sends no "
+            "response headers within timeout_seconds is read as gone too: when its /models still "
+            "answers, the request is sent once more and that hang costs timeout_seconds twice."
         ),
     )
 

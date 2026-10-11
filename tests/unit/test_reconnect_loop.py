@@ -629,6 +629,38 @@ async def test_the_failure_sentence_starts_a_sentence_of_its_own_at_both_seams(b
     assert failed.detail.endswith(" The model server did not come back within 30s")
 
 
+@pytest.mark.parametrize("wait", [30.0, 0.0])
+async def test_a_kill_file_written_before_the_drop_ends_the_turn_without_waiting(
+        bus, sessions, sleeps, wait):
+    """IN-58: KILL is read between iterations; a drop after it was written takes no wait, no fallback
+    sleep and no relaunch: the turn ends with the kill summary."""
+    pair = FakePair()
+    llm = _scripted([_pce(), _answer("never")], wait=wait)
+    loop = _loop(llm, bus, server_recovery=lambda: pair)
+    reads = {"n": 0}
+
+    def killed() -> bool:  # absent at the top of the first iteration, present by the time the call fails
+        reads["n"] += 1
+        return reads["n"] > 1
+
+    loop._kill.is_killed = killed  # type: ignore[method-assign]
+
+    await loop.run_turn("go")
+
+    assert pair.calls == []  # no wait, no relaunch
+    assert sleeps == []  # no fallback retry either
+    assert len(llm.calls) == 1
+    assert sessions[0].terminated_reason == "kill_file"
+    assert [f.reason for f in _failed(bus)] == ["kill_file"]
+
+
+def test_the_knob_says_a_hang_before_headers_costs_the_timeout_twice():
+    from localharness.config.models import ProviderConfig
+
+    desc = ProviderConfig.model_fields["reconnect_wait_seconds"].description
+    assert "response headers" in desc and "timeout_seconds twice" in desc
+
+
 async def test_one_failed_reconnect_publishes_exactly_one_llm_error(bus, sessions, sleeps):
     pair = FakePair(error=TimeoutError("the model server did not come back within 30s"))
     llm = _scripted([_pce("refused")])
