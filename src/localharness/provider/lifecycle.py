@@ -857,3 +857,183 @@ async def launch_lock(config_dir: Path, *, on_wait: Callable[[], Awaitable[None]
             fallback.release()
         if fd is not None:
             os.close(fd)  # releases the flock; the kernel also does when a holder dies
+
+
+# ---------------------------------------------------------------------------
+# Waiting for a dropped model server, and relaunching it once
+# ---------------------------------------------------------------------------
+_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("lh_relaunch_deadline", default=None)
+"""The monotonic time the current recovery flight's bound ends. Set INSIDE the flight task, so it is
+visible to the `relaunch` the flight awaits and to nothing the caller of `recover` runs."""
+
+_RELAUNCH_DEFAULT_SECONDS = 1800.0  # `activate`'s own default timeout, used outside any flight
+
+_UNWINDING: set[asyncio.Task] = set()
+"""Detached flights still unwinding after their last awaiter left: asyncio keeps only weak references
+to tasks, and the `finally` that releases a launch lock must get to run."""
+
+BOUND_TEXT = "the model server did not come back within {seconds}s"
+EXITED_TEXT = "the model server exited. Log tail:\n"
+EXITED_AGAIN_TEXT = "the model server exited; it was restarted once and exited again. Log tail:\n"
+RESTART_FAILED_TEXT = "the model server exited; it was restarted once and the restart failed: "
+"""The four sentences a recovery ends with when it fails; the loop appends them to the turn's ending."""
+
+
+def relaunch_budget() -> float:
+    """Seconds left in the current recovery flight's bound, never below 1.0; the zero-argument
+    `relaunch` passes this as `activate`'s `timeout_seconds` (D-22). Outside any flight it is
+    `activate`'s own default, 1800.0."""
+    deadline = _DEADLINE.get()
+    if deadline is None:
+        return _RELAUNCH_DEFAULT_SECONDS
+    return max(1.0, deadline - time.monotonic())
+
+
+class _Run:
+    """One flight: its task and how many callers are awaiting it."""
+
+    __slots__ = ("task", "awaiters")
+
+    def __init__(self, task: asyncio.Task) -> None:
+        self.task = task
+        self.awaiters = 0
+
+
+class _Flight:
+    """The mutable single-flight slot inside a frozen `ServerRecovery`: the flight now under way, if any."""
+
+    __slots__ = ("current",)
+
+    def __init__(self) -> None:
+        self.current: _Run | None = None
+
+
+@dataclass(frozen=True)
+class ServerRecovery:
+    """What to do when the model server a session talks to drops: wait for it, and relaunch it once if
+    this harness launched it and it died. Once per server death per session (D-16).
+
+    `base_url` is the client address the pair was built for (the asking loop compares it with its own
+    client's address before using the pair). `config_dir` is the strategy's own config dir
+    (`recovery_config_dir`), or None for a pure poll (LM Studio, a hand-run server): with it a dead
+    process is known at once and its log tail is shown. `relaunch` is the zero-argument coroutine the
+    REPL builds over the active spec, or None when nothing can be relaunched; it reads its time bound
+    from `relaunch_budget()`. `runtime` names the server in `wait_ready`'s messages.
+
+    `recover` takes the key per call and stores nothing of it. Callers of one pair share one flight.
+    """
+
+    base_url: str | None
+    config_dir: Path | None
+    relaunch: Callable[[], Awaitable["LiveEndpoint | None"]] | None
+    runtime: str | None = None
+    _flight: _Flight = field(default_factory=_Flight, init=False, compare=False, repr=False)
+
+    async def recover(
+        self,
+        *,
+        base_url: str,
+        api_key: Any,
+        wait_seconds: float,
+        on_lost: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Wait until the server at `base_url` answers `/models` (relaunching a dead launched server
+        once), within `wait_seconds`. `on_lost` is awaited once if it is still down after the
+        queue-visibility threshold. Raises `TimeoutError` / `RuntimeError` / `LaunchRefused` with one
+        readable sentence; a cancelled caller leaves, and the last one to leave cancels the flight."""
+        slot = self._flight
+        run = slot.current
+        if run is None or run.task.done():
+            task = asyncio.get_running_loop().create_task(
+                self._fly(base_url, api_key, wait_seconds, on_lost)
+            )
+            task.add_done_callback(_retrieve)
+            run = slot.current = _Run(task)
+        run.awaiters += 1
+        try:
+            return await asyncio.shield(run.task)
+        finally:
+            run.awaiters -= 1
+            if run.task.done():
+                if slot.current is run:
+                    slot.current = None  # a resolved flight is cleared: the next death is a new flight
+            elif run.awaiters == 0:
+                if slot.current is run:
+                    slot.current = None  # detach BEFORE cancel, or a recover this tick joins a dying task
+                _UNWINDING.add(run.task)
+                run.task.add_done_callback(_UNWINDING.discard)
+                run.task.cancel()
+
+    async def _fly(
+        self,
+        base_url: str,
+        api_key: Any,
+        wait_seconds: float,
+        on_lost: Callable[[], Awaitable[None]],
+    ) -> None:
+        from localharness.provider import client as _client
+
+        deadline = time.monotonic() + wait_seconds
+        _DEADLINE.set(deadline)
+        poll = _client._QUEUE_VISIBILITY_SECONDS
+        timer = asyncio.get_running_loop().create_task(_announce_after(poll, on_lost))
+        relaunched = False
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(self._bound_text(wait_seconds))
+                try:
+                    await server.wait_ready(
+                        base_url,
+                        config_dir=self.config_dir,
+                        timeout_seconds=remaining,
+                        poll_seconds=poll,
+                        runtime=self.runtime,
+                        **server.key_kwargs(api_key),
+                    )
+                    return
+                except TimeoutError as late:
+                    raise TimeoutError(self._bound_text(wait_seconds)) from late
+                except RuntimeError as died:  # the launched process is gone (wait_ready's own signal)
+                    if self.relaunch is None:
+                        raise RuntimeError(EXITED_TEXT + self._tail()) from died
+                    if relaunched:
+                        raise RuntimeError(EXITED_AGAIN_TEXT + self._tail()) from died
+                    relaunched = True
+                # Outside the try above: a LaunchRefused (itself a RuntimeError) must never be read as
+                # a poll failure.
+                log.info("model server process exited; relaunching it once")
+                try:
+                    await self.relaunch()
+                except server.LaunchRefused:
+                    raise
+                except (RuntimeError, TimeoutError) as failed:
+                    raise RuntimeError(RESTART_FAILED_TEXT + str(failed)) from failed
+        finally:
+            timer.cancel()
+            await asyncio.gather(timer, return_exceptions=True)
+
+    def _tail(self) -> str:
+        return server.log_tail(self.config_dir) if self.config_dir is not None else ""
+
+    def _bound_text(self, wait_seconds: float) -> str:
+        text = BOUND_TEXT.format(seconds=int(round(wait_seconds)))
+        if self.config_dir is not None:
+            text += ". Log tail:\n" + server.log_tail(self.config_dir)
+        return text
+
+
+def _retrieve(task: asyncio.Task) -> None:
+    """Retrieve a flight's outcome so a failure nobody awaits any more is never logged as unretrieved."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _announce_after(seconds: float, on_lost: Callable[[], Awaitable[None]]) -> None:
+    """Await `on_lost` once the server has been down for `seconds`; a publish that fails costs nothing."""
+    await asyncio.sleep(seconds)
+    try:
+        await on_lost()
+    except Exception:  # noqa: BLE001 - telling the person must never fail the recovery
+        log.debug("could not announce the dropped model server", exc_info=True)
