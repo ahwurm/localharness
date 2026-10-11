@@ -2598,6 +2598,11 @@ class AgentLoop:
 
         if session.connection_retry_used:
             return False, ""
+        if self._kill.is_killed():
+            # The KILL file is read between iterations only; a wait would hold it off for the whole bound
+            # and a relaunch would start a model server after it. Back to the top: the kill check ends
+            # the turn with its own summary, before any wait, sleep or launch.
+            return True, ""
         bound = self._reconnect_bound(session)
         if bound <= 0 or session.reconnect_used:
             session.connection_retry_used = True
