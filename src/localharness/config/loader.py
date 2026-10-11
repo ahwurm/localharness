@@ -2414,7 +2414,9 @@ class ConfigLoader:
         wrote one (`_layer_baseline`, `_global_layer_ask`, `_global_layer_kill_file` all take that
         rung). Everything else is the shared rule: `mode`, `workspace_root` and the `ask` rule sets
         narrow-only (PRD §3.3), `deny_patterns` UNION (MERG-02 — safety accumulates), `kill_file`
-        pinned (F5 — one file stops every agent on the box).
+        pinned (F5 — one file stops every agent on the box), `max_actions` and
+        `max_duration_minutes` lower-only against the operator's own file else the built-in's
+        number (AGENT_CORE_LOWER_ONLY_KEYS), `max_tool_calls` dropped to the base's None.
 
         Only keys the workspace yaml actually WROTE are considered; the rest of `merged` is the
         base's own dump and is none of the repo's doing.
@@ -2477,6 +2479,55 @@ class ConfigLoader:
                     budget.get("kill_file"), name, baseline,
                 )
                 budget["kill_file"] = baseline
+
+        # The budget: lower-only against the operator's own `agents/<name>.yaml` when it holds a
+        # finite value (a global null falls through), else against the built-in's own number — the
+        # builder's rung, finite for every built-in. The workspace file shadows the global one
+        # (its values are not merged), so an omission or a null restores the baseline here rather
+        # than leaving the base's. `max_tool_calls` is never a project's to set: nothing derives
+        # it, so the base's value (None) comes back.
+        if not isinstance(budget, dict):
+            budget = {}
+            perms["budget"] = budget
+        declared_budget = declared.get("budget") if isinstance(declared.get("budget"), dict) else {}
+        base_budget = getattr(base.permissions, "budget", None)
+        for key_path in sorted(AGENT_CORE_LOWER_ONLY_KEYS):
+            field = key_path.rsplit(".", 1)[-1]
+            finite = ((lambda v: _finite_int(v, **_ACTIONS_BOUNDS)) if field == "max_actions"
+                      else (lambda v: _finite_number(v, ge=0.1, le=1440.0)))
+            baseline = self._global_layer_agent_budget(name, field)
+            if not finite(baseline):
+                baseline = getattr(base_budget, field, None)
+            value = declared_budget.get(field)
+            if value is not None and finite(value) and (baseline is None or value <= baseline):
+                budget[field] = value
+                continue
+            if value is not None:
+                log.warning(
+                    "ignoring workspace %s %r for agent %r: a project may only lower it (%r)",
+                    field, value, name, baseline,
+                )
+            budget[field] = baseline
+        if declared_budget.get("max_tool_calls") is not None:
+            log.warning(
+                "ignoring workspace max_tool_calls %r for agent %r: a project cannot set it",
+                declared_budget["max_tool_calls"], name,
+            )
+        budget["max_tool_calls"] = getattr(base_budget, "max_tool_calls", None)
+
+    def _global_layer_agent_budget(self, stem: str, field: str) -> Any:
+        """`permissions.budget.<field>` as the global `agents/<stem>.yaml` alone declares it, or
+        None (no file, a file that does not parse, or a key left out or null)."""
+        path = self._config_dir / "agents" / f"{stem}.yaml"
+        if not path.exists():
+            return None
+        try:
+            raw = self._without_withheld(_load_yaml_file(path), path)
+        except ConfigError:
+            return None
+        perms = raw.get("permissions") if isinstance(raw, dict) else None
+        budget = perms.get("budget") if isinstance(perms, dict) else None
+        return budget.get(field) if isinstance(budget, dict) else None
 
     def agent_yaml_paths(self) -> list[Path]:
         """Every agent yaml discovery reads, GLOBAL dir first so the local layer wins by stem.
