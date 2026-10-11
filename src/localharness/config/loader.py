@@ -2030,9 +2030,12 @@ class ConfigLoader:
 
     def _global_agent_section(self, stem: str, head: str, *, overlay: bool = True) -> Any:
         """The raw `head` section as the GLOBAL layer alone sets it for agent `stem`: its
-        agents/<stem>.yaml, else (when `overlay`) the global overrides' `agent:` section, else
-        _UNSET. A section that is not a mapping counts as absent, and so does a file that does not
-        parse. Returns a shallow copy: the caller may edit it, the file's dict stays untouched."""
+        agents/<stem>.yaml's section merged over (when `overlay`) the global overrides' `agent:`
+        section, in step 5b's order, so the restore is exactly what a global-only load of the agent
+        holds (WR-03: a key the operator set through `components set agent.stuck_detector.*` is
+        not lost because the agent file also has the section). Either alone when only one has it,
+        else _UNSET. A section that is not a mapping counts as absent, and so does a file that does
+        not parse. Returns a copy: the caller may edit it, the file's dict stays untouched."""
         def declared(data: Any) -> Any:
             section = data.get(head) if isinstance(data, dict) else None
             return dict(section) if isinstance(section, dict) else _UNSET
@@ -2046,9 +2049,12 @@ class ConfigLoader:
         agent_file = self._config_dir / "agents" / f"{stem}.yaml"
         found = (read(lambda: self._without_withheld(_load_yaml_file(agent_file), agent_file))
                  if agent_file.exists() else _UNSET)
-        if found is _UNSET and overlay:
-            found = read(self._overlay_agent)
-        return found
+        if not overlay:
+            return found
+        under = read(self._overlay_agent)
+        if under is _UNSET:
+            return found
+        return under if found is _UNSET else deep_merge(under, found)
 
     @staticmethod
     def _plugin_agent_default(head: str, key: str) -> Any:

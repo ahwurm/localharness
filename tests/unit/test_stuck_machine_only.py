@@ -145,6 +145,40 @@ def test_the_global_overrides_agent_section_is_the_next_rung(layers) -> None:
     assert len(_notes(loader)) == 1
 
 
+def test_the_restore_is_the_global_cascade_not_the_first_section_found(layers) -> None:
+    """WR-03: the agent file's section and the overrides' `agent:` section are merged, as a
+    global-only load merges them (step 5b), so a shadowing file that declares no section at all
+    cannot drop the operator's overrides key."""
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml",
+                _agent(stuck_detector={"escalation_threshold": 2}))
+    _write_yaml(global_dir / "overrides.yaml", {"agent": {"stuck_detector": {"window_size": 20}}})
+    _write_yaml(ws / "agents" / "deployer.yaml", _agent())
+
+    alone, _ = _load(global_dir, None)
+    cfg, loader = _load(global_dir, ws)
+
+    assert (alone.stuck_detector.escalation_threshold, alone.stuck_detector.window_size) == (2, 20)
+    assert cfg.stuck_detector == alone.stuck_detector
+    assert _notes(loader) == []
+
+
+def test_the_agent_files_key_wins_over_the_overrides_key_in_the_restore(layers) -> None:
+    global_dir, ws = layers
+    _write_yaml(global_dir / "agents" / "deployer.yaml",
+                _agent(stuck_detector={"window_size": 7}))
+    _write_yaml(global_dir / "overrides.yaml",
+                {"agent": {"stuck_detector": {"window_size": 20, "escalation_threshold": 2}}})
+    _write_yaml(ws / "agents" / "deployer.yaml", _agent(stuck_detector={"window_size": 50}))
+
+    alone, _ = _load(global_dir, None)
+    cfg, loader = _load(global_dir, ws)
+
+    assert (cfg.stuck_detector.window_size, cfg.stuck_detector.escalation_threshold) == (7, 2)
+    assert cfg.stuck_detector == alone.stuck_detector
+    assert len(_notes(loader)) == 1
+
+
 def test_a_workspace_section_equal_to_the_global_one_earns_no_note(layers) -> None:
     global_dir, ws = layers
     section = {"escalation_threshold": 2, "window_size": 4}
