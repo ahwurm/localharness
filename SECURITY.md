@@ -205,7 +205,9 @@ gate-family rule above and stays registered if the plugin later fails.
 ### Machine-level-only settings
 
 A project's `.localharness/` may set what the agent does inside that project: the model it asks
-for, budgets, prompts and agent structure, memory tuning, and stricter permissions. A setting that
+for, budgets (which it may only lower, see [Settings a project may only
+lower](#settings-a-project-may-only-lower)), prompts and agent structure, memory tuning, and
+stricter permissions. A setting that
 says where a request or a credential goes, which credential is sent, what program the harness starts
 or imports, or which file outside the project it writes belongs to your machine, so only your
 machine-level (global) `config.yaml` or `overrides.yaml` may set it. A repository you cloned must
@@ -283,13 +285,24 @@ agent file that shadows one of yours, and through the log when it overlays a bui
 A project's `.localharness/` may make some budgets smaller but never larger. A larger value, a value
 that is not a number or one outside the setting's range is ignored, the harness prints a warning
 naming the key and the file, and your value (or the shipped default, where your global config sets
-none) stands. A `null` keeps your value without a warning. These are all of them:
+none) stands. A `null` keeps your value without a warning. The agent budgets below are the one
+exception to the shipped-default rule, as their entries say. These are all of them:
 
 - `org.children_budget.<name>.actions` and `.minutes`, for each built-in child agent and for
   `default` (the ceiling of an agent you define): the most model round-trips and wall-clock minutes
   a child may spend
 - `org.children_budget.lookup_share` and `org.children_budget.review_share`: the part of a parent's
   remaining budget a delegated child receives
+- `permissions.budget.max_actions` and `permissions.budget.max_duration_minutes`, in a project agent
+  file, in a project division file, or in a project overlay of a built-in agent
+  (`agents/explore.yaml`): the most model round-trips and wall-clock minutes one agent may spend.
+  Against your own value, from your agent file, your division file, your `org.yaml` or the `agent:`
+  section of your `overrides.yaml`, the project may only go lower: a larger value is ignored with a
+  warning, and a `null` or a missing key keeps yours. Where your global config sets none, the
+  project's number is kept as written and, on a phone or other remote session left `unattended`,
+  capped by `org.children_budget` and `channels.unattended_max_actions`
+- `permissions.budget.max_tool_calls` cannot be set by a project at all: a project agent file never
+  carries it, and a project overlay of a built-in agent has it dropped with a warning
 
 ## Human approval gate
 
@@ -933,6 +946,16 @@ arrive in.
 reached an agent through the inherited global scope therefore needed a separate per-tool tag before
 the checks knew what it was. Now every tool carries its own declarations, the three readers above
 read the same ones, and a tool that declares nothing gets the most restrictive values.
+
+**Untrusted output cannot delay a stuck escalation.** The stuck detector counts a changing result as
+progress only for a tool whose output the harness trusts, such as `bash_exec` or `agent`, as
+declared by `result_origin`. Output from a web page, an MCP server or memory cannot delay an
+escalation however much it varies, and a tool that declares nothing, or whose declaration cannot be
+read, counts as untrusted. Output an attacker can still influence through a trusted tool (a shell
+reading a file from a cloned repository, a delegated agent relaying a web summary) can delay the
+nudge. That case is bounded by the per-turn ceiling on identical calls
+(`stuck_detector.call_only_multiplier` times `escalation_threshold`, whatever the results are) and by
+you.
 
 **What this does NOT cover.** A declaration is believed. A tool that declares `ingest: none` while
 it actually fetches attacker-controlled text is treated as it says, and turning on a plugin you

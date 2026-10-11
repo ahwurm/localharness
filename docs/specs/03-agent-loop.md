@@ -129,17 +129,38 @@ import hashlib
 @dataclass
 class StuckDetector:
     window_size: int = 5
-    """Sliding window of last N action signatures to check for repetition."""
+    """Sliding window of the last N action signatures to check for repetition."""
 
     recovery_threshold: int = 2
-    """Number of identical signatures in window before injecting recovery message."""
+    """Number of identical signatures in the window before the recovery nudge."""
 
     escalation_threshold: int = 3
-    """Number of identical signatures in window before stopping the agent."""
+    """Number of identical signatures in the window before stopping the agent."""
 
-    def record(self, tool_name: str, args: dict) -> None:
-        """Append this tool call's signature to the window.
-        Window is a fixed-size deque — oldest entries are dropped automatically."""
+    max_nudges_per_turn: int = 3
+    """Nudges spent in one turn before the next repeat escalates."""
+
+    call_only_multiplier: int = 3
+    """Per-turn ceiling on one identical call, as a multiple of escalation_threshold
+    (1-10). The turn escalates once the same tool with the same arguments has been
+    called call_only_multiplier x escalation_threshold times, whatever the results were."""
+
+    result_origin: "Callable[[str], str] | None" = None
+    """Looks up a tool's declared `result_origin` by name (the tool registry's lookup).
+    None means no tool is trusted."""
+
+    def record(self, tool_name: str, args: dict, result: tuple[bool, str]) -> None:
+        """Record one tool call. `result` is the exact (success, content) pair the model saw.
+
+        Two counters are fed. The per-turn call-only tally always counts the call by
+        tool_name + args. The windowed signature (a fixed-size deque, oldest dropped
+        automatically) folds the result in only for a tool whose schema declares
+        `result_origin: trusted`: a trusted tool whose result changes is making progress
+        and is a different signature each time. For an untrusted tool (a web page, an MCP
+        server, a memory lookup), an unknown tool, a lookup that raises, or any other
+        origin, the window holds the call alone, so output that varies on every call
+        (a nonce, a timestamp) cannot keep a loop alive. The lookup fails closed to
+        call-only."""
 
     def check(self) -> "StuckState":
         """Analyze the current window for repetition.
@@ -147,9 +168,19 @@ class StuckDetector:
         Returns:
             StuckState.CLEAR: No repeated signatures detected.
             StuckState.RECOVERING: recovery_threshold met. Caller must inject
-                                   recovery message into next LLM request.
+                                   recovery message into the session.
             StuckState.ESCALATE: escalation_threshold met. Caller must stop loop.
         """
+
+    def classify(self) -> "tuple[StuckState, str]":
+        """The ladder the loop calls once per iteration after recording its tool calls.
+
+        The call-only ceiling is checked first: once any single call has been made
+        call_only_multiplier x escalation_threshold times this turn the answer is
+        ESCALATE, regardless of the window and of results. The tally is never cleared.
+        Otherwise the window decides. A first repeat is a nudge: the window is cleared
+        (a clean slate) and the signature recorded as warned. A repeat of a warned
+        signature, or a nudge once max_nudges_per_turn are spent, is ESCALATE."""
 
     def compute_signature(self, tool_name: str, args: dict) -> str:
         """Return SHA-256 hex digest of tool_name + canonical JSON of args.
@@ -162,13 +193,21 @@ class StuckDetector:
         # 16 hex chars (64 bits) is sufficient for duplicate detection in a 5-item window
 
     def recovery_message(self, repeated_signature: str) -> str:
-        """Return the recovery injection text for the assistant message prefix."""
+        """Return the recovery injection text."""
         return (
             "You have attempted the same tool call multiple times with identical arguments "
             "and received the same result. That approach is not working. "
             "Consider a fundamentally different strategy: try different arguments, "
-            "use a different tool, or conclude that the information is not available this way."
+            "use a different tool, or conclude that the information is not available this way. "
+            "If you are waiting on something external, say so and stop; do not poll."
         )
+
+```
+
+The stuck notice reaches the person once, through the escalation event
+(`reason="stuck_detected"`). The turn's reply is the model's own wrap-up of its partial work and
+carries no stuck text. When the ceiling, not the window, ended the turn, the event's detail
+says how many times the same call was made.
 
 from enum import Enum
 class StuckState(Enum):
@@ -418,9 +457,12 @@ _execute_loop(session, task, on_token):
         max_duration_minutes = config.permissions.budget.max_duration_minutes,
     )
     stuck_detector = StuckDetector(
-        window_size = 5,
-        recovery_threshold = 2,
-        escalation_threshold = 3,
+        window_size = config.stuck_detector.window_size,
+        recovery_threshold = config.stuck_detector.recovery_threshold,
+        escalation_threshold = config.stuck_detector.escalation_threshold,
+        max_nudges_per_turn = config.stuck_detector.max_nudges_per_turn,
+        call_only_multiplier = config.stuck_detector.call_only_multiplier,
+        result_origin = tools.result_origin,    # a tool's declared result_origin, by name
     )
     tools = tool_registry.get_tools_for_agent(config)  # scoped list
     tool_schemas = [t.info() for t in tools]
@@ -619,33 +661,36 @@ _execute_loop(session, task, on_token):
                                           tool_name=tool_call.name, output=content,
                                           error=content if not result.success else None, ...))
 
-            # 9f. Record to stuck detector
-            stuck_detector.record(tool_call.name, tool_call.arguments)
+            # 9f. Record to stuck detector: the call, and the (success, content) the model saw.
+            #     A refused or denied call is recorded too, with its refusal text.
+            stuck_detector.record(tool_call.name, tool_call.arguments, (result.success, content))
 
         # ── Stuck Detection (after batch) ─────────────────────────────────────
 
         # 10. Check stuck state after processing all tool calls in this batch
-        stuck_state = stuck_detector.check()
+        stuck_state, repeated_sig = stuck_detector.classify()
 
         if stuck_state == StuckState.RECOVERING:
             # Inject recovery hint into the NEXT iteration's request
-            # (not this one — the tool results are already appended)
-            repeated_sig = stuck_detector.most_repeated_signature()
+            # (not this one — the tool results are already appended). classify() has already
+            # cleared the window: a clean slate.
             recovery_injection = stuck_detector.recovery_message(repeated_sig)
             log.info("Stuck recovery triggered for %s at iteration %d",
                      config.name, session.iteration)
 
         elif stuck_state == StuckState.ESCALATE:
             session.terminated_reason = "stuck"
-            await bus.emit(StuckEvent(
+            # The one place the person is told: the reply carries no stuck text.
+            await bus.emit(Escalation(
                 agent_id=session.agent_id,
                 session_id=session.session_id,
-                iteration=session.iteration,
-                repeated_signature=stuck_detector.most_repeated_signature(),
+                reason="stuck_detected",
+                stuck_signature=repeated_sig,
+                iteration_at_escalation=session.iteration,
             ))
             log.warning("Agent %s stuck after %d iterations, escalating",
                         config.name, session.iteration)
-            return _format_stuck_summary(session)
+            return await _final_summary_on_stuck(session)   # the model's partial work
 
         # ── Loop continues ─────────────────────────────────────────────────────
         # (back to top: kill check → budget check → context prep → LLM call)
@@ -689,20 +734,27 @@ WRONG:
 
 ### Sliding Window
 
-The stuck detector maintains a `collections.deque(maxlen=window_size)` of action signatures. Each call to `record()` appends one signature and drops the oldest if at capacity.
+The stuck detector keeps two counters. The first is a `collections.deque(maxlen=window_size)` of action signatures: each call to `record()` appends one signature and drops the oldest if at capacity. It drives the nudge and the ladder. The second is a per-turn tally of identical calls (tool name and arguments), never cleared, that drives the call-only ceiling of `call_only_multiplier` x `escalation_threshold`.
 
 ```python
 from collections import deque
 
 class StuckDetector:
-    def __init__(self, window_size=5, recovery_threshold=2, escalation_threshold=3):
+    def __init__(self, window_size=5, recovery_threshold=2, escalation_threshold=3,
+                 max_nudges_per_turn=3, *, call_only_multiplier=3, result_origin=None):
         self._window: deque[str] = deque(maxlen=window_size)
-        self.window_size = window_size
-        self.recovery_threshold = recovery_threshold
-        self.escalation_threshold = escalation_threshold
+        self._call_counts: dict[str, int] = {}
+        self._ceiling = call_only_multiplier * escalation_threshold
+        self._result_origin = result_origin
+        ...
 
-    def record(self, tool_name: str, args: dict) -> None:
-        self._window.append(self.compute_signature(tool_name, args))
+    def record(self, tool_name: str, args: dict, result: tuple[bool, str]) -> None:
+        call_sig = self.compute_signature(tool_name, args)
+        self._call_counts[call_sig] = self._call_counts.get(call_sig, 0) + 1
+        if self._trusted(tool_name):       # result_origin lookup says exactly "trusted"
+            self._window.append(hash(call_sig, result))   # a changed result is a new signature
+        else:                              # untrusted, unknown, lookup error: fail closed
+            self._window.append(call_sig)
 
     def check(self) -> StuckState:
         if len(self._window) < self.recovery_threshold:
@@ -745,15 +797,20 @@ CLEAR ────────────────────────�
 CLEAR ──[2 identical in window]──────────────────────────────────► RECOVERING
   Action:
     Set recovery_injection = stuck_detector.recovery_message(sig)
+    Clear the window (a clean slate), remember sig as warned
     Log: "Stuck recovery triggered at iteration N"
     Continue loop normally (do NOT stop the agent)
 
-RECOVERING ──[3 identical in window]────────────────────────────► ESCALATE
+RECOVERING ──[a warned signature repeats, or the nudges are spent]──► ESCALATE
   Action:
     Set session.terminated_reason = "stuck"
-    Emit StuckEvent to bus
-    Return _format_stuck_summary(session)
+    Emit one Escalation event (reason "stuck_detected") to the bus
+    Return the model's own wrap-up of its partial work (no stuck text in the reply)
     (loop exits)
+
+ANY ──[one identical call reaches call_only_multiplier x escalation_threshold]──► ESCALATE
+  The same action as above, whatever the results were: a poll whose trusted result changes
+  every time reads as progress in the window, and the ceiling is what bounds it.
 
 RECOVERING ──[recovery injection changes behavior]───────────────► CLEAR
   (if the recovery hint worked and the model uses different args,
