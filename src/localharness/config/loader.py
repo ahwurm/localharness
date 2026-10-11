@@ -2532,6 +2532,7 @@ class ConfigLoader:
             perms["budget"] = budget
         declared_budget = declared.get("budget") if isinstance(declared.get("budget"), dict) else {}
         base_budget = getattr(base.permissions, "budget", None)
+        ws_file = str(self._local_dir / "agents" / f"{name}.yaml")
         for key_path in sorted(AGENT_CORE_LOWER_ONLY_KEYS):
             field = key_path.rsplit(".", 1)[-1]
             finite = ((lambda v: _finite_int(v, **_ACTIONS_BOUNDS)) if field == "max_actions"
@@ -2550,15 +2551,17 @@ class ConfigLoader:
                 budget[field] = value
                 continue
             if value is not None:
+                # SECURITY.md promises the key AND the file (IN-08), as the stuck_detector note
+                # above names it.
                 log.warning(
-                    "ignoring workspace %s %r for agent %r: a project may only lower it (%r)",
-                    field, value, name, baseline,
+                    "ignoring permissions.budget.%s %r in %r: a project may only lower it (%r)",
+                    field, value, ws_file, baseline,
                 )
             budget[field] = baseline
         if declared_budget.get("max_tool_calls") is not None:
             log.warning(
-                "ignoring workspace max_tool_calls %r for agent %r: a project cannot set it",
-                declared_budget["max_tool_calls"], name,
+                "ignoring permissions.budget.max_tool_calls %r in %r: a project cannot set it",
+                declared_budget["max_tool_calls"], ws_file,
             )
         budget["max_tool_calls"] = getattr(base_budget, "max_tool_calls", None)
 
