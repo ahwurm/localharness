@@ -133,6 +133,13 @@ class LifecycleStrategy(Protocol):
 
     def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness: ...
 
+    def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
+        """The config dir a reconnect poll for a server THIS strategy launched should hand to
+        `wait_ready`: with it a dead process is known at once from its pidfile and its log tail is
+        shown; None means a pure poll (nothing records a pid to read a death from). The strategy, not
+        the caller, knows its own paths (D-20)."""
+        ...
+
 
 class ManagedVllmStrategy:
     """Lifecycle for the harness-managed vLLM server (init guided setup / reboot autostart /
@@ -185,6 +192,10 @@ class ManagedVllmStrategy:
         # No fit for vLLM (D-10): `autosense` is accepted and unused, `window` stays None.
         return LiveEndpoint(base_url=base_url, served_models=served, handle=handle, note=decision.note,
                             dropped_env=tuple(dropped))
+
+    def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
+        """The config dir `activate` polls with, so a reconnect poll reads the same pidfile and log."""
+        return config_dir
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
         # OFF the event loop: the #100 verified docker stop can block ~90s worst-case (drain +
@@ -370,6 +381,10 @@ class SpawnedProcessStrategy:
         return LiveEndpoint(base_url=base_url, served_models=served, handle=pid, note=decision.note,
                             window=report, dropped_env=tuple(dropped))
 
+    def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
+        """The config dir `activate` polls with, so a reconnect poll reads the same pidfile and log."""
+        return config_dir
+
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
         # OFF the event loop (same reason as ManagedVllmStrategy.stop): a SIGTERM→SIGKILL grace
         # window blocks, so run it in a worker thread. `launch="binary"` ALWAYS here — a spawned
@@ -438,6 +453,10 @@ class DaemonStrategy:
             await self._pull(spec)                       # tag not on disk → pull it
         await self._load(v1, spec.model)                 # warm-up: load into memory (no generation)
         return LiveEndpoint(base_url=v1, served_models=[spec.model], handle=pid)
+
+    def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
+        """The config dir `activate` polls with, so a reconnect poll reads the same pidfile and log."""
+        return config_dir
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
         # OWNER RULING: stop the WHOLE daemon (verified GPU-free), NOT keep_alive:0. A spawned daemon
@@ -584,6 +603,11 @@ class LmsStrategy:
         # model; the caller takes served_models[0], so return the intended key — the DaemonStrategy
         # precedent — not wait_ready's raw list). No pidfile → an opaque daemon handle.
         return LiveEndpoint(base_url=v1, served_models=[spec.model], handle="lms-daemon")
+
+    def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
+        # `activate` polls with `config_dir=None` and writes no pidfile, so a dead LM Studio server is
+        # polled until the bound and is never relaunched (G-5, P-18).
+        return None
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
         # `lms daemon down` (whole daemon) = the verified GPU-free stop (a bare `lms server stop`
