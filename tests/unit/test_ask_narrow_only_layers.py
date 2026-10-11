@@ -362,17 +362,30 @@ def test_a_workspace_overlay_cannot_move_a_builtins_kill_file(layers, caplog, tm
     assert any("kill_file" in r.getMessage() for r in caplog.records)
 
 
-def test_the_documented_budget_overlay_still_works(layers, caplog) -> None:
-    """The reason this hook exists (a bigger budget) must survive the narrowing, silently."""
+def test_a_workspace_overlay_cannot_lift_a_builtins_budget(layers, caplog) -> None:
+    """A repo may shrink a built-in's budget and never grow it: the base's 8 stands over a 99."""
     global_dir, ws = layers
     _write_yaml(ws / "agents" / "explore.yaml", {"permissions": {"budget": {"max_actions": 99}}})
 
     with caplog.at_level(logging.WARNING):
         cfg = _builtin(global_dir, ws)
 
-    assert cfg.permissions.budget.max_actions == 99
+    assert cfg.permissions.budget.max_actions == _builtin_base().permissions.budget.max_actions == 8
     assert cfg.permissions.mode == _builtin_base().permissions.mode
-    assert not caplog.records, "a plain budget overlay warned about something"
+    budget_warnings = [r for r in caplog.records if "max_actions" in r.getMessage()]
+    assert len(budget_warnings) == 1
+    assert len(caplog.records) == 1, "the budget clamp is the only thing worth a warning here"
+
+
+def test_a_workspace_overlay_may_lower_a_builtins_budget_silently(layers, caplog) -> None:
+    global_dir, ws = layers
+    _write_yaml(ws / "agents" / "explore.yaml", {"permissions": {"budget": {"max_actions": 5}}})
+
+    with caplog.at_level(logging.WARNING):
+        cfg = _builtin(global_dir, ws)
+
+    assert cfg.permissions.budget.max_actions == 5
+    assert not caplog.records, "a lowering budget overlay warned about something"
 
 
 def test_the_workspace_overlay_is_narrowed_against_the_operators_own_file(layers) -> None:

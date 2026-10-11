@@ -584,3 +584,97 @@ def test_loading_a_file_twice_notes_once_and_agrees_with_itself(tmp_path):
     again = loader.load_agent_file(ws / "agents" / "analyst.yaml")
     twice = loader.load_agent_file(ws / "agents" / "analyst.yaml")
     assert again.budget_kept_from_workspace == twice.budget_kept_from_workspace == {"max_actions"}
+
+
+# ---------------------------------------------------------------------------
+# A workspace agents/<built-in>.yaml overlay: clamped against the operator's file, else the base
+# ---------------------------------------------------------------------------
+
+import logging  # noqa: E402
+
+
+def _overlay(loader, name: str = "explore"):
+    from localharness.agent.subagent import build_explore_config
+
+    return loader.overlay_builtin_config(name, build_explore_config(name)).permissions.budget
+
+
+def _budget_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records]
+
+
+def test_an_overlay_cannot_lift_the_operators_file(tmp_path, caplog):
+    loader, _ = _world(tmp_path,
+                       g_agents={"explore": {"permissions": {"budget": {"max_actions": 20}}}},
+                       ws_agents={"explore": {"permissions": {"budget": {"max_actions": 25}}}})
+    with caplog.at_level(logging.WARNING):
+        assert _overlay(loader).max_actions == 20
+    assert len(_budget_warnings(caplog)) == 1 and "max_actions" in _budget_warnings(caplog)[0]
+
+
+def test_an_overlay_may_lower_the_operators_file(tmp_path, caplog):
+    loader, _ = _world(tmp_path,
+                       g_agents={"explore": {"permissions": {"budget": {"max_actions": 20}}}},
+                       ws_agents={"explore": {"permissions": {"budget": {"max_actions": 15}}}})
+    with caplog.at_level(logging.WARNING):
+        assert _overlay(loader).max_actions == 15
+    assert _budget_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("ws_file", [{"permissions": {"mode": "read-only"}},
+                                     {"permissions": {"budget": {"max_actions": None}}}])
+def test_an_omission_or_null_restores_the_operators_value_silently(tmp_path, caplog, ws_file):
+    loader, _ = _world(tmp_path,
+                       g_agents={"explore": {"permissions": {"budget": {"max_actions": 20}}}},
+                       ws_agents={"explore": ws_file})
+    with caplog.at_level(logging.WARNING):
+        assert _overlay(loader).max_actions == 20
+    assert _budget_warnings(caplog) == []
+
+
+def test_without_an_operator_file_the_base_is_the_baseline(tmp_path, caplog):
+    loader, _ = _world(tmp_path, ws_agents={"explore": {"permissions": {"budget": {
+        "max_actions": 99, "max_duration_minutes": 60.0}}}})
+    with caplog.at_level(logging.WARNING):
+        budget = _overlay(loader)
+    assert (budget.max_actions, budget.max_duration_minutes) == (8, 3.0)
+    assert len(_budget_warnings(caplog)) == 2
+
+
+def test_without_an_operator_file_a_lower_value_is_taken(tmp_path, caplog):
+    loader, _ = _world(tmp_path, ws_agents={"explore": {"permissions": {"budget": {
+        "max_actions": 4}}}})
+    with caplog.at_level(logging.WARNING):
+        assert _overlay(loader).max_actions == 4
+    assert _budget_warnings(caplog) == []
+
+
+def test_a_global_null_falls_through_to_the_base(tmp_path):
+    loader, _ = _world(tmp_path,
+                       g_agents={"explore": {"permissions": {"budget": {"max_actions": None}}}},
+                       ws_agents={"explore": {"permissions": {"budget": {"max_actions": 50}}}})
+    assert _overlay(loader).max_actions == 8
+
+
+@pytest.mark.parametrize("bad", ["lots", True, 0, 2.5])
+def test_a_non_finite_overlay_value_gives_the_baseline_with_a_warning(tmp_path, caplog, bad):
+    loader, _ = _world(tmp_path, ws_agents={"explore": {"permissions": {"budget": {
+        "max_actions": bad}}}})
+    with caplog.at_level(logging.WARNING):
+        assert _overlay(loader).max_actions == 8
+    assert len(_budget_warnings(caplog)) == 1
+
+
+def test_an_overlay_cannot_set_max_tool_calls(tmp_path, caplog):
+    loader, _ = _world(tmp_path, ws_agents={"explore": {"permissions": {"budget": {
+        "max_tool_calls": 50}}}})
+    with caplog.at_level(logging.WARNING):
+        assert _overlay(loader).max_tool_calls is None
+    assert len(_budget_warnings(caplog)) == 1 and "max_tool_calls" in _budget_warnings(caplog)[0]
+
+
+def test_a_global_overlay_of_a_builtin_keeps_full_authority(tmp_path):
+    loader, _ = _world(tmp_path, g_agents={"explore": {"permissions": {"budget": {
+        "max_actions": 500, "max_tool_calls": 40}}}})
+    budget = _overlay(loader)
+    assert (budget.max_actions, budget.max_tool_calls) == (500, 40)
