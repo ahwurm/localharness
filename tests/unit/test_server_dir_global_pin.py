@@ -133,9 +133,11 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     # liveness (D-33) instead of trusting `server:` alone, + 1 from `_pidfile_process_holds` (IN-54),
     # which reads the same pidfile's pid to see whether the process on the port is that one,
     # + 1 from Phase 7's `_launch_lock`, which reads the global dir to lock it (the launch lock
-    # lives beside the pidfile; the relaunch closure gets the dir as an argument instead).
+    # lives beside the pidfile; the relaunch closure gets the dir as an argument instead),
+    # + 1 from Phase 7's `server_recovery`, the reconnect supplier, which reads the global dir to
+    # give a launched server's pair its strategy's config dir (read once, passed down as a local).
     # None of them starts or stops a server.
-    assert text.count("self._server_config_dir") == 11, _where(text, "self._server_config_dir")
+    assert text.count("self._server_config_dir") == 12, _where(text, "self._server_config_dir")
     # assignment + the property's own two reads on one line + 6 deliberately-untouched uses,
     # + 1 from phase 41's `_audit_base_dir` property, which reads `self._config_dir` as its
     # FALLBACK when the session has no workspace layer, + 1 from Phase 2's `_announce_window`,
