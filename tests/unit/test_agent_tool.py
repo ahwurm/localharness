@@ -183,3 +183,65 @@ async def test_delegation_result_fields_are_forwarded():
         "delegated_to": "coder", "status": "budget_exhausted", "terminated_reason": "budget_actions",
         "tool_calls": 3, "artifacts": ["/w/review.md"], "child_session_id": "s-1", "handoff": handoff,
     }
+
+
+# --- shape: lookup | review (08-09): picks only the share of the parent's remaining budget -----
+
+def test_shape_is_an_optional_enum_in_the_schema():
+    params = _make_agent_tool().info().parameters
+    assert params["properties"]["shape"] == {
+        "type": "string",
+        "enum": ["lookup", "review"],
+        "description": "lookup (default): a smaller share of your remaining budget; review: a larger one.",
+    }
+    assert "shape" not in params["required"]
+    assert params["required"] == ["agent_id", "task"]
+
+
+@pytest.mark.asyncio
+async def test_no_shape_keeps_the_three_argument_runner_call():
+    runner = AsyncMock(return_value="ok")
+    await _make_agent_tool(runner=runner)._execute(agent_id="coder", task="write hello.py")
+    runner.assert_awaited_once_with("coder", "write hello.py", None)
+
+
+@pytest.mark.asyncio
+async def test_a_runner_that_takes_no_shape_still_works_without_one():
+    seen = []
+
+    async def spy_runner(agent_id, task, grant_handles=None):
+        seen.append((agent_id, task, grant_handles))
+        return "ok"
+
+    result = await _make_agent_tool(runner=spy_runner).run(agent_id="coder", task="x")
+    assert result.success and seen == [("coder", "x", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["lookup", "review"])
+async def test_a_shape_reaches_the_runner_as_a_keyword(shape):
+    runner = AsyncMock(return_value="ok")
+    result = await _make_agent_tool(runner=runner)._execute(
+        agent_id="coder", task="write hello.py", shape=shape)
+    assert result.success
+    runner.assert_awaited_once_with("coder", "write hello.py", None, shape=shape)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["deep", "", "Review", "REVIEW", 3])
+async def test_any_other_shape_is_refused_before_dispatch(shape):
+    runner = AsyncMock(return_value="ok")
+    tool = _make_agent_tool(runner=runner)
+    result = await tool._execute(agent_id="coder", task="write hello.py", shape=shape)
+    assert result.success is False
+    assert result.error_type == "validation_error"
+    assert "shape must be 'lookup' or 'review'" in result.error
+    runner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_shape_through_run_reaches_the_runner():
+    runner = AsyncMock(return_value="ok")
+    result = await _make_agent_tool(runner=runner).run(agent_id="coder", task="x", shape="review")
+    assert result.success
+    runner.assert_awaited_once_with("coder", "x", None, shape="review")

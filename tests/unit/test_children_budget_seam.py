@@ -879,3 +879,63 @@ def test_the_surface_matrix_for_a_configured_child(mock_llm_client, bus, cfg_kw,
 def test_the_knob_still_caps_a_child_whose_own_limit_is_looser(mock_llm_client, bus):
     loop, gate, _ = _seam_child(mock_llm_client, bus, _child(actions=500, minutes=12.0), local=False)
     assert loop.action_limit() == _KNOB
+
+
+# ---------------------------------------------------------------------------
+# shape: lookup | review picks only the share (08-09 Task 3, D-18, D-31, D-50)
+# ---------------------------------------------------------------------------
+
+from localharness.tools.builtin.agent_tool import AgentTool  # noqa: E402
+
+
+async def _through_the_tool(bus, agent_id, task, *, shape=None, **runner_kw):
+    runner = await _runner(bus, **runner_kw)
+    tool = AgentTool(agent_runner=runner, available_agents=[agent_id])
+    return await tool.run(agent_id=agent_id, task=task, **({} if shape is None else {"shape": shape}))
+
+
+@pytest.mark.parametrize(("shape", "expected"), [(None, (5, 1.0)), ("lookup", (5, 1.0)), ("review", (8, 2.0))])
+async def test_the_shape_picks_the_share_of_an_unconfigured_child(recorded_loops, bus, shape, expected):
+    result = await _through_the_tool(
+        bus, "coder", "write", shape=shape,
+        parent_remaining_fn=lambda: (20, 4.0), load_agent=lambda n: _child(n))
+    assert result.success
+    assert _pair_or_none(recorded_loops[0]) == expected
+
+
+@pytest.mark.parametrize("shape", [None, "lookup", "review"])
+async def test_the_shape_never_changes_a_ceiling(recorded_loops, bus, shape):
+    await _through_the_tool(
+        bus, "coder", "write", shape=shape,
+        parent_remaining_fn=lambda: (100, 60.0), load_agent=lambda n: _child(n, actions=6, minutes=2.0))
+    assert _pair_or_none(recorded_loops[0]) == (6, 2.0)
+
+
+@pytest.mark.parametrize(("shape", "expected"), [(None, (5, 1.0)), ("review", (8, 2.0))])
+@pytest.mark.parametrize("hook", _HOOKS)
+async def test_the_shape_reaches_a_built_in_child(recorded_loops, bus, hook, shape, expected):
+    await _through_the_tool(
+        bus, "explore", "find X", shape=shape,
+        parent_remaining_fn=lambda: (20, 4.0), load_builtin_override=hook)
+    assert _pair(recorded_loops[0]) == expected
+
+
+async def test_a_refused_shape_builds_no_child(recorded_loops, bus):
+    result = await _through_the_tool(
+        bus, "coder", "write", shape="deep",
+        parent_remaining_fn=lambda: (20, 4.0), load_agent=lambda n: _child(n))
+    assert result.success is False and result.error_type == "validation_error"
+    assert recorded_loops == []
+
+
+async def test_the_runner_still_takes_three_positional_arguments(recorded_loops, bus):
+    runner = await _runner(bus, parent_remaining_fn=lambda: (20, 4.0), load_agent=lambda n: _child(n))
+    await runner("coder", "write", None)
+    await runner("coder", "write")
+    assert [_pair_or_none(c) for c in recorded_loops] == [(5, 1.0)] * 2
+
+
+def test_the_shape_is_a_keyword_with_default_none_on_the_runner_and_the_config_dispatcher():
+    assert inspect.signature(sub.dispatch_config_subagent).parameters["shape"].default is None
+    assert inspect.signature(sub.dispatch_config_subagent).parameters["shape"].kind is (
+        inspect.Parameter.KEYWORD_ONLY)

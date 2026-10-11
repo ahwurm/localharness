@@ -12,6 +12,10 @@ HANDOFF_INSTRUCTION = (
     "`findings: ...`, `evidence: ...`, `uncertainties: ...`, `remaining: ...`."
 )
 
+# The two budget shares a delegation can ask for (`org.children_budget.lookup_share` / `review_share`).
+# A shape picks only the share; a child's ceiling never moves with it.
+SHAPES = ("lookup", "review")
+
 
 def compose_brief(
     task: str, purpose: str | None = None, inputs: list[str] | None = None,
@@ -126,6 +130,14 @@ class AgentTool(Tool):
                         "description": "What the result must satisfy.",
                     },
                     "stop_condition": {"type": "string", "description": "When the subagent should stop."},
+                    "shape": {
+                        "type": "string",
+                        "enum": ["lookup", "review"],
+                        "description": (
+                            "lookup (default): a smaller share of your remaining budget; "
+                            "review: a larger one."
+                        ),
+                    },
                 },
                 "required": ["agent_id", "task"],
             },
@@ -139,11 +151,22 @@ class AgentTool(Tool):
         purpose: str | None = None, inputs: list[str] | None = None,
         constraints: str | None = None, expected_output: str | None = None,
         checks: list[str] | None = None, stop_condition: str | None = None,
+        shape: str | None = None,
     ) -> ToolResult:
+        # The registry's validator maps JSON types only and ignores `enum`, so the two values are
+        # checked here, before anything is dispatched.
+        if shape is not None and shape not in SHAPES:
+            return self.err(f"shape must be 'lookup' or 'review', not {shape!r}",
+                            error_type="validation_error")
         brief = compose_brief(task, purpose, inputs, constraints, expected_output, checks,
                               stop_condition)
         try:
-            result = await self._agent_runner(agent_id, brief, grant_handles)
+            # `shape` rides only when the model supplied one: the runner contract stays three
+            # positional arguments, so every existing runner (and test fake) keeps working.
+            if shape is None:
+                result = await self._agent_runner(agent_id, brief, grant_handles)
+            else:
+                result = await self._agent_runner(agent_id, brief, grant_handles, shape=shape)
             if isinstance(result, str):
                 return self.ok(result, delegated_to=agent_id, status="completed",
                                terminated_reason=None, tool_calls=0, artifacts=[],
