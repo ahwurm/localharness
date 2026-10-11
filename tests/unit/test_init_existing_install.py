@@ -351,6 +351,33 @@ def test_nothing_listening_and_no_unit_keeps_todays_flow(live):  # noqa: F811
     assert config.read_text(encoding="utf-8") == CONFIG
 
 
+def _todays_flow_keeps(live, config: Path) -> None:  # noqa: F811
+    _terminal(live.monkeypatch)
+    confirm = _answers(live.monkeypatch, True)
+
+    result = _init(live.cfg)
+
+    _exited(result, 0)
+    assert confirm.ask.call_count == 1 and not (live.cfg / "overrides.yaml").exists()
+    assert config.read_text(encoding="utf-8") == CONFIG or "ollama" in config.read_text(encoding="utf-8")
+
+
+def test_a_stopped_unit_on_another_port_is_not_the_providers_server(live):  # noqa: F811
+    """WR-05: an embedding server on :8090 is not what the provider at :8080 points at."""
+    _nothing_answers(live)
+    _systemd(live, ("embed.service", "disabled", str(live.home / ".config/systemd/user/embed.service"), ""))
+    live.fake_systemd.journal([{"_EXE": str(live.bin), "_CMDLINE": f"llama-server -m {live.model_a} "
+                                "--alias embed --port 8090"}], unit="embed.service")
+    _todays_flow_keeps(live, seed(live))
+
+
+def test_a_stopped_unit_is_not_imported_behind_a_provider_that_is_not_llama_cpp(live):  # noqa: F811
+    _nothing_answers(live)
+    _systemd(live, ("llm.service", "disabled", str(live.home / ".config/systemd/user/llm.service"), ""))
+    _journal(live, extra=" -c 65536", host="127.0.0.1")
+    _todays_flow_keeps(live, seed(live, CONFIG.replace("provider_type: llamacpp", "provider_type: ollama")))
+
+
 # ------------------------------------------------------------------ adoption, and the quiet next starts
 
 

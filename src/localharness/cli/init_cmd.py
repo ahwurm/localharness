@@ -922,12 +922,15 @@ def _daemon_lines() -> list[str]:
     return lines
 
 
-def _unit_import(config_path: Path) -> tuple[InitRecords | None, tuple[str, str] | None]:
+def _unit_import(config_path: Path, *, only_port: int | None = None
+                 ) -> tuple[InitRecords | None, tuple[str, str] | None]:
     """D-21, D-23, D-50: nothing answers, so the user's own units are sensed (units.user_units). The
     first unit whose journal, else unit file, yields a record is imported as `server:` (its model
     leading the ranking, discovery's other models its peers). Returns (records, None), or
     (None, the first skip that names a model as `(unit, reason)`, else None): an `AttachOnly` from a
-    stopped unit has nothing to attach to, so it is that unit's skip."""
+    stopped unit has nothing to attach to, so it is that unit's skip. With `only_port` (an existing
+    install's `provider.base_url` port, WR-05) a unit that serves another port is not the provider's
+    server and is passed over without a word."""
     first_skip: tuple[str, str] | None = None
     ini = init_import.read_config_ini(init_import.user_config_ini())
     for state in units.user_units():
@@ -942,6 +945,8 @@ def _unit_import(config_path: Path) -> tuple[InitRecords | None, tuple[str, str]
             if first_skip is None:
                 first_skip = (state.unit, imp.reason)
             continue
+        if only_port is not None and imp.spec.port != only_port:
+            continue  # an unrelated llama-server unit (an embedding server on :8090) is not this provider
         gap = units.journal_environment_gap(state, rec) if source == "journal" else None
         if gap is not None:  # WR-04: the unit's own Environment= could not be read: say so, import nothing silently
             imp = replace(imp, shown=(*imp.shown, f"environment of {visible_text(state.unit)} not read "
@@ -1550,7 +1555,9 @@ def _existing_install_import(config_path: Path, harness: HarnessConfig) -> InitR
         return None
     found = procfs.listeners(port)
     if not found:
-        return _unit_import(config_path)[0]
+        if harness.provider.provider_type != "llamacpp":  # an Ollama / vLLM provider is not a llama-server unit
+            return None
+        return _unit_import(config_path, only_port=port)[0]
     if not any(lst.uid == os.getuid() for lst in found):
         return None
     try:
