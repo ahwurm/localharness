@@ -598,7 +598,7 @@ def port_holder(port: int) -> Optional[Holder]:
     if not found:
         return None
     me = os.getuid()
-    mine = [lst for lst in found if lst.uid == me]
+    mine = procfs.reachable_first([lst for lst in found if lst.uid == me])
     if not mine:
         return Holder(None, None, None, found[0].uid)
     pid = procfs.pid_for_inode(mine[0].inode)

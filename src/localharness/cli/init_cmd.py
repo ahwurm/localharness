@@ -1015,7 +1015,7 @@ def _import_listener(config_path: Path, result: DetectorResult) -> InitRecords |
     error = result.raw_response.get("error") if isinstance(result.raw_response, dict) else None
     answered_401 = isinstance(error, dict) and error.get("code") == 401
     me = os.getuid()
-    mine = [lst for lst in found if lst.uid == me]
+    mine = procfs.reachable_first([lst for lst in found if lst.uid == me])
     if not mine:  # another uid's listener is known by the uid column alone (T-5-59)
         if not answered_401:
             return None

@@ -19,18 +19,21 @@ the directory-open flag is read with `getattr`, so the module still imports wher
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from localharness.provider import server
 
 __all__ = [
-    "PROC_ROOT", "NET_TCP_CAP", "PID_SCAN_CAP", "FD_SCAN_CAP", "CMDLINE_CAP", "ENVIRON_CAP",
+    "PROC_ROOT", "NET_TCP_CAP", "PID_SCAN_CAP", "FD_SCAN_CAP", "FD_TOTAL_CAP", "PROC_ENTRY_CAP",
+    "CMDLINE_CAP", "ENVIRON_CAP",
     "STAT_CAP", "CGROUP_CAP", "MAPS_LINE_CAP", "MAPPED_PATHS_CAP",
-    "Listener", "ProcRecord", "ProcRefusal", "listeners", "pid_for_inode", "read_process",
+    "Listener", "ProcRecord", "ProcRefusal", "listeners", "reachable_first", "pid_for_inode",
+    "read_process",
 ]
 
 PROC_ROOT = "/proc"
@@ -38,7 +41,13 @@ PROC_ROOT = "/proc"
 
 NET_TCP_CAP = 4 << 20
 PID_SCAN_CAP = 4096
+"""Most of THIS user's processes `pid_for_inode` enters; another user's pids are not counted against it."""
 FD_SCAN_CAP = 16384
+"""Most fd links read of ONE process; a process past it is passed over, the scan goes on."""
+FD_TOTAL_CAP = 1 << 20
+"""Most fd links read across all of this user's processes."""
+PROC_ENTRY_CAP = 1 << 20
+"""Most numeric `/proc` entries looked at, whoever owns them."""
 CMDLINE_CAP = 256 * 1024
 ENVIRON_CAP = 256 * 1024
 STAT_CAP = 4 * 1024
@@ -55,10 +64,27 @@ _READ_CHUNK = 65536
 
 @dataclass(frozen=True)
 class Listener:
-    """One LISTEN row: the socket inode and the uid /proc/net/tcp names as its owner."""
+    """One LISTEN row: the socket inode, the uid /proc/net/tcp names as its owner and the local address
+    it is bound to (`""` when the row's address could not be read; not part of equality)."""
 
     inode: int
     uid: int
+    local_ip: str = field(default="", compare=False)
+
+    @property
+    def reachable_on_loopback(self) -> bool:
+        """True for a socket bound to loopback or to every address (or whose address is unknown): the
+        rows a connection to 127.0.0.1 can have reached. A socket bound to another interface's address
+        on the same port is a different server."""
+        if not self.local_ip:
+            return True
+        try:
+            ip = ipaddress.ip_address(self.local_ip)
+        except ValueError:
+            return True
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        return ip.is_loopback or ip.is_unspecified
 
 
 @dataclass(frozen=True)
@@ -108,6 +134,25 @@ def _net_tcp_rows(name: str) -> list[list[str]]:
     return [line.decode("ascii", "replace").split() for line in lines[1:]]
 
 
+def _decode_ip(text: str) -> str:
+    """The address of a `/proc/net/tcp{,6}` row's hex `local_address` (host-endian 32-bit words, so
+    little-endian on the machines this runs on), or `""` for anything else."""
+    try:
+        raw = bytes.fromhex(text)
+    except ValueError:
+        return ""
+    if len(raw) == 4:
+        return str(ipaddress.IPv4Address(raw[::-1]))
+    if len(raw) == 16:
+        return str(ipaddress.IPv6Address(b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4))))
+    return ""
+
+
+def reachable_first(found: list[Listener]) -> list[Listener]:
+    """`found` with the rows a loopback connection can have reached ahead of the others (stable)."""
+    return sorted(found, key=lambda lst: not lst.reachable_on_loopback)
+
+
 def listeners(port: int) -> list[Listener]:
     """The LISTEN sockets on local `port`, `net/tcp` rows first then `net/tcp6`, in file order.
     A row with inode 0 (a socket on its way out) never matches."""
@@ -117,9 +162,10 @@ def listeners(port: int) -> list[Listener]:
             try:
                 if fields[3] != _LISTEN or fields[9] == "0":
                     continue
-                if int(fields[1].rsplit(":", 1)[1], 16) != port:
+                address, _, local_port = fields[1].rpartition(":")
+                if int(local_port, 16) != port:
                     continue
-                found.append(Listener(int(fields[9]), int(fields[7])))
+                found.append(Listener(int(fields[9]), int(fields[7]), _decode_ip(address)))
             except (IndexError, ValueError):
                 continue
     return found
@@ -127,11 +173,12 @@ def listeners(port: int) -> list[Listener]:
 
 def pid_for_inode(inode: int) -> int | None:
     """The pid of this user's process that holds socket `inode`, or None. Only `/proc/<pid>` of
-    this uid is entered; at most `PID_SCAN_CAP` pids and `FD_SCAN_CAP` fd links are looked at."""
+    this uid is entered. At most `PID_SCAN_CAP` of this user's pids, `FD_SCAN_CAP` links of one process
+    and `FD_TOTAL_CAP` links in all are looked at (another user's pids cost nothing against the first;
+    a process past the second is passed over, not the whole scan); a cap hit is `None`."""
     wanted = f"socket:[{inode}]"
     me = os.getuid()
-    pids = 0
-    links = 0
+    entries = pids = total_links = 0
     try:
         top = os.scandir(_proc_path())
     except OSError:
@@ -140,17 +187,24 @@ def pid_for_inode(inode: int) -> int | None:
         for entry in top:
             if not entry.name.isdigit():
                 continue
-            pids += 1
-            if pids > PID_SCAN_CAP:
+            entries += 1
+            if entries > PROC_ENTRY_CAP:
                 return None
             try:
                 if entry.stat(follow_symlinks=False).st_uid != me:
                     continue
+                pids += 1  # only this user's processes count against the cap
+                if pids > PID_SCAN_CAP:
+                    return None
                 with os.scandir(os.path.join(entry.path, "fd")) as fds:
+                    links = 0
                     for fd_entry in fds:
                         links += 1
-                        if links > FD_SCAN_CAP:
+                        total_links += 1
+                        if total_links > FD_TOTAL_CAP:
                             return None
+                        if links > FD_SCAN_CAP:
+                            break  # this process alone holds more than the cap: not read further
                         try:
                             if os.readlink(fd_entry.path) == wanted:
                                 return int(entry.name)
