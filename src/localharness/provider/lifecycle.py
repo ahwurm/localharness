@@ -1063,7 +1063,7 @@ class ServerRecovery:
                 window = asyncio.timeout(max(0.0, deadline - time.monotonic()))
                 try:
                     async with window:
-                        await self.relaunch()
+                        live = await self.relaunch()
                 except server.LaunchRefused:
                     raise
                 except TimeoutError as failed:
@@ -1072,6 +1072,12 @@ class ServerRecovery:
                     raise RuntimeError(RESTART_FAILED_TEXT + str(failed)) from failed
                 except RuntimeError as failed:
                     raise RuntimeError(RESTART_FAILED_TEXT + str(failed)) from failed
+                if live is not None and deadline - time.monotonic() <= 0:
+                    # activate's own readiness wait has just seen /models answer at this address: the
+                    # server is serving, so a relaunch that finished on the bound's edge is a success,
+                    # never "did not come back". With time left the loop polls once more, which is
+                    # what catches a relaunched server that dies again at once.
+                    return
         finally:
             timer.cancel()
             await asyncio.gather(timer, return_exceptions=True)
