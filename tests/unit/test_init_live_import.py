@@ -19,6 +19,9 @@ import pytest
 import yaml
 
 import localharness.cli.init_cmd as init_cmd
+from localharness.cli import init_import
+from localharness.cli.workspace import decide_machine_trust
+from localharness.config import trust
 from localharness.provider import autosense, speed_stats
 from localharness.provider.detector import DetectorResult
 from tests.unit.gguf_support import write_gguf
@@ -31,6 +34,9 @@ from tests.unit.test_init_core_setup import (
     _terminal,
 )
 from tests.unit.test_init_cmd import _make_capability_result
+from tests.unit.launch_support import record_opens
+from tests.unit.test_init_adoption import _expected
+from tests.unit.trust_support import answers, never_asked
 from tests.unit.units_support import fake_systemd  # noqa: F401  (fixture)
 
 UNIT = "llama-server.service"
@@ -326,3 +332,170 @@ def test_a_change_never_imports(live, monkeypatch):
     result = _init(live.cfg, "--no-input", "--model", "qwen-27b")
 
     _exited(result, 0)
+
+
+# ------------------------------------------------------------------ secrets, shown extras, adoption
+
+
+SECRET = "sk-live-0123456789secret"
+
+
+def everything_under(*roots: Path) -> dict[Path, str]:
+    """The text of every regular file below `roots` (what init may have written anywhere)."""
+    found: dict[Path, str] = {}
+    for root in roots:
+        for path in Path(root).rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                found[path] = path.read_text(encoding="utf-8", errors="replace")
+    return found
+
+
+def machine_dirs(live) -> list[Path]:
+    return [live.cfg, live.home, Path(os.environ["LOCALHARNESS_HOME"])]
+
+
+def test_an_inline_key_is_written_only_as_provider_api_key_in_the_private_config(live):
+    live.detect.return_value = detected(models=(), raw=KEYED_401)
+    live.serve("--api-key", SECRET, "--host", "0.0.0.0", "--verbose", "-c", "65536")  # noqa: S104
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    cfg = live.written()
+    assert cfg["provider"]["api_key"] == SECRET
+    assert (live.cfg / "config.yaml").stat().st_mode & 0o777 == 0o600
+    server = cfg["server"]
+    assert server["bind_all"] is True and server["require_api_key"] is True
+    assert SECRET not in " ".join(server["extra_args"]) and "--verbose" not in server["extra_args"]
+    assert init_import.VERBOSE_DROPPED in lines_of(result)  # the one line, verbatim
+    assert SECRET not in result.output
+    for path, text in everything_under(*machine_dirs(live)).items():
+        if path != live.cfg / "config.yaml":
+            assert SECRET not in text, path
+
+
+def test_an_unkeyed_wide_bind_says_every_interface_no_key(live):
+    live.serve("--host", "0.0.0.0", "-c", "65536")  # noqa: S104
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert any("every interface, no key" in line for line in block_of(result))
+    assert live.written()["server"]["bind_all"] is True
+
+
+def test_a_key_file_is_recorded_and_never_opened_on_a_terminal_or_without_one(live, tmp_path):
+    key = tmp_path / "keys" / "key"
+    key.parent.mkdir()
+    key.write_text("K-from-the-file\n", encoding="utf-8")
+    live.detect.return_value = detected(models=(), raw=KEYED_401)
+    live.serve("--api-key-file", str(key), "-c", "65536")
+
+    for index, interactive in enumerate((True, False)):
+        live.cfg = tmp_path / f"cfg{index}"
+        if interactive:
+            _terminal(live.monkeypatch)
+        else:
+            _terminal(live.monkeypatch, on=False)
+        with record_opens() as opened:
+            result = _init(live.cfg, *([] if interactive else ["--no-input"]))
+        _exited(result, 0)
+        assert str(key) not in opened
+        server = live.written()["server"]
+        assert server["api_key_file"] == str(key) and server["require_api_key"] is True
+        assert f"key file: {key} (read at start, never by init)" in lines_of(result)
+        assert "K-from-the-file" not in result.output
+
+
+def test_an_interactive_import_adopts_the_key_file_and_the_next_start_asks_nothing(live, tmp_path):
+    key = tmp_path / "key"
+    key.write_text("K\n", encoding="utf-8")
+    live.detect.return_value = detected(models=(), raw=KEYED_401)
+    live.serve("--api-key-file", str(key), "-c", "65536")
+    _terminal(live.monkeypatch)
+
+    _exited(_init(live.cfg), 0)
+
+    recorded = trust.recorded_machine(live.cfg)
+    assert recorded is not None and recorded["entries"] == _expected(live.cfg)
+    assert {"server.api_key_file", "server.model", "server.binary", "server.require_api_key"} \
+        <= {e["name"] for e in recorded["entries"]}
+    never_asked(live.monkeypatch)
+    decided = decide_machine_trust(live.cfg, ask=True, launching=True)
+    assert decided.withheld == {} and decided.line == ""
+
+
+def test_a_no_input_import_adopts_nothing_and_the_next_terminal_start_asks_about_the_key_file(
+        live, tmp_path):
+    key = tmp_path / "key"
+    key.write_text("K\n", encoding="utf-8")
+    live.detect.return_value = detected(models=(), raw=KEYED_401)
+    live.serve("--api-key-file", str(key), "-c", "65536")
+
+    _exited(_init(live.cfg, "--no-input"), 0)
+
+    assert trust.recorded_machine(live.cfg) is None
+    asked = answers(live.monkeypatch, True)
+    decide_machine_trust(live.cfg, ask=True, launching=True)
+    assert len(asked) == 1 and "server.api_key_file" in asked[0]
+
+
+def test_the_shell_tools_init_adopts_nothing(live, monkeypatch):
+    live.serve("-c", "65536")
+    monkeypatch.setenv("LOCALHARNESS_COMMIT", "1")
+    _terminal(live.monkeypatch)
+
+    _exited(_init(live.cfg), 0)
+
+    assert trust.recorded_machine(live.cfg) is None
+
+
+def test_the_adoption_holds_no_key_value(live):
+    live.detect.return_value = detected(models=(), raw=KEYED_401)
+    live.serve("--api-key", SECRET, "-c", "65536")
+    _terminal(live.monkeypatch)
+
+    _exited(_init(live.cfg), 0)
+
+    assert SECRET not in yaml.safe_dump(trust.recorded_machine(live.cfg))
+
+
+def test_config_ini_is_carried_and_shown_with_its_annotation(live, monkeypatch):
+    ini = live.home / ".config" / "llama.cpp" / "config.ini"
+    ini.parent.mkdir(parents=True)
+    ini.write_text("tools = all\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(live.home / ".config"))
+    live.serve("-c", "65536")
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert live.written()["server"]["config_ini"] == "tools = all\n"
+    assert "config.ini (~/.config/llama.cpp): tools=all (serves a shell-exec tool on the port)" \
+        in block_of(result)
+
+
+def test_a_decoy_hugging_face_token_in_the_environment_appears_nowhere(live):
+    live.serve("-c", "65536", environ={"HF_TOKEN": "hf_decoy", "LLAMA_ARG_THREADS": "8"})
+    _terminal(live.monkeypatch)
+
+    result = _init(live.cfg)
+
+    _exited(result, 0)
+    assert live.written()["server"]["env"] == {"LLAMA_ARG_THREADS": "8"}
+    assert "hf_decoy" not in result.output
+    for path, text in everything_under(*machine_dirs(live)).items():
+        assert "hf_decoy" not in text, path
+
+
+def test_an_escape_sequence_in_an_argument_prints_escaped_on_every_line(live):
+    live.serve(base=("llama-server", "-m", str(live.model_a), "--alias", "\x1b[2Kqwen", "--port", "8080",
+                     "-c", "65536", "--note\x0aX"))
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    shown = result.output
+    assert "\\x1b[2Kqwen" in shown
+    for line in shown.splitlines():
+        assert not any(ord(ch) < 0x20 and ch != "\t" for ch in line), repr(line)
