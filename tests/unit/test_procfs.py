@@ -128,6 +128,89 @@ def test_pid_for_inode_stops_at_the_fd_cap(fake_proc, monkeypatch):
     assert procfs.pid_for_inode(68389) is None
 
 
+def test_other_users_pids_do_not_count_against_the_pid_cap(fake_proc, monkeypatch):
+    """IN-03: a desktop with thousands of other users' processes must not hide this user's server."""
+    from types import SimpleNamespace
+
+    fake_proc.process(4242, fds={3: 68389})
+    real_scandir = os.scandir
+    me = os.getuid()
+
+    class Entry:
+        def __init__(self, real, uid):
+            self._real, self._uid = real, uid
+            self.name, self.path = real.name, real.path
+
+        def stat(self, follow_symlinks=True):
+            return SimpleNamespace(st_uid=self._uid)
+
+    class Top:
+        def __init__(self, entries):
+            self.entries = entries
+
+        def __iter__(self):
+            return iter(self.entries)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def scandir(path):
+        if str(path) != procfs.PROC_ROOT:
+            return real_scandir(path)
+        with real_scandir(path) as it:
+            real = [e for e in it if e.name.isdigit()]
+        strangers = [Entry(real[0], me + 1) for _ in range(50)]
+        for i, e in enumerate(strangers):
+            e.name = str(100 + i)
+        return Top([*strangers, *(Entry(e, me) for e in real)])
+
+    monkeypatch.setattr(procfs.os, "scandir", scandir)
+    monkeypatch.setattr(procfs, "PID_SCAN_CAP", 2)
+    assert procfs.pid_for_inode(68389) == 4242
+
+
+def test_a_process_past_the_fd_cap_is_passed_over_not_the_whole_scan(fake_proc, monkeypatch):
+    fake_proc.process(4241, fds={n: 90000 + n for n in range(1, 6)})
+    fake_proc.process(4242, fds={3: 68389})
+    monkeypatch.setattr(procfs, "FD_SCAN_CAP", 2)
+    assert procfs.pid_for_inode(68389) == 4242
+
+
+def test_the_total_fd_cap_still_ends_the_scan(fake_proc, monkeypatch):
+    fake_proc.process(4242, fds={3: 68389})
+    monkeypatch.setattr(procfs, "FD_TOTAL_CAP", 0)
+    assert procfs.pid_for_inode(68389) is None
+
+
+# ------------------------------------------------------------------------------ the bound address
+
+
+def test_a_listener_carries_the_address_it_is_bound_to(fake_proc):
+    fake_proc.listen(8080, 1, 1000)
+    fake_proc.listen(8080, 2, 1000, ip="0100A8C0")  # 192.168.0.1
+    fake_proc.listen(8080, 3, 1000, family="tcp6")  # ::1
+    fake_proc.listen(8080, 4, 1000, family="tcp6", ip="00000000000000000000000000000000")  # ::
+    fake_proc.listen(8080, 5, 1000, family="tcp6", ip="0000000000000000FFFF00000100007F")  # ::ffff:127.0.0.1
+    assert [lst.local_ip for lst in procfs.listeners(8080)] == [
+        "127.0.0.1", "192.168.0.1", "::1", "::", "::ffff:127.0.0.1"]
+    assert [lst.reachable_on_loopback for lst in procfs.listeners(8080)] == [True, False, True, True, True]
+
+
+def test_reachable_first_puts_a_loopback_row_ahead_of_another_interface_on_the_same_port(fake_proc):
+    fake_proc.listen(8080, 1, 1000, ip="0100A8C0")
+    fake_proc.listen(8080, 2, 1000)
+    assert [lst.inode for lst in procfs.reachable_first(procfs.listeners(8080))] == [2, 1]
+
+
+def test_an_unreadable_address_is_unknown_and_never_excludes_a_row(fake_proc):
+    fake_proc.raw_net("tcp", "  sl  local_address\n   0: ZZZZ:1F90 00000000:0000 0A 0:0 0:0 0 1000 0 77 1\n")
+    [row] = procfs.listeners(8080)
+    assert row.local_ip == "" and row.reachable_on_loopback and row == procfs.Listener(77, 1000)
+
+
 # ----------------------------------------------------------------------------------- read_process
 
 
