@@ -415,8 +415,19 @@ class OrchestratorREPL:
         self._active_heavy: Optional[tuple[Any, str]] = None
         _srv = getattr(harness_config, "server", None)
         _prov = getattr(harness_config, "provider", None)
-        if _srv is not None and getattr(_srv, "gpu", False) and _prov is not None:
-            self._active_heavy = (_srv, _prov.base_url)
+        # The lock tracks only what the harness LAUNCHED (D-33): a `server:` record alone proves
+        # nothing is up, and a foreign process on its port is not ours to stop. So the seed asks the
+        # strategy's own liveness (a pidfile, a container, or — LM Studio — a 2 s HTTP probe, P6, at
+        # construction). Any error is "not up" (D-58); no config dir means nothing to ask about.
+        if (_srv is not None and getattr(_srv, "gpu", False) and _prov is not None
+                and config_dir is not None):
+            try:
+                from localharness.provider.lifecycle import strategy_for
+                _alive = bool(strategy_for(_srv).liveness(_srv, self._server_config_dir).alive)
+            except Exception:  # noqa: BLE001 — a liveness that cannot be asked is "not launched"
+                _alive = False
+            if _alive:
+                self._active_heavy = (_srv, _prov.base_url)
 
     @property
     def _server_config_dir(self) -> Path | None:

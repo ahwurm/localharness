@@ -28,6 +28,7 @@ from localharness.cli.app import app
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.models import EndpointRef, HarnessConfig, ManagedServerConfig, ProviderConfig
 from localharness.provider import server
+from tests.unit.launch_support import harness_launched, stub_liveness  # noqa: F401
 from tests.unit.test_repl_model_cmd import _heavy_primary, _xrepl
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
 
@@ -36,6 +37,24 @@ BASE = "http://127.0.0.1:8099/v1"
 PRIMARY = "http://localhost:8081/v1"  # the REPL doubles' primary endpoint
 PEER = "http://127.0.0.1:8090/v1"
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _liveness_from_the_pid_seam(monkeypatch, request, tmp_path):
+    """The REPL seeds its accelerator lock through the strategy's liveness (D-33, D-62, D-67), which
+    would read a real pidfile or ask docker. Here the start tests already drive liveness through
+    `server.server_pid` (`_record_launch` replaces it after a launch, `_start(..., loading=True)`
+    before start), so the answer follows that seam: alive exactly when the test has replaced
+    `server.server_pid` and the replacement returns a pid; the real one is never called. A test that
+    requests `harness_launched` gets the launched answer instead."""
+    if "harness_launched" in request.fixturenames:
+        return
+    real = server.server_pid
+
+    def alive() -> bool:
+        return server.server_pid is not real and server.server_pid(tmp_path) is not None
+
+    stub_liveness(monkeypatch, alive)
 
 
 # ------------------------------------------------------------------------------- the fakes
@@ -282,7 +301,8 @@ def _record_strategies(monkeypatch, *, fail: tuple[str, ...] = ()) -> list[tuple
             log.append(("stop", spec.model))
 
         def liveness(self, spec, config_dir):
-            return lifecycle.Liveness(alive=False)
+            # the harness launched the primary it records (the restored incumbent needs the seed)
+            return lifecycle.Liveness(alive=True, detail="pid 4321")
 
     monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: _Recorder())
     monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)
@@ -358,7 +378,8 @@ async def test_a_restored_incumbent_gets_its_own_key(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("require", [True, False])
-async def test_the_repl_model_list_and_window_probes_carry_a_required_key(tmp_path, monkeypatch, require):
+async def test_the_repl_model_list_and_window_probes_carry_a_required_key(
+        tmp_path, monkeypatch, require, harness_launched):
     from localharness.agent import context as context_mod
     from localharness.cli import model_ops
     from localharness.cli.repl import OrchestratorREPL
