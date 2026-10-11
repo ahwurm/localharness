@@ -676,3 +676,66 @@ async def test_a_remote_unattended_root_stops_at_the_knob_on_a_real_mobile_chann
     assert len(registry.calls) <= 5
     failed = [e for e in bus.history(event_types=[TurnFailed]) if e.reason == "budget_exceeded"]
     assert len(failed) == 1 and "channels.unattended_max_actions" in failed[0].detail
+
+
+# --------------------------------------------------- CR-52: a headless terminal is unattended
+
+
+class _TtyStdin:
+    def isatty(self) -> bool:
+        return True
+
+
+def _terminal(tmp_path, monkeypatch, *, tty: bool, commit: bool = False, no_input: bool = False):
+    import io
+
+    monkeypatch.setattr("sys.stdin", _TtyStdin() if tty else io.StringIO("go\n"))
+    if commit:
+        monkeypatch.setenv("LOCALHARNESS_COMMIT", "abc123")
+    else:
+        monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    return TerminalChannel(bus=None, config={}, history_file=str(tmp_path / ".h"), no_input=no_input)
+
+
+@pytest.mark.parametrize(("tty", "commit", "no_input"), [
+    (True, False, True),    # cron / CI: localharness start --no-input
+    (False, False, False),  # piped stdin
+    (True, True, False),    # a start the model launched through bash_exec
+])
+def test_a_headless_terminal_root_runs_under_the_knob_when_unattended(
+        mock_llm_client, bus, tmp_path, monkeypatch, tty, commit, no_input):
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="unattended",
+                 unattended_max_actions=100)
+    loop.gate.attach_channel(_terminal(tmp_path, monkeypatch, tty=tty, commit=commit,
+                                       no_input=no_input))
+    assert loop.gate.local_operator is False
+    assert loop.action_limit() == 100
+    assert loop._resolve_max_actions() == (100, "channels.unattended_max_actions")
+
+
+def test_an_interactive_terminal_root_stays_uncapped(mock_llm_client, bus, tmp_path, monkeypatch):
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="unattended",
+                 unattended_max_actions=100)
+    loop.gate.attach_channel(_terminal(tmp_path, monkeypatch, tty=True))
+    assert loop.gate.local_operator is True
+    assert loop.action_limit() == 0
+
+
+@pytest.mark.asyncio
+async def test_start_with_no_input_builds_a_terminal_that_is_no_local_operator(tmp_path, monkeypatch):
+    """The real start path passes --no-input to the channel: even with a keyboard attached, a
+    `--no-input` session answers to nobody, so the gate does not see a local operator."""
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_start_cmd import _stub_start_boundaries
+
+    seen: dict = {}
+
+    async def repl_run(self):
+        seen["channel"] = self._channel.local_operator
+        seen["gate"] = self._agent.gate.local_operator
+
+    _stub_start_boundaries(tmp_path, monkeypatch, repl_run=repl_run)
+    monkeypatch.setattr("sys.stdin", _TtyStdin())
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    await _start_async(None, False, False, str(tmp_path), no_input=True)
+    assert seen == {"channel": False, "gate": False}

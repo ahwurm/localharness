@@ -13,6 +13,7 @@ through the real adapter on the fake gateway.
 from __future__ import annotations
 
 import asyncio
+import io
 import types
 from pathlib import Path
 
@@ -102,8 +103,19 @@ def _acp(tmp_path: Path):
     return AcpChannel(config_dir=str(tmp_path / "config"))
 
 
+class _TtyStdin:
+    """Stands in for a keyboard: the interactive terminal a person sits at."""
+
+    def isatty(self) -> bool:
+        return True
+
+
 @pytest.mark.parametrize("build", [_terminal, _acp], ids=["terminal", "acp"])
-def test_a_local_operator_is_never_locked(tmp_path, build):
+def test_a_local_operator_is_never_locked(tmp_path, build, monkeypatch):
+    # CR-52: the terminal is a local operator only on a real tty with no agent-command marker,
+    # so the interactive case is set up as one.
+    monkeypatch.setattr("sys.stdin", _TtyStdin())
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
     channel = build(tmp_path)
     assert channel.local_operator is True
     gate = _gate(tmp_path, remote_unattended=False)
@@ -286,3 +298,25 @@ async def test_a_locked_discord_question_carries_no_infinity(tmp_path, monkeypat
         assert not gate.grants.path.exists(), "nothing durable may be written from a locked remote"
     finally:
         await ch.stop()
+
+
+# --- CR-52: an unattended terminal surface is no local operator -------------------------------
+
+
+@pytest.mark.parametrize("how", ["no_input", "piped", "model_spawned"])
+def test_a_headless_terminal_is_not_a_local_operator_and_is_locked(tmp_path, monkeypatch, how):
+    from localharness.channels.terminal import TerminalChannel
+
+    monkeypatch.setattr("sys.stdin", _TtyStdin())
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    if how == "piped":
+        monkeypatch.setattr("sys.stdin", io.StringIO("do the thing\n"))
+    if how == "model_spawned":
+        monkeypatch.setenv("LOCALHARNESS_COMMIT", "abc123")
+    channel = TerminalChannel(EventBus(), {}, history_file=str(tmp_path / ".h"),
+                              no_input=how == "no_input")
+    assert channel.local_operator is False
+    gate = _gate(tmp_path, remote_unattended=False)
+    gate.attach_channel(channel)
+    assert gate.local_operator is False
+    assert gate._remote_locked()
