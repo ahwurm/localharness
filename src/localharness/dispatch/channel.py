@@ -38,6 +38,7 @@ from localharness.core.events import (
     ParseFailed,
     PermissionResolved,
     PermissionStaged,
+    ProviderLost,
     TaskComplete,
     TurnFailed,
 )
@@ -332,6 +333,7 @@ class DispatchChannel(ChannelAdapter):
             self.bus.subscribe(Escalation, self.on_escalation),
             self.bus.subscribe(ParseFailed, self.on_parse_failed),
             self.bus.subscribe(Heartbeat, self.on_heartbeat),
+            self.bus.subscribe(ProviderLost, self.on_provider_lost),  # the base text (no Esc here)
             # The only way this channel hears about the staging queue: the loop holds no channel
             # handle, so a parked call and its answer both travel as their own events.
             self.bus.subscribe(PermissionStaged, self.on_permission_staged),

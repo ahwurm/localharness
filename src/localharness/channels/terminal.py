@@ -55,6 +55,7 @@ from localharness.core.events import (
     Observation,
     ParseFailed,
     PermissionStaged,
+    ProviderLost,
     TaskComplete,
     TurnFailed,
 )
@@ -1100,6 +1101,10 @@ class TerminalChannel(ChannelAdapter):
         self._escalation_handle = None
         self._parse_failed_handle = None
         self._heartbeat_handle = None
+        self._provider_lost_handle = None
+        # The status-row sentence for a dropped model server (ProviderLost). Its own slot: the
+        # turn-time _box_working state would hide _box_activity, and the wait is mid-turn.
+        self._provider_lost_text: str = ""
         self._turn_failed_handle = None
         self._consolidation_started_handle = None
         self._consolidation_finished_handle = None
@@ -1128,6 +1133,7 @@ class TerminalChannel(ChannelAdapter):
             CompactionTriggered, self.on_compaction_triggered
         )
         self._heartbeat_handle = self.bus.subscribe(Heartbeat, self.on_heartbeat)
+        self._provider_lost_handle = self.bus.subscribe(ProviderLost, self.on_provider_lost)
         # The only way a channel hears that `auto` parked a call (core/events.PermissionStaged):
         # the loop holds no channel handle, and a queue notice is not about one tool result.
         self._permission_staged_handle = self.bus.subscribe(
@@ -1151,6 +1157,7 @@ class TerminalChannel(ChannelAdapter):
             self._escalation_handle,
             self._parse_failed_handle,
             self._heartbeat_handle,
+            self._provider_lost_handle,
             self._consolidation_started_handle,
             self._consolidation_finished_handle,
             self._permission_staged_handle,
@@ -1809,9 +1816,14 @@ class TerminalChannel(ChannelAdapter):
         lands), the between-turns '· dreaming…' consolidation pass, or a plain 'working' while
         the model generates. Returns [] when idle so the ConditionalContainer collapses the row
         to zero height. Refreshed by app.invalidate() from _box_tick — never a rich Status."""
-        if not (self._box_working or self._box_dreaming or self._box_activity):
+        if not (self._box_working or self._box_dreaming or self._box_activity
+                or self._provider_lost_text):
             return []
         glyph = _SPIN_FRAMES[int(time.monotonic() * 8) % len(_SPIN_FRAMES)]
+        if self._provider_lost_text:
+            # first, ahead of every other branch: while the server is gone the turn is still
+            # "working", and that state would otherwise hide the only sentence that says why
+            return [("class:hint", f"  {glyph} {self._provider_lost_text} ")]
         show_tps = False  # only turn activity shows the rate — never a swap-load or dreaming line
         if self._burst is not None:
             activity = f"{' · '.join(self._burst.tools)} · {self._burst.done}/{self._burst.calls}"
@@ -1983,6 +1995,8 @@ class TerminalChannel(ChannelAdapter):
         thinking/streaming/burst active. The glyph itself now renders in the status row
         (see _box_status_frags), no longer in the box's bottom border."""
         self._box_working = working
+        if not working:
+            self._provider_lost_text = ""
         self._invalidate_box()
 
     async def _box_tick(self) -> None:
@@ -2082,6 +2096,9 @@ class TerminalChannel(ChannelAdapter):
         heartbeat, so only the verified (stream-end) figure is shown, never the mid-stream
         approximation."""
         label = "[muted]thinking\u2026[/muted]"
+        if self._provider_lost_text:
+            # classic mode: the dropped-server sentence replaces the label until the next heartbeat
+            label = f"[muted]{escape(self._provider_lost_text)}[/muted]"
         snap = None
         if self.tps_source is not None:
             try:
@@ -2127,6 +2144,7 @@ class TerminalChannel(ChannelAdapter):
                 self._dreaming = None
 
     def _stop_thinking(self) -> None:
+        self._provider_lost_text = ""
         if self._box_active:
             self.box_notify_working(False)  # box mode: drop the in-frame glyph
         if self._thinking is not None:
@@ -2211,8 +2229,26 @@ class TerminalChannel(ChannelAdapter):
         is the 'model is now generating' signal (REPL-02)."""
         self._context_pct = event.context_utilization_pct
         async with self._output_lock:
+            if self._provider_lost_text:  # the server is back (a call is starting): drop the line
+                self._provider_lost_text = ""
+                self._invalidate_box()
             self._stop_dreaming()  # a turn is beginning — replace the dreaming dot with thinking
             self._start_thinking()
+
+    async def on_provider_lost(self, event: ProviderLost) -> None:
+        """The model server dropped and the loop is waiting for it: say so, with the bound, in the
+        status row (box) or the thinking label (classic). Unlike the base default, this surface
+        has Esc, so it says what stops the wait. Never filters on parent_id (a child loop may
+        publish it) and never prints `event.detail`. Shown until the next heartbeat or the turn's
+        end clears it; there is no "recovered" event."""
+        n = int(round(event.wait_seconds))
+        text = f"model server unreachable — waiting up to {n}s; Esc stops"
+        async with self._output_lock:
+            self._provider_lost_text = text
+            if self._box_active:
+                self._invalidate_box()
+            else:
+                self._start_thinking()  # creates the Status, or refreshes its label, from the slot
 
     async def on_consolidation_started(self, event: ConsolidationStarted) -> None:
         """A background memory consolidation/mining pass began (#20): show the quiet

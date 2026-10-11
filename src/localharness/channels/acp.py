@@ -76,6 +76,7 @@ from localharness.core.events import (
     ParseFailed,
     PermissionResolved,
     PermissionStaged,
+    ProviderLost,
     TaskComplete,
     TurnFailed,
 )
@@ -1101,6 +1102,7 @@ class AcpChannel(ChannelAdapter):
             self.bus.subscribe(TurnFailed, self.on_turn_failed),
             self.bus.subscribe(ParseFailed, self.on_parse_failed),
             self.bus.subscribe(Escalation, self.on_escalation),
+            self.bus.subscribe(ProviderLost, self.on_provider_lost),  # the base text (no Esc here)
             # The queue: the only way this channel hears that `auto` parked a call, and the only
             # way it hears the answer once somebody gives one.
             self.bus.subscribe(PermissionStaged, self.on_permission_staged),
