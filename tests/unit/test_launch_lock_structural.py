@@ -59,11 +59,31 @@ def _locked(call: ast.Call, parents: dict[ast.AST, ast.AST]) -> bool:
     return False
 
 
+def _activate_references(tree: ast.AST, parents: dict[ast.AST, ast.AST]) -> list[ast.AST]:
+    """Every way to reach `activate` that is not a direct `<expr>.activate(` call (IN-59): a bound-method
+    reference (`act = strategy.activate`, `partial(strategy.activate, ...)`) and `getattr(x, "activate")`.
+    Where such a reference is finally called cannot be judged from here, so each one is reported as a
+    launch outside the lock, wherever it sits: a launch must be written as a direct call."""
+    found: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "activate":
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                found.append(node)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+              and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)
+              and node.args[1].value == "activate"):
+            found.append(node)
+    return found
+
+
 def unlocked_activate_calls(source: str) -> list[int]:
-    """Line numbers of every `.activate(` call in `source` that is not inside a launch-lock block."""
+    """Line numbers of every `.activate(` call in `source` that is not inside a launch-lock block, and of
+    every indirect reference to `activate` (see `_activate_references`)."""
     tree = ast.parse(source)
     parents = _parents(tree)
-    return sorted(call.lineno for call in _activate_calls(tree) if not _locked(call, parents))
+    return sorted([call.lineno for call in _activate_calls(tree) if not _locked(call, parents)]
+                  + [ref.lineno for ref in _activate_references(tree, parents)])
 
 
 def _source_files():
@@ -78,7 +98,7 @@ def test_every_activate_under_src_sits_inside_a_launch_lock_block():
         tree = ast.parse(text)
         found += [f"{path.relative_to(SRC)}:{c.lineno}" for c in _activate_calls(tree)]
         unlocked += [f"{path.relative_to(SRC)}:{line}" for line in unlocked_activate_calls(text)]
-    assert unlocked == [], f"a launch without the launch lock: {unlocked}"
+    assert unlocked == [], f"a launch without the launch lock (or through an indirect reference): {unlocked}"
     # The five launch sites (a sixth must take the lock AND change this number on purpose):
     #   cli/start_cmd.py  _start_managed_server        start's down-server branch
     #   cli/repl.py       the cold branch              the first launch of a REPL started with no server
@@ -113,6 +133,13 @@ def test_every_activate_under_src_sits_inside_a_launch_lock_block():
         # the lock call that builds the items is not inside its own body
         ("async def f(s):\n    async with launch_lock(s.activate(spec, d, url)):\n        pass\n", [2]),
         ("def f(s):\n    s.activate()\n    s.deactivate()\n    activate(1)\n", [2]),
+        # IN-59: a launch reached through a bound reference or getattr is reported, even inside a block
+        ("async def f(s):\n    act = s.activate\n    await act(spec, d, url)\n", [2]),
+        ("async def f(s):\n    async with launch_lock(d):\n        act = s.activate\n"
+         "        await act(spec, d, url)\n", [3]),
+        ("async def f(s):\n    await getattr(s, \"activate\")(spec, d, url)\n", [2]),
+        ("async def f(s):\n    await functools.partial(s.activate, spec)(d, url)\n", [2]),
+        ("async def f(s):\n    await getattr(s, \"deactivate\")()\n    x = s.activated\n", []),
     ],
 )
 def test_the_checker_reports_exactly_the_unlocked_activates(source, expected):
