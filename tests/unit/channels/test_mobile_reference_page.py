@@ -46,7 +46,7 @@ def test_every_sse_only_frame_is_handled(page):
     "UserMessage", "TurnStarted", "TurnCompleted", "TurnFailed", "Action", "Observation",
     "TaskComplete", "Heartbeat", "ParseFailed", "CompactionTriggered", "Escalation",
     "InputRouted", "PermissionStaged", "PermissionResolved", "PermissionAsked",
-    "ConsolidationStarted", "ConsolidationFinished",
+    "ConsolidationStarted", "ConsolidationFinished", "ProviderLost",
 ])
 def test_every_live_bus_event_in_the_vocabulary_is_handled(page, event):
     """§4.2's table, walked. These are the events a client must handle."""
@@ -679,3 +679,49 @@ console.log(JSON.stringify(out));
     assert got["waking"][0] == "starting: starting the session"
     ((cls, text),) = got["waking"][1]
     assert cls == "row sys" and "waking the chat you left" in text
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_ProviderLost_draws_a_system_row_live_even_when_child_stamped(page, tmp_path):
+    """D-09 / D-44: the dropped-server line reaches the phone as a `row sys` with the base text
+    (no "Esc": a phone has no such key), whoever published it. Whole-second bounds only: JS rounds
+    halves up, Python to even (the page and the channels agree on integers, not on 0.5)."""
+    rendered = _drive(page, """
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
+                  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
+onEvent("ProviderLost", {event_type: "ProviderLost", agent_id: "a", session_id: "s",
+                         detail: "<img src=x onerror=alert(1)>", wait_seconds: 1800,
+                         parent_id: "child-1"});
+report();
+""", tmp_path)
+    lost = [r for r in rendered if "unreachable" in r["text"]]
+    assert len(lost) == 1, rendered
+    assert lost[0]["cls"].startswith("row sys")
+    assert lost[0]["text"] == "model server unreachable \u2014 waiting up to 1800s"
+    assert "Esc" not in lost[0]["text"]
+    assert "onerror" not in lost[0]["text"], "the detail must never reach the page"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_ProviderLost_is_drawn_in_history_for_root_and_child_lines(page, tmp_path):
+    """D-44: renderSpine draws a ProviderLost row before its generic parent_id skip, so a
+    child-stamped line is not lost from a finished turn's replay."""
+    rendered = _drive(page, """
+const hist = document.getElementById("hist");
+renderSpine([
+  JSON.stringify({seq: 1, event_type: "UserMessage", content: "go"}),
+  JSON.stringify({seq: 2, event_type: "ProviderLost", wait_seconds: 30, detail: "x"}),
+  JSON.stringify({seq: 3, event_type: "ProviderLost", wait_seconds: 30, detail: "x",
+                  parent_id: "child-1"}),
+  JSON.stringify({seq: 4, event_type: "Heartbeat", parent_id: "child-1"}),
+  JSON.stringify({seq: 5, event_type: "TaskComplete", summary: "done", success: true,
+                  duration_seconds: 1.0}),
+], hist);
+const text = (n) => (n.textContent || "") + n.children.map(text).join("");
+console.log(JSON.stringify(hist.children.map((r) => ({ cls: r.className, text: text(r) }))));
+""", tmp_path)
+    lost = [r for r in rendered if "unreachable" in r["text"]]
+    assert [r["text"] for r in lost] == ["model server unreachable \u2014 waiting up to 30s"] * 2, rendered
+    assert all(r["cls"].startswith("row sys") for r in lost)
+    assert any(r["cls"].startswith("row user") for r in rendered)
+    assert any(r["cls"].startswith("row answer") for r in rendered)

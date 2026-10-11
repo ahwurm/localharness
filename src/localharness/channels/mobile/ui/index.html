@@ -659,6 +659,12 @@ function onEvent(name, data) {
         (data.wrote_grant ? " — a permanent grant was written" : "")));
       break;
     case "PermissionAsked": break;   // audit only; it carries no payload to draw
+    case "ProviderLost":
+      // Drawn for a child-stamped event too (a child loop may be the one that publishes it):
+      // no `child` branch here. A number into textContent via el(); `detail` is never shown.
+      add(el("div", "row sys",
+        "model server unreachable — waiting up to " + Math.round(data.wait_seconds) + "s"));
+      break;
     default: break;
   }
 }
@@ -1369,6 +1375,13 @@ function renderSpine(lines, container) {
   for (let i = 0; i < parsed.length; i++) {
     const d = parsed[i];
     if (i >= liveFrom) { onEvent(d.event_type || "Event", d); continue; }
+    if (d.event_type === "ProviderLost") {   // shown for a child-stamped line too, so before the skip
+      const lost = el("div", "row sys",
+        "model server unreachable — waiting up to " + Math.round(d.wait_seconds) + "s");
+      container.appendChild(lost);
+      if (container === log) { S.lastRow = lost; $("greet").hidden = true; }
+      continue;
+    }
     if (d.parent_id) continue;               // a subagent's traffic collapses to nothing here
     let r = null;
     if (d.event_type === "UserMessage") {
