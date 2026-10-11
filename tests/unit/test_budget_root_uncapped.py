@@ -673,14 +673,17 @@ def test_an_unbounded_root_on_a_real_remote_channel_is_capped_when_unattended(
     assert loop._resolve_max_actions() == (100, "channels.unattended_max_actions")
 
 
-@pytest.mark.parametrize(("cls", "channel_id"), [(TerminalChannel, "terminal")])
-def test_the_terminal_and_zed_are_local_operators_and_run_uncapped(mock_llm_client, bus, cls, channel_id):
-    assert cls.local_operator is True
+def test_a_terminal_built_without_its_constructor_reads_as_remote(mock_llm_client, bus):
+    """IN-71: this used to assert the class constant `TerminalChannel.local_operator is True`,
+    which production no longer reads (each instance decides) and which made a bare instance
+    fail open. The class default is now the safe one; the interactive case is pinned by
+    `test_an_interactive_terminal_root_stays_uncapped` on a real instance under a fake tty."""
+    assert TerminalChannel.local_operator is False
     loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="unattended",
                  unattended_max_actions=100)
-    loop.gate.attach_channel(_bare(cls, channel_id))
-    assert loop.gate.local_operator is True
-    assert loop.action_limit() == 0
+    loop.gate.attach_channel(_bare(TerminalChannel, "terminal"))
+    assert loop.gate.local_operator is False
+    assert loop.action_limit() == 100
 
 
 # IN-70: Zed is a local operator per instance; an ACP session the model launched is not. (The ACP
