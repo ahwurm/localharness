@@ -458,6 +458,11 @@ def test_an_agent_with_no_budget_registers_a_card_with_no_action_limit(tmp_path)
 # session in `unattended` would run its root (max_actions None) with no ceiling at all.
 
 
+class _TtyStdin:
+    def isatty(self) -> bool:
+        return True
+
+
 def _start_world(tmp_path, monkeypatch, channels: dict | None):
     import yaml as _yaml
 
@@ -479,6 +484,10 @@ async def test_start_hands_the_machine_knob_to_the_root_loop_and_the_runner(
     tmp_path, monkeypatch, channels, expected,
 ):
     world = _start_world(tmp_path, monkeypatch, channels)
+    # An interactive terminal: a tty, no --no-input, not model-spawned (WR-70 keys the knob on the
+    # operator, not the mode, so pytest's own non-tty stdin would already be capped).
+    monkeypatch.setattr("sys.stdin", _TtyStdin())
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
     await world.start()
     loop = world.loop
     assert loop.action_limit() == 0  # the terminal root: attended, uncapped
@@ -487,3 +496,21 @@ async def test_start_hands_the_machine_knob_to_the_root_loop_and_the_runner(
     assert loop.action_limit() == expected
     (kw,) = world.runner_kwargs
     assert kw["unattended_max_actions"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("no_input", [True, False])
+async def test_a_headless_start_in_the_default_auto_mode_runs_under_the_knob(
+    tmp_path, monkeypatch, no_input,
+):
+    """WR-70: cron / CI (`--no-input`) and a piped stdin run in `auto`, the default mode, with nobody
+    at the machine; they are capped at the knob, never unbounded."""
+    import io
+
+    world = _start_world(tmp_path, monkeypatch, {"unattended_max_actions": 37})
+    monkeypatch.setattr("sys.stdin", _TtyStdin() if no_input else io.StringIO("go\n"))
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    await world.start(no_input=no_input)
+    loop = world.loop
+    assert loop.gate.mode == "auto"
+    assert loop._resolve_max_actions() == (37, "channels.unattended_max_actions")

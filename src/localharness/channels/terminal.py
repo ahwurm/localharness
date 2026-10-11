@@ -536,8 +536,8 @@ def is_local_operator(*, no_input: bool = False) -> bool:
     """Is a person at this machine driving this terminal session (CR-52)? True only on a tty stdin,
     without `--no-input`, and without the agent-command ``LOCALHARNESS_COMMIT`` marker (a
     `localharness start` the model launched through `bash_exec` or `python_exec` is no operator).
-    A cron or CI run, a piped stdin and a model-spawned start are unattended surfaces: they must
-    run under `channels.unattended_max_actions` in `unattended`, never unbounded. The same test as
+    A cron or CI run, a piped stdin and a model-spawned start are unattended surfaces: they run
+    under `channels.unattended_max_actions` in every mode (WR-70), never unbounded. The same test as
     `localharness model`'s, judged once when the channel is built."""
     import sys
 

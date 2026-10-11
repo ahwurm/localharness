@@ -242,10 +242,29 @@ def test_without_a_knob_the_remote_root_runs_on_its_configured_value(mock_llm_cl
     assert _loop(mock_llm_client, bus, [], max_actions=None, local=False).action_limit() == 0
 
 
-def test_a_gate_that_is_not_unattended_applies_no_cap(mock_llm_client, bus):
-    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="auto", local=False,
+# WR-70 (owner ruling, departs from D-07's `mode == "unattended"`): with no local operator the knob
+# applies in every mode. This test used to pin `auto` + remote as uncapped (0).
+@pytest.mark.parametrize("mode", ["auto", "trusted", "guarded", "read-only", "unattended"])
+def test_a_gate_with_no_local_operator_is_capped_in_every_mode(mock_llm_client, bus, mode):
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode=mode, local=False,
                  unattended_max_actions=100)
-    assert loop.action_limit() == 0
+    assert loop._resolve_max_actions() == (100, "channels.unattended_max_actions")
+
+
+@pytest.mark.parametrize("mode", ["auto", "trusted", "guarded", "read-only", "unattended"])
+def test_a_local_operator_is_never_capped_in_any_mode(mock_llm_client, bus, mode):
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode=mode, local=True,
+                 unattended_max_actions=100, budget_fallback=ChildBudget(actions=8, minutes=3.0))
+    assert (loop.action_limit(), loop.time_limit()) == (0, 0.0)
+
+
+def test_the_fallback_minutes_follow_the_same_rule_in_auto(mock_llm_client, bus):
+    """The time limit keys on the same predicate as the knob: no local operator, any mode."""
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="auto", local=False,
+                 budget_fallback=ChildBudget(actions=8, minutes=3.0),
+                 budget_labels=BudgetLabels(fallback="org.children_budget.default"))
+    assert loop._resolve_max_minutes() == (3.0, "org.children_budget.default")
+    assert loop._resolve_max_actions() == (8, "org.children_budget.default")
 
 
 @pytest.mark.asyncio
@@ -362,14 +381,20 @@ async def test_leaving_unattended_mid_turn_uncaps_from_the_next_check(mock_llm_c
     assert not [e for e in bus.history(event_types=[TurnFailed]) if e.reason == "budget_exceeded"]
 
 
-def test_the_limit_follows_the_gate_mode_both_ways(mock_llm_client, bus):
+def test_the_limit_follows_the_operator_both_ways_and_not_the_mode(mock_llm_client, bus):
+    # WR-70: this used to pin the limit following the gate MODE (auto 0, unattended 7). It now
+    # follows whether a local operator is attached; switching the mode changes nothing.
     loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="auto", local=False,
                  unattended_max_actions=7)
-    assert loop.action_limit() == 0
+    assert loop.action_limit() == 7
     loop.gate.mode = "unattended"
     assert loop.action_limit() == 7
+    loop.gate.attach_channel(_channel(local=True))
+    assert loop.action_limit() == 0
     loop.gate.mode = "auto"
     assert loop.action_limit() == 0
+    loop.gate.attach_channel(_channel(local=False))
+    assert loop.action_limit() == 7
 
 
 # --------------------------------------------------------------------------- remaining_budget
@@ -702,9 +727,10 @@ def _terminal(tmp_path, monkeypatch, *, tty: bool, commit: bool = False, no_inpu
     (False, False, False),  # piped stdin
     (True, True, False),    # a start the model launched through bash_exec
 ])
+@pytest.mark.parametrize("mode", ["unattended", "auto", "trusted"])  # WR-70: every mode
 def test_a_headless_terminal_root_runs_under_the_knob_when_unattended(
-        mock_llm_client, bus, tmp_path, monkeypatch, tty, commit, no_input):
-    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="unattended",
+        mock_llm_client, bus, tmp_path, monkeypatch, tty, commit, no_input, mode):
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode=mode,
                  unattended_max_actions=100)
     loop.gate.attach_channel(_terminal(tmp_path, monkeypatch, tty=tty, commit=commit,
                                        no_input=no_input))
@@ -713,8 +739,9 @@ def test_a_headless_terminal_root_runs_under_the_knob_when_unattended(
     assert loop._resolve_max_actions() == (100, "channels.unattended_max_actions")
 
 
-def test_an_interactive_terminal_root_stays_uncapped(mock_llm_client, bus, tmp_path, monkeypatch):
-    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="unattended",
+@pytest.mark.parametrize("mode", ["unattended", "auto", "trusted"])
+def test_an_interactive_terminal_root_stays_uncapped(mock_llm_client, bus, tmp_path, monkeypatch, mode):
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode=mode,
                  unattended_max_actions=100)
     loop.gate.attach_channel(_terminal(tmp_path, monkeypatch, tty=True))
     assert loop.gate.local_operator is True

@@ -236,9 +236,9 @@ global config, a project's whole `proposer:` section is ignored. These are all o
 - `org.web_fetch_allow_private`
 - `org.default_effort`
 - `channels.remote_unattended`
-- `channels.unattended_max_actions` (the action ceiling for every agent while the session runs
-  `unattended` with no one at the terminal: a remote channel, or a terminal started with
-  `--no-input`, from a pipe, or by the model itself; a project cannot raise it)
+- `channels.unattended_max_actions` (the action ceiling for every agent while no one is at the
+  terminal, in every permission mode, `auto` included: a remote channel, or a terminal started with
+  `--no-input` (cron, CI), from a pipe, or by the model itself; a project cannot raise it)
 - `proposer.base_url`
 - `proposer.api_key`
 - `image.comfyui_url`
@@ -301,8 +301,8 @@ exception to the shipped-default rule, as their entries say. These are all of th
   Against your own value, from your agent file, your division file, your `org.yaml` or the `agent:`
   section of your `overrides.yaml`, the project may only go lower: a larger value is ignored with a
   warning, and a `null` or a missing key keeps yours. Where your global config sets none, the
-  project's number is kept as written and, on a phone or other remote session left `unattended`,
-  capped by `org.children_budget` and `channels.unattended_max_actions`
+  project's number is kept as written and, on a phone or any other session with no one at the
+  terminal (in any mode), capped by `org.children_budget` and `channels.unattended_max_actions`
 - `permissions.budget.max_tool_calls` cannot be set by a project at all: a project agent file never
   carries it, and a project overlay of a built-in agent has it dropped with a warning
 

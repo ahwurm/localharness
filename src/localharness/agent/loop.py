@@ -319,8 +319,8 @@ class BudgetViolation:
 def _cap_limit(limit: int | float, cap: int | float) -> int | float:
     """`limit` under `cap`, where a `limit` of 0 means no limit at all (the `> 0` idiom of
     `BudgetTracker.check`): 0 takes the cap, anything else takes the smaller of the two. A literal
-    `min(limit, cap)` would return 0 (unbounded) for the default root on a remote unattended
-    surface, the case the machine knob exists for. The one place the loop applies a cap: both
+    `min(limit, cap)` would return 0 (unbounded) for the default root on a surface with no local
+    operator, the case the machine knob exists for. The one place the loop applies a cap: both
     resolvers call it, for actions and for minutes alike."""
     return cap if limit == 0 else min(limit, cap)
 
@@ -1179,7 +1179,7 @@ class AgentLoop:
         self._server_recovery = server_recovery
         self._local_recovery: "ServerRecovery | None" = None
         # The budget seams. `budget_fallback` is a child's own ceiling (a seam-written ChildBudget),
-        # applied on a remote unattended gate beneath the configured value; `budget_labels` names the
+        # applied with no local operator (any mode) beneath the configured value; `budget_labels` names the
         # config keys they came from for the failure text; `unattended_max_actions` is the machine
         # knob (None: no knob, as in the bench and tests). See _resolve_max_actions.
         self._budget_fallback = budget_fallback
@@ -1320,26 +1320,29 @@ class AgentLoop:
 
     # ------------------------------------------------------------------ budget resolution
 
-    def _remote_unattended(self) -> bool:
-        """Is this loop's person away from the machine with the gate off? True when the gate's mode is
-        `unattended` and no local operator (the terminal, Zed) is attached. Read through the gate's
-        public surface on every call, so a mode switched mid-turn is seen at the next check."""
-        return (
-            getattr(self._gate, "mode", None) == "unattended"
-            and not getattr(self._gate, "local_operator", False)
-        )
+    def _unattended_surface(self) -> bool:
+        """Is nobody at this machine to stop the loop? True whenever the gate has no local operator
+        (an interactive terminal with a tty, or Zed), whatever the mode: a phone, Discord, a
+        `--no-input`, piped, cron or model-spawned start runs in `auto` or `trusted` with nobody
+        able to stop it as surely as in `unattended` (WR-70, an owner ruling that departs from
+        D-07's `mode == "unattended"`; D-10 grants "unbounded" to the interactive terminal root
+        only). A gate with no such flag is treated as remote. Read through the gate's public
+        surface on every call, so an operator attached or detached mid-turn is seen at the next
+        check."""
+        return not getattr(self._gate, "local_operator", False)
 
     def _resolve_max_actions(self) -> tuple[int, str | None]:
         """The action limit this loop runs under right now, and the config key that bound it.
 
         The configured value first (None reads as 0, no limit; it has no label here: a seam-written
-        value carries `budget_labels.actions`). Then, only on a remote unattended gate, the child's
-        fallback ceiling and the machine knob `channels.unattended_max_actions`, each applied as
-        `_cap_limit` does (0 takes the cap, otherwise the smaller wins); an equal value keeps the
-        earlier label. An attended terminal root is never capped here: the person is the budget."""
+        value carries `budget_labels.actions`). Then, only when no local operator is attached
+        (`_unattended_surface`, in any mode), the child's fallback ceiling and the machine knob
+        `channels.unattended_max_actions`, each applied as `_cap_limit` does (0 takes the cap,
+        otherwise the smaller wins); an equal value keeps the earlier label. An interactive
+        terminal root is never capped here: the person is the budget."""
         limit: int = self._config.permissions.budget.max_actions or 0
         label = self._budget_labels.actions
-        if self._remote_unattended():
+        if self._unattended_surface():
             fallback = self._budget_fallback
             if fallback is not None:
                 capped = _cap_limit(limit, fallback.actions)
@@ -1354,10 +1357,11 @@ class AgentLoop:
 
     def _resolve_max_minutes(self) -> tuple[float, str | None]:
         """The time limit in minutes, and the key that bound it (0.0 = none): the configured value,
-        then on a remote unattended gate the child's fallback minutes. There is no knob for minutes."""
+        then, under the same rule as actions (no local operator, any mode), the child's fallback
+        minutes. There is no knob for minutes."""
         limit: float = self._config.permissions.budget.max_duration_minutes or 0.0
         label = self._budget_labels.minutes
-        if self._remote_unattended():
+        if self._unattended_surface():
             fallback = self._budget_fallback
             if fallback is not None:
                 capped = _cap_limit(limit, fallback.minutes)
@@ -2753,7 +2757,7 @@ class AgentLoop:
         bound = float(wait)
         if session is not None:
             # The time limit the BudgetTracker enforces: the live turn's own (which carries a child's
-            # fallback on a remote unattended gate), else what the loop resolves for it now.
+            # fallback when no local operator is attached), else what the loop resolves for it now.
             live = self._live_turn
             if live is not None and live[0] is session:
                 limit: Any = live[1].max_duration_minutes
