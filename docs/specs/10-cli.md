@@ -1246,8 +1246,9 @@ any other mode; a scheduled job still writes `permissions.mode: unattended` in i
 nobody is there to type it. Discord takes the same five names as a plain `mode <name>` message, and
 Zed's picker lists them. With `channels.remote_unattended: false` in the machine config,
 `unattended` is refused from the phone and Discord with one line naming the setting
-(`unattended can only be switched on from this machine's terminal or Zed here …`); the terminal and
-Zed are never limited.
+(`unattended can only be switched on from this machine's terminal or Zed here …`); an interactive
+terminal (a tty, without `--no-input`, not launched by the agent) and Zed are never limited, while a
+`--no-input`, piped or agent-launched session is locked like a remote one.
 See spec 06 for the config keys and SECURITY.md for what each mode does and does not stop.
 
 **`/image` attaches a picture to your next message** (a vision model such as the reference

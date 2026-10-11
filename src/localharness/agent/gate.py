@@ -417,7 +417,9 @@ class PermissionGate:
         app, Discord) cannot switch this session to `unattended` (:meth:`set_mode` refuses with
         :data:`REMOTE_UNATTENDED_REFUSAL`) and is never offered "always" (:meth:`_ask` hands it the
         question ungrantable, so an always that comes back anyway counts once); a local operator
-        (the terminal, Zed) is never limited. True (the default) is 0.16's behaviour."""
+        (an interactive terminal: a tty, without `--no-input`, not launched by the agent; or Zed) is
+        never limited, and a headless terminal is locked like a remote channel. True (the default)
+        is 0.16's behaviour."""
         self._local_operator = False
         """Is the attached channel's person at this machine? Read off the channel by
         :meth:`attach_channel` (``ChannelAdapter.local_operator``); False until one is attached."""
@@ -511,9 +513,10 @@ class PermissionGate:
         driven from the phone or Discord is refused with :data:`REMOTE_UNATTENDED_REFUSAL`. A
         paired phone or an allowlisted chat account is otherwise as good as a shell on this
         machine, and the owner who wants that lock can have it; the default keeps the switch
-        (owner, 2026-10-03: nothing done from the phone or Discord today may start failing). The
-        terminal and Zed are never limited, and neither is a switch with no channel behind it
-        (config, the trust question, a resumed session).
+        (owner, 2026-10-03: nothing done from the phone or Discord today may start failing). An
+        interactive terminal (a tty, without `--no-input`, not launched by the agent) and Zed are
+        never limited, and neither is a switch with no channel behind it (config, the trust
+        question, a resumed session); a `--no-input`, piped or agent-launched terminal is.
 
         Raises ``ValueError`` with a message the channel shows verbatim when the name is unknown
         or the switch is locked.

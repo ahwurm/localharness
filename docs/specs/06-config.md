@@ -1334,8 +1334,8 @@ class ChannelsConfig(BaseModel):
         default=True,
         description=(
             "May the phone app or Discord switch the session to `unattended` and answer "
-            "\"always\"? False refuses both from every remote channel, never from the terminal "
-            "or Zed. Machine-level only."
+            "\"always\"? False refuses both from every channel with no local operator, never "
+            "from an interactive terminal or Zed. Machine-level only."
         ),
     )
 
@@ -1382,7 +1382,9 @@ routes sends the key.
 
 **`channels.remote_unattended`** (machine-level only, default `true`): `false` refuses `unattended`
 and "always" from the phone and Discord, through the gate and each channel's `local_operator`
-flag; the terminal and Zed are never limited.
+flag; an interactive terminal (a tty, without `--no-input`, not launched by the agent) and Zed
+(not launched by the agent) are never limited, while a `--no-input`, piped or agent-launched session
+is locked like a remote one.
 
 **`channels.unattended_max_actions`** (machine-level only, default `100`, at least 1): the most tool
 calls one turn may dispatch while no one is at this machine, in every permission mode (`auto`,

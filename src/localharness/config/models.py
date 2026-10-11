@@ -2308,8 +2308,10 @@ class ChannelsConfig(BaseModel):
             "May a remote channel (the phone app, Discord) switch the session to `unattended` and "
             "answer a question with \"always\"? True (the default) keeps 0.16's behaviour: a paired "
             "phone or an allowlisted Discord account can do both. False refuses both from every "
-            "remote channel with one line naming this setting; the terminal and Zed are never "
-            "affected. Machine-level only."
+            "remote channel with one line naming this setting; an interactive terminal (a tty, "
+            "without --no-input, not launched by the agent) and Zed are never affected, while a "
+            "--no-input, piped or agent-launched session is locked like a remote one. "
+            "Machine-level only."
         ),
     )
 
