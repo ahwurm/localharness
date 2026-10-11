@@ -46,6 +46,29 @@ def test_the_count_is_the_config_yaml_peers(tmp_path):
     assert loader.harness_warnings == [LINE.format(n=1)]
 
 
+def test_the_count_is_the_peers_that_vanish_by_name(tmp_path):
+    loader = _loader(tmp_path, config_extra={"extra_endpoints": [_peer("a"), _peer("b"), _peer("c")]},
+                     overrides={"extra_endpoints": [_peer("b"), _peer("z")]})
+    loader.load_harness()
+    assert loader.harness_warnings == [LINE.format(n=2)]
+
+
+def test_an_overrides_list_that_carries_every_config_peer_is_silent(tmp_path):
+    """WR-08: the peer-posture flow and init's import copy config.yaml's list; nothing vanishes."""
+    for over in ([_peer("a"), _peer("b")], [_peer("b"), _peer("a"), _peer("extra")]):
+        (tmp_path / str(len(over))).mkdir()
+        loader = _loader(tmp_path / str(len(over)), config_extra={"extra_endpoints": [_peer("a"), _peer("b")]},
+                         overrides={"extra_endpoints": over})
+        loader.load_harness()
+        assert loader.harness_warnings == []
+
+
+def test_an_empty_overrides_list_hides_every_config_peer(tmp_path):
+    loader = _loader(tmp_path, config_extra={"extra_endpoints": [_peer("a")]}, overrides={"extra_endpoints": []})
+    loader.load_harness()
+    assert loader.harness_warnings == [LINE.format(n=1)]
+
+
 def test_an_empty_config_list_is_silent(tmp_path):
     loader = _loader(tmp_path, config_extra={"extra_endpoints": []},
                      overrides={"extra_endpoints": [_peer("c")]})

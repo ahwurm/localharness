@@ -977,11 +977,18 @@ class ConfigLoader:
         merged, self.harness_warnings = _narrow_harness_global_only(merged, sources, ws_files)
         # An overrides.yaml `extra_endpoints` REPLACES config.yaml's list wholesale (lists do not
         # merge), so the peers config.yaml names vanish without a word. Say so once — only over a
-        # non-empty list: the `[]` an `init`-written config.yaml holds shadows nothing.
+        # non-empty list (the `[]` an `init`-written config.yaml holds shadows nothing) and only when a
+        # peer by name actually vanishes: Phase 4's peer-posture flow and `init`'s import copy the whole
+        # config.yaml list into overrides.yaml, and then nothing is hidden (D-40, WR-08).
         config_peers = sources[0].get("extra_endpoints")
+        over_peers = sources[1].get("extra_endpoints")
         if "extra_endpoints" in sources[1] and isinstance(config_peers, list) and config_peers:
-            self.harness_warnings.append(
-                f"overrides.yaml extra_endpoints replaces the {len(config_peers)} peers in config.yaml")
+            kept_names = {p.get("name") for p in over_peers if isinstance(p, dict)} \
+                if isinstance(over_peers, list) else set()
+            hidden = [p for p in config_peers if not (isinstance(p, dict) and p.get("name") in kept_names)]
+            if hidden:
+                self.harness_warnings.append(
+                    f"overrides.yaml extra_endpoints replaces the {len(hidden)} peers in config.yaml")
         # The one refusal: the global layers set no provider and the workspace's gave way whole,
         # so there is nothing to run against. One line naming the file to set it in — never a field
         # report, which would show the project's address back.
