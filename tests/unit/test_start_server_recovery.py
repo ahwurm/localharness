@@ -240,6 +240,23 @@ async def test_a_server_another_process_brought_up_meanwhile_is_waited_on_not_la
     assert not [line for line in seen.lines if "starting it" in line]
 
 
+async def test_an_lm_studio_server_already_up_is_waited_on_with_no_pidfile_check(tmp_path, monkeypatch):
+    """IN-55: LM Studio writes no pidfile, so waiting on it with the raw config dir read "exited during
+    startup" at once; the wait uses the strategy's own dir (None for LM Studio), as the reconnect does."""
+    _Launch(monkeypatch)
+    stub_liveness(monkeypatch, True)
+    waited: list[tuple] = []
+
+    async def wait_ready(base_url, **kw):
+        waited.append((base_url, kw))
+        return ["m"]
+
+    monkeypatch.setattr(server, "wait_ready", wait_ready)
+    lms = ManagedServerConfig(runtime="lmstudio", model="qwen", port=1234)
+    assert await _start_managed_server(lms, tmp_path, "http://localhost:1234/v1", {}) is None
+    assert waited == [("http://localhost:1234/v1", {"config_dir": None})]
+
+
 async def test_a_free_lock_prints_no_wait_line(tmp_path, monkeypatch):
     seen = _Launch(monkeypatch)
     stub_liveness(monkeypatch, False)
