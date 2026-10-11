@@ -430,8 +430,13 @@ class ChannelAdapter(ABC):
         status note instead (child completions stay internal — see on_task_complete —
         but child failures surface; silence is indistinguishable from progress)."""
         if event.reason == "stuck_detected":
-            # The escalation is delivered once, by on_escalation (root and child alike); the
-            # bus still carries both events, only this default handler stays quiet (D-40).
+            # The escalation is delivered once, by on_escalation (root and child alike), so no
+            # stuck line here (D-40). The reply is another matter: a root stuck turn publishes no
+            # TaskComplete, and its detail IS the reply, the model's wrap-up of its partial work
+            # (D-04), which nothing else puts in front of the person (CR-51). A child's stays with
+            # its parent, as a child's TaskComplete does.
+            if not getattr(event, "parent_id", None):
+                await self.send_stuck_reply(event)
             return
         if getattr(event, "parent_id", None):
             await self.send_message(
@@ -446,6 +451,14 @@ class ChannelAdapter(ABC):
             detail=detail[:400] or None,
             agent_id=event.agent_id,
         )
+
+    async def send_stuck_reply(self, event: TurnFailed) -> None:
+        """Deliver a root stuck turn's reply (`TurnFailed.detail`) as a plain message, the way a
+        TaskComplete summary is delivered. Nothing when it is empty. A channel that already
+        streamed the answer's tokens overrides this so the reply is not printed twice."""
+        detail = (event.detail or "").strip()
+        if detail:
+            await self.send_message(content=detail, agent_id=event.agent_id)
 
     async def on_parse_failed(self, event: ParseFailed) -> None:
         """Default handler for ParseFailed events. Same principle as on_turn_failed: silence
