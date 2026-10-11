@@ -289,13 +289,14 @@ none) stands. A `null` keeps your value without a warning. The agent budgets bel
 exception to the shipped-default rule, as their entries say. These are all of them:
 
 - `org.children_budget.<name>.actions` and `.minutes`, for each built-in child agent and for
-  `default` (the ceiling of an agent you define): the most model round-trips and wall-clock minutes
-  a child may spend
+  `default` (the ceiling of an agent you define): the most tool calls a child may dispatch (checked
+  before each of its model calls) and the wall-clock minutes it may spend
 - `org.children_budget.lookup_share` and `org.children_budget.review_share`: the part of a parent's
   remaining budget a delegated child receives
 - `permissions.budget.max_actions` and `permissions.budget.max_duration_minutes`, in a project agent
   file, in a project division file, or in a project overlay of a built-in agent
-  (`agents/explore.yaml`): the most model round-trips and wall-clock minutes one agent may spend.
+  (`agents/explore.yaml`): the most tool calls one agent's turn may dispatch and the wall-clock
+  minutes it may spend.
   Against your own value, from your agent file, your division file, your `org.yaml` or the `agent:`
   section of your `overrides.yaml`, the project may only go lower: a larger value is ignored with a
   warning, and a `null` or a missing key keeps yours. Where your global config sets none, the

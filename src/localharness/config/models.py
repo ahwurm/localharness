@@ -226,10 +226,12 @@ class BudgetConfig(BaseModel):
         ge=1,
         le=10_000,
         description=(
-            "The iteration ceiling for one turn: how many model round-trips the loop makes "
-            "before it stops. Distinct from max_tool_calls (a ceiling on dispatched tool calls). "
-            "None means no configured limit and the surface decides: an attended terminal runs "
-            "unbounded, a remote unattended surface is capped by channels.unattended_max_actions."
+            "The most tool calls one turn may dispatch (a call the gate refused does not count). "
+            "Checked before each model call, so the calls of the iteration in progress complete "
+            "and a parallel batch can end past it. Distinct from max_tool_calls, a per-call "
+            "refusal that does not end the turn. None means no configured limit and the surface "
+            "decides: an attended terminal runs unbounded, a remote unattended surface is capped "
+            "by channels.unattended_max_actions."
         ),
     )
 
@@ -1533,10 +1535,11 @@ completion read this table, so the two cannot drift."""
 
 
 class ChildBudget(BaseModel):
-    """One child agent's own ceiling: model round-trips and wall-clock minutes."""
+    """One child agent's own ceiling: tool calls dispatched and wall-clock minutes."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    actions: int = Field(ge=1, le=10_000, description="Model round-trips the child may make.")
+    actions: int = Field(ge=1, le=10_000, description=(
+        "Tool calls the child may dispatch, checked before each of its model calls."))
     minutes: float = Field(gt=0, le=1440.0, description="Wall-clock minutes the child may run.")
 
 
@@ -2314,8 +2317,10 @@ class ChannelsConfig(BaseModel):
         default=100,
         ge=1,
         description=(
-            "The action ceiling for every loop while the session is `unattended` with no local "
-            "operator. 100 is the value the old cap had. Machine-level only."
+            "The most tool calls one turn of any loop may dispatch while the session is "
+            "`unattended` with no local operator, checked before each model call (the calls of "
+            "the iteration in progress complete). 100 is the value the old cap had. "
+            "Machine-level only."
         ),
     )
 
