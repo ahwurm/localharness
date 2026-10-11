@@ -25,6 +25,8 @@ from tests.unit.test_launch_paths_repl import (  # noqa: F401
 )
 from tests.unit.test_repl_model_cmd import _harness, _xrepl
 
+NOT_A_GGUF = "{} is not a GGUF file — /model <path.gguf> or a preset name"
+
 
 @pytest.fixture(autouse=True)
 def _liveness_not_launched(monkeypatch, request):
@@ -222,3 +224,123 @@ async def test_a_vllm_primary_still_restarts_on_a_cached_model(tmp_path, boundar
 
     assert seen == [{"model": "cached-b", "served_name": None, "runtime": "vllm"}]
     assert primary.model == "cached-b"
+
+
+# --- a typed GGUF path restarts that file under its own name -------------------------------------- #
+
+
+def _gguf(tmp_path, name="Other-Q4.gguf"):
+    models = tmp_path / "models"
+    models.mkdir(exist_ok=True)
+    path = models / name
+    path.write_bytes(b"GGUF")
+    return path
+
+
+@pytest.mark.asyncio
+async def test_a_typed_gguf_path_restarts_that_file_under_its_own_name(
+        tmp_path, boundaries, monkeypatch):
+    path = _gguf(tmp_path)
+    primary = _llama(served_name="qwen-27b")
+    harness, repl, channel, _, _ = _on_a_peer(tmp_path, primary)
+    _ready_as(monkeypatch, "Other-Q4")
+    seen = _record_activations(monkeypatch)
+
+    await repl._handle_slash(f"/model {path}")
+
+    assert seen == [{"model": str(path), "served_name": "Other-Q4", "runtime": "llamacpp"}]
+    cmd = boundaries.cmds[-1]
+    assert _flag_value(cmd, "-m") == str(path) and _flag_value(cmd, "-a") == "Other-Q4"
+    assert any(m.startswith(f"Restarting managed llama.cpp with {path}") for m in channel.messages)
+    # in memory only: nothing about the record reached overrides.yaml (T-5-65)
+    overlay = load_overlay(tmp_path / "overrides.yaml") or {}
+    assert "model" not in overlay.get("server", {}) and "served_name" not in overlay.get("server", {})
+
+
+# --- anything else on a llama.cpp primary: one line, before anything moves ------------------------ #
+
+
+@pytest.fixture
+def untouched(monkeypatch, boundaries):
+    """Spies on every path that would stop, launch or decide; the test asserts none ran."""
+    calls: list[str] = []
+    real_decision = managed_server.launch_decision
+
+    def decision(*a, **kw):
+        calls.append("launch_decision")
+        return real_decision(*a, **kw)
+
+    async def free(*a, **kw):
+        calls.append("free_accelerator")
+
+    monkeypatch.setattr(managed_server, "launch_decision", decision)
+    monkeypatch.setattr(lifecycle, "free_accelerator", free)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_an_hf_cache_name_on_a_llama_cpp_primary_is_one_line_and_nothing_moves(
+        tmp_path, boundaries, untouched, monkeypatch):
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    primary = _llama(served_name="qwen-27b")
+    harness, repl, channel, agent, peer = _on_a_peer(tmp_path, primary)
+    held = repl._active_heavy
+
+    await repl._handle_slash("/model cached-b")
+
+    assert channel.messages[-1] == NOT_A_GGUF.format("cached-b")
+    assert untouched == []
+    assert boundaries.stops == [] and boundaries.cmds == [] and boundaries.waits == []
+    assert agent._llm.rebinds == [] and agent._llm.config.base_url == PEER_URL
+    assert repl._active_heavy is held
+    assert primary.model == "/x/primary.gguf" and primary.served_name == "qwen-27b"
+
+
+@pytest.mark.asyncio
+async def test_a_local_models_name_on_a_llama_cpp_primary_gets_the_same_line(
+        tmp_path, boundaries, untouched):
+    from localharness.config.models import LocalModelEntry
+    primary = _llama(served_name="qwen-27b",
+                     local_models=[LocalModelEntry(name="reg-model", path="/x/reg")])
+    _, repl, channel, agent, _ = _on_a_peer(tmp_path, primary)
+
+    await repl._handle_slash("/model reg-model")
+
+    assert channel.messages[-1] == NOT_A_GGUF.format("reg-model")
+    assert untouched == [] and boundaries.stops == [] and agent._llm.rebinds == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make", ["directory", "other-file"])
+async def test_a_typed_path_that_is_not_a_gguf_file_gets_the_same_line(
+        tmp_path, boundaries, untouched, make):
+    target = tmp_path / "models"
+    target.mkdir()
+    if make == "other-file":
+        target = target / "weights.bin"
+        target.write_bytes(b"x")
+    primary = _llama(served_name="qwen-27b")
+    _, repl, channel, agent, _ = _on_a_peer(tmp_path, primary)
+
+    await repl._handle_slash(f"/model {target}")
+
+    assert channel.messages[-1] == NOT_A_GGUF.format(str(target))
+    assert untouched == [] and boundaries.stops == [] and boundaries.cmds == []
+    assert agent._llm.rebinds == []
+
+
+@pytest.mark.asyncio
+async def test_on_a_declared_only_llama_cpp_primary_the_gguf_line_comes_first(
+        tmp_path, boundaries, untouched, monkeypatch):
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    primary = _llama(binary=None, served_name="qwen-27b")
+    _, repl, channel, _, _ = _on_a_peer(tmp_path, primary)
+
+    await repl._handle_slash("/model cached-b")
+
+    assert channel.messages[-1] == NOT_A_GGUF.format("cached-b")
+    assert NO_LLAMA_PRIMARY not in channel.messages and untouched == []
+
+    await repl._handle_slash("/model qwen-27b")  # its own name: the declared-only refusal, as before
+
+    assert channel.messages[-1] == NO_LLAMA_PRIMARY

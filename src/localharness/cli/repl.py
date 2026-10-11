@@ -124,6 +124,9 @@ def _dropped_image_path(line: str) -> str | None:
 # #129: a /model swap that writes a new default to the user overlay must SAY so — the write
 # outlives the session, and a silent one leaves the user running an experiment forever.
 SAVED_DEFAULT_NOTE = " (saved as default — persists across restarts)"
+# A llama.cpp primary restarts on a weights file: anything else a person typed (a local_models name,
+# an HF-cache repo id) is answered here, before anything is stopped (D-58).
+NOT_A_GGUF_LINE = "{target} is not a GGUF file — /model <path.gguf> or a preset name"
 
 PLUGINS_USAGE = "Usage: /plugins, /plugins enable <name> or /plugins disable <name>"
 PLUGINS_TERMINAL_ONLY = ("/plugins works only in a terminal session. From a shell: "
@@ -2083,6 +2086,14 @@ class OrchestratorREPL:
             )
             return
 
+        # A llama.cpp primary restarts on a weights FILE: its own record (its served name), or a
+        # regular .gguf the person typed. Anything else (a local_models name, an HF-cache repo id) is
+        # answered in one line as the first statement of the fallthrough (D-58) — before the launch
+        # decision, the rebind-back or any stop — so nothing is launched, stopped or rebound.
+        typed_gguf = Path(target).expanduser().is_file() and target.lower().endswith(".gguf")
+        if managed.runtime == "llamacpp" and target != prim_served and not typed_gguf:
+            await self._send_info(NOT_A_GGUF_LINE.format(target=target))
+            return
         # Downloaded-but-not-served → managed restart. The managed vLLM serves at the PRIMARY
         # provider base_url; if we're currently on a peer (an in-session cross-endpoint switch),
         # re-point the client back FIRST so the restart's probe + wait_ready target the vLLM, not
@@ -2154,10 +2165,14 @@ class OrchestratorREPL:
             await strategy.stop(managed, self._server_config_dir)
             # The record already names its weights: the primary's served name never replaces them
             # (a llama.cpp alias never reaches -m; a vLLM --served-model-name alias never becomes
-            # the vLLM model, D-70). Only a name other than the primary's, on a non-llama.cpp
-            # runtime, changes the model.
+            # the vLLM model, D-70). Only a name other than the primary's (non-llama.cpp), or a typed
+            # regular .gguf (llama.cpp, named in memory only, never persisted), changes the model.
             if managed.runtime != "llamacpp" and target != prim_served:
                 managed.model = target
+            elif managed.runtime == "llamacpp" and typed_gguf and target != prim_served:
+                from localharness.agent import gguf_header
+                managed.model = str(Path(target).expanduser())
+                managed.served_name = gguf_header.preset_name(target)
             # the provider's key, only when the managed server is set to require one (default off)
             ep = await strategy.activate(
                 managed, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress,

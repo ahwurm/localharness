@@ -266,6 +266,32 @@ async def test_model_managed_restart_path(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_model_managed_restart_on_llamacpp_answers_a_non_gguf_name_in_one_line(
+        tmp_path, monkeypatch):
+    """The vLLM test above restarts on `cached-b`; on a llama.cpp primary a cached name would reach
+    `-m`, so it is answered in one line before anything is stopped or launched (D-58, WR-04)."""
+    from localharness.provider import server as managed_server
+
+    calls: list[str] = []
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    monkeypatch.setattr(managed_server, "stop_server", lambda cfg, launch="binary": calls.append("stop") or True)
+    monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: calls.append("start") or 1234)
+
+    srv = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server",
+                              model="/x/primary.gguf", served_name="qwen-27b")
+    harness = _harness(srv)
+    repl, channel, agent = _repl(tmp_path, harness, live=["model-a"])
+
+    await repl._handle_slash("/model cached-b")
+
+    assert channel.messages[-1] == "cached-b is not a GGUF file — /model <path.gguf> or a preset name"
+    assert calls == []
+    assert agent._llm.config.model == "model-a"
+    assert harness.server.model == "/x/primary.gguf" and harness.server.served_name == "qwen-27b"
+    assert not (tmp_path / "overrides.yaml").exists()
+
+
+@pytest.mark.asyncio
 async def test_ctrl_c_during_a_slow_model_swap_never_exits_the_session(tmp_path):
     """A /model swap blocks the single box coordinator for as long as it runs (a managed restart:
     minutes). Ctrl+C presses land in the control queue meanwhile — invisible, since the loop

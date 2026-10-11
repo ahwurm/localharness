@@ -222,21 +222,22 @@ async def test_a_failed_cold_launch_announces_no_window(tmp_path, fake):
 
 @pytest.mark.asyncio
 async def test_a_fit_by_server_restart_sends_its_line_and_records_it(tmp_path, fake, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    primary = _llama_primary()
+    served = primary.served_name  # the record's own name, so the two files cannot drift (D-66)
     fake.live = LiveEndpoint(
-        base_url=PRIMARY_URL, served_models=["cached-b"], handle=1,
+        base_url=PRIMARY_URL, served_models=[served], handle=1,
         window=_report(served=65536, trained=None, fits=None, free_bytes=None, total_bytes=None,
                        weights_bytes=None, asked=None, mode="fit-by-server"))
-    harness, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=_llama_primary())
+    harness, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=primary)
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash(f"/model {served}")
 
     expected = "window: served by llama-server's --fit · served 65,536"
     assert channel.messages.count(expected) == 1
     restarting = next(i for i, m in enumerate(channel.messages) if m.startswith("Restarting managed"))
     assert channel.messages.index(expected) > restarting
     assert fake.activations[-1]["autosense"] is harness.autosense
-    rec = _ledger(tmp_path, harness.provider.provider_type, "cached-b")
+    rec = _ledger(tmp_path, harness.provider.provider_type, served)
     assert rec is not None and rec.served == 65536
 
 
@@ -273,9 +274,9 @@ async def test_a_restore_passes_autosense_but_announces_and_records_nothing(tmp_
 @pytest.mark.asyncio
 async def test_a_swap_back_failure_restores_with_autosense_and_stays_silent_on_the_window(
         tmp_path, fake, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    primary = _llama_primary()
     peer = _launchable_peer()
-    harness, repl, channel, agent = _session(tmp_path, peer, server=_llama_primary())
+    harness, repl, channel, agent = _session(tmp_path, peer, server=primary)
     _on_the_cold_peer(repl, agent, peer)
     calls: list[dict] = []
     ok = _live(_report())
@@ -288,7 +289,7 @@ async def test_a_swap_back_failure_restores_with_autosense_and_stays_silent_on_t
 
     fake.activate = activate
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash(f"/model {primary.served_name}")
 
     assert len(calls) == 2 and all(c["autosense"] is harness.autosense for c in calls)
     assert _window_lines(channel) == []
