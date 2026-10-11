@@ -544,7 +544,8 @@ async def test_a_later_caller_after_a_spent_bound_takes_one_look_and_the_same_fa
 
 async def test_a_later_caller_with_a_longer_bound_waits_only_what_is_left_of_it(models):
     """A child's bound (capped by its budget) ran out; the root, with the whole bound, continues the same
-    outage from the drop: no second announcement, and the server coming back ends it."""
+    outage from the drop, and the server coming back ends it. The root waits longer than the one line
+    said so far ("up to 0.1 s"), so it says so once more (WR-19)."""
     state = {"down": True}
     models(ModelsEndpoint(down=lambda: state["down"]))
     announce = Announce()
@@ -553,7 +554,7 @@ async def test_a_later_caller_with_a_longer_bound_waits_only_what_is_left_of_it(
         await pair.recover(base_url=URL, api_key="none", wait_seconds=0.1, on_lost=announce)
     asyncio.get_running_loop().call_later(0.1, state.update, {"down": False})
     await pair.recover(base_url=URL, api_key="none", wait_seconds=5, on_lost=announce)
-    assert announce.count == 1
+    assert announce.count == 2
     assert pair._flight.outage is None  # ended well: the next drop is a new outage
 
 
@@ -641,6 +642,67 @@ async def test_a_new_root_turn_cancels_a_flight_every_caller_left(models, tmp_pa
     assert flight.cancelled() and pair._flight.current is None
     await asyncio.sleep(0)
     assert lifecycle._UNWINDING == set()
+
+
+class Said:
+    """An `on_lost` per caller that records which caller announced, in order."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def of(self, who: str):
+        async def announce() -> None:
+            self.lines.append(who)
+        return announce
+
+
+async def test_a_root_joining_a_childs_short_wait_announces_its_own_longer_one(monkeypatch):
+    """WR-19: the child (0.3 s of budget) announced "waiting up to 0.3s" and left; the root then waits up to
+    the whole bound on the same flight. Without a second line Discord and the phone would be told 0.3 s and
+    then wait silently: the root's longer wait is announced once."""
+    state = {"down": True}
+    monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(ModelsEndpoint(down=lambda: state["down"])))
+    said = Said()
+    pair = ServerRecovery(None, None, None)
+    with pytest.raises(TimeoutError):
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=30, on_lost=said.of("child"),
+                           leave_after=0.3)
+    assert said.lines == ["child"]
+    asyncio.get_running_loop().call_later(0.3, state.update, {"down": False})
+    await pair.recover(base_url=URL, api_key="none", wait_seconds=30, on_lost=said.of("root"))
+    assert said.lines == ["child", "root"]
+
+
+async def test_callers_with_the_same_wait_end_share_one_announcement(monkeypatch):
+    state = {"down": True}
+    monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(ModelsEndpoint(down=lambda: state["down"])))
+    said = Said()
+    pair = ServerRecovery(None, None, None)
+    first = asyncio.create_task(pair.recover(base_url=URL, api_key="none", wait_seconds=30,
+                                             on_lost=said.of("first")))
+    await asyncio.sleep(0.1)  # announced by now
+    second = asyncio.create_task(pair.recover(base_url=URL, api_key="none", wait_seconds=30,
+                                              on_lost=said.of("second")))
+    await asyncio.sleep(0.1)
+    state["down"] = False
+    await asyncio.wait_for(asyncio.gather(first, second), 2.0)
+    assert said.lines == ["first"]  # the second caller's wait ends where the first one's does
+
+
+async def test_a_shorter_joiner_says_nothing_more(monkeypatch):
+    state = {"down": True}
+    monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(ModelsEndpoint(down=lambda: state["down"])))
+    said = Said()
+    pair = ServerRecovery(None, None, None)
+    root = asyncio.create_task(pair.recover(base_url=URL, api_key="none", wait_seconds=30,
+                                            on_lost=said.of("root")))
+    await asyncio.sleep(0.1)
+    with pytest.raises(TimeoutError):
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=30, on_lost=said.of("child"),
+                           leave_after=0.2)
+    state["down"] = False
+    await asyncio.wait_for(root, 2.0)
+    assert said.lines == ["root"]  # "up to 30s" already covers the child's 0.2 s
 
 
 async def test_forgetting_the_outage_gives_the_next_drop_a_whole_new_flight(models, tmp_path):
