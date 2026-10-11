@@ -1156,6 +1156,13 @@ class AcpChannel(ChannelAdapter):
             return
         await self.send_message(event.summary)
 
+    async def send_stuck_reply(self, event: TurnFailed) -> None:
+        """A stuck turn's wrap-up, on the same terms as `on_task_complete`: only when nothing
+        streamed this turn, since a streaming provider has already typed it into the panel."""
+        if self._streamed_this_turn:
+            return
+        await super().send_stuck_reply(event)
+
     async def on_observation(self, event: Observation) -> None:
         """`Observation` → ACP `tool_call_update`, completed or failed with its output."""
         if self._conn is None or self._session_id is None:

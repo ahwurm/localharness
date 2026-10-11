@@ -1,8 +1,11 @@
 """A stuck turn is announced once (STUCK-04, D-04, D-40).
 
 The reply is the partial work and carries no stuck text; TurnFailed.detail is that reply; the
-default ChannelAdapter.on_turn_failed stays quiet for stuck_detected so Escalation, delivered by
-on_escalation, is the one notice. The bus still carries both events.
+default ChannelAdapter.on_turn_failed adds no stuck line for stuck_detected, so Escalation,
+delivered by on_escalation, is the one notice. It does deliver a ROOT turn's detail as a plain
+message (CR-51): a stuck turn publishes no TaskComplete, so that is the only way the wrap-up the
+loop spent a model call on reaches the terminal, Discord or (when nothing streamed) Zed. The bus
+still carries both events.
 """
 from __future__ import annotations
 
@@ -89,7 +92,8 @@ async def test_a_recording_channel_sees_exactly_one_error_for_a_stuck_turn(mock_
     error, _detail = chan.errors[0]
     assert "escalated: stuck_detected" in error
     assert not any("turn failed" in e for e, _ in chan.errors)
-    assert chan.sent == []
+    # CR-51: the reply reaches the person as a plain message, once, with no stuck text in it.
+    assert chan.sent == ["partial work"]
     # the bus still carries both events
     assert len(bus.history(event_types=[Escalation])) == 1
     assert len(bus.history(event_types=[TurnFailed])) == 1
@@ -119,3 +123,64 @@ async def test_other_turn_failed_reasons_behave_as_before():
         agent_id="kid", session_id="s", parent_id="p", reason="budget_exceeded", detail="x",
         iterations=4, duration_seconds=1.0))
     assert len(chan.sent) == 1 and "subagent kid failed (budget_exceeded)" in chan.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_root_reply_sends_nothing():
+    chan = _Recorder(bus=object())
+    await chan.on_turn_failed(TurnFailed(
+        agent_id="a", session_id="s", reason="stuck_detected", detail="  ",
+        iterations=4, duration_seconds=1.0))
+    assert chan.sent == [] and chan.errors == []
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_renders_a_stuck_turns_wrapup(tmp_path):
+    """CR-51 at the terminal: the REPL never prints run_turn's return value and does not stream
+    answer text, so the TurnFailed handler is the reply's only way onto the screen."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from localharness.channels.terminal import TERMINAL_THEME, TerminalChannel
+    from localharness.core.bus import EventBus
+
+    ch = TerminalChannel(EventBus(), {}, history_file=str(tmp_path / ".hist"))
+    ch._console = Console(file=StringIO(), force_terminal=False, width=120, theme=TERMINAL_THEME)
+    await ch.on_turn_failed(TurnFailed(
+        agent_id="root", session_id="s", reason="stuck_detected",
+        detail="Wrote parser.py; tests still failing on the date case.",
+        iterations=6, duration_seconds=1.0))
+    out = ch._console.file.getvalue()
+    assert "Wrote parser.py; tests still failing on the date case." in out
+    assert "turn failed" not in out and "stuck_detected" not in out
+
+
+def _acp(tmp_path):
+    from localharness.channels.acp import AcpChannel
+
+    class _Conn:
+        def __init__(self):
+            self.texts: list[str] = []
+
+        async def session_update(self, session_id, update, **kw):
+            self.texts.append(update.content.text)
+
+    ch = AcpChannel(config_dir=str(tmp_path / "config"))
+    ch._conn, ch._session_id = _Conn(), "sess"
+    return ch
+
+
+@pytest.mark.asyncio
+async def test_zed_gets_the_wrapup_when_nothing_streamed_and_never_twice(tmp_path):
+    failed = TurnFailed(agent_id="root", session_id="s", reason="stuck_detected",
+                        detail="partial work", iterations=4, duration_seconds=1.0)
+    ch = _acp(tmp_path)
+    ch._streamed_this_turn = False
+    await ch.on_turn_failed(failed)
+    assert ch._conn.texts == ["partial work"]
+
+    streamed = _acp(tmp_path)
+    streamed._streamed_this_turn = True  # the wrap-up was typed into the panel as it generated
+    await streamed.on_turn_failed(failed)
+    assert streamed._conn.texts == []
