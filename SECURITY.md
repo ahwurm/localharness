@@ -278,6 +278,19 @@ summary. A project's `stuck_detector` section is announced in the start summary 
 agent file that shadows one of yours, and through the log when it overlays a built-in agent, as the
 `kill_file` case does for its own key.
 
+### Settings a project may only lower
+
+A project's `.localharness/` may make some budgets smaller but never larger. A larger value, a value
+that is not a number or one outside the setting's range is ignored, the harness prints a warning
+naming the key and the file, and your value (or the shipped default, where your global config sets
+none) stands. A `null` keeps your value without a warning. These are all of them:
+
+- `org.children_budget.<name>.actions` and `.minutes`, for each built-in child agent and for
+  `default` (the ceiling of an agent you define): the most model round-trips and wall-clock minutes
+  a child may spend
+- `org.children_budget.lookup_share` and `org.children_budget.review_share`: the part of a parent's
+  remaining budget a delegated child receives
+
 ## Human approval gate
 
 From v0.14 every tool call of every agent — subagents included — passes one decision function

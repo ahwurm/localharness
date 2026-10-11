@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import reprlib as repr_lib
@@ -21,6 +22,7 @@ from .models import (
     LEGACY_MODE_ALIASES,
     AgentConfig,
     BudgetConfig,
+    ChildrenBudgetConfig,
     DivisionConfig,
     HarnessConfig,
     OrgConfig,
@@ -666,6 +668,97 @@ def _narrow_harness_global_only(merged: dict, sources: tuple[dict, ...],
         note=lambda path, file, ws: f"ignoring {path} in {file}: only the global config may set it")
 
 
+_CHILD_ENTRIES = ("explore", "web_researcher", "search_verifier", "cruncher", "chunk_summarizer",
+                  "default")
+"""The `org.children_budget` entries, `default` included on purpose, each with `actions` and
+`minutes`."""
+
+HARNESS_LOWER_ONLY_FIELDS: frozenset[str] = frozenset(
+    {f"org.children_budget.{entry}.{key}" for entry in _CHILD_ENTRIES for key in ("actions", "minutes")}
+    | {"org.children_budget.lookup_share", "org.children_budget.review_share"})
+"""The core harness keys a project may make smaller and never larger: each child agent's own
+ceiling and the shares a delegated child takes of its parent's budget. A workspace value is kept
+only when it is a finite number not above what the global layers set (or, where they are silent,
+the shipped default); a larger, non-numeric or out-of-range one is dropped with a warning naming
+the key and the file, and a `null` is dropped quietly. The window-ratio phase adds its paths here."""
+
+# The bounds the models give these fields. Stated once; a workspace value above the baseline is
+# refused whatever its bound, so the upper bound only matters to a value that carries no baseline.
+_ACTIONS_BOUNDS = {"ge": 1, "le": 10_000}
+_MINUTES_BOUNDS = {"gt": 0, "le": 1440.0}
+_SHARE_BOUNDS = {"gt": 0, "le": 1.0}
+
+
+def _finite_int(v: Any, *, ge: Optional[int] = None, le: Optional[int] = None) -> bool:
+    """Is `v` a whole number (a bool is not one) inside the bounds given? Judged on a raw YAML
+    value, where a string, a list or `true` can sit in a numeric field."""
+    return (isinstance(v, int) and not isinstance(v, bool)
+            and (ge is None or v >= ge) and (le is None or v <= le))
+
+
+def _finite_number(v: Any, *, gt: Optional[float] = None, ge: Optional[float] = None,
+                   le: Optional[float] = None) -> bool:
+    """Is `v` an int or float (a bool is neither), finite, and inside the bounds given?"""
+    return (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            and (gt is None or v > gt) and (ge is None or v >= ge) and (le is None or v <= le))
+
+
+def _budget_value_ok(parts: list[str], v: Any) -> bool:
+    """Is `v` a usable value at this `org.children_budget` path, on the field's own bounds?"""
+    if parts[-1] == "actions":
+        return _finite_int(v, **_ACTIONS_BOUNDS)
+    return _finite_number(v, **(_MINUTES_BOUNDS if parts[-1] == "minutes" else _SHARE_BOUNDS))
+
+
+_CHILDREN_BUDGET_DEFAULTS = ChildrenBudgetConfig()
+
+
+def _children_budget_default(parts: list[str]) -> int | float:
+    """The shipped value at an `org.children_budget` path, read off a default instance. Never
+    `_model_default`: that descends into `ChildBudget`, whose fields are required, and returns
+    _UNSET, which would leave the lower-only rule without a bound."""
+    node: Any = _CHILDREN_BUDGET_DEFAULTS
+    for part in parts[2:]:
+        node = getattr(node, part)
+    return node
+
+
+def _lower_only_baseline(parts: list[str], machine: Any) -> int | float:
+    """What a project may not exceed at this path: the global layers' value when it is usable,
+    else the shipped default. Always a finite `int` (actions) or `float` (minutes, shares), so the
+    kind of a value to accept is read off it."""
+    allowed = machine if _budget_value_ok(parts, machine) else _children_budget_default(parts)
+    return allowed if parts[-1] == "actions" else float(allowed)
+
+
+def _accepted_lower(ws: Any, allowed: int | float) -> bool:
+    """Is this workspace value absent, or a finite number of the baseline's kind not above it?
+    The baseline is inside the field's bounds, so only the lower bound is left to check."""
+    if ws is _UNSET:
+        return True
+    ok = _finite_int(ws, ge=1) if isinstance(allowed, int) else _finite_number(ws, gt=0)
+    return ok and ws <= allowed
+
+
+def _guard_children_budget_sections(merged: dict, sources: tuple[dict, ...],
+                                    ws_files: tuple[str, str]) -> tuple[dict, list[str]]:
+    """Restore `org.children_budget`, or one of its entries, to the global layers' when a workspace
+    source set it to something that is not a mapping (`5`, a string, `null`): the merged config
+    would not validate. The block is judged first, then each entry. One warning per path and
+    file. Never mutates."""
+    global_view = deep_merge(sources[0], sources[1])
+    warnings: list[str] = []
+    for parts in [["org", "children_budget"]] + [["org", "children_budget", e] for e in _CHILD_ENTRIES]:
+        path = ".".join(parts)
+        for source, file in zip(sources[2:], ws_files):
+            value = _dig(source, parts)
+            if value is _UNSET or isinstance(value, dict):
+                continue
+            warnings.append(f"ignoring {path} in {file}: a project may only lower it")
+            merged = _put(merged, parts, _dig(global_view, parts))
+    return merged, warnings
+
+
 def _gate_default(ask_field: str) -> Any:
     """The shipped `GateSettings` default behind one `AskConfig` field, or None.
 
@@ -1003,6 +1096,15 @@ class ConfigLoader:
         # and a log record would reach the terminal a second time through logging.lastResort.
         ws_files = self.plugin_layer_files()[2:]
         merged, self.harness_warnings = _narrow_harness_global_only(merged, sources, ws_files)
+        # A project may only lower a child's ceiling or a share (the raw sources, before the
+        # merge has folded a `null` into a value). Sections that are not mappings give way first.
+        merged, section_notes = _guard_children_budget_sections(merged, sources, ws_files)
+        merged, lower_notes = _narrow_raw(
+            merged, sources, ws_files, HARNESS_LOWER_ONLY_FIELDS,
+            baseline=_lower_only_baseline, accept=_accepted_lower,
+            note=lambda path, file, ws: None if ws is None else
+            f"ignoring {path} in {file}: a project may only lower it")
+        self.harness_warnings += section_notes + lower_notes
         # An overrides.yaml `extra_endpoints` REPLACES config.yaml's list wholesale (lists do not
         # merge), so the peers config.yaml names vanish without a word. Say so once — only over a
         # non-empty list (the `[]` an `init`-written config.yaml holds shadows nothing) and only when a
