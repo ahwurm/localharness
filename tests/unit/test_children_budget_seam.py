@@ -646,9 +646,11 @@ async def test_the_overlay_ceiling_is_the_ceiling_the_share_is_capped_by(recorde
     assert recorded_loops[0]["budget_labels"].actions is None  # the overlay's own value bound it
 
 
-async def test_the_cruncher_leaves_and_combines_get_no_fallback_and_never_read_the_parent(
-    recorded_loops, bus
-):
+async def test_the_cruncher_leaves_and_combines_take_a_share_of_a_finite_parent(recorded_loops, bus):
+    """WR-51: the cruncher path used to bypass the seam (no parent read, no share, no fallback), so
+    a remote unattended root with little left could dispatch N leaves plus a 6-action, 20-minute
+    combine. Every leaf and combine turn now goes through `_child_budget`: under a parent with
+    (20, 4.0) left and the lookup share 0.25, each takes min(share x remaining, its ceiling)."""
     from localharness.agent.context import ContentStore
 
     store = ContentStore()
@@ -657,11 +659,33 @@ async def test_the_cruncher_leaves_and_combines_get_no_fallback_and_never_read_t
     runner = await _runner(
         bus, parent_store=store, parent_remaining_fn=lambda: reads.append(1) or (20, 4.0))
     await runner("cruncher", "what does it say?", [handle])
-    assert reads == []
+    assert len(reads) == len(recorded_loops) >= 2  # the parent is read once per child loop
     assert {c["config"].name for c in recorded_loops} == {"chunk-summarizer", "cruncher"}
-    assert [c.get("budget_fallback") for c in recorded_loops] == [None] * len(recorded_loops)
+    assert {c["config"].name: _pair(c) for c in recorded_loops} == {
+        "chunk-summarizer": (3, 1.0), "cruncher": (5, 1.0)}
+    for c in recorded_loops:
+        assert c["budget_fallback"] is not None
+        assert c["budget_labels"].minutes == "org.children_budget.lookup_share"
+    combine = next(c for c in recorded_loops if c["config"].name == "cruncher")
+    assert combine["budget_labels"].actions == "org.children_budget.lookup_share"
+    leaf = next(c for c in recorded_loops if c["config"].name == "chunk-summarizer")
+    assert leaf["budget_labels"].actions is None  # its own (builder-written) ceiling bound it
+    assert leaf["budget_labels"].fallback == "org.children_budget.chunk_summarizer"
+
+
+async def test_the_cruncher_under_an_infinite_parent_keeps_its_rungs_as_the_fallback(
+    recorded_loops, bus
+):
+    from localharness.agent.context import ContentStore
+
+    store = ContentStore()
+    handle = store.put("a granted document")
+    runner = await _runner(bus, parent_store=store, parent_remaining_fn=lambda: (0, 0.0))
+    await runner("cruncher", "what does it say?", [handle], shape="review")
     assert {c["config"].name: _pair(c) for c in recorded_loops} == {
         "chunk-summarizer": (3, 6.0), "cruncher": (6, 20.0)}
+    assert {c["config"].name: (c["budget_fallback"].actions, c["budget_fallback"].minutes)
+            for c in recorded_loops} == {"chunk-summarizer": (3, 6.0), "cruncher": (6, 20.0)}
 
 
 # --- the nested runner reads the child loop's own remainder -----------------------------------------
