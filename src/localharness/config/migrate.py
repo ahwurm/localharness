@@ -68,7 +68,7 @@ import yaml
 
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION
 from localharness.config.models import HarnessConfig, PermissionConfig
-from localharness.config.overlay import atomic_write_text, restrict_config_file
+from localharness.config.overlay import atomic_write_text, refuse_unwritable, restrict_config_file
 from localharness.config.plugin_sections import core_harness_view
 from localharness.config.redact import secret_values, validation_text, yaml_problem, yaml_where
 from localharness.core.private_files import touch_private
@@ -477,14 +477,26 @@ def _write_with_backup(path: Path, original: bytes, updated: dict) -> Path:
     rewritten file no longer exposes. Older backups of this same file are pruned afterwards
     (:data:`BACKUP_RETENTION`). The rewrite is atomic (`overlay.atomic_write_text`): a crash,
     Ctrl-C or a full disk leaves the old file or the new one, never a truncated one (WR-01).
+
+    A file that will be refused is refused BEFORE its backup exists, and a backup made for a write
+    that then fails is removed again: the atomic write left the original whole, so that copy is no
+    undo for anything, and a file that keeps failing (a read-only agent file is retried on every
+    start) would otherwise gain one stray copy per attempt, which pruning never reaches (WR-20).
     """
+    refuse_unwritable(path)
     stamp = datetime.now().strftime(BACKUP_STAMP_FORMAT)
     backup = path.with_name(f"{path.name}{BACKUP_INFIX}{stamp}")
-    touch_private(backup)
-    backup.write_bytes(original)
-    restrict_config_file(backup)
-    atomic_write_text(path, yaml.safe_dump(updated, default_flow_style=False, sort_keys=False),
-                      refuse_read_only=True)
+    made = not backup.exists()  # a backup of the same second from an earlier write is never removed
+    try:
+        touch_private(backup)
+        backup.write_bytes(original)
+        restrict_config_file(backup)
+        atomic_write_text(path, yaml.safe_dump(updated, default_flow_style=False, sort_keys=False),
+                          refuse_read_only=True)
+    except BaseException:
+        if made:
+            backup.unlink(missing_ok=True)
+        raise
     restrict_config_file(path)
     _prune_backups(path, keep=backup)
     return backup
