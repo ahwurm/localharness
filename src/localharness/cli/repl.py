@@ -2114,6 +2114,13 @@ class OrchestratorREPL:
         if managed.runtime == "llamacpp" and target != prim_served and not typed_gguf:
             await self._send_info(NOT_A_GGUF_LINE.format(target=target))
             return
+        # A process the harness did not launch holding the primary's port ends the restart in the same
+        # one sentence, before anything is launched or stopped: a launch beside it would be answered by
+        # the foreign server and reported as ready (WR-52). Off the loop, like the cold-peer guard.
+        incumbent = await asyncio.to_thread(self._foreign_incumbent, managed, target)
+        if incumbent is not None:
+            await self._send_info(incumbent)
+            return
         # Downloaded-but-not-served → managed restart. The managed vLLM serves at the PRIMARY
         # provider base_url; if we're currently on a peer (an in-session cross-endpoint switch),
         # re-point the client back FIRST so the restart's probe + wait_ready target the vLLM, not
