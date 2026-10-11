@@ -108,6 +108,7 @@ async def test_a_relaunch_surfaces_the_decisions_note_once(tmp_path, boundaries)
     await repl._build_relaunch(
         peer.lifecycle, PEER_URL, repl._server_config_dir, {"api_key": SENTINEL}, "llamacpp-local",
         "llamacpp")()
+    await repl._drain_relaunch_reports()  # the report is sent after the relaunch returns (WR-17)
 
     expected = (f"--api-key-file {key_dir} unreadable: not a regular file — "
                 "launched on 127.0.0.1 for this run")
@@ -162,6 +163,7 @@ async def test_the_window_is_announced_with_the_endpoint_and_served_model(tmp_pa
 
     live = await _primary_relaunch(repl, primary, ptype="llamacpp")()
     await _primary_relaunch(repl, primary, ptype=None)()
+    await repl._drain_relaunch_reports()  # the report is sent after the relaunch returns (WR-17)
 
     assert seen[0] == (live, "llamacpp", "qwen-gguf")
     assert seen[1][1:] == ("llamacpp", "qwen-gguf")  # no endpoint type: the spec's runtime
@@ -188,6 +190,73 @@ async def test_a_report_that_fails_never_fails_the_relaunch_that_succeeded(tmp_p
 
     assert live is not None and live.served_models == ["qwen-gguf"]
     assert len(boundaries.cmds) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_slow_report_is_not_part_of_the_relaunch(tmp_path, boundaries):
+    """WR-17: the relaunch returns as soon as activate does; its window lines are sent afterwards, so a
+    slow channel never holds the recovery flight (and its bound) open."""
+    primary = _llama_primary()
+    _, repl, _, _ = _session(tmp_path, _launchable_peer(), server=primary)
+    sent: list[str] = []
+
+    async def slow_window(live, provider_type, model_id):
+        await asyncio.sleep(0.5)
+        sent.append(model_id)
+
+    repl._announce_window = slow_window
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    live = await _primary_relaunch(repl, primary)()
+    assert loop.time() - started < 0.4
+    assert live is not None and sent == []
+    await repl._drain_relaunch_reports()
+    assert sent == ["qwen-gguf"]  # still said, best-effort, after the relaunch
+
+
+@pytest.mark.asyncio
+async def test_a_relaunch_whose_report_crosses_the_bound_is_still_a_success(tmp_path, boundaries, monkeypatch):
+    """WR-17 through a real flight: activate returns at about 0.3 s of a 0.5 s bound and the report takes
+    0.5 s more. The wait ends well; it is not "the model server did not come back"."""
+    from tests.unit.reconnect_support import write_dead_pidfile
+
+    primary = _llama_primary()
+    _, repl, _, _ = _session(tmp_path, _launchable_peer(), server=primary)
+    cfg = repl._server_config_dir
+    monkeypatch.setattr(provider_client, "_QUEUE_VISIBILITY_SECONDS", 0.02)
+    write_dead_pidfile(cfg)
+    launched: list[int] = []
+
+    async def slow_activate(self, spec, config_dir, base_url, **kw):
+        await asyncio.sleep(0.3)  # activate's own readiness wait saw /models answer at about 0.3 s
+        write_live_pidfile(cfg)
+        launched.append(1)
+        return lifecycle.LiveEndpoint(base_url=base_url, served_models=["qwen-gguf"], handle=1)
+
+    monkeypatch.setattr(lifecycle.SpawnedProcessStrategy, "activate", slow_activate)
+
+    async def wait_ready(base_url, config_dir=None, **kw):
+        if managed_server.server_pid(cfg) is None:
+            if config_dir is not None:
+                raise RuntimeError("llama.cpp exited during startup. Log tail:\n")
+            raise TimeoutError("nothing answers")  # the look at the address before relaunching
+        return ["qwen-gguf"]
+
+    monkeypatch.setattr(managed_server, "wait_ready", wait_ready)
+
+    async def slow_window(live, provider_type, model_id):
+        await asyncio.sleep(0.5)  # crosses the 0.5 s bound
+
+    repl._announce_window = slow_window
+    pair = lifecycle.ServerRecovery(PRIMARY_URL, cfg, _primary_relaunch(repl, primary), "llamacpp")
+
+    async def nobody():
+        return None
+
+    await asyncio.wait_for(pair.recover(base_url=PRIMARY_URL, api_key="none", wait_seconds=0.5,
+                                        on_lost=nobody), 5)
+    await repl._drain_relaunch_reports()
+    assert launched == [1]
 
 
 @pytest.mark.asyncio
