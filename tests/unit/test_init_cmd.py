@@ -897,3 +897,58 @@ def test_init_keeps_a_child_ceiling_share_or_knob_that_differs(tmp_path):
     assert data["org"]["children_budget"] == {"explore": {"actions": 4, "minutes": 3.0},
                                               "review_share": 0.4}
     assert data["channels"]["unattended_max_actions"] == 40
+
+
+# IN-04: a re-init before the first upgraded start still clears init's values from old agent files.
+
+
+def _old_agent(config_dir):
+    import yaml
+
+    path = config_dir / "agents" / "scout.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump({"name": "scout", "role": "r", "permissions": {
+        "budget": {"max_actions": 100}, "allow_patterns": []}}), encoding="utf-8")
+    return path
+
+
+def _old_config(config_dir, stamp):
+    import yaml
+
+    perms = {} if stamp is None else {"init_nulls_revision": stamp}
+    (config_dir / "config.yaml").write_text(yaml.safe_dump({
+        "version": "1", "provider": _WR06_PROVIDER, "org": {"permissions": perms}}), encoding="utf-8")
+
+
+def test_a_reinit_over_an_unmigrated_install_clears_inits_values_in_old_agent_files(tmp_path):
+    import yaml
+
+    from localharness.cli.init_cmd import _write_harness
+    from localharness.config.defaults import CURRENT_INIT_NULLS_REVISION
+    from localharness.config.migrate import BACKUP_INFIX
+    from localharness.config.models import HarnessConfig, OrgConfig, PermissionConfig
+
+    _old_config(tmp_path, None)
+    agent = _old_agent(tmp_path)
+    _write_harness(tmp_path, HarnessConfig.model_validate({
+        "version": "1", "provider": _WR06_PROVIDER,
+        "org": OrgConfig(permissions=PermissionConfig(
+            init_nulls_revision=CURRENT_INIT_NULLS_REVISION)).model_dump()}), True, force=True)
+
+    data = yaml.safe_load(agent.read_text(encoding="utf-8"))
+    assert data["permissions"]["budget"]["max_actions"] is None
+    assert data["permissions"]["allow_patterns"] == []  # only init's values: migrate owns the rest
+    assert len(list(agent.parent.glob(f"scout.yaml{BACKUP_INFIX}*"))) == 1
+
+
+def test_a_reinit_over_a_migrated_install_leaves_agent_files_alone(tmp_path):
+    from localharness.cli.init_cmd import _write_harness
+    from localharness.config.defaults import CURRENT_INIT_NULLS_REVISION
+    from localharness.config.models import HarnessConfig
+
+    _old_config(tmp_path, CURRENT_INIT_NULLS_REVISION)
+    agent = _old_agent(tmp_path)
+    before = agent.read_bytes()
+    _write_harness(tmp_path, HarnessConfig.model_validate(
+        {"version": "1", "provider": _WR06_PROVIDER}), True, force=True)
+    assert agent.read_bytes() == before  # a hand-set 100 after the step ran is the person's
