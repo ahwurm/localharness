@@ -237,6 +237,36 @@ def _third_model(live) -> None:  # noqa: F811
     gguf(live.home / "models" / "gguf" / "C.gguf")
 
 
+def test_a_journal_record_takes_the_unit_files_environment_when_both_name_the_same_model(live):  # noqa: F811
+    """WR-04: the journal knows no Environment=; the unit file beside it does."""
+    _nothing_answers(live)
+    path = _unit_file(live, "Environment=LLAMA_ARG_N_PARALLEL=2",
+                      f"ExecStart={live.bin} -m {live.model_a} --alias qwen-27b --host 0.0.0.0 --port 8080")
+    _systemd(live, (UNIT, "disabled", str(path), ""))
+    _journal(live)
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert live.written()["server"]["env"] == {"LLAMA_ARG_N_PARALLEL": "2"}
+    assert "env: LLAMA_ARG_N_PARALLEL=2" in block_of(result)
+    assert not any("not read" in line for line in lines_of(result))
+
+
+def test_an_environment_a_unit_file_keeps_out_of_reach_is_named_in_the_block(live):  # noqa: F811
+    _nothing_answers(live)
+    path = _unit_file(live, "EnvironmentFile=/etc/llama.env",
+                      f"ExecStart={live.bin} -m {live.model_a} --alias qwen-27b --host 0.0.0.0 --port 8080")
+    _systemd(live, (UNIT, "disabled", str(path), ""))
+    _journal(live)
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert f"environment of {UNIT} not read (uses EnvironmentFile=)" in block_of(result)
+    assert live.written()["server"]["port"] == 8080
+
+
 def test_the_unit_file_answers_when_the_journal_does_not_and_a_key_in_it_is_a_key(live):  # noqa: F811
     _nothing_answers(live)
     path = _unit_file(live, "WorkingDirectory=%h", "Environment=LLAMA_API_KEY=K LLAMA_ARG_N_GPU_LAYERS=99",

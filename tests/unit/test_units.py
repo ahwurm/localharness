@@ -369,6 +369,51 @@ def test_unit_record_the_journal_skip_wins_when_it_names_a_model(fake_systemd, t
     assert isinstance(skip, units.Skip) and "relative path (rel/a.gguf)" in skip.reason
 
 
+def test_a_journal_record_takes_the_environment_and_cwd_of_a_unit_file_naming_the_same_model(
+        fake_systemd, tmp_path, home):
+    """WR-04: the journal knows neither; the unit file does."""
+    model = _model(tmp_path)
+    fake_systemd.journal([{"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model} -ngl 9"}])
+    frag = _unit_file(tmp_path, _service(
+        "WorkingDirectory=/srv/llama", "Environment=LLAMA_ARG_PORT=8090 LLAMA_API_KEY=s3cret",
+        f"ExecStart=/b/llama-server -m {model} -ngl 9"))
+    source, rec = units.unit_record(_state(fragment=frag))
+    assert source == "journal"
+    assert dict(rec.environ) == {"LLAMA_ARG_PORT": "8090", "LLAMA_API_KEY": "s3cret"}
+    assert rec.cwd == "/srv/llama" and rec.exe == "/b/llama-server"
+    assert units.journal_environment_gap(_state(fragment=frag), rec) is None
+
+
+def test_a_unit_file_that_spells_the_same_words_gives_the_exactly_quoted_tokens(fake_systemd, tmp_path, home):
+    """WR-02: `--alias "my model"` reads as three words in the journal and as two in the unit file."""
+    model = _model(tmp_path)
+    fake_systemd.journal([{"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model} --alias my model"}])
+    frag = _unit_file(tmp_path, _service(f'ExecStart=/b/llama-server -m {model} --alias "my model"'))
+    _, rec = units.unit_record(_state(fragment=frag))
+    assert rec.argv[-2:] == ("--alias", "my model")
+
+
+def test_a_unit_file_that_names_another_model_leaves_the_journal_record_alone(fake_systemd, tmp_path, home):
+    model = _model(tmp_path)
+    fake_systemd.journal([{"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model}"}])
+    frag = _unit_file(tmp_path, _service("Environment=LLAMA_ARG_PORT=1", "ExecStart=/b/llama-server -m /m/other.gguf"))
+    _, rec = units.unit_record(_state(fragment=frag))
+    assert rec.environ is None and rec.cwd is None
+    assert units.journal_environment_gap(_state(fragment=frag), rec) == "names another model"
+
+
+def test_the_environment_a_unit_file_hides_is_named_not_dropped_silently(fake_systemd, tmp_path, home):
+    model = _model(tmp_path)
+    fake_systemd.journal([{"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model}"}])
+    frag = _unit_file(tmp_path, _service("EnvironmentFile=/etc/llama.env", f"ExecStart=/b/llama-server -m {model}"))
+    _, rec = units.unit_record(_state(fragment=frag))
+    assert rec.environ is None
+    assert units.journal_environment_gap(_state(fragment=frag), rec) == "uses EnvironmentFile="
+    drop = _state(fragment=frag, drop_ins="/h/llm.service.d/o.conf")
+    assert units.journal_environment_gap(drop, rec) == "has drop-ins (/h/llm.service.d/o.conf)"
+    assert units.journal_environment_gap(_state(), rec) is None  # no unit file: nothing to say
+
+
 # ------------------------------------------------------------------------------- user_units
 
 
