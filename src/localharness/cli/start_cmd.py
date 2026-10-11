@@ -9,10 +9,10 @@ import logging
 import os
 import re
 import socket
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 import yaml
@@ -38,6 +38,9 @@ from localharness.core.private_files import touch_private
 from localharness.core.which import which_outside_cwd
 from localharness.plugins.channels import (OWN_COMMAND, accepted_channels, channel_names,
                                            plugin_channel_names)
+
+if TYPE_CHECKING:
+    from localharness.provider.lifecycle import ServerRecovery
 
 console = Console()
 err_console = Console(stderr=True)
@@ -664,6 +667,23 @@ def _sense_before_trust(global_dir: Path, *, can_ask: bool, path_binary: str | N
     return SensedStart(launching, annotations, converted, path_written, undo_line, ini_written, ini_prior)
 
 
+def _server_recovery_supplier(repl_cell: list) -> Callable[[], ServerRecovery]:
+    """The one reconnect supplier `start` hands the root loop and the delegation runner (D-21).
+
+    The REPL exists only after the loop and the runner are built, so the supplier is late-bound the
+    way `get_parent_session_id` is: it answers `repl_cell[0].server_recovery()` once the cell holds a
+    REPL, and until then (and for ACP, which returns before any REPL is built) one shared poll-only
+    ``ServerRecovery(None, None, None)``. The shared pair is the same object on every call, so
+    `ProviderLost` is still published once per death."""
+    from localharness.provider.lifecycle import ServerRecovery
+    shared = ServerRecovery(None, None, None)
+
+    def _supplier() -> "ServerRecovery":
+        return repl_cell[0].server_recovery() if repl_cell else shared
+
+    return _supplier
+
+
 async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launch_key: dict[str, str],
                                 *, path_binary: str | None = None, autosense: Any = None,
                                 endpoint_out: list | None = None,
@@ -686,13 +706,17 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     joins the posture phrase when the launch really binds beyond loopback, its ``lines`` follow the
     announcement once, and ``printed`` is set. The waiting and refused branches print none of it."""
     from localharness.provider import server as managed_server
-    from localharness.provider.lifecycle import strategy_for
+    from localharness.provider.lifecycle import LAUNCH_LOCK_WAIT_LINE, launch_lock, strategy_for
     strategy = strategy_for(srv)
     label = managed_server.RUNTIME_LABELS.get(srv.runtime, srv.runtime)
-    if _managed_server_running(strategy, srv, global_dir):
+
+    async def _wait_for_loading_server() -> None:
         console.print(f"Managed {label} is still loading — waiting...")
         # Already launched (a live pidfile / running container) — only wait for readiness.
         await managed_server.wait_ready(base_url, config_dir=global_dir, **launch_key)
+
+    if _managed_server_running(strategy, srv, global_dir):
+        await _wait_for_loading_server()
         return None
     keyed = bool(launch_key)
     decision = managed_server.launch_decision(srv, keyed)
@@ -703,19 +727,34 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     if notes is not None and notes.suffix and exposed:
         posture = f"{posture or 'every interface'} — {notes.suffix}"
     detail = f"{posture}; " if posture else ""
-    console.print(f"Managed {label} is not running — starting it ({detail}model load can take several minutes)...",
-                  markup=False)
-    if notes is not None:
-        for line in notes.lines:
-            err_console.print(line, markup=False, soft_wrap=True)
-        notes.printed = True
-    if decision.note:
-        err_console.print(decision.note, markup=False, soft_wrap=True)
-    # activate = serve_command → start_server → wait_ready (launch + readiness) via the lifecycle
-    # strategy. The off-loop verified-stop wrapper lives in the strategy, not this launch path.
-    live = await strategy.activate(srv, global_dir, base_url, autosense=autosense, **launch_key)
-    if endpoint_out is not None:
-        endpoint_out.append(live)
+
+    async def _say_launch_lock_wait() -> None:
+        err_console.print(LAUNCH_LOCK_WAIT_LINE, markup=False, soft_wrap=True)
+
+    # D-27 item 1: the launch is taken under the one launch lock, so another LocalHarness process
+    # that is launching the same server (the REPL's relaunch, a second `start`) cannot overwrite the
+    # one pidfile. The refusal above was answered before the lock: a refused launch never touches it.
+    loading = False
+    async with launch_lock(global_dir, on_wait=_say_launch_lock_wait):
+        if _managed_server_running(strategy, srv, global_dir):
+            loading = True  # someone else brought it up while we waited for the lock: attach, never launch
+        else:
+            console.print(
+                f"Managed {label} is not running — starting it ({detail}model load can take several minutes)...",
+                markup=False)
+            if notes is not None:
+                for line in notes.lines:
+                    err_console.print(line, markup=False, soft_wrap=True)
+                notes.printed = True
+            if decision.note:
+                err_console.print(decision.note, markup=False, soft_wrap=True)
+            # activate = serve_command → start_server → wait_ready (launch + readiness) via the lifecycle
+            # strategy. The off-loop verified-stop wrapper lives in the strategy, not this launch path.
+            live = await strategy.activate(srv, global_dir, base_url, autosense=autosense, **launch_key)
+            if endpoint_out is not None:
+                endpoint_out.append(live)
+    if loading:
+        await _wait_for_loading_server()
     return None
 
 
@@ -1951,6 +1990,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         max_tokens=clamp_response_tokens(_cfg_window, _output_cap),
         tool_call_mode=probed_mode or "native",
         queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling
+        # D-41: the reconnect bound reaches the client the root loop and every child share; without
+        # this line a real session keeps the LLMConfig default 0.0 (reconnect off).
+        reconnect_wait_seconds=provider.reconnect_wait_seconds,
         provider_type=provider.provider_type,  # keys the measured-speed ledger (speed_stats)
         config_dir=cfg_path,  # …and WRITES it where the /model picker reads it (this session's dir)
     )
@@ -2331,6 +2373,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         available_agent_names = ["explore", "web-researcher", "cruncher",
                                  "search-verifier"] + [c.name for c in card_registry.all_cards()]
 
+        # D-21: ONE supplier for the root loop and every child; the REPL fills the cell below.
+        repl_cell: list = []
+        server_recovery_fn = _server_recovery_supplier(repl_cell)
         _run_agent = make_explore_agent_runner(
             llm=llm,
             bus=bus,
@@ -2375,6 +2420,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             effort_ratios=_effort_ratios,
             # D-34: the value the session loop below is built with (the loop does not exist yet).
             template_margin_ratio=harness.autosense.template_margin_ratio,
+            server_recovery=server_recovery_fn,
         )
 
         agent_tool = AgentTool(
@@ -2417,6 +2463,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # "default" is the org id the store is built with. A workspace can neither rewrite nor
             # blank the org's safety voice.
             guardrails_path=cfg_path / "orgs" / "default" / "GUARDRAILS.md",
+            # D-21: the same supplier the runner hands every child; late-bound to the REPL below (ACP
+            # never builds one, so its loop shares the poll-only pair).
+            server_recovery=server_recovery_fn,
             # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
             # prompt's memory section.
             memory_slot=memory_slot,
@@ -2703,6 +2752,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             launch_lines=tuple(pending),
         )
 
+        repl_cell.append(repl)  # late binding: the supplier now answers repl.server_recovery()
         await repl.run()
         request = repl.restart_request or (
             SLEEP_ACTION if mobile_channel is not None and mobile_channel.sleeping else None)
