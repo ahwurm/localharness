@@ -108,6 +108,17 @@ def test_a_credential_spelled_out_of_llamas_grammar_is_still_never_kept():
     assert not masked.keys and masked.refused is None
 
 
+def test_a_credential_valued_key_is_never_kept_and_makes_the_import_attach_only():
+    doc = '{"mcpServers":{"x":{"headers":{"Authorization":"Bearer SECRET123"}}}}'
+    for key in ("mcp-servers-json", "LLAMA_ARG_MCP_SERVERS_JSON", "some-token", "LLAMA_ARG_X_SECRET"):
+        masked = mask_config_ini(f"ctx-size = 3\n{key} = {doc}\n".encode())
+        assert masked.kept == "ctx-size = 3\n"
+        assert masked.keyshaped == key
+        assert attach(proc(), ini_read(f"ctx-size = 3\n{key} = {doc}\n")) \
+            == f"holds a key the import cannot place ({key})"
+    assert mask_config_ini(b"ctx-size = 3\n").keyshaped is None
+
+
 def test_text_that_is_not_utf8_masks_to_nothing():
     assert mask_config_ini(b"ctx-size = \xff\xfe\n") == IniImport("", {}, None)
 
