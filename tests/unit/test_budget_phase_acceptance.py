@@ -340,3 +340,114 @@ def test_a_higher_children_budget_value_is_put_back_with_the_warning(tmp_path):
     budget = sub.build_explore_config(
         budget=harness.org.children_budget.for_name("explore")).permissions.budget
     assert (budget.max_actions, budget.max_duration_minutes) == (8, 3.0)
+
+
+# =========================================================================== criterion 5: migration, init, cards
+
+from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
+
+from typer.testing import CliRunner  # noqa: E402
+
+from localharness.cli.app import app  # noqa: E402
+from localharness.config import migrate  # noqa: E402
+from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION  # noqa: E402
+from localharness.orchestrator.cards import AgentCardRegistry  # noqa: E402
+from localharness.provider.client import CapabilityResult  # noqa: E402
+from localharness.provider.detector import DetectorResult  # noqa: E402
+
+_SERVER = {"runtime": "llamacpp", "launch": "binary", "binary": "/x/llama-server",
+           "model": "/x/m.gguf", "port": 8081}
+
+
+def test_a_migrated_install_reaches_the_uncapped_attended_root(tmp_path, mock_llm_client, bus):
+    """Criterion 5 / D-26 / D-62: a 0.17 config.yaml (with a `server:` block, init's three values)
+    plus a pre-v0.14 agents/orchestrator.yaml carrying max_actions 100 is migrated; the orchestrator
+    then loads with max_actions None, and a loop on an attended terminal gate has no action limit.
+    The 100 an old install carries into an agent comes from that agent file, never from config.yaml's
+    org budget, so the migration has to reach the sidecar."""
+    g = tmp_path / "global"
+    cfg_file = g / "config.yaml"
+    _put(cfg_file, {
+        "version": "1", "provider": _PROVIDER, "server": dict(_SERVER),
+        "org": {"permissions": {"defaults_revision": CURRENT_DEFAULTS_REVISION,
+                                "budget": {"max_actions": 100}},
+                "context": {"max_tool_output_chars": 32000,
+                            "tool_result_evict_threshold_chars": 8000}},
+    })
+    _put(g / "agents" / "orchestrator.yaml", {
+        "name": "orchestrator", "role": "Run the team.", "model": "inherit",
+        "permissions": {"mode": "auto", "budget": {"max_actions": 100}, "allow_patterns": []},
+        "context": {"max_tool_output_chars": 32000, "tool_result_evict_threshold_chars": 8000},
+    })
+
+    before = ConfigLoader(config_dir=g).load_agent("orchestrator")
+    assert before.permissions.budget.max_actions == 100  # the cap this migration exists to lift
+
+    original, plan = migrate.load_plan(cfg_file)
+    assert plan is not None and plan.init_nulls_due
+    migrate.apply(cfg_file, original, plan)
+
+    after = ConfigLoader(config_dir=g).load_agent("orchestrator")
+    assert after.permissions.budget.max_actions is None
+    root, _ = _gate_loop(mock_llm_client, bus, after, local=True, knob=100)
+    assert root.gate.mode == "unattended"
+    assert root.action_limit() == 0
+    assert root.time_limit() == 0.0
+    # and the same migrated root is still capped by the machine knob on a remote surface
+    remote, _ = _gate_loop(mock_llm_client, bus, after, local=False, knob=100)
+    assert remote.action_limit() == 100
+
+
+def _detected() -> DetectorResult:
+    return DetectorResult(found=True, provider_type="ollama", base_url="http://localhost:11434",
+                          models=["test-model:7b"], suggested_model="test-model:7b",
+                          probe_duration_ms=42.0)
+
+
+def _capabilities() -> CapabilityResult:
+    return CapabilityResult(tool_call_mode="native", context_window=128_000, supports_streaming=True,
+                            probe_duration_ms=10.0, probe_error=None, server_reached=True)
+
+
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
+def test_a_fresh_init_is_born_null_and_needs_no_migration(mock_client_cls, mock_detect, tmp_path,
+                                                          monkeypatch):
+    """Criterion 5 / D-25: after the default flip a fresh init writes org.permissions.budget.max_actions,
+    org.context.max_tool_output_chars and org.context.tool_result_evict_threshold_chars as null, stamps
+    init_nulls_revision current, and migrate.plan of it is None."""
+    import localharness.cli.init_cmd as init_cmd
+
+    monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: None)
+    monkeypatch.setattr(init_cmd, "_identify_endpoint_provider", lambda *_: "unknown")
+    mock_detect.return_value = _detected()
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_capabilities())
+    mock_client_cls.return_value = mock_client
+
+    result = CliRunner().invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
+    assert result.exit_code == 0, result.output
+
+    data = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    org = data["org"]
+    assert "max_actions" in org["permissions"]["budget"]
+    assert org["permissions"]["budget"]["max_actions"] is None
+    assert org["context"]["max_tool_output_chars"] is None
+    assert org["context"]["tool_result_evict_threshold_chars"] is None
+    assert org["permissions"]["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
+    assert migrate.plan(data) is None
+
+
+def test_an_agent_with_no_budget_registers_a_card_with_no_action_limit(tmp_path):
+    """Criterion 5 / D-12 / BUDGET-11: an agent file with no budget, loaded through the loader,
+    registers an AgentCard whose budget_max_actions is None, and the card is listed."""
+    loader, _ = _world(tmp_path, g_agents={"helper": _agent("helper")})
+    cfg = loader.load_agent("helper")
+    assert cfg.permissions.budget.max_actions is None
+
+    registry = AgentCardRegistry()
+    card = registry.register_from_config(cfg)
+
+    assert card.budget_max_actions is None
+    assert registry.get("helper").budget_max_actions is None
+    assert card in registry.all_cards()
