@@ -131,6 +131,15 @@ async def test_a_directory_that_cannot_be_prepared_is_a_runtime_error_before_any
     assert popen == []
 
 
+async def test_text_that_cannot_be_written_as_utf8_is_a_runtime_error_before_any_launch(tmp_path, popen):
+    """IN-52: a lone surrogate (a double-quoted YAML `\\ud800`) is a clean refusal, not a traceback."""
+    with pytest.raises(RuntimeError, match="could not prepare"):
+        await lifecycle.SpawnedProcessStrategy().activate(
+            _spec(config_ini="ctx-size = 1\ud800\n"), tmp_path, BASE)
+    assert popen == []
+    assert [p.name for p in _ini(tmp_path).parent.iterdir()] == []
+
+
 # ------------------------------------------------------------------------------- the file
 
 

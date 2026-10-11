@@ -299,9 +299,10 @@ class SpawnedProcessStrategy:
         # the record's bytes in a harness-owned directory, never the person's real file (D-30).
         try:
             home = server.prepare_config_ini_home(config_dir, spec.port, getattr(spec, "config_ini", None))
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:  # a lone surrogate in the record cannot be written as UTF-8
             raise RuntimeError(
-                f"could not prepare {server.config_ini_home(config_dir, spec.port)}: {exc.strerror or exc}"
+                f"could not prepare {server.config_ini_home(config_dir, spec.port)}: "
+                f"{getattr(exc, 'strerror', None) or exc}"
             ) from exc
 
         def launch(cmd: list[str]) -> tuple[int, list[str]]:
