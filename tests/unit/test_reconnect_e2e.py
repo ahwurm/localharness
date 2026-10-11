@@ -415,6 +415,7 @@ async def test_a_bound_that_passes_during_a_relaunch_ends_the_turn_with_one_llm_
     r = rig(wait=1.0)
     write_live_pidfile(r.cfg)
     r.on_start = lambda: write_live_pidfile(r.cfg)  # up as a process, never answering
+    started = time.monotonic()
     turn = asyncio.ensure_future(r.loop().run_turn("go"))
     try:
         await asyncio.sleep(0.1)
@@ -422,12 +423,16 @@ async def test_a_bound_that_passes_during_a_relaunch_ends_the_turn_with_one_llm_
         summary = await asyncio.wait_for(turn, 10)
     finally:
         await r.aclose()
+    elapsed = time.monotonic() - started
 
     (failed,) = _failed(r.bus)
     assert failed.reason == "llm_error"
-    # the bound ran out inside the relaunch's own readiness wait, so the flight reports the failed restart
-    assert "the model server exited; it was restarted once and the restart failed" in failed.detail
-    assert "not ready after 1s" in failed.detail and "not ready after 1s" in summary
+    # the bound ran out inside the relaunch's own readiness wait: the relaunch is held to the flight's
+    # bound, so the turn ends at the bound with the bound's sentence, not at activate's later clock
+    assert "the model server did not come back within 1s" in failed.detail
+    assert "did not come back within 1s" in summary
+    assert "the restart failed" not in failed.detail
+    assert elapsed < 2.5  # activate's own wait (3 s polls, a 1 s floor from a later start) ran to ~4 s
     assert len(r.starts) == 1
     assert not [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
 

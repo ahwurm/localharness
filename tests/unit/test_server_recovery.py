@@ -373,6 +373,48 @@ async def test_a_relaunch_that_found_another_holder_already_serving_just_keeps_p
 # --- the bound ------------------------------------------------------------------------------- #
 
 
+async def test_a_relaunch_that_outlasts_the_bound_is_cut_at_the_bound(models, tmp_path):
+    """A relaunch waiting on a lock another process holds for its own long launch, or a liveness check
+    that hangs, ends at the flight's bound with the bound's sentence; the relaunch itself is cancelled."""
+    models(ModelsEndpoint(down=lambda: True))
+    cancelled: list[int] = []
+
+    async def stuck():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(1)
+            raise
+
+    relaunch = RecordingRelaunch(stuck)
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(TimeoutError) as info:
+        await asyncio.wait_for(ServerRecovery(URL, tmp_path, relaunch).recover(
+            base_url=URL, api_key="none", wait_seconds=0.3, on_lost=Announce()), 2.0)
+    assert asyncio.get_running_loop().time() - started < 1.0
+    assert str(info.value).startswith("the model server did not come back within 0s")
+    assert relaunch.calls == 1 and cancelled == [1]
+
+
+async def test_a_relaunch_under_a_lock_held_elsewhere_ends_at_the_bound_and_lets_go(models, tmp_path):
+    models(ModelsEndpoint(down=lambda: True))
+    lock = server.lock_path(tmp_path)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    foreign = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(foreign, fcntl.LOCK_EX)
+    try:
+        async def under_the_lock():
+            async with lifecycle.launch_lock(tmp_path):
+                pytest.fail("the lock is held elsewhere for the whole test")
+
+        with pytest.raises(TimeoutError, match="did not come back within"):
+            await asyncio.wait_for(ServerRecovery(URL, tmp_path, RecordingRelaunch(under_the_lock)).recover(
+                base_url=URL, api_key="none", wait_seconds=0.3, on_lost=Announce()), 2.0)
+    finally:
+        os.close(foreign)
+    assert lifecycle._HELD == {}
+
+
 async def test_the_bound_with_no_config_dir_has_no_log_tail(models):
     endpoint = models(ModelsEndpoint(down=lambda: True))
     with pytest.raises(TimeoutError) as info:
