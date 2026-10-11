@@ -21,7 +21,7 @@ from typer.testing import CliRunner
 
 from localharness.cli import model_ops
 from localharness.cli.app import app
-from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION
 from localharness.config.loader import ConfigLoader
 from localharness.config.migrate import plan
 from localharness.config.models import (
@@ -83,6 +83,8 @@ def _write_v092_config(home, *, deny=None, revision=V092_REVISION, extra_org=Non
     }
     if revision is not None:
         org["permissions"]["defaults_revision"] = revision
+    if revision == CURRENT_DEFAULTS_REVISION:  # "already current" means current for both one-shot steps
+        org["permissions"]["init_nulls_revision"] = CURRENT_INIT_NULLS_REVISION
     if extra_org:
         org.update(extra_org)
     data = {
