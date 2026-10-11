@@ -2530,20 +2530,30 @@ class AgentLoop:
         begin(call.id, str(args.get("agent_id", "")),
               str(args.get("purpose") or args.get("task", ""))[:120])
 
-    def _reconnect_bound(self) -> float:
+    def _reconnect_bound(self, session: Session | None = None) -> float:
         """The configured reconnect wait in seconds, or 0.0 (reconnect off). Honoured only when the
         client's config carries a real positive number and a string address: a stand-in client, a
-        bool, a mock attribute or a negative value all read as off."""
+        bool, a mock attribute or a negative value all read as off.
+
+        With `session`, a loop with a finite duration budget (a child: explore 3 minutes, a verifier
+        6) never waits longer than what is left of it: past its budget the wait would only end in the
+        budget check, while its parent sat behind it. A bound clamped to 0 takes the fallback row."""
         cfg = getattr(self._llm, "config", None)
         wait = getattr(cfg, "reconnect_wait_seconds", 0.0)
-        if (
+        if not (
             isinstance(wait, (int, float))
             and not isinstance(wait, bool)
             and wait > 0
             and isinstance(getattr(cfg, "base_url", None), str)
         ):
-            return float(wait)
-        return 0.0
+            return 0.0
+        bound = float(wait)
+        if session is not None:
+            budget = getattr(getattr(self._config, "permissions", None), "budget", None)
+            limit = getattr(budget, "max_duration_minutes", None)
+            if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
+                bound = min(bound, max(0.0, limit * 60.0 - session.elapsed_seconds()))
+        return bound
 
     def _recovery_pair(self, base_url: str) -> "ServerRecovery":
         """The ServerRecovery that waits for `base_url`: the supplier's pair when it is for this
@@ -2586,7 +2596,7 @@ class AgentLoop:
 
         if session.connection_retry_used:
             return False, ""
-        bound = self._reconnect_bound()
+        bound = self._reconnect_bound(session)
         if bound <= 0 or session.reconnect_used:
             session.connection_retry_used = True
             await asyncio.sleep(_client._QUEUE_VISIBILITY_SECONDS)
