@@ -33,7 +33,7 @@ A paired phone can do what you can do at the terminal, including switching the s
 ## Not there yet
 
 - It is a reference page to fork, **not a finished chat app**.
-- One live session at a time, from the folder you started in: no switching between live chats, no concurrent sessions. An idle session sleeps to disk and your next message resumes it; the drawer lists past chats. Nothing stops you running the terminal and the phone on the same agent at once, which can mix their history; you are warned.
+- One live session at a time, from the folder you started in: no switching between live chats, no concurrent sessions. An idle session sleeps to disk and your next message resumes it, from its last answered request: a turn that ended without an answer is not carried into the wake (the chat log still shows it). The drawer lists past chats. Nothing stops you running the terminal and the phone on the same agent at once, which can mix their history; you are warned.
 - Incognito only keeps pictures off the phone. Memory, sessions and pictures are still written to disk.
 - Images only (paste, drop or 📎; up to 4, 20 MiB each, PNG/JPEG/GIF/WebP, not on a nudge), no other file upload; paste and drop are untested on a real phone. No diff review, no per-device revoke (`--rotate-token` re-pairs every device and clears push subscriptions), and the memory screen has no promote button.
 - The memory screen now reads memory through the memory plugin; this is tested on the server only, not yet on a phone.
