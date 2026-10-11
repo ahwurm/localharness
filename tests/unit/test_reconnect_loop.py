@@ -1,3 +1,4 @@
+# ruff: noqa: F811  (the imported `sessions` fixture is used by name as a test argument)
 """The loop's half of reconnect (RECON-02/04/06/08): one decision table at both seams, the bounded wait
 through the server's own address and key, an identical re-send, and endings that carry the flight's
 sentence.
@@ -383,3 +384,267 @@ def test_the_keyword_sits_directly_after_guardrails_path():
     names = list(inspect.signature(AgentLoop.__init__).parameters)
     assert names[names.index("guardrails_path") + 1] == "server_recovery"
     assert inspect.signature(AgentLoop.__init__).parameters["server_recovery"].default is None
+
+
+# ---------------------------------------------------------------------------
+# Through the real ServerRecovery: ProviderLost, the address and the key, endings, Esc
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+import logging  # noqa: E402
+
+import httpx  # noqa: E402
+from pydantic import SecretStr  # noqa: E402
+
+from localharness.core.events import Observation, ProviderLost  # noqa: E402
+from localharness.provider import lifecycle, server  # noqa: E402
+from localharness.provider.lifecycle import ServerRecovery  # noqa: E402
+from tests.unit.reconnect_support import (  # noqa: E402
+    ModelsEndpoint,
+    assert_no_key_leak,
+    write_serve_log,
+)
+
+SENTINEL = "sk-sentinel-7d1e0b52-never-in-a-log"
+
+
+@pytest.fixture
+def models(monkeypatch):
+    """Install a `/models` handler as the transport `wait_ready` uses; poll fast."""
+    monkeypatch.setattr(client_mod, "_QUEUE_VISIBILITY_SECONDS", 0.02)
+
+    def install(endpoint: ModelsEndpoint) -> ModelsEndpoint:
+        monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(endpoint))
+        return endpoint
+
+    return install
+
+
+def _real(llm: Any, bus: Any, pair: Any = None, **kw: Any) -> AgentLoop:
+    pair = pair if pair is not None else ServerRecovery(None, None, None)
+    return _loop(llm, bus, server_recovery=lambda: pair, **kw)
+
+
+def _lost(bus) -> list[Any]:
+    return bus.history(event_types=[ProviderLost])
+
+
+async def test_one_death_publishes_one_provider_lost(bus, sessions, models):
+    models(ModelsEndpoint(down_for=4))
+    llm = _scripted([_pce("refused"), _answer("ok")], wait=5.0)
+
+    assert await _real(llm, bus).run_turn("go") == "ok"
+
+    lost = _lost(bus)
+    assert len(lost) == 1
+    assert lost[0].wait_seconds == 5.0
+    assert lost[0].agent_id == sessions[0].agent_id
+    assert lost[0].session_id == sessions[0].session_id
+
+
+async def test_a_blip_publishes_nothing(bus, models):
+    models(ModelsEndpoint(down_for=0))
+    llm = _scripted([_pce("refused"), _answer("ok")], wait=5.0)
+    assert await _real(llm, bus).run_turn("go") == "ok"
+    assert _lost(bus) == []
+
+
+async def test_the_detail_is_redacted_and_capped(bus, models):
+    models(ModelsEndpoint(down_for=4))
+    text = "unreachable at http://user:secret@127.0.0.1:9/tokenize\x07"
+    llm = _scripted([_pce(text), _answer("ok")], wait=5.0)
+    await _real(llm, bus).run_turn("go")
+    detail = _lost(bus)[0].detail
+    assert "http://127.0.0.1:9/tokenize" in detail
+    assert "user:secret" not in detail
+    assert "\x07" not in detail
+
+    models(ModelsEndpoint(down_for=4))
+    bus2 = type(bus)()
+    llm = _scripted([_pce("z" * 1000), _answer("ok")], wait=5.0)
+    await _real(llm, bus2).run_turn("go")
+    assert 0 < len(_lost(bus2)[0].detail) <= 200
+
+
+async def test_a_publish_failure_never_fails_the_wait(bus, models):
+    models(ModelsEndpoint(down_for=4))
+    llm = _scripted([_pce("refused"), _answer("ok")], wait=5.0)
+    loop = _real(llm, bus)
+
+    async def broken(event: Any) -> None:
+        raise RuntimeError("bus is down")
+
+    real_publish = bus.publish
+
+    async def publish(event: Any) -> None:
+        if isinstance(event, ProviderLost):
+            await broken(event)
+        return await real_publish(event)
+
+    bus.publish = publish  # type: ignore[method-assign]
+    assert await loop.run_turn("go") == "ok"
+
+
+async def test_the_poll_uses_the_address_and_key_at_reconnect_time(bus, models, caplog):
+    endpoint = models(ModelsEndpoint(down_for=2))
+    llm = _scripted([_pce("refused"), _answer("ok")], wait=5.0)
+    loop = _real(llm, bus)
+    # what rebind_endpoint does after the loop was built
+    llm.config.base_url = "http://127.0.0.1:7/v1"
+    llm.config.api_key = SecretStr(SENTINEL)
+
+    with caplog.at_level(logging.DEBUG):
+        summary = await loop.run_turn("go")
+
+    assert summary == "ok"
+    assert endpoint.urls and set(endpoint.urls) == {"http://127.0.0.1:7/v1/models"}
+    assert set(endpoint.auth) == {"Bearer " + SENTINEL}
+    lost = _lost(bus)
+    assert_no_key_leak(SENTINEL, summary, *[e.detail for e in lost], caplog=caplog)
+
+
+async def test_a_pair_built_for_another_address_is_refused_for_the_key(bus, models):
+    endpoint = models(ModelsEndpoint(down_for=1))
+    llm = _scripted([_pce("refused"), _answer("ok")], wait=5.0)
+    llm.config.api_key = SecretStr(SENTINEL)
+    other = ServerRecovery("http://other:1/v1", None, None)
+
+    assert await _real(llm, bus, pair=other).run_turn("go") == "ok"
+
+    assert set(endpoint.urls) == {URL + "/models"}
+
+
+async def test_the_bound_passing_ends_as_llm_error_with_the_sentence(bus, models, caplog):
+    models(ModelsEndpoint(down=lambda: True))
+    llm = _scripted([_pce("refused"), _answer("never reached")], wait=0.2)
+
+    with caplog.at_level(logging.DEBUG):
+        summary = await _real(llm, bus).run_turn("go")
+
+    failed = _failed(bus)
+    assert [f.reason for f in failed] == ["llm_error"]
+    assert "did not come back within 0s" in failed[0].detail
+    assert "did not come back within 0s" in summary
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+async def test_a_dead_server_with_no_relaunch_ends_at_once_with_its_log_tail(bus, models, tmp_path):
+    from tests.unit.reconnect_support import write_dead_pidfile
+
+    models(ModelsEndpoint(down=lambda: True))
+    write_dead_pidfile(tmp_path)
+    write_serve_log(tmp_path, "boom-tail\n")
+    llm = _scripted([_pce("refused"), _answer("never reached")], wait=30.0)
+    pair = ServerRecovery(None, tmp_path, None)
+
+    summary = await asyncio.wait_for(_real(llm, bus, pair=pair).run_turn("go"), timeout=10)
+
+    failed = _failed(bus)
+    assert [f.reason for f in failed] == ["llm_error"]
+    assert "the model server exited. Log tail:" in failed[0].detail
+    assert "boom-tail" in summary
+    assert not [f for f in failed if f.reason == "internal_error"]
+
+
+async def test_the_note_is_stripped_of_control_characters_and_capped(bus, sessions, sleeps):
+    note = "xxx\x1b[31m\nline2" + "y" * 5000
+    pair = FakePair(error=RuntimeError(note))
+    llm = _scripted([_pce("refused")])
+
+    summary = await _loop(llm, bus, server_recovery=lambda: pair).run_turn("go")
+
+    ending = summary.split("iterations. ", 1)[1]
+    assert "\x1b" not in ending
+    assert "\n" in ending
+    assert len(ending) <= 1500
+    assert ending.startswith("xxx[31m\nline2")
+
+
+async def test_one_failed_reconnect_publishes_exactly_one_llm_error(bus, sessions, sleeps):
+    pair = FakePair(error=TimeoutError("the model server did not come back within 30s"))
+    llm = _scripted([_pce("refused")])
+    await _loop(llm, bus, server_recovery=lambda: pair).run_turn("go")
+    assert [f.reason for f in _failed(bus)] == ["llm_error"]
+
+
+async def test_cancelling_the_turn_during_the_wait_propagates_and_stops_the_flight(bus, models):
+    endpoint = models(ModelsEndpoint(down=lambda: True))
+    llm = _scripted([_pce("refused"), _answer("never reached")], wait=30.0)
+    loop = _real(llm, bus)
+
+    task = asyncio.ensure_future(loop.run_turn("go"))
+    for _ in range(200):
+        if endpoint.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert endpoint.calls, "the wait never started polling"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _failed(bus) == []
+    for _ in range(100):
+        if not lifecycle._UNWINDING:
+            break
+        await asyncio.sleep(0.01)
+    assert not lifecycle._UNWINDING
+    settled = endpoint.calls
+    await asyncio.sleep(0.2)
+    assert endpoint.calls == settled
+
+
+# ---------------------------------------------------------------------------
+# Nothing appended, one tool run, a child's stamped event
+# ---------------------------------------------------------------------------
+
+
+async def test_a_failure_on_the_first_iteration_re_sends_the_same_messages(bus, sleeps):
+    llm = _scripted([_pce("refused"), _answer("ok")], wait=None)
+    assert await _loop(llm, bus).run_turn("go") == "ok"
+    assert llm.sent[0] == llm.sent[1]
+    assert len(llm.sent[0]) == len(llm.sent[1])
+
+
+async def test_a_build_failure_on_the_first_iteration_appends_nothing(bus, sessions, sleeps):
+    pair = FakePair()
+    llm = _scripted([_answer("ok")])
+    loop = _loop(llm, bus, server_recovery=lambda: pair)
+    real = loop._ctx.build_messages
+    lengths: list[int] = []
+
+    async def build(messages, *a: Any, **k: Any):
+        lengths.append(len(messages))
+        if len(lengths) == 1:
+            raise ProviderConnectionError(_UNREACHABLE)
+        return await real(messages, *a, **k)
+
+    loop._ctx.build_messages = build  # type: ignore[method-assign]
+    assert await loop.run_turn("go") == "ok"
+    assert len(lengths) == 2 and lengths[0] == lengths[1]
+    assert len(pair.calls) == 1
+
+
+async def test_a_tool_runs_once_across_a_drop_and_its_re_send(bus, sessions, sleeps):
+    pair = FakePair()
+    registry = _Registry()
+    llm = _scripted([_pce("refused"), _tool_answer(), _answer("done")])
+    loop = _tool_loop(llm, bus, registry, server_recovery=lambda: pair)
+
+    assert await loop.run_turn("go") == "done"
+
+    assert registry.ran == 1
+    observed = [o for o in bus.history(event_types=[Observation]) if o.tool_call_id == "tc-1"]
+    assert len(observed) == 1
+
+
+async def test_a_child_loop_publishes_a_stamped_provider_lost(bus, models):
+    from localharness.agent.subagent import _ParentIdBus
+
+    models(ModelsEndpoint(down_for=4))
+    llm = _scripted([_pce("refused"), _answer("ok")], wait=5.0)
+    child = _real(llm, _ParentIdBus(bus, "parent-1"))
+
+    assert await child.run_turn("go") == "ok"
+
+    lost = _lost(bus)
+    assert len(lost) == 1 and lost[0].parent_id == "parent-1"
