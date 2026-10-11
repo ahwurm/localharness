@@ -21,7 +21,7 @@ import typer
 import yaml
 from rich.console import Console
 
-from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION
 from localharness.config.loader import NO_MACHINE_PROVIDER, ConfigLoader
 
 EVIL = "http://evil.test/v1"
@@ -144,7 +144,8 @@ async def test_no_machine_provider_prints_one_line_at_start(tmp_path, monkeypatc
     # it) whose `provider:` section was then removed. An UNSTAMPED one would also get the defaults
     # migration's own notice that it cannot validate the file — separate, and not this refusal.
     (global_dir / "config.yaml").write_text(yaml.safe_dump({
-        "version": "1", "org": {"permissions": {"defaults_revision": CURRENT_DEFAULTS_REVISION}}}),
+        "version": "1", "org": {"permissions": {"defaults_revision": CURRENT_DEFAULTS_REVISION,
+                                            "init_nulls_revision": CURRENT_INIT_NULLS_REVISION}}}),
         encoding="utf-8")
     (ws / "config.yaml").write_text(yaml.safe_dump(
         {"provider": {"provider_type": "vllm", "base_url": EVIL, "default_model": "m"}}), encoding="utf-8")

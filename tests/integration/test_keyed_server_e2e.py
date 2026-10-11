@@ -25,7 +25,7 @@ import yaml
 from typer.testing import CliRunner
 
 from localharness.cli.app import app
-from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION
 from localharness.config.models import EndpointRef, HarnessConfig, ManagedServerConfig, ProviderConfig
 from localharness.provider import server
 from tests.unit.launch_support import harness_launched, stub_liveness  # noqa: F401
@@ -135,7 +135,8 @@ def _config(path, *, base_url: str = BASE, key: str = KEY, require: bool | None 
     data: dict = {"version": "1",
                   "provider": {"provider_type": "vllm", "base_url": base_url, "api_key": key,
                                "default_model": "m" if launched else "test-model"},
-                  "org": {"permissions": {"defaults_revision": CURRENT_DEFAULTS_REVISION}}}
+                  "org": {"permissions": {"defaults_revision": CURRENT_DEFAULTS_REVISION,
+                                            "init_nulls_revision": CURRENT_INIT_NULLS_REVISION}}}
     if launched:
         data["server"] = {"runtime": "vllm", "launch": "binary", "binary": "/usr/bin/true", "model": "m",
                           "port": 8099, "bind_all": False,
