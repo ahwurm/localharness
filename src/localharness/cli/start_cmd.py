@@ -1235,9 +1235,10 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
     try:
         backups = _migrate.apply(config_file, original, plan)
     except _migrate.PartialMigrationError as exc:
-        # WR-02: some files WERE rewritten before one failed; they are named with their backups,
-        # never passed over in silence. config.yaml is written last, so its stamps did not move
-        # and `config migrate` (or the next start) really does try the rest again.
+        # WR-02 / CR-20: every other file WAS rewritten, config.yaml and its deny defaults
+        # included; they are named with their backups, never passed over in silence. Only the
+        # stamp that would skip a failed file stayed put, so `config migrate` (or the next start)
+        # really does try the rest again.
         written = "".join(
             f"; rewrote {path} (backup at {backup})" for path, backup in zip(exc.written, exc.backups))
         err_console.print(
