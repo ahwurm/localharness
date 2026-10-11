@@ -845,14 +845,25 @@ class AcpChannel(ChannelAdapter):
         self._gate = gate
         self._registry = tool_registry
         self._wire_editor_file_io(tool_registry)
+        refused: Optional[str] = None
         if self._pending_mode is not None:
-            gate.set_mode(self._pending_mode, from_channel=True)
-            self._pending_mode = None
+            try:
+                gate.set_mode(self._pending_mode, from_channel=True)
+            except ValueError as exc:
+                # WR-81: an agent-launched session is no local operator (IN-70), so under
+                # `channels.remote_unattended: false` a pre-prompt `unattended` is refused, as it
+                # is once the gate exists. The session comes up in the gate's own mode and says
+                # why, never a failed bring-up.
+                refused = str(exc)
+            finally:
+                self._pending_mode = None
         await self.start()
         # The picker shows the gate's mode from here on, whatever `session/new` could say before
         # the gate existed: the configured one, a picked one, or `guarded` after a declined trust
         # question (QA-18).
         await self._update(update_current_mode(str(gate.mode)))
+        if refused is not None:
+            await self.send_message(refused)
         self._ready.set()
         try:
             await self._closed.wait()

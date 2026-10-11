@@ -123,6 +123,37 @@ def test_a_local_operator_is_never_locked(tmp_path, build, monkeypatch):
     assert gate.set_mode("unattended", from_channel=True) == "unattended"
 
 
+@pytest.mark.asyncio
+async def test_an_agent_launched_acp_session_with_unattended_picked_early_still_comes_up(
+        tmp_path, monkeypatch):
+    """WR-81: `unattended` picked in Zed's picker before the first prompt, in a session the agent
+    launched (no local operator), under the lock. `serve` used to let the gate's ValueError escape
+    and the whole bring-up failed; the session now comes up in the configured mode and says why."""
+    from localharness.agent.gate import REMOTE_UNATTENDED_REFUSAL
+
+    monkeypatch.setenv("LOCALHARNESS_COMMIT", "abc123")
+    channel = _acp(tmp_path)
+    assert channel.local_operator is False
+    channel._pending_mode = "unattended"
+    sent: list[str] = []
+
+    async def capture(content, agent_id=None, metadata=None, **kw):
+        sent.append(content)
+
+    monkeypatch.setattr(channel, "send_message", capture)
+    gate = _gate(tmp_path, remote_unattended=False)
+    gate.attach_channel(channel)
+    channel._closed.set()  # serve returns as soon as it is up
+
+    await channel.serve(bus=EventBus(), agent_loop=None, gate=gate,
+                        tool_registry=types.SimpleNamespace())
+
+    assert gate.mode == "guarded"
+    assert channel._pending_mode is None
+    assert sent == [REMOTE_UNATTENDED_REFUSAL]
+    assert channel._ready.is_set()
+
+
 def test_remote_channels_are_not_local_operators():
     from localharness.channels.base import ChannelAdapter
     from localharness.channels.mobile.channel import MobileChannel
