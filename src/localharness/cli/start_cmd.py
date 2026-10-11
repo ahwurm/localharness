@@ -1211,6 +1211,53 @@ def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
     legacy.unlink(missing_ok=True)  # two-process first-start race: the other may have unlinked
 
 
+def _migration_clauses(plan: Any, config_file: Path,
+                       written: "frozenset[Path] | None" = None) -> str:
+    """The receipt's per-change clauses, rich-safe (each file-supplied part escaped). With
+    `written` (a partial migration, WR-30) only the changes of the files actually rewritten are
+    named; None names every change of the plan.
+
+    escape(): a path under the user's config dir reaches rich as data — this receipt fires on the
+    FIRST start after an upgrade, so under a markup-named config dir it crashed every session until
+    the config was hand-edited."""
+    from localharness.config import migrate as _migrate
+
+    def done(path: Path) -> bool:
+        return written is None or path in written
+
+    config_done = done(config_file)
+    removed_note = (
+        f"; removed permissions.{_migrate.DEAD_KEY} (gone in v0.14 — grants live in the global "
+        "store)" if config_done and plan.removed_allow_patterns is not None else ""
+    )
+    # The sidecar files are named, not counted: this receipt is the only notice a user gets that
+    # an agent file on disk was rewritten, and "1 file cleaned" does not say which (finding R10).
+    for sidecar in plan.sidecars:
+        if sidecar.removed is not None and done(sidecar.path):
+            removed_note += "; cleaned " + escape(f"{_migrate.DEAD_KEY} from {sidecar.path.name}")
+    # init's own 100 / 32000 / 8000, cleared once under its own stamp: one clause per file, each
+    # naming it (a stamp-only rewrite of config.yaml says nothing — no value was changed).
+    if config_done and plan.nulled:
+        removed_note += _migrate.INIT_NULLS_CLAUSE + " (config.yaml)"
+    elif config_done and plan.init_nulls_due:
+        removed_note += _migrate.INIT_NULLS_STAMP_CLAUSE  # IN-03: say why config.yaml was rewritten
+    for sidecar in plan.sidecars:
+        if sidecar.nulled and done(sidecar.path):
+            removed_note += (
+                _migrate.INIT_NULLS_CLAUSE
+                + " (" + escape(f"{sidecar.path.parent.name}/{sidecar.path.name}") + ")"
+            )
+    # A launched vLLM server that predates server.bind_all keeps listening on every interface, as
+    # it did: written for the user once, said once, and doctor's row says how to undo it.
+    if config_done and plan.bind_all_paths:
+        removed_note += (
+            "; kept the model server reachable from other machines ("
+            + escape(", ".join(f"{p}.bind_all: true" for p in plan.bind_all_paths))
+            + ") — `localharness doctor` says how to keep it on this machine"
+        )
+    return removed_note
+
+
 def _auto_migrate_deny_defaults(config_file: Path) -> None:
     """First-start-after-upgrade fold-in of new shipped security defaults (issue #15).
 
@@ -1236,14 +1283,20 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
         backups = _migrate.apply(config_file, original, plan)
     except _migrate.PartialMigrationError as exc:
         # WR-02 / CR-20: every other file WAS rewritten, config.yaml and its deny defaults
-        # included; they are named with their backups, never passed over in silence. Only the
-        # stamp that would skip a failed file stayed put, so `config migrate` (or the next start)
-        # really does try the rest again.
+        # included; they are named with their backups, never passed over in silence, and (WR-30)
+        # with the same per-change clauses the success receipt prints for the files that were
+        # written: a network-exposure key added or a budget value cleared is said here too. A
+        # failed file is recorded as owed (CR-30), so `config migrate` (or the next start) really
+        # does try it again.
         written = "".join(
             f"; rewrote {path} (backup at {backup})" for path, backup in zip(exc.written, exc.backups))
+        config_written = config_file in exc.written
         err_console.print(
-            "[yellow]⚠[/yellow]  " + escape(f"Could not finish updating the config: {exc}{written}. ")
-            + "Run 'localharness config migrate' to finish; continuing with the current config.",
+            "[yellow]⚠[/yellow]  " + escape(f"Could not finish updating the config: {exc}{written}")
+            + _migration_clauses(plan, config_file, frozenset(exc.written)) + ". "
+            + "Run 'localharness config migrate' to finish; "
+            + ("continuing; config.yaml was updated." if config_written
+               else "continuing with the current config."),
             soft_wrap=True,
         )
         return
@@ -1257,38 +1310,7 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
     if not backups:
         return  # CR-30: only the list of owed files changed (a file on it was fixed by hand)
 
-    # escape(): `backup` is a path under the user's config dir and the exception text above quotes
-    # one too. Both reach rich as data — this receipt fires on the FIRST start after an upgrade,
-    # so under a markup-named config dir it crashed every session until the config was hand-edited.
-    removed_note = (
-        f"; removed permissions.{_migrate.DEAD_KEY} (gone in v0.14 — grants live in the global "
-        "store)" if plan.removed_allow_patterns is not None else ""
-    )
-    # The sidecar files are named, not counted: this receipt is the only notice a user gets that
-    # an agent file on disk was rewritten, and "1 file cleaned" does not say which (finding R10).
-    for sidecar in plan.sidecars:
-        if sidecar.removed is not None:
-            removed_note += f"; cleaned {_migrate.DEAD_KEY} from {sidecar.path.name}"
-    # init's own 100 / 32000 / 8000, cleared once under its own stamp: one clause per file, each
-    # naming it (a stamp-only rewrite of config.yaml says nothing — no value was changed).
-    if plan.nulled:
-        removed_note += _migrate.INIT_NULLS_CLAUSE + " (config.yaml)"
-    elif plan.init_nulls_due:
-        removed_note += _migrate.INIT_NULLS_STAMP_CLAUSE  # IN-03: say why config.yaml was rewritten
-    for sidecar in plan.sidecars:
-        if sidecar.nulled:
-            removed_note += (
-                _migrate.INIT_NULLS_CLAUSE
-                + " (" + escape(f"{sidecar.path.parent.name}/{sidecar.path.name}") + ")"
-            )
-    # A launched vLLM server that predates server.bind_all keeps listening on every interface, as
-    # it did: written for the user once, said once, and doctor's row says how to undo it.
-    if plan.bind_all_paths:
-        removed_note += (
-            "; kept the model server reachable from other machines ("
-            + escape(", ".join(f"{p}.bind_all: true" for p in plan.bind_all_paths))
-            + ") — `localharness doctor` says how to keep it on this machine"
-        )
+    removed_note = _migration_clauses(plan, config_file)
     head = (
         "Config repaired" if plan.config_unchanged
         else "Config updated" if plan.defaults_unchanged
