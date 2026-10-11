@@ -712,8 +712,11 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
 
     async def _wait_for_loading_server() -> None:
         console.print(f"Managed {label} is still loading — waiting...")
-        # Already launched (a live pidfile / running container) — only wait for readiness.
-        await managed_server.wait_ready(base_url, config_dir=global_dir, **launch_key)
+        # Already launched (a live pidfile / running container) — only wait for readiness. The dir is
+        # the strategy's own: LM Studio writes no pidfile, so with the raw dir a server another
+        # process brought up would read "exited during startup" at once.
+        await managed_server.wait_ready(base_url, config_dir=strategy.recovery_config_dir(global_dir),
+                                        **launch_key)
 
     if _managed_server_running(strategy, srv, global_dir):
         await _wait_for_loading_server()
