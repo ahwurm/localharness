@@ -11,6 +11,7 @@ import pytest
 from localharness.config.models import EndpointRef, ManagedServerConfig
 from localharness.provider import lifecycle
 from localharness.provider import server as managed_server
+from tests.unit.launch_support import harness_launched, stub_liveness  # noqa: F401
 from tests.unit.test_repl_model_cmd import (
     _harness,
     _heavy_primary,
@@ -21,6 +22,15 @@ PEER_URL = "http://127.0.0.1:8080/v1"
 PRIMARY_URL = "http://localhost:8081/v1"
 NO_LLAMA_PEER = "no llama-server — set extra_endpoints[llamacpp-local].lifecycle.binary"
 NO_LLAMA_PRIMARY = "no llama-server — set server.binary"
+
+
+@pytest.fixture(autouse=True)
+def _liveness_not_launched(monkeypatch, request):
+    """Every gpu-primary build here seeds the accelerator lock through its strategy's liveness
+    (D-33); this module launches nothing, so the answer is "not up" unless the test requests
+    `harness_launched` (the harness launched the primary)."""
+    if "harness_launched" not in request.fixturenames:
+        stub_liveness(monkeypatch, False)
 
 
 @pytest.fixture(autouse=True)
@@ -106,7 +116,8 @@ def _session(tmp_path, peer, server=None, **repl_kw):
 
 
 @pytest.mark.asyncio
-async def test_a_declared_only_cold_peer_answers_one_line_and_touches_nothing(tmp_path, boundaries):
+async def test_a_declared_only_cold_peer_answers_one_line_and_touches_nothing(
+        tmp_path, boundaries, harness_launched):
     harness, repl, channel, agent = _session(tmp_path, _declared_only_peer())
     seeded = repl._active_heavy
     assert seeded is not None and seeded[0] is harness.server
@@ -506,7 +517,7 @@ async def test_a_spec_that_is_not_the_peers_own_lifecycle_is_not_named_as_the_pe
 
 @pytest.mark.asyncio
 async def test_a_failed_cold_launch_reports_why_the_incumbent_was_not_restored(
-        tmp_path, boundaries, monkeypatch):
+        tmp_path, boundaries, monkeypatch, harness_launched):
     primary = _llama_primary(binary=None)
     peer = _launchable_peer()
     _, repl, channel, agent = _session(tmp_path, peer, server=primary)
@@ -647,7 +658,7 @@ _REAL_START_SERVER = managed_server.start_server  # the `boundaries` fixture rep
 
 @pytest.mark.asyncio
 async def test_a_cold_launch_with_a_missing_binary_restores_the_incumbent_in_one_failure_line(
-        tmp_path, boundaries, monkeypatch):
+        tmp_path, boundaries, monkeypatch, harness_launched):
     class _Child:
         pid = 4242
 
@@ -706,7 +717,7 @@ async def test_a_failed_restore_that_is_not_a_launch_error_keeps_its_type_name(
 
 @pytest.mark.asyncio
 async def test_a_cold_launch_whose_restore_fails_names_the_cause_in_the_one_failure_line(
-        tmp_path, boundaries, monkeypatch):
+        tmp_path, boundaries, monkeypatch, harness_launched):
     _, repl, channel, _ = _session(tmp_path, _launchable_peer())
 
     async def never_ready(base_url, config_dir=None, **kw):

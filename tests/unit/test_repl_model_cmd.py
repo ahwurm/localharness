@@ -18,6 +18,16 @@ from localharness.config.overlay import (
     atomic_write_overlay,
     load_overlay,
 )
+from tests.unit.launch_support import harness_launched, stub_liveness  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _liveness_not_launched(monkeypatch, request):
+    """Every gpu-primary build here seeds the accelerator lock through its strategy's liveness
+    (D-33); this module launches nothing, so the answer is "not up" unless the test requests
+    `harness_launched` (the harness launched the primary)."""
+    if "harness_launched" not in request.fixturenames:
+        stub_liveness(monkeypatch, False)
 
 
 @pytest.fixture(autouse=True)
@@ -894,7 +904,8 @@ def test_cold_lifecycle_targets_surfaces_cold_launchable_peer(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_model_cold_peer_heavy_swap_stops_incumbent_launches_rebinds(tmp_path, monkeypatch):
+async def test_model_cold_peer_heavy_swap_stops_incumbent_launches_rebinds(
+        tmp_path, monkeypatch, harness_launched):
     """/model <cold-peer> → GPU-lock: verified-stop the incumbent heavy (docker vLLM), LAUNCH the
     cold llama.cpp peer ourselves (start→wait), rebind the client at the peer, and move _active_heavy.
     Ordering: stop-incumbent → start-peer → wait-peer."""
@@ -948,7 +959,8 @@ async def test_model_cold_peer_heavy_swap_stops_incumbent_launches_rebinds(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_model_cold_peer_launch_failure_restores_incumbent(tmp_path, monkeypatch):
+async def test_model_cold_peer_launch_failure_restores_incumbent(
+        tmp_path, monkeypatch, harness_launched):
     """If launching the cold peer FAILS after the incumbent was stopped, the harness re-activates the
     incumbent (best-effort) so the box is never left with nothing serving; the client stays put."""
     from localharness.provider import server as managed_server

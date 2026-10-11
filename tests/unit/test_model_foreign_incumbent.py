@@ -356,3 +356,75 @@ def test_holder_of_takes_the_command_from_argv0_then_exe(fake_proc, fake_systemd
     rec = procfs.read_process(2002)
     assert not isinstance(rec, procfs.ProcRefusal)
     assert workspace.holder_of(rec).command == "other-server"
+
+
+# --- the seed ------------------------------------------------------------------------------------ #
+
+
+def test_a_llamacpp_primary_with_no_harness_pidfile_is_not_seeded(tmp_path, monkeypatch):
+    monkeypatch.setattr(managed_server, "server_pid", lambda cfg: None)
+    repl, _, _ = _build(tmp_path, _harness(_llama_primary()))
+
+    assert repl._active_heavy is None
+
+
+def test_a_harness_launched_primary_is_seeded(tmp_path, harness_launched):
+    harness = _harness(_llama_primary())
+    repl, _, _ = _build(tmp_path, harness)
+
+    assert repl._active_heavy == (harness.server, harness.provider.base_url)
+
+
+def test_an_lm_studio_primary_seeds_through_its_endpoint(tmp_path, monkeypatch):
+    import httpx
+
+    server = ManagedServerConfig(runtime="lmstudio", binary="/x/lms", model="m", port=1234, gpu=True)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: SimpleNamespace(status_code=200))
+    harness = _harness(server, peers=[])
+    repl, _, _ = _build(tmp_path, harness)
+    assert repl._active_heavy == (server, harness.provider.base_url)
+
+    def down(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "get", down)
+    repl, _, _ = _build(tmp_path, harness)
+    assert repl._active_heavy is None
+
+
+def test_a_liveness_that_raises_means_no_seed_and_the_repl_still_builds(tmp_path, monkeypatch):
+    def raising(self, spec, config_dir):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(lifecycle.ManagedVllmStrategy, "liveness", raising)
+    server = ManagedServerConfig(launch="docker", docker_image="vllm:latest", model="m", port=8080)
+    repl, _, _ = _build(tmp_path, _harness(server, peers=[]))
+
+    assert repl._active_heavy is None
+
+
+def test_no_config_dir_means_no_seed_and_liveness_is_never_asked(monkeypatch):
+    asked: list[str] = []
+    stub_liveness(monkeypatch, lambda: asked.append("asked") or True)
+    repl = OrchestratorREPL(
+        orchestrator=SimpleNamespace(), agent_loop=SimpleNamespace(_llm=FakeLLM()),
+        channel=FakeChannel(), bus=SimpleNamespace(), config_dir=None,
+        harness_config=_harness(_llama_primary()))
+
+    assert repl._active_heavy is None and asked == []
+
+
+def test_a_cpu_server_or_no_provider_asks_no_liveness(tmp_path, monkeypatch):
+    asked: list[str] = []
+    stub_liveness(monkeypatch, lambda: asked.append("asked") or True)
+    cpu = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/m.gguf",
+                              port=8080, gpu=False)
+    repl, _, _ = _build(tmp_path, _harness(cpu))
+    assert repl._active_heavy is None
+
+    repl = OrchestratorREPL(
+        orchestrator=SimpleNamespace(), agent_loop=SimpleNamespace(_llm=FakeLLM()),
+        channel=FakeChannel(), bus=SimpleNamespace(), config_dir=tmp_path,
+        harness_config=SimpleNamespace(server=_llama_primary(), provider=None))
+    assert repl._active_heavy is None
+    assert asked == []
