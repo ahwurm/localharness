@@ -993,3 +993,14 @@ def test_an_infinite_parent_writes_nothing_into_the_childs_budget(shape):
         assert _written(out) == before
         assert (lab.actions, lab.minutes) == (None, None)
         assert fb is not None
+
+
+async def test_a_config_agent_named_like_a_builtin_takes_the_default_entry(recorded_loops, bus):
+    """IN-57: an agents/chunk-summarizer.yaml (model-writable) is a config child, so it takes the
+    `default` entry, never the chunk-summarizer built-in's rung by name."""
+    runner = await _runner(bus, load_agent=lambda n: _child(n))
+    await runner("chunk-summarizer", "summarize this")
+    (call,) = recorded_loops
+    assert call["config"].name == "chunk-summarizer"
+    assert _fb(call["budget_fallback"]) == (8, 3.0)
+    assert call["budget_labels"].fallback == "org.children_budget.default"

@@ -642,8 +642,10 @@ async def dispatch_config_subagent(
     child_registry = ToolRegistry.from_allowed(allowed, base_registry=base_registry)
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
     # The child's budget is chosen once, here, from the parent's remainder as it stands NOW (D-32).
+    # Every config child takes the `default` entry (D-33), whatever it is called: a (model-writable)
+    # agents/chunk-summarizer.yaml must not pick up that built-in's rung by its name (IN-57).
     agent_config, budget_fallback, budget_labels = _child_budget(
-        agent_config, getattr(agent_config, "name", ""), children_budget=children_budget,
+        agent_config, "default", children_budget=children_budget,
         shape=shape, parent_remaining=parent_remaining_fn)
     _kill, _compact = _child_runtime_paths(agent_config, config_dir, state_dir=state_dir)
     child_loop = AgentLoop(
