@@ -257,8 +257,9 @@ what the harness launches or imports, which file outside the project it writes, 
 protection is on may be set only by the global `config.yaml` or `overrides.yaml`: `provider.base_url`,
 `provider.api_key`, `extra_endpoints`, `active_endpoint`, `server` (the whole section),
 `org.audit_log_path`, `org.hooks`, `org.enforce_capability_floor`, `org.web_fetch_allow_private`,
-`channels.remote_unattended`, `proposer.base_url`, `proposer.api_key`, and in an agent file
-`memory.embedding_model` and `permissions.budget.kill_file`. A workspace value that differs from
+`channels.remote_unattended`, `channels.unattended_max_actions`, `proposer.base_url`,
+`proposer.api_key`, and in an agent file `memory.embedding_model`, `permissions.budget.kill_file`
+and the whole `stuck_detector` section. A workspace value that differs from
 the global one (or from the default, when the global layer is silent) is ignored, and `start` names
 the key and the file in its startup warnings; a workspace value equal to it is treated as yours.
 `org.enforce_capability_floor` (bool, default `true`) switches the capability floor: when it is on,
@@ -713,11 +714,15 @@ class BudgetConfig(BaseModel):
     """Execution budget constraints for one agent session."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    max_actions: int = Field(
-        default=100,
+    max_actions: Optional[int] = Field(
+        default=None,
         ge=1,
         le=10_000,
-        description="Maximum number of tool calls in one session.",
+        description=(
+            "Maximum number of tool calls in one turn. None means no configured limit and the "
+            "surface decides: an attended terminal runs unbounded, a remote unattended surface is "
+            "capped by channels.unattended_max_actions."
+        ),
     )
 
     max_duration_minutes: float = Field(
@@ -848,13 +853,14 @@ class ContextConfig(BaseModel):
         ),
     )
 
-    max_tool_output_chars: int = Field(
-        default=32_000,
+    max_tool_output_chars: Optional[int] = Field(
+        default=None,
         ge=100,
         le=500_000,
         description=(
             "Maximum characters of tool output to include in a single Observation. "
-            "Output exceeding this limit is truncated with a '... [truncated]' suffix."
+            "Output exceeding this limit is truncated with a '... [truncated]' suffix. "
+            "None means 32000; an explicit integer is honoured as written."
         ),
     )
 
@@ -1332,6 +1338,15 @@ class ChannelsConfig(BaseModel):
         ),
     )
 
+    unattended_max_actions: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            "The action ceiling for every loop while the session is `unattended` with no local "
+            "operator. Machine-level only."
+        ),
+    )
+
 
 class HarnessConfig(BaseModel):
     """Root harness configuration. Stored at ~/.localharness/config.yaml."""
@@ -1366,6 +1381,29 @@ routes sends the key.
 **`channels.remote_unattended`** (machine-level only, default `true`): `false` refuses `unattended`
 and "always" from the phone and Discord, through the gate and each channel's `local_operator`
 flag; the terminal and Zed are never limited.
+
+**`channels.unattended_max_actions`** (machine-level only, default `100`, at least 1): the most tool
+calls one turn may make while the session runs `unattended` with no one at this machine, whatever
+`permissions.budget.max_actions` says. An agent that configures a lower number keeps it; one that
+configures a higher number, or none, runs under this one, and the stop names the key
+(`... Stopping to prevent runaway execution. (channels.unattended_max_actions)`). The interactive
+terminal (and Zed) is never capped by it: with `permissions.budget.max_actions` unset, the person at
+the keyboard is the budget, and the stuck ladder, the kill file and the permission gate stay on. The
+limit is read at every check, so switching the session into or out of `unattended` takes effect at
+the next iteration while the calls already in flight finish.
+
+**`org.children_budget`** (default shown; a project may only lower it): each child agent's own
+ceiling of model round-trips and minutes, `explore` 8 / 3, `web_researcher` 56 / 20,
+`search_verifier` 12 / 6, `cruncher` 6 / 20, `chunk_summarizer` 3 / 6 and `default` 8 / 3 (any
+child with no entry of its own), plus `lookup_share` (`0.25`) and `review_share` (`0.5`), the part
+of a finite parent's remaining budget a delegated lookup or review child takes. Write one key of
+an entry (`explore: {actions: 4}`) and the other keeps its default. The brief a config
+child receives states the limits its own loop enforces (`Budget: no action limit, no time limit.`
+when there are none) and lists only the tools it actually holds.
+
+**`org.permissions.init_nulls_revision`** (bookkeeping, default `0`): a stamp the config migration
+sets once it has cleared the three numbers older `init` runs wrote (`max_actions: 100`,
+`max_tool_output_chars: 32000` and `tool_result_evict_threshold_chars: 8000`); leave it alone.
 
 ---
 
@@ -1405,9 +1443,10 @@ list — every field is declared there with its own description.
 | `permissions.ask.<rule set>` | list[string] or null | null | — | Override one of the gate rule sets in `agent/gate_types.py`; null = the shipped default |
 | `permissions.deny_patterns` | list[string] | 32 shipped defaults | format: `tool(arg_glob)` | Deny patterns. Unioned down the hierarchy — an agent can add, never remove |
 | `permissions.workspace_root` | string or null | `null` | abs or `~/…` path | Hard filesystem confinement for write/edit/bash_exec, enforced as `permission_denied`. Null (the default, workspace or not, since v0.14.1) = unconfined |
-| `permissions.budget.max_actions` | int | `100` | 1–10000 | Max tool calls |
+| `permissions.budget.max_actions` | int or null | `null` | 1–10000 | Max tool calls in one turn; null = no configured limit (an attended terminal runs unbounded; a remote unattended surface is capped by `channels.unattended_max_actions`) |
 | `permissions.budget.max_duration_minutes` | float or null | `null` | 0.1–1440 | Max turn duration; null (the default since 0.13.3) = no time limit. A `config.yaml` written by an older `init` still carries `30.0` and still pins it |
 | `permissions.budget.max_tool_calls` | int or null | null | 0+ | Separate ceiling on dispatched tool calls; null = `max_actions` alone governs |
+| `stuck_detector.call_only_multiplier` | int | `3` | 1–10 | Per-turn ceiling on one identical call (same tool, same arguments) whatever its results: `call_only_multiplier` x `escalation_threshold` calls escalate. Machine-level only, with the whole `stuck_detector` section |
 | `permissions.budget.kill_file` | string or null | `"KILL"` | bare name, abs, or `~/…` path | Kill switch file. A bare name resolves under the config directory (`~/.localharness/KILL` by default); null disables the kill switch. Read from the global layer only — see "The kill switch" below |
 | `memory.max_notes_chars` | int | `16000` | 0–200000 | Chars of `MEMORY.md` injected per turn |
 | `memory.shared_read` | list[string] | `[]` | division, org | Extra org-hierarchy scopes this agent may read |
@@ -1424,7 +1463,8 @@ list — every field is declared there with its own description.
 | `context.compaction_threshold_pct` | float | `80.0` | 50.0–99.0 | Compaction trigger |
 | `context.preserve_first_n_messages` | int | `4` | 1+ | Preserved prefix count |
 | `context.preserve_last_n_messages` | int | `8` | 2+ | Preserved suffix count |
-| `context.max_tool_output_chars` | int | `32000` | 100–500000 | Tool output cap |
+| `context.max_tool_output_chars` | int or null | `null` | 100–500000 | Tool output cap; null = 32000 |
+| `context.tool_result_evict_threshold_chars` | int or null | `null` | 500–500000 | Size above which a tool result may be evicted to a restorable stub; null = 8000 |
 | `context.system_prompt_file` | string or null | null | abs or ~/… path | System prompt file |
 | `context.microagents` | list[string] | `[]` | — | Microagent names |
 | `schedule.cron` | string or null | null | 5-field cron | Schedule expression |

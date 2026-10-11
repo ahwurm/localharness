@@ -62,6 +62,12 @@ def recorded_loops(monkeypatch):
             calls.append(kwargs)
             self.current_session_id = None
 
+        def action_limit(self):
+            return 0
+
+        def time_limit(self):
+            return 0.0
+
         async def run_turn(self, task, *a, **k):
             return ""
 
