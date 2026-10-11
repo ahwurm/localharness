@@ -25,6 +25,7 @@ import contextlib
 import contextvars
 import dataclasses
 import errno
+import functools
 import logging
 import os
 import time
@@ -943,20 +944,78 @@ def relaunch_budget() -> float:
 class _Run:
     """One flight: its task and how many callers are awaiting it."""
 
-    __slots__ = ("task", "awaiters")
+    __slots__ = ("task", "awaiters", "outage")
 
-    def __init__(self, task: asyncio.Task) -> None:
+    def __init__(self, task: asyncio.Task, outage: "_Outage | None" = None) -> None:
         self.task = task
         self.awaiters = 0
+        self.outage = outage
+
+
+class _Outage:
+    """A drop that no flight has ended yet: what it has already spent. It is opened by the first flight
+    for a drop and kept on the pair after a flight that failed (or whose last awaiter left), so a loop
+    that runs after it in the same root turn (the root after its child, a web retry, the next reduce
+    level) continues the same outage instead of starting a whole new bound and another relaunch. It is
+    dropped when a flight ends well, when a call to the server goes through, or when the person starts a
+    new root turn (`forget_outages`)."""
+
+    __slots__ = ("started", "relaunched", "announced", "failed")
+
+    def __init__(self, started: float) -> None:
+        self.started = started
+        self.relaunched = False
+        self.announced = False
+        self.failed: BaseException | None = None
 
 
 class _Flight:
-    """The mutable single-flight slot inside a frozen `ServerRecovery`: the flight now under way, if any."""
+    """The mutable single-flight slot inside a frozen `ServerRecovery`: the flight now under way, if any,
+    and the outage it belongs to."""
 
-    __slots__ = ("current",)
+    __slots__ = ("current", "outage", "__weakref__")
 
     def __init__(self) -> None:
         self.current: _Run | None = None
+        self.outage: _Outage | None = None
+
+
+_OPEN_OUTAGES: "weakref.WeakKeyDictionary[_Flight, str | None]" = weakref.WeakKeyDictionary()
+"""Every pair slot with an outage on record, mapped to its pair's client address (None for a pure poll
+pair). Weak: a pair the REPL's memo dropped takes its record with it."""
+
+
+def forget_outages(base_url: str | None = None, *, every: bool = False) -> None:
+    """End the outage record of every pair for `base_url` (and of the address-less pairs): a call to that
+    server has just gone through, so the next drop is a new one with its own whole bound, relaunch and
+    announcement. `every=True` ends them all: the person started a new root turn. A flight still under
+    way keeps running; only the record is dropped."""
+    for slot, pair_url in list(_OPEN_OUTAGES.items()):
+        if every or pair_url is None or (
+                base_url is not None and pair_url.rstrip("/") == base_url.rstrip("/")):
+            slot.outage = None
+            _OPEN_OUTAGES.pop(slot, None)
+
+
+def _settle(slot: _Flight, outage: _Outage, task: asyncio.Task) -> None:
+    """A flight ended: a success ends its outage; a failure is kept on it for the loops still to come."""
+    if task.cancelled():
+        return
+    failed = task.exception()
+    if failed is None:
+        if slot.outage is outage:
+            slot.outage = None
+            _OPEN_OUTAGES.pop(slot, None)
+    else:
+        outage.failed = failed
+
+
+def _again(failed: BaseException) -> BaseException:
+    """A fresh exception of the same type and text as an outage's earlier failure, raised to a later loop."""
+    try:
+        return type(failed)(*failed.args)
+    except Exception:  # noqa: BLE001 - a type that cannot be rebuilt still reads as its text
+        return RuntimeError(str(failed))
 
 
 @dataclass(frozen=True)
@@ -971,7 +1030,11 @@ class ServerRecovery:
     REPL builds over the active spec, or None when nothing can be relaunched; it reads its time bound
     from `relaunch_budget()`. `runtime` names the server in `wait_ready`'s messages.
 
-    `recover` takes the key per call and stores nothing of it. Callers of one pair share one flight.
+    `recover` takes the key per call and stores nothing of it. Callers of one pair share one flight, and
+    loops that call it one after another share one outage: a drop no flight could end is continued by
+    the next caller within the same bound (measured from the drop), never with a second relaunch or a
+    second announcement; once that bound is spent a later caller gets one look at the address and the
+    same failure. A call that goes through, or a new root turn, ends the outage (`forget_outages`).
     """
 
     base_url: str | None
@@ -995,11 +1058,16 @@ class ServerRecovery:
         slot = self._flight
         run = slot.current
         if run is None or run.task.done():
+            outage = slot.outage
+            if outage is None:  # a new drop; otherwise this continues one an earlier loop could not end
+                outage = slot.outage = _Outage(time.monotonic())
+                _OPEN_OUTAGES[slot] = self.base_url
             task = asyncio.get_running_loop().create_task(
-                self._fly(base_url, api_key, wait_seconds, on_lost)
+                self._fly(base_url, api_key, wait_seconds, on_lost, outage)
             )
             task.add_done_callback(_retrieve)
-            run = slot.current = _Run(task)
+            task.add_done_callback(functools.partial(_settle, slot, outage))
+            run = slot.current = _Run(task, outage)
         run.awaiters += 1
         try:
             return await asyncio.shield(run.task)
@@ -1011,6 +1079,11 @@ class ServerRecovery:
             elif run.awaiters == 0:
                 if slot.current is run:
                     slot.current = None  # detach BEFORE cancel, or a recover this tick joins a dying task
+                if slot.outage is run.outage:
+                    # the person stopped the wait (Esc): nothing it spent, a relaunch cut short included,
+                    # carries over to whoever asks next
+                    slot.outage = None
+                    _OPEN_OUTAGES.pop(slot, None)
                 _UNWINDING.add(run.task)
                 run.task.add_done_callback(_UNWINDING.discard)
                 run.task.cancel()
@@ -1021,14 +1094,30 @@ class ServerRecovery:
         api_key: Any,
         wait_seconds: float,
         on_lost: Callable[[], Awaitable[None]],
+        outage: _Outage,
     ) -> None:
         from localharness.provider import client as _client
 
-        deadline = time.monotonic() + wait_seconds
+        deadline = outage.started + wait_seconds  # the bound runs from the drop, not from this caller
         _DEADLINE.set(deadline)
         poll = _client._QUEUE_VISIBILITY_SECONDS
-        timer = asyncio.get_running_loop().create_task(_announce_after(poll, on_lost))
-        relaunched = False
+        if deadline - time.monotonic() <= 0 and outage.failed is not None:
+            # An earlier loop of this root turn already spent this outage's bound and failed: one look
+            # at the address (it may be back), never another whole wait or another relaunch.
+            if await self._answers(base_url, api_key, time.monotonic() + poll):
+                return
+            raise _again(outage.failed) from outage.failed
+        # what the outage's one relaunch already came to, when an earlier loop spent it and failed
+        earlier = outage.failed if outage.relaunched else None
+        timer: asyncio.Task | None = None
+        if not outage.announced:  # one announcement per outage, however many loops wait through it
+
+            async def announce() -> None:
+                outage.announced = True
+                await on_lost()
+
+            timer = asyncio.get_running_loop().create_task(_announce_after(poll, announce))
+        relaunched = outage.relaunched
         try:
             while True:
                 remaining = deadline - time.monotonic()
@@ -1051,6 +1140,9 @@ class ServerRecovery:
                     if self.relaunch is None:
                         raise RuntimeError(EXITED_TEXT + self._tail()) from died
                     if relaunched:
+                        if earlier is not None and (isinstance(earlier, server.LaunchRefused) or str(
+                                earlier).startswith(RESTART_FAILED_TEXT)):
+                            raise _again(earlier) from died  # the one relaunch was refused or failed
                         raise RuntimeError(EXITED_AGAIN_TEXT + self._tail()) from died
                     relaunched = True
                 # The launched process is gone, but something may already serve at the address (the
@@ -1063,6 +1155,7 @@ class ServerRecovery:
                 # Outside the try above: a LaunchRefused (itself a RuntimeError) must never be read as
                 # a poll failure.
                 log.info("model server process exited; relaunching it once")
+                outage.relaunched = True
                 # The relaunch is held to the flight's bound as a whole: its launch-lock wait (the lock
                 # itself has no timeout, D-26), a liveness check that hangs, and activate's own readiness
                 # wait (whose clock starts later and never goes below 1 s) all end at the deadline.
@@ -1086,8 +1179,9 @@ class ServerRecovery:
                     # what catches a relaunched server that dies again at once.
                     return
         finally:
-            timer.cancel()
-            await asyncio.gather(timer, return_exceptions=True)
+            if timer is not None:
+                timer.cancel()
+                await asyncio.gather(timer, return_exceptions=True)
 
     async def _answers(self, base_url: str, api_key: Any, deadline: float) -> bool:
         """One look at the address with no pidfile check: True when anything there answers (the

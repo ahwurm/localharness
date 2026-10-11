@@ -523,6 +523,91 @@ async def test_a_pair_with_no_config_dir_never_reads_a_death_only_the_bound(mode
     assert relaunch.calls == 0
 
 
+# --- one outage across loops that run one after another (CR-51) ------------------------------- #
+
+
+async def test_a_later_caller_after_a_spent_bound_takes_one_look_and_the_same_failure(models):
+    endpoint = models(ModelsEndpoint(down=lambda: True))
+    announce = Announce()
+    pair = ServerRecovery(None, None, None)
+    with pytest.raises(TimeoutError) as first:
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=0.15, on_lost=announce)
+    polls = endpoint.calls
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(TimeoutError) as second:
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=0.15, on_lost=announce)
+    assert asyncio.get_running_loop().time() - started < 0.1  # one look, never a second bound
+    assert endpoint.calls == polls + 1
+    assert str(second.value) == str(first.value)
+    assert announce.count == 1
+
+
+async def test_a_later_caller_with_a_longer_bound_waits_only_what_is_left_of_it(models):
+    """A child's bound (capped by its budget) ran out; the root, with the whole bound, continues the same
+    outage from the drop: no second announcement, and the server coming back ends it."""
+    state = {"down": True}
+    models(ModelsEndpoint(down=lambda: state["down"]))
+    announce = Announce()
+    pair = ServerRecovery(None, None, None)
+    with pytest.raises(TimeoutError):
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=0.1, on_lost=announce)
+    asyncio.get_running_loop().call_later(0.1, state.update, {"down": False})
+    await pair.recover(base_url=URL, api_key="none", wait_seconds=5, on_lost=announce)
+    assert announce.count == 1
+    assert pair._flight.outage is None  # ended well: the next drop is a new outage
+
+
+async def test_a_later_caller_after_a_failed_relaunch_never_relaunches_again(models, tmp_path):
+    models(_served_while_alive(tmp_path))
+    relaunch = RecordingRelaunch(RuntimeError("llama.cpp exited during startup. Log tail:\nboom"))
+    pair = ServerRecovery(URL, tmp_path, relaunch)
+    with pytest.raises(RuntimeError) as first:
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
+    with pytest.raises(RuntimeError) as second:
+        await asyncio.wait_for(
+            pair.recover(base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce()), 1.0)
+    assert relaunch.calls == 1
+    assert str(second.value) == str(first.value)
+    assert str(second.value).startswith("the model server exited; it was restarted once and the restart failed")
+
+
+async def test_a_later_caller_after_a_refused_relaunch_gets_the_refusal_again(models, tmp_path):
+    models(_served_while_alive(tmp_path))
+    relaunch = RecordingRelaunch(server.LaunchRefused("no llama-server — set server.binary"))
+    pair = ServerRecovery(URL, tmp_path, relaunch)
+    with pytest.raises(server.LaunchRefused):
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
+    with pytest.raises(server.LaunchRefused, match="set server.binary"):
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
+    assert relaunch.calls == 1
+
+
+async def test_forgetting_the_outage_gives_the_next_drop_a_whole_new_flight(models, tmp_path):
+    models(_served_while_alive(tmp_path))
+    relaunch = RecordingRelaunch(RuntimeError("boom"))
+    pair = ServerRecovery(URL, tmp_path, relaunch)
+    with pytest.raises(RuntimeError):
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
+    assert pair._flight in lifecycle._OPEN_OUTAGES
+    lifecycle.forget_outages("http://elsewhere:1/v1")  # another server's call says nothing about this one
+    assert pair._flight.outage is not None
+    lifecycle.forget_outages(URL + "/")  # a call to this address went through
+    assert pair._flight.outage is None and pair._flight not in lifecycle._OPEN_OUTAGES
+    with pytest.raises(RuntimeError):
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=5, on_lost=Announce())
+    assert relaunch.calls == 2
+
+
+async def test_a_new_root_turn_forgets_every_outage(models):
+    models(ModelsEndpoint(down=lambda: True))
+    pairs = [ServerRecovery(None, None, None), ServerRecovery(URL, None, None)]
+    for pair in pairs:
+        with pytest.raises(TimeoutError):
+            await pair.recover(base_url=URL, api_key="none", wait_seconds=0.05, on_lost=Announce())
+    lifecycle.forget_outages(every=True)
+    assert all(pair._flight.outage is None for pair in pairs)
+
+
 # --- failures reach everyone, and are never left unretrieved --------------------------------- #
 
 
