@@ -394,7 +394,12 @@ async def test_restoring_a_file_keyed_primary_reuses_the_sessions_key_with_no_se
 # --- path 3: the managed restart / swap-back --------------------------------------------------- #
 
 
+PRIMARY_SERVED = "qwen-primary"  # never "model-a": `_session` serves that live, so it would be "already active"
+
+
 def _llama_primary(*, binary: str | None = "/x/llama-server", **extra) -> ManagedServerConfig:
+    """A llama.cpp primary that names its served alias: `/model <PRIMARY_SERVED>` swaps back to it."""
+    extra.setdefault("served_name", PRIMARY_SERVED)
     return ManagedServerConfig(
         runtime="llamacpp", binary=binary, model="/x/primary.gguf", port=8081, gpu=True, **extra)
 
@@ -409,13 +414,12 @@ def _on_the_cold_peer(repl, agent, peer) -> None:
 @pytest.mark.asyncio
 async def test_a_swap_back_to_a_declared_only_primary_refuses_before_its_rebind(
         tmp_path, boundaries, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     peer = _launchable_peer()
     _, repl, channel, agent = _session(tmp_path, peer, server=_llama_primary(binary=None))
     _on_the_cold_peer(repl, agent, peer)
     held = repl._active_heavy
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
 
     assert channel.messages[-1] == NO_LLAMA_PRIMARY
     assert agent._llm.rebinds == []
@@ -426,13 +430,12 @@ async def test_a_swap_back_to_a_declared_only_primary_refuses_before_its_rebind(
 
 @pytest.mark.asyncio
 async def test_a_llama_cpp_restart_names_the_runtime(tmp_path, boundaries, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     _, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=_llama_primary())
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
 
     assert any(m.startswith(
-        "Restarting managed llama.cpp with cached-b — model load can take several minutes...")
+        f"Restarting managed llama.cpp with {PRIMARY_SERVED} — model load can take several minutes...")
         for m in channel.messages)
 
 
@@ -627,13 +630,12 @@ async def test_launch_path_2_cold_branch_host_is_last(tmp_path, boundaries):
 
 @pytest.mark.asyncio
 async def test_launch_path_3_swap_back_host_is_last(tmp_path, boundaries, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     peer = _launchable_peer()
     primary = _llama_primary(extra_args=["--host", "0.0.0.0"])
     _, repl, _, agent = _session(tmp_path, peer, server=primary)
     _on_the_cold_peer(repl, agent, peer)
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
 
     assert boundaries.cmds
     assert boundaries.cmds[-1][-2:] == ["--host", "127.0.0.1"]
@@ -780,12 +782,11 @@ async def test_a_repl_built_without_the_keyword_prints_nothing_extra(tmp_path, b
 @pytest.mark.asyncio
 async def test_a_swap_back_that_is_the_sessions_first_launch_prints_the_line_once_before_its_announcement(
         tmp_path, boundaries, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     _, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=_llama_primary(),
                                    launch_lines=(LINE,))
     sent = _when_sent(channel, boundaries)
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
 
     assert channel.messages.count(LINE) == 1
     assert channel.messages.index(LINE) < next(
@@ -809,13 +810,12 @@ async def test_a_restore_that_is_the_sessions_first_launch_prints_the_line(tmp_p
 
 @pytest.mark.asyncio
 async def test_the_sessions_second_launch_prints_none_of_the_lines(tmp_path, boundaries, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     peer = _launchable_peer()
     primary = _llama_primary()
     _, repl, channel, agent = _session(tmp_path, peer, server=primary, launch_lines=(LINE,))
 
     await repl._handle_slash("/model qwen-gguf")  # the cold launch: the first
-    await repl._handle_slash("/model cached-b")   # the swap-back: the second
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")  # the swap-back: the second
     await repl._restore_incumbent((primary, PRIMARY_URL))  # and a restore: the third
 
     assert channel.messages.count(LINE) == 1
@@ -840,13 +840,12 @@ async def test_a_refused_cold_launch_prints_none_of_the_lines_and_keeps_them_for
 
 @pytest.mark.asyncio
 async def test_a_refused_swap_back_and_a_refused_restore_keep_the_lines(tmp_path, boundaries, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     peer = _launchable_peer()
     declared = _llama_primary(binary=None)
     _, repl, channel, agent = _session(tmp_path, peer, server=declared, launch_lines=(LINE,))
     _on_the_cold_peer(repl, agent, peer)
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash(f"/model {PRIMARY_SERVED}")
     restored = await repl._restore_incumbent((declared, PRIMARY_URL))
 
     assert channel.messages == [NO_LLAMA_PRIMARY] and restored[0] is None
