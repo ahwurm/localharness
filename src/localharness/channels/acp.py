@@ -65,7 +65,7 @@ from acp.schema import (
     ToolCallUpdate,
 )
 
-from localharness.channels.base import ChannelAdapter, sanitize_for_display
+from localharness.channels.base import ChannelAdapter, provider_lost_line, sanitize_for_display
 from localharness.channels.errors import NotInteractiveError
 from localharness.core.events import (
     PENDING_APPROVED_NUDGE,
@@ -1201,6 +1201,13 @@ class AcpChannel(ChannelAdapter):
     ) -> None:
         if content:
             await self._update(update_agent_message_text(content))
+
+    async def on_provider_lost(self, event: ProviderLost) -> None:
+        """The base line, set off by blank lines. ACP renders system lines as agent-message text, and
+        a drop mid-stream puts this one between the partial answer and the re-sent one, which would
+        otherwise run together with it into one paragraph."""
+        await self.send_message("\n\n" + provider_lost_line(event.wait_seconds) + "\n\n",
+                                agent_id=event.agent_id, metadata={"style": "system.info"})
 
     async def send_streaming(
         self, token_stream: AsyncIterator[str], agent_id: str | None = None
