@@ -252,6 +252,10 @@ global config, a project's whole `proposer:` section is ignored. These are all o
   miss downloads)
 - `permissions.budget.kill_file`, in an agent file (the one kill switch for every agent on the
   machine)
+- `stuck_detector.*`, in an agent file or a built-in agent's overlay (the whole section: how many
+  identical calls earn a nudge and an escalation); it comes back as a whole from your global
+  config, so a project file can neither raise a threshold, shrink the window, nor leave a key out
+  to fall back to a looser default
 - `<name>.enabled`, for a plugin you installed (a plugin that ships with LocalHarness can be
   switched per project)
 
@@ -268,7 +272,9 @@ settings a project may set — its name, default model, temperature, output cap,
 log level and the memory switch — choose nothing outside the project. One key is announced
 differently: a project agent file's `permissions.budget.kill_file` is ignored like the others, but
 its warning names the agent rather than the file and is logged rather than printed in the start
-summary.
+summary. A project's `stuck_detector` section is announced in the start summary when it sits in an
+agent file that shadows one of yours, and through the log when it overlays a built-in agent, as the
+`kill_file` case does for its own key.
 
 ## Human approval gate
 
