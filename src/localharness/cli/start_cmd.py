@@ -1254,6 +1254,8 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
             soft_wrap=True,
         )
         return
+    if not backups:
+        return  # CR-30: only the list of owed files changed (a file on it was fixed by hand)
 
     # escape(): `backup` is a path under the user's config dir and the exception text above quotes
     # one too. Both reach rich as data — this receipt fires on the FIRST start after an upgrade,

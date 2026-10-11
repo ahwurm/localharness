@@ -1651,8 +1651,10 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
         console.print("[cyan]i[/cyan]  " + escape(
             f"Updated {path.parent.name}/{path.name}{INIT_NULLS_CLAUSE} — backup at {backup}"),
             soft_wrap=True)
-    # WR-21: a file init cannot write is named and passed over, never a traceback; the stamp below
-    # then stays due, so `start` (or `config migrate`) tries the file again once it can be written.
+    # WR-21: a file init cannot write is named and passed over, never a traceback. CR-30: it is
+    # recorded as owed (migrate.INIT_NULLS_PENDING_FILE), so the stamp below is still written as
+    # current (D-25) and `start` (or `config migrate`) retries that file alone once it can be
+    # written; config.yaml and the files written here are never matched again.
     for path, exc in unwritten:
         reason = exc.strerror or str(exc) or type(exc).__name__
         console.print("[yellow]⚠[/yellow]  " + escape(
@@ -1682,8 +1684,6 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
     knob = harness.channels.unattended_max_actions
     if knob != type(harness.channels).model_fields["unattended_max_actions"].default:
         data["channels"]["unattended_max_actions"] = knob
-    if unwritten:  # WR-21: the step has not finished, so its stamp must not say it has
-        data["org"]["permissions"]["init_nulls_revision"] = 0
     # D-12: no null preset field in a record (`records` are dumps the caller made first)
     server_dict, peer_dicts = records if records is not None else _record_dicts(harness)
     if server_dict is not None:

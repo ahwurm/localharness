@@ -408,9 +408,10 @@ def _locked_world(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 @_not_root
-def test_a_failed_sidecar_leaves_config_unstamped_so_the_step_runs_again(tmp_path):
-    # CR-20 changed this pin: config.yaml used to be left byte-for-byte unwritten. It now gets every
-    # change but the init-nulls stamp, which stays due so the failed file is retried.
+def test_a_failed_sidecar_is_recorded_as_owed_and_retried_alone(tmp_path):
+    # CR-20 changed this pin: config.yaml used to be left byte-for-byte unwritten. CR-30 changed it
+    # again: the stamp is no longer held back (that re-ran the match over config.yaml at every
+    # start); it moves, and the failed file is recorded in the pending file instead.
     cfg, ok, locked = _locked_world(tmp_path)
     original, plan = migrate.load_plan(cfg)
 
@@ -421,7 +422,8 @@ def test_a_failed_sidecar_leaves_config_unstamped_so_the_step_runs_again(tmp_pat
     assert [p for p, _ in caught.value.failures] == [locked]
     assert len(caught.value.backups) == 2
     on_disk = _disk(cfg)["org"]
-    assert "init_nulls_revision" not in on_disk["permissions"]  # the stamp did not move
+    assert on_disk["permissions"]["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
+    assert migrate.read_init_nulls_pending(tmp_path) == ("agents/b_locked.yaml",)
     assert on_disk["permissions"]["budget"]["max_actions"] is None  # config.yaml's own values did
     assert _disk(ok)["permissions"]["budget"]["max_actions"] is None
     assert _disk(locked)["permissions"]["budget"]["max_actions"] == 100
@@ -433,6 +435,7 @@ def test_a_failed_sidecar_leaves_config_unstamped_so_the_step_runs_again(tmp_pat
     _migrate(cfg)
     assert _disk(locked)["permissions"]["budget"]["max_actions"] is None
     assert _disk(cfg)["org"]["permissions"]["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
+    assert not (tmp_path / migrate.INIT_NULLS_PENDING_FILE).exists()
     assert migrate.load_plan(cfg)[1] is None
 
 
@@ -557,7 +560,9 @@ def test_an_unwritable_sidecar_never_holds_back_the_deny_defaults(tmp_path):
     perms = _disk(cfg)["org"]["permissions"]
     assert perms["deny_patterns"] == list(PermissionConfig().deny_patterns)  # every default landed
     assert perms["defaults_revision"] == CURRENT_DEFAULTS_REVISION
-    assert "init_nulls_revision" not in perms  # the step that clears `locked` stays due
+    # CR-30 changed this pin (it was "the stamp stays due"): the stamp moves, `locked` is owed.
+    assert perms["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
+    assert migrate.read_init_nulls_pending(tmp_path) == ("agents/locked.yaml",)
     assert "Could not finish updating the config" in " ".join(err.getvalue().split())
 
     # The file is retried, not skipped: the next plan still names it, and once it is writable the
@@ -616,3 +621,88 @@ def test_a_failed_dead_key_only_sidecar_still_lets_the_init_nulls_stamp_move(tmp
     assert _disk(cfg)["org"]["permissions"]["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
     _, again = migrate.load_plan(cfg)
     assert again is not None and [s.path for s in again.sidecars] == [dead]
+
+
+# ------------------------------- CR-30: a hand-set value survives while an owed sidecar stays locked
+
+
+@_not_root
+def test_a_hand_set_100_survives_every_start_while_a_sidecar_stays_unwritable(tmp_path):
+    """The owner sets `max_actions: 100` by hand, in config.yaml and in an agent file that was
+    written, after the first start. However many starts follow while another agent file stays
+    read-only, both values stay; the locked file is still cleared once it can be written."""
+    import contextlib
+
+    cfg, ok, locked = _locked_world(tmp_path)
+    with contextlib.redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+        _auto_migrate_deny_defaults(cfg)  # start 1: the step runs, `locked` is owed
+    assert _disk(ok)["permissions"]["budget"]["max_actions"] is None
+
+    data = _disk(cfg)
+    data["org"]["permissions"]["budget"]["max_actions"] = 100  # the owner's own choice now
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    ok.write_text(yaml.safe_dump({"name": "a_ok", "permissions": {"budget": {"max_actions": 100}}},
+                                 sort_keys=False), encoding="utf-8")
+    config_bytes = cfg.read_bytes()
+
+    for _ in range(3):  # starts 2..4, `locked` still read-only
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), redirect_stdout(io.StringIO()):
+            _auto_migrate_deny_defaults(cfg)
+        assert "b_locked.yaml" in err.getvalue()  # still retried, and said
+        assert _disk(cfg)["org"]["permissions"]["budget"]["max_actions"] == 100
+        assert _disk(ok)["permissions"]["budget"]["max_actions"] == 100
+        assert cfg.read_bytes() == config_bytes  # not even rewritten
+
+    locked.chmod(0o644)
+    with contextlib.redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+        _auto_migrate_deny_defaults(cfg)
+    assert _disk(locked)["permissions"]["budget"]["max_actions"] is None  # owed, so cleared once
+    assert _disk(cfg)["org"]["permissions"]["budget"]["max_actions"] == 100
+    assert _disk(ok)["permissions"]["budget"]["max_actions"] == 100
+    assert not (tmp_path / migrate.INIT_NULLS_PENDING_FILE).exists()
+    assert migrate.load_plan(cfg)[1] is None
+
+    # And never again: a 100 the owner now writes into the formerly locked file stays too.
+    locked.write_text(yaml.safe_dump({"name": "b_locked",
+                                      "permissions": {"budget": {"max_actions": 100}}}),
+                      encoding="utf-8")
+    assert migrate.load_plan(cfg)[1] is None
+
+
+@_not_root
+def test_an_owed_file_fixed_by_hand_drops_off_the_pending_list(tmp_path):
+    """A listed file that no longer holds init's values is struck off, so a 100 the owner writes
+    into it later is never matched."""
+    import contextlib
+
+    cfg, _ok, locked = _locked_world(tmp_path)
+    with contextlib.redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+        _auto_migrate_deny_defaults(cfg)
+    locked.chmod(0o644)
+    locked.write_text(yaml.safe_dump({"name": "b_locked",
+                                      "permissions": {"budget": {"max_actions": 150}}}),
+                      encoding="utf-8")
+    with contextlib.redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+        _auto_migrate_deny_defaults(cfg)
+    assert not (tmp_path / migrate.INIT_NULLS_PENDING_FILE).exists()
+    assert _disk(locked)["permissions"]["budget"]["max_actions"] == 150
+    locked.write_text(yaml.safe_dump({"name": "b_locked",
+                                      "permissions": {"budget": {"max_actions": 100}}}),
+                      encoding="utf-8")
+    assert migrate.load_plan(cfg)[1] is None
+
+
+def test_the_pending_list_names_only_files_under_the_sidecar_dirs(tmp_path):
+    """A line naming anything else is inert: only globbed agents/divisions files are matched."""
+    cfg = _write(tmp_path, _v017(stamp=CURRENT_INIT_NULLS_REVISION, max_actions=150))
+    other = tmp_path / "elsewhere.yaml"
+    other.write_text(yaml.safe_dump({"permissions": {"budget": {"max_actions": 100}}}),
+                     encoding="utf-8")
+    (tmp_path / migrate.INIT_NULLS_PENDING_FILE).write_text("elsewhere.yaml\n../x.yaml\n",
+                                                           encoding="utf-8")
+    original, plan = migrate.load_plan(cfg)
+    assert plan is not None and plan.sidecars == () and plan.config_unchanged
+    assert migrate.apply(cfg, original, plan) == []
+    assert _disk(other)["permissions"]["budget"]["max_actions"] == 100
+    assert not (tmp_path / migrate.INIT_NULLS_PENDING_FILE).exists()
