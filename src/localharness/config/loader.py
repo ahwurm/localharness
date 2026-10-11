@@ -479,7 +479,7 @@ def org_deny_loosenings(perms: Any) -> list[tuple[str, str]]:
 HARNESS_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({
     "provider.base_url", "provider.api_key", "extra_endpoints", "active_endpoint", "server",
     "org.audit_log_path", "org.hooks", "org.enforce_capability_floor",
-    "org.web_fetch_allow_private", "channels.remote_unattended",
+    "org.web_fetch_allow_private", "channels.remote_unattended", "channels.unattended_max_actions",
     "autosense", "effort_budget", "org.default_effort",
     "proposer.base_url", "proposer.api_key"})
 """The core harness keys only the global config (config.yaml or overrides.yaml) may set.
@@ -490,7 +490,9 @@ the proposer's address and key, the peer endpoints and the recorded active endpo
 harness launches (`server`, the whole section: executable, image, arguments, address), a file it
 writes anywhere on disk (`org.audit_log_path`), free-form settings a hook plugin may read a URL or a
 command from (`org.hooks`), and the protections' own switches (`org.enforce_capability_floor`,
-`org.web_fetch_allow_private`, `channels.remote_unattended`). An address alone is enough to leak:
+`org.web_fetch_allow_private`, `channels.remote_unattended`) and the action ceiling a remote
+channel's unattended session runs under (`channels.unattended_max_actions`: dropped, never merely
+lowered, so only the machine moves it). An address alone is enough to leak:
 every message and every file the agent reads travels to it, key or no key. A member may be a whole
 section or list (`server`, `extra_endpoints`); readers test a dot-path with
 `is_harness_global_only`, which also matches the keys inside a member section.
@@ -617,26 +619,32 @@ def _put(data: dict, parts: list[str], value: Any) -> dict:
     return {**data, head: _put(inner, rest, value)} if isinstance(inner, dict) else data
 
 
-def _narrow_harness_global_only(merged: dict, sources: tuple[dict, ...],
-                                ws_files: tuple[str, str]) -> tuple[dict, list[str]]:
-    """Undo every HARNESS_GLOBAL_ONLY_FIELDS value a workspace source (config.yaml, overrides.yaml)
-    set differently from the global layers (or from the field's default, when they are silent); one
-    warning per such path and file. The global value goes back; when there is none the key goes, so
-    the default applies; and when there is no default either, the workspace's whole section gives
-    way to the global layers' (or to none). Removing, never writing a default, keeps the result the
-    same in any order of paths. Never mutates."""
+def _narrow_raw(merged: dict, sources: tuple[dict, ...], ws_files: tuple[str, str],
+                paths: Collection[str], *, baseline: Callable[[list[str], Any], Any],
+                accept: Callable[[Any, Any], bool],
+                note: Callable[[str, Any, Any], Optional[str]]) -> tuple[dict, list[str]]:
+    """Walk `paths` over the raw config sources and undo what a workspace source set that
+    `accept` refuses; the one walker behind the machine-level-only drop and the lower-only rule.
+
+    `baseline(parts, machine)` is the value the global layers allow (`machine`: what they set at
+    that path, or _UNSET); `accept(ws, allowed)` judges one workspace source's value (_UNSET, the
+    key being absent, is the caller's to accept); `note(path, file, ws)` is the warning for a value
+    refused, or None for a silent restore. One warning per such path and file. The global value
+    goes back; when there is none the key goes, so the default applies; and when there is no
+    baseline either, the workspace's whole section gives way to the global layers' (or to none).
+    Removing, never writing a default, keeps the result the same in any order of paths. Never
+    mutates."""
     global_view = deep_merge(sources[0], sources[1])
     warnings: list[str] = []
-    for path in sorted(HARNESS_GLOBAL_ONLY_FIELDS):
+    for path in sorted(paths):
         parts = path.split(".")
         machine = _dig(global_view, parts)
-        allowed = _model_default(HarnessConfig, parts) if machine is _UNSET else machine
-        dropped = [f"ignoring {path} in {file}: only the global config may set it"
-                   for source, file in zip(sources[2:], ws_files)
-                   if _dig(source, parts) not in (_UNSET, allowed)]
-        if not dropped:
+        allowed = baseline(parts, machine)
+        refused = [(file, ws) for source, file in zip(sources[2:], ws_files)
+                   for ws in (_dig(source, parts),) if not accept(ws, allowed)]
+        if not refused:
             continue
-        warnings += dropped
+        warnings += [text for file, ws in refused if (text := note(path, file, ws)) is not None]
         if machine is not _UNSET:
             merged = _put(merged, parts, machine)
         elif allowed is not _UNSET:
@@ -644,6 +652,18 @@ def _narrow_harness_global_only(merged: dict, sources: tuple[dict, ...],
         else:
             merged = _put(merged, parts[:-1], _dig(global_view, parts[:-1]))
     return merged, warnings
+
+
+def _narrow_harness_global_only(merged: dict, sources: tuple[dict, ...],
+                                ws_files: tuple[str, str]) -> tuple[dict, list[str]]:
+    """Undo every HARNESS_GLOBAL_ONLY_FIELDS value a workspace source (config.yaml, overrides.yaml)
+    set differently from the global layers (or from the field's default, when they are silent); one
+    warning per such path and file. See `_narrow_raw` for the restore."""
+    return _narrow_raw(
+        merged, sources, ws_files, HARNESS_GLOBAL_ONLY_FIELDS,
+        baseline=lambda parts, machine: _model_default(HarnessConfig, parts) if machine is _UNSET else machine,
+        accept=lambda ws, allowed: ws is _UNSET or ws == allowed,
+        note=lambda path, file, ws: f"ignoring {path} in {file}: only the global config may set it")
 
 
 def _gate_default(ask_field: str) -> Any:
