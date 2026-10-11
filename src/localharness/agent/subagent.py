@@ -1195,6 +1195,8 @@ async def _run_chunk_summarizer(
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
     children_budget: ChildrenBudgetConfig | None = None,
     unattended_max_actions: int | None = None,
+    parent_remaining_fn: Callable[[], tuple[int, float]] | None = None,
+    shape: str | None = None,
 ) -> str:
     """Run ONE leaf over a single granted chunk in a FRESH bounded window; return its extract (or '').
     The leaf's store is granted ONLY this chunk (parent=cruncher_store), so it reads exactly one
@@ -1227,7 +1229,12 @@ async def _run_chunk_summarizer(
         [name for name in CHUNK_SUMMARIZER_TOOLS if leaf_registry.has(name)],
     )
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
-    chunk_cfg = build_chunk_summarizer_config(budget=_children_budget(children_budget).for_name("chunk-summarizer"))
+    # WR-51: the leaf is a child like any other, so the dispatch seam picks its budget: a share of a
+    # finite parent's remaining (never above its own ceiling), else its ceiling as the fallback.
+    chunk_cfg, leaf_fallback, leaf_labels = _child_budget(
+        build_chunk_summarizer_config(budget=_children_budget(children_budget).for_name("chunk-summarizer")),
+        "chunk-summarizer", children_budget=children_budget, shape=shape,
+        parent_remaining=parent_remaining_fn)
     _kill, _compact = _child_runtime_paths(chunk_cfg, config_dir, state_dir=state_dir)
     try:
         leaf_loop = AgentLoop(
@@ -1240,6 +1247,7 @@ async def _run_chunk_summarizer(
             template_margin_ratio=template_margin_ratio,
             server_recovery=server_recovery,
             unattended_max_actions=unattended_max_actions,
+            budget_fallback=leaf_fallback, budget_labels=leaf_labels,
         )
         answer = await leaf_loop.run_turn(leaf_task)  # raw extract (no findings-wrapper to mis-parse)
     except Exception as exc:  # noqa: BLE001 - one bad leaf must not abort the whole reduce
@@ -1259,6 +1267,8 @@ async def _cruncher_combine_turn(
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
     children_budget: ChildrenBudgetConfig | None = None,
     unattended_max_actions: int | None = None,
+    parent_remaining_fn: Callable[[], tuple[int, float]] | None = None,
+    shape: str | None = None,
 ) -> str:
     """One bounded cruncher reduce turn over `items` (section-extracts, or partial-summaries on a
     higher level). Tool-less (pure reasoning over inline text) unless a clean-origin exec_seed is
@@ -1270,7 +1280,11 @@ async def _cruncher_combine_turn(
         from localharness.tools.builtin.cruncher_exec import CruncherExecTool
         await reg.register(CruncherExecTool(exec_seed, cell_timeout_s=exec_cfg.cell_timeout_s,
                                             mem_limit_mb=exec_cfg.mem_limit_mb), scope="global")
-    cfg = build_cruncher_config(budget=_children_budget(children_budget).for_name("cruncher"))
+    # WR-51: the combine turn goes through the dispatch seam too, so a finite parent's share binds it.
+    cfg, combine_fallback, combine_labels = _child_budget(
+        build_cruncher_config(budget=_children_budget(children_budget).for_name("cruncher")),
+        "cruncher", children_budget=children_budget, shape=shape,
+        parent_remaining=parent_remaining_fn)
     cfg.tools = ToolConfig(add=[])  # reduce over inline text; exec (if any) resolves via inherited global
     _kill, _compact = _child_runtime_paths(cfg, config_dir, state_dir=state_dir)
     loop = AgentLoop(config=cfg, llm=llm, bus=child_bus, context_manager=ctx,
@@ -1279,7 +1293,8 @@ async def _cruncher_combine_turn(
                      effort=effort, effort_ratios=effort_ratios,
                      template_margin_ratio=template_margin_ratio,
                      server_recovery=server_recovery,
-                     unattended_max_actions=unattended_max_actions)
+                     unattended_max_actions=unattended_max_actions,
+                     budget_fallback=combine_fallback, budget_labels=combine_labels)
     label = "PARTIAL group of section-extracts" if partial else "EXTRACTS from the document's sections"
     goal = ("a faithful partial summary that preserves ALL question-relevant facts verbatim"
             if partial else "one accurate, grounded answer to the question")
@@ -1361,13 +1376,19 @@ async def dispatch_cruncher_subagent(
     server_recovery: "Callable[[], ServerRecovery | None] | None" = None,
     children_budget: ChildrenBudgetConfig | None = None,
     unattended_max_actions: int | None = None,
+    parent_remaining_fn: Callable[[], tuple[int, float]] | None = None,
+    shape: str | None = None,
 ) -> str:
     """J3 cruncher: faithful over-window reduce (Plan α). Reads the GRANTED over-window body(ies) by
     handle (read-through), splits each (harness-orchestrated map), summarizes each chunk in a fresh
     leaf window granted just that chunk, then the cruncher's tool-less loop combines the per-section
     extracts into a faithful answer. Every window bounded; nothing truncated (each chunk fully read).
     No host-dangerous tool anywhere on this path (L1); an untrusted granted body resolves only here,
-    never in a bash-holder (L3)."""
+    never in a bash-holder (L3).
+
+    `parent_remaining_fn` / `shape` (WR-51): every leaf and every combine turn is built through the
+    dispatch seam (`_child_budget`), so under a finite parent each takes its share of what the
+    parent has left, never more than its own `org.children_budget` ceiling."""
     from localharness.agent.context import ContextManager
     from localharness.agent.loop import AgentLoop
     from localharness.tools.builtin.chunk_tool import split_lossless
@@ -1420,6 +1441,7 @@ async def dispatch_cruncher_subagent(
                 server_recovery=server_recovery,
                 children_budget=children_budget,
                 unattended_max_actions=unattended_max_actions,
+                parent_remaining_fn=parent_remaining_fn, shape=shape,
             )
     raw = await asyncio.gather(*[_summarize(i, ph) for i, ph in enumerate(piece_handles)])
     extracts = [f"[section {i + 1}]\n{e.strip()}" for i, e in enumerate(raw) if e and e.strip().upper() != "NONE"]
@@ -1471,6 +1493,7 @@ async def dispatch_cruncher_subagent(
             server_recovery=server_recovery,
             children_budget=children_budget,
             unattended_max_actions=unattended_max_actions,
+            parent_remaining_fn=parent_remaining_fn, shape=shape,
         )
 
     items, level, reduce_trace = await hierarchical_reduce(
@@ -1498,6 +1521,7 @@ async def dispatch_cruncher_subagent(
         server_recovery=server_recovery,
         children_budget=children_budget,
         unattended_max_actions=unattended_max_actions,
+        parent_remaining_fn=parent_remaining_fn, shape=shape,
     )
     log.info("cruncher reduced %d section(s) over %d granted handle(s)", n_sections, len(handles))
     # R2: only a BROAD query (level>=1) inserted lossy partial nodes; on a TARGETED query the final
@@ -1722,6 +1746,7 @@ def make_explore_agent_runner(
                 server_recovery=server_recovery,
                 children_budget=children_budget,
                 unattended_max_actions=unattended_max_actions,
+                parent_remaining_fn=parent_remaining_fn, shape=shape,
             )
             return r if isinstance(r, DelegationResult) else DelegationResult(str(r))
         if name == "explore":
