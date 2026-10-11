@@ -5,6 +5,7 @@ ReAct while-loop execution engine for LocalHarness agents.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import inspect
 import json
@@ -39,6 +40,10 @@ if TYPE_CHECKING:
     from localharness.provider.lifecycle import ServerRecovery
 
 log = logging.getLogger("localharness.agent.loop")
+
+_TURN_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar("lh_turn_depth", default=0)
+"""How many `run_turn`s enclose the running code. A child loop's turn runs inside its parent's (awaited,
+or in a task that copied the context), so a turn that starts at depth 0 is a ROOT turn: the person's."""
 
 UNKNOWN_TOOL_META = ToolMeta(group="other", destructive=True)
 """What the gate is told about a tool whose schema could not be read (`_tool_facts`).
@@ -1381,6 +1386,12 @@ class AgentLoop:
 
         from localharness.provider.client import ProviderError
 
+        if _TURN_DEPTH.get() == 0:
+            # A new root turn: any drop an earlier turn could not end is over; the next one gets a whole
+            # bound and its one relaunch. A child's turn never does this, so the loops that run one
+            # after another inside one root turn share one outage (one bound, one relaunch).
+            self._forget_outages(every=True)
+        turn_depth = _TURN_DEPTH.set(_TURN_DEPTH.get() + 1)
         try:
             summary = await self._execute_loop(session, task, on_token, images)
         except ProviderError as exc:
@@ -1423,6 +1434,8 @@ class AgentLoop:
                 tokens_estimated=session.tokens_estimated,
             ))
             return summary
+        finally:
+            _TURN_DEPTH.reset(turn_depth)
 
         session.summary = summary
         reason = session.terminated_reason or "complete"
@@ -1877,6 +1890,7 @@ class AgentLoop:
                 return _format_error_summary(session, exc)
 
             session.connection_retry_used = False  # a call went through: the next outage retries again
+            self._forget_outages()  # ... and, for every loop sharing the pair, waits a whole bound again
 
             # Accumulate per-turn token usage (TELEM-02)
             if usage is not None:
@@ -2547,6 +2561,18 @@ class AgentLoop:
 
             self._local_recovery = ServerRecovery(None, None, None)
         return self._local_recovery
+
+    def _forget_outages(self, *, every: bool = False) -> None:
+        """End the reconnect pairs' record of a drop no flight could end (lifecycle.forget_outages): for
+        this loop's own server address once a call to it went through, or every record when a root turn
+        begins. Never fails the turn."""
+        try:
+            from localharness.provider import lifecycle as _lifecycle
+
+            base_url = getattr(getattr(self._llm, "config", None), "base_url", None)
+            _lifecycle.forget_outages(base_url if isinstance(base_url, str) else None, every=every)
+        except Exception:  # noqa: BLE001 - bookkeeping for the next drop must never end this turn
+            log.debug("could not end the reconnect outage record", exc_info=True)
 
     async def _reconnect(self, session: Session, exc: Exception) -> tuple[bool, str]:
         """What a ProviderConnectionError does, at either seam: (retry, note). retry True means the

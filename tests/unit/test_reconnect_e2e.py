@@ -459,3 +459,170 @@ async def test_a_gpu_false_managed_primary_that_dies_ends_the_turn_at_once_with_
     assert "the model server exited. Log tail:" in failed.detail and "segfault tail" in failed.detail
     assert "segfault tail" in summary
     assert r.starts == []
+
+
+# ---------------------------------------------------------------------------
+# One outage per root turn: a root and the child it delegates to share one bound and one relaunch
+# ---------------------------------------------------------------------------
+
+
+class _Delegating:
+    """A registry whose one tool is a delegation: the model server dies, then a child loop (on the same
+    client and the same supplier) runs its own turn, and its ending is the tool's result."""
+
+    def __init__(self, rig: Rig) -> None:
+        self.rig = rig
+        self.child_summaries: list[str] = []
+
+    def get_tools_for_agent(self, agent_id, division_id, tool_config):
+        return {}
+
+    async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+        from localharness.tools.base import ToolResult
+
+        self.rig.up = False
+        self.rig.alive = False
+        write_dead_pidfile(self.rig.cfg)  # the launched server dies while the child works
+        child = _loop(self.rig.llm, self.rig.bus, server_recovery=self.rig.repl.server_recovery)
+        self.child_summaries.append(await child.run_turn("look it up"))
+        return ToolResult(output=self.child_summaries[-1], success=True)
+
+
+def _serving(r: Rig) -> None:
+    write_live_pidfile(r.cfg)
+    r.up = True
+    r.alive = True
+
+
+async def test_a_root_after_its_child_spent_the_bound_waits_no_second_bound(sessions, rig, caplog):
+    """CR-51: the child's flight relaunches the dead server once and spends the whole bound on a server
+    that never answers; the root's next call meets the same outage and takes one look, not a second
+    bound: one relaunch, one ProviderLost, and the person's whole wait stays within one bound."""
+    caplog.set_level(logging.DEBUG)
+    r = rig(chat_class=ToolThenDone, wait=1.0)
+    _serving(r)
+
+    def up_as_a_process_never_answering():
+        write_live_pidfile(r.cfg)
+        r.alive = True
+
+    r.on_start = up_as_a_process_never_answering
+    delegating = _Delegating(r)
+    root = _tool_loop(r.llm, r.bus, delegating, server_recovery=r.repl.server_recovery)
+    started = time.monotonic()
+    try:
+        summary = await asyncio.wait_for(root.run_turn("go"), 10)
+    finally:
+        await r.aclose()
+    elapsed = time.monotonic() - started
+
+    assert len(r.starts) == 1  # one relaunch for the whole root turn
+    assert len(_lost(r.bus)) == 1  # one announcement for the one outage
+    assert elapsed < 1.6  # one bound (1 s) and one short look, not a second bound
+    assert "did not come back within 1s" in delegating.child_summaries[0]
+    assert "did not come back within 1s" in summary
+    assert [f.reason for f in _failed(r.bus)] == ["llm_error", "llm_error"]  # the child, then the root
+    assert not [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
+
+
+async def test_a_root_after_its_childs_relaunch_died_never_relaunches_again(sessions, rig):
+    """CR-51: the one relaunch already happened (and died) inside the child's turn; the root's next drop
+    in the same turn ends with that same sentence, with no second launch of a crash-looping server."""
+    r = rig(chat_class=ToolThenDone, wait=5.0)
+    _serving(r)
+
+    def dies():
+        write_dead_pidfile(r.cfg)
+        write_serve_log(r.cfg, "cuda oom tail")
+
+    r.on_start = dies
+    delegating = _Delegating(r)
+    root = _tool_loop(r.llm, r.bus, delegating, server_recovery=r.repl.server_recovery)
+    started = time.monotonic()
+    try:
+        summary = await asyncio.wait_for(root.run_turn("go"), 10)
+    finally:
+        await r.aclose()
+
+    assert len(r.starts) == 1
+    assert len(_lost(r.bus)) <= 1
+    assert time.monotonic() - started < 2.5  # well inside the 5 s bound: nothing waited for it twice
+    assert "it was restarted once and the restart failed" in delegating.child_summaries[0]
+    assert "it was restarted once and the restart failed" in summary
+    assert "cuda oom tail" in summary
+
+
+async def test_a_new_root_turn_gets_a_whole_bound_and_its_relaunch_again(sessions, rig):
+    """The outage record lasts one root turn: the person's next message relaunches the server again."""
+    r = rig(chat_class=ToolThenDone, wait=5.0)
+    _serving(r)
+    r.on_start = lambda: write_dead_pidfile(r.cfg)
+    delegating = _Delegating(r)
+    try:
+        await asyncio.wait_for(
+            _tool_loop(r.llm, r.bus, delegating, server_recovery=r.repl.server_recovery).run_turn("go"), 10)
+        assert len(r.starts) == 1
+        r.on_start = r._bring_up  # this time the relaunch comes up
+        summary = await asyncio.wait_for(r.loop().run_turn("again"), 10)
+    finally:
+        await r.aclose()
+
+    assert len(r.starts) == 2
+    assert summary == "done"
+
+
+async def test_a_call_that_goes_through_ends_the_outage_for_every_loop_on_the_pair(sessions, rig):
+    """A drop the child could not end, then the server comes back and a call goes through: the next drop
+    in the same root turn is a new one, with its own announcement and its own relaunch."""
+    r = rig(wait=5.0)
+    _serving(r)
+    pair = r.repl.server_recovery()
+    from localharness.provider.lifecycle import _Outage
+
+    pair._flight.outage = _Outage(time.monotonic() - 60.0)  # an outage whose bound is long spent ...
+    pair._flight.outage.failed = TimeoutError("the model server did not come back within 5s")
+    lifecycle._OPEN_OUTAGES[pair._flight] = pair.base_url
+    from localharness.agent import loop as loop_mod
+
+    depth = loop_mod._TURN_DEPTH.set(1)  # a child's turn: only the call going through can end it
+    try:
+        # ... and a call that goes through at that address ends it
+        assert await asyncio.wait_for(_loop(r.llm, r.bus, server_recovery=r.repl.server_recovery)
+                                      .run_turn("go"), 10) == "ok"
+    finally:
+        loop_mod._TURN_DEPTH.reset(depth)
+        await r.aclose()
+    assert pair._flight.outage is None
+    assert pair._flight not in lifecycle._OPEN_OUTAGES
+
+
+async def test_a_child_turn_never_ends_the_outage_but_a_root_turn_does(sessions, rig):
+    from localharness.agent import loop as loop_mod
+    from localharness.provider.lifecycle import _Outage
+
+    r = rig(wait=5.0)
+    pair = r.repl.server_recovery()
+    seen: list[bool] = []
+
+    async def turn() -> None:
+        pair._flight.outage = _Outage(time.monotonic())
+        lifecycle._OPEN_OUTAGES[pair._flight] = pair.base_url
+        loop = _loop(r.llm, r.bus, server_recovery=r.repl.server_recovery)
+        loop._execute_loop = _record_outage  # type: ignore[method-assign]
+        await loop.run_turn("go")
+
+    async def _record_outage(*_a, **_k) -> str:
+        seen.append(pair._flight.outage is not None)
+        return "ok"
+
+    try:
+        depth = loop_mod._TURN_DEPTH.set(1)
+        try:
+            await turn()  # a child's turn: the outage is still on record while it runs
+        finally:
+            loop_mod._TURN_DEPTH.reset(depth)
+        await turn()  # a root turn: it is gone before the loop runs
+    finally:
+        await r.aclose()
+    assert seen == [True, False]
+    assert loop_mod._TURN_DEPTH.get() == 0
