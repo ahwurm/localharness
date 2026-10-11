@@ -248,6 +248,33 @@ def test_a_cache_ram_the_field_cannot_hold_stays_an_argument():
     assert out.spec.extra_args == ["-cram", "-1"]
 
 
+@pytest.mark.parametrize("value", ["abc", "-1", "9" * 5000, "١٢٣", "1.5", "1" * 10])
+def test_a_cache_ram_in_the_environment_the_field_cannot_hold_stays_a_variable_and_never_raises(value):
+    out = imported(llama(environ={"LLAMA_ARG_CACHE_RAM": value}))
+    assert out.spec.cache_ram is None
+    assert out.spec.env == {"LLAMA_ARG_CACHE_RAM": value}
+
+
+def test_a_cache_ram_figure_in_the_environment_fills_the_field_and_argv_wins():
+    assert imported(llama(environ={"LLAMA_ARG_CACHE_RAM": "512"})).spec.cache_ram == 512
+    out = imported(llama("-cram", "64", environ={"LLAMA_ARG_CACHE_RAM": "-1"}))
+    assert out.spec.cache_ram == 64 and out.spec.env is None
+
+
+def test_an_over_long_cache_ram_on_argv_stays_an_argument():
+    out = imported(llama("--cache-ram", "9" * 5000))
+    assert out.spec.cache_ram is None and out.spec.extra_args == ["--cache-ram", "9" * 5000]
+
+
+def test_a_value_no_step_could_place_is_attach_only_not_a_traceback(monkeypatch):
+    def boom(_text):
+        raise ValueError("Exceeds the limit")
+
+    monkeypatch.setattr(init_import, "_plain_ram", lambda text: True)
+    monkeypatch.setattr(init_import, "_int", boom)
+    assert attach(llama("--port", "9", "-c", "9")) == "holds a value a record cannot carry (record)"
+
+
 def test_a_dangling_value_flag_cannot_be_carried():
     assert attach(proc(("llama-server", "-m", "/m/a.gguf", "--port"), mapped=())) \
         == "holds a value a record cannot carry (--port)"

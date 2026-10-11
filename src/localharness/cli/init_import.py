@@ -252,7 +252,7 @@ def _walk(tokens: tuple[str, ...]) -> _Walk:
             walk.key_files.append((written, value))
         elif field == "hf_token":
             pass  # a download credential: never carried, never shown
-        elif field == "cram" and not (value.isascii() and value.isdigit()):
+        elif field == "cram" and not _plain_ram(value):
             # `-cram -1` (no limit) is not a value the record's field can carry: it stays an argument
             walk.extra.append(tok)
             if inline is None:
@@ -288,6 +288,12 @@ def _binary(rec: ProcRecord, resolver: Callable[[str], str | None]) -> tuple[str
         return (joined, "process") if joined is not None else (None, None)
     found = resolver(argv0)
     return (found, "path") if found else (None, None)
+
+
+def _plain_ram(text: str) -> bool:
+    """A `--cache-ram` value `ManagedServerConfig.cache_ram` can hold: plain ASCII digits, at most nine
+    (a longer string is not a MiB figure, and `int()` of thousands of digits raises)."""
+    return text.isascii() and text.isdigit() and len(text) <= 9
 
 
 def _int(text: str) -> int | None:
@@ -428,6 +434,23 @@ def import_record(
     port: int | None = None,
     ini: IniRead | None = None,
 ) -> Imported | AttachOnly:
+    """`_import_record`, with a value no step could place becoming the attach-only line
+    `holds a value a record cannot carry` and never a traceback: `init` calls this after it has detected
+    a process and before it writes a file (WR-01)."""
+    try:
+        return _import_record(rec, source=source, binary_resolver=binary_resolver, port=port, ini=ini)
+    except (ValueError, OverflowError):
+        return AttachOnly("holds a value a record cannot carry (record)")
+
+
+def _import_record(
+    rec: ProcRecord,
+    *,
+    source: str,
+    binary_resolver: Callable[[str], str | None],
+    port: int | None = None,
+    ini: IniRead | None = None,
+) -> Imported | AttachOnly:
     """Translate `rec` (a live process, a journal entry or a unit file, named by `source`) into a
     record, or into the one reason it is attached to only. `port` is the listener port the caller found
     the process on, used when the process names none; `ini` is `config.ini` read and masked by
@@ -464,7 +487,12 @@ def import_record(
             continue  # nothing else from environ is read: not its value, not its presence
         field = _ENV_FIELDS.get(name)
         if field is not None:
-            if value:
+            if field == "cram" and value and not _plain_ram(value):
+                # `LLAMA_ARG_CACHE_RAM=-1` (no limit), like `-cram -1`, is not a value the field can carry:
+                # it stays what it was, a variable, unless argv already named the option
+                if "cram" not in fields:
+                    env[name] = value
+            elif value:
                 fields.setdefault(field, value)
             continue
         category = excluded_option(name)
