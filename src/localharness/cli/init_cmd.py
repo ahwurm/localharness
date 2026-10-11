@@ -34,7 +34,7 @@ from localharness.cli import init_import, workspace
 from localharness.cli.errors import _HANDLED, report_filesystem_error
 from localharness.cli.workspace import shown_path, visible_text
 from localharness.config import trust
-from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.migrate import BACKUP_STAMP_FORMAT
 from localharness.config.overlay import atomic_write_overlay, load_overlay
@@ -1109,7 +1109,10 @@ def _write_attached(config_path: Path, result: DetectorResult, attached: Attache
         ),
         org=OrgConfig(
             default_model=model,
-            permissions=PermissionConfig(defaults_revision=CURRENT_DEFAULTS_REVISION),
+            permissions=PermissionConfig(
+                defaults_revision=CURRENT_DEFAULTS_REVISION,
+                init_nulls_revision=CURRENT_INIT_NULLS_REVISION,
+            ),
         ),
         server=None,
     )
@@ -1228,7 +1231,10 @@ def _skip_for_now(config_path: Path, model: str | None, *, force: bool = False) 
         ),
         org=OrgConfig(
             default_model=name,
-            permissions=PermissionConfig(defaults_revision=CURRENT_DEFAULTS_REVISION),
+            permissions=PermissionConfig(
+                defaults_revision=CURRENT_DEFAULTS_REVISION,
+                init_nulls_revision=CURRENT_INIT_NULLS_REVISION,
+            ),
         ),
         server=None,
     ), memory_on=True, force=force)
@@ -1526,7 +1532,10 @@ def _write_records(config_path: Path, recs: InitRecords, *, force: bool = False,
         ),
         org=OrgConfig(
             default_model=recs.served,
-            permissions=PermissionConfig(defaults_revision=CURRENT_DEFAULTS_REVISION),
+            permissions=PermissionConfig(
+                defaults_revision=CURRENT_DEFAULTS_REVISION,
+                init_nulls_revision=CURRENT_INIT_NULLS_REVISION,
+            ),
         ),
         server=recs.server.model_copy(deep=True),
         extra_endpoints=[peer.model_copy(deep=True) for peer in recs.peers],
@@ -1692,7 +1701,10 @@ def _write_config(
     # revision gate in config/migrate.py only protects configs stamped current at birth).
     org_kwargs: dict = {
         "default_model": selected_model,
-        "permissions": PermissionConfig(defaults_revision=CURRENT_DEFAULTS_REVISION),
+        "permissions": PermissionConfig(
+            defaults_revision=CURRENT_DEFAULTS_REVISION,
+            init_nulls_revision=CURRENT_INIT_NULLS_REVISION,
+        ),
     }
     records: list[Callable[[], None]] = []
     window = _served_window(result, cfg_dir=config_path, model=selected_model, deferred=records)
