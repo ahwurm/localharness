@@ -100,6 +100,11 @@ def permission_denied_reason(error: str | None) -> str | None:
     return error[len(DENIED_OBSERVATION_PREFIX):].strip() or None
 
 
+def provider_lost_line(wait_seconds: float) -> str:
+    """The ProviderLost line every surface without Esc shows (D-08), the bound in whole seconds."""
+    return f"model server unreachable — waiting up to {int(round(wait_seconds))}s"
+
+
 class ChannelAdapter(ABC):
     """
     Abstract base for all channel adapters.
@@ -482,9 +487,8 @@ class ChannelAdapter(ABC):
         publishes it, and a person watching a stalled turn must still be told. The text carries
         the bound only, never `event.detail`, and never names a key (Esc belongs to the terminal's
         own override; this surface may have none)."""
-        n = int(round(event.wait_seconds))
         await self.send_message(
-            f"model server unreachable — waiting up to {n}s",
+            provider_lost_line(event.wait_seconds),
             agent_id=event.agent_id,
             metadata={"style": "system.info"},
         )

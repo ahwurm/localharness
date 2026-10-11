@@ -302,12 +302,29 @@ async def test_acp_delivers_the_base_text_and_unsubscribes_on_stop(tmp_path):
     try:
         await bus.publish(_lost(1800.0))
         await bus.publish(_lost(30.0, detail="", parent_id="parent-session"))
-        assert conn.texts == [BASE_1800, BASE_30]
+        # the base text, set off by blank lines from the agent-message text around it (IN-10)
+        assert conn.texts == [f"\n\n{BASE_1800}\n\n", f"\n\n{BASE_30}\n\n"]
         assert all("Esc" not in t for t in conn.texts)
     finally:
         await ch.stop()
     await bus.publish(_lost(1800.0))
-    assert conn.texts == [BASE_1800, BASE_30], "a stopped channel hears nothing"
+    assert len(conn.texts) == 2, "a stopped channel hears nothing"
+
+
+async def test_acp_keeps_the_line_apart_from_a_streamed_answer(tmp_path):
+    """IN-10: a mid-stream drop puts the line between the partial answer and the re-sent one; ACP shows
+    all three as one agent message, so the line is its own paragraph rather than glued to either."""
+    bus = EventBus()
+    ch = AcpChannel(config_dir=str(tmp_path / "config"))
+    conn = _Conn()
+    ch._conn = conn
+    ch._session_id = "sess"
+    ch.bus = bus
+    await ch.send_message("partial ans")
+    await ch.on_provider_lost(_lost(1800.0))
+    await ch.send_message("the whole answer")
+    joined = "".join(conn.texts)
+    assert f"partial ans\n\n{BASE_1800}\n\nthe whole answer" == joined
 
 
 def test_the_plugin_api_version_did_not_move():
