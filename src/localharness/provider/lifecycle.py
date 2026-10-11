@@ -1070,7 +1070,7 @@ class ServerRecovery:
                     if window.expired():
                         raise TimeoutError(self._bound_text(wait_seconds)) from failed
                     raise RuntimeError(RESTART_FAILED_TEXT + str(failed)) from failed
-                except RuntimeError as failed:
+                except (RuntimeError, OSError) as failed:  # OSError: e.g. the server binary is gone
                     raise RuntimeError(RESTART_FAILED_TEXT + str(failed)) from failed
                 if live is not None and deadline - time.monotonic() <= 0:
                     # activate's own readiness wait has just seen /models answer at this address: the
