@@ -7,6 +7,7 @@ import copy
 import pytest
 from pydantic import ValidationError
 
+from localharness.agent.gate import fail_closed_gate
 from localharness.config.defaults import (
     CURRENT_DEFAULTS_REVISION,
     CURRENT_INIT_NULLS_REVISION,
@@ -23,6 +24,7 @@ from localharness.config.models import (
     OrgConfig,
     PermissionConfig,
 )
+from localharness.orchestrator.cards import AgentCardRegistry
 from localharness.config.overlay import deep_merge
 
 
@@ -210,3 +212,80 @@ async def test_the_bench_pipeline_caps_tool_output_at_todays_size_when_unset():
     loop = await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
     cap_stage = loop._ctx._pipeline._deterministic_stages[0]
     assert cap_stage.max_chars == DEFAULT_TOOL_OUTPUT_CHARS == 32_000
+
+
+# --------------------------------------------------------------------------- the card
+
+
+def _no_limit_config() -> AgentConfig:
+    return AgentConfig(name="n", role="r", permissions={"budget": {"max_actions": None}})
+
+
+def test_a_card_keeps_an_unset_action_limit():
+    card = AgentCardRegistry().generate_card(_no_limit_config())
+    assert card.budget_max_actions is None
+
+
+def test_an_agent_without_an_action_limit_registers():
+    registry = AgentCardRegistry()
+    card = registry.register_from_config(_no_limit_config())
+    assert registry.get("n") is card
+    assert registry.get("n").budget_max_actions is None
+
+
+# --------------------------------------------------------------------------- the gate property
+
+
+class _Channel:
+    def __init__(self, local_operator=None):
+        if local_operator is not None:
+            self.local_operator = local_operator
+
+
+def test_the_gate_exposes_the_attached_channels_operator_flag(tmp_path):
+    gate = fail_closed_gate(permissions=PermissionConfig(), workspace=tmp_path)
+    assert gate.local_operator is False, "a fail-closed gate has no channel"
+    gate.attach_channel(_Channel(local_operator=True))
+    assert gate.local_operator is True
+    gate.attach_channel(_Channel())
+    assert gate.local_operator is False, "a channel without the attribute is not local"
+
+
+def test_the_gate_operator_flag_is_read_only(tmp_path):
+    gate = fail_closed_gate(permissions=PermissionConfig(), workspace=tmp_path)
+    with pytest.raises(AttributeError):
+        gate.local_operator = True
+
+
+# --------------------------------------------------------------------------- the loop
+
+
+@pytest.mark.asyncio
+async def test_a_loop_with_no_action_limit_runs_a_turn_unbounded(faithful_fake_llm, bus, tmp_path):
+    from localharness.agent.context import ContextManager
+    from localharness.agent.loop import AgentLoop
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.core.events import TurnFailed, TurnStarted
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    cfg = AgentConfig.model_validate({
+        "name": "no-limit-agent",
+        "role": "Test agent.",
+        "tools": {"deny": ["web_search", "web_fetch", "web_page_query"]},
+        "permissions": {"mode": "unattended",
+                        "budget": {"max_actions": None, "kill_file": str(tmp_path / "KILL")}},
+    })
+    loop = AgentLoop(
+        config=cfg, llm=faithful_fake_llm(tool_plan=[("glob", {"pattern": "*.py"})]),
+        bus=bus, context_manager=ContextManager(), tool_registry=reg,
+        permission_evaluator=PermissionEvaluator(),
+    )
+    await loop.run_turn("list python files")
+
+    started = bus.history(event_types=[TurnStarted])
+    assert len(started) == 1
+    assert started[0].budget.max_actions == 0
+    assert not bus.history(event_types=[TurnFailed])

@@ -1901,11 +1901,11 @@ async def test_failed_tool_error_text_reaches_model(faithful_fake_llm, bus, tmp_
 def test_agent_tool_timeout_exceeds_child_budget_and_summary_headroom():
     """600s cancelled children mid-final-summary (no terminal event, '' to parent).
     The timeout must stay >= child max duration + slow-model summary headroom."""
-    from localharness.agent.subagent import WEB_MAX_DURATION_MINUTES
+    from localharness.config.models import ChildrenBudgetConfig
     from localharness.tools.builtin.agent_tool import AgentTool
 
     assert AgentTool.timeout_s >= 1800.0
-    assert AgentTool.timeout_s >= (WEB_MAX_DURATION_MINUTES * 60) * 2
+    assert AgentTool.timeout_s >= (ChildrenBudgetConfig().web_researcher.minutes * 60) * 2
 
 
 # ---------------------------------------------------------------------------

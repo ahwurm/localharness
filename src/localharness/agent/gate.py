@@ -476,6 +476,13 @@ class PermissionGate:
         self._local_operator = bool(getattr(channel, "local_operator", False))
         self.asker = channel.ask_permission if getattr(channel, "can_ask", False) else None
 
+    @property
+    def local_operator(self) -> bool:
+        """Is the attached channel's person at this machine? The channel's own flag as
+        :meth:`attach_channel` read it (False until one is attached, and on a fail-closed gate).
+        The loop reads it here, never through the private attribute."""
+        return self._local_operator
+
     def _remote_locked(self) -> bool:
         """The machine's lock applies: it is set (remote_unattended False), a channel is attached,
         and the person answering is not at this machine."""
