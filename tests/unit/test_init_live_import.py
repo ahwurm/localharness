@@ -87,7 +87,7 @@ class Live:
         self.detect = AsyncMock(return_value=detected())
 
     def serve(self, *extra: str, model: Path | None = None, environ: dict | None = None,
-              unit: str | None = UNIT, base: tuple[str, ...] | None = None, uid_ok: bool = True,
+              unit: str | None = UNIT, base: tuple[str, ...] | None = None, exe: str | None = None,
               **process_kw) -> None:
         """Replace the listener: argv is `llama-server -m A --alias qwen-27b --host 127.0.0.1 --port
         8080` (unless `base` says otherwise) plus `extra`."""
@@ -95,7 +95,7 @@ class Live:
             "llama-server", "-m", str(model or self.model_a), "--alias", "qwen-27b",
             "--host", "127.0.0.1", "--port", "8080")
         self.fake_proc.listen(8080, INODE, os.getuid())
-        self.fake_proc.process(PID, argv=(*argv, *extra), environ=environ, exe=str(self.bin),
+        self.fake_proc.process(PID, argv=(*argv, *extra), environ=environ, exe=exe or str(self.bin),
                                cwd=str(self.home), cgroup=cgroup(unit) if unit else None,
                                fds={7: INODE}, **process_kw)
 

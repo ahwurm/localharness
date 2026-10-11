@@ -23,6 +23,7 @@ from localharness.agent.context import response_reserve
 from localharness.agent.gguf_header import (
     DiscoveredModel,
     discover,
+    preset_name,
     rank_models,
     unique_preset_name,
     walk_ggufs,
@@ -49,7 +50,7 @@ from localharness.config.models import (
     PermissionConfig,
     ProviderConfig,
 )
-from localharness.provider import autosense, procfs, speed_stats
+from localharness.provider import autosense, procfs, speed_stats, units
 from localharness.provider import server as managed_server
 from localharness.provider.server import RUNTIME_LABELS
 from localharness.provider.client import CapabilityResult, LLMClient, LLMConfig
@@ -472,6 +473,7 @@ class Attached:
     line: str
     default_model: str
     server_ready: bool = True
+    result: DetectorResult | None = None  # the detection the provider is written from
 
 
 def init_app(
@@ -573,6 +575,11 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
         picked = _pick_server(config_path, endpoint, model, interactive, force=force)
         if isinstance(picked, SetupResult):  # skipped for now: saved unchecked, or nothing saved
             outcome = picked
+        elif isinstance(picked, Attached):  # attached only: provider written, one line, no record
+            console.print(picked.line, markup=False, soft_wrap=True)
+            config_file = _write_attached(config_path, picked.result, picked, force=force)
+            _receipt(config_file, starting)
+            outcome = SetupResult(config_file, picked.server_ready)
         elif isinstance(picked, InitRecords):  # a record: shown, written, launched by the first start
             _show_records(picked)
             config_file = _write_records(config_path, picked, force=force,
@@ -910,10 +917,12 @@ _autosense_mod = autosense  # `_second_line` takes a keyword named `autosense`, 
 
 
 def _import_listener(config_path: Path, result: DetectorResult) -> InitRecords | Attached | None:
-    """D-26, D-53: the process listening on the detected port, before the model list is judged.
-    An own-uid llama-server becomes records; None means "today's attach path" (nothing listens, or a
-    listener this import does not translate). Only a listener that answered HTTP gets here, so a
-    user-owned process that does not answer is never imported."""
+    """D-25, D-26, D-53, D-54: the process listening on the detected port, before the model list is
+    judged. An own-uid llama-server becomes records; every case the import cannot reproduce becomes an
+    `Attached` (provider only, one line, exit 0). None means "today's attach path": nothing listens, or
+    a listener this import has no business with (another uid answering 200, a user-owned process that
+    is not llama-server). Only a listener that answered HTTP gets here, so a user-owned process that
+    does not answer is never imported."""
     try:
         port = urlparse(result.base_url).port
     except ValueError:
@@ -923,23 +932,104 @@ def _import_listener(config_path: Path, result: DetectorResult) -> InitRecords |
     found = procfs.listeners(port)
     if not found:
         return None
-    mine = [lst for lst in found if lst.uid == os.getuid()]
-    if not mine:
-        return None
+    # D-54: "answered 401" is the error code in the body the detector kept
+    error = result.raw_response.get("error") if isinstance(result.raw_response, dict) else None
+    answered_401 = isinstance(error, dict) and error.get("code") == 401
+    me = os.getuid()
+    mine = [lst for lst in found if lst.uid == me]
+    if not mine:  # another uid's listener is known by the uid column alone (T-5-59)
+        if not answered_401:
+            return None
+        uid = found[0].uid
+        try:
+            import pwd  # function-local (D-71): the module imports where pwd is absent
+
+            name = pwd.getpwuid(uid).pw_name
+        except (ImportError, KeyError):
+            name = str(uid)
+        line = (f":{port} is keyed and owned by uid {uid} ({visible_text(name)}) — set provider.api_key; "
+                "attached only, no server record written")
+        return Attached(line, result.suggested_model, server_ready=False, result=result)
     pid = procfs.pid_for_inode(mine[0].inode)
     if pid is None:
         return None
     rec = procfs.read_process(pid)
-    if isinstance(rec, procfs.ProcRefusal) or init_import.runtime_of(rec) != "llamacpp":
+    if isinstance(rec, procfs.ProcRefusal):
+        state = units.unit_file_state(rec.unit) if rec.unit else None
+        who = workspace.incumbent_subject(workspace.Holder(rec.unit, pid, None, me, state), port=port)
+        return Attached(f"{who} {rec.reason}{init_import.ATTACH_ONLY_SUFFIX}", result.suggested_model,
+                        result=result)
+    runtime = init_import.runtime_of(rec)
+    if runtime is None:
         return None
     holder = workspace.holder_of(rec)
+    who = workspace.incumbent_subject(holder, port=port)
+    if runtime != "llamacpp":  # a keyed Ollama or LM Studio has no place for a key; unkeyed attaches as before
+        if not answered_401:
+            return None
+        return Attached(f"{who} runs {RUNTIME_LABELS[runtime]}, which cannot carry a key"
+                        f"{init_import.ATTACH_ONLY_SUFFIX}", _attach_model(rec, result), result=result)
     imp = init_import.import_record(
         rec, source="live", binary_resolver=which_outside_cwd, port=port,
         ini=init_import.read_config_ini(init_import.user_config_ini()))
     if isinstance(imp, init_import.AttachOnly):
-        return None
+        return Attached(f"{who} {imp.reason}{init_import.ATTACH_ONLY_SUFFIX}", _attach_model(rec, result),
+                        result=result)
     return _records_from_import(config_path, imp, holder, port=port, running=True,
                                 base_url=result.base_url)
+
+
+def _argv_value(argv: Sequence[str], short: str, long: str) -> str | None:
+    """The value after `short` or `long` (space or `=` form, `_` read as `-`), else None."""
+    for idx, tok in enumerate(argv):
+        flag, eq, value = tok.partition("=")
+        if flag.startswith("--"):
+            flag = flag.replace("_", "-")
+        if flag == long and eq:
+            return value
+        if flag in (short, long) and not eq and idx + 1 < len(argv):
+            return argv[idx + 1]
+    return None
+
+
+def _attach_model(rec, result: DetectorResult) -> str:
+    """D-25: the model an attach-only provider names: the process's `-a`/`--alias`, else the stem of
+    its `-m`/`--model`, else the detector's suggestion."""
+    argv = rec.argv[1:] if rec.argv else ()
+    environ = rec.environ or {}
+    alias = _argv_value(argv, "-a", "--alias") or environ.get("LLAMA_ARG_ALIAS")
+    if alias:
+        return alias
+    model = _argv_value(argv, "-m", "--model") or environ.get("LLAMA_ARG_MODEL")
+    if model:
+        return preset_name(model)
+    return result.suggested_model
+
+
+def _write_attached(config_path: Path, result: DetectorResult, attached: Attached, *,
+                    force: bool = False) -> Path:
+    """D-25: a provider-only config.yaml for an attach: the detected address, the model the attach names,
+    no `server:`, no capability probe (so no claim about tool calling), nothing adopted. Memory and
+    host tools are on, as in every fresh config."""
+    model = attached.default_model
+    harness = HarnessConfig(
+        version="1",
+        provider=ProviderConfig(
+            provider_type=result.provider_type,
+            base_url=result.base_url,
+            api_key="none",
+            default_model=model,
+            available_models=[model] if model else [],
+            supports_function_calling=None,
+            timeout_seconds=600.0,
+        ),
+        org=OrgConfig(
+            default_model=model,
+            permissions=PermissionConfig(defaults_revision=CURRENT_DEFAULTS_REVISION),
+        ),
+        server=None,
+    )
+    return _write_harness(config_path, harness, True, force=force)
 
 
 def _second_line(imp: init_import.Imported, holder: workspace.Holder, *, port: int, running: bool,
