@@ -288,6 +288,55 @@ def test_a_claimed_port_is_no_incumbent(tmp_path, fake_proc, fake_systemd, monke
     assert repl._foreign_incumbent(repl._harness.server, "flash-next") is None
 
 
+def _with_pidfile_process(monkeypatch, pid: int = 4321) -> None:
+    """The shared pidfile names a live process (a peer launched earlier, or the primary's own)."""
+    monkeypatch.setattr(managed_server, "server_pid", lambda _d: pid)
+
+
+def test_a_live_peers_pidfile_does_not_claim_a_foreign_process_on_the_primarys_port(
+        tmp_path, fake_proc, fake_systemd, monkeypatch):
+    """IN-54: the pidfile is shared; its process is not the one holding the primary's port."""
+    stub_liveness(monkeypatch, True)
+    _with_pidfile_process(monkeypatch)
+    fake_systemd.answer_prefix("systemctl", "--user", "show", stdout=_show())
+    _foreign(fake_proc, cgroup=_cgroup())  # pid 1234, parent 1
+    repl, _, _ = _build(tmp_path, _harness(_llama_primary()))
+
+    sentence = repl._foreign_incumbent(repl._harness.server, "flash-next")
+
+    assert sentence is not None and "llama-server.service (pid 1234)" in sentence
+
+
+def test_the_pidfile_process_holding_the_port_is_still_claimed(tmp_path, fake_proc, monkeypatch):
+    stub_liveness(monkeypatch, True)
+    _with_pidfile_process(monkeypatch, pid=1234)
+    _foreign(fake_proc)
+    repl, _, _ = _build(tmp_path, _harness(_llama_primary()))
+
+    assert repl._foreign_incumbent(repl._harness.server, "flash-next") is None
+
+
+def test_a_child_of_the_pidfile_process_holding_the_port_is_still_claimed(tmp_path, fake_proc, monkeypatch):
+    """A wrapper script that does not exec: the listener is the pidfile process's child."""
+    stub_liveness(monkeypatch, True)
+    _with_pidfile_process(monkeypatch, pid=4321)
+    fake_proc.listen(8080, 5551, os.getuid())
+    fake_proc.process(4321, argv=("/x/wrapper.sh",))
+    fake_proc.process(1234, stat=b"1234 (llama-server) S 4321 " + b"0 " * 20 + b"\n", fds={7: 5551})
+    repl, _, _ = _build(tmp_path, _harness(_llama_primary()))
+
+    assert repl._foreign_incumbent(repl._harness.server, "flash-next") is None
+
+
+def test_a_listener_whose_owner_cannot_be_read_keeps_the_strategys_claim(tmp_path, fake_proc, monkeypatch):
+    stub_liveness(monkeypatch, True)
+    _with_pidfile_process(monkeypatch)
+    fake_proc.listen(8080, 5551, os.getuid())  # no process holds the inode in this tree
+    repl, _, _ = _build(tmp_path, _harness(_llama_primary()))
+
+    assert repl._foreign_incumbent(repl._harness.server, "flash-next") is None
+
+
 def test_a_free_port_is_no_incumbent(tmp_path, fake_proc, monkeypatch):
     stub_liveness(monkeypatch, False)
     repl, _, _ = _build(tmp_path, _harness(_llama_primary()))

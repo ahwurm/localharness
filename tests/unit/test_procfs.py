@@ -560,3 +560,35 @@ def test_procfs_does_no_gguf_parsing_http_or_subprocess():
     text = pathlib.Path(procfs.__file__).read_text()
     for banned in ("import subprocess", "import httpx", "gguf_header", "import pwd"):
         assert banned not in text
+
+
+# ------------------------------------------------------------------------------- parentage (IN-54)
+
+
+def _stat_with_parent(pid: int, parent: int) -> bytes:
+    return f"{pid} (a b) S {parent} ".encode() + b"0 " * 20 + b"\n"
+
+
+def test_parent_pid_reads_field_four_after_the_last_parenthesis(fake_proc):
+    fake_proc.process(50, stat=_stat_with_parent(50, 7))
+    assert procfs.parent_pid(50) == 7
+    assert procfs.parent_pid(51) is None  # no such process
+    fake_proc.process(52, stat=b"garbage")
+    assert procfs.parent_pid(52) is None
+
+
+def test_a_process_is_its_own_and_its_ancestors_descendant(fake_proc):
+    fake_proc.process(30, stat=_stat_with_parent(30, 20))
+    fake_proc.process(20, stat=_stat_with_parent(20, 10))
+    fake_proc.process(10, stat=_stat_with_parent(10, 1))
+    assert procfs.is_self_or_descendant(10, 10)
+    assert procfs.is_self_or_descendant(30, 10)
+    assert not procfs.is_self_or_descendant(10, 30)
+    assert not procfs.is_self_or_descendant(30, 99)
+    assert not procfs.is_self_or_descendant(30, 10, depth=1)
+
+
+def test_a_parent_loop_ends_the_walk(fake_proc):
+    fake_proc.process(3, stat=_stat_with_parent(3, 4))
+    fake_proc.process(4, stat=_stat_with_parent(4, 3))
+    assert not procfs.is_self_or_descendant(3, 99)
