@@ -343,3 +343,15 @@ def test_the_plugin_api_version_did_not_move():
     from localharness.plugins import api
 
     assert api.PLUGIN_API_VERSION == "1"
+
+
+def test_spec_11_lists_on_provider_lost_in_the_base_class_block():
+    """IN-12: a plugin-channel author reads the ChannelAdapter listing, not only the subscription table."""
+    from pathlib import Path
+
+    spec = (Path(__file__).resolve().parents[2] / "docs" / "specs" / "11-channels.md").read_text(
+        encoding="utf-8")
+    listing = spec[spec.index("    async def on_heartbeat(self, event: Heartbeat)"):]
+    listing = listing[:listing.index("```")]
+    assert "async def on_provider_lost(self, event: ProviderLost) -> None:" in listing
+    assert "detail" in listing and "parent_id" in listing and "subscribe" in listing

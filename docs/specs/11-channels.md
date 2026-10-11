@@ -263,6 +263,21 @@ class ChannelAdapter(ABC):
         Terminal channel may show a spinner update.
         """
         pass
+
+    async def on_provider_lost(self, event: ProviderLost) -> None:
+        """
+        Default handler for ProviderLost events: the model server dropped and the
+        loop is waiting for it. Default: one system line with the bound, rounded up
+        to whole seconds. It never shows `event.detail` and never filters on
+        `parent_id` (a child loop may publish it). The terminal overrides it to add
+        "; Esc stops"; ACP sets the line apart with blank lines. Concrete, so a
+        plugin channel inherits it; a channel still has to subscribe to receive it.
+        """
+        await self.send_message(
+            provider_lost_line(event.wait_seconds),  # "model server unreachable — waiting up to Ns"
+            agent_id=event.agent_id,
+            metadata={"style": "system.info"},
+        )
 ```
 
 ### Error Types
