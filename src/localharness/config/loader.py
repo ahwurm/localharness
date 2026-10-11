@@ -761,6 +761,26 @@ def _coerce_global(model: type[BaseModel], field: str, v: Any, **fill: Any) -> A
         return _INVALID
 
 
+def _refuse_invalid_global_budget(field: str, value: Any, file: Optional[Path], key_prefix: str) -> None:
+    """Raise the ConfigValidationError the operator's own budget value earns, naming the global
+    file that holds it (WR-22). Reached when that value is present but does not validate and a
+    workspace file declares the same key: the load fails as it fails with no workspace file over
+    it, never falls to the schema default (None, no limit)."""
+    key = f"{key_prefix}permissions.budget.{field}"
+    try:
+        BudgetConfig.model_validate({field: value})
+    except ValidationError as exc:
+        line = _file_line_map(file).get(key) if file is not None else None
+        errors = [_field_error(key, err, err["msg"], line, model=BudgetConfig, secrets=frozenset())
+                  for err in exc.errors()]
+        raise ConfigValidationError(str(file), errors) from None
+    except (OverflowError, ValueError, TypeError):
+        pass
+    line = _file_line_map(file).get(key) if file is not None else None
+    raise ConfigValidationError(str(file), [ConfigFieldError(
+        key, value, "is not a valid budget value", line)]) from None
+
+
 def _budget_value_ok(parts: list[str], v: Any) -> bool:
     """Is `v` a usable value at this `org.children_budget` path, on the field's own bounds?"""
     if parts[-1] == "actions":
@@ -1868,18 +1888,18 @@ class ConfigLoader:
                     decl, src = d_val, div_path
 
             # The global value as the model validates it (CR-01): a global `"50"` or `50.0` is the
-            # operator's 50, never silence. One that is present and does not validate is refused
-            # ground for the workspace too: its value is removed, never kept and never marked.
-            baseline = self._global_layer_budget(path.stem, div_name, field)
-            if baseline is not None:
-                baseline = _coerce_global(BudgetConfig, field, baseline)
+            # operator's 50, never silence. One that is present and does not validate fails the
+            # load, as it does with no workspace file over it (WR-22): the operator's raw value is
+            # put back so AgentConfig's validation names it. Removing the field instead would load
+            # the schema default, None, which is no limit at all.
+            raw_global, g_file, g_key = self._global_layer_budget_source(path.stem, div_name, field)
+            baseline = (raw_global if raw_global is None
+                        else _coerce_global(BudgetConfig, field, raw_global))
             note = (f"ignoring permissions.budget.{field} in {str(src)!r}: "
                     "a project may only lower it")
             if baseline is _INVALID:
                 if decl is not _UNSET:
-                    budget.pop(field, None)
-                    if note not in self.agent_warnings:
-                        self.agent_warnings.append(note)
+                    _refuse_invalid_global_budget(field, raw_global, g_file, g_key)
                 continue
             if finite(baseline):
                 if decl is not _UNSET and finite(decl) and decl <= baseline:
@@ -2128,6 +2148,14 @@ class ConfigLoader:
         it, so it answers when an unrelated key in the same file is invalid; a file that does not
         parse is silent. No caller role enters (spec §13).
         """
+        return self._global_layer_budget_source(stem, div_name, field)[0]
+
+    def _global_layer_budget_source(
+        self, stem: str, div_name: Optional[str], field: str
+    ) -> tuple[Any, Optional[Path], str]:
+        """`_global_layer_budget`'s value, the file that declared it, and the key prefix the value
+        sits under in that file (`"agent."` in overrides.yaml, else `""`); `(None, None, "")` when
+        the global layer is silent. The file is what an error about that value names (WR-22)."""
         def _declared(source: Any) -> Any:
             perms = source.get("permissions") if isinstance(source, dict) else None
             budget = perms.get("budget") if isinstance(perms, dict) else None
@@ -2147,18 +2175,19 @@ class ConfigLoader:
             except ConfigError:
                 return None
 
-        rungs: list[Callable[[], Any]] = [
-            lambda: _declared_file(self._config_dir / "agents" / f"{stem}.yaml"),
-            lambda: (_declared_file(self._config_dir / "divisions" / f"{div_name}.yaml")
-                     if div_name else None),
-            lambda: _declared_file(self._config_dir / "org.yaml"),
-            _overlay,
+        files: list[Optional[Path]] = [
+            self._config_dir / "agents" / f"{stem}.yaml",
+            self._config_dir / "divisions" / f"{div_name}.yaml" if div_name else None,
+            self._config_dir / "org.yaml",
         ]
-        for rung in rungs:
-            value = rung()
+        for file in files:
+            value = _declared_file(file) if file is not None else None
             if value is not None and value != "inherit":
-                return value
-        return None
+                return value, file, ""
+        value = _overlay()
+        if value is not None and value != "inherit":
+            return value, _resolve_user_overlay_path(self._config_dir), "agent."
+        return None, None, ""
 
     def _global_layer_permission(self, field: str, stem: str, div_name: Optional[str]) -> Any:
         """`permissions.<field>` as the GLOBAL layer alone declares it, or None.

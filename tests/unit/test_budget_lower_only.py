@@ -292,8 +292,9 @@ def test_an_unrelated_workspace_block_of_other_org_keys_is_untouched(tmp_path):
 # ---------------------------------------------------------------------------
 
 import yaml  # noqa: E402
+from pathlib import Path  # noqa: E402
 
-from localharness.config.loader import AGENT_CORE_LOWER_ONLY_KEYS, ConfigLoader  # noqa: E402
+from localharness.config.loader import AGENT_CORE_LOWER_ONLY_KEYS, ConfigLoader, ConfigValidationError  # noqa: E402
 
 _PROVIDER = {"provider_type": "vllm", "base_url": "http://localhost:8000/v1",
              "default_model": "global-model"}
@@ -713,13 +714,39 @@ def test_a_global_minutes_spelled_as_a_string_still_bounds_a_shadowing_file(tmp_
     assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_duration_minutes")]
 
 
-def test_a_global_budget_that_does_not_validate_is_never_read_as_silence(tmp_path):
-    # Present and unusable fails closed: the workspace value is refused, never kept and marked.
+@pytest.mark.parametrize("ws_value", [9999, 5])
+def test_a_global_budget_that_does_not_validate_is_never_read_as_silence(tmp_path, ws_value):
+    # WR-22 changed this pin: it used to expect the load to succeed at None (no limit at all).
+    # Present and unusable now fails the load, naming the operator's file, exactly as that global
+    # file fails with no workspace file over it; a workspace value never turns it into "unbounded".
     loader, ws = _world(tmp_path,
                         g_agents={"worker": _agent(budget={"max_actions": "lots"})},
-                        ws_agents={"worker": _agent(budget={"max_actions": 9999})})
-    assert _loaded(loader) == (None, None, frozenset())
-    assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_actions")]
+                        ws_agents={"worker": _agent(budget={"max_actions": ws_value})})
+    with pytest.raises(ConfigValidationError) as caught:
+        loader.load_agent("worker")
+    assert caught.value.path == str(tmp_path / "global" / "agents" / "worker.yaml")
+    assert [e.field_path for e in caught.value.errors] == ["permissions.budget.max_actions"]
+    assert caught.value.errors[0].yaml_line is not None
+
+
+def test_an_invalid_global_agent_file_value_fails_even_over_a_valid_global_overlay(tmp_path):
+    loader, _ = _world(tmp_path,
+                       g_agents={"worker": _agent(budget={"max_actions": 50.5})},
+                       g_over={"agent": {"permissions": {"budget": {"max_actions": 20}}}},
+                       ws_agents={"worker": _agent(budget={"max_actions": 9999})})
+    with pytest.raises(ConfigValidationError) as caught:
+        loader.load_agent("worker")
+    assert caught.value.path.endswith(str(Path("global") / "agents" / "worker.yaml"))
+
+
+def test_an_invalid_global_overlay_budget_is_named_under_its_agent_key(tmp_path):
+    loader, _ = _world(tmp_path,
+                       g_over={"agent": {"permissions": {"budget": {"max_duration_minutes": 0.05}}}},
+                       ws_agents={"worker": _agent(budget={"max_duration_minutes": 5.0})})
+    with pytest.raises(ConfigValidationError) as caught:
+        loader.load_agent("worker")
+    assert caught.value.path == str(tmp_path / "global" / "overrides.yaml")
+    assert [e.field_path for e in caught.value.errors] == ["agent.permissions.budget.max_duration_minutes"]
 
 
 @pytest.mark.parametrize("spelled", ["20", 20.0])
