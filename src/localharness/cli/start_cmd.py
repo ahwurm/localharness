@@ -2447,6 +2447,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # D-34: the value the session loop below is built with (the loop does not exist yet).
             template_margin_ratio=harness.autosense.template_margin_ratio,
             server_recovery=server_recovery_fn,
+            # D-09: the operator's per-child ceilings, a value (the block does not change mid-session).
+            children_budget=harness.org.children_budget,
+            # D-57: the machine knob reaches every child loop, so a remote unattended surface has
+            # a ceiling on each of them, not only on the root.
+            unattended_max_actions=harness.channels.unattended_max_actions,
         )
 
         agent_tool = AgentTool(

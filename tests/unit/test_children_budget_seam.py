@@ -285,3 +285,112 @@ def test_children_budget_is_keyword_only_with_default_none(fn):
     assert param.default is None
     names = list(inspect.signature(fn).parameters)
     assert names.index("children_budget") > names.index("server_recovery")
+
+
+# ---------------------------------------------------------------------------
+# The machine knob reaches every child loop (08-09 Task 1, D-57)
+# ---------------------------------------------------------------------------
+
+def _config_child(name: str = "coder"):
+    from localharness.config.models import AgentConfig, BudgetConfig, PermissionConfig
+
+    return AgentConfig(name=name, role="test child",
+                       permissions=PermissionConfig(budget=BudgetConfig()))
+
+
+def _knobs(calls: list[dict]) -> list:
+    return [c["unattended_max_actions"] for c in calls]
+
+
+async def test_the_knob_reaches_a_config_child(recorded_loops, bus):
+    runner = await _runner(bus, unattended_max_actions=100, load_agent=lambda n: _config_child(n))
+    await runner("coder", "write hello.py")
+    assert _knobs(recorded_loops) == [100]
+
+
+@pytest.mark.parametrize("hook", _HOOKS)
+@pytest.mark.parametrize(
+    ("agent_id", "task"),
+    [("explore", "find X"), ("web-researcher", "research X"), ("search-verifier", _VERIFY_TASK)],
+)
+async def test_the_knob_reaches_every_built_in_child_and_every_web_retry(
+    recorded_loops, bus, hook, agent_id, task
+):
+    runner = await _runner(bus, unattended_max_actions=100, load_builtin_override=hook)
+    await runner(agent_id, task)
+    assert recorded_loops
+    assert set(_knobs(recorded_loops)) == {100}
+    if agent_id == "web-researcher":
+        assert len(recorded_loops) == 1 + sub.WEB_ZERO_CALL_RETRIES >= 2
+
+
+async def test_the_knob_reaches_the_nested_search_verifier(recorded_loops, bus):
+    runner = await _runner(bus, unattended_max_actions=100, max_subagent_depth=3)
+    await runner("web-researcher", "research X")
+    agent_tool = recorded_loops[0]["tool_registry"]._tools["global"]["agent"]
+    before = len(recorded_loops)
+    await agent_tool._agent_runner("search-verifier", _VERIFY_TASK)
+    assert len(recorded_loops) > before
+    assert recorded_loops[-1]["unattended_max_actions"] == 100
+
+
+async def test_the_knob_reaches_the_cruncher_leaves_and_combine_turns(recorded_loops, bus):
+    from localharness.agent.context import ContentStore
+
+    store = ContentStore()
+    handle = store.put("a granted document")
+    runner = await _runner(bus, unattended_max_actions=100, parent_store=store)
+    await runner("cruncher", "what does it say?", [handle])
+    assert {c["config"].name for c in recorded_loops} == {"chunk-summarizer", "cruncher"}
+    assert set(_knobs(recorded_loops)) == {100}
+
+
+async def test_a_partial_combine_level_carries_the_knob_too(monkeypatch, bus):
+    from localharness.agent.context import ContentStore
+
+    calls: list[dict] = []
+
+    class _Loop:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            self.current_session_id = None
+            self._name = kwargs["config"].name
+
+        async def run_turn(self, task, *a, **k):
+            return "extract " * 150 if self._name == "chunk-summarizer" else "combined"
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", _Loop)
+    store = ContentStore()
+    handle = store.put("section text. " * 4000)
+    runner = await _runner(bus, unattended_max_actions=100, parent_store=store, max_context_tokens=2000)
+    await runner("cruncher", "what does it say?", [handle])
+    assert len([c for c in calls if c["config"].name == "cruncher"]) >= 2
+    assert set(_knobs(calls)) == {100}
+
+
+@pytest.mark.parametrize(
+    ("agent_id", "task"),
+    [("coder", "write"), ("explore", "find X"), ("web-researcher", "research X"),
+     ("search-verifier", _VERIFY_TASK)],
+)
+async def test_with_no_knob_every_child_loop_gets_none(recorded_loops, bus, agent_id, task):
+    runner = await _runner(bus, load_agent=lambda n: _config_child(n))
+    await runner(agent_id, task)
+    assert recorded_loops
+    assert set(_knobs(recorded_loops)) == {None}
+
+
+_KNOB_TAKERS = _BLOCK_TAKERS + [sub.dispatch_config_subagent]
+
+
+@pytest.mark.parametrize("fn", _KNOB_TAKERS, ids=lambda f: f.__name__)
+def test_unattended_max_actions_is_keyword_only_with_default_none(fn):
+    param = inspect.signature(fn).parameters["unattended_max_actions"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is None
+
+
+def test_the_config_child_dispatcher_takes_children_budget():
+    param = inspect.signature(sub.dispatch_config_subagent).parameters["children_budget"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is None
