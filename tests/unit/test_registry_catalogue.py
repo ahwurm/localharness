@@ -282,8 +282,8 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 208, (
-        "catalogue should be 208 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 225, (
+        "catalogue should be 225 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -302,7 +302,10 @@ def test_self_check_leaves_enumerate(components_home):
         "sizing and effort sections) plus active_endpoint.effort x1 (the "
         "reasoning-effort enum on the persisted endpoint selection; agent.effort is withheld, the "
         "`agent:` overlay does not carry it, D-08) "
-        "plus provider.reconnect_wait_seconds x1 (the reconnect bound). "
+        "plus provider.reconnect_wait_seconds x1 (the reconnect bound) "
+        "plus channels.unattended_max_actions x1, the two permissions.init_nulls_revision "
+        "stamps (org and agent) x2 and the fourteen org.children_budget.* leaves (six entries "
+        "of actions and minutes, lookup_share, review_share) x14 (the delegated-budget schema). "
         f"got {len(entries)}"
     )
 
@@ -386,8 +389,8 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 208, (
-        "catalogue should be 208 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 225, (
+        "catalogue should be 225 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -406,7 +409,10 @@ def test_role_sections_leaves_enumerate(components_home):
         "sizing and effort sections) plus active_endpoint.effort x1 (the "
         "reasoning-effort enum on the persisted endpoint selection; agent.effort is withheld, the "
         "`agent:` overlay does not carry it, D-08) "
-        "plus provider.reconnect_wait_seconds x1 (the reconnect bound). "
+        "plus provider.reconnect_wait_seconds x1 (the reconnect bound) "
+        "plus channels.unattended_max_actions x1, the two permissions.init_nulls_revision "
+        "stamps (org and agent) x2 and the fourteen org.children_budget.* leaves (six entries "
+        "of actions and minutes, lookup_share, review_share) x14 (the delegated-budget schema). "
         f"got {len(entries)}"
     )
 

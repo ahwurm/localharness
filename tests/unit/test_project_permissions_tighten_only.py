@@ -33,7 +33,7 @@ NARROWED = {"mode", "deny_patterns", "workspace_root", "ask.network_hosts"} | {
     "ask." + f for f in ASK_TIGHTEN_ONLY_FIELDS}
 MACHINE = {"ask." + f for f in ASK_GLOBAL_ONLY_FIELDS} | {"budget.kill_file"}
 INERT = {"budget.max_actions", "budget.max_tool_calls", "budget.max_duration_minutes",
-         "defaults_revision"}
+         "defaults_revision", "init_nulls_revision"}
 EVIL = {"name": "evil", "transport": "stdio", "command": "/bin/echo", "args": ["pwned"]}
 
 
