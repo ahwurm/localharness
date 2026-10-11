@@ -22,7 +22,7 @@ from typer.testing import CliRunner
 
 from localharness.cli.app import app
 from localharness.config import migrate
-from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION
 from localharness.config.models import HarnessConfig, ManagedServerConfig, ProviderConfig
 from localharness.config.redact import reveal
 from tests.unit.launch_support import stub_liveness
@@ -39,6 +39,7 @@ DRY_RUN_LINE = "server.bind_all: true (keeps the model server reachable from oth
 def _stamped(**sections) -> dict:
     return {"version": "1", "provider": dict(PROVIDER),
             "org": {"permissions": {"defaults_revision": CURRENT_DEFAULTS_REVISION,
+                                    "init_nulls_revision": CURRENT_INIT_NULLS_REVISION,
                                     "deny_patterns": ["write(/etc/*)"]}},
             **sections}
 
@@ -69,7 +70,9 @@ def test_a_stamped_config_without_a_deny_list_keeps_its_shipped_defaults():
     """A plan that only keeps a server's reach must not write `deny_patterns: []` (which would drop
     every shipped deny default) into a stamped config that never listed them."""
     data = {"version": "1", "provider": dict(PROVIDER),
-            "org": {"permissions": {"defaults_revision": CURRENT_DEFAULTS_REVISION}}, "server": dict(VLLM)}
+            "org": {"permissions": {"defaults_revision": CURRENT_DEFAULTS_REVISION,
+                                    "init_nulls_revision": CURRENT_INIT_NULLS_REVISION}},
+            "server": dict(VLLM)}
     plan = migrate.plan(data)
     assert plan is not None and "deny_patterns" not in plan.updated["org"]["permissions"]
     migrated = HarnessConfig.model_validate(plan.updated)
@@ -111,6 +114,7 @@ def test_a_new_install_is_never_migrated():
                             server=ManagedServerConfig(launch="docker", docker_image="img", model="m"))
     data = yaml.safe_load(yaml.safe_dump(reveal(harness.model_dump(mode="python"))))
     data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+    data["org"]["permissions"]["init_nulls_revision"] = CURRENT_INIT_NULLS_REVISION
     assert data["server"]["bind_all"] is False
     assert migrate.plan(data) is None
 

@@ -16,6 +16,7 @@ import yaml
 from typer.testing import CliRunner
 
 from localharness.cli.app import app
+from localharness.config.defaults import CURRENT_INIT_NULLS_REVISION
 from localharness.config.models import PermissionConfig
 
 runner = CliRunner()
@@ -391,6 +392,7 @@ def test_migrate_repairs_the_dead_key_even_when_already_stamped_current(tmp_path
     cfg = _write_config(tmp_path, PermissionConfig().deny_patterns, allow_patterns=[])
     data = yaml.safe_load(cfg.read_text())
     data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+    data["org"]["permissions"]["init_nulls_revision"] = CURRENT_INIT_NULLS_REVISION
     cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     result = _run(tmp_path)
@@ -454,6 +456,7 @@ def test_repairing_the_dead_key_at_the_current_stamp_re_adds_nothing(tmp_path):
     cfg = _write_config(tmp_path, deny, allow_patterns=[])
     data = yaml.safe_load(cfg.read_text())
     data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+    data["org"]["permissions"]["init_nulls_revision"] = CURRENT_INIT_NULLS_REVISION
     cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     p = plan(yaml.safe_load(cfg.read_text()))
@@ -535,6 +538,7 @@ def test_a_clean_tree_plans_nothing(tmp_path):
     cfg = _write_config(tmp_path, PermissionConfig().deny_patterns)
     data = yaml.safe_load(cfg.read_text())
     data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+    data["org"]["permissions"]["init_nulls_revision"] = CURRENT_INIT_NULLS_REVISION
     cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     _write_agent_file(tmp_path, "scout", allow_patterns=_ABSENT)
 
@@ -561,6 +565,8 @@ def test_start_auto_migrate_repairs_an_agent_file_and_says_so(tmp_path):
     from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 
     data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+
+    data["org"]["permissions"]["init_nulls_revision"] = CURRENT_INIT_NULLS_REVISION
     cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     agent = _write_agent_file(tmp_path, "scout", allow_patterns=[])
 
@@ -599,6 +605,8 @@ def test_plan_never_re_adds_the_agents_yaml_deny(tmp_path):
     assert AGENTS_YAML_DENY not in p.added
 
     data["org"]["permissions"]["defaults_revision"] = CURRENT_DEFAULTS_REVISION
+
+    data["org"]["permissions"]["init_nulls_revision"] = CURRENT_INIT_NULLS_REVISION
     assert plan(data) is None
 
     assert _run(tmp_path).exit_code == 0

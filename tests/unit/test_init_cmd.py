@@ -438,6 +438,30 @@ def test_init_stamps_current_defaults_revision(mock_client_cls, mock_detect, tmp
 
 @patch("localharness.cli.init_cmd.detect_provider")
 @patch("localharness.cli.init_cmd.LLMClient")
+def test_init_stamps_current_init_nulls_revision(mock_client_cls, mock_detect, tmp_path):
+    """A fresh config is born at the current init-nulls stamp, so the one-shot step that nulls
+    init's old numbers never runs on it, and the two context sizes dump as null."""
+    from localharness.config.defaults import CURRENT_INIT_NULLS_REVISION
+    from localharness.config.migrate import plan
+
+    mock_detect.return_value = _make_detector_result()
+    mock_client = MagicMock()
+    mock_client.detect_capabilities = AsyncMock(return_value=_make_capability_result())
+    mock_client_cls.return_value = mock_client
+
+    result = runner.invoke(app, ["init", "--config-dir", str(tmp_path), "--force"])
+    assert result.exit_code == 0, result.output
+    import yaml
+
+    data = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert data["org"]["permissions"]["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
+    assert data["org"]["context"]["max_tool_output_chars"] is None
+    assert data["org"]["context"]["tool_result_evict_threshold_chars"] is None
+    assert plan(data) is None
+
+
+@patch("localharness.cli.init_cmd.detect_provider")
+@patch("localharness.cli.init_cmd.LLMClient")
 def test_init_writes_local_decode_timeout(mock_client_cls, mock_detect, tmp_path):
     """Written config uses the 600s local-decode timeout, not the old too-tight 300s
     (a 4096-token completion at ~10 tok/s is ~410s)."""
