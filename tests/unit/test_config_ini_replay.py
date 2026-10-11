@@ -164,6 +164,24 @@ def test_the_directories_are_owner_only_and_no_temporary_file_is_left(tmp_path):
     assert [p.name for p in (home / "llama.cpp").iterdir()] == ["config.ini"]
 
 
+@pytest.mark.parametrize("config_ini", ["a = 1\n", None])
+def test_temporary_files_a_killed_launch_left_are_removed_and_nothing_else_is(tmp_path, config_ini):
+    """IN-56: strays go; an unrelated entry stays, and a stray link is unlinked, not followed."""
+    home = server.prepare_config_ini_home(tmp_path, 8080, "old = 1\n")
+    directory = home / "llama.cpp"
+    (directory / ".config.ini.abc123").write_text("half")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    (directory / ".config.ini.link").symlink_to(outside)
+    (directory / "notes.txt").write_text("mine")
+
+    server.prepare_config_ini_home(tmp_path, 8080, config_ini)
+
+    assert sorted(p.name for p in directory.iterdir()) == sorted(
+        ["notes.txt", "config.ini"] if config_ini else ["notes.txt"])
+    assert outside.read_text() == "keep"
+
+
 def test_a_rewrite_replaces_the_bytes(tmp_path):
     server.prepare_config_ini_home(tmp_path, 8080, "a = 1\n")
     server.prepare_config_ini_home(tmp_path, 8080, "b = 2\n")

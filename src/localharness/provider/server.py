@@ -427,8 +427,12 @@ def _own_directory(path: Path) -> None:
 
 
 def prepare_config_ini_home(config_dir: Path, port: int, config_ini: str | None) -> Path:
-    """Make `config_ini_home(config_dir, port)` hold exactly `config_ini` as `llama.cpp/config.ini`
-    (or no file when `config_ini` is None) and return the home.
+    """Make `config_ini_home(config_dir, port)` hold the record's `config_ini` bytes as
+    `llama.cpp/config.ini` (or no `config.ini` when `config_ini` is None) and return the home.
+    Temporary files a killed launch left (`.config.ini.*`) are removed; anything else in the directory
+    is left alone, since llama.cpp reads only `config.ini` there. The checks are path-based, a
+    confused-deputy guard and not a sandbox (spec 16 §9): code running as this user can still swap
+    a component between a check and its use.
 
     llama-server reads `$XDG_CONFIG_HOME/llama.cpp/config.ini` before argv and env can say anything,
     so a relaunch must read only the bytes its record carries (the ones the trust snapshot
@@ -442,6 +446,11 @@ def prepare_config_ini_home(config_dir: Path, port: int, config_ini: str | None)
     target_dir = home / "llama.cpp"
     for path in (home.parent, home, target_dir):
         _own_directory(path)
+    with contextlib.suppress(OSError):
+        for stray in os.scandir(target_dir):
+            if stray.name.startswith(".config.ini."):
+                with contextlib.suppress(OSError):  # unlinks a link itself, never what it points at
+                    os.unlink(stray.path)
     target = target_dir / "config.ini"
     try:
         is_dir = stat.S_ISDIR(os.lstat(target).st_mode)
