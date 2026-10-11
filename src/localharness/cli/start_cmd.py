@@ -1252,7 +1252,18 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
     # The sidecar files are named, not counted: this receipt is the only notice a user gets that
     # an agent file on disk was rewritten, and "1 file cleaned" does not say which (finding R10).
     for sidecar in plan.sidecars:
-        removed_note += f"; cleaned {_migrate.DEAD_KEY} from {sidecar.path.name}"
+        if sidecar.removed is not None:
+            removed_note += f"; cleaned {_migrate.DEAD_KEY} from {sidecar.path.name}"
+    # init's own 100 / 32000 / 8000, cleared once under its own stamp: one clause per file, each
+    # naming it (a stamp-only rewrite of config.yaml says nothing — no value was changed).
+    if plan.nulled:
+        removed_note += _migrate.INIT_NULLS_CLAUSE + " (config.yaml)"
+    for sidecar in plan.sidecars:
+        if sidecar.nulled:
+            removed_note += (
+                _migrate.INIT_NULLS_CLAUSE
+                + " (" + escape(f"{sidecar.path.parent.name}/{sidecar.path.name}") + ")"
+            )
     # A launched vLLM server that predates server.bind_all keeps listening on every interface, as
     # it did: written for the user once, said once, and doctor's row says how to undo it.
     if plan.bind_all_paths:

@@ -152,8 +152,11 @@ def test_migrate_leaves_other_keys_semantically_unchanged(tmp_path):
     after = yaml.safe_load(cfg.read_text())
     for d in (before, after):
         d["org"]["permissions"].pop("deny_patterns")
-        # the migration's own revision stamp is bookkeeping, not a user key
+        # the migration's own revision stamps are bookkeeping, not user keys
         d["org"]["permissions"].pop("defaults_revision", None)
+        d["org"]["permissions"].pop("init_nulls_revision", None)
+    # ...and this stale fixture carries init's old `max_actions: 100`, which the init-nulls step clears
+    before["org"]["permissions"]["budget"]["max_actions"] = None
     assert after == before
 
 
@@ -423,6 +426,8 @@ def test_migrate_leaves_other_keys_unchanged_when_stripping_the_dead_key(tmp_pat
     for d in (before, after):
         d["org"]["permissions"].pop("deny_patterns")
         d["org"]["permissions"].pop("defaults_revision", None)
+        d["org"]["permissions"].pop("init_nulls_revision", None)
+    before["org"]["permissions"]["budget"]["max_actions"] = None  # init's old 100, cleared once
     assert after == before
 
 

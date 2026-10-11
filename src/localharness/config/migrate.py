@@ -43,6 +43,16 @@ reads (`loader._global_layer_permission`). Left alone, an empty one warns on EVE
 populated one fails validation with no repair path at all, so migrate walks those files and
 strips the same key, each with its own timestamped backup (:data:`SIDECAR_DIRS`).
 
+The third write is the init-nulls step, under its OWN stamp (`org.permissions.init_nulls_revision`,
+never `defaults_revision`): older `init` runs dumped three values as if the person had chosen them
+(`max_actions: 100`, `max_tool_output_chars: 32000`, `tool_result_evict_threshold_chars: 8000`),
+and those now default to "none, follow the window". While the stamp is below
+`CURRENT_INIT_NULLS_REVISION` the step sets exactly those three values to null (an equality match
+on a plain int: a hand-set 150 stays) in config.yaml and in every agent/division file, then moves
+its own stamp. It never runs on content alone, never moves `defaults_revision` and never reads the
+deny list, so a deny default the person deleted stays deleted, and it writes no key the machine
+fingerprint covers.
+
 The updated config is validated through the real HarnessConfig model before anything is
 written — a migrate that writes an invalid config is worse than none.
 """
@@ -56,7 +66,7 @@ from typing import Optional
 
 import yaml
 
-from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION
 from localharness.config.models import HarnessConfig, PermissionConfig
 from localharness.config.overlay import restrict_config_file
 from localharness.config.plugin_sections import core_harness_view
@@ -112,16 +122,70 @@ R10). Named as a tuple rather than globbed from the dir because migrate must onl
 files whose shape it knows; a future sibling directory is opted in here, deliberately."""
 
 
+INIT_NULL_KEYS: tuple[tuple[tuple[str, ...], int], ...] = (
+    (("permissions", "budget", "max_actions"), 100),
+    (("context", "max_tool_output_chars"), 32000),
+    (("context", "tool_result_evict_threshold_chars"), 8000),
+)
+"""The three values older `init` dumped as if chosen, each as (path relative to a section, the
+value init wrote). The section is `org` in config.yaml and the file's root in an agent/division
+file. Constant keys and constant values: an equality match, so nothing a file contains can steer
+which key the step touches."""
+
+INIT_NULLS_CLAUSE = (
+    "; cleared init's max_actions: 100 and tool-output sizes — no action limit on a terminal, "
+    "sizes follow the window"
+)
+"""The receipt clause for one rewritten file, verbatim; the caller appends the file's name."""
+
+
+def _init_nulls(section: dict) -> tuple[dict, tuple[str, ...]]:
+    """`section` with each :data:`INIT_NULL_KEYS` value that equals what init wrote set to None.
+
+    Returns (the copy, the dotted paths nulled). Pure: the input is never mutated and no section
+    is created. A match is `type(v) is int and v == value`, so a bool, a float, a string or a
+    different number is the person's and is left as it is."""
+    out = dict(section)
+    nulled: list[str] = []
+    for path, value in INIT_NULL_KEYS:
+        node: object = out
+        for key in path[:-1]:
+            node = node.get(key) if isinstance(node, dict) else None
+        leaf = node.get(path[-1]) if isinstance(node, dict) else None
+        if type(leaf) is not int or leaf != value:
+            continue
+        parent = out
+        for key in path[:-1]:  # copy down the path so the original nested mappings stay untouched
+            parent[key] = dict(parent[key])
+            parent = parent[key]
+        parent[path[-1]] = None
+        nulled.append(".".join(path))
+    return out, tuple(nulled)
+
+
+def _init_nulls_due(data: dict) -> bool:
+    """True while `org.permissions.init_nulls_revision` (a plain int, else 0) is below the current
+    revision. The only trigger for the step: content alone never runs it."""
+    org = data.get("org") if isinstance(data.get("org"), dict) else {}
+    perms = org.get("permissions") if isinstance(org.get("permissions"), dict) else {}
+    stamped = perms.get("init_nulls_revision")
+    return (stamped if type(stamped) is int else 0) < CURRENT_INIT_NULLS_REVISION
+
+
 @dataclass(frozen=True)
 class SidecarPlan:
-    """One agent/division file still carrying `permissions.allow_patterns`.
+    """One agent/division file needing the dead key stripped, init's values nulled, or both.
 
-    `removed` is the entries deleted (`[]` for the empty value pre-v0.14 `write_agent` wrote).
-    `updated` is the file's whole mapping with the key gone, ready to write."""
+    `removed` is the entries deleted (`[]` for the empty value pre-v0.14 `write_agent` wrote), or
+    None when the file carries no dead key. `nulled` names the init values set to null, at the
+    file's own paths. `updated` is the file's whole mapping with both applied, ready to write:
+    ONE plan, one write and one backup per file, because the backup name is stamped to the second
+    and a second write would overwrite the first backup with already-rewritten bytes."""
 
     path: Path
-    removed: list
+    removed: Optional[list]
     updated: dict
+    nulled: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -143,6 +207,10 @@ class MigrationPlan:
     bind_all_paths: tuple[str, ...] = ()
     """Each launched vLLM section given `bind_all: true` (`"server"`,
     `"extra_endpoints[0].lifecycle"`, …) — see `_needs_bind_all`."""
+    nulled: tuple[str, ...] = ()
+    """The `org.` paths the init-nulls step set to null in config.yaml (may be empty)."""
+    init_nulls_due: bool = False
+    """The init-nulls stamp is below current, so config.yaml is rewritten (at least the stamp)."""
 
     @property
     def defaults_unchanged(self) -> bool:
@@ -160,14 +228,15 @@ class MigrationPlan:
 
         Rewriting an untouched file would still cost the user a backup and a YAML round-trip
         (comments and key order are not preserved), so the writer skips it."""
-        return self.defaults_unchanged and not self.bind_all_paths
+        return self.defaults_unchanged and not self.bind_all_paths and not self.init_nulls_due
 
 
-def scan_sidecars(config_dir: Path) -> list[SidecarPlan]:
-    """Every `agents/*.yaml` and `divisions/*.yaml` under `config_dir` still carrying the dead key.
+def scan_sidecars(config_dir: Path, *, init_nulls_due: bool = False) -> list[SidecarPlan]:
+    """Every `agents/*.yaml` and `divisions/*.yaml` under `config_dir` still carrying the dead key,
+    and, when `init_nulls_due`, carrying any of init's three values.
 
     Read-only and forgiving: a file that will not parse, or that is not a mapping, is left alone
-    rather than rewritten — migrate deletes one key it understands, and a file it cannot read is
+    rather than rewritten — migrate edits keys it understands, and a file it cannot read is
     not a file it can safely edit. Sorted so the CLI's listing (and its backups) are in a stable
     order. Nothing outside the global config dir is ever considered (review finding R10)."""
     found: list[SidecarPlan] = []
@@ -180,15 +249,19 @@ def scan_sidecars(config_dir: Path) -> list[SidecarPlan]:
             if not isinstance(data, dict):
                 continue
             perms = data.get("permissions")
-            if not isinstance(perms, dict) or DEAD_KEY not in perms:
-                continue
-            updated_perms = dict(perms)
-            dead = updated_perms.pop(DEAD_KEY)
             updated = dict(data)
-            updated["permissions"] = updated_perms
-            found.append(
-                SidecarPlan(path, list(dead) if isinstance(dead, list) else [], updated)
-            )
+            removed: Optional[list] = None
+            if isinstance(perms, dict) and DEAD_KEY in perms:
+                updated_perms = dict(perms)
+                dead = updated_perms.pop(DEAD_KEY)
+                updated["permissions"] = updated_perms
+                removed = list(dead) if isinstance(dead, list) else []
+            nulled: tuple[str, ...] = ()
+            if init_nulls_due:
+                updated, nulled = _init_nulls(updated)
+            if removed is None and not nulled:
+                continue
+            found.append(SidecarPlan(path, removed, updated, nulled))
     return found
 
 
@@ -224,6 +297,11 @@ def plan(data: dict, sidecars: tuple[SidecarPlan, ...] = ()) -> Optional[Migrati
     anything the user deleted stays deleted, and repairing the dead key never smuggles it back
     (review finding R10).
 
+    The init-nulls step is a third, separate reason for a plan: while
+    `org.permissions.init_nulls_revision` is below the current value, the three values init
+    dumped are nulled (`_init_nulls`) and that stamp is written, even when none matched. It reads
+    neither `defaults_revision` nor the deny list, so it can never re-add a deleted default.
+
     None = nothing to do.
     """
     org = data.get("org") if isinstance(data.get("org"), dict) else {}
@@ -233,7 +311,8 @@ def plan(data: dict, sidecars: tuple[SidecarPlan, ...] = ()) -> Optional[Migrati
     has_dead_key = DEAD_KEY in perms
     at_current = stamped >= CURRENT_DEFAULTS_REVISION
     bind_all_paths = _needs_bind_all(data)
-    if at_current and not has_dead_key and not sidecars and not bind_all_paths:
+    nulls_due = _init_nulls_due(data)
+    if at_current and not has_dead_key and not sidecars and not bind_all_paths and not nulls_due:
         return None
 
     user_deny = perms.get("deny_patterns")
@@ -254,6 +333,15 @@ def plan(data: dict, sidecars: tuple[SidecarPlan, ...] = ()) -> Optional[Migrati
         updated_perms["defaults_revision"] = CURRENT_DEFAULTS_REVISION
         updated_org["permissions"] = updated_perms
         updated["org"] = updated_org
+    nulled: tuple[str, ...] = ()
+    if nulls_due:  # its own stamp; the deny half above and `defaults_revision` are never consulted
+        current_org = updated["org"] if isinstance(updated.get("org"), dict) else org
+        new_org, paths = _init_nulls(current_org)
+        new_perms = dict(new_org["permissions"]) if isinstance(new_org.get("permissions"), dict) else {}
+        new_perms["init_nulls_revision"] = CURRENT_INIT_NULLS_REVISION
+        new_org["permissions"] = new_perms
+        updated["org"] = new_org
+        nulled = tuple(f"org.{p}" for p in paths)
     if "server" in bind_all_paths:
         updated["server"] = {**data["server"], "bind_all": True}
     if any(p != "server" for p in bind_all_paths):
@@ -264,7 +352,7 @@ def plan(data: dict, sidecars: tuple[SidecarPlan, ...] = ()) -> Optional[Migrati
         ]
     return MigrationPlan(
         added, stamped, CURRENT_DEFAULTS_REVISION, updated, removed, tuple(sidecars),
-        bind_all_paths=bind_all_paths,
+        bind_all_paths=bind_all_paths, nulled=nulled, init_nulls_due=nulls_due,
     )
 
 
@@ -287,7 +375,8 @@ def load_plan(config_file: Path) -> tuple[bytes, Optional[MigrationPlan]]:
         raise MigrationError(f"Could not parse {config_file}:{line}:{column}: {yaml_problem(exc)}") from None
     if not isinstance(data, dict):
         raise MigrationError(f"{config_file} is not a valid config mapping.")
-    return original, plan(data, tuple(scan_sidecars(config_file.parent)))
+    due = _init_nulls_due(data)
+    return original, plan(data, tuple(scan_sidecars(config_file.parent, init_nulls_due=due)))
 
 
 def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> list[Path]:
