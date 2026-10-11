@@ -31,6 +31,13 @@ from localharness.config.overlay import deep_merge
 # --------------------------------------------------------------------------- BudgetConfig
 
 
+def test_max_actions_defaults_to_none():
+    """No configured action limit: the surface decides (an attended terminal runs unbounded, a remote
+    unattended one is capped by the machine knob)."""
+    assert BudgetConfig().max_actions is None
+    assert PermissionConfig().budget.max_actions is None
+
+
 def test_max_actions_accepts_none_and_keeps_its_bounds():
     assert BudgetConfig(max_actions=None).max_actions is None
     assert BudgetConfig(max_actions=1).max_actions == 1

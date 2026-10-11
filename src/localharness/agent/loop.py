@@ -37,6 +37,7 @@ from localharness.plugins.api import ContextBudget
 from localharness.tools.capabilities import CoResidenceError
 
 if TYPE_CHECKING:
+    from localharness.config.models import ChildBudget
     from localharness.provider.lifecycle import ServerRecovery
 
 log = logging.getLogger("localharness.agent.loop")
@@ -1088,6 +1089,9 @@ class AgentLoop:
         template_margin_ratio: float | None = None,
         effort: tuple[str, str] | None = None,
         effort_ratios: tuple[float, float] | None = None,
+        budget_fallback: "ChildBudget | None" = None,
+        budget_labels: BudgetLabels | None = None,
+        unattended_max_actions: int | None = None,
     ) -> None:
         self._config = config
         self._llm = llm
@@ -1173,6 +1177,14 @@ class AgentLoop:
         # when the caller has none); a loop with no usable pair keeps one loop-local poll-only pair.
         self._server_recovery = server_recovery
         self._local_recovery: "ServerRecovery | None" = None
+        # The budget seams. `budget_fallback` is a child's own ceiling (a seam-written ChildBudget),
+        # applied on a remote unattended gate beneath the configured value; `budget_labels` names the
+        # config keys they came from for the failure text; `unattended_max_actions` is the machine
+        # knob (None: no knob, as in the bench and tests). See _resolve_max_actions.
+        self._budget_fallback = budget_fallback
+        self._budget_labels = budget_labels or BudgetLabels()
+        self._unattended_max_actions = unattended_max_actions
+        self._live_turn: tuple[Session, BudgetTracker] | None = None
         # PAPI-04's consumer seam: the memory slot, asked for its per-turn section right after the
         # guardrails. It is the loop's ONLY memory path — the loop never holds a store; recall
         # scope, writes and traces are the occupant's. None or an empty slot adds no section.
@@ -1304,6 +1316,70 @@ class AgentLoop:
     def gate(self) -> Any:
         """This session's permission gate — the object subagents share (PRD §3.4)."""
         return self._gate
+
+    # ------------------------------------------------------------------ budget resolution
+
+    def _remote_unattended(self) -> bool:
+        """Is this loop's person away from the machine with the gate off? True when the gate's mode is
+        `unattended` and no local operator (the terminal, Zed) is attached. Read through the gate's
+        public surface on every call, so a mode switched mid-turn is seen at the next check."""
+        return (
+            getattr(self._gate, "mode", None) == "unattended"
+            and not getattr(self._gate, "local_operator", False)
+        )
+
+    def _resolve_max_actions(self) -> tuple[int, str | None]:
+        """The action limit this loop runs under right now, and the config key that bound it.
+
+        The configured value first (None reads as 0, no limit; it has no label here: a seam-written
+        value carries `budget_labels.actions`). Then, only on a remote unattended gate, the child's
+        fallback ceiling and the machine knob `channels.unattended_max_actions`, each applied as
+        `_cap_limit` does (0 takes the cap, otherwise the smaller wins); an equal value keeps the
+        earlier label. An attended terminal root is never capped here: the person is the budget."""
+        limit: int = self._config.permissions.budget.max_actions or 0
+        label = self._budget_labels.actions
+        if self._remote_unattended():
+            fallback = self._budget_fallback
+            if fallback is not None and (limit == 0 or fallback.actions < limit):
+                limit, label = fallback.actions, self._budget_labels.fallback
+            knob = self._unattended_max_actions
+            if knob is not None and (limit == 0 or knob < limit):
+                limit, label = knob, "channels.unattended_max_actions"
+        return limit, label
+
+    def _resolve_max_minutes(self) -> tuple[float, str | None]:
+        """The time limit in minutes, and the key that bound it (0.0 = none): the configured value,
+        then on a remote unattended gate the child's fallback minutes. There is no knob for minutes."""
+        limit: float = self._config.permissions.budget.max_duration_minutes or 0.0
+        label = self._budget_labels.minutes
+        if self._remote_unattended():
+            fallback = self._budget_fallback
+            if fallback is not None and (limit == 0 or fallback.minutes < limit):
+                limit, label = fallback.minutes, self._budget_labels.fallback
+        return limit, label
+
+    def action_limit(self) -> int:
+        """The most tool calls this loop will run in a turn, as its gate stands now; 0 means no limit.
+        Usable before any turn: it reads the config, the fallback, the knob and the live gate only."""
+        return self._resolve_max_actions()[0]
+
+    def time_limit(self) -> float:
+        """The most minutes this loop will run in a turn, as its gate stands now; 0.0 means no limit."""
+        return self._resolve_max_minutes()[0]
+
+    def remaining_budget(self) -> tuple[int, float]:
+        """What is left of the turn in progress as `(actions, minutes)`; 0 / 0.0 means infinite for
+        that key (no limit, or no turn in progress). A finite remainder is floored at 1 action and
+        0.1 minutes: `BudgetConfig`'s own lower bounds, so a value written from them validates."""
+        live = self._live_turn
+        if live is None:
+            return 0, 0.0
+        session, tracker = live
+        limit = tracker.limit
+        actions = 0 if limit == 0 else max(1, limit - session.actions_taken)
+        minutes_limit = tracker.max_duration_minutes
+        minutes = 0.0 if minutes_limit == 0 else max(0.1, minutes_limit - session.elapsed_minutes())
+        return actions, minutes
 
     def _deny_fn(self, tool_name: str, params: dict) -> Any:
         """THIS agent's DENY tier, handed to the gate on every check.
@@ -1463,14 +1539,13 @@ class AgentLoop:
                 self._prior_session_context = compact_msg["content"]
                 log.info("Loaded compact.md for agent %s", self._config.name)
 
-        budget_cfg = self._config.permissions.budget
         await self._bus.publish(TurnStarted(
             agent_id=session.agent_id,
             session_id=session.session_id,
             task_summary=task[:200],
             budget=BudgetSpec(
-                max_actions=budget_cfg.max_actions or 0,  # None = unbounded
-                max_duration_minutes=budget_cfg.max_duration_minutes or 0.0,  # None = unbounded
+                max_actions=self._resolve_max_actions()[0],  # a turn-start snapshot; 0 = unbounded
+                max_duration_minutes=self._resolve_max_minutes()[0],  # 0.0 = unbounded
                 max_context_tokens=self._config.context.max_context_tokens,
             ),
         ))
@@ -1491,6 +1566,7 @@ class AgentLoop:
                 # Back at the caller's depth BEFORE the turn's ending is published: a TurnFailed or
                 # TurnCompleted handler (or a task it creates, which copies the context) that starts a
                 # root turn must be read as a root turn, not as a child of the turn that just ended.
+                self._live_turn = None  # no turn in progress on any exit path: remaining_budget() reads (0, 0.0)
                 _TURN_DEPTH.reset(turn_depth)
                 if root_turn:
                     # The person's turn is over, however it ended (Esc's CancelledError included): a
@@ -1620,11 +1696,14 @@ class AgentLoop:
         self._presence_penalty_next = None  # a degenerate retry's penalty lasts one turn
         self._thinking_off_next = False  # so does a reasoning cut's thinking-off retry
 
+        minutes, minutes_label = self._resolve_max_minutes()
         budget = BudgetTracker(
-            max_actions=self._config.permissions.budget.max_actions or 0,  # None = unbounded
-            max_duration_minutes=self._config.permissions.budget.max_duration_minutes or 0.0,
+            max_actions=self._resolve_max_actions,  # the bound method: re-read at every check
+            max_duration_minutes=minutes,
             max_tool_calls=self._config.permissions.budget.max_tool_calls,
+            minutes_bound_by=minutes_label,
         )
+        self._live_turn = (session, budget)
         sd_cfg = self._config.stuck_detector
         stuck_detector = StuckDetector(
             window_size=sd_cfg.window_size,
@@ -2666,8 +2745,13 @@ class AgentLoop:
             return 0.0
         bound = float(wait)
         if session is not None:
-            budget = getattr(getattr(self._config, "permissions", None), "budget", None)
-            limit = getattr(budget, "max_duration_minutes", None)
+            # The time limit the BudgetTracker enforces: the live turn's own (which carries a child's
+            # fallback on a remote unattended gate), else what the loop resolves for it now.
+            live = self._live_turn
+            if live is not None and live[0] is session:
+                limit: Any = live[1].max_duration_minutes
+            else:
+                limit = self._resolve_max_minutes()[0]
             if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0:
                 bound = min(bound, max(0.0, limit * 60.0 - session.elapsed_seconds()))
         return bound
@@ -3046,9 +3130,11 @@ class AgentLoop:
             session.terminated_reason = "kill_file"
             return StepResult(action="kill")
 
+        minutes, minutes_label = self._resolve_max_minutes()
         budget = BudgetTracker(
-            max_actions=self._config.permissions.budget.max_actions or 0,  # None = unbounded
-            max_duration_minutes=self._config.permissions.budget.max_duration_minutes or 0.0,
+            max_actions=self._resolve_max_actions,
+            max_duration_minutes=minutes,
+            minutes_bound_by=minutes_label,
         )
         violation = budget.check(session)
         if violation is not None:

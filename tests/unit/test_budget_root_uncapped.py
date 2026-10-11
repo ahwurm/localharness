@@ -96,3 +96,372 @@ def test_budget_note_reads_a_live_limit_and_is_silent_without_one():
     live = BudgetTracker(max_actions=lambda: (12, "k"), max_duration_minutes=0)
     assert "3/12 tool calls used" in _budget_note(_session(3), live)
     assert _budget_note(_session(3), BudgetTracker(max_actions=lambda: (0, None), max_duration_minutes=0)) == ""
+
+
+# =========================================================================== the loop's resolvers
+
+from types import SimpleNamespace  # noqa: E402
+
+from localharness.agent.context import ContextManager  # noqa: E402
+from localharness.agent.loop import AgentLoop  # noqa: E402
+from localharness.agent.permissions import PermissionEvaluator  # noqa: E402
+from localharness.config.models import (  # noqa: E402
+    AgentConfig,
+    BudgetConfig,
+    ChildBudget,
+    PermissionConfig,
+)
+from localharness.core.events import TurnFailed, TurnStarted  # noqa: E402
+
+KNOB_KEY = "channels.unattended_max_actions"
+
+
+def _channel(*, local: bool) -> SimpleNamespace:
+    """The few attributes a gate reads off a channel (it asks nothing: `can_ask` is False)."""
+    return SimpleNamespace(channel_id="terminal" if local else "phone", local_operator=local, can_ask=False)
+
+
+class _Registry:
+    """Runs every call, with an output that differs per call (so nothing reads as stuck)."""
+
+    def __init__(self, on_call=None):
+        self.calls: list[dict] = []
+        self._on_call = on_call
+
+    def get_tools_for_agent(self, agent_id, division_id, tool_config):
+        return {}
+
+    async def dispatch(self, name, arguments, agent_id, division_id, tool_config, **kw):
+        from localharness.tools.base import ToolResult
+
+        self.calls.append(dict(arguments))
+        if self._on_call is not None:
+            self._on_call(len(self.calls))
+        return ToolResult(output=f"ran {arguments}", success=True)
+
+
+def _calls(mock_llm_client, n: int, *, per_iteration: int = 1) -> list:
+    """`n` iterations of distinct tool calls, then a plain answer."""
+    Response, ToolCall = mock_llm_client.Response, mock_llm_client.ToolCall
+    out = []
+    for i in range(n):
+        tcs = [
+            ToolCall(id=f"tc-{i}-{j}", name="bash", arguments={"cmd": f"echo {i}-{j}"})
+            for j in range(per_iteration)
+        ]
+        out.append(Response(content=None, tool_calls=tcs))
+    out.append(Response(content="all done"))
+    return out
+
+
+def _loop(
+    mock_llm_client,
+    bus,
+    responses,
+    *,
+    max_actions=None,
+    max_minutes=None,
+    mode="unattended",
+    local: bool | None = None,
+    registry=None,
+    **kw,
+) -> AgentLoop:
+    cfg = AgentConfig(
+        name="budget-agent",
+        role="Test.",
+        permissions=PermissionConfig(
+            mode=mode,
+            deny_patterns=[],
+            budget=BudgetConfig(max_actions=max_actions, max_duration_minutes=max_minutes),
+        ),
+    )
+    loop = AgentLoop(
+        config=cfg,
+        llm=mock_llm_client(responses),
+        bus=bus,
+        context_manager=ContextManager(),
+        tool_registry=registry if registry is not None else _Registry(),
+        permission_evaluator=PermissionEvaluator(),
+        **kw,
+    )
+    if local is not None:
+        loop.gate.attach_channel(_channel(local=local))
+    return loop
+
+
+# --------------------------------------------------------------------------- attended root
+
+
+def test_an_attended_root_has_no_action_limit_even_in_unattended_mode(mock_llm_client, bus):
+    loop = _loop(mock_llm_client, bus, [], mode="unattended", local=True, unattended_max_actions=100)
+    assert loop.gate.mode == "unattended"
+    assert loop.action_limit() == 0
+    assert loop.time_limit() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_an_attended_root_runs_past_100_actions_with_no_budget_stop(mock_llm_client, bus):
+    registry = _Registry()
+    loop = _loop(
+        mock_llm_client, bus, _calls(mock_llm_client, 105),
+        local=True, unattended_max_actions=100, registry=registry,
+    )
+    summary = await loop.run_turn("go")
+    assert len(registry.calls) == 105
+    assert "all done" in summary
+    assert not [e for e in bus.history(event_types=[TurnFailed]) if e.reason == "budget_exceeded"]
+    started = bus.history(event_types=[TurnStarted])
+    assert started[0].budget.max_actions == 0
+    assert started[0].budget.max_duration_minutes == 0.0
+
+
+# --------------------------------------------------------------------------- remote unattended
+
+
+def test_a_remote_unattended_root_is_capped_by_the_knob(mock_llm_client, bus):
+    loop = _loop(
+        mock_llm_client, bus, [], max_actions=500, local=False, unattended_max_actions=100,
+    )
+    assert loop.action_limit() == 100
+
+
+def test_the_knob_caps_the_default_root_whose_configured_limit_is_none(mock_llm_client, bus):
+    """The knob's primary case: a literal min(0, cap) would be 0, which is unbounded."""
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, local=False, unattended_max_actions=100)
+    assert loop.action_limit() == 100
+
+
+def test_a_configured_limit_under_the_knob_is_kept(mock_llm_client, bus):
+    loop = _loop(mock_llm_client, bus, [], max_actions=40, local=False, unattended_max_actions=100)
+    assert loop.action_limit() == 40
+    assert loop._resolve_max_actions() == (40, None)
+
+
+def test_without_a_knob_the_remote_root_runs_on_its_configured_value(mock_llm_client, bus):
+    assert _loop(mock_llm_client, bus, [], max_actions=500, local=False).action_limit() == 500
+    assert _loop(mock_llm_client, bus, [], max_actions=None, local=False).action_limit() == 0
+
+
+def test_a_gate_that_is_not_unattended_applies_no_cap(mock_llm_client, bus):
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="auto", local=False,
+                 unattended_max_actions=100)
+    assert loop.action_limit() == 0
+
+
+@pytest.mark.asyncio
+async def test_the_failure_names_the_machine_knob(mock_llm_client, bus):
+    registry = _Registry()
+    loop = _loop(
+        mock_llm_client, bus, _calls(mock_llm_client, 150),
+        max_actions=500, local=False, unattended_max_actions=100, registry=registry,
+    )
+    summary = await loop.run_turn("go")
+    assert len(registry.calls) == 100
+    failed = [e for e in bus.history(event_types=[TurnFailed]) if e.reason == "budget_exceeded"]
+    assert failed
+    assert "(channels.unattended_max_actions)" in summary
+    assert "Agent reached the maximum of 100 tool calls." in summary
+
+
+# --------------------------------------------------------------------------- the fallback rung
+
+
+def test_the_fallback_caps_a_remote_unattended_child(mock_llm_client, bus):
+    loop = _loop(
+        mock_llm_client, bus, [], max_actions=None, local=False, unattended_max_actions=100,
+        budget_fallback=ChildBudget(actions=8, minutes=3.0),
+        budget_labels=BudgetLabels(fallback="org.children_budget.default"),
+    )
+    assert loop._resolve_max_actions() == (8, "org.children_budget.default")
+    assert loop.action_limit() == 8
+    assert loop.time_limit() == 3.0
+
+
+def test_the_fallback_is_not_applied_on_an_attended_gate(mock_llm_client, bus):
+    loop = _loop(
+        mock_llm_client, bus, [], max_actions=None, local=True,
+        budget_fallback=ChildBudget(actions=8, minutes=3.0),
+        budget_labels=BudgetLabels(fallback="org.children_budget.default"),
+    )
+    assert loop.action_limit() == 0
+    assert loop.time_limit() == 0.0
+
+
+def test_an_equal_value_keeps_the_earlier_label(mock_llm_client, bus):
+    loop = _loop(
+        mock_llm_client, bus, [], max_actions=16, max_minutes=12.0, local=False,
+        budget_fallback=ChildBudget(actions=16, minutes=12.0),
+        budget_labels=BudgetLabels(actions="agent.permissions.budget.max_actions",
+                                   minutes="agent.permissions.budget.max_duration_minutes",
+                                   fallback="org.children_budget.default"),
+    )
+    assert loop._resolve_max_actions() == (16, "agent.permissions.budget.max_actions")
+    assert loop._resolve_max_minutes() == (12.0, "agent.permissions.budget.max_duration_minutes")
+
+
+def test_a_configured_limit_over_the_fallback_is_lowered_to_it(mock_llm_client, bus):
+    loop = _loop(
+        mock_llm_client, bus, [], max_actions=40, max_minutes=12.0, local=False,
+        budget_fallback=ChildBudget(actions=8, minutes=3.0),
+        budget_labels=BudgetLabels(fallback="org.children_budget.default"),
+    )
+    assert loop._resolve_max_actions() == (8, "org.children_budget.default")
+    assert loop._resolve_max_minutes() == (3.0, "org.children_budget.default")
+
+
+def test_the_knob_beats_a_looser_fallback_and_names_itself(mock_llm_client, bus):
+    loop = _loop(
+        mock_llm_client, bus, [], max_actions=None, local=False, unattended_max_actions=5,
+        budget_fallback=ChildBudget(actions=8, minutes=3.0),
+        budget_labels=BudgetLabels(fallback="org.children_budget.default"),
+    )
+    assert loop._resolve_max_actions() == (5, KNOB_KEY)
+
+
+# --------------------------------------------------------------------------- the live gate
+
+
+@pytest.mark.asyncio
+async def test_a_flip_to_unattended_mid_turn_caps_from_the_next_check(mock_llm_client, bus):
+    holder: dict = {}
+
+    def flip(call_number: int) -> None:
+        if call_number == 1:  # while the first iteration's two parallel calls are in flight
+            holder["loop"].gate.attach_channel(_channel(local=False))
+
+    registry = _Registry(on_call=flip)
+    loop = _loop(
+        mock_llm_client, bus, _calls(mock_llm_client, 10, per_iteration=2),
+        local=True, unattended_max_actions=2, registry=registry,
+    )
+    holder["loop"] = loop
+    summary = await loop.run_turn("go")
+    assert len(registry.calls) == 2  # the iteration in flight completed both calls...
+    failed = [e for e in bus.history(event_types=[TurnFailed]) if e.reason == "budget_exceeded"]
+    assert failed  # ...and the very next check stopped the turn
+    assert "(channels.unattended_max_actions)" in summary
+
+
+@pytest.mark.asyncio
+async def test_leaving_unattended_mid_turn_uncaps_from_the_next_check(mock_llm_client, bus):
+    holder: dict = {}
+
+    def attach_operator(call_number: int) -> None:
+        if call_number == 2:
+            holder["loop"].gate.attach_channel(_channel(local=True))
+
+    registry = _Registry(on_call=attach_operator)
+    loop = _loop(
+        mock_llm_client, bus, _calls(mock_llm_client, 6),
+        local=False, unattended_max_actions=2, registry=registry,
+    )
+    holder["loop"] = loop
+    summary = await loop.run_turn("go")
+    assert len(registry.calls) == 6
+    assert "all done" in summary
+    assert not [e for e in bus.history(event_types=[TurnFailed]) if e.reason == "budget_exceeded"]
+
+
+def test_the_limit_follows_the_gate_mode_both_ways(mock_llm_client, bus):
+    loop = _loop(mock_llm_client, bus, [], max_actions=None, mode="auto", local=False,
+                 unattended_max_actions=7)
+    assert loop.action_limit() == 0
+    loop.gate.mode = "unattended"
+    assert loop.action_limit() == 7
+    loop.gate.mode = "auto"
+    assert loop.action_limit() == 0
+
+
+# --------------------------------------------------------------------------- remaining_budget
+
+
+def test_remaining_budget_is_zero_before_any_turn(mock_llm_client, bus):
+    loop = _loop(mock_llm_client, bus, [], max_actions=10, max_minutes=5.0, local=True)
+    assert loop.remaining_budget() == (0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_remaining_budget_during_a_turn_and_cleared_after_it(mock_llm_client, bus):
+    seen: list[tuple[int, float]] = []
+    holder: dict = {}
+
+    def probe(call_number: int) -> None:
+        if call_number == 3:
+            seen.append(holder["loop"].remaining_budget())
+
+    registry = _Registry(on_call=probe)
+    loop = _loop(
+        mock_llm_client, bus, _calls(mock_llm_client, 4),
+        max_actions=10, max_minutes=5.0, local=True, registry=registry,
+    )
+    holder["loop"] = loop
+    await loop.run_turn("go")
+    (actions, minutes), = seen
+    assert actions == 7  # 10 - 3: the call being run is already counted
+    assert 0.1 <= minutes <= 5.0
+    assert loop.remaining_budget() == (0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_remaining_budget_is_zero_for_a_key_with_no_limit(mock_llm_client, bus):
+    seen: list[tuple[int, float]] = []
+    holder: dict = {}
+
+    def probe(call_number: int) -> None:
+        seen.append(holder["loop"].remaining_budget())
+
+    loop = _loop(mock_llm_client, bus, _calls(mock_llm_client, 1), local=True,
+                 registry=_Registry(on_call=probe))
+    holder["loop"] = loop
+    await loop.run_turn("go")
+    assert seen == [(0, 0.0)]
+
+
+@pytest.mark.asyncio
+async def test_a_finite_remainder_is_floored(mock_llm_client, bus):
+    seen: list[tuple[int, float]] = []
+    holder: dict = {}
+
+    def probe(call_number: int) -> None:
+        seen.append(holder["loop"].remaining_budget())
+
+    loop = _loop(mock_llm_client, bus, _calls(mock_llm_client, 3), max_actions=2, max_minutes=0.1,
+                 local=True, registry=_Registry(on_call=probe))
+    holder["loop"] = loop
+    await loop.run_turn("go")
+    assert seen
+    assert all(a >= 1 and m >= 0.1 for a, m in seen)
+
+
+@pytest.mark.asyncio
+async def test_the_live_turn_is_cleared_when_the_turn_raises(mock_llm_client, bus):
+    class Boom:
+        config = SimpleNamespace(tool_call_mode="native", context_window=128_000)
+
+        async def stream_complete(self, *a, **kw):
+            raise KeyboardInterrupt  # not caught by the loop's `except Exception`
+
+    loop = _loop(mock_llm_client, bus, [], max_actions=10, local=True)
+    loop._llm = Boom()
+    with pytest.raises(BaseException):
+        await loop.run_turn("go")
+    assert loop._live_turn is None
+    assert loop.remaining_budget() == (0, 0.0)
+
+
+# --------------------------------------------------------------------------- the reconnect clamp
+
+
+def test_the_reconnect_clamp_reads_the_effective_time_limit(mock_llm_client, bus):
+    """A remote unattended child's fallback minutes bound its reconnect wait; the attended root's is
+    unbounded by the budget."""
+    llm_cfg = SimpleNamespace(reconnect_wait_seconds=600.0, base_url="http://127.0.0.1:1/v1",
+                              tool_call_mode="native", context_window=128_000)
+    child = _loop(mock_llm_client, bus, [], max_minutes=None, local=False,
+                  budget_fallback=ChildBudget(actions=8, minutes=3.0))
+    child._llm = SimpleNamespace(config=llm_cfg)
+    assert child._reconnect_bound(Session(agent_id="a", session_id="s", messages=[])) <= 180.0
+
+    root = _loop(mock_llm_client, bus, [], max_minutes=None, local=True)
+    root._llm = SimpleNamespace(config=llm_cfg)
+    assert root._reconnect_bound(Session(agent_id="a", session_id="s", messages=[])) == 600.0

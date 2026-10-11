@@ -222,7 +222,7 @@ class BudgetConfig(BaseModel):
     model_config = ConfigDict(frozen=False, extra="forbid")
 
     max_actions: Optional[int] = Field(
-        default=100,
+        default=None,
         ge=1,
         le=10_000,
         description=(
