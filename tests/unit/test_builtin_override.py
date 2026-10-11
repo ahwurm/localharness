@@ -97,7 +97,10 @@ def test_overlay_malformed_yaml_raises(tmp_path):
 
 @pytest.mark.asyncio
 async def test_runner_passes_override_config_to_web_dispatch(monkeypatch):
-    """The runner resolves the builtin override and hands it to the dispatch as config_override."""
+    """The runner resolves the builtin override and hands it to the dispatch as config_override.
+
+    The dispatch seam (08-09) sits between the two and works on a deep copy, so what arrives is an
+    equal config, not the overlay's own object."""
     captured = {}
     async def _fake_web(task, **kwargs):
         captured["config_override"] = kwargs.get("config_override")
@@ -113,14 +116,15 @@ async def test_runner_passes_override_config_to_web_dispatch(monkeypatch):
         load_builtin_override=lambda name, base: overridden if name == "web-researcher" else base,
     )
     await runner("web-researcher", "research X")
-    assert captured["config_override"] is overridden
+    assert captured["config_override"] is not overridden  # the seam's copy: the overlay's own is never written
+    assert captured["config_override"] == overridden
     assert captured["config_override"].permissions.budget.max_actions == 40
 
 
 @pytest.mark.asyncio
-async def test_runner_without_override_hook_passes_none(monkeypatch):
-    """No load_builtin_override wired (bench / old callers) -> config_override is None so the
-    dispatch builds its own default config: strictly no behavior change."""
+async def test_runner_without_override_hook_passes_the_seams_copy_of_the_builder(monkeypatch):
+    """No load_builtin_override wired (bench / old callers) -> the dispatch seam (08-09) still runs
+    on the bare builder result, so the dispatcher receives its copy; the numbers are the builder's."""
     captured = {}
     async def _fake_web(task, **kwargs):
         captured["config_override"] = kwargs.get("config_override", "MISSING")
@@ -131,7 +135,9 @@ async def test_runner_without_override_hook_passes_none(monkeypatch):
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
     )
     await runner("web-researcher", "research X")
-    assert captured["config_override"] is None
+    assert captured["config_override"] == build_web_researcher_config("web-researcher")
+    budget = captured["config_override"].permissions.budget
+    assert (budget.max_actions, budget.max_duration_minutes) == (56, 20.0)
 
 
 @pytest.mark.asyncio

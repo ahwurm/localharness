@@ -2452,6 +2452,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # D-57: the machine knob reaches every child loop, so a remote unattended surface has
             # a ceiling on each of them, not only on the root.
             unattended_max_actions=harness.channels.unattended_max_actions,
+            # D-32: the root loop's live remainder, read at each dispatch (late-bound like effort_fn:
+            # the loop is built after this runner).
+            parent_remaining_fn=lambda: agent_loop.remaining_budget(),
         )
 
         agent_tool = AgentTool(
