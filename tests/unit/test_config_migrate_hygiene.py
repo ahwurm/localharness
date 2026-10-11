@@ -213,3 +213,69 @@ def test_a_sidecar_keeps_its_own_backup_budget(tmp_path):
     assert all(p.exists() for p in agent_stale)
     # config.yaml was over budget and was pruned independently
     assert not config_stale[0].exists()
+
+
+# --- WR-01: the rewrite is atomic -------------------------------------------
+
+def test_a_failed_rewrite_leaves_the_original_file_whole_and_no_temp_file(tmp_path, monkeypatch):
+    """A crash, Ctrl-C or ENOSPC partway through used to leave a truncated config.yaml (the
+    rewrite truncated first, then wrote). Now the old bytes stay until a complete new file is
+    renamed over them."""
+    import errno
+
+    from localharness.config import migrate
+
+    cfg = tmp_path / "config.yaml"
+    original = b"version: '1'\norg:\n  name: kept\n"
+    cfg.write_bytes(original)
+
+    def disk_full(_fd):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(migrate.os, "fsync", disk_full)
+    with pytest.raises(OSError):
+        migrate._write_with_backup(cfg, original, {"version": "1", "org": {"name": "new"}})
+
+    assert cfg.read_bytes() == original
+    assert not list(tmp_path.glob(".config.yaml.*.tmp"))
+    assert len(_backups(tmp_path)) == 1  # one backup per file, as before
+
+
+def test_a_rewrite_replaces_the_file_whole(tmp_path):
+    from localharness.config import migrate
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("version: '1'\n", encoding="utf-8")
+    migrate._write_with_backup(cfg, cfg.read_bytes(), {"version": "1", "org": {"name": "x"}})
+    assert yaml.safe_load(cfg.read_text()) == {"version": "1", "org": {"name": "x"}}
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
+@posix_only
+def test_a_symlinked_sidecar_keeps_its_link(tmp_path):
+    from localharness.config import migrate
+
+    real = tmp_path / "shared" / "scout.yaml"
+    real.parent.mkdir()
+    real.write_text("name: scout\n", encoding="utf-8")
+    link = tmp_path / "agents" / "scout.yaml"
+    link.parent.mkdir()
+    link.symlink_to(real)
+
+    migrate._write_with_backup(link, link.read_bytes(), {"name": "scout", "role": "r"})
+
+    assert link.is_symlink() and link.resolve() == real.resolve()
+    assert yaml.safe_load(real.read_text()) == {"name": "scout", "role": "r"}
+
+
+@posix_only
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes anything")
+def test_a_read_only_file_is_refused_not_replaced_through_its_directory(tmp_path):
+    from localharness.config import migrate
+
+    agent = tmp_path / "scout.yaml"
+    agent.write_text("name: scout\n", encoding="utf-8")
+    agent.chmod(0o444)
+    with pytest.raises(PermissionError):
+        migrate._write_with_backup(agent, agent.read_bytes(), {"name": "other"})
+    assert agent.read_text() == "name: scout\n"

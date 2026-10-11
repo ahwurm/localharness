@@ -58,7 +58,10 @@ written — a migrate that writes an invalid config is worse than none.
 """
 from __future__ import annotations
 
+import errno
 import logging
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -411,19 +414,41 @@ def _write_with_backup(path: Path, original: bytes, updated: dict) -> Path:
     Both files get `CONFIG_FILE_MODE`: the backup is a byte-for-byte copy of a config.yaml that
     may carry `provider.api_key`, so leaving IT at the umask default would hand out the secret the
     rewritten file no longer exposes. Older backups of this same file are pruned afterwards
-    (:data:`BACKUP_RETENTION`).
+    (:data:`BACKUP_RETENTION`). The rewrite is atomic (:func:`_atomic_write_text`): a crash,
+    Ctrl-C or a full disk leaves the old file or the new one, never a truncated one (WR-01).
     """
     stamp = datetime.now().strftime(BACKUP_STAMP_FORMAT)
     backup = path.with_name(f"{path.name}{BACKUP_INFIX}{stamp}")
     touch_private(backup)
     backup.write_bytes(original)
     restrict_config_file(backup)
-    path.write_text(
-        yaml.safe_dump(updated, default_flow_style=False, sort_keys=False), encoding="utf-8"
-    )
+    _atomic_write_text(path, yaml.safe_dump(updated, default_flow_style=False, sort_keys=False))
     restrict_config_file(path)
     _prune_backups(path, keep=backup)
     return backup
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace the file `path` names with `text`, atomically: a same-directory temp file, fsynced,
+    restricted to the config mode, then `os.replace`d over the target. A symlinked file keeps its
+    link (the file it points at is the one replaced). A file the caller may not write is refused
+    as `write_text` would refuse it: replacing it through the directory would quietly override a
+    read-only bit the owner set."""
+    target = path.resolve()
+    if target.exists() and not os.access(target, os.W_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(target))
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    tmp_path = Path(tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        restrict_config_file(tmp_path)
+        os.replace(tmp_path, target)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _prune_backups(path: Path, *, keep: Path) -> None:
