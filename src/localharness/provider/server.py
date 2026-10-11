@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import ipaddress
 import os
+import re
 import shutil
 import signal
 import stat
@@ -61,6 +62,18 @@ def key_kwargs(api_key: Any) -> dict[str, str]:
     server is called exactly as before."""
     raw = _raw_key(api_key)
     return {"api_key": raw} if raw else {}
+
+
+_URL_USERINFO = re.compile(r"(?<=://)[^/\s?#]*@")
+
+
+def strip_url_credentials(text: str) -> str:
+    """`text` with URL userinfo removed (`http://user:pass@host` -> `http://host`), up to the LAST "@"
+    of the authority, as httpx splits it: `http://u:p@ss@host` is a working URL whose password is
+    "p@ss". An "@" after the path, query, fragment or a space is not userinfo and stays. The one helper
+    every surface that publishes or keeps server error text uses (the loop's ProviderLost detail and
+    failure note, the recovery's outage record), so a fix here reaches all of them."""
+    return _URL_USERINFO.sub("", text)
 
 
 def required_key_kwargs(spec: Any, api_key: Any) -> dict[str, str]:

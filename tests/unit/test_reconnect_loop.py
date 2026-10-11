@@ -571,6 +571,41 @@ def test_url_credentials_are_removed_up_to_the_last_at_of_the_authority(text, ke
     assert "ss@" not in out.split("://", 1)[1].split("/", 1)[0]
 
 
+def test_every_surface_strips_url_credentials_through_the_one_helper(monkeypatch):
+    """IN-26: the loop's detail and note and the recovery's outage record use one shared helper, so a fix
+    to the authority rule reaches all of them; there is no second copy of the regex."""
+    import inspect as _inspect
+
+    from localharness.agent import loop as loop_mod
+    from localharness.agent.loop import _sanitize_provider_text
+    from localharness.provider import lifecycle, server
+
+    calls: list[str] = []
+    real = server.strip_url_credentials
+
+    def spy(text: str) -> str:
+        calls.append(text)
+        return real(text)
+
+    monkeypatch.setattr(server, "strip_url_credentials", spy)
+    assert _sanitize_provider_text("at http://u:p@ss@h:9/v1", 200) == "at http://h:9/v1"
+    outage = lifecycle._Outage(0.0)
+    slot = lifecycle._Flight()
+
+    class _Done:
+        def cancelled(self):
+            return False
+
+        def exception(self):
+            return RuntimeError("bind failed at http://u:p@ss@h:9/v1")
+
+    lifecycle._settle(slot, outage, _Done())
+    assert outage.failed == (RuntimeError, "bind failed at http://h:9/v1")
+    assert len(calls) == 2
+    regex = "[^/\\s?#]*@"
+    assert regex not in _inspect.getsource(loop_mod) and regex not in _inspect.getsource(lifecycle)
+
+
 async def test_a_publish_failure_never_fails_the_wait(bus, models):
     models(ModelsEndpoint(down_for=4))
     llm = _scripted([_pce("refused"), _answer("ok")], wait=5.0)

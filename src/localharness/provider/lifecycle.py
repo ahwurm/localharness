@@ -29,7 +29,6 @@ import functools
 import logging
 import math
 import os
-import re
 import time
 import weakref
 from dataclasses import dataclass, field
@@ -1037,12 +1036,7 @@ def _settle(slot: _Flight, outage: _Outage, task: asyncio.Task) -> None:
             slot.outage = None
             _OPEN_OUTAGES.pop(slot, None)
     else:
-        outage.failed = (type(failed), _without_credentials(str(failed)))
-
-
-def _without_credentials(text: str) -> str:
-    """URL userinfo removed, up to the last "@" of the authority (as httpx splits it)."""
-    return re.sub(r"(?<=://)[^/\s?#]*@", "", text)
+        outage.failed = (type(failed), server.strip_url_credentials(str(failed)))
 
 
 def _again(failed: tuple[type[BaseException], str]) -> BaseException:
