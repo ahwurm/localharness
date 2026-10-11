@@ -223,10 +223,13 @@ def model(
 
     # D-35/D-58: the primary's served name swaps back to the primary: it clears a persisted peer
     # selection, then the ordinary default persistence below sets the default (on a llama.cpp
-    # primary `persist_default_model` never writes `server.model`, so an alias cannot become `-m`).
+    # primary `persist_default_model` never writes `server.model`, so an alias cannot become `-m`; on
+    # any other runtime the call below is told not to, so a `--served-model-name` alias cannot become
+    # the model the next start loads, D-70, WR-54).
     # A primary already selected and already the default has nothing to switch, so that name falls
     # through to today's path unchanged.
     target: Optional[str] = None
+    primary_swap_back = False
     if (
         harness.server is not None
         and name == model_ops.primary_served_name(harness.server, provider)
@@ -244,6 +247,7 @@ def model(
                 raise typer.Exit(2)
             console.print("Cleared the peer selection.", markup=False, soft_wrap=True)
         target = name
+        primary_swap_back = True
     elif name.isdigit() and 1 <= int(name) <= len(choices):
         target = choices[int(name) - 1]
     elif name in choices:
@@ -297,7 +301,7 @@ def model(
         audit_warning = asyncio.run(
             model_ops.persist_default_model(
                 harness, target, config_dir=loader._config_dir, audit_base_dir=_audit_dir,
-                local_operator=_is_local_operator(),
+                local_operator=_is_local_operator(), write_server_model=not primary_swap_back,
             )
         )
     except Exception as exc:
