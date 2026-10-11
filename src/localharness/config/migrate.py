@@ -132,10 +132,7 @@ value init wrote). The section is `org` in config.yaml and the file's root in an
 file. Constant keys and constant values: an equality match, so nothing a file contains can steer
 which key the step touches."""
 
-INIT_NULLS_CLAUSE = (
-    "; cleared init's max_actions: 100 and tool-output sizes — no action limit on a terminal, "
-    "sizes follow the window"
-)
+INIT_NULLS_CLAUSE = "; cleared init's max_actions: 100 and tool-output sizes — no action limit on a terminal, sizes follow the window"  # noqa: E501
 """The receipt clause for one rewritten file, verbatim; the caller appends the file's name."""
 
 
