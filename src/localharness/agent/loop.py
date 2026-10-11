@@ -2613,11 +2613,15 @@ class AgentLoop:
         cfg = self._llm.config  # read now: a rebind since the loop was built is what the poll must use
 
         pair = self._recovery_pair(cfg.base_url)
+        # The flight and its one relaunch run to the configured bound, shared by every loop on the pair;
+        # this loop's own (budget-clamped) bound is only how long IT waits before leaving.
+        knob = self._reconnect_bound()
         try:
             await pair.recover(
                 base_url=cfg.base_url, api_key=getattr(cfg, "api_key", None),
-                wait_seconds=bound,
+                wait_seconds=knob,
                 on_lost=lambda: self._publish_provider_lost(session, exc, bound),
+                leave_after=bound if bound < knob else None,
             )
         except Exception as failed:  # never BaseException: Esc's CancelledError must propagate
             text = str(failed)
