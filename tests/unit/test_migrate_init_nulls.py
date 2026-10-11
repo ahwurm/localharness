@@ -706,3 +706,31 @@ def test_the_pending_list_names_only_files_under_the_sidecar_dirs(tmp_path):
     assert migrate.apply(cfg, original, plan) == []
     assert _disk(other)["permissions"]["budget"]["max_actions"] == 100
     assert not (tmp_path / migrate.INIT_NULLS_PENDING_FILE).exists()
+
+
+# ------------------------------- WR-30: a partial migration's receipt names config.yaml's changes
+
+
+@_not_root
+def test_a_partial_receipt_names_every_change_config_yaml_got(tmp_path):
+    """config.yaml IS written on the partial path, so its clauses (the cleared budget value, the
+    bind_all key that keeps a server on the network) are said there, as on the success path; the
+    locked file's own clause is not, because it was not written."""
+    import contextlib
+
+    data = _v017()
+    data["server"] = {"runtime": "vllm", "launch": "binary", "binary": "/usr/bin/vllm", "model": "m",
+                      "port": 8081}
+    cfg = _write(tmp_path, data)
+    locked = _sidecar(tmp_path, "agents", "locked",
+                      {"name": "locked", "permissions": {"budget": {"max_actions": 100}}})
+    locked.chmod(0o444)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err), redirect_stdout(io.StringIO()):
+        _auto_migrate_deny_defaults(cfg)
+    text = " ".join(err.getvalue().split())
+    assert "Could not finish updating the config" in text
+    assert " ".join(migrate.INIT_NULLS_CLAUSE.split()) + " (config.yaml)" in text
+    assert "server.bind_all: true" in text and "reachable from other machines" in text
+    assert "(agents/locked.yaml)" not in text
+    assert "continuing; config.yaml was updated." in text
