@@ -241,6 +241,29 @@ async def test_the_primary_is_relaunched_with_the_providers_key_fixed_when_the_p
 
 
 @pytest.mark.asyncio
+async def test_a_peer_whose_key_file_changed_is_relaunched_with_the_new_key(tmp_path, boundaries, monkeypatch):
+    """WR-55: a cold /model launch re-reads the peer's key file and leaves `_active_heavy` at the same
+    object and address; the supplier must not hand back a pair whose relaunch still carries the old key,
+    or the relaunched server would require a key the client no longer sends."""
+    peer = _launchable_peer(api_key=PEER_KEY, require_api_key=True)
+    _, repl, _, _ = _build(tmp_path, server=_llama_primary(), peers=[peer],
+                           active=(peer.lifecycle, PEER_URL), on=PEER_URL)
+    started = _capture_start_kw(monkeypatch)
+    before = repl.server_recovery()
+    assert repl.server_recovery() is before  # nothing changed: the same pair
+
+    peer.api_key = SecretStr("KEY-SENTINEL-peer-rotated")  # the key file said something new
+    after = repl.server_recovery()
+    assert after is not before
+    await after.relaunch()
+
+    (call,) = started
+    assert call["api_key"] == "KEY-SENTINEL-peer-rotated"
+    assert PEER_KEY not in repr(repl._recovery_memo[0])
+    assert "KEY-SENTINEL-peer-rotated" not in repr(repl._recovery_memo[0])  # only a digest is kept
+
+
+@pytest.mark.asyncio
 async def test_the_relaunch_activates_the_very_object_in_active_heavy(tmp_path, boundaries, monkeypatch):
     primary = _llama_primary()
     _, repl, _, _ = _build(tmp_path, server=primary, active=(primary, PRIMARY_URL))
