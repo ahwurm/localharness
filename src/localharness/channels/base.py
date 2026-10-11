@@ -205,10 +205,12 @@ class ChannelAdapter(ABC):
     halves of the restart, never over a remote channel. False is the safe default."""
 
     local_operator: bool = False
-    """Does the person answering sit at this machine? True for the terminal and Zed (ACP, over
-    stdio): `channels.remote_unattended` never limits them. False for the phone app and chat
-    channels, which `channels.remote_unattended: false` locks out of `unattended` and "always".
-    False is the safe default: a new channel that says nothing is treated as remote."""
+    """Does the person answering sit at this machine? True for an interactive terminal (a tty,
+    without `--no-input`, not launched by the agent) and for Zed (ACP, over stdio, not launched by
+    the agent), each judged per instance: `channels.remote_unattended` never limits them. False
+    for the phone app, chat channels and a headless terminal, which `channels.remote_unattended:
+    false` locks out of `unattended` and "always". False is the safe default: a new channel that
+    says nothing is treated as remote."""
 
     async def ask_permission(self, request: Any) -> Any:
         """Render one ASK verdict and return the human's `Decision` (PRD §3.5).

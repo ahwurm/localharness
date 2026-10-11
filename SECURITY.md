@@ -1333,8 +1333,10 @@ phone's pairing and the Discord allow list the way you would guard a shell login
 two to this machine, set `channels.remote_unattended: false`
 in your machine-level config (a project cannot set it). `unattended` is then refused from the phone
 and Discord with one line naming the setting, and their permission questions are put without
-"always" — an "always" that comes back anyway counts once. The terminal and Zed are never limited
-by it. It is `true` by default, so nothing you do from the phone or Discord today stops working,
+"always" — an "always" that comes back anyway counts once. An interactive terminal (a keyboard on
+a tty, without `--no-input`, not launched by the agent) and Zed (not launched by the agent) are
+never limited by it; a `--no-input`, piped or agent-launched session answers to nobody here and is
+locked like the phone. It is `true` by default, so nothing you do from the phone or Discord today stops working,
 and `localharness doctor` shows a row while the phone app or the Discord plugin is on and the lock
 is not set.
 
