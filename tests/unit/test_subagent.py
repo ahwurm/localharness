@@ -15,10 +15,8 @@ from __future__ import annotations
 import pytest
 
 from localharness.agent.permissions import PermissionEvaluator
+from localharness.config.models import ChildrenBudgetConfig
 from localharness.agent.subagent import (
-    EXPLORE_MAX_ACTIONS,
-    EXPLORE_MAX_DURATION_MINUTES,
-    EXPLORE_MAX_TOOL_CALLS,
     EXPLORE_ROLE,
     EXPLORE_TOOLS,
     MAX_DEPTH,
@@ -62,10 +60,11 @@ def test_explore_config_has_distinct_bounded_budget():
     cfg = build_explore_config("explore")
     assert cfg.name == "explore"
     budget = cfg.permissions.budget
-    assert budget.max_actions == EXPLORE_MAX_ACTIONS == 8
-    assert budget.max_duration_minutes == EXPLORE_MAX_DURATION_MINUTES == 3.0
-    # BUDGET-POLICY invariant: max_tool_calls = max_actions + 1
-    assert EXPLORE_MAX_TOOL_CALLS == EXPLORE_MAX_ACTIONS + 1 == 9
+    explore = ChildrenBudgetConfig().explore
+    assert budget.max_actions == explore.actions == 8
+    assert budget.max_duration_minutes == explore.minutes == 3.0
+    # nothing derives max_tool_calls from max_actions (spec 16 §7.1)
+    assert budget.max_tool_calls is None
 
 
 def test_explore_config_sanitizes_underscore_name():
