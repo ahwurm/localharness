@@ -32,8 +32,12 @@ class FakePair:
         self.error = error
         self.calls: list[dict[str, Any]] = []
 
-    async def recover(self, **kw: Any) -> None:
-        self.calls.append(kw)
+    async def recover(self, *, base_url: str, api_key: Any, wait_seconds: float, on_lost: Any,
+                      **kw: Any) -> None:
+        # The real keywords are named (IN-56): a dropped or misspelled one is a TypeError here, not a
+        # silent pass; the tail only tolerates a keyword added later.
+        self.calls.append({"base_url": base_url, "api_key": api_key, "wait_seconds": wait_seconds,
+                           "on_lost": on_lost, **kw})
         if self.error is not None:
             raise self.error
 
@@ -282,6 +286,20 @@ async def test_a_failure_that_is_not_one_of_the_flights_own_is_named(bus, sessio
     assert [f.reason for f in _failed(bus)] == ["llm_error"]
 
 
+def test_the_fakes_name_the_real_keywords():
+    """IN-56: the stand-ins keep the real call shapes, so a keyword the loop or the flight stops passing
+    (or misspells) fails the tests that use them instead of passing silently."""
+    from localharness.provider import server
+    from localharness.provider.lifecycle import ServerRecovery
+
+    real = inspect.signature(ServerRecovery.recover).parameters
+    fake = inspect.signature(FakePair.recover).parameters
+    assert [n for n in real if n != "self"] == [n for n in fake if n not in ("self", "kw")]
+    real_wait = [n for n in inspect.signature(server.wait_ready).parameters]
+    fake_wait = [n for n in inspect.signature(_Observed.__call__).parameters if n not in ("self", "kw")]
+    assert real_wait == fake_wait
+
+
 # ---------------------------------------------------------------------------
 # Which pair
 # ---------------------------------------------------------------------------
@@ -293,8 +311,14 @@ class _Observed:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def __call__(self, base_url: str, **kw: Any) -> None:
-        self.calls.append({"base_url": base_url, **kw})
+    async def __call__(self, base_url: str, config_dir: Any = None, timeout_seconds: float = 1800.0,
+                       poll_seconds: float = 3.0, on_poll: Any = None, *, api_key: Any = None,
+                       runtime: Any = None, liveness: bool = False, **kw: Any) -> None:
+        # wait_ready's own signature (IN-56), so a misspelled keyword lands in `kw` and is caught below
+        assert not kw, f"wait_ready has no keyword {sorted(kw)}"
+        self.calls.append({"base_url": base_url, "config_dir": config_dir,
+                           "timeout_seconds": timeout_seconds, "poll_seconds": poll_seconds,
+                           "api_key": api_key, "runtime": runtime, "liveness": liveness})
 
 
 @pytest.fixture
