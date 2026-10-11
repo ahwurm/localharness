@@ -539,6 +539,14 @@ section (`memory.embedding_model`: the model sentence-transformers loads, and a 
 imports Python from) is re-resolved by `_narrow_agent_global_only`. Never marked GLOBAL_ONLY on the
 plugin's AgentConfigModel: the resolver refuses such a plugin (plugins/resolve.py)."""
 
+AGENT_CORE_GLOBAL_ONLY_SECTIONS: frozenset[str] = frozenset({"stuck_detector"})
+"""Core agent-file SECTIONS only the global layer may set. A workspace agent file (and a workspace
+overlay of a built-in) gets such a section restored WHOLE from the global layer: the global
+`agents/<name>.yaml` section, else the global overrides' `agent:` section, else the schema default.
+Never key by key — a workspace file that merely OMITS a key would fall to the schema default and
+lift a stricter global value. Distinct from AGENT_GLOBAL_ONLY_FIELDS, which names dotted keys under
+plugin sections (and the kill switch) and is a label read by the docs gate."""
+
 
 def layer_files(layer_dir: Path, subdir: str, *, contained: bool = False) -> list[Path]:
     """The `<layer_dir>/<subdir>/*.yaml` files of ONE config layer, sorted — the one enumeration
@@ -1512,6 +1520,24 @@ class ConfigLoader:
         if self._local_dir is not None:
             self._narrow_project_layer_permissions(merged, path.stem, div_name)
 
+        # 5c'. The core sections only the global layer may set (AGENT_CORE_GLOBAL_ONLY_SECTIONS),
+        #      restored WHOLE for a workspace file: the global section, else the schema default.
+        #      Never key by key — a workspace file that omits `escalation_threshold` would fall to
+        #      the schema's looser default over a stricter global one (spec 17 §6). A file that
+        #      declared the section differently earns one note; one that left it out, none.
+        if self._local_dir is not None and in_layer(path, self._local_dir):
+            for section in sorted(AGENT_CORE_GLOBAL_ONLY_SECTIONS):
+                restored = self._global_agent_section(path.stem, section)
+                if restored is _UNSET:
+                    merged.pop(section, None)
+                else:
+                    merged[section] = restored
+                if section in raw and raw[section] != (
+                        {} if restored is _UNSET else restored):
+                    note = f"ignoring {section} in {str(path)!r}: only the global config may set it"
+                    if note not in self.agent_warnings:
+                        self.agent_warnings.append(note)
+
         # 5d. QA-18: an agent that sets no `permissions.mode` (in its file, or under `agent:` in
         #     overrides.yaml) runs in the org's, the mode `init`'s posture question writes. Key
         #     presence, never a comparison with the default: an explicit `mode: auto` is the
@@ -1737,6 +1763,28 @@ class ConfigLoader:
         found = (read(lambda: self._without_withheld(_load_yaml_file(agent_file), agent_file))
                  if agent_file.exists() else _UNSET)
         if found is _UNSET:
+            found = read(self._overlay_agent)
+        return found
+
+    def _global_agent_section(self, stem: str, head: str, *, overlay: bool = True) -> Any:
+        """The raw `head` section as the GLOBAL layer alone sets it for agent `stem`: its
+        agents/<stem>.yaml, else (when `overlay`) the global overrides' `agent:` section, else
+        _UNSET. A section that is not a mapping counts as absent, and so does a file that does not
+        parse. Returns a shallow copy: the caller may edit it, the file's dict stays untouched."""
+        def declared(data: Any) -> Any:
+            section = data.get(head) if isinstance(data, dict) else None
+            return dict(section) if isinstance(section, dict) else _UNSET
+
+        def read(load: Callable[[], Any]) -> Any:
+            try:
+                return declared(load())
+            except ConfigError:
+                return _UNSET
+
+        agent_file = self._config_dir / "agents" / f"{stem}.yaml"
+        found = (read(lambda: self._without_withheld(_load_yaml_file(agent_file), agent_file))
+                 if agent_file.exists() else _UNSET)
+        if found is _UNSET and overlay:
             found = read(self._overlay_agent)
         return found
 
@@ -2109,6 +2157,29 @@ class ConfigLoader:
         Only keys the workspace yaml actually WROTE are considered; the rest of `merged` is the
         base's own dump and is none of the repo's doing.
         """
+        # The core sections only the global layer may set come back whole (the global
+        # agents/<name>.yaml section, else the built-in's own): `stuck_detector` is restored whole
+        # here, as at `load_agent_file`. The overrides' `agent:` section never reaches a built-in.
+        # Before the permissions narrowing and its early return.
+        for section in sorted(AGENT_CORE_GLOBAL_ONLY_SECTIONS):
+            restored = self._global_agent_section(name, section, overlay=False)
+            from_base = restored is _UNSET
+            if from_base:
+                restored = base.model_dump().get(section)
+            merged[section] = restored
+            # The base's dump is complete, the file's raw section is not: a raw key that the
+            # restored section already holds changes nothing, so only a differing key is "tried".
+            declared_section = raw.get(section) if section in raw else _UNSET
+            if declared_section is _UNSET:
+                tried = False
+            elif from_base and isinstance(declared_section, dict) and isinstance(restored, dict):
+                tried = any(restored.get(k, _UNSET) != v for k, v in declared_section.items())
+            else:
+                tried = declared_section != restored
+            if tried:
+                log.warning(
+                    "ignoring %s in %r: only the global config may set it",
+                    section, str(self._local_dir / "agents" / f"{name}.yaml"))
         base_perms = base.model_dump().get("permissions") or {}
         declared = raw.get("permissions") if isinstance(raw.get("permissions"), dict) else {}
         self._narrow_project_layer_permissions(
