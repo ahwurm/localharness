@@ -120,6 +120,22 @@ async def test_the_down_primarys_served_name_is_listed_and_swaps_back(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_an_up_primarys_name_rebinds_and_never_restarts_it(tmp_path, boundaries, monkeypatch):
+    """WR-51: the session is on a peer and the primary still serves its name: a plain rebind."""
+    primary = _llama(served_name="qwen-27b")
+    _, repl, channel, agent, _ = _on_a_peer(tmp_path, primary, primary_live=["qwen-27b"])
+    _ready_as(monkeypatch, "qwen-27b")
+    seen = _record_activations(monkeypatch)
+
+    await repl._handle_slash("/model qwen-27b")
+
+    assert boundaries.stops == [] and boundaries.cmds == [] and seen == []
+    assert not any(m.startswith("Restarting managed") for m in channel.messages)
+    assert agent._llm.config.base_url == PRIMARY_URL and agent._llm.config.model == "qwen-27b"
+    assert any(m.startswith("Switched to qwen-27b") for m in channel.messages)
+
+
+@pytest.mark.asyncio
 async def test_the_served_name_resolves_by_its_listed_number(tmp_path, boundaries, monkeypatch):
     primary = _llama(served_name="qwen-27b")
     _, repl, channel, agent, _ = _on_a_peer(tmp_path, primary)
