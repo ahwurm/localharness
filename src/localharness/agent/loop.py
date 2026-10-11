@@ -315,36 +315,84 @@ class BudgetViolation:
     message: str
 
 
+def _cap_limit(limit: int, cap: int) -> int:
+    """`limit` under `cap`, where a `limit` of 0 means no limit at all (the `> 0` idiom of
+    `BudgetTracker.check`): 0 takes the cap, anything else takes the smaller of the two. A literal
+    `min(limit, cap)` would return 0 (unbounded) for the default root on a remote unattended
+    surface, the case the machine knob exists for."""
+    return cap if limit == 0 else min(limit, cap)
+
+
+@dataclass(frozen=True)
+class BudgetLabels:
+    """The config keys a loop's budget came from, so a stop can say which one bound it.
+
+    `actions` / `minutes` name the key a seam-written value was read from; `fallback` names the
+    rung a child's fallback budget came from (`org.children_budget.<entry>`). The root has none
+    of them: a configured value is the person's own and is not named."""
+
+    actions: str | None = None
+    minutes: str | None = None
+    fallback: str | None = None
+
+
 @dataclass
 class BudgetTracker:
-    max_actions: int
+    # An int (the limit; 0 = none), or a supplier of `(limit, label)` read at every check, so a limit
+    # that follows the live gate is never stale. `label` names the config key that bound it, or None.
+    max_actions: "int | Callable[[], tuple[int, str | None]]"
     max_duration_minutes: float
     # Dispatch-time tool-call ceiling, DISTINCT from max_actions (BudgetConfig.max_actions is
     # ge=1 so the loop always gets its first LLM round-trip). None (default): no separate cap,
     # every existing caller is unaffected — only the bench runner sets this, from
     # scenario.limits.max_tool_calls, which — unlike max_actions — may legitimately be 0.
     max_tool_calls: int | None = None
+    # The config key the time limit came from, named in the time failure text; None names nothing.
+    minutes_bound_by: str | None = None
+
+    def _actions(self) -> tuple[int, str | None]:
+        """The action limit and the key that bound it, read once."""
+        if callable(self.max_actions):
+            return self.max_actions()
+        return self.max_actions, None
+
+    @property
+    def limit(self) -> int:
+        """The action limit right now (0 = none)."""
+        return self._actions()[0]
+
+    @property
+    def bound_by(self) -> str | None:
+        """The config key bounding the action limit right now, or None."""
+        return self._actions()[1]
 
     def check(self, session: Session) -> BudgetViolation | None:
-        if self.max_actions > 0 and session.actions_taken >= self.max_actions:
+        limit, label = self._actions()
+        if limit > 0 and session.actions_taken >= limit:
+            message = (
+                f"Agent reached the maximum of {limit} tool calls. "
+                f"Stopping to prevent runaway execution."
+            )
+            if label is not None:
+                message += f" ({label})"
             return BudgetViolation(
                 reason="actions",
-                limit=self.max_actions,
+                limit=limit,
                 current=session.actions_taken,
-                message=(
-                    f"Agent reached the maximum of {self.max_actions} tool calls. "
-                    f"Stopping to prevent runaway execution."
-                ),
+                message=message,
             )
         if self.max_duration_minutes > 0 and session.elapsed_minutes() >= self.max_duration_minutes:
+            message = (
+                f"Agent reached the time limit of {self.max_duration_minutes:.1f} minutes. "
+                f"Stopping after {session.actions_taken} tool calls."
+            )
+            if self.minutes_bound_by is not None:
+                message += f" ({self.minutes_bound_by})"
             return BudgetViolation(
                 reason="time",
                 limit=self.max_duration_minutes,
                 current=session.elapsed_minutes(),
-                message=(
-                    f"Agent reached the time limit of {self.max_duration_minutes:.1f} minutes. "
-                    f"Stopping after {session.actions_taken} tool calls."
-                ),
+                message=message,
             )
         return None
 
@@ -748,9 +796,10 @@ def _budget_note(session: Session, budget: BudgetTracker) -> str:
     usage warnings). Empty string when both budgets are unlimited."""
     parts = []
     nearly = False
-    if budget.max_actions > 0:
-        parts.append(f"{session.actions_taken}/{budget.max_actions} tool calls used")
-        nearly = nearly or (budget.max_actions - session.actions_taken) <= 2
+    limit = budget.limit  # read once: a live limit can move between two reads
+    if limit > 0:
+        parts.append(f"{session.actions_taken}/{limit} tool calls used")
+        nearly = nearly or (limit - session.actions_taken) <= 2
     if budget.max_duration_minutes > 0:
         elapsed = session.elapsed_minutes()
         parts.append(f"{elapsed:.1f}/{budget.max_duration_minutes:.0f} min elapsed")
