@@ -729,6 +729,21 @@ def test_a_global_budget_that_does_not_validate_is_never_read_as_silence(tmp_pat
     assert caught.value.errors[0].yaml_line is not None
 
 
+@pytest.mark.parametrize("field,bad", [("max_actions", "lots"), ("max_duration_minutes", 0.05)])
+def test_an_invalid_global_budget_fails_under_a_shadowing_file_that_omits_the_key(
+        tmp_path, field, bad):
+    """WR-31: the omission case of WR-22. A workspace `agents/worker.yaml` with no budget block
+    over a global one whose value does not validate fails the load, naming the global file, as it
+    does with no workspace file at all; it never loads as None (no limit)."""
+    loader, _ = _world(tmp_path,
+                       g_agents={"worker": _agent(budget={field: bad})},
+                       ws_agents={"worker": _agent()})
+    with pytest.raises(ConfigValidationError) as caught:
+        loader.load_agent("worker")
+    assert caught.value.path == str(tmp_path / "global" / "agents" / "worker.yaml")
+    assert [e.field_path for e in caught.value.errors] == [f"permissions.budget.{field}"]
+
+
 def test_an_invalid_global_agent_file_value_fails_even_over_a_valid_global_overlay(tmp_path):
     loader, _ = _world(tmp_path,
                        g_agents={"worker": _agent(budget={"max_actions": 50.5})},
