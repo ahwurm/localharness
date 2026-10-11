@@ -129,8 +129,10 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     # 8 = the 7 that stop, launch or restore a server + 1 from Phase 5's `_foreign_incumbent`, which
     # asks the primary's strategy liveness (read-only) whether a listener on its port is the
     # harness's own (D-33), + 1 from the accelerator-lock seed in `__init__`, which asks the same
-    # liveness (D-33) instead of trusting `server:` alone. Neither starts or stops a server.
-    assert text.count("self._server_config_dir") == 9, _where(text, "self._server_config_dir")
+    # liveness (D-33) instead of trusting `server:` alone, + 1 from `_pidfile_process_holds` (IN-54),
+    # which reads the same pidfile's pid to see whether the process on the port is that one.
+    # None of them starts or stops a server.
+    assert text.count("self._server_config_dir") == 10, _where(text, "self._server_config_dir")
     # assignment + the property's own two reads on one line + 6 deliberately-untouched uses,
     # + 1 from phase 41's `_audit_base_dir` property, which reads `self._config_dir` as its
     # FALLBACK when the session has no workspace layer, + 1 from Phase 2's `_announce_window`,
