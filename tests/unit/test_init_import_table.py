@@ -385,6 +385,46 @@ def test_a_hugging_face_token_on_argv_is_dropped_never_shown():
     assert "hf_argvsecret" not in everywhere(out) and "hf_other" not in everywhere(out)
 
 
+MCP_JSON = '{"mcpServers":{"x":{"url":"https://h","headers":{"Authorization":"Bearer SECRET123"}}}}'
+
+
+def test_an_mcp_servers_document_is_a_credential_never_shown_or_recorded():
+    # D-27 only annotates the flag; the value can embed headers/env tokens, so D-19(2) refuses it
+    reason = attach(llama("--mcp-servers-json", MCP_JSON))
+    assert reason == "holds a key the import cannot place (--mcp-servers-json)"
+    assert "SECRET123" not in reason
+    assert attach(llama(f"--mcp_servers_json={MCP_JSON}")) \
+        == "holds a key the import cannot place (--mcp_servers_json)"
+    assert attach(llama(environ={"LLAMA_ARG_MCP_SERVERS_JSON": MCP_JSON})) \
+        == "holds a key the import cannot place (LLAMA_ARG_MCP_SERVERS_JSON)"
+
+
+def test_the_path_form_of_the_mcp_option_is_still_imported_and_annotated():
+    out = imported(llama("--mcp-servers-config", "/etc/mcp.json"))
+    assert out.spec.extra_args == ["--mcp-servers-config", "/etc/mcp.json"]
+    assert "(serves a shell-exec tool on the port)" in " ".join(out.shown)
+
+
+@pytest.mark.parametrize("name", [
+    "LLAMA_ARG_HF_TOKEN", "LLAMA_ARG_SOME_SECRET", "LLAMA_ARG_PASSWORD", "LLAMA_ARG_PASSWD",
+    "LLAMA_ARG_AUTH_HEADER", "LLAMA_ARG_CREDENTIALS", "LLAMA_ARG_ADMIN_KEY",
+])
+def test_a_llama_arg_name_that_reads_as_a_credential_is_attach_only_without_its_value(name):
+    rec = llama(environ={name: "hf_SECRET"})
+    assert attach(rec) == f"holds a key the import cannot place ({name})"
+
+
+def test_a_single_dash_equals_token_is_split_like_the_double_dash_form():
+    out = imported(llama("-hft=hf_SECRET", "-ngl", "9"))
+    assert out.spec.extra_args == ["-ngl", "9"]
+    assert "hf_SECRET" not in everywhere(out)
+    out = imported(llama("-ctk=q8_0"))
+    assert out.spec.cache_type_k == "q8_0" and not out.spec.extra_args
+    assert attach(llama("-mu=https://user:tok@host/m.gguf")) \
+        == "a record needs a local path; none mapped under ~/.cache/huggingface/hub"
+    assert attach(llama("-secret-thing=abc")) == "holds a key the import cannot place (-secret-thing)"
+
+
 # ------------------------------------------------------------------------------------ the bind
 
 

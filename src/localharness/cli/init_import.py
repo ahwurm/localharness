@@ -92,6 +92,27 @@ _ENV_FIELDS: dict[str, str] = {
 
 _ENV_PREFIX = "LLAMA_ARG_"
 
+_SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|CRED", re.IGNORECASE)
+"""A flag, `LLAMA_ARG_*` name or `config.ini` key that reads as a credential. The table in
+`provider/server.py` names the credentials llama-server really reads; this is the net under it, so a
+name the table does not list is still never carried, shown or audited (D-19(2): anything key-shaped left
+makes the process attach-only)."""
+
+_CREDENTIAL_VALUED = frozenset({"mcp-servers-json"})
+"""Options whose VALUE is a document that can embed credentials (`headers`, `env` of an MCP server
+definition). D-27 annotates them for display only and refuses nothing for the annotation; a value that can
+hold a bearer token is refused under D-19(2) all the same, so it never reaches a shown line, the record
+or an audit entry."""
+
+
+def _credential_name(name: str) -> bool:
+    """True when `name` (a flag with its dashes, an env name or a config.ini key) reads as a credential or
+    takes a credential-bearing document as its value."""
+    if _SECRETISH.search(name):
+        return True
+    bare = name.lstrip("-").lower().replace("_", "-").removeprefix("llama-arg-")
+    return bare in _CREDENTIAL_VALUED
+
 _RUNTIME_BY_NAME = {
     "llama-server": "llamacpp",
     "ollama": "ollama",
@@ -129,11 +150,13 @@ class IniImport:
     Hugging Face token, host or port line); `keys` holds the values that are routed to the import's own
     key and bind handling, under the key as written (`api-key`, `LLAMA_API_KEY`, `api-key-file`,
     `LLAMA_ARG_API_KEY_FILE`, `host`, `port`, ...); `refused` is the first download-identity or TLS key as
-    written, which makes the import attach-only."""
+    written, which makes the import attach-only; `keyshaped` is the first other key that reads as a
+    credential (`_credential_name`), left out of `kept` and also attach-only at import."""
 
     kept: str
     keys: dict[str, str]
     refused: str | None
+    keyshaped: str | None = None
 
 
 @dataclass(frozen=True)
@@ -191,11 +214,9 @@ def _walk(tokens: tuple[str, ...]) -> _Walk:
         if not tok.startswith("-"):
             walk.extra.append(tok)
             continue
-        name, written, inline = tok, tok, None
-        if tok.startswith("--"):
-            written, eq, rest = tok.partition("=")
-            name = written.replace("_", "-")
-            inline = rest if eq else None
+        written, eq, rest = tok.partition("=")  # a single-dash token splits on `=` too: `-hft=<token>`
+        name = written.replace("_", "-") if tok.startswith("--") else written
+        inline = rest if eq else None
         field = _ARGV_FIELDS.get(name)
         group = None
         if field is None:
@@ -207,7 +228,7 @@ def _walk(tokens: tuple[str, ...]) -> _Walk:
                 walk.verbose.append(len(walk.extra) - 1)
                 continue
             else:
-                if walk.keyshaped is None and "api-key" in name.lstrip("-").lower():
+                if walk.keyshaped is None and _credential_name(name):
                     walk.keyshaped = written
                 walk.extra.append(tok)
                 continue
@@ -310,6 +331,7 @@ def mask_config_ini(data: bytes) -> IniImport:
     kept: list[str] = []
     keys: dict[str, str] = {}
     refused: str | None = None
+    keyshaped: str | None = None
     section = ""
     for raw in _INI_NEWLINE.split(text):
         header = _INI_HEADER.match(raw)
@@ -337,10 +359,14 @@ def mask_config_ini(data: bytes) -> IniImport:
                 continue
             if dashed in _INI_TOKEN_KEYS or "api-key" in dashed:
                 continue  # a credential llama-server would not read from this spelling: still never kept
+            if _credential_name(key):
+                keyshaped = keyshaped or key  # the import cannot place it: attach-only, never kept or shown
+                continue
         kept.append(raw)
     while kept and not kept[-1].strip():
         kept.pop()
-    return IniImport("\n".join(kept) + "\n" if any(line.strip() for line in kept) else "", keys, refused)
+    return IniImport("\n".join(kept) + "\n" if any(line.strip() for line in kept) else "", keys, refused,
+                     keyshaped)
 
 
 def user_config_ini() -> Path:
@@ -452,7 +478,7 @@ def import_record(
             if name == _KEY_FILE_ENV and value:
                 env_key_files.append((name, value))
             # LLAMA_ARG_API_KEY is read by nothing: stripped and dropped
-        elif "API_KEY" in name:
+        elif _credential_name(name):
             env_keyshaped = env_keyshaped or name
         elif category is None:
             env[name] = value
@@ -510,7 +536,7 @@ def import_record(
         return AttachOnly("holds more than one --api-key")
     if inline and resolved_files:
         return AttachOnly("holds a key the import cannot place (--api-key and --api-key-file)")
-    keyshaped = walk.keyshaped or env_keyshaped
+    keyshaped = walk.keyshaped or env_keyshaped or (ini_masked.keyshaped if ini_masked is not None else None)
     if keyshaped is not None:
         return AttachOnly(f"holds a key the import cannot place ({visible_text(keyshaped)})")
     key_file = resolved_files[0][1] if resolved_files else None
