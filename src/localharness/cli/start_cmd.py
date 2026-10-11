@@ -1270,6 +1270,8 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
     # naming it (a stamp-only rewrite of config.yaml says nothing — no value was changed).
     if plan.nulled:
         removed_note += _migrate.INIT_NULLS_CLAUSE + " (config.yaml)"
+    elif plan.init_nulls_due:
+        removed_note += _migrate.INIT_NULLS_STAMP_CLAUSE  # IN-03: say why config.yaml was rewritten
     for sidecar in plan.sidecars:
         if sidecar.nulled:
             removed_note += (

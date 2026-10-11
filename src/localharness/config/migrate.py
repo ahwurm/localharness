@@ -154,6 +154,10 @@ value init wrote). The section is `org` in config.yaml and the file's root in an
 file. Constant keys and constant values: an equality match, so nothing a file contains can steer
 which key the step touches."""
 
+INIT_NULLS_STAMP_CLAUSE = "; recorded org.permissions.init_nulls_revision in config.yaml (nothing of init's to clear there)"  # noqa: E501
+"""The receipt clause when config.yaml is rewritten only to record the init-nulls stamp (IN-03): a
+rewrite (one backup, one YAML round-trip) never goes unexplained."""
+
 INIT_NULLS_CLAUSE = "; cleared init's max_actions: 100 and tool-output sizes — no action limit on a terminal, sizes follow the window"  # noqa: E501
 """The receipt clause for one rewritten file, verbatim; the caller appends the file's name."""
 

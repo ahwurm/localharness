@@ -75,6 +75,14 @@ def migrate(
     config is already at the current defaults revision the repair is the removal ALONE: no deny
     pattern you deleted is re-added.
 
+    Once per install it also clears three values older `init` runs wrote as if you had chosen
+    them: `max_actions: 100`, `max_tool_output_chars: 32000` and
+    `tool_result_evict_threshold_chars: 8000`, set to null wherever they still hold exactly that
+    number, in config.yaml and in each agent/division file (a number you changed stays). It then
+    records `org.permissions.init_nulls_revision` in config.yaml, which rewrites that file even
+    when nothing matched (comments and key order are not kept; the backup has them). It never
+    runs again after that stamp.
+
     It also writes `server.bind_all: true` into a vLLM server section that LocalHarness launches
     and that was written before that setting existed (earlier releases listened on every network
     interface; this one listens on this machine only unless `bind_all` is true), so a server
@@ -163,6 +171,15 @@ def migrate(
                 + " [dim](init's value; the default now follows the model)[/dim]",
                 soft_wrap=True,
             )
+    if plan.init_nulls_due:
+        # IN-03: the one-time step is recorded even when nothing matched, and that is a rewrite of
+        # config.yaml (a backup, comments and key order lost) the person should see coming.
+        console.print(
+            "  [cyan]~[/cyan] " + escape(
+                f"org.permissions.init_nulls_revision → {_migrate.CURRENT_INIT_NULLS_REVISION}")
+            + " [dim](records the one-time step; config.yaml is rewritten)[/dim]",
+            soft_wrap=True,
+        )
 
     # A launched vLLM server written before server.bind_all existed keeps its reach (the release
     # launches on 127.0.0.1 otherwise); `localharness doctor` says how to keep it on this machine.
@@ -206,6 +223,8 @@ def migrate(
         removed_note += f"; cleaned {cleaned} agent/division file(s)"
     if plan.nulled:
         removed_note += _migrate.INIT_NULLS_CLAUSE + " (config.yaml)"
+    elif plan.init_nulls_due:
+        removed_note += _migrate.INIT_NULLS_STAMP_CLAUSE
     for sidecar in plan.sidecars:
         if sidecar.nulled:
             removed_note += (

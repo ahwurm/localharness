@@ -467,3 +467,29 @@ def test_config_migrate_names_what_it_wrote_and_never_says_refusing(tmp_path):
     assert result.exit_code == 1
     assert f"Rewrote {ok}" in plain and "Could not finish" in plain
     assert "Refusing to write" not in plain
+
+
+# ------------------------------------------- IN-03: a stamp-only rewrite says why it happened
+
+
+def test_a_stamp_only_rewrite_says_it_recorded_the_stamp(tmp_path):
+    cfg = _write(tmp_path, _v017(max_actions=150, output=20000, evict=5000))
+    out = " ".join(_start_receipt(cfg).split())
+    assert " ".join(migrate.INIT_NULLS_STAMP_CLAUSE.split()) in out
+
+
+def test_a_rewrite_that_cleared_values_does_not_also_claim_stamp_only(tmp_path):
+    cfg = _write(tmp_path, _v017())
+    out = " ".join(_start_receipt(cfg).split())
+    assert "nothing of init's to clear" not in out
+
+
+def test_config_migrate_dry_run_and_help_announce_the_init_nulls_step(tmp_path):
+    _write(tmp_path, _v017(max_actions=150, output=20000, evict=5000))
+    dry = runner.invoke(app, ["config", "migrate", "--config-dir", str(tmp_path), "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert "org.permissions.init_nulls_revision →" in " ".join(dry.output.split())
+    real = runner.invoke(app, ["config", "migrate", "--config-dir", str(tmp_path)])
+    assert " ".join(migrate.INIT_NULLS_STAMP_CLAUSE.split()) in " ".join(real.output.split())
+    helped = runner.invoke(app, ["config", "migrate", "--help"])
+    assert "init_nulls_revision" in " ".join(helped.output.split())
