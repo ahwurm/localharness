@@ -709,9 +709,14 @@ def _finite_int(v: Any, *, ge: Optional[int] = None, le: Optional[int] = None) -
 
 def _finite_number(v: Any, *, gt: Optional[float] = None, ge: Optional[float] = None,
                    le: Optional[float] = None) -> bool:
-    """Is `v` an int or float (a bool is neither), finite, and inside the bounds given?"""
-    return (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
-            and (gt is None or v > gt) and (ge is None or v >= ge) and (le is None or v <= le))
+    """Is `v` an int or float (a bool is neither), finite, and inside the bounds given? Only a
+    float can be infinite or NaN: `math.isfinite` on a huge YAML int (400 digits) would raise
+    OverflowError converting it, and an int compares with the bounds exactly (WR-04)."""
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    if isinstance(v, float) and not math.isfinite(v):
+        return False
+    return (gt is None or v > gt) and (ge is None or v >= ge) and (le is None or v <= le)
 
 
 _INVALID = object()
