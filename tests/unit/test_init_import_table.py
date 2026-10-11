@@ -651,6 +651,37 @@ def test_a_process_with_no_model_at_all_uses_the_mapped_one_too(tmp_path):
     assert attach(proc(("llama-server", "--jinja"), mapped=())).startswith("a record needs a local path")
 
 
+@pytest.mark.parametrize("draft_args, environ", [
+    (("-hf", "org/main", "-hfd", "org/draft"), None),
+    (("-hf", "org/main", "--hf_repo_draft=org/draft"), None),
+    (("-hf", "org/main", "--spec-draft-hf", "org/draft"), None),
+    (("-hf", "org/main"), {"LLAMA_ARG_SPEC_DRAFT_HF_REPO": "org/draft"}),
+    (("-hfd", "org/draft"), None),
+])
+def test_a_draft_download_beside_the_main_one_cannot_pick_the_mapped_file(tmp_path, draft_args, environ):
+    """WR-07: maps lists the later (lower) mapping first, which is the draft; no guess is made."""
+    main, draft = mapped_model(tmp_path, "main"), mapped_model(tmp_path, "draft")
+    rec = proc(("llama-server", *draft_args), mapped=(draft, main), environ=environ)
+    assert attach(rec).startswith("downloads a draft model beside the main one")
+
+
+def test_a_local_draft_model_is_passed_over_when_the_main_one_is_a_download(tmp_path):
+    main, draft = mapped_model(tmp_path, "main"), mapped_model(tmp_path, "draft")
+    for argv in (("-hf", "org/main", "-md", draft), ("-hf", "org/main", f"--model_draft={draft}")):
+        out = imported(proc(("llama-server", *argv), mapped=(draft, main)))
+        assert out.spec.model == main
+    out = imported(proc(("llama-server", "-hf", "org/main"), mapped=(draft, main),
+                        environ={"LLAMA_ARG_MODEL_DRAFT": draft}))
+    assert out.spec.model == main
+
+
+def test_a_draft_download_does_not_matter_when_the_main_model_is_a_local_path(tmp_path):
+    out = imported(proc(("llama-server", "-m", "/m/a.gguf", "-hfd", "org/draft"),
+                        mapped=(mapped_model(tmp_path, "d"),)))
+    assert out.spec.model == "/m/a.gguf"
+    assert not out.spec.extra_args  # the download flag leaves the record, as every download flag does
+
+
 # --------------------------------------------------------------------------------------- --verbose
 
 
