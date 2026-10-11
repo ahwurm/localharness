@@ -532,7 +532,15 @@ def test_an_unusable_newest_run_does_not_hand_over_an_older_one(fake_systemd, tm
         "not json",
         {"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model} --alias it's --host 127.0.0.1"},
     ])
-    assert units.read_journal("u.service") == units.Skip("has an unparseable command line in its journal")
+    assert units.read_journal("u.service") == units.Skip("has an argument the journal cannot show exactly")
+
+
+@pytest.mark.parametrize("tail", ['--chat-template-kwargs {"enable_thinking":false}', "--alias 'a b'",
+                                  "--override-kv a=str:C:\\x"])
+def test_the_journal_does_not_quote_so_a_quote_or_backslash_is_not_read_as_shell(fake_systemd, tmp_path, tail):
+    model = _model(tmp_path)
+    fake_systemd.journal([{"_EXE": "/b/llama-server", "_CMDLINE": f"llama-server -m {model} {tail}"}])
+    assert units.read_journal("u.service") == units.Skip("has an argument the journal cannot show exactly")
 
 
 def test_a_non_llama_newer_entry_does_not_hide_the_llama_run(fake_systemd, tmp_path):

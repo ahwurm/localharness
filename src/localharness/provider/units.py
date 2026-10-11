@@ -175,16 +175,18 @@ def read_journal(unit: str) -> ProcRecord | Skip:
     `pid=0`, `environ=None` and `cwd=None` (the journal knows neither). Queried by the trusted
     `_SYSTEMD_USER_UNIT=` and `_UID=` fields, never `-u`, which matches the forgeable `USER_UNIT`.
 
-    The NEWEST run decides: one the journal cannot show (a `_CMDLINE` journald nulled past 4096 bytes or
-    kept as a byte array, or one that does not parse) is a `Skip`, never a reason to import the run
-    before it, which may have bound otherwise."""
+    `_CMDLINE` is `/proc/<pid>/cmdline` with the NULs turned into spaces: journald does not quote it, so
+    it is split on whitespace and read exactly only when it holds no quote or backslash (an argument with
+    a space in it cannot be told from two). The NEWEST run decides: one the journal cannot show (a
+    `_CMDLINE` journald nulled past 4096 bytes or kept as a byte array, a quote or a backslash in the
+    line) is a `Skip`, never a reason to import the run before it, which may have bound otherwise."""
     uid = os.getuid()
     out = _run(["journalctl", "--user", "-o", "json", "-n", str(JOURNAL_LINES), "--all",
                 "--output-fields=_EXE,_CMDLINE", "--no-pager", f"_SYSTEMD_USER_UNIT={unit}",
                 f"_UID={uid}"], timeout=JOURNAL_TIMEOUT_S, cap=JOURNAL_OUTPUT_CAP)
     if out is None:
         return Skip("has an unreadable journal", names_model=False)
-    newest: tuple[str, list[str]] | None = None
+    newest: tuple[str, str] | None = None
     for line in reversed(out.splitlines()):
         try:
             entry = json.loads(line)
@@ -199,19 +201,17 @@ def read_journal(unit: str) -> ProcRecord | Skip:
             if os.path.basename(exe) == _LLAMA_SERVER:  # null past 4096 bytes, or a byte array
                 return Skip("has a command line the journal cannot show")
             continue
-        try:
-            argv = shlex.split(cmdline)
-        except ValueError:
-            if os.path.basename(exe) == _LLAMA_SERVER:
-                return Skip("has an unparseable command line in its journal")
-            continue
+        words = cmdline.split()
         if os.path.basename(exe) == _LLAMA_SERVER or (
-                argv and os.path.basename(argv[0]) == _LLAMA_SERVER):
-            newest = (exe, argv)
+                words and os.path.basename(words[0]) == _LLAMA_SERVER):
+            newest = (exe, cmdline)
             break
     if newest is None:
         return Skip("has no llama-server in its journal", names_model=False)
-    exe, argv = newest
+    exe, cmdline = newest
+    if any(ch in cmdline for ch in "\"'\\"):
+        return Skip("has an argument the journal cannot show exactly")
+    argv = cmdline.split()
     if not os.path.isabs(exe):
         return Skip(f"names a relative path ({exe})")
     model = _option_value(argv, "-m", "--model")
