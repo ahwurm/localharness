@@ -1643,6 +1643,13 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
 
     reset = _saved_choices_reset(config_path, harness) if force else None
     config_file = config_path / "config.yaml"
+    # IN-04: the stamp written below also gates the sidecar walk, so an agent/division file older
+    # than it is cleared of init's values now (once; nothing when the step has already run).
+    from localharness.config.migrate import INIT_NULLS_CLAUSE, clear_sidecars_before_restamp
+    for path, backup in clear_sidecars_before_restamp(config_path):
+        console.print("[cyan]i[/cyan]  " + escape(
+            f"Updated {path.parent.name}/{path.name}{INIT_NULLS_CLAUSE} — backup at {backup}"),
+            soft_wrap=True)
     if force and config_file.exists():
         # --force starts over; the config it replaces stays beside it, owner-only, so it can be
         # undone. A distinct infix: never counted or pruned as one of migrate's backups.

@@ -288,6 +288,34 @@ def scan_sidecars(config_dir: Path, *, init_nulls_due: bool = False) -> list[Sid
     return found
 
 
+def clear_sidecars_before_restamp(config_dir: Path) -> list[tuple[Path, Path]]:
+    """Run the init-nulls step over the agent/division files ahead of a re-init (IN-04).
+
+    `init` writes config.yaml with `init_nulls_revision` current, and that one stamp also gates the
+    sidecar walk. Re-initialising a directory whose config.yaml is still below it (or is missing,
+    or does not parse) would therefore leave older `agents/*.yaml` carrying init's values for good.
+    So, before the re-init writes its stamp, each such file has exactly init's values cleared
+    (`_init_nulls`; nothing else, the dead key included, is touched), with its own backup and the
+    same atomic write as the migration. Returns `(file, backup)` for each file rewritten; nothing
+    when config.yaml's stamp is already current, because the step has run."""
+    config_file = config_dir / "config.yaml"
+    if config_file.exists():
+        try:
+            data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            data = None
+        if isinstance(data, dict) and not _init_nulls_due(data):
+            return []
+    written: list[tuple[Path, Path]] = []
+    for sidecar in scan_sidecars(config_dir, init_nulls_due=True):
+        if not sidecar.nulled:
+            continue
+        original = sidecar.path.read_bytes()
+        updated, _ = _init_nulls(yaml.safe_load(original.decode("utf-8")))
+        written.append((sidecar.path, _write_with_backup(sidecar.path, original, updated)))
+    return written
+
+
 def _needs_bind_all(data: dict) -> tuple[str, ...]:
     """Where a config written before `server.bind_all` existed launches a vLLM server: the server
     section and each extra endpoint's lifecycle with runtime vllm (the default) and no bind_all key.
