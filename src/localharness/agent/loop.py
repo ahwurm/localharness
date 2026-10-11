@@ -1388,7 +1388,8 @@ class AgentLoop:
 
         from localharness.provider.client import ProviderError
 
-        if _TURN_DEPTH.get() == 0:
+        root_turn = _TURN_DEPTH.get() == 0
+        if root_turn:
             # A new root turn: any drop an earlier turn could not end is over; the next one gets a whole
             # bound and its one relaunch. A child's turn never does this, so the loops that run one
             # after another inside one root turn share one outage (one bound, one relaunch).
@@ -1402,6 +1403,11 @@ class AgentLoop:
                 # TurnCompleted handler (or a task it creates, which copies the context) that starts a
                 # root turn must be read as a root turn, not as a child of the turn that just ended.
                 _TURN_DEPTH.reset(turn_depth)
+                if root_turn:
+                    # The person's turn is over, however it ended (Esc's CancelledError included): a
+                    # shared flight every child left at its own budget must not go on to relaunch the
+                    # model server, or hold the launch lock, with no turn waiting on it.
+                    self._abandon_idle_flights()
         except ProviderError as exc:
             # A provider failure escaping _execute_loop — e.g. the TokenCounter hitting a dead
             # endpoint in build_messages after the server was killed mid-session. A KNOWN
@@ -2590,6 +2596,19 @@ class AgentLoop:
         except Exception:  # noqa: BLE001 - bookkeeping for the next drop must never end this turn
             log.debug("could not end the reconnect outage record", exc_info=True)
 
+    def _abandon_idle_flights(self) -> None:
+        """Cancel the reconnect flights nobody awaits any more (lifecycle.abandon_idle_flights). Never
+        fails the turn; does nothing when no flight was ever started in this process."""
+        import sys
+
+        lifecycle = sys.modules.get("localharness.provider.lifecycle")
+        if lifecycle is None:
+            return
+        try:
+            lifecycle.abandon_idle_flights()
+        except Exception:  # noqa: BLE001 - cleanup at a turn's end must never change how it ended
+            log.debug("could not cancel an abandoned reconnect flight", exc_info=True)
+
     async def _reconnect(self, session: Session, exc: Exception) -> tuple[bool, str]:
         """What a ProviderConnectionError does, at either seam: (retry, note). retry True means the
         caller `continue`s (the iteration is spent and the request rebuilt); False means the caller
@@ -2605,7 +2624,9 @@ class AgentLoop:
         if self._kill.is_killed():
             # The KILL file is read between iterations only; a wait would hold it off for the whole bound
             # and a relaunch would start a model server after it. Back to the top: the kill check ends
-            # the turn with its own summary, before any wait, sleep or launch.
+            # the turn with its own summary, before any wait, sleep or launch; and a flight an earlier
+            # loop left running at its own budget is stopped too.
+            self._abandon_idle_flights()
             return True, ""
         bound = self._reconnect_bound(session)
         if bound <= 0 or session.reconnect_used:

@@ -1005,12 +1005,26 @@ def forget_outages(base_url: str | None = None, *, every: bool = False) -> None:
                 base_url is not None and pair_url.rstrip("/") == base_url.rstrip("/")):
             slot.outage = None
             _OPEN_OUTAGES.pop(slot, None)
-            run = slot.current
-            if every and run is not None and run.awaiters == 0 and not run.task.done():
-                slot.current = None
-                _UNWINDING.add(run.task)
-                run.task.add_done_callback(_UNWINDING.discard)
-                run.task.cancel()
+            if every:
+                _cancel_if_idle(slot)
+
+
+def abandon_idle_flights() -> None:
+    """Cancel every flight nobody awaits any more (each caller left at its own budget), keeping the outage
+    records. Called when a root turn ends, however it ends (Esc included), and when a KILL file stops a
+    loop: no relaunch may start, and no launch lock stay held, with no turn waiting on it (D-17, IN-58).
+    A flight that still has an awaiter is left alone."""
+    for slot in list(_OPEN_OUTAGES):
+        _cancel_if_idle(slot)
+
+
+def _cancel_if_idle(slot: "_Flight") -> None:
+    run = slot.current
+    if run is not None and run.awaiters == 0 and not run.task.done():
+        slot.current = None  # detach before cancel, as recover does for its last awaiter
+        _UNWINDING.add(run.task)
+        run.task.add_done_callback(_UNWINDING.discard)
+        run.task.cancel()
 
 
 def _settle(slot: _Flight, outage: _Outage, task: asyncio.Task) -> None:
