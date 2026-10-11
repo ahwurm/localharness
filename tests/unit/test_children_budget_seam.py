@@ -553,6 +553,9 @@ def test_a_written_share_always_validates():
     """The floors are BudgetConfig's own lower bounds: the copy stays a valid config."""
     out, _, _ = _seam(_child(), parent=(1, 0.1))
     AgentConfig.model_validate(out.model_dump())
+    # IN-59: the floors were actually applied, not merely survived validation.
+    assert out.permissions.budget.max_actions == 1
+    assert out.permissions.budget.max_duration_minutes == pytest.approx(0.1)
 
 
 # --- the runner: the parent's remainder is read at each dispatch ---------------------------------
