@@ -397,6 +397,7 @@
 // SameSite=Strict cookie that /api/auth/enroll sets in exchange for it — a GET-only value derived
 // from the token, never the token itself.
 const LS = window.localStorage;
+const FAILED_HINT = " \u00b7 stuck? + starts a fresh chat";  // the failure row names the escape (live 2026-10-09)
 // PAIRING (A2). The enrolment QR encodes `https://host/#t=<token>`, and the FRAGMENT is the
 // reason that is allowed: a fragment is never sent to a server, so it lands in no access log,
 // no proxy log and no Referer — which is what the "never put the token in a URL" rule is
@@ -595,7 +596,8 @@ function onEvent(name, data) {
       if (!child) { S.turn = false; S.sent = false; restDials(); }
       paint();
       add(el("div", "row " + (child ? "sys child" : "err"),
-        (child ? "subagent failed — " : "turn failed — ") + data.reason + ": " + (data.detail || "")));
+        (child ? "subagent failed — " : "turn failed — ") + data.reason + ": " + (data.detail || "") +
+        (child ? "" : FAILED_HINT)));
       break;
     case "Action": renderAction(data, child); break;
     case "Observation": renderObservation(data, child); break;
@@ -1376,7 +1378,7 @@ function renderSpine(lines, container) {
       r = el("div", "row answer");
       withCode(r, d.summary || "");
     } else if (d.event_type === "TurnFailed") {
-      r = el("div", "row err", "turn failed — " + d.reason + ": " + (d.detail || ""));
+      r = el("div", "row err", "turn failed — " + d.reason + ": " + (d.detail || "") + FAILED_HINT);
     }
     if (r) {
       container.appendChild(r);

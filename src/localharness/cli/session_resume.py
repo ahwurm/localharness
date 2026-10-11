@@ -21,18 +21,23 @@ server was serving: a thread wakes only where it slept.
 
 The ContentStore is not in the file. A disk resume starts with an empty store, so a tool result the
 sleeping session had evicted comes back as its stub and the model re-fetches it if it needs it.
+
+A thread wakes at its last answered request (`settled`). The loop commits a turn that ended without
+an answer exactly as it stood, and a wake that re-reads that tail stays stuck through every reopen
+and restart; the wake cuts it, the sitting log keeps it.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from localharness.core.private_files import write_private_bytes
+from localharness.core.types import is_harness_message
 
 log = logging.getLogger(__name__)
 
@@ -124,7 +129,41 @@ def take_asleep(path: Path, *, workspace: str) -> Resume | None:
         log.info("the thread asleep at %s belongs to %s, not %s; left in place", path, slept_in, workspace)
         return None
     path.unlink(missing_ok=True)
-    return resume
+    kept = settled(resume.conversation)
+    if len(kept) != len(resume.conversation):
+        log.info("the thread asleep at %s ended on a turn without an answer; waking without its last %d messages",
+                 path, len(resume.conversation) - len(kept))
+    return replace(resume, conversation=kept)
+
+
+def settled(conversation: tuple[dict, ...]) -> tuple[dict, ...]:
+    """The conversation up to its last answered request.
+
+    A turn that ends without an answer — two empty replies, a tool call whose result never came,
+    a harness nudge as the last word — is committed to the conversation as it stood (live
+    2026-10-09, a phone thread: the request, an "I'll create that image" preamble, two nudges, two
+    empty replies). Woken that way, every next message reads a history that ends in blanks and the
+    thread stays stuck across every reopen and server restart. So a thread wakes only with turns
+    that ended on an assistant reply with text and no pending tool call: everything from the last
+    human request onward is cut until that holds, down to the system prompt. The sitting log still
+    shows every word; the model's context does not."""
+    out = list(conversation)
+    while out and not _answered(out[-1]):
+        last_human = next((i for i in range(len(out) - 1, -1, -1) if _is_human(out[i])), None)
+        if last_human is None:
+            return tuple(m for m in out if m.get("role") == "system")
+        del out[last_human:]
+    return tuple(out)
+
+
+def _answered(message: dict) -> bool:
+    content = message.get("content")
+    text = content.strip() if isinstance(content, str) else content
+    return message.get("role") == "assistant" and not message.get("tool_calls") and bool(text)
+
+
+def _is_human(message: dict) -> bool:
+    return message.get("role") == "user" and not is_harness_message(message)
 
 
 def sleeping_sitting(path: Path) -> str | None:
