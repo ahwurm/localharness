@@ -551,6 +551,16 @@ Never key by key — a workspace file that merely OMITS a key would fall to the 
 lift a stricter global value. Distinct from AGENT_GLOBAL_ONLY_FIELDS, which names dotted keys under
 plugin sections (and the kill switch) and is a label read by the docs gate."""
 
+AGENT_CORE_LOWER_ONLY_KEYS: frozenset[str] = frozenset({
+    "permissions.budget.max_actions", "permissions.budget.max_duration_minutes"})
+"""Core agent-file KEYS a workspace layer may only LOWER. Against the global layer's own value for the
+agent (its agents/<name>.yaml, the division, the legacy org.yaml, the overrides' `agent:` section) a
+workspace agent file, a workspace division file that shadows the global one, or a workspace overlay
+of a built-in keeps a value only when it is at or below that baseline; where the global layer says
+nothing the workspace's number is kept as written (and marked, so the seam can cap it at use). The
+sibling of AGENT_CORE_GLOBAL_ONLY_SECTIONS, which restores whole sections; a later phase adds its
+`context.*` window-ratio paths here."""
+
 
 def layer_files(layer_dir: Path, subdir: str, *, contained: bool = False) -> list[Path]:
     """The `<layer_dir>/<subdir>/*.yaml` files of ONE config layer, sorted — the one enumeration
@@ -1660,6 +1670,16 @@ class ConfigLoader:
                     if note not in self.agent_warnings:
                         self.agent_warnings.append(note)
 
+        # 5c''. The budget keys a workspace layer may only LOWER (AGENT_CORE_LOWER_ONLY_KEYS). The
+        #      rule reads what the workspace FILES DECLARED (raw), never the merged value: after the
+        #      merge a `null` and an omission are indistinguishable, and the schema default must
+        #      never be taken for a workspace's number. It runs whenever a workspace file is on this
+        #      agent's cascade: the agent file itself, or a workspace division file that shadows
+        #      the global division (the division door lifts every member's budget). The baseline is
+        #      one per file, `_global_layer_budget` — the loader knows layers, never callers
+        #      (spec §13).
+        budget_kept = self._lower_only_agent_budget(merged, raw, path, div_name)
+
         # 5d. QA-18: an agent that sets no `permissions.mode` (in its file, or under `agent:` in
         #     overrides.yaml) runs in the org's, the mode `init`'s posture question writes. Key
         #     presence, never a comparison with the default: an explicit `mode: auto` is the
@@ -1734,7 +1754,86 @@ class ConfigLoader:
 
         self._agent_plugin_sections[result.name] = agent_sections
         result._plugin_settings = plugin_settings  # read as attributes: result.memory.recall_scope
+        result._budget_kept_from_workspace = frozenset(budget_kept)
         return result
+
+    def _lower_only_agent_budget(
+        self, merged: dict, raw: dict, path: Path, div_name: Optional[str]
+    ) -> set[str]:
+        """Apply AGENT_CORE_LOWER_ONLY_KEYS to `merged` (the agent's cascade, in place) and return
+        the budget fields kept from a workspace file while the global layer was silent.
+
+        Against a finite global baseline B the workspace may only lower: a value at or below B is
+        kept, a higher or non-finite one becomes B with a note, a `null` or an omission becomes B
+        silently. Where the global layer declares nothing a finite workspace value is kept as
+        written, no note, and its field is returned (the seam caps a marked value on a remote
+        unattended session); a non-finite one is removed with a note."""
+        local = self._local_dir
+        if local is None:
+            return set()
+        ws_agent = in_layer(path, local)
+        div_path = self._find_file("divisions", div_name) if div_name else None
+        ws_div = div_path is not None and in_layer(div_path, local)
+        if not ws_agent and not ws_div:
+            return set()  # no workspace file on this cascade: nothing a repo wrote reaches it
+        div_raw: Any = None
+        if ws_div:
+            try:
+                div_raw = self._without_withheld(_load_yaml_file(div_path), div_path)
+            except ConfigError:
+                div_raw = None
+        perms = merged.get("permissions")
+        budget = perms.get("budget") if isinstance(perms, dict) else None
+        if not isinstance(budget, dict):
+            return set()
+
+        def _unset(v: Any) -> bool:
+            return v is None or v == "inherit"
+
+        kept: set[str] = set()
+        for key_path in sorted(AGENT_CORE_LOWER_ONLY_KEYS):
+            field = key_path.rsplit(".", 1)[-1]
+            parts = ["permissions", "budget", field]
+            in_actions = field == "max_actions"
+
+            def finite(v: Any) -> bool:
+                return (_finite_int(v, **_ACTIONS_BOUNDS) if in_actions
+                        else _finite_number(v, ge=0.1, le=1440.0))
+
+            a_val = _dig(raw, parts)
+            a_val = None if a_val is _UNSET else a_val
+            if not ws_agent and not _unset(a_val):
+                continue  # the global agent file decided; the cascade never reached the division
+            # W: the workspace declaration the cascade uses, and the file that wrote it.
+            decl, src = _UNSET, None
+            if ws_agent and not _unset(a_val):
+                decl, src = a_val, path
+            elif ws_div:
+                d_val = _dig(div_raw, parts)
+                if d_val is not _UNSET and not _unset(d_val):
+                    decl, src = d_val, div_path
+
+            baseline = self._global_layer_budget(path.stem, div_name, field)
+            note = (f"ignoring permissions.budget.{field} in {str(src)!r}: "
+                    "a project may only lower it")
+            if finite(baseline):
+                if decl is not _UNSET and finite(decl) and decl <= baseline:
+                    result = decl
+                else:
+                    result = baseline
+                    if decl is not _UNSET and note not in self.agent_warnings:
+                        self.agent_warnings.append(note)
+                budget[field] = result
+            elif decl is _UNSET:
+                continue  # silent global, nothing declared: the cascade's own answer stands
+            elif finite(decl):
+                budget[field] = decl
+                kept.add(field)
+            else:
+                budget.pop(field, None)
+                if note not in self.agent_warnings:
+                    self.agent_warnings.append(note)
+        return kept
 
     def _without_project_mcp(self, raw: dict, path: Path) -> dict:
         """An untrusted project's agent-file `tools.mcp_servers` is removed before the merge, so no
@@ -1948,6 +2047,47 @@ class ConfigLoader:
         return _resolve_scalar(
             "kill_file", agent_val, div_val, getattr(org_budget, "kill_file", None), None
         )
+
+    def _global_layer_budget(self, stem: str, div_name: Optional[str], field: str) -> Any:
+        """`permissions.budget.<field>` as the GLOBAL layer alone declares it, or None.
+
+        One baseline per file: the global agents/<stem>.yaml, else the global divisions/<div>.yaml,
+        else the legacy global org.yaml, else the global overrides' `agent:` section — the first
+        value that is neither `null` nor "inherit". Raw YAML, as `_global_layer_kill_file` reads
+        it, so it answers when an unrelated key in the same file is invalid; a file that does not
+        parse is silent. No caller role enters (spec §13).
+        """
+        def _declared(source: Any) -> Any:
+            perms = source.get("permissions") if isinstance(source, dict) else None
+            budget = perms.get("budget") if isinstance(perms, dict) else None
+            return budget.get(field) if isinstance(budget, dict) else None
+
+        def _declared_file(path: Path) -> Any:
+            if not path.exists():
+                return None
+            try:
+                return _declared(self._without_withheld(_load_yaml_file(path), path))
+            except ConfigError:
+                return None
+
+        def _overlay() -> Any:
+            try:
+                return _declared(self._overlay_agent())
+            except ConfigError:
+                return None
+
+        rungs: list[Callable[[], Any]] = [
+            lambda: _declared_file(self._config_dir / "agents" / f"{stem}.yaml"),
+            lambda: (_declared_file(self._config_dir / "divisions" / f"{div_name}.yaml")
+                     if div_name else None),
+            lambda: _declared_file(self._config_dir / "org.yaml"),
+            _overlay,
+        ]
+        for rung in rungs:
+            value = rung()
+            if value is not None and value != "inherit":
+                return value
+        return None
 
     def _global_layer_permission(self, field: str, stem: str, div_name: Optional[str]) -> Any:
         """`permissions.<field>` as the GLOBAL layer alone declares it, or None.

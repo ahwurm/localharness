@@ -284,3 +284,303 @@ def test_an_unrelated_workspace_block_of_other_org_keys_is_untouched(tmp_path):
     loader, _ = _layers(tmp_path, ws_cfg={"org": {"name": "proj"}})
     assert loader.load_harness().org.name == "proj"
     assert _warnings(loader) == []
+
+
+# ---------------------------------------------------------------------------
+# permissions.budget.max_actions / max_duration_minutes in an agent file: lower-only against the
+# global layer's own cascade; kept and marked where the global layer is silent
+# ---------------------------------------------------------------------------
+
+import yaml  # noqa: E402
+
+from localharness.config.loader import AGENT_CORE_LOWER_ONLY_KEYS, ConfigLoader  # noqa: E402
+
+_PROVIDER = {"provider_type": "vllm", "base_url": "http://localhost:8000/v1",
+             "default_model": "global-model"}
+
+
+def _put(path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.dump(data), encoding="utf-8")
+
+
+def _agent(name: str = "worker", budget=None, **extra) -> dict:
+    data = {"name": name, "role": "Work", **extra}
+    if budget is not None:
+        data["permissions"] = {"budget": budget}
+    return data
+
+
+def _world(tmp_path, *, g_agents=None, g_divs=None, ws_agents=None, ws_divs=None, g_org=None,
+           g_over=None):
+    """A global dir and a workspace dir, each with the agent and division files given."""
+    g, ws = tmp_path / "global", tmp_path / "proj" / ".localharness"
+    ws.mkdir(parents=True)
+    _put(g / "config.yaml", {"version": "1", "provider": _PROVIDER})
+    if g_org is not None:
+        _put(g / "org.yaml", g_org)
+    if g_over is not None:
+        _put(g / "overrides.yaml", g_over)
+    for base, agents, divs in ((g, g_agents, g_divs), (ws, ws_agents, ws_divs)):
+        for stem, data in (agents or {}).items():
+            _put(base / "agents" / f"{stem}.yaml", data)
+        for stem, data in (divs or {}).items():
+            _put(base / "divisions" / f"{stem}.yaml", data)
+    return ConfigLoader(config_dir=g, local_config_dir=ws), ws
+
+
+def _notes(loader) -> list[str]:
+    return [n for n in loader.agent_warnings if "a project may only lower it" in n]
+
+
+def _only(path, field: str) -> str:
+    return f"ignoring permissions.budget.{field} in {str(path)!r}: a project may only lower it"
+
+
+def _loaded(loader, name: str = "worker"):
+    cfg = loader.load_agent(name)
+    return cfg.permissions.budget.max_actions, cfg.permissions.budget.max_duration_minutes, \
+        cfg.budget_kept_from_workspace
+
+
+def test_the_agent_lower_only_set_names_both_budget_keys():
+    assert AGENT_CORE_LOWER_ONLY_KEYS == frozenset({
+        "permissions.budget.max_actions", "permissions.budget.max_duration_minutes"})
+
+
+def test_a_shadowing_file_cannot_raise_a_global_budget(tmp_path):
+    loader, ws = _world(tmp_path,
+                        g_agents={"worker": _agent(budget={"max_actions": 10})},
+                        ws_agents={"worker": _agent(budget={"max_actions": 16})})
+    assert _loaded(loader)[0] == 10
+    assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_actions")]
+
+
+def test_a_shadowing_file_may_lower_a_global_budget(tmp_path):
+    loader, _ = _world(tmp_path,
+                       g_agents={"worker": _agent(budget={"max_actions": 10})},
+                       ws_agents={"worker": _agent(budget={"max_actions": 5})})
+    assert _loaded(loader) == (5, None, frozenset())
+    assert _notes(loader) == []
+
+
+def test_an_equal_value_is_kept_without_a_note(tmp_path):
+    loader, _ = _world(tmp_path,
+                       g_agents={"worker": _agent(budget={"max_actions": 10})},
+                       ws_agents={"worker": _agent(budget={"max_actions": 10})})
+    assert _loaded(loader)[0] == 10
+    assert _notes(loader) == []
+
+
+def test_a_null_in_a_shadowing_file_keeps_the_global_value_silently(tmp_path):
+    loader, _ = _world(tmp_path,
+                       g_agents={"worker": _agent(budget={"max_actions": 10})},
+                       ws_agents={"worker": _agent(budget={"max_actions": None})})
+    assert _loaded(loader) == (10, None, frozenset())
+    assert _notes(loader) == []
+
+
+def test_an_omitted_budget_in_a_shadowing_file_keeps_the_global_value_silently(tmp_path):
+    loader, _ = _world(tmp_path,
+                       g_agents={"worker": _agent(budget={"max_actions": 10})},
+                       ws_agents={"worker": _agent()})
+    assert _loaded(loader) == (10, None, frozenset())
+    assert _notes(loader) == []
+
+
+def test_an_omitted_key_of_a_declared_budget_keeps_the_global_value_silently(tmp_path):
+    loader, _ = _world(tmp_path,
+                       g_agents={"worker": _agent(budget={"max_actions": 10})},
+                       ws_agents={"worker": _agent(budget={"max_duration_minutes": 4.0})})
+    assert _loaded(loader) == (10, 4.0, frozenset({"max_duration_minutes"}))
+    assert _notes(loader) == []
+
+
+@pytest.mark.parametrize("bad", ["lots", True, 2.5, [3], 0, -3, 10_001])
+def test_a_non_finite_workspace_value_keeps_the_global_value_with_a_note(tmp_path, bad):
+    loader, ws = _world(tmp_path,
+                        g_agents={"worker": _agent(budget={"max_actions": 10})},
+                        ws_agents={"worker": _agent(budget={"max_actions": bad})})
+    assert _loaded(loader) == (10, None, frozenset())
+    assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_actions")]
+
+
+def test_a_higher_workspace_value_over_a_global_fifty_gives_fifty(tmp_path):
+    loader, ws = _world(tmp_path,
+                        g_agents={"worker": _agent(budget={"max_actions": 50})},
+                        ws_agents={"worker": _agent(budget={"max_actions": 100})})
+    assert _loaded(loader)[0] == 50
+    assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_actions")]
+
+
+def test_minutes_follow_the_same_rule(tmp_path):
+    loader, ws = _world(tmp_path,
+                        g_agents={"worker": _agent(budget={"max_duration_minutes": 5.0})},
+                        ws_agents={"worker": _agent(budget={"max_duration_minutes": 30.0})})
+    assert _loaded(loader)[1] == 5.0
+    assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_duration_minutes")]
+
+
+@pytest.mark.parametrize("bad", ["soon", True, 0, 0.05, 1441.0, math.inf])
+def test_a_non_finite_minutes_value_keeps_the_global_value_with_a_note(tmp_path, bad):
+    loader, ws = _world(tmp_path,
+                        g_agents={"worker": _agent(budget={"max_duration_minutes": 5.0})},
+                        ws_agents={"worker": _agent(budget={"max_duration_minutes": bad})})
+    assert _loaded(loader)[1] == 5.0
+    assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_duration_minutes")]
+
+
+def test_a_workspace_only_agent_is_kept_as_written_and_marked(tmp_path):
+    loader, _ = _world(tmp_path, ws_agents={"analyst": _agent(
+        "analyst", budget={"max_actions": 16, "max_duration_minutes": 12})})
+    assert _loaded(loader, "analyst") == (
+        16, 12.0, frozenset({"max_actions", "max_duration_minutes"}))
+    assert _notes(loader) == []
+
+
+def test_only_the_declared_field_is_marked(tmp_path):
+    loader, _ = _world(tmp_path, ws_agents={"analyst": _agent(
+        "analyst", budget={"max_actions": 16})})
+    assert _loaded(loader, "analyst")[0::2] == (16, frozenset({"max_actions"}))
+
+
+def test_a_workspace_agent_with_no_budget_is_not_marked(tmp_path):
+    loader, _ = _world(tmp_path, ws_agents={"analyst": _agent("analyst")})
+    assert _loaded(loader, "analyst")[2] == frozenset()
+    assert _notes(loader) == []
+
+
+def test_a_null_budget_value_in_a_workspace_only_agent_is_not_marked(tmp_path):
+    loader, _ = _world(tmp_path, ws_agents={"analyst": _agent(
+        "analyst", budget={"max_actions": None})})
+    assert _loaded(loader, "analyst")[2] == frozenset()
+
+
+def test_a_non_finite_value_under_a_silent_global_is_removed_with_a_note(tmp_path):
+    loader, ws = _world(tmp_path, ws_agents={"analyst": _agent(
+        "analyst", budget={"max_actions": "lots"})})
+    assert _loaded(loader, "analyst") == (None, None, frozenset())
+    assert _notes(loader) == [_only(ws / "agents" / "analyst.yaml", "max_actions")]
+
+
+def test_a_workspace_file_cannot_set_max_tool_calls(tmp_path):
+    loader, _ = _world(tmp_path, ws_agents={"analyst": _agent(
+        "analyst", budget={"max_actions": 16, "max_tool_calls": 50})})
+    assert loader.load_agent("analyst").permissions.budget.max_tool_calls is None
+
+
+# -- the division door -------------------------------------------------------------------------
+
+def test_a_workspace_division_cannot_raise_a_global_divisions_budget(tmp_path):
+    loader, ws = _world(
+        tmp_path,
+        g_divs={"research": {"name": "research", "permissions": {"budget": {"max_actions": 20}}}},
+        g_agents={"worker": _agent(division="research")},
+        ws_divs={"research": {"name": "research",
+                              "permissions": {"budget": {"max_actions": 200}}}})
+    assert _loaded(loader) == (20, None, frozenset())
+    assert _notes(loader) == [_only(ws / "divisions" / "research.yaml", "max_actions")]
+
+
+def test_a_workspace_division_may_lower_a_global_divisions_budget(tmp_path):
+    loader, _ = _world(
+        tmp_path,
+        g_divs={"research": {"name": "research", "permissions": {"budget": {"max_actions": 20}}}},
+        g_agents={"worker": _agent(division="research")},
+        ws_divs={"research": {"name": "research",
+                              "permissions": {"budget": {"max_actions": 10}}}})
+    assert _loaded(loader) == (10, None, frozenset())
+    assert _notes(loader) == []
+
+
+def test_a_shadowing_division_that_omits_the_budget_cannot_lift_it(tmp_path):
+    loader, _ = _world(
+        tmp_path,
+        g_divs={"research": {"name": "research", "permissions": {"budget": {"max_actions": 20}}}},
+        g_agents={"worker": _agent(division="research")},
+        ws_divs={"research": {"name": "research"}})
+    assert _loaded(loader) == (20, None, frozenset())
+    assert _notes(loader) == []
+
+
+def test_a_global_agents_own_budget_outranks_a_workspace_division(tmp_path):
+    loader, _ = _world(
+        tmp_path,
+        g_divs={"research": {"name": "research"}},
+        g_agents={"worker": _agent(division="research", budget={"max_actions": 7})},
+        ws_divs={"research": {"name": "research",
+                              "permissions": {"budget": {"max_actions": 200}}}})
+    assert _loaded(loader) == (7, None, frozenset())
+    assert _notes(loader) == []
+
+
+def test_a_workspace_division_under_a_silent_global_is_kept_and_marked(tmp_path):
+    loader, _ = _world(
+        tmp_path,
+        g_agents={"worker": _agent(division="research")},
+        ws_divs={"research": {"name": "research",
+                              "permissions": {"budget": {"max_actions": 200}}}})
+    assert _loaded(loader) == (200, None, frozenset({"max_actions"}))
+    assert _notes(loader) == []
+
+
+# -- the baseline rungs ------------------------------------------------------------------------
+
+def test_a_legacy_global_org_file_is_a_baseline(tmp_path):
+    loader, ws = _world(tmp_path, g_org={"name": "o", "permissions": {"budget": {"max_actions": 30}}},
+                        ws_agents={"analyst": _agent("analyst", budget={"max_actions": 40})})
+    assert _loaded(loader, "analyst") == (30, None, frozenset())
+    assert _notes(loader) == [_only(ws / "agents" / "analyst.yaml", "max_actions")]
+
+
+def test_the_global_overrides_agent_section_is_a_baseline(tmp_path):
+    loader, ws = _world(
+        tmp_path, g_over={"agent": {"permissions": {"budget": {"max_actions": 25}}}},
+        ws_agents={"analyst": _agent("analyst", budget={"max_actions": 40})})
+    assert _loaded(loader, "analyst")[0] == 25
+    assert _notes(loader) == [_only(ws / "agents" / "analyst.yaml", "max_actions")]
+
+
+def test_the_global_agent_file_outranks_the_global_division_as_a_baseline(tmp_path):
+    loader, ws = _world(
+        tmp_path,
+        g_divs={"research": {"name": "research", "permissions": {"budget": {"max_actions": 90}}}},
+        g_agents={"worker": _agent(division="research", budget={"max_actions": 12})},
+        ws_agents={"worker": _agent(division="research", budget={"max_actions": 50})})
+    assert _loaded(loader)[0] == 12
+    assert _notes(loader) == [_only(ws / "agents" / "worker.yaml", "max_actions")]
+
+
+# -- no workspace on the cascade; repeated loads ------------------------------------------------
+
+def test_a_global_agent_with_a_global_division_is_loaded_as_before(tmp_path):
+    loader, _ = _world(
+        tmp_path,
+        g_divs={"research": {"name": "research", "permissions": {"budget": {"max_actions": 20}}}},
+        g_agents={"worker": _agent(division="research", budget={"max_duration_minutes": 9.0})})
+    assert _loaded(loader) == (20, 9.0, frozenset())
+    assert _notes(loader) == []
+
+
+def test_a_workspace_less_session_takes_any_value(tmp_path):
+    g = tmp_path / "global"
+    _put(g / "config.yaml", {"version": "1", "provider": _PROVIDER})
+    _put(g / "agents" / "worker.yaml", _agent(budget={"max_actions": 5000}))
+    loader = ConfigLoader(config_dir=g)
+    assert _loaded(loader) == (5000, None, frozenset())
+    assert _notes(loader) == []
+
+
+def test_loading_a_file_twice_notes_once_and_agrees_with_itself(tmp_path):
+    loader, ws = _world(tmp_path,
+                        g_agents={"worker": _agent(budget={"max_actions": 10})},
+                        ws_agents={"worker": _agent(budget={"max_actions": 16}),
+                                   "analyst": _agent("analyst", budget={"max_actions": 16})})
+    path = ws / "agents" / "worker.yaml"
+    first = loader.load_agent_file(path)
+    second = loader.load_agent_file(path)
+    assert first.permissions.budget == second.permissions.budget
+    assert _notes(loader) == [_only(path, "max_actions")]
+    again = loader.load_agent_file(ws / "agents" / "analyst.yaml")
+    twice = loader.load_agent_file(ws / "agents" / "analyst.yaml")
+    assert again.budget_kept_from_workspace == twice.budget_kept_from_workspace == {"max_actions"}
