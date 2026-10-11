@@ -217,6 +217,29 @@ async def test_terminal_classic_mode_puts_the_escaped_text_in_the_thinking_label
     assert ch._provider_lost_text == "" and "unreachable" not in made[0].labels[-1]
 
 
+async def test_terminal_classic_mode_shows_the_line_over_an_open_tool_burst():
+    """WR-05: a family burst (a run of reads) stays open across iterations and its counter is the one
+    live display; a drop during the next call must freeze it so the drop line is shown, not hidden."""
+    ch = _terminal()
+    made: list[_FakeStatus] = []
+
+    def status(label, **kw):
+        made.append(_FakeStatus(label))
+        return made[-1]
+
+    ch._console.status = status  # type: ignore[assignment]
+    await ch.send_tool_call("web_search", {"query": "q"})
+    await ch.send_tool_result("web_search", "ok", is_error=False)
+    assert ch._burst is not None and ch._thinking is None
+
+    await ch.on_provider_lost(_lost(1800.0))
+
+    assert ch._burst is None  # frozen into its scrollback line
+    assert made[0].stopped  # the burst's own counter stopped
+    assert ch._thinking is made[-1] and TERMINAL_1800 in made[-1].labels[-1]
+    assert "web_search" in ch._console.file.getvalue()
+
+
 async def test_terminal_subscribes_on_start_and_unsubscribes_on_stop(tmp_path):
     ch = _terminal()
     ch._box_active = True  # no rich Status; the slot is what a delivery changes

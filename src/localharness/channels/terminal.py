@@ -2248,6 +2248,10 @@ class TerminalChannel(ChannelAdapter):
             if self._box_active:
                 self._invalidate_box()
             else:
+                # rich allows one live display, and a family burst (a run of reads) stays open across
+                # iterations: freeze it, and any dreaming dot, so the drop line is what the person sees
+                self._close_burst()
+                self._stop_dreaming()
                 self._start_thinking()  # creates the Status, or refreshes its label, from the slot
 
     async def on_consolidation_started(self, event: ConsolidationStarted) -> None:
