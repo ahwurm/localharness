@@ -116,13 +116,84 @@ async def test_a_child_stuck_turn_posts_the_escalation_and_no_failed_status_line
 async def test_other_turn_failed_reasons_behave_as_before():
     chan = _Recorder(bus=object())
     await chan.on_turn_failed(TurnFailed(
-        agent_id="a", session_id="s", reason="budget_exceeded", detail="Max actions reached.",
+        agent_id="a", session_id="s", reason="internal_error", detail="boom " * 200,
         iterations=4, duration_seconds=1.0))
-    assert chan.errors == [("turn failed — budget_exceeded", "Max actions reached.")]
+    assert chan.errors == [("turn failed — internal_error", ("boom " * 200).strip()[:400])]
     await chan.on_turn_failed(TurnFailed(
         agent_id="kid", session_id="s", parent_id="p", reason="budget_exceeded", detail="x",
         iterations=4, duration_seconds=1.0))
     assert len(chan.sent) == 1 and "subagent kid failed (budget_exceeded)" in chan.sent[0]
+
+
+# IN-73: a root budget stop is one error line naming the bound, then the wrap-up reply WHOLE. The
+# budget row above used to pin `send_error(..., detail[:400])` for budget_exceeded.
+
+_KNOB_NOTE = ("[Budget limit reached: Agent reached the maximum of 100 tool calls. Stopping to "
+              "prevent runaway execution. (channels.unattended_max_actions) Completed 100 tool "
+              "calls in 12.0 minutes.]")
+
+
+@pytest.mark.asyncio
+async def test_a_root_budget_stop_names_the_bound_once_and_sends_the_reply_whole():
+    chan = _Recorder(bus=object())
+    reply = "Found the three call sites. " * 40  # well past 400 characters
+    await chan.on_turn_failed(TurnFailed(
+        agent_id="a", session_id="s", reason="budget_exceeded",
+        detail=f"{reply.strip()}\n\n{_KNOB_NOTE}", iterations=4, duration_seconds=1.0))
+    (error,) = chan.errors
+    assert error[0] == "turn failed — budget_exceeded"
+    assert "(channels.unattended_max_actions)" in error[1] and "Found the three" not in error[1]
+    assert chan.sent == [reply.strip()]
+
+
+@pytest.mark.asyncio
+async def test_a_root_budget_stop_with_no_reply_sends_only_the_error_line():
+    chan = _Recorder(bus=object())
+    await chan.on_turn_failed(TurnFailed(
+        agent_id="a", session_id="s", reason="budget_exceeded", detail=_KNOB_NOTE,
+        iterations=4, duration_seconds=1.0))
+    assert len(chan.errors) == 1 and chan.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_budget_detail_without_the_loops_notice_is_all_reply():
+    chan = _Recorder(bus=object())
+    await chan.on_turn_failed(TurnFailed(
+        agent_id="a", session_id="s", reason="budget_exceeded", detail="Max actions reached.",
+        iterations=4, duration_seconds=1.0))
+    assert chan.errors == [("turn failed — budget_exceeded", None)]
+    assert chan.sent == ["Max actions reached."]
+
+
+@pytest.mark.asyncio
+async def test_zed_gets_the_budget_wrapup_only_when_nothing_streamed(tmp_path):
+    failed = TurnFailed(agent_id="root", session_id="s", reason="budget_exceeded",
+                        detail=f"partial work\n\n{_KNOB_NOTE}", iterations=4, duration_seconds=1.0)
+    ch = _acp(tmp_path)
+    ch._streamed_this_turn = False
+    await ch.on_turn_failed(failed)
+    assert "partial work" in ch._conn.texts
+
+    streamed = _acp(tmp_path)
+    streamed._streamed_this_turn = True
+    await streamed.on_turn_failed(failed)
+    assert "partial work" not in streamed._conn.texts
+
+
+@pytest.mark.asyncio
+async def test_a_real_budget_stop_reaches_a_channel_whole(mock_llm_client, bus):
+    """End to end through the loop: the wrap-up the loop generated arrives whole, and the error
+    line carries the loop's notice."""
+    from tests.unit.test_budget_root_uncapped import _calls, _loop, _Registry
+
+    chan = _Recorder(bus)
+    bus.subscribe(TurnFailed, chan.on_turn_failed)
+    loop = _loop(mock_llm_client, bus, _calls(mock_llm_client, 5), max_actions=2, local=True,
+                 registry=_Registry())
+    await loop.run_turn("go")
+    (error,) = chan.errors
+    assert error[0] == "turn failed — budget_exceeded" and "maximum of 2 tool calls" in error[1]
+    assert all("[Budget limit reached" not in m for m in chan.sent)
 
 
 @pytest.mark.asyncio
