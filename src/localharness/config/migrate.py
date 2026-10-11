@@ -542,7 +542,7 @@ def _write_with_backup(path: Path, original: bytes, updated: dict) -> Path:
         backup.write_bytes(original)
         restrict_config_file(backup)
         atomic_write_text(path, yaml.safe_dump(updated, default_flow_style=False, sort_keys=False),
-                          refuse_read_only=True)
+                          refuse_read_only=True, follow_links=True)
     except BaseException:
         if made:
             backup.unlink(missing_ok=True)

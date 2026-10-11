@@ -173,7 +173,9 @@ def test_atomic_write_cleans_tempfile_when_the_write_itself_fails(tmp_path, monk
 
 
 @pytest.mark.skipif(__import__("os").name != "posix", reason="symlinks")
-def test_an_overlay_write_keeps_a_symlinked_file_linked(tmp_path):
+def test_an_overlay_write_replaces_a_symlink_and_leaves_its_target_alone(tmp_path):
+    """CR-31: the link is replaced in place by a regular file (the pre-IN-21 behaviour); the file
+    it pointed at is never written. (This test used to pin the write going THROUGH the link.)"""
     from localharness.config import overlay as overlay_mod
     real = tmp_path / "dotfiles" / "overrides.yaml"
     real.parent.mkdir()
@@ -182,8 +184,46 @@ def test_an_overlay_write_keeps_a_symlinked_file_linked(tmp_path):
     link.parent.mkdir()
     link.symlink_to(real)
     overlay_mod.atomic_write_overlay(link, {"agent": {"temperature": 0.3}})
-    assert link.is_symlink() and link.resolve() == real.resolve()
-    assert overlay_mod.load_overlay(real) == {"agent": {"temperature": 0.3}}
+    assert not link.is_symlink()
+    assert overlay_mod.load_overlay(link) == {"agent": {"temperature": 0.3}}
+    assert real.read_text(encoding="utf-8") == "{}\n"
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="symlinks")
+def test_a_repo_overrides_symlink_cannot_redirect_a_workspace_write_to_the_machine_overlay(
+        tmp_path):
+    """CR-31: a cloned repository's `.localharness/overrides.yaml` pointing at the user's machine
+    overlay: the workspace write lands in the project, and the machine file is unchanged."""
+    from localharness.config import overlay as overlay_mod
+    machine = tmp_path / "home" / ".localharness" / "overrides.yaml"
+    machine.parent.mkdir(parents=True)
+    machine.write_text("memory:\n  enabled: false\n", encoding="utf-8")
+    repo_file = tmp_path / "home" / "src" / "repo" / ".localharness" / "overrides.yaml"
+    repo_file.parent.mkdir(parents=True)
+    repo_file.symlink_to("../../../.localharness/overrides.yaml")
+    assert repo_file.resolve() == machine.resolve()
+
+    overlay_mod.atomic_write_overlay(repo_file, {"memory": {"enabled": True}})
+
+    assert machine.read_text(encoding="utf-8") == "memory:\n  enabled: false\n"
+    assert not repo_file.is_symlink()
+    assert overlay_mod.load_overlay(repo_file) == {"memory": {"enabled": True}}
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="symlinks")
+def test_a_dangling_repo_symlink_creates_nothing_outside_the_repo(tmp_path):
+    """CR-31: a dangling link aimed outside the project creates neither the file nor its dirs."""
+    from localharness.config import overlay as overlay_mod
+    repo_dir = tmp_path / "repo" / ".localharness"
+    repo_dir.mkdir(parents=True)
+    link = repo_dir / "experiment-overlay.yaml"
+    link.symlink_to("../../made/by/repo/evil.yaml")
+
+    overlay_mod.atomic_write_overlay(link, {"agent": {"temperature": 0.3}})
+
+    assert not (tmp_path / "made").exists()
+    assert not link.is_symlink()
+    assert overlay_mod.load_overlay(link) == {"agent": {"temperature": 0.3}}
 
 
 def test_the_shared_writer_refuses_a_read_only_file_only_when_asked(tmp_path):
