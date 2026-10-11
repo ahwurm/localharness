@@ -271,7 +271,12 @@ async def test_a_typed_gguf_path_restarts_that_file_under_its_own_name(
     # in memory only: nothing about the record reached overrides.yaml (T-5-65)
     overlay = load_overlay(tmp_path / "overrides.yaml") or {}
     assert "model" not in overlay.get("server", {}) and "served_name" not in overlay.get("server", {})
-    assert primary.model == "/x/primary.gguf" and primary.served_name == "qwen-27b"  # WR-53
+    # IN-57: the shared record keeps its own weights and name, and no default is saved for a name the
+    # record never serves
+    assert primary.model == "/x/primary.gguf" and primary.served_name == "qwen-27b"
+    assert "default_model" not in overlay.get("provider", {}) and "default_model" not in overlay.get("org", {})
+    assert any("this session only" in m for m in channel.messages)
+    assert not any("saved as default" in m for m in channel.messages)
 
 
 @pytest.mark.asyncio

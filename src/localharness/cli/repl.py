@@ -124,6 +124,9 @@ def _dropped_image_path(line: str) -> str | None:
 # #129: a /model swap that writes a new default to the user overlay must SAY so — the write
 # outlives the session, and a silent one leaves the user running an experiment forever.
 SAVED_DEFAULT_NOTE = " (saved as default — persists across restarts)"
+# A typed .gguf is served for this session only: the record keeps its own weights and name, so the
+# saved default is not rewritten for a name the record never serves (IN-57).
+TYPED_SWAP_NOTE = " (this session only — the saved default is unchanged)"
 # A llama.cpp primary restarts on a weights file: anything else a person typed (a local_models name,
 # an HF-cache repo id) is answered here, before anything is stopped (D-58).
 NOT_A_GGUF_LINE = "{target} is not a GGUF file — /model <path.gguf> or a preset name"
@@ -2247,12 +2250,13 @@ class OrchestratorREPL:
         # as written; persisting the alias would write it over server.model (D-70), so nothing is.
         alias_swap_back = (managed.runtime != "llamacpp" and target == prim_served
                            and managed.model != target)
-        saved = False if alias_swap_back else await self._persist_landed(llm.config.base_url, served)
+        saved = (False if alias_swap_back or typed_swap
+                 else await self._persist_landed(llm.config.base_url, served))
         rate = self._measured_note(medians, prim_ptype, served)
         await self._send_info(
             f"Switched to {served} (tool calling: {cap.tool_call_mode}).{note}"
             + (f" {rate}." if rate else "")
-            + (SAVED_DEFAULT_NOTE if saved else ""), colorize=True,
+            + (SAVED_DEFAULT_NOTE if saved else TYPED_SWAP_NOTE if typed_swap else ""), colorize=True,
         )
 
     def _grouped_model_lines(
