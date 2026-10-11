@@ -1416,6 +1416,11 @@ when there are none) and lists only the tools it actually holds.
 **`org.permissions.init_nulls_revision`** (bookkeeping, default `0`): a stamp the config migration
 sets once it has cleared the three numbers older `init` runs wrote (`max_actions: 100`,
 `max_tool_output_chars: 32000` and `tool_result_evict_threshold_chars: 8000`); leave it alone.
+`init` writes it as current. The stamp moves even when an agent or division file could not be
+written (read-only, root-owned, a read-only store link): that file is listed in
+`init-nulls-pending.txt` beside `config.yaml`, and only the files listed there are retried, for
+exactly those three values, until they can be written. A `100` you set by hand after the step ran
+is never cleared.
 
 ---
 

@@ -959,7 +959,7 @@ def test_a_reinit_over_a_migrated_install_leaves_agent_files_alone(tmp_path):
 
 @pytest.mark.skipif(hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
                     reason="root writes a read-only file")
-def test_a_reinit_over_a_read_only_agent_file_warns_and_keeps_the_step_due(tmp_path):
+def test_a_reinit_over_a_read_only_agent_file_warns_and_records_it_as_owed(tmp_path):
     import io
 
     import yaml
@@ -990,11 +990,23 @@ def test_a_reinit_over_a_read_only_agent_file_warns_and_keeps_the_step_due(tmp_p
     assert agent.read_bytes() == before
     assert list(agent.parent.glob(f"scout.yaml{migrate.BACKUP_INFIX}*")) == []
     written = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
-    assert written["org"]["permissions"]["init_nulls_revision"] == 0  # the step stays due
+    # CR-30 changed this pin (it was `0`, "the step stays due", which re-armed the match over
+    # config.yaml): init writes the stamp as current (D-25) and records the file as owed.
+    assert written["org"]["permissions"]["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
+    assert migrate.read_init_nulls_pending(tmp_path) == ("agents/scout.yaml",)
 
-    # ...so the start-time migration retries the file once it can be written.
+    # A 100 the owner then sets in config.yaml is never matched, while the file stays locked...
+    written["org"]["permissions"]["budget"]["max_actions"] = 100
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(written), encoding="utf-8")
+    original, plan = migrate.load_plan(tmp_path / "config.yaml")
+    assert plan is not None and plan.nulled == () and not plan.init_nulls_due
+
+    # ...and the start-time migration retries the file once it can be written.
     agent.chmod(0o644)
     original, plan = migrate.load_plan(tmp_path / "config.yaml")
     assert plan is not None and [s.path for s in plan.sidecars] == [agent]
     migrate.apply(tmp_path / "config.yaml", original, plan)
     assert yaml.safe_load(agent.read_text(encoding="utf-8"))["permissions"]["budget"]["max_actions"] is None
+    on_disk = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert on_disk["org"]["permissions"]["budget"]["max_actions"] == 100
+    assert migrate.read_init_nulls_pending(tmp_path) == ()
