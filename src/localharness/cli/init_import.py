@@ -396,13 +396,45 @@ _INI_KEY_FILE_KEYS = frozenset({"api-key-file", "llama_arg_api_key_file"})
 _INI_TOKEN_KEYS = frozenset({"hf-token", "hft"})
 
 
+_INI_COMMENT_START = re.compile(r"[;#]")
+
+
+def _credential_comment(text: str) -> bool:
+    """True when comment text names a credential-shaped key (`# api-key=sk-...`, `; hf-token = ...`,
+    `# old LLAMA_API_KEY`): the same net `_credential_name` casts over a key, applied to the words of a
+    comment, plus the `hft` and `mcp-servers-json` spellings. Over-matching only drops a harmless comment."""
+    dashed = text.lower().replace("_", "-")
+    return bool(_SECRETISH.search(text) or "mcp-servers-json" in dashed
+                or any(re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", dashed)
+                       for name in _INI_TOKEN_KEYS | _INI_KEY_FILE_KEYS | _INI_INLINE_KEYS))
+
+
+def _without_credential_comment(raw: str, code_end: int | None) -> str | None:
+    """`raw` with a comment that names a credential-shaped key removed (T-5-47): a whole-line comment
+    returns None (the line is dropped), a trailing comment is cut with the blanks before it. `code_end` is
+    where the line's code ends (the header or `key = value` match end), None for a line that is neither.
+    A comment that names no credential is returned verbatim."""
+    if code_end is None:
+        blank = len(raw) - len(raw.lstrip(" \t"))
+        if raw[blank:blank + 1] in (";", "#"):
+            return None if _credential_comment(raw[blank:]) else raw
+        found = _INI_COMMENT_START.search(raw)
+        code_end = found.start() if found is not None else len(raw)
+    comment = raw[code_end:]
+    if not _credential_comment(comment):
+        return raw
+    return raw[:code_end].rstrip(" \t")
+
+
 def mask_config_ini(data: bytes) -> IniImport:
     """Mask `config.ini` text (D-28). The `api-key`, `api-key-file` and Hugging Face token lines (env and
     flag spellings, any letter case) leave `kept` and every shown line: the first two route their value
     through `keys`, the token is dropped. `host` and `port` lines leave `kept` too (the record owns the
     bind, and the `config_ini` field refuses them) and ride `keys` to the host and port resolution. A
-    download-identity or TLS key is named in `refused`. Everything else is kept verbatim. Text that is not
-    UTF-8 masks to nothing."""
+    download-identity or TLS key is named in `refused`. A comment that names a credential-shaped key
+    (`# api-key=sk-...`, a trailing `; hf-token=...`) is dropped or cut too (T-5-47): a commented-out old
+    key never reaches the record, a shown line or an audit entry. Everything else is kept verbatim. Text
+    that is not UTF-8 masks to nothing."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
@@ -416,7 +448,7 @@ def mask_config_ini(data: bytes) -> IniImport:
         header = _INI_HEADER.match(raw)
         if header is not None:
             section = header.group(1).strip()
-            kept.append(raw)
+            kept.append(_without_credential_comment(raw, header.end()))
             continue
         kv = _INI_KV.match(raw)
         if kv is not None:
@@ -441,7 +473,11 @@ def mask_config_ini(data: bytes) -> IniImport:
             if _credential_name(key):
                 keyshaped = keyshaped or key  # the import cannot place it: attach-only, never kept or shown
                 continue
-        kept.append(raw)
+            line = _without_credential_comment(raw, kv.end())
+        else:
+            line = _without_credential_comment(raw, None)
+        if line is not None:
+            kept.append(line)
     while kept and not kept[-1].strip():
         kept.pop()
     return IniImport("\n".join(kept) + "\n" if any(line.strip() for line in kept) else "", keys, refused,
