@@ -582,14 +582,6 @@ async def dispatch_config_subagent(
 
     allowed = _config_child_allowed(agent_config)
     child_registry = ToolRegistry.from_allowed(allowed, base_registry=base_registry)
-    # Make the toolset explicit in the brief — small models attend weakly to absent
-    # tools (observed live: a bash-less child globbed for `pip` instead of saying
-    # "I have no shell"). One line turns capability inference into capability fact.
-    budget = agent_config.permissions.budget
-    minutes = (f"{budget.max_duration_minutes:g} minutes" if budget.max_duration_minutes
-               else "no time limit")
-    task = prepend_toolset(f"Budget: {budget.max_actions} actions, {minutes}.\n\n{task}", allowed)
-
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
     _kill, _compact = _child_runtime_paths(agent_config, config_dir, state_dir=state_dir)
     child_loop = AgentLoop(
@@ -606,6 +598,17 @@ async def dispatch_config_subagent(
         template_margin_ratio=template_margin_ratio,
         server_recovery=server_recovery,
     )
+
+    # Make the limits and the toolset explicit in the brief — small models attend weakly to absent
+    # tools (observed live: a bash-less child globbed for `pip` instead of saying "I have no
+    # shell"). The brief is built AFTER the loop so it prints the limits that loop will enforce
+    # (action_limit / time_limit), and names only the tools its registry holds: a name
+    # `from_allowed` skipped (a typo, a plugin not installed) must not be advertised.
+    action_limit, time_limit = child_loop.action_limit(), child_loop.time_limit()
+    actions = "no action limit" if action_limit == 0 else f"{action_limit} actions"
+    minutes = "no time limit" if time_limit == 0 else f"{time_limit:g} minutes"
+    held = [name for name in allowed if child_registry.has(name)]
+    task = prepend_toolset(f"Budget: {actions}, {minutes}.\n\n{task}", held)
 
     summary = await child_loop.run_turn(task)
     tool_calls_used = _count_session_tool_calls(bus, child_loop.current_session_id)
@@ -1128,7 +1131,7 @@ async def _run_chunk_summarizer(
         f"{header}QUESTION:\n{question}\n\nYour granted section handle is '{chunk_handle}'. Read it with "
         f"tool_result_get('{chunk_handle}'), then extract everything relevant to the question above "
         f"(verbatim figures/sentences). If nothing is relevant, reply with exactly: NONE.",
-        list(CHUNK_SUMMARIZER_TOOLS),
+        [name for name in CHUNK_SUMMARIZER_TOOLS if leaf_registry.has(name)],
     )
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
     chunk_cfg = build_chunk_summarizer_config(budget=_children_budget(children_budget).for_name("chunk-summarizer"))

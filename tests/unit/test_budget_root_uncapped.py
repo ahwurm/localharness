@@ -465,3 +465,137 @@ def test_the_reconnect_clamp_reads_the_effective_time_limit(mock_llm_client, bus
     root = _loop(mock_llm_client, bus, [], max_minutes=None, local=True)
     root._llm = SimpleNamespace(config=llm_cfg)
     assert root._reconnect_bound(Session(agent_id="a", session_id="s", messages=[])) == 600.0
+
+
+# =========================================================================== the child's brief
+
+
+async def _briefed_task(monkeypatch, bus, agent_config, *, mode="auto", **dispatch_kw) -> str:
+    """Dispatch a config child through the real loop and return the brief its turn received."""
+    from localharness.agent.gate import fail_closed_gate
+    from localharness.agent.subagent import dispatch_config_subagent
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    seen: list[str] = []
+
+    async def record_turn(self, task, *a, **k):
+        seen.append(task)
+        return "done"
+
+    monkeypatch.setattr(AgentLoop, "run_turn", record_turn)
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    gate = fail_closed_gate(permissions=SimpleNamespace(mode=mode))
+    gate.attach_channel(_channel(local=True))
+    await dispatch_config_subagent(
+        "find it",
+        agent_config=agent_config,
+        llm=SimpleNamespace(config=SimpleNamespace(tool_call_mode="native", context_window=128_000)),
+        bus=bus,
+        base_registry=base,
+        parent_session_id="parent",
+        permission_evaluator=PermissionEvaluator(),
+        gate=gate,
+        **dispatch_kw,
+    )
+    (task,) = seen
+    return task
+
+
+def _child(*, tools_add=None, **budget) -> AgentConfig:
+    from localharness.config.models import ToolConfig
+
+    kw = {"tools": ToolConfig(add=tools_add)} if tools_add else {}
+    return AgentConfig(
+        name="yaml-child", role="a child",
+        permissions=PermissionConfig(budget=BudgetConfig(**budget)),
+        **kw,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_child_with_no_budget_is_briefed_with_no_limits(monkeypatch, bus):
+    task = await _briefed_task(monkeypatch, bus, _child(tools_add=["glob"]))
+    assert task.startswith("(Your ONLY available tools: glob.")
+    assert "Budget: no action limit, no time limit." in task
+
+
+@pytest.mark.asyncio
+async def test_a_child_with_a_budget_is_briefed_with_its_own_numbers(monkeypatch, bus):
+    task = await _briefed_task(
+        monkeypatch, bus, _child(tools_add=["glob"], max_actions=16, max_duration_minutes=12.0)
+    )
+    assert "Budget: 16 actions, 12 minutes." in task
+
+
+@pytest.mark.asyncio
+async def test_the_toolset_line_names_only_tools_the_child_registry_holds(monkeypatch, bus):
+    task = await _briefed_task(monkeypatch, bus, _child(tools_add=["glob", "nonexistent_tool"]))
+    first_line = task.split("\n", 1)[0]
+    assert "glob" in first_line
+    assert "nonexistent_tool" not in task
+
+
+@pytest.mark.asyncio
+async def test_a_toolset_nothing_of_which_is_held_says_none(monkeypatch, bus):
+    task = await _briefed_task(monkeypatch, bus, _child(tools_add=["nonexistent_tool"]))
+    assert task.startswith("(Your ONLY available tools: none.")
+
+
+@pytest.mark.asyncio
+async def test_the_brief_prints_the_limits_the_loop_will_enforce(monkeypatch, bus):
+    built: list[AgentLoop] = []
+    real_init = AgentLoop.__init__
+
+    def spy(self, *a, **k):
+        real_init(self, *a, **k)
+        built.append(self)
+
+    monkeypatch.setattr(AgentLoop, "__init__", spy)
+    task = await _briefed_task(
+        monkeypatch, bus, _child(tools_add=["glob"], max_actions=16, max_duration_minutes=12.0),
+    )
+    (child,) = built
+    assert f"Budget: {child.action_limit()} actions, {child.time_limit():g} minutes." in task
+
+
+@pytest.mark.asyncio
+async def test_the_chunk_summarizer_leaf_brief_names_only_held_tools(monkeypatch, bus):
+    from localharness.agent import subagent
+    from localharness.agent.context import ContentStore
+    from localharness.tools import ToolRegistry
+    from localharness.tools.builtin import register_builtin_tools
+
+    seen: list[str] = []
+
+    async def record_turn(self, task, *a, **k):
+        seen.append(task)
+        return "NONE"
+
+    monkeypatch.setattr(AgentLoop, "run_turn", record_turn)
+    monkeypatch.setattr(subagent, "CHUNK_SUMMARIZER_TOOLS", ["tool_result_get", "nonexistent_tool"])
+    store = ContentStore()
+    handle = store.put("a granted section")
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
+
+    await base.register(ToolResultGetTool(store), scope="global")  # the root registry holds it in a real run
+    await subagent._run_chunk_summarizer(
+        handle,
+        "what?",
+        store,
+        llm=SimpleNamespace(config=SimpleNamespace(tool_call_mode="native", context_window=128_000)),
+        bus=bus,
+        base_registry=base,
+        parent_session_id="parent",
+        permission_evaluator=PermissionEvaluator(),
+        token_counter=None,
+        max_context_tokens=None,
+        depth=0,
+        max_subagent_depth=3,
+    )
+    (task,) = seen
+    assert task.startswith("(Your ONLY available tools: tool_result_get.")
+    assert "nonexistent_tool" not in task
