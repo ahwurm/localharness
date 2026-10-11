@@ -540,3 +540,17 @@ async def test_a_headless_start_through_the_real_start_writes_nothing(tmp_path, 
     await _drive(tmp_path)
 
     assert _overrides(tmp_path) == {} and _audit(tmp_path) == []
+
+
+def test_a_commented_out_key_never_reaches_overrides_or_the_audit_log(g, xdg):
+    _ini(xdg, "# api-key=sk-old-commented\nctx-size = 8192 ; hf-token = hf_old_trailing\n"
+              "; LLAMA_API_KEY = sk-old-semicolon\nthreads = 4\n")
+    _recorded_machine(g)
+
+    _sense_before_trust(g, can_ask=True, path_binary=None)
+
+    assert _overrides(g) == {"server": {"config_ini": "ctx-size = 8192\nthreads = 4\n"}}
+    for name in ("overrides.yaml", "audit.jsonl"):
+        text = (g / name).read_text(encoding="utf-8")
+        for secret in ("sk-old-commented", "hf_old_trailing", "sk-old-semicolon"):
+            assert secret not in text

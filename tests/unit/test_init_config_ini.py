@@ -336,3 +336,41 @@ def test_the_ini_shown_line_comes_after_env_and_before_the_key_file_line():
     out = imported(rec, ini_read("ctx-size = 4\n"))
     heads = [line.split(":")[0].split(" (")[0] for line in out.shown]
     assert heads[:4] == ["flags", "env", "config.ini", "key file"]
+
+
+# ------------------------------------------------------------------ comments that name a key (T-5-47)
+
+
+@pytest.mark.parametrize("comment", [
+    "# api-key=sk-old-secret",
+    "; api-key = sk-old-secret",
+    "   #LLAMA_API_KEY=sk-old-secret",
+    "; api-key-file = /home/u/old-secret",
+    "# hf-token = sk-old-secret",
+    "; hft=sk-old-secret",
+    "# mcp-servers-json = {\"h\": \"sk-old-secret\"}",
+    "# the old password was sk-old-secret",
+])
+def test_a_comment_line_that_names_a_key_is_dropped(comment):
+    out = mask_config_ini(f"ctx-size = 8192\n{comment}\nthreads = 4\n".encode())
+
+    assert out.kept == "ctx-size = 8192\nthreads = 4\n"
+    assert "sk-old-secret" not in out.kept
+
+
+@pytest.mark.parametrize("trailer", [
+    " ; api-key=sk-old-secret",
+    "\t# hf-token = sk-old-secret",
+    " ;LLAMA_API_KEY=sk-old-secret",
+])
+def test_a_trailing_comment_that_names_a_key_is_cut(trailer):
+    out = mask_config_ini(f"ctx-size = 8192{trailer}\n[*] {trailer.strip()}\nthreads = 4\n".encode())
+
+    assert out.kept == "ctx-size = 8192\n[*]\nthreads = 4\n"
+    assert "sk-old-secret" not in out.kept
+
+
+def test_a_comment_that_names_no_credential_is_kept_verbatim():
+    text = "# tuned for the 5090\nctx-size = 8192 ; the window\n[*] # all models\n; threads below\nthreads = 4\n"
+
+    assert mask_config_ini(text.encode()).kept == text
