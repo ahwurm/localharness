@@ -754,3 +754,85 @@ console.log(JSON.stringify(hist.children.map((r) => ({ cls: r.className, text: t
     assert all(r["cls"].startswith("row sys") for r in lost)
     assert any(r["cls"].startswith("row user") for r in rendered)
     assert any(r["cls"].startswith("row answer") for r in rendered)
+
+
+# --- D-67: a stuck root turn is announced once, live and in history -------------------------
+
+_ESC = ('{seq: 2, reason: "stuck_detected", '
+        'detail: "Repeated identical tool calls at iteration 7"}')
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_stuck_root_turn_shows_one_notice_live_and_the_reply_summary_alone(page, tmp_path):
+    rendered = _drive(page, HELLO + f"""
+onEvent("Escalation", {_ESC});
+onEvent("TurnFailed", {{seq: 3, reason: "stuck_detected", detail: "PARTIAL WORK"}});
+report();
+""", tmp_path)
+    assert len([r for r in rendered if "stuck_detected" in r["text"]]) == 1, rendered
+    assert rendered[-1] == {"cls": "row sys", "text": "PARTIAL WORK"}, rendered
+    assert not any("turn failed —" in r["text"] for r in rendered), rendered
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_stuck_root_turn_with_no_summary_adds_no_empty_row_live(page, tmp_path):
+    base = _drive(page, HELLO + f"""
+onEvent("Escalation", {_ESC});
+report();
+""", tmp_path)
+    rendered = _drive(page, HELLO + f"""
+onEvent("Escalation", {_ESC});
+onEvent("TurnFailed", {{seq: 3, reason: "stuck_detected", detail: ""}});
+report();
+""", tmp_path)
+    assert len([r for r in rendered if "stuck_detected" in r["text"]]) == 1, rendered
+    assert not any(r["cls"] == "row sys" and not r["text"] for r in rendered), rendered
+    assert not any("turn failed —" in r["text"] for r in rendered), rendered
+    assert len(rendered) == len(base), "an empty summary must add no row at all"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_childs_stuck_turn_keeps_its_subagent_failed_row_live(page, tmp_path):
+    rendered = _drive(page, HELLO + """
+onEvent("TurnFailed", {seq: 4, parent_id: "p", reason: "stuck_detected", detail: "child partial"});
+report();
+""", tmp_path)
+    child = [r for r in rendered if r["cls"] == "row sys child"]
+    assert len(child) == 1 and child[0]["text"].startswith("subagent failed — stuck_detected")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_stuck_root_turn_shows_one_notice_in_the_history_replay(page, tmp_path):
+    lines = """[
+  JSON.stringify({seq: 1, event_type: "UserMessage", content: "go"}),
+  JSON.stringify({seq: 2, event_type: "Escalation", reason: "stuck_detected",
+                  detail: "Repeated identical tool calls at iteration 7"}),
+  JSON.stringify({seq: 3, event_type: "TurnFailed", reason: "stuck_detected",
+                  detail: "PARTIAL WORK"}),
+  JSON.stringify({seq: 4, event_type: "TurnFailed", parent_id: "c", reason: "stuck_detected",
+                  detail: "child partial"}),
+]"""
+    rendered = _drive(page, f"\nrenderSpine({lines}, log); report();", tmp_path)
+    assert len([r for r in rendered if "stuck_detected" in r["text"]]) == 1, rendered
+    assert [r["text"] for r in rendered if r["cls"] == "row sys"] == ["PARTIAL WORK"], rendered
+    assert not any("turn failed — stuck_detected" in r["text"] for r in rendered), rendered
+    assert not any("subagent failed" in r["text"] for r in rendered), rendered
+
+    # other reasons render as before
+    later = lines[:-1] + """  JSON.stringify({seq: 5, event_type: "UserMessage", content: "again"}),
+  JSON.stringify({seq: 6, event_type: "TurnFailed", reason: "provider_error",
+                  detail: "connection reset"}),
+]"""
+    rendered = _drive(page, f"\nrenderSpine({later}, log); report();", tmp_path)
+    assert any("turn failed — provider_error: connection reset" in r["text"]
+               for r in rendered), rendered
+    assert len([r for r in rendered if "stuck_detected" in r["text"]]) == 1, rendered
+
+
+def test_the_stuck_branches_are_present_without_a_js_engine(page):
+    live = page.split('case "TurnFailed"', 1)[1].split("break;", 1)[0]
+    assert '"stuck_detected"' in live
+    module = page[page.index("function renderSpine"):]
+    spine = module.split("\nfunction ", 1)[0].split("\nasync function ", 1)[0]
+    assert '"stuck_detected"' in spine
+    assert '"Escalation"' in spine

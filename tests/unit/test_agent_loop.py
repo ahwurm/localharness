@@ -317,7 +317,7 @@ import pytest
 from localharness.agent.loop import AgentLoop
 from localharness.agent.context import ContextManager
 from localharness.agent.permissions import PermissionEvaluator
-from localharness.core.events import TurnStarted, TurnCompleted, TurnFailed, Action, Observation
+from localharness.core.events import TurnStarted, TurnCompleted, TurnFailed, Action, Observation, Escalation
 
 
 def _make_agent_loop(mock_llm_client_factory, responses, bus, config=None, tool_registry=None,
@@ -557,7 +557,9 @@ async def test_run_turn_stops_on_stuck_escalation(mock_llm_client, bus):
     summary = await loop.run_turn("task")
     failed = bus.history(event_types=[TurnFailed])
     assert any(e.reason == "stuck_detected" for e in failed)
-    assert "stuck" in summary.lower() or "escalat" in summary.lower()
+    # the notice is the Escalation event's, once; the reply carries no stuck text
+    assert len(bus.history(event_types=[Escalation])) == 1
+    assert "stuck" not in summary.lower() and "escalat" not in summary.lower()
 
 
 @pytest.mark.asyncio
@@ -666,7 +668,7 @@ async def test_recovery_nudge_reaches_next_request_and_persists(mock_llm_client,
 @pytest.mark.asyncio
 async def test_stuck_escalation_returns_wrapup_summary(mock_llm_client, bus):
     """#83: on stuck escalation the loop makes ONE no-tools wrap-up pass and returns the
-    model's partial-work summary (plus a stuck tail), not a dead '[Agent stuck: …]' notice."""
+    model's partial-work summary alone: the stuck notice is the Escalation event's, once."""
     Response = mock_llm_client.Response
     ToolCallObj = mock_llm_client.ToolCall
     tc = ToolCallObj(id="a", name="bash", arguments={"cmd": "ls"})
@@ -685,9 +687,9 @@ async def test_stuck_escalation_returns_wrapup_summary(mock_llm_client, bus):
     loop._llm = _StuckThenWrapupLLM()
     summary = await loop.run_turn("task")
 
-    assert "Wrote /tmp/out.txt; the parser step is still TODO." in summary
-    assert "partial completion" in summary
-    assert "[Agent stuck: repeated identical tool calls" in summary
+    assert summary == "Wrote /tmp/out.txt; the parser step is still TODO."
+    assert "Agent stuck" not in summary
+    assert "Escalating to orchestrator" not in summary
     # telemetry stays honest: still terminates as stuck + fires TurnFailed
     failed = bus.history(event_types=[TurnFailed])
     assert any(e.reason == "stuck_detected" for e in failed)
@@ -699,8 +701,8 @@ async def test_stuck_escalation_returns_wrapup_summary(mock_llm_client, bus):
 
 @pytest.mark.asyncio
 async def test_stuck_escalation_falls_back_when_wrapup_raises(mock_llm_client, bus):
-    """#83: if the wrap-up provider call fails, fall back cleanly to the plain stuck notice —
-    the summary pass must never kill the turn."""
+    """#83: if the wrap-up provider call fails, fall back cleanly to the turn's last assistant
+    content (here none, so empty) with no stuck text — the summary pass must never kill the turn."""
     Response = mock_llm_client.Response
     ToolCallObj = mock_llm_client.ToolCall
     tc = ToolCallObj(id="a", name="bash", arguments={"cmd": "ls"})
@@ -719,8 +721,8 @@ async def test_stuck_escalation_falls_back_when_wrapup_raises(mock_llm_client, b
     loop._llm = _StuckThenRaiseLLM()
     summary = await loop.run_turn("task")
 
-    assert "Escalating to orchestrator." in summary   # _format_stuck_summary fallback wording
-    assert "partial completion" not in summary
+    assert summary == ""
+    assert "Agent stuck" not in summary
     failed = bus.history(event_types=[TurnFailed])
     assert any(e.reason == "stuck_detected" for e in failed)
 

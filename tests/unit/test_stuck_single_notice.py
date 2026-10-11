@@ -1,0 +1,121 @@
+"""A stuck turn is announced once (STUCK-04, D-04, D-40).
+
+The reply is the partial work and carries no stuck text; TurnFailed.detail is that reply; the
+default ChannelAdapter.on_turn_failed stays quiet for stuck_detected so Escalation, delivered by
+on_escalation, is the one notice. The bus still carries both events.
+"""
+from __future__ import annotations
+
+import pytest
+
+from localharness.channels.base import ChannelAdapter
+from localharness.core.events import Escalation, TurnFailed
+
+
+class _Recorder(ChannelAdapter):
+    def __init__(self, bus):
+        super().__init__(bus=bus, config=object())
+        self.sent: list[str] = []
+        self.errors: list[tuple[str, str | None]] = []
+
+    async def read_input(self): return None
+    async def send_message(self, content, agent_id=None, **kw): self.sent.append(content)
+    async def send_error(self, error, detail=None, agent_id=None, **kw):
+        self.errors.append((error, detail))
+    async def send_streaming(self, *a, **kw): pass
+    async def send_tool_call(self, *a, **kw): pass
+    async def send_tool_result(self, *a, **kw): pass
+    async def start(self): pass
+    async def stop(self): pass
+
+
+def _subscribe(bus):
+    chan = _Recorder(bus)
+    bus.subscribe(TurnFailed, chan.on_turn_failed)
+    bus.subscribe(Escalation, chan.on_escalation)
+    return chan
+
+
+class _StuckLLM:
+    class config:
+        tool_call_mode = "native"
+        context_window = 128_000
+
+    def __init__(self, response_cls, tool_call, wrapup):
+        self._resp, self._tc, self._wrapup = response_cls, tool_call, wrapup
+
+    async def stream_complete(self, messages=None, tools=None, on_token=None, **kw):
+        if tools is None:
+            if self._wrapup is None:
+                raise RuntimeError("provider boom")
+            return self._resp(content=self._wrapup), None
+        return self._resp(content=None, tool_calls=[self._tc]), None
+
+
+async def _stuck_turn(mock_llm_client, bus, wrapup):
+    from tests.unit.test_agent_loop import _SameResultRegistry, _make_agent_loop
+
+    loop = _make_agent_loop(mock_llm_client, [], bus, tool_registry=_SameResultRegistry())
+    tc = mock_llm_client.ToolCall(id="a", name="bash", arguments={"cmd": "ls"})
+    loop._llm = _StuckLLM(mock_llm_client.Response, tc, wrapup)
+    return await loop.run_turn("task")
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_turns_reply_is_the_wrapup_and_carries_no_stuck_text(mock_llm_client, bus):
+    reply = await _stuck_turn(mock_llm_client, bus, "Wrote the file; parser still TODO.")
+    assert reply == "Wrote the file; parser still TODO."
+    for needle in ("[Agent stuck", "Escalating to orchestrator", "partial completion"):
+        assert needle not in reply
+    failed = bus.history(event_types=[TurnFailed])
+    assert [e.detail for e in failed] == [reply]
+    assert [e.reason for e in failed] == ["stuck_detected"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_wrapup_leaves_the_last_assistant_content_or_nothing(mock_llm_client, bus):
+    reply = await _stuck_turn(mock_llm_client, bus, None)
+    assert reply == ""
+    assert "[Agent stuck" not in reply
+    assert [e.detail for e in bus.history(event_types=[TurnFailed])] == [""]
+
+
+@pytest.mark.asyncio
+async def test_a_recording_channel_sees_exactly_one_error_for_a_stuck_turn(mock_llm_client, bus):
+    chan = _subscribe(bus)
+    await _stuck_turn(mock_llm_client, bus, "partial work")
+
+    assert len(chan.errors) == 1
+    error, _detail = chan.errors[0]
+    assert "escalated: stuck_detected" in error
+    assert not any("turn failed" in e for e, _ in chan.errors)
+    assert chan.sent == []
+    # the bus still carries both events
+    assert len(bus.history(event_types=[Escalation])) == 1
+    assert len(bus.history(event_types=[TurnFailed])) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_child_stuck_turn_posts_the_escalation_and_no_failed_status_line():
+    chan = _Recorder(bus=object())
+    await chan.on_turn_failed(TurnFailed(
+        agent_id="child", session_id="s", parent_id="p", reason="stuck_detected",
+        detail="partial", iterations=4, duration_seconds=1.0))
+    assert chan.sent == [] and chan.errors == []
+    await chan.on_escalation(Escalation(
+        agent_id="child", session_id="s", parent_id="p", reason="stuck_detected",
+        detail="Repeated identical tool calls at iteration 4", iteration_at_escalation=4))
+    assert len(chan.errors) == 1 and chan.sent == []
+
+
+@pytest.mark.asyncio
+async def test_other_turn_failed_reasons_behave_as_before():
+    chan = _Recorder(bus=object())
+    await chan.on_turn_failed(TurnFailed(
+        agent_id="a", session_id="s", reason="budget_exceeded", detail="Max actions reached.",
+        iterations=4, duration_seconds=1.0))
+    assert chan.errors == [("turn failed — budget_exceeded", "Max actions reached.")]
+    await chan.on_turn_failed(TurnFailed(
+        agent_id="kid", session_id="s", parent_id="p", reason="budget_exceeded", detail="x",
+        iterations=4, duration_seconds=1.0))
+    assert len(chan.sent) == 1 and "subagent kid failed (budget_exceeded)" in chan.sent[0]

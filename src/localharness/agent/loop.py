@@ -699,13 +699,9 @@ def _format_kill_summary(session: Session) -> str:
 
 def _format_stuck_summary(session: Session) -> str:
     # #91 (same defect, third call site) — turn-scoped, see _format_budget_summary.
+    # The stuck notice is delivered once, by the Escalation event; the reply is the partial work.
     last = _last_assistant_content(session.messages[getattr(session, "turn_start_idx", 0):])
-    prefix = f"{last}\n\n" if last else ""
-    return (
-        f"{prefix}"
-        f"[Agent stuck: repeated identical tool calls detected after {session.iteration} iterations. "
-        f"Escalating to orchestrator.]"
-    )
+    return last or ""
 
 
 def _format_error_summary(session: Session, exc: Exception) -> str:
@@ -2844,10 +2840,9 @@ class AgentLoop:
         self, session: Session, iterations: int, on_token: Callable | None,
     ) -> str:
         """One forced no-tools generation so a stuck-escalated agent returns its PARTIAL
-        WORK instead of a dead '[Agent stuck: …]' notice (#83). Mirrors
-        _final_summary_on_budget; falls back to the plain stuck notice on any provider
-        error or empty text. Telemetry (terminated_reason, Escalation, TurnFailed) is
-        unchanged — only the returned content improves."""
+        WORK (#83). Mirrors _final_summary_on_budget; on any provider error or empty text
+        it falls back to the turn's last assistant content (possibly empty). The stuck
+        notice is delivered once, by the Escalation event: the reply carries none."""
         instruction = (
             "[You have been stopped: you repeated the same tool call multiple times with "
             "identical arguments. Do NOT call any tools.] In ONE reply, wrap up honestly "
@@ -2872,14 +2867,9 @@ class AgentLoop:
                 return _format_stuck_summary(session)
             session.push(harness_message(instruction, "stuck_summary"))
             session.push({"role": "assistant", "content": text})
-            return (
-                f"{_clean_summary(text)}\n\n"
-                f"[Agent stuck: repeated identical tool calls detected after {iterations} "
-                f"iterations; stopped after recovery warnings failed. The summary above "
-                f"reflects partial completion.]"
-            )
+            return _clean_summary(text)
         except Exception as exc:  # noqa: BLE001 — the summary pass must never kill the turn
-            log.warning("final-summary-on-stuck failed (%s); returning plain notice", exc)
+            log.warning("final-summary-on-stuck failed (%s); returning the partial work", exc)
             return _format_stuck_summary(session)
 
     # --- Dynamic output cap -------------------------------------------------------------
