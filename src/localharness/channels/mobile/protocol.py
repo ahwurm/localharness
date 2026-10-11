@@ -30,7 +30,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PROTOCOL_VERSION = 5
+PROTOCOL_VERSION = 6
 """Bumped on any breaking change to the wire.
 
 v2: Observation gained an optional generated-image id field (never released; replaced by v4's artifact).
@@ -45,6 +45,7 @@ v5: /api/protocol gained "screens" ({memory, pictures}): the page shows the Memo
 buttons only when the session has them (memory: the slot's occupant offers a browse API; pictures:
 an artifact root is bound and --incognito is off), and GET /api/artifacts lists the gallery. No event
 or frame schema moved.
+v6: ProviderLost: a new event; additive, older pages ignore it at `default: break`.
 
 Enforced rather than remembered: `tests/unit/channels/test_mobile_protocol.py` snapshots every
 event and frame schema into a checked-in fixture and fails if a schema moves without this
