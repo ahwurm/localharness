@@ -582,6 +582,67 @@ async def test_a_later_caller_after_a_refused_relaunch_gets_the_refusal_again(mo
     assert relaunch.calls == 1
 
 
+async def test_a_child_that_leaves_at_its_own_budget_leaves_the_relaunch_to_the_root(models, tmp_path):
+    """WR-60 / WR-18: a child with 0.3 s of budget left starts the flight; the relaunch is still waiting
+    (behind another launch) when the child leaves. The flight is not cut and the outage is not marked
+    relaunched: the root (30 s) joins the same flight, gets its one relaunch, and does not fail at once."""
+    models(_served_while_alive(tmp_path))
+    release = asyncio.Event()
+
+    async def held_then_up():
+        await release.wait()  # e.g. the launch lock held by another launch, or sizing the launch
+        write_live_pidfile(tmp_path)
+
+    relaunch = RecordingRelaunch(held_then_up)
+    pair = ServerRecovery(URL, tmp_path, relaunch)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(TimeoutError, match="did not come back within"):
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=30, on_lost=Announce(),
+                           leave_after=0.3)
+    assert loop.time() - started < 1.0  # the child left at its own bound
+    assert pair._flight.current is not None and not pair._flight.current.task.done()  # not cancelled
+    assert pair._flight.outage.relaunched is False  # nothing has been started yet
+
+    loop.call_later(0.2, release.set)
+    started = loop.time()
+    await asyncio.wait_for(pair.recover(base_url=URL, api_key="none", wait_seconds=30, on_lost=Announce()), 5)
+    assert loop.time() - started >= 0.15  # it waited for the relaunch, it did not fail at once
+    assert relaunch.calls == 1
+
+
+async def test_a_joiner_with_a_longer_bound_outlasts_a_first_caller_with_a_short_one(monkeypatch):
+    """WR-18: the flight runs to the configured bound, not to the first caller's clamp; each caller
+    leaves at its own."""
+    state = {"down": True}
+    monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(ModelsEndpoint(down=lambda: state["down"])))
+    pair = ServerRecovery(None, None, None)
+    short = asyncio.create_task(pair.recover(base_url=URL, api_key="none", wait_seconds=30,
+                                             on_lost=Announce(), leave_after=0.1))
+    await asyncio.sleep(0.02)
+    long = asyncio.create_task(pair.recover(base_url=URL, api_key="none", wait_seconds=30,
+                                            on_lost=Announce(), leave_after=5.0))
+    with pytest.raises(TimeoutError):
+        await short
+    asyncio.get_running_loop().call_later(0.2, state.update, {"down": False})
+    await asyncio.wait_for(long, 2.0)  # the verifier's wait was not cut at the explorer's 0.1 s
+
+
+async def test_a_new_root_turn_cancels_a_flight_every_caller_left(models, tmp_path):
+    models(_served_while_alive(tmp_path))
+    relaunch = RecordingRelaunch(lambda: asyncio.Event().wait())
+    pair = ServerRecovery(URL, tmp_path, relaunch)
+    with pytest.raises(TimeoutError):
+        await pair.recover(base_url=URL, api_key="none", wait_seconds=30, on_lost=Announce(),
+                           leave_after=0.1)
+    flight = pair._flight.current.task
+    lifecycle.forget_outages(every=True)
+    await asyncio.wait_for(asyncio.wait([flight]), 2.0)
+    assert flight.cancelled() and pair._flight.current is None
+    await asyncio.sleep(0)
+    assert lifecycle._UNWINDING == set()
+
+
 async def test_forgetting_the_outage_gives_the_next_drop_a_whole_new_flight(models, tmp_path):
     models(_served_while_alive(tmp_path))
     relaunch = RecordingRelaunch(RuntimeError("boom"))

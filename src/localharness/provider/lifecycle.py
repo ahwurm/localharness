@@ -988,13 +988,20 @@ pair). Weak: a pair the REPL's memo dropped takes its record with it."""
 def forget_outages(base_url: str | None = None, *, every: bool = False) -> None:
     """End the outage record of every pair for `base_url` (and of the address-less pairs): a call to that
     server has just gone through, so the next drop is a new one with its own whole bound, relaunch and
-    announcement. `every=True` ends them all: the person started a new root turn. A flight still under
-    way keeps running; only the record is dropped."""
+    announcement. `every=True` ends them all: the person started a new root turn, and a flight that
+    nobody awaits any more (every caller left at its own budget) is cancelled with it. A flight that
+    still has awaiters keeps running; only the record is dropped."""
     for slot, pair_url in list(_OPEN_OUTAGES.items()):
         if every or pair_url is None or (
                 base_url is not None and pair_url.rstrip("/") == base_url.rstrip("/")):
             slot.outage = None
             _OPEN_OUTAGES.pop(slot, None)
+            run = slot.current
+            if every and run is not None and run.awaiters == 0 and not run.task.done():
+                slot.current = None
+                _UNWINDING.add(run.task)
+                run.task.add_done_callback(_UNWINDING.discard)
+                run.task.cancel()
 
 
 def _settle(slot: _Flight, outage: _Outage, task: asyncio.Task) -> None:
@@ -1050,11 +1057,19 @@ class ServerRecovery:
         api_key: Any,
         wait_seconds: float,
         on_lost: Callable[[], Awaitable[None]],
+        leave_after: float | None = None,
     ) -> None:
         """Wait until the server at `base_url` answers `/models` (relaunching a dead launched server
         once), within `wait_seconds`. `on_lost` is awaited once if it is still down after the
         queue-visibility threshold. Raises `TimeoutError` / `RuntimeError` / `LaunchRefused` with one
-        readable sentence; a cancelled caller leaves, and the last one to leave cancels the flight."""
+        readable sentence; a cancelled caller leaves, and the last one to leave cancels the flight.
+
+        `wait_seconds` is the configured bound: the flight, and its one relaunch, run to it (measured
+        from the drop) whoever started them. `leave_after`, when given and shorter, is how long THIS
+        caller waits (a child's remaining duration budget): at that point it leaves with the bound
+        sentence for its own seconds, and the flight is NOT cancelled, even when it was the last
+        awaiter, so the next loop of the turn (the root) joins the same flight and its one relaunch
+        instead of finding the outage spent. A caller's budget never cuts the shared relaunch short."""
         slot = self._flight
         run = slot.current
         if run is None or run.task.done():
@@ -1068,15 +1083,29 @@ class ServerRecovery:
             task.add_done_callback(_retrieve)
             task.add_done_callback(functools.partial(_settle, slot, outage))
             run = slot.current = _Run(task, outage)
+        own = None
+        if leave_after is not None and leave_after < wait_seconds:
+            own = max(0.0, leave_after)
         run.awaiters += 1
+        left = False  # this caller left at its own (shorter) bound: the flight goes on for the next one
         try:
-            return await asyncio.shield(run.task)
+            if own is None:
+                return await asyncio.shield(run.task)
+            window = asyncio.timeout(own)
+            try:
+                async with window:
+                    return await asyncio.shield(run.task)
+            except TimeoutError:
+                if not window.expired():
+                    raise  # the flight's own failure, not this caller's bound
+                left = True
+                raise TimeoutError(self._bound_text(own)) from None
         finally:
             run.awaiters -= 1
             if run.task.done():
                 if slot.current is run:
                     slot.current = None  # a resolved flight is cleared: the next death is a new flight
-            elif run.awaiters == 0:
+            elif run.awaiters == 0 and not left:
                 if slot.current is run:
                     slot.current = None  # detach BEFORE cancel, or a recover this tick joins a dying task
                 if slot.outage is run.outage:
@@ -1155,23 +1184,31 @@ class ServerRecovery:
                 # Outside the try above: a LaunchRefused (itself a RuntimeError) must never be read as
                 # a poll failure.
                 log.info("model server process exited; relaunching it once")
-                outage.relaunched = True
                 # The relaunch is held to the flight's bound as a whole: its launch-lock wait (the lock
                 # itself has no timeout, D-26), a liveness check that hangs, and activate's own readiness
                 # wait (whose clock starts later and never goes below 1 s) all end at the deadline.
                 # Cancelling it there is the same path Esc takes (D-17).
                 window = asyncio.timeout(max(0.0, deadline - time.monotonic()))
+                # The outage counts as relaunched only once a launch really happened (or was refused):
+                # a window that closed while the relaunch still waited for the lock or sized the launch
+                # started nothing, and a later loop must still get its one relaunch.
                 try:
                     async with window:
                         live = await self.relaunch()
                 except server.LaunchRefused:
+                    outage.relaunched = True
                     raise
                 except TimeoutError as failed:
                     if window.expired():
+                        if self.config_dir is not None and server.server_pid(self.config_dir) is not None:
+                            outage.relaunched = True  # a process was started before the bound passed
                         raise TimeoutError(self._bound_text(wait_seconds)) from failed
+                    outage.relaunched = True
                     raise RuntimeError(RESTART_FAILED_TEXT + str(failed)) from failed
                 except (RuntimeError, OSError) as failed:  # OSError: e.g. the server binary is gone
+                    outage.relaunched = True
                     raise RuntimeError(RESTART_FAILED_TEXT + str(failed)) from failed
+                outage.relaunched = True
                 if live is not None and deadline - time.monotonic() <= 0:
                     # activate's own readiness wait has just seen /models answer at this address: the
                     # server is serving, so a relaunch that finished on the bound's edge is a success,

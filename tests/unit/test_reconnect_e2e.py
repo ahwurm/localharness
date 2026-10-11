@@ -474,8 +474,10 @@ class _Delegating:
     """A registry whose one tool is a delegation: the model server dies, then a child loop (on the same
     client and the same supplier) runs its own turn, and its ending is the tool's result."""
 
-    def __init__(self, rig: Rig) -> None:
+    def __init__(self, rig: Rig, child_bound: float | None = None, on_death=None) -> None:
         self.rig = rig
+        self.child_bound = child_bound  # a child with this much duration budget left
+        self.on_death = on_death
         self.child_summaries: list[str] = []
 
     def get_tools_for_agent(self, agent_id, division_id, tool_config):
@@ -487,7 +489,13 @@ class _Delegating:
         self.rig.up = False
         self.rig.alive = False
         write_dead_pidfile(self.rig.cfg)  # the launched server dies while the child works
+        if self.on_death is not None:
+            self.on_death()
         child = _loop(self.rig.llm, self.rig.bus, server_recovery=self.rig.repl.server_recovery)
+        if self.child_bound is not None:
+            real = child._reconnect_bound
+            child._reconnect_bound = (  # type: ignore[method-assign]
+                lambda session=None: min(real(), self.child_bound) if session is not None else real())
         self.child_summaries.append(await child.run_turn("look it up"))
         return ToolResult(output=self.child_summaries[-1], success=True)
 
@@ -630,3 +638,34 @@ async def test_a_child_turn_never_ends_the_outage_but_a_root_turn_does(sessions,
         await r.aclose()
     assert seen == [True, False]
     assert loop_mod._TURN_DEPTH.get() == 0
+
+
+async def test_a_child_whose_budget_ends_before_the_relaunch_starts_leaves_it_to_the_root(sessions, rig):
+    """WR-60: the child (0.3 s of budget left) leaves while the shared relaunch still waits behind another
+    process's launch lock. The root, with the whole bound, joins that flight: one server is started and the
+    root's turn completes; it never ends at once with a false "restarted once and exited again"."""
+    r = rig(chat_class=ToolThenDone, wait=30.0)
+    _serving(r)
+    lock = server_mod.lock_path(r.cfg)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    held: list[int] = []
+
+    def foreign_launch_holds_the_lock():
+        fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        held.append(fd)
+        asyncio.get_running_loop().call_later(0.8, lambda: (os.close(fd), held.remove(fd)))
+
+    delegating = _Delegating(r, child_bound=0.3, on_death=foreign_launch_holds_the_lock)
+    root = _tool_loop(r.llm, r.bus, delegating, server_recovery=r.repl.server_recovery)
+    try:
+        summary = await asyncio.wait_for(root.run_turn("go"), 10)
+    finally:
+        for fd in held:
+            os.close(fd)
+        await r.aclose()
+
+    assert "did not come back" in delegating.child_summaries[0]  # the child left at its own bound
+    assert len(r.starts) == 1  # the one relaunch happened, for the root
+    assert summary == "done"
+    assert [f.reason for f in _failed(r.bus)] == ["llm_error"]  # the child only

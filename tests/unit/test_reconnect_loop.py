@@ -33,11 +33,11 @@ class FakePair:
         self.calls: list[dict[str, Any]] = []
 
     async def recover(self, *, base_url: str, api_key: Any, wait_seconds: float, on_lost: Any,
-                      **kw: Any) -> None:
+                      leave_after: float | None = None, **kw: Any) -> None:
         # The real keywords are named (IN-56): a dropped or misspelled one is a TypeError here, not a
         # silent pass; the tail only tolerates a keyword added later.
         self.calls.append({"base_url": base_url, "api_key": api_key, "wait_seconds": wait_seconds,
-                           "on_lost": on_lost, **kw})
+                           "on_lost": on_lost, "leave_after": leave_after, **kw})
         if self.error is not None:
             raise self.error
 
@@ -422,7 +422,9 @@ async def test_a_child_waits_no_longer_than_what_is_left_of_its_duration_budget(
     assert await loop.run_turn("go") == "ok"
 
     (call,) = pair.calls
-    assert 170.0 < call["wait_seconds"] <= 180.0
+    # the shared flight runs to the configured bound; this child leaves at what is left of its budget
+    assert call["wait_seconds"] == 1800.0
+    assert 170.0 < call["leave_after"] <= 180.0
 
 
 async def test_a_child_past_its_budget_has_no_wait_left(bus, sessions, sleeps):
