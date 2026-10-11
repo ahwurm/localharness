@@ -1946,12 +1946,23 @@ class LLMClient:
         return ""
 
     def _wrap_error(self, exc: Exception) -> ProviderError:
-        """Map openai SDK exceptions to LocalHarness provider error types."""
+        """Map openai SDK exceptions to LocalHarness provider error types.
+
+        Raw httpx errors raised while a streamed body is read are mapped here too: the openai
+        library converts only errors raised while sending or reading headers, so a mid-stream drop
+        arrives as an httpx exception (a drop is a connection error, a mid-stream hang a timeout)."""
         if isinstance(exc, ProviderError):
             # Already one of ours — e.g. the inference gate's #62 fail-fast (ProviderConnectionError)
             # or queue-wait ceiling (ProviderTimeoutError). Pass it through so the loop's specific
             # handlers still fire; re-wrapping would downgrade it to a base ProviderError.
             return exc
+        # Raw httpx errors (a body read after the headers arrived). TimeoutException subclasses
+        # TransportError, so the timeout branch must be tested first or a hang would be mapped as
+        # a connection drop and hold the turn for the whole reconnect bound.
+        if isinstance(exc, httpx.TimeoutException):
+            return ProviderTimeoutError(str(exc), cause=exc)
+        if isinstance(exc, httpx.TransportError):
+            return ProviderConnectionError(str(exc), cause=exc)
         if isinstance(exc, openai.APIConnectionError):
             return ProviderConnectionError(str(exc), cause=exc)
         if isinstance(exc, openai.APITimeoutError):
