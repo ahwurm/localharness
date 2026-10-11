@@ -1336,7 +1336,11 @@ and Discord with one line naming the setting, and their permission questions are
 "always" — an "always" that comes back anyway counts once. An interactive terminal (a keyboard on
 a tty, without `--no-input`, not launched by the agent) and Zed (not launched by the agent) are
 never limited by it; a `--no-input`, piped or agent-launched session answers to nobody here and is
-locked like the phone. It is `true` by default, so nothing you do from the phone or Discord today stops working,
+locked like the phone. "Launched by the agent" is read from the `LOCALHARNESS_COMMIT` marker the
+agent's commands carry, which every process they start inherits: a Zed (or a terminal emulator)
+that the agent itself cold-started, say from "open this in Zed", passes it on, so a session you
+later start from that Zed is capped and locked like the phone too. That errs on the safe side;
+start the editor yourself to be treated as at the machine. It is `true` by default, so nothing you do from the phone or Discord today stops working,
 and `localharness doctor` shows a row while the phone app or the Discord plugin is on and the lock
 is not set.
 
