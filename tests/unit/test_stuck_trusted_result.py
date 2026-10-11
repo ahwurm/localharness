@@ -13,10 +13,12 @@ from localharness.agent.loop import StuckDetector, StuckState
 from localharness.config.models import (
     AgentConfig,
     PermissionConfig,
+    RecoveryInjectionConfig,
     StuckDetectorConfig,
 )
 from localharness.core.events import Escalation, TurnFailed
 
+NUDGE_TAIL = "If you are waiting on something external, say so and stop; do not poll."
 GIT_PUSH = {"command": "git push"}
 GH_RUN = {"command": "gh run list"}
 
@@ -152,6 +154,35 @@ def test_the_multiplier_scales_the_ceiling():
     states = [_step(sd, "bash_exec", GH_RUN, (True, f"t{i}")) for i in range(6)]
     assert states[:-1] == [StuckState.CLEAR] * 5
     assert states[-1] == StuckState.ESCALATE
+
+
+# --- the nudge sentence (D-05, D-41) ------------------------------------------
+
+
+def test_the_nudge_default_and_the_detector_agree_and_end_with_the_sentence():
+    default = RecoveryInjectionConfig().message
+    assert default.endswith(NUDGE_TAIL)
+    assert StuckDetector().recovery_message("x") == default
+    assert AgentConfig(name="t", role="t").recovery_injection.message == default
+
+
+@pytest.mark.asyncio
+async def test_the_nudge_pushed_into_history_ends_with_the_sentence(mock_llm_client, bus):
+    from tests.unit.test_agent_loop import _SameResultRegistry, _make_agent_loop
+
+    Response = mock_llm_client.Response
+    tc = mock_llm_client.ToolCall(id="a", name="bash", arguments={"cmd": "ls"})
+    responses = [
+        Response(content=None, tool_calls=[tc]),
+        Response(content=None, tool_calls=[tc]),   # second identical call: RECOVERING
+        Response(content="done"),
+    ]
+    loop = _make_agent_loop(mock_llm_client, responses, bus, tool_registry=_SameResultRegistry())
+    await loop.run_turn("task")
+
+    nudges = [m["content"] for m in loop._conversation
+              if m.get("role") == "user" and (m.get("content") or "").endswith(NUDGE_TAIL)]
+    assert len(nudges) == 1
 
 
 # --- loop level ----------------------------------------------------------------
