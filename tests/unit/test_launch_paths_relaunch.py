@@ -260,6 +260,58 @@ async def test_a_relaunch_whose_report_crosses_the_bound_is_still_a_success(tmp_
 
 
 @pytest.mark.asyncio
+async def test_draining_with_a_bound_lets_a_quick_report_finish_and_cancels_a_stuck_one(tmp_path):
+    """IN-25 / IN-63: at exit a quick report still gets said; one that would hang is cancelled, never
+    left to asyncio.run's teardown."""
+    _, repl, _, _ = _session(tmp_path, _launchable_peer(), server=_llama_primary())
+    said: list[str] = []
+
+    async def quick():
+        await asyncio.sleep(0.05)
+        said.append("quick")
+
+    async def stuck():
+        await asyncio.Event().wait()
+
+    loop = asyncio.get_running_loop()
+    tasks = [loop.create_task(quick()), loop.create_task(stuck())]
+    repl._relaunch_reports.update(tasks)
+    for task in tasks:
+        task.add_done_callback(repl._relaunch_reports.discard)
+
+    started = loop.time()
+    await repl._drain_relaunch_reports(timeout=0.3)
+    assert loop.time() - started < 1.0
+    assert said == ["quick"]
+    assert tasks[1].cancelled()
+    assert repl._relaunch_reports == set()
+
+
+@pytest.mark.asyncio
+async def test_leaving_the_repl_drains_the_relaunch_reports(tmp_path, monkeypatch):
+    """IN-25 / IN-63: the REPL's exit path drains the pending reports, bounded."""
+    from localharness.cli import repl as repl_mod
+
+    _, repl, _, _ = _session(tmp_path, _launchable_peer(), server=_llama_primary())
+    seen: list[float | None] = []
+
+    async def drain(timeout=None):
+        seen.append(timeout)
+
+    async def nothing():
+        return None
+
+    repl._drain_relaunch_reports = drain
+    repl._use_input_box = lambda: False
+    repl._run_classic = nothing
+    repl._prefetch_model_cache = nothing
+    repl._subscribe_pending = lambda: None  # this session's stand-in bus has no subscribe
+    repl._unsubscribe_pending = lambda: None
+    await repl.run()
+    assert seen == [repl_mod.RELAUNCH_REPORT_DRAIN_SECONDS]
+
+
+@pytest.mark.asyncio
 async def test_a_live_pidfile_under_the_lock_means_no_launch(tmp_path, boundaries):
     primary = _llama_primary()
     _, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=primary)

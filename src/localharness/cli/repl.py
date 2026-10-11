@@ -32,6 +32,9 @@ from localharness.core.events import (
 
 log = logging.getLogger(__name__)
 
+RELAUNCH_REPORT_DRAIN_SECONDS = 2.0
+"""How long the REPL's exit waits for a relaunch report still being sent before cancelling it."""
+
 MODE_EFFECTS: dict[str, str] = {
     "auto": "runs everything except a small blacklist — deletes pointing outside this project, "
             "sudo, pipe-to-shell, force-push and hard-reset, and writes to protected paths",
@@ -490,6 +493,12 @@ class OrchestratorREPL:
             self._unsubscribe_pending()
             if self._model_prefetch is not None and not self._model_prefetch.done():
                 self._model_prefetch.cancel()
+            # A relaunch's window lines and ledger entry still being sent get a short, bounded chance
+            # to finish before the event loop tears them down; whatever is left is cancelled.
+            try:
+                await self._drain_relaunch_reports(timeout=RELAUNCH_REPORT_DRAIN_SECONDS)
+            except Exception:  # noqa: BLE001 - leaving the REPL never fails on a best-effort report
+                log.debug("relaunch reports could not be drained at exit", exc_info=True)
 
     def _subscribe_pending(self) -> None:
         """Watch the staging queue change, so the row under the input box can follow it.
@@ -2689,11 +2698,20 @@ class OrchestratorREPL:
         except Exception:  # noqa: BLE001 - a report never fails a launch that succeeded
             log.debug("relaunch: the launch report could not be sent", exc_info=True)
 
-    async def _drain_relaunch_reports(self) -> None:
-        """Wait for the background relaunch reports still being sent (tests, and a clean shutdown)."""
-        reports = list(self.__dict__.get("_relaunch_reports", ()))
-        if reports:
-            await asyncio.gather(*reports, return_exceptions=True)
+    async def _drain_relaunch_reports(self, timeout: float | None = None) -> None:
+        """Wait for the background relaunch reports still being sent. `run` calls it at exit with a
+        bound (`RELAUNCH_REPORT_DRAIN_SECONDS`): a report not sent by then is cancelled, costing only
+        its lines. Without a timeout (tests) it waits for all of them. During a turn the report runs
+        beside the loop's re-send, so its lines may land among the re-sent answer's; that costs
+        ordering only (each line is whole) and is accepted."""
+        reports = [task for task in self.__dict__.get("_relaunch_reports", ()) if not task.done()]
+        if not reports:
+            return
+        _, pending = await asyncio.wait(reports, timeout=timeout)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def _provider_type_for_base_url(self, base_url: str) -> str | None:
         """Resolve the runtime ``provider_type`` for ``base_url`` against the CURRENT session config
