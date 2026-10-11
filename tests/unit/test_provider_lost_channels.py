@@ -2,7 +2,7 @@
 and ACP through an explicit subscription (a base default alone reaches nobody).
 
 The text is the contract (D-08): `model server unreachable — waiting up to {N}s`, with an em dash,
-N = int(round(wait_seconds)); only the terminal's override adds `; Esc stops`. A child loop may
+N = math.ceil(wait_seconds) (IN-11: the phone page agrees); only the terminal's override adds `; Esc stops`. A child loop may
 publish the event, so a ProviderLost carrying a parent_id is shown everywhere (D-44). The phone's
 rows are in tests/unit/channels/test_mobile_reference_page.py and test_mobile_channel.py.
 """
@@ -180,6 +180,18 @@ async def test_terminal_empty_detail_and_whole_second_bounds():
     ch._box_active = True
     await ch.on_provider_lost(_lost(30.0, detail=""))
     assert "model server unreachable — waiting up to 30s; Esc stops" in _frags_text(ch)
+
+
+@pytest.mark.parametrize(("seconds", "shown"), [(30.0, 30), (2.5, 3), (3.5, 4), (0.4, 1), (29.2, 30)])
+async def test_every_python_surface_rounds_the_bound_up(seconds, shown):
+    """IN-11: the same number as the phone page (Math.ceil), never round-half-even, and never "0s"."""
+    ch = _recording()
+    await ch.on_provider_lost(_lost(seconds))
+    assert ch.sent[0][0] == f"model server unreachable — waiting up to {shown}s"
+    term = _terminal()
+    term._box_active = True
+    await term.on_provider_lost(_lost(seconds))
+    assert f"waiting up to {shown}s; Esc stops" in _frags_text(term)
 
 
 class _FakeStatus:

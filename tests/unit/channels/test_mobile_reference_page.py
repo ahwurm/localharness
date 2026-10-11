@@ -684,8 +684,8 @@ console.log(JSON.stringify(out));
 @pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
 def test_a_ProviderLost_draws_a_system_row_live_even_when_child_stamped(page, tmp_path):
     """D-09 / D-44: the dropped-server line reaches the phone as a `row sys` with the base text
-    (no "Esc": a phone has no such key), whoever published it. Whole-second bounds only: JS rounds
-    halves up, Python to even (the page and the channels agree on integers, not on 0.5)."""
+    (no "Esc": a phone has no such key), whoever published it. A fractional bound is rounded up on
+    both sides (Math.ceil here, math.ceil in the channels): see the test below."""
     rendered = _drive(page, """
 onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
                   protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
@@ -700,6 +700,35 @@ report();
     assert lost[0]["text"] == "model server unreachable \u2014 waiting up to 1800s"
     assert "Esc" not in lost[0]["text"]
     assert "onerror" not in lost[0]["text"], "the detail must never reach the page"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_fractional_bound_reads_the_same_number_as_every_other_surface(page, tmp_path):
+    """IN-11: the page rounds the bound up, as the Python channels do (they used round(), which is
+    half-to-even, against the page's half-up Math.round): 2.5 reads 3 everywhere, 0.4 never "0s"."""
+    from localharness.channels.base import provider_lost_line
+
+    rendered = _drive(page, """
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
+                  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
+onEvent("ProviderLost", {event_type: "ProviderLost", agent_id: "a", session_id: "s",
+                         detail: "", wait_seconds: 2.5});
+onEvent("ProviderLost", {event_type: "ProviderLost", agent_id: "a", session_id: "s",
+                         detail: "", wait_seconds: 0.4});
+report();
+""", tmp_path)
+    lost = [r["text"] for r in rendered if "unreachable" in r["text"]]
+    assert lost == [provider_lost_line(2.5), provider_lost_line(0.4)], rendered
+    assert lost == ["model server unreachable \u2014 waiting up to 3s",
+                    "model server unreachable \u2014 waiting up to 1s"]
+
+    replayed = _drive(page, """
+const hist = document.getElementById("hist");
+renderSpine([JSON.stringify({seq: 1, event_type: "ProviderLost", wait_seconds: 2.5, detail: "x"})], hist);
+const text = (n) => (n.textContent || "") + n.children.map(text).join("");
+console.log(JSON.stringify(hist.children.map((r) => ({ cls: r.className, text: text(r) }))));
+""", tmp_path)
+    assert [r["text"] for r in replayed if "unreachable" in r["text"]] == [provider_lost_line(2.5)]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")

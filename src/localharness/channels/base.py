@@ -1,6 +1,7 @@
 """ChannelAdapter ABC — pluggable interface for all channel adapters."""
 from __future__ import annotations
 
+import math
 import re
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
@@ -100,9 +101,16 @@ def permission_denied_reason(error: str | None) -> str | None:
     return error[len(DENIED_OBSERVATION_PREFIX):].strip() or None
 
 
+def provider_lost_seconds(wait_seconds: float) -> int:
+    """The bound in whole seconds, rounded UP: the same number on every surface (the phone page uses
+    Math.ceil; Python's round() is half-to-even, JavaScript's Math.round half-up, so 2.5 read 2 here
+    and 3 there), and a sub-second bound never reads "0s"."""
+    return math.ceil(wait_seconds)
+
+
 def provider_lost_line(wait_seconds: float) -> str:
     """The ProviderLost line every surface without Esc shows (D-08), the bound in whole seconds."""
-    return f"model server unreachable — waiting up to {int(round(wait_seconds))}s"
+    return f"model server unreachable — waiting up to {provider_lost_seconds(wait_seconds)}s"
 
 
 class ChannelAdapter(ABC):

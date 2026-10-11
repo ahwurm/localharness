@@ -38,6 +38,7 @@ from rich.theme import Theme
 from localharness.channels.base import (
     PERMISSION_DENIED_LINE,
     ChannelAdapter,
+    provider_lost_seconds,
     sanitize_for_display,
 )
 from localharness.channels.errors import ChannelStartError
@@ -2241,7 +2242,7 @@ class TerminalChannel(ChannelAdapter):
         has Esc, so it says what stops the wait. Never filters on parent_id (a child loop may
         publish it) and never prints `event.detail`. Shown until the next heartbeat or the turn's
         end clears it; there is no "recovered" event."""
-        n = int(round(event.wait_seconds))
+        n = provider_lost_seconds(event.wait_seconds)
         text = f"model server unreachable — waiting up to {n}s; Esc stops"
         async with self._output_lock:
             self._provider_lost_text = text
