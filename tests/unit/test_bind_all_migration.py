@@ -25,6 +25,7 @@ from localharness.config import migrate
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
 from localharness.config.models import HarnessConfig, ManagedServerConfig, ProviderConfig
 from localharness.config.redact import reveal
+from tests.unit.launch_support import stub_liveness
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
 
 runner = CliRunner()
@@ -121,6 +122,7 @@ async def test_the_first_start_after_the_upgrade_says_so_once_with_a_backup(tmp_
     from localharness.cli.start_cmd import _start_async
 
     _stub_start_boundaries(tmp_path, monkeypatch)
+    stub_liveness(monkeypatch, False)  # the absent pidfile's answer, for start and for the REPL's seed
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(_stamped(server=dict(VLLM))), encoding="utf-8")
     printed = _capture_start_console(monkeypatch)
 
