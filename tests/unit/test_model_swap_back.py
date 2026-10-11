@@ -271,6 +271,46 @@ async def test_a_typed_gguf_path_restarts_that_file_under_its_own_name(
     # in memory only: nothing about the record reached overrides.yaml (T-5-65)
     overlay = load_overlay(tmp_path / "overrides.yaml") or {}
     assert "model" not in overlay.get("server", {}) and "served_name" not in overlay.get("server", {})
+    assert primary.model == "/x/primary.gguf" and primary.served_name == "qwen-27b"  # WR-53
+
+
+@pytest.mark.asyncio
+async def test_the_original_name_still_swaps_back_after_a_typed_file_was_served(
+        tmp_path, boundaries, monkeypatch):
+    path = _gguf(tmp_path)
+    primary = _llama(served_name="qwen-27b")
+    _, repl, channel, _, _ = _on_a_peer(tmp_path, primary)
+    _ready_as(monkeypatch, "Other-Q4")
+    await repl._handle_slash(f"/model {path}")
+    _ready_as(monkeypatch, "qwen-27b")
+    seen = _record_activations(monkeypatch)
+
+    await repl._handle_slash("/model qwen-27b")
+
+    assert not any("Unknown model" in m for m in channel.messages)
+    assert seen == [{"model": "/x/primary.gguf", "served_name": "qwen-27b", "runtime": "llamacpp"}]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_typed_restart_leaves_the_primary_record_as_it_was(tmp_path, boundaries, monkeypatch):
+    """WR-53: the typed file never loads; the original weights stay reachable by their name."""
+    path = _gguf(tmp_path)
+    primary = _llama(served_name="qwen-27b")
+    _, repl, channel, _, _ = _on_a_peer(tmp_path, primary)
+
+    async def wait_ready(base_url, config_dir=None, **kw):
+        raise RuntimeError("the model file would not load")
+
+    monkeypatch.setattr(managed_server, "wait_ready", wait_ready)
+
+    await repl._handle_slash(f"/model {path}")
+
+    assert any(m.startswith("Model swap failed: the model file would not load") for m in channel.messages)
+    assert primary.model == "/x/primary.gguf" and primary.served_name == "qwen-27b"
+    channel.messages.clear()
+    await repl._handle_slash("/model")
+    assert any("qwen-27b" in m for m in channel.messages)
+    assert not any("Other-Q4" in m for m in channel.messages)
 
 
 # --- anything else on a llama.cpp primary: one line, before anything moves ------------------------ #

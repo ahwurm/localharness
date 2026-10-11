@@ -2184,6 +2184,10 @@ class OrchestratorREPL:
             return
         if freed is not None:
             self._active_heavy = None
+        # The shared record's own weights and name, put back if the restart fails (WR-53).
+        before = (managed.model, managed.served_name)
+        spec = managed
+        typed_swap = managed.runtime == "llamacpp" and typed_gguf and target != prim_served
         try:
             # The verified stop can block ~90s worst-case (#100); the strategy runs it OFF the event
             # loop (asyncio.to_thread inside strategy.stop) so heartbeats/the channel stay live while
@@ -2196,17 +2200,22 @@ class OrchestratorREPL:
             # regular .gguf (llama.cpp, named in memory only, never persisted), changes the model.
             if managed.runtime != "llamacpp" and target != prim_served:
                 managed.model = target
-            elif managed.runtime == "llamacpp" and typed_gguf and target != prim_served:
+            elif typed_swap:
+                # A copy for the launch: the shared record (the primary's served name, the listing,
+                # the swap-back target) keeps its own weights, so a typed file is never "the primary"
+                # (WR-53, IN-57).
                 from localharness.agent import gguf_header
-                managed.model = str(Path(target).expanduser())
-                managed.served_name = gguf_header.preset_name(target)
+                spec = managed.model_copy(update={
+                    "model": str(Path(target).expanduser()),
+                    "served_name": gguf_header.preset_name(target)})
             # the provider's key, only when the managed server is set to require one (default off)
             ep = await strategy.activate(
-                managed, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress,
+                spec, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress,
                 autosense=getattr(self._harness, "autosense", None), **launch_kw,
             )
             models = ep.served_models
         except (RuntimeError, TimeoutError) as exc:
+            managed.model, managed.served_name = before
             # The primary half-started (still alive on a TimeoutError) — tear it down before restoring
             # a peer incumbent (shared pidfile → else it orphans). If we freed a peer (b2 swap-back),
             # restore it; otherwise the primary is simply down (the pre-existing restart-failure mode).
@@ -2221,6 +2230,9 @@ class OrchestratorREPL:
                 f"Model swap failed: {exc}{tail}", metadata={"style": "system.error"}
             )
             return
+        except BaseException:
+            managed.model, managed.served_name = before
+            raise
         finally:
             if box_note is not None:
                 box_note(None)
