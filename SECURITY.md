@@ -236,8 +236,9 @@ global config, a project's whole `proposer:` section is ignored. These are all o
 - `org.web_fetch_allow_private`
 - `org.default_effort`
 - `channels.remote_unattended`
-- `channels.unattended_max_actions` (the action ceiling for every agent while a remote channel runs
-  the session `unattended` with no one at the terminal; a project cannot raise it)
+- `channels.unattended_max_actions` (the action ceiling for every agent while the session runs
+  `unattended` with no one at the terminal: a remote channel, or a terminal started with
+  `--no-input`, from a pipe, or by the model itself; a project cannot raise it)
 - `proposer.base_url`
 - `proposer.api_key`
 - `image.comfyui_url`

@@ -2557,8 +2557,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # #35: REPL history resolves under this session's state dir (default
             # ~/.localharness/.repl_history). The transcript records what you typed while working in
             # THIS project, so it follows the work (ruled); the kill file above deliberately does not.
+            # CR-52: `--no-input`, a piped stdin and a model-spawned start are no local operator,
+            # so `unattended` caps them at channels.unattended_max_actions.
             channel = TerminalChannel(
-                bus=bus, config={}, history_file=str(resolve_runtime_path(".repl_history", state_dir))
+                bus=bus, config={}, history_file=str(resolve_runtime_path(".repl_history", state_dir)),
+                no_input=no_input,
             )
         # PRD §3.5: the channel decides how an ASK is rendered and whether it can be rendered at
         # all. A channel that cannot ask leaves the gate with no asker, which is the fail-closed

@@ -1387,11 +1387,14 @@ flag; the terminal and Zed are never limited.
 **`channels.unattended_max_actions`** (machine-level only, default `100`, at least 1): the most tool
 calls one turn may dispatch while the session runs `unattended` with no one at this machine,
 whatever `permissions.budget.max_actions` says. It is checked before each model call, so the calls
-of the iteration in progress complete and a parallel batch can end the turn a few calls past it. An agent that configures a lower number keeps it; one that
-configures a higher number, or none, runs under this one, and the stop names the key
+of the iteration in progress complete and a parallel batch can end the turn a few calls past it.
+An agent that configures a lower number keeps it; one that configures a higher number, or none,
+runs under this one, and the stop names the key
 (`... Stopping to prevent runaway execution. (channels.unattended_max_actions)`). The interactive
 terminal (and Zed) is never capped by it: with `permissions.budget.max_actions` unset, the person at
-the keyboard is the budget, and the stuck ladder, the kill file and the permission gate stay on. The
+the keyboard is the budget, and the stuck ladder, the kill file and the permission gate stay on. A
+terminal session with no one at the keyboard is not interactive and is capped like a remote one:
+`start --no-input`, a piped stdin, and a `localharness start` the model launched itself. The
 limit is read at every check, so switching the session into or out of `unattended` takes effect at
 the next iteration while the calls already in flight finish.
 

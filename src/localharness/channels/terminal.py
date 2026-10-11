@@ -532,6 +532,20 @@ def _tty(stream: Any) -> bool:
         return False
 
 
+def is_local_operator(*, no_input: bool = False) -> bool:
+    """Is a person at this machine driving this terminal session (CR-52)? True only on a tty stdin,
+    without `--no-input`, and without the agent-command ``LOCALHARNESS_COMMIT`` marker (a
+    `localharness start` the model launched through `bash_exec` or `python_exec` is no operator).
+    A cron or CI run, a piped stdin and a model-spawned start are unattended surfaces: they must
+    run under `channels.unattended_max_actions` in `unattended`, never unbounded. The same test as
+    `localharness model`'s, judged once when the channel is built."""
+    import sys
+
+    if no_input or "LOCALHARNESS_COMMIT" in os.environ:
+        return False
+    return _tty(sys.stdin)
+
+
 def cannot_ask_reason() -> str | None:
     """Why this process could not put a permission question to a human — None when it can.
 
@@ -995,7 +1009,9 @@ class TerminalChannel(ChannelAdapter):
     terminal after the input box has closed."""
 
     local_operator = True
-    """The person at this terminal is at this machine: `channels.remote_unattended` never limits it."""
+    """The person at an interactive terminal is at this machine: `channels.remote_unattended`
+    never limits it. Each instance re-judges this when it is built (:func:`is_local_operator`):
+    a `--no-input`, piped-stdin or model-spawned run is not a local operator (CR-52)."""
 
     @property
     def can_ask(self) -> bool:
@@ -1015,10 +1031,14 @@ class TerminalChannel(ChannelAdapter):
         bus: EventBus,
         config: dict[str, Any],
         history_file: str = ".repl_history",
+        *,
+        no_input: bool = False,
     ) -> None:
         # A bare relative default; start_cmd resolves it UNDER the active config dir (#35, so
         # --config-dir isolates REPL history). Absolute/~ values are honored as-is at use.
         super().__init__(bus, config)
+        # CR-52: what the gate reads as `local_operator`, the person this session answers to.
+        self.local_operator = is_local_operator(no_input=no_input)
         self._console = Console(theme=TERMINAL_THEME, highlight=False)
         self._err_console = Console(stderr=True, theme=TERMINAL_THEME, highlight=False)
         self._history: FileHistory | None = None
