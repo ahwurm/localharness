@@ -2329,9 +2329,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             preserve_last_n=agent_config.context.preserve_last_n_messages,
             # Without bus= the CompactionTriggered publishes in ContextManager are dead code and
             # interactive compactions are invisible (found forensically: a real compaction fired
-            # with zero telemetry). session_id stays unset — sessions rotate; agent+iteration id it.
+            # with zero telemetry). The sitting id names the session file those events go to (an
+            # empty id would write sessions/.jsonl); the loop re-asserts it at the start of every turn.
             bus=bus,
             agent_id=agent_config.name,
+            session_id=sitting_id,
             pipeline=pipeline,
             eviction_store=eviction_store,
             # An evicted body's origin is what its tool DECLARES (result_origin, SAFE-03).

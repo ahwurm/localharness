@@ -634,6 +634,9 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             memory_slot=plugin_result.slot if plugin_result is not None else None,
             kill_file_path=None,
             compact_md_path=COMPACT_DISABLED,  # no prior-session context; see the pipeline above
+            # Without this the loop's per-turn session setter would overwrite the manager's
+            # stable run id with a fresh per-turn uuid.
+            session_id=session_id,
         )
     except BaseException as e:
         await _stop_bench_memory(plugin_result, plugin_tmp)
