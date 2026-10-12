@@ -745,6 +745,7 @@ GIT_CONFIG_DANGEROUS_KEYS_DEFAULT: tuple[str, ...] = (
     "alias.*", "url.*.insteadOf",
     "diff.*.command", "diff.external", "filter.*.clean", "filter.*.smudge", "merge.*.driver",
     "sequence.editor", "gpg.program",
+    "diff.*.textconv", "pager.*", "credential.*.helper", "filter.*.process",
 )
 """Git config keys whose VALUE is a command git will run later (PRD §3.1 ``shell-destructive``).
 
@@ -759,6 +760,9 @@ ungrantable rather than merely unfamiliar: the damage happens on some *later* co
 Derivation: every git-config(1) key whose documented value is a command line or a path git later
 executes or includes, restricted to the ones reachable from a single ``git config`` write (the
 hook, pager, editor, credential, alias, external-diff/filter/merge-driver and include families).
+A textconv driver and a per-command pager (``pager.log``) run on a *read*, a URL-scoped credential
+helper (``credential.https://x.helper``, covered by the glob) hands over secrets exactly like
+``credential.helper``, and a process filter runs a program like a clean one does (Phase 10, D-21).
 Source: git-config(1) and githooks(5); raised by the v0.14 critic as F3(a), because the shipped
 classifier filed all of these under one grantable ``git config`` key.
 

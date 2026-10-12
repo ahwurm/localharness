@@ -555,6 +555,15 @@ Per-subcommand because git spells the destination four different ways; the shape
 rather than written as three branches, and the value-flag tables keep an option's argument from
 being read as the destination."""
 
+GIT_OUTPUT_SUBCOMMANDS = frozenset({"diff", "log", "show"})
+GIT_OUTPUT_FLAG = "--output"
+GIT_NO_INDEX_FLAG = "--no-index"
+"""The two git spellings that make a read-only-looking command touch the filesystem (Phase 10,
+D-20, D-51). ``git diff|log|show --output=F`` (or ``--output F``) WRITES F, and ``git diff
+--no-index A B`` compares two arbitrary paths outside any repository. Exact spellings are
+complete: git rejects an abbreviation of either (git-diff(1); RESEARCH row j). Without them
+``git diff --output=~/.bashrc`` was a plain read in every mode."""
+
 COPY_COMMANDS = ("cp", "mv", "install", "rsync")
 """PRD §3.2 step 8: the commands whose destination is a positional argument."""
 
@@ -1896,7 +1905,13 @@ def _git_targets(signature: str, argv: tuple[str, ...]) -> list[str]:
 
     Every other git signature returns no target: git writes inside the repository it is already
     in, which the workspace boundary already covers — these four choose where the repository goes.
+    Besides them, ``git diff|log|show --output`` writes a file and ``git diff --no-index`` diffs
+    arbitrary filesystem paths (:data:`GIT_OUTPUT_SUBCOMMANDS`); those paths are reported too, and
+    a plain ``git diff`` / ``git log`` / ``git show`` still reports nothing.
     """
+    words = signature.split()
+    if len(words) >= 2 and words[1] in GIT_OUTPUT_SUBCOMMANDS:
+        return _git_output_targets(words[1], argv)
     shape = GIT_DESTINATION_SHAPES.get(signature)
     if shape is None:
         return []
@@ -1913,6 +1928,44 @@ def _git_targets(signature: str, argv: tuple[str, ...]) -> list[str]:
     if len(positionals) >= 2:
         return positionals[-1:]
     return [_repository_name(positionals[0])] if positionals else []
+
+
+def _git_output_targets(subcommand: str, argv: tuple[str, ...]) -> list[str]:
+    """The files ``git diff|log|show`` writes (``--output``) or reads outside a repository
+    (``diff --no-index``), read off the arguments that follow the subcommand.
+
+    ``--output`` is only honoured before a bare ``--`` (after it, everything is a pathspec).
+    With ``--no-index`` every operand is a path: git permutes options, so operands on either side
+    of the flag count, and a ``--`` is skipped rather than ending the scan. Over-reporting is the
+    safe direction here — an extra target only asks when it leaves the project.
+    """
+    found = _first_subcommand("git", list(argv[1:]))
+    if found is None:  # pragma: no cover - the signature already named a subcommand
+        return []
+    after = found[1]
+    outputs: list[str] = []
+    operands: list[str] = []
+    no_index = False
+    options_ended = False
+    index = 0
+    while index < len(after):
+        token = after[index]
+        index += 1
+        if options_ended:
+            operands.append(token)
+        elif token == "--":
+            options_ended = True
+        elif token == GIT_OUTPUT_FLAG:
+            if index < len(after):
+                outputs.append(after[index])
+                index += 1
+        elif token.startswith(f"{GIT_OUTPUT_FLAG}="):
+            outputs.append(token.split("=", 1)[1])
+        elif token == GIT_NO_INDEX_FLAG and subcommand == "diff":
+            no_index = True
+        elif not token.startswith("-"):
+            operands.append(token)
+    return outputs + (operands if no_index else [])
 
 
 def _repository_name(source: str) -> str:

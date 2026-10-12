@@ -1,0 +1,176 @@
+"""Phase 10 (SHELL-01): the git gaps the read-only tier never saw.
+
+``git diff|log|show --output=F`` writes a file, ``git diff --no-index A B`` reads two arbitrary
+filesystem paths, and four more git config key families run a program on a later, ordinary
+command. The first block is the golden for what must NOT move: the plain reads stay ALLOW in every
+mode (D-20), measured against the unmodified tree before the classifier was edited.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from localharness.agent.gate import tool_meta_from_schema
+from localharness.agent.gate_types import GIT_CONFIG_DANGEROUS_KEYS_DEFAULT, GateSettings, Verdict
+from localharness.agent.shell_classify import classify_shell
+from localharness.agent.verdict import GateContext, evaluate
+from localharness.tools.builtin.bash_tool import BashExecTool
+
+SETTINGS = GateSettings()
+MODES = ("auto", "guarded", "trusted", "read-only", "unattended")
+BASH_META = tool_meta_from_schema(BashExecTool().info())
+
+
+def _no_grants(workspace: Path, klass: str, key: str):
+    return None
+
+
+@pytest.fixture
+def ws(tmp_path, monkeypatch):
+    """A workspace with its own HOME and global config dir, so nothing touches the real ones."""
+    home = (tmp_path / "home").resolve()
+    (home / ".localharness").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(home / ".localharness"))
+    workspace = (home / "proj").resolve()
+    workspace.mkdir()
+    return workspace
+
+
+def _verdict(command: str, workspace: Path, mode: str):
+    ctx = GateContext(
+        workspace=workspace, boundary=workspace, grants=_no_grants,
+        has_review_surface=True, mode=mode,  # type: ignore[arg-type]
+    )
+    return evaluate("bash_exec", {"command": command}, BASH_META, ctx, SETTINGS)
+
+
+def _segments(command: str):
+    return classify_shell(command, SETTINGS).segments
+
+
+def _targets(command: str) -> tuple[str, ...]:
+    return tuple(t for segment in _segments(command) for t in segment.write_targets)
+
+
+# ------------------------------------------------------------------ the plain-read golden
+
+PLAIN_READS = (
+    "git diff",
+    "git diff HEAD~1 -- x",
+    "git diff --stat",
+    "git diff --cached",
+    "git log -p -3",
+    "git log --oneline -5",
+    "git show HEAD",
+    "git show HEAD:README.md",
+)
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("command", PLAIN_READS)
+def test_plain_git_reads_stay_allow_in_every_mode(command, mode, ws):
+    """D-20: written and run against the unmodified tree first; it must pass there and after."""
+    assert _verdict(command, ws, mode).verdict is Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command", PLAIN_READS)
+def test_plain_git_reads_are_one_read_only_segment_without_targets(command):
+    (segment,) = _segments(command)
+    assert segment.read_only is True
+    assert segment.write_targets == ()
+    assert segment.inline_interpreter is False
+
+
+# ------------------------------------------------------------------ --output / --no-index targets
+
+@pytest.mark.parametrize("command,expected", [
+    ("git diff --output=out.patch", ("out.patch",)),
+    ("git diff --output out.patch", ("out.patch",)),
+    ("git log -p --output=l.txt", ("l.txt",)),
+    ("git show HEAD --output=s.txt", ("s.txt",)),
+    ("git -C sub diff --output=o", ("o",)),
+    ("git diff --no-index a b", ("a", "b")),
+    ("git diff --no-index -- a b", ("a", "b")),
+    ("git diff --stat --no-index a b", ("a", "b")),
+    ("git diff -- --output", ()),
+    ("git diff -- --output=x", ()),
+    ("git diff --output-indicator-new=+", ()),
+    ("git diff HEAD~1 -- x", ()),
+])
+def test_output_and_no_index_report_their_targets(command, expected):
+    assert _targets(command) == expected
+
+
+def test_a_machine_override_of_write_shaped_commands_is_unchanged_for_git():
+    """git stays in the write-shaped family: dropping it drops these too, as for clone/init."""
+    settings = GateSettings(write_shaped_commands=frozenset())
+    targets = tuple(
+        t for s in classify_shell("git diff --output=o", settings).segments for t in s.write_targets
+    )
+    assert targets == ()
+
+
+@pytest.mark.parametrize("mode", ("auto", "guarded", "trusted"))
+def test_output_into_a_protected_path_asks(mode, ws):
+    result = _verdict("git diff --output=~/.bashrc", ws, mode)
+    assert result.verdict is Verdict.ASK
+    assert result.request is not None and result.request.klass == "protected-path"
+
+
+def test_output_into_a_protected_path_is_denied_read_only(ws):
+    assert _verdict("git diff --output=~/.bashrc", ws, "read-only").verdict is Verdict.DENY
+
+
+def test_output_into_a_protected_path_is_allowed_unattended(ws):
+    assert _verdict("git diff --output=~/.bashrc", ws, "unattended").verdict is Verdict.ALLOW
+
+
+def test_no_index_outside_the_boundary_asks_in_guarded(ws):
+    result = _verdict("git diff --no-index /etc/hosts /etc/passwd", ws, "guarded")
+    assert result.verdict is Verdict.ASK
+
+
+# ------------------------------------------------------------------ the dangerous keys
+
+NEW_KEY_WRITES = (
+    "git config diff.tc.textconv ./x",
+    "git config pager.log ./x",
+    "git config --global pager.diff 'sh -c evil'",
+    "git config credential.https://x.helper ./x",
+    "git config filter.x.process ./x",
+)
+
+
+@pytest.mark.parametrize("command", NEW_KEY_WRITES)
+def test_new_dangerous_key_writes_are_destructive(command):
+    (segment,) = _segments(command)
+    assert segment.destructive is True
+    assert segment.signature.startswith("git config ")
+    assert segment.read_only is False
+
+
+def test_the_four_globs_are_defaults():
+    for glob in ("diff.*.textconv", "pager.*", "credential.*.helper", "filter.*.process"):
+        assert glob in GIT_CONFIG_DANGEROUS_KEYS_DEFAULT
+
+
+def test_inline_dash_c_pager_adds_a_destructive_segment():
+    segments = _segments("git -c pager.log=./x log")
+    assert [s.signature for s in segments] == ["git log", "git config pager.log"]
+    assert any(s.destructive for s in segments)
+
+
+def test_reading_a_dangerous_key_stays_read_only():
+    (segment,) = _segments("git config --get pager.log")
+    assert segment.read_only is True and segment.destructive is False
+
+
+def test_an_ordinary_inline_config_is_unchanged():
+    assert [s.signature for s in _segments("git -c color.ui=always log")] == ["git log"]
+
+
+def test_no_index_reports_operands_on_either_side_of_the_flag():
+    """git permutes options, so `git diff /etc/shadow --no-index /dev/null` reads /etc/shadow."""
+    assert _targets("git diff /etc/shadow --no-index /dev/null") == ("/etc/shadow", "/dev/null")
