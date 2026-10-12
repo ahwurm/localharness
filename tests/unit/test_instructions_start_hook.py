@@ -8,12 +8,17 @@ top call the module helpers directly.
 """
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
+
+import yaml
+from rich.console import Console
 
 from localharness.cli import start_cmd
 from localharness.config import trust
 from localharness.config.project_records import read_instructions
 from tests.unit.test_workspace_state_landing import (
+    AGENT,
     _drive,
     _install_recorders,
     _one,
@@ -197,3 +202,248 @@ def test_the_store_is_untouched_by_building_the_handle(tmp_path, monkeypatch, fa
     """read_instructions is importable from here and a fresh root has no record."""
     _home, _g, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     assert read_instructions(_project(ws)) is None
+
+
+# ------------------------------------------------------------------ the drive: wiring (Task 2)
+
+def _tty(monkeypatch) -> StringIO:
+    """A person at a terminal: stdin is a tty and the start console is a terminal."""
+    import localharness.cli.workspace as ws_mod
+
+    monkeypatch.setattr(ws_mod, "_stdin_is_a_terminal", lambda: True)
+    buf = StringIO()
+    monkeypatch.setattr(
+        start_cmd, "console", Console(file=buf, force_terminal=True, width=400, color_system=None))
+    return buf
+
+
+def _record_terminals(monkeypatch) -> list:
+    """Keep each TerminalChannel the drive builds (the REPL is stubbed, so nothing reads it)."""
+    import localharness.channels.terminal as term
+
+    made: list = []
+    real = term.TerminalChannel.__init__
+
+    def _init(self, *a, **kw):
+        made.append(self)
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(term.TerminalChannel, "__init__", _init)
+    return made
+
+
+def _trusted_project(tmp_path, monkeypatch, fake_home, text: str = CLAUDE):
+    _home, _g, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
+    proj = _project(ws)
+    _put_instructions(proj, text)
+    trust.record_trust(proj, True)
+    return proj, ws
+
+
+def _recorded(proj):
+    return read_instructions(proj.resolve())
+
+
+async def _read_bubble(channel) -> str:
+    """Consume the channel's first hint the way the REPL does: one input bubble, app faked."""
+    from localharness.channels import terminal as term_mod
+
+    seen: list[str] = []
+
+    class _FakeApp:
+        async def run_async(self):
+            return "typed"
+
+    def _fake_build(history, prompt, hint, context_pct=None, model_names_fn=None, **_kw):
+        seen.append(hint)
+        return _FakeApp()
+
+    real = term_mod._build_input_app
+    term_mod._build_input_app = _fake_build
+    try:
+        await channel.start()
+        await channel.read_input()
+        await channel.stop()
+    finally:
+        term_mod._build_input_app = real
+    return seen[0]
+
+
+async def test_a_first_run_hint_carries_the_line_and_the_bubble_writes_the_yes_record(
+        tmp_path, monkeypatch, fake_home):
+    proj, _ws = _trusted_project(tmp_path, monkeypatch, fake_home)
+    _tty(monkeypatch)
+    made = _record_terminals(monkeypatch)
+    rec = _install_recorders(monkeypatch)
+
+    await _drive()
+
+    handle = _handle_of(rec)
+    (channel,) = made
+    line = handle.start_line
+    assert line and line.startswith("Using CLAUDE.md (") and line.endswith("; /instructions off")
+    assert channel.instructions_hint == line
+    assert channel.instructions_on_delivered == handle.on_delivered
+    assert channel.first_prompt_hint == "Describe a task, or /help for commands. · " + line
+    assert _recorded(proj) is None  # nothing is written before the bubble shows the line
+
+    shown = await _read_bubble(channel)
+
+    assert line in shown
+    record = _recorded(proj)
+    assert record is not None and record.state == "yes"
+
+
+async def test_a_returning_start_replaces_the_default_hint_with_the_line(
+        tmp_path, monkeypatch, fake_home):
+    proj, _ws = _trusted_project(tmp_path, monkeypatch, fake_home)
+    _tty(monkeypatch)
+    made = _record_terminals(monkeypatch)
+    rec = _install_recorders(monkeypatch)
+    monkeypatch.setattr("localharness.cli.start_cmd._first_prompt_hint",
+                        lambda is_returning: "/help for commands.")
+
+    await _drive()
+
+    (channel,) = made
+    assert channel.first_prompt_hint == _handle_of(rec).start_line
+
+
+async def test_a_resumed_start_still_sets_the_hint_and_the_binding(
+        tmp_path, monkeypatch, fake_home):
+    from localharness.cli.start_cmd import _start_async
+    from localharness.cli.session_resume import Resume
+
+    proj, _ws = _trusted_project(tmp_path, monkeypatch, fake_home)
+    _tty(monkeypatch)
+    made = _record_terminals(monkeypatch)
+    rec = _install_recorders(monkeypatch)
+    resume = Resume(
+        action=("enable", "example"), agent_name=AGENT, conversation=(), prior_context="",
+        eviction_store=None, queued=(), gate_mode="auto", previous_sitting_id="old",
+    )
+
+    await _start_async(None, False, False, None, resume=resume)
+
+    handle = _handle_of(rec)
+    (channel,) = made
+    assert channel.instructions_hint == handle.start_line
+    assert channel.first_prompt_hint == handle.start_line
+    assert channel.instructions_on_delivered == handle.on_delivered
+
+
+async def test_no_input_sets_no_hint_and_writes_no_record(tmp_path, monkeypatch, fake_home):
+    from localharness.cli.start_cmd import _start_async
+
+    proj, _ws = _trusted_project(tmp_path, monkeypatch, fake_home)
+    _tty(monkeypatch)
+    made = _record_terminals(monkeypatch)
+    rec = _install_recorders(monkeypatch)
+
+    await _start_async(None, False, False, None, no_input=True)
+
+    handle = _handle_of(rec)
+    (channel,) = made
+    assert handle is not None and handle._no_input is True
+    assert channel.instructions_hint == ""
+    assert "CLAUDE.md" not in channel.first_prompt_hint
+    assert _recorded(proj) is None
+
+
+async def test_piped_stdin_sets_no_hint_and_writes_no_record(tmp_path, monkeypatch, fake_home):
+    proj, _ws = _trusted_project(tmp_path, monkeypatch, fake_home)
+    made = _record_terminals(monkeypatch)
+    rec = _install_recorders(monkeypatch)
+
+    await _drive()  # no tty: pytest's stdin is not a terminal
+
+    (channel,) = made
+    assert _handle_of(rec) is not None
+    assert channel.instructions_hint == "" and channel.first_prompt_hint == ""
+    assert _recorded(proj) is None
+
+
+async def test_the_runner_and_the_repl_hold_the_same_handle(tmp_path, monkeypatch, fake_home):
+    _trusted_project(tmp_path, monkeypatch, fake_home)
+    rec = _install_recorders(monkeypatch)
+
+    await _drive()
+
+    handle = _handle_of(rec)
+    assert handle is not None
+    assert _one(rec, "runner")["project_instructions"] is handle
+    assert _one(rec, "repl")["instructions"] is handle
+
+
+async def test_children_false_takes_the_handle_from_the_runner_only(
+        tmp_path, monkeypatch, fake_home):
+    _home, g, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
+    proj = _project(ws)
+    _put_instructions(proj)
+    trust.record_trust(proj, True)
+    cfg = g / "config.yaml"
+    data = yaml.safe_load(cfg.read_text()) or {}
+    data["instructions"] = {"children": False}
+    cfg.write_text(yaml.safe_dump(data))
+    rec = _install_recorders(monkeypatch)
+
+    await _drive()
+
+    handle = _handle_of(rec)
+    assert handle is not None
+    assert _one(rec, "runner")["project_instructions"] is None
+    assert _one(rec, "repl")["instructions"] is handle
+
+
+async def test_a_declined_root_hands_nothing_to_the_runner_the_repl_or_the_channel(
+        tmp_path, monkeypatch, fake_home):
+    proj, _ws = _trusted_project(tmp_path, monkeypatch, fake_home)
+    trust.record_trust(proj, False)
+    _tty(monkeypatch)
+    made = _record_terminals(monkeypatch)
+    rec = _install_recorders(monkeypatch)
+
+    await _drive()
+
+    assert _handle_of(rec) is None
+    assert _one(rec, "runner")["project_instructions"] is None
+    assert _one(rec, "repl")["instructions"] is None
+    (channel,) = made
+    assert channel.instructions_on_delivered is None and channel.instructions_hint == ""
+    assert _recorded(proj) is None
+
+
+async def test_acp_hands_the_handle_to_the_trust_question_and_to_serve(
+        tmp_path, monkeypatch, fake_home):
+    from localharness.cli.start_cmd import _start_async
+
+    proj, _ws = _trusted_project(tmp_path, monkeypatch, fake_home)
+    rec = _install_recorders(monkeypatch)
+    trust_kw: dict = {}
+    serve_kw: dict = {}
+
+    async def _fake_trust(gate, notice=None, **kw):
+        trust_kw.update(kw)
+        return "auto"
+
+    monkeypatch.setattr("localharness.cli.session_trust.establish_session_trust", _fake_trust)
+
+    class _Acp:
+        instructions_on_delivered = None
+
+        async def serve(self, **kw):
+            serve_kw.update(kw)
+
+        def __getattr__(self, name):
+            raise AttributeError(name)
+
+    acp = _Acp()
+    await _start_async(None, False, False, None, channel_mode="acp", no_input=True,
+                       acp_channel=acp)
+
+    handle = _handle_of(rec)
+    assert handle is not None
+    assert handle._no_input is False  # ACP's internal no_input is not the CLI flag (D-06)
+    assert trust_kw["instructions"] is handle
+    assert serve_kw["instructions"] is handle
+    assert acp.instructions_on_delivered == handle.on_delivered

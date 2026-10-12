@@ -2528,6 +2528,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         server_recovery_fn = _server_recovery_supplier(repl_cell)
         _run_agent = make_explore_agent_runner(
             llm=llm,
+            # D-51: children get the instructions too unless the machine opted out
+            # (`instructions.children`, machine-only); the loop keeps the handle either way.
+            project_instructions=(instructions_handle if harness.instructions.children else None),
             bus=bus,
             base_registry=tool_registry,
             permission_evaluator=perm_eval,
@@ -2713,6 +2716,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             console.print(Text(RESTARTED_LINE.format(
                 name=resume.action[1], state="on" if resume.action[0] == "enable" else "off")),
                 soft_wrap=True)
+        if instructions_handle is not None and hasattr(channel, "instructions_on_delivered"):
+            # D-47: delivery is the receipt. The channel calls this once its own checked send / hint
+            # / attached client has happened; a channel that never calls it writes no record.
+            channel.instructions_on_delivered = instructions_handle.on_delivered
+            if (can_ask and isinstance(channel, TerminalChannel)
+                    and instructions_handle.start_line):
+                # D-06 / D-64: only a person at a tty (no --no-input) can read the line; piped stdin
+                # sets no hint, so no receipt reaches the handle and no record is written.
+                channel.instructions_hint = instructions_handle.start_line
+                channel.first_prompt_hint = _hint_with_instructions(
+                    channel.first_prompt_hint, instructions_handle.start_line)
         if hasattr(channel, "tps_source"):
             # The instrument cluster. Colored tok/s readout (status row / thinking label): poll
             # the client's live decode-speed snapshot. The client object survives /model rebinds,
@@ -2872,7 +2886,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             from localharness.cli.session_trust import establish_session_trust
 
             try:
-                await establish_session_trust(gate, lambda text: console.print(f"[dim]{text}[/dim]"))
+                await establish_session_trust(
+                    gate, lambda text: console.print(f"[dim]{text}[/dim]"),
+                    instructions=instructions_handle,
+                )
             except Exception:  # noqa: BLE001 — a broken trust store costs a notice, not the session
                 log.warning("could not settle workspace trust", exc_info=True)
             # Co-author consent (spec 14): settle once per project + install the hook.
@@ -2887,7 +2904,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # directly on this loop, so there is no line to pull and no REPL. `serve()` returns
             # when the connection closes, and the ordered teardown in `finally` runs unchanged.
             await acp_channel.serve(
-                bus=bus, agent_loop=agent_loop, gate=gate, tool_registry=tool_registry
+                bus=bus, agent_loop=agent_loop, gate=gate, tool_registry=tool_registry,
+                instructions=instructions_handle,
             )
             return
 
@@ -2907,6 +2925,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             harness_config=harness,
             on_agent_deployed=_register_deployed_agent,
             gate=gate,  # what /mode switches; the same object the loop and subagents hold
+            instructions=instructions_handle,  # /instructions and the session-trust pass-through
             # /mcp: the live MCPClientManager so list-status / hot-add / hot-remove reach it.
             # None when no MCP server is configured (the command degrades to config-only).
             mcp_manager=mcp_manager,
