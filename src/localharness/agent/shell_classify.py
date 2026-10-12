@@ -56,6 +56,7 @@ from .gate_types import (
     ENV_REDIRECT_EXCLUDED,
     GateSettings,
     ShellClassification,
+    UNPARSED_SHELL_SIGNATURE,
     ShellSegment,
 )
 
@@ -718,9 +719,152 @@ def classify_shell(command: str, settings: GateSettings) -> ShellClassification:
     return ShellClassification(segments=tuple(segments), dropped=tuple(dropped))
 
 
-COMMENT_WORD_STARTS = frozenset(";&|()")
-"""A ``#`` opens a comment when the character before it is whitespace or one of these (or it is the
-start of the text); ``$#``, ``${#x}``, ``a#b`` and ``16#ff`` are not comments."""
+COMMENT_WORD_STARTS = frozenset(";&|(")
+"""Besides a blank (space, tab, newline — bash's own, never ``str.isspace()``) these are the characters
+after which a ``#`` opens a comment (CR-01 / CR-02 / CR-51). ``)`` is NOT one: it closes ``$(…)``,
+``<(…)`` and ``x=(…)``, where the word goes on, and the classifier does not tell that from a bare
+group. ``<`` and ``>`` are not either. A ``#`` that is judged not to start a comment is only ever
+over-read as text, which fails toward asking; a ``#`` wrongly judged to start one hides the rest of
+the line. ``$#``, ``${#x}``, ``a#b`` and ``16#ff`` are not comments."""
+
+BASH_BLANKS = " \t\n"
+
+_JOIN_TOP, _JOIN_PAREN, _JOIN_ARITH, _JOIN_BACKTICK, _JOIN_PARAM, _JOIN_FUNSUB = range(6)
+"""The contexts :class:`_JoinScan` tells apart: the command text itself; a ``$(…)`` / ``<(…)`` / ``>(…)``
+body; a ``$((…))`` body; a backtick body; a ``${…}`` parameter expansion; a bash 5.3 ``${ cmd; }`` /
+``${| cmd; }`` body. Each is a fresh shell context with its own quote, comment and continuation state."""
+
+_JOIN_CLOSERS = {
+    _JOIN_PAREN: ")", _JOIN_ARITH: ")", _JOIN_BACKTICK: "`", _JOIN_PARAM: "}", _JOIN_FUNSUB: "}",
+}
+
+
+class _JoinScan:
+    """One recursive pass over the command text: continuations dropped, comments stripped.
+
+    ``balanced`` ends False when a quote, a backtick, a ``$(``, a ``${`` is still open at the end of its
+    context. Bash refuses such a line, so nothing the text names would run; the classifier cannot trust
+    its own reading of it either, and :func:`_join_continuations` says so (CR-54 / WR-01).
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.index = 0
+        self.balanced = True
+
+    def scan(self, kind: int) -> tuple[str, bool]:
+        """Scan one context from ``self.index``; returns (its text, whether its closer was met).
+
+        The closer itself is consumed but not included. Comments are recognised in the command text and
+        in ``$(…)``, backtick and funsub bodies only: never in a parameter expansion or arithmetic,
+        where ``#`` is an operator.
+        """
+        text, size = self.text, len(self.text)
+        out: list[str] = []
+        quote = ""
+        word_start = True  # judged on the JOINED text: `a\\` newline `#b` is the word `a#b`
+        nested = 0  # `(` open inside a $( body, or `{` open inside a funsub body
+        comments = kind in (_JOIN_TOP, _JOIN_PAREN, _JOIN_BACKTICK, _JOIN_FUNSUB)
+        while self.index < size:
+            index = self.index
+            char = text[index]
+            if quote == "'":
+                out.append(char)
+                self.index += 1
+                quote = "" if char == "'" else quote
+                continue
+            if char == "\\":
+                if text[index + 1 : index + 2] != "\n":
+                    out.append(text[index : index + 2])
+                    word_start = False
+                self.index += 2  # backslash-newline is dropped, in double quotes too
+                continue
+            if char == "`":
+                if quote == "" and kind == _JOIN_BACKTICK:
+                    self.index += 1
+                    return "".join(out), True
+                out.append(char)
+                self.index += 1
+                self._nested(out, _JOIN_BACKTICK)
+                word_start = False
+                continue
+            if char == "$":
+                following = text[index + 1 : index + 2]
+                if following == "(":
+                    inner = _JOIN_ARITH if text[index + 2 : index + 3] == "(" else _JOIN_PAREN
+                    out.append("$(")
+                    self.index += 2
+                    self._nested(out, inner)
+                    word_start = False
+                    continue
+                if following == "{":
+                    after = text[index + 2 : index + 3]
+                    inner = _JOIN_FUNSUB if after and after in " \t\n|" else _JOIN_PARAM
+                    out.append("${")
+                    self.index += 2
+                    self._nested(out, inner)
+                    word_start = False
+                    continue
+            if quote == '"':
+                out.append(char)
+                self.index += 1
+                quote = "" if char == '"' else quote
+                continue
+            if char in "'\"":
+                quote = char
+                out.append(char)
+                self.index += 1
+                word_start = False
+                continue
+            if char in "<>" and text[index + 1 : index + 2] == "(":
+                out.append(char + "(")
+                self.index += 2
+                self._nested(out, _JOIN_PAREN)
+                word_start = False
+                continue
+            if kind in (_JOIN_PAREN, _JOIN_ARITH) and char in "()":
+                if char == "(":
+                    nested += 1
+                elif nested:
+                    nested -= 1
+                else:
+                    self.index += 1
+                    return "".join(out), True
+            elif kind == _JOIN_PARAM and char == "}":
+                self.index += 1
+                return "".join(out), True
+            elif kind == _JOIN_FUNSUB:
+                if char == "}" and not nested:
+                    self.index += 1
+                    return "".join(out), True
+                if char == "{" and word_start and text[index + 1 : index + 2] in (" ", "\t", "\n"):
+                    nested += 1
+                elif char == "}":
+                    nested -= 1
+            if char == "#" and comments and word_start:
+                end = index
+                while end < size and text[end] != "\n":
+                    if kind == _JOIN_BACKTICK and text[end] == "`":
+                        break
+                    escaped = text[end] == "\\" and text[end + 1 : end + 2] not in ("", "\n")
+                    end += 2 if escaped else 1
+                self.index = end
+                continue
+            out.append(char)
+            self.index += 1
+            word_start = char in BASH_BLANKS or char in COMMENT_WORD_STARTS
+        if quote:
+            self.balanced = False
+        return "".join(out), False
+
+    def _nested(self, out: list[str], kind: int) -> None:
+        """Scan a nested context and append its text and closer to ``out``."""
+        body, closed = self.scan(kind)
+        out.append(body)
+        if closed:
+            out.append(_JOIN_CLOSERS[kind])
+        else:
+            self.balanced = False
 
 
 def _join_continuations(text: str) -> str:
@@ -736,48 +880,23 @@ def _join_continuations(text: str) -> str:
     line and no further, so ``ls # c\\`` newline ``rm x`` runs ``rm x`` and ``ls # don't`` newline
     ``rm x`` does too. The comment text is dropped here, in the same pass that tracks quotes, so an
     apostrophe, a bracket or a trailing backslash in it can neither swallow the next line nor open a
-    quote the splitter would carry to the end of the text. The newline is kept. A ``#`` inside quotes,
-    escaped, or inside ``${ … }`` is not a comment.
+    quote the splitter would carry to the end of the text. The newline is kept.
+
+    The stripper must never HIDE a command, so it errs toward keeping text (CR-01 / CR-02 / CR-51): a
+    ``#`` opens a comment only after bash's own blanks (space, tab, newline), ``;``, ``&``, ``|`` or
+    ``(``, never after ``)``, and never inside quotes, ``${ … }``, ``$(( … ))`` or after a character
+    ``str.isspace()`` calls a space and bash does not (NBSP, CR, VT). ``$( … )`` and backtick bodies
+    are scanned as contexts of their own, also inside double quotes (CR-03, CR-51): a comment there
+    ends at the newline, or at the closing backtick.
+
+    When a quote or substitution never closes, the text cannot be trusted to split where bash splits
+    it, and the result leads with :data:`UNPARSED_SHELL_SIGNATURE` as a command of its own.
     """
-    out: list[str] = []
-    quote = ""
-    braces = 0  # depth of ${ ... }, where "#" is a pattern operator
-    word_start = True  # judged on the JOINED text: `a\\` newline `#b` is the word `a#b`, not a comment
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if quote == "'":
-            quote = "" if char == "'" else quote
-            word_start = False
-        elif char == "\\" and index + 1 < len(text):
-            if text[index + 1] != "\n":
-                out.append(text[index : index + 2])
-                word_start = False
-            index += 2
-            continue
-        elif char in "'\"":
-            quote = "" if quote == char else (quote or char)
-            word_start = False
-        elif quote:
-            word_start = False
-        elif char == "$" and text[index + 1 : index + 2] == "{":
-            braces += 1
-            out.append("${")
-            word_start = False
-            index += 2
-            continue
-        elif char == "}" and braces:
-            braces -= 1
-            word_start = False
-        elif char == "#" and word_start and not braces:
-            while index < len(text) and text[index] != "\n":
-                index += 1
-            continue
-        else:
-            word_start = char.isspace() or char in COMMENT_WORD_STARTS
-        out.append(char)
-        index += 1
-    return "".join(out)
+    scan = _JoinScan(text)
+    joined, _ = scan.scan(_JOIN_TOP)
+    if scan.balanced:
+        return joined
+    return f"{UNPARSED_SHELL_SIGNATURE}\n{joined}"
 
 
 # ------------------------------------------------------- working directory (finding R2a)
@@ -1594,6 +1713,7 @@ def _make_segment(
     # `rm -rf` says nothing about plain `rm`, which is the point of critic finding 12.
     destructive = (
         force_destructive
+        or signature == UNPARSED_SHELL_SIGNATURE
         or signature in settings.destructive_signatures
         or signature.split(" ", 1)[0] in settings.destructive_signatures
         or _dotted_variant(signature.split(" ", 1)[0]) in settings.destructive_signatures

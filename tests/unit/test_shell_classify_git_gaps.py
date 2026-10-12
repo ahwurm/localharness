@@ -292,3 +292,90 @@ def test_comment_stripping_leaves_non_comments_alone(command, joined):
     from localharness.agent.shell_classify import _join_continuations
 
     assert _join_continuations(command) == joined
+
+
+# ------------------------------------------------------------------ invented comments (CR-01, CR-02, CR-51, CR-03; iteration 2)
+
+NOT_A_COMMENT_ROWS = (
+    "echo $(true)#c ; rm -rf /etc/x",
+    "echo $((1))#c ; rm -rf /etc/x",
+    "cat <(true)#c ; rm -rf /etc/x",
+    "x=(a b)#c; rm -rf /etc/x",
+    "echo $(ls)#x; rm -rf /etc/x",
+    "echo a #c ; rm -rf /etc/x",
+    "echo a #c ; rm -rf /etc/x",
+    "echo a\u0085#c ; rm -rf /etc/x",
+    "echo a\x1f#c ; rm -rf /etc/x",
+    "echo a\x0b#c ; rm -rf /etc/x",
+    "echo a\x0c#c ; rm -rf /etc/x",
+    "echo a\r#c ; rm -rf /etc/x",
+    "echo `ls # c` ; rm -rf /etc/x",
+    "echo `ls # c`#d ; rm -rf /etc/x",
+)
+"""A ``#`` that bash does not read as a comment: the stripper used to drop it and the rest of the line,
+`; rm -rf /etc/x` included. Each has the verdict of the same command with the comment removed."""
+
+
+@pytest.mark.parametrize("command", NOT_A_COMMENT_ROWS)
+def test_an_invented_comment_never_hides_the_command_after_it(command):
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+@pytest.mark.parametrize("command", NOT_A_COMMENT_ROWS)
+def test_an_invented_comment_row_is_not_allowed(command, mode, ws):
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+QUOTED_SUBSTITUTION_COMMENT_ROWS = (
+    'echo "$(echo a # c\\\nrm -rf /etc/x)"',
+    'echo "$(echo a # don\'t\nrm -rf /etc/x)"',
+    'echo "$(echo a # c\nrm -rf /etc/x)"',
+    "echo $(echo a # don't\nrm -rf /etc/x)",
+    "echo `echo a # c\nrm -rf /etc/x`",
+)
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+@pytest.mark.parametrize("command", QUOTED_SUBSTITUTION_COMMENT_ROWS)
+def test_a_comment_inside_a_substitution_never_hides_its_next_line(command, mode, ws):
+    """A `$(...)` is a shell of its own, also inside double quotes: its comment ends at the newline."""
+    assert any(s.signature == "rm -rf" for s in _segments(command)), command
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command,joined", [
+    ("echo $(true)#c", "echo $(true)#c"),
+    ("echo $((1))#c ; ls", "echo $((1))#c ; ls"),
+    ("echo a #c ; ls", "echo a #c ; ls"),
+    ("echo a\r#c ; ls", "echo a\r#c ; ls"),
+    ("(ls)#c\nrm x", "(ls)#c\nrm x"),
+    ("(ls) #c\nrm x", "(ls) \nrm x"),
+    ("(#c\nls)", "(\nls)"),
+    ("echo `ls # c` x", "echo `ls ` x"),
+    ("echo `ls #c\nls` x", "echo `ls \nls` x"),
+    ("echo $(ls # c\nrm x)", "echo $(ls \nrm x)"),
+    ('echo "$(ls # c\nrm x)"', 'echo "$(ls \nrm x)"'),
+    ('echo "$(ls # c\\\nrm x)"', 'echo "$(ls \nrm x)"'),
+    ("echo ${x:-a # b} ; ls", "echo ${x:-a # b} ; ls"),
+    ("echo $((a # b)) ; ls", "echo $((a # b)) ; ls"),
+    ("echo 'a\nb # c'", "echo 'a\nb # c'"),
+])
+def test_comment_stripping_follows_bashs_own_word_starts(command, joined):
+    from localharness.agent.shell_classify import _join_continuations
+
+    assert _join_continuations(command) == joined
+
+
+@pytest.mark.parametrize("command", [
+    "echo it's ; rm -rf /etc/x",
+    "echo 'unterminated",
+    'echo "unterminated ; rm -rf /etc/x',
+    "echo $(ls ; rm -rf /etc/x",
+    "echo `ls ; rm -rf /etc/x",
+    "echo ${x:-a ; rm -rf /etc/x",
+])
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+def test_text_whose_quoting_does_not_balance_is_never_silent(command, mode, ws):
+    """Bash refuses it, and the classifier cannot trust where its commands begin: ask in every mode."""
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
