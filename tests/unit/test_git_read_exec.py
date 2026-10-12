@@ -684,6 +684,30 @@ async def test_missing_blobs_are_never_fetched(base, scripts, kwargs):
     assert not marker.exists()
 
 
+# ----------------------------------------------------------------------------- core.sshCommand
+
+def _arm_ssh_command(repo: Path, script: Path) -> None:
+    git(repo, "config", "core.sshCommand", str(script))
+    git(repo, "remote", "add", "origin", "ssh://example.invalid/repo.git")
+
+
+@requires_git
+async def test_control_ssh_command_runs_under_bare_git(armed, scripts):
+    script, marker = marker_script(scripts, "ssh")
+    _arm_ssh_command(armed, script)
+    git(armed, "fetch", "origin", check=False)
+    assert _fires(marker), "control: the fixture must arm the vector under bare git"
+
+
+@requires_git
+@pytest.mark.parametrize("kwargs", TOOL_READS)
+async def test_ssh_command_in_the_repo_config_never_runs(armed, scripts, kwargs):
+    """A repo-config `core.sshCommand` runs on a network transport; a git_read call never opens one."""
+    script, marker = marker_script(scripts, "ssh")
+    _arm_ssh_command(armed, script)
+    await _tool_leaves_absent(armed, marker, kwargs)
+
+
 # --------------------------------------------------------------------------------- submodule filters
 
 @requires_git
