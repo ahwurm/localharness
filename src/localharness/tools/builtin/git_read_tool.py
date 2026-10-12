@@ -10,17 +10,22 @@ Two layers make a read-only `git` safe to hand to a critic that may be prompt-in
   the fsmonitor, pager, hooks and signature programs, every verb turns off external diff and textconv
   drivers, and the environment is built from scratch rather than inherited.
 
-This module imports nothing from `agent/`; the tool class, its streaming read and the clean-filter
-precheck live in later plans.
+This module imports nothing from `agent/`. `GitReadTool` (the declaration, the per-call pin check and
+the streaming read) lives at the end of the module; the clean-filter precheck is a later plan.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import shutil
+import signal
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from localharness.tools.base import Tool, ToolResult, ToolSchema
 
 # D-04 / D-44: the one argv prefix every git call this module makes starts with. `--no-lazy-fetch`
 # follows `--no-pager` so a git too old to know it exits 129 (the git_version pin) instead of
@@ -342,3 +347,202 @@ def git_read_pin_failure(root: Path) -> GitReadPinFailure | None:
 def git_read_repository_present(root: Path) -> bool:
     """D-13: is there a `.git` (directory, file or dangling link) at the root or any parent? No git runs."""
     return any(os.path.lexists(d / ".git") for d in [root, *root.parents])
+
+
+# ---------------------------------------------------------------------------------------------- tool
+
+# Pitfall 2: asyncio's default StreamReader limit is 64 KiB; one minified line past it would raise in
+# readline. 8 MiB holds any line a 4000-line cap could usefully carry.
+READ_STREAM_LIMIT = 8 * 1024 * 1024
+
+# D-36: the line appended to a read cut at max_lines, verbatim.
+TRUNCATED_LINE = "[git_read: truncated at {max_lines} lines]"
+
+NO_OUTPUT = "(no output)"
+
+
+async def _reap(proc: asyncio.subprocess.Process) -> None:
+    """Kill a still-running child (and its session on POSIX) and reap it, on EVERY exit path.
+
+    Same shape as bash_tool's `_kill_and_reap`: kill is a synchronous signal, the wait is shielded so a
+    cancellation unwinding through a `finally` cannot abandon the reap, and its CancelledError is
+    suppressed so the original cancellation keeps propagating.
+    """
+    if proc.returncode is not None:
+        return
+    if os.name != "nt":
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    with contextlib.suppress(asyncio.CancelledError, ProcessLookupError):
+        await asyncio.shield(proc.wait())
+
+
+async def _drain_stderr(stream: asyncio.StreamReader | None) -> str:
+    """Read stderr to EOF (an undrained pipe blocks git, Pitfall 3) and keep its first STDERR_CAP_CHARS."""
+    if stream is None:
+        return ""
+    kept = bytearray()
+    keep_bytes = STDERR_CAP_CHARS * 4  # a character is at most four utf-8 bytes
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            break
+        if len(kept) < keep_bytes:
+            kept.extend(chunk[: keep_bytes - len(kept)])
+    return bytes(kept).decode("utf-8", errors="replace")[:STDERR_CAP_CHARS]
+
+
+class GitReadTool(Tool):
+    """Read-only `git diff | show | log` of the workspace repository (D-01, D-17, D-64).
+
+    Constructing it runs nothing. `timeout_s` is 60 so the inner read timeout (30s) and the pins (5s
+    each) finish, and kill and reap their git, before `Tool.run`'s outer wait_for fires (Pitfall 1).
+    """
+
+    timeout_s: float = 60.0
+
+    def __init__(self, root: Path) -> None:
+        self._root = Path(os.path.realpath(root))
+
+    def info(self) -> ToolSchema:
+        # `ingest` is explicit: the default "untrusted" plus the root capability floor would deny the tool.
+        return ToolSchema(
+            name="git_read",
+            group="fs.read",
+            gate_family="allow", ingest="none", host="safe", result_origin="trusted",
+            description=(
+                "Read the git history of the workspace: diff, show or log. Read-only; it runs no "
+                "repository-configured command. Paths are relative to the workspace root."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "subcommand": {
+                        "type": "string",
+                        "enum": list(SUBCOMMANDS),
+                        "description": "Which read to run: diff, show or log.",
+                    },
+                    "revision": {
+                        "type": "string",
+                        "description": "A commit, branch, tag or range such as A..B or A...B.",
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Paths relative to the workspace root; pathspec magic such as "
+                        ":(glob) is allowed.",
+                    },
+                    "max_lines": {
+                        "type": "integer",
+                        "description": "Stop after this many output lines.",
+                        "default": DEFAULT_MAX_LINES,
+                        "minimum": 1,
+                        "maximum": MAX_LINES_LIMIT,
+                    },
+                    "stat": {
+                        "type": "boolean",
+                        "description": "A summary of changed files instead of the patch.",
+                        "default": False,
+                    },
+                    "cached": {
+                        "type": "boolean",
+                        "description": "diff only: the index against the revision or HEAD.",
+                        "default": False,
+                    },
+                },
+                "required": ["subcommand"],
+            },
+            destructive=False,
+            estimated_tokens=800,
+        )
+
+    async def _execute(
+        self,
+        subcommand: str,
+        revision: str | None = None,
+        paths: list[str] | None = None,
+        max_lines: int | None = None,
+        stat: bool = False,
+        cached: bool = False,
+    ) -> ToolResult:
+        # D-63: validate before any process exists.
+        try:
+            call = _validate_call(self._root, subcommand, revision, paths, max_lines, stat, cached)
+        except GitReadValidationError as exc:
+            return self.err(str(exc), error_type="validation_error")
+        # D-11: the layout may have changed since registration; re-run the one pin function every call.
+        failure = await asyncio.to_thread(git_read_pin_failure, self._root)
+        if failure is not None:
+            return self.err(failure.message(per_call=True), error_type="permission_denied")
+        argv = _read_argv(call, call.paths)
+        return await self._stream(argv, call.max_lines)
+
+    async def _stream(self, argv: list[str], max_lines: int, trailing: str | None = None) -> ToolResult:
+        """D-06 / D-36 / D-60 / D-61: run `argv`, stop at `max_lines`, enforce the timeout, reap always.
+
+        `trailing` is appended after the (possibly truncated) output; the clean-filter precheck passes it.
+        """
+        timeout = GIT_READ_TIMEOUT_SECONDS  # read at call time so a test can patch it
+        extra: dict[str, bool] = {} if os.name == "nt" else {"start_new_session": True}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(self._root),
+                env=_git_env(self._root),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=READ_STREAM_LIMIT,
+                **extra,
+            )
+        except OSError as exc:
+            return self.err(f"git could not be started: {exc.strerror or exc.__class__.__name__}")
+        stderr_task = asyncio.ensure_future(_drain_stderr(proc.stderr))
+
+        async def collect() -> tuple[bytes, bool, str]:
+            assert proc.stdout is not None
+            lines: list[bytes] = []
+            truncated = False
+            try:
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    if len(lines) >= max_lines:
+                        truncated = True
+                        break
+                    lines.append(line)
+            except ValueError:
+                # One line past READ_STREAM_LIMIT: stop here, as a truncation.
+                truncated = True
+            if truncated:
+                await _reap(proc)
+                return b"".join(lines), True, ""
+            await proc.wait()
+            return b"".join(lines), False, await stderr_task
+
+        try:
+            body, truncated, stderr = await asyncio.wait_for(collect(), timeout)
+        except asyncio.TimeoutError:
+            return self.err(f"git_read timed out after {GIT_READ_TIMEOUT_SECONDS}s", error_type="timeout_error")
+        finally:
+            await _reap(proc)
+            if not stderr_task.done():
+                stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
+
+        if not truncated and proc.returncode != 0:
+            return self.err(f"git exited with {proc.returncode}: {stderr}")
+        text = body.decode("utf-8", errors="replace")
+        if not text:
+            text = NO_OUTPUT
+        if truncated:
+            if not text.endswith("\n"):
+                text += "\n"
+            text += TRUNCATED_LINE.format(max_lines=max_lines)
+        if trailing:
+            text += ("" if text.endswith("\n") else "\n") + trailing
+        return self.ok(text, truncated=truncated)
