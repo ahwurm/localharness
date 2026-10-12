@@ -494,3 +494,82 @@ def test_literal_names_and_computed_values_keep_the_tier(command):
 @pytest.mark.parametrize("mode", ("read-only", "guarded"))
 def test_the_added_git_variables_are_no_longer_allowed_as_a_read(command, mode, ws):
     assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+# --------------------------------------------------------------------------- env options with a value (WR-02 / WR-52, iteration 2)
+
+ENV_VALUE_OPTION_SPELLINGS = [
+    "env -C /tmp rm -rf /etc/x",
+    "env -C/tmp rm -rf /etc/x",
+    "env --chdir /tmp rm -rf /etc/x",
+    "env --chdir=/tmp rm -rf /etc/x",
+    "env --chd /tmp rm -rf /etc/x",
+    "env -a foo rm -rf /etc/x",
+    "env --argv0 foo rm -rf /etc/x",
+    "env --argv0=foo rm -rf /etc/x",
+    "env -P /bin rm -rf /etc/x",
+    "env -u FOO rm -rf /etc/x",
+    "env --unset FOO rm -rf /etc/x",
+    "env --unset=FOO rm -rf /etc/x",
+    "env --un FOO rm -rf /etc/x",
+    "env -iC /tmp rm -rf /etc/x",
+    "env -i -C /tmp -u A -a b rm -rf /etc/x",
+    "env -C /tmp -S'rm -rf /etc/x'",
+    "env -C /tmp env -a x rm -rf /etc/x",
+]
+
+
+@pytest.mark.parametrize("command", ENV_VALUE_OPTION_SPELLINGS)
+def test_env_options_that_take_a_value_do_not_hide_the_command(command):
+    """The value is skipped by the peel; before, `-C /tmp` made the command `tmp`."""
+    (segment,) = _segments(command)
+    assert segment.signature == "rm -rf" and segment.destructive is True
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+@pytest.mark.parametrize("command", ENV_VALUE_OPTION_SPELLINGS)
+def test_an_env_value_option_row_is_not_allowed(command, mode, ws):
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+def test_env_chdir_moves_where_the_wrapped_command_writes(ws):
+    """`env -C /etc touch x` writes /etc/x, not the workspace's x; it stays in the wrapped command only."""
+    (segment,) = _segments("env -C /etc touch x")
+    assert segment.write_targets == ("/etc/x",)
+    assert _segments("env -C /etc touch x; touch y")[-1].write_targets == ("y",)
+    assert _segments("env -C $D touch x")[0].unresolvable_write is True
+    assert _verdict("env -C /etc touch x", ws, "guarded").verdict is Verdict.ASK
+
+
+@pytest.mark.parametrize("command,signature", [
+    ("env -u FOO ls", "ls"),
+    ("env -C . ls", "ls"),
+    ("env FOO=1 -u BAR ls", "ls"),
+    ("env -0 ls", "ls"),
+    ("env -v ls", "ls"),
+    ("env --debug ls", "ls"),
+])
+def test_env_value_options_leave_ordinary_reads_read_only(command, signature):
+    (segment,) = _segments(command)
+    assert segment.signature == signature and segment.read_only is True
+
+
+@pytest.mark.parametrize("command", [
+    "env -S'rm\\_-rf\\_/etc/x'",
+    "env -S 'rm\\_-rf\\_/etc/x'",
+    "env --split-string='rm\\_-rf\\_/etc/x'",
+])
+def test_env_split_string_reads_a_backslash_underscore_as_a_blank(command):
+    assert "rm -rf" in [s.signature for s in _segments(command)]
+
+
+@pytest.mark.parametrize("command", [
+    "env -S'rm\\c -rf /etc/x'",
+    "env -S 'rm ${X} -rf /etc/x'",
+    "env -S'rm\\n-rf /etc/x'",
+    "env -S'rm \\q'",
+    "env -S'rm -rf \\'",
+])
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+def test_env_split_string_with_an_escape_the_classifier_cannot_follow_asks_in_every_mode(command, mode, ws):
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
