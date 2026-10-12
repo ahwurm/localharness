@@ -153,3 +153,169 @@ def test_a_pin_failure_does_not_change_the_exit_code(tmp_path, monkeypatch, fake
     assert passing.stdout.count("issue(s) found") == failing.stdout.count("issue(s) found")
     n = lambda text: next(ln for ln in text.splitlines() if "issue(s) found" in ln)  # noqa: E731
     assert n(passing.stdout) == n(failing.stdout)
+
+
+# ------------------------------------------------------------------------------- Task 2
+
+
+def _real(path: Path) -> str:
+    return os.path.realpath(path)
+
+
+def _assert_one_fixed_row(out: str, expected: str) -> None:
+    """Exactly one git_read row, equal to the literal sentence, and none of git's own words."""
+    assert _row(out).endswith(expected), out
+    assert "fatal" not in out.lower(), out
+    assert "not a git repository" not in out.lower(), out
+
+
+@requires_git
+def test_a_workspace_layer_below_the_toplevel_names_the_workspace_root(tmp_path, monkeypatch, fake_home):
+    m = _machine(tmp_path, monkeypatch, fake_home)
+    repo = make_repo(m.home / "proj")
+    sub = repo / "sub"
+    (sub / ".localharness").mkdir(parents=True)
+    monkeypatch.chdir(sub)
+
+    out = _run().stdout
+
+    _assert_one_fixed_row(
+        out,
+        f"git_read not registered: the repository toplevel is not the workspace root ({_real(sub)!r})",
+    )
+
+
+@requires_git
+def test_a_narrowed_workspace_root_is_the_boundary_doctor_explains(tmp_path, monkeypatch, fake_home):
+    m = _machine(tmp_path, monkeypatch, fake_home)
+    repo = make_repo(m.home / "proj", {"README": "x\n", "pkg/mod.py": "y = 1\n"})
+    narrowed = repo / "pkg"
+    agents = m.global_dir / "agents"
+    agents.mkdir()
+    (agents / "orchestrator.yaml").write_text(
+        yaml.safe_dump({"name": "orchestrator", "role": "Test role",
+                        "permissions": {"workspace_root": str(narrowed)}}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(repo)
+
+    out = _run().stdout
+
+    assert "Config valid" in out, out
+    _assert_one_fixed_row(
+        out,
+        f"git_read not registered: the repository toplevel is not the workspace root ({_real(narrowed)!r})",
+    )
+
+
+@requires_git
+def test_a_symlinked_dot_git_to_an_outside_repository_names_the_git_dir(tmp_path, monkeypatch, fake_home):
+    m = _machine(tmp_path, monkeypatch, fake_home)
+    outside = make_repo(tmp_path / "outside")
+    proj = m.home / "proj"
+    proj.mkdir()
+    (proj / ".git").symlink_to(outside / ".git")
+    monkeypatch.chdir(proj)
+
+    out = _run().stdout
+
+    _assert_one_fixed_row(
+        out,
+        f"git_read not registered: the git directory is outside the workspace root ({_real(outside / '.git')!r})",
+    )
+
+
+@requires_git
+def test_a_symlinked_objects_directory_names_the_link_itself(tmp_path, monkeypatch, fake_home):
+    # D-71: the walk inside .git names the offending symlink, with the same git_dir wording.
+    m = _machine(tmp_path, monkeypatch, fake_home)
+    repo = make_repo(m.home / "proj")
+    outside = make_repo(tmp_path / "outside")
+    objects = repo / ".git" / "objects"
+    for child in sorted(objects.rglob("*"), reverse=True):
+        child.rmdir() if child.is_dir() else child.unlink()
+    objects.rmdir()
+    objects.symlink_to(outside / ".git" / "objects")
+    monkeypatch.chdir(repo)
+
+    out = _run().stdout
+
+    _assert_one_fixed_row(
+        out,
+        "git_read not registered: the git directory is outside the workspace root "
+        f"({os.path.join(_real(repo), '.git', 'objects')!r})",
+    )
+
+
+@requires_git
+def test_a_linked_worktree_names_the_git_dir(tmp_path, monkeypatch, fake_home):
+    # D-33: a linked worktree's git dir lives under the main repository, outside the worktree root.
+    m = _machine(tmp_path, monkeypatch, fake_home)
+    main = make_repo(m.home / "proj")
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", "-q", str(wt), "-b", "feature")
+    monkeypatch.chdir(wt)
+
+    out = _run().stdout
+
+    _assert_one_fixed_row(
+        out,
+        "git_read not registered: the git directory is outside the workspace root "
+        f"({os.path.join(_real(main), '.git', 'worktrees', 'wt')!r})",
+    )
+
+
+@requires_git
+def test_a_dubious_owner_prints_the_ownership_row(tmp_path, monkeypatch, fake_home):
+    # D-30: the tool's own ownership check, no safe.directory sensing; doctor names it.
+    m = _machine(tmp_path, monkeypatch, fake_home)
+    repo = make_repo(m.home / "proj")
+    monkeypatch.chdir(repo)
+    real_uid = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real_uid + 1)
+
+    out = _run().stdout
+
+    _assert_one_fixed_row(
+        out,
+        f"git_read not registered: {_real(repo)!r} is not owned by you (dubious ownership)",
+    )
+
+
+@requires_git
+def test_a_bracketed_folder_survives_rich_markup_in_the_alternates_row(tmp_path, monkeypatch, fake_home):
+    # rich silently DELETES `[old]` from an unescaped path; the whole message goes through escape().
+    m = _machine(tmp_path, monkeypatch, fake_home)
+    repo = make_repo(m.home / "[old] proj")
+    other = make_repo(tmp_path / "other")
+    alternates = repo / ".git" / "objects" / "info" / "alternates"
+    alternates.parent.mkdir(parents=True, exist_ok=True)
+    alternates.write_text(str(other / ".git" / "objects") + "\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+
+    out = _run().stdout
+
+    assert "[old] proj" in _row(out), out
+    _assert_one_fixed_row(
+        out,
+        "git_read not registered: the repository borrows objects from outside "
+        f"({os.path.join(_real(repo), '.git', 'objects', 'info', 'alternates')!r})",
+    )
+
+
+@requires_git
+def test_the_layer_report_fixture_with_an_empty_dot_git_prints_the_toplevel_row(tmp_path, monkeypatch, fake_home):
+    # The `_layout` of test_doctor_layer_report: an EMPTY proj/.git, cwd two levels down (D-66).
+    m = _machine(tmp_path, monkeypatch, fake_home)
+    proj = m.home / "proj"
+    (proj / ".git").mkdir(parents=True)
+    deep = proj / "src" / "pkg"
+    deep.mkdir(parents=True)
+    monkeypatch.chdir(deep)
+
+    out = _run().stdout
+
+    _assert_one_fixed_row(
+        out,
+        f"git_read not registered: the repository toplevel is not the workspace root ({_real(proj)!r})",
+    )

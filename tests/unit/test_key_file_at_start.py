@@ -283,6 +283,11 @@ async def _launch_call(tmp_path, monkeypatch, popen, key_path, provider_key="non
 
 def _doctor_text(tmp_path, monkeypatch, fake_home, key_path) -> str:
     from tests.unit.test_doctor_exposure_rows import _doctor
+    # The `popen` fixture replaces the process-wide subprocess.Popen with a recorder that starts
+    # nothing; doctor's git_read row (10-04) would run git through subprocess.run on top of it. This
+    # file grades the key-file rows, so the row is switched off (no repository found, no git run).
+    from localharness.tools.builtin import git_read_tool
+    monkeypatch.setattr(git_read_tool, "git_read_repository_present", lambda root: False)
     return _doctor(tmp_path, monkeypatch, fake_home, key="none",
                    server={**LLAMA_RECORD, "api_key_file": str(key_path)})
 
