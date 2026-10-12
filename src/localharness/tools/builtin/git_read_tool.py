@@ -110,6 +110,16 @@ def _git_env(root: Path) -> dict[str, str]:
     return env
 
 
+def _complete_characters(part: bytes) -> bytes:
+    """``part`` without a UTF-8 sequence the byte cut left unfinished at its end (IN-52 it4)."""
+    try:
+        part.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if exc.reason == "unexpected end of data":
+            return part[: exc.start]
+    return part
+
+
 def _run_git(root: Path, args: Sequence[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
     """D-06 / D-37: run `git <prefix> <args>` synchronously under the from-scratch environment.
 
@@ -717,7 +727,8 @@ class GitReadTool(Tool):
                     if len(line) > room:
                         cut = "bytes"
                         if room > 0:
-                            lines.append(line[:room])  # keep the part that fits, so a first long line is not lost
+                            # keep the part that fits, so a first long line is not lost, but not half a character
+                            lines.append(_complete_characters(line[:room]))
                         break
                     lines.append(line)
                     total += len(line)
