@@ -125,6 +125,40 @@ def test_a_function_nested_in_a_function_body_has_its_body_classified(ws, comman
     _check(command, "DENY/ASKU/ASKU", ws)
 
 
+# --------------------------------------------------------------------------- CR-51: glued redirections
+
+GLUED_REDIRECTION_HAZARDS = (
+    "cat </dev/null>~/.bashrc",
+    "cat <a>~/.bashrc",
+    "cat <a&>~/.bashrc",
+    "cat <<<x>~/.bashrc",
+    "echo x >a>~/.bashrc",
+    "echo x >> a>> ~/.bashrc",
+    "echo x 2>&1>~/.bashrc",
+    "echo x >&2>~/.bashrc",
+    "echo x >&2 3>&1>~/.bashrc",
+)
+
+
+@pytest.mark.parametrize("command", GLUED_REDIRECTION_HAZARDS)
+def test_a_redirect_operand_ends_at_the_next_operator(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("echo x 2>&1", "ok/ok/ok"),
+        ("echo x >&2", "ok/ok/ok"),
+        ("echo x >'a>b'", "DENY/ok/ok"),
+        ("cat <a >b", "DENY/ok/ok"),
+        ("make 2>&1 | tail -5", "DENY/ASK/ok"),
+    ),
+)
+def test_redirection_controls_keep_their_verdict(ws, command, expected):
+    _check(command, expected, ws)
+
+
 # --------------------------------------------------------------------------- WR-01: the depth guard
 
 NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")

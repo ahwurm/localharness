@@ -4689,7 +4689,9 @@ def _extract_redirections(text: str) -> tuple[str, list[str]]:
                 index += 1
             while index < len(text) and text[index] in " \t":
                 index += 1
-            word, index = _read_word(text, index)
+            # `<`, `>` and `&` are metacharacters: the operand ends at the next one, which starts the next
+            # redirection (`2>&1>~/.bashrc`, `<a>~/.bashrc`; CR-51 it5).
+            word, index = _read_word(text, index, REDIRECT_WORD_STOPS)
             # `N>&M`, `>&M`, `<&M`, `N>&-` move a file descriptor — no file is named, and the
             # operand (`1`, `-`) is not a command. `&>FILE` and `N>FILE` do name a file, and so
             # does `>&WORD` when WORD is not digits or `-`: bash reads it as `&>WORD` (CR-52 it4).
@@ -4706,6 +4708,9 @@ def _extract_redirections(text: str) -> tuple[str, list[str]]:
 FD_DUPLICATION_OPERAND_RE = re.compile(r"^(?:[0-9]+|-)-?$")
 """The operand of ``>&`` that duplicates, moves or closes a file descriptor (``2``, ``-``, ``2-``); any
 other word after ``>&`` is a file, written like ``&>WORD`` (CR-52 it4)."""
+
+REDIRECT_WORD_STOPS = frozenset("<>&")
+"""Metacharacters that end the operand of a redirection. ``;|()`` never reach the operand: the splitter took them."""
 
 HEREDOC_WORD_STOPS = frozenset(";&|<>()")
 """The characters that end a here-document delimiter or here-string operand besides a blank: the
