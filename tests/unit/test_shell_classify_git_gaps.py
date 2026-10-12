@@ -955,3 +955,92 @@ def test_an_ordinary_backtick_substitution_is_unchanged():
     assert [s.signature for s in _segments("echo `ls` `date`")] == ["ls", "date", "echo"]
     assert [s.signature for s in _segments("echo `echo \\`date\\``")] == ["date", "echo", "echo"]
     assert [s.signature for s in _segments("echo `echo a\\\\b \\$HOME`")] == ["echo", "echo"]
+
+
+# ------------------------------------------------------------------ case, time, timeout, coproc, trap (CR-05, WR-55; iteration 3)
+
+COMPOUND_AND_WRAPPER_ROWS = (
+    f"case x in a) {X};; esac",
+    f"case $f in *) {X} ;; esac",
+    f"case a in (a) {X} ;& b) true ;; esac",
+    f"case a in\na)\n  {X}\n  ;;\nesac",
+    f"case x in a) ls;; b|c) {X};; esac",
+    f"case x in a) ls;; *) {X}; esac",
+    f"case x in a) case y in b) {X};; esac;; esac",
+    f"if true; then case x in a) {X};; esac; fi",
+    f"echo $(case x in a) {X};; esac)",
+    f"( case x in a) {X};; esac )",
+    f"case $({X}) in a) ls;; esac",
+    f"time {{ {X}; }}",
+    f"time ( {X} )",
+    f"time -p {X}",
+    f"time -f %e {X}",
+    f"time -f '%e %M' {X}",
+    f"time -o /dev/null {X}",
+    f"time ! {X}",
+    f"time -p {{ {X}; }}",
+    f"coproc {X}",
+    f"coproc X {{ {X}; }}",
+    f"coproc {{ {X}; }}",
+    f"timeout -s KILL 5 {X}",
+    f"timeout -s KILL -k 1 5 {X}",
+    f"timeout --signal=KILL 5 {X}",
+    f"timeout --preserve-status --foreground 5 {X}",
+    f"timeout -k 1s 5 {X}",
+    f"trap '{X}' EXIT",
+    f"trap -- '{X}' INT TERM",
+    f"trap \"{X}\" 0",
+    f"then ( {X} )",
+    f"! {{ {X}; }}",
+)
+
+
+@pytest.mark.parametrize("mode", THREE_MODES)
+@pytest.mark.parametrize("command", COMPOUND_AND_WRAPPER_ROWS)
+def test_a_compound_command_or_wrapper_does_not_hide_its_body(command, mode, ws):
+    """Each row ran its `rm` in bash 5.3.9; `auto` allowed them all because the head word was unfamiliar."""
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command,expected", (
+    ("case $x in a) ls;; b|c) cat f;; *) echo hi;; esac", ["ls", "cat", "echo"]),
+    ("case x in\n a) ls ;;\n b) pwd\n ;;\nesac\nls", ["ls", "ls"]),
+    ("case x in a) case y in b) ls;; esac;; esac", ["ls"]),
+    ("if true; then case x in a) ls;; esac; fi", ["ls"]),
+    ("echo $(case x in a) ls;; esac) ok", ["ls", "echo"]),
+    ("case x in a) ls;; esac > out", ["ls", ":"]),
+    ("time ls", ["ls"]),
+    ("time -p ls -la", ["ls"]),
+    ("time -f %e ls", ["ls"]),
+    ("time -- ls", ["ls"]),
+    ("time { ls; }", ["ls"]),
+    ("timeout 30 ls", ["ls"]),
+    ("timeout -s KILL 5 ls", ["ls"]),
+    ("timeout --signal=KILL -k 1 5 ls", ["ls"]),
+    ("coproc ls", ["ls"]),
+    ("coproc X { ls; }", ["ls"]),
+    ("trap - EXIT", ["trap"]),
+    ("trap '' INT", ["trap"]),
+    ("trap -p", ["trap"]),
+    ("if true; then { ls; }; fi", ["ls"]),
+    ("while true; do { ls; }; done", ["ls"]),
+    ("! { ls; }", ["ls"]),
+    ("git log --grep case", ["git log"]),
+    ("echo $(git log --grep case)", ["git log", "echo"]),
+    ("echo case x in a) y", ["echo"]),
+))
+def test_ordinary_compound_commands_and_wrappers_classify_by_their_bodies(command, expected):
+    assert [s.signature for s in _segments(command)] == expected
+
+
+def test_a_trap_action_is_a_payload_and_its_host_is_not_read_only():
+    segments = _segments("trap 'rm -f $tmp' EXIT")
+    assert [s.signature for s in segments] == ["trap", "rm -f"]
+    assert not segments[0].read_only
+
+
+@pytest.mark.parametrize("command", ("case x in", "case x in a) ls", "case x", "case in a) ls;; esac"))
+def test_a_case_that_does_not_parse_fails_toward_asking(command, ws):
+    assert any(s.signature == UNPARSED_SHELL_SIGNATURE for s in _segments(command)), command
+    assert _verdict(command, ws, "auto").verdict is Verdict.ASK
