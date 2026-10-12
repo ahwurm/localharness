@@ -418,9 +418,16 @@ class Notice:
     text: str
 
 
-def notice_value(value: Any) -> str:
-    """``repr(value)`` cut to ``NOTICE_VALUE_MAX`` characters, the last replaced by ``…``."""
+def notice_value(value: Any, *, secret: bool = False) -> str:
+    """The fingerprint of a rejected value: ``repr(value)`` cut to ``NOTICE_VALUE_MAX`` characters,
+    the last replaced by ``…``.
+
+    With ``secret=True`` (the value sits at, or holds, a secret field) the repr is never kept: it
+    is a short digest, so a rotated value still reads as a different notice and prints again, but
+    the store holds no copy of the secret (WR-04, WR-52)."""
     text = repr(value)
+    if secret:
+        return "<secret " + hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12] + ">"
     if len(text) > NOTICE_VALUE_MAX:
         return text[: NOTICE_VALUE_MAX - 1] + "…"
     return text

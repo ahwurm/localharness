@@ -27,6 +27,8 @@ from localharness.config.project_records import (
     Notice,
     notice_value,
     read_notices,
+    replace_notices,
+    store_path,
 )
 from localharness.core.events import NarrowingNotice
 from localharness.tools.builtin import register_builtin_tools
@@ -659,3 +661,46 @@ async def test_a_built_in_overlay_note_is_in_the_first_start_and_not_told_at_dis
 def _one_runner(rec) -> dict:
     assert rec["runner"], "the runner was never built - the patch did not bite"
     return rec["runner"][-1]
+
+
+# ------------------------------------------------------------------ WR-04 / WR-52: no secret in the fingerprint
+
+SECRET_KEY = "sk-SECRET-1234567890"
+
+
+def test_a_rejected_api_key_is_a_digest_never_its_repr_and_still_changes_with_the_value(
+    tmp_path,
+):
+    first, _ = _layers(tmp_path / "a", ws_cfg={"provider": {"api_key": SECRET_KEY}})
+    second, _ = _layers(tmp_path / "b", ws_cfg={"provider": {"api_key": SECRET_KEY + "2"}})
+    third, _ = _layers(tmp_path / "c", ws_cfg={"provider": {"api_key": SECRET_KEY}})
+    for loader in (first, second, third):
+        loader.load_harness()
+
+    [a] = [n for n in first.notices if n.subject == "provider.api_key"]
+    [b] = [n for n in second.notices if n.subject == "provider.api_key"]
+    [c] = [n for n in third.notices if n.subject == "provider.api_key"]
+    assert SECRET_KEY not in a.value and SECRET_KEY not in a.text
+    assert a.value.startswith("<secret ") and a.value != b.value  # a rotated key prints again
+    assert a.value == c.value  # the same key does not
+
+    root = tmp_path / "root"
+    root.mkdir()
+    replace_notices(root, first.notices, config_dir=tmp_path / "cfg")
+    assert SECRET_KEY not in store_path(tmp_path / "cfg").read_text(encoding="utf-8")
+
+
+def test_a_whole_section_dropped_around_a_secret_is_a_digest_too():
+    from localharness.config.loader import _narrowing_notice
+
+    notice = _narrowing_notice("provider", "/x/config.yaml", {"api_key": SECRET_KEY}, "dropped")
+    assert SECRET_KEY not in notice.value and notice.value.startswith("<secret ")
+    plain = _narrowing_notice(KNOB, "/x/config.yaml", 5000, "dropped")
+    assert plain.value == "5000"
+
+
+def test_notice_value_secret_is_a_short_digest():
+    one = notice_value(SECRET_KEY, secret=True)
+    assert one == notice_value(SECRET_KEY, secret=True)
+    assert one != notice_value(SECRET_KEY + "x", secret=True)
+    assert SECRET_KEY not in one and len(one) < 40
