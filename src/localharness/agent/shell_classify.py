@@ -725,13 +725,16 @@ the line. ``$#``, ``${#x}``, ``a#b`` and ``16#ff`` are not comments."""
 
 BASH_BLANKS = " \t\n"
 
-COMMENT_HAZARD_CHARS = ";&|`"
+COMMENT_HAZARD_CHARS = ";&|`<>"
 COMMENT_HAZARD_OPENERS = ("$(", "<(", ">(")
+COMMENT_HAZARD_WORD_START = "-"
 """A dropped comment holding one of these could be hiding a command if the stripper judged a ``#`` a
 comment where bash did not (``[[ a =~ (a|#b) ]]; rm x``, ``shopt -s extglob`` then ``@(a|#b)``,
-``+(#) >(rm x)``). The command is then classified a second time with comments left in, and the
-dangerous segments of that reading are added (:func:`_classify_command_text`). A comment without them
-has nothing to hide."""
+``+(#) >(rm x)``). ``<`` and ``>`` are there because bash still runs a redirection after such a ``#``
+(``[[ a =~ (a|#b) ]] > ~/.bashrc``), and a word starting with ``-`` because it can be the carrier's own
+flag (``git log @(a|#b) --output ~/.bashrc``) (UF-1). The command is then classified a second time with
+comments left in, and the dangerous segments of that reading are added
+(:func:`_classify_command_text`). A comment without them has nothing to hide."""
 
 _JOIN_TOP, _JOIN_PAREN, _JOIN_ARITH, _JOIN_BACKTICK, _JOIN_PARAM, _JOIN_FUNSUB, _JOIN_BRACKET = range(7)
 """The contexts :class:`_JoinScan` tells apart: the command text itself; a ``$(…)`` / ``<(…)`` / ``>(…)``
@@ -1167,8 +1170,10 @@ class _JoinScan:
                     escaped = text[end] == "\\" and text[end + 1 : end + 2] not in ("", "\n")
                     end += 2 if escaped else 1
                 dropped = text[index:end]
-                if any(c in dropped for c in COMMENT_HAZARD_CHARS) or any(
-                    opener in dropped for opener in COMMENT_HAZARD_OPENERS
+                if (
+                    any(c in dropped for c in COMMENT_HAZARD_CHARS)
+                    or any(opener in dropped for opener in COMMENT_HAZARD_OPENERS)
+                    or any(word.startswith(COMMENT_HAZARD_WORD_START) for word in dropped.split())
                 ):
                     self.hazard = True
                 self.index = end
@@ -1355,7 +1360,8 @@ def _classify_command_text(
 
     The comment stripper must never be able to HIDE a command (T-10-16). It is made to follow bash
     closely, but a ``#`` is not a comment in every context (a ``[[ =~ ]]`` regex, an extglob group).
-    So when it dropped a comment holding ``;``, ``&``, ``|``, a backtick, ``$(``, ``<(`` or ``>(``, the
+    So when it dropped a comment holding ``;``, ``&``, ``|``, a backtick, ``<``, ``>``, ``$(`` or a word
+    that starts with ``-`` (a redirection or a flag bash still runs, UF-1), the
     text is also classified with every ``#`` kept, and the segments of that second reading that the
     first lacks are added — but only the ones that matter (destructive, writing, an inline program,
     a pipe into a shell, an environment redirect). In the second reading a real comment is text: its
