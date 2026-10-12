@@ -348,12 +348,35 @@ async def test_explicit_tools_add_holds_git_read_when_the_session_registered_it(
 
 
 async def test_explicit_tools_add_over_a_registry_without_git_read_holds_nothing(mock_llm_client, bus):
+    import warnings
+
     from localharness.agent.subagent import _config_child_allowed
 
     base = ToolRegistry()
     await register_builtin_tools(base)
     cfg = _child_cfg(add=["read", "git_read"])
     assert not ToolRegistry.from_allowed(_config_child_allowed(cfg), base_registry=base).has("git_read")
-    first = await _first_message(mock_llm_client, bus, cfg, base)
+    # WR-05 / IN-53: no per-turn "unknown tool 'git_read'" warning for a built-in that was merely not offered.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        first = await _first_message(mock_llm_client, bus, cfg, base)
+    assert not [w for w in caught if "unknown tool" in str(w.message)], [str(w.message) for w in caught]
     assert "(Your ONLY available tools: read." in first
     assert "git_read" not in first
+
+
+async def test_a_typo_in_tools_add_still_warns_and_git_read_alone_leaves_an_empty_add(mock_llm_client, bus):
+    import warnings
+
+    from localharness.agent.subagent import _without_unoffered_optional_tools
+
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    child = ToolRegistry.from_allowed(["read"], base_registry=base)
+    assert _without_unoffered_optional_tools(_child_cfg(add=["git_read"]), child).tools.add == []
+    typo = _child_cfg(add=["read", "gitt_read"])
+    assert _without_unoffered_optional_tools(typo, child) is typo
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        await _first_message(mock_llm_client, bus, typo, base)
+    assert any("unknown tool 'gitt_read'" in str(w.message) for w in caught)
