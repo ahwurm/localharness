@@ -789,7 +789,9 @@ SED_LABEL_COMMANDS = "btT:v"
 def classify_shell(command: str, settings: GateSettings) -> ShellClassification:
     """Classify one shell command string. PRD §3.2 steps 1-8, in order.
 
-    Pure: the same string and settings always produce the same classification.
+    Pure apart from one input: a bare relative ``cd NAME`` is read against the harness process's own ``CDPATH``
+    (:func:`_apply_cd`, CR-54 it4), so the classification of ``cd sub && …`` can differ between a test and a session
+    that set it. A caller that caches a classification by (command, settings) must key on that variable too (IN-53 it5).
     """
     segments, dropped = _classify_command_text(command, settings)
     return ShellClassification(segments=tuple(segments), dropped=tuple(dropped))
