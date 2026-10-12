@@ -34,7 +34,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import structlog
 
-from localharness.channels.base import ChannelAdapter, sanitize_for_display
+from localharness.channels.base import ChannelAdapter, _call_receipt, sanitize_for_display
 from localharness.channels.errors import NotInteractiveError
 from localharness.core.bus import EventBus
 from localharness.core.content import image_label
@@ -46,6 +46,7 @@ from localharness.core.events import (
     Action,
     Escalation,
     Heartbeat,
+    InstructionsChanged,
     PermissionResolved,
     PermissionStaged,
     TurnCompleted,
@@ -600,7 +601,21 @@ class MobileChannel(ChannelAdapter):
             if prev is None or seq > prev:
                 self._forwarded_max[sid] = seq
         self._emit(type(event).__name__, seq, payload)
+        if isinstance(event, InstructionsChanged) and event.cause in ("start", "too_large"):
+            # The forwarded event IS the phone's copy; this only settles whether anyone was there.
+            await self.notice_on_first_contact(event.text, self.instructions_on_delivered)
         await self._react(event)
+
+    async def notice_on_first_contact(
+        self, text: str, on_delivered: Callable[[], None] | None
+    ) -> None:
+        """Send no second copy (the forwarded event already carries the line to every attached
+        client) and run the receipt only when a client was attached at the moment of emission;
+        otherwise keep the text and write nothing."""
+        if self.client_count > 0:
+            _call_receipt(on_delivered)
+        else:
+            self._first_contact_notice = text
 
     # ---------------------------------------------------------------- push (A2)
 

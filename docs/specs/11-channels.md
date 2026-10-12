@@ -278,7 +278,44 @@ class ChannelAdapter(ABC):
             agent_id=event.agent_id,
             metadata={"style": "system.info"},
         )
+
+    # Project instructions (all concrete; a channel still has to subscribe).
+    instructions_on_delivered = None   # the handle's receipt, bound by start
+    _first_contact_notice = None       # the line the base kept
+
+    async def notice_on_first_contact(self, text, on_delivered) -> None:
+        """Keep the text and never call back. A surface that can prove a person
+        received it overrides this and calls `on_delivered` only after its own
+        send returned."""
+
+    async def on_instructions_changed(self, event) -> None:
+        """Causes "start" and "too_large" go to `notice_on_first_contact`; every
+        other cause is one system line. Never filters on `parent_id`."""
+
+    async def on_narrowing_notice(self, event) -> None:
+        """One system line with the event's text."""
 ```
+
+### Project instructions line
+
+When a project instructions file (`CLAUDE.md`, `AGENTS.md` or `.localharness/INSTRUCTIONS.md`) is used, the
+session says so once, and the answer is only recorded after a person was actually reached. The base class
+holds the line through `notice_on_first_contact` and never records anything, so a plugin channel written
+without knowing about instructions leaves the file unrecorded and is offered the line again next session.
+Each built-in surface proves delivery its own way:
+
+- **Terminal:** the line is part of the first input bubble's hint; showing that hint is the delivery. A
+  later change (adopted, changed by the model, shadowed, refused) and a narrowing note appear in the next
+  input bubble only, as plain sanitized text, and clear at the next submit or on `/instructions on`.
+- **Editor (ACP):** the line is sent as an agent message and counts once the editor's update call returned;
+  with no connection yet it waits for the next prompt. A failed send keeps it queued.
+- **Chat platforms (Discord):** the line is sent to the conversation of the allowlisted message being
+  answered, through a send that raises on failure; with no message to answer it waits for the next one.
+- **Phone:** the event reaches the phone through the ordinary event stream; it counts only when a paired
+  client was attached at that moment.
+
+`/instructions off|on|show` is handled in an editor session as one reply with no model turn, after the
+session is up.
 
 ### Error Types
 
@@ -681,6 +718,8 @@ The terminal channel subscribes to events after `start()` is called. The bus del
 | `Escalation` | `on_escalation` | `send_error(reason, detail, agent_id)` |
 | `Heartbeat` | `on_heartbeat` | spinner update if elapsed > 10s |
 | `ProviderLost` | `on_provider_lost` | status line "model server unreachable — waiting up to Ns; Esc stops"; other channels send "model server unreachable — waiting up to Ns" as a system line |
+| `InstructionsChanged` | `on_instructions_changed` | start and too-large lines go to `notice_on_first_contact` (the terminal shows the start line in its first hint); other causes: a system line (terminal: the next input bubble) |
+| `NarrowingNotice` | `on_narrowing_notice` | a system line with the event's text (terminal: the next input bubble) |
 
 The channel does NOT subscribe to:
 - `UserMessage` (channel publishes these, it doesn't receive its own)

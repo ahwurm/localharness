@@ -24,7 +24,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 import structlog
 
-from localharness.channels.base import ChannelAdapter, sanitize_for_display
+from localharness.channels.base import ChannelAdapter, _call_receipt, sanitize_for_display
 from localharness.channels.errors import ChannelStartError
 from localharness.core.artifacts import artifact_root
 from localharness.core.bus import EventBus
@@ -34,6 +34,8 @@ from localharness.core.events import (
     Action,
     Escalation,
     Heartbeat,
+    InstructionsChanged,
+    NarrowingNotice,
     Observation,
     ParseFailed,
     PermissionResolved,
@@ -309,6 +311,10 @@ class DispatchChannel(ChannelAdapter):
         self._images: list[dict] = []  # parts of the message read_input last returned, until taken
         self._current_msg: InboundMessage | None = None  # the message being answered (reply target)
         self._handles: list[Any] = []
+        # First-contact lines (text, receipt) with no allowlisted message to answer yet, or whose
+        # send failed. Delivered at the next `read_input`. Not `_pending_notices`, which is the
+        # parked-call map below.
+        self._first_contact_pending: list[tuple[str, Callable[[], None] | None]] = []
         # message id -> queue of emoji, for ask_permission and pending notices: push (a reaction
         # event) bridged to pull (an awaiting gate) the same way on_message is bridged to read_input.
         self._reaction_waiters: dict[int, asyncio.Queue | _ConfirmTaps] = {}
@@ -334,6 +340,8 @@ class DispatchChannel(ChannelAdapter):
             self.bus.subscribe(ParseFailed, self.on_parse_failed),
             self.bus.subscribe(Heartbeat, self.on_heartbeat),
             self.bus.subscribe(ProviderLost, self.on_provider_lost),  # the base text (no Esc here)
+            self.bus.subscribe(InstructionsChanged, self.on_instructions_changed),
+            self.bus.subscribe(NarrowingNotice, self.on_narrowing_notice),
             # The only way this channel hears about the staging queue: the loop holds no channel
             # handle, so a parked call and its answer both travel as their own events.
             self.bus.subscribe(PermissionStaged, self.on_permission_staged),
@@ -398,6 +406,7 @@ class DispatchChannel(ChannelAdapter):
                 await self._adapter.react(msg.handle, self._ack)
             except Exception:  # noqa: BLE001 — a failed reaction must never drop the turn
                 pass
+        await self._deliver_first_contact()
         return (msg.text or "").strip() or " ".join(image_label(p) for p in msg.images)
 
     def take_images(self) -> list[dict]:
@@ -590,6 +599,40 @@ class DispatchChannel(ChannelAdapter):
                 await self._adapter.send(msg.conversation, chunk)
             except Exception as e:  # noqa: BLE001
                 log.error(f"{self.channel_id}_send_failed", error=str(e))
+
+    async def _send_or_raise(self, content: str) -> None:
+        """Like :meth:`_send`, but a failed adapter send propagates (and with no current message
+        there is no one to send to, which is a failure too). A receipt may only follow a send that
+        returned, so this is the proof :meth:`_send` swallows."""
+        msg = self._current_msg
+        if msg is None:
+            raise RuntimeError("no current message to answer")
+        for chunk in _chunk(content, self._adapter.message_limit):
+            await self._adapter.send(msg.conversation, chunk)
+
+    async def notice_on_first_contact(
+        self, text: str, on_delivered: Callable[[], None] | None
+    ) -> None:
+        """Send the line to the conversation of the message being answered, then run the receipt.
+
+        `_current_msg` is only ever set by `read_input` from the allowlist-gated queue, so a send
+        to it reaches a person who is allowed to drive this session. With no current message, or
+        when the send raises, the text is kept for the next `read_input` and nothing is called."""
+        if self._current_msg is not None:
+            try:
+                await self._send_or_raise(text)
+            except Exception as e:  # noqa: BLE001 - kept for the next allowlisted message
+                log.debug(f"{self.channel_id}_first_contact_not_delivered", error=str(e))
+            else:
+                _call_receipt(on_delivered)
+                return
+        self._first_contact_pending.append((text, on_delivered))
+
+    async def _deliver_first_contact(self) -> None:
+        """Offer the kept lines again now that an allowlisted message is being answered."""
+        pending, self._first_contact_pending = self._first_contact_pending, []
+        for text, on_delivered in pending:
+            await self.notice_on_first_contact(text, on_delivered)
 
     async def send_message(
         self,
