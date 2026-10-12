@@ -479,22 +479,32 @@ async def test_blob_show_returns_the_raw_blob_without_textconv(armed, scripts):
 def _pty_run(cwd: Path, argv: list[str], env: dict[str, str]) -> None:
     """Run `argv` with stdout on a pseudo terminal (the only way git starts a pager) and wait for it."""
     import pty
+    import select
     import subprocess
 
-    master, slave = pty.openpty()
+    try:
+        master, slave = pty.openpty()
+    except OSError:  # IN-54: a sandbox without /dev/ptmx or /dev/pts
+        pytest.skip("no pseudo terminal available")
     env = {**env, "TERM": "xterm"}
+    proc = None
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=slave, stderr=slave)
         os.close(slave)
         slave = -1
+        deadline = time.monotonic() + 20  # IN-02: a git or pager that never closes the slave cannot hang the run
         try:
-            while True:  # drain so a full pty buffer cannot block git
-                if not os.read(master, 65536):
+            while time.monotonic() < deadline:  # drain so a full pty buffer cannot block git
+                ready, _, _ = select.select([master], [], [], max(0.0, min(1.0, deadline - time.monotonic())))
+                if ready and not os.read(master, 65536):
                     break
         except OSError:
             pass
         proc.wait(timeout=20)
     finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
         if slave != -1:
             os.close(slave)
         os.close(master)
