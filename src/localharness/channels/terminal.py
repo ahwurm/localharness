@@ -38,6 +38,7 @@ from rich.theme import Theme
 from localharness.channels.base import (
     PERMISSION_DENIED_LINE,
     ChannelAdapter,
+    _call_receipt,
     provider_lost_seconds,
     sanitize_for_display,
 )
@@ -53,6 +54,8 @@ from localharness.core.events import (
     ConsolidationStarted,
     Escalation,
     Heartbeat,
+    InstructionsChanged,
+    NarrowingNotice,
     Observation,
     ParseFailed,
     PermissionStaged,
@@ -1050,6 +1053,13 @@ class TerminalChannel(ChannelAdapter):
         # #49: hint drawn INSIDE the first input bubble (immune to the box repaint that drops
         # a banner hint in a real TTY). start_cmd sets it for interactive sessions; shown once.
         self.first_prompt_hint: str = ""
+        # The project-instructions start line as `start` put it into the first hint. Showing a
+        # hint that contains it IS the delivery, and the receipt runs there (see
+        # `_maybe_deliver_instructions`). Empty means no line is owed on this surface.
+        self.instructions_hint: str = ""
+        # A change line (adopted, harness_written, shadowed, refused, a narrowing note) waits here
+        # for the next input bubble / the empty box and is cleared at the next submit.
+        self._instructions_status: str = ""
         self._output_lock: asyncio.Lock = asyncio.Lock()
         self._thinking: Status | None = None  # rich Status while the model is generating (REPL-02)
         self._dreaming: Status | None = None  # rich Status while a background memory pass runs (#20)
@@ -1124,6 +1134,8 @@ class TerminalChannel(ChannelAdapter):
         self._parse_failed_handle = None
         self._heartbeat_handle = None
         self._provider_lost_handle = None
+        self._instructions_handle = None
+        self._narrowing_handle = None
         # The status-row sentence for a dropped model server (ProviderLost). Its own slot: the
         # turn-time _box_working state would hide _box_activity, and the wait is mid-turn.
         self._provider_lost_text: str = ""
@@ -1156,6 +1168,10 @@ class TerminalChannel(ChannelAdapter):
         )
         self._heartbeat_handle = self.bus.subscribe(Heartbeat, self.on_heartbeat)
         self._provider_lost_handle = self.bus.subscribe(ProviderLost, self.on_provider_lost)
+        self._instructions_handle = self.bus.subscribe(
+            InstructionsChanged, self.on_instructions_changed
+        )
+        self._narrowing_handle = self.bus.subscribe(NarrowingNotice, self.on_narrowing_notice)
         # The only way a channel hears that `auto` parked a call (core/events.PermissionStaged):
         # the loop holds no channel handle, and a queue notice is not about one tool result.
         self._permission_staged_handle = self.bus.subscribe(
@@ -1180,6 +1196,8 @@ class TerminalChannel(ChannelAdapter):
             self._parse_failed_handle,
             self._heartbeat_handle,
             self._provider_lost_handle,
+            self._instructions_handle,
+            self._narrowing_handle,
             self._consolidation_started_handle,
             self._consolidation_finished_handle,
             self._permission_staged_handle,
@@ -1505,6 +1523,9 @@ class TerminalChannel(ChannelAdapter):
         # #49: the first prompt carries the guidance hint in the bubble's bottom border;
         # consume it so later prompts don't repeat it.
         hint, self.first_prompt_hint = self.first_prompt_hint, ""
+        self._maybe_deliver_instructions(hint)
+        hint = self._hint_with_status(hint)
+        self._instructions_status = ""
         app = _build_input_app(
             self._history, prompt, hint=hint, context_pct=self._context_pct,
             model_names_fn=self._model_names_for_menu, on_paste_image=self.on_paste_image,
@@ -1544,6 +1565,7 @@ class TerminalChannel(ChannelAdapter):
 
         # #49: the first prompt carries the guidance hint inside the box; consume it once.
         self._first_box_hint, self.first_prompt_hint = self.first_prompt_hint, ""
+        self._maybe_deliver_instructions(self._first_box_hint)
         self._box_active = True
         # ask_permission suspends the box and puts it back; it needs the REPL's own callbacks to
         # restart it, and this is the only place they exist.
@@ -1554,6 +1576,7 @@ class TerminalChannel(ChannelAdapter):
             # Without this the box border keeps repeating it all session, while the classic
             # read_input path consumes it after one prompt (the two modes disagreed).
             self._first_box_hint = ""
+            self._instructions_status = ""
             self._last_keystroke_at = time.monotonic()  # a submit is presence, whatever fed it
             ctrl_queue.put_nowait(("submit", text))
 
@@ -1803,8 +1826,9 @@ class TerminalChannel(ChannelAdapter):
             return 0
 
     def _box_placeholder(self) -> str:
-        """Dim text inside the empty box: the #49 guidance hint until first use, then nothing."""
-        return self._first_box_hint
+        """Dim text inside the empty box: the #49 guidance hint until first use, then nothing; a
+        pending instructions change line rides with it until the next submit."""
+        return self._hint_with_status(self._first_box_hint)
 
     def _box_instrument_frags(self) -> list[tuple[str, str]]:
         """Footer-right: the local-model instrument cluster — `model · 25.3 tok/s · ██░░░░░░░░ 8%`.
@@ -2275,6 +2299,50 @@ class TerminalChannel(ChannelAdapter):
                 self._close_burst()
                 self._stop_dreaming()
                 self._start_thinking()  # creates the Status, or refreshes its label, from the slot
+
+    # ------------------------------------------------------------------ #
+    # Project instructions: the hint is the receipt, change lines wait for the next bubble
+    # ------------------------------------------------------------------ #
+
+    def _maybe_deliver_instructions(self, consumed: str) -> None:
+        """The first hint was just consumed. When it carries the instructions start line, that
+        display is the delivery: clear the owed line and run the handle's receipt (once, guarded)."""
+        line = self.instructions_hint
+        if line and consumed and line in consumed:
+            self.instructions_hint = ""
+            _call_receipt(self.instructions_on_delivered)
+
+    def _hint_with_status(self, hint: str) -> str:
+        """The hint and the pending change line, joined with a middle dot, either alone when the
+        other is empty."""
+        return " · ".join(part for part in (hint, self._instructions_status) if part)
+
+    def _set_instructions_status(self, text: str) -> None:
+        """Store a change line for the next bubble. Sanitized (never rich-escaped: prompt_toolkit
+        draws it) and flattened to one line; a second pending text joins with a middle dot."""
+        clean = " ".join(sanitize_for_display(text).split())
+        if not clean:
+            return
+        current = self._instructions_status
+        if clean not in current:
+            self._instructions_status = f"{current} · {clean}" if current else clean
+        self._invalidate_box()
+
+    def clear_instructions_status(self) -> None:
+        """Drop a pending change line (the REPL calls this on `/instructions on`) and repaint."""
+        self._instructions_status = ""
+        self._invalidate_box()
+
+    async def on_instructions_changed(self, event: InstructionsChanged) -> None:
+        """The start line is the first hint (see `_maybe_deliver_instructions`), so nothing happens
+        for it here; every other cause waits for the next input bubble. Never filters on parent_id."""
+        if event.cause == "start":
+            return
+        self._set_instructions_status(event.text)
+
+    async def on_narrowing_notice(self, event: NarrowingNotice) -> None:
+        """A dispatch-time narrowing note rides in the same next-bubble slot."""
+        self._set_instructions_status(event.text)
 
     async def on_consolidation_started(self, event: ConsolidationStarted) -> None:
         """A background memory consolidation/mining pass began (#20): show the quiet
