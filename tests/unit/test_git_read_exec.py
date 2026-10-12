@@ -257,8 +257,63 @@ async def test_a_line_past_the_stream_limit_is_a_marked_truncation_not_a_silent_
     assert result.success is True
     assert result.truncated is True
     assert result.output.startswith("first\n")
-    assert result.output.endswith("[git_read: truncated at 100 lines]")
+    # WR-59: the marker names the real cause and the lines actually kept, not the max_lines cap.
+    assert result.output.endswith(
+        "[git_read: output cut after 1 lines: a line longer than 8 MiB; narrow with paths]")
+    assert "100 lines" not in result.output
     assert len(result.output) < 1024 * 1024
+
+
+@requires_git
+async def test_a_first_line_past_the_stream_limit_is_never_no_output(root, base, monkeypatch):
+    """WR-03: the very first line is the over-long one: the answer is the marker, not '(no output)'."""
+    body = 'case " $* " in *" log "*) head -c 9000000 /dev/zero | tr "\\0" x; echo; exit 0 ;; esac'
+    fake = fake_git(base / "fake", body)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+    result = await GitReadTool(root).run(subcommand="log")
+    assert result.success is True and result.truncated is True
+    assert result.output == "[git_read: output cut after 0 lines: a line longer than 8 MiB; narrow with paths]"
+    assert "(no output)" not in result.output
+
+
+@requires_git
+async def test_output_is_cut_at_a_byte_cap_with_its_own_marker(root, base, monkeypatch):
+    """WR-58: max_lines bounds the count only; many medium lines stop at MAX_RETURNED_BYTES."""
+    monkeypatch.setattr(grt, "MAX_RETURNED_BYTES", 1000)
+    (root / "wide.txt").write_text("".join(("x" * 99) + "\n" for _ in range(100)))
+    git(root, "add", "wide.txt")
+    git(root, "commit", "-q", "-m", "wide")
+    result = await GitReadTool(root).run(subcommand="show", revision="HEAD", max_lines=4000)
+    assert result.success is True and result.truncated is True
+    marker = result.output.rsplit("\n", 1)[-1]
+    assert marker.startswith("[git_read: truncated at 1000 bytes after ")
+    assert marker.endswith(" lines; narrow with paths]")
+    assert len(result.output) < 1000 + 200
+    assert "truncated at 4000 lines" not in result.output
+
+
+@requires_git
+async def test_a_single_line_over_the_byte_cap_keeps_its_head(root, base, monkeypatch):
+    """WR-58: the first line alone is past the cap: the part that fits is kept, then the marker."""
+    monkeypatch.setattr(grt, "MAX_RETURNED_BYTES", 500)
+    body = 'case " $* " in *" log "*) head -c 5000 /dev/zero | tr "\\0" y; echo; exit 0 ;; esac'
+    fake = fake_git(base / "fake", body)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+    result = await GitReadTool(root).run(subcommand="log")
+    assert result.truncated is True
+    assert result.output.startswith("y" * 500 + "\n")
+    assert result.output.endswith("[git_read: truncated at 500 bytes after 1 lines; narrow with paths]")
+    assert result.output != "(no output)"
+
+
+@requires_git
+async def test_output_exactly_at_the_byte_cap_gets_no_marker(root, base, monkeypatch):
+    body = 'case " $* " in *" log "*) printf "aaaa\\nbbbb\\n"; exit 0 ;; esac'
+    fake = fake_git(base / "fake", body)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(grt, "MAX_RETURNED_BYTES", 10)
+    result = await GitReadTool(root).run(subcommand="log")
+    assert result.truncated is False and result.output == "aaaa\nbbbb\n"
 
 
 # --------------------------------------------------------------------------------------- timeout
