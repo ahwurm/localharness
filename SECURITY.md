@@ -737,6 +737,23 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   program to run, so they are keyed as inline code. None of these counts as read-only any more;
   each is judged as the write or the interpreter it is. A plain `git diff`, `git log` or
   `git show` and the ordinary reads (`find`, `sort`, `uniq`, `sed -n`, `rg`, `tree`) stay silent.
+- **An environment assignment can change which program a read-only command runs.** `PATH=./d ls`
+  signs as `ls`, but it is not the `ls` the read-only tier assumed. So a command leaves that tier
+  when a name on `permissions.ask.exec_redirect_env_vars` is assigned before it, inline
+  (`NAME=value cmd`), through `env`, or earlier in the same shell sequence by a bare assignment,
+  `export`, `declare`, `typeset`, `readonly`, `local`, `printf -v`, `read` or `hash -p`. The shipped
+  names are `PATH`, `BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `HOME`, any
+  name matching `*_CONFIG*`, `GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`, `GIT_PAGER`, `PAGER`,
+  `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`,
+  `GIT_CONFIG_KEY_*`, `GIT_DIR` and `GIT_COMMON_DIR`; names match case-sensitively, as environment
+  names do. The six names whose value is itself a command (`GIT_PAGER`, `PAGER`, `GIT_EDITOR`,
+  `GIT_SEQUENCE_EDITOR`, `GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`) keep the tier when the value is
+  empty or itself classifies as read-only, so `GIT_PAGER=cat git log` stays silent, and
+  `GIT_CONFIG_NOSYSTEM`, which only drops the system git config, is never counted. Both of those
+  rules are fixed in code and no config layer can move a name into them. A project layer can only
+  add names to the list, never remove one, which is why it is not on the machine-level list above.
+  `git --git-dir` is treated like `GIT_DIR`. An assignment inside a `( … )` subshell stays inside
+  it.
 - **`git_read` runs no command a repository configures.** It is a structured `diff`, `show` or
   `log` of the workspace's own repository. It is registered with the other built-in tools, given
   by default to the agents you define as config children, and it asks nothing. Every call starts
@@ -793,6 +810,14 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   parser: a destructive spelling that is not on it — an alias, an encoded command, a cmdlet nobody
   listed — classifies as an ordinary inline interpreter and can be granted. The same "best-effort
   by construction" caveat as the POSIX shell boundary applies, with a shorter list behind it.
+- **The environment rule has residuals.** `source` and `.`, assignments made inside `eval`, function
+  bodies that assign, aliases and `enable -f` are not followed as environment carriers. An "always"
+  answer given to a plain signature such as `ls` also covers a later `PATH=… ls`, because the
+  signature does not change. On the `git_read` side: `remote.*.uploadpack`, `remote.*.receivepack`,
+  `gpg.*.program` and `core.gitProxy` are not on the dangerous git key list; a hard link inside
+  `.git` looks exactly like a copy and is not refused (a symbolic link out of the git directories
+  is); a worktree-reading `diff` may refresh `.git/index`, git's own stat cache inside the root,
+  which runs no command; and `git_read` has not been tested on Windows.
 - **There is still no OS sandbox.** Everything above is a policy boundary, enforced by this process
   in this process. It narrows an enumerated set of mistakes and crossings; it does not contain a
   program that has already started running.

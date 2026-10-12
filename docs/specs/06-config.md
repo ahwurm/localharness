@@ -1450,7 +1450,10 @@ of a finite parent's remaining budget a delegated lookup or review child takes. 
 an entry (`explore: {actions: 4}`) and the other keeps the value from your global config, else its
 default. The brief a config
 child receives states the limits its own loop enforces (`Budget: no action limit, no time limit.`
-when there are none) and lists only the tools it actually holds.
+when there are none) and lists only the tools it actually holds. A config child with no `tools.add`
+gets `read`, `glob`, `grep` and `git_read`; one with an explicit `tools.add` lists `git_read` to
+hold it. Either way it holds `git_read` only when the session registered it, which needs a workspace
+boundary and a repository whose root is that boundary (SECURITY.md, the `git_read` bullets).
 
 **`org.permissions.init_nulls_revision`** (bookkeeping, default `0`): a stamp the config migration
 sets once it has cleared the three numbers older `init` runs wrote (`max_actions: 100`,
@@ -1648,8 +1651,14 @@ overrides for one of the gate's rule sets, each defaulting to `null`, meaning "u
 default in `agent/gate_types.py`", which is where the defaults and their sources are documented:
 `read_only_signatures`, `destructive_signatures`, `pipe_to_shell_sources`, `pipe_to_shell_sinks`,
 `interpreter_commands`, `inline_by_nature`, `wrapper_commands`, `dropped_commands`,
-`subcommand_tools`, `payload_commands`, `write_shaped_commands`, `protected_paths_home`,
-`protected_paths_workspace`, `protected_paths_system`. The last of those is new in v0.14.1 and
+`subcommand_tools`, `payload_commands`, `write_shaped_commands`, `source_commands`,
+`git_config_dangerous_keys`, `exec_redirect_env_vars`, `protected_paths_home`,
+`protected_paths_workspace`, `protected_paths_system`. `exec_redirect_env_vars` lists environment
+variable names whose assignment takes a shell command out of the read-only tier (`PATH`, `HOME`,
+`GIT_DIR`, `*_CONFIG*` and the rest of the shipped list in SECURITY.md); `*` globs match
+case-sensitively, and a project layer can only add names. The exemption for command-valued names
+(`GIT_PAGER=cat` stays read-only) and the exclusion of `GIT_CONFIG_NOSYSTEM` are fixed in code.
+`protected_paths_system` is new in v0.14.1 and
 holds the system directories a mistaken write cannot be taken back from — `/etc`, `/usr`, `/bin`,
 `/sbin`, `/lib`, `/lib64`, `/boot`, `/var`, `/opt`, `/root`, `/srv`, macOS `/System`, `/Library`,
 `/Applications`, Windows `C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`,
