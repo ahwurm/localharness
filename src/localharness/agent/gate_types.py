@@ -509,6 +509,12 @@ unfamiliar word, silent in ``auto``) and hide ``rm -rf`` behind it, so they are 
 destructive, ungrantable, and asked about by ``auto`` wherever they point. Deliberately NOT config-settable.
 The pure wrappers (:data:`PURE_EXEC_WRAPPERS`) are not here: they change nothing about who runs the command."""
 
+COMPOSING_RUNNERS = frozenset({"uv run"})
+"""Commands that run another command in a changed environment. PRD §3.2 step 7 lists
+``uv run`` as its own interpreter key, so the runner composes with the inner signature
+instead of peeling away (see the classifier's module docstring). ``auto`` judges a composed
+signature as the inner command it runs (``uv run rm -rf x`` is the ``rm -rf`` entry)."""
+
 PURE_EXEC_WRAPPERS: frozenset[str] = frozenset({
     "sg", "taskset", "chrt", "setarch", "strace", "ltrace", "valgrind", "perf", "numactl", "prlimit",
     "fakeroot", "faketime", "eatmydata", "xvfb-run", "dbus-run-session",

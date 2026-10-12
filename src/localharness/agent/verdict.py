@@ -37,6 +37,7 @@ from urllib.parse import urlparse
 
 from localharness.agent.gate_types import (
     AUTO_ASK_CLASSES,
+    COMPOSING_RUNNERS,
     DEFAULT_MODE,
     DOTTED_VARIANT_SEPARATOR,
     HARNESS_CONFIG_FILES,
@@ -969,6 +970,9 @@ def _auto_blacklisted(
     if blacklist.pipe_to_shell and segment.pipe_to_shell:
         return AUTO_PIPE_TO_SHELL_ENTRY
     signature = segment.signature
+    for runner in COMPOSING_RUNNERS:  # `uv run rm -rf x` is judged as the `rm -rf` it runs (CR-04 it5)
+        if signature.startswith(f"{runner} ") and len(signature) > len(runner) + 1:
+            signature = signature[len(runner) + 1 :]
     if signature == UNPARSED_SHELL_SIGNATURE:
         return signature  # quoting that does not balance: no mode runs text it could not split
     if signature in blacklist.irreversible_signatures:
