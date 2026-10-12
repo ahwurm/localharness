@@ -602,8 +602,11 @@ class ToolRegistry:
         # Step 5: Apply result size cap (resolved once per dispatch, for output and error alike)
         cap = self.result_size_cap_chars
         if len(result.output) > cap:
+            # the cut says so, and marker included the whole stays within the cap
+            marker = f"\n... [output cut: {len(result.output)} chars total — head kept] ..."
+            kept = result.output[:cap - len(marker)] + marker if cap > len(marker) else result.output[:cap]
             result = ToolResult(
-                output=result.output[:cap],
+                output=kept,
                 success=result.success,
                 error=result.error,
                 error_type=result.error_type,
@@ -1314,7 +1317,7 @@ Rationale: Research on local models (from FEATURES.md) shows context window degr
 | Pre-hook raises other exception | Exception is logged; execution continues |
 | `run()` raises exception | Caught by `Tool.run()` wrapper; `ToolResult(success=False, error_type="execution_error")` |
 | `run()` exceeds timeout | `ToolResult(success=False, error_type="timeout_error")` |
-| Result exceeds size cap | Output truncated; `truncated=True` set; `original_length` set |
+| Result exceeds size cap | Output cut to the cap with a trailing `... [output cut: N chars total — head kept] ...` marker inside it (a cap too small to hold the marker cuts plainly); `truncated=True` set; `original_length` set |
 | Post-hook raises | Exception logged; result returned unchanged |
 | `register()` name collision | `ValueError` raised (programming error — fail fast) |
 | `register()` invalid tool object | `TypeError` raised |
