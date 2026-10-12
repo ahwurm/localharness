@@ -1057,3 +1057,10 @@ def test_a_case_that_does_not_parse_fails_toward_asking(command, ws):
 def test_a_substitution_in_the_delimiter_word_belongs_to_the_word(command):
     """Bash's delimiter is `2$(cat <<E…)#` (the shell warns it never finds it); the command after it runs."""
     assert any(s.signature == "rm -rf" for s in _segments(command)), command
+
+
+def test_a_heredoc_operator_at_the_end_of_a_backtick_body_ends_with_the_backtick():
+    """The backtick that closes the body is not the start of a substitution inside the delimiter word."""
+    prose = "Bash never reads `<<E` in a comment, so the next line is a command."
+    assert not any(s.signature == UNPARSED_SHELL_SIGNATURE for s in _segments(prose))
+    assert not any(s.signature == UNPARSED_SHELL_SIGNATURE for s in _segments("echo `cat <<E`"))
