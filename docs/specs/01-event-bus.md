@@ -342,6 +342,33 @@ class Action(BaseEvent):
     content: Optional[str] = None
     """Raw LLM response text."""
 
+    has_tool_calls: bool = False
+    """True when the response also carried tool calls: the content is narration, not the final answer."""
+
+    finish_reason: Optional[str] = None
+    """The provider's finish reason, or the loop's own "degenerate" / "reasoning_cut" when it aborted the response."""
+
+    reasoning_chars: Optional[int] = None
+    """Size of the hidden reasoning the server returned, 0 when it sent none."""
+
+    output_cap: Optional[int] = None
+    """The per-call output cap the request carried; None when the client's configured cap was used."""
+
+    # --- Response accounting (llm_response; model and latency also on tool_call) ---
+    model: Optional[str] = None
+    """The model name the request went to; None when the client names none."""
+
+    prompt_tokens: Optional[int] = None
+    """Provider-reported prompt tokens of this response. None when the provider reported none, and always
+    None on a tool_call row, so one response's usage is counted once."""
+
+    completion_tokens: Optional[int] = None
+    """Provider-reported completion tokens of this response. None when the provider reported none, and
+    always None on a tool_call row, so one response's usage is counted once."""
+
+    latency_ms: Optional[int] = None
+    """Wall time of the completion call that produced the response, in milliseconds."""
+
     # --- Tool call fields (action_type == "tool_call") ---
     tool_call_id: Optional[ToolCallID] = None
     """UUID4 for matching with corresponding Observation."""
