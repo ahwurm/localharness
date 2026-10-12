@@ -2748,9 +2748,16 @@ the quoting ones. ``\\c`` (end of string), ``\\n`` and the other control escapes
 change what runs in ways the classifier does not follow, so a string using one is unparseable."""
 
 
+ENV_SPLIT_COMMENT_RE = re.compile(r"(?:^|[ \t\r\n])#")
+
+
 def _env_split_words(value: str) -> list[str] | None:
     """The words of an ``env -S`` string, or None when it uses something the classifier cannot follow."""
     if "${" in value:
+        return None
+    # CR-04 (it4): env treats a `#` at a word start as a comment up to the next newline (the text after it
+    # runs) and `\f` / `\v` as blanks; `shlex` does neither, so a string using one reads as another command.
+    if "\x0b" in value or "\x0c" in value or ENV_SPLIT_COMMENT_RE.search(value.replace("\\_", " ")):
         return None
     pairs = re.findall(r"\\(.?)", value)
     if any(second not in ENV_SPLIT_ESCAPES for second in pairs):
