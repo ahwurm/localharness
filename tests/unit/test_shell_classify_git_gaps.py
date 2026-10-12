@@ -606,7 +606,6 @@ def test_a_hash_in_a_context_the_stripper_does_not_know_still_shows_the_command_
 @pytest.mark.parametrize("command", (
     "ls # list the directory",
     "git status # what changed? (short)",
-    "ls -la # a < b > c",
     "echo a # don't",  # an apostrophe alone leaves the text balanced after the comment is dropped
     "cat f # the file\ngrep x f # and a match",
 ))
@@ -626,7 +625,64 @@ def test_a_comment_that_holds_a_separator_is_also_read_with_the_comment_left_in(
     assert _join("ls # a `b`")[1] is True
     assert _join("ls # a $(b)")[1] is True
     assert _join("ls # ab")[1] is False
+    # UF-1: a redirection or a flag in the dropped text is also run by bash when the `#` was no comment
+    assert _join("ls # a < b")[1] is True
+    assert _join("ls # a > b")[1] is True
+    assert _join("ls # use -l")[1] is True
+    assert _join("ls # a-b")[1] is False
     assert _join("ls # a; b", strip_comments=False)[0] == "ls # a; b"
+
+
+UF1_REDIRECT_AND_FLAG_ROWS = (
+    "[[ a =~ (a|#b) ]] > ~/.bashrc",
+    "[[ a =~ (a|#b) ]] >> ~/.ssh/authorized_keys",
+    "[[ a =~ (a|#b) ]] > /etc/cron.d/x",
+    "shopt -s extglob\ngit log @(a|#b) --output ~/.bashrc",
+)
+"""UF-1: bash runs the redirection (or the carrier's own `--output`) that follows the `#`, which is part of a
+regex or an extglob group, not a comment. The dropped text holds no separator, only `>` or a dash-led word,
+so the second reading has to fire for it too; the protected-path ask (ungrantable in guarded, auto and
+trusted, as on 19c9cb4) must come back."""
+
+
+@pytest.mark.parametrize("mode", ("guarded", "auto", "trusted"))
+@pytest.mark.parametrize("command", UF1_REDIRECT_AND_FLAG_ROWS)
+def test_a_redirection_or_flag_after_a_hash_that_is_no_comment_still_asks_for_the_protected_path(
+    command, mode, ws
+):
+    result = _verdict(command, ws, mode)
+    assert result.verdict is Verdict.ASK, command
+    assert result.request is not None and result.request.grantable is False, command
+
+
+@pytest.mark.parametrize("command", UF1_REDIRECT_AND_FLAG_ROWS)
+def test_a_redirection_or_flag_after_a_hash_that_is_no_comment_is_denied_read_only(command, ws):
+    assert _verdict(command, ws, "read-only").verdict is Verdict.DENY
+
+
+@pytest.mark.parametrize("command", UF1_REDIRECT_AND_FLAG_ROWS)
+def test_the_second_reading_reports_the_write_target_of_a_redirection_or_flag_after_a_hash(command):
+    assert "~/.bashrc" in _targets(command) or any(
+        t.startswith(("~/.ssh", "/etc")) for t in _targets(command)
+    ), command
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+@pytest.mark.parametrize("command, expected", (
+    ("ls # list files", Verdict.ALLOW),
+    ("git log --oneline # recent", Verdict.ALLOW),
+    ("ls # use -l", Verdict.ALLOW),
+))
+def test_an_ordinary_commented_command_keeps_its_verdict_after_uf1(command, expected, mode, ws):
+    assert _verdict(command, ws, mode).verdict is expected, command
+
+
+def test_a_commented_test_runner_keeps_its_verdict_after_uf1(ws):
+    """`pytest` is unfamiliar: deny read-only, grantable ask in guarded, allow in auto - with or without the comment."""
+    for mode in ("read-only", "guarded", "auto"):
+        plain = _verdict("pytest -q", ws, mode)
+        commented = _verdict("pytest -q # run tests", ws, mode)
+        assert commented.verdict is plain.verdict, mode
 
 
 # ------------------------------------------------------------------ heredocs read inside the join scan (iteration 3)
