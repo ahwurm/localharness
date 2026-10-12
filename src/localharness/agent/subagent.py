@@ -805,6 +805,7 @@ async def dispatch_config_subagent(
     unattended_max_actions: int | None = None,
     parent_remaining_fn: "Callable[[], tuple[int, float]] | None" = None,
     shape: str | None = None,
+    project_instructions: Any = None,
 ) -> DelegationResult:
     """Spawn a child from a YAML-defined AgentConfig, run one turn, return distilled findings.
 
@@ -847,6 +848,7 @@ async def dispatch_config_subagent(
         compact_md_path=_compact,
         effort=effort, effort_ratios=effort_ratios,
         template_margin_ratio=template_margin_ratio,
+        project_instructions=project_instructions,
         server_recovery=server_recovery,
         unattended_max_actions=unattended_max_actions,
         budget_fallback=budget_fallback,
@@ -897,6 +899,7 @@ async def dispatch_explore_subagent(
     budget_fallback: ChildBudget | None = None,
     budget_labels: Any = None,
     on_child_loop: Callable[[Any], None] | None = None,
+    project_instructions: Any = None,
 ) -> DelegationResult:
     """Spawn a read-only explore child, run one turn on `task`, return structured findings.
 
@@ -956,6 +959,7 @@ async def dispatch_explore_subagent(
         compact_md_path=_compact,
         effort=effort, effort_ratios=effort_ratios,
         template_margin_ratio=template_margin_ratio,
+        project_instructions=project_instructions,
         server_recovery=server_recovery,
         unattended_max_actions=unattended_max_actions,
         budget_fallback=budget_fallback,
@@ -1001,6 +1005,7 @@ async def dispatch_web_subagent(
     budget_fallback: ChildBudget | None = None,
     budget_labels: Any = None,
     on_child_loop: Callable[[Any], None] | None = None,
+    project_instructions: Any = None,
 ) -> DelegationResult:
     """Spawn a web-research child (web_search/web_fetch[/web_page_query] only), run one turn, return findings.
 
@@ -1055,6 +1060,7 @@ async def dispatch_web_subagent(
             compact_md_path=_compact,
             effort=effort, effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
+            project_instructions=project_instructions,
             server_recovery=server_recovery,
             unattended_max_actions=unattended_max_actions,
             budget_fallback=budget_fallback,
@@ -1213,6 +1219,7 @@ async def dispatch_search_verifier_subagent(
     budget_fallback: ChildBudget | None = None,
     budget_labels: Any = None,
     on_child_loop: Callable[[Any], None] | None = None,
+    project_instructions: Any = None,
 ) -> DelegationResult:
     """Spawn a BLIND search-verifier (web_search/web_fetch/web_page_query), run one turn, write a
     keep-flag ledger row, and return a COMPACT verdict flag (never the transcript).
@@ -1253,6 +1260,7 @@ async def dispatch_search_verifier_subagent(
         compact_md_path=_compact,
         effort=effort, effort_ratios=effort_ratios,
         template_margin_ratio=template_margin_ratio,
+        project_instructions=project_instructions,
         server_recovery=server_recovery,
         unattended_max_actions=unattended_max_actions,
         budget_fallback=budget_fallback,
@@ -1395,6 +1403,7 @@ async def _run_chunk_summarizer(
     unattended_max_actions: int | None = None,
     parent_remaining_fn: Callable[[], tuple[int, float]] | None = None,
     shape: str | None = None,
+    project_instructions: Any = None,
 ) -> str:
     """Run ONE leaf over a single granted chunk in a FRESH bounded window; return its extract (or '').
     The leaf's store is granted ONLY this chunk (parent=cruncher_store), so it reads exactly one
@@ -1443,6 +1452,7 @@ async def _run_chunk_summarizer(
             kill_file_path=_kill, compact_md_path=_compact,
             effort=effort, effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
+            project_instructions=project_instructions,
             server_recovery=server_recovery,
             unattended_max_actions=unattended_max_actions,
             budget_fallback=leaf_fallback, budget_labels=leaf_labels,
@@ -1467,6 +1477,7 @@ async def _cruncher_combine_turn(
     unattended_max_actions: int | None = None,
     parent_remaining_fn: Callable[[], tuple[int, float]] | None = None,
     shape: str | None = None,
+    project_instructions: Any = None,
 ) -> str:
     """One bounded cruncher reduce turn over `items` (section-extracts, or partial-summaries on a
     higher level). Tool-less (pure reasoning over inline text) unless a clean-origin exec_seed is
@@ -1490,6 +1501,7 @@ async def _cruncher_combine_turn(
                      kill_file_path=_kill, compact_md_path=_compact,
                      effort=effort, effort_ratios=effort_ratios,
                      template_margin_ratio=template_margin_ratio,
+                     project_instructions=project_instructions,
                      server_recovery=server_recovery,
                      unattended_max_actions=unattended_max_actions,
                      budget_fallback=combine_fallback, budget_labels=combine_labels)
@@ -1576,6 +1588,7 @@ async def dispatch_cruncher_subagent(
     unattended_max_actions: int | None = None,
     parent_remaining_fn: Callable[[], tuple[int, float]] | None = None,
     shape: str | None = None,
+    project_instructions: Any = None,
 ) -> str:
     """J3 cruncher: faithful over-window reduce (Plan α). Reads the GRANTED over-window body(ies) by
     handle (read-through), splits each (harness-orchestrated map), summarizes each chunk in a fresh
@@ -1636,6 +1649,7 @@ async def dispatch_cruncher_subagent(
                 state_dir=state_dir,
                 effort=effort, effort_ratios=effort_ratios,
                 template_margin_ratio=template_margin_ratio,
+                project_instructions=project_instructions,
                 server_recovery=server_recovery,
                 children_budget=children_budget,
                 unattended_max_actions=unattended_max_actions,
@@ -1688,6 +1702,7 @@ async def dispatch_cruncher_subagent(
             state_dir=state_dir,
             effort=effort, effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
+            project_instructions=project_instructions,
             server_recovery=server_recovery,
             children_budget=children_budget,
             unattended_max_actions=unattended_max_actions,
@@ -1716,6 +1731,7 @@ async def dispatch_cruncher_subagent(
         exec_seed=exec_seed, exec_cfg=cruncher_config, config_dir=config_dir, state_dir=state_dir,
         effort=effort, effort_ratios=effort_ratios,
         template_margin_ratio=template_margin_ratio,
+        project_instructions=project_instructions,
         server_recovery=server_recovery,
         children_budget=children_budget,
         unattended_max_actions=unattended_max_actions,
@@ -1765,6 +1781,7 @@ def make_explore_agent_runner(
     children_budget: ChildrenBudgetConfig | None = None,
     unattended_max_actions: int | None = None,
     parent_remaining_fn: Callable[[], tuple[int, float]] | None = None,
+    project_instructions: Any = None,
 ) -> Callable[..., Awaitable[Any]]:
     """Build the AgentTool runner for delegation (module-level seam, T1).
 
@@ -1790,6 +1807,11 @@ def make_explore_agent_runner(
     the nested runner) so a child sizes its output headroom with the margin the person set; None
     leaves children on the 1/64 default. Bench/eval loops are non-interactive and keep that default
     (`bench/runner.py` does not pass it).
+
+    `project_instructions`: the parent's per-root project instructions handle (D-51), shared by every
+    child loop, the cruncher leaf and combine loops and the nested runner, so marks, drops and the
+    dedupe of refusals are one (a child marks with the parent's sitting id). None (bench loops, tests,
+    or `instructions.children: false`, which `start` decides) gives every child no instructions.
 
     `server_recovery`: the parent session's late-bound reconnect supplier (D-21), a zero-argument
     callable returning a `ServerRecovery` (or None). Every child loop, the cruncher leaf and combine
@@ -1898,6 +1920,7 @@ def make_explore_agent_runner(
             effort_fn=effort_fn,
             effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
+            project_instructions=project_instructions,
             server_recovery=server_recovery,
             children_budget=children_budget,
             unattended_max_actions=unattended_max_actions,
@@ -1941,6 +1964,7 @@ def make_explore_agent_runner(
                 state_dir=state_dir,
                 effort=child_effort(parent_effort, None), effort_ratios=effort_ratios,
                 template_margin_ratio=template_margin_ratio,
+                project_instructions=project_instructions,
                 server_recovery=server_recovery,
                 children_budget=children_budget,
                 unattended_max_actions=unattended_max_actions,
@@ -1987,6 +2011,7 @@ def make_explore_agent_runner(
                 effort=child_effort(parent_effort, getattr(cfg, "effort", None)),
                 effort_ratios=effort_ratios,
                 template_margin_ratio=template_margin_ratio,
+                project_instructions=project_instructions,
                 server_recovery=server_recovery,
                 children_budget=children_budget,
                 unattended_max_actions=unattended_max_actions,
@@ -2026,6 +2051,7 @@ def make_explore_agent_runner(
             effort=child_effort(parent_effort, getattr(config_override, "effort", None)),
             effort_ratios=effort_ratios,
             template_margin_ratio=template_margin_ratio,
+            project_instructions=project_instructions,
             server_recovery=server_recovery,
             children_budget=children_budget,
             unattended_max_actions=unattended_max_actions,
