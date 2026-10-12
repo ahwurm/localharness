@@ -290,6 +290,53 @@ def test_an_unrelated_plain_delete_or_move_is_unchanged(command, project):
     assert _shell(command, _ctx(project)) is Verdict.ALLOW, command
 
 
+@pytest.mark.parametrize("command", [
+    "rm ./plugins/*.py", "rm plugins/*.tmp", "mv plugins/*.py build/", "rm build/plugins/*.o",
+    "rm $BUILD/config.yaml", "rm */config.yaml", "rm node_modules/*/plugins", "rm build/*/config.yaml",
+    "rm .localharness/agents/*", "rm .localharness/agents/$NAME.yaml", "rm .localharness/*.tmp",
+    "cd $SOMEWHERE && rm notes.txt",
+])
+def test_a_glob_or_variable_operand_in_the_workspace_is_not_asked_about(command, project):
+    """WR-09 it3: the unplaced-operand rule asked, ungrantably, whenever any literal component was
+    NAMED like a protected entry (`plugins`, `config.yaml`) wherever the operand pointed, so an
+    ordinary `rm ./plugins/*.py` regressed from ALLOW. A glob or variable operand is placed as far as
+    its literal prefix goes and asks only when that prefix is a config folder."""
+    assert _shell(command, _ctx(project)) is Verdict.ALLOW, command
+
+
+@pytest.mark.parametrize("template", [
+    "rm {c}/project_rec*", "rm {c}/*", "rm {c}/project_records.yam?", "rm {c}/[p]roject_records.yaml",
+    "rm {c}/project_records.{{yaml,yaml.lock}}", "rm {c}/$NAME", "rm {c}/*.yaml", "mv {c}/conf* /tmp/x",
+    "rm {c}/plugins/*.py", "cd {c} && rm *", "cd {c} && rm project_rec*", "rm -r {c}/*",
+])
+def test_a_glob_that_could_match_a_protected_entry_in_a_config_folder_asks(
+        template, project, tmp_path, monkeypatch):
+    """WR-08/WR-56 it3: `rm -f <cfg>/project_rec*` asked and `rm <cfg>/project_rec*` did not, the
+    asymmetry CR-01 was filed to remove. The literal prefix is the config folder, so the glob is
+    matched against the protected names."""
+    config_dir = tmp_path / "global"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(config_dir))
+    for base in (str(config_dir), ".localharness"):
+        command = template.format(c=base)
+        if base == ".localharness" and command.startswith("cd "):
+            continue
+        assert _shell(command, _ctx(project)) is Verdict.ASK, command
+
+
+@pytest.mark.parametrize("template", [
+    "rm {c}/agents/*", "rm {c}/*.tmp", "rm {c}/tools/*.sh", "rm {c}/audit.*",
+])
+def test_a_glob_in_a_config_folder_that_cannot_match_an_entry_is_allowed(
+        template, project, tmp_path, monkeypatch):
+    config_dir = tmp_path / "global"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(config_dir))
+    for base in (str(config_dir), ".localharness"):
+        command = template.format(c=base)
+        assert _shell(command, _ctx(project)) is Verdict.ALLOW, command
+
+
 # ------------------------------------------------------------- what no longer asks
 
 @pytest.mark.parametrize("command", [

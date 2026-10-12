@@ -3229,10 +3229,7 @@ def _make_segment(
         destructive_targets=scoped_targets,
         unresolvable_destructive=scoped_unresolvable,
         removal_targets=tuple(target for target, _ in resolved_removals),
-        unresolvable_removal=any(unresolvable for _, unresolvable in resolved_removals) or any(
-            any(bad in target for bad in UNRESOLVABLE_TARGET_CHARS)
-            for target, _ in resolved_removals
-        ),
+        unresolvable_removal=any(unresolvable for _, unresolvable in resolved_removals),
         env_redirect=env_redirect,
         program=program,
     )

@@ -31,7 +31,7 @@ import fnmatch
 import os
 import posixpath
 from dataclasses import dataclass
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Literal, Optional
 from urllib.parse import urlparse
 
@@ -642,14 +642,13 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
     return False
 
 
-def _protected_config_entry(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
-    """Is ``path`` one of the protected entries of a harness config folder (the global one or a
-    project's ``.localharness/``)? Only that rule of :func:`_protected`, not the system, home or
-    workspace-name sets. Asked about the target of a plain delete or move-away (see
-    :func:`_removal_asks`)."""
+def _below_config_folder(path: Path, ctx: GateContext) -> Optional[tuple[str, ...]]:
+    """The parts of ``path`` BELOW a harness config folder (the global one, the session's
+    ``--config-dir``, or a project's ``.localharness/``), or None when it is not inside one. The
+    empty tuple is the folder itself."""
     for config_dir in _config_dirs(ctx):
         if _within(config_dir, path):
-            return bool(_config_dir_verdict(path.relative_to(config_dir).parts, settings))
+            return path.relative_to(config_dir).parts
     for container in (ctx.workspace, ctx.boundary):
         if container is None:
             continue
@@ -658,45 +657,114 @@ def _protected_config_entry(path: Path, ctx: GateContext, settings: GateSettings
             continue
         relative = path.relative_to(container).parts
         if WORKSPACE_DIR_NAME in relative:
-            index = relative.index(WORKSPACE_DIR_NAME)
-            return bool(_config_dir_verdict(relative[index + 1:], settings))
-    return False
+            return relative[relative.index(WORKSPACE_DIR_NAME) + 1:]
+    return None
+
+
+def _protected_config_entry(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
+    """Is ``path`` one of the protected entries of a harness config folder (the global one or a
+    project's ``.localharness/``), or the folder itself? Only that rule of :func:`_protected`, not
+    the system, home or workspace-name sets. Asked about the target of a plain delete or move-away
+    (see :func:`_removal_asks`): moving the folder away takes every entry with it (WR-08 it3),
+    which a WRITE to the folder does not (``localharness init`` creates and replaces it, so
+    :func:`_config_dir_verdict` leaves the folder itself alone)."""
+    parts = _below_config_folder(path, ctx)
+    if parts is None:
+        return False
+    return bool(_config_dir_verdict(parts, settings))
+
+
+_GLOB_OR_VARIABLE_CHARS = (*UNRESOLVABLE_TARGET_CHARS, "[", "{")
+
+
+def _may_name_a_protected_entry(component: str, settings: GateSettings) -> bool:
+    """Could this path component, holding a glob or a variable, be a protected entry's name?
+    A glob is matched against the names; a variable, a brace list or a substitution cannot be, so
+    it is read as "could be"."""
+    if any(char in component for char in ("$", "`", "{")):
+        return True
+    return any(
+        fnmatch.fnmatchcase(name, component) for name in settings.protected_config_dir_entries
+    )
+
+
+def _removal_hit(
+    raw: str, directory_lost: bool, anchor: Optional[Path], ctx: GateContext, settings: GateSettings
+) -> Optional[str]:
+    """The reason a plain delete or move-away of ``raw`` asks, or None (see :func:`_removal_asks`).
+
+    A placed operand asks when it is, or is inside, a config folder's protected entry (or is the
+    folder). An operand holding a glob or variable is placed as far as its literal prefix goes
+    (WR-09 it3): it asks only when that prefix is, or is inside, a config folder AND the glob could
+    match a protected entry; a plain ``./plugins/*.py`` in the workspace is not that. Only when the
+    base is genuinely unknown (the directory is a ``cd`` the classifier could not follow, the first
+    component is itself a variable, the working directory is unreadable) is the operand read by its
+    literal names: a protected entry's name, or an entry name after a literal ``.localharness``.
+    """
+    text = raw.replace("\\", "/")
+    comps = PurePosixPath(text).parts
+    absolute = text.startswith(("/", "~"))
+    tainted = [i for i, comp in enumerate(comps)
+               if any(char in comp for char in _GLOB_OR_VARIABLE_CHARS)]
+    protected_names = settings.protected_config_dir_entries
+    if directory_lost and not absolute:
+        return f"({raw}, unresolved)" if any(c in protected_names for c in comps) else None
+    if not tainted:
+        resolved = _resolve(raw, anchor)
+        if resolved is None:
+            return f"({raw}, unresolved)" if any(c in protected_names for c in comps) else None
+        return f"({resolved})" if _protected_config_entry(resolved, ctx, settings) else None
+    first = tainted[0]
+    base = _resolve(str(PurePosixPath(*comps[:first])), anchor) if first else None
+    if base is None:
+        # Genuinely unknown base: a literal `.localharness` followed by something that could be an entry.
+        for index, comp in enumerate(comps):
+            if comp == WORKSPACE_DIR_NAME and index + 1 < len(comps) and _may_name_a_protected_entry(
+                comps[index + 1], settings
+            ):
+                return f"({raw}, unresolved)"
+        return None
+    parts = _below_config_folder(base, ctx)
+    if parts is None:
+        return None
+    if parts:
+        return f"({raw})" if parts[0] in protected_names else None
+    return f"({raw})" if _may_name_a_protected_entry(comps[first], settings) else None
 
 
 def _removal_asks(
-    segments, anchor: Optional[Path], ctx: GateContext, settings: GateSettings
+    segments, anchor: Optional[Path], ctx: GateContext, settings: GateSettings,
+    siblings=(),
 ) -> list[_Ask]:
     """The ``protected-path`` ask for a plain ``rm`` / ``unlink`` / ``rmdir`` / ``mv``-away of a
-    protected config-folder entry (Phase 11, CR-01 it2; ruling taken on the owner's behalf by the
-    GSD run).
+    protected config-folder entry, or of the folder itself (Phase 11, CR-01 it2 and WR-08 it3;
+    ruling taken on the owner's behalf by the GSD run).
 
     A write to ``project_records.yaml`` asks in every mode, and so does ``rm -f`` / ``rm -rf`` /
     ``shred`` of it (a protected target); the plain spellings did not, and a deleted record is a
     fresh root at the next start (the earlier ``off`` forgotten, a rewritten file adopted under
     the first-contact line). So the plain spellings agree with the forced ones. Only the entries of
-    :data:`~localharness.agent.gate_types.PROTECTED_CONFIG_DIR_ENTRIES` are asked about here, not
-    every protected path: a plain ``rm`` of a file elsewhere is unchanged. A path the classifier
-    cannot place (a variable, a glob, an unreadable ``cd``) asks only when one of its literal
-    components IS a protected entry's name.
+    :data:`~localharness.agent.gate_types.PROTECTED_CONFIG_DIR_ENTRIES` and the folder are asked
+    about here, not every protected path: a plain ``rm`` of a file elsewhere is unchanged.
+    :func:`_removal_hit` says how a glob or variable operand is read.
+
+    ``siblings`` are all the segments of the line, read-only ones included: an ``xargs rm`` takes
+    its paths from a neighbour (``find <cfg> | xargs rm``), so every path a neighbour names is
+    read as an operand of that removal.
     """
     asks: list[_Ask] = []
+
+    def _add(raw: str, lost: bool) -> None:
+        hit = _removal_hit(raw, lost, anchor, ctx, settings)
+        if hit is not None:
+            asks.append(_ask_record(
+                "protected-path", raw,
+                f"deletes or moves a protected config entry {hit}",
+            ))
+
     for segment in segments:
         for raw in segment.removal_targets:
-            unplaced = segment.unresolvable_removal and not raw.startswith(("/", "~"))
-            resolved = None if unplaced else _resolve(raw, anchor)
-            if resolved is None:
-                parts = Path(raw.replace("\\", "/")).parts
-                if any(part in settings.protected_config_dir_entries for part in parts):
-                    asks.append(_ask_record(
-                        "protected-path", raw,
-                        f"deletes or moves a protected config entry ({raw}, unresolved)",
-                    ))
-                continue
-            if _protected_config_entry(resolved, ctx, settings):
-                asks.append(_ask_record(
-                    "protected-path", str(resolved),
-                    f"deletes or moves a protected config entry ({resolved})",
-                ))
+            _add(raw, segment.unresolvable_removal)
     return asks
 
 
@@ -1160,7 +1228,7 @@ def _evaluate_shell(
         for target in segment.write_targets
     ))
 
-    asks += _removal_asks(non_read_only, anchor, ctx, settings)
+    asks += _removal_asks(non_read_only, anchor, ctx, settings, classified.segments)
 
     for segment in non_read_only:
         runs_it = False

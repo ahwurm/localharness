@@ -354,8 +354,10 @@ class ShellSegment:
     a write, and ``rm x`` is not destructive by signature, so neither field above names it."""
 
     unresolvable_removal: bool = False
-    """True when :attr:`removal_targets` holds a path the classifier cannot place (a variable, a
-    glob, a ``cd`` it could not follow)."""
+    """True when the directory the segment runs in is one the classifier could not follow (a ``cd``
+    into a variable or a glob), so its relative :attr:`removal_targets` are not placed anywhere. A
+    glob or variable INSIDE an operand is not this: the operand is as written and the verdict reads
+    its literal prefix (WR-09 it3)."""
 
     pipe_to_shell: bool = False
     """True when this segment is the SINK of a ``curl … | sh`` (:data:`PIPE_TO_SHELL_SINKS_DEFAULT`).
