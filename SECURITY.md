@@ -745,7 +745,9 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   names are `PATH`, `BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `HOME`, any
   name matching `*_CONFIG*`, `GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`, `GIT_PAGER`, `PAGER`,
   `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`,
-  `GIT_CONFIG_KEY_*`, `GIT_DIR` and `GIT_COMMON_DIR`; names match case-sensitively, as environment
+  `GIT_CONFIG_KEY_*`, `GIT_DIR`, `GIT_COMMON_DIR`, `GIT_SSH`, `GIT_ASKPASS`, `SSH_ASKPASS`,
+  `GIT_PROXY_COMMAND`, `GIT_EXEC_PATH`, `GIT_TRACE*` (which append to a named file) and
+  `GIT_REDIRECT_*`; names match case-sensitively, as environment
   names do. The six names whose value is itself a command (`GIT_PAGER`, `PAGER`, `GIT_EDITOR`,
   `GIT_SEQUENCE_EDITOR`, `GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`) keep the tier when the value is
   empty or itself classifies as read-only, so `GIT_PAGER=cat git log` stays silent, and

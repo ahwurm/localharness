@@ -25,6 +25,8 @@ def test_the_shipped_table_is_the_decided_tuple_in_order() -> None:
         "*_CONFIG*", "GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_PAGER", "PAGER", "GIT_EDITOR",
         "GIT_SEQUENCE_EDITOR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_*",
         "GIT_DIR", "GIT_COMMON_DIR",
+        "GIT_SSH", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXEC_PATH",
+        "GIT_TRACE*", "GIT_REDIRECT_*",
     )
 
 
@@ -139,6 +141,18 @@ LEAVES_THE_TIER = [
     "GIT_PAGER=/tmp/cat git log",
     "PAGER=./sort git log",
     "GIT_PAGER='cat; ./x' git log",
+    # WR-02 / WR-57: programs a git read can start, and files it can append to
+    "GIT_SSH=./x.sh git remote show origin",
+    "GIT_ASKPASS=./x git fetch",
+    "SSH_ASKPASS=./x git fetch",
+    "GIT_PROXY_COMMAND=./x git ls-remote origin",
+    "GIT_EXEC_PATH=./d git status",
+    "GIT_TRACE=/home/u/.bashrc git status",
+    "GIT_TRACE2_EVENT=/tmp/t git log",
+    "GIT_TRACE_PACKET=/tmp/t git log",
+    "GIT_TRACE_PERFORMANCE=/tmp/t git log",
+    "GIT_REDIRECT_STDERR=/tmp/t git log",
+    "env GIT_TRACE=/tmp/t git status",
 ]
 
 
@@ -471,3 +485,12 @@ def test_a_computed_name_export_before_ls_has_the_verdict_of_the_literal_path_ex
 def test_literal_names_and_computed_values_keep_the_tier(command):
     last = _segments(command)[-1]
     assert last.read_only is True and last.env_redirect is False
+
+
+@pytest.mark.parametrize("command", [
+    "GIT_SSH=./x.sh git remote show origin",
+    "GIT_TRACE=/home/u/.bashrc git status",
+])
+@pytest.mark.parametrize("mode", ("read-only", "guarded"))
+def test_the_added_git_variables_are_no_longer_allowed_as_a_read(command, mode, ws):
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
