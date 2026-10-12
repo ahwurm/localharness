@@ -117,7 +117,7 @@ delimiter line. Scanning it as a heredoc is the R1 bug — the scanner skipped `
 ``<`` and then read the SECOND ``<`` as the start of a ``<<`` operator, took the rest of the line
 as a delimiter word, and swallowed every following line as a body (bash(1) "Here Strings")."""
 
-ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 """``K=V`` prefix form. PRD §3.2 step 4: ``env`` skips these before the wrapped command."""
 
 ENV_CARRIER_DECLARERS = frozenset({"export", "declare", "typeset", "readonly", "local"})
@@ -969,6 +969,86 @@ def _read_heredoc_delimiter(
     return "".join(chars), quoted, index, True
 
 
+ARRAY_ASSIGNMENT_WORD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=$")
+"""The word in front of the ``(`` of an array literal: ``x=``, ``x+=`` (``declare -a x=(…)`` has it as its operand)."""
+
+
+def _current_word(out: list[str]) -> str:
+    """The word being built at the end of ``out``: the text after the last blank or operator (bounded)."""
+    chars: list[str] = []
+    for piece in reversed(out):
+        for char in reversed(piece):
+            if char in BASH_BLANKS or char in COMMENT_WORD_STARTS:
+                return "".join(reversed(chars))
+            chars.append(char)
+        if len(chars) > 256:
+            break
+    return "".join(reversed(chars))
+
+
+def _array_literal_is_plain(text: str, open_index: int) -> bool:
+    """Is the ``(`` at ``open_index`` the start of an array literal bash reads as plain words (CR-01 / CR-55 it4)?
+
+    Words, quotes and substitutions (stepped over whole) up to a ``)`` are a literal. An unquoted ``;``, ``&``,
+    ``|``, ``<``, ``>`` or ``(``, a ``#`` that starts a word, or no closing ``)`` at all is a syntax error in
+    bash, which then runs the lines after it; this says so by returning False."""
+    size = len(text)
+    index = open_index + 1
+    word_start = True
+    while index < size:
+        char = text[index]
+        if char == ")":
+            return True
+        if char in ";&|<>(" or (char == "#" and word_start):
+            return False
+        if char == "$" and text[index + 1 : index + 2] == "'":
+            _, index, closed = _decode_ansi_c(text, index + 2)
+            if not closed:
+                return False
+            word_start = False
+            continue
+        if char == "$" and text[index + 1 : index + 2] == '"':
+            index += 1
+            continue
+        step = _skip_word_part(text, index)
+        if step > size:
+            return False
+        word_start = char in BASH_BLANKS
+        index = step
+    return False
+
+
+def _collapse_array_literals(text: str) -> str:
+    """Replace every ``NAME=( … )`` / ``NAME+=( … )`` by ``NAME=(__lh_array__)``: one blank-free word.
+
+    ``shlex`` splits ``x=(a b)`` at the blank, so its second half (``b)``) was read as the command and the real
+    command after the assignment was never looked at (CR-01 it4). The elements are words: their substitutions
+    were lifted before this, and nothing else in them runs."""
+    out: list[str] = []
+    index = 0
+    size = len(text)
+    while index < size:
+        char = text[index]
+        step = _skip_word_part(text, index) if char in "\\'\"`$" else index + 1
+        if step > index + 1 or char in "\\'\"`":
+            step = min(step, size)
+            out.append(text[index:step])
+            index = step
+            continue
+        if char == "(" and out and out[-1][-1:] == "=" and ARRAY_ASSIGNMENT_WORD_RE.match(_current_word(out)):
+            end = _matching(text, index)
+            if end < size:
+                out.append(ARRAY_PLACEHOLDER)
+                index = end + 1
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+ARRAY_PLACEHOLDER = "(__lh_array__)"
+
+
 class _JoinScan:
     """One recursive pass over the command text: continuations dropped, comments stripped, heredoc
     bodies removed.
@@ -1118,10 +1198,21 @@ class _JoinScan:
                 word_start = False
                 tracker.opaque()
                 continue
+            if (
+                char == "(" and kind in HEREDOC_KINDS and out and out[-1][-1:] == "="
+                and ARRAY_ASSIGNMENT_WORD_RE.match(_current_word(out))
+                and not _array_literal_is_plain(text, index)
+            ):
+                # CR-01 / CR-02 / CR-55 (it4): bash reads `NAME=( … )` as words only. An operator, a `<<`
+                # or a comment inside is a syntax error after which it carries on at the next line, so the
+                # classifier cannot say what runs: the text is asked about as unparsed.
+                self.balanced = False
             if char == "\n":
                 out.append(char)
                 self.index += 1
                 word_start = True
+                if bracket:
+                    self.balanced = False  # `x[` newline … `]=1` is one subscript whose `$(…)` runs (CR-55 it4)
                 bracket = 0
                 tracker.step(char, nested)
                 if pending:
@@ -2247,6 +2338,7 @@ def _assignment_redirects(token: str, settings: GateSettings) -> bool:
     A table name sets it on any value, empty included; the six command-valued names are exempt
     when the value is empty or reads as a read-only command line."""
     name, _, value = token.partition("=")
+    name = name.removesuffix("+")  # `PATH+=./d` appends to PATH: it redirects what runs the same way
     if not _is_redirect_env_name(name, settings):
         return False
     if name in COMMAND_VALUED_ENV_VARS:
@@ -4089,6 +4181,7 @@ def _tokenize(text: str) -> list[str]:
     ``comments=False`` (CR-53): ``shlex`` would end a word at a ``#`` anywhere in it, unlike bash, and
     hide ``git diff a#b --output=x`` or ``{#;rm x``. The real comments are gone by now, dropped by
     :func:`_join_continuations`, which every command text and every lifted payload goes through."""
+    text = _collapse_array_literals(text)
     try:
         return shlex.split(text, comments=False)
     except ValueError:
