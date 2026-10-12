@@ -801,6 +801,7 @@ class ProjectInstructions:
         self._candidate: Candidate | None = None
         self._declined = False
         self._marked = False
+        self._had_record = False
         self._warned: set[tuple] = set()
         self._held: InstructionsNotice | None = None
         self._awaiting: _Awaiting | None = None
@@ -892,6 +893,19 @@ class ProjectInstructions:
             "refused", name, path, self._last.size, self._last.state,
             reason="unreadable store",
             text=f"{display_name(name)} not used this turn (unreadable store)",
+        )
+
+    def _record_lost_refusal(self) -> InstructionsNotice | None:
+        """The ``record lost`` line, once per handle: the file stays out until ``/instructions on``."""
+        name, path = self._last.name, self._last.path
+        key = ("refused", "record lost", path, 0)
+        if key in self._warned:
+            return None
+        self._warned.add(key)
+        return self._notice(
+            "refused", name, path, self._last.size, self._last.state,
+            reason="record lost",
+            text=f"{display_name(name)} not used this turn (record lost); /instructions on",
         )
 
     @staticmethod
@@ -990,6 +1004,13 @@ class ProjectInstructions:
         usable = record is not None and record.state == "yes"
         if self._mem_state == "off":
             return None, None
+        if record is not None:
+            fx.append(lambda: setattr(self, "_had_record", True))
+        elif self._had_record or (self._marked and self._awaiting is None):
+            # a record this sitting saw (or a mark it left) has vanished: deleted, damaged or
+            # swapped under a running sitting. That is not a fresh root, so nothing is adopted;
+            # only `/instructions on` brings the file back (CR-51, D-72)
+            return None, self._record_lost_refusal()
         if not usable and self._mem_state != "yes":
             if record is None and self._basis in ("layer", "trusted") and not self._no_input:
                 pass  # the no-record sitting: used, with the start line owed
@@ -1331,6 +1352,7 @@ class ProjectInstructions:
             with _store_transaction(self._config_dir) as data:
                 _put_record(data, _normalize_root(self._root), record, pending)
         self._marked = False
+        self._had_record = True
         self._candidate = cand
         self._recorded_path = record.path
         self._last = InstructionsState(
@@ -1357,6 +1379,7 @@ class ProjectInstructions:
                 )
             _put_record(data, key, new, pending)
         self._recorded_path = new.path
+        self._had_record = True
         self._last = InstructionsState(new.name, new.path, new.size, new.digest, "off")
 
     def _answer_in_memory(self, value: str) -> None:
@@ -1448,6 +1471,8 @@ class ProjectInstructions:
         self._awaiting = None
         self._start_line = None
         self._awaiting_too_large = None
+        if aw is not None:
+            self._had_record = True
         if aw is not None and self._dropped_digest is not None:
             self._marked = False
         self._dropped_digest = None

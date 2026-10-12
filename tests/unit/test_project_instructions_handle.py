@@ -853,3 +853,60 @@ def test_a_failed_set_state_never_raises(instructions_home, tmp_path, monkeypatc
         assert run_instructions_command(h, "off") == "instructions not changed (unreadable store)"
         assert run_instructions_command(h, "on") == "CLAUDE.md not used this turn (unreadable store)"
     assert _record_of(root)["state"] == "yes"  # the store was unavailable: nothing changed
+
+
+# --------------------------------------------------------------------------- CR-51: a vanished record
+
+
+def test_a_record_that_vanishes_under_a_mark_never_adopts_the_models_rewrite(
+    instructions_home, tmp_path,
+):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _recorded(root)
+    assert h.section(WINDOW) == (TEXT, None)
+    h.mark_pending()
+    _rewrite(root, CHANGED)
+    store_file().unlink()
+    text, notice = h.section(WINDOW)
+    assert text is None
+    assert notice is not None and notice.cause == "refused" and notice.reason == "record lost"
+    assert notice.text == "CLAUDE.md not used this turn (record lost); /instructions on"
+    assert h.section(WINDOW) == (None, None)
+    assert not store_file().exists()  # nothing was adopted or written
+    assert run_instructions_command(h, "on") == f"using CLAUDE.md ({pr.format_kb(len(CHANGED))})"
+    assert h.section(WINDOW) == (CHANGED, None)
+
+
+def test_a_record_that_vanishes_does_not_undo_off(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _recorded(root)
+    h.set_state("off")
+    store_file().unlink()
+    text, notice = h.section(WINDOW)
+    assert text is None
+    assert notice is not None and notice.reason == "record lost"
+    assert not store_file().exists()
+
+
+def test_a_record_written_by_the_receipt_that_vanishes_is_not_a_fresh_root(
+    instructions_home, tmp_path,
+):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _open(root)
+    assert h.section(WINDOW)[0] == TEXT
+    h.on_delivered()
+    store_file().unlink()
+    _rewrite(root, CHANGED)
+    text, notice = h.section(WINDOW)
+    assert text is None and notice.reason == "record lost"
+    assert not store_file().exists()
+
+
+def test_a_corrupt_store_under_a_running_sitting_is_not_a_fresh_root(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _recorded(root)
+    assert h.section(WINDOW) == (TEXT, None)
+    store_file().write_text("[: not yaml", encoding="utf-8")
+    _rewrite(root, CHANGED)
+    text, notice = h.section(WINDOW)
+    assert text is None and notice.reason == "record lost"
