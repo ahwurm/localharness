@@ -518,3 +518,27 @@ def test_a_brace_that_is_not_a_group_does_not_swallow_the_rest():
     assert "touch" in [s.signature for s in _segments("echo {a; touch y")]
     assert [s.signature for s in _segments("{ ls; }; touch y")] == ["ls", "touch"]
     assert [s.signature for s in _segments("f() { echo {a,b}; }; f")] == ["echo", "f"]
+
+
+# ------------------------------------------------------------------ bash 5.3 funsubs (CR-56; iteration 2)
+
+FUNSUB_ROWS = (
+    "echo ${ rm -rf /etc/x; }",
+    "echo ${| rm -rf /etc/x; }",
+    'echo "${ rm -rf /etc/x; }"',
+    "x=${ rm -rf /etc/x; }",
+    "echo ${ { rm -rf /etc/x; }; }",
+    "echo ${ ls # c\nrm -rf /etc/x\n}",
+)
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+@pytest.mark.parametrize("command", FUNSUB_ROWS)
+def test_a_funsub_body_is_classified_like_a_command_substitution(command, mode, ws):
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+def test_a_funsub_of_a_read_is_read_only_and_a_plain_expansion_is_unchanged():
+    assert all(s.read_only for s in _segments("echo ${ ls; } ${x:-a} ${#y}"))
+    assert [s.signature for s in _segments("echo ${x:-$(rm -rf /etc/x)}")] == ["rm -rf", "echo"]
