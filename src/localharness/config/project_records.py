@@ -626,7 +626,7 @@ def _start_text(name: str, size: int) -> str:
 
 
 def _harness_written_text(name: str) -> str:
-    return f"{display_name(name)} changed by the model; not used \u2014 /instructions on"
+    return f"{display_name(name)} changed by the model; not used — /instructions on"
 
 
 def _name_rank(name: str) -> int:
@@ -743,7 +743,7 @@ class ProjectInstructions:
         config_dir: Any = None,
     ) -> None:
         self._root = Path(os.fspath(root))
-        self.sitting_id = sitting_id
+        self._sitting_id = sitting_id
         self._max_ratio = max_ratio
         self._basis = basis
         self._no_input = no_input
@@ -862,8 +862,8 @@ class ProjectInstructions:
         return True
 
     def _marks(self, pending: dict[str, str]) -> _Marks:
-        own = self._marked or self.sitting_id in pending
-        foreign = {sid for sid in pending if sid != self.sitting_id}
+        own = self._marked or self._sitting_id in pending
+        foreign = {sid for sid in pending if sid != self._sitting_id}
         live, dead = set(foreign), set()
         if foreign:
             try:
@@ -1053,7 +1053,7 @@ class ProjectInstructions:
         text = read.data.decode("utf-8", errors="replace")
         digest = read.digest
         at_recorded = first is not None and str(first.real) == record.path
-        clear = set(marks.dead) | ({self.sitting_id} & set(pending))
+        clear = set(marks.dead) | ({self._sitting_id} & set(pending))
 
         if digest == record.digest:
             if shadowing:
@@ -1167,7 +1167,7 @@ class ProjectInstructions:
             "shadowed", record.name, record.path, read.size, "pending", shadowed=shadow.name,
             text=(
                 f"{shadow.name} (model edit) not used; using {display_name(record.name)}"
-                " \u2014 /instructions on to switch"
+                " — /instructions on to switch"
             ),
         )
 
@@ -1187,7 +1187,7 @@ class ProjectInstructions:
                 raw = _inst_raw(data, key)
                 record = _record_from_dict(raw)
                 pending = dict(_pending_from_dict(raw))
-                pending[self.sitting_id] = datetime.now(timezone.utc).isoformat()
+                pending[self._sitting_id] = datetime.now(timezone.utc).isoformat()
                 if record is not None:
                     _put_record(data, key, record, pending)
                 else:
@@ -1204,23 +1204,160 @@ class ProjectInstructions:
         change found with no mark is adopted through the start line (written only by
         ``on_delivered``), so one change never draws two lines."""
         try:
-            self._run(window_tokens, at_start=True)
+            _, notice = self._run(window_tokens, at_start=True)
         except (OSError, RuntimeError) as exc:
             log.debug("project_instructions_precheck_failed", error=str(exc))
             self._summary_entity = None
             self._start_line = None
             self._awaiting = None
             return
+        if notice is not None and notice.cause in ("harness_written", "shadowed"):
+            self._held = notice  # the first assembly's call (or any call with none of its own) says it
         self._summary_entity = self._entity()
 
     def _entity(self) -> str | None:
         """The counts entity text for the summary line (D-54)."""
         if self._awaiting is not None:
             return display_name(self._awaiting.name)
-        name = display_name(self._last.name)
-        if self._last.state == "none":
+        state = self._last.state
+        if state == "none":
             return None
+        name = display_name(self._last.name)
+        if state == "off":
+            return f"{name} (off)"
+        if state == "harness_written":
+            return f"{name} (model edit; /instructions on)"
+        if state == "too_large":
+            return f"{name} (too large)"
         return name
+
+    # ---- state changes
+
+    def decline(self) -> None:
+        """The workspace was declined this sitting: the handle is inert, nothing is written (D-61)."""
+        self._declined = True
+        self._awaiting = None
+        self._start_line = None
+        self._held = None
+
+    def set_state(self, value: Literal["yes", "off"]) -> None:
+        """The person's answer (D-33): ``yes`` accepts the first resolving candidate's current
+        bytes, ``off`` is never re-adopted until ``yes``. Both clear an owed start line. Under
+        ``--no-input`` the answer holds for this sitting only and nothing is written."""
+        if self._declined:
+            return
+        self._awaiting = None
+        self._start_line = None
+        self._held = None
+        self._dropped_digest = None
+        self._set_failure = None
+        try:
+            if self._no_input:
+                self._answer_in_memory(value)
+            elif value == "yes":
+                self._accept()
+            else:
+                self._turn_off()
+        except (OSError, RuntimeError) as exc:
+            log.debug("project_instructions_set_state_failed", error=str(exc))
+            self._set_failure = "unreadable store"
+
+    def _accept(self) -> None:
+        cand = first_candidate(self._root)
+        if cand is None:
+            self._set_failure = "no file"
+            self._last = replace(self._last, state="none")
+            return
+        record = accept_instructions(self._root, cand, config_dir=self._config_dir)
+        if record is None:
+            probe = guarded_read(cand.real, self._root, ACCEPT_MAX_BYTES)
+            self._set_failure = "too large" if probe.failure == "too_large" else (
+                probe.failure or "unreadable"
+            )
+            return
+        pending = dict(record.pending)
+        if self._sitting_id in pending:
+            del pending[self._sitting_id]
+            with _store_transaction(self._config_dir) as data:
+                _put_record(data, _normalize_root(self._root), record, pending)
+        self._marked = False
+        self._candidate = cand
+        self._recorded_path = record.path
+        self._last = InstructionsState(
+            record.name, record.path, record.size, record.digest, "pending" if pending else "yes"
+        )
+
+    def _turn_off(self) -> None:
+        key = _normalize_root(self._root)
+        with _store_transaction(self._config_dir) as data:
+            raw = _inst_raw(data, key)
+            record = _record_from_dict(raw)
+            pending = dict(_pending_from_dict(raw))
+            if record is not None:
+                new = replace(record, state="off")
+            else:
+                cand = self._candidate or first_candidate(self._root)
+                if cand is None:
+                    self._set_failure = "no file"
+                    return
+                read = guarded_read(cand.real, self._root, ACCEPT_MAX_BYTES)
+                new = InstructionsRecord(
+                    path=str(cand.real), name=display_name(cand.name), digest=read.digest or "",
+                    size=read.size, state="off",
+                )
+            _put_record(data, key, new, pending)
+        self._recorded_path = new.path
+        self._last = InstructionsState(new.name, new.path, new.size, new.digest, "off")
+
+    def _answer_in_memory(self, value: str) -> None:
+        cand = first_candidate(self._root)
+        if cand is None:
+            self._set_failure = "no file"
+            return
+        if value == "off":
+            self._mem_state = "off"
+            self._last = replace(self._last, state="off")
+            return
+        probe = guarded_read(cand.real, self._root, ACCEPT_MAX_BYTES)
+        if probe.failure is not None:
+            self._set_failure = "too large" if probe.failure == "too_large" else probe.failure
+            return
+        self._mem_state = "yes"
+        self._candidate = cand
+        self._last = InstructionsState(
+            display_name(cand.name), str(cand.real), probe.size, probe.digest, "yes"
+        )
+
+    def _refresh(self) -> None:
+        """Bring ``state`` up to date with the store and the file (for ``/instructions show``)."""
+        try:
+            key = _normalize_root(self._root)
+            with _store_transaction(self._config_dir) as data:
+                raw = _inst_raw(data, key)
+                record = _record_from_dict(raw)
+                pending = dict(_pending_from_dict(raw))
+        except (OSError, RuntimeError):
+            return
+        if record is not None:
+            probe = guarded_read(record.path, self._root, ACCEPT_MAX_BYTES)
+            state = _state_name(
+                record, marks_open=bool(pending) or self._marked, digest=probe.digest,
+                too_large=False,
+            )
+            if self._mem_state == "off":
+                state = "off"
+            self._recorded_path = record.path
+            self._last = InstructionsState(
+                record.name, record.path, record.size, record.digest, state
+            )
+        elif self._awaiting is None and self._mem_state is None:
+            cand = self._candidate or first_candidate(self._root)
+            if cand is None:
+                return
+            probe = guarded_read(cand.real, self._root, ACCEPT_MAX_BYTES)
+            self._last = InstructionsState(
+                display_name(cand.name), str(cand.real), probe.size, probe.digest, "none"
+            )
 
     # ---- delivery
 
@@ -1246,7 +1383,7 @@ class ProjectInstructions:
                         path=aw.path, name=display_name(aw.name), digest=aw.digest, size=aw.size,
                         state="yes", harness_written=self._dropped_digest,
                     )
-                    pending.pop(self.sitting_id, None)
+                    pending.pop(self._sitting_id, None)
                     _put_record(data, key, record, pending)
                 if big is not None:
                     entry = _entry_for_write(data, key)
@@ -1302,3 +1439,41 @@ def open_project_instructions(
     )
     handle._precheck(window_tokens)
     return handle
+
+
+_DECLINED_REPLY = "instructions are not used in this session (the workspace was declined)"
+_USAGE = "usage: /instructions off | on | show"
+
+
+def run_instructions_command(handle: ProjectInstructions | None, arg: str) -> str:
+    """The one ``/instructions`` handler the REPL and ACP share (D-59); the reply is the text.
+
+    ``off`` / ``on`` / ``show`` only: no preview of the file and no diff of a change (D-01)."""
+    if handle is None:
+        return "no instructions file in this workspace"
+    word = arg.strip().lower()
+    if word not in ("off", "on", "show"):
+        return _USAGE
+    if word == "show":
+        if not handle._declined:
+            handle._refresh()
+        st = handle.state
+        return (
+            f"{display_name(st.name)}: {st.path!r} · {format_kb(st.size)} · "
+            f"sha256 {st.digest or '-'} · {st.state}"
+        )
+    if handle._declined:
+        return _DECLINED_REPLY
+    handle.set_state("off" if word == "off" else "yes")
+    st = handle.state
+    name = display_name(st.name)
+    failure = handle._set_failure
+    if failure == "no file":
+        return "no instructions file in this workspace"
+    if word == "off":
+        if failure is not None:  # the answer could not be kept: say so rather than claim it
+            return f"instructions not changed ({failure})"
+        return f"instructions off for this workspace; /instructions on to use {name}"
+    if failure is not None:
+        return f"{name} not used this turn ({failure})"
+    return f"using {name} ({format_kb(st.size)})"
