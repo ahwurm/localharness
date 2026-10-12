@@ -502,8 +502,8 @@ def test_directory_tracking_controls(ws, command, expected):
         "find . -maxdepth 0 -exec time rm -rf /etc/x \;",
         "find . -maxdepth 0 -exec ionice rm -rf /etc/x \;",
         "find . -maxdepth 0 -exec flock /tmp/l rm -rf /etc/x \;",
-        "find . -maxdepth 0 -execdir env rm -rf /etc/x \;",
-        "find . -maxdepth 0 -ok env rm -rf /etc/x \;",
+        "find . -maxdepth 0 -execdir env rm -rf /etc/x \\;",
+        "find . -maxdepth 0 -ok env rm -rf /etc/x \\;",
         "find . -maxdepth 0 -exec env nice timeout 5 rm -rf /etc/x +",
         "echo | xargs env rm -rf /etc/x",
         "echo | xargs nice rm -rf /etc/x",
@@ -762,3 +762,87 @@ def test_an_ordinary_comment_holding_an_arrow_changes_nothing(ws, command):
 )
 def test_the_uf1_hazards_keep_their_verdict(ws, command):
     _check(command, "DENY/ASKU/ASKU", ws)
+
+
+# --------------------------------------------------------------------------- WR-04 / WR-54: state-changing forms of read-only commands
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "git branch newbranch",
+        "git branch newbranch HEAD~1",
+        "git branch -f main HEAD~1",
+        "git branch --force main HEAD",
+        "git branch -u origin/x",
+        "git branch --set-upstream-to=origin/x",
+        "git branch --unset-upstream",
+        "git branch --edit-description",
+        "git branch --track x origin/x",
+        "git branch -t x origin/x",
+        "git branch --no-track x",
+        "git branch --create-reflog x",
+        "git branch -- x",
+        "file -C -m msrc",
+        "file -C",
+        "file --compile -m msrc",
+        "date -s '2020-01-01'",
+        "date --set=2020-01-01",
+        "date 010112002020",
+        "hostname newname",
+        "hostname -F /etc/hostname",
+        "ss -K",
+        "ss --kill",
+        "ss -tK",
+        "docker --host=ssh://x ps",
+        "docker -H tcp://x ps",
+        "docker --context prod ps",
+    ),
+)
+def test_a_state_changing_form_of_a_read_only_command_leaves_the_tier(ws, command):
+    """WR-04 / WR-54 (it4): a signature decides the tier, so the forms that write a ref, a magic file, the clock, the
+    host name or kill sockets need a signature of their own (still grantable, not read-only)."""
+    words = _words(command, ws).split("/")
+    assert words[0] != "ok" and words[1] != "ok", words
+    assert not all(s.read_only for s in _segments(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "git branch",
+        "git branch -a",
+        "git branch -vv",
+        "git branch -r",
+        "git branch --list 'feat*'",
+        "git branch -l 'feat*'",
+        "git branch --contains abc",
+        "git branch --no-contains abc",
+        "git branch --merged main",
+        "git branch --no-merged main",
+        "git branch --points-at HEAD",
+        "git branch --sort=-committerdate",
+        "git branch --show-current",
+        "git branch --format='%(refname)'",
+        "git branch -a --list 'origin/*'",
+        "file foo",
+        "file -b --mime-type foo",
+        "date",
+        "date +%Y-%m-%d",
+        "date -u +%s",
+        "date -d yesterday +%F",
+        "date --date='1 day ago'",
+        "hostname",
+        "hostname -f",
+        "hostname -I",
+        "ss -tlnp",
+        "docker ps",
+        "docker ps -a",
+    ),
+)
+def test_the_listing_forms_keep_the_read_only_tier(ws, command):
+    _check(command, "ok/ok/ok", ws)
+
+
+def test_git_branch_deletion_keeps_its_destructive_key(ws):
+    _check("git branch -d x", "DENY/ASKU/ok", ws)
+    _check("git branch -D x", "DENY/ASKU/ok", ws)

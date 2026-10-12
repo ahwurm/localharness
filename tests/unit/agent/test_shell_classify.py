@@ -729,8 +729,10 @@ def test_a_grant_on_the_bare_git_subcommand_never_covers_its_operations() -> Non
 
 
 def test_an_unrecognized_git_operation_word_does_not_join_the_key() -> None:
-    """A branch NAME is not an operation: `git branch feature` must not key on the name."""
-    assert sigs("git branch feature") == ("git branch",)
+    """A branch NAME is not an operation: `git branch feature` must not key on the name. It is not the listing key
+    either: it creates a ref, so it has a key of its own (WR-04 / WR-54 it4), the same for every name."""
+    assert sigs("git branch feature") == ("git branch --create",) == sigs("git branch other")
+    assert sigs("git branch feature") != sigs("git branch")
     assert sigs("git remote") == ("git remote",)
 
 
