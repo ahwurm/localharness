@@ -1047,6 +1047,41 @@ def test_a_mark_left_after_a_drop_is_cleared_while_the_dropped_bytes_stay_in_the
     assert notice is not None and notice.cause == "adopted"
 
 
+def test_a_dropped_start_line_file_then_a_hand_edit_is_the_persons_change(
+    instructions_home, tmp_path,
+):
+    """WR-05 it2: the awaiting-step drop kept the mark, so the person's fix-up of the dropped
+    bytes was called "changed by the model" again."""
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _open(root)
+    assert h.section(WINDOW)[0] == TEXT  # the start line is owed and never delivered
+    h.mark_pending()
+    _rewrite(root, CHANGED)  # a harness call changed the bytes the line described
+    text, notice = h.section(WINDOW)
+    assert text is None and notice is not None and notice.cause == "harness_written"
+    assert h.state.state == "harness_written"
+    assert "pending" not in load_store().get("roots", {}).get(str(root.resolve()), {}).get(
+        "instructions", {}
+    )
+    assert h.section(WINDOW) == (None, None)  # the dropped bytes stay out, silently
+    _rewrite(root, "the person's fix-up\n")  # no mark stands: this is the person's change
+    assert h.section(WINDOW) == ("the person's fix-up\n", None)
+    assert h.state.state != "harness_written"
+
+
+def test_a_second_model_write_after_the_drop_is_dropped_again(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _open(root)
+    assert h.section(WINDOW)[0] == TEXT
+    h.mark_pending()
+    _rewrite(root, CHANGED)
+    assert h.section(WINDOW)[1].cause == "harness_written"
+    h.mark_pending()  # the model names the file again
+    _rewrite(root, "yet another\n")
+    text, notice = h.section(WINDOW)
+    assert text is None and notice is not None and notice.cause == "harness_written"
+
+
 def test_another_live_sessions_mark_survives_the_clearing(instructions_home, tmp_path):
     root = make_root(tmp_path, {"CLAUDE.md": TEXT})
     h = _recorded(root)

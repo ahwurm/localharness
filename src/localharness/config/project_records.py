@@ -1167,12 +1167,18 @@ class ProjectInstructions:
             fx.append(lambda: setattr(self, "_start_notice_given", True))
             return text, self._notice("start", aw.name, aw.path, aw.size, "none", text=aw.text)
         if read.digest == self._dropped_digest:
+            # still the dropped bytes: the mark that dropped them stood for them and no more, or
+            # a later hand edit would be called the model's again (WR-05 it2)
+            self._clear_own_marks(data, key, record, pending, self._marks(pending), fx)
             return None, None
         digest = read.digest
-        if self._marks(pending).any:
+        marks = self._marks(pending)
+        if marks.any:
             # a harness call named the file after the line was owed: the bytes the line
-            # described stay the ones in use, the model's are dropped (D-84)
+            # described stay the ones in use, the model's are dropped (D-84). The dropped digest
+            # pins those bytes out, so the mark is spent and is cleared with the drop (WR-05 it2)
             fx.append(lambda: setattr(self, "_dropped_digest", digest))
+            self._clear_own_marks(data, key, record, pending, marks, fx)
             state = InstructionsState(
                 display_name(aw.name), aw.path, read.size, digest, "harness_written"
             )
