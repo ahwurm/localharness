@@ -666,3 +666,62 @@ def test_a_wrapper_option_the_peel_must_skip_does_not_hide_the_command(ws, comma
 )
 def test_wrapper_option_controls(ws, command, expected):
     _check(command, expected, ws)
+
+
+# --------------------------------------------------------------------------- WR-03 / IN-53: unmodelled exec wrappers
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "pkexec rm -rf /etc/x",
+        "runuser -u bob -- rm -rf /etc/x",
+        "sg grp -c 'rm -rf /etc/x'",
+        "newgrp grp",
+        "machinectl shell root@ /bin/rm -rf /etc/x",
+        "strace rm -rf /etc/x",
+        "strace -f -o /tmp/t rm -rf /etc/x",
+        "ltrace rm -rf /etc/x",
+        "taskset 1 rm -rf /etc/x",
+        "taskset -c 0 rm -rf /etc/x",
+        "chrt -i 0 rm -rf /etc/x",
+        "unshare rm -rf /etc/x",
+        "unshare -r rm -rf /etc/x",
+        "nsenter -t 1 -m rm -rf /etc/x",
+        "setarch x86_64 rm -rf /etc/x",
+        "setpriv --reuid=1 rm -rf /etc/x",
+        "numactl -N 0 rm -rf /etc/x",
+        "prlimit --nofile=10 rm -rf /etc/x",
+        "fakeroot rm -rf /etc/x",
+        "faketime now rm -rf /etc/x",
+        "eatmydata rm -rf /etc/x",
+        "valgrind rm -rf /etc/x",
+        "perf stat rm -rf /etc/x",
+        "bwrap --bind / / rm -rf /etc/x",
+        "firejail rm -rf /etc/x",
+        "xvfb-run rm -rf /etc/x",
+        "dbus-run-session -- rm -rf /etc/x",
+        "toybox rm -rf /etc/x",
+        "csh -c 'rm -rf /etc/x'",
+        "tcsh -c 'rm -rf /etc/x'",
+        "script -qc 'rm -rf /etc/x' /dev/null",
+        "echo | xargs strace rm -rf /etc/x",
+    ),
+)
+def test_an_exec_wrapper_the_peel_does_not_model_asks_in_every_mode(ws, command):
+    """WR-03 / IN-53 (it4): a program that runs the command after its options hides ``rm -rf`` from ``auto`` unless it
+    is peeled or filed with ``sudo``; the unmodelled ones are filed with ``sudo`` (ungrantable, asked in ``auto``)."""
+    _check(command, "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "nice /usr/bin/env rm -rf /etc/x",
+        "env /usr/bin/nice rm -rf /etc/x",
+        "timeout 5 /usr/bin/timeout 5 rm -rf /etc/x",
+        "nice ./env rm -rf /etc/x",
+    ),
+)
+def test_a_wrapper_spelled_as_a_path_in_a_chain_is_still_a_wrapper(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+    assert any(s.signature == "rm -rf" for s in _segments(command))
