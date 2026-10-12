@@ -124,6 +124,29 @@ visible instead of feeding it to a phantom heredoc body (bash(1) "Arithmetic Exp
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 """``K=V`` prefix form. PRD §3.2 step 4: ``env`` skips these before the wrapped command."""
 
+ENV_CARRIER_DECLARERS = frozenset({"export", "declare", "typeset", "readonly", "local"})
+"""Builtins whose ``NAME=value`` operands set a variable for every later command in the shell
+sequence (Phase 10, D-28, D-57). ``local`` is here because a function body that calls it still
+reaches later commands in that body."""
+
+PRINTF_VARIABLE_FLAG = "-v"
+"""``printf -v NAME FORMAT …`` writes into the shell variable NAME; the value is unknown, so a
+table name counts (D-28)."""
+
+READ_ARRAY_FLAG = "-a"
+"""``read -a NAME`` assigns the words to the array NAME; the value is unknown."""
+
+READ_VALUE_FLAGS = frozenset({"-d", "-n", "-N", "-p", "-t", "-u", "-i"})
+"""``read`` options that take a value (not a variable name): the next token, or the rest of the
+cluster, is skipped when looking for the names ``read`` assigns."""
+
+HASH_PATH_FLAG = "-p"
+"""``hash -p PATH NAME`` pins NAME to an arbitrary path for every later lookup in the shell, which
+is a ``PATH`` redirect by another door (D-57; verified ``hash -p ./evil_ls ls; ls`` ran evil)."""
+
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+"""A shell variable name."""
+
 OPERAND_PLACEHOLDER = "__lh_operand__"
 """A plain word (none of ``$*?`{``) appended to a command-valued environment variable's value
 before it is classified (Phase 10, D-38). Git appends its operands to ``GIT_PAGER``,
@@ -1172,6 +1195,11 @@ def _classify_one(
     program = argv[0] if argv else ""  # as written: the verdict's tool-script rule reads the path
     if argv:
         argv = [_basename(argv[0]), *argv[1:]]
+    # An assignment that redirects what runs is recognised BEFORE the drop paths below discard it:
+    # `PATH=./d;` and `export PATH=./d` are dropped segments, yet every later segment of this shell
+    # runs under them (D-28). The flag is only ever set here, never cleared.
+    if _sequence_env_redirect(argv, prefix_assignments, settings):
+        cwd.env_redirect = True
     if not argv:
         if not redirect_targets:
             return None, [], [text.strip()] if text.strip() else [], None
@@ -1193,6 +1221,8 @@ def _classify_one(
     peeled, peeled_assignments = _peel(argv, settings)
     if not peeled:
         return None, [], [text.strip()], None
+    if peeled is not argv and _sequence_env_redirect(peeled, [], settings):
+        cwd.env_redirect = True  # `builtin export PATH=./d`, `command export …`
     if len(peeled) < len(argv):
         program = peeled[0]  # only the wrapper's word was shortened; the peeled one is as written
     # `NAME=v cmd` and `env NAME=v cmd` hit one rule (D-27); it applies to this command and to
@@ -1268,6 +1298,99 @@ def _assignment_redirects(token: str, settings: GateSettings) -> bool:
 def _assignments_redirect(tokens: Sequence[str], settings: GateSettings) -> bool:
     """True when any of the ``NAME=value`` tokens redirects what runs."""
     return any(_assignment_redirects(token, settings) for token in tokens)
+
+
+def _variable_name(token: str) -> str | None:
+    """The variable name a ``printf -v`` / ``read`` operand names, array subscript dropped."""
+    name = token.split("[", 1)[0]
+    return name if IDENTIFIER_RE.match(name) else None
+
+
+def _printf_variable(argv: Sequence[str]) -> str | None:
+    """The NAME of ``printf -v NAME`` / ``printf -vNAME``, read off the leading options."""
+    index = 1
+    while index < len(argv) and argv[index].startswith("-") and argv[index] != "--":
+        token = argv[index]
+        if token == PRINTF_VARIABLE_FLAG:
+            return _variable_name(argv[index + 1]) if index + 1 < len(argv) else None
+        if token.startswith(PRINTF_VARIABLE_FLAG):
+            return _variable_name(token[len(PRINTF_VARIABLE_FLAG):])
+        index += 1
+    return None
+
+
+def _read_variables(argv: Sequence[str]) -> list[str]:
+    """Every variable name ``read`` assigns: its identifier operands and the ``-a`` array."""
+    names: list[str] = []
+    index = 1
+    options_done = False
+    while index < len(argv):
+        token = argv[index]
+        index += 1
+        if not options_done and token == "--":
+            options_done = True
+            continue
+        if not options_done and token.startswith("-") and token != "-":
+            for position, letter in enumerate(token[1:], start=1):
+                flag = f"-{letter}"
+                if flag != READ_ARRAY_FLAG and flag not in READ_VALUE_FLAGS:
+                    continue
+                attached = token[position + 1:]
+                if attached:
+                    value = attached
+                elif index < len(argv):
+                    value = argv[index]
+                    index += 1
+                else:
+                    value = ""
+                if flag == READ_ARRAY_FLAG:
+                    name = _variable_name(value)
+                    if name:
+                        names.append(name)
+                break
+            continue
+        name = _variable_name(token)
+        if name:
+            names.append(name)
+    return names
+
+
+def _hash_pins_a_path(argv: Sequence[str]) -> bool:
+    """``hash -p`` in any option spelling (``-p``, ``-rp``), read off the leading options."""
+    for token in argv[1:]:
+        if not token.startswith("-") or token == "-" or token == "--":
+            return False
+        if not token.startswith("--") and HASH_PATH_FLAG[1] in token[1:]:
+            return True
+    return False
+
+
+def _sequence_env_redirect(
+    argv: Sequence[str], assignments: Sequence[str], settings: GateSettings
+) -> bool:
+    """Does this command set, for the REST of the shell sequence, a variable that redirects what
+    runs (D-28, D-57)?
+
+    ``argv`` is the command after its prefixes; ``assignments`` are the ``K=V`` prefixes the
+    command carried. A bare assignment (empty ``argv``) sets them; ``export``/``declare``/
+    ``typeset``/``readonly``/``local`` set their ``NAME=value`` operands; ``printf -v`` and
+    ``read`` set a variable whose value is unknown, so every table name counts but the excluded
+    one; ``hash -p`` pins a program path. Anything else returns False: an inline ``PATH=./d ls``
+    applies to that command only and is the inline rule's.
+    """
+    if not argv:
+        return _assignments_redirect(assignments, settings)
+    head = argv[0]
+    if head in ENV_CARRIER_DECLARERS:
+        return _assignments_redirect([t for t in argv[1:] if ASSIGNMENT_RE.match(t)], settings)
+    if head == "printf":
+        name = _printf_variable(argv)
+        return name is not None and _is_redirect_env_name(name, settings)
+    if head == "read":
+        return any(_is_redirect_env_name(name, settings) for name in _read_variables(argv))
+    if head == "hash":
+        return _hash_pins_a_path(argv)
+    return False
 
 
 def _basename(token: str) -> str:
