@@ -270,7 +270,7 @@ async def test_runner_load_failure_text_does_not_echo_the_rejected_value():
     text = str(ei.value)
     assert secret not in text and "SECRET" not in text and "got:" not in text
     assert text == ("agent 'bad' could not be loaded: "
-                    "/w/agents/bad.yaml: invalid model.api_key: Value error, bad key <value> (and 1 more)")
+                    "/w/agents/bad.yaml: invalid model: value rejected by validation (and 1 more)")
 
     def _dangling(name):
         raise ConfigReferenceError("/w/agents/bad.yaml", "division", secret, "no such division")
@@ -281,6 +281,114 @@ async def test_runner_load_failure_text_does_not_echo_the_rejected_value():
     assert secret not in text
     assert text == ("agent 'bad' could not be loaded: "
                     "/w/agents/bad.yaml: field 'division' references something that does not exist")
+
+
+_MARKER = "sk-live-TOPSECRET99"
+
+
+def _real_refusal_text(tmp_path, agent: dict, sub: str = "") -> str:
+    """The text the model gets for an agent file, written to disk and loaded by the real loader."""
+    import yaml
+
+    from localharness.agent.subagent import _load_failure_text
+    from localharness.config.loader import ConfigError, ConfigLoader
+
+    root = tmp_path / sub if sub else tmp_path
+    (root / "agents").mkdir(parents=True)
+    (root / "agents" / "bad.yaml").write_text(yaml.safe_dump(agent), encoding="utf-8")
+    with pytest.raises(ConfigError) as ei:
+        ConfigLoader(config_dir=root).load_agent("bad")
+    text = _load_failure_text("bad", ei.value)
+    assert text is not None and text.startswith("agent 'bad' could not be loaded: ")
+    assert str(root / "agents" / "bad.yaml") in text  # the file is named
+    return text
+
+
+def _assert_no_file_text(text: str) -> None:
+    for leaked in (_MARKER, "TOPSECRET", "sk-live", "got:", "Value error", "\\", "\n"):
+        assert leaked not in text, (leaked, text)
+
+
+def test_list_value_with_a_secret_looking_string_is_not_echoed(tmp_path):
+    text = _real_refusal_text(tmp_path, {
+        "name": "bad", "role": "Work",
+        "permissions": {"deny_patterns": [f"Bad PATTERN {_MARKER}"]}})
+    _assert_no_file_text(text)
+    assert "Bad PATTERN" not in text
+    assert "invalid permissions.deny_patterns: value rejected by validation" in text
+
+
+def test_name_with_newline_quote_backslash_and_secret_is_not_echoed(tmp_path):
+    text = _real_refusal_text(tmp_path, {
+        "name": f"Bad\n'\"\\{_MARKER}", "role": "Work"})
+    _assert_no_file_text(text)
+    assert "invalid name: value rejected by validation" in text
+
+
+def test_timezone_with_quote_and_secret_is_not_echoed(tmp_path):
+    text = _real_refusal_text(tmp_path, {
+        "name": "bad", "role": "Work",
+        "schedule": {"cron": "* * * * *", "timezone": f"No'Such\\{_MARKER}"}})
+    _assert_no_file_text(text)
+    assert "invalid schedule.timezone: value rejected by validation" in text
+
+
+def test_unknown_key_named_like_a_secret_is_not_echoed(tmp_path):
+    text = _real_refusal_text(tmp_path, {"name": "bad", "role": "Work", _MARKER: "x"})
+    _assert_no_file_text(text)
+    assert "invalid setting: not a recognized setting" in text
+
+    text = _real_refusal_text(tmp_path, {
+        "name": "bad", "role": "Work", "permissions": {_MARKER: True}}, sub="nested")
+    _assert_no_file_text(text)
+    assert "invalid permissions: not a recognized setting" in text
+
+
+def test_nested_mapping_value_is_not_echoed(tmp_path):
+    text = _real_refusal_text(tmp_path, {
+        "name": "bad", "role": "Work",
+        "permissions": {"mode": {"k": _MARKER, "nested": {"deep": _MARKER}}}})
+    _assert_no_file_text(text)
+    assert "invalid permissions.mode:" in text
+
+    text = _real_refusal_text(tmp_path, {
+        "name": "bad", "role": "Work", "max_tokens": {"x": {"y": _MARKER}}}, sub="second")
+    _assert_no_file_text(text)
+    assert "invalid max_tokens: " in text
+
+
+def test_a_field_the_schema_does_not_declare_is_never_named():
+    from localharness.agent.subagent import _declared_field_path
+
+    assert _declared_field_path("permissions.deny_patterns.0") == "permissions.deny_patterns.0"
+    assert _declared_field_path("permissions.deny_patterns.x") == "permissions.deny_patterns"
+    assert _declared_field_path(f"permissions.{_MARKER}.mode") == "permissions"
+    assert _declared_field_path(_MARKER) == ""
+    assert _declared_field_path("") == ""
+
+
+def test_several_errors_still_report_the_count_and_name_only_the_first_declared_field():
+    from localharness.agent.subagent import _load_failure_text
+    from localharness.config.loader import ConfigFieldError, ConfigValidationError
+
+    exc = ConfigValidationError("/w/agents/bad.yaml", [
+        ConfigFieldError(_MARKER, _MARKER, f"Extra {_MARKER}", kind="extra_forbidden"),
+        ConfigFieldError("name", _MARKER, f"Value error, {_MARKER!r}", kind="value_error"),
+        ConfigFieldError("role", None, "x", kind="missing"),
+    ])
+    assert _load_failure_text("bad", exc) == (
+        "agent 'bad' could not be loaded: "
+        "/w/agents/bad.yaml: invalid setting: not a recognized setting (and 2 more)")
+
+
+def test_a_reference_error_names_only_the_declared_field():
+    from localharness.agent.subagent import _load_failure_text
+    from localharness.config.loader import ConfigReferenceError
+
+    text = _load_failure_text("bad", ConfigReferenceError("/w/agents/bad.yaml", _MARKER, _MARKER, "gone"))
+    assert _MARKER not in text
+    assert text == ("agent 'bad' could not be loaded: "
+                    "/w/agents/bad.yaml: field 'setting' references something that does not exist")
 
 
 def _runner_with(load_agent, available_agents):
