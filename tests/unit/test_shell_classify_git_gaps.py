@@ -1044,3 +1044,16 @@ def test_a_trap_action_is_a_payload_and_its_host_is_not_read_only():
 def test_a_case_that_does_not_parse_fails_toward_asking(command, ws):
     assert any(s.signature == UNPARSED_SHELL_SIGNATURE for s in _segments(command)), command
     assert _verdict(command, ws, "auto").verdict is Verdict.ASK
+
+
+# ------------------------------------------------------------------ a substitution inside a heredoc delimiter word (fuzz, iteration 3)
+
+@pytest.mark.parametrize("command", (
+    "1<<2$(cat <<E\nx\nE\n)#& rm -rf /etc/x",
+    "<<-E$(()#a[1<<1]=3&)#E ; rm -rf /etc/x",
+    "cat <<E`echo` ; rm -rf /etc/x",
+    "cat <<E${x:-a} ; rm -rf /etc/x",
+))
+def test_a_substitution_in_the_delimiter_word_belongs_to_the_word(command):
+    """Bash's delimiter is `2$(cat <<E…)#` (the shell warns it never finds it); the command after it runs."""
+    assert any(s.signature == "rm -rf" for s in _segments(command)), command
