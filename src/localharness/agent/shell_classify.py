@@ -1111,12 +1111,17 @@ class _JoinScan:
         self.delicate = _has_delicate_construct(text) if delicate is None else delicate
         self.hazard = False  # a comment that could hold a command was dropped; see COMMENT_HAZARD_CHARS
 
-    def scan(self, kind: int) -> tuple[str, bool]:
+    def scan(self, kind: int, single: str = "quote") -> tuple[str, bool]:
         """Scan one context from ``self.index``; returns (its text, whether its closer was met).
 
         The closer itself is consumed but not included. Comments are recognised in the command text and
         in ``$(…)``, backtick and funsub bodies only: never in a parameter expansion or arithmetic,
         where ``#`` is an operator.
+
+        ``single`` is how a ``'`` is read in a ``${…}`` that stands inside double quotes (CR-01 it5):
+        ``"quote"`` opens a quote (everywhere else), ``"literal"`` is an ordinary character (the WORD of
+        ``"${x:-WORD}"``), ``"unsure"`` is a pattern operator whose reading depends on the bash version,
+        so a ``'`` there makes the text unreadable.
         """
         text, size = self.text, len(self.text)
         out: list[str] = []
@@ -1185,9 +1190,13 @@ class _JoinScan:
                 if following == "{":
                     after = text[index + 2 : index + 3]
                     inner = _JOIN_FUNSUB if after and after in " \t\n|" else _JOIN_PARAM
+                    single = "quote"
+                    in_double = quote == '"' or (kind == _JOIN_PARAM and single != "quote" and quote == "")
+                    if in_double and inner == _JOIN_PARAM:
+                        single = "literal" if _param_default_operator(text, index + 1) else "unsure"
                     out.append("${")
                     self.index += 2
-                    self._nested(out, inner, bool(pending))
+                    self._nested(out, inner, bool(pending), single)
                     word_start = False
                     tracker.opaque()
                     continue
@@ -1203,6 +1212,14 @@ class _JoinScan:
                 self.index += 1
                 quote = "" if char == '"' else quote
                 continue
+            if char == "'" and kind == _JOIN_PARAM and single != "quote":
+                if single == "unsure":
+                    self.balanced = False
+                else:
+                    out.append(char)  # an ordinary character of "${x:-WORD}"
+                    self.index += 1
+                    word_start = False
+                    continue
             if char in "'\"":
                 quote = char
                 out.append(char)
@@ -1331,13 +1348,13 @@ class _JoinScan:
             self.balanced = False
         return "".join(out), False
 
-    def _nested(self, out: list[str], kind: int, outer_pending: bool = False) -> None:
+    def _nested(self, out: list[str], kind: int, outer_pending: bool = False, single: str = "quote") -> None:
         """Scan a nested context and append its text and closer to ``out``.
 
         A newline inside it while the enclosing line still owes a heredoc body is a layout whose body
         starts are not certain, so the text is flagged instead of guessed (CR-01)."""
         start = self.index
-        body, closed = self.scan(kind)
+        body, closed = self.scan(kind, single)
         out.append(body)
         if closed:
             out.append(_JOIN_CLOSERS[kind])
@@ -1750,7 +1767,7 @@ def _quoted_substitution_end(text: str, index: int) -> int | None:
     if char == "$" and text[index + 1 : index + 2] == "(":
         return _matching(text, index + 1) + 1
     if char == "$" and text[index + 1 : index + 2] == "{":
-        return _matching_brace(text, index + 1) + 1
+        return _matching_brace(text, index + 1, True) + 1
     if char == "`":
         return _closing_backtick(text, index) + 1
     return None
@@ -2073,15 +2090,36 @@ def _command_position(prefix: str) -> bool:
     return True
 
 
-def _matching_brace(text: str, open_index: int) -> int:
+PARAM_DEFAULT_OPERATORS = (":-", ":=", ":+", ":?", "-", "=", "+", "?")
+PARAM_NAME_RE = re.compile(r"[!#]?(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!-])(?:\[[^\]]*\])?")
+
+
+def _param_default_operator(text: str, open_index: int) -> bool:
+    """Is the ``${`` whose ``{`` is at ``open_index`` a ``${name:-WORD}`` (or ``:=``, ``:+``, ``:?``, no colon)?
+
+    In those WORDs a single quote inside a double-quoted expansion is an ordinary character (bash(1) QUOTING;
+    bash 4.3+). For the pattern operators (``#``, ``%``, ``/``, ``^``, ``,``) the reading depends on the bash
+    version, so the caller treats a quote there as unreadable (CR-01 it5)."""
+    match = PARAM_NAME_RE.match(text, open_index + 1)
+    if match is None:
+        return False
+    rest = text[match.end() : match.end() + 2]
+    return any(rest.startswith(operator) for operator in PARAM_DEFAULT_OPERATORS)
+
+
+def _matching_brace(text: str, open_index: int, in_double: bool = False) -> int:
     """Index of the ``}`` closing the ``{`` at ``open_index``; end of string if unbalanced.
 
     ``{`` opens ``${…}``; a blank or ``|`` after it makes it a bash 5.3 funsub ``${ cmd; }`` /
     ``${| cmd; }`` whose body is a command list with groups of its own. Quotes, escapes, ``$(…)`` and
     nested ``${…}`` are stepped over whole; the first unquoted ``}`` closes a plain expansion.
+
+    ``in_double``: the expansion stands inside a double-quoted string, where a ``'`` in the WORD of
+    ``${x:-WORD}`` is an ordinary character and opens no quote (CR-01 it5).
     """
     after = text[open_index + 1 : open_index + 2]
     funsub = bool(after) and after in " \t\n|"
+    literal_single = in_double and not funsub and _param_default_operator(text, open_index)
     groups = 0
     index = open_index + 1
     quote: str | None = None
@@ -2098,12 +2136,15 @@ def _matching_brace(text: str, open_index: int) -> int:
         if char == "\\":
             index += 2
             continue
+        if char == "'" and literal_single:
+            index += 1
+            continue
         if char in "'\"`":
             quote = char
         elif char == "$" and text[index + 1 : index + 2] == "(":
             index = _matching(text, index + 1)
         elif char == "$" and text[index + 1 : index + 2] == "{":
-            index = _matching_brace(text, index + 1)
+            index = _matching_brace(text, index + 1, in_double)
         elif funsub and char == "{" and text[index - 1 : index] in GROUP_BRACE_BEFORE \
                 and text[index + 1 : index + 2] in GROUP_BRACE_AFTER:
             groups += 1
