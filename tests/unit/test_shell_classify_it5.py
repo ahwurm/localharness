@@ -209,6 +209,42 @@ def test_a_commented_array_literal_that_is_not_plain_still_asks(ws, command):
     _check(command, "!ok/!ok/!ok", ws)
 
 
+# --------------------------------------------------------------------------- IN-51: inline git -c display keys
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "git -c format.pretty=oneline log",
+        "git -c merge.conflictstyle=diff3 diff",
+        "git -c blame.coloring=none diff",
+        "git -c rerere.enabled=false status",
+        "git -c gc.auto=0 status",
+        "git -c help.autocorrect=0 status",
+        "git -c log.showSignature=false log",
+        "git -c color.ui=always log",
+    ),
+)
+def test_git_inline_display_keys_keep_the_read_only_tier(ws, command):
+    _check(command, "ok/ok/ok", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "git -c log.showSignature=true log",
+        "git -c log.showSignature log",
+        "git -c format.outputDirectory=/etc/x log",
+        "git -c format.signatureFile=/etc/passwd log",
+        "git -c merge.tool=x log",
+        "git -c blame.ignoreRevsFile=/etc/passwd blame x",
+        "git --exec-path=/tmp/x log",
+        "git -c gc.pruneExpire=now status",
+    ),
+)
+def test_git_inline_keys_that_run_or_name_something_still_leave_the_tier(ws, command):
+    _check(command, "DENY/ASK/ok", ws)
+
+
 # --------------------------------------------------------------------------- WR-01: the depth guard
 
 NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")
