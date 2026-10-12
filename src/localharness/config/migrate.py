@@ -55,7 +55,10 @@ fingerprint covers. The stamp moves as soon as config.yaml is written, whether o
 file could be: one that could not is recorded by name in :data:`INIT_NULLS_PENDING_FILE`, and only
 the files listed there are retried (CR-30). Holding the stamp back instead would re-run the
 equality match over config.yaml and every written file at every start, clearing a `100` the owner
-had set by hand since.
+had set by hand since. For the same reason, while config.yaml itself cannot be written (a read-only
+file, a link into a read-only store) no agent file has init's values cleared either (SEC-01): the
+stamp that would record it cannot land, so the next start would match that file again and clear a
+`100` the owner had put back. The step runs whole on the first start that can write config.yaml.
 
 The updated config is validated through the real HarnessConfig model before anything is
 written — a migrate that writes an invalid config is worse than none.
@@ -123,10 +126,14 @@ class PartialMigrationError(MigrationError):
     `config migrate` retries that file, and only that file: such a file is never skipped for good.
     A file migrate cannot read or parse is never in the plan at all (:func:`scan_sidecars`), so it
     is neither tried nor recorded (IN-32). An unwritable agent file never holds back config.yaml,
-    and never re-arms the step for the files that were written."""
+    and never re-arms the step for the files that were written. An unwritable config.yaml holds
+    back the step's clearing of every agent file (SEC-01): its stamp cannot move, so no file is
+    cleared that the next start would match again. `nulls_held` says so: a sidecar in `written`
+    then had at most the dead key removed, none of init's values."""
 
     def __init__(self, failures: list[tuple[Path, OSError]], written: list[Path],
-                 backups: list[Path]) -> None:
+                 backups: list[Path], *, nulls_held: bool = False) -> None:
+        self.nulls_held = nulls_held
         self.failures = tuple(failures)
         self.failed = failures[0][0]
         self.written = tuple(written)
@@ -244,12 +251,16 @@ class SidecarPlan:
     None when the file carries no dead key. `nulled` names the init values set to null, at the
     file's own paths. `updated` is the file's whole mapping with both applied, ready to write:
     ONE plan, one write and one backup per file, because the backup name is stamped to the second
-    and a second write would overwrite the first backup with already-rewritten bytes."""
+    and a second write would overwrite the first backup with already-rewritten bytes.
+
+    `stripped` is the mapping with the dead key removed and nothing else (None when the file has no
+    dead key): what is written when the init-nulls step is held back (SEC-01, :func:`apply`)."""
 
     path: Path
     removed: Optional[list]
     updated: dict
     nulled: tuple[str, ...] = ()
+    stripped: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -328,12 +339,13 @@ def scan_sidecars(config_dir: Path, *, init_nulls_due: bool = False,
                 dead = updated_perms.pop(DEAD_KEY)
                 updated["permissions"] = updated_perms
                 removed = list(dead) if isinstance(dead, list) else []
+            stripped = updated if removed is not None else None  # _init_nulls never mutates it
             nulled: tuple[str, ...] = ()
             if init_nulls_due or _sidecar_name(path) in init_nulls_owed:
                 updated, nulled = _init_nulls(updated)
             if removed is None and not nulled:
                 continue
-            found.append(SidecarPlan(path, removed, updated, nulled))
+            found.append(SidecarPlan(path, removed, updated, nulled, stripped))
     return found
 
 
@@ -521,6 +533,12 @@ def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> list[
     file that keeps failing costs config.yaml no rewrite and no backup per start. The other
     sidecar repair, the dead key, is found on content alone and needs no record.
 
+    The one exception runs the other way (SEC-01): while the stamp is due and config.yaml itself
+    cannot be written, no sidecar has init's values cleared. The stamp could not move, so a cleared
+    file would be matched again at the next start and a `100` the owner put back would be cleared a
+    second time. Such a file gets the dead key's removal alone, or is not written at all; config.yaml
+    is still tried (and its failure raised), and the step runs whole once config.yaml is writable.
+
     The sidecars are NOT model-validated: migrate is the only repair path for a file that cannot
     load, so refusing to delete the fatal key because something ELSE in the file is invalid would
     leave the user with no way out at all. The one key removed is fatal by definition, and the
@@ -539,18 +557,29 @@ def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> list[
     written: list[Path] = []
     failures: list[tuple[Path, OSError]] = []
     owed: list[str] = []
+    hold_nulls = False  # SEC-01: no sidecar is cleared while the stamp recording it cannot land
+    if migration.init_nulls_due:
+        try:
+            refuse_unwritable(config_file)
+        except OSError:
+            hold_nulls = True
     for sidecar in migration.sidecars:
+        updated = sidecar.updated
+        if hold_nulls and sidecar.nulled:
+            if sidecar.stripped is None:
+                continue  # nothing but init's values to write: the run that can stamp clears them
+            updated = sidecar.stripped
         try:
             backups.append(
-                _write_with_backup(sidecar.path, sidecar.path.read_bytes(), sidecar.updated)
+                _write_with_backup(sidecar.path, sidecar.path.read_bytes(), updated)
             )
         except OSError as exc:
             failures.append((sidecar.path, exc))
-            if sidecar.nulled:
+            if sidecar.nulled and not hold_nulls:
                 owed.append(_sidecar_name(sidecar.path))
             continue
         written.append(sidecar.path)
-    if migration.init_nulls_due or migration.init_nulls_owed:
+    if (migration.init_nulls_due and not hold_nulls) or migration.init_nulls_owed:
         # Before config.yaml: its stamp is only ever current with the files owed on record.
         try:
             write_init_nulls_pending(config_file.parent, owed)
@@ -563,7 +592,7 @@ def apply(config_file: Path, original: bytes, migration: MigrationPlan) -> list[
         except OSError as exc:
             failures.append((config_file, exc))
     if failures:
-        raise PartialMigrationError(failures, written, backups)
+        raise PartialMigrationError(failures, written, backups, nulls_held=hold_nulls)
     return backups
 
 
