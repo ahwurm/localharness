@@ -279,12 +279,16 @@ def _print_git_read(workspace: Path | None, workspace_root: str | None) -> None:
     from localharness.agent.verdict import narrow_boundary
     from localharness.tools.builtin import git_read_tool
 
-    boundary, _warning = narrow_boundary(
-        derive_session_boundary(cwd=Path.cwd(), local_dir=workspace), workspace_root
-    )
-    if boundary is None or not git_read_tool.git_read_repository_present(boundary):
+    try:
+        boundary, _warning = narrow_boundary(
+            derive_session_boundary(cwd=Path.cwd(), local_dir=workspace), workspace_root
+        )
+        if boundary is None or not git_read_tool.git_read_repository_present(boundary):
+            return
+        failure = git_read_tool.git_read_pin_failure(boundary)
+    except Exception:  # noqa: BLE001 - WR-04 / IN-51: a diagnostic row never aborts doctor
+        console.print(_INFO + " " + escape("git_read: could not be checked"), soft_wrap=True)
         return
-    failure = git_read_tool.git_read_pin_failure(boundary)
     if failure is not None:
         console.print(_INFO + " " + escape(failure.message()), soft_wrap=True)
     else:

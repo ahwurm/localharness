@@ -73,6 +73,20 @@ async def test_no_boundary_registers_no_git_read_and_runs_no_git(monkeypatch):
 
 
 @requires_git
+@pytest.mark.parametrize("where", ["pin", "present"])
+async def test_an_unexpected_error_while_checking_registers_nothing_and_does_not_raise(repo, monkeypatch, where):
+    """WR-04 / IN-51: a check that raises must not abort start; git_read is simply absent."""
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(grt, "git_read_pin_failure" if where == "pin" else "git_read_repository_present", boom)
+    reg = ToolRegistry()
+    await register_builtin_tools(reg, boundary=repo)
+    assert "git_read" not in _held(reg)
+    assert "bash_exec" in _held(reg)
+
+
+@requires_git
 async def test_healthy_repository_registers_git_read_at_the_realpath(repo, base, monkeypatch):
     calls = _spy(monkeypatch)
     link = base / "link"

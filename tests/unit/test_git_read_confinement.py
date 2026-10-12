@@ -299,6 +299,31 @@ def test_rev_parse_timeout_fails_closed(root, monkeypatch):
 
 
 @requires_git
+@pytest.mark.parametrize("exc", [TypeError("x"), ValueError("y"), subprocess.SubprocessError("z")])
+def test_an_unexpected_exception_is_a_check_pin_not_a_crash(root, monkeypatch, exc):
+    """WR-04 / IN-51: only TimeoutExpired and OSError were caught; anything else escaped into start/doctor."""
+    def run(argv, **kw):
+        raise exc
+
+    monkeypatch.setattr(subprocess, "run", run)
+    pin = git_read_pin_failure(root)
+    assert pin == GitReadPinFailure("check", type(exc).__name__)
+    assert pin.message() == (
+        "git_read not registered: the repository could not be checked (" + repr(type(exc).__name__) + ")")
+
+
+@requires_git
+def test_a_popen_without_the_context_manager_protocol_is_a_check_pin(root, monkeypatch):
+    """The launch_support.PopenRecorder shape: subprocess.run raises TypeError on it."""
+    class Rec:
+        def __init__(self, cmd, **kw):
+            self.pid = 1
+
+    monkeypatch.setattr(subprocess, "Popen", Rec)
+    assert git_read_pin_failure(root) == GitReadPinFailure("check", "TypeError")
+
+
+@requires_git
 def test_one_rev_parse_call_and_every_argv_has_the_prefix(root, monkeypatch):
     real_run = subprocess.run
     seen: list[list[str]] = []
@@ -328,6 +353,7 @@ def test_message_templates_verbatim():
         "toplevel": "the repository toplevel is not the workspace root ('/p/git')",
         "git_dir": "the git directory is outside the workspace root ('/p/git')",
         "common_dir": "the common git directory is outside the workspace root ('/p/git')",
+        "check": "the repository could not be checked ('/p/git')",
         "alternates": "the repository borrows objects from outside ('/p/git')",
     }
     for pin, text in cases.items():
