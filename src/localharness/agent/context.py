@@ -164,6 +164,13 @@ def _fail_closed_origin(_name: str) -> Origin:
     return "untrusted"
 
 
+def _fail_closed_host(_name: str) -> Literal["dangerous", "safe"]:
+    """No host lookup wired: every tool counts as one that can touch the host, so no failed
+    call is ever dropped from the request. The lookup that reads declarations is
+    ToolRegistry.host, wired by start and bench."""
+    return "dangerous"
+
+
 # #134 RESTORE PIN: restoring a body re-inflates usage, which re-arms this very pass, which
 # evicts the just-restored body under the SAME handle — measured live as a 24-minute turn of
 # restore/evict/restore. A body pulled back by these tools is therefore PINNED against the
@@ -439,6 +446,84 @@ def _out_of_view_note(messages: list[Message], max_context_tokens: int) -> str:
         f"{_OUT_OF_VIEW_PREFIX} {len(entries)} evicted tool result(s) are not in this prompt — "
         f"{shown}. Restore one before relying on it.]"
     )
+
+
+def _tool_outcome(message: Message) -> dict[str, Any] | None:
+    """The private outcome the agent loop stamped on a tool message, or None (unstamped)."""
+    stamp = message.get("_lh")
+    outcome = stamp.get("outcome") if isinstance(stamp, dict) else None
+    return outcome if isinstance(outcome, dict) else None
+
+
+def _drop_superseded_failures(
+    messages: list[Message],
+    host: Callable[[str], str] | None,
+) -> list[Message]:
+    """Request view only: leave out a failed tool exchange that a later identical call fixed.
+
+    Pure -- returns a new list (or the input list itself when nothing is dropped) and never
+    mutates a message. An exchange is dropped, both halves together, only when ALL hold:
+    the assistant message carries exactly one tool call and no other content; its tool message
+    carries a stamped outcome with ok False, neither denied nor staged, and its content does not
+    start with the denial prefix; the tool's declared host is "safe" (a lookup that raises or is
+    unwired means not safe); and a LATER tool message carries ok True with the same call-only
+    signature. An unstamped tool message (a session saved before the stamp existed) is never
+    dropped. It never commits: the caller's list, the bus and history.jsonl keep both halves.
+    """
+    # Imported here: agent/gate.py loads this module, so a module-level import would be a cycle.
+    from localharness.agent.gate import DENIED_OBSERVATION_PREFIX
+
+    if host is None:
+        return messages
+    tool_index: dict[str, int] = {}
+    last_success: dict[str, int] = {}
+    for i, m in enumerate(messages):
+        if m.get("role") != "tool":
+            continue
+        tc_id = m.get("tool_call_id")
+        if tc_id:
+            tool_index.setdefault(tc_id, i)
+        outcome = _tool_outcome(m)
+        if outcome is not None and outcome.get("ok") is True and outcome.get("call"):
+            last_success[outcome["call"]] = i
+
+    dropped: set[int] = set()
+    for i, m in enumerate(messages):
+        if m.get("role") != "assistant":
+            continue
+        calls = m.get("tool_calls") or []
+        content = m.get("content")
+        if len(calls) != 1 or (isinstance(content, str) and content.strip()) \
+                or (content and not isinstance(content, str)):
+            continue
+        meta = _call_meta([m])
+        if len(meta) != 1:
+            continue
+        tc_id, (name, _hint) = next(iter(meta.items()))
+        j = tool_index.get(tc_id)
+        if j is None or j <= i:
+            continue
+        tool_msg = messages[j]
+        outcome = _tool_outcome(tool_msg)
+        if outcome is None or outcome.get("ok") is not False:
+            continue
+        if outcome.get("denied") or outcome.get("staged"):
+            continue
+        body = tool_msg.get("content")
+        if not isinstance(body, str) or body.startswith(DENIED_OBSERVATION_PREFIX):
+            continue
+        try:
+            safe = host(name) == "safe"
+        except Exception:  # noqa: BLE001 — fail closed: a lookup error means not safe
+            safe = False
+        if not safe:
+            continue
+        if last_success.get(outcome.get("call", ""), -1) <= j:
+            continue
+        dropped.update((i, j))
+    if not dropped:
+        return messages
+    return [m for k, m in enumerate(messages) if k not in dropped]
 
 
 def _evict_large_tool_results(
@@ -1834,6 +1919,7 @@ class ContextManager:
         compaction_trigger_fraction: float = DEFAULT_COMPACTION_TRIGGER_FRACTION,
         max_response_tokens: int | None = None,
         result_origin: Callable[[str], Origin] | None = None,
+        host: Callable[[str], Literal["dangerous", "safe"]] | None = None,
         tool_output_chars: int | None = None,
         tool_output_ratio: float = TOOL_OUTPUT_RATIO_DEFAULT,
         evict_ratio: float = EVICT_RATIO_DEFAULT,
@@ -1872,6 +1958,10 @@ class ContextManager:
         # How an evicted body's origin is read: the producing tool's declared result_origin
         # (ToolRegistry.result_origin, wired by start and bench); unwired, every body is untrusted.
         self._result_origin = result_origin or _fail_closed_origin
+        # How a superseded failure is judged droppable: the producing tool's declared host
+        # (ToolRegistry.host, wired by start and bench); unwired, every tool counts as dangerous
+        # and nothing is ever dropped from the request view.
+        self._host = host or _fail_closed_host
         self._token_counter = token_counter or TokenCounter()
         self._bus = bus
         self._agent_id = agent_id
@@ -2180,6 +2270,14 @@ class ContextManager:
                                 post_usage_fraction=post_budget.usage_fraction,
                                 stages_modified=[],
                             ))
+
+        # Superseded failures leave the REQUEST view only (never `messages`, the bus or
+        # history.jsonl). Every build, unconditionally: a deterministic transform of the same
+        # session yields the same prefix, so the cache holds. After the pipeline block so the
+        # summary's count-based commit span and compaction's inputs saw the undropped list; the
+        # out-of-view note, the floor, ensure_active_references and the returned budget see the
+        # request as it is sent.
+        repaired = _drop_superseded_failures(repaired, self._host)
 
         # MOVE 0c EMERGENCY FLOOR (coordinator ruling: overflow must be IMPOSSIBLE). When — fire
         # cap reached, no safe cut, no pipeline at all — utilization still exceeds the budget, drop
