@@ -863,13 +863,15 @@ workspace's number and marks it; the schema default for a window ratio, which is
 
 def _guard_children_budget_sections(merged: dict, sources: tuple[dict, ...],
                                     ws_files: tuple[str, str]) -> tuple[dict, list[str]]:
-    """Restore `org.children_budget`, or one of its entries, to the global layers' when a workspace
-    source set it to something that is not a mapping (`5`, a string, `null`): the merged config
-    would not validate. The block is judged first, then each entry. One warning per path and
-    file. Never mutates."""
+    """Restore `org.children_budget`, one of its entries, or `org.context` to the global layers' when
+    a workspace source set it to something that is not a mapping (`5`, a string, `null`): the merged
+    config would not validate, and a project's `org.context: null` must not erase the window ratios
+    the machine set. The block is judged first, then each entry. One warning per path and file.
+    Never mutates."""
     global_view = deep_merge(sources[0], sources[1])
     warnings: list[str] = []
-    for parts in [["org", "children_budget"]] + [["org", "children_budget", e] for e in _CHILD_ENTRIES]:
+    for parts in ([["org", "children_budget"]] + [["org", "children_budget", e] for e in _CHILD_ENTRIES]
+                  + [["org", "context"]]):
         path = ".".join(parts)
         for source, file in zip(sources[2:], ws_files):
             value = _dig(source, parts)

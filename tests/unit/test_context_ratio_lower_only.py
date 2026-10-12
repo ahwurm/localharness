@@ -391,3 +391,20 @@ def test_an_invalid_global_ratio_fails_the_load(tmp_path, name, bad):
     loader, _ = _layers(tmp_path, g_cfg=_ctx(**{name: bad}))
     with pytest.raises(Exception):
         loader.load_harness()
+
+
+@pytest.mark.parametrize("bad", [None, "x", 5, [0.03]])
+def test_a_workspace_org_context_that_is_not_a_mapping_keeps_the_machines_ratios(tmp_path, bad):
+    """`org.context: null` (or a string, a number, a list) in a project file must not abort the
+    harness load: the section gives way to the global one, with a note naming the file."""
+    loader, ws = _layers(tmp_path, g_cfg=_ctx(tool_output_ratio=0.02), ws_cfg={"org": {"context": bad}})
+    harness = loader.load_harness()
+    assert harness.org.context.tool_output_ratio == 0.02
+    assert harness.org.context.evict_ratio == DEFAULTS["evict_ratio"]
+    assert _warnings(loader) == [f"ignoring org.context in {ws / 'config.yaml'}: a project may only lower it"]
+
+
+def test_a_workspace_org_context_that_is_not_a_mapping_gives_way_to_the_defaults_when_the_machine_is_silent(tmp_path):
+    loader, ws = _layers(tmp_path, ws_over={"org": {"context": None}})
+    assert _got(loader) == DEFAULTS[TOR]
+    assert _warnings(loader) == [f"ignoring org.context in {ws / 'overrides.yaml'}: a project may only lower it"]
