@@ -43,6 +43,12 @@ GIT_READ_PREFIX: tuple[str, ...] = (
     "-c", "gpg.x509.program=false",
     "-c", "color.ui=never",
     "-c", "diff.submodule=short",
+    # WR-53 (it4): keys that name a FILE git would open and parse, wherever on disk the repository's own
+    # config points: an identity map, an attributes file, a diff order file. Their bytes shape the output
+    # and a missing path comes back in the error, so each is pointed at nothing.
+    "-c", "mailmap.file=", "-c", "mailmap.blob=",
+    "-c", "core.attributesFile=/dev/null",
+    "-c", "diff.orderFile=/dev/null",
 )
 
 # D-04 / D-43: flags every verb carries. `dirty`, not `all`, so `log -p` still shows submodule bumps

@@ -802,7 +802,9 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   pins the built-in `medium` format on `log` and `show` (a `format.pretty` or `pretty.*` alias that
   asks for a signature status, `%G?`, would otherwise make git run `gpg.program`) and sets every
   `gpg.*.program` to `false`, turns off external diff and `textconv` drivers, forbids a promisor remote's lazy fetch and keeps
-  a submodule's own filters from running, and from an environment built from scratch: no inherited
+  a submodule's own filters from running, points the four keys that name a file git would open
+  (`mailmap.file`, `mailmap.blob`, `core.attributesFile`, `diff.orderFile`) at nothing so the repository's
+  own config cannot make it read a file outside the repository, and from an environment built from scratch: no inherited
   `GIT_*` variable, no `safe.directory`, no system or global git config, and a `PATH` reduced to
   its absolute entries outside the workspace so `git` can never resolve to a binary inside it
   (`.venv/bin` and `node_modules/.bin` are dropped, and so is an entry that is a link into or out of
@@ -865,8 +867,11 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   answer given to a plain signature such as `ls` also covers a later `PATH=… ls`, because the
   signature does not change. A program written as a path signs as its name, so `./d/ls` reads as
   `ls`; the six command-valued variables above are the one place a path never keeps the read-only
-  tier. On the `git_read` side: `remote.*.uploadpack`, `remote.*.receivepack`,
-  `gpg.*.program` and `core.gitProxy` are not on the dangerous git key list; a hard link inside
+  tier. On the `git_read` side: `remote.*.uploadpack`, `remote.*.receivepack`, `gpg.*.program` and
+  `core.gitProxy` were not on the dangerous git key list in earlier iterations; they are now (ruling taken on
+  the owner's behalf by the GSD run, review iteration 4), and an inline `git -c KEY=…` (or `--config-env`) whose
+  key is not on a short allow-list of display keys, like `--exec-path=DIR`, takes the command out of the
+  read-only tier; a hard link inside
   `.git` looks exactly like a copy and is not refused (a symbolic link out of the git directories
   is); a worktree-reading `diff` may refresh `.git/index`, git's own stat cache inside the root,
   which runs no command; and `git_read` has not been tested on Windows.

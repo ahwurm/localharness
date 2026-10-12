@@ -657,6 +657,37 @@ async def test_signature_placeholder_in_a_configured_pretty_format_never_runs_gp
         await _tool_leaves_absent(armed, marker, kwargs)
 
 
+# ------------------------------------------------------------------------------ keys that name a file
+
+@requires_git
+async def test_config_keys_that_name_a_file_outside_the_repository_are_not_read(armed, base):
+    """WR-53 (it4): `mailmap.file`, `diff.orderFile` and `core.attributesFile` in the repository's own config
+    pointed at a file outside it; under bare git their bytes shaped the output and a missing path came back in the
+    error. The prefix points each at nothing."""
+    outside = base / "outside"
+    outside.mkdir()
+    (outside / "map").write_text("Mapped Secret <proper@e.org> <t@t.t>\n")
+    (outside / "attr").write_text("a.txt -diff\n")
+    (outside / "order").write_text("a.txt\nREADME\n")
+    (armed / "README").write_text("changed\n")
+    git(armed, "config", "mailmap.file", str(outside / "map"))
+    git(armed, "config", "core.attributesFile", str(outside / "attr"))
+    git(armed, "config", "diff.orderFile", str(outside / "order"))
+    assert "Mapped Secret" in git(armed, "log", "-1").stdout  # controls: bare git reads all three
+    assert "Binary files" in git(armed, "diff").stdout
+    bare = git(armed, "diff", "--stat").stdout
+    assert bare.index("a.txt") < bare.index("README")
+    log = await GitReadTool(armed).run(subcommand="log")
+    assert "Mapped Secret" not in log.output and "t <t@t.t>" in log.output
+    diff = await GitReadTool(armed).run(subcommand="diff", stat=True)
+    assert diff.output.index("README") < diff.output.index("a.txt")  # git's default (path) order
+    full = await GitReadTool(armed).run(subcommand="diff")
+    assert "Binary files" not in full.output and "+three" in full.output
+    git(armed, "config", "diff.orderFile", str(outside / "nonexistent_secret_file"))
+    gone = await GitReadTool(armed).run(subcommand="diff", stat=True)
+    assert "nonexistent_secret_file" not in (gone.output + (gone.error or ""))
+
+
 # --------------------------------------------------------------------------------------- lazy fetch
 
 @requires_git

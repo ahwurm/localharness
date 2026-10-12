@@ -49,6 +49,8 @@ def test_constants():
         "-c", "gpg.program=false", "-c", "gpg.openpgp.program=false",
         "-c", "gpg.ssh.program=false", "-c", "gpg.x509.program=false",
         "-c", "color.ui=never", "-c", "diff.submodule=short",
+        "-c", "mailmap.file=", "-c", "mailmap.blob=",
+        "-c", "core.attributesFile=/dev/null", "-c", "diff.orderFile=/dev/null",
     )
     assert grt.VERB_GUARD_FLAGS == tuple(GUARDS)
 
