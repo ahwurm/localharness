@@ -408,3 +408,38 @@ def test_a_workspace_org_context_that_is_not_a_mapping_gives_way_to_the_defaults
     loader, ws = _layers(tmp_path, ws_over={"org": {"context": None}})
     assert _got(loader) == DEFAULTS[TOR]
     assert _warnings(loader) == [f"ignoring org.context in {ws / 'overrides.yaml'}: a project may only lower it"]
+
+
+def test_a_null_org_context_in_one_project_file_keeps_a_valid_lowering_in_the_other(tmp_path):
+    """Each project source is judged on its own: `config.yaml` writing `org.context: null` gives way
+    with a note, and the lowering `overrides.yaml` wrote at the same path survives it."""
+    loader, ws = _layers(tmp_path, ws_cfg={"org": {"context": None}}, ws_over=_ctx(tool_output_ratio=0.01))
+    assert _got(loader) == 0.01
+    assert _warnings(loader) == [f"ignoring org.context in {ws / 'config.yaml'}: a project may only lower it"]
+
+
+def test_a_null_org_context_in_overrides_keeps_a_valid_lowering_in_config(tmp_path):
+    loader, ws = _layers(tmp_path, ws_cfg=_ctx(tool_output_ratio=0.01), ws_over={"org": {"context": None}})
+    assert _got(loader) == 0.01
+    assert _warnings(loader) == [f"ignoring org.context in {ws / 'overrides.yaml'}: a project may only lower it"]
+
+
+@pytest.mark.parametrize("raising_file", ["config", "overrides"])
+def test_a_raise_beside_a_non_mapping_org_context_is_still_refused(tmp_path, raising_file):
+    """Lower-only holds across the two project files: the sibling of a non-mapping section may lower
+    but never raise above the machine's ratio."""
+    raising = _ctx(tool_output_ratio=0.9)
+    bad = {"org": {"context": None}}
+    kw = ({"ws_cfg": raising, "ws_over": bad} if raising_file == "config"
+          else {"ws_cfg": bad, "ws_over": raising})
+    loader, ws = _layers(tmp_path, g_cfg=_ctx(tool_output_ratio=0.02), **kw)
+    assert _got(loader) == 0.02
+    other = "overrides.yaml" if raising_file == "config" else "config.yaml"
+    assert _warnings(loader) == sorted([
+        f"ignoring org.context in {ws / other}: a project may only lower it",
+        _note(TOR, ws / f"{raising_file}.yaml")])
+
+
+def test_a_raise_beside_a_non_mapping_org_context_gives_the_default_when_the_machine_is_silent(tmp_path):
+    loader, _ = _layers(tmp_path, ws_cfg=_ctx(tool_output_ratio=0.9), ws_over={"org": {"context": "x"}})
+    assert _got(loader) == DEFAULTS[TOR]
