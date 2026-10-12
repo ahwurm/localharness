@@ -714,9 +714,7 @@ def classify_shell(command: str, settings: GateSettings) -> ShellClassification:
 
     Pure: the same string and settings always produce the same classification.
     """
-    text = _strip_heredocs(command)
-    text = _join_continuations(text)
-    segments, dropped = _classify_text(text, settings)
+    segments, dropped = _classify_command_text(_strip_heredocs(command), settings)
     return ShellClassification(segments=tuple(segments), dropped=tuple(dropped))
 
 
@@ -729,6 +727,12 @@ over-read as text, which fails toward asking; a ``#`` wrongly judged to start on
 the line. ``$#``, ``${#x}``, ``a#b`` and ``16#ff`` are not comments."""
 
 BASH_BLANKS = " \t\n"
+
+COMMENT_HAZARD_CHARS = ";&|`"
+"""A dropped comment holding one of these (or ``$(``) could be hiding a command if the stripper judged
+a ``#`` a comment where bash did not (``[[ a =~ (a|#b) ]]; rm x``, ``shopt -s extglob`` then ``@(a|#b)``,
+``(( 0 # )); rm x``). The command is then classified a second time with comments left in, and the
+verdicts are the union (:func:`_classify_command_text`). A comment without them has nothing to hide."""
 
 _JOIN_TOP, _JOIN_PAREN, _JOIN_ARITH, _JOIN_BACKTICK, _JOIN_PARAM, _JOIN_FUNSUB = range(6)
 """The contexts :class:`_JoinScan` tells apart: the command text itself; a ``$(…)`` / ``<(…)`` / ``>(…)``
@@ -815,10 +819,12 @@ class _JoinScan:
     its own reading of it either, and :func:`_join_continuations` says so (CR-54 / WR-01).
     """
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, strip_comments: bool = True) -> None:
         self.text = text
         self.index = 0
         self.balanced = True
+        self.strip_comments = strip_comments
+        self.hazard = False  # a comment that could hold a command was dropped; see COMMENT_HAZARD_CHARS
 
     def scan(self, kind: int) -> tuple[str, bool]:
         """Scan one context from ``self.index``; returns (its text, whether its closer was met).
@@ -832,7 +838,9 @@ class _JoinScan:
         quote = ""
         word_start = True  # judged on the JOINED text: `a\\` newline `#b` is the word `a#b`
         nested = 0  # `(` open inside a $( body, or `{` open inside a funsub body
-        comments = kind in (_JOIN_TOP, _JOIN_PAREN, _JOIN_BACKTICK, _JOIN_FUNSUB)
+        comments = self.strip_comments and kind in (
+            _JOIN_TOP, _JOIN_PAREN, _JOIN_BACKTICK, _JOIN_FUNSUB
+        )
         while self.index < size:
             index = self.index
             char = text[index]
@@ -927,6 +935,9 @@ class _JoinScan:
                         break
                     escaped = text[end] == "\\" and text[end + 1 : end + 2] not in ("", "\n")
                     end += 2 if escaped else 1
+                dropped = text[index:end]
+                if any(c in dropped for c in COMMENT_HAZARD_CHARS) or "$(" in dropped:
+                    self.hazard = True
                 self.index = end
                 continue
             out.append(char)
@@ -971,11 +982,40 @@ def _join_continuations(text: str) -> str:
     When a quote or substitution never closes, the text cannot be trusted to split where bash splits
     it, and the result leads with :data:`UNPARSED_SHELL_SIGNATURE` as a command of its own.
     """
-    scan = _JoinScan(text)
+    return _join(text)[0]
+
+
+def _join(text: str, *, strip_comments: bool = True) -> tuple[str, bool]:
+    """:func:`_join_continuations`, and whether a comment that could hold a command was dropped.
+
+    ``strip_comments=False`` leaves every ``#`` in the text, as ordinary characters: the reading that
+    cannot hide anything behind a comment the stripper invented."""
+    scan = _JoinScan(text, strip_comments)
     joined, _ = scan.scan(_JOIN_TOP)
-    if scan.balanced:
-        return joined
-    return f"{UNPARSED_SHELL_SIGNATURE}\n{joined}"
+    if not scan.balanced:
+        joined = f"{UNPARSED_SHELL_SIGNATURE}\n{joined}"
+    return joined, scan.hazard
+
+
+def _classify_command_text(
+    text: str, settings: GateSettings, cwd: _Cwd | None = None
+) -> tuple[list[ShellSegment], list[str]]:
+    """Join, strip comments and classify one command text — twice when a comment dropped could hide one.
+
+    The comment stripper must never be able to HIDE a command (T-10-16). It is made to follow bash
+    closely, but a ``#`` is not a comment in every context (a ``[[ =~ ]]`` regex, an extglob group, a
+    ``(( ))``). So when it dropped a comment holding ``;``, ``&``, ``|``, a backtick or ``$(``, the text is
+    also classified with every ``#`` kept, and the segments of the second reading that the first lacks
+    are added: the stricter of the two, never the looser.
+    """
+    joined, hazard = _join(text)
+    second_cwd = cwd.copy() if (hazard and cwd is not None) else None
+    segments, dropped = _classify_text(joined, settings, cwd)
+    if hazard:
+        kept, _ = _join(text, strip_comments=False)
+        more, _ = _classify_text(kept, settings, second_cwd)
+        segments = [*segments, *(segment for segment in more if segment not in segments)]
+    return segments, dropped
 
 
 # ------------------------------------------------------- working directory (finding R2a)
@@ -1852,7 +1892,7 @@ def _build(
         payload_cwd = cwd.copy()
         payload_cwd.env_redirect = payload_cwd.env_redirect or env_redirect
         # CR-01 / WR-54: the shell that runs the payload joins its continuations (and drops its comments).
-        inner_segments, _ = _classify_text(_join_continuations(payload_text), settings, payload_cwd)
+        inner_segments, _ = _classify_command_text(payload_text, settings, payload_cwd)
         extras.extend(inner_segments)
 
     host = _make_segment(
