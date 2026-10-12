@@ -248,6 +248,19 @@ async def test_huge_output_is_terminated_not_buffered(root):
     assert len(result.output.split("\n")) == 51
 
 
+@requires_git
+async def test_a_line_past_the_stream_limit_is_a_marked_truncation_not_a_silent_drop(root, base, monkeypatch):
+    body = 'case " $* " in *" log "*) echo first; head -c 9000000 /dev/zero | tr "\\0" x; echo; exit 0 ;; esac'
+    fake = fake_git(base / "fake", body)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+    result = await GitReadTool(root).run(subcommand="log", max_lines=100)
+    assert result.success is True
+    assert result.truncated is True
+    assert result.output.startswith("first\n")
+    assert result.output.endswith("[git_read: truncated at 100 lines]")
+    assert len(result.output) < 1024 * 1024
+
+
 # --------------------------------------------------------------------------------------- timeout
 
 @requires_git

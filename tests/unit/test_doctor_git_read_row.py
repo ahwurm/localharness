@@ -319,3 +319,43 @@ def test_the_layer_report_fixture_with_an_empty_dot_git_prints_the_toplevel_row(
         out,
         f"git_read not registered: the repository toplevel is not the workspace root ({_real(proj)!r})",
     )
+
+
+@requires_git
+def test_a_stub_popen_never_crashes_doctor_or_moves_its_exit_code(tmp_path, monkeypatch, fake_home):
+    m = _machine(tmp_path, monkeypatch, fake_home)
+    repo = make_repo(m.home / "proj")
+    monkeypatch.chdir(repo)
+    baseline = _run()
+
+    class StubPopen:
+        calls: list = []
+
+        def __init__(self, *a, **kw):
+            StubPopen.calls.append(a)
+            self.returncode = 0
+            self.args = a[0] if a else ()
+
+        def communicate(self, *a, **kw):
+            return (b"", b"")
+
+        def wait(self, *a, **kw):
+            return 0
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(subprocess, "Popen", StubPopen)
+    stubbed = _run()
+
+    assert stubbed.exception is None or isinstance(stubbed.exception, SystemExit)
+    assert stubbed.exit_code == baseline.exit_code
