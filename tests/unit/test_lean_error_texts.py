@@ -251,6 +251,38 @@ async def test_runner_surfaces_a_load_error_that_is_not_a_not_found():
     assert str(ei.value) == "agent 'bad' could not be loaded: first line"
 
 
+async def test_runner_load_failure_text_does_not_echo_the_rejected_value():
+    """The agent file is untrusted: the model sees the file, the field and a short reason, never
+    the value the file held (here a secret-looking one, and one the reason text itself repeats)."""
+    from localharness.config.loader import (
+        ConfigFieldError, ConfigReferenceError, ConfigValidationError)
+
+    secret = "sk-live-SECRET-0123456789abcdef"
+
+    def _invalid(name):
+        raise ConfigValidationError("/w/agents/bad.yaml", [
+            ConfigFieldError("model.api_key", secret, f"Value error, bad key {secret}"),
+            ConfigFieldError("model.name", 7, "Input should be a string"),
+        ])
+
+    with pytest.raises(ValueError) as ei:
+        await _runner_with(_invalid, [])("bad", "x")
+    text = str(ei.value)
+    assert secret not in text and "SECRET" not in text and "got:" not in text
+    assert text == ("agent 'bad' could not be loaded: "
+                    "/w/agents/bad.yaml: invalid model.api_key: Value error, bad key <value> (and 1 more)")
+
+    def _dangling(name):
+        raise ConfigReferenceError("/w/agents/bad.yaml", "division", secret, "no such division")
+
+    with pytest.raises(ValueError) as ei:
+        await _runner_with(_dangling, [])("bad", "x")
+    text = str(ei.value)
+    assert secret not in text
+    assert text == ("agent 'bad' could not be loaded: "
+                    "/w/agents/bad.yaml: field 'division' references something that does not exist")
+
+
 def _runner_with(load_agent, available_agents):
     import localharness.agent.subagent as subagent
 

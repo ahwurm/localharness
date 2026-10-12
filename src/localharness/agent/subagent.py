@@ -203,15 +203,34 @@ def _not_wired_text(
 
 def _load_failure_text(agent_id: str, exc: BaseException) -> str | None:
     """The refusal for an agent whose definition EXISTS but would not load (a parse or validation
-    error): its real error, first line, so the model is not told "not wired" about a file that is
-    there. None for a plain not-found (the loader's ``searched_paths``, or ``FileNotFoundError``),
-    which keeps the two-line not-wired text."""
+    error), so the model is not told "not wired" about a file that is there. None for a plain
+    not-found (the loader's ``searched_paths``, or ``FileNotFoundError``), which keeps the two-line
+    not-wired text.
+
+    The agent file is untrusted project text, so a validation or reference error names the file and
+    the field with a short reason but never the value the file held (the loader's own report, with
+    its bounded and masked ``got:`` value, is for the person at the terminal). Any other error shows
+    its first line, capped."""
     if hasattr(exc, "searched_paths") or isinstance(exc, FileNotFoundError):
         return None
-    lines = [ln.strip() for ln in str(exc).splitlines() if ln.strip()]
-    detail = lines[0] if lines else type(exc).__name__
-    if detail.endswith(":") and len(lines) > 1:  # a validation error's first line is only the path
-        detail = f"{detail} {lines[1]}"
+    from localharness.config.loader import ConfigReferenceError, ConfigValidationError
+
+    if isinstance(exc, ConfigValidationError):
+        detail = f"{exc.path}:"
+        if exc.errors:
+            first = exc.errors[0]
+            reason = str(first.message)
+            value = first.value
+            if isinstance(value, str) and len(value) >= 4:
+                reason = reason.replace(value, "<value>")
+            detail += f" invalid {first.field_path}: {reason}"
+            if len(exc.errors) > 1:
+                detail += f" (and {len(exc.errors) - 1} more)"
+    elif isinstance(exc, ConfigReferenceError):
+        detail = f"{exc.path}: field {exc.field!r} references something that does not exist"
+    else:
+        lines = [ln.strip() for ln in str(exc).splitlines() if ln.strip()]
+        detail = lines[0] if lines else type(exc).__name__
     if len(detail) > 300:
         detail = detail[:300] + "..."
     return f"agent {agent_id!r} could not be loaded: {detail}"
