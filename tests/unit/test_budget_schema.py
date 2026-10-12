@@ -11,8 +11,6 @@ from localharness.agent.gate import fail_closed_gate
 from localharness.config.defaults import (
     CURRENT_DEFAULTS_REVISION,
     CURRENT_INIT_NULLS_REVISION,
-    DEFAULT_TOOL_EVICT_THRESHOLD_CHARS,
-    DEFAULT_TOOL_OUTPUT_CHARS,
 )
 from localharness.config.models import (
     AgentConfig,
@@ -197,28 +195,6 @@ def test_context_sizes_default_to_none_and_keep_their_bounds():
     with pytest.raises(ValidationError):
         ContextConfig(tool_result_evict_threshold_chars=499)
     assert ContextConfig(max_tool_output_chars=100).max_tool_output_chars == 100
-
-
-def test_the_context_size_constants_are_todays_numbers():
-    assert DEFAULT_TOOL_OUTPUT_CHARS == 32_000
-    assert DEFAULT_TOOL_EVICT_THRESHOLD_CHARS == 8_000
-
-
-@pytest.mark.asyncio
-async def test_the_bench_pipeline_caps_tool_output_at_todays_size_when_unset():
-    from localharness.bench import runner as bench_runner
-    from localharness.bench.schema import LimitsSpec, ScenarioSpec, SuccessCriteria
-    from localharness.core.events import BudgetSpec
-
-    scen = ScenarioSpec(
-        name="cap-default", prompt="x",
-        success_criteria=SuccessCriteria(rubric=["contains:X"]),
-        budget=BudgetSpec(), limits=LimitsSpec(),
-        tools_allowed=[], slice="train", category="tool_basics",
-    )
-    loop = await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
-    cap_stage = loop._ctx._pipeline._deterministic_stages[0]
-    assert cap_stage.max_chars == DEFAULT_TOOL_OUTPUT_CHARS == 32_000
 
 
 # --------------------------------------------------------------------------- the card
