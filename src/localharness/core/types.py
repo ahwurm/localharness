@@ -16,10 +16,42 @@ Message = dict[str, Any]
 
 
 class MessageProvenance(TypedDict):
-    """Internal source information; never inferred from model-visible text."""
+    """Internal source information; never inferred from model-visible text.
+
+    A user message's private ``_lh`` is this; a tool message's is a
+    :class:`ToolProvenance` (see ``Provenance``).
+    """
 
     origin: Literal["human", "harness"]
     subtype: str
+
+
+class ToolOutcome(TypedDict):
+    """What became of one tool call, written by the agent loop and never shown to the model.
+
+    ``call`` is the call-only signature of the tool name and arguments, ``ok`` is
+    whether the call ran and succeeded, ``denied`` whether the permission gate refused
+    it and ``staged`` whether the gate staged it for a human.
+    """
+
+    call: str
+    ok: bool
+    denied: bool
+    staged: bool
+
+
+class ToolProvenance(TypedDict):
+    """A tool message's private ``_lh``.
+
+    It deliberately carries no ``origin``: an origin would add a source to every
+    compaction summary that reads the key.
+    """
+
+    outcome: ToolOutcome
+
+
+# The documented type of a message's private ``_lh`` key.
+Provenance = MessageProvenance | ToolProvenance
 
 
 def human_message(content: Content, subtype: str = "request") -> Message:
