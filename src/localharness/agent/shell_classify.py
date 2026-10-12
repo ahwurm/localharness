@@ -1143,7 +1143,10 @@ class _JoinScan:
                     inner = _JOIN_PAREN
                     if text[index + 2 : index + 3] == "(" and _is_arithmetic(text, index + 1):
                         inner = _JOIN_ARITH
-                    out.append("$(")
+                    # `$((` that is NOT arithmetic (`$(( #)\n … ))`) is a subshell in a substitution. A blank between the
+                    # parentheses keeps every later pass, which sees the text after its comments are gone, from
+                    # reading it as arithmetic again and lifting nothing from it (CR-08 it4).
+                    out.append("$( " if inner == _JOIN_PAREN and text[index + 2 : index + 3] == "(" else "$(")
                     self.index += 2
                     self._nested(out, inner, bool(pending))
                     word_start = False

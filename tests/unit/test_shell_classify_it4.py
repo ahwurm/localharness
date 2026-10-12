@@ -568,3 +568,27 @@ def test_a_substitution_in_double_quotes_has_its_own_quote_context(ws, command):
 )
 def test_double_quote_substitution_controls(ws, command, expected):
     _check(command, expected, ws)
+
+
+# --------------------------------------------------------------------------- CR-08: $(( that is not arithmetic
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        'echo "$(( #)\nif true;then rm -rf /etc/x;fi))"',
+        'x="$(( #)\nif true;then rm -rf /etc/x;fi))"',
+        'echo "$(( #)\nrm -rf /etc/x\n))"',
+    ),
+)
+def test_a_comment_that_makes_dollar_paren_paren_a_subshell_does_not_hide_the_body(ws, command):
+    """CR-08 (it4): the scanner judges ``$((`` not arithmetic (the comment's ``)`` closes the inner paren) and drops
+    the comment; the lifter must not judge the comment-free text arithmetic again."""
+    _check(command, "!ok/!ok/!ok", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("echo $((1+2))", "echo $(( (1+2)*3 ))", 'echo "$((1+2))"', "echo $( (ls) )", "x=$((a<<2)); echo $x"),
+)
+def test_arithmetic_and_subshell_controls(ws, command):
+    _check(command, "ok/ok/ok", ws)
