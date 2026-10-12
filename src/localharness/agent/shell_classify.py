@@ -1790,11 +1790,13 @@ def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
     braces = 0
     index = 0
     quote: str | None = None
+    mark = 0  # buffer index where the current command began: after the last separator or counted `{` (CR-53 it5)
 
     def flush(next_piped: bool) -> None:
-        nonlocal piped, buffer
+        nonlocal piped, buffer, mark
         parts.append(_Raw("".join(buffer), piped))
         buffer = []
+        mark = 0
         piped = next_piped
 
     while index < len(text):
@@ -1835,7 +1837,7 @@ def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
         if (
             char == "c" and text.startswith("case", index)
             and text[index + 4 : index + 5] in (" ", "\t", "\n") and previous in GROUP_BRACE_BEFORE
-            and _command_position("".join(buffer))
+            and _command_position("".join(buffer[mark:]))
         ):
             # `case x in a) rm y;; esac` is one command: its `;;`, `|` and `)` split nothing.
             end = _case_end(text, index)
@@ -1852,12 +1854,15 @@ def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
         if (
             char == "{" and track_braces and previous in GROUP_BRACE_BEFORE
             and text[index + 1 : index + 2] in GROUP_BRACE_AFTER
-            and _command_position("".join(buffer))
+            and _command_position("".join(buffer[mark:]))
         ):
             # Only a `{` that is a word of its own, where a command may start, opens a group;
-            # `{#`, `{a,b}`, `x{y` and the `{` of `echo { ; rm x` do not.
+            # `{#`, `{a,b}`, `x{y` and the `{` of `echo { ; rm x` do not. The question is asked of the text
+            # since the current command began, not since the last flush: inside `f() { g() {` the inner `{`
+            # follows `g()`, not `f() { g()` (CR-53 it5).
             braces += 1
             buffer.append(char)
+            mark = len(buffer)
             index += 1
             continue
         if char == "}" and braces and previous in GROUP_BRACE_BEFORE:
@@ -1891,6 +1896,8 @@ def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
                 continue
         buffer.append(char)
         index += 1
+        if braces and char in ";\n&|":
+            mark = len(buffer)  # a separator inside a group starts the next command of that group
     flush(False)
     if braces and track_braces:
         return _split_top_level(text, track_braces=False)
