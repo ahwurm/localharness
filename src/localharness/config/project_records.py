@@ -1067,7 +1067,7 @@ class ProjectInstructions:
                 return None, None
         if self._awaiting is not None:
             if record is None or (record.state == "yes" and record.digest != self._awaiting.digest):
-                return self._awaiting_step(record, cap, pending, stored, fx)
+                return self._awaiting_step(data, key, record, cap, pending, stored, fx)
             fx.append(self._clear_awaiting)
         if not usable:
             return self._no_record(cap, stored, fx, at_start=at_start)
@@ -1111,9 +1111,26 @@ class ProjectInstructions:
         fx.append(lambda: setattr(self, "_start_notice_given", True))
         return text, self._notice("start", cand.name, path, read.size, "none", text=line)
 
+    def _clear_own_marks(
+        self, data: dict, key: str, record: InstructionsRecord | None, pending: dict[str, str],
+        marks: _Marks, fx: list[Callable[[], None]],
+    ) -> None:
+        """The turn-end check found the bytes in use unchanged (or still the dropped ones): this
+        handle's mark, and any dead session's, did not stand for a change. Clear them, or a
+        later hand edit would be called the model's (WR-05). Another live session's mark stays.
+        Under ``--no-input`` nothing is written."""
+        clear = set(marks.dead) | ({self._sitting_id} & set(pending))
+        if clear and not self._no_input:
+            left = {k: v for k, v in pending.items() if k not in clear}
+            if record is not None:
+                _put_record(data, key, record, left)
+            else:
+                _put_marks_only(data, key, left)
+        fx.append(lambda: setattr(self, "_marked", False))
+
     def _awaiting_step(
-        self, record: InstructionsRecord | None, cap: int, pending: dict[str, str],
-        stored: frozenset[Notice], fx: list[Callable[[], None]],
+        self, data: dict, key: str, record: InstructionsRecord | None, cap: int,
+        pending: dict[str, str], stored: frozenset[Notice], fx: list[Callable[[], None]],
     ) -> tuple[str | None, InstructionsNotice | None]:
         """A start line is owed: the digest it described is the one in use this sitting."""
         aw = self._awaiting
@@ -1127,6 +1144,7 @@ class ProjectInstructions:
         text = read.data.decode("utf-8", errors="replace")
         in_use = {"name": aw.name, "path": aw.path, "size": read.size, "in_use": True}
         if read.digest == aw.digest:
+            self._clear_own_marks(data, key, record, pending, self._marks(pending), fx)
             self._set_last(fx, record, marks_open=False, digest=read.digest, **in_use)
             if self._start_notice_given:
                 return text, None
@@ -1198,7 +1216,9 @@ class ProjectInstructions:
             return text, None
 
         if digest == record.harness_written:
-            self._set_last(fx, record, marks_open=bool(pending) or self._marked, digest=digest)
+            self._clear_own_marks(data, key, record, pending, marks, fx)
+            left = {k: v for k, v in pending.items() if k not in clear}
+            self._set_last(fx, record, marks_open=bool(left), digest=digest)
             return None, None
 
         if marks.any:

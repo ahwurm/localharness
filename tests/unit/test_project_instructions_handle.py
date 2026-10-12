@@ -947,3 +947,53 @@ def test_a_recorded_file_that_is_gone_under_a_mark_is_still_refused(instructions
     text, notice = h.section(WINDOW)
     assert text is None
     assert notice is not None and notice.reason == "unreadable"
+
+
+# --------------------------------------------------------------------------- WR-05: a mark outlives its turn
+
+
+def test_a_mark_on_an_undelivered_start_line_is_cleared_when_the_file_is_unchanged(
+    instructions_home, tmp_path,
+):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _open(root)
+    assert h.section(WINDOW)[0] == TEXT  # the start line is owed and never delivered
+    h.mark_pending()  # a read that merely names the file
+    assert h.section(WINDOW) == (TEXT, None)
+    assert not store_file().exists() or "pending" not in load_store()["roots"].get(
+        str(root.resolve()), {}
+    ).get("instructions", {})
+    _rewrite(root, CHANGED)  # the person's own edit afterwards
+    assert h.section(WINDOW) == (CHANGED, None)  # used, not dropped as the model's
+
+
+def test_a_mark_left_after_a_drop_is_cleared_while_the_dropped_bytes_stay_in_the_file(
+    instructions_home, tmp_path,
+):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _recorded(root)
+    h.mark_pending()
+    _rewrite(root, CHANGED)
+    assert h.section(WINDOW)[1].cause == "harness_written"
+    h.mark_pending()  # one later named read
+    assert set(_stored_marks(root)) == {"s1"}
+    assert h.section(WINDOW) == (None, None)
+    assert "pending" not in _record_of(root)
+    _rewrite(root, "the person's fix-up\n")  # no mark stands: this is the person's change
+    text, notice = h.section(WINDOW)
+    assert text == "the person's fix-up\n"
+    assert notice is not None and notice.cause == "adopted"
+
+
+def test_another_live_sessions_mark_survives_the_clearing(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _recorded(root)
+    h.mark_pending()
+    _rewrite(root, CHANGED)
+    h.section(WINDOW)
+    with live_child() as pid:
+        register_session("s2", pid=pid)
+        _put_mark(root, "s2")
+        h.mark_pending()
+        assert h.section(WINDOW) == (None, None)
+        assert set(_stored_marks(root)) == {"s2"}
