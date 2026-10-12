@@ -679,8 +679,10 @@ CHUNK_SUMMARIZER_ROLE = (
 )
 
 
-# YAML-defined children with no tools.add get a safe read-only set.
-CONFIG_CHILD_DEFAULT_TOOLS: list[str] = ["read", "glob", "grep"]
+# YAML-defined children with no tools.add get a safe read-only set. git_read is read-only and
+# confined to the session boundary; `ToolRegistry.from_allowed` skips a bare name the base registry
+# lacks, so a session that did not register git_read never offers it (and the brief never names it).
+CONFIG_CHILD_DEFAULT_TOOLS: list[str] = ["read", "glob", "grep", "git_read"]
 
 
 def _config_child_allowed(agent_config: Any) -> list[str]:

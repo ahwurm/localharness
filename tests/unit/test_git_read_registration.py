@@ -252,3 +252,94 @@ def test_the_other_callers_pass_no_boundary(rel):
     assert calls, f"{rel} no longer calls register_builtin_tools - update this pin"
     for call in calls:
         assert "boundary" not in {k.arg for k in call.keywords}, rel
+
+
+# ------------------------------------------------------------------ config children (D-18, D-67, D-72)
+
+HANDOFF = (
+    "Reviewed the draft.\n\nHANDOFF\nstatus: completed\nartifacts: review.md\n"
+    "- findings: two unsupported claims\nevidence: lines 3 and 9\nremaining: none"
+)
+
+
+def _child_cfg(**tools):
+    from localharness.config.models import AgentConfig
+
+    raw = {
+        "name": "reviewer", "role": "Reviews drafts.",
+        "permissions": {"mode": "unattended", "deny_patterns": [],
+                        "budget": {"max_actions": 3, "max_duration_minutes": 5}},
+    }
+    if tools:
+        raw["tools"] = tools
+    return AgentConfig.model_validate(raw)
+
+
+async def _first_message(mock_llm_client, bus, cfg, base) -> str:
+    from localharness.agent.permissions import PermissionEvaluator
+    from localharness.agent.subagent import dispatch_config_subagent
+    from tests.unit.test_task_references import capture
+
+    llm = mock_llm_client([mock_llm_client.Response(content=HANDOFF),
+                           mock_llm_client.Response(content="CONFIRMED")])
+    seen = capture(llm)
+    await dispatch_config_subagent(
+        "Review draft.md", agent_config=cfg, llm=llm, bus=bus, base_registry=base,
+        parent_session_id="parent", permission_evaluator=PermissionEvaluator(),
+    )
+    return "\n".join(str(m.get("content")) for m in seen[0])
+
+
+def test_child_default_sets():
+    from localharness.agent.subagent import CONFIG_CHILD_DEFAULT_TOOLS, EXPLORE_TOOLS
+
+    assert CONFIG_CHILD_DEFAULT_TOOLS == ["read", "glob", "grep", "git_read"]
+    assert EXPLORE_TOOLS == ["read", "glob", "grep"]
+
+
+async def test_default_child_over_a_registry_without_git_read_never_hears_of_it(mock_llm_client, bus):
+    from localharness.agent.subagent import _config_child_allowed
+
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    cfg = _child_cfg()
+    assert not ToolRegistry.from_allowed(_config_child_allowed(cfg), base_registry=base).has("git_read")
+    first = await _first_message(mock_llm_client, bus, cfg, base)
+    assert "(Your ONLY available tools: read, glob, grep." in first
+    assert "git_read" not in first
+
+
+@requires_git
+async def test_default_child_over_a_registry_with_git_read_holds_and_names_it(repo, mock_llm_client, bus):
+    from localharness.agent.subagent import _config_child_allowed
+
+    base = ToolRegistry()
+    await register_builtin_tools(base, boundary=repo)
+    cfg = _child_cfg()
+    assert ToolRegistry.from_allowed(_config_child_allowed(cfg), base_registry=base).has("git_read")
+    first = await _first_message(mock_llm_client, bus, cfg, base)
+    assert "(Your ONLY available tools: read, glob, grep, git_read." in first
+
+
+@requires_git
+async def test_explicit_tools_add_holds_git_read_when_the_session_registered_it(repo, mock_llm_client, bus):
+    from localharness.agent.subagent import _config_child_allowed
+
+    base = ToolRegistry()
+    await register_builtin_tools(base, boundary=repo)
+    cfg = _child_cfg(add=["read", "git_read"])
+    assert ToolRegistry.from_allowed(_config_child_allowed(cfg), base_registry=base).has("git_read")
+    first = await _first_message(mock_llm_client, bus, cfg, base)
+    assert "(Your ONLY available tools: read, git_read." in first
+
+
+async def test_explicit_tools_add_over_a_registry_without_git_read_holds_nothing(mock_llm_client, bus):
+    from localharness.agent.subagent import _config_child_allowed
+
+    base = ToolRegistry()
+    await register_builtin_tools(base)
+    cfg = _child_cfg(add=["read", "git_read"])
+    assert not ToolRegistry.from_allowed(_config_child_allowed(cfg), base_registry=base).has("git_read")
+    first = await _first_message(mock_llm_client, bus, cfg, base)
+    assert "(Your ONLY available tools: read." in first
+    assert "git_read" not in first
