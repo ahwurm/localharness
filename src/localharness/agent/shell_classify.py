@@ -641,6 +641,32 @@ SED_ATTACHED_VALUE_LETTERS = "efl"
 ``-l 70``). Inside a cluster, everything after one of these letters is that argument, so
 ``sed -e's/i/x/'`` is not read as an in-place edit (sed(1))."""
 
+SED_FLAG_LETTERS = "nsErzub"
+"""sed's short options that take no value and change nothing this scanner cares about (``-n``
+quiet, ``-s`` separate, ``-E``/``-r`` extended regexes, ``-z`` NUL lines, ``-u`` unbuffered, ``-b``
+binary). ``e``, ``f``, ``l`` and ``i`` are handled in :func:`_sed_script_facts` because they take a
+value (sed(1), D-54)."""
+
+SED_LONG_OPTIONS = (
+    "expression", "file", "in-place", "line-length", "null-data", "zero-terminated", "quiet",
+    "silent", "regexp-extended", "separate", "sandbox", "debug", "posix", "unbuffered",
+    "follow-symlinks", "help", "version", "binary",
+)
+"""sed's long options. GNU getopt accepts an exact name or a unique prefix; an unknown or ambiguous
+spelling is read as running a command, the safe direction (sed(1), D-54)."""
+
+SED_ADDRESS_FLAGS = "IM"
+SED_SUBSTITUTE_PLAIN_FLAGS = "gpiImM0123456789"
+SED_NO_ARGUMENT_COMMANDS = "=dDgGhHnNpPxzF"
+SED_NUMBER_COMMANDS = "qQlL"
+SED_TEXT_COMMANDS = "aic"
+SED_FILE_COMMANDS = "rR"
+SED_LABEL_COMMANDS = "btT:v"
+"""The sed script grammar the scanner needs: the flags of an address (``/re/I``) and of ``s``
+(``w`` and ``e`` are handled apart), and the command letters by how they take their argument
+(sed(1) "Commands"; D-54)."""
+
+
 
 # --------------------------------------------------------------------------- public API
 
@@ -650,9 +676,37 @@ def classify_shell(command: str, settings: GateSettings) -> ShellClassification:
     Pure: the same string and settings always produce the same classification.
     """
     text = _strip_heredocs(command)
-    text = text.replace("\\\n", "")
+    text = _join_continuations(text)
     segments, dropped = _classify_text(text, settings)
     return ShellClassification(segments=tuple(segments), dropped=tuple(dropped))
+
+
+def _join_continuations(text: str) -> str:
+    """Drop each backslash-newline pair, as the shell does — except inside single quotes.
+
+    The old blanket ``text.replace("\\\n", "")`` also removed the pair inside a single-quoted
+    word and mis-paired ``\\\\`` + newline, so a ``sed`` script written ``a x\\\\`` newline
+    ``w ~/.bashrc`` reached the sed scanner with its second command glued onto the first (Phase 10,
+    D-54). A backslash escapes the character after it, so ``\\\\`` is a pair and the newline that
+    follows it is a real newline; single quotes keep every character, double quotes drop the pair.
+    """
+    out: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            quote = "" if char == "'" else quote
+        elif char == "\\" and index + 1 < len(text):
+            if text[index + 1] != "\n":
+                out.append(text[index : index + 2])
+            index += 2
+            continue
+        elif char in "'\"":
+            quote = "" if quote == char else (quote or char)
+        out.append(char)
+        index += 1
+    return "".join(out)
 
 
 # ------------------------------------------------------- working directory (finding R2a)
@@ -1829,8 +1883,9 @@ def _write_targets(signature: str, argv: tuple[str, ...], settings: GateSettings
         return _uniq_target(argv)
     if head == "tree":
         return _tree_targets(argv)
-    if signature == "sed -i":
-        return _sed_files(list(argv))
+    if head == "sed":
+        files = _sed_files(list(argv)) if signature == "sed -i" else []
+        return files + _sed_script_facts(argv)[0]
     family = "tar" if head in TAR_FAMILY else head
     if family not in settings.write_shaped_commands:
         return []
@@ -2096,8 +2151,8 @@ def _tree_targets(argv: Sequence[str]) -> list[str]:
 def _runs_named_program(argv: Sequence[str]) -> bool:
     """Does this command's own flag name a program for it to run? (D-23, D-50, D-51, D-52.)
 
-    ``rg --pre CMD`` / ``--hostname-bin CMD``, ``sort --compress-program P`` and ``git grep -O`` /
-    ``--open-files-in-pager`` all execute something the model chose from inside a command the
+    ``rg --pre CMD`` / ``--hostname-bin CMD``, ``sort --compress-program P``, ``git grep -O`` /
+    ``--open-files-in-pager`` and a ``sed`` script's ``e`` / ``s///e`` / ``-f`` all execute something the model chose from inside a command the
     read-only tier would otherwise wave through. The segment is then inline: guarded asks
     ``interpreter-inline``, read-only denies.
     """
@@ -2111,6 +2166,8 @@ def _runs_named_program(argv: Sequence[str]) -> bool:
         return False
     if head == "sort":
         return _sort_facts(argv)[1]
+    if head == "sed":
+        return _sed_script_facts(argv)[1]
     if head == "git":
         found = _first_subcommand("git", list(argv[1:]))
         if found is None or found[0] != "grep":
@@ -2125,6 +2182,221 @@ def _runs_named_program(argv: Sequence[str]) -> bool:
             elif token.startswith("-") and "O" in token[1:]:
                 return True
     return False
+
+
+def _sed_script_facts(argv: Sequence[str]) -> tuple[list[str], bool]:
+    """``sed`` → (the files its script writes with ``w`` / ``W`` / ``s///w``, whether it runs a command).
+
+    sed(1), D-54. The options are read first (:data:`SED_FLAG_LETTERS`, :data:`SED_LONG_OPTIONS`):
+    every ``-e`` / ``--expression`` value is a script, joined by newlines; with none, the first
+    operand is the script. ``-f`` / ``--file`` names a script file nobody has read, and an option
+    this scanner does not know, or one that is ambiguous, cannot be reasoned about — both count as
+    running a command. The script is then parsed by :func:`_sed_script_commands` and never
+    substring-matched (a regex may contain ``w out``).
+    """
+    scripts: list[str] = []
+    operands: list[str] = []
+    runs_command = False
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        index += 1
+        if token == "--":
+            operands.extend(argv[index:])
+            break
+        if token.startswith("--"):
+            name, equals, value = token[2:].partition("=")
+            matches = [opt for opt in SED_LONG_OPTIONS if opt.startswith(name)]
+            option = name if name in SED_LONG_OPTIONS else (matches[0] if len(matches) == 1 else "")
+            if not name or not option:
+                runs_command = True
+            elif option in ("expression", "file", "line-length"):
+                if not equals:
+                    value = argv[index] if index < len(argv) else ""
+                    index += 1
+                if option == "expression":
+                    scripts.append(value)
+                elif option == "file":
+                    runs_command = True
+            continue
+        if token.startswith("-") and token != "-":
+            for position, letter in enumerate(token[1:], start=1):
+                if letter in SED_FLAG_LETTERS:
+                    continue
+                if letter in "efl":
+                    value = token[position + 1:]
+                    if not value:
+                        value = argv[index] if index < len(argv) else ""
+                        index += 1
+                    if letter == "e":
+                        scripts.append(value)
+                    elif letter == "f":
+                        runs_command = True
+                elif letter != "i":
+                    runs_command = True  # an option we do not know: assume the worst
+                break  # `i` takes the rest of the cluster as a backup suffix
+            continue
+        operands.append(token)
+    if not scripts and not runs_command and operands:
+        scripts.append(operands[0])
+    targets, runs = _sed_script_commands("\n".join(scripts))
+    return targets, runs_command or runs
+
+
+def _sed_script_commands(script: str) -> tuple[list[str], bool]:
+    """Walk one sed script command by command: (``w`` / ``W`` / ``s///w`` files, runs a command).
+
+    Commands are separated by ``;``, a newline, ``{`` and ``}``. Each is: optional addresses
+    (digits, ``$``, ``/re/`` or ``\\cREc`` with ``I``/``M``, ``first~step``, ``,addr2`` including
+    ``+N`` / ``~N``) and ``!``, then one command letter by :data:`SED_NO_ARGUMENT_COMMANDS` and its
+    siblings. ``w`` / ``W`` take the rest of the line as a file, ``e`` runs a command, ``s`` is
+    read as delimiter, regex, replacement, flags (``e`` runs a command, ``w`` takes the rest of
+    the line as a file). A character that is not a command, or a part that never terminates, counts
+    as running a command: when the scanner cannot read the script, it assumes the worst.
+    """
+    targets: list[str] = []
+    length = len(script)
+
+    def line_end(start: int) -> int:
+        end = script.find("\n", start)
+        return length if end < 0 else end
+
+    def delimited(start: int, delimiter: str) -> int:
+        """Index just past the closing delimiter (backslash escapes the next character), or -1."""
+        position = start
+        while position < length:
+            char = script[position]
+            if char == "\\":
+                position += 2
+                continue
+            if char == delimiter:
+                return position + 1
+            position += 1
+        return -1
+
+    def address(start: int, second: bool) -> int:
+        """Index past an address at ``start``, ``start`` if there is none, -2 if malformed."""
+        if start >= length:
+            return start
+        char = script[start]
+        if char.isdigit() or (second and char in "+~"):
+            end = start + 1
+            while end < length and script[end].isdigit():
+                end += 1
+            if char.isdigit() and end < length and script[end] == "~":
+                end += 1
+                while end < length and script[end].isdigit():
+                    end += 1
+            return end
+        if char == "$":
+            return start + 1
+        if char in "/\\":
+            if char == "/":
+                end = delimited(start + 1, "/")
+            else:
+                end = delimited(start + 2, script[start + 1]) if start + 1 < length else -1
+            if end < 0:
+                return -2
+            while end < length and script[end] in SED_ADDRESS_FLAGS:
+                end += 1
+            return end
+        return start
+
+    index = 0
+    while index < length:
+        char = script[index]
+        if char in " \t\n;{}":
+            index += 1
+            continue
+        first = address(index, second=False)
+        if first == -2:
+            return targets, True
+        index = first
+        while index < length and script[index] in " \t":
+            index += 1
+        if index < length and script[index] == ",":
+            index += 1
+            while index < length and script[index] in " \t":
+                index += 1
+            second = address(index, second=True)
+            if second == -2 or second == index:
+                return targets, True
+            index = second
+        while index < length and script[index] in " \t!":
+            index += 1
+        if index >= length:
+            return targets, True  # addresses with no command
+        command = script[index]
+        index += 1
+        if command in "{}":
+            continue
+        if command == "#":
+            index = line_end(index)
+        elif command in SED_TEXT_COMMANDS:
+            index = line_end(index)
+            # a line ending in an ODD number of backslashes continues the text on the next line
+            while index < length and (len(script[:index]) - len(script[:index].rstrip("\\"))) % 2:
+                index = line_end(index + 1)
+        elif command in SED_FILE_COMMANDS:
+            index = line_end(index)
+        elif command in SED_LABEL_COMMANDS:
+            while index < length and script[index] in " \t":
+                index += 1
+            stops = " \t\n;" if command == ":" else " \t\n;}"
+            while index < length and script[index] not in stops:
+                index += 1
+        elif command == "y":
+            if index >= length or script[index] in "\n\\":
+                return targets, True
+            delimiter = script[index]
+            mid = delimited(index + 1, delimiter)
+            end = delimited(mid, delimiter) if mid > 0 else -1
+            if end < 0:
+                return targets, True
+            index = end
+        elif command in "wW":
+            end = line_end(index)
+            name = script[index:end].strip()
+            if not name:
+                return targets, True
+            targets.append(name)
+            index = end
+        elif command == "e":
+            return targets, True
+        elif command == "s":
+            if index >= length or script[index] in "\n\\":
+                return targets, True
+            delimiter = script[index]
+            mid = delimited(index + 1, delimiter)
+            end = delimited(mid, delimiter) if mid > 0 else -1
+            if end < 0:
+                return targets, True
+            index = end
+            while index < length and script[index] not in " \t\n;}#":
+                flag = script[index]
+                if flag == "e":
+                    return targets, True
+                if flag == "w":
+                    stop = line_end(index + 1)
+                    name = script[index + 1:stop].strip()
+                    if not name:
+                        return targets, True
+                    targets.append(name)
+                    index = stop
+                    break
+                if flag not in SED_SUBSTITUTE_PLAIN_FLAGS:
+                    return targets, True
+                index += 1
+        elif command in SED_NUMBER_COMMANDS:
+            while index < length and script[index] in " \t":
+                index += 1
+            while index < length and script[index].isdigit():
+                index += 1
+        elif command in SED_NO_ARGUMENT_COMMANDS:
+            pass
+        else:
+            return targets, True
+    return targets, False
 
 
 def _git_output_targets(subcommand: str, argv: tuple[str, ...]) -> list[str]:
