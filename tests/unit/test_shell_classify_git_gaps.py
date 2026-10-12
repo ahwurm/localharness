@@ -429,3 +429,25 @@ def test_a_heredoc_piped_to_a_shell_is_not_read_only(mode, ws):
 def test_a_heredoc_body_is_still_data():
     assert [s.signature for s in _segments("cat <<E\nrm -rf /etc/x\nE")] == ["cat"]
     assert [s.signature for s in _segments("cat <<E >f\nrm -rf /etc/x\nE")] == ["cat"]
+
+
+# ------------------------------------------------------------------ a `#` inside a word is not a comment (CR-53; iteration 2)
+
+def test_a_hash_inside_a_word_does_not_hide_the_flags_after_it():
+    """shlex ended a word at any `#`; bash does not, and `--output`, `-delete`, `--force` were lost."""
+    assert _targets("git diff a#b --output=x") == ("x",)
+    assert _targets("git diff a#b --output=~/.bashrc") == ("~/.bashrc",)
+    assert [s.signature for s in _segments("find . a#b -delete")] == ["find -delete"]
+    assert [s.signature for s in _segments("git push origin feat#12 --force")] == ["git push --force"]
+    assert [s.signature for s in _segments("rm a#b -rf ~/z")] == ["rm -rf"]
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+@pytest.mark.parametrize("command", (
+    "git diff a#b --output=~/.bashrc",
+    "git push origin feat#12 --force",
+    "cat a#b ~/.ssh/id_rsa",
+))
+def test_a_hash_inside_a_word_row_has_the_verdict_of_its_control(command, mode, ws):
+    control = command.replace("a#b", "ab").replace("feat#12", "feat12")
+    assert _verdict(command, ws, mode).verdict is _verdict(control, ws, mode).verdict

@@ -3223,8 +3223,12 @@ def _unquote(word: str) -> str:
 
 
 def _tokenize(text: str) -> list[str]:
-    """``shlex`` one command (comments stripped); fall back to whitespace on bad quoting."""
+    """``shlex`` one command; fall back to whitespace on bad quoting.
+
+    ``comments=False`` (CR-53): ``shlex`` would end a word at a ``#`` anywhere in it, unlike bash, and
+    hide ``git diff a#b --output=x`` or ``{#;rm x``. The real comments are gone by now, dropped by
+    :func:`_join_continuations`, which every command text and every lifted payload goes through."""
     try:
-        return shlex.split(text, comments=True)
+        return shlex.split(text, comments=False)
     except ValueError:
         return text.split()
