@@ -215,3 +215,40 @@ def test_git_read_is_a_harness_tool_name():
     from localharness.tools.builtin.bash_tool import _HARNESS_TOOL_NAMES
 
     assert "git_read" in _HARNESS_TOOL_NAMES
+
+
+# ------------------------------------------------------------------ start's hoist and the no-boundary callers (D-08, D-42)
+
+def _calls(path: Path, name: str) -> list[ast.Call]:
+    tree = ast.parse(path.read_text())
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            callee = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else None
+            if callee == name:
+                found.append(node)
+    return found
+
+
+def test_start_computes_the_boundary_once_above_registration():
+    start = SRC / "cli" / "start_cmd.py"
+    derive = _calls(start, "derive_session_boundary")
+    narrow = _calls(start, "narrow_boundary")
+    register = _calls(start, "register_builtin_tools")
+    assert len(derive) == len(narrow) == len(register) == 1
+    assert narrow[0].lineno < register[0].lineno
+    kw = {k.arg: k.value for k in register[0].keywords}
+    assert isinstance(kw.get("boundary"), ast.Name) and kw["boundary"].id == "_boundary"
+    gates = _calls(start, "PermissionGate")
+    assert len(gates) == 1
+    gate_kw = {k.arg: k.value for k in gates[0].keywords}
+    assert isinstance(gate_kw.get("boundary"), ast.Name) and gate_kw["boundary"].id == "_boundary"
+
+
+@pytest.mark.parametrize("rel", ["bench/runner.py", "cli/components_cmd.py", "cli/mobile_cmd.py"])
+def test_the_other_callers_pass_no_boundary(rel):
+    calls = _calls(SRC / rel, "register_builtin_tools")
+    assert calls, f"{rel} no longer calls register_builtin_tools - update this pin"
+    for call in calls:
+        assert "boundary" not in {k.arg for k in call.keywords}, rel
