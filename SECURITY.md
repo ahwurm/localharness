@@ -749,8 +749,9 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   extglob group and the stripper does not know it, a dropped comment that holds `;`, `&`, `|`, a
   backtick, `$(`, `<(` or `>(` makes the harness classify the command a second time with every `#` kept
   and add the segments of that reading that are destructive, write, run an inline program, pipe into a
-  shell or redirect the environment — only those, so the words of an ordinary comment draw no question,
-  and a second reading that does not balance is not used. A quote, backtick or substitution that never
+  shell or redirect the environment — only those, so the words of an ordinary comment draw no question
+  unless a separator in it is followed by a destructive word (`# clean up; rm old files`), and a second
+  reading that does not balance is not used. A quote, backtick or substitution that never
   closes (bash refuses such a line) is asked about as `__lh_unparsed_shell__` in every mode, `auto`
   included, and the answer cannot be remembered, as is an `env -S` string using an escape or expansion
   the classifier does not follow.
