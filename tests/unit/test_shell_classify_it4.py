@@ -224,3 +224,39 @@ def test_a_function_definition_after_grammar_has_its_body_classified(ws, command
 )
 def test_function_definition_controls(ws, command, expected):
     _check(command, expected, ws)
+
+
+# --------------------------------------------------------------------------- CR-04: env -S
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "env -S $'\\frm -rf /etc/x'",
+        "env -S $'\\vrm -rf /etc/x'",
+        "env -S $'x=1\\frm -rf /etc/x'",
+        "env -S '#\nrm -rf /etc/x'",
+        "env -S ' # c\nrm -rf /etc/x'",
+        "env -S '\\_#\nrm -rf /etc/x'",
+        "env --split-string='# c\nrm -rf /etc/x'",
+    ),
+)
+def test_env_split_string_that_env_reads_differently_asks(ws, command):
+    """CR-04 (it4): ``env -S`` ends a word at ``\\f`` / ``\\v`` and starts a comment at a ``#`` that opens a word;
+    ``shlex`` does neither, so the string is not split here: it is the unparsed placeholder."""
+    _check(command, "!ok/!ok/!ok", ws)
+    assert any(s.signature == UNPARSED_SHELL_SIGNATURE for s in _segments(command))
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("env -S $'\\trm -rf /etc/x'", "DENY/ASKU/ASKU"),
+        ("env -S $'\\nrm -rf /etc/x'", "DENY/ASKU/ASKU"),
+        ("env -S $'\\rrm -rf /etc/x'", "DENY/ASKU/ASKU"),
+        ("env -S '\\_rm -rf /etc/x'", "DENY/ASKU/ASKU"),
+        ("env -S 'ls -l'", "ok/ok/ok"),
+        ("env -S 'echo a#b'", "ok/ok/ok"),
+    ),
+)
+def test_env_split_string_controls(ws, command, expected):
+    _check(command, expected, ws)
