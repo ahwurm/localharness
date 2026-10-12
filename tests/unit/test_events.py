@@ -1,4 +1,4 @@
-"""Tests for localharness.core.events — all 34 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
+"""Tests for localharness.core.events — all 36 event models, BudgetSpec, AnyEvent, EVENT_TYPE_MAP."""
 import json
 import pytest
 from localharness.core.events import (
@@ -16,8 +16,11 @@ from localharness.core.events import (
     EVENT_TYPE_MAP,
     ExpectationAttached,
     Heartbeat,
+    InstructionsChanged,
+    InstructionsNotice,
     MemoryGateFired,
     MutationArchived,
+    NarrowingNotice,
     Observation,
     OutcomeObserved,
     PermissionAsked,
@@ -141,8 +144,8 @@ def test_event_serialization_roundtrip():
 
 
 def test_event_type_map_complete():
-    """EVENT_TYPE_MAP has entries for all 34 event types."""
-    assert len(EVENT_TYPE_MAP) == 34
+    """EVENT_TYPE_MAP has entries for all 36 event types."""
+    assert len(EVENT_TYPE_MAP) == 36
     expected_keys = {
         "SystemReady", "AgentCreated", "AgentDeleted", "TurnStarted", "TurnCompleted",
         "TurnFailed", "UserMessage", "TaskRequest", "TaskComplete", "Action",
@@ -152,7 +155,7 @@ def test_event_type_map_complete():
         "ExpectationAttached", "OutcomeObserved", "SurpriseScored",
         "ConsolidationStarted", "ConsolidationFinished", "InputRouted",
         "TurnEndMicroPassCompleted", "PermissionAsked", "PermissionStaged",
-        "PermissionResolved", "ProviderLost",
+        "PermissionResolved", "ProviderLost", "InstructionsChanged", "NarrowingNotice",
     }
     assert set(EVENT_TYPE_MAP.keys()) == expected_keys
 
@@ -182,6 +185,76 @@ def test_provider_lost_event():
         parent_id=SessionID("p"),
     )
     assert child.parent_id == "p"
+
+
+def test_instructions_changed_event():
+    """InstructionsChanged is a frozen bus event that carries the file's facts and the rendered
+    line, never its bytes; the cause is a closed set; it round-trips through deserialize_event."""
+    import typing
+
+    ev = InstructionsChanged(
+        agent_id=AgentID("a"), session_id=SessionID("s"), path="/r/CLAUDE.md",
+        name="CLAUDE.md", size=5, state="yes", cause="start",
+        text="Using CLAUDE.md (0.0 KB); /instructions off",
+    )
+    assert ev.event_type == "InstructionsChanged"
+    assert ev.shadowed is None
+    with pytest.raises(Exception):  # frozen
+        ev.size = 6  # type: ignore[misc]
+    with pytest.raises(Exception):  # cause outside the Literal
+        InstructionsChanged(
+            agent_id=AgentID("a"), session_id=SessionID("s"), path="p", name="n", size=0,
+            state="yes", cause="surprise", text="t",  # type: ignore[arg-type]
+        )
+    assert EVENT_TYPE_MAP["InstructionsChanged"] is InstructionsChanged
+    assert InstructionsChanged in typing.get_args(AnyEvent)
+    restored = deserialize_event(ev.model_dump_json())
+    assert isinstance(restored, InstructionsChanged)
+    assert restored == ev
+
+
+def test_instructions_changed_field_set_is_exactly_the_documented_one():
+    """The only fields beyond BaseEvent's are the documented ones (T-11-08: no bytes field)."""
+    own = set(InstructionsChanged.model_fields) - {
+        "id", "seq", "timestamp", "agent_id", "session_id", "parent_id",
+    }
+    assert own == {"event_type", "path", "name", "size", "state", "cause", "shadowed", "text"}
+
+
+def test_narrowing_notice_event():
+    """NarrowingNotice is registered in both tables and round-trips."""
+    import typing
+
+    ev = NarrowingNotice(
+        agent_id=AgentID("a"), session_id=SessionID("s"), key="explore.max_actions",
+        file="/w/.localharness/agents/explore.yaml", accept_file="/g/agents/explore.yaml",
+        text="ignoring explore.max_actions in x: only the global config may set it",
+    )
+    assert ev.event_type == "NarrowingNotice"
+    with pytest.raises(Exception):  # frozen
+        ev.key = "x"  # type: ignore[misc]
+    assert EVENT_TYPE_MAP["NarrowingNotice"] is NarrowingNotice
+    assert NarrowingNotice in typing.get_args(AnyEvent)
+    restored = deserialize_event(ev.model_dump_json())
+    assert isinstance(restored, NarrowingNotice)
+    assert restored == ev
+
+
+def test_instructions_notice_is_a_frozen_dataclass_and_not_an_event():
+    """The handle's notice is a plain frozen dataclass: not a BaseEvent, not on the wire."""
+    import dataclasses
+
+    n = InstructionsNotice(
+        cause="adopted", name="CLAUDE.md", path="/r/CLAUDE.md", size=3, state="yes",
+        shadowed=None, reason=None, text="CLAUDE.md changed, using it",
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        n.text = "x"  # type: ignore[misc]
+    assert not issubclass(InstructionsNotice, BaseEvent)
+    assert InstructionsNotice not in EVENT_TYPE_MAP.values()
+    assert {f.name for f in dataclasses.fields(InstructionsNotice)} == {
+        "cause", "name", "path", "size", "state", "shadowed", "reason", "text",
+    }
 
 
 def test_input_routed_event():
@@ -252,14 +325,14 @@ def test_budget_spec_frozen():
 
 
 def test_any_event_union():
-    """AnyEvent type contains all 34 event classes."""
+    """AnyEvent type contains all 36 event classes."""
     # AnyEvent is a Union; check its __args__
     import typing
     from localharness.core.events import (
         ConsolidationFinished, ConsolidationStarted, InputRouted, TurnEndMicroPassCompleted,
     )
     args = typing.get_args(AnyEvent)
-    assert len(args) == 34
+    assert len(args) == 36
     expected = {
         SystemReady, AgentCreated, AgentDeleted, TurnStarted, TurnCompleted, TurnFailed,
         UserMessage, TaskRequest, TaskComplete, Action, Observation,
@@ -269,7 +342,7 @@ def test_any_event_union():
         ExpectationAttached, OutcomeObserved, SurpriseScored,
         ConsolidationStarted, ConsolidationFinished, InputRouted,
         TurnEndMicroPassCompleted, PermissionAsked, PermissionStaged, PermissionResolved,
-        ProviderLost,
+        ProviderLost, InstructionsChanged, NarrowingNotice,
     }
     assert set(args) == expected
 
