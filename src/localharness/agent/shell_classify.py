@@ -1006,15 +1006,25 @@ def _take_heredoc_operators(line: str) -> tuple[str, list[tuple[str, bool]]]:
     or the scan invents a delimiter and eats the rest of the command as its body (finding R1):
     the here-string :data:`HERE_STRING_OPERATOR`, the arithmetic left shift inside
     :data:`ARITHMETIC_OPENERS`, and a quoted literal ``<<`` (handled by the quote state below).
+
+    A comment is a fourth (CR-52): from a ``#`` that opens one (:data:`COMMENT_WORD_STARTS`, the same
+    rule :func:`_join_continuations` applies) to the end of the line, ``<<E`` is text. The comment is
+    kept verbatim for the join to drop. The delimiter word ends at a blank or at a shell operator
+    (CR-55): ``cat <<E; rm x`` has the delimiter ``E`` and goes on to run ``rm x``.
     """
     out: list[str] = []
     delimiters: list[tuple[str, bool]] = []
     index = 0
     quote: str | None = None
+    word_start = True
     while index < len(line):
         char = line[index]
         if quote:
             out.append(char)
+            if char == "\\" and quote == '"' and index + 1 < len(line):
+                out.append(line[index + 1])
+                index += 2
+                continue
             if char == quote:
                 quote = None
             index += 1
@@ -1022,17 +1032,23 @@ def _take_heredoc_operators(line: str) -> tuple[str, list[tuple[str, bool]]]:
         if char == "\\" and index + 1 < len(line):
             out.append(line[index : index + 2])
             index += 2
+            word_start = False
             continue
+        if char == "#" and word_start:
+            out.append(line[index:])
+            break
         if char in "'\"`":
             quote = char
             out.append(char)
             index += 1
+            word_start = False
             continue
         opener = next((o for o in ARITHMETIC_OPENERS if line.startswith(o, index)), None)
         if opener is not None:
             end = _matching(line, index + len(opener) - 2)
             out.append(line[index : end + 1])
             index = end + 1
+            word_start = False
             continue
         if line.startswith(HERE_STRING_OPERATOR, index):
             index += len(HERE_STRING_OPERATOR)
@@ -1040,8 +1056,9 @@ def _take_heredoc_operators(line: str) -> tuple[str, list[tuple[str, bool]]]:
             while index < len(line) and line[index] in " \t":
                 out.append(line[index])
                 index += 1
-            word, index = _read_word(line, index)
+            word, index = _read_word(line, index, HEREDOC_WORD_STOPS)
             out.append(word)
+            word_start = False
             continue
         if line[index : index + 2] == "<<":
             index += 2
@@ -1050,15 +1067,17 @@ def _take_heredoc_operators(line: str) -> tuple[str, list[tuple[str, bool]]]:
                 index += 1
             while index < len(line) and line[index] in " \t":
                 index += 1
-            word, index = _read_word(line, index)
+            word, index = _read_word(line, index, HEREDOC_WORD_STOPS)
             if word:
                 delimiters.append((_unquote(word), dash))
                 out.append(" ")
+                word_start = True
                 continue
             out.append("<<")
             continue
         out.append(char)
         index += 1
+        word_start = char in BASH_BLANKS or char in COMMENT_WORD_STARTS
     return "".join(out), delimiters
 
 
@@ -3159,8 +3178,15 @@ def _extract_redirections(text: str) -> tuple[str, list[str]]:
     return "".join(out), targets
 
 
-def _read_word(text: str, index: int) -> tuple[str, int]:
-    """Read one whitespace-delimited word from ``index``, honouring quotes."""
+HEREDOC_WORD_STOPS = frozenset(";&|<>()")
+"""The characters that end a here-document delimiter or here-string operand besides a blank: the
+shell's operators (CR-55). ``cat <<E|sh`` pipes to ``sh``; the delimiter is ``E``."""
+
+
+def _read_word(text: str, index: int, stops: frozenset[str] = frozenset()) -> tuple[str, int]:
+    """Read one whitespace-delimited word from ``index``, honouring quotes.
+
+    ``stops`` are unquoted characters that end the word as a blank does and stay in the text."""
     out: list[str] = []
     quote: str | None = None
     while index < len(text):
@@ -3180,7 +3206,7 @@ def _read_word(text: str, index: int) -> tuple[str, int]:
             out.append(char)
             index += 1
             continue
-        if char in " \t\n":
+        if char in " \t\n" or char in stops:
             break
         out.append(char)
         index += 1
