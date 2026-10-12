@@ -3395,6 +3395,25 @@ def _git_branch_creates(after: list[str]) -> bool:
     return positionals > 0 and not listing
 
 
+def _file_compile_targets(argv: Sequence[str]) -> list[str]:
+    """The file ``file -C [-m MAGIC]`` writes: ``MAGIC.mgc`` (file(1)); ``magic.mgc`` when no ``-m`` names it.
+
+    ``-m`` takes a colon-separated list and the compiled file is named after the first entry (WR-04 it4)."""
+    magic = ""
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        index += 1
+        if token in ("-m", "--magic-file") and index < len(argv):
+            magic = argv[index]
+        elif token.startswith("--magic-file="):
+            magic = token.split("=", 1)[1]
+        elif token.startswith("-m") and len(token) > 2 and not token.startswith("--"):
+            magic = token[2:]
+    first = magic.split(":", 1)[0]
+    return [f"{first}.mgc" if first else "magic.mgc"]
+
+
 def _mutating_form(head: str, rest: list[str]) -> str:
     """The distinct, non-read-only key of a read-only command's state-changing form, or ``""`` (WR-04 / WR-54 it4).
 
@@ -3777,6 +3796,8 @@ def _write_targets(signature: str, argv: tuple[str, ...], settings: GateSettings
         return _uniq_target(argv)
     if head == "tree":
         return _tree_targets(argv)
+    if head == "file" and signature == "file -C":
+        return _file_compile_targets(argv)
     if head == "sed":
         files = _sed_files(list(argv)) if signature == "sed -i" else []
         return files + _sed_script_facts(argv)[0]

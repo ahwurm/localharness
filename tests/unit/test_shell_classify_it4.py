@@ -859,3 +859,12 @@ def test_a_tilde_form_only_the_shell_can_expand_is_an_unresolvable_target_not_a_
     boundary, as a ``$VAR`` target is), and ``evaluate`` returns a verdict instead of raising."""
     words = _words(command, ws).split("/")
     assert len(words) == 3 and words[0] != "ok" and words[1] != "ok", words
+
+
+def test_file_compile_names_the_mgc_file_it_writes(ws):
+    """WR-04 (it4): ``file -C -m SRC`` writes ``SRC.mgc``; the target is reported like any other write."""
+    assert _segments("file -C -m msrc")[0].write_targets == ("msrc.mgc",)
+    assert _segments("file -C -m a:b")[0].write_targets == ("a.mgc",)
+    assert _segments("file -C")[0].write_targets == ("magic.mgc",)
+    _check("file -C -m /etc/cron.d/x", "DENY/ASKU/ASKU", ws)
+    _check("file -C -m msrc", "DENY/ASK/ok", ws)
