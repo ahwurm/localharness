@@ -304,6 +304,16 @@ def test_a_write_or_edit_of_the_recorded_file_or_any_candidate_is_named(named, t
     assert loop._names_instruction_file(tool, {"path": str(root / "sub" / "CLAUDE.md")}) is False
 
 
+@pytest.mark.parametrize("tool", ["write", "edit"])
+@pytest.mark.parametrize("spelling", ["claude.md", "Claude.MD", "agents.MD", "CLAUDE.MD"])
+def test_a_differently_cased_name_is_named_like_the_candidate(named, tool, spelling):
+    """UF-1: on a case-insensitive filesystem `claude.md` is `CLAUDE.md`; the write/edit rule folds
+    case so the spelling cannot escape the mark. A file elsewhere is still not named."""
+    loop, _, root = named
+    assert loop._names_instruction_file(tool, {"path": str(root / spelling)}) is True
+    assert loop._names_instruction_file(tool, {"path": str(root / "sub" / spelling)}) is False
+
+
 def test_a_path_spelled_around_the_file_still_resolves_to_it(named):
     loop, _, root = named
     (root / "sub").mkdir()

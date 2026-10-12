@@ -1373,11 +1373,14 @@ class AgentLoop:
         if name in ("write", "edit"):
             from localharness.tools.builtin.paths import resolve_user_path
 
-            target = resolve_user_path(value).resolve()
-            known = {p.resolve() for p in candidates}
+            # Compared case-folded (UF-1): on a case-insensitive filesystem `claude.md` is
+            # `CLAUDE.md`, and `resolve()` does not fold case. Over-marking on a case-sensitive
+            # one fails toward a mark, never toward using a model's bytes.
+            target = str(resolve_user_path(value).resolve()).casefold()
+            known = {str(p.resolve()).casefold() for p in candidates}
             recorded = handle.recorded_path
             if recorded is not None:
-                known.add(Path(recorded).resolve())
+                known.add(str(Path(recorded).resolve()).casefold())
             return target in known
         basenames = {p.name for p in candidates}
         if name == "bash_exec":
