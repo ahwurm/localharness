@@ -44,11 +44,12 @@ silent allow, but an ask is grantable and a grant on one of these keys is broade
 from __future__ import annotations
 
 import fnmatch
+import os
 import posixpath
 import re
 import shlex
 from dataclasses import replace
-from typing import NamedTuple, Optional, Sequence
+from typing import Mapping, NamedTuple, Optional, Sequence
 
 from .gate_types import (
     COMMAND_VALUED_ENV_VARS,
@@ -74,6 +75,9 @@ DIRECTORY_CHANGE_COMMANDS = frozenset({"cd", "pushd"})
 else (finding R2a). ``cd ~/.ssh && echo x >> authorized_keys`` used to drop the ``cd`` and report
 the bare ``authorized_keys``, which the verdict then resolved against the workspace — the write
 landed on the protected file with nothing asked. Both spellings move; ``pushd`` also stacks."""
+
+SHELL_RUNS_PEELED_BUILTIN = frozenset({"builtin", "command", "time"})
+"""The wrappers that run the builtin they front in the current shell (``builtin cd /`` moves it)."""
 
 DIRECTORY_RESTORE_COMMANDS = frozenset({"popd"})
 """``popd`` returns to whatever ``pushd`` stacked. The classifier does not model that stack, so a
@@ -1546,19 +1550,38 @@ class _Cwd:
     ``env_redirect`` rides the same carrier (Phase 10, D-28): the shell's assignment scope is the
     same scope, so ``PATH=./d; ls`` taints the ``ls`` and ``( PATH=./d ); ls`` does not. It is only
     ever set, never cleared.
+
+    ``cdpath`` is the same kind of fact for ``CDPATH`` (CR-54 it4): the value the command text last gave it (None:
+    never), because a bare relative ``cd NAME`` lands wherever ``$CDPATH`` says. ``cd_functions``
+    maps the names of functions and aliases defined in this shell whose body changes the directory to the absolute
+    directory the body ends in (None: unknown); calling one moves the shell there (the body is classified at its
+    definition with a copy of this object).
     """
 
-    __slots__ = ("path", "unresolvable", "env_redirect")
+    __slots__ = ("path", "unresolvable", "env_redirect", "cdpath", "cd_functions")
 
     def __init__(
-        self, path: str | None = None, unresolvable: bool = False, env_redirect: bool = False
+        self, path: str | None = None, unresolvable: bool = False, env_redirect: bool = False,
+        cdpath: str | None = None, cd_functions: Mapping[str, str | None] | None = None,
     ) -> None:
         self.path = path
         self.unresolvable = unresolvable
         self.env_redirect = env_redirect
+        self.cdpath = cdpath
+        self.cd_functions: dict[str, str | None] = dict(cd_functions or {})
 
     def copy(self) -> _Cwd:
-        return _Cwd(self.path, self.unresolvable, self.env_redirect)
+        return _Cwd(self.path, self.unresolvable, self.env_redirect, self.cdpath, self.cd_functions)
+
+    def call(self, name: str) -> None:
+        """Run the function or alias ``name`` if it changes the directory: it ends where its body did."""
+        if name not in self.cd_functions:
+            return
+        end = self.cd_functions[name]
+        if end is None:
+            self.unresolvable = True
+        else:
+            self.path, self.unresolvable = end, False
 
 
 def _apply_cd(cwd: _Cwd, argv: list[str]) -> None:
@@ -1576,8 +1599,74 @@ def _apply_cd(cwd: _Cwd, argv: list[str]) -> None:
         return
     if ABSOLUTE_PATH_RE.match(target):
         cwd.path, cwd.unresolvable = _normalize(target), False
+    elif _searches_cdpath(target) and (
+        cwd.cdpath is not None or os.environ.get(CDPATH_VARIABLE)
+    ):
+        # CDPATH decides which directory a bare relative name means (CR-54 it4). The environment's own value is
+        # not read (it is the harness's, may hold several entries and can differ from the child's): unknown.
+        found = _cdpath_target(cwd.cdpath, target) if cwd.cdpath is not None else None
+        if found is None:
+            cwd.unresolvable = True
+        elif found == target and not cwd.unresolvable:
+            cwd.path = _normalize(posixpath.join(cwd.path, target) if cwd.path else target)
+        else:
+            cwd.path, cwd.unresolvable = _normalize(found), False
     elif not cwd.unresolvable:
         cwd.path = _normalize(posixpath.join(cwd.path, target) if cwd.path else target)
+
+
+CDPATH_VARIABLE = "CDPATH"
+CDPATH_UNKNOWN = "$"
+"""The value standing for a ``CDPATH`` the text assigns but the classifier cannot read; it holds a ``$``."""
+
+
+def _searches_cdpath(target: str) -> bool:
+    """Does ``cd TARGET`` consult ``$CDPATH``? Every relative name but ``.``/``..`` and the ``./`` / ``../`` forms."""
+    return target not in (".", "..") and not target.startswith(("./", "../", "~"))
+
+
+def _assigned_cdpath(argv: Sequence[str], assignments: Sequence[str]) -> str | None:
+    """The value this command gives ``CDPATH`` for the rest of the shell, or None if it does not assign it.
+
+    Any spelling counts, inline prefix included (over-reporting is the safe direction here): a bare or
+    prefix ``CDPATH=…``, ``export``/``declare``/``typeset``/``readonly``/``local`` of it or of a computed
+    name, ``printf -v CDPATH`` and ``read CDPATH``. The value is as written; ``CDPATH_UNKNOWN`` stands for
+    one that cannot be read (appended, computed, read from input). CR-54 it4."""
+    value: str | None = None
+    candidates = list(assignments)
+    if argv and argv[0] in ENV_CARRIER_DECLARERS:
+        candidates.extend(argv[1:])
+        if any(_has_computed_name(token) for token in argv[1:]):
+            return CDPATH_UNKNOWN
+    for token in candidates:
+        name, equals, text = token.partition("=")
+        if name.removesuffix("+") != CDPATH_VARIABLE or not equals:
+            continue
+        value = CDPATH_UNKNOWN if name.endswith("+") or any(c in text for c in "$`") else text
+    if argv and argv[0] == "printf" and _printf_variable(argv) == CDPATH_VARIABLE:
+        value = CDPATH_UNKNOWN
+    if argv and argv[0] == "read" and CDPATH_VARIABLE in _read_variables(argv):
+        value = CDPATH_UNKNOWN
+    return value
+
+
+def _cdpath_target(cdpath: str, target: str) -> str | None:
+    """Where ``cd TARGET`` lands under ``CDPATH=cdpath`` when that can be read: one absolute or ``~`` entry
+    (bash tries it first and falls back to the current directory, which the boundary covers). None = unknown."""
+    if not cdpath:
+        return target
+    if ":" in cdpath or CDPATH_UNKNOWN in cdpath:
+        return None
+    if cdpath == ".":
+        return target
+    if cdpath.startswith("~") or ABSOLUTE_PATH_RE.match(cdpath):
+        return posixpath.join(cdpath, target)
+    return None
+
+
+def _body_changes_directory(argv: Sequence[str]) -> bool:
+    """Is any word of ``alias NAME='…cd…'`` a directory change?"""
+    return any(word in DIRECTORY_CHANGE_COMMANDS or word in DIRECTORY_RESTORE_COMMANDS for word in argv)
 
 
 def _resolve_target(cwd: _Cwd, target: str) -> tuple[str, bool]:
@@ -2083,13 +2172,22 @@ def _classify_text(
             continue
         inner = _group_inner(body)
         subshell = inner is not None and body.startswith("(")
+        function_name = ""
         if inner is None:
             inner = _function_body(body)
             subshell = True  # a definition's `cd` runs when the function is CALLED, not here
+            if inner is not None:
+                match = FUNCTION_DEFINITION_RE.match(body)
+                function_name = (match.group("keyword_name") or match.group("name")) if match else ""
         if inner is not None:
-            group_segments, group_dropped = _classify_text(
-                inner, settings, cwd.copy() if subshell else cwd
-            )
+            body_cwd = cwd.copy() if subshell else cwd
+            group_segments, group_dropped = _classify_text(inner, settings, body_cwd)
+            if function_name and (body_cwd.path, body_cwd.unresolvable) != (cwd.path, cwd.unresolvable):
+                # calling it moves this shell (CR-54 it4); a body that ends in a relative directory is unknown
+                ends = body_cwd.path if body_cwd.path and ABSOLUTE_PATH_RE.match(body_cwd.path) else None
+                if ends and cwd.path and ends.startswith(cwd.path.rstrip("/") + "/"):
+                    ends = None  # reached by a relative `cd` from where the definition is: it depends on the caller
+                cwd.cd_functions[function_name] = None if body_cwd.unresolvable else ends
             segments.extend(group_segments)
             dropped.extend(group_dropped)
             previous_head = None
@@ -2290,6 +2388,16 @@ def _classify_one(
     # runs under them (D-28). The flag is only ever set here, never cleared.
     if _sequence_env_redirect(argv, prefix_assignments, settings):
         cwd.env_redirect = True
+    assigned_cdpath = _assigned_cdpath(argv, prefix_assignments)
+    if assigned_cdpath is not None:
+        cwd.cdpath = assigned_cdpath
+    if argv:
+        cwd.call(argv[0])  # a function or alias whose body changes the directory is being called
+    if argv and argv[0] == "alias":
+        for token in argv[1:]:
+            name, equals, value = token.partition("=")
+            if equals and _body_changes_directory(_tokenize(value)):
+                cwd.cd_functions[name] = None
     if not argv:
         if not redirect_targets:
             return None, [], [text.strip()] if text.strip() else [], None
@@ -2311,6 +2419,15 @@ def _classify_one(
     peeled, peeled_assignments, directories = _peel(argv, settings)
     if not peeled:
         return None, [], [text.strip()], None
+    if peeled[0] != argv[0]:
+        cwd.call(peeled[0])
+    if len(peeled) < len(argv) and peeled[0] in DIRECTORY_CHANGE_COMMANDS | DIRECTORY_RESTORE_COMMANDS:
+        # `builtin cd`, `command cd`, `time cd` run in THIS shell; any other wrapper's `cd` is an external
+        # program that moves nothing, but the directory is made unknown rather than guessed (CR-54 it4).
+        if argv[0] in SHELL_RUNS_PEELED_BUILTIN and peeled[0] in DIRECTORY_CHANGE_COMMANDS:
+            _apply_cd(cwd, peeled)
+        else:
+            cwd.unresolvable = True
     if peeled is not argv and _sequence_env_redirect(peeled, [], settings):
         cwd.env_redirect = True  # `builtin export PATH=./d`, `command export …`
     if len(peeled) < len(argv):
@@ -2599,7 +2716,8 @@ def _build(
             extras.append(segment)
         extras.extend(more)
     for payload_text in payload_texts:
-        payload_cwd = cwd.copy()
+        # `eval 'cd /'` runs in THIS shell, so its directory change outlives the payload (CR-54 it4).
+        payload_cwd = cwd if head == "eval" else cwd.copy()
         payload_cwd.env_redirect = payload_cwd.env_redirect or env_redirect
         # CR-01 / WR-54: the shell that runs the payload joins its continuations (and drops its comments).
         inner_segments, _ = _classify_command_text(payload_text, settings, payload_cwd)

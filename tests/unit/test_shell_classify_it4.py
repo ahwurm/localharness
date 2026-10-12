@@ -414,3 +414,75 @@ def test_git_dir_as_a_subcommand_argument_is_a_read(ws, command):
 def test_git_dir_as_a_global_option_still_redirects(ws, command):
     words = _words(command, ws).split("/")
     assert words[0] != "ok" and words[1] != "ok", words
+
+
+# --------------------------------------------------------------------------- CR-54: the directory moves unseen
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "CDPATH=~ cd .ssh && echo x >> authorized_keys",
+        "export CDPATH=~; cd .ssh && echo x >> authorized_keys",
+        "CDPATH=~; cd .ssh && echo x >> authorized_keys",
+        "declare -x CDPATH=~; cd .ssh && echo x >> authorized_keys",
+        "CDPATH=/etc; cd cron.d && echo x > job",
+        "builtin cd ~/.ssh && echo x >> authorized_keys",
+        "command cd ~/.ssh && echo x >> authorized_keys",
+        "command -p cd ~/.ssh && echo x >> authorized_keys",
+        "time cd ~/.ssh && echo x >> authorized_keys",
+        "builtin cd / && rm -rf etc",
+        "command cd / && rm -rf etc",
+        "time cd / && rm -rf etc",
+        "eval 'cd /' && rm -rf etc",
+        "eval 'cd ~/.ssh' && echo x >> authorized_keys",
+        "f(){ cd /; }; f; rm -rf etc",
+        "f(){ cd ~/.ssh; }; f && echo x >> authorized_keys",
+        "function f { cd /; }; f; rm -rf etc",
+    ),
+)
+def test_a_directory_change_the_classifier_must_follow(ws, command):
+    """CR-54 (it4): ``CDPATH``, ``builtin``/``command``/``time cd``, ``eval 'cd …'`` and a function or alias that
+    changes the directory move the shell; the later relative write or delete is read in the new directory."""
+    _check(command, "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "CDPATH=/a:/b; cd src && echo x >> authorized_keys",
+        "CDPATH=$X; cd src && echo x >> authorized_keys",
+        "export CDPATH=\"$HOME:$CDPATH\"; cd src && echo x >> authorized_keys",
+        "f(){ cd \"$1\"; }; f ~/.ssh && echo x >> authorized_keys",
+        "alias c='cd /'; c; echo x > out",
+        "cd /a; f(){ cd sub; }; f; echo x > out",
+    ),
+)
+def test_an_unreadable_cdpath_makes_the_directory_unknown(ws, command):
+    segments = _segments(command)
+    assert segments[-1].unresolvable_write, segments[-1]
+
+
+def test_cdpath_in_the_harness_environment_makes_a_bare_cd_unknown(ws, monkeypatch):
+    monkeypatch.setenv("CDPATH", "/a:/b")
+    assert _segments("cd src && echo x > out")[-1].unresolvable_write
+    assert not _segments("cd ./src && echo x > out")[-1].unresolvable_write
+    assert not _segments("cd /tmp && echo x > out")[-1].unresolvable_write
+    monkeypatch.delenv("CDPATH")
+    assert not _segments("cd src && echo x > out")[-1].unresolvable_write
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("cd src && echo x > out", "DENY/ok/ok"),
+        ("cd ./src && rm -rf build", "DENY/ASKU/ok"),
+        ("CDPATH=; cd src && echo x > out", "DENY/ok/ok"),
+        ("CDPATH=. ; cd src && echo x > out", "DENY/ok/ok"),
+        ("CDPATH=~; cd ./src && echo x > out", "DENY/ok/ok"),
+        ("f(){ echo hi; }; f; echo x > out", "DENY/ASK/ok"),
+        ("builtin echo hi > out", "DENY/ok/ok"),
+        ("cd ~/.ssh && echo x >> authorized_keys", "DENY/ASKU/ASKU"),
+    ),
+)
+def test_directory_tracking_controls(ws, command, expected):
+    _check(command, expected, ws)
