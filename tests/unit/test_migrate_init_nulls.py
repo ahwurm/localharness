@@ -754,3 +754,94 @@ def test_an_unreadable_sidecar_is_neither_tried_nor_owed(tmp_path):
         hidden.chmod(0o644)
     assert _disk(hidden)["permissions"]["budget"]["max_actions"] == 100
     assert migrate.load_plan(cfg)[1] is None
+
+
+# ------------------------- SEC-01: an unwritable config.yaml clears no agent file's init values
+
+
+def _read_only_config(tmp_path: Path, kind: str, data: dict) -> tuple[Path, "callable"]:
+    """config.yaml the migration cannot write: a 0444 file, or a link into a read-only directory
+    (the store-link shape). Returns the config path and a callable that makes it writable."""
+    if kind == "file":
+        cfg = _write(tmp_path, data)
+        cfg.chmod(0o444)
+        return cfg, lambda: cfg.chmod(0o644)
+    store = tmp_path / "store"
+    store.mkdir()
+    real = store / "config.yaml"
+    real.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    store.chmod(0o555)
+    cfg = tmp_path / "config.yaml"
+    cfg.symlink_to(real)
+    return cfg, lambda: store.chmod(0o755)
+
+
+@_not_root
+@pytest.mark.parametrize("kind", ["file", "store_link"])
+def test_an_owner_set_100_is_never_cleared_twice_while_config_yaml_is_read_only(tmp_path, kind):
+    """SEC-01: config.yaml cannot be written, so the init-nulls stamp cannot move. Clearing an
+    agent file anyway would match it again at the next start and clear a `100` the owner put back.
+    No agent file is cleared until config.yaml can be written; then the step runs once, whole."""
+    import contextlib
+
+    data = _v017()
+    data["org"]["permissions"]["defaults_revision"] = 0  # deny defaults owed as well
+    cfg, make_writable = _read_only_config(tmp_path, kind, data)
+    agent = _sidecar(tmp_path, "agents", "a",
+                     {"name": "a", "permissions": {"budget": {"max_actions": 100}}})
+    try:
+        for _ in range(2):  # start 1, then (after the owner re-sets 100) start 2
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), redirect_stdout(io.StringIO()):
+                _auto_migrate_deny_defaults(cfg)
+            text = " ".join(err.getvalue().split())
+            assert "Could not finish updating the config" in text  # the deny defaults did not land
+            assert "continuing with the current config." in text
+            assert "(agents/a.yaml)" not in text  # no clearing is claimed
+            assert _disk(agent)["permissions"]["budget"]["max_actions"] == 100
+            assert not list(agent.parent.glob(f"a.yaml{migrate.BACKUP_INFIX}*"))
+            assert not (tmp_path / migrate.INIT_NULLS_PENDING_FILE).exists()
+            agent.write_text(yaml.safe_dump({"name": "a",
+                                             "permissions": {"budget": {"max_actions": 100}}}),
+                             encoding="utf-8")  # the owner sets 100 (again) by hand
+        assert _disk(cfg)["org"]["permissions"].get("init_nulls_revision") is None
+    finally:
+        make_writable()
+
+    with contextlib.redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+        _auto_migrate_deny_defaults(cfg)  # config.yaml writable: the step runs once and stamps
+    perms = _disk(cfg)["org"]["permissions"]
+    assert perms["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION
+    assert perms["defaults_revision"] == CURRENT_DEFAULTS_REVISION
+    assert _disk(agent)["permissions"]["budget"]["max_actions"] is None
+    assert not (tmp_path / migrate.INIT_NULLS_PENDING_FILE).exists()
+    assert migrate.load_plan(cfg)[1] is None
+    agent.write_text(yaml.safe_dump({"name": "a", "permissions": {"budget": {"max_actions": 100}}}),
+                     encoding="utf-8")
+    assert migrate.load_plan(cfg)[1] is None  # and never again
+
+
+@_not_root
+def test_a_read_only_config_yaml_still_lets_a_sidecar_lose_the_dead_key_but_not_inits_values(tmp_path):
+    """The dead key's removal is found on content and needs no stamp, so it still lands; init's
+    values in the same file wait for the run that can record the stamp."""
+    import contextlib
+
+    cfg, make_writable = _read_only_config(tmp_path, "file", _v017())
+    agent = _sidecar(tmp_path, "agents", NAME, _pre_v014_agent())
+    try:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), redirect_stdout(io.StringIO()):
+            _auto_migrate_deny_defaults(cfg)
+        text = " ".join(err.getvalue().split())
+        on_disk = _disk(agent)
+        assert migrate.DEAD_KEY not in on_disk["permissions"]
+        assert on_disk["permissions"]["budget"]["max_actions"] == 100
+        assert on_disk["context"]["max_tool_output_chars"] == 32000
+        assert f"cleaned {migrate.DEAD_KEY} from {agent.name}" in text
+        assert f"(agents/{agent.name})" not in text
+    finally:
+        make_writable()
+    _migrate(cfg)
+    assert _disk(agent)["permissions"]["budget"]["max_actions"] is None
+    assert _disk(cfg)["org"]["permissions"]["init_nulls_revision"] == CURRENT_INIT_NULLS_REVISION

@@ -1212,10 +1212,11 @@ def _migrate_legacy_root_agent_yaml(agents_dir: Path) -> None:
 
 
 def _migration_clauses(plan: Any, config_file: Path,
-                       written: "frozenset[Path] | None" = None) -> str:
+                       written: "frozenset[Path] | None" = None, *, nulls_held: bool = False) -> str:
     """The receipt's per-change clauses, rich-safe (each file-supplied part escaped). With
     `written` (a partial migration, WR-30) only the changes of the files actually rewritten are
-    named; None names every change of the plan.
+    named; None names every change of the plan. `nulls_held` (SEC-01: config.yaml could not be
+    written, so no agent file had init's values cleared) drops the per-file init-nulls clauses.
 
     escape(): a path under the user's config dir reaches rich as data — this receipt fires on the
     FIRST start after an upgrade, so under a markup-named config dir it crashed every session until
@@ -1242,7 +1243,7 @@ def _migration_clauses(plan: Any, config_file: Path,
     elif config_done and plan.init_nulls_due:
         removed_note += _migrate.INIT_NULLS_STAMP_CLAUSE  # IN-03: say why config.yaml was rewritten
     for sidecar in plan.sidecars:
-        if sidecar.nulled and done(sidecar.path):
+        if sidecar.nulled and done(sidecar.path) and not nulls_held:
             removed_note += (
                 _migrate.INIT_NULLS_CLAUSE
                 + " (" + escape(f"{sidecar.path.parent.name}/{sidecar.path.name}") + ")"
@@ -1293,7 +1294,8 @@ def _auto_migrate_deny_defaults(config_file: Path) -> None:
         config_written = config_file in exc.written
         err_console.print(
             "[yellow]⚠[/yellow]  " + escape(f"Could not finish updating the config: {exc}{written}")
-            + _migration_clauses(plan, config_file, frozenset(exc.written)) + ". "
+            + _migration_clauses(plan, config_file, frozenset(exc.written),
+                                 nulls_held=exc.nulls_held) + ". "
             + "Run 'localharness config migrate' to finish; "
             + ("continuing; config.yaml was updated." if config_written
                else "continuing with the current config."),
