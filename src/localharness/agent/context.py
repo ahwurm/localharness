@@ -1354,6 +1354,7 @@ class ToolResultCapStage:
     `start` and the bench hand the stage the context manager's live `tool_output_cap_chars`."""
 
     def __init__(self, max_chars: int | Callable[[], int] = 50_000) -> None:
+        # An int, or a callable resolved on every `apply`: read it through `apply`, not as a number.
         self.max_chars = max_chars
 
     def apply(
