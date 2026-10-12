@@ -181,7 +181,7 @@ unfamiliar `f`, where before the whole definition classified as a single command
 `cmd { arg }` — a command with a brace-shaped argument — out of this branch."""
 
 FUNCTION_HEAD_WITH_BODY_RE = re.compile(
-    r"^(?:function\s+[^\s(){}]+\s*(?:\(\s*\))?|[^\s(){}]+\s*\(\s*\))\s*\S", re.DOTALL
+    r"^(?:function\s+[^\s(){}]+(?:\s*\(\s*\)\s*\S|\s+\S)|[^\s(){}]+\s*\(\s*\)\s*\S)", re.DOTALL
 )
 """The head of a function definition with something after it. When :func:`_function_body` cannot read that
 something as a bare group, the definition is unparsed (CR-54 it5)."""
