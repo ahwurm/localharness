@@ -1281,6 +1281,18 @@ queue is in-session and a restart drops it, and a `/approve` typed into the box 
 by the input router and lands after the turn ends, which is why the hotkeys exist. `guarded` and
 `trusted` do not stage; they ask, and block.
 
+**`/instructions off | on | show` is the person's switch for the project's instructions file.**
+`/instructions off` stops using the project's `CLAUDE.md`, `AGENTS.md` or
+`.localharness/INSTRUCTIONS.md` for this workspace until `/instructions on`; `on` uses the file as
+it is now; `show` prints its path, size, hash and state. There is no preview of the file and no
+diff of a change, and no ids to type. The same command works in Zed, and on the terminal, Discord and
+the phone alike, because all of them run through this REPL (Zed through its own intercept, which
+calls the same handler). A change the model's own call made is dropped and offered back through
+`on`; a change made by hand is used, with one line saying so. `/instructions on` also clears the
+terminal's pending change line. When the project holds an instructions file, the session-trust
+question names it, and the answer reaches the same handle: a yes makes the file usable, a no
+declines it for the session.
+
 **`--no-input` is not a permission switch.** It governs one question only — whether to load an
 untrusted workspace's config layer — and never loosens the gate. A `--no-input` run with no trust
 record for this workspace runs `guarded`, not `auto`, and because such a run usually has nobody to
