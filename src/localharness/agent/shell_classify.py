@@ -50,7 +50,7 @@ import posixpath
 import re
 import shlex
 from dataclasses import replace
-from typing import Mapping, NamedTuple, Optional, Sequence
+from typing import Iterable, Mapping, NamedTuple, Optional, Sequence
 
 from .gate_types import (
     COMMAND_VALUED_ENV_VARS,
@@ -784,6 +784,25 @@ SED_LABEL_COMMANDS = "btT:v"
 
 
 
+INSTRUCTION_FILE_READERS: frozenset[str] = frozenset({
+    "cat", "head", "tail", "wc", "grep", "ls", "stat", "sed -n", "rg", "diff", "find",
+    "git show", "git log", "git diff", "git status", "git blame", "git ls-files",
+    "git add", "git commit", "git grep", "echo", "printf", "test", "[",
+})
+"""Signatures that only READ a project instructions file when they name one (Phase 11, D-35, D-73).
+
+A closed list: suppression of the naming mark is fail-open, so a verb joins only after its exec and
+pager flags are enumerated (D-07). ``git grep -O…``, ``rg --pre``, ``sed e`` and the like are not
+excluded here by flag; the classifier sets ``inline_interpreter`` on them (Phase 10) and the
+predicate reads that fact. ``awk``, ``tee``, ``mv``, ``cp``, ``xargs``, ``[[`` and ``sudo`` stay off
+(D-86): their false positives are accepted, since a false mark clears at turn end while the digest
+holds."""
+
+INSTRUCTION_PIPELINE_READERS: frozenset[str] = frozenset({"sort", "uniq", "cut", "tr"})
+"""Signatures that read only inside a pipeline (Phase 11, D-07, D-73): ``sort -o F`` and a second
+``uniq`` operand are write targets the predicate already refuses, so no operand count lives here."""
+
+
 # --------------------------------------------------------------------------- public API
 
 def classify_shell(command: str, settings: GateSettings) -> ShellClassification:
@@ -795,6 +814,53 @@ def classify_shell(command: str, settings: GateSettings) -> ShellClassification:
     """
     segments, dropped = _classify_command_text(command, settings)
     return ShellClassification(segments=tuple(segments), dropped=tuple(dropped))
+
+
+def _instruction_leaf(path: str) -> str:
+    """The last component of ``path`` (split on ``/`` and ``\\``), casefolded."""
+    return re.split(r"[/\\]", path)[-1].casefold()
+
+
+def instruction_file_reads_only(
+    command: str, basenames: Iterable[str], settings: GateSettings | None = None
+) -> bool:
+    """True when ``command`` cannot write a project instructions file (Phase 11, D-35, D-73).
+
+    The loop's naming rule calls this for a ``bash_exec`` command that names one of ``basenames``;
+    ``False`` means "mark it". The whole command is the unit: segments carry no pipeline
+    membership, so every segment must pass, not just the ones that name a file.
+
+    Reads only facts :func:`_make_segment` already set: ``signature``, ``argv``, ``write_targets``,
+    ``inline_interpreter``, ``destructive``, ``unresolvable_write``, ``env_redirect`` and, for
+    ``find`` alone, ``read_only`` (False once an ``-exec`` payload was lifted). It never re-parses
+    flags and never reads the filesystem. Every unclear case fails toward marking: a name in the
+    text but in no segment's argv or write target (``$f``, a dropped assignment, a quote-split
+    target, a heredoc body), an unparsed command, an unlisted verb.
+    """
+    names = {str(n).casefold() for n in basenames}
+    segs = classify_shell(command, settings or GateSettings()).segments
+    tokens = [t.casefold() for s in segs for t in (*s.argv, *s.write_targets)]
+    text = command.casefold()
+    in_text = {n for n in names if n in text}
+    in_segments = {n for n in names if any(n in t for t in tokens)}
+    if not (in_text or in_segments):
+        return True
+    if in_text - in_segments:
+        return False
+    for s in segs:
+        if s.env_redirect or s.inline_interpreter or s.destructive or s.unresolvable_write:
+            return False
+        if any(_instruction_leaf(t) in names for t in s.write_targets):
+            return False
+        sig = s.signature
+        if sig in INSTRUCTION_FILE_READERS:
+            if sig == "find" and not s.read_only:
+                return False
+        elif sig in INSTRUCTION_PIPELINE_READERS and len(segs) > 1:
+            continue
+        else:
+            return False
+    return True
 
 
 COMMENT_WORD_STARTS = frozenset(";&|(")
