@@ -499,7 +499,12 @@ def test_a_function_whose_body_is_not_a_bare_group_is_unparsed(ws, command):
     ("f(){ ls; }; f", "f() { echo hi; }\nf", "function f { ls; }; f", "f() ( ls ); f", "g() { cat x | wc -l; }; g"),
 )
 def test_a_plain_function_definition_is_still_read(ws, command):
+    assert not any(s.signature == "__lh_unparsed_shell__" for s in _segments(command))
     _check(command, "DENY/ASK/ok", ws)  # the call `f` is an unfamiliar command, as before
+
+
+def test_the_word_function_alone_is_not_a_definition(ws):
+    assert not any(s.signature == "__lh_unparsed_shell__" for s in _segments("function followDeepLink"))
 
 
 @pytest.mark.parametrize(
