@@ -522,8 +522,8 @@ def test_a_wrapper_in_a_payload_is_peeled_to_the_command(ws, command):
 @pytest.mark.parametrize(
     "command, expected",
     (
-        ("find . -maxdepth 0 -exec rm -rf /etc/x \;", "DENY/ASKU/ASKU"),
-        ("find . -exec env -C /etc rm -rf x \;", "DENY/ASKU/ASKU"),
+        ("find . -maxdepth 0 -exec rm -rf /etc/x \\;", "DENY/ASKU/ASKU"),
+        ("find . -exec env -C /etc rm -rf x \\;", "DENY/ASKU/ASKU"),
         ("find . -exec env FOO=1 ls {} \\;", "DENY/ASK/ok"),
         ("xargs -n1 env ls", "DENY/ASK/ok"),
     ),
@@ -592,3 +592,77 @@ def test_a_comment_that_makes_dollar_paren_paren_a_subshell_does_not_hide_the_bo
 )
 def test_arithmetic_and_subshell_controls(ws, command):
     _check(command, "ok/ok/ok", ws)
+
+
+# --------------------------------------------------------------------------- CR-05: wrapper option tables
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "timeout .5 rm -rf /etc/x",
+        "timeout 5. rm -rf /etc/x",
+        "timeout 1e1 rm -rf /etc/x",
+        "timeout +1 rm -rf /etc/x",
+        "timeout 0x1 rm -rf /etc/x",
+        "timeout 0x.8 rm -rf /etc/x",
+        "timeout 1.s rm -rf /etc/x",
+        "timeout .1m rm -rf /etc/x",
+        "timeout inf rm -rf /etc/x",
+        "timeout -s KILL -k 3 .5 rm -rf /etc/x",
+        "timeout --foreground 1e1 rm -rf /etc/x",
+        "nice --adjustment 5 rm -rf /etc/x",
+        "nice --adjustment=5 rm -rf /etc/x",
+        "nice --adj 5 rm -rf /etc/x",
+        "nice -n5 rm -rf /etc/x",
+        "nice -5 rm -rf /etc/x",
+        "ionice --class best-effort rm -rf /etc/x",
+        "ionice --classdata 4 rm -rf /etc/x",
+        "ionice -c 2 -n 4 rm -rf /etc/x",
+        "ionice -c3 rm -rf /etc/x",
+        "stdbuf -o L rm -rf /etc/x",
+        "stdbuf --output L rm -rf /etc/x",
+        "stdbuf -i 0 rm -rf /etc/x",
+        "stdbuf -oL -eL rm -rf /etc/x",
+        "eval -- rm -rf /etc/x",
+        "command eval -- rm -rf /etc/x",
+        "builtin eval -- rm -rf /etc/x",
+        "echo x | xargs -i rm -rf /etc/x",
+        "echo x | xargs --replace rm -rf /etc/x",
+        "echo x | xargs -n1 -i rm -rf /etc/x",
+        "echo x | xargs -e rm -rf /etc/x",
+        "echo x | xargs -l rm -rf /etc/x",
+        "echo x | xargs --eof rm -rf /etc/x",
+        "echo x | xargs --max-lines rm -rf /etc/x",
+        "echo x | xargs -0rt -n 1 rm -rf /etc/x",
+        "echo x | xargs -I{} rm -rf /etc/x",
+        "echo x | xargs -I {} rm -rf /etc/x",
+        "echo x | xargs --max-args=1 rm -rf /etc/x",
+        "echo x | xargs --max-args 1 rm -rf /etc/x",
+        "echo x | xargs --process-slot-var V rm -rf /etc/x",
+        "echo x | xargs -- rm -rf /etc/x",
+        "echo x | xargs --not-an-option rm -rf /etc/x",
+    ),
+)
+def test_a_wrapper_option_the_peel_must_skip_does_not_hide_the_command(ws, command):
+    """CR-05 (it4): the real wrappers take forms the option tables missed, and the wrapped ``rm -rf`` was read as an
+    option value. An option an ``xargs`` line has that this does not know makes the payload unparsed."""
+    _check(command, "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("timeout 5 pytest -q", "DENY/ASK/ok"),
+        ("timeout -s KILL 5 pytest", "DENY/ASK/ok"),
+        ("timeout 5 rm -rf /etc/x", "DENY/ASKU/ASKU"),
+        ("nice -n 5 pytest", "DENY/ASK/ok"),
+        ("ionice -c3 nice make", "DENY/ASK/ok"),
+        ("stdbuf -oL pytest -q", "DENY/ASK/ok"),
+        ("ls | xargs -n1 wc -l", "DENY/ASK/ok"),
+        ("ls | xargs -I{} cp {} /tmp", "DENY/ASK/ok"),
+        ("ls | xargs grep foo", "DENY/ASK/ok"),
+        ("eval echo hi", "DENY/ASK/ok"),
+    ),
+)
+def test_wrapper_option_controls(ws, command, expected):
+    _check(command, expected, ws)
