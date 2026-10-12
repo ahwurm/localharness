@@ -75,6 +75,14 @@ INSTRUCTION_BASENAMES: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md", "INSTRUCTION
 NOTICE_VALUE_MAX = 200
 """The longest ``value`` repr a notice stores; a huge rejected section must not bloat the store."""
 
+NOTICE_TEXT_MAX = 2000
+"""The longest notice ``text`` the store keeps (T-11-56): a cloned repository's config must not grow
+``project_records.yaml`` without bound. Applied where a ``Notice`` is built, so the live set and the
+stored set compare equal."""
+
+NOTICE_TEXT_MARKER = "… (cut)"
+"""What ends a notice text that was cut to ``NOTICE_TEXT_MAX``."""
+
 _APPROX_CHARS_PER_TOKEN = 4
 """Characters per token for the size cap. Kept private and equal to
 ``agent.context.APPROX_CHARS_PER_TOKEN`` (a test holds them together): ``agent/__init__`` imports
@@ -410,6 +418,11 @@ class Notice:
     file: str
     value: str
     text: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.text, str) and len(self.text) > NOTICE_TEXT_MAX:
+            cut = self.text[: NOTICE_TEXT_MAX - len(NOTICE_TEXT_MARKER)] + NOTICE_TEXT_MARKER
+            object.__setattr__(self, "text", cut)
 
 
 def notice_value(value: Any, *, secret: bool = False) -> str:

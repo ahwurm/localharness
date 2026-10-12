@@ -83,6 +83,10 @@ class ConfigParseError(ConfigError):
 # MESSAGE, not on the value: `_short_repr` never builds the full repr in the first place.
 VALUE_REPR_LIMIT = 500
 
+# How much of a rejected value a stored narrowing notice's text may show (T-11-56): a cloned repo
+# chooses the value, and the text is kept in project_records.yaml.
+NOTICE_EXCERPT_LIMIT = 80
+
 _BOUNDED_REPR = repr_lib.Repr()
 _BOUNDED_REPR.maxlevel = 4
 _BOUNDED_REPR.maxstring = 120
@@ -2556,7 +2560,8 @@ class ConfigLoader:
             candidate = None
         if candidate is None or not candidate.is_relative_to(boundary):
             self._narrowed(note, "permissions.workspace_root", configured, (
-                f"ignoring workspace permissions.workspace_root {configured!r} for agent {stem!r}: "
+                "ignoring workspace permissions.workspace_root "
+                f"{_short_repr(configured, NOTICE_EXCERPT_LIMIT)} for agent {stem!r}: "
                 f"a project layer may only confine INSIDE the project it sits in ({boundary})"
             ))
             perms["workspace_root"] = global_root
@@ -2675,7 +2680,8 @@ class ConfigLoader:
                 if value is True or value == baseline:
                     continue  # switching the ask ON is tightening; restating it is a no-op
                 self._narrowed(note, "permissions.ask.network_hosts", value, (
-                    f"ignoring workspace permissions.ask.network_hosts {value!r} for agent "
+                    "ignoring workspace permissions.ask.network_hosts "
+                    f"{_short_repr(value, NOTICE_EXCERPT_LIMIT)} for agent "
                     f"{stem!r}: a project layer may only switch the network-host ask ON (the "
                     f"global layer asks for {baseline!r})"
                 ))
