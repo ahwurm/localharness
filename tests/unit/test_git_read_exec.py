@@ -14,7 +14,19 @@ import pytest
 
 from localharness.tools.builtin import git_read_tool as grt
 from localharness.tools.builtin.git_read_tool import GitReadTool
-from tests.unit.git_support import fake_git, git, make_repo, requires_git
+from tests.unit.git_support import (
+    REAL_GIT,
+    fake_git,
+    git,
+    git_env,
+    git_with_env,
+    make_repo,
+    marker_script,
+    partial_clone,
+    requires_git,
+    signed_history,
+    submodule_repo,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -249,3 +261,393 @@ async def test_read_past_the_timeout_is_killed(root, base, monkeypatch):
     assert result.success is False
     assert result.error_type == "timeout_error"
     assert result.error == "git_read timed out after 1s"
+
+
+# ============================================================================ the no-execution matrix
+#
+# Each vector: the CONTROL (bare git under git_support's environment with the fixture's config) must
+# touch the marker, which proves the fixture really arms the vector; then every listed tool call must
+# leave the marker absent. A control that does not fire means the fixture is wrong, not the tool safe.
+
+TOOL_READS = [
+    pytest.param({"subcommand": "diff"}, id="diff"),
+    pytest.param({"subcommand": "diff", "stat": True}, id="diff-stat"),
+    pytest.param({"subcommand": "diff", "revision": "HEAD"}, id="diff-HEAD"),
+    pytest.param({"subcommand": "show", "revision": "HEAD"}, id="show-HEAD"),
+    pytest.param({"subcommand": "log"}, id="log"),
+]
+
+
+@pytest.fixture
+def scripts(base: Path) -> Path:
+    d = base / "scripts"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture
+def armed(base: Path) -> Path:
+    """A repository with two commits touching a.txt, a modified worktree file, and no vector configured."""
+    repo = make_repo(base / "ROOT", {"a.txt": "one\n", "README": "hello\n"})
+    (repo / "a.txt").write_text("two\n")
+    git(repo, "commit", "-q", "-am", "second")
+    (repo / "a.txt").write_text("three\n")
+    return repo
+
+
+def _fires(marker: Path) -> bool:
+    """True when the marker exists; consumes it so the next call starts clean."""
+    fired = marker.exists()
+    marker.unlink(missing_ok=True)
+    return fired
+
+
+async def _tool_leaves_absent(repo: Path, marker: Path, kwargs: dict, *, bump: Path | None = None) -> None:
+    marker.unlink(missing_ok=True)
+    if bump is not None:
+        os.utime(bump, (time.time() + 5, time.time() + 5))
+    result = await GitReadTool(repo).run(**kwargs)
+    assert not marker.exists(), f"the marker ran under {kwargs}: {result}"
+
+
+# ------------------------------------------------------------------------------------ diff.external
+
+@requires_git
+async def test_control_diff_external_runs_under_bare_git(armed, scripts):
+    script, marker = marker_script(scripts, "ext")
+    git(armed, "config", "diff.external", str(script))
+    assert git(armed, "diff").returncode == 0
+    assert _fires(marker)
+
+
+@requires_git
+@pytest.mark.parametrize("kwargs", TOOL_READS)
+async def test_diff_external_never_runs(armed, scripts, kwargs):
+    script, marker = marker_script(scripts, "ext")
+    git(armed, "config", "diff.external", str(script))
+    await _tool_leaves_absent(armed, marker, kwargs)
+
+
+# --------------------------------------------------------------------------- aliases shadowing verbs (D-73)
+
+@requires_git
+async def test_control_alias_marker_runs_under_bare_git(armed, scripts):
+    script, marker = marker_script(scripts, "al")
+    git(armed, "config", "alias.mydiff", f"!{script}")
+    git(armed, "mydiff")
+    assert _fires(marker)
+
+
+@requires_git
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"subcommand": "diff"}, id="diff"),
+        pytest.param({"subcommand": "show", "revision": "HEAD"}, id="show-HEAD"),
+        pytest.param({"subcommand": "log"}, id="log"),
+    ],
+)
+async def test_aliases_shadowing_the_verbs_never_run(armed, scripts, kwargs):
+    script, marker = marker_script(scripts, "al")
+    for verb in ("diff", "log", "show"):
+        git(armed, "config", f"alias.{verb}", f"!{script}")
+    # git ignores an alias that shadows a built-in even for bare git; the row guards a regression.
+    await _tool_leaves_absent(armed, marker, kwargs)
+
+
+# ------------------------------------------------------------------------------------ textconv drivers
+
+def _arm_textconv(repo: Path, script: Path) -> None:
+    (repo / ".gitattributes").write_text("*.txt diff=tc\n")
+    git(repo, "add", ".gitattributes")
+    git(repo, "commit", "-q", "-m", "attrs")
+    git(repo, "config", "diff.tc.textconv", str(script))
+    (repo / "a.txt").write_text("four\n")
+
+
+@requires_git
+async def test_control_textconv_runs_under_bare_git(armed, scripts):
+    script, marker = marker_script(scripts, "tc", passthrough=True)
+    _arm_textconv(armed, script)
+    git(armed, "diff", "--no-ext-diff")
+    assert _fires(marker)
+
+
+@requires_git
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        *TOOL_READS,
+        pytest.param({"subcommand": "log", "stat": True}, id="log-stat"),
+    ],
+)
+async def test_textconv_never_runs(armed, scripts, kwargs):
+    script, marker = marker_script(scripts, "tc", passthrough=True)
+    _arm_textconv(armed, script)
+    await _tool_leaves_absent(armed, marker, kwargs)
+
+
+@requires_git
+async def test_control_textconv_on_blob_show_runs_under_bare_git(armed, scripts):
+    script, marker = marker_script(scripts, "tc", passthrough=True)
+    _arm_textconv(armed, script)
+    git(armed, "show", "--textconv", "HEAD:a.txt")
+    assert _fires(marker)
+
+
+@requires_git
+async def test_blob_show_returns_the_raw_blob_without_textconv(armed, scripts):
+    script, marker = marker_script(scripts, "tc", passthrough=True)
+    _arm_textconv(armed, script)
+    marker.unlink(missing_ok=True)
+    result = await GitReadTool(armed).run(subcommand="show", revision="HEAD:a.txt")
+    assert result.success is True
+    assert result.output == "two\n"
+    assert not marker.exists()
+
+
+# ------------------------------------------------------------------------------------------- pagers
+
+def _pty_run(cwd: Path, argv: list[str], env: dict[str, str]) -> None:
+    """Run `argv` with stdout on a pseudo terminal (the only way git starts a pager) and wait for it."""
+    import pty
+    import subprocess
+
+    master, slave = pty.openpty()
+    env = {**env, "TERM": "xterm"}
+    try:
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=slave, stderr=slave)
+        os.close(slave)
+        slave = -1
+        try:
+            while True:  # drain so a full pty buffer cannot block git
+                if not os.read(master, 65536):
+                    break
+        except OSError:
+            pass
+        proc.wait(timeout=20)
+    finally:
+        if slave != -1:
+            os.close(slave)
+        os.close(master)
+
+
+def _pty_git(cwd: Path, *args: str) -> None:
+    _pty_run(cwd, [REAL_GIT, *args], git_env(cwd.parent))
+
+
+def _arm_pagers(repo: Path, script: Path) -> None:
+    for key in ("core.pager", "pager.log", "pager.diff", "pager.show"):
+        git(repo, "config", key, str(script))
+
+
+@requires_git
+@pytest.mark.skipif(os.name == "nt", reason="needs a pseudo terminal")
+async def test_control_pager_runs_on_a_terminal(armed, scripts):
+    script, marker = marker_script(scripts, "pg")
+    _arm_pagers(armed, script)
+    _pty_git(armed, "log")
+    assert _fires(marker)
+
+
+@requires_git
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"subcommand": "diff"}, id="diff"),
+        pytest.param({"subcommand": "show", "revision": "HEAD"}, id="show-HEAD"),
+        pytest.param({"subcommand": "log"}, id="log"),
+    ],
+)
+async def test_pagers_never_run(armed, scripts, kwargs):
+    script, marker = marker_script(scripts, "pg")
+    _arm_pagers(armed, script)
+    await _tool_leaves_absent(armed, marker, kwargs)
+
+
+@requires_git
+@pytest.mark.skipif(os.name == "nt", reason="needs a pseudo terminal")
+@pytest.mark.parametrize("verb", ["diff", "show", "log"])
+async def test_tool_argv_neutralises_the_pager_even_on_a_terminal(armed, scripts, verb):
+    """The tool's pipes never give git a terminal, so the prefix is proven by running its own argv on a pty."""
+    script, marker = marker_script(scripts, "pg")
+    _arm_pagers(armed, script)
+    call = grt._validate_call(armed, verb, "HEAD" if verb == "show" else None)
+    _pty_run(armed, grt._read_argv(call, call.paths), grt._git_env(armed))
+    assert not marker.exists()
+
+
+# --------------------------------------------------------------------------------- hooks and fsmonitor
+
+@requires_git
+async def test_control_index_hook_runs_under_bare_git(armed, scripts):
+    hooks = scripts / "hooks"
+    _script, marker = marker_script(hooks, "post-index-change")
+    git(armed, "config", "core.hooksPath", str(hooks))
+    os.utime(armed / "README", (time.time() + 5, time.time() + 5))
+    git(armed, "diff")
+    assert _fires(marker)
+
+
+@requires_git
+@pytest.mark.parametrize(
+    "kwargs",
+    [pytest.param({"subcommand": "diff"}, id="diff"), pytest.param({"subcommand": "diff", "stat": True}, id="diff-stat")],
+)
+async def test_index_hook_never_runs(armed, scripts, kwargs):
+    hooks = scripts / "hooks"
+    _script, marker = marker_script(hooks, "post-index-change")
+    git(armed, "config", "core.hooksPath", str(hooks))
+    await _tool_leaves_absent(armed, marker, kwargs, bump=armed / "README")
+
+
+@requires_git
+async def test_control_fsmonitor_runs_under_bare_git(armed, scripts):
+    script, marker = marker_script(scripts, "fsm")
+    git(armed, "config", "core.fsmonitor", str(script))
+    git(armed, "diff")
+    assert _fires(marker)
+
+
+@requires_git
+@pytest.mark.parametrize(
+    "kwargs",
+    [pytest.param({"subcommand": "diff"}, id="diff"), pytest.param({"subcommand": "diff", "stat": True}, id="diff-stat")],
+)
+async def test_fsmonitor_never_runs(armed, scripts, kwargs):
+    script, marker = marker_script(scripts, "fsm")
+    git(armed, "config", "core.fsmonitor", str(script))
+    await _tool_leaves_absent(armed, marker, kwargs)
+
+
+# --------------------------------------------------------------------------------- signature programs
+
+def _arm_signatures(repo: Path, script: Path) -> str:
+    tag = signed_history(repo, "v1")
+    git(repo, "config", "log.showSignature", "true")
+    git(repo, "config", "gpg.program", str(script))
+    return tag
+
+
+@requires_git
+async def test_control_gpg_program_runs_for_commit_and_tag(armed, scripts):
+    script, marker = marker_script(scripts, "gpg")
+    tag = _arm_signatures(armed, script)
+    git(armed, "log", "-1")
+    assert _fires(marker)
+    git(armed, "show", tag)
+    assert _fires(marker)
+
+
+@requires_git
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"subcommand": "log"}, id="log"),
+        pytest.param({"subcommand": "show", "revision": "HEAD"}, id="show-HEAD"),
+        pytest.param({"subcommand": "show", "revision": "v1"}, id="show-tag"),
+    ],
+)
+async def test_gpg_program_never_runs(armed, scripts, kwargs):
+    script, marker = marker_script(scripts, "gpg")
+    _arm_signatures(armed, script)
+    await _tool_leaves_absent(armed, marker, kwargs)
+
+
+# --------------------------------------------------------------------------------------- lazy fetch
+
+@requires_git
+async def test_control_promisor_fetch_runs_under_bare_git(base, scripts):
+    script, marker = marker_script(scripts, "up")
+    dst = partial_clone(base, script)
+    git(dst, "show", "HEAD:a.txt", check=False)
+    assert _fires(marker)
+
+
+@requires_git
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"subcommand": "show", "revision": "HEAD:a.txt"}, id="show-blob"),
+        pytest.param({"subcommand": "log"}, id="log"),
+    ],
+)
+async def test_missing_blobs_are_never_fetched(base, scripts, kwargs):
+    script, marker = marker_script(scripts, "up")
+    dst = partial_clone(base, script)
+    marker.unlink(missing_ok=True)
+    result = await GitReadTool(dst).run(**kwargs)
+    assert result.success is False
+    assert not marker.exists()
+
+
+# --------------------------------------------------------------------------------- submodule filters
+
+@requires_git
+async def test_control_submodule_filter_runs_under_bare_git(base, scripts):
+    script, marker = marker_script(scripts, "sf", passthrough=True)
+    sup = submodule_repo(base, script)
+    marker.unlink(missing_ok=True)
+    out = git(sup, "diff").stdout
+    assert "Submodule sub" in out  # diff.submodule=log is what bare git honours
+    assert _fires(marker)
+
+
+@requires_git
+@pytest.mark.parametrize(
+    "kwargs",
+    [pytest.param({"subcommand": "diff"}, id="diff"), pytest.param({"subcommand": "diff", "stat": True}, id="diff-stat")],
+)
+async def test_submodule_filter_never_runs(base, scripts, kwargs):
+    script, marker = marker_script(scripts, "sf", passthrough=True)
+    sup = submodule_repo(base, script)
+    await _tool_leaves_absent(sup, marker, kwargs)
+
+
+@requires_git
+async def test_submodule_pointer_change_is_short_form(base, scripts):
+    script, marker = marker_script(scripts, "sf", passthrough=True)
+    sup = submodule_repo(base, script)
+    (sup / "sub" / "f.txt").write_text("committed in sub\n")
+    git(sup / "sub", "commit", "-q", "-am", "inner")  # runs the clean filter: that is the bare-git control
+    assert _fires(marker)
+    assert "Submodule sub" in git(sup, "diff").stdout
+    marker.unlink(missing_ok=True)
+    result = await GitReadTool(sup).run(subcommand="diff")
+    assert result.success is True
+    assert "Subproject commit" in result.output
+    assert "Submodule sub" not in result.output
+    assert not marker.exists()
+
+
+# -------------------------------------------------------------------------------- inherited environment
+
+@requires_git
+@pytest.mark.parametrize("variant", ["external", "parameters", "count", "git_dir", "all"])
+async def test_inherited_git_environment_is_ignored(armed, base, scripts, monkeypatch, variant):
+    script, marker = marker_script(scripts, "env")
+    other = make_repo(base / "other", {"other.txt": "other\n"})
+    (other / "other.txt").write_text("other changed\n")
+    env = {
+        "external": {"GIT_EXTERNAL_DIFF": str(script)},
+        "parameters": {"GIT_CONFIG_PARAMETERS": f"'diff.external'='{script}'"},
+        "count": {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "diff.external", "GIT_CONFIG_VALUE_0": str(script)},
+        "git_dir": {"GIT_DIR": str(other / ".git")},
+    }
+    chosen = {k: v for d in env.values() for k, v in d.items()} if variant == "all" else env[variant]
+    if variant != "all":
+        # The control: bare git under the same inherited variable obeys it.
+        git_with_env(armed, chosen, "diff", check=False)
+        if variant == "git_dir":
+            out = git_with_env(armed, chosen, "diff").stdout
+            assert "other.txt" in out and "a.txt" not in out
+        else:
+            assert _fires(marker)
+    marker.unlink(missing_ok=True)
+    for key, value in chosen.items():
+        monkeypatch.setenv(key, value)
+    result = await GitReadTool(armed).run(subcommand="diff")
+    assert result.success is True
+    assert "a.txt" in result.output and "-two" in result.output and "+three" in result.output
+    assert "other.txt" not in result.output
+    assert not marker.exists()
