@@ -902,3 +902,34 @@ def test_a_group_that_never_closes_can_only_over_split(command):
 ))
 def test_a_brace_group_in_command_position_is_still_a_group(command, expected):
     assert [s.signature for s in _segments(command)] == expected
+
+
+# ------------------------------------------------------------------ `$((` that is a subshell, and arithmetic that runs commands (CR-54; iteration 3)
+
+@pytest.mark.parametrize("mode", THREE_MODES)
+@pytest.mark.parametrize("command", (
+    f"echo $((ls); {X})",
+    f"echo $((ls) | {X})",
+    f"echo $((ls) && {X})",
+    f"echo \"$((ls); {X})\"",
+    f"x=$((ls); {X})",
+    f"echo $(( $({X}) + 1 ))",
+    f"echo $(( `{X}` + 1 ))",
+    f"echo $[ $({X}) + 1 ]",
+    f"(( n = $({X}) ))",
+))
+def test_a_double_paren_that_is_not_arithmetic_is_a_command_substitution(command, mode, ws):
+    """Bash reads `$((` as arithmetic only if it closes with `))`; `$((ls); rm x)` runs the `rm` (proof run)."""
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command", (
+    "echo $((1+2))",
+    "echo $(( (1+2)*3 )) $((a<<2))",
+    "x=$((1<<2)); ls",
+    "echo $[1+2]",
+))
+def test_ordinary_arithmetic_is_unchanged(command, ws):
+    assert all(s.read_only for s in _segments(command)), command
+    assert not any(s.signature == UNPARSED_SHELL_SIGNATURE for s in _segments(command))

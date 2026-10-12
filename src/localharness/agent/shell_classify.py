@@ -1689,12 +1689,13 @@ def _lift_substitutions(
             out.append(char)
             index += 1
             continue
-        if text[index : index + 3] == "$((":
-            end = _matching(text, index + 2)
+        if text[index : index + 3] == "$((" and _is_arithmetic(text, index + 1):
+            # Arithmetic runs whatever `$(…)` and backticks it holds (`$(( $(rm x) + 1 ))`); nothing else.
+            end = _matching(text, index + 1)
+            _, inner_lifted = _lift_substitutions(text[index + 3 : end - 1], settings, cwd)
+            lifted.extend(inner_lifted)
             out.append(SUBSTITUTION_SENTINEL)
-            index = end + 1 if text[end : end + 1] == ")" else end
-            if text[index : index + 1] == ")":
-                index += 1
+            index = end + 1
             continue
         if char == "$" and text[index + 1 : index + 2] == "(":
             end = _matching(text, index + 1)
