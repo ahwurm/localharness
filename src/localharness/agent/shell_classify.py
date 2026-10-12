@@ -434,6 +434,43 @@ FIND_COMMAND = "find"
 following the options — every other member of ``settings.payload_commands`` goes through
 :func:`_command_payload`."""
 
+FIND_WRITE_PRIMARY_PREFIX = "-fprint"
+FIND_WRITE_PRIMARIES = frozenset({"-fls"})
+"""``find``'s primaries that WRITE a file named by the next token: ``-fprint``, ``-fprint0``,
+``-fprintf FILE FORMAT`` (the prefix covers the bfs/GNU variants) and ``-fls`` (find(1)). The
+file is created or truncated, so ``find ~ -maxdepth 0 -fprintf ~/.bashrc x`` overwrites a startup
+script from what the tier called a read (Phase 10, D-53)."""
+
+SORT_OUTPUT_OPTION = "output"
+SORT_COMPRESS_OPTION = "compress-program"
+SORT_VALUE_LETTERS = "ktST"
+"""``sort``'s long options of interest and its short options that take a value. GNU getopt accepts
+any unambiguous prefix of a long option: ``--o=F`` is ``--output=F`` (a prefix of length 1 is
+unambiguous for ``output``) and ``--co=P`` is ``--compress-program=P`` (``--c`` is ambiguous with
+``--check``, so the prefix must be at least two). ``-o FILE`` writes the sorted text over FILE,
+``--compress-program`` runs a program on the temporary files. ``-k -t -S -T`` take a value, which
+must not be read as ``-o`` (``sort -t o f``). Source: sort(1), D-52."""
+
+UNIQ_VALUE_LETTERS = "fsw"
+UNIQ_VALUE_OPTIONS = ("skip-fields", "skip-chars", "check-chars")
+"""``uniq``'s options whose value is the next token or attached to the letter, so that the value
+is not counted as the INPUT operand: ``uniq -f 1 in out`` writes ``out`` (uniq(1), D-52)."""
+
+TREE_OUTPUT_LETTER = "o"
+"""``tree -o FILE`` sends the listing to FILE; the letter may be in a cluster (``-ao``) or have
+its value attached (``-oFILE``) (tree(1), D-52)."""
+
+RG_PROGRAM_FLAGS = ("--pre", "--hostname-bin")
+"""ripgrep flags that RUN the program named by their value (``--pre CMD`` is a preprocessor run on
+every file, ``--hostname-bin`` is run to learn the host name). Exact or with ``=``: rg accepts no
+abbreviations, and ``--pre-glob`` is a different, harmless flag (rg(1), D-23/D-50)."""
+
+GIT_GREP_PAGER_OPTION = "open-files-in-pager"
+"""``git grep -O[PAGER]`` / ``--open-files-in-pager[=PAGER]`` runs a pager on the matches. Long
+spellings are matched as a prefix of length two or more (``--op``, ``--open=cmd``), short ones as
+any one-dash cluster containing ``O`` (``-nO``, ``-Ovim``): over-matching is the safe direction
+(git-grep(1), D-51)."""
+
 XARGS_VALUE_FLAGS = frozenset({"-n", "-I", "-i", "-P", "-d", "-a", "-E", "-s", "-L", "--max-args",
                                "--replace", "--max-procs", "--delimiter", "--arg-file", "--eof",
                                "--max-chars", "--max-lines"})
@@ -1153,6 +1190,7 @@ def _build(
                 payload_argvs.append(payload)
 
     signature, inline = _signature(argv, settings, find_delete=find_delete)
+    inline = inline or _runs_named_program(argv)
     force_destructive = False
     force_read_only = False
     if signature == GIT_CONFIG_SIGNATURE:
@@ -1241,6 +1279,7 @@ def _make_segment(
         (force_read_only or signature in settings.read_only_signatures)
         and not destructive
         and not payload_lifted
+        and not inline
     )
     # Owner ruling 2026-09-11: `auto` allows a destructive verb whose danger is entirely its
     # target when every target lands inside the project. Resolved through the same `cd` tracking
@@ -1780,6 +1819,16 @@ def _write_targets(signature: str, argv: tuple[str, ...], settings: GateSettings
     if not argv:
         return []
     head = argv[0]
+    # Computed BEFORE the write_shaped_commands gate (D-56): these commands are not in that list,
+    # and a machine override of it must neither drop their targets nor count as a loosening.
+    if head == FIND_COMMAND:
+        return _find_write_targets(argv)
+    if head == "sort":
+        return _sort_facts(argv)[0]
+    if head == "uniq":
+        return _uniq_target(argv)
+    if head == "tree":
+        return _tree_targets(argv)
     if signature == "sed -i":
         return _sed_files(list(argv))
     family = "tar" if head in TAR_FAMILY else head
@@ -1928,6 +1977,154 @@ def _git_targets(signature: str, argv: tuple[str, ...]) -> list[str]:
     if len(positionals) >= 2:
         return positionals[-1:]
     return [_repository_name(positionals[0])] if positionals else []
+
+
+def _find_write_targets(argv: Sequence[str]) -> list[str]:
+    """The files ``find -fprint/-fprint0/-fprintf/-fls`` writes (:data:`FIND_WRITE_PRIMARY_PREFIX`).
+
+    A ``-exec`` / ``-ok`` payload is skipped to its terminator: ``find . -exec grep -fprint x {} \\;``
+    hands ``-fprint`` to ``grep``, not to find.
+    """
+    out: list[str] = []
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        index += 1
+        if token in FIND_PAYLOAD_PRIMARIES:
+            while index < len(argv) and argv[index] not in FIND_PAYLOAD_TERMINATORS:
+                index += 1
+            index += 1
+        elif token.startswith(FIND_WRITE_PRIMARY_PREFIX) or token in FIND_WRITE_PRIMARIES:
+            if index < len(argv):
+                out.append(argv[index])
+                index += 1
+    return out
+
+
+def _sort_facts(argv: Sequence[str]) -> tuple[list[str], bool]:
+    """``sort`` → (the files ``-o`` / ``--output`` writes, whether ``--compress-program`` runs one).
+
+    Options end at ``--``. A long option is matched on its name before ``=`` as a prefix
+    (:data:`SORT_OUTPUT_OPTION`, :data:`SORT_COMPRESS_OPTION`); in a one-dash cluster ``o`` and the
+    letters of :data:`SORT_VALUE_LETTERS` take the rest of the cluster, or the next token, as
+    their value and end the cluster — so ``-t o`` is a separator and ``-uo out`` an output.
+    """
+    targets: list[str] = []
+    runs_program = False
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        index += 1
+        if token == "--":
+            break
+        if token.startswith("--"):
+            name, equals, value = token[2:].partition("=")
+            if name and SORT_OUTPUT_OPTION.startswith(name):
+                if equals:
+                    targets.append(value)
+                elif index < len(argv):
+                    targets.append(argv[index])
+                    index += 1
+            elif len(name) >= 2 and SORT_COMPRESS_OPTION.startswith(name):
+                runs_program = True
+                if not equals:
+                    index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            for position, letter in enumerate(token[1:], start=1):
+                if letter != "o" and letter not in SORT_VALUE_LETTERS:
+                    continue
+                attached = token[position + 1:]
+                value = attached or (argv[index] if index < len(argv) else "")
+                if not attached:
+                    index += 1
+                if letter == "o" and value:
+                    targets.append(value)
+                break
+    return targets, runs_program
+
+
+def _uniq_target(argv: Sequence[str]) -> list[str]:
+    """``uniq [OPTION]... [INPUT [OUTPUT]]``: the second operand is written (uniq(1)).
+
+    The value of ``-f/-s/-w`` (next token, attached, or ``--skip-fields 1``) is not an operand,
+    ``--`` ends the options, and ``-`` alone is an operand (standard input / output).
+    """
+    operands: list[str] = []
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        index += 1
+        if token == "--":
+            operands.extend(argv[index:])
+            break
+        if token.startswith("--"):
+            name, equals, _ = token[2:].partition("=")
+            if not equals and name and any(opt.startswith(name) for opt in UNIQ_VALUE_OPTIONS):
+                index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            for position, letter in enumerate(token[1:], start=1):
+                if letter in UNIQ_VALUE_LETTERS:
+                    if position == len(token) - 1:  # nothing attached: the value is the next token
+                        index += 1
+                    break
+            continue
+        operands.append(token)
+    return operands[1:2]
+
+
+def _tree_targets(argv: Sequence[str]) -> list[str]:
+    """``tree -o FILE``: a one-dash token containing ``o`` writes to the text after the letter, or
+    to the next token when ``o`` is its last letter (``-o out``, ``-ao out``, ``-oout``)."""
+    out: list[str] = []
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        index += 1
+        if not token.startswith("-") or token.startswith("--") or TREE_OUTPUT_LETTER not in token[1:]:
+            continue
+        attached = token.split(TREE_OUTPUT_LETTER, 1)[1]
+        if attached:
+            out.append(attached)
+        elif index < len(argv):
+            out.append(argv[index])
+            index += 1
+    return out
+
+
+def _runs_named_program(argv: Sequence[str]) -> bool:
+    """Does this command's own flag name a program for it to run? (D-23, D-50, D-51, D-52.)
+
+    ``rg --pre CMD`` / ``--hostname-bin CMD``, ``sort --compress-program P`` and ``git grep -O`` /
+    ``--open-files-in-pager`` all execute something the model chose from inside a command the
+    read-only tier would otherwise wave through. The segment is then inline: guarded asks
+    ``interpreter-inline``, read-only denies.
+    """
+    head = argv[0] if argv else ""
+    if head == "rg":
+        for token in argv[1:]:
+            if token == "--":
+                break
+            if any(token == flag or token.startswith(f"{flag}=") for flag in RG_PROGRAM_FLAGS):
+                return True
+        return False
+    if head == "sort":
+        return _sort_facts(argv)[1]
+    if head == "git":
+        found = _first_subcommand("git", list(argv[1:]))
+        if found is None or found[0] != "grep":
+            return False
+        for token in found[1]:
+            if token == "--":
+                break
+            if token.startswith("--"):
+                name = token[2:].split("=", 1)[0]
+                if len(name) >= 2 and GIT_GREP_PAGER_OPTION.startswith(name):
+                    return True
+            elif token.startswith("-") and "O" in token[1:]:
+                return True
+    return False
 
 
 def _git_output_targets(subcommand: str, argv: tuple[str, ...]) -> list[str]:
