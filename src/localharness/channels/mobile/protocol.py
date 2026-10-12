@@ -47,6 +47,12 @@ an artifact root is bound and --incognito is off), and GET /api/artifacts lists 
 or frame schema moved.
 v6: ProviderLost: a new event; additive, older pages ignore it at `default: break`.
 
+One recorded exception to "a moved schema bumps the version": additive OPTIONAL fields on an
+existing event that the page does not read re-record the snapshot without a bump (the page renders
+the same frames either way; an old client ignores a key it never reads). Taken for
+`Action.finish_reason="reasoning_cut"` (cb96515) and for `Action.model`/`prompt_tokens`/
+`completion_tokens`/`latency_ms` (499c6df). A field the page DOES read, or a changed meaning, is a bump.
+
 Enforced rather than remembered: `tests/unit/channels/test_mobile_protocol.py` snapshots every
 event and frame schema into a checked-in fixture and fails if a schema moves without this
 integer moving in the same diff. A project that auto-generates its schema specifically because
