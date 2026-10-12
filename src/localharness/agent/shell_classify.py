@@ -43,6 +43,7 @@ silent allow, but an ask is grantable and a grant on one of these keys is broade
 
 from __future__ import annotations
 
+import contextvars
 import fnmatch
 import os
 import posixpath
@@ -1527,12 +1528,14 @@ def _nesting_too_deep(text: str) -> bool:
     quote = ""
     while index < size:
         char = text[index]
+        if quote == "'":
+            quote = "" if char == "'" else quote  # no escapes inside single quotes: `'\'` is a whole string
+            index += 1
+            continue
         if char == "\\":
             index += 2
             continue
-        if quote == "'":
-            quote = "" if char == "'" else quote
-        elif char in "'\"" and not quote:
+        if char in "'\"" and not quote:
             quote = char
         elif char == '"' and quote == '"':
             quote = ""
@@ -2252,6 +2255,9 @@ def _classify_case(
     return segments, dropped
 
 
+_CLASSIFY_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar("lh_classify_depth", default=0)
+
+
 def _classify_text(
     text: str, settings: GateSettings, cwd: _Cwd | None = None
 ) -> tuple[list[ShellSegment], list[str]]:
@@ -2259,7 +2265,25 @@ def _classify_text(
 
     ``cwd`` carries the directory a leading ``cd`` moved the shell to (finding R2a); a fresh one
     means "wherever the command started".
+
+    The recursion is capped at :data:`MAX_GROUP_DEPTH` levels whatever the text looks like (WR-01 it5): the
+    textual guard (:func:`_nesting_too_deep`) is a fast path that a misread quote can fool, this is not. A level
+    past the cap is the unparsed-shell placeholder, which asks in every mode.
     """
+    depth = _CLASSIFY_DEPTH.get()
+    if depth >= MAX_GROUP_DEPTH:
+        host, _, _, _ = _classify_one(UNPARSED_SHELL_SIGNATURE, settings, cwd)
+        return ([host] if host is not None else []), []
+    token = _CLASSIFY_DEPTH.set(depth + 1)
+    try:
+        return _classify_text_level(text, settings, cwd)
+    finally:
+        _CLASSIFY_DEPTH.reset(token)
+
+
+def _classify_text_level(
+    text: str, settings: GateSettings, cwd: _Cwd | None = None
+) -> tuple[list[ShellSegment], list[str]]:
     segments: list[ShellSegment] = []
     dropped: list[str] = []
     previous_head: str | None = None
