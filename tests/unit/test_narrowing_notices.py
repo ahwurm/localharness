@@ -704,3 +704,45 @@ def test_notice_value_secret_is_a_short_digest():
     assert one == notice_value(SECRET_KEY, secret=True)
     assert one != notice_value(SECRET_KEY + "x", secret=True)
     assert SECRET_KEY not in one and len(one) < 40
+
+
+# ------------------------------------------------------------------ T-11-56: the stored text is bounded
+
+
+def test_a_huge_rejected_overlay_value_yields_a_capped_notice_and_a_small_store(tmp_path):
+    """A cloned repo's explore.yaml names a 1 MB `workspace_root` and `network_hosts`: both notice
+    texts show a short excerpt, no text passes the store cap and the store file stays small."""
+    from localharness.config.project_records import NOTICE_TEXT_MAX
+
+    global_dir = tmp_path / "global"
+    ws = tmp_path / "proj" / ".localharness"
+    ws.mkdir(parents=True)
+    _write(global_dir / "config.yaml", {
+        "version": "1",
+        "provider": {"provider_type": "vllm", "base_url": "http://localhost:8000/v1",
+                     "default_model": "m"},
+    })
+    big = "A\nB" * 350_000  # about 1 MB, with newlines
+    _write(ws / "agents" / "explore.yaml", {"permissions": {
+        "workspace_root": big, "ask": {"network_hosts": big},
+    }})
+    loader = ConfigLoader(config_dir=global_dir, local_config_dir=ws)
+    loader.overlay_builtin_config("explore", build_explore_config("explore"))
+
+    wanted = {"permissions.workspace_root", "permissions.ask.network_hosts"}
+    rows = [n for n in loader.notices if n.subject in wanted]
+    assert {n.subject for n in rows} == wanted
+    for n in rows:
+        assert len(n.text) < 600 and "\n" not in n.text  # a short, repr-safe excerpt
+        assert "truncated" in n.text
+
+    # the store boundary: any over-long text is cut with a marker, whoever built it
+    huge = Notice("narrowing", "x.y", "/f", "'v'", "t" * 1_000_000)
+    assert len(huge.text) == NOTICE_TEXT_MAX and huge.text.endswith("(cut)")
+    assert Notice("narrowing", "x.y", "/f", "'v'", "t" * NOTICE_TEXT_MAX).text == "t" * NOTICE_TEXT_MAX
+
+    root = tmp_path / "proj"
+    cfg = tmp_path / "records"
+    replace_notices(root, [huge, *rows], config_dir=cfg)
+    assert (cfg / "project_records.yaml").stat().st_size < 10_000
+    assert read_notices(root, config_dir=cfg) == frozenset([huge, *rows])
