@@ -756,7 +756,7 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   included, and the answer cannot be remembered, as is an `env -S` string using an escape or expansion
   the classifier does not follow.
 - **What the shell reader does not follow (residuals, recorded as a ruling taken on the owner's behalf
-  by the GSD run at the end of the Phase 10 review).** The body of a heredoc whose command is a shell
+  by the GSD run at the end of its code review of the shell classifier).** The body of a heredoc whose command is a shell
   (`bash <<'E'`, `cat <<E | sh`) is data to the classifier, not a program it reads: `bash <<'E'` with
   `rm -rf x` in the body signs as `bash`. A `( … )` group followed by a redirection (`(rm x) > log`) is
   not recursed into and signs as `(rm`. An invented comment (`[[ a =~ a|#b ]]; cmd`) can hide a command
