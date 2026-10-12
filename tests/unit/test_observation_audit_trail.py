@@ -116,6 +116,40 @@ async def test_observation_records_real_upstream_cap_truncation(bus):
     assert len(obs[0].output) == 500
     assert obs[0].truncated is True
     assert obs[0].original_length == 2000
+    # The model reads this same cut text, so the cut says so and the whole still fits the cap.
+    assert obs[0].output.startswith("x" * 100)
+    assert obs[0].output.endswith("[output cut: 2000 chars total — head kept] ...")
+    tool_msgs = [m for msgs in llm.seen for m in msgs if m.get("role") == "tool"]
+    assert tool_msgs and tool_msgs[-1]["content"].endswith("[output cut: 2000 chars total — head kept] ...")
+
+
+@pytest.mark.asyncio
+async def test_a_result_under_the_cap_carries_no_cut_marker_and_a_tiny_cap_cuts_plainly():
+    """The marker appears only when something was cut; a cap too small to hold it cuts plainly."""
+    class _T(Tool):
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self._text = text
+
+        def info(self) -> ToolSchema:
+            return ToolSchema(name="t", description="t",
+                              parameters={"type": "object", "properties": {}, "required": []},
+                              ingest="none", host="safe")
+
+        async def _execute(self, **kw: Any) -> ToolResult:
+            return self.ok(self._text)
+
+    from localharness.config.models import ToolConfig
+
+    exact = ToolRegistry(result_size_cap=500)
+    await exact.register(_T("y" * 500), scope="global")
+    res = await exact.dispatch("t", {}, "a", "d", ToolConfig(inherit=["global"]))
+    assert res.output == "y" * 500 and res.truncated is False
+
+    tiny = ToolRegistry(result_size_cap=20)
+    await tiny.register(_T("y" * 500), scope="global")
+    res = await tiny.dispatch("t", {}, "a", "d", ToolConfig(inherit=["global"]))
+    assert res.output == "y" * 20 and res.truncated is True and res.original_length == 500
 
 
 @pytest.mark.asyncio
