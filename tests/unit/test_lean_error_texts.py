@@ -157,3 +157,15 @@ def test_ingest_refusal_is_one_line_naming_the_sanctioned_route():
         "`bash_exec` (matched http client: 'curl'); delegate the read to web-researcher, and if "
         "that fails, do not work around it; report the failure."
     )
+
+
+def test_not_wired_suggestion_never_names_an_absent_agent(tmp_path):
+    from localharness.agent.subagent import _not_wired_text
+
+    d = tmp_path / "agents"
+    d.mkdir()
+    (d / "real-one.yaml").write_text("name: real-one\n")
+    line1 = _not_wired_text("real-oen", "real-oen", [str(d / "real-oen.yaml")]).split("\n")[0]
+    named = line1.split(":")[0].split(", ")
+    present = {"cruncher", "explore", "search-verifier", "web-researcher", "real-one"}
+    assert named and set(named) <= present
