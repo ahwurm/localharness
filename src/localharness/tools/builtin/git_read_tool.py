@@ -122,6 +122,7 @@ def _check_path(p: object, real_root: str) -> str:
         raise GitReadValidationError("a path may not be empty")
     if _has_control(p):
         raise GitReadValidationError("a path may not contain control characters")
+    _magic(p)  # D-47: an unterminated ":(" is rejected here, before any process
     if ":(prefix:" in p or _magic_has_prefix(p):
         raise GitReadValidationError("the prefix: pathspec magic is not allowed; give " + PATH_FORM)
     s = p
@@ -148,6 +149,72 @@ def _magic_has_prefix(p: str) -> bool:
     if close < 0:
         return False
     return any(w.strip().startswith("prefix") for w in p[2:close].split(","))
+
+
+def _magic(element: str) -> tuple[str, list[str], str]:
+    """D-47: split one pathspec element into (kind, magic words, path part).
+
+    Long form `:(w1,w2,...)rest` gives its words; short form is `:` followed by any run of `/`, `!`, `^`
+    and an optional `:` terminator (`/` is the word "top", `!` or `^` the word "exclude"); `:` with no
+    magic letter keeps no words; anything else is plain. An element opening `:(` with no `)` is rejected.
+    """
+    if element.startswith(":("):
+        close = element.find(")")
+        if close < 0:
+            raise GitReadValidationError(
+                f"{element!r} has an unterminated ':(' pathspec magic; give {PATH_FORM}"
+            )
+        words = [w.strip() for w in element[2:close].split(",")]
+        return "long", [w for w in words if w], element[close + 1:]
+    if element.startswith(":"):
+        i = 1
+        words = []
+        while i < len(element) and element[i] in "/!^":
+            words.append("top" if element[i] == "/" else "exclude")
+            i += 1
+        if i < len(element) and element[i] == ":":
+            i += 1
+        return "short", words, element[i:]
+    return "plain", [], element
+
+
+def _narrow_for_filters(paths: Sequence[str]) -> list[str]:
+    """D-15 / D-46: keep a worktree diff off every path a clean or process filter binds.
+
+    Each positive element is emitted twice, under `:(attr:!filter)` (filter unspecified) and
+    `:(attr:-filter)` (filter unset), merged into the long-form magic it already carries; `:/x` is
+    normalised to `:(top)x` first. Every exclusion is kept verbatim. When no positive element exists the
+    two bare positive elements come first: an exclusion with no positive pathspec applies to the whole
+    tree (gitglossary), so `:!vendor/` alone would still diff every bound path through the filter (verified
+    row b). A second `attr:` word in one element is fatal in git ("Only one 'attr:' specification is
+    allowed", row b3), so an existing `attr:SPEC` becomes `attr:REQ SPEC` (git ANDs them), and an exclude
+    word is never combined with an attr: word (`:(exclude,attr:filter)` still runs the filter, row b).
+    """
+    out: list[str] = []
+    positive = False
+    for element in paths:
+        _kind, words, rest = _magic(element)
+        if "exclude" in words:
+            out.append(element)
+            continue
+        positive = True
+        for requirement in ("!filter", "-filter"):
+            attr = "attr:" + requirement
+            others: list[str] = []
+            merged = False
+            for word in words:
+                if word.startswith("attr:") and not merged:
+                    attr = f"attr:{requirement} {word[len('attr:'):]}"
+                    merged = True
+                else:
+                    others.append(word)
+            out.append(":(" + ",".join([attr, *others]) + ")" + rest)
+    if not positive:
+        out = [*BARE_NARROWING, *out]
+    return out
+
+
+BARE_NARROWING: tuple[str, str] = (":(attr:!filter)", ":(attr:-filter)")
 
 
 def _validate_call(
