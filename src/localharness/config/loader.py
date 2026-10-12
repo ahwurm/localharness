@@ -554,14 +554,18 @@ lift a stricter global value. Distinct from AGENT_GLOBAL_ONLY_FIELDS, which name
 plugin sections (and the kill switch) and is a label read by the docs gate."""
 
 AGENT_CORE_LOWER_ONLY_KEYS: frozenset[str] = frozenset({
-    "permissions.budget.max_actions", "permissions.budget.max_duration_minutes"})
+    "permissions.budget.max_actions", "permissions.budget.max_duration_minutes",
+    "context.tool_output_ratio", "context.evict_ratio", "context.result_cap_ratio"})
 """Core agent-file KEYS a workspace layer may only LOWER. Against the global layer's own value for the
-agent (its agents/<name>.yaml, the division, the legacy org.yaml, the overrides' `agent:` section) a
-workspace agent file, a workspace division file that shadows the global one, or a workspace overlay
-of a built-in keeps a value only when it is at or below that baseline; where the global layer says
-nothing the workspace's number is kept as written (and marked, so the seam can cap it at use). The
-sibling of AGENT_CORE_GLOBAL_ONLY_SECTIONS, which restores whole sections; a later phase adds its
-`context.*` window-ratio paths here."""
+agent (its agents/<name>.yaml, the division, the global org settings, the overrides' `agent:`
+section) a workspace agent file, a workspace division file that shadows the global one, or a
+workspace overlay of a built-in keeps a value only when it is at or below that baseline. Two
+families, one rule: a budget key where the global layer says nothing keeps the workspace's number as
+written (and marked, so the seam can cap it at use); a window-ratio key (`context.*`) always has a
+baseline, the global layer's value else the schema default, so it is never kept above it. The
+sibling of AGENT_CORE_GLOBAL_ONLY_SECTIONS, which restores whole sections."""
+
+_RATIO_NAMES = ("tool_output_ratio", "evict_ratio", "result_cap_ratio")
 
 
 def layer_files(layer_dir: Path, subdir: str, *, contained: bool = False) -> list[Path]:
@@ -844,6 +848,17 @@ def _accepted_lower(ws: Any, allowed: int | float) -> bool:
         return True
     ok = _finite_int(ws, ge=1) if isinstance(allowed, int) else _finite_number(ws, gt=0)
     return ok and ws <= allowed
+
+
+_LOWER_ONLY_KEY_ROWS: dict[str, tuple[Callable[[Any], bool], Any]] = {
+    "permissions.budget.max_actions": (lambda v: _finite_int(v, **_ACTIONS_BOUNDS), _UNSET),
+    "permissions.budget.max_duration_minutes": (lambda v: _finite_number(v, ge=0.1, le=1440.0), _UNSET),
+    **{f"context.{name}": (lambda v: _finite_number(v, **_RATIO_BOUNDS),
+                           ContextConfig.model_fields[name].default) for name in _RATIO_NAMES},
+}
+"""One row per AGENT_CORE_LOWER_ONLY_KEYS path: the predicate for a finite value of that key and the
+baseline used where the global layer says nothing (_UNSET for a budget key, which then keeps the
+workspace's number and marks it; the schema default for a window ratio, which is never silent)."""
 
 
 def _guard_children_budget_sections(merged: dict, sources: tuple[dict, ...],
@@ -1774,6 +1789,10 @@ class ConfigLoader:
         #      one per file, `_global_layer_budget` — the loader knows layers, never callers
         #      (spec §13).
         budget_kept = self._lower_only_agent_budget(merged, raw, path, div_name)
+        #      The window ratios follow the same rule on the same baseline reader, but a workspace
+        #      `org.context` reaches EVERY agent (a global agent file included), so they run
+        #      whenever a workspace layer exists, and restore on an omission too.
+        self._lower_only_agent_context(merged, raw, path, div_name)
 
         # 5d. QA-18: an agent that sets no `permissions.mode` (in its file, or under `agent:` in
         #     overrides.yaml) runs in the org's, the mode `init`'s posture question writes. Key
@@ -1887,13 +1906,11 @@ class ConfigLoader:
 
         kept: set[str] = set()
         for key_path in sorted(AGENT_CORE_LOWER_ONLY_KEYS):
+            if not key_path.startswith("permissions.budget."):
+                continue  # a window ratio: _lower_only_agent_context
             field = key_path.rsplit(".", 1)[-1]
             parts = ["permissions", "budget", field]
-            in_actions = field == "max_actions"
-
-            def finite(v: Any) -> bool:
-                return (_finite_int(v, **_ACTIONS_BOUNDS) if in_actions
-                        else _finite_number(v, ge=0.1, le=1440.0))
+            finite = _LOWER_ONLY_KEY_ROWS[key_path][0]
 
             a_val = _dig(raw, parts)
             a_val = None if a_val is _UNSET else a_val
@@ -1938,6 +1955,70 @@ class ConfigLoader:
                 if note not in self.agent_warnings:
                     self.agent_warnings.append(note)
         return kept
+
+    def _lower_only_agent_context(
+        self, merged: dict, raw: dict, path: Path, div_name: Optional[str]
+    ) -> None:
+        """Apply the `context.*` members of AGENT_CORE_LOWER_ONLY_KEYS to `merged` (in place).
+
+        Every workspace door into an agent's `context` is judged: its own file, a workspace
+        division file, and the workspace `config.yaml` / `overrides.yaml` `org.context`. The final
+        ratio is the merged one when finite and not above the baseline B (the global layer's own
+        cascade, else the schema default), else B; so a higher value, a `null`, and an omission
+        that a workspace `org.context` caused (it hides the legacy org.yaml block, or replaces the
+        global one with `null`) all end at B. A value a global source supplied is left as the
+        cascade produced it: a malformed one fails validation as it does with no workspace.
+        A note is made only for a value the agent or division FILE wrote; one a workspace
+        config.yaml / overrides.yaml wrote is already reported once by `load_harness`."""
+        local = self._local_dir
+        if local is None:
+            return
+        ctx = merged.get("context", _UNSET)
+        if ctx is not _UNSET and not isinstance(ctx, dict):
+            return  # not a mapping: validation reports it
+        ws_agent = in_layer(path, local)
+        div_path = self._find_file("divisions", div_name) if div_name else None
+        ws_div = div_path is not None and in_layer(div_path, local)
+        agent_ctx = raw.get("context") if isinstance(raw.get("context"), dict) else {}
+        div_ctx = self._raw_division_context(div_name) if div_name else {}
+        org_ctx = self._raw_org_context()
+        sources = self._raw_config_sources()
+        ws_org = ((sources[3], local / "overrides.yaml"), (sources[2], local / "config.yaml"))
+        org_touched = any(_dig(source, ["org", "context"]) is not _UNSET for source, _ in ws_org)
+        for key_path in sorted(k for k in AGENT_CORE_LOWER_ONLY_KEYS if k.startswith("context.")):
+            name = key_path.split(".", 1)[1]
+            finite, default = _LOWER_ONLY_KEY_ROWS[key_path]
+            value = ctx.get(name, _UNSET) if isinstance(ctx, dict) else _UNSET
+            # The source that supplied `value`, by the merge's own precedence.
+            src, from_workspace = None, False
+            if name in agent_ctx:
+                src, from_workspace = path, ws_agent
+            elif name in div_ctx:
+                src, from_workspace = div_path, ws_div
+            elif name in org_ctx:
+                for source, file in ws_org:
+                    if _dig(source, ["org", "context", name]) is not _UNSET:
+                        src, from_workspace = file, True
+                        break
+            if value is not _UNSET and not from_workspace:
+                continue  # a global source decided
+            if value is _UNSET and not (org_touched or ws_agent or ws_div):
+                continue  # nothing a workspace layer wrote could have hidden a global value
+            def usable(v: Any, name: str = name) -> bool:
+                c = _coerce_global(ContextConfig, name, v)
+                return not isinstance(v, bool) and c is not _INVALID and finite(c)
+            raw_base = self._global_layer_value(path.stem, div_name, key_path, accept=usable)
+            baseline = default if raw_base is None else _coerce_global(ContextConfig, name, raw_base)
+            if finite(value) and value <= baseline:
+                continue
+            if value is _UNSET and baseline == default:
+                continue  # the schema default would apply anyway: stamp nothing
+            merged["context"] = {**(ctx if isinstance(ctx, dict) else {}), name: baseline}
+            ctx = merged["context"]
+            note = f"ignoring context.{name} in {str(src)!r}: a project may only lower it"
+            if (value is not _UNSET and value is not None and src in (path, div_path)
+                    and note not in self.agent_warnings):
+                self.agent_warnings.append(note)
 
     def _without_project_mcp(self, raw: dict, path: Path) -> dict:
         """An untrusted project's agent-file `tools.mcp_servers` is removed before the merge, so no
@@ -2159,32 +2240,57 @@ class ConfigLoader:
         )
 
     def _global_layer_budget(self, stem: str, div_name: Optional[str], field: str) -> Any:
-        """`permissions.budget.<field>` as the GLOBAL layer alone declares it, or None.
-
-        One baseline per file: the global agents/<stem>.yaml, else the global divisions/<div>.yaml,
-        else the legacy global org.yaml, else the global overrides' `agent:` section — the first
-        value that is neither `null` nor "inherit". Raw YAML, as `_global_layer_kill_file` reads
-        it, so it answers when an unrelated key in the same file is invalid; a file that does not
-        parse is silent. No caller role enters (spec §13).
-        """
-        return self._global_layer_budget_source(stem, div_name, field)[0]
+        """`permissions.budget.<field>` as the GLOBAL layer alone declares it, or None; the
+        budget spelling of `_global_layer_value`, kept for its callers."""
+        return self._global_layer_value(stem, div_name, f"permissions.budget.{field}")
 
     def _global_layer_budget_source(
         self, stem: str, div_name: Optional[str], field: str
     ) -> tuple[Any, Optional[Path], str]:
         """`_global_layer_budget`'s value, the file that declared it, and the key prefix the value
-        sits under in that file (`"agent."` in overrides.yaml, else `""`); `(None, None, "")` when
-        the global layer is silent. The file is what an error about that value names (WR-22)."""
-        def _declared(source: Any) -> Any:
-            perms = source.get("permissions") if isinstance(source, dict) else None
-            budget = perms.get("budget") if isinstance(perms, dict) else None
-            return budget.get(field) if isinstance(budget, dict) else None
+        sits under in that file; `(None, None, "")` when the global layer is silent. The file is
+        what an error about that value names (WR-22)."""
+        return self._global_layer_value_source(stem, div_name, f"permissions.budget.{field}")
 
-        def _declared_file(path: Path) -> Any:
-            if not path.exists():
+    def _global_layer_value(
+        self, stem: str, div_name: Optional[str], path: str,
+        accept: Optional[Callable[[Any], bool]] = None,
+    ) -> Any:
+        """The value at the dotted `path` (`permissions.budget.max_actions`, `context.evict_ratio`)
+        as the GLOBAL layer alone declares it, or None. See `_global_layer_value_source`."""
+        return self._global_layer_value_source(stem, div_name, path, accept)[0]
+
+    def _global_layer_value_source(
+        self, stem: str, div_name: Optional[str], path: str,
+        accept: Optional[Callable[[Any], bool]] = None,
+    ) -> tuple[Any, Optional[Path], str]:
+        """`_global_layer_value`'s value, the file that declared it, and the key prefix the value
+        sits under in that file (`"agent."` in overrides.yaml, `"org."` in config.yaml, else `""`);
+        `(None, None, "")` when the global layer is silent.
+
+        One baseline per file: the global agents/<stem>.yaml, else the global divisions/<div>.yaml,
+        then the org rung (a `context.*` path: the global config.yaml and overrides.yaml `org:`
+        sections, then the legacy org.yaml; any other path: the legacy org.yaml alone), else the
+        global overrides' `agent:` section. The first value that is neither `null` nor "inherit"
+        (and that `accept`, when given, admits). Raw YAML, as `_global_layer_kill_file` reads it,
+        so it answers when an unrelated key in the same file is invalid; a file that does not
+        parse is silent. No caller role enters (spec §13).
+        """
+        parts = path.split(".")
+
+        def _usable(value: Any) -> bool:
+            return (value is not None and value != "inherit"
+                    and (accept is None or accept(value)))
+
+        def _declared(source: Any) -> Any:
+            found = _dig(source, parts)
+            return None if found is _UNSET else found
+
+        def _declared_file(file: Path) -> Any:
+            if not file.exists():
                 return None
             try:
-                return _declared(self._without_withheld(_load_yaml_file(path), path))
+                return _declared(self._without_withheld(_load_yaml_file(file), file))
             except ConfigError:
                 return None
 
@@ -2194,17 +2300,37 @@ class ConfigLoader:
             except ConfigError:
                 return None
 
+        def _global_org() -> Any:
+            # The global config.yaml and overrides.yaml `org:` sections, merged in their order.
+            try:
+                g_cfg, g_over = self._raw_config_sources()[:2]
+            except ConfigError:
+                return None
+            org: dict = {}
+            for source in (g_cfg, g_over):
+                section = source.get("org") if isinstance(source, dict) else None
+                if isinstance(section, dict):
+                    org = deep_merge(org, section)
+            return _declared(org)
+
         files: list[Optional[Path]] = [
             self._config_dir / "agents" / f"{stem}.yaml",
             self._config_dir / "divisions" / f"{div_name}.yaml" if div_name else None,
-            self._config_dir / "org.yaml",
         ]
         for file in files:
             value = _declared_file(file) if file is not None else None
-            if value is not None and value != "inherit":
+            if _usable(value):
                 return value, file, ""
+        if parts[0] == "context":
+            value = _global_org()
+            if _usable(value):
+                return value, self._config_dir / "config.yaml", "org."
+        org_file = self._config_dir / "org.yaml"
+        value = _declared_file(org_file)
+        if _usable(value):
+            return value, org_file, ""
         value = _overlay()
-        if value is not None and value != "inherit":
+        if _usable(value):
             return value, _resolve_user_overlay_path(self._config_dir), "agent."
         return None, None, ""
 
@@ -2604,9 +2730,10 @@ class ConfigLoader:
         base_budget = getattr(base.permissions, "budget", None)
         ws_file = str(self._local_dir / "agents" / f"{name}.yaml")
         for key_path in sorted(AGENT_CORE_LOWER_ONLY_KEYS):
+            if not key_path.startswith("permissions.budget."):
+                continue  # a window ratio: below
             field = key_path.rsplit(".", 1)[-1]
-            finite = ((lambda v: _finite_int(v, **_ACTIONS_BOUNDS)) if field == "max_actions"
-                      else (lambda v: _finite_number(v, ge=0.1, le=1440.0)))
+            finite = _LOWER_ONLY_KEY_ROWS[key_path][0]
             # The operator's value as the model validates it (CR-01: a global `"20"` is 20), else
             # the built-in's own number.
             baseline = self._global_layer_agent_budget(name, field)
@@ -2634,6 +2761,46 @@ class ConfigLoader:
                 declared_budget["max_tool_calls"], ws_file,
             )
         budget["max_tool_calls"] = getattr(base_budget, "max_tool_calls", None)
+
+        # The window ratios: lower-only against the operator's own `agents/<name>.yaml` ratio when
+        # it holds a usable one, else the built-in's own (the ContextConfig default). The workspace
+        # file shadows the global one, so an omission or a null restores the baseline here too.
+        declared_ctx = raw.get("context") if isinstance(raw.get("context"), dict) else {}
+        base_ctx = base.model_dump().get("context") or {}
+        ctx = merged.get("context")
+        for key_path in sorted(k for k in AGENT_CORE_LOWER_ONLY_KEYS if k.startswith("context.")):
+            if not isinstance(ctx, dict):
+                break  # `context` is not a mapping: validation reports it
+            ratio = key_path.split(".", 1)[1]
+            finite = _LOWER_ONLY_KEY_ROWS[key_path][0]
+            baseline = self._global_layer_agent_value(name, key_path)
+            if baseline is not None and not isinstance(baseline, bool):
+                baseline = _coerce_global(ContextConfig, ratio, baseline)
+            if baseline is None or baseline is _INVALID or isinstance(baseline, bool) or not finite(baseline):
+                baseline = base_ctx.get(ratio, ContextConfig.model_fields[ratio].default)
+            value = declared_ctx.get(ratio)
+            if finite(value) and value <= baseline:
+                final = value
+            else:
+                final = baseline
+                if value is not None:
+                    log.warning(
+                        "ignoring workspace %s %r for agent %r: a project may only lower it (%r)",
+                        key_path, value, name, baseline,
+                    )
+            ctx[ratio] = final
+
+    def _global_layer_agent_value(self, stem: str, path: str) -> Any:
+        """The value at the dotted `path` as the global `agents/<stem>.yaml` alone declares it, or
+        None (no file, a file that does not parse, or a key left out or null)."""
+        file = self._config_dir / "agents" / f"{stem}.yaml"
+        if not file.exists():
+            return None
+        try:
+            found = _dig(self._without_withheld(_load_yaml_file(file), file), path.split("."))
+        except ConfigError:
+            return None
+        return None if found is _UNSET else found
 
     def _global_layer_agent_budget(self, stem: str, field: str) -> Any:
         """`permissions.budget.<field>` as the global `agents/<stem>.yaml` alone declares it, or

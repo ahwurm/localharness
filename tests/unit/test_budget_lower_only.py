@@ -345,9 +345,10 @@ def _loaded(loader, name: str = "worker"):
         cfg.budget_kept_from_workspace
 
 
-def test_the_agent_lower_only_set_names_both_budget_keys():
+def test_the_agent_lower_only_set_names_both_budget_keys_and_the_three_ratios():
     assert AGENT_CORE_LOWER_ONLY_KEYS == frozenset({
-        "permissions.budget.max_actions", "permissions.budget.max_duration_minutes"})
+        "permissions.budget.max_actions", "permissions.budget.max_duration_minutes",
+        "context.tool_output_ratio", "context.evict_ratio", "context.result_cap_ratio"})
 
 
 def test_a_shadowing_file_cannot_raise_a_global_budget(tmp_path):
