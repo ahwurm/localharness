@@ -11,7 +11,7 @@ Two layers make a read-only `git` safe to hand to a critic that may be prompt-in
   drivers, and the environment is built from scratch rather than inherited.
 
 This module imports nothing from `agent/`. `GitReadTool` (the declaration, the per-call pin check and
-the streaming read) lives at the end of the module; the clean-filter precheck is a later plan.
+the clean-filter precheck and the streaming read) lives at the end of the module.
 """
 from __future__ import annotations
 
@@ -461,6 +461,59 @@ async def _drain_stderr(stream: asyncio.StreamReader | None) -> str:
     return bytes(kept).decode("utf-8", errors="replace")[:STDERR_CAP_CHARS]
 
 
+# D-14 / D-45: the precheck pattern and D-16: the one trailing line a narrowed diff ends with, verbatim.
+FILTER_KEY_PATTERN = r"^filter\..*\.(clean|process)$"
+FILTER_OMITTED_LINE = (
+    "[git_read: a filter driver is configured ({key!r}); paths it binds were omitted"
+    " — cached: true or a two-revision diff includes them]"
+)
+
+
+class GitReadPrecheckError(Exception):
+    """The filter precheck could not answer; str() is the failure text and no read is spawned."""
+
+
+def _filter_driver_key(root: Path) -> str | None:
+    """D-14 / D-45: ask git whether a clean or process filter driver is configured.
+
+    One `config --name-only --get-regexp` through the one prefix, environment and cwd, so includes,
+    `includeIf` and `config.worktree` are seen and nothing is cached. Exit 1 means none (None); exit 0
+    returns the first key, `fsdecode`d (a subsection may hold spaces, never a newline; the driver's value
+    is never read). Any other exit, a signal, a timeout or an OSError fails closed.
+    """
+    try:
+        proc = _run_git(root, ["config", "--name-only", "--get-regexp", FILTER_KEY_PATTERN])
+    except subprocess.TimeoutExpired:
+        raise GitReadPrecheckError(
+            f"git_read timed out after {GIT_PIN_TIMEOUT_SECONDS}s checking for filter drivers"
+        ) from None
+    except OSError as exc:
+        raise GitReadPrecheckError(
+            f"git could not be started: {exc.strerror or exc.__class__.__name__}"
+        ) from None
+    if proc.returncode == 1:
+        return None
+    if proc.returncode == 0:
+        for raw in proc.stdout.split(b"\n"):
+            if raw:
+                return os.fsdecode(raw)
+        raise GitReadPrecheckError("git exited with 0 but named no filter driver")  # unreachable; fail closed
+    stderr = proc.stderr.decode("utf-8", errors="replace")[:STDERR_CAP_CHARS]
+    raise GitReadPrecheckError(f"git exited with {proc.returncode}: {stderr}")
+
+
+def _is_two_revision(root: Path, revision: str) -> bool:
+    """D-34: ask git, never parse the revision. Two or more `--revs-only` lines and exit 0 is a
+    two-revision diff (blob against blob, no filter); anything else answers False, the safe direction."""
+    try:
+        proc = _run_git(root, ["rev-parse", "--revs-only", revision, "--"])
+    except (subprocess.SubprocessError, OSError):
+        return False
+    if proc.returncode != 0:
+        return False
+    return sum(1 for line in proc.stdout.split(b"\n") if line) >= 2
+
+
 class GitReadTool(Tool):
     """Read-only `git diff | show | log` of the workspace repository (D-01, D-17, D-64).
 
@@ -543,8 +596,22 @@ class GitReadTool(Tool):
         failure = await asyncio.to_thread(git_read_pin_failure, self._root)
         if failure is not None:
             return self.err(failure.message(per_call=True), error_type="permission_denied")
-        argv = _read_argv(call, call.paths)
-        return await self._stream(argv, call.max_lines)
+        pathspecs: list[str] = list(call.paths)
+        trailing: str | None = None
+        if call.subcommand == "diff" and not call.cached:
+            # D-14: a worktree diff canonicalises files through clean/process filters; ask on every call.
+            try:
+                key = await asyncio.to_thread(_filter_driver_key, self._root)
+            except GitReadPrecheckError as exc:
+                return self.err(str(exc), error_type="execution_error")
+            if key is not None:
+                two = call.revision is not None and await asyncio.to_thread(
+                    _is_two_revision, self._root, call.revision
+                )
+                if not two:
+                    pathspecs = _narrow_for_filters(pathspecs)
+                    trailing = FILTER_OMITTED_LINE.format(key=key)
+        return await self._stream(_read_argv(call, pathspecs), call.max_lines, trailing=trailing)
 
     async def _stream(self, argv: list[str], max_lines: int, trailing: str | None = None) -> ToolResult:
         """D-06 / D-36 / D-60 / D-61: run `argv`, stop at `max_lines`, enforce the timeout, reap always.
