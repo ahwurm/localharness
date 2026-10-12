@@ -27,7 +27,15 @@ from localharness.agent.gate import (
     tool_meta_from_schema,
 )
 from localharness.agent.gate_types import GateOutcome, ToolMeta
-from localharness.core.types import Message, harness_message, human_message, is_harness_message, provider_messages
+from localharness.core.types import (
+    Message,
+    ToolOutcome,
+    ToolProvenance,
+    harness_message,
+    human_message,
+    is_harness_message,
+    provider_messages,
+)
 from localharness.core.content import redact_images, text_part
 from localharness.agent.context import APPROX_CHARS_PER_TOKEN, response_reserve
 from localharness.agent.context import ActiveReferenceError, ActiveReferenceOverflow
@@ -144,6 +152,44 @@ class StuckState(Enum):
     ESCALATE = "escalate"
 
 
+def compute_signature(tool_name: str, args: Any) -> str:
+    """The call-only signature of a tool name and its arguments (16 hex characters).
+
+    The stuck detector counts repeats by it and the loop stamps it on every tool message
+    so the request view can tell which later call superseded a failed one.
+    """
+    canonical = f"{tool_name}:{json.dumps(args, sort_keys=True, separators=(',', ':'))}"
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _tool_message(
+    tool_call: Any,
+    content: str,
+    *,
+    ok: bool,
+    denied: bool = False,
+    staged: bool = False,
+) -> Message:
+    """A tool-role message stamped with a private outcome the model never sees.
+
+    The loop is the only producer of tool messages, so the stamp cannot be forged by
+    model text; ``provider_messages`` strips ``_lh`` on every wire path. A message whose
+    signature cannot be computed is left unstamped, and an unstamped message is never
+    dropped from a request.
+    """
+    message: Message = {"role": "tool", "tool_call_id": tool_call.id, "content": content}
+    try:
+        message["_lh"] = ToolProvenance(outcome=ToolOutcome(
+            call=compute_signature(tool_call.name, tool_call.arguments),
+            ok=ok,
+            denied=denied,
+            staged=staged,
+        ))
+    except Exception:  # noqa: BLE001 — unstamped is the safe direction
+        log.debug("could not stamp tool message for %s", getattr(tool_call, "name", "?"))
+    return message
+
+
 class StuckDetector:
     def __init__(
         self,
@@ -173,8 +219,7 @@ class StuckDetector:
         self.ceiling_hit: str | None = None
 
     def compute_signature(self, tool_name: str, args: dict) -> str:
-        canonical = f"{tool_name}:{json.dumps(args, sort_keys=True, separators=(',', ':'))}"
-        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+        return compute_signature(tool_name, args)
 
     def _trusted(self, tool_name: str) -> bool:
         """True only when the injected lookup says exactly "trusted" for this tool.
@@ -2272,11 +2317,7 @@ class AgentLoop:
                     self._config.name, len(tool_calls),
                 )
                 for tool_call in tool_calls:
-                    session.push({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": _TRUNCATED_TOOL_CALL_FEEDBACK,
-                    })
+                    session.push(_tool_message(tool_call, _TRUNCATED_TOOL_CALL_FEEDBACK, ok=False))
                 continue
 
             # 9. No tool calls — check if parse failed on an attempted tool call
@@ -2561,11 +2602,7 @@ class AgentLoop:
                         f"({budget.max_tool_calls} allowed) has been reached. Answer "
                         f"directly without calling any more tools."
                     )
-                    session.push({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": refusal_text,
-                    })
+                    session.push(_tool_message(tool_call, refusal_text, ok=False))
                     stuck_detector.record(tool_call.name, tool_call.arguments, (False, refusal_text))
                     continue
 
@@ -2595,11 +2632,10 @@ class AgentLoop:
                 if not perm_result.allowed:
                     self._record_task_result(tool_call, success=False)
                     denied_text = f"{DENIED_OBSERVATION_PREFIX}{perm_result.reason}"
-                    session.push({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": denied_text,
-                    })
+                    session.push(_tool_message(
+                        tool_call, denied_text, ok=False, denied=True,
+                        staged=getattr(perm_result, "pending", None) is not None,
+                    ))
                     await self._bus.publish(Observation(
                         agent_id=session.agent_id,
                         session_id=session.session_id,
@@ -2675,11 +2711,7 @@ class AgentLoop:
                     tool_call, success=not is_error, metadata=result_metadata, before=task_before,
                     result=tool_result,
                 )
-                session.push({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result_content,
-                })
+                session.push(_tool_message(tool_call, result_content, ok=not is_error))
 
                 await self._bus.publish(Observation(
                     agent_id=session.agent_id,
@@ -3311,11 +3343,7 @@ class AgentLoop:
         if finish_reason == "length" and tool_calls:
             session.truncated_tool_calls += 1
             for tool_call in tool_calls:
-                session.push({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": _TRUNCATED_TOOL_CALL_FEEDBACK,
-                })
+                session.push(_tool_message(tool_call, _TRUNCATED_TOOL_CALL_FEEDBACK, ok=False))
             return StepResult(
                 action="error",
                 error="output-token-ceiling truncation mid-tool-call; not executed",
@@ -3339,11 +3367,10 @@ class AgentLoop:
                 # Neither counter moves for a refused call: it did not run. `executed` fed
                 # `StepResult.tool_calls_executed`, so a turn whose every call was denied
                 # reported the same number as one where every call ran.
-                session.push({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": f"{DENIED_OBSERVATION_PREFIX}{perm.reason}",
-                })
+                session.push(_tool_message(
+                    tool_call, f"{DENIED_OBSERVATION_PREFIX}{perm.reason}", ok=False, denied=True,
+                    staged=getattr(perm, "pending", None) is not None,
+                ))
                 continue
             self._open_delegation(tool_call)
             session.actions_taken += 1
@@ -3371,11 +3398,7 @@ class AgentLoop:
                 tool_call, success=success, metadata=metadata, before=task_before,
                 result=tool_result,
             )
-            session.push({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": result_content,
-            })
+            session.push(_tool_message(tool_call, result_content, ok=success))
             executed += 1
 
         return StepResult(
