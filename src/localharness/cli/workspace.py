@@ -202,6 +202,8 @@ def _stdin_is_a_terminal() -> bool:
 # are both "yes, I mean to work here"; nobody says yes to one and no to the other, and asking
 # twice teaches a person to hit return without reading, which is the failure the whole release is
 # about. So there is one sentence, and it says all three things a yes does.
+# A found instructions file is named in the same sentence (`..._WITH_INSTRUCTIONS`): one more
+# noun, still one question, and a yes also records the file.
 OFFER_PROMPT = (
     "Trust this workspace? LocalHarness will keep its state in ./.localharness here, load that "
     "config, and run tools without asking except for dangerous actions."
@@ -214,6 +216,23 @@ TRUST_ONLY_PROMPT = (
 """The same question where ``.localharness`` already exists, so there is nothing to create. Kept
 as its own string rather than composed, because the sentence a person reads at 2am is the design
 and a half-sentence about creating a directory that is already there reads as a bug."""
+
+OFFER_PROMPT_WITH_INSTRUCTIONS = (
+    "Trust this workspace? LocalHarness will keep its state in ./.localharness here, load that "
+    "config and its {name}, and run tools without asking except for dangerous actions."
+)
+"""`OFFER_PROMPT` where the project holds an instructions file (`CLAUDE.md`, `AGENTS.md` or
+`.localharness/INSTRUCTIONS.md`): one more noun in the same question, never a second question. A
+yes writes the trust record and the instructions record; a no writes neither. Chosen only when
+`first_candidate(root)` finds a file, so every project without one is asked `OFFER_PROMPT`
+byte for byte."""
+
+TRUST_ONLY_PROMPT_WITH_INSTRUCTIONS = (
+    "Trust this workspace? LocalHarness will load its .localharness config and its {name}, and "
+    "run tools here without asking, except for dangerous actions."
+)
+"""`TRUST_ONLY_PROMPT` with the instructions noun, for a workspace that already exists. Its own
+string for the same reason as the original."""
 
 
 def settle_startup_trust(
@@ -317,9 +336,23 @@ def settle_startup_trust(
     if existing is None and trust.offer_was_declined(target):
         return None
 
+    from localharness.config.project_records import (
+        accept_instructions,
+        display_name,
+        first_candidate,
+    )
+
     snap = trust.executables_snapshot(existing) if existing is not None else []
-    answer = _ask_create((TRUST_ONLY_PROMPT if existing is not None else OFFER_PROMPT)
-                         + _servers_suffix(snap))
+    # The clause is chosen from the same candidate a yes records, so the sentence a person reads
+    # and the file the store is told about can never differ (T-11-32).
+    candidate = first_candidate(root)
+    if existing is not None:
+        question = TRUST_ONLY_PROMPT if candidate is None else (
+            TRUST_ONLY_PROMPT_WITH_INSTRUCTIONS.format(name=display_name(candidate.name)))
+    else:
+        question = OFFER_PROMPT if candidate is None else (
+            OFFER_PROMPT_WITH_INSTRUCTIONS.format(name=display_name(candidate.name)))
+    answer = _ask_create(question + _servers_suffix(snap))
     if answer is None:
         return None  # EOF is not an answer; nothing recorded, nothing created
     trust.record_trust(root, answer)
@@ -330,6 +363,12 @@ def settle_startup_trust(
         _notice(DECLINED_NOTICE.format(root=root))
         return None
     trust.record_executables(root, snap)  # the yes approved exactly the list it showed
+    if candidate is not None:
+        try:
+            accept_instructions(root, candidate)
+        except OSError:
+            # A store that cannot be written costs the record, never the session or the answer.
+            log.warning("could not record the instructions answer for %s", root, exc_info=True)
     if existing is not None:
         return None
     try:
