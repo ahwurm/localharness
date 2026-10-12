@@ -19,7 +19,7 @@ class MessageProvenance(TypedDict):
     """Internal source information; never inferred from model-visible text.
 
     A user message's private ``_lh`` is this; a tool message's is a
-    :class:`ToolProvenance` (see ``Provenance``).
+    :class:`ToolProvenance`.
     """
 
     origin: Literal["human", "harness"]
@@ -50,8 +50,8 @@ class ToolProvenance(TypedDict):
     outcome: ToolOutcome
 
 
-# The documented type of a message's private ``_lh`` key.
-Provenance = MessageProvenance | ToolProvenance
+# A message's private ``_lh`` key is a ``MessageProvenance`` (user messages) or a
+# ``ToolProvenance`` (tool messages); readers test the key they need, never the shape.
 
 
 def human_message(content: Content, subtype: str = "request") -> Message:
