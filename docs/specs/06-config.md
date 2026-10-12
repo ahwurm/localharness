@@ -257,7 +257,8 @@ what the harness launches or imports, which file outside the project it writes, 
 protection is on may be set only by the global `config.yaml` or `overrides.yaml`: `provider.base_url`,
 `provider.api_key`, `extra_endpoints`, `active_endpoint`, `server` (the whole section),
 `org.audit_log_path`, `org.hooks`, `org.enforce_capability_floor`, `org.web_fetch_allow_private`,
-`channels.remote_unattended`, `channels.unattended_max_actions`, `proposer.base_url`,
+`channels.remote_unattended`, `channels.unattended_max_actions`, `instructions.max_ratio`,
+`instructions.children`, `proposer.base_url`,
 `proposer.api_key`, and in an agent file `memory.embedding_model`, `permissions.budget.kill_file`
 and the whole `stuck_detector` section. A workspace value that differs from
 the global one (or from the default, when the global layer is silent) is ignored, and `start` names
@@ -1389,6 +1390,14 @@ class ChannelsConfig(BaseModel):
     )
 
 
+class InstructionsConfig(BaseModel):
+    """How much of a project's own instructions file the session takes in."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    max_ratio: float = Field(default=0.25, gt=0, le=0.5)
+    children: bool = True
+
+
 class HarnessConfig(BaseModel):
     """Root harness configuration. Stored at ~/.localharness/config.yaml."""
     model_config = ConfigDict(frozen=False, extra="forbid")
@@ -1396,6 +1405,7 @@ class HarnessConfig(BaseModel):
     version: str = Field(default="1", description="Config schema version.")
     provider: ProviderConfig
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
+    instructions: InstructionsConfig = Field(default_factory=InstructionsConfig)
     org: OrgConfig = Field(default_factory=OrgConfig)
     server: Optional[ManagedServerConfig] = None
 ```
@@ -1441,6 +1451,15 @@ launched itself, in `auto` as much as in `unattended`. A child's own ceiling (`o
 and its minutes are applied under the same rule. The limit is read at every check, so a local
 operator attaching or leaving takes effect at the next iteration while the calls already in flight
 finish.
+
+**The `instructions:` block** (machine-level only) has two keys. `instructions.max_ratio` (default
+`0.25`, above 0 and at most `0.5`) is the largest share of the context window a project's
+instructions file (`CLAUDE.md`, `AGENTS.md` or `.localharness/INSTRUCTIONS.md`) may take, measured
+in tokens through four characters per token; a file over it is not used and one line names the
+limit. A 65,536-token window gives a 64 KB limit at the default. `instructions.children` (default
+`true`) says whether delegated children receive the same file as the session that started them.
+Both are the machine's: a project's value for either is ignored with a warning naming the key and
+the file, and your global value stands; a project block that restates your values draws no warning.
 
 **`org.children_budget`** (default shown; a project may only lower it): each child agent's own
 ceiling of dispatched tool calls and minutes, `explore` 8 / 3, `web_researcher` 56 / 20,

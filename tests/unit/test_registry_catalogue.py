@@ -282,8 +282,8 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 234, (
-        "catalogue should be 234 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 236, (
+        "catalogue should be 236 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -311,7 +311,9 @@ def test_self_check_leaves_enumerate(components_home):
         "org.context.evict_ratio, org.context.result_cap_ratio and the three "
         "agent.context.* twins) "
         "plus permissions.ask.exec_redirect_env_vars x2 (the env-assignment redirect table, "
-        "org and agent, Phase 10 SHELL-03). "
+        "org and agent, Phase 10 SHELL-03) "
+        "plus instructions.max_ratio and instructions.children x2 (the machine-level "
+        "project-instructions knobs). "
         f"got {len(entries)}"
     )
 
@@ -395,8 +397,8 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 234, (
-        "catalogue should be 234 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 236, (
+        "catalogue should be 236 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -424,7 +426,9 @@ def test_role_sections_leaves_enumerate(components_home):
         "org.context.evict_ratio, org.context.result_cap_ratio and the three "
         "agent.context.* twins) "
         "plus permissions.ask.exec_redirect_env_vars x2 (the env-assignment redirect table, "
-        "org and agent, Phase 10 SHELL-03). "
+        "org and agent, Phase 10 SHELL-03) "
+        "plus instructions.max_ratio and instructions.children x2 (the machine-level "
+        "project-instructions knobs). "
         f"got {len(entries)}"
     )
 

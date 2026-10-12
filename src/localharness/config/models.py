@@ -2376,6 +2376,35 @@ class ChannelsConfig(BaseModel):
     )
 
 
+class InstructionsConfig(BaseModel):
+    """How much of a project's own instructions file (CLAUDE.md, AGENTS.md or
+    .localharness/INSTRUCTIONS.md) the session takes in. Machine-level only: a project's
+    `.localharness/` loads with no prompt, so it may not widen what a file it ships can take from
+    the window or push that file into every child."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    max_ratio: float = Field(
+        default=0.25,
+        gt=0,
+        le=0.5,
+        description=(
+            "The largest share of the context window a project's instructions file may take, "
+            "measured in tokens through four characters per token. Above it the file is not used "
+            "and one line names the limit. 0.25 gives a 64 KB limit on a 65,536-token window. "
+            "Above 0, at most 0.5. Machine-level only."
+        ),
+    )
+
+    children: bool = Field(
+        default=True,
+        description=(
+            "Do delegated children receive the same project instructions file as the session that "
+            "started them? True (the default) gives them the one text; False leaves it to the "
+            "session alone. Machine-level only."
+        ),
+    )
+
+
 class AutosenseConfig(BaseModel):
     """How the harness sizes the window and prompt cache of a server it launches. Machine-level
     only: these set memory margins and the folders searched for model files on this machine's
@@ -2440,6 +2469,11 @@ class HarnessConfig(BaseModel):
     channels: ChannelsConfig = Field(
         default_factory=ChannelsConfig,
         description="Remote-channel rules (the phone app, Discord). Machine-level only.",
+    )
+    instructions: InstructionsConfig = Field(
+        default_factory=InstructionsConfig,
+        description="The project instructions file's size bound and whether children get it. "
+                    "Machine-level only.",
     )
     org: OrgConfig = Field(default_factory=OrgConfig)
     server: Optional[ManagedServerConfig] = Field(

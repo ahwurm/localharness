@@ -63,6 +63,10 @@ CASES = {
     "channels.remote_unattended": ({"channels": {"remote_unattended": False}},
                                    {"channels": {"remote_unattended": True}},
                                    lambda h: h.channels.remote_unattended, False, "True"),
+    "instructions.max_ratio": ({}, {"instructions": {"max_ratio": 0.5}},
+                               lambda h: h.instructions.max_ratio, 0.25, "0.5"),
+    "instructions.children": ({}, {"instructions": {"children": False}},
+                              lambda h: h.instructions.children, True, "False"),
 }
 
 
@@ -113,6 +117,7 @@ def test_restating_or_absent_is_no_warning(tmp_path):
         "extra_endpoints": [PEER], "active_endpoint": None, "server": MACHINE_SERVER,
         "org": {"audit_log_path": "audit.jsonl", "hooks": {}, "web_fetch_allow_private": []},
         "channels": {"remote_unattended": True},
+        "instructions": {"max_ratio": 0.25, "children": True},
     }
     loader, _ = _layers(tmp_path / "restated", g_cfg={"extra_endpoints": [PEER], "server": MACHINE_SERVER},
                         ws_cfg=restated)
