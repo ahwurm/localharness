@@ -6,6 +6,7 @@ Nothing here runs a command: the rows go through ``evaluate`` and ``classify_she
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -122,3 +123,45 @@ NESTED_FUNCTION_HAZARDS = (
 @pytest.mark.parametrize("command", NESTED_FUNCTION_HAZARDS)
 def test_a_function_nested_in_a_function_body_has_its_body_classified(ws, command):
     _check(command, "DENY/ASKU/ASKU", ws)
+
+
+# --------------------------------------------------------------------------- WR-01: the depth guard
+
+NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")
+
+
+@pytest.mark.parametrize("prefix", NEST_PREFIXES)
+def test_a_deep_nest_after_a_misleading_apostrophe_is_read_in_bounded_time(prefix):
+    """WR-01 (it5): a stray ``\\'``, a comment or a heredoc apostrophe made the textual guard think it was quoted,
+    so the nest reached the splitter and took seconds. The classifier's own recursion is capped too."""
+    n = 1000
+    text = prefix + "{ " * n + "true" + "; }" * n
+    started = time.monotonic()
+    try:
+        result = classify_shell(text, SETTINGS)
+    except RecursionError:
+        result = None
+    assert time.monotonic() - started < 5.0
+    if result is not None and n > 64:
+        assert any(segment.destructive for segment in result.segments)
+
+
+@pytest.mark.parametrize(
+    "opener, closer",
+    (("{ ", "; }"), ("( ", " )"), ("echo $( ", " )"), ("`", "`"), ("f() { ", "; }"), ("if true; then ", "; fi")),
+)
+@pytest.mark.parametrize("prefix", NEST_PREFIXES[:3])
+def test_every_nest_shape_under_ten_kilobytes_is_read_in_bounded_time(prefix, opener, closer):
+    n = max(10, (10_000 - len(prefix)) // (len(opener) + len(closer)))
+    text = prefix + opener * n + "true" + closer * n
+    started = time.monotonic()
+    try:
+        classify_shell(text, SETTINGS)
+    except RecursionError:
+        pass
+    assert time.monotonic() - started < 5.0
+
+
+def test_the_classifier_recursion_is_capped_even_when_the_textual_guard_is_fooled():
+    text = "echo '\\'\n" + "( " * 100 + "rm -rf /etc/x" + " )" * 100
+    assert any(segment.destructive for segment in classify_shell(text, SETTINGS).segments)
