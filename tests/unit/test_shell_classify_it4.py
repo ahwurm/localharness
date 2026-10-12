@@ -846,3 +846,16 @@ def test_the_listing_forms_keep_the_read_only_tier(ws, command):
 def test_git_branch_deletion_keeps_its_destructive_key(ws):
     _check("git branch -d x", "DENY/ASKU/ok", ws)
     _check("git branch -D x", "DENY/ASKU/ok", ws)
+
+
+# --------------------------------------------------------------------------- IN-51: ~+ ~- ~user write targets
+
+@pytest.mark.parametrize(
+    "command",
+    ("echo x > ~+/.bashrc", "cd ~-; rm -rf etc", "cp a ~nosuchuser/b", "echo x > ~-/y"),
+)
+def test_a_tilde_form_only_the_shell_can_expand_is_an_unresolvable_target_not_a_crash(ws, command):
+    """IN-51 (it4): ``Path('~+/x').expanduser()`` raises ``RuntimeError``; the target is now unresolvable (outside the
+    boundary, as a ``$VAR`` target is), and ``evaluate`` returns a verdict instead of raising."""
+    words = _words(command, ws).split("/")
+    assert len(words) == 3 and words[0] != "ok" and words[1] != "ok", words
