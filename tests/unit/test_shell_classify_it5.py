@@ -622,6 +622,46 @@ def test_an_oversized_brace_list_holding_a_flag_is_unparsed(ws):
     _check("rm {-r," + items + "} /etc/x", "DENY/ASKU/ASKU", ws)
 
 
+# --------------------------------------------------------------------------- CR-06: data evaluated as code
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "a='x[$(rm -rf /etc/x)]'; echo $((a))",
+        "a='x[$(rm -rf /etc/x)]'; echo ${b[a]}",
+        "a='x[$(rm -rf /etc/x)]'; echo $[a]",
+        "a='$(rm -rf /etc/x)'; echo ${a@P}",
+        "x=(['a[$(rm -rf /etc/x)]']=1)",
+        "let 'a[$(rm -rf /etc/x)]=1'",
+        "printf -v 'a[$(rm -rf /etc/x)]' x",
+        "[[ 1 -eq 'a[$(rm -rf /etc/x)]' ]]",
+        "declare 'a[$(rm -rf /etc/x)]=1'",
+        "unset 'a[$(rm -rf /etc/x)]'",
+        "PS4='$(rm -rf /etc/x) '; set -x; echo hi",
+        "let 'a[`rm -rf /etc/x`]=1'",
+    ),
+)
+def test_a_literal_the_same_text_evaluates_as_code_is_read(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("echo $((i+1))", "ok/ok/ok"),
+        ("echo ${arr[i]}", "ok/ok/ok"),
+        ("echo ${#x}", "ok/ok/ok"),
+        ("echo $(( (a+b)*c ))", "ok/ok/ok"),
+        ("echo 'costs $(5)'", "ok/ok/ok"),
+        ("echo 'costs $(5)'; echo $((1+2))", "DENY/ASK/ok"),
+        ("grep -E '^\\$\\(' f; echo $((1+2))", "ok/ok/ok"),
+        ("git commit -m 'fix $(x)'", "DENY/ASK/ok"),
+    ),
+)
+def test_arithmetic_and_literal_controls_keep_their_verdict(ws, command, expected):
+    _check(command, expected, ws)
+
+
 # --------------------------------------------------------------------------- WR-01: the depth guard
 
 NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")
