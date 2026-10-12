@@ -661,10 +661,26 @@ def test_a_file_the_account_does_not_own_is_used_only_under_a_record(instruction
     monkeypatch.setattr(os, "geteuid", lambda: os.stat(root / "CLAUDE.md").st_uid + 1)
     h = _open(root)
     assert h.start_line is None
-    assert h.summary_entity is None
-    assert h.section(WINDOW) == (None, None)
+    assert h.summary_entity == "CLAUDE.md (not yours; /instructions on)"  # WR-53
+    text, notice = h.section(WINDOW)
+    assert text is None
+    assert notice is not None and notice.cause == "refused" and notice.reason == "not owned by you"
+    assert notice.text == "CLAUDE.md not used (not owned by you); /instructions on"
+    assert h.section(WINDOW) == (None, None)  # once
     pr.accept_instructions(root, pr.first_candidate(root))  # an answered prompt covers any owner
     assert h.section(WINDOW) == (TEXT, None)
+
+
+def test_on_brings_in_a_file_the_account_does_not_own(instructions_home, tmp_path, monkeypatch):
+    """A trusted root asks no question, so `/instructions on` is the way in (WR-53)."""
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    monkeypatch.setattr(os, "geteuid", lambda: os.stat(root / "CLAUDE.md").st_uid + 1)
+    h = _open(root, basis="trusted")
+    assert h.section(WINDOW)[0] is None
+    assert run_instructions_command(h, "on") == "using CLAUDE.md (5.1 KB)"
+    assert h.section(WINDOW) == (TEXT, None)
+    assert h.summary_entity == "CLAUDE.md (not yours; /instructions on)"  # the start's own, unchanged
+    assert _record_of(root)["state"] == "yes"
 
 
 def test_a_shadow_found_at_start_under_a_mark_is_recorded_and_held(instructions_home, tmp_path):

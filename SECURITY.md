@@ -1169,7 +1169,9 @@ first input bubble, or a channel's first reply to a person. A start with `--no-i
 stdin that is not a terminal, writes no record. A file that is not a regular file, that leaves the
 workspace by a link, or that is larger than `instructions.max_ratio` of the context window is not
 used, and the start prints one line when it is too large. A file owned by another account is not
-used by default either: it waits for the trust question.
+used by default either: on a workspace that asks the trust question it waits for that, and on one
+you already trusted (which asks nothing) it waits for `/instructions on`, and the session says so in
+one line (ruling taken on the owner's behalf by the GSD run).
 
 The file is sensed, not asked about. Its bytes are hashed when it is read. A change that no call of
 the harness named (you edited it, or a `git pull` rewrote it) is used with a visible
