@@ -1612,6 +1612,48 @@ def _nesting_too_deep(text: str) -> bool:
     return False
 
 
+EVALUATION_CONTEXT_RE = re.compile(
+    r"\$\(\(|\$\[|\(\(|\blet\b|\bdeclare\b|\btypeset\b|\blocal\b|\bprintf\s+-v|\bunset\b|@P\b|\bPS4=|\$\{[^}]*\["
+    r"|\[\[.*\s-(?:eq|ne|lt|gt|le|ge)\s|=\(\s*\["
+)
+"""Where bash evaluates the VALUE of a variable (or an operand) as code: arithmetic (``$(( ))``, ``$[ ]``, ``(( ))``,
+``let``, ``declare -i``, ``[[ -eq ]]``, an array subscript), ``${v@P}`` and ``PS4``. An array subscript there is
+expanded first, so a literal ``x[$(cmd)]`` runs ``cmd`` (CR-06 it5)."""
+
+
+def _literal_substitutions(
+    text: str, settings: GateSettings, cwd: _Cwd | None
+) -> list[ShellSegment]:
+    """CR-06 (it5): the commands inside single-quoted literals of a text that also evaluates values as code.
+
+    ``a='x[$(rm -rf /etc/x)]'; echo $((a))`` stores inert text and then has bash evaluate it. Only the form where the
+    literal stands in the same command text is read; a value that arrives at run time (``read n < file``) is the
+    residual named in SECURITY.md. The substitutions of each literal are classified as the commands they would be."""
+    found: list[ShellSegment] = []
+    index = 0
+    size = len(text)
+    while index < size:
+        char = text[index]
+        if char == "\\":
+            index += 2
+        elif char == '"':
+            end = index + 1
+            while end < size and text[end] != '"':
+                end += 2 if text[end] == "\\" else 1
+            index = end + 1
+        elif char == "'":
+            end = text.find("'", index + 1)
+            end = size if end == -1 else end
+            literal = text[index + 1 : end]
+            if "$(" in literal or "`" in literal or "${ " in literal:
+                _, lifted = _lift_substitutions(literal, settings, (cwd or _Cwd()).copy())
+                found.extend(lifted)
+            index = end + 1
+        else:
+            index += 1
+    return found
+
+
 def _classify_command_text(
     text: str, settings: GateSettings, cwd: _Cwd | None = None
 ) -> tuple[list[ShellSegment], list[str]]:
@@ -1634,6 +1676,8 @@ def _classify_command_text(
     joined, hazard = _join(text)
     second_cwd = cwd.copy() if (hazard and cwd is not None) else None
     segments, dropped = _classify_text(joined, settings, cwd)
+    if EVALUATION_CONTEXT_RE.search(joined):
+        segments = [*segments, *_literal_substitutions(joined, settings, cwd)]
     if hazard:
         kept, _ = _join(text, strip_comments=False)
         if not kept.startswith(UNPARSED_SHELL_SIGNATURE):
