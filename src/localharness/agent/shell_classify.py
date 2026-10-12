@@ -153,9 +153,6 @@ before it is classified (Phase 10, D-38). Git appends its operands to ``GIT_PAGE
 ``GIT_EXTERNAL_DIFF`` and ``GIT_EDITOR`` — the paths, the file — so ``sort -o`` must be judged
 with an operand present, where it is write-shaped, and ``cat`` stays read-only."""
 
-DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
-"""``timeout``'s positional duration (``timeout 30``, ``timeout 1.5m``) — skipped when peeling."""
-
 SHELL_KEYWORDS = frozenset({
     "if", "then", "elif", "else", "fi", "while", "until", "for", "do", "done",
     "case", "esac", "select", "function", "!", "{", "}", "coproc",
@@ -188,9 +185,6 @@ WRAPPER_VALUE_FLAGS = frozenset({"-n", "-k", "-c", "-u", "-p", "--signal", "--ki
 """Wrapper flags that consume the next argument (``nice -n 10 cmd``, ``timeout -k 5 2 cmd``),
 so the peel does not mistake the value for the wrapped command (PRD §3.2 step 4)."""
 
-WRAPPER_NUMERIC_ARG = frozenset({"timeout"})
-"""Wrappers whose first positional argument is a duration, not the wrapped command."""
-
 WRAPPER_HEAD_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "watch": frozenset({"-n", "--interval"}),
     "flock": frozenset({"-w", "--wait", "--timeout", "-E", "--conflict-exit-code",
@@ -207,6 +201,15 @@ WRAPPER_HEAD_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "env": frozenset({"-u", "--unset", "-C", "--chdir", "-a", "--argv0", "-P"}),
     "time": frozenset({"-f", "--format", "-o", "--output"}),
     "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "ionice": frozenset({"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"}),
+    "stdbuf": frozenset({"-i", "--input", "-o", "--output", "-e", "--error"}),
+    "nohup": frozenset(),
+    "setsid": frozenset(),
+    "unbuffer": frozenset(),
+    "busybox": frozenset(),
+    "toybox": frozenset(),
+    "builtin": frozenset(),
 }
 """Value-taking options PER wrapper, REPLACING :data:`WRAPPER_VALUE_FLAGS` for these heads.
 
@@ -224,9 +227,11 @@ argument. ``exec``'s ``-a NAME`` is the opposite mistake: it DOES take a value (
 wrapped command is given), so ``exec -a NAME rm -rf x`` peeled to ``NAME``. Sources: bash(1)
 SHELL BUILTIN COMMANDS (``command [-pVv]``, ``exec [-cl] [-a name]``)."""
 
-WRAPPER_POSITIONAL_SKIPS: dict[str, int] = {"flock": 1, "chroot": 1}
+WRAPPER_POSITIONAL_SKIPS: dict[str, int] = {"flock": 1, "chroot": 1, "timeout": 1}
 """Wrappers whose first positional is an OPERAND, not the wrapped command: ``flock LOCKFILE CMD``
-(a file or an fd number) and ``chroot DIR CMD``."""
+(a file or an fd number), ``chroot DIR CMD`` and ``timeout DURATION CMD``. The duration is whatever
+``strtod`` reads (``.5``, ``1e1``, ``+1``, ``0x1``, ``1.s``, ``inf``) so it is skipped unread, never matched
+against a pattern that a spelling can slip past (CR-05 it4)."""
 
 WRAPPER_SUBCOMMANDS: dict[str, tuple[str, ...]] = {"poetry": ("run",), "pipx": ("run",)}
 """Wrappers that only wrap under one subcommand. ``poetry run rm -rf x`` runs the ``rm``;
@@ -507,11 +512,21 @@ spellings are matched as a prefix of length two or more (``--op``, ``--open=cmd`
 any one-dash cluster containing ``O`` (``-nO``, ``-Ovim``): over-matching is the safe direction
 (git-grep(1), D-51)."""
 
-XARGS_VALUE_FLAGS = frozenset({"-n", "-I", "-i", "-P", "-d", "-a", "-E", "-s", "-L", "--max-args",
-                               "--replace", "--max-procs", "--delimiter", "--arg-file", "--eof",
-                               "--max-chars", "--max-lines"})
+XARGS_VALUE_FLAGS = frozenset({"-n", "-I", "-P", "-d", "-a", "-E", "-s", "-L", "--max-args",
+                               "--max-procs", "--delimiter", "--arg-file", "--max-chars",
+                               "--process-slot-var"})
 """``xargs`` options that consume the next argument; the first token after them is the
-payload command (PRD §3.2 step 5)."""
+payload command (PRD §3.2 step 5). ``-i``/``-e``/``-l`` and their long forms ``--replace``/``--eof``/
+``--max-lines`` take their value ATTACHED only (``-iREPL``, ``--replace=R``), so ``xargs -i rm`` runs ``rm``
+and is not in this table (CR-05 it4); the optional-value options are in :data:`XARGS_ATTACHED_FLAGS`."""
+
+XARGS_ATTACHED_FLAGS = frozenset({"-i", "-e", "-l", "--replace", "--eof", "--max-lines"})
+XARGS_BOOLEAN_FLAGS = frozenset({
+    "-0", "-o", "-p", "-r", "-t", "-x", "--null", "--open-tty", "--interactive", "--no-run-if-empty",
+    "--verbose", "--exit", "--show-limits", "--help", "--version",
+})
+"""The rest of xargs(1)'s options. A token the three tables do not know is an option this classifier does not
+read, so where its operand ends is unknown: the payload is the unparsed placeholder (CR-05 it4)."""
 
 PARALLEL_VALUE_FLAGS = frozenset({"-j", "--jobs", "-n", "--max-args", "-N", "-I", "--replace",
                                   "-L", "--max-lines", "-S", "--sshlogin", "--delay", "--timeout",
@@ -2975,6 +2990,20 @@ def _env_value_option(rest: list[str], index: int) -> tuple[int, str, str] | Non
     return (2 if has_value else 1), option, rest[index + 1] if has_value else ""
 
 
+def _takes_next_value(token: str, value_flags: frozenset[str]) -> bool:
+    """Does this option token consume the NEXT argument as its value (``-n 5``, ``--adjustment 5``)?
+
+    A getopt long option may be abbreviated to any unambiguous prefix (``--adj 5``), so a ``--long`` token that
+    is a prefix of a value-taking long option counts as that option (CR-05 it4). A ``--long=value`` or an
+    attached short value (``-n5``) is one token and takes nothing more."""
+    if token in value_flags:
+        return True
+    return (
+        token.startswith("--") and len(token) > 2 and "=" not in token
+        and any(flag.startswith(token) for flag in value_flags if flag.startswith("--"))
+    )
+
+
 def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str], list[str]]:
     """PRD §3.2 step 4: peel wrappers down to the command they wrap.
 
@@ -3020,10 +3049,7 @@ def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]
                 index += 1  # `time ! cmd` negates the pipeline; the command is what follows
                 continue
             if token.startswith("-") and token != "-":
-                index += 2 if token in value_flags else 1
-                continue
-            if head in WRAPPER_NUMERIC_ARG and DURATION_RE.match(token):
-                index += 1
+                index += 2 if _takes_next_value(token, value_flags) else 1
                 continue
             if skips:
                 skips -= 1
@@ -3129,8 +3155,17 @@ def _command_payload(argv: list[str]) -> list[str]:
     index = 1
     while index < len(argv):
         token = argv[index]
+        if token == "--":
+            index += 1
+            break
         if token.startswith("-") and token != "-":
-            index += 2 if token in value_flags else 1
+            if argv[0] == "xargs":
+                consumed = _xargs_option(argv, index)
+                if consumed is None:
+                    return [UNPARSED_SHELL_SIGNATURE]
+                index += consumed
+                continue
+            index += 2 if _takes_next_value(token, value_flags) else 1
             continue
         break
     payload = argv[index:]
@@ -3138,6 +3173,37 @@ def _command_payload(argv: list[str]) -> list[str]:
         if separator in payload:
             payload = payload[: payload.index(separator)]
     return payload
+
+
+def _xargs_option(argv: list[str], index: int) -> int | None:
+    """How many tokens the ``xargs`` option at ``argv[index]`` takes, or None if it is not one this knows."""
+    token = argv[index]
+    if token.startswith("--"):
+        name = token.split("=", 1)[0]
+        longs = [flag for flag in (*XARGS_VALUE_FLAGS, *XARGS_ATTACHED_FLAGS, *XARGS_BOOLEAN_FLAGS)
+                 if flag.startswith("--") and flag.startswith(name)]
+        if name in longs:
+            longs = [name]
+        if len(longs) != 1:
+            return None
+        flag = longs[0]
+        if flag in XARGS_VALUE_FLAGS and "=" not in token:
+            return 2 if index + 1 < len(argv) else 1
+        return 1
+    position = 1
+    while position < len(token):
+        flag = f"-{token[position]}"
+        if flag in XARGS_BOOLEAN_FLAGS:
+            position += 1
+            continue
+        if flag in XARGS_ATTACHED_FLAGS:
+            return 1  # the rest of the cluster is its value
+        if flag in XARGS_VALUE_FLAGS:
+            if position + 1 < len(token):
+                return 1  # attached value (`-n1`, `-I{}`)
+            return 2 if index + 1 < len(argv) else 1
+        return None
+    return 1
 
 
 def _inline_payloads(argv: list[str], settings: GateSettings) -> list[str]:
@@ -3160,7 +3226,10 @@ def _inline_by_nature_payload(argv: list[str]) -> list[str]:
     only a variable (``eval $CMD``) recurses to an unfamiliar segment, which is what ``bash -c
     "$CMD"`` already does, because neither one can be resolved without running it.
     """
-    text = " ".join(argv[1:]).strip()
+    rest = argv[1:]
+    if rest[:1] == ["--"]:
+        rest = rest[1:]  # `eval -- CMD`: bash takes the `--` as the end of options and runs CMD (CR-05 it4)
+    text = " ".join(rest).strip()
     return [text] if text else []
 
 
