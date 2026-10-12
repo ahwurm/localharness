@@ -31,6 +31,31 @@ _COULD_NOT_RUN_EXIT_CODES = frozenset({126, 127})
 # segfaulting child is a failure on Linux and a success on Windows, for the same crash.
 _WINDOWS_ABNORMAL_EXIT_FLOOR = 0x8000_0000
 
+# The longest a single bash_exec call may run. One source for the schema maximum, the clamp and
+# the retry sentence a timed-out call carries.
+BASH_TIMEOUT_MAX_S = 300.0
+
+
+def _timeout_result(timeout: float, command: str) -> ToolResult:
+    """The result of a command that outran its clamped ``timeout``.
+
+    Below ``BASH_TIMEOUT_MAX_S`` a longer timeout is possible, so both fields carry the one-line
+    retry hint. It goes on ``error`` as well as ``output`` because the loop shows the model
+    ``[tool error] `` plus ``error`` for a failed call and never reads ``output``. A call already
+    at the maximum gets the fact alone.
+    """
+    suffix = (
+        f"\nretry with timeout_s up to {BASH_TIMEOUT_MAX_S:g} if the command needs longer."
+        if timeout < BASH_TIMEOUT_MAX_S
+        else ""
+    )
+    return ToolResult(
+        output=f"Command timed out after {timeout}s: {command}" + suffix,
+        success=False,
+        error=f"Timeout after {timeout}s" + suffix,
+        error_type="timeout_error",
+    )
+
 
 def _could_not_run(rc: int) -> bool:
     """Whether an exit code means the command never ran, rather than ran and said no."""
@@ -247,10 +272,10 @@ class BashExecTool(Tool):
                     },
                     "timeout_s": {
                         "type": "number",
-                        "description": "Command timeout in seconds. Max 300.",
+                        "description": f"Command timeout in seconds. Max {BASH_TIMEOUT_MAX_S:g}.",
                         "default": 60.0,
                         "minimum": 1.0,
-                        "maximum": 300.0,
+                        "maximum": BASH_TIMEOUT_MAX_S,
                     },
                     "working_dir": {
                         "type": "string",
@@ -292,7 +317,7 @@ class BashExecTool(Tool):
         if not cwd.exists():
             return self.err(f"working_dir does not exist: {cwd}")
 
-        timeout = min(timeout_s, 300.0)
+        timeout = min(timeout_s, BASH_TIMEOUT_MAX_S)
         try:
             bash = _find_bash()
             if not bash:
@@ -332,12 +357,7 @@ class BashExecTool(Tool):
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                return ToolResult(
-                    output=f"Command timed out after {timeout}s: {command}",
-                    success=False,
-                    error=f"Timeout after {timeout}s",
-                    error_type="timeout_error",
-                )
+                return _timeout_result(timeout, command)
             finally:
                 # Timeout, cancellation, or any other escape: the child never outlives this call.
                 await _kill_and_reap(proc, job)
