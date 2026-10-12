@@ -8,7 +8,6 @@ instructions record. Where no file is found, every question is asked byte for by
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 from pathlib import Path
@@ -26,10 +25,11 @@ from localharness.cli.workspace import (
     TRUST_ONLY_PROMPT_WITH_INSTRUCTIONS,
     settle_startup_trust,
 )
+from localharness.agent.gate import PermissionGate
+from localharness.agent.gate_types import Decision, PermissionRequest
 from localharness.config import trust
-from localharness.config.project_records import read_instructions
-from localharness.config.project_records import store_path
-from tests.unit.instructions_support import instructions_home  # noqa: F401
+from localharness.config.grants import GrantStore
+from localharness.config.project_records import read_instructions, store_path
 
 OFFER_CLAUSE = (
     "Trust this workspace? LocalHarness will keep its state in ./.localharness here, load that "
@@ -53,7 +53,7 @@ OUTSIDE_TRUST_QUESTION = (
 
 
 @pytest.fixture
-def project(tmp_path, monkeypatch, fake_home, instructions_home) -> Path:
+def project(tmp_path, monkeypatch, fake_home) -> Path:
     """A hermetic `$HOME` with the global layer and a project directory with NO workspace."""
     home = tmp_path / "home"
     (home / ".localharness").mkdir(parents=True)
@@ -97,6 +97,7 @@ def test_the_constants_are_the_fixed_texts():
     assert OFFER_PROMPT_WITH_INSTRUCTIONS.format(name="CLAUDE.md") == OFFER_CLAUSE
     assert TRUST_ONLY_PROMPT_WITH_INSTRUCTIONS.format(name="AGENTS.md") == TRUST_ONLY_CLAUSE
     # the originals are still their own strings
+    assert session_trust.TRUST_QUESTION_WITH_INSTRUCTIONS.format(name="CLAUDE.md") == SESSION_CLAUSE
     assert OFFER_PROMPT.endswith("load that config, and run tools without asking except for "
                                  "dangerous actions.")
 
@@ -239,3 +240,165 @@ def test_a_store_failure_while_recording_costs_the_record_never_the_answer(
 
 def test_the_outside_workspace_question_is_unchanged_byte_for_byte():
     assert ws_mod.TRUST_QUESTION == OUTSIDE_TRUST_QUESTION
+    assert session_trust.TRUST_QUESTION != ws_mod.TRUST_QUESTION
+
+
+# ------------------------------------------------------------------ the session-trust question
+
+
+class _Handle:
+    """The `ProjectInstructions` surface `establish_session_trust` uses: the display name, and the
+    two calls a yes and a no make."""
+
+    def __init__(self, name: str = "CLAUDE.md", *, raises: bool = False) -> None:
+        self.state = SimpleNamespace(name=name)
+        self.calls: list[tuple] = []
+        self._raises = raises
+
+    def set_state(self, value: str) -> None:
+        self.calls.append(("set_state", value))
+        if self._raises:
+            raise OSError("store unwritable")
+
+    def decline(self) -> None:
+        self.calls.append(("decline",))
+        if self._raises:
+            raise OSError("store unwritable")
+
+
+def _gate(tmp_path: Path, boundary: Path, asker=None, mode: str = "auto") -> PermissionGate:
+    return PermissionGate(
+        boundary=boundary,
+        workspace=boundary,
+        grants=GrantStore(tmp_path / "grants.yaml"),
+        mode=mode,  # type: ignore[arg-type]
+        asker=asker,
+        channel_name="test",
+    )
+
+
+def _asker(kind: str, seen: list):
+    async def _ask(request: PermissionRequest) -> Decision:
+        seen.append(request)
+        return Decision(kind=kind)
+
+    return _ask
+
+
+@pytest.fixture
+def fresh(tmp_path) -> Path:
+    root = tmp_path / "fresh"
+    root.mkdir()
+    return root
+
+
+async def test_the_session_question_carries_the_clause_and_a_yes_sets_the_state(tmp_path, fresh):
+    seen: list[PermissionRequest] = []
+    handle = _Handle()
+    gate = _gate(tmp_path, fresh, asker=_asker("allow_once", seen))
+
+    mode = await session_trust.establish_session_trust(gate, instructions=handle)
+
+    assert mode == "auto"
+    assert len(seen) == 1, "one question, never a second"
+    assert seen[0].reason == SESSION_CLAUSE
+    assert seen[0].display.startswith(SESSION_CLAUSE)
+    assert trust.is_trusted_tree(fresh) is True
+    assert handle.calls == [("set_state", "yes")]
+
+
+async def test_a_session_no_declines_the_file_and_records_the_no(tmp_path, fresh):
+    seen: list[PermissionRequest] = []
+    handle = _Handle()
+    gate = _gate(tmp_path, fresh, asker=_asker("reject_once", seen))
+
+    mode = await session_trust.establish_session_trust(gate, instructions=handle)
+
+    assert mode == session_trust.UNTRUSTED_MODE
+    assert len(seen) == 1
+    assert trust.is_trusted_tree(fresh) is False
+    assert handle.calls == [("decline",)], "set_state is never called on a no"
+
+
+async def test_without_a_handle_the_request_is_the_original_question(tmp_path, fresh):
+    seen: list[PermissionRequest] = []
+    gate = _gate(tmp_path, fresh, asker=_asker("allow_once", seen))
+
+    assert await session_trust.establish_session_trust(gate) == "auto"
+
+    assert seen[0].reason == session_trust.TRUST_QUESTION
+    assert seen[0].display.startswith(session_trust.TRUST_QUESTION)
+
+
+async def test_a_handle_with_no_name_asks_the_original_question(tmp_path, fresh):
+    seen: list[PermissionRequest] = []
+    gate = _gate(tmp_path, fresh, asker=_asker("allow_once", seen))
+
+    await session_trust.establish_session_trust(gate, instructions=_Handle(name=""))
+
+    assert seen[0].reason == session_trust.TRUST_QUESTION
+
+
+async def test_a_recorded_no_declines_the_file_and_does_not_ask(tmp_path, fresh):
+    trust.record_trust(fresh, False)
+    seen: list[PermissionRequest] = []
+    handle = _Handle()
+    gate = _gate(tmp_path, fresh, asker=_asker("allow_once", seen))
+
+    mode = await session_trust.establish_session_trust(gate, instructions=handle)
+
+    assert mode == session_trust.UNTRUSTED_MODE
+    assert seen == []
+    assert handle.calls == [("decline",)]
+
+
+async def test_a_recorded_yes_asks_nothing_and_never_touches_the_handle(tmp_path, fresh):
+    trust.record_trust(fresh, True)
+    seen: list[PermissionRequest] = []
+    handle = _Handle()
+    gate = _gate(tmp_path, fresh, asker=_asker("allow_once", seen))
+
+    assert await session_trust.establish_session_trust(gate, instructions=handle) == "auto"
+
+    assert seen == []
+    assert handle.calls == []
+
+
+async def test_a_channel_that_cannot_ask_never_touches_the_handle(tmp_path, fresh):
+    handle = _Handle()
+    gate = _gate(tmp_path, fresh, asker=None)
+
+    assert await session_trust.establish_session_trust(gate, instructions=handle) == (
+        session_trust.UNTRUSTED_MODE
+    )
+
+    assert handle.calls == []
+    assert trust.is_trusted_tree(fresh) is None
+
+
+async def test_a_handle_that_raises_fails_neither_answer(tmp_path, fresh, caplog):
+    seen: list[PermissionRequest] = []
+    yes = _gate(tmp_path, fresh, asker=_asker("allow_once", seen))
+    with caplog.at_level(logging.WARNING, logger=session_trust.log.name):
+        assert await session_trust.establish_session_trust(
+            yes, instructions=_Handle(raises=True)
+        ) == "auto"
+    assert trust.is_trusted_tree(fresh) is True
+    assert any("project instructions" in r.getMessage() for r in caplog.records)
+
+    other = tmp_path / "other"
+    other.mkdir()
+    no = _gate(tmp_path, other, asker=_asker("reject_once", []))
+    assert await session_trust.establish_session_trust(
+        no, instructions=_Handle(raises=True)
+    ) == session_trust.UNTRUSTED_MODE
+    assert trust.is_trusted_tree(other) is False
+
+
+async def test_a_mode_nobody_gates_never_touches_the_handle(tmp_path, fresh):
+    handle = _Handle()
+    gate = _gate(tmp_path, fresh, asker=_asker("allow_once", []), mode="guarded")
+
+    assert await session_trust.establish_session_trust(gate, instructions=handle) == "guarded"
+
+    assert handle.calls == []
