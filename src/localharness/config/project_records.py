@@ -796,7 +796,8 @@ class _Awaiting:
 class _Marks:
     """Open marks seen at one call: this handle's own, other sessions' live ones, dead ones.
 
-    Under ``--no-input`` the dead ones are treated as absent (and never cleared)."""
+    A dead session's mark counts as a mark with or without ``--no-input`` (UF-2); under it nothing is
+    written, so the dead ones are never cleared from the store."""
 
     own: bool
     live: frozenset[str]
@@ -987,8 +988,6 @@ class ProjectInstructions:
             except Exception:  # noqa: BLE001 — cannot tell who is alive: nobody's mark is dead
                 alive = set(foreign)
             live, dead = foreign & alive, foreign - alive
-        if self._no_input:
-            dead = set()
         return _Marks(own, frozenset(live), frozenset(dead))
 
     def _set_last(
