@@ -174,3 +174,24 @@ def test_an_ordinary_inline_config_is_unchanged():
 def test_no_index_reports_operands_on_either_side_of_the_flag():
     """git permutes options, so `git diff /etc/shadow --no-index /dev/null` reads /etc/shadow."""
     assert _targets("git diff /etc/shadow --no-index /dev/null") == ("/etc/shadow", "/dev/null")
+
+
+# ------------------------------------------------------------------ continuations (D-54, T-10-16)
+
+def test_a_dangerous_word_split_by_a_continuation_still_classifies_dangerous():
+    split = _segments("git conf\\\nig --global core.pager x")
+    joined = _segments("git config --global core.pager x")
+    assert [s.argv for s in split] == [s.argv for s in joined]
+    assert split[0].argv[1] == "config"
+    assert _targets("git diff --out\\\nput=/tmp/x") == _targets("git diff --output=/tmp/x") == ("/tmp/x",)
+
+
+def test_ordinary_multiline_commands_classify_as_their_joined_form():
+    assert [s.argv for s in _segments("git log \\\n  --oneline \\\n  -5")] == [
+        s.argv for s in _segments("git log   --oneline   -5")
+    ]
+    assert [s.argv for s in _segments("ls -la\ngit status")] == [("ls", "-la"), ("git", "status")]
+
+
+def test_a_continuation_inside_single_quotes_is_kept():
+    assert _segments("echo 'a\\\nb'")[0].argv == ("echo", "a\\\nb")
