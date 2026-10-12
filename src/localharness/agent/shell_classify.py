@@ -1282,7 +1282,7 @@ FUNSUB_OPENERS = (" ", "\t", "\n", "|")
 """What follows the ``${`` of a bash 5.3 command substitution that needs no subshell (``${ cmd; }``,
 ``${| cmd; }``). Not the empty string: ``${`` at the end of the text opens nothing."""
 
-GROUP_BRACE_BEFORE = ("", " ", "\t", "\n", ";", "&", "|", "(")
+GROUP_BRACE_BEFORE = ("", " ", "\t", "\n", ";", "&", "|", "(", ")")
 GROUP_BRACE_AFTER = (" ", "\t", "\n", "")
 """What may stand either side of the ``{`` / ``}`` of a ``{ … }`` group: it is a word of its own, so a
 blank, an operator or the start of the command before it (``{ ls; }``, ``{ ls;}``), a blank or the end after

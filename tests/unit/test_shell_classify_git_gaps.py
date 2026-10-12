@@ -560,3 +560,15 @@ def test_a_write_after_a_cd_the_classifier_cannot_read_is_never_silent_in_guarde
 @pytest.mark.parametrize("command", ("cd sub && echo x > f", "cd ./sub/.. && echo x > f", "echo x > f"))
 def test_a_write_after_a_readable_cd_inside_the_workspace_is_unchanged(command, ws):
     assert _verdict(command, ws, "guarded").verdict is Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command", (
+    "f(){ rm -rf /etc/x; }; f",
+    "f() { rm -rf /etc/x; }; f",
+    "function f { rm -rf /etc/x; }; f",
+    "{ rm -rf /etc/x;}",
+    "true && { rm -rf /etc/x; touch y; }",
+    "if true; then { rm -rf /etc/x; }; fi",
+))
+def test_a_brace_group_in_any_ordinary_spelling_is_recursed_into(command):
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
