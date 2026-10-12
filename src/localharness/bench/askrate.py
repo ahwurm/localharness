@@ -92,6 +92,7 @@ BUILTIN_TOOL_FAMILIES: Mapping[str, GateFamily] = {
     "agent": "delegate",
     "web_search": "network", "web_fetch": "network", "web_page_query": "network",
     "memory_search": "allow", "memory_get": "allow", "remember": "allow",
+    "git_read": "allow",
 }
 """Each builtin schema's declared `gate_family` (SAFE-01), pinned equal to the live declarations
 by tests/unit/test_tool_declarations.py.
