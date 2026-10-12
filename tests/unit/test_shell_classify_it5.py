@@ -528,6 +528,63 @@ def test_a_function_or_trap_without_a_directory_change_leaves_the_directory_alon
     assert not last.unresolvable_destructive
 
 
+# --------------------------------------------------------------------------- CR-04: wrapper option tables
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "poetry -n run rm -rf /etc/x",
+        "poetry -C x run rm -rf /etc/x",
+        "poetry --directory x run rm -rf /etc/x",
+        "poetry -P x run rm -rf /etc/x",
+        "poetry run rm -rf /etc/x",
+        "poetry --no-interaction run rm -rf /etc/x",
+        "poetry --frobnicate run rm -rf /etc/x",
+        "pipx run --spec foo rm -rf /etc/x",
+        "pipx run --frobnicate rm -rf /etc/x",
+        "systemd-run -H host rm -rf /etc/x",
+        "systemd-run --service-type oneshot rm -rf /etc/x",
+        "systemd-run --on-boot 1s rm -rf /etc/x",
+        "systemd-run --on-unit-active 1s rm -rf /etc/x",
+        "systemd-run --timer-property X rm -rf /etc/x",
+        "systemd-run --scope rm -rf /etc/x",
+        "systemd-run --frobnicate rm -rf /etc/x",
+        "uv run --env-file .env rm -rf /etc/x",
+        "uv run --extra dev rm -rf /etc/x",
+        "uv run --group dev rm -rf /etc/x",
+        "uv run --with x rm -rf /etc/x",
+        "parallel -a list.txt rm -rf {}",
+        "parallel --retries 3 rm -rf {} ::: a",
+        "parallel --workdir /tmp rm -rf {} ::: a",
+        "parallel -j4 rm -rf {} ::: a",
+        "ssh -B eth0 host 'rm -rf /etc/x'",
+        "ssh -vp 22 host 'rm -rf /etc/x'",
+        "ssh -o K=V -p 22 host 'rm -rf /etc/x'",
+        "ssh -frobnicate host 'rm -rf /etc/x'",
+        "caffeinate -w 1 rm -rf /etc/x",
+    ),
+)
+def test_a_wrapper_option_the_peel_misread_no_longer_hides_the_command(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command, signature",
+    (
+        ("uv run --extra dev pytest", "uv run pytest"),
+        ("uv run --env-file .env python app.py", "uv run python <script>"),
+        ("uv run --with x python app.py", "uv run python <script>"),
+        ("uv run --group dev pytest -q", "uv run pytest"),
+        ("poetry run pytest", "pytest"),
+        ("poetry -n run pytest", "pytest"),
+        ("systemd-run --user --scope ls", "ls"),
+        ("systemd-run -H host ls", "ls"),
+    ),
+)
+def test_ordinary_uses_of_those_wrappers_sign_as_the_wrapped_command(ws, command, signature):
+    assert _segments(command)[0].signature == signature
+
+
 # --------------------------------------------------------------------------- WR-01: the depth guard
 
 NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")

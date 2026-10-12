@@ -54,6 +54,7 @@ from typing import Mapping, NamedTuple, Optional, Sequence
 
 from .gate_types import (
     COMMAND_VALUED_ENV_VARS,
+    COMPOSING_RUNNERS,
     DOTTED_VARIANT_SEPARATOR,
     ENV_REDIRECT_EXCLUDED,
     GateSettings,
@@ -193,15 +194,46 @@ WRAPPER_VALUE_FLAGS = frozenset({"-n", "-k", "-c", "-u", "-p", "--signal", "--ki
 """Wrapper flags that consume the next argument (``nice -n 10 cmd``, ``timeout -k 5 2 cmd``),
 so the peel does not mistake the value for the wrapped command (PRD §3.2 step 4)."""
 
+SYSTEMD_RUN_VALUE_FLAGS = frozenset({
+    "-u", "--unit", "-p", "--property", "-E", "--setenv", "--slice", "--description", "--uid", "--gid", "--nice",
+    "--working-directory", "-M", "--machine", "-H", "--host", "--on-active", "--on-calendar", "--on-boot",
+    "--on-startup", "--on-unit-active", "--on-unit-inactive", "--timer-property", "--service-type",
+})
+SYSTEMD_RUN_BOOLEAN_FLAGS = frozenset({
+    "--", "-h", "--help", "--version", "--user", "--system", "--scope", "--no-block", "--no-ask-password",
+    "-q", "--quiet", "-t", "--pty", "-P", "--pipe", "-G", "--collect", "-r", "--remain-after-exit", "-d",
+    "--same-dir", "-S", "--shell", "--wait", "--send-sighup", "--slice-inherit", "--expand-environment",
+    "--on-clock-change", "--on-timezone-change", "--no-pager", "--no-legend", "--json", "--background",
+})
+POETRY_VALUE_FLAGS = frozenset({"-C", "--directory", "-P", "--project"})
+POETRY_BOOLEAN_FLAGS = frozenset({
+    "--", "-h", "--help", "-q", "--quiet", "-v", "-vv", "-vvv", "--verbose", "-V", "--version", "--ansi", "--no-ansi",
+    "-n", "--no-interaction", "--no-plugins", "--no-cache",
+})
+PIPX_VALUE_FLAGS = frozenset({"--spec", "--python", "--pip-args", "--index-url", "--path"})
+PIPX_BOOLEAN_FLAGS = frozenset({
+    "--", "-h", "--help", "-q", "--quiet", "-v", "--verbose", "--version", "--no-cache", "--system-site-packages",
+    "--pypackages", "--skip-maintenance",
+})
+STRICT_WRAPPER_OPTIONS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "systemd-run": (SYSTEMD_RUN_VALUE_FLAGS, SYSTEMD_RUN_BOOLEAN_FLAGS),
+    "poetry": (POETRY_VALUE_FLAGS, POETRY_BOOLEAN_FLAGS),
+    "pipx": (PIPX_VALUE_FLAGS, PIPX_BOOLEAN_FLAGS),
+}
+"""Wrappers whose option set is closed and small enough to list: (value-taking, boolean) options from systemd-run(1),
+``poetry --help`` and ``pipx --help``. An option in neither table is not read as "a boolean" (the guess that hid
+``rm -rf`` behind ``poetry -n run``): the peeled command is the unparsed-shell placeholder (CR-04 it5). Long
+options match by unique-prefix abbreviation, as getopt does; a short cluster is read letter by letter."""
+
 WRAPPER_HEAD_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "watch": frozenset({"-n", "--interval"}),
     "flock": frozenset({"-w", "--wait", "--timeout", "-E", "--conflict-exit-code",
                         "-c", "--command"}),
-    "chroot": frozenset({"--userspec", "--groups"}),
-    "caffeinate": frozenset({"-t"}),
-    "systemd-run": frozenset({"-u", "--unit", "-p", "--property", "-E", "--setenv", "--slice",
-                              "--description", "--uid", "--gid", "--nice", "--working-directory",
-                              "-M", "--machine", "--on-active", "--on-calendar"}),
+    "chroot": frozenset({"--userspec", "--groups", "-u", "-g", "-G"}),
+    "caffeinate": frozenset({"-t", "-w"}),
+    "systemd-run": SYSTEMD_RUN_VALUE_FLAGS,
+    "poetry": POETRY_VALUE_FLAGS,
+    "pipx": PIPX_VALUE_FLAGS,
     "uvx": frozenset({"--from", "--with", "--python", "-p", "--project", "--directory"}),
     "command": frozenset(),
     "exec": frozenset({"-a"}),
@@ -467,13 +499,20 @@ of its braces and fields — false asks on a command that is usually a read. The
 inside a program nobody parsed is exactly why) and lose the recursion. The same split
 :data:`NON_SHELL_INTERPRETERS` makes for ``python3 -c``."""
 
-COMPOSING_RUNNERS = frozenset({"uv run"})
-"""Commands that run another command in a changed environment. PRD §3.2 step 7 lists
-``uv run`` as its own interpreter key, so the runner composes with the inner signature
-instead of peeling away (see the module docstring)."""
-
-UV_RUN_VALUE_FLAGS = frozenset({"--with", "--python", "-p", "--project", "--directory", "--package"})
-"""``uv run`` flags that take a value, skipped when finding the inner command."""
+UV_RUN_VALUE_FLAGS = frozenset({
+    "--with", "--python", "-p", "--project", "--directory", "--package", "--extra", "--group", "--no-group",
+    "--only-group", "--with-editable", "--with-requirements", "--env-file", "--index", "--default-index",
+    "--index-url", "-i", "--extra-index-url", "--find-links", "-f", "--constraints", "-c", "--overrides",
+    "--build-constraints", "--index-strategy", "--keyring-provider", "--resolution", "--prerelease",
+    "--exclude-newer", "--upgrade-package", "-P", "--reinstall-package", "--no-binary-package",
+    "--no-build-package", "--link-mode", "--config-setting", "-C", "--refresh-package", "--cache-dir",
+    "--color", "--config-file", "--allow-insecure-host", "--python-platform", "--python-preference",
+    "--fork-strategy", "--no-install-package", "--script-dependencies",
+})
+"""``uv run`` flags that take a value, skipped when finding the inner command (uv-run(1); CR-04 it5 added the
+dependency, index and environment options: ``uv run --extra dev pytest`` is ``uv run pytest``, not ``uv run dev``).
+An option not listed is read as a boolean, which is the one place this table can still be wrong: ordinary uv runs
+use a dozen flags and a new uv adds more, so an unknown option is not made an ungrantable ask (named residual)."""
 
 FIND_PAYLOAD_PRIMARIES = ("-exec", "-execdir", "-ok", "-okdir")
 """PRD §3.2 step 5: ``find`` primaries whose argument list up to ``;`` or ``+`` is a command."""
@@ -546,7 +585,10 @@ read, so where its operand ends is unknown: the payload is the unparsed placehol
 PARALLEL_VALUE_FLAGS = frozenset({"-j", "--jobs", "-n", "--max-args", "-N", "-I", "--replace",
                                   "-L", "--max-lines", "-S", "--sshlogin", "--delay", "--timeout",
                                   "--joblog", "--results", "--tmpdir", "--colsep", "-d",
-                                  "--delimiter"})
+                                  "--delimiter", "-a", "--arg-file", "--retries", "--workdir", "--wd",
+                                  "--tagstring", "--load", "--halt", "--nice", "--sshloginfile", "--slf",
+                                  "--basefile", "--bf", "--return", "--block", "--block-size", "--recstart",
+                                  "--recend", "--memfree", "--memsuspend", "--env", "--trc", "--max-replace-args"})
 """GNU ``parallel`` options that consume the next argument (parallel(1)), same role as
 :data:`XARGS_VALUE_FLAGS`."""
 
@@ -3199,6 +3241,23 @@ def _takes_next_value(token: str, value_flags: frozenset[str]) -> bool:
     )
 
 
+def _wrapper_option_known(token: str, valued: frozenset[str], booleans: frozenset[str]) -> bool:
+    """Is this option token in a wrapper's tables (:data:`STRICT_WRAPPER_OPTIONS`)?"""
+    if token in valued or token in booleans:
+        return True
+    if token.startswith("--"):
+        name = token.split("=", 1)[0]
+        longs = [flag for flag in (*valued, *booleans) if flag.startswith("--") and len(flag) > 2]
+        return len(name) > 2 and any(flag.startswith(name) for flag in longs)
+    for letter in token[1:]:
+        flag = f"-{letter}"
+        if flag in valued:
+            return True  # the rest of the cluster is its value
+        if flag not in booleans:
+            return False
+    return True
+
+
 def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str], list[str]]:
     """PRD §3.2 step 4: peel wrappers down to the command they wrap.
 
@@ -3247,6 +3306,8 @@ def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]
                 index += 1  # `time ! cmd` negates the pipeline; the command is what follows
                 continue
             if token.startswith("-") and token != "-":
+                if head in STRICT_WRAPPER_OPTIONS and not _wrapper_option_known(token, *STRICT_WRAPPER_OPTIONS[head]):
+                    return [UNPARSED_SHELL_SIGNATURE], assignments, directories
                 index += 2 if _takes_next_value(token, value_flags) else 1
                 continue
             if skips:
@@ -3259,6 +3320,15 @@ def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]
             if index >= len(rest) or rest[index] not in required:
                 return argv, assignments, directories
             index += 1
+            # the subcommand's own options (`pipx run --spec X app`) end where the command starts; one the table does
+            # not know hides where that is
+            while index < len(rest) and rest[index].startswith("-") and rest[index] != "-":
+                if rest[index] == "--":
+                    index += 1
+                    break
+                if head not in STRICT_WRAPPER_OPTIONS or not _wrapper_option_known(rest[index], *STRICT_WRAPPER_OPTIONS[head]):
+                    return [UNPARSED_SHELL_SIGNATURE], assignments, directories
+                index += 2 if _takes_next_value(rest[index], value_flags) else 1
         if index >= len(rest):
             return argv, assignments, directories
         assignments.extend(level)
@@ -3312,6 +3382,33 @@ def _find_payloads(argv: list[str]) -> tuple[list[list[str]], bool]:
     return payloads, delete
 
 
+SSH_VALUE_LETTERS = "BbcDEeFIiJLlmOopPQRSWw"
+SSH_BOOLEAN_LETTERS = "1246AaCfGgKkMNnqsTtVvXxYy"
+
+
+def _ssh_options_end(rest: Sequence[str]) -> int | None:
+    """Index of the HOST in ssh's argument list, or None when an option is not one ssh(1) documents.
+
+    A cluster may end in an option that takes a value (``-vp 22``) or carry it attached (``-p22``)."""
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token == "--":
+            return index + 1
+        if not token.startswith("-") or token == "-":
+            return index
+        index += 1
+        letters = token[1:]
+        for position, letter in enumerate(letters):
+            if letter in SSH_VALUE_LETTERS:
+                if position == len(letters) - 1:
+                    index += 1  # the value is the next token
+                break
+            if letter not in SSH_BOOLEAN_LETTERS:
+                return None
+    return index
+
+
 def _remote_command(argv: list[str]) -> tuple[list[str], bool] | None:
     """The command ``ssh``/``docker exec`` will run elsewhere — (tokens, the remote side is a
     shell) — or None if this is neither.
@@ -3328,6 +3425,11 @@ def _remote_command(argv: list[str]) -> tuple[list[str], bool] | None:
         if tuple(rest[: len(prefix)]) != prefix:
             return None
         rest = rest[len(prefix):]
+    if argv[0] == "ssh":
+        end = _ssh_options_end(rest)
+        if end is None:  # an option ssh(1) does not list: where the host is, is unknown (CR-04 it5)
+            return [UNPARSED_SHELL_SIGNATURE], shell_joined
+        return (rest[end + 1:] if end < len(rest) else []), shell_joined
     index = 0
     while index < len(rest):
         token = rest[index]
