@@ -64,11 +64,32 @@ class ContextConfig:
     at startup. This is the total window — system prompt + history + tools + response.
     The context manager targets % of this value, not an absolute token count."""
 
-    max_tool_output_chars: int = 32_000
+    max_tool_output_chars: Optional[int] = None
     """Maximum CHARACTERS — not tokens — of a single tool result kept in context.
+    None (the default) means `tool_output_ratio` of the live window in characters at
+    four per token, never below 100; an integer (100–500,000) is used as written.
     Passed to CompactionPipeline as `tool_result_cap` and consumed by
-    ToolResultCapStage, which head+tail truncates anything longer. Range 100–500,000.
-    Distinct from the ToolRegistry's own 50,000-char dispatch cap (see Stage 1)."""
+    ToolResultCapStage, which head+tail truncates anything longer.
+    Distinct from the ToolRegistry's own dispatch cap, which follows `result_cap_ratio`
+    (see Stage 1)."""
+
+    tool_result_evict_threshold_chars: Optional[int] = None
+    """Only tool-result bodies longer than this are evicted to the ContentStore.
+    None means `evict_ratio` of the live window in characters, never below 500;
+    an integer is used as written."""
+
+    tool_output_ratio: float = 0.0625
+    """Share of the live window (1/16) one tool result may take at the prompt-build cap
+    when `max_tool_output_chars` is unset. Bounds (0, 1]. A project may only lower it."""
+
+    evict_ratio: float = 0.015625
+    """Share of the live window (1/64) a body must exceed to be evicted when
+    `tool_result_evict_threshold_chars` is unset. Bounds (0, 1]. A project may only lower it."""
+
+    result_cap_ratio: float = 0.09375
+    """Share of the live window (3/32) one tool result may take at dispatch, floor 1,000
+    characters. The context manager feeds it to the registry. Bounds (0, 1]. A project may
+    only lower it."""
 
     summary_compaction_threshold: float = 0.80
     """Trigger summarize-middle compaction when context usage exceeds this fraction.
@@ -479,12 +500,16 @@ On every `build_messages()` pass the manager computes usage once, then:
 if usage_fraction >= 0.50:      # WEB_EVICT_USAGE_FRACTION
     evict stale web results     # keep newest 2, min 500 chars, URL/query preserved
 if usage_fraction >= 0.50:      # TOOL_EVICT_USAGE_FRACTION
-    evict large tool results    # keep newest 3, bodies > 8,000 chars
+    evict large tool results    # keep newest 3, bodies over the eviction threshold
 ```
 
-The **8,000-character threshold** (`TOOL_EVICT_THRESHOLD_CHARS`, config key
-`context.tool_result_evict_threshold_chars`) exists because stubbing a small body saves nothing and
-still costs a cache invalidation. The **keep-last window** (3 for tool results, 2 for web) leaves
+After compaction, every pass ends with one more request-view step that is not tied to usage: see
+*Superseded failures (request view only)* below.
+
+The **eviction threshold** (config key `context.tool_result_evict_threshold_chars`) exists because
+stubbing a small body saves nothing and still costs a cache invalidation. Unset, it is `evict_ratio`
+(1/64) of the live window in characters at four per token — 8,192 characters at 131,072 tokens,
+never below 500; an integer is honoured as written. The **keep-last window** (3 for tool results, 2 for web) leaves
 the most recent observations verbatim — those are the ones the model is actively reasoning over.
 
 Eviction requires a wired eviction store, which the root agent has and a leaf child does not. This
@@ -570,6 +595,26 @@ model configuration, not a guarantee. The 79.10% peak in particular is a near-mi
 slightly larger tool results would have crossed 0.80 and paid for a summarization. The equilibrium
 is a tendency of the design, not an invariant of it.
 
+### Superseded failures (request view only)
+
+On every `build_messages()` pass, after compaction and before the reply reserve is applied, the
+manager leaves a failed tool exchange out of the **request** — never out of the session — when all
+of these hold:
+
+- the assistant message carries only that one tool call and no other content;
+- the result is a failure that the permission gate neither refused nor staged for a human;
+- the tool declares `host: safe` (a tool that can touch the host is never dropped, and a tool the
+  manager cannot look up counts as one that can);
+- a later call with the same call-only signature (the tool name plus its canonical arguments)
+  succeeded.
+
+Both halves of the exchange go together, matched by tool-call id, so pairing repair never sees an
+orphan. The outcome is stamped privately by the agent loop, the only producer of tool messages, and
+is stripped before the wire like every other private field. The session, the event log and
+`history.jsonl` keep both halves. The transform is deterministic, so two builds of one session send
+identical requests and the prefix cache holds. A tool message with no stamp (a session saved by an
+older version) is never dropped. This step changes no compaction stage and no threshold.
+
 ---
 
 ## Compaction Pipeline: 4 Stages
@@ -644,8 +689,11 @@ window. A `grep` over a large codebase can return megabytes of text. Without thi
 fills the entire window.
 
 **The cap is denominated in CHARACTERS, not tokens.** There is no `tool_result_max_tokens` field
-anywhere in the harness. The knob is `context.max_tool_output_chars` (default **32,000** characters),
-which the pipeline receives as its `tool_result_cap` constructor argument.
+anywhere in the harness. The knob is `context.max_tool_output_chars`. Unset, the cap is
+`tool_output_ratio` (1/16) of the window's characters at four per token — 32,768 at 131,072 tokens,
+16,384 at 65,536 — never below 100; an integer is honoured as written. The pipeline receives it as
+its `tool_result_cap` constructor argument. The window is the one in force now: it shrinks after a
+server overflow and follows a `/model` switch, and the cap follows it.
 
 ### Two different caps, two different places
 
@@ -653,13 +701,14 @@ These are easy to conflate and are not the same mechanism:
 
 | Cap | Value | Where it lives | When it applies |
 |-----|-------|----------------|-----------------|
-| `ToolRegistry.result_size_cap_chars` | 50,000 chars | `tools/registry.py` | At **dispatch** — the moment a tool returns, before its output ever becomes a message. A hard ceiling on what enters history at all. |
-| `CompactionPipeline` `tool_result_cap`, from `context.max_tool_output_chars` | 32,000 chars | `agent/context.py`, Stage 1 | At **prompt build** — applied to tool messages already in history, on over-threshold passes. |
+| `ToolRegistry.result_size_cap_chars` | `result_cap_ratio` of the window (49,152 chars at 131,072 tokens, floor 1,000) | `tools/registry.py` | At **dispatch** — the moment a tool returns, before its output ever becomes a message. A hard ceiling on what enters history at all. The context manager feeds the registry, and child registries inherit the same source. |
+| `CompactionPipeline` `tool_result_cap`, from `context.max_tool_output_chars` | `tool_output_ratio` of the window (32,768 chars at 131,072 tokens, floor 100) | `agent/context.py`, Stage 1 | At **prompt build** — applied to tool messages already in history, on over-threshold passes. |
 
 The registry cap is the wider one and fires first; the Stage 1 cap is the tighter one and fires
 later, on the history. A tool result can therefore be truncated twice by two independent
-mechanisms, and the constructor default on `CompactionPipeline` itself is 50,000 — the 32,000 the
-harness actually runs on comes from config, not from that default.
+mechanisms. The web page query budget is 0.9 of the registry cap (44,236 chars at 131,072 tokens).
+A registry or `CompactionPipeline` built with no cap still defaults to 50,000; `start` and the
+bench wire both to the live window.
 
 ```python
 class ToolResultCapStage:
@@ -1264,9 +1313,9 @@ context:
   compaction_threshold_pct: 80.0          # fire summary compaction at 80%
   preserve_first_n_messages: 4            # keep first N messages in summary compact (min 1)
   preserve_last_n_messages: 8             # keep last N messages in summary compact (min 2)
-  max_tool_output_chars: 32000            # CHARACTER cap per tool result (Stage 1)
+  max_tool_output_chars: null             # CHARACTER cap per tool result (Stage 1); null = tool_output_ratio of the window
   tool_result_eviction: true              # page bulky results out to the ContentStore at 50%
-  tool_result_evict_threshold_chars: 8000 # only bodies larger than this are evicted
+  tool_result_evict_threshold_chars: null # only bodies larger than this are evicted; null = evict_ratio of the window
 ```
 
 Fields the earlier draft of this spec listed that **do not exist**: `tool_result_max_tokens`,

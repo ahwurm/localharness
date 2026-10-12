@@ -754,6 +754,12 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   in this process. It narrows an enumerated set of mistakes and crossings; it does not contain a
   program that has already started running.
 
+**What the model is shown is never edited to hide a refusal.** The request the model receives may
+leave out a failed call that a later identical call fixed, but never a refusal, never a call staged
+for your approval and never a failure of a tool that can act on your machine (`host: dangerous`,
+`bash_exec` among them). The session record, the event log and `history.jsonl` keep every call
+either way.
+
 **Being asked too often is itself a security failure.** A gate that interrupts you about ordinary
 work trains you to approve without reading, and an approval nobody read protects nothing — the
 prompt is only worth what your attention to it is worth. That is why the silent paths above are
@@ -881,8 +887,10 @@ logs, the phone session's `sessions/asleep.json` while it sleeps, `history.jsonl
 `memory.log`, `.repl_history`, the speed ledger, the live-session files, `vllm/serve.log`,
 `vllm/server.pid` and `vllm/launch.lock` (empty, never read), agent files written by `agent create`, by a start (the root agent) or by the
 in-session creation workflow, autoresearch's archive, run journals and budget file, and
-`plugins/README.md`. The same writers make the same files owner-only in a project's
-`.localharness/` (its sessions, history and memory). The one script `start` installs,
+`plugins/README.md`. Each model response's row in `history.jsonl` records the model name, the
+server-reported prompt and completion token counts and the call's duration (numbers and a name,
+nothing else from the response), and the file stays owner-only (0600). The same writers make the
+same files owner-only in a project's `.localharness/` (its sessions, history and memory). The one script `start` installs,
 `tools/design-screenshot.js`, is owner-only and executable (0700). `init --force` saves the old
 `config.yaml` beside the new one before it writes, and says where.
 

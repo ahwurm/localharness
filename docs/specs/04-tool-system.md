@@ -263,7 +263,7 @@ class ToolRegistry:
     def __init__(
         self,
         default_timeout_s: float = 30.0,
-        result_size_cap_chars: int = 50_000,
+        result_size_cap: int | Callable[[], int] = 50_000,
     ) -> None:
         # Nested dict: scope → tool_name → tool_instance
         # _tools["global"]["glob"] = GlobTool()
@@ -281,13 +281,29 @@ class ToolRegistry:
         self._agent_tools: dict[str, dict[str, ToolProtocol]] = {}
 
         self._default_timeout_s = default_timeout_s
-        self._result_size_cap_chars = result_size_cap_chars
+        # The cap's SOURCE: an int, or a callable read on every dispatch (the context manager's
+        # `result_cap_chars`), so a window change reaches the next dispatch.
+        self._result_size_cap = result_size_cap
         self._lock = asyncio.Lock()
 
         # Pre/post hook callables registered by the hook system (spec 09).
         # Called by dispatch() before and after run().
         self._pre_hooks: list[Callable] = []
         self._post_hooks: list[Callable] = []
+
+    @property
+    def result_size_cap_chars(self) -> int:
+        """The bound on what one tool result may put into the conversation, in characters.
+        Resolved on every read: the source called when it is callable, else the int."""
+        cap = self._result_size_cap
+        return cap() if callable(cap) else cap
+
+    def set_result_size_cap(self, cap: int | Callable[[], int]) -> None:
+        """Late-bind the cap source. `start` builds the registry before the context manager and
+        calls this once the manager exists; a registry nobody calls it on keeps 50,000.
+        `from_allowed(..., base_registry=...)` copies the base registry's source (the callable,
+        not a snapshot), so a child follows the root's live window."""
+        self._result_size_cap = cap
 
     # -------------------------------------------------------------------------
     # Registration
@@ -583,10 +599,11 @@ class ToolRegistry:
         # Step 4: Execute
         result = await tool.run(**validated)
 
-        # Step 5: Apply result size cap
-        if len(result.output) > self._result_size_cap_chars:
+        # Step 5: Apply result size cap (resolved once per dispatch, for output and error alike)
+        cap = self.result_size_cap_chars
+        if len(result.output) > cap:
             result = ToolResult(
-                output=result.output[: self._result_size_cap_chars],
+                output=result.output[:cap],
                 success=result.success,
                 error=result.error,
                 error_type=result.error_type,
@@ -595,6 +612,12 @@ class ToolRegistry:
                 original_length=len(result.output),
                 metadata=result.metadata,
             )
+
+        if result.error and len(result.error) > cap:
+            result = result.model_copy(update={
+                "error": result.error[:cap]
+                + f"\n… [error truncated: {len(result.error):,} chars total]",
+            })
 
         result = result.model_copy(
             update={"duration_ms": int(time.monotonic() * 1000) - start_ms}
@@ -1305,15 +1328,9 @@ Rationale: Research on local models (from FEATURES.md) shows context window degr
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `default_timeout_s` | `float` | `30.0` | Default `run()` timeout. Individual tools may override via `Tool.timeout_s`. |
-| `result_size_cap_chars` | `int` | `50_000` | Maximum characters in `ToolResult.output` before truncation. Approximately 12K tokens at 4 chars/token. |
+| `result_size_cap` | `int \| Callable[[], int]` | `50_000` | The bound on what one tool result may put into the conversation, in characters, for both its output and its error text. Normally a callable fed by the context manager. |
 
-These values may be overridden via the global harness config (`~/.localharness/config.yaml`) under:
-
-```yaml
-tools:
-  default_timeout_s: 30
-  result_size_cap_chars: 50000
-```
+Neither constructor parameter has a config key. `start` and the bench call `set_result_size_cap` with the context manager's `result_cap_chars`, so the cap is `context.result_cap_ratio` of the live window (3/32: 49,152 characters at 131,072 tokens, never below 1,000), and a child registry built by `from_allowed` inherits that same source.
 
 ---
 
