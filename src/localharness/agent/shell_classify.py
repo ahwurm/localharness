@@ -1277,6 +1277,10 @@ def _split_top_level(text: str) -> list[_Raw]:
     return parts
 
 
+FUNSUB_OPENERS = (" ", "\t", "\n", "|")
+"""What follows the ``${`` of a bash 5.3 command substitution that needs no subshell (``${ cmd; }``,
+``${| cmd; }``). Not the empty string: ``${`` at the end of the text opens nothing."""
+
 GROUP_BRACE_BEFORE = ("", " ", "\t", "\n", ";", "&", "|", "(")
 GROUP_BRACE_AFTER = (" ", "\t", "\n", "")
 """What may stand either side of the ``{`` / ``}`` of a ``{ … }`` group: it is a word of its own, so a
@@ -1457,6 +1461,13 @@ def _lift_substitutions(
         if char == "$" and text[index + 1 : index + 2] == "(":
             end = _matching(text, index + 1)
             recurse(text[index + 2 : end])
+            out.append(SUBSTITUTION_SENTINEL)
+            index = end + 1
+            continue
+        if char == "$" and text[index + 1 : index + 2] == "{" and text[index + 2 : index + 3] in FUNSUB_OPENERS:
+            # CR-56: bash 5.3 `${ cmd; }` and `${| cmd; }` run their body in THIS shell, like `$(…)`.
+            end = _matching_brace(text, index + 1)
+            recurse(text[index + 2 + (text[index + 2] == "|") : end])
             out.append(SUBSTITUTION_SENTINEL)
             index = end + 1
             continue
