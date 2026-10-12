@@ -25,7 +25,6 @@ MAX_CONFIGURABLE_MAX_TOKENS: int = 128_000
 # response room internally (agent.context.response_reserve) — never pre-subtract it here.
 DEFAULT_MAX_CONTEXT_TOKENS: int = 131_072
 DEFAULT_COMPACTION_THRESHOLD_PCT: float = 80.0
-DEFAULT_MAX_TOOL_OUTPUT_CHARS: int = 32_000
 DEFAULT_MAX_NOTES_CHARS: int = 16_000
 DEFAULT_MAX_ACTIONS: int = 100
 DEFAULT_MAX_DURATION_MINUTES: float | None = None  # no turn time limit by default (see BudgetConfig)
