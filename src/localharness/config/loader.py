@@ -866,19 +866,31 @@ def _guard_children_budget_sections(merged: dict, sources: tuple[dict, ...],
     """Restore `org.children_budget`, one of its entries, or `org.context` to the global layers' when
     a workspace source set it to something that is not a mapping (`5`, a string, `null`): the merged
     config would not validate, and a project's `org.context: null` must not erase the window ratios
-    the machine set. The block is judged first, then each entry. One warning per path and file.
-    Never mutates."""
+    the machine set. Only the offending source gives way: a mapping the other project file wrote at
+    the same path is kept (and clamped later by the lower-only rule). The block is judged first,
+    then each entry. One warning per path and file. Never mutates."""
     global_view = deep_merge(sources[0], sources[1])
     warnings: list[str] = []
     for parts in ([["org", "children_budget"]] + [["org", "children_budget", e] for e in _CHILD_ENTRIES]
                   + [["org", "context"]]):
         path = ".".join(parts)
+        refused = False
         for source, file in zip(sources[2:], ws_files):
             value = _dig(source, parts)
             if value is _UNSET or isinstance(value, dict):
                 continue
             warnings.append(f"ignoring {path} in {file}: a project may only lower it")
-            merged = _put(merged, parts, _dig(global_view, parts))
+            refused = True
+        if refused:
+            # Only the offending source gives way: the global section, then each project source
+            # that did write a mapping, in merge order. What those sources set is still clamped by
+            # `_narrow_raw` afterwards, so nothing can rise through this path.
+            restored = _dig(global_view, parts)
+            for source in sources[2:]:
+                value = _dig(source, parts)
+                if isinstance(value, dict):
+                    restored = deep_merge(restored if isinstance(restored, dict) else {}, value)
+            merged = _put(merged, parts, restored)
     return merged, warnings
 
 
