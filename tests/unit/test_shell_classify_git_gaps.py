@@ -379,3 +379,53 @@ def test_comment_stripping_follows_bashs_own_word_starts(command, joined):
 def test_text_whose_quoting_does_not_balance_is_never_silent(command, mode, ws):
     """Bash refuses it, and the classifier cannot trust where its commands begin: ask in every mode."""
     assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+# ------------------------------------------------------------------ heredocs (CR-52, CR-55; iteration 2)
+
+COMMENT_HEREDOC_ROWS = (
+    ("ls # <<E\ntouch y\nE", "touch"),
+    ("ls # <<'X'\ntouch y", "touch"),
+    ("ls # note <<-EOF\ntouch y\nEOF", "touch"),
+    ("ls ; # <<E\ntouch y\nE", "touch"),
+    ('echo "a\\" <<E"\ntouch y', "touch"),
+)
+
+
+@pytest.mark.parametrize("command,expected", COMMENT_HEREDOC_ROWS)
+def test_a_heredoc_operator_inside_a_comment_opens_no_heredoc(command, expected):
+    """Bash never reads `<<E` in a comment, so the next line is a command and must be classified."""
+    assert expected in [s.signature for s in _segments(command)], command
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded"))
+@pytest.mark.parametrize("command,expected", COMMENT_HEREDOC_ROWS[:3])
+def test_a_commented_heredoc_row_is_not_allowed(command, expected, mode, ws):
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+OPERATOR_AFTER_DELIMITER_ROWS = (
+    ("cat <<E|sh\necho hi\nE", "sh"),
+    ("cat <<E;touch y\nbody\nE", "touch"),
+    ("cat <<E; touch y\nbody\nE", "touch"),
+    ("cat <<E&&touch y\nbody\nE", "touch"),
+    ("cat <<'E'|sh\nbody\nE", "sh"),
+    ("cat <<-E;touch y\n\tbody\n\tE", "touch"),
+    ("cat <<E\nbody\nE\ntouch y", "touch"),
+)
+
+
+@pytest.mark.parametrize("command,expected", OPERATOR_AFTER_DELIMITER_ROWS)
+def test_the_heredoc_delimiter_stops_at_a_shell_operator(command, expected):
+    """`cat <<E|sh` has the delimiter `E`; the old reader took `E|sh` and hid the sink."""
+    assert expected in [s.signature for s in _segments(command)], command
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded"))
+def test_a_heredoc_piped_to_a_shell_is_not_read_only(mode, ws):
+    assert _verdict("cat <<E|sh\necho hi\nE", ws, mode).verdict is not Verdict.ALLOW
+
+
+def test_a_heredoc_body_is_still_data():
+    assert [s.signature for s in _segments("cat <<E\nrm -rf /etc/x\nE")] == ["cat"]
+    assert [s.signature for s in _segments("cat <<E >f\nrm -rf /etc/x\nE")] == ["cat"]
