@@ -1687,8 +1687,13 @@ directories are protected by file rather than wholesale, through one list that a
 harness config directory a session uses — the one it was started with (`--config-dir`), the default
 `~/.localharness` and a project's `.localharness/` alike:
 `config.yaml`, `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`,
-`declined_workspace_offers.yaml` and `plugins/**`, the entries that change what the harness does
-next (the last three exist only in the global one). Agents, divisions, tools, session state,
+`declined_workspace_offers.yaml`, `plugins/**`, `project_records.yaml` and
+`project_records.yaml.lock`, the entries that change what the harness does
+next (`grants.yaml`, `declined_workspace_offers.yaml`, `plugins/**`, `project_records.yaml` and its lock
+exist only in the global one).
+`project_records.yaml` is the per-workspace record of whether a project's instructions file is
+used, and of the narrowing notices last shown for that workspace; it is machine-level, owner-only
+(0600), and never written by a project. Agents, divisions, tools, session state,
 memory, history, the audit log and the kill file are bookkeeping and are not protected — writing
 them is the harness being used. `config.yaml` and `overrides.yaml` have one more rule, in code
 ahead of the verdict (`agent/gate.py`, `HARNESS_CONFIG_FILE_REASON`): the agent's `write` and

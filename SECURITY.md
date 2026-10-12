@@ -419,9 +419,10 @@ read and argue with. Each step below says what it does in `auto`.
      `~/.gnupg`, `~/.config/gh`, `~/.kube`, `~/.docker`, `~/.git-credentials`, `~/.netrc`,
      `~/.npmrc`, `~/.pypirc`, `~/.config/gcloud`, `~/.azure`, your shell rc and profile files and
      the Windows credential folders. `~/.localharness` is no longer protected as a whole tree:
-     **one six-entry list protects each harness config directory a session uses** — `config.yaml`,
-     `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`, `declined_workspace_offers.yaml`
-     and `plugins/**`, the files that change what the harness does next. Those directories are the
+     **one eight-entry list protects each harness config directory a session uses** — `config.yaml`,
+     `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`, `declined_workspace_offers.yaml`,
+     `plugins/**`, `project_records.yaml` and its lock file `project_records.yaml.lock`, the files
+     that change what the harness does next. Those directories are the
      one the session was started with (`--config-dir`, else `LOCALHARNESS_DIR`, else
      `~/.localharness`), the default `~/.localharness` and any `.localharness/` in the project; a
      config directory the session does not use is not covered. Everything else under one (agents,
@@ -1013,7 +1014,8 @@ the session, and nothing else stops.
 The files the harness creates there are owner-only (0600) from their first byte — created with
 that mode, never written first and changed after: `config.yaml` and its backups
 (`config.yaml.bak-<stamp>` from the security-defaults update, `config.yaml.before-init-<stamp>`
-from `init --force`), `overrides.yaml`, `grants.yaml`, `trusted_workspaces.yaml`, the phone token,
+from `init --force`), `overrides.yaml`, `grants.yaml`, `trusted_workspaces.yaml`, `project_records.yaml` (and its
+`project_records.yaml.lock`), the phone token,
 the push key and the push subscriptions, `audit.jsonl`, each agent's `bus-events.jsonl`, session
 logs, the phone session's `sessions/asleep.json` while it sleeps, `history.jsonl`, `memory.db`
 (and its `-wal` and `-shm` files), `MEMORY.md`, `compact.md` and
@@ -1152,6 +1154,47 @@ it is exploitable on the target model.
 **Not a current vector: memory.** Tool output is written to per-agent history, not to
 the queryable facts memory, and no code path promotes tool output into the facts an
 agent recalls. If that changes, this section changes with it.
+
+### Project instructions files
+
+A project's `CLAUDE.md`, `AGENTS.md` or `.localharness/INSTRUCTIONS.md` is text the repository
+controls, so it is treated as attacker-controlled. It enters the agent's role once, after the
+guardrails, inside a fence: a fixed header says the text is the project's and not the harness's
+policy, and the file's text sits between an opening and a closing line carrying a tag chosen at
+random for each process, with any line of the file that would close the fence neutralised first.
+It is used after the one trust question on a fresh clone, or with one visible line
+("Using CLAUDE.md (5.1 KB); /instructions off") on a workspace whose settings layer already loads,
+and the record that it was shown is written only once that line has reached a person: the terminal's
+first input bubble, or a channel's first reply to a person. A start with `--no-input`, or with
+stdin that is not a terminal, writes no record. A file that is not a regular file, that leaves the
+workspace by a link, or that is larger than `instructions.max_ratio` of the context window is not
+used, and the start prints one line when it is too large. A file owned by another account is not
+used by default either: it waits for the trust question.
+
+The file is sensed, not asked about. Its bytes are hashed when it is read. A change that no call of
+the harness named (you edited it, or a `git pull` rewrote it) is used with a visible
+"changed, using it" line. A change that one of the harness's own calls named (a `write` or `edit`
+of the file, a shell write the classifier reads, or a child agent's) is dropped from the next turn,
+marked, and offered back through `/instructions on`, so a model cannot rewrite its own standing
+orders in the middle of a session and have them adopted unseen. `/instructions off` records a no
+that no later edit overturns until `on`. Delegated children receive the file unless the machine
+config turns that off.
+
+The record lives in `project_records.yaml` in the config folder, with its lock sidecar
+`project_records.yaml.lock`. Both are protected config-folder entries (a write of either asks, even
+in `auto`) and the harness creates both owner-only (0600). A project cannot write them, which is
+what stops a model from setting `yes` under its own hash.
+
+**What this does NOT cover.** A write the model makes without naming the file in any call's
+arguments is not seen as the model's: through an MCP filesystem tool, through a hard link written
+later, through a program the repository configures that a reader-listed git command runs (a hook, an
+fsmonitor, an external diff or text conversion, a pager), through a rewrite such as `git checkout`
+or `git pull`, or through a detached process that lands between two turns. That text is used under
+the same visible "changed, using it" line, fenced, bounded by the approval gate and the capability
+floor, and in front of you at the next turn. It is no more than the model could already put in
+front of itself by reading any file. And the fence is smaller than one other door: a project agent
+file (`.localharness/agents/<name>.yaml`) replaces that agent's whole role, unfenced and ahead of
+the guardrails, with no prompt beyond the workspace's own.
 
 ### What a web fetch may reach
 
