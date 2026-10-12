@@ -222,12 +222,6 @@ def _load_store(path: Path) -> tuple[dict, bytes | None]:
     return {}, raw if data is not None else None
 
 
-def _load(path: Path) -> dict:
-    """The store as a dict; absent, empty, corrupt or non-dict reads as ``{}``. An unreadable
-    store raises ``StoreUnavailable``."""
-    return _load_store(path)[0]
-
-
 def _keep_damaged_copy(path: Path, raw: bytes) -> None:
     """Best effort: keep the damaged store beside it (0600, ``.corrupt``, the latest one) before
     a write replaces it, so a reset is never silent. Written with ``atomic_write_text``, which
@@ -1423,6 +1417,8 @@ class ProjectInstructions:
         self._held = None
         self._dropped_digest = None
         self._set_failure = None
+        if value == "yes":  # a second loss after `/instructions on` is a new loss to say (IN-06)
+            self._warned = {k for k in self._warned if k[:2] != ("refused", "record lost")}
         try:
             if self._no_input:
                 self._answer_in_memory(value)

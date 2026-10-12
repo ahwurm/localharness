@@ -918,6 +918,22 @@ def test_a_record_written_by_the_receipt_that_vanishes_is_not_a_fresh_root(
     assert not store_file().exists()
 
 
+def test_a_second_record_loss_after_on_is_said_again(instructions_home, tmp_path):
+    """IN-06: the once-per-handle line is re-armed by `/instructions on`."""
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _recorded(root)
+    assert h.section(WINDOW) == (TEXT, None)
+    store_file().unlink()
+    first = h.section(WINDOW)[1]
+    assert first is not None and first.reason == "record lost"
+    assert h.section(WINDOW) == (None, None)  # once per loss
+    assert run_instructions_command(h, "on").startswith("using CLAUDE.md")
+    assert h.section(WINDOW) == (TEXT, None)
+    store_file().unlink()
+    second = h.section(WINDOW)[1]
+    assert second is not None and second.reason == "record lost"
+
+
 def test_a_corrupt_store_under_a_running_sitting_is_not_a_fresh_root(instructions_home, tmp_path):
     root = make_root(tmp_path, {"CLAUDE.md": TEXT})
     h = _recorded(root)
