@@ -1054,10 +1054,12 @@ class ProjectInstructions:
             return None, None
         if record is not None:
             fx.append(lambda: setattr(self, "_had_record", True))
-        elif self._had_record or (self._marked and self._awaiting is None):
-            # a record this sitting saw (or a mark it left) has vanished: deleted, damaged or
-            # swapped under a running sitting. That is not a fresh root, so nothing is adopted;
-            # only `/instructions on` brings the file back (CR-51, D-72)
+        elif self._had_record:
+            # a record this handle saw has vanished: deleted, damaged or swapped under a running
+            # sitting. That is not a fresh root, so nothing is adopted; only `/instructions on`
+            # brings the file back (CR-51, D-72). A mark alone is not a record seen: a sitting
+            # that never had one (`--no-input`, awaiting trust, a root that is not owned) has
+            # nothing to lose, and the not-owned line below must not be pre-empted (WR-07, WR-55)
             return None, self._record_lost_refusal()
         if not usable and self._mem_state != "yes":
             if record is None and self._basis in ("layer", "trusted") and not self._no_input:
@@ -1489,6 +1491,7 @@ class ProjectInstructions:
             self._set_failure = "too large" if probe.failure == "too_large" else probe.failure
             return
         self._mem_state = "yes"
+        self._marked = False  # the person adopted the bytes as they are: no mark stands (WR-07)
         self._candidate = cand
         self._last = InstructionsState(
             display_name(cand.name), str(cand.real), probe.size, probe.digest, "yes"
