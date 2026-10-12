@@ -1165,8 +1165,8 @@ random for each process, with any line of the file that would close the fence ne
 It is used after the one trust question on a fresh clone, or with one visible line
 ("Using CLAUDE.md (5.1 KB); /instructions off") on a workspace whose settings layer already loads,
 and the record that it was shown is written only once that line has reached a person: the terminal's
-first input bubble, or a channel's first reply to a person. A start with `--no-input`, or with
-stdin that is not a terminal, writes no record. A file that is not a regular file, that leaves the
+first input bubble, or a channel's first reply to a person. A terminal start with `--no-input`, or
+without a tty, writes no record. A file that is not a regular file, that leaves the
 workspace by a link, or that is larger than `instructions.max_ratio` of the context window is not
 used, and the start prints one line when it is too large. A file owned by another account is not
 used by default either: on a workspace that asks the trust question it waits for that, and on one
@@ -1185,13 +1185,20 @@ config turns that off.
 The record lives in `project_records.yaml` in the config folder, with its lock sidecar
 `project_records.yaml.lock`. Both are protected config-folder entries (a write of either asks, even
 in `auto`) and the harness creates both owner-only (0600). A project cannot write them, which is
-what stops a model from setting `yes` under its own hash.
+what stops a model from setting `yes` under its own hash. A record that this session already saw and
+that then vanishes (deleted, damaged) is not a fresh root: nothing is adopted until `/instructions
+on`, and the session says so once. A store that cannot be read (a permission error, a link, not a
+regular file) is reported as unreadable and never replaced as if it were empty; a store that is
+damaged is kept beside itself as `project_records.yaml.corrupt` before the next write replaces it
+(ruling taken on the owner's behalf by the GSD run).
 
 **What this does NOT cover.** A write the model makes without naming the file in any call's
 arguments is not seen as the model's: through an MCP filesystem tool, through a hard link written
 later, through a program the repository configures that a reader-listed git command runs (a hook, an
 fsmonitor, an external diff or text conversion, a pager), through a rewrite such as `git checkout`
-or `git pull`, or through a detached process that lands between two turns. That text is used under
+or `git pull`, through a detached process that lands between two turns, or through a name the call
+never spells out (a shell glob, brace or variable, a code string that builds the name, or a link the
+repository ships that points at the file). That text is used under
 the same visible "changed, using it" line, fenced, bounded by the approval gate and the capability
 floor, and in front of you at the next turn. It is no more than the model could already put in
 front of itself by reading any file. And the fence is smaller than one other door: a project agent

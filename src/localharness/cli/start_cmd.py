@@ -2431,7 +2431,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 pass  # skip agents that fail to load — non-fatal
         orchestrator = AgentCreationFlow(card_registry=card_registry)
 
-        # --- 9a. Project instructions (spec 20; D-48, D-67, D-69) ---
+        # --- 9a. Project instructions (spec 17; D-48, D-67, D-69) ---
         # One handle per session on the effective boundary, built above the delegation block so the
         # runner, the loop, the REPL and ACP all hold the same object. Nothing is built for a
         # declined root or a root with no instructions file.
