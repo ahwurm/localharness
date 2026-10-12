@@ -486,3 +486,47 @@ def test_cdpath_in_the_harness_environment_makes_a_bare_cd_unknown(ws, monkeypat
 )
 def test_directory_tracking_controls(ws, command, expected):
     _check(command, expected, ws)
+
+
+# --------------------------------------------------------------------------- CR-06: wrappers inside find -exec / xargs payloads
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "find . -maxdepth 0 -exec env rm -rf /etc/x \;",
+        "find . -maxdepth 0 -exec nice rm -rf /etc/x \;",
+        "find . -maxdepth 0 -exec timeout 5 rm -rf /etc/x \;",
+        "find . -maxdepth 0 -exec nohup rm -rf /etc/x \;",
+        "find . -maxdepth 0 -exec stdbuf -o0 rm -rf /etc/x \;",
+        "find . -maxdepth 0 -exec setsid rm -rf /etc/x \;",
+        "find . -maxdepth 0 -exec time rm -rf /etc/x \;",
+        "find . -maxdepth 0 -exec ionice rm -rf /etc/x \;",
+        "find . -maxdepth 0 -exec flock /tmp/l rm -rf /etc/x \;",
+        "find . -maxdepth 0 -execdir env rm -rf /etc/x \;",
+        "find . -maxdepth 0 -ok env rm -rf /etc/x \;",
+        "find . -maxdepth 0 -exec env nice timeout 5 rm -rf /etc/x +",
+        "echo | xargs env rm -rf /etc/x",
+        "echo | xargs nice rm -rf /etc/x",
+        "echo | xargs timeout 5 rm -rf /etc/x",
+        "echo | xargs nohup rm -rf /etc/x",
+        "echo | parallel env rm -rf /etc/x",
+    ),
+)
+def test_a_wrapper_in_a_payload_is_peeled_to_the_command(ws, command):
+    """CR-06 (it4): the payload of ``find -exec`` / ``xargs`` / ``parallel`` goes through the same wrapper peel as
+    a top-level command; ``env rm -rf`` signed as ``env``, a read-only signature."""
+    _check(command, "DENY/ASKU/ASKU", ws)
+    assert any(s.signature == "rm -rf" for s in _segments(command))
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("find . -maxdepth 0 -exec rm -rf /etc/x \;", "DENY/ASKU/ASKU"),
+        ("find . -exec env -C /etc rm -rf x \;", "DENY/ASKU/ASKU"),
+        ("find . -exec env FOO=1 ls {} \\;", "DENY/ASK/ok"),
+        ("xargs -n1 env ls", "DENY/ASK/ok"),
+    ),
+)
+def test_payload_wrapper_controls(ws, command, expected):
+    _check(command, expected, ws)
