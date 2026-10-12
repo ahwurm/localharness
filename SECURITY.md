@@ -727,6 +727,15 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   `&&`, `;`, `|`, newlines and inside groups, peels wrappers, lifts `find -exec` and `xargs`
   payloads, and canonicalizes destructive flags — that is an enumerated set of known shapes, not a
   proof. The ask-once on an unfamiliar signature is the backstop for whatever the list misses.
+- **Comments, continuations and quoting are read the way bash reads them, and text whose quoting does
+  not balance is asked about.** A `#` opens a comment only after a space, tab, newline, `;`, `&`, `|`
+  or `(` — not after `)`, after a non-bash blank such as a no-break space or a carriage return, or
+  inside quotes, `${…}` or `$((…))`; a `$(…)`, `<(…)`, backtick or bash 5.3 `${ cmd; }` body is a
+  shell context of its own, inside double quotes too, and a `<<WORD` in a comment opens no heredoc.
+  `$'…'` strings are decoded before classifying, and a heredoc delimiter ends at a shell operator.
+  A quote, backtick or substitution that never closes (bash refuses such a line) is asked about as
+  `__lh_unparsed_shell__` in every mode, `auto` included, and the answer cannot be remembered, as is
+  an `env -S` string using an escape or expansion the classifier does not follow.
 - **The classifier reads what a command writes and what it runs, not only its name.** `git diff`,
   `git log` and `git show` with `--output FILE` write that file, and `git diff --no-index` compares
   two paths outside any repository (operands on either side of the flag count), so each names its
@@ -799,7 +808,9 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   asked about as an unknown one rather than as destructive, and a grant on that placeholder
   covers the next command built the same way. The prompt still happens; the label on it understates
   what may run.
-- **A write target containing a variable, a glob or a substitution is treated as outside.** It
+- **A write target containing a variable, a glob or a substitution is treated as outside.** So is a
+  target written after a `cd` or `env -C` whose directory the classifier cannot read (`cd $HOME &&
+  echo x > .bashrc`). It
   cannot be resolved before the shell expands it, so it is treated as an out-of-project write
   (parked in `auto`, asked in `guarded`) — and once
   you answer "always" for that unresolved shape, a later expansion of the same shape to a different
