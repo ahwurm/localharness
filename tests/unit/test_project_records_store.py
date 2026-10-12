@@ -703,3 +703,75 @@ def test_a_lock_left_by_a_dead_process_is_harmless(instructions_home, tmp_path):
     child.wait()
     pr.replace_notices(root, [_notice()])
     assert pr.read_notices(root) == frozenset({_notice()})
+
+
+# --------------------------------------------------------------------------- WR-03 / WR-51: an unreadable store
+
+
+def _two_roots(tmp_path: Path) -> tuple[Path, Path]:
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    for r in (a, b):
+        r.mkdir()
+        (r / "CLAUDE.md").write_text("x", encoding="utf-8")
+        write_instructions(r, _record(r, state="off" if r is b else "yes"))
+    return a, b
+
+
+def test_an_unreadable_store_is_unavailable_and_the_next_write_does_not_erase_it(
+    instructions_home, tmp_path,
+):
+    a, b = _two_roots(tmp_path)
+    before = store_file().read_bytes()
+    store_file().chmod(0)
+    try:
+        if os.access(store_file(), os.R_OK):  # running as root: the mode does not bite
+            pytest.skip("permission bits are not enforced for this user")
+        with pytest.raises(StoreUnavailable):
+            read_instructions(a)
+        with pytest.raises(StoreUnavailable):
+            pr.replace_notices(a, [pr.Notice("k", "s", "f", "v", "t")])
+    finally:
+        store_file().chmod(0o600)
+    assert store_file().read_bytes() == before
+    assert read_instructions(b).state == "off"
+
+
+def test_a_symlinked_store_is_unavailable_and_left_alone(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": "x"})
+    target = tmp_path / "elsewhere.yaml"
+    target.write_text("roots: {}\n", encoding="utf-8")
+    store_file().symlink_to(target)
+    with pytest.raises(StoreUnavailable):
+        read_instructions(root)
+    with pytest.raises(StoreUnavailable):
+        write_instructions(root, _record(root))
+    assert store_file().is_symlink()
+    assert target.read_text(encoding="utf-8") == "roots: {}\n"
+
+
+def test_a_directory_in_the_stores_place_is_unavailable(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": "x"})
+    store_file().mkdir()
+    with pytest.raises(StoreUnavailable):
+        read_instructions(root)
+
+
+def test_an_absent_or_empty_store_is_no_records_not_unavailable(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": "x"})
+    assert read_instructions(root) is None
+    store_file().write_text("", encoding="utf-8")
+    assert read_instructions(root) is None
+    assert not store_file().with_name(store_file().name + ".corrupt").exists()
+
+
+def test_a_damaged_store_is_kept_beside_it_before_a_write_replaces_it(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": "x"})
+    store_file().write_text("key: [unclosed", encoding="utf-8")
+    assert read_instructions(root) is None  # a read leaves it alone
+    copy = store_file().with_name(store_file().name + ".corrupt")
+    assert not copy.exists()
+    write_instructions(root, _record(root))
+    assert copy.read_text(encoding="utf-8") == "key: [unclosed"
+    assert stat.S_IMODE(copy.stat().st_mode) == 0o600
+    assert read_instructions(root) is not None
