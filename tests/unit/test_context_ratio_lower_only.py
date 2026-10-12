@@ -383,3 +383,11 @@ def test_a_workspace_overlay_that_omits_context_keeps_the_operators_ratio(tmp_pa
         cfg = _builtin(tmp_path, g={"context": {"evict_ratio": 0.01}}, ws={"role": "Look around"})
     assert cfg.context.evict_ratio == 0.01
     assert _ratio_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("bad", [0, -0.1, 1.5])
+def test_an_invalid_global_ratio_fails_the_load(tmp_path, name, bad):
+    loader, _ = _layers(tmp_path, g_cfg=_ctx(**{name: bad}))
+    with pytest.raises(Exception):
+        loader.load_harness()

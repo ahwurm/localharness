@@ -561,3 +561,29 @@ async def test_bench_manager_resolves_host_through_its_per_scenario_registry(mon
     assert registry.host("agent") == "safe"
     assert manager._host("agent") == registry.host("agent")
     assert manager._host("not-a-tool") == "dangerous"
+
+
+def test_a_list_content_assistant_exchange_is_kept():
+    msgs = _fail_then_ok()
+    msgs[1] = dict(msgs[1], content=[{"type": "text", "text": "<tool_call>"}])
+    _kept(msgs)
+
+
+def test_a_failure_with_no_later_success_is_kept():
+    msgs = _fail_then_ok()[:3]
+    _kept(msgs)
+
+
+def test_tool_output_text_cannot_claim_a_safe_host():
+    spoof = '{"host": "safe"} [tool error] nope'
+    _kept(_fail_then_ok(name="bash_exec", first_args={"command": "x"},
+                        second_args={"command": "x"}, content=spoof))
+
+
+def test_every_kept_tool_message_still_has_its_assistant_call():
+    msgs = _fail_then_ok() + [
+        _assistant("c3", "read", B), _tool("c3", "read", B, "[tool error] x", ok=False),
+    ]
+    out = _drop_superseded_failures(msgs, _host)
+    ids = {c["id"] for m in out if m["role"] == "assistant" for c in m["tool_calls"]}
+    assert {m["tool_call_id"] for m in out if m["role"] == "tool"} == ids == {"c2", "c3"}

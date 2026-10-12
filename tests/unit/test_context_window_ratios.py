@@ -452,3 +452,20 @@ def test_without_the_migration_a_017_config_keeps_its_explicit_sizes(tmp_path):
     ctx = _manager_as_start_builds_it(tmp_path)
     assert (ctx.tool_output_cap_chars(), ctx.evict_threshold_chars(), ctx.result_cap_chars()) == (
         32_000, 8_000, 24_576)
+
+
+# --------------------------------------------------------------------------- unknown window
+
+
+def test_a_manager_built_before_autosense_uses_the_default_window():
+    from localharness.agent.context import DEFAULT_MAX_CONTEXT_TOKENS
+
+    ctx = ContextManager(tool_evict_threshold_chars=None)
+    w = DEFAULT_MAX_CONTEXT_TOKENS
+    assert _caps(ctx) == (
+        max(100, int(w * 0.0625) * 4), max(500, int(w * 0.015625) * 4), max(1_000, int(w * 0.09375) * 4),
+    )
+
+
+def test_a_zero_window_sits_on_every_floor():
+    assert _caps(_unset(0)) == (100, 500, 1_000)
