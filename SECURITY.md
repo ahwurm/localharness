@@ -727,19 +727,43 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   `&&`, `;`, `|`, newlines and inside groups, peels wrappers, lifts `find -exec` and `xargs`
   payloads, and canonicalizes destructive flags — that is an enumerated set of known shapes, not a
   proof. The ask-once on an unfamiliar signature is the backstop for whatever the list misses.
-- **Comments, continuations and quoting are read the way bash reads them, and text whose quoting does
-  not balance is asked about.** A `#` opens a comment only after a space, tab, newline, `;`, `&`, `|`
-  or `(` — not after `)`, after a non-bash blank such as a no-break space or a carriage return, or
-  inside quotes, `${…}` or `$((…))`; a `$(…)`, `<(…)`, backtick or bash 5.3 `${ cmd; }` body is a
-  shell context of its own, inside double quotes too, and a `<<WORD` in a comment opens no heredoc.
-  `$'…'` strings are decoded before classifying, and a heredoc delimiter ends at a shell operator.
-  Where bash reads a `#` as part of a regex, an extglob group or an arithmetic expression and the
-  stripper does not know it, a dropped comment that holds `;`, `&`, `|`, a backtick or `$(` makes the
-  harness classify the command a second time with every `#` kept and ask for the stricter of the two
-  (a real comment such as `# fetch; unpack` can therefore draw a question it would not otherwise).
-  A quote, backtick or substitution that never closes (bash refuses such a line) is asked about as
-  `__lh_unparsed_shell__` in every mode, `auto` included, and the answer cannot be remembered, as is
-  an `env -S` string using an escape or expansion the classifier does not follow.
+- **Comments, continuations, heredocs and quoting are read the way bash reads them, and text whose
+  quoting does not balance is asked about.** One pass reads quotes, continuations, comments, nested
+  `$(…)`, `<(…)`, backtick and bash 5.3 `${ cmd; }` bodies (each a shell context of its own, inside
+  double quotes too) and heredocs together. A `#` opens a comment only after a space, tab, newline,
+  `;`, `&`, `|`, `(` or the `)` that closes a bare `( … )` group — not after the `)` of `$(…)`,
+  `<(…)` or `x=(…)`, after a non-bash blank such as a no-break space or a carriage return, or inside
+  quotes, `${…}` or arithmetic. A `<<WORD` is a heredoc operator only outside quotes, comments,
+  `((…))`, `$((…))`, `$[…]` and `name[…]` subscripts; its delimiter is read with the quoting removed
+  (`'E'`, `"E"`, `\E`, `$'E'`, `$"E"`), a `$(…)`, `${…}` or backtick inside the delimiter word is part of
+  the word, and its body starts after the next real newline of the same context, so a backslash-newline
+  after the operator, a quote that spans lines and a heredoc inside `"$(cat <<'EOF' … EOF)"` or a
+  `bash -c` / `ssh` payload are read as bash reads them. A quoted delimiter keeps the body data; for an
+  unquoted one the `$(…)` and backticks of the body are classified as commands, as bash runs them. A
+  heredoc whose delimiter never appears is not swallowed (its lines are classified), and a newline in a
+  nested substitution while a body is owed is asked about. `$'…'` strings are decoded before classifying.
+  A `{` opens a group only in command position; a `$((` that does not close with `))` is a command
+  substitution; a `case … esac` is parsed and every clause body classified (one that does not parse is
+  asked about); `time [options]`, `timeout -s/-k`, `coproc [NAME]`, `! `, and the action of `trap 'CMD'
+  SIGNALS` are looked through to the command they run. Where bash reads a `#` as part of a regex or an
+  extglob group and the stripper does not know it, a dropped comment that holds `;`, `&`, `|`, a
+  backtick, `$(`, `<(` or `>(` makes the harness classify the command a second time with every `#` kept
+  and add the segments of that reading that are destructive, write, run an inline program, pipe into a
+  shell or redirect the environment — only those, so the words of an ordinary comment draw no question,
+  and a second reading that does not balance is not used. A quote, backtick or substitution that never
+  closes (bash refuses such a line) is asked about as `__lh_unparsed_shell__` in every mode, `auto`
+  included, and the answer cannot be remembered, as is an `env -S` string using an escape or expansion
+  the classifier does not follow.
+- **What the shell reader does not follow (residuals, recorded as a ruling taken on the owner's behalf
+  by the GSD run at the end of the Phase 10 review).** The body of a heredoc whose command is a shell
+  (`bash <<'E'`, `cat <<E | sh`) is data to the classifier, not a program it reads: `bash <<'E'` with
+  `rm -rf x` in the body signs as `bash`. A `( … )` group followed by a redirection (`(rm x) > log`) is
+  not recursed into and signs as `(rm`. An invented comment (`[[ a =~ a|#b ]]; cmd`) can hide a command
+  whose only fact is that it is unfamiliar, because the second reading adds nothing merely for being
+  unfamiliar. Nesting deeper than about 400 levels raises `RecursionError`, which the gate turns into a
+  deny. In `auto` the
+  action of a `trap` with a target the classifier cannot place (`trap 'rm -f "$tmp"' EXIT`) is asked
+  about, because it is classified like an `eval` payload.
 - **The classifier reads what a command writes and what it runs, not only its name.** `git diff`,
   `git log` and `git show` with `--output FILE` write that file, and `git diff --no-index` compares
   two paths outside any repository (operands on either side of the flag count), so each names its
