@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 
 from localharness.agent.gate import tool_meta_from_schema
-from localharness.agent.gate_types import GIT_CONFIG_DANGEROUS_KEYS_DEFAULT, GateSettings, Verdict
+from localharness.agent.gate_types import (
+    GIT_CONFIG_DANGEROUS_KEYS_DEFAULT,
+    UNPARSED_SHELL_SIGNATURE,
+    GateSettings,
+    Verdict,
+)
 from localharness.agent.shell_classify import classify_shell
 from localharness.agent.verdict import GateContext, evaluate
 from localharness.tools.builtin.bash_tool import BashExecTool
@@ -349,7 +354,7 @@ def test_a_comment_inside_a_substitution_never_hides_its_next_line(command, mode
     ("echo $((1))#c ; ls", "echo $((1))#c ; ls"),
     ("echo a #c ; ls", "echo a #c ; ls"),
     ("echo a\r#c ; ls", "echo a\r#c ; ls"),
-    ("(ls)#c\nrm x", "(ls)#c\nrm x"),
+    ("(ls)#c\nrm x", "(ls)\nrm x"),  # the `)` of a bare group ends the word (WR-54, CR-02)
     ("(ls) #c\nrm x", "(ls) \nrm x"),
     ("(#c\nls)", "(\nls)"),
     ("echo `ls # c` x", "echo `ls ` x"),
@@ -622,3 +627,132 @@ def test_a_comment_that_holds_a_separator_is_also_read_with_the_comment_left_in(
     assert _join("ls # a $(b)")[1] is True
     assert _join("ls # ab")[1] is False
     assert _join("ls # a; b", strip_comments=False)[0] == "ls # a; b"
+
+
+# ------------------------------------------------------------------ heredocs read inside the join scan (iteration 3)
+
+X = "rm -rf /etc/x"
+THREE_MODES = ("read-only", "guarded", "auto")
+
+HEREDOC_LAYOUT_ROWS = (
+    # CR-01 / CR-52: a continuation after the operator, a quote spanning lines, a quoted newline delimiter
+    f"cat <<E \\\n; {X}\nhi\nE",
+    f"cat <<E\\\n; {X}",
+    f"cat <<E\\\n;{X}\nE\n",
+    f"cat <<E&&\\\n{X}\necho",
+    f'echo "multi\nline <<E text"\n{X}',
+    f"echo 'multi\nline <<E text'\n{X}",
+    f'echo "\n<<E "\n{X}\nE\n',
+    f'echo "a\n<<E b"\n{X}\nE',
+    f"cat <<'\n' ; {X}",
+    # CR-02: `)#` opens a comment, so `<<E` after it is text
+    f"(true)#<<E\n{X}\nE",
+    f"(true)#<<'X'\n{X}",
+    f"(true) #<<E\n{X}\nE",
+    # CR-03: two delimiter spellings and the arithmetic that is not `$((`
+    f"cat <<$'E'\nbody\nE\n{X}",
+    f'cat <<$"E"\nbody\nE\n{X}',
+    f"cat <<$'E\\x46'\nbody\nEF\n{X}",
+    f"echo $[1<<2]\n{X}",
+    f"a[1<<1]=3\n{X}",
+    f"echo $(( 1 << 2 )); {X}",
+    f"(( 1 << 2 )); {X}",
+    # WR-54: a bare group is followed by a real comment
+    f"({X})#c",
+    f"ls\n({X})#c",
+)
+
+
+@pytest.mark.parametrize("mode", THREE_MODES)
+@pytest.mark.parametrize("command", HEREDOC_LAYOUT_ROWS)
+def test_a_heredoc_layout_bash_reads_differently_never_hides_the_command(command, mode, ws):
+    """Each row ran its `rm` in bash 5.3.9 (marker files); the old line-at-a-time scanner took it for body."""
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+def test_a_continuation_after_a_heredoc_operator_joins_the_lines_first():
+    assert "sh" in [s.signature for s in _segments("cat <<E \\\n| sh\nhi\nE")]
+    # bash joins the lines: `cat <<E body`, and the next line `E` ends an empty body
+    assert [s.signature for s in _segments("cat <<E \\\nbody\nE")] == ["cat"]
+
+
+def test_an_unterminated_heredoc_is_classified_not_swallowed(ws):
+    """Bash reads the rest as the body, but a delimiter this reader got wrong would look the same."""
+    assert "rm -rf" in [s.signature for s in _segments(f"cat <<E\n{X}\n")]
+    assert _verdict(f"cat <<'E\n{X}", ws, "auto").verdict is not Verdict.ALLOW  # an unclosed quote asks
+
+
+@pytest.mark.parametrize("command", (
+    "cat <<E\nbody\nE\nls",
+    "cat <<-E\n\tbody\n\tE\nls",
+    "cat <<'E' > f\nrm -rf /\nE\nls",
+    "cat <<A <<B\none\nA\ntwo\nB\nls",
+    "cat <<$'E'\nrm -rf /\nE\nls",
+    'cat <<"E"\nrm -rf /\nE\nls',
+    "cat <<\\E\nrm -rf /\nE\nls",
+    "cat <<E\nrm -rf /\nE\nls # <<F",
+    "echo $((1<<2)) $[1<<2]; ls",
+    "a=$((1<<2)); b[2]=1; ls",
+    "cat <<<'x' <<<'y'; ls",
+))
+def test_a_well_formed_heredoc_still_swallows_its_body_and_only_it(command):
+    assert "rm -rf" not in [s.signature for s in _segments(command)], command
+    assert not any(s.signature == UNPARSED_SHELL_SIGNATURE for s in _segments(command)), command
+
+
+COMMIT_IDIOM_ROWS = (
+    "git commit -m \"$(cat <<'EOF'\nfix: don't crash\nEOF\n)\"",
+    "git add -A && git commit -m \"$(cat <<'EOF'\nfix: don't crash\nEOF\n)\"",
+    "gh pr create --title \"x\" --body \"$(cat <<'EOF'\n- it's a `thing`; fine\nEOF\n)\"",
+    "git commit -m \"$(cat <<'EOF'\nDon't (crash\nwith `x` and \"y\" and $(z)\nEOF\n)\"",
+    "git commit -m \"$(cat <<'EOF'\nDon't crash )\nEOF\n)\"",
+    "git commit -m \"$(cat <<'EOF'\nit's\nEOF\n)\" && git push",
+)
+PAYLOAD_HEREDOC_ROWS = (
+    "bash -c 'cat <<EOF\nit'\"'\"'s fine\nEOF'",
+    "ssh host 'cat > f <<EOF\nit'\"'\"'s fine\nEOF'",
+    "docker exec c sh -c 'cat > f <<EOF\nit'\"'\"'s fine\nEOF'",
+    "eval \"cat <<EOF\nit's fine\nEOF\"",
+)
+
+
+@pytest.mark.parametrize("command", COMMIT_IDIOM_ROWS + PAYLOAD_HEREDOC_ROWS)
+def test_the_commit_idiom_and_heredoc_payloads_are_not_an_unparsed_ask(command, ws):
+    """WR-01 / WR-51: iteration 2 made `don't` in a heredoc body an ungrantable ask in every mode."""
+    assert not any(s.signature == UNPARSED_SHELL_SIGNATURE for s in _segments(command)), command
+    assert _verdict(command, ws, "auto").verdict is not Verdict.DENY
+    assert _verdict(command, ws, "guarded").verdict is not Verdict.DENY
+
+
+@pytest.mark.parametrize("command", COMMIT_IDIOM_ROWS[:3])
+def test_the_commit_idiom_classifies_as_the_same_command_without_the_apostrophe(command):
+    control = command.replace("don't", "dont").replace("it's", "its")
+    assert [s.signature for s in _segments(command)] == [s.signature for s in _segments(control)]
+
+
+def test_the_heredoc_body_of_a_commit_message_is_data_in_auto(ws):
+    command = "git commit -m \"$(cat <<'EOF'\nfix: don't crash\nEOF\n)\""
+    assert _verdict(command, ws, "auto").verdict is Verdict.ALLOW
+
+
+def test_a_newline_in_a_nested_context_while_a_heredoc_is_owed_is_never_silent(ws):
+    """The body of `cat <<E $(echo a<nl>b)` starts after which newline? Not guessed: the text is flagged."""
+    command = f"cat <<E $(echo a\nb)\nbody\nE\n{X}"
+    assert any(s.signature == "rm -rf" for s in _segments(command))
+    assert _verdict(command, ws, "auto").verdict is not Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command,joined", [
+    ("cat <<E\nbody\nE\nls", "cat  \nls"),
+    ("cat <<E >f\nbody\nE", "cat   >f\n"),
+    ("cat <<-E\n\tbody\n\tE\nls", "cat  \nls"),
+    ("echo $(cat <<'E'\nit's\nE\n) ; ls", "echo $(cat  \n) ; ls"),
+    ("cat <<E \\\n; ls\nbody\nE", "cat   ; ls\n"),
+    ("echo $((1<<2)) ; ls", "echo $((1<<2)) ; ls"),
+    ("(true)#c\nls", "(true)\nls"),
+])
+def test_the_join_strips_heredocs_with_the_text_it_reads(command, joined):
+    from localharness.agent.shell_classify import _join_continuations
+
+    assert _join_continuations(command) == joined
