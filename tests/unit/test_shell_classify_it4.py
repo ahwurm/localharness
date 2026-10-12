@@ -189,3 +189,38 @@ def test_a_nest_inside_the_bound_is_still_read(ws):
     command = "{ " * depth + "rm -rf /etc/x" + "; }" * depth
     _check(command, "DENY/ASKU/ASKU", ws)
     _check("{ " * depth + "ls" + "; }" * depth, "ok/ok/ok", ws)
+
+
+# --------------------------------------------------------------------------- CR-03: function definitions after grammar
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "{ f() { rm -rf /etc/x; }; f; }",
+        "{ function f { rm -rf /etc/x; }; f; }",
+        "time { f() { rm -rf /etc/x; }; f; }",
+        "if true; then f() { rm -rf /etc/x; }; f; fi",
+        "! f() { rm -rf /etc/x; }; f",
+        "while true; do f() { rm -rf /etc/x; }; f; done",
+        "if true; then function f { rm -rf /etc/x; }; f; fi",
+        "{ f () { rm -rf /etc/x; }; f; }",
+        "{ { g() ( rm -rf /etc/x ); g; }; }",
+    ),
+)
+def test_a_function_definition_after_grammar_has_its_body_classified(ws, command):
+    """CR-03 (it4): a definition after ``{``, ``then``, ``do``, ``!`` or ``time`` hid its body (a regression for
+    the ``{`` and ``function`` forms: the iteration-3 phantom-``{`` fix)."""
+    _check(command, "!ok/!ok/!ok", ws)
+    assert any(s.signature == "rm -rf" for s in _segments(command))
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("f() { rm -rf /etc/x; }; f", "DENY/ASKU/ASKU"),
+        ("{ f() { echo hi; }; f; }", "DENY/ASK/ok"),
+        ("if true; then f() { echo hi; }; f; fi", "DENY/ASK/ok"),
+    ),
+)
+def test_function_definition_controls(ws, command, expected):
+    _check(command, expected, ws)
