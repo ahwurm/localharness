@@ -447,7 +447,7 @@ def test_accept_keeps_a_mark_that_has_no_record_yet(instructions_home, tmp_path)
 
 @pytest.mark.parametrize("size,text", [
     (0, "0.0 KB"), (410, "0.4 KB"), (5222, "5.1 KB"), (10240, "10 KB"),
-    (65536, "64 KB"), (215040, "210 KB"),
+    (65536, "64 KB"), (215040, "210 KB"), (10239, "10 KB"), (10188, "9.9 KB"),
 ])
 def test_format_kb(size, text):
     assert pr.format_kb(size) == text
