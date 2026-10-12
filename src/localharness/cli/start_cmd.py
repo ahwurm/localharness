@@ -2338,6 +2338,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             eviction_store=eviction_store,
             # An evicted body's origin is what its tool DECLARES (result_origin, SAFE-03).
             result_origin=tool_registry.result_origin,
+            # A failed call a later identical call fixed may leave the request only for a tool
+            # that declares host: safe; the manager fails closed on anything else.
+            host=tool_registry.host,
             # The configured sizes and ratios, raw (an unset size stays None): the manager
             # resolves them from its live window on every use.
             **context_size_kwargs(agent_config.context),

@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from localharness.agent.context import ContextManager
+from localharness.agent.context import ContextManager, _drop_superseded_failures
 from localharness.agent.gate import DENIED_OBSERVATION_PREFIX
 from localharness.agent.gate_types import GateOutcome
 from localharness.agent.loop import (
@@ -290,3 +290,274 @@ async def test_step_path_stamps_denial_result_and_truncation(bus):
     await loop.step(session)
     msg = [m for m in session.messages if m["role"] == "tool"][-1]
     assert msg["_lh"]["outcome"]["ok"] is False and msg["_lh"]["outcome"]["denied"] is False
+
+
+# ---------------------------------------------------------------------------
+# Task 2: the request-view drop
+# ---------------------------------------------------------------------------
+
+SAFE = {"read": "safe", "agent": "safe"}
+
+
+def _host(name: str) -> str:
+    return SAFE.get(name, "dangerous")
+
+
+def _call(tc_id: str, name: str, args: dict, *, as_object: bool = False) -> Any:
+    if as_object:
+        return SimpleNamespace(
+            id=tc_id, type="function",
+            function=SimpleNamespace(name=name, arguments=json.dumps(args)),
+        )
+    return {"id": tc_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+def _assistant(tc_id: str, name: str, args: dict, *, content: str | None = None,
+               as_object: bool = False) -> dict:
+    return {"role": "assistant", "content": content,
+            "tool_calls": [_call(tc_id, name, args, as_object=as_object)]}
+
+
+def _tool(tc_id: str, name: str, args: dict, content: str, *, ok: bool, denied: bool = False,
+          staged: bool = False, stamped: bool = True) -> dict:
+    msg: dict[str, Any] = {"role": "tool", "tool_call_id": tc_id, "content": content}
+    if stamped:
+        msg["_lh"] = _outcome(name, args, ok=ok, denied=denied, staged=staged)
+    return msg
+
+
+A = {"path": "a"}
+B = {"path": "b"}
+USER = {"role": "user", "content": "go"}
+
+
+def _fail_then_ok(name: str = "read", first_args: dict = A, second_args: dict = A, **first_kw) -> list[dict]:
+    first_kw.setdefault("ok", False)
+    return [
+        USER,
+        _assistant("c1", name, first_args),
+        _tool("c1", name, first_args, first_kw.pop("content", "[tool error] nope"), **first_kw),
+        _assistant("c2", name, second_args),
+        _tool("c2", name, second_args, "fine", ok=True),
+    ]
+
+
+def test_a_superseded_failure_is_dropped_and_the_input_is_untouched():
+    msgs = _fail_then_ok()
+    before = list(msgs)
+    out = _drop_superseded_failures(msgs, _host)
+    assert out == [msgs[0], msgs[3], msgs[4]]
+    assert msgs == before and all(a is b for a, b in zip(msgs, before))
+    assert out is not msgs
+
+
+def test_tool_calls_given_as_objects_match_like_dicts():
+    msgs = [
+        USER,
+        _assistant("c1", "read", A, as_object=True),
+        _tool("c1", "read", A, "[tool error] nope", ok=False),
+        _assistant("c2", "read", A, as_object=True),
+        _tool("c2", "read", A, "fine", ok=True),
+    ]
+    assert _drop_superseded_failures(msgs, _host) == [msgs[0], msgs[3], msgs[4]]
+
+
+def _kept(msgs: list[dict], host=_host) -> None:
+    out = _drop_superseded_failures(msgs, host)
+    assert out == msgs
+
+
+def test_a_denial_is_kept():
+    _kept(_fail_then_ok(denied=True, content=f"{DENIED_OBSERVATION_PREFIX}no"))
+
+
+def test_a_staged_call_is_kept():
+    _kept(_fail_then_ok(denied=True, staged=True, content=f"{DENIED_OBSERVATION_PREFIX}pending #1"))
+
+
+def test_a_failure_of_a_dangerous_host_tool_is_kept():
+    _kept(_fail_then_ok(name="bash_exec", first_args={"command": "x"}, second_args={"command": "x"}))
+
+
+def test_an_assistant_message_with_other_content_is_kept():
+    msgs = _fail_then_ok()
+    msgs[1] = _assistant("c1", "read", A, content="Let me try.")
+    _kept(msgs)
+
+
+def test_an_assistant_message_with_two_calls_is_kept():
+    msgs = _fail_then_ok()
+    msgs[1]["tool_calls"].append(_call("c1b", "read", B))
+    msgs.insert(3, _tool("c1b", "read", B, "fine", ok=True))
+    _kept(msgs)
+
+
+def test_a_different_later_call_does_not_supersede():
+    _kept(_fail_then_ok(second_args=B))
+
+
+def test_an_unstamped_failure_is_kept():
+    _kept(_fail_then_ok(stamped=False))
+
+
+def test_a_success_before_the_failure_is_kept():
+    msgs = [
+        USER,
+        _assistant("c0", "read", A), _tool("c0", "read", A, "fine", ok=True),
+        _assistant("c1", "read", A), _tool("c1", "read", A, "[tool error] nope", ok=False),
+    ]
+    _kept(msgs)
+
+
+def test_a_stamped_non_denied_failure_with_the_denial_prefix_is_kept():
+    _kept(_fail_then_ok(content=f"{DENIED_OBSERVATION_PREFIX}looks like one"))
+
+
+def test_unwired_and_raising_hosts_drop_nothing():
+    msgs = _fail_then_ok()
+    assert _drop_superseded_failures(msgs, None) == msgs
+
+    def boom(_name: str) -> str:
+        raise RuntimeError("lookup broke")
+
+    assert _drop_superseded_failures(msgs, boom) == msgs
+
+
+def test_pairs_are_matched_by_id_not_adjacency():
+    msgs = [
+        USER,
+        _assistant("c1", "read", A),
+        {"role": "user", "content": "interleaved"},
+        _tool("c1", "read", A, "[tool error] nope", ok=False),
+        _assistant("c2", "read", A),
+        _tool("c2", "read", A, "fine", ok=True),
+    ]
+    out = _drop_superseded_failures(msgs, _host)
+    assert [m.get("tool_call_id") for m in out if m["role"] == "tool"] == ["c2"]
+    assert all(not (m["role"] == "assistant" and m["tool_calls"][0]["id"] == "c1") for m in out)
+
+
+@pytest.mark.asyncio
+async def test_two_builds_are_byte_identical_and_the_failed_pair_stays_in_the_record():
+    ctx = ContextManager(host=_host)
+    msgs = _fail_then_ok()
+    first, _ = await ctx.build_messages(msgs, None)
+    second, _ = await ctx.build_messages(msgs, None)
+
+    def wire(out):
+        return json.dumps(provider_messages(out), sort_keys=True)
+
+    assert wire(first) == wire(second)
+    assert "c1" not in wire(first) and "c2" in wire(first)
+    assert all("_lh" not in m for m in provider_messages(first))
+    assert any(m.get("tool_call_id") == "c1" for m in msgs), "the caller's list lost the failed pair"
+    assert len(msgs) == 5
+    assert ctx.repair_tool_pairing(first) == first
+
+
+@pytest.mark.asyncio
+async def test_an_unwired_manager_drops_nothing():
+    msgs = _fail_then_ok()
+    out, _ = await ContextManager().build_messages(msgs, None)
+    assert any(m.get("tool_call_id") == "c1" for m in out)
+
+
+@pytest.mark.asyncio
+async def test_the_registry_reports_the_declared_host_and_fails_closed():
+    registry = await _registry(_FlakyProbe(name="read", host="safe"), _FlakyProbe(name="danger", host="dangerous"))
+    assert registry.host("read") == "safe"
+    assert registry.host("danger") == "dangerous"
+    assert ToolRegistry().host("nope") == "dangerous"
+
+
+@pytest.fixture
+async def store(tmp_path: Path):
+    s = MemoryStore(agent_id="obs-agent", division_id="", org_id="", base_dir=str(tmp_path))
+    await s.open()
+    yield s
+    await s.close()
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_the_third_request_omits_the_failed_exchange_but_the_record_keeps_it(bus, store):
+    registry = await _registry(_FlakyProbe())
+    args = {"path": "a"}
+    llm = _RecordingLLM([
+        FakeLLMResponse(content=None, tool_calls=[FakeToolCall(id="tc-1", name="probe", arguments=args)]),
+        FakeLLMResponse(content=None, tool_calls=[FakeToolCall(id="tc-2", name="probe", arguments=args)]),
+        FakeLLMResponse(content="Done."),
+    ])
+    loop = _loop(llm, bus, registry, ctx=ContextManager(host=registry.host))
+    await loop.run_turn("task")
+
+    assert len(llm.seen) == 3
+    third = llm.seen[2]
+    third_ids = {m.get("tool_call_id") for m in third if m.get("role") == "tool"}
+    assert third_ids == {"tc-2"}
+    call_ids = {tc["id"] if isinstance(tc, dict) else tc.id
+                for m in third for tc in (m.get("tool_calls") or [])}
+    assert call_ids == {"tc-2"}
+    # The second request still carried the failure: it had not yet been superseded.
+    assert {m.get("tool_call_id") for m in llm.seen[1] if m.get("role") == "tool"} == {"tc-1"}
+
+    kept = {m.get("tool_call_id") for m in _tool_messages(loop)}
+    assert kept == {"tc-1", "tc-2"}
+    conversation, _ = loop.resume_state()
+    assert sum(1 for m in conversation if m.get("role") == "assistant" and m.get("tool_calls")) == 2
+
+    observations = [e for e in bus.history(event_types=[Observation]) if e.observation_type == "tool_result"]
+    assert [o.tool_call_id for o in observations] == ["tc-1", "tc-2"]
+    for o in observations:
+        await store._on_observation(o)
+    rows = [json.loads(line) for line in Path(store._history_path).read_text().splitlines() if line.strip()]
+    assert [r["call_id"] for r in rows if r["type"] == "tool_result"] == ["tc-1", "tc-2"]
+
+
+@pytest.mark.asyncio
+async def test_start_passes_the_registry_host_to_the_root_manager(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_start_cmd import _stub_start_boundaries
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    seen: list[dict] = []
+    real_init = ContextManager.__init__
+
+    def spy_init(self, *a, **k):
+        seen.append(k)
+        return real_init(self, *a, **k)
+
+    monkeypatch.setattr(ContextManager, "__init__", spy_init)
+    await _start_async(None, False, False, str(tmp_path))
+
+    wired = [k for k in seen if k.get("bus") is not None]
+    assert wired
+    for k in wired:
+        host = k.get("host")
+        assert host is not None and getattr(host, "__func__", None) is ToolRegistry.host
+        assert host.__self__ is k["result_origin"].__self__, "host and result_origin read different registries"
+
+
+@pytest.mark.asyncio
+async def test_bench_manager_resolves_host_through_its_per_scenario_registry(monkeypatch):
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import LimitsSpec, ScenarioSpec, SuccessCriteria
+    from localharness.core.events import BudgetSpec
+
+    captured: dict = {}
+
+    class FakeAgentLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop", FakeAgentLoop)
+    scen = ScenarioSpec(
+        name="t", prompt="x", success_criteria=SuccessCriteria(rubric=["contains:OK"]),
+        budget=BudgetSpec(), limits=LimitsSpec(), tools_allowed=["agent"], slice="train",
+        category="tool_basics",
+    )
+    await bench_runner._build_agent_loop(bus=None, llm_client=None, scenario=scen)
+    registry = captured["tool_registry"]
+    manager = captured["context_manager"]
+    assert registry.host("agent") == "safe"
+    assert manager._host("agent") == registry.host("agent")
+    assert manager._host("not-a-tool") == "dangerous"

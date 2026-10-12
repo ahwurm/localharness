@@ -516,6 +516,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         # An evicted body's origin is what its tool DECLARES (SAFE-03). Late-bound: tool_registry is
         # assigned a few lines below, before any turn runs.
         result_origin=lambda name: tool_registry.result_origin(name),
+        host=lambda name: tool_registry.host(name),
         token_counter=token_counter,
         # The configured sizes and ratios, raw (an unset size stays None): the bench measures what
         # `start` runs, the eviction threshold included.

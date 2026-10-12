@@ -305,6 +305,13 @@ class ToolRegistry:
         schema = self.schema_of(name)
         return schema.result_origin if schema is not None else "untrusted"
 
+    def host(self, name: str) -> Literal["dangerous", "safe"]:
+        """Whether `name` can touch the host: the tool's declared host; a name no registered tool
+        answers to fails closed (dangerous). Read by the context manager to decide whether a
+        superseded failure may leave the request view."""
+        schema = self.schema_of(name)
+        return schema.host if schema is not None else "dangerous"
+
     def _find_tool_by_name(self, name: str) -> ToolProtocol | None:
         for bucket in [
             self._tools["global"],
