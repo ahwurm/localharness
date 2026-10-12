@@ -90,7 +90,7 @@ def test_plain_git_reads_are_one_read_only_segment_without_targets(command):
     ("git diff --output out.patch", ("out.patch",)),
     ("git log -p --output=l.txt", ("l.txt",)),
     ("git show HEAD --output=s.txt", ("s.txt",)),
-    ("git -C sub diff --output=o", ("o",)),
+    ("git -C sub diff --output=o", ("sub/o",)),  # CR-54: git applies -C before it opens the file
     ("git diff --no-index a b", ("a", "b")),
     ("git diff --no-index -- a b", ("a", "b")),
     ("git diff --stat --no-index a b", ("a", "b")),
@@ -101,6 +101,32 @@ def test_plain_git_reads_are_one_read_only_segment_without_targets(command):
 ])
 def test_output_and_no_index_report_their_targets(command, expected):
     assert _targets(command) == expected
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("git -C ~ log --output=.bashrc", ("~/.bashrc",)),
+    ("git -C ~/.ssh show --output=authorized_keys HEAD", ("~/.ssh/authorized_keys",)),
+    ("git -C /etc diff --output=cron.d/x", ("/etc/cron.d/x",)),
+    ("git -C a -C b show --output=x", ("a/b/x",)),
+    ("git -C a -C /abs show --output=x", ("/abs/x",)),
+    ("git -C ~ diff --no-index --output=.bashrc a b", ("~/.bashrc", "~/a", "~/b")),
+    ("git -C sub diff --output=/tmp/o", ("/tmp/o",)),
+    ("git -C $D log --output=x", ("$D/x",)),
+    ("git -c core.pager=cat -C sub log --output=x", ("sub/x",)),
+])
+def test_dash_c_moves_the_output_and_no_index_targets_into_its_directory(command, expected):
+    assert _targets(command) == expected
+
+
+@pytest.mark.parametrize("mode", ("auto", "guarded", "trusted"))
+def test_output_through_dash_c_into_a_protected_path_asks(mode, ws):
+    result = _verdict("git -C ~ log --output=.bashrc", ws, mode)
+    assert result.verdict is Verdict.ASK
+    assert result.request is not None and result.request.klass == "protected-path"
+
+
+def test_output_through_dash_c_is_denied_read_only(ws):
+    assert _verdict("git -C ~ diff --no-index --output=.bashrc a b", ws, "read-only").verdict is Verdict.DENY
 
 
 def test_a_machine_override_of_write_shaped_commands_is_unchanged_for_git():
