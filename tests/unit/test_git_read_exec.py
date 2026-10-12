@@ -307,6 +307,21 @@ async def test_a_single_line_over_the_byte_cap_keeps_its_head(root, base, monkey
 
 
 @requires_git
+async def test_the_byte_cap_does_not_cut_a_multibyte_character(root, base, monkeypatch):
+    """IN-52 (it4): a cut inside a UTF-8 sequence left one U+FFFD right before the marker."""
+    monkeypatch.setattr(grt, "MAX_RETURNED_BYTES", 501)
+    body = 'case " $* " in *" log "*) head -c 500 /dev/zero | tr "\\0" y; printf "\\303\\251\\n"; exit 0 ;; esac'
+    fake = fake_git(base / "fake", body)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+    result = await GitReadTool(root).run(subcommand="log")
+    assert result.truncated is True
+    assert "\ufffd" not in result.output
+    assert result.output.startswith("y" * 500 + "\n")
+    monkeypatch.setattr(grt, "_complete_characters", lambda part: part)  # control: the cut does land mid-character
+    assert "\ufffd" in (await GitReadTool(root).run(subcommand="log")).output
+
+
+@requires_git
 async def test_output_exactly_at_the_byte_cap_gets_no_marker(root, base, monkeypatch):
     body = 'case " $* " in *" log "*) printf "aaaa\\nbbbb\\n"; exit 0 ;; esac'
     fake = fake_git(base / "fake", body)
