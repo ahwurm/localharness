@@ -19,6 +19,8 @@ then the store is reported unavailable; it never proceeds unlocked.
 from __future__ import annotations
 
 import copy
+import errno
+import hashlib
 import os
 import stat
 import threading
@@ -355,3 +357,168 @@ def write_instructions(
     key = _normalize_root(root)
     with _store_transaction(config_dir) as data:
         _entry_for_write(data, key)["instructions"] = _record_to_dict(record)
+
+
+# --------------------------------------------------------------------------- candidates
+
+
+def instruction_candidates(root: Any) -> tuple[Path, Path, Path]:
+    """The three lexical candidate paths under ``root``, in the order they are tried."""
+    base = Path(root)
+    first, second, third = (base / name for name in CANDIDATE_NAMES)
+    return first, second, third
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """An instructions file that resolved: its display ``name`` relative to the root, the
+    lexical ``path`` under the root, and the ``real`` resolved path."""
+
+    name: str
+    path: Path
+    real: Path
+
+
+def first_candidate(root: Any) -> Candidate | None:
+    """The first of ``CLAUDE.md``, ``AGENTS.md``, ``.localharness/INSTRUCTIONS.md`` that is
+    usable, or None.
+
+    Only these three names are ever candidates; nothing else under ``.claude/`` is read. A
+    candidate is skipped silently when it is absent, when it is a link that leaves the resolved
+    root (the contained-link rule the config layer uses), or when it is not a regular file. The
+    regular-file test is ``os.stat``, which does not open the file, so a FIFO cannot block it.
+    A link that stays inside the root is kept with its resolved real path."""
+    root_real = Path(root).resolve()
+    for name, lexical in zip(CANDIDATE_NAMES, instruction_candidates(root)):
+        if not os.path.lexists(lexical):
+            continue
+        try:
+            real = lexical.resolve()
+            if not real.is_relative_to(root_real):
+                continue
+            if not stat.S_ISREG(os.stat(real).st_mode):
+                continue
+        except (OSError, RuntimeError, ValueError):
+            continue
+        return Candidate(name=name, path=lexical, real=real)
+    return None
+
+
+# --------------------------------------------------------------------------- guarded read
+
+
+@dataclass(frozen=True)
+class GuardedRead:
+    """The outcome of ``guarded_read``: the bytes with their size and digest, or a ``failure``
+    that is one of ``"too_large"``, ``"not a regular file"``, ``"unreadable"``."""
+
+    data: bytes | None
+    size: int
+    digest: str | None
+    failure: str | None
+
+
+def _digest(data: bytes) -> str:
+    """Hex digest of the raw bytes. Private on purpose: no public name carries the algorithm."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def _refused(failure: str, size: int = 0) -> GuardedRead:
+    return GuardedRead(data=None, size=size, digest=None, failure=failure)
+
+
+def guarded_read(real_path: Any, root: Any, cap: int) -> GuardedRead:
+    """Read an instructions file without trusting the filesystem to stay as it was.
+
+    ``real_path`` is a recorded real path. It is re-checked on every read: it must still equal
+    its own ``realpath`` (a parent directory swapped for a link is not the file recorded) and
+    sit inside the resolved ``root``. It is opened read-only without following a link, without
+    blocking (a FIFO opens at once) and without a controlling terminal, and ``fstat`` must show
+    a regular file before a byte is read. At most ``cap + 1`` bytes are read; more than ``cap``
+    is ``too_large``. The digest is over the raw bytes read."""
+    path_text = os.fspath(real_path)
+    try:
+        contained = os.path.realpath(path_text) == path_text and Path(path_text).is_relative_to(
+            Path(root).resolve()
+        )
+    except (OSError, RuntimeError, ValueError):
+        contained = False
+    if not contained:
+        return _refused("not a regular file")
+    flags = (
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        fd = os.open(path_text, flags)
+    except OSError as exc:
+        return _refused("not a regular file" if exc.errno == errno.ELOOP else "unreadable")
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return _refused("not a regular file")
+        if info.st_size > cap:
+            return _refused("too_large", info.st_size)
+        chunks: list[bytes] = []
+        total = 0
+        while total <= cap:
+            chunk = os.read(fd, min(1 << 16, cap + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    except OSError:
+        return _refused("unreadable")
+    finally:
+        os.close(fd)
+    if total > cap:
+        return _refused("too_large", total)
+    data = b"".join(chunks)
+    return GuardedRead(data=data, size=len(data), digest=_digest(data), failure=None)
+
+
+def accept_instructions(
+    root: Any, candidate: Candidate, *, config_dir: Any = None
+) -> InstructionsRecord | None:
+    """Record ``state: yes`` for the candidate's current bytes: the one function every yes path
+    calls (the offer prompt, the session-trust question, ``/instructions on``).
+
+    The bytes are read through ``guarded_read`` with the ``ACCEPT_MAX_BYTES`` ceiling; a guard
+    failure or an oversize file writes nothing and returns None. Existing open marks are kept;
+    ``harness_written`` and ``shadow`` are cleared."""
+    read = guarded_read(candidate.real, root, ACCEPT_MAX_BYTES)
+    if read.failure is not None or read.digest is None:
+        return None
+    key = _normalize_root(root)
+    with _store_transaction(config_dir) as data:
+        entry = _entry_for_write(data, key)
+        record = InstructionsRecord(
+            path=str(candidate.real),
+            name=display_name(candidate.name),
+            digest=read.digest,
+            size=read.size,
+            state="yes",
+            pending=_pending_from_dict(entry.get("instructions")),
+        )
+        entry["instructions"] = _record_to_dict(record)
+    return record
+
+
+# --------------------------------------------------------------------------- display
+
+
+def format_kb(n: int) -> str:
+    """A byte count in KB (1024 bytes): one decimal below 10 KB (``5.1 KB``, ``0.4 KB``), an
+    integer from 10 KB (``210 KB``)."""
+    kb = n / 1024
+    return f"{kb:.1f} KB" if kb < 10 else f"{kb:.0f} KB"
+
+
+def display_name(name: str) -> str:
+    """A file name safe to print: ANSI, C0 and C1 control sequences stripped.
+
+    The sanitiser lives in ``channels``; importing it here, not at module load, keeps the config
+    package from importing channels when it loads."""
+    from localharness.channels.base import sanitize_for_display
+
+    return sanitize_for_display(name)
