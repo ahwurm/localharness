@@ -724,10 +724,12 @@ the line. ``$#``, ``${#x}``, ``a#b`` and ``16#ff`` are not comments."""
 BASH_BLANKS = " \t\n"
 
 COMMENT_HAZARD_CHARS = ";&|`"
-"""A dropped comment holding one of these (or ``$(``) could be hiding a command if the stripper judged
-a ``#`` a comment where bash did not (``[[ a =~ (a|#b) ]]; rm x``, ``shopt -s extglob`` then ``@(a|#b)``,
-``(( 0 # )); rm x``). The command is then classified a second time with comments left in, and the
-verdicts are the union (:func:`_classify_command_text`). A comment without them has nothing to hide."""
+COMMENT_HAZARD_OPENERS = ("$(", "<(", ">(")
+"""A dropped comment holding one of these could be hiding a command if the stripper judged a ``#`` a
+comment where bash did not (``[[ a =~ (a|#b) ]]; rm x``, ``shopt -s extglob`` then ``@(a|#b)``,
+``+(#) >(rm x)``). The command is then classified a second time with comments left in, and the
+dangerous segments of that reading are added (:func:`_classify_command_text`). A comment without them
+has nothing to hide."""
 
 _JOIN_TOP, _JOIN_PAREN, _JOIN_ARITH, _JOIN_BACKTICK, _JOIN_PARAM, _JOIN_FUNSUB, _JOIN_BRACKET = range(7)
 """The contexts :class:`_JoinScan` tells apart: the command text itself; a ``$(…)`` / ``<(…)`` / ``>(…)``
@@ -1071,7 +1073,9 @@ class _JoinScan:
                     escaped = text[end] == "\\" and text[end + 1 : end + 2] not in ("", "\n")
                     end += 2 if escaped else 1
                 dropped = text[index:end]
-                if any(c in dropped for c in COMMENT_HAZARD_CHARS) or "$(" in dropped:
+                if any(c in dropped for c in COMMENT_HAZARD_CHARS) or any(
+                    opener in dropped for opener in COMMENT_HAZARD_OPENERS
+                ):
                     self.hazard = True
                 self.index = end
                 continue
@@ -1256,18 +1260,30 @@ def _classify_command_text(
     """Join, strip comments and classify one command text — twice when a comment dropped could hide one.
 
     The comment stripper must never be able to HIDE a command (T-10-16). It is made to follow bash
-    closely, but a ``#`` is not a comment in every context (a ``[[ =~ ]]`` regex, an extglob group, a
-    ``(( ))``). So when it dropped a comment holding ``;``, ``&``, ``|``, a backtick or ``$(``, the text is
-    also classified with every ``#`` kept, and the segments of the second reading that the first lacks
-    are added: the stricter of the two, never the looser.
+    closely, but a ``#`` is not a comment in every context (a ``[[ =~ ]]`` regex, an extglob group).
+    So when it dropped a comment holding ``;``, ``&``, ``|``, a backtick, ``$(``, ``<(`` or ``>(``, the
+    text is also classified with every ``#`` kept, and the segments of that second reading that the
+    first lacks are added — but only the ones that matter (destructive, writing, an inline program,
+    a pipe into a shell, an environment redirect). In the second reading a real comment is text: its
+    words are unfamiliar programs and an apostrophe in it is an open quote, which says nothing about
+    what bash runs. So a second reading that does not balance is not used (the first one stands, as
+    the only reading bash can have run), and the words of a comment never add a segment merely for
+    being unfamiliar (WR-02 / WR-52, WR-53).
     """
     joined, hazard = _join(text)
     second_cwd = cwd.copy() if (hazard and cwd is not None) else None
     segments, dropped = _classify_text(joined, settings, cwd)
     if hazard:
         kept, _ = _join(text, strip_comments=False)
-        more, _ = _classify_text(kept, settings, second_cwd)
-        segments = [*segments, *(segment for segment in more if segment not in segments)]
+        if not kept.startswith(UNPARSED_SHELL_SIGNATURE):
+            more, _ = _classify_text(kept, settings, second_cwd)
+            segments = [*segments, *(
+                segment for segment in more
+                if segment not in segments and (
+                    segment.destructive or segment.write_targets or segment.inline_interpreter
+                    or segment.pipe_to_shell or segment.env_redirect
+                )
+            )]
     return segments, dropped
 
 

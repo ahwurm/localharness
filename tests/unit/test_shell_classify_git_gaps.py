@@ -800,3 +800,59 @@ def test_an_ordinary_unquoted_body_adds_only_what_it_runs(ws):
     assert _verdict(command, ws, "auto").verdict is Verdict.ALLOW
     assert _targets(command) == ("f",)
     assert _targets("cat <<E > f\n$(date)\nE") == ("f",)
+
+
+# ------------------------------------------------------------------ the second reading draws no question on a real comment (WR-02/WR-52, WR-53; iteration 3)
+
+COMMENT_WITH_HAZARD_CHARS_ROWS = (
+    ("# list files; show sizes\nls -la", "ls -la"),
+    ("# Check status & report\ngit status", "git status"),
+    ("# list | count\nls | wc -l", "ls | wc -l"),
+    ("cat x # a|b", "cat x"),
+    ("echo hi # R&D", "echo hi"),
+    ("ls # a `b`", "ls"),
+    ("ls  # it's fine & quick", "ls"),
+    ("# run this; it's slow\nls", "ls"),
+    ("ls\n# it's a trap; really\npwd", "ls\npwd"),
+    ("pytest -q tests/ -x # stop on first failure; don't rerun", "pytest -q tests/ -x"),
+    ("git log --oneline # what's new | head", "git log --oneline"),
+    ("x=$(ls | wc -l)  # count; it's quick", "x=$(ls | wc -l)"),
+    ("echo 'a' # it's `x` | y", "echo 'a'"),
+    ("ls # list files; then more", "ls"),
+    ("git status # check state & continue", "git status"),
+    ("make # build `all` target", "make"),
+    ("git diff # compare with `main` | review", "git diff"),
+    ("### `BashExecTool`", ""),
+    ("ls # see <(this) and >(that)", "ls"),
+)
+
+
+@pytest.mark.parametrize("mode", THREE_MODES)
+@pytest.mark.parametrize("command,control", COMMENT_WITH_HAZARD_CHARS_ROWS)
+def test_a_real_comment_with_a_separator_or_an_apostrophe_is_still_only_a_comment(command, control, mode, ws):
+    """The second reading made these a deny (read-only), an ask (guarded) and, with an apostrophe, an
+    ungrantable ask in every mode: `#` read as a program and `it's` as an open quote."""
+    assert not any(s.signature == UNPARSED_SHELL_SIGNATURE for s in _segments(command)), command
+    assert [s.signature for s in _segments(command)] == [s.signature for s in _segments(control)]
+    if control:
+        assert _verdict(command, ws, mode).verdict is _verdict(control, ws, mode).verdict
+
+
+@pytest.mark.parametrize("command", (
+    f"shopt -s extglob\necho +(#) >({X})",
+    f"shopt -s extglob\necho +(#b) $({X})",
+    f"shopt -s extglob\necho +(#b) <({X})",
+    f"shopt -s extglob\necho +(#) `{X}`",
+))
+@pytest.mark.parametrize("mode", THREE_MODES)
+def test_a_command_in_any_substitution_after_an_invented_comment_is_still_seen(command, mode, ws):
+    """The gate listed `$(` and forgot the two other substitution openers (WR-53)."""
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+def test_a_second_reading_that_does_not_balance_adds_nothing():
+    from localharness.agent.shell_classify import _join
+
+    assert _join("ls # a; it's", strip_comments=False)[0].startswith(UNPARSED_SHELL_SIGNATURE)
+    assert [s.signature for s in _segments("ls # a; it's")] == ["ls"]
