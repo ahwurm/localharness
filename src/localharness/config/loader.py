@@ -144,6 +144,7 @@ class ConfigFieldError:
         secrets: frozenset[str] = frozenset(),
         secret: bool = False,
         withheld: bool = False,
+        kind: str = "",
     ) -> None:
         self.field_path = field_path
         self.value = value
@@ -154,6 +155,10 @@ class ConfigFieldError:
         # pre-43 message (agent yamls, org.yaml, a global-only harness error) byte-identical.
         self.source_path = source_path
         self.secrets, self.secret, self.withheld = secrets, secret, withheld
+        # pydantic's error `type` ("missing", "string_type", "value_error", ...), "" when the error
+        # did not come from pydantic. A fixed vocabulary, so a caller that must not repeat the
+        # file's text (the model-facing agent load refusal) can word the reason from it alone.
+        self.kind = kind
 
     def shown_value(self) -> Optional[str]:
         """The rejected value as it may be printed: the mask on or inside a secret field; None when
@@ -301,7 +306,7 @@ def _field_error(field_path: str, err: Any, message: str, yaml_line: Optional[in
     inside a secret field, and withheld for a key the model does not have."""
     return ConfigFieldError(field_path, err.get("input"), scrub(message, secrets), yaml_line,
                             secrets=secrets, secret=at_secret(model, err["loc"]),
-                            withheld=err["type"] == "extra_forbidden")
+                            withheld=err["type"] == "extra_forbidden", kind=str(err["type"]))
 
 
 def _pydantic_error_to_field_errors(

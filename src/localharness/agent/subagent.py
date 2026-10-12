@@ -201,15 +201,108 @@ def _not_wired_text(
     )
 
 
+_FAILURE_REASON_FALLBACK = "value rejected by validation"
+
+# What the model is told for a pydantic error `type`. Every phrase is fixed text; none is taken from
+# the error's message, which for a validator this repo wrote repeats the value the file held.
+_FAILURE_REASONS: dict[str, str] = {
+    "missing": "required setting is missing",
+    "extra_forbidden": "not a recognized setting",
+    "string_type": "must be a string",
+    "int_type": "must be a whole number",
+    "int_parsing": "must be a whole number",
+    "int_from_float": "must be a whole number",
+    "float_type": "must be a number",
+    "float_parsing": "must be a number",
+    "bool_type": "must be true or false",
+    "bool_parsing": "must be true or false",
+    "list_type": "must be a list",
+    "dict_type": "must be a mapping",
+    "model_type": "must be a mapping",
+    "model_attributes_type": "must be a mapping",
+    "literal_error": "not one of the allowed values",
+    "enum": "not one of the allowed values",
+    "string_too_short": "too short",
+    "string_too_long": "too long",
+    "too_short": "too short",
+    "too_long": "too long",
+    "greater_than": "out of the allowed range",
+    "greater_than_equal": "out of the allowed range",
+    "less_than": "out of the allowed range",
+    "less_than_equal": "out of the allowed range",
+    "string_pattern_mismatch": "does not match the required format",
+    "value_error": _FAILURE_REASON_FALLBACK,
+    "assertion_error": _FAILURE_REASON_FALLBACK,
+}
+
+
+def _declared_steps(annotations: list[Any], part: str) -> list[Any]:
+    """The annotations a path ``part`` can lead to from any of ``annotations``: a field NAME the
+    schema declares on a model, or a list index (digits only). A mapping's key, a model's
+    undeclared key and anything else lead nowhere, so the walk stops there."""
+    import types
+    import typing
+
+    from pydantic import BaseModel
+
+    out: list[Any] = []
+    for ann in annotations:
+        origin = typing.get_origin(ann)
+        args = typing.get_args(ann)
+        if origin is typing.Annotated:
+            out += _declared_steps([args[0]], part)
+        elif origin is typing.Union or origin is types.UnionType:
+            out += _declared_steps(list(args), part)
+        elif isinstance(ann, type) and issubclass(ann, BaseModel):
+            info = ann.model_fields.get(part)
+            if info is not None:
+                out.append(info.annotation)
+        elif origin in (list, set, frozenset, tuple) and part.isdigit():
+            out += [a for a in args if a is not Ellipsis]
+    return out
+
+
+def _declared_field_path(field_path: str) -> str:
+    """The longest leading part of ``field_path`` made only of names the agent schema declares (or
+    list indices), "" when not even the first part is one. An agent file is untrusted text and a path
+    can carry a key the file invented or a mapping's key, so only schema-declared names ever reach the
+    model. A part that is not a declared name ends the walk, and so does everything after it. The
+    first part may also name a bundled plugin's agent section, walked against that plugin's model."""
+    from localharness.config.models import AgentConfig
+
+    parts = field_path.split(".")
+    annotations: list[Any] = [AgentConfig]
+    if parts and parts[0] not in AgentConfig.model_fields:
+        from localharness.plugins.builtin import bundled_plugins
+
+        model = next((c.AgentConfigModel for c in bundled_plugins()
+                      if c.manifest.name == parts[0] and c.AgentConfigModel is not None), None)
+        if model is None:
+            return ""
+        annotations = [model]
+        kept = [parts[0]]
+        parts = parts[1:]
+    else:
+        kept = []
+    for part in parts:
+        annotations = _declared_steps(annotations, part)
+        if not annotations:
+            break
+        kept.append(part)
+    return ".".join(kept)
+
+
 def _load_failure_text(agent_id: str, exc: BaseException) -> str | None:
     """The refusal for an agent whose definition EXISTS but would not load (a parse or validation
     error), so the model is not told "not wired" about a file that is there. None for a plain
     not-found (the loader's ``searched_paths``, or ``FileNotFoundError``), which keeps the two-line
     not-wired text.
 
-    The agent file is untrusted project text, so a validation or reference error names the file and
-    the field with a short reason but never the value the file held (the loader's own report, with
-    its bounded and masked ``got:`` value, is for the person at the terminal). Any other error shows
+    The agent file is untrusted project text, so a validation or reference error is built only from
+    trusted parts: the file's path, a field path that the agent schema declares (never an invented
+    key, never a mapping's key), and one fixed phrase per pydantic error type. Nothing the file held
+    (a value, a key, the validator's own message) is ever copied in; the loader's full report, with
+    its bounded and masked ``got:`` value, is for the person at the terminal. Any other error shows
     its first line, capped."""
     if hasattr(exc, "searched_paths") or isinstance(exc, FileNotFoundError):
         return None
@@ -219,15 +312,14 @@ def _load_failure_text(agent_id: str, exc: BaseException) -> str | None:
         detail = f"{exc.path}:"
         if exc.errors:
             first = exc.errors[0]
-            reason = str(first.message)
-            value = first.value
-            if isinstance(value, str) and len(value) >= 4:
-                reason = reason.replace(value, "<value>")
-            detail += f" invalid {first.field_path}: {reason}"
+            reason = _FAILURE_REASONS.get(getattr(first, "kind", ""), _FAILURE_REASON_FALLBACK)
+            where = _declared_field_path(str(first.field_path)) or "setting"
+            detail += f" invalid {where}: {reason}"
             if len(exc.errors) > 1:
                 detail += f" (and {len(exc.errors) - 1} more)"
     elif isinstance(exc, ConfigReferenceError):
-        detail = f"{exc.path}: field {exc.field!r} references something that does not exist"
+        where = _declared_field_path(str(exc.field)) or "setting"
+        detail = f"{exc.path}: field {where!r} references something that does not exist"
     else:
         lines = [ln.strip() for ln in str(exc).splitlines() if ln.strip()]
         detail = lines[0] if lines else type(exc).__name__
