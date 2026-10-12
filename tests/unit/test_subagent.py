@@ -444,8 +444,8 @@ async def test_runner_dispatches_yaml_defined_agent(monkeypatch):
     assert captured["task"] == "summarize video X"
     assert loads == ["youtube-summarizer"]
 
-    # unknown name still refuses, with builder guidance in the message
-    with pytest.raises(ValueError, match="CREATE one"):
+    # unknown name still refuses, naming the closest available agents
+    with pytest.raises(ValueError, match="the closest available to"):
         await runner("nonexistent-agent", "do thing")
 
     # "orchestrator" (the root) is never loadable as a child (self-delegation guard)

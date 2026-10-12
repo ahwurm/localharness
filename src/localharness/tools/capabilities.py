@@ -195,15 +195,9 @@ def assert_no_ingest_via_exec(
             continue
         who = f" '{agent_id}'" if agent_id else ""
         raise IngestViaExecError(
-            f"BLOCKED: agent{who} holds no web-ingest tool, so it may not reach the web through "
-            f"`{schema.name}` instead (matched {label}: {hit.group(0).strip()!r}). Reading remote "
-            f"content here would put attacker-controllable bytes one call from a host action — "
-            f"the capability floor denies you the web verbs for exactly that reason, and routing "
-            f"around it defeats the split.\n"
-            f"DELEGATE instead: agent(agent_id='web-researcher', task='<what you need, including "
-            f"the exact queries or URLs>').\n"
-            f"If you believe the web-researcher itself is broken, SAY SO TO THE USER and STOP — "
-            f"report the failure, do not work around it. A silent workaround hides a real bug."
+            f"BLOCKED: agent{who} holds no web-ingest tool and may not reach the web through "
+            f"`{schema.name}` (matched {label}: {hit.group(0).strip()!r}); delegate the read to "
+            f"web-researcher, and if that fails, do not work around it; report the failure."
         )
 
 
