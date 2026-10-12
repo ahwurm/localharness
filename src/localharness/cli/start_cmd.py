@@ -33,10 +33,6 @@ from localharness.cli.workspace import (
     visible_text,
     write_overlay_validated,
 )
-from localharness.config.defaults import (
-    DEFAULT_TOOL_EVICT_THRESHOLD_CHARS,
-    DEFAULT_TOOL_OUTPUT_CHARS,
-)
 from localharness.config.effort import EFFORT_UNENFORCED_LINE
 from localharness.core.private_files import touch_private
 from localharness.core.which import which_outside_cwd
@@ -1409,7 +1405,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     import time as _time
     import uuid
 
-    from localharness.agent.context import CompactionPipeline, ContextManager, TokenCounter
+    from localharness.agent.context import (
+        CompactionPipeline,
+        ContextManager,
+        TokenCounter,
+        context_size_kwargs,
+    )
     from localharness.agent.loop import AgentLoop
     from localharness.agent.permissions import PermissionEvaluator
     from localharness.channels.terminal import TerminalChannel
@@ -2306,11 +2307,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             from localharness.agent.context import make_compaction_summarize_fn, summarizer_input_chars
             pipeline = CompactionPipeline(
                 token_counter=token_counter,
-                tool_result_cap=(
-                    agent_config.context.max_tool_output_chars
-                    if agent_config.context.max_tool_output_chars is not None
-                    else DEFAULT_TOOL_OUTPUT_CHARS
-                ),
+                # Read per apply from the step-8 manager (the closure never runs if this
+                # construction fails): the cap follows the manager's live window.
+                tool_result_cap=lambda: ctx_mgr.tool_output_cap_chars(),
                 preserve_first_n=agent_config.context.preserve_first_n_messages,
                 preserve_last_n=agent_config.context.preserve_last_n_messages,
                 llm_summarize_fn=make_compaction_summarize_fn(  # shared, tuple-unpack tested
@@ -2337,16 +2336,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             eviction_store=eviction_store,
             # An evicted body's origin is what its tool DECLARES (result_origin, SAFE-03).
             result_origin=tool_registry.result_origin,
-            tool_evict_threshold_chars=(
-                agent_config.context.tool_result_evict_threshold_chars
-                if agent_config.context.tool_result_evict_threshold_chars is not None
-                else DEFAULT_TOOL_EVICT_THRESHOLD_CHARS
-            ),
+            # The configured sizes and ratios, raw (an unset size stays None): the manager
+            # resolves them from its live window on every use.
+            **context_size_kwargs(agent_config.context),
             tool_evict_enabled=agent_config.context.tool_result_eviction,
             token_counter=token_counter,
             compaction_trigger_fraction=_compaction_trigger_fraction,
             max_response_tokens=_output_cap,
         )
+        # The registry was built in step 2, before the manager existed; nothing dispatches a model
+        # tool call before this line. From here its result cap follows the manager's live window.
+        tool_registry.set_result_size_cap(ctx_mgr.result_cap_chars)
 
         # --- 9. Orchestrator layer ---
         from localharness.orchestrator.router import AgentCreationFlow

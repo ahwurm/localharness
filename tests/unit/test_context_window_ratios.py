@@ -290,3 +290,165 @@ async def test_a_rebound_child_web_query_reports_the_same_budget_as_the_root():
 
 def test_an_unwired_web_query_tool_keeps_forty_five_thousand():
     assert WebPageQueryTool()._output_budget() == 45_000
+
+
+# --------------------------------------------------------------------------- start wiring
+
+
+async def test_start_feeds_the_manager_the_raw_sizes_and_ratios(tmp_path, monkeypatch):
+    from localharness.cli.start_cmd import _start_async
+    from tests.unit.test_start_cmd import _stub_start_boundaries
+
+    _stub_start_boundaries(tmp_path, monkeypatch)
+    with (tmp_path / "config.yaml").open("a") as fh:
+        fh.write(
+            "org:\n"
+            "  context:\n"
+            "    max_context_tokens: 65536\n"
+            "    tool_output_ratio: 0.03125\n"
+            "    evict_ratio: 0.01\n"
+            "    result_cap_ratio: 0.05\n"
+        )
+    managers: list[tuple[ContextManager, dict]] = []
+    pipelines: list[dict] = []
+    caps: list[Any] = []
+    real_ctx_init = ContextManager.__init__
+    real_pipe_init = CompactionPipeline.__init__
+    real_set = ToolRegistry.set_result_size_cap
+
+    def spy_ctx(self, *a, **k):
+        managers.append((self, k))
+        return real_ctx_init(self, *a, **k)
+
+    def spy_pipe(self, *a, **k):
+        pipelines.append(k)
+        return real_pipe_init(self, *a, **k)
+
+    def spy_set(self, cap):
+        caps.append(cap)
+        return real_set(self, cap)
+
+    monkeypatch.setattr(ContextManager, "__init__", spy_ctx)
+    monkeypatch.setattr(CompactionPipeline, "__init__", spy_pipe)
+    monkeypatch.setattr(ToolRegistry, "set_result_size_cap", spy_set)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    root, kw = next((m, k) for m, k in managers if k.get("bus") is not None)
+    assert kw["tool_output_chars"] is None
+    assert kw["tool_evict_threshold_chars"] is None
+    assert kw["tool_output_ratio"] == 0.03125
+    assert kw["evict_ratio"] == 0.01
+    assert kw["result_cap_ratio"] == 0.05
+    pipe_cap = pipelines[-1]["tool_result_cap"]
+    assert callable(pipe_cap)
+    assert pipe_cap() == root.tool_output_cap_chars() == 8_192
+    assert caps and caps[-1] == root.result_cap_chars
+    assert caps[-1]() == 13_104
+    root.max_context_tokens = 8_192  # a refit or an overflow on the live manager
+    assert pipe_cap() == 1_024
+    assert caps[-1]() == 1_636
+
+
+# --------------------------------------------------------------------------- bench wiring
+
+
+async def test_the_bench_feeds_its_manager_pipeline_and_scenario_registry(monkeypatch):
+    from localharness.bench import runner as bench_runner
+    from localharness.bench.schema import LimitsSpec, ScenarioSpec, SuccessCriteria
+    from localharness.config.models import AgentConfig
+    from localharness.core.events import BudgetSpec
+
+    scen = ScenarioSpec(
+        name="ratios", prompt="x",
+        success_criteria=SuccessCriteria(rubric=["contains:X"]),
+        budget=BudgetSpec(), limits=LimitsSpec(),
+        tools_allowed=[], slice="train", category="tool_basics",
+    )
+    cfg = AgentConfig(
+        name="bench-ratios", role="r",
+        context={"max_tool_output_chars": 20_000, "evict_ratio": 0.01, "result_cap_ratio": 0.05},
+    )
+    seen: list[dict] = []
+    real_init = ContextManager.__init__
+
+    def spy(self, *a, **k):
+        seen.append(k)
+        return real_init(self, *a, **k)
+
+    monkeypatch.setattr(ContextManager, "__init__", spy)
+    base = ToolRegistry()
+    loop = await bench_runner._build_agent_loop(
+        bus=None, llm_client=None, scenario=scen, agent_config=cfg, base_registry=base,
+    )
+    kw = seen[-1]
+    assert kw["tool_output_chars"] == 20_000
+    assert kw["tool_output_ratio"] == 0.0625
+    assert kw["tool_evict_threshold_chars"] is None  # the bench passed none before
+    assert kw["evict_ratio"] == 0.01
+    assert kw["result_cap_ratio"] == 0.05
+    ctx = loop._ctx
+    cap = ctx._pipeline._deterministic_stages[0].max_chars
+    assert callable(cap) and cap() == ctx.tool_output_cap_chars() == 20_000
+    assert loop._tools.result_size_cap_chars == ctx.result_cap_chars()
+    ctx.max_context_tokens = 8_192
+    assert loop._tools.result_size_cap_chars == ctx.result_cap_chars() == 1_636
+    assert base.result_size_cap_chars == 50_000  # never the shared base
+
+
+# --------------------------------------------------------------------------- 0.17 migration
+
+
+def _config_017(tmp_path):
+    import yaml
+
+    from localharness.config.defaults import CURRENT_DEFAULTS_REVISION
+    from localharness.config.models import PermissionConfig
+
+    data = {
+        "version": "1",
+        "provider": {"provider_type": "vllm", "base_url": "http://127.0.0.1:9/v1",
+                     "default_model": "m", "api_key": "none"},
+        "org": {
+            "permissions": {
+                "defaults_revision": CURRENT_DEFAULTS_REVISION,
+                "deny_patterns": list(PermissionConfig().deny_patterns),
+                "budget": {"max_actions": 100},
+            },
+            "context": {"max_context_tokens": 65_536, "max_tool_output_chars": 32_000,
+                        "tool_result_evict_threshold_chars": 8_000},
+        },
+    }
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    (agents / "worker.yaml").write_text(
+        yaml.safe_dump({"name": "worker", "role": "worker"}), encoding="utf-8")
+    return cfg
+
+
+def _manager_as_start_builds_it(tmp_path) -> ContextManager:
+    from localharness.config.loader import ConfigLoader
+
+    ctx_cfg = ConfigLoader(config_dir=tmp_path).load_agent("worker").context
+    return ContextManager(max_context_tokens=ctx_cfg.max_context_tokens, **context_size_kwargs(ctx_cfg))
+
+
+def test_a_017_config_reaches_the_ratios_through_the_migration(tmp_path):
+    from localharness.config import migrate
+
+    cfg = _config_017(tmp_path)
+    original, plan = migrate.load_plan(cfg)
+    assert plan is not None
+    migrate.apply(cfg, original, plan)
+    ctx = _manager_as_start_builds_it(tmp_path)
+    assert ctx.max_context_tokens == 65_536
+    assert _caps(ctx) == (16_384, 4_096, 24_576)
+
+
+def test_without_the_migration_a_017_config_keeps_its_explicit_sizes(tmp_path):
+    _config_017(tmp_path)
+    ctx = _manager_as_start_builds_it(tmp_path)
+    assert (ctx.tool_output_cap_chars(), ctx.evict_threshold_chars(), ctx.result_cap_chars()) == (
+        32_000, 8_000, 24_576)

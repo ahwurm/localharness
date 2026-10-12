@@ -454,15 +454,15 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         token_counter = TokenCounter()
     bench_store = ContentStore()
 
-    from localharness.agent.context import make_compaction_summarize_fn, summarizer_input_chars
-    from localharness.config.defaults import DEFAULT_TOOL_OUTPUT_CHARS
+    from localharness.agent.context import (
+        context_size_kwargs,
+        make_compaction_summarize_fn,
+        summarizer_input_chars,
+    )
     bench_pipeline = CompactionPipeline(
         token_counter=token_counter,
-        tool_result_cap=(
-            cctx.max_tool_output_chars
-            if cctx.max_tool_output_chars is not None
-            else DEFAULT_TOOL_OUTPUT_CHARS
-        ),
+        # Read per apply from the manager built below: the cap follows its live window.
+        tool_result_cap=lambda: ctx_manager.tool_output_cap_chars(),
         preserve_first_n=cctx.preserve_first_n_messages,
         preserve_last_n=cctx.preserve_last_n_messages,
         llm_summarize_fn=make_compaction_summarize_fn(  # shared, tuple-unpack tested
@@ -517,8 +517,14 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
         # assigned a few lines below, before any turn runs.
         result_origin=lambda name: tool_registry.result_origin(name),
         token_counter=token_counter,
+        # The configured sizes and ratios, raw (an unset size stays None): the bench measures what
+        # `start` runs, the eviction threshold included.
+        **context_size_kwargs(cctx),
     )
     tool_registry = ToolRegistry.from_allowed(scenario.tools_allowed, base_registry=base_registry if base_registry is not None else ToolRegistry())
+    # The cap source goes on THIS scenario's registry, never on the shared base registry: the base
+    # outlives the run and would carry one scenario's manager (and window) into the next.
+    tool_registry.set_result_size_cap(ctx_manager.result_cap_chars)
 
     # J3: bind the store-backed verbs (load_document / chunk / tool_result_get / web verbs) onto this
     # per-scenario registry so they hit bench_store — the SAME store the cruncher reads THROUGH on a
