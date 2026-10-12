@@ -57,6 +57,7 @@ from .gate_types import (
     DOTTED_VARIANT_SEPARATOR,
     ENV_REDIRECT_EXCLUDED,
     GateSettings,
+    PURE_EXEC_WRAPPERS,
     ShellClassification,
     UNPARSED_SHELL_SIGNATURE,
     ShellSegment,
@@ -2812,6 +2813,9 @@ def _build(
             )
         return host, inner_extras, [], head
 
+    if head in PURE_EXEC_WRAPPERS:
+        extras.extend(_wrapped_command_segments(argv, settings, cwd, env_redirect))
+
     payload_argvs: list[list[str]] = []
     payload_texts: list[str] = []
     find_delete = False
@@ -2901,6 +2905,46 @@ def _build(
         env_redirect=env_redirect,
     )
     return host, extras, [], head
+
+
+PURE_WRAPPER_MAX_WORDS = 64
+"""How many words of a pure wrapper's argument list are tried as the start of a command."""
+
+
+def _wrapped_command_segments(
+    argv: list[str], settings: GateSettings, cwd: _Cwd, env_redirect: bool
+) -> list[ShellSegment]:
+    """WR-02 / WR-51 (it5): the dangerous commands a pure wrapper (:data:`PURE_EXEC_WRAPPERS`) may run.
+
+    The wrapper's own option grammar is not modelled, so no option is skipped: every later word is read as the
+    start of a command, and what comes out is kept only when it is destructive, writes, runs inline code, pipes
+    into a shell or redirects what runs. ``strace -c ls`` yields nothing (the wrapper stays an ordinary unfamiliar
+    command); ``taskset -c 0 rm -rf /etc/x`` yields the ``rm -rf``. A word holding blanks is a command STRING
+    (``sg users -c 'rm -rf x'``) and is read as shell text; a string that does not parse is left alone, since
+    that is also what an option value such as ``faketime '2020-01-01 10:00:00'`` looks like."""
+    found: list[ShellSegment] = []
+    for position in range(1, min(len(argv), PURE_WRAPPER_MAX_WORDS)):
+        word = argv[position]
+        if not word or word.startswith("-") or _basename(word) in PURE_EXEC_WRAPPERS:
+            continue  # a later wrapper's own words are tried from the outer list
+        if any(blank in word for blank in " \t\n"):
+            segments, _ = _classify_command_text(word, settings, cwd.copy())
+            segments = [segment for segment in segments if segment.signature != UNPARSED_SHELL_SIGNATURE]
+        else:
+            peeled, assignments, _ = _peel([_basename(word), *argv[position + 1:]], settings)
+            if not peeled or _basename(peeled[0]) in PURE_EXEC_WRAPPERS:
+                continue
+            host, more, _, _ = _build(
+                peeled, settings, [], cwd,
+                env_redirect=env_redirect or _assignments_redirect(assignments, settings),
+            )
+            segments = ([host] if host is not None else []) + more
+        found.extend(
+            segment for segment in segments
+            if segment.destructive or segment.write_targets or segment.inline_interpreter
+            or segment.pipe_to_shell or segment.env_redirect
+        )
+    return found
 
 
 def _make_segment(

@@ -501,19 +501,26 @@ from the one flag table is what keeps the two in step: a flag added there can ne
 here."""
 
 PRIVILEGE_AND_EXEC_WRAPPERS: frozenset[str] = frozenset({
-    "pkexec", "runuser", "sg", "newgrp", "machinectl", "nsenter", "unshare", "setpriv",
-    "taskset", "chrt", "setarch", "strace", "ltrace", "valgrind", "perf", "numactl", "prlimit",
-    "fakeroot", "faketime", "eatmydata", "bwrap", "firejail", "xvfb-run", "dbus-run-session",
+    "pkexec", "runuser", "newgrp", "machinectl", "nsenter", "unshare", "setpriv", "bwrap", "firejail",
 })
-"""Programs that run the command after their options, as ``sudo`` does, but with an option grammar the
-classifier does not model (review iteration 4, WR-03 / IN-53). Peeling them wrongly signs the wrapper (an
-unfamiliar word, silent in ``auto``) and hides ``rm -rf`` behind it; guessing where their options end is the
-mistake the ``timeout``/``nice`` tables made. So they are filed with ``sudo``/``su``/``doas``: destructive,
-ungrantable, and asked about by ``auto`` wherever they point. The privilege helpers (``pkexec``, ``runuser``,
-``sg``, ``newgrp``, ``machinectl``, ``nsenter``, ``setpriv``, ``unshare``, ``bwrap``, ``firejail``) change who or
-where the command runs; the rest (``strace``, ``taskset``, ``chrt``, ``setarch``, ``numactl``, ``prlimit``,
-``fakeroot``, ``faketime``, ``eatmydata``, ``valgrind``, ``perf``, ``xvfb-run``, ``dbus-run-session``,
-``ltrace``) are pure wrappers that a later iteration may model one by one. Deliberately NOT config-settable."""
+"""The privilege helpers: they change WHO or WHERE the command after their options runs, with an option grammar
+the classifier does not model (review iteration 4, WR-03 / IN-53). Peeling them would sign the wrapper (an
+unfamiliar word, silent in ``auto``) and hide ``rm -rf`` behind it, so they are filed with ``sudo``/``su``/``doas``:
+destructive, ungrantable, and asked about by ``auto`` wherever they point. Deliberately NOT config-settable.
+The pure wrappers (:data:`PURE_EXEC_WRAPPERS`) are not here: they change nothing about who runs the command."""
+
+PURE_EXEC_WRAPPERS: frozenset[str] = frozenset({
+    "sg", "taskset", "chrt", "setarch", "strace", "ltrace", "valgrind", "perf", "numactl", "prlimit",
+    "fakeroot", "faketime", "eatmydata", "xvfb-run", "dbus-run-session",
+})
+"""Programs that profile, pin or sandbox-lite a command they run after options the classifier does not model
+(``strace -c ls``, ``taskset -c 0 python3 bench.py``, ``xvfb-run pytest``; review iteration 5, WR-02 / WR-51).
+Filing them with ``sudo`` made every ordinary use an unanswerable question, so they are ordinary unfamiliar
+commands (a grantable ask, silent in ``auto``, as before iteration 4) — except that the classifier reads EVERY
+later word of the argument list as the start of a command, and a word that starts a destructive, writing or
+inline command is lifted as a segment of its own (``taskset -c 0 rm -rf /etc/x`` is an ``rm -rf`` segment).
+No option is skipped, so an option the tables do not know cannot hide anything. ``sg`` is the group switcher
+of shadow-utils and also the ast-grep binary; its ``-c STRING`` is read as shell text. Not config-settable."""
 
 DESTRUCTIVE_SIGNATURES_DEFAULT: frozenset[str] = WINDOWS_DESTRUCTIVE_SIGNATURES | PRIVILEGE_AND_EXEC_WRAPPERS | frozenset({
     "rm -r", "rm -f", "rm -rf",
