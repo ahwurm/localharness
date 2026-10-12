@@ -933,3 +933,25 @@ def test_a_double_paren_that_is_not_arithmetic_is_a_command_substitution(command
 def test_ordinary_arithmetic_is_unchanged(command, ws):
     assert all(s.read_only for s in _segments(command)), command
     assert not any(s.signature == UNPARSED_SHELL_SIGNATURE for s in _segments(command))
+
+
+# ------------------------------------------------------------------ nested backticks (CR-55; iteration 3)
+
+@pytest.mark.parametrize("mode", THREE_MODES)
+@pytest.mark.parametrize("command", (
+    f"echo `echo \\`{X}\\``",
+    f"echo `echo \\`echo \\\\\\`{X}\\\\\\`\\``",
+    f"echo \"`echo \\`{X}\\``\"",
+    f"x=`echo \\`{X}\\`; true`",
+    f"echo `echo \\`true\\`; {X}`",
+))
+def test_a_command_in_an_escaped_inner_backtick_is_classified(command, mode, ws):
+    """The lifter cut the body at the first escaped backtick; bash unescapes it and runs the inner command."""
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+def test_an_ordinary_backtick_substitution_is_unchanged():
+    assert [s.signature for s in _segments("echo `ls` `date`")] == ["ls", "date", "echo"]
+    assert [s.signature for s in _segments("echo `echo \\`date\\``")] == ["date", "echo", "echo"]
+    assert [s.signature for s in _segments("echo `echo a\\\\b \\$HOME`")] == ["echo", "echo"]
