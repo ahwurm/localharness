@@ -1311,10 +1311,15 @@ def _value_keeps_tier(value: str, settings: GateSettings) -> bool:
     The value goes through the full classifier with :data:`OPERAND_PLACEHOLDER` appended, because
     git appends its operands; it keeps the tier only when there is at least one segment and every
     segment is read-only with no write targets, no env redirect and no inline danger. Recursion is
-    bounded by the value's own length: each level classifies a strictly shorter string."""
+    bounded by the value's own length: each level classifies a strictly shorter string.
+
+    A program spelled as a path (``./cat``, ``bin/cat``) never keeps it (WR-55 / IN-01): the classifier
+    signs by basename, so ``GIT_EXTERNAL_DIFF=./cat git diff`` would read as ``cat`` while running a
+    file the workspace controls. The value must name a command, resolved from PATH."""
     classified = classify_shell(f"{value} {OPERAND_PLACEHOLDER}", settings)
     return bool(classified.segments) and all(
-        segment.read_only
+        not any(separator in segment.program for separator in PATH_SEPARATORS)
+        and segment.read_only
         and not segment.write_targets
         and not segment.env_redirect
         and not segment.inline_interpreter
