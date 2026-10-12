@@ -3573,19 +3573,52 @@ def _file_compile_targets(argv: Sequence[str]) -> list[str]:
     """The file ``file -C [-m MAGIC]`` writes: ``MAGIC.mgc`` (file(1)); ``magic.mgc`` when no ``-m`` names it.
 
     ``-m`` takes a colon-separated list and the compiled file is named after the first entry (WR-04 it4)."""
-    magic = ""
-    index = 1
-    while index < len(argv):
-        token = argv[index]
+    _, magics = _file_options(argv[1:])
+    firsts = [magic.split(":", 1)[0] for magic in magics]
+    return [f"{first}.mgc" for first in firsts if first] or ["magic.mgc"]
+
+
+FILE_VALUE_LETTERS = "efFmP"
+FILE_VALUE_LONG_OPTIONS = ("exclude", "files-from", "separator", "parameter")
+
+
+def _file_options(rest: Sequence[str]) -> tuple[bool, list[str]]:
+    """``file ARGS`` read the way getopt reads them → (does it compile, every ``-m`` / ``--magic-file`` value).
+
+    file(1): a short option that takes a value may end a cluster (``-Cm FILE`` is ``-C -m FILE``) or carry it
+    attached (``-Cm./x``); a long option may be abbreviated to a unique prefix (``--comp``, ``--magic``). Over-
+    matching a prefix is the safe direction (CR-59 it5)."""
+    compile_ = False
+    magics: list[str] = []
+    index = 0
+    while index < len(rest):
+        token = rest[index]
         index += 1
-        if token in ("-m", "--magic-file") and index < len(argv):
-            magic = argv[index]
-        elif token.startswith("--magic-file="):
-            magic = token.split("=", 1)[1]
-        elif token.startswith("-m") and len(token) > 2 and not token.startswith("--"):
-            magic = token[2:]
-    first = magic.split(":", 1)[0]
-    return [f"{first}.mgc" if first else "magic.mgc"]
+        if token == "--":
+            break
+        if token.startswith("--"):
+            name, equals, value = token[2:].partition("=")
+            if len(name) >= 2 and "compile".startswith(name):
+                compile_ = True
+            elif len(name) >= 2 and "magic-file".startswith(name):
+                if not equals and index < len(rest):
+                    value, index = rest[index], index + 1
+                magics.append(value)
+            elif name and not equals and any(option.startswith(name) for option in FILE_VALUE_LONG_OPTIONS):
+                index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            for position, letter in enumerate(token[1:], start=1):
+                if letter == "C":
+                    compile_ = True
+                elif letter in FILE_VALUE_LETTERS:
+                    value = token[position + 1 :]
+                    if not value and index < len(rest):
+                        value, index = rest[index], index + 1
+                    if letter == "m":
+                        magics.append(value)
+                    break
+    return compile_, magics
 
 
 def _mutating_form(head: str, rest: list[str]) -> str:
@@ -3595,7 +3628,7 @@ def _mutating_form(head: str, rest: list[str]) -> str:
     ``hostname NAME`` / ``-F`` sets the host name; ``ss -K`` kills sockets. The plain commands are on the read-only
     list, and a signature decides the tier, so these forms get a signature of their own."""
     flags = [token for token in rest if token.startswith("-") and token != "-"]
-    if head == "file" and any(_matches_flag(t, ("-C", "--compile")) for t in flags):
+    if head == "file" and _file_options(rest)[0]:
         return "file -C"
     if head == "ss" and any(_matches_flag(t, ("-K", "--kill")) for t in flags):
         return "ss -K"
@@ -3691,6 +3724,19 @@ def _git_config_facts(argv: list[str], settings: GateSettings) -> tuple[str, boo
     except ValueError:  # pragma: no cover - only reached with the "git config" signature
         return GIT_CONFIG_SIGNATURE, False, False
 
+    write, key = _git_config_scan(tokens)
+    if write and key and _is_dangerous_git_key(key, settings):
+        return f"{GIT_CONFIG_SIGNATURE} {key}", True, False
+    return GIT_CONFIG_SIGNATURE, False, not write
+
+
+def _git_config_tokens_write(tokens: Sequence[str]) -> bool:
+    """Do the arguments after ``git config`` write (a flag of the write family, a subcommand, or key and value)?"""
+    return _git_config_scan(list(tokens))[0]
+
+
+def _git_config_scan(tokens: Sequence[str]) -> tuple[bool, str | None]:
+    """(is it a write, the key) for the arguments that follow ``git config``."""
     write = False
     key: str | None = None
     index = 0
@@ -3714,10 +3760,7 @@ def _git_config_facts(argv: list[str], settings: GateSettings) -> tuple[str, boo
             # A second positional is the VALUE the key is being set to.
             write = True
         index += 1
-
-    if write and key and _is_dangerous_git_key(key, settings):
-        return f"{GIT_CONFIG_SIGNATURE} {key}", True, False
-    return GIT_CONFIG_SIGNATURE, False, not write
+    return write, key
 
 
 def _git_inline_config_segments(
@@ -3896,10 +3939,17 @@ def _operation_word(base: str, after: list[str]) -> str:
     ``after`` is everything past the subcommand. Table order decides, not command-line order, so
     the destructive reading wins when a command carries two spellings.
     """
+    prefixes = base in LONG_PREFIX_OPERATION_BASES
     for canonical, spellings in SUBCOMMAND_OPERATION_WORDS.get(base, ()):
-        if any(_matches_flag(token, spellings) for token in after):
+        if any(_matches_flag(token, spellings, prefix_long=prefixes) for token in after):
             return canonical
     return ""
+
+
+LONG_PREFIX_OPERATION_BASES = frozenset({"git branch"})
+"""Signatures whose command parses its options with git's parse-options, which accepts any unambiguous PREFIX of
+a long option (``git branch --del x`` is ``--delete``): a long spelling in :data:`SUBCOMMAND_OPERATION_WORDS` is
+matched by prefix there. Over-matching (a prefix git would call ambiguous) is the safe direction (CR-58 it5)."""
 
 
 def _destructive_verb(base: str, settings: GateSettings) -> tuple[str, tuple[str, ...]]:
@@ -3975,7 +4025,9 @@ def _destructive_flags(base: str, rest: list[str], settings: GateSettings) -> st
     return suffix + "".join(f" --{flag}" for flag in longs)
 
 
-def _matches_flag(token: str, spellings: tuple[str, ...], attached_value_letters: str = "") -> bool:
+def _matches_flag(
+    token: str, spellings: tuple[str, ...], attached_value_letters: str = "", *, prefix_long: bool = False
+) -> bool:
     """Does this token carry one of these flags — exact, long-with-value, or inside a cluster?
 
     Short options cluster, so ``sed -Ei`` is ``sed -i`` with extended regexes. The old test was
@@ -3990,6 +4042,9 @@ def _matches_flag(token: str, spellings: tuple[str, ...], attached_value_letters
     for spelling in spellings:
         if token == spelling or token.startswith(f"{spelling}="):
             return True
+        if prefix_long and spelling.startswith("--") and token.startswith("--") and len(token) > 2:
+            if spelling[2:].startswith(token[2:].split("=", 1)[0]):
+                return True
         if len(spelling) != 2 or not spelling.startswith("-"):
             continue
         if not token.startswith("-") or token.startswith("--"):
@@ -4610,12 +4665,52 @@ def _git_output_targets(subcommand: str, argv: tuple[str, ...]) -> list[str]:
             no_index = True
         elif not token.startswith("-"):
             operands.append(token)
+    if subcommand == "archive":
+        outputs += _option_values(after, "o", ())
+    elif subcommand == "format-patch":
+        outputs += _option_values(after, "o", ("output-directory",))
+    elif subcommand == "bundle":
+        words = [token for token in after if not token.startswith("-")]
+        if len(words) >= 2 and words[0] == "create":
+            outputs.append(words[1])  # `git bundle create FILE REFS…`
+    elif subcommand == "config" and _git_config_tokens_write(after):
+        outputs += _option_values(after, "f", ("file",))
     targets = outputs + (operands if no_index else [])
     # git applies `-C DIR` before it opens `--output` or a `--no-index` operand, so a relative one lives under DIR.
     where = _git_directory_prefix(list(argv[1:]))
     if where:
         targets = [t if t.startswith(("/", "~")) else posixpath.join(where, t) for t in targets]
     return targets
+
+
+def _option_values(tokens: Sequence[str], short: str, longs: Sequence[str]) -> list[str]:
+    """Every value of ``-s VALUE`` / ``-sVALUE`` (also last in a cluster) and ``--long VALUE`` / ``--long=VALUE``."""
+    values: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if token == "--":
+            break
+        if token.startswith("--"):
+            name, equals, value = token[2:].partition("=")
+            if name in longs:
+                if equals:
+                    values.append(value)
+                elif index < len(tokens):
+                    values.append(tokens[index])
+                    index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            position = token.find(short, 1)
+            if position > 0:
+                attached = token[position + 1 :]
+                if attached:
+                    values.append(attached)
+                elif index < len(tokens):
+                    values.append(tokens[index])
+                    index += 1
+    return values
 
 
 def _repository_name(source: str) -> str:

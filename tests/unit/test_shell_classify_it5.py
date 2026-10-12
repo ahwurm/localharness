@@ -387,6 +387,97 @@ def test_cdpath_given_through_env_is_tracked(ws, command):
     _check(command, "DENY/ASKU/ASKU", ws)
 
 
+# --------------------------------------------------------------------------- CR-58 / WR-52 / CR-59 / WR-54
+
+@pytest.mark.parametrize(
+    "abbreviated, exact",
+    (
+        ("git branch --edit-desc", "git branch --edit-description"),
+        ("git branch --unset-up", "git branch --unset-upstream"),
+        ("git branch --set-upstream-t=origin/x", "git branch --set-upstream-to=origin/x"),
+        ("git branch --set-up=o/x", "git branch --set-upstream-to=o/x"),
+        ("git branch --no-tr", "git branch --no-track"),
+        ("git branch --create-r", "git branch --create-reflog"),
+        ("git branch --del x", "git branch --delete x"),
+        ("git branch --dele x", "git branch --delete x"),
+        ("git branch --delet x", "git branch --delete x"),
+        ("git branch --mov a b", "git branch --move a b"),
+        ("git branch --cop a b", "git branch --copy a b"),
+        ("git branch --forc x HEAD", "git branch --force x HEAD"),
+    ),
+)
+def test_a_git_branch_long_option_prefix_has_the_key_of_its_full_spelling(ws, abbreviated, exact):
+    assert _segments(abbreviated)[0].signature == _segments(exact)[0].signature
+    assert _segments(abbreviated)[0].signature != "git branch"
+    assert not _segments(abbreviated)[0].read_only
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("git branch", "git branch -a", "git branch -vv", "git branch --list", "git branch --color=always",
+     "git branch --show-current", "git branch --sort=-committerdate", "git branch --merged main",
+     "git branch --format=%(refname)", "git branch --contains HEAD", "git branch --remotes"),
+)
+def test_git_branch_listings_keep_the_read_only_tier(ws, command):
+    _check(command, "ok/ok/ok", ws)
+
+
+@pytest.mark.parametrize(
+    "command, target",
+    (
+        ("file -Cm /etc/cron.d/x", "/etc/cron.d/x.mgc"),
+        ("file -bCm /etc/cron.d/x", "/etc/cron.d/x.mgc"),
+        ("file --compile --magic=/etc/cron.d/x", "/etc/cron.d/x.mgc"),
+        ("file -Cm./x", "./x.mgc"),
+        ("file --comp -m /etc/cron.d/x", "/etc/cron.d/x.mgc"),
+        ("file -C -m /etc/cron.d/x", "/etc/cron.d/x.mgc"),
+        ("file -C --magic-file=/etc/cron.d/x", "/etc/cron.d/x.mgc"),
+        ("file -C", "magic.mgc"),
+    ),
+)
+def test_file_compile_names_the_mgc_file_it_writes(ws, command, target):
+    segment = _segments(command)[0]
+    assert segment.signature == "file -C"
+    assert target in segment.write_targets
+
+
+def test_file_compile_into_a_protected_path_is_asked_about(ws):
+    _check("file -Cm /etc/cron.d/x", "DENY/ASKU/ASKU", ws)
+    _check("file --comp -m /etc/cron.d/x", "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command", ("file x.txt", "file -b x.txt", "file -m magic x.txt", "file --mime-type x.txt", "file -L -i x")
+)
+def test_file_without_compile_is_a_read(ws, command):
+    _check(command, "ok/ok/ok", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "git archive -o ~/.bashrc HEAD",
+        "git bundle create ~/.bashrc HEAD",
+        "git format-patch -o ~/.ssh -1",
+        "git config -f ~/.bashrc user.name x",
+        "git archive -o~/.bashrc HEAD",
+        "git format-patch --output-directory ~/.ssh -1",
+        "git config --file ~/.bashrc user.name x",
+    ),
+)
+def test_other_git_subcommands_that_write_a_named_file_report_it(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("git archive HEAD", "git bundle verify x.bundle", "git format-patch -1", "git config -f .gitmodules --get-regexp path",
+     "git config --file x.cfg --list"),
+)
+def test_those_git_subcommands_without_a_write_stay_quiet(ws, command):
+    assert not _segments(command)[0].write_targets
+
+
 # --------------------------------------------------------------------------- WR-01: the depth guard
 
 NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")
