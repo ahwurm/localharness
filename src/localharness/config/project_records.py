@@ -36,7 +36,7 @@ import structlog
 import yaml
 
 from localharness.config import session_presence
-from localharness.config.overlay import atomic_write_overlay
+from localharness.config.overlay import atomic_write_overlay, atomic_write_text
 from localharness.config.paths import global_config_dir
 from localharness.core.events import InstructionsCause, InstructionsNotice
 
@@ -170,19 +170,25 @@ def _open_sidecar(config_dir: Any) -> int:
 
 
 def _read_store_bytes(path: Path) -> bytes | None:
-    """The data file's bytes, or None when it is absent or not a regular file. Opened
-    ``O_RDONLY`` without following a link and without blocking on a FIFO."""
+    """The data file's bytes, or None when it is absent (ENOENT, and only that).
+
+    Opened ``O_RDONLY`` without following a link and without blocking on a FIFO. Any other
+    failure (EACCES after a ``sudo`` left the file root-owned, EMFILE, EIO), a symlink and a
+    file that is not a regular one raise ``StoreUnavailable``: an unreadable store is not an
+    empty one, and the next write must not replace it (WR-03, WR-51, CR-51)."""
     flags = (
         os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0)
     )
     try:
         fd = os.open(path, flags)
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise StoreUnavailable(f"cannot read {PROJECT_RECORDS_FILE}: {exc}") from exc
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
+            raise StoreUnavailable(f"{PROJECT_RECORDS_FILE} is not a regular file")
         chunks: list[bytes] = []
         while True:
             chunk = os.read(fd, 1 << 16)
@@ -190,23 +196,49 @@ def _read_store_bytes(path: Path) -> bytes | None:
                 break
             chunks.append(chunk)
         return b"".join(chunks)
-    except OSError:
-        return None
+    except StoreUnavailable:
+        raise
+    except OSError as exc:
+        raise StoreUnavailable(f"cannot read {PROJECT_RECORDS_FILE}: {exc}") from exc
     finally:
         os.close(fd)
 
 
-def _load(path: Path) -> dict:
-    """The store as a dict. Missing, unreadable, corrupt or non-dict reads as ``{}`` — a damaged
-    store means "no records", never a crashed session (the ``coauthor._load`` rule)."""
+def _load_store(path: Path) -> tuple[dict, bytes | None]:
+    """The store as a dict, and the raw bytes when they were damaged (else None).
+
+    Absent and empty read as ``{}``; so do unparsable bytes and a non-mapping document — a
+    damaged store means "no records", never a crashed session (the ``coauthor._load`` rule) —
+    but the damaged bytes are handed back so a write can keep a copy before replacing them."""
     raw = _read_store_bytes(path)
-    if raw is None:
-        return {}
+    if raw is None or not raw.strip():
+        return {}, None
     try:
         data = yaml.safe_load(raw.decode("utf-8"))
     except Exception:  # noqa: BLE001 — corrupt YAML or bytes: undecided, not an error
-        return {}
-    return data if isinstance(data, dict) else {}
+        return {}, raw
+    if isinstance(data, dict):
+        return data, None
+    return {}, raw if data is not None else None
+
+
+def _load(path: Path) -> dict:
+    """The store as a dict; absent, empty, corrupt or non-dict reads as ``{}``. An unreadable
+    store raises ``StoreUnavailable``."""
+    return _load_store(path)[0]
+
+
+def _keep_damaged_copy(path: Path, raw: bytes) -> None:
+    """Best effort: keep the damaged store beside it (0600, ``.corrupt``, the latest one) before
+    a write replaces it, so a reset is never silent. Written with ``atomic_write_text``, which
+    replaces a link at that name rather than following it; the copy is for a person to read, so
+    undecodable bytes are shown replaced."""
+    try:
+        atomic_write_text(
+            path.with_name(path.name + ".corrupt"), raw.decode("utf-8", errors="replace")
+        )
+    except OSError:
+        pass
 
 
 @contextmanager
@@ -216,9 +248,10 @@ def _store_transaction(config_dir: Any = None) -> Iterator[dict]:
     The yielded dict is ``{"version": 1, "roots": {...}}``; mutate it in place. It is written
     through ``atomic_write_overlay`` (0600) only when it differs from what was loaded, so a
     read leaves the file and its inode alone. Never nest it: a second flock from this process
-    on a new descriptor would wait on the first."""
+    on a new descriptor would wait on the first. A store that cannot be read raises
+    ``StoreUnavailable`` before the block runs, so it is never overwritten as if empty."""
     with _store_lock(config_dir):
-        loaded = _load(store_path(config_dir))
+        loaded, damaged = _load_store(store_path(config_dir))
         roots = loaded.get("roots")
         data = {
             "version": loaded.get("version", STORE_VERSION),
@@ -228,6 +261,8 @@ def _store_transaction(config_dir: Any = None) -> Iterator[dict]:
         before = copy.deepcopy(data)
         yield data
         if data != before:
+            if damaged is not None:
+                _keep_damaged_copy(store_path(config_dir), damaged)
             atomic_write_overlay(store_path(config_dir), data)
 
 
