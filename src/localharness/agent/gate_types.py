@@ -1011,6 +1011,16 @@ spellings of the same operation on the other shell (:data:`WINDOWS_DESTRUCTIVE_F
 
 Deliberately NOT config-settable: adding a verb here LOOSENS ``auto``."""
 
+UNPARSED_SHELL_SIGNATURE = "__lh_unparsed_shell__"
+"""The signature of the segment the classifier adds when a command's quoting does not balance.
+
+The text was cut short by a quote, a backtick or a substitution that never closes, so the
+classifier cannot tell where the commands in it begin and end: a stray apostrophe in a comment, or a
+construct it mis-reads, would otherwise swallow the commands after it into one quoted word. Bash
+itself refuses such a line, so asking costs nothing real. The segment is destructive and ``auto``
+asks about it (:func:`~localharness.agent.verdict._auto_blacklisted`), so no mode runs the text
+unexamined."""
+
 DOTTED_VARIANT_SEPARATOR = "."
 """How a command family spells its variants: ``mkfs`` is a dispatcher and the thing anybody
 actually runs is ``mkfs.ext4``, ``mkfs.xfs``, ``mkfs.vfat`` (mkfs(8): "mkfs.<fstype>").

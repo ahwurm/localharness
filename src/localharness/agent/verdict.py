@@ -43,6 +43,7 @@ from localharness.agent.gate_types import (
     TOOL_SCRIPT_UNCONFIRMED,
     UNCONFIRMED_TOOL_SCRIPT_REASON,
     UNGRANTABLE_CLASSES,
+    UNPARSED_SHELL_SIGNATURE,
     GateSettings,
     Grant,
     Mode,
@@ -965,6 +966,8 @@ def _auto_blacklisted(
     if blacklist.pipe_to_shell and segment.pipe_to_shell:
         return AUTO_PIPE_TO_SHELL_ENTRY
     signature = segment.signature
+    if signature == UNPARSED_SHELL_SIGNATURE:
+        return signature  # quoting that does not balance: no mode runs text it could not split
     if signature in blacklist.irreversible_signatures:
         return signature
     verb = signature.split(" ", 1)[0]
@@ -1075,9 +1078,12 @@ def _evaluate_shell(
             if segment.destructive and segment.signature == signature
         ]
         hit = next((entry for entry in entries if entry is not None), None)
+        unparsed = signature == UNPARSED_SHELL_SIGNATURE
         asks.append(_ask_record(
-            "shell-destructive", signature, f"destructive shell command ({signature})",
-            allowed_in_auto=hit is None, auto_entry=hit,
+            "shell-destructive", signature,
+            "shell text whose quoting does not balance" if unparsed
+            else f"destructive shell command ({signature})",
+            allowed_in_auto=hit is None, auto_entry=hit, grantable=False if unparsed else None,
         ))
 
     asks += _target_asks(ctx, settings, tuple(
