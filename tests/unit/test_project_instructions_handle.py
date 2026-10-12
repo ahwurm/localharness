@@ -320,22 +320,36 @@ def test_no_input_uses_a_changed_file_under_a_record_and_writes_nothing(instruct
     assert store_file().read_bytes() == before
 
 
-def test_no_input_skips_a_file_with_a_live_foreign_mark_and_ignores_a_dead_one(
+def test_no_input_skips_a_file_with_a_live_foreign_mark_and_treats_a_dead_one_the_same(
     instructions_home, tmp_path,
 ):
+    """UF-2: a dead writer's mark counts with and without --no-input; under it nothing is written."""
     root = make_root(tmp_path, {"CLAUDE.md": TEXT})
     _recorded(root)
     h = _open(root, no_input=True, sitting_id="n1")
     _rewrite(root, CHANGED)
-    _put_mark(root, "gone")
+    _put_mark(root, "gone")  # never registered: not live
     before = store_file().read_bytes()
-    assert h.section(WINDOW) == (CHANGED, None)  # a dead mark is absent
+    assert h.section(WINDOW) == (None, None)  # the dead writer's change stays out, silently
+    assert store_file().read_bytes() == before
     with live_child() as pid:
         register_session("s2", pid=pid)
         _put_mark(root, "s2")
         before = store_file().read_bytes()
         assert h.section(WINDOW) == (None, None)
         assert store_file().read_bytes() == before
+
+
+def test_no_input_uses_the_file_when_a_dead_mark_stands_for_unchanged_bytes(
+    instructions_home, tmp_path,
+):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    _recorded(root)
+    h = _open(root, no_input=True, sitting_id="n1")
+    _put_mark(root, "gone")
+    before = store_file().read_bytes()
+    assert h.section(WINDOW) == (TEXT, None)  # the digest holds: the mark stood for no change
+    assert store_file().read_bytes() == before
 
 
 def test_no_input_without_a_record_uses_nothing_and_never_marks(instructions_home, tmp_path):
