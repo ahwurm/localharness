@@ -359,6 +359,93 @@ def write_instructions(
         _entry_for_write(data, key)["instructions"] = _record_to_dict(record)
 
 
+# --------------------------------------------------------------------------- notices
+
+
+@dataclass(frozen=True)
+class Notice:
+    """One print-on-change line (a narrowing warning, an oversized file).
+
+    Hashable, so a set of notices compares whole tuples. ``value`` is the ``repr`` of the
+    rejected value and is the narrowing fingerprint: the same key rejected with a different
+    value is a different notice and prints again."""
+
+    kind: str
+    subject: str
+    file: str
+    value: str
+    text: str
+
+
+def notice_value(value: Any) -> str:
+    """``repr(value)`` cut to ``NOTICE_VALUE_MAX`` characters, the last replaced by ``…``."""
+    text = repr(value)
+    if len(text) > NOTICE_VALUE_MAX:
+        return text[: NOTICE_VALUE_MAX - 1] + "…"
+    return text
+
+
+def _notice_to_dict(notice: Notice) -> dict:
+    return {
+        "kind": notice.kind, "subject": notice.subject, "file": notice.file,
+        "value": notice.value, "text": notice.text,
+    }
+
+
+def _notice_from_dict(raw: Any) -> Notice | None:
+    """The notice, or None for an entry that is not a mapping of five strings."""
+    if not isinstance(raw, dict):
+        return None
+    fields = [raw.get(k) for k in ("kind", "subject", "file", "value", "text")]
+    if not all(isinstance(f, str) for f in fields):
+        return None
+    return Notice(*fields)
+
+
+def _stored_notices(entry: dict | None) -> frozenset[Notice]:
+    raw = entry.get("notices") if entry is not None else None
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(n for n in map(_notice_from_dict, raw) if n is not None)
+
+
+def read_notices(root: Any, *, config_dir: Any = None) -> frozenset[Notice]:
+    """The notices last stored for ``root``; malformed entries are skipped."""
+    key = _normalize_root(root)
+    with _store_transaction(config_dir) as data:
+        return _stored_notices(_entry(data, key))
+
+
+def replace_notices(root: Any, notices: Any, *, config_dir: Any = None) -> None:
+    """Replace the root's stored notices with ``notices``, keeping its instructions mapping.
+
+    The stored set is the notices of the latest start, so a notice that disappears and returns
+    is unseen again."""
+    key = _normalize_root(root)
+    wanted = sorted(
+        set(notices), key=lambda n: (n.kind, n.subject, n.file, n.value, n.text)
+    )
+    with _store_transaction(config_dir) as data:
+        if wanted:
+            _entry_for_write(data, key)["notices"] = [_notice_to_dict(n) for n in wanted]
+            return
+        entry = _entry(data, key)
+        if entry is not None:
+            entry.pop("notices", None)
+            _prune(data, key)
+
+
+def unseen(root: Any, notices: Any, *, config_dir: Any = None) -> list[Notice]:
+    """The given notices that are not in the root's stored set, in the given order, a repeat
+    collapsed to its first occurrence. A pure read: it never writes the store."""
+    stored = read_notices(root, config_dir=config_dir)
+    out: list[Notice] = []
+    for notice in notices:
+        if notice not in stored and notice not in out:
+            out.append(notice)
+    return out
+
+
 # --------------------------------------------------------------------------- candidates
 
 
