@@ -381,3 +381,51 @@ def test_carried_forms_ask_in_guarded_and_deny_read_only(ws):
     assert _verdict("PATH=./d; ls", ws, "guarded").verdict is Verdict.ASK
     assert _verdict("export PATH=./d && ls", ws, "read-only").verdict is Verdict.DENY
     assert _verdict("export GIT_PAGER=cat; git log", ws, "read-only").verdict is Verdict.ALLOW
+
+
+# --------------------------------------------------------------------------- env -S (CR-53)
+
+ENV_SPLIT_SPELLINGS = [
+    "env -S'rm -rf x'",
+    "env -S 'rm -rf x'",
+    "env --split-string='rm -rf x'",
+    "env --split-string 'rm -rf x'",
+    "env --split='rm -rf x'",
+    "env --s 'rm -rf x'",
+    "env -iS'rm -rf x'",
+    "env -S'env -S\"rm -rf x\"'",
+]
+
+
+@pytest.mark.parametrize("command", ENV_SPLIT_SPELLINGS)
+def test_env_split_string_is_classified_as_the_command_it_runs(command):
+    """`env -S STR` re-parses STR and runs it, so it is `rm -rf`, never a bare read-only `env`."""
+    (segment,) = _segments(command)
+    assert segment.signature == "rm -rf" and segment.destructive is True and segment.read_only is False
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+def test_env_split_string_is_never_allowed_as_a_read(mode, ws):
+    assert _verdict("env -S'rm -rf /etc/x'", ws, mode).verdict is not Verdict.ALLOW
+
+
+def test_env_split_string_carries_the_assignment_it_runs():
+    (segment,) = _segments("env -S'PATH=./d ls'")
+    assert segment.signature == "ls" and segment.env_redirect is True and segment.read_only is False
+
+
+def test_env_split_string_that_cannot_be_split_is_unfamiliar_not_read_only():
+    (segment,) = _segments("env --split-string='unbalanced \"'")
+    assert segment.read_only is False
+
+
+@pytest.mark.parametrize("command,signature", [
+    ("env -S'ls -la'", "ls"),
+    ("env -S ''", "env"),
+    ("env -i ls", "ls"),
+    ("env -u FOO ls", "ls"),
+    ("env", "env"),
+])
+def test_ordinary_env_spellings_do_not_move(command, signature):
+    (segment,) = _segments(command)
+    assert segment.signature == signature and segment.read_only is True
