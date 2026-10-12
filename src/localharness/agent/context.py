@@ -1899,6 +1899,10 @@ class ContextManager:
         """Allow the agent loop to bump iteration so CompactionTriggered events carry it."""
         self._iteration = int(iteration)
 
+    def set_session_id(self, session_id: str) -> None:
+        """Allow the agent loop to set the session so CompactionTriggered events carry it."""
+        self._session_id = str(session_id)
+
     def tool_output_cap_chars(self) -> int:
         """The most characters of one tool result the compaction pipeline keeps (head+tail). An
         explicit `tool_output_chars` is used as written; otherwise `tool_output_ratio` of the live
