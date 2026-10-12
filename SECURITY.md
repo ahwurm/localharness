@@ -718,9 +718,10 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   to a key that repoints execution (`core.hooksPath`, `core.sshCommand`, `alias.*`, filters
   including a process filter, merge drivers, a `textconv` driver, a per-command `pager.*`, a
   URL-scoped credential helper such as `credential.https://host.helper`, and the rest of a named
-  list) is ungrantable — parked in `auto`, asked every time in
-  `guarded` — including the
-  `-c key=value` spelling on any git command; `eval`'s argument is classified the way `bash -c`'s
+  list) is ungrantable — asked every time in `guarded` and `trusted`, denied in `read-only`, and
+  allowed in `auto`, as `git config core.hooksPath` already was (ruling taken on the owner's behalf by
+  the GSD run: `auto` stays the mode that does not ask about interpreter or config execution) —
+  including the `-c key=value` spelling on any git command; `eval`'s argument is classified the way `bash -c`'s
   is; and a shell function's body is classified where it is defined, not hidden behind its name.
 - **The shell boundary is best-effort by construction.** A `bash_exec` call is one opaque string.
   The harness strips heredoc bodies, lifts `$(…)`, backticks and process substitutions, splits at
