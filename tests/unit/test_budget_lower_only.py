@@ -87,6 +87,7 @@ def test_the_lower_only_set_names_every_entry_and_both_shares():
                             if f.annotation.__name__ == "ChildBudget"}
     want = {f"org.children_budget.{e}.{k}" for e in ENTRIES for k in ("actions", "minutes")}
     want |= {"org.children_budget.lookup_share", "org.children_budget.review_share"}
+    want |= {f"org.context.{n}" for n in ("tool_output_ratio", "evict_ratio", "result_cap_ratio")}
     assert L.HARNESS_LOWER_ONLY_FIELDS == want
     assert not L.HARNESS_LOWER_ONLY_FIELDS & L.HARNESS_GLOBAL_ONLY_FIELDS
 
