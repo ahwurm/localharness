@@ -446,6 +446,15 @@ READ_STREAM_LIMIT = 8 * 1024 * 1024
 # D-36: the line appended to a read cut at max_lines, verbatim.
 TRUNCATED_LINE = "[git_read: truncated at {max_lines} lines]"
 
+# WR-03 / WR-58: max_lines bounds the count, not the size; one-line files (minified bundles) would
+# otherwise return tens of megabytes. Read at call time so a test can patch it.
+MAX_RETURNED_BYTES = 200_000
+TRUNCATED_BYTES_LINE = "[git_read: truncated at {limit} bytes after {lines} lines; narrow with paths]"
+# WR-03 / WR-59: a single line past READ_STREAM_LIMIT ends the read; the lines kept are counted.
+LONG_LINE_LINE = (
+    "[git_read: output cut after {lines} lines: a line longer than {mib} MiB; narrow with paths]"
+)
+
 NO_OUTPUT = "(no output)"
 
 
@@ -656,30 +665,38 @@ class GitReadTool(Tool):
             return self.err(f"git could not be started: {exc.strerror or exc.__class__.__name__}")
         stderr_task = asyncio.ensure_future(_drain_stderr(proc.stderr))
 
-        async def collect() -> tuple[bytes, bool, str]:
+        async def collect() -> tuple[bytes, str, str]:
             assert proc.stdout is not None
             lines: list[bytes] = []
-            truncated = False
+            cut = ""  # why the read stopped early: "lines", "bytes" or "long"
+            total = 0
             try:
                 while True:
                     line = await proc.stdout.readline()
                     if not line:
                         break
                     if len(lines) >= max_lines:
-                        truncated = True
+                        cut = "lines"
+                        break
+                    room = MAX_RETURNED_BYTES - total
+                    if len(line) > room:
+                        cut = "bytes"
+                        if room > 0:
+                            lines.append(line[:room])  # keep the part that fits, so a first long line is not lost
                         break
                     lines.append(line)
+                    total += len(line)
             except ValueError:
                 # One line past READ_STREAM_LIMIT: stop here, as a truncation.
-                truncated = True
-            if truncated:
+                cut = "long"
+            if cut:
                 await _reap(proc)
-                return b"".join(lines), True, ""
+                return b"".join(lines), cut + f":{len(lines)}", ""
             await proc.wait()
-            return b"".join(lines), False, await stderr_task
+            return b"".join(lines), "", await stderr_task
 
         try:
-            body, truncated, stderr = await asyncio.wait_for(collect(), timeout)
+            body, cut, stderr = await asyncio.wait_for(collect(), timeout)
         except asyncio.TimeoutError:
             return self.err(f"git_read timed out after {GIT_READ_TIMEOUT_SECONDS}s", error_type="timeout_error")
         finally:
@@ -689,15 +706,22 @@ class GitReadTool(Tool):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await stderr_task
 
+        truncated = bool(cut)
         if not truncated and proc.returncode != 0:
             return self.err(f"git exited with {proc.returncode}: {stderr}")
         text = body.decode("utf-8", errors="replace")
-        if not text:
-            text = NO_OUTPUT
         if truncated:
-            if not text.endswith("\n"):
+            if text and not text.endswith("\n"):
                 text += "\n"
-            text += TRUNCATED_LINE.format(max_lines=max_lines)
+            reason, _, kept = cut.partition(":")
+            if reason == "lines":
+                text += TRUNCATED_LINE.format(max_lines=max_lines)
+            elif reason == "bytes":
+                text += TRUNCATED_BYTES_LINE.format(limit=MAX_RETURNED_BYTES, lines=kept)
+            else:
+                text += LONG_LINE_LINE.format(lines=kept, mib=READ_STREAM_LIMIT // (1024 * 1024))
+        elif not text:
+            text = NO_OUTPUT
         if trailing:
             text += ("" if text.endswith("\n") else "\n") + trailing
         return self.ok(text, truncated=truncated)
