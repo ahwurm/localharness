@@ -861,7 +861,46 @@ class ContextConfig(BaseModel):
         description=(
             "Maximum characters of tool output to include in a single Observation. "
             "Output exceeding this limit is truncated with a '... [truncated]' suffix. "
-            "None means 32000; an explicit integer is honoured as written."
+            "None means `tool_output_ratio` of the live context window; an explicit integer "
+            "is used exactly as written."
+        ),
+    )
+
+    tool_result_evict_threshold_chars: Optional[int] = Field(
+        default=None,
+        ge=500,
+        le=500_000,
+        description=(
+            "Char size above which a tool result becomes eligible for eviction to a restorable "
+            "stub. None means `evict_ratio` of the live context window (never below 500); an "
+            "explicit integer is used exactly as written."
+        ),
+    )
+
+    tool_output_ratio: float = Field(
+        default=0.0625, gt=0, le=1.0,
+        description=(
+            "The share of the live context window, in characters at four per token, one tool "
+            "result's output may take when max_tool_output_chars is None. A project may only "
+            "lower it."
+        ),
+    )
+
+    evict_ratio: float = Field(
+        default=0.015625, gt=0, le=1.0,
+        description=(
+            "The share of the live context window, in characters at four per token, above which "
+            "a tool result is evicted to a restorable stub when tool_result_evict_threshold_chars "
+            "is None. A project may only lower it."
+        ),
+    )
+
+    result_cap_ratio: float = Field(
+        default=0.09375, gt=0, le=1.0,
+        description=(
+            "The share of the live context window, in characters at four per token, one tool "
+            "result may put into the conversation at all (the tool registry's result cap). A "
+            "project may only lower it."
         ),
     )
 
@@ -1481,13 +1520,23 @@ list — every field is declared there with its own description.
 | `context.compaction_threshold_pct` | float | `80.0` | 50.0–99.0 | Compaction trigger |
 | `context.preserve_first_n_messages` | int | `4` | 1+ | Preserved prefix count |
 | `context.preserve_last_n_messages` | int | `8` | 2+ | Preserved suffix count |
-| `context.max_tool_output_chars` | int or null | `null` | 100–500000 | Tool output cap; null = 32000 |
-| `context.tool_result_evict_threshold_chars` | int or null | `null` | 500–500000 | Size above which a tool result may be evicted to a restorable stub; null = 8000 |
+| `context.max_tool_output_chars` | int or null | `null` | 100–500000 | Tool output cap; null = `tool_output_ratio` of the live window, an integer is used as written |
+| `context.tool_result_evict_threshold_chars` | int or null | `null` | 500–500000 | Size above which a tool result may be evicted to a restorable stub; null = `evict_ratio` of the live window, an integer is used as written |
+| `context.tool_output_ratio` | float | `0.0625` | (0, 1] | Share of the live window one tool result's output may take (characters at four per token); lower-only from a project |
+| `context.evict_ratio` | float | `0.015625` | (0, 1] | Share of the live window above which a tool result is evicted to a stub; lower-only from a project |
+| `context.result_cap_ratio` | float | `0.09375` | (0, 1] | Share of the live window one tool result may put into the conversation at all; lower-only from a project |
 | `context.system_prompt_file` | string or null | null | abs or ~/… path | System prompt file |
 | `context.microagents` | list[string] | `[]` | — | Microagent names |
 | `schedule.cron` | string or null | null | 5-field cron | Schedule expression |
 | `schedule.timezone` | string | `"UTC"` | IANA timezone | Schedule timezone |
 | `schedule.task` | string or null | null | — | Task to run |
+
+**The three window ratios are lower-only from a project.** A project layer (its agent or division
+files, its `config.yaml` or `overrides.yaml`, or its override of a built-in agent) may only lower
+`tool_output_ratio`, `evict_ratio` and `result_cap_ratio`: a larger, zero or non-numeric value is
+ignored with a warning naming the key and the file, and a `null` or missing key keeps the machine's
+value. An explicit size a project writes (`max_tool_output_chars`,
+`tool_result_evict_threshold_chars`) is used as written.
 
 **Three memory keys the schema still accepts but nothing reads.** `memory.sqlite_path`,
 `memory.history_path` and `memory.notes_path` parse without error and are then ignored: the memory
@@ -2224,7 +2273,7 @@ context:
   compaction_threshold_pct: 80.0
   preserve_first_n_messages: 4
   preserve_last_n_messages: 8
-  max_tool_output_chars: 32000
+  max_tool_output_chars: null   # null follows the window through tool_output_ratio
   system_prompt_file: ~/.localharness/prompts/morning-briefing.md
   microagents: []
 
@@ -2272,7 +2321,7 @@ context:
   compaction_threshold_pct: 80.0
   preserve_first_n_messages: 4
   preserve_last_n_messages: 8
-  max_tool_output_chars: 32000
+  max_tool_output_chars: null   # null follows the window through tool_output_ratio
 
 shared_memory: ~/.localharness/divisions/financial/shared.db
 ```
@@ -2306,7 +2355,7 @@ context:
   compaction_threshold_pct: 80.0
   preserve_first_n_messages: 4
   preserve_last_n_messages: 8
-  max_tool_output_chars: 32000
+  max_tool_output_chars: null   # null follows the window through tool_output_ratio
 
 log_level: info
 audit_log_path: ~/.localharness/audit.jsonl

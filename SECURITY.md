@@ -207,7 +207,8 @@ gate-family rule above and stays registered if the plugin later fails.
 A project's `.localharness/` may set what the agent does inside that project: the model it asks
 for, budgets (which it may only lower, see [Settings a project may only
 lower](#settings-a-project-may-only-lower)), prompts and agent structure, memory tuning, and
-stricter permissions. A setting that
+stricter permissions. The share of the model's window a tool result may fill is the same kind of
+setting: a project may only lower it. A setting that
 says where a request or a credential goes, which credential is sent, what program the harness starts
 or imports, or which file outside the project it writes belongs to your machine, so only your
 machine-level (global) `config.yaml` or `overrides.yaml` may set it. A repository you cloned must
@@ -305,6 +306,17 @@ exception to the shipped-default rule, as their entries say. These are all of th
   terminal (in any mode), capped by `org.children_budget` and `channels.unattended_max_actions`
 - `permissions.budget.max_tool_calls` cannot be set by a project at all: a project agent file never
   carries it, and a project overlay of a built-in agent has it dropped with a warning
+- `context.tool_output_ratio`, `context.evict_ratio` and `context.result_cap_ratio` (and their
+  `org.context.*` spellings), in a project agent file, a project division file, the project's
+  `config.yaml` or `overrides.yaml`, or a project override of a built-in agent: the share of the
+  model's window one tool result may fill, the size above which a result is moved out of the prompt,
+  and what one result may put into the conversation at all. A project may only make them smaller: a
+  larger, zero or non-numeric value is ignored with a warning naming the key and the file, and a
+  `null` or a missing key keeps yours
+
+An explicit size a project writes (`context.max_tool_output_chars`,
+`context.tool_result_evict_threshold_chars`) is a context setting like any other and is used as
+written.
 
 ## Human approval gate
 
