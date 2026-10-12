@@ -776,6 +776,39 @@ async def test_phone_a_change_line_is_forwarded_and_never_a_receipt(tmp_path):
     await channel.stop()
 
 
+async def test_phone_a_narrowing_notice_is_forwarded_once_and_never_a_receipt(tmp_path):
+    bus, channel = await _phone(tmp_path)
+    receipts = Receipts()
+    channel.instructions_on_delivered = receipts
+    client = channel.attach_client()
+
+    await bus.publish(_narrowing("narrowed"))
+
+    rows = _frames(client)
+    assert [r[0] for r in rows] == ["NarrowingNotice"]
+    assert rows[0][1]["text"] == "narrowed"
+    assert receipts.calls == 0
+    assert channel._first_contact_notice is None
+    await channel.stop()
+
+
+async def test_a_narrowing_notice_is_never_a_receipt_on_acp_discord_or_the_base():
+    receipts = Receipts()
+    bus = EventBus()
+    acp, conn = _acp(bus)
+    acp.instructions_on_delivered = receipts
+    await acp.start()
+    plugin = PluginStyleChannel(bus)
+    plugin.instructions_on_delivered = receipts
+    await plugin.start()
+
+    await bus.publish(_narrowing("narrowed"))
+
+    assert conn.texts() == ["narrowed"]
+    assert [c for c, _ in plugin.sent] == ["narrowed"]
+    assert receipts.calls == 0
+
+
 async def test_phone_a_raising_receipt_never_breaks_the_forwarder(tmp_path):
     bus, channel = await _phone(tmp_path)
 
