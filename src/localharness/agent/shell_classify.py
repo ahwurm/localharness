@@ -3501,18 +3501,49 @@ def _mutating_form(head: str, rest: list[str]) -> str:
         positional = any(not t.startswith("-") for t in rest)
         if positional or any(_matches_flag(t, ("-F", "--file")) for t in flags):
             return "hostname --set"
-    if head == "date":
-        if any(_matches_flag(t, ("-s", "--set")) for t in flags):
-            return "date -s"
-        index = 0
-        while index < len(rest):
-            token = rest[index]
-            index += 1
-            if token in ("-d", "-f", "-r", "--date", "--file", "--reference") and index < len(rest):
-                index += 1  # the option's value (`-d 'yesterday'`)
-            elif not token.startswith("-") and not token.startswith("+"):
-                return "date -s"  # `date MMDDhhmm`: a bare operand sets the clock
+    if head == "date" and _date_sets_the_clock(rest):
+        return "date -s"
     return ""
+
+
+DATE_VALUE_LETTERS = "dfr"
+DATE_VALUE_OPTIONS = ("date", "file", "reference")
+
+
+def _date_sets_the_clock(rest: Sequence[str]) -> bool:
+    """Does ``date ARGS`` set the clock: ``-s``/``--set`` (any ``--se`` prefix), or a bare ``MMDDhhmm`` operand?
+
+    date(1) options read the way getopt does (WR-53 it5): ``-d``, ``-f``, ``-r`` take a value (attached or the
+    next token, also last in a cluster: ``-ud @0``), ``-I[FMT]`` takes its format attached and ends the cluster
+    (``-Iseconds`` holds an ``s`` that is no option), ``--date``/``--file``/``--reference`` take one; ``+FORMAT``
+    is a format, not a time."""
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        index += 1
+        if token == "--":
+            return any(not operand.startswith("+") for operand in rest[index:])
+        if token.startswith("--"):
+            name, equals, _ = token[2:].partition("=")
+            if name and "set".startswith(name):
+                return True
+            if name and not equals and any(option.startswith(name) for option in DATE_VALUE_OPTIONS):
+                index += 1  # the option's value (`--date 'yesterday'`)
+            continue
+        if token.startswith("-") and token != "-":
+            for position, letter in enumerate(token[1:], start=1):
+                if letter == "s":
+                    return True
+                if letter in DATE_VALUE_LETTERS:
+                    if position == len(token) - 1:
+                        index += 1  # the value is the next token
+                    break
+                if letter == "I":
+                    break
+            continue
+        if not token.startswith("+"):
+            return True  # `date MMDDhhmm`: a bare operand sets the clock
+    return False
 
 
 def _interpreter_mode(

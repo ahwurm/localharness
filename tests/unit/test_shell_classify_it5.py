@@ -159,6 +159,29 @@ def test_redirection_controls_keep_their_verdict(ws, command, expected):
     _check(command, expected, ws)
 
 
+# --------------------------------------------------------------------------- WR-53: date
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "date -Iseconds", "date -Ins", "date -Ihours", "date -u -Iseconds", "date -d'next sat' +%F",
+        "date -ud @0", "date -d 'yesterday' +%F", "date --date=tomorrow", "date --date tomorrow", "date +%s",
+        "date -R", "date -r file", "date --utc", "date -u",
+    ),
+)
+def test_date_that_only_prints_keeps_the_read_only_tier(ws, command):
+    _check(command, "ok/ok/ok", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("date -s '2020-01-01'", "date --set=2020-01-01", "date --se 2020-01-01", "date -us 2020-01-01",
+     "date -s2020-01-01", "date 01010101", "date -u 01010101", "date -d x -s y"),
+)
+def test_date_that_sets_the_clock_leaves_the_tier(ws, command):
+    _check(command, "DENY/ASK/ok", ws)
+
+
 # --------------------------------------------------------------------------- WR-01: the depth guard
 
 NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")
