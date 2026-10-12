@@ -926,6 +926,8 @@ PROTECTED_CONFIG_DIR_ENTRIES: tuple[str, ...] = (
     "grants.yaml",
     "declined_workspace_offers.yaml",
     "plugins",
+    "project_records.yaml",
+    "project_records.yaml.lock",
 )
 """The entries inside a harness config directory — the global one and any in-project
 ``.localharness/`` — that are protected in every mode.
@@ -937,7 +939,9 @@ the deny patterns and the ``ask`` rule sets, so a write there edits the gate its
 load; ``grants.yaml`` holds every "always here" and every "never here" a human has answered;
 ``declined_workspace_offers.yaml`` is its smaller sibling. ``plugins/`` is CODE the harness
 imports and runs. A directory entry protects its subtree, so ``plugins/**`` is covered by the
-one word.
+one word. ``project_records.yaml`` is the per-root instructions record and ``project_records.yaml.lock``
+its lock: a replaced store would clear every mark and set ``yes`` under the model's own hash, and a
+replaced lock is lost exclusion.
 
 Everything else under a config directory is allowed: ``agents/`` and ``divisions/`` (agent
 definitions — creating one through the harness is the harness working), ``tools/`` (scripts the

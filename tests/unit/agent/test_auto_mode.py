@@ -205,6 +205,9 @@ def test_in_project_only_git_is_protected_wholesale(project):
     (".localharness/agents/orchestrator/memory.db", Verdict.ALLOW),
     (".localharness/config.yaml.bak", Verdict.ALLOW),
     (".localharness/agents/config.yaml", Verdict.ALLOW),
+    (".localharness/project_records.yaml", Verdict.ASK),
+    (".localharness/project_records.yaml.lock", Verdict.ASK),
+    (".localharness/project_records.yaml.bak", Verdict.ALLOW),
 ])
 def test_only_the_harness_files_that_decide_what_runs_are_protected(relative, expected, project):
     """The narrowing the replay forced (owner ruling 2026-09-11, "only hard blacklists… and even
@@ -233,6 +236,12 @@ def test_the_global_config_dir_answers_by_the_same_list(project, tmp_path, monke
     assert _verdict("write", {"path": str(config_dir / "agents" / "x.yaml")}, ctx, WRITE) is Verdict.ALLOW
     assert _verdict("write", {"path": str(config_dir / "tools" / "x.sh")}, ctx, WRITE) is Verdict.ALLOW
     assert _verdict("write", {"path": str(config_dir / "audit.jsonl")}, ctx, WRITE) is Verdict.ALLOW
+    # The per-root instructions record and its lock: a replaced store would set `yes` under the
+    # model's own hash. Its sibling stores and a backup copy are not on the list.
+    assert _verdict("write", {"path": str(config_dir / "project_records.yaml")}, ctx, WRITE) is Verdict.ASK
+    assert _verdict("write", {"path": str(config_dir / "project_records.yaml.lock")}, ctx, WRITE) is Verdict.ASK
+    assert _verdict("write", {"path": str(config_dir / "project_records.yaml.bak")}, ctx, WRITE) is Verdict.ALLOW
+    assert _verdict("write", {"path": str(config_dir / "coauthor_consent.yaml")}, ctx, WRITE) is Verdict.ALLOW
 
 
 # ------------------------------------------------------------- what no longer asks
