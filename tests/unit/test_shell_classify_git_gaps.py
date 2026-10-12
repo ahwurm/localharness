@@ -756,3 +756,47 @@ def test_the_join_strips_heredocs_with_the_text_it_reads(command, joined):
     from localharness.agent.shell_classify import _join_continuations
 
     assert _join_continuations(command) == joined
+
+
+# ------------------------------------------------------------------ an unquoted heredoc body runs its substitutions (CR-51; iteration 3)
+
+UNQUOTED_BODY_ROWS = (
+    f"cat <<E\n$({X})\nE",
+    f"cat <<E\nhello `{X}`\nE",
+    f"read -r l <<E\n$({X})\nE\necho \"$l\"",
+    f"cat <<E\n${{ {X}; }}\nE",
+    f"cat <<E\nx ${{y:-$({X})}} z\nE",
+    f"cat <<-E\n\t$({X})\n\tE",
+    f"cat <<E > f\n$(echo $({X}))\nE",
+    f"cat <<A <<'B'\n$({X})\nA\nbody\nB",
+)
+
+
+@pytest.mark.parametrize("mode", THREE_MODES)
+@pytest.mark.parametrize("command", UNQUOTED_BODY_ROWS)
+def test_the_substitutions_in_an_unquoted_heredoc_body_are_classified(command, mode, ws):
+    """Bash expands the body of `<<E`: `read -r l <<E` / `$(rm x)` / `E` runs the `rm` (proof run)."""
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command", (
+    f"cat <<'E'\n$({X})\nE",
+    f'cat <<"E"\n$({X})\nE',
+    f"cat <<\\E\n$({X})\nE",
+    f"cat <<$'E'\n$({X})\nE",
+    f"cat <<E\n\\$({X})\nE",
+    f"cat <<E\n\\`{X}\\`\nE",
+    "cat <<E\n${HOME} $HOME ${x:-a} $((1+2))\nE",
+    "cat <<'A' <<B\n$(rm -rf /)\nA\nplain\nB",
+))
+def test_a_quoted_or_escaped_heredoc_body_is_still_data(command):
+    assert [s.signature for s in _segments(command)] == ["cat"], command
+
+
+def test_an_ordinary_unquoted_body_adds_only_what_it_runs(ws):
+    command = "cat > f <<EOF\nbuilt on $(date) in ${HOME}\nEOF"
+    assert [s.signature for s in _segments(command)] == ["date", "cat"]
+    assert _verdict(command, ws, "auto").verdict is Verdict.ALLOW
+    assert _targets(command) == ("f",)
+    assert _targets("cat <<E > f\n$(date)\nE") == ("f",)

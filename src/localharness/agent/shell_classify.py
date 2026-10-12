@@ -1143,8 +1143,8 @@ class _JoinScan:
         would be if the reading were wrong (CR-01), where the old scanner swallowed the rest of the
         text."""
         text, size = self.text, len(self.text)
-        for delimiter, dash, _expand, _slot in pending:
-            position = self.index
+        for delimiter, dash, expand, slot in pending:
+            start = position = self.index
             while position < size:
                 newline = text.find("\n", position)
                 line_end = size if newline == -1 else newline
@@ -1155,6 +1155,59 @@ class _JoinScan:
             else:
                 return
             self.index = size if newline == -1 else newline + 1
+            if expand:
+                # An unquoted delimiter: bash expands the body, so `$(…)` and backticks in it RUN (CR-51).
+                # They go back into the text as here-string operands of the same command, where the
+                # lifter classifies them; every other word of the body stays data.
+                found = self._body_substitutions(text[start:position])
+                if found:
+                    out[slot] = " " + " ".join(f"<<< {piece}" for piece in found) + " "
+
+    def _body_substitutions(self, body: str) -> list[str]:
+        """The command substitutions an unquoted heredoc body would run, each as the text bash reads.
+
+        Quotes mean nothing in a body, a backslash escapes the next character (``\\$(`` runs nothing), and
+        a plain ``${x}`` is not a substitution."""
+        scan = _JoinScan(body, self.strip_comments)
+        found: list[str] = []
+        while scan.index < len(body):
+            index = scan.index
+            char, following = body[index], body[index + 1 : index + 2]
+            piece: list[str] = []
+            if char == "\\":
+                scan.index += 2
+                continue
+            if char == "`":
+                piece.append("`")
+                scan.index += 1
+                scan._nested(piece, _JOIN_BACKTICK)
+            elif char == "$" and following == "(":
+                inner = _JOIN_PAREN
+                if body[index + 2 : index + 3] == "(" and _is_arithmetic(body, index + 1):
+                    inner = _JOIN_ARITH
+                piece.append("$(")
+                scan.index += 2
+                scan._nested(piece, inner)
+            elif char == "$" and following == "{":
+                after = body[index + 2 : index + 3]
+                inner = _JOIN_FUNSUB if after and after in " \t\n|" else _JOIN_PARAM
+                piece.append("${")
+                scan.index += 2
+                scan._nested(piece, inner)
+                if inner == _JOIN_PARAM and "$(" not in piece[1] and "`" not in piece[1]:
+                    piece = []
+            elif char == "$" and following == "[":
+                piece.append("$[")
+                scan.index += 2
+                scan._nested(piece, _JOIN_BRACKET)
+            else:
+                scan.index += 1
+                continue
+            if piece:
+                found.append("".join(piece))
+        self.balanced = self.balanced and scan.balanced
+        self.hazard = self.hazard or scan.hazard
+        return found
 
 
 def _join_continuations(text: str) -> str:
