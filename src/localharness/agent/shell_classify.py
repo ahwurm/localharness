@@ -154,7 +154,7 @@ DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
 
 SHELL_KEYWORDS = frozenset({
     "if", "then", "elif", "else", "fi", "while", "until", "for", "do", "done",
-    "case", "esac", "select", "function", "!", "{", "}",
+    "case", "esac", "select", "function", "!", "{", "}", "coproc",
 })
 """Compound-command keywords. They are grammar, not commands, so they are stripped from the
 front of a segment and a keyword-only segment is dropped — otherwise ``do rm -rf $f`` (the
@@ -201,6 +201,8 @@ WRAPPER_HEAD_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "exec": frozenset({"-a"}),
     "wsl": frozenset({"-d", "--distribution", "-u", "--user", "--cd", "--shell-type"}),
     "env": frozenset({"-u", "--unset", "-C", "--chdir", "-a", "--argv0", "-P"}),
+    "time": frozenset({"-f", "--format", "-o", "--output"}),
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
 }
 """Value-taking options PER wrapper, REPLACING :data:`WRAPPER_VALUE_FLAGS` for these heads.
 
@@ -810,6 +812,66 @@ def _ansi_c_as_single_quoted(text: str, index: int) -> tuple[str, int, bool]:
     return quoted, end, closed
 
 
+CASE_COMMAND_WORDS = frozenset({
+    "if", "then", "elif", "else", "while", "until", "do", "!", "{", "time", "coproc",
+})
+"""Words after which a command (so a ``case``) may still start."""
+
+
+class _CaseTracker:
+    """Which unquoted ``)`` ends the pattern of a ``case`` clause rather than a ``$(`` or a group.
+
+    ``$(case x in a) rm y;; esac)`` holds a ``)`` that closes nothing: the pattern's terminator. A
+    scanner that counts parentheses closes the substitution there and reads the clause body as part
+    of the outer command (B WR-55). The tracker follows words at command position: ``case`` opens one
+    (remembering the parenthesis depth), ``esac`` closes it, and a ``)`` at that depth while one is
+    open is a pattern terminator. A ``case`` that is an argument (``git log --grep case``) is not at
+    command position and opens nothing.
+    """
+
+    __slots__ = ("starts", "word", "command", "stray")
+
+    def __init__(self) -> None:
+        self.starts: list[int] = []
+        self.word = ""
+        self.command = True
+        self.stray = False  # an `esac` met with no `case` of this scan open: the end of an enclosing clause
+
+    def opaque(self) -> None:
+        """A quote, an escape or a substitution is part of the current word: it is no keyword."""
+        self.word = "\0"
+
+    def step(self, char: str, depth: int) -> None:
+        """Feed one unquoted character; ``depth`` is the parenthesis depth it stands at."""
+        if char in " \t\n;&|()<>":
+            word, self.word = self.word, ""
+            if word:
+                if self.command and word == "case":
+                    self.starts.append(depth)
+                    self.command = False
+                elif self.command and word == "esac":
+                    if self.starts:
+                        self.starts.pop()
+                    else:
+                        self.stray = True
+                    self.command = False
+                elif not (self.command and word in CASE_COMMAND_WORDS):
+                    self.command = False
+            if char in "\n;&|(":
+                self.command = True
+            elif char == ")":
+                self.command = False
+        else:
+            self.word += char
+
+    def at_pattern_end(self, depth: int) -> bool:
+        """Is a ``)`` at this depth the end of a ``case`` pattern (call after :meth:`step`)?"""
+        return bool(self.starts) and self.starts[-1] == depth
+
+    def pattern_end(self) -> None:
+        self.command = True
+
+
 def _is_arithmetic(text: str, first: int) -> bool:
     """Is the ``((`` whose first ``(`` is at ``first`` arithmetic (CR-54, CR-03)?
 
@@ -931,6 +993,7 @@ class _JoinScan:
         groups = 0  # bare `( … )` groups open in this context: the `)` that closes one ends a word
         bracket = 0  # `name[` subscripts open on this line: `<<` inside is a shift
         pending: list[list] = []  # heredocs whose body starts at the next newline: [delimiter, dash, expand, slot]
+        tracker = _CaseTracker()  # a `)` that ends a `case` pattern does not close a `$(` (B WR-55)
         comments = self.strip_comments and kind in (
             _JOIN_TOP, _JOIN_PAREN, _JOIN_BACKTICK, _JOIN_FUNSUB
         )
@@ -946,6 +1009,7 @@ class _JoinScan:
                 if text[index + 1 : index + 2] != "\n":
                     out.append(text[index : index + 2])
                     word_start = False
+                    tracker.opaque()
                 self.index += 2  # backslash-newline is dropped, in double quotes too
                 continue
             if char == "`":
@@ -956,6 +1020,7 @@ class _JoinScan:
                 self.index += 1
                 self._nested(out, _JOIN_BACKTICK, bool(pending))
                 word_start = False
+                tracker.opaque()
                 continue
             if char == "$":
                 following = text[index + 1 : index + 2]
@@ -966,6 +1031,7 @@ class _JoinScan:
                     out.append(quoted)
                     self.balanced = self.balanced and closed
                     word_start = False
+                    tracker.opaque()
                     continue
                 if quote == "" and following == '"':
                     self.index += 1  # `$"…"` is the double-quoted string; the `$` is not part of it
@@ -978,6 +1044,7 @@ class _JoinScan:
                     self.index += 2
                     self._nested(out, inner, bool(pending))
                     word_start = False
+                    tracker.opaque()
                     continue
                 if following == "{":
                     after = text[index + 2 : index + 3]
@@ -986,12 +1053,14 @@ class _JoinScan:
                     self.index += 2
                     self._nested(out, inner, bool(pending))
                     word_start = False
+                    tracker.opaque()
                     continue
                 if following == "[":
                     out.append("$[")  # deprecated arithmetic: `<<` inside is a shift (CR-03)
                     self.index += 2
                     self._nested(out, _JOIN_BRACKET, bool(pending))
                     word_start = False
+                    tracker.opaque()
                     continue
             if quote == '"':
                 out.append(char)
@@ -1003,22 +1072,26 @@ class _JoinScan:
                 out.append(char)
                 self.index += 1
                 word_start = False
+                tracker.opaque()
                 continue
             if char == "<" and text.startswith("<<", index):
                 if text.startswith(HERE_STRING_OPERATOR, index):
                     out.append(HERE_STRING_OPERATOR)
                     self.index += len(HERE_STRING_OPERATOR)
                     word_start = False
+                    tracker.opaque()
                     continue
                 if kind in HEREDOC_KINDS and not bracket:
                     self._heredoc_operator(out, pending)
                     word_start = True
+                    tracker.opaque()
                     continue
             if char in "<>" and text[index + 1 : index + 2] == "(":
                 out.append(char + "(")
                 self.index += 2
                 self._nested(out, _JOIN_PAREN, bool(pending))
                 word_start = False
+                tracker.opaque()
                 continue
             if (
                 char == "(" and word_start and kind in HEREDOC_KINDS
@@ -1028,21 +1101,30 @@ class _JoinScan:
                 self.index += 1
                 self._nested(out, _JOIN_ARITH, bool(pending))
                 word_start = False
+                tracker.opaque()
                 continue
             if char == "\n":
                 out.append(char)
                 self.index += 1
                 word_start = True
                 bracket = 0
+                tracker.step(char, nested)
                 if pending:
                     self._heredoc_bodies(out, pending)
                     pending = []
                 continue
+            tracker.step(char, nested)
             if kind in (_JOIN_PAREN, _JOIN_ARITH) and char in "()":
                 if char == "(":
                     nested += 1
                 elif nested:
                     nested -= 1
+                elif kind == _JOIN_PAREN and tracker.at_pattern_end(nested):
+                    out.append(char)  # the `)` after a `case` pattern: it closes nothing
+                    self.index += 1
+                    tracker.pattern_end()
+                    word_start = True
+                    continue
                 else:
                     self.index += 1
                     return "".join(out), True
@@ -1386,7 +1468,6 @@ def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
     parts: list[_Raw] = []
     buffer: list[str] = []
     piped = False
-    depth = 0
     braces = 0
     index = 0
     quote: str | None = None
@@ -1426,18 +1507,25 @@ def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
             index = end + 1
             continue
         previous = buffer[-1][-1:] if buffer else ""
-        if char == "(":
-            depth += 1
-            buffer.append(char)
-            index += 1
+        if (
+            char == "c" and text.startswith("case", index)
+            and text[index + 4 : index + 5] in (" ", "\t", "\n") and previous in GROUP_BRACE_BEFORE
+            and _command_position("".join(buffer))
+        ):
+            # `case x in a) rm y;; esac` is one command: its `;;`, `|` and `)` split nothing.
+            end = _case_end(text, index)
+            buffer.append(text[index:end])
+            index = end
             continue
-        if char == ")":
-            depth = max(0, depth - 1)
-            buffer.append(char)
-            index += 1
+        if char == "(":
+            # A parenthesised unit (`$(…)`, `<(…)`, `( … )`, `f()`, `x=(…)`) is taken whole, so the `;;` and
+            # `)` of a `case` inside it split nothing.
+            end = _matching(text, index)
+            buffer.append(text[index : end + 1])
+            index = end + 1
             continue
         if (
-            char == "{" and track_braces and depth == 0 and previous in GROUP_BRACE_BEFORE
+            char == "{" and track_braces and previous in GROUP_BRACE_BEFORE
             and text[index + 1 : index + 2] in GROUP_BRACE_AFTER
             and _command_position("".join(buffer))
         ):
@@ -1452,7 +1540,7 @@ def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
             buffer.append(char)
             index += 1
             continue
-        if depth == 0 and braces == 0:
+        if braces == 0:
             pair = text[index : index + 2]
             if char in "<>" or (char == "&" and text[index + 1 : index + 2] == ">"):
                 # A redirection operator, fd duplication included: the `&` of `2>&1` or
@@ -1482,6 +1570,156 @@ def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
     if braces and track_braces:
         return _split_top_level(text, track_braces=False)
     return parts
+
+
+def _skip_word_part(text: str, index: int) -> int:
+    """The index after the quote, escape or substitution that starts at ``index``; ``index + 1`` if none."""
+    char = text[index]
+    if char == "\\":
+        return index + 2
+    if char in "'\"":
+        end = index + 1
+        while end < len(text) and text[end] != char:
+            end += 2 if (char == '"' and text[end] == "\\") else 1
+        return end + 1
+    if char == "`":
+        return _closing_backtick(text, index) + 1
+    if char == "$" and text[index + 1 : index + 2] == "(":
+        return _matching(text, index + 1) + 1
+    if char == "$" and text[index + 1 : index + 2] == "{":
+        return _matching_brace(text, index + 1) + 1
+    return index + 1
+
+
+def _case_end(text: str, start: int) -> int:
+    """The index just past the ``esac`` that closes the ``case`` at ``start`` (end of text if none)."""
+    tracker = _CaseTracker()
+    depth = 0
+    index = start
+    opened = False
+    while index < len(text):
+        step = _skip_word_part(text, index)
+        if step != index + 1 or text[index] in "\\'\"`":
+            tracker.opaque()
+            index = step
+            continue
+        char = text[index]
+        tracker.step(char, depth)
+        if tracker.starts:
+            opened = True
+        elif opened:
+            return index
+        if char == "(":
+            depth += 1
+        elif char == ")" and not tracker.at_pattern_end(depth):
+            depth = max(0, depth - 1)
+        elif char == ")":
+            tracker.pattern_end()
+        index += 1
+    tracker.step(" ", depth)
+    return len(text)
+
+
+def _case_pattern_end(text: str, start: int) -> int:
+    """The index of the ``)`` that ends the pattern list starting at ``start``; -1 if none."""
+    depth = 0
+    index = start
+    while index < len(text):
+        step = _skip_word_part(text, index)
+        if step != index + 1 or text[index] in "\\'\"`":
+            index = step
+            continue
+        char = text[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return index
+            depth -= 1
+        index += 1
+    return -1
+
+
+def _case_clause_end(text: str, start: int) -> tuple[int, int] | None:
+    """(end of the clause body, index to continue from) for the body starting at ``start``.
+
+    The body ends at the ``;;`` / ``;&`` / ``;;&`` of its own clause, or before the ``esac`` that closes
+    the whole ``case`` (then the continue index is that ``esac``'s end). A ``case`` nested in the body
+    keeps its own terminators. None when neither is found."""
+    tracker = _CaseTracker()
+    depth = 0
+    index = start
+    while index < len(text):
+        step = _skip_word_part(text, index)
+        if step != index + 1 or text[index] in "\\'\"`":
+            tracker.opaque()
+            index = step
+            continue
+        char = text[index]
+        if char == ";" and depth == 0 and not tracker.starts:
+            for terminator in (";;&", ";;", ";&"):
+                if text.startswith(terminator, index):
+                    return index, index + len(terminator)
+        tracker.step(char, depth)
+        if tracker.stray:
+            return index - 4, index - 4
+        if char == "(":
+            depth += 1
+        elif char == ")" and not tracker.at_pattern_end(depth):
+            depth = max(0, depth - 1)
+        elif char == ")":
+            tracker.pattern_end()
+        index += 1
+    tracker.step(" ", depth)
+    if tracker.stray:
+        return len(text) - 4, len(text) - 4
+    return None
+
+
+def _parse_case(text: str) -> tuple[list[str], list[str], str] | None:
+    """Split ``case WORD in PATTERN) BODY ;; … esac`` into (subject and patterns, bodies, text after).
+
+    None when it does not parse: the caller then fails toward asking."""
+    size = len(text)
+
+    def skip_blanks(index: int) -> int:
+        while index < size and text[index] in " \t\n":
+            index += 1
+        return index
+
+    def word_end(index: int) -> int:
+        while index < size and text[index] not in " \t\n;&|<>()":
+            step = _skip_word_part(text, index)
+            index = step
+        return index
+
+    index = skip_blanks(4)
+    subject_end = word_end(index)
+    if subject_end == index:
+        return None
+    heads = [text[index:subject_end]]
+    index = skip_blanks(subject_end)
+    if text[index : index + 2] != "in" or text[index + 2 : index + 3] not in ("", " ", "\t", "\n", "("):
+        return None
+    index = skip_blanks(index + 2)
+    bodies: list[str] = []
+    while True:
+        if text.startswith("esac", index) and text[index + 4 : index + 5] in ("", " ", "\t", "\n", ";", "&", "|", ")", ">", "<"):
+            return heads, bodies, text[index + 4 :]
+        if text[index : index + 1] == "(":
+            index = skip_blanks(index + 1)
+        pattern_end = _case_pattern_end(text, index)
+        if pattern_end < 0:
+            return None
+        heads.append(text[index:pattern_end])
+        clause = _case_clause_end(text, pattern_end + 1)
+        if clause is None:
+            return None
+        body_end, index = clause
+        bodies.append(text[pattern_end + 1 : body_end])
+        index = skip_blanks(index)
+        if index >= size:
+            return None
 
 
 FUNSUB_OPENERS = (" ", "\t", "\n", "|")
@@ -1589,6 +1827,72 @@ def _group_inner(body: str) -> str | None:
     return None
 
 
+PREFIX_WORDS = frozenset({"if", "then", "elif", "else", "while", "until", "do", "!"})
+
+
+def _compound_after_prefix(body: str) -> str | None:
+    """The compound command (``{ … }``, ``( … )``, ``case … esac``) after leading grammar words, or None.
+
+    ``then ( rm x )``, ``! { rm x; }``, ``time -p { rm x; }``, ``coproc NAME { rm x; }``: the words in
+    front only say how the group is run, so the group is what gets classified (CR-05)."""
+    rest = body
+    while True:
+        rest = rest.lstrip()
+        word, end = _read_word(rest, 0)
+        if word in PREFIX_WORDS:
+            rest = rest[end:]
+        elif word == "time":
+            rest = rest[end:]
+            while True:
+                rest = rest.lstrip()
+                option, end = _read_word(rest, 0)
+                if not option.startswith("-"):
+                    break
+                rest = rest[end:]
+                if option in TIME_VALUE_OPTIONS:
+                    rest = rest.lstrip()
+                    rest = rest[_read_word(rest, 0)[1] :]
+        elif word == "coproc":
+            rest = rest[end:].lstrip()
+            name, end = _read_word(rest, 0)
+            after = rest[end:].lstrip()
+            if IDENTIFIER_RE.match(name) and after[:1] in ("{", "(") and not after.startswith("(("):
+                rest = after  # `coproc NAME { … }`: NAME only when a compound command follows
+        else:
+            break
+    if rest.startswith("(") or (rest.startswith("{") and rest[1:2] in (" ", "\t", "\n")):
+        return rest
+    if rest.startswith("case") and rest[4:5] in (" ", "\t", "\n"):
+        return rest
+    return None
+
+
+def _classify_case(
+    body: str, settings: GateSettings, cwd: _Cwd
+) -> tuple[list[ShellSegment], list[str]]:
+    """Classify ``case WORD in PATTERN) BODY ;; … esac``: every body is a command list (CR-05, WR-55).
+
+    The subject and the patterns only matter for the substitutions in them. A ``case`` that does not
+    parse gets the unparsed-shell placeholder: no mode runs text the classifier could not split."""
+    parsed = _parse_case(body)
+    if parsed is None:
+        return _classify_text(UNPARSED_SHELL_SIGNATURE, settings, cwd)
+    heads, bodies, after = parsed
+    segments: list[ShellSegment] = []
+    dropped: list[str] = []
+    for head in heads:
+        segments.extend(_lift_substitutions(head, settings, cwd)[1])
+    for clause in bodies:
+        clause_segments, clause_dropped = _classify_text(clause, settings, cwd)
+        segments.extend(clause_segments)
+        dropped.extend(clause_dropped)
+    if after.strip():  # a redirection after `esac`
+        tail_segments, tail_dropped = _classify_text(f": {after}", settings, cwd)
+        segments.extend(tail_segments)
+        dropped.extend(tail_dropped)
+    return segments, dropped
+
+
 def _classify_text(
     text: str, settings: GateSettings, cwd: _Cwd | None = None
 ) -> tuple[list[ShellSegment], list[str]]:
@@ -1604,6 +1908,15 @@ def _classify_text(
     for raw in _split_top_level(text):
         body = raw.text.strip()
         if not body:
+            previous_head = None
+            continue
+        compound = _compound_after_prefix(body)
+        if compound is not None:
+            body = compound  # `time { … }`, `then ( … )`, `! case …`: the prefix runs nothing itself
+        if body.startswith("case") and body[4:5] in (" ", "\t", "\n"):
+            case_segments, case_dropped = _classify_case(body, settings, cwd)
+            segments.extend(case_segments)
+            dropped.extend(case_dropped)
             previous_head = None
             continue
         inner = _group_inner(body)
@@ -1746,14 +2059,17 @@ def _closing_backtick(text: str, open_index: int) -> int:
 
 
 def _matching(text: str, open_index: int) -> int:
-    """Index of the ``)`` closing the ``(`` at ``open_index``; end of string if unbalanced."""
+    """Index of the ``)`` closing the ``(`` at ``open_index``; end of string if unbalanced.
+
+    The ``)`` that ends a ``case`` pattern inside it closes nothing (:class:`_CaseTracker`)."""
     depth = 0
     index = open_index
     quote: str | None = None
+    tracker = _CaseTracker()
     while index < len(text):
         char = text[index]
         if quote:
-            if char == "\\" and quote in ('"', "`") and index + 1 < len(text):
+            if char == "\\" and quote == '"' and index + 1 < len(text):
                 index += 2
                 continue
             if char == quote:
@@ -1761,18 +2077,32 @@ def _matching(text: str, open_index: int) -> int:
             index += 1
             continue
         if char == "\\":
+            tracker.opaque()
             index += 2
             continue
         if char in "'\"":
             quote = char
+            tracker.opaque()
             index += 1
             continue
+        if char == "`":
+            tracker.opaque()
+            index = _closing_backtick(text, index) + 1
+            continue
+        if char == "$" and text[index + 1 : index + 2] == "{":
+            tracker.opaque()
+            index = _matching_brace(text, index + 1) + 1
+            continue
+        tracker.step(char, depth)
         if char == "(":
             depth += 1
         elif char == ")":
-            depth -= 1
-            if depth == 0:
-                return index
+            if tracker.at_pattern_end(depth):
+                tracker.pattern_end()
+            else:
+                depth -= 1
+                if depth == 0:
+                    return index
         index += 1
     return len(text)
 
@@ -2084,6 +2414,8 @@ def _build(
         payload_texts = _inline_payloads(argv, settings)
     elif head in settings.inline_by_nature and head not in OPAQUE_INLINE_PROGRAMS:
         payload_texts = _inline_by_nature_payload(argv)
+    elif head == "trap":
+        payload_texts = _trap_payload(argv)
 
     if head in WRAPPER_INLINE_COMMAND_FLAGS:
         payload_texts = _flag_values(list(argv[1:]), WRAPPER_INLINE_COMMAND_FLAGS[head])
@@ -2349,6 +2681,9 @@ def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]
                 level.append(token)
                 index += 1
                 continue
+            if head == "time" and token == "!":
+                index += 1  # `time ! cmd` negates the pipeline; the command is what follows
+                continue
             if token.startswith("-") and token != "-":
                 index += 2 if token in value_flags else 1
                 continue
@@ -2492,6 +2827,19 @@ def _inline_by_nature_payload(argv: list[str]) -> list[str]:
     """
     text = " ".join(argv[1:]).strip()
     return [text] if text else []
+
+
+def _trap_payload(argv: list[str]) -> list[str]:
+    """``trap 'CMD' SIGNAL…`` → CMD, the shell text that runs when the signal arrives (CR-05, WR-55).
+
+    The first operand after the options (``-l``, ``-p``, ``--``) is the action; ``-`` resets the trap
+    and an empty one ignores the signal, so neither runs anything."""
+    index = 1
+    while index < len(argv) and argv[index].startswith("-") and argv[index] != "-":
+        index += 1
+    if index >= len(argv) or argv[index] in ("", "-"):
+        return []
+    return [argv[index]]
 
 
 def _inline_flag(token: str, flags: tuple[str, ...], *, fold: bool = False) -> str | None:
