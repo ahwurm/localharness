@@ -316,6 +316,8 @@ PIN_MESSAGES: dict[str, str] = {
     "git_dir": "the git directory is outside the workspace root ({value!r})",
     "common_dir": "the common git directory is outside the workspace root ({value!r})",
     "alternates": "the repository borrows objects from outside ({value!r})",
+    # WR-04 / IN-51: any other exception while checking; the value is the exception's class name only.
+    "check": "the repository could not be checked ({value!r})",
 }
 
 
@@ -381,6 +383,18 @@ def _symlink_outside(dirs: Sequence[str], real_root: str) -> GitReadPinFailure |
 
 def git_read_pin_failure(root: Path) -> GitReadPinFailure | None:
     """D-10: the one function registration, every call and doctor share.
+
+    An exception the checks do not anticipate (WR-04 / IN-51) fails closed as pin `check` with the
+    exception's class name as the value; it never escapes into `start` or `doctor`.
+    """
+    try:
+        return _git_read_pin_failure(root)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic helper must not take its caller down
+        return GitReadPinFailure("check", type(exc).__name__)
+
+
+def _git_read_pin_failure(root: Path) -> GitReadPinFailure | None:
+    """The checks behind `git_read_pin_failure`.
 
     Checks, in order: git on the from-scratch PATH, the prefix's `version` call, ownership of the root
     and its .git, one `rev-parse` (toplevel, git dir, common dir), the git dir's owner, a walk of the

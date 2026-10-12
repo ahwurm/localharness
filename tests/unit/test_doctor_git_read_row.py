@@ -359,3 +359,42 @@ def test_a_stub_popen_never_crashes_doctor_or_moves_its_exit_code(tmp_path, monk
 
     assert stubbed.exception is None or isinstance(stubbed.exception, SystemExit)
     assert stubbed.exit_code == baseline.exit_code
+
+
+@requires_git
+def test_a_popen_recorder_without_the_context_protocol_prints_a_check_row_and_keeps_the_exit_code(
+        tmp_path, monkeypatch, fake_home):
+    """WR-04 / IN-51: the launch_support.PopenRecorder shape made git_read_pin_failure raise TypeError."""
+    m = _machine(tmp_path, monkeypatch, fake_home)
+    repo = make_repo(m.home / "proj")
+    monkeypatch.chdir(repo)
+    baseline = _run()
+
+    class Recorder:
+        def __init__(self, cmd, **kw):
+            self.pid = 4242
+
+    monkeypatch.setattr(subprocess, "Popen", Recorder)
+    recorded = _run()
+
+    assert recorded.exit_code == baseline.exit_code
+    assert _row(recorded.stdout).endswith(
+        "git_read not registered: the repository could not be checked ('TypeError')")
+
+
+@requires_git
+def test_a_helper_that_raises_prints_one_info_row_and_keeps_the_exit_code(tmp_path, monkeypatch, fake_home):
+    m = _machine(tmp_path, monkeypatch, fake_home)
+    repo = make_repo(m.home / "proj")
+    monkeypatch.chdir(repo)
+    baseline = _run()
+
+    def boom(root):
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(git_read_tool, "git_read_pin_failure", boom)
+    broken = _run()
+
+    assert broken.exit_code == baseline.exit_code
+    assert _row(broken.stdout).endswith("git_read: could not be checked")
+    assert "secret detail" not in broken.stdout

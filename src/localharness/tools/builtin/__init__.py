@@ -47,11 +47,16 @@ async def register_builtin_tools(
     if boundary is not None:
         from localharness.tools.builtin import git_read_tool
 
-        # No `.git` at the boundary or above: nothing to read, and no git is run to find out.
-        if git_read_tool.git_read_repository_present(boundary):
-            failure = await asyncio.to_thread(git_read_tool.git_read_pin_failure, boundary)
-            if failure is None:
-                await registry.register(git_read_tool.GitReadTool(boundary), scope="global")
+        # No `.git` at the boundary or above: nothing to read, and no git is run to find out. An
+        # unexpected error while checking (WR-04 / IN-51) registers nothing instead of aborting start.
+        offer = False
+        try:
+            if git_read_tool.git_read_repository_present(boundary):
+                offer = await asyncio.to_thread(git_read_tool.git_read_pin_failure, boundary) is None
+        except Exception:  # noqa: BLE001
+            offer = False
+        if offer:
+            await registry.register(git_read_tool.GitReadTool(boundary), scope="global")
 
 
 def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:

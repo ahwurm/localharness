@@ -788,7 +788,8 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   alternates, or when the workspace root sits below the repository's toplevel. `doctor` prints
   `git_read not registered:` and a fixed sentence naming the offending path, never git's own
   output, because that can quote text the repository controls. A `.git` that changes after start
-  is refused on the next call with a fixed sentence of the same shape, instead of being read.
+  is refused on the next call with a fixed sentence of the same shape, instead of being read. An unexpected error while checking (anything the checks do not
+  anticipate) is treated as a failed check, never as a pass, and never aborts `start` or `doctor`.
 - **A command whose name comes from a substitution or a variable is unfamiliar, not destructive.**
   A name the shell builds at run time cannot be signed at classification time, so the command is
   asked about as an unknown one rather than as destructive, and a grant on that placeholder
