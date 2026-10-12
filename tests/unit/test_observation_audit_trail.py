@@ -103,7 +103,7 @@ async def test_observation_records_real_upstream_cap_truncation(bus):
         async def _execute(self, **kwargs: Any) -> ToolResult:
             return self.ok("x" * 2000)
 
-    registry = ToolRegistry(result_size_cap_chars=500)
+    registry = ToolRegistry(result_size_cap=500)
     await registry.register(_BigTool(), scope="global")
 
     llm = _RecordingLLM(_one_tool_call_then_done(

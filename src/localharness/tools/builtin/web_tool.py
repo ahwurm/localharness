@@ -13,6 +13,7 @@ import os
 import re
 import sys
 from asyncio.subprocess import DEVNULL, PIPE
+from collections.abc import Callable
 from typing import Any, Optional
 
 import httpx
@@ -309,7 +310,11 @@ class WebFetchTool(Tool):
         )
 
 
-_QUERY_OUTPUT_BUDGET = 45000  # stay under ToolRegistry.result_size_cap_chars (50k) with headroom
+# The page-query budget stays under the registry's result cap with headroom: a fraction of the cap
+# read per call. A tool with no registry wired keeps _QUERY_OUTPUT_BUDGET (0.9 of the registry's
+# default 50,000 cap).
+_QUERY_OUTPUT_BUDGET_FRACTION = 0.9
+_QUERY_OUTPUT_BUDGET = 45_000
 _QUERY_MAX_MATCHES = 20
 
 # The page-query pattern is bounded (orchestrator ruling R2). CPython's regex engine holds the GIL, so
@@ -399,9 +404,18 @@ class WebPageQueryTool(Tool):
 
     timeout_s = 10.0
 
-    def __init__(self, store: Any = None) -> None:
+    def __init__(self, store: Any = None, result_cap: Callable[[], int] | None = None) -> None:
         # Same per-agent ContentStore the paired web_fetch wrote to (bound together per agent).
         self._store = store if store is not None else _get_default_store()
+        # The registry's live result cap (a closure over the registry the tool is registered in);
+        # None = no registry wired, the fixed budget applies.
+        self._result_cap = result_cap
+
+    def _output_budget(self) -> int:
+        """Characters of matches one call may return, read per call from the registry's cap."""
+        if self._result_cap is not None:
+            return int(self._result_cap() * _QUERY_OUTPUT_BUDGET_FRACTION)
+        return _QUERY_OUTPUT_BUDGET
 
     def info(self) -> ToolSchema:
         return ToolSchema(
@@ -459,9 +473,10 @@ class WebPageQueryTool(Tool):
             return self.ok(_UNTRUSTED + f"(no match for {pattern!r} in the {len(text)}-char retained page)")
         # Emit bounded chunks under the budget — slicing the final region if a single span is huge —
         # so the registry's 50k cap never has to truncate-lossily. The full page stays queryable.
+        budget = self._output_budget()
         parts, used, fit_all = [], 0, True
         for s, e in spans:
-            room = _QUERY_OUTPUT_BUDGET - used
+            room = budget - used
             if room <= 0:
                 fit_all = False
                 break

@@ -29,7 +29,9 @@ async def register_builtin_tools(
     for tool in [GlobTool(), GrepTool(), ReadTool(),
                  WriteTool(workspace_root=workspace_root), EditTool(workspace_root=workspace_root),
                  BashExecTool(workspace_root=workspace_root),
-                 WebSearchTool(), WebFetchTool(), WebPageQueryTool(), ChunkTool(), LoadDocumentTool()]:
+                 WebSearchTool(), WebFetchTool(),
+                 WebPageQueryTool(result_cap=lambda: registry.result_size_cap_chars),
+                 ChunkTool(), LoadDocumentTool()]:
         await registry.register(tool, scope="global")
 
     if eviction_store is not None:
@@ -46,6 +48,8 @@ def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:
     from localharness.tools.builtin.load_document_tool import LoadDocumentTool
     from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
     from localharness.tools.builtin.web_tool import WebFetchTool, WebPageQueryTool
-    for tool in (WebFetchTool(store), WebPageQueryTool(store), ToolResultGetTool(store),
+    for tool in (WebFetchTool(store),
+                 WebPageQueryTool(store, result_cap=lambda: registry.result_size_cap_chars),
+                 ToolResultGetTool(store),
                  ChunkTool(store), LoadDocumentTool(store)):
         registry.rebind_global(tool)

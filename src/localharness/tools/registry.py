@@ -125,7 +125,7 @@ class ToolRegistry:
     def __init__(
         self,
         default_timeout_s: float = 30.0,
-        result_size_cap_chars: int = 50_000,
+        result_size_cap: int | Callable[[], int] = 50_000,
     ) -> None:
         self._tools: dict[str, dict[str, ToolProtocol]] = {
             "global": {},
@@ -137,7 +137,9 @@ class ToolRegistry:
         self._division_tools: dict[str, dict[str, ToolProtocol]] = {}
         self._agent_tools: dict[str, dict[str, ToolProtocol]] = {}
         self._default_timeout_s = default_timeout_s
-        self._result_size_cap_chars = result_size_cap_chars
+        # The cap is a SOURCE (an int, or a callable resolved on every read), so a context
+        # window that changes mid-session reaches the next dispatch; see result_size_cap_chars.
+        self._result_size_cap = result_size_cap
         self._lock = __import__("asyncio").Lock()
         self._pre_hooks: list[Callable] = []
         self._post_hooks: list[Callable] = []
@@ -453,9 +455,10 @@ class ToolRegistry:
 
         result = await tool.run(**validated)
 
-        if len(result.output) > self._result_size_cap_chars:
+        cap = self.result_size_cap_chars  # resolved once per dispatch, for output and error alike
+        if len(result.output) > cap:
             result = ToolResult(
-                output=result.output[: self._result_size_cap_chars],
+                output=result.output[:cap],
                 success=result.success,
                 error=result.error,
                 error_type=result.error_type,
@@ -465,11 +468,11 @@ class ToolRegistry:
                 metadata=result.metadata,
             )
 
-        if result.error and len(result.error) > self._result_size_cap_chars:
+        if result.error and len(result.error) > cap:
             # .error was never capped here — the old event-slice bounded it by accident (#133).
             # MCP tools mirror whole server responses into .error, so cap at the choke point.
             result = result.model_copy(update={
-                "error": result.error[: self._result_size_cap_chars]
+                "error": result.error[:cap]
                 + f"\n… [error truncated: {len(result.error):,} chars total]",
             })
 
@@ -541,6 +544,20 @@ class ToolRegistry:
             or name in self._tools["mcp"]
         )
 
+    @property
+    def result_size_cap_chars(self) -> int:
+        """The bound on what one tool result may put into the conversation, in characters.
+        Resolved on every read (the source may be a callable fed by the context manager), so a
+        window change reaches the next dispatch."""
+        cap = self._result_size_cap
+        return cap() if callable(cap) else cap
+
+    def set_result_size_cap(self, cap: int | Callable[[], int]) -> None:
+        """Late-bind the result cap source. `start` builds the registry before the context
+        manager and calls this once the manager exists (passing its bound `result_cap_chars`);
+        a registry nobody calls it on keeps 50,000."""
+        self._result_size_cap = cap
+
     @classmethod
     def from_allowed(
         cls,
@@ -571,6 +588,8 @@ class ToolRegistry:
                 "Passing None previously silently returned a zero-tool registry."
             )
         out = cls()
+        # Children follow the root's live window: inherit the cap SOURCE, never a snapshot.
+        out._result_size_cap = base_registry._result_size_cap
 
         unresolved_external: list[str] = []
         for entry in allowed:
