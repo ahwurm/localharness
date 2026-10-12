@@ -111,12 +111,21 @@ def _git_env(root: Path) -> dict[str, str]:
 
 
 def _complete_characters(part: bytes) -> bytes:
-    """``part`` without a UTF-8 sequence the byte cut left unfinished at its end (IN-52 it4)."""
-    try:
-        part.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        if exc.reason == "unexpected end of data":
-            return part[: exc.start]
+    """``part`` without a UTF-8 sequence the byte cut left unfinished at its end (IN-52 it4).
+
+    Only the last three bytes are looked at, so an invalid byte earlier in the text (a latin-1 file in a diff) does
+    not hide a half character at the cut (IN-52 it5): the nearest lead byte there says how many bytes it needs."""
+    for back in (1, 2, 3):
+        if len(part) < back:
+            break
+        byte = part[-back]
+        if byte < 0x80:
+            break
+        if byte >= 0xC0:  # a lead byte
+            needed = 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+            if needed > back:
+                return part[:-back]
+            break
     return part
 
 
