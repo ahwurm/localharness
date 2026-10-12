@@ -2711,7 +2711,27 @@ def _build(
         inline = True
 
     for payload in payload_argvs:
-        segment, more, _, _ = _build(payload, settings, [], cwd, env_redirect=env_redirect)
+        # CR-06 (it4): a lifted payload is a command line like any other, so the wrappers in front of it
+        # (`find -exec env rm …`, `xargs nice rm …`) are peeled to the command they run.
+        payload_program = ""
+        payload_cwd = cwd
+        payload_redirect = env_redirect
+        peeled_payload, payload_assignments, payload_directories = _peel(
+            [_basename(payload[0]), *payload[1:]], settings
+        )
+        if peeled_payload and len(peeled_payload) < len(payload):
+            payload, payload_program = peeled_payload, peeled_payload[0]
+            payload_redirect = payload_redirect or _assignments_redirect(payload_assignments, settings)
+            if payload_directories:
+                payload_cwd = cwd.copy()
+                for directory in payload_directories:
+                    if directory.startswith("-"):
+                        payload_cwd.unresolvable = True
+                    else:
+                        _apply_cd(payload_cwd, ["cd", directory])
+        segment, more, _, _ = _build(
+            payload, settings, [], payload_cwd, program=payload_program, env_redirect=payload_redirect
+        )
         if segment is not None:
             extras.append(segment)
         extras.extend(more)
