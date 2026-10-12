@@ -3214,6 +3214,7 @@ def _make_segment(
                 for target in scoped_targets
             )
         )
+    resolved_removals = [_resolve_target(cwd or _Cwd(), t) for t in removal_operands(signature, argv)]
     return ShellSegment(
         signature=signature,
         argv=argv,
@@ -3227,6 +3228,11 @@ def _make_segment(
         target_scoped_destructive=operands is not None,
         destructive_targets=scoped_targets,
         unresolvable_destructive=scoped_unresolvable,
+        removal_targets=tuple(target for target, _ in resolved_removals),
+        unresolvable_removal=any(unresolvable for _, unresolvable in resolved_removals) or any(
+            any(bad in target for bad in UNRESOLVABLE_TARGET_CHARS)
+            for target, _ in resolved_removals
+        ),
         env_redirect=env_redirect,
         program=program,
     )
@@ -4435,6 +4441,41 @@ def destructive_targets(
         token for token in rest
         if not token.startswith(POSIX_OPTION_PREFIX) and token.lower() not in slash_flags
     ]
+
+
+REMOVAL_VERBS = frozenset({"rm", "unlink", "rmdir", "mv"})
+"""The plain commands that delete a path or move it away (:func:`removal_operands`)."""
+
+
+def removal_operands(signature: str, argv: tuple[str, ...]) -> list[str]:
+    """The paths a plain delete or move-away names: ``rm``, ``unlink``, ``rmdir`` operands and
+    every ``mv`` SOURCE (a moved-away file is gone from where it was). ``uv run rm x`` is the
+    ``rm`` it runs. Empty for every other command.
+
+    Kept apart from :func:`destructive_targets` and from ``write_targets``: ``rm x`` is not
+    destructive by signature (only ``rm -rf`` / ``rm -f`` are), ``mv`` reports only its
+    destination as a write, and the verdict needs the operands of exactly these four verbs to ask
+    when one of them names a protected config-folder entry (Phase 11, CR-01 it2). Operands only;
+    ``--`` ends the options.
+    """
+    if not argv:
+        return []
+    start = 0
+    if signature.startswith(tuple(f"{runner} " for runner in COMPOSING_RUNNERS)):
+        start = next((i for i, token in enumerate(argv) if token in REMOVAL_VERBS), len(argv))
+    if start >= len(argv) or argv[start] not in REMOVAL_VERBS:
+        return []
+    verb, rest = argv[start], list(argv[start + 1:])
+    if verb == "mv":
+        return list(copy_operands(rest).sources)
+    out: list[str] = []
+    options_over = False
+    for token in rest:
+        if options_over or not token.startswith(POSIX_OPTION_PREFIX) or token == POSIX_OPTION_PREFIX:
+            out.append(token)
+        elif token == "--":
+            options_over = True
+    return out
 
 
 def _find_operands(rest: list[str]) -> list[str]:

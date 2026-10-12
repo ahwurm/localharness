@@ -642,6 +642,64 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
     return False
 
 
+def _protected_config_entry(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
+    """Is ``path`` one of the protected entries of a harness config folder (the global one or a
+    project's ``.localharness/``)? Only that rule of :func:`_protected`, not the system, home or
+    workspace-name sets. Asked about the target of a plain delete or move-away (see
+    :func:`_removal_asks`)."""
+    for config_dir in _config_dirs(ctx):
+        if _within(config_dir, path):
+            return bool(_config_dir_verdict(path.relative_to(config_dir).parts, settings))
+    for container in (ctx.workspace, ctx.boundary):
+        if container is None:
+            continue
+        container = Path(container).expanduser().resolve()
+        if not _within(container, path):
+            continue
+        relative = path.relative_to(container).parts
+        if WORKSPACE_DIR_NAME in relative:
+            index = relative.index(WORKSPACE_DIR_NAME)
+            return bool(_config_dir_verdict(relative[index + 1:], settings))
+    return False
+
+
+def _removal_asks(
+    segments, anchor: Optional[Path], ctx: GateContext, settings: GateSettings
+) -> list[_Ask]:
+    """The ``protected-path`` ask for a plain ``rm`` / ``unlink`` / ``rmdir`` / ``mv``-away of a
+    protected config-folder entry (Phase 11, CR-01 it2; ruling taken on the owner's behalf by the
+    GSD run).
+
+    A write to ``project_records.yaml`` asks in every mode, and so does ``rm -f`` / ``rm -rf`` /
+    ``shred`` of it (a protected target); the plain spellings did not, and a deleted record is a
+    fresh root at the next start (the earlier ``off`` forgotten, a rewritten file adopted under
+    the first-contact line). So the plain spellings agree with the forced ones. Only the entries of
+    :data:`~localharness.agent.gate_types.PROTECTED_CONFIG_DIR_ENTRIES` are asked about here, not
+    every protected path: a plain ``rm`` of a file elsewhere is unchanged. A path the classifier
+    cannot place (a variable, a glob, an unreadable ``cd``) asks only when one of its literal
+    components IS a protected entry's name.
+    """
+    asks: list[_Ask] = []
+    for segment in segments:
+        for raw in segment.removal_targets:
+            unplaced = segment.unresolvable_removal and not raw.startswith(("/", "~"))
+            resolved = None if unplaced else _resolve(raw, anchor)
+            if resolved is None:
+                parts = Path(raw.replace("\\", "/")).parts
+                if any(part in settings.protected_config_dir_entries for part in parts):
+                    asks.append(_ask_record(
+                        "protected-path", raw,
+                        f"deletes or moves a protected config entry ({raw}, unresolved)",
+                    ))
+                continue
+            if _protected_config_entry(resolved, ctx, settings):
+                asks.append(_ask_record(
+                    "protected-path", str(resolved),
+                    f"deletes or moves a protected config entry ({resolved})",
+                ))
+    return asks
+
+
 def _truncate(text: str) -> str:
     flat = " ".join(text.split())
     if len(flat) <= DISPLAY_ARG_MAX_CHARS:
@@ -1101,6 +1159,8 @@ def _evaluate_shell(
         for segment in classified.segments
         for target in segment.write_targets
     ))
+
+    asks += _removal_asks(non_read_only, anchor, ctx, settings)
 
     for segment in non_read_only:
         runs_it = False
