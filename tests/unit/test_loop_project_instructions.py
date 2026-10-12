@@ -614,3 +614,35 @@ def test_the_new_loop_code_never_touches_the_file():
 def test_the_purity_scan_bites():
     tree = ast.parse("def _mark_instruction_calls(self):\n    open('x').read()\n")
     assert _forbidden_uses(_function_nodes(tree, _NEW_FUNCTIONS)["_mark_instruction_calls"]) == {"open"}
+
+
+# --- WR-02 / IN-55: the header names the file whose text follows ------------------------------------
+
+from localharness.config import project_records as _pr  # noqa: E402
+from tests.unit.instructions_support import instructions_home, make_root  # noqa: E402,F401
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("instructions_home")
+@pytest.mark.parametrize("no_input", [False, True])
+async def test_after_a_start_time_take_over_the_header_names_the_file_it_fences(
+    bus, tmp_path, no_input,
+):
+    root = make_root(tmp_path, {"AGENTS.md": "old rules\n"})
+    cand = _pr.first_candidate(root)
+    assert _pr.accept_instructions(root, cand) is not None
+    (root / "CLAUDE.md").write_text("new rules\n", encoding="utf-8")  # above the recorded file
+    handle = _pr.open_project_instructions(
+        root, sitting_id="s1", max_ratio=0.25, basis="layer", no_input=no_input,
+        window_tokens=65536,
+    )
+    assert handle is not None
+    loop, llm = _build(bus, handle)
+    await loop.run_turn("hi")
+    role = llm.roles[0]
+    assert "(CLAUDE.md), not harness policy" in role and "new rules" in role
+    assert "(AGENTS.md)" not in role
+    assert handle.state.name == "CLAUDE.md"
+    assert handle.state.path == str((root / "CLAUDE.md").resolve())
+    shown = _pr.run_instructions_command(handle, "show")
+    assert shown.startswith("CLAUDE.md: ") and str((root / "CLAUDE.md").resolve()) in shown
