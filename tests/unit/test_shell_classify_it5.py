@@ -105,3 +105,20 @@ def test_the_default_value_hazard_keeps_its_three_segments(ws):
 )
 def test_an_apostrophe_in_a_default_value_is_not_an_ask(ws, command):
     _check(command, "ok/ok/ok", ws)
+
+
+# --------------------------------------------------------------------------- CR-53: nested function definitions
+
+NESTED_FUNCTION_HAZARDS = (
+    "f(){ g(){ rm -rf /etc/x; }; g; }; f",
+    "f() { g() { rm -rf /etc/x; }; g; }; f",
+    "function f { function g { rm -rf /etc/x; }; g; }; f",
+    "{ f() { g() { rm -rf /etc/x; }; g; }; f; }",
+    "f() { echo a; g() { rm -rf /etc/x; }; g; }; f",
+    "f() { g() { cd /; }; g; }; f; rm -rf etc",
+)
+
+
+@pytest.mark.parametrize("command", NESTED_FUNCTION_HAZARDS)
+def test_a_function_nested_in_a_function_body_has_its_body_classified(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
