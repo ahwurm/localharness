@@ -199,6 +199,31 @@ def test_a_continuation_inside_single_quotes_is_kept():
 
 # ------------------------------------------------------------------ payloads and comments (CR-01, CR-03)
 
+PAYLOAD_ROWS = (
+    ("bash -c 'r\\\nm -rf /etc/x'", "bash -c 'rm -rf /etc/x'"),
+    ("eval 'r\\\nm -rf /etc/x'", "eval 'rm -rf /etc/x'"),
+    ("sh -c 'g\\\nit push --force'", "sh -c 'git push --force'"),
+    ("sh -c 'mk\\\nfs /dev/sda'", "sh -c 'mkfs /dev/sda'"),
+    ("ls | xargs bash -c 'r\\\nm -rf /etc/x'", "ls | xargs bash -c 'rm -rf /etc/x'"),
+)
+
+
+@pytest.mark.parametrize("split,joined", PAYLOAD_ROWS)
+def test_a_continuation_inside_a_lifted_payload_is_joined_before_it_is_classified(split, joined):
+    """The inner shell joins `r\\<newline>m`, so the payload must classify as `rm`, not as `r` and `m`."""
+    assert any(s.destructive for s in _segments(joined))
+    assert [(s.signature, s.destructive) for s in _segments(split)] == [
+        (s.signature, s.destructive) for s in _segments(joined)
+    ]
+
+
+@pytest.mark.parametrize("mode", ("auto", "guarded"))
+@pytest.mark.parametrize("split,joined", PAYLOAD_ROWS)
+def test_a_split_destructive_payload_is_not_allowed(split, joined, mode, ws):
+    assert _verdict(split, ws, mode).verdict is _verdict(joined, ws, mode).verdict
+    assert _verdict(split, ws, mode).verdict is not Verdict.ALLOW
+
+
 COMMENT_ROWS = (
     "echo a # c\\\nrm -rf /etc/x",
     "ls # don't\nrm -rf /etc/x",
