@@ -18,7 +18,7 @@ from collections import Counter, deque
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Callable, Literal, NamedTuple, Optional
 
 from localharness.agent.gate import (
     DENIED_OBSERVATION_PREFIX,
@@ -584,6 +584,34 @@ _PARSE_FAILURE_NUDGE = (
 def _is_harness_nudge(message: Message) -> bool:
     """Classify canonical provenance, never text a human could quote."""
     return is_harness_message(message)
+
+
+def _request_model_name(llm: Any) -> Optional[str]:
+    """The model name a request to this client goes to, or None when it names none.
+
+    Only a real ``str`` counts: a test double's attribute (a mock) or a malformed value must
+    never reach the typed ``Action.model`` field and kill the turn with a ValidationError.
+    """
+    name = getattr(getattr(llm, "config", None), "model", None)
+    return name if isinstance(name, str) and name else None
+
+
+def _usage_count(usage: Any, field: str) -> Optional[int]:
+    """The provider-reported token count ``field`` of ``usage``, or None.
+
+    Never the local token-count fallback; a non-int (or bool) value is None.
+    """
+    if usage is None:
+        return None
+    value = getattr(usage, field, None)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _elapsed_ms(started: float) -> int:
+    """Whole milliseconds since the ``time.monotonic()`` reading ``started``."""
+    return int((time.monotonic() - started) * 1000)
 
 
 def _strip_sentinel_exchanges(messages: list[Message]) -> list[Message]:
@@ -1837,6 +1865,10 @@ class AgentLoop:
         # so a prior turn's cap never suppresses this turn's compaction.
         if hasattr(self._ctx, "reset_compaction_guard"):
             self._ctx.reset_compaction_guard()
+        # Name the session on the manager so its CompactionTriggered events land in this
+        # session's file (the root's is the sitting id; a child holds its own).
+        if hasattr(self._ctx, "set_session_id"):
+            self._ctx.set_session_id(session.session_id)
 
         while True:
             session.iteration += 1
@@ -1964,6 +1996,11 @@ class AgentLoop:
                 and self._llm_takes_disable_thinking
             ):
                 _cap_kwargs["disable_thinking"] = True
+            # Accounting for the Action rows this response produces: the model the request goes
+            # to and the wall time of the attempt that answers. Taken per iteration, right at the
+            # call, so a reconnect's wait (the `continue` path) is never counted as latency.
+            _req_model = _request_model_name(self._llm)
+            _t0 = time.monotonic()
             try:
                 response_message, usage = await self._llm.stream_complete(
                     messages=request_messages,
@@ -1971,7 +2008,9 @@ class AgentLoop:
                     on_token=on_token,
                     **_cap_kwargs,
                 )
+                _latency_ms = _elapsed_ms(_t0)
             except ProviderDegenerateError as exc:
+                _latency_ms = _elapsed_ms(_t0)
                 # The provider aborted a generation that locked into repetition (see
                 # client._RepetitionWatch). Record it where the empty reply would have been,
                 # then retry ONCE with a presence penalty for the rest of the turn; a second
@@ -1985,6 +2024,8 @@ class AgentLoop:
                     finish_reason="degenerate",
                     reasoning_chars=exc.chars,
                     output_cap=request_cap,
+                    model=_req_model,
+                    latency_ms=_latency_ms,
                 ))
                 if not session.degenerate_reprompt_used:
                     session.degenerate_reprompt_used = True
@@ -2005,6 +2046,7 @@ class AgentLoop:
                 self._conversation = _strip_sentinel_exchanges(session.messages)
                 return _DEGENERATE_TURN_NOTICE.format(unit=exc.unit[:40], repeats=exc.repeats)
             except ProviderReasoningBudgetError as exc:
+                _latency_ms = _elapsed_ms(_t0)
                 # The client cut a generation whose reasoning passed the level's budget (a runtime
                 # with no server-side budget key; llama.cpp enforces its own). Record it where the
                 # reply would have been, then send the IDENTICAL request once more with thinking off
@@ -2019,6 +2061,8 @@ class AgentLoop:
                     finish_reason="reasoning_cut",
                     reasoning_chars=exc.spent,
                     output_cap=request_cap,
+                    model=_req_model,
+                    latency_ms=_latency_ms,
                 ))
                 if not session.reasoning_cut_used:
                     session.reasoning_cut_used = True
@@ -2176,6 +2220,10 @@ class AgentLoop:
                 finish_reason=finish_reason,
                 reasoning_chars=len(getattr(response_message, "reasoning_content", None) or ""),
                 output_cap=request_cap,
+                model=_req_model,
+                prompt_tokens=_usage_count(usage, "prompt_tokens"),
+                completion_tokens=_usage_count(usage, "completion_tokens"),
+                latency_ms=_latency_ms,
             ))
 
             # 8b. When the calls came from CONTENT (xml mode, or the native taught-XML
@@ -2529,6 +2577,10 @@ class AgentLoop:
                     tool_call_id=tool_call.id,
                     tool_name=tool_call.name,
                     tool_params=tool_call.arguments,
+                    # The response that produced this call: its model and wall time, but no
+                    # tokens -- that response's usage lives on its one llm_response row.
+                    model=_req_model,
+                    latency_ms=_latency_ms,
                 ))
 
                 # Permission gate: deny patterns, then the ask a human answers (PRD §3.1).
@@ -3169,6 +3221,8 @@ class AgentLoop:
         session.iteration += 1
         if hasattr(self._ctx, "set_iteration"):  # FIX 4: carry the real iteration into ctx (step path)
             self._ctx.set_iteration(session.iteration)
+        if hasattr(self._ctx, "set_session_id"):  # ... and the session, so its events name it
+            self._ctx.set_session_id(session.session_id)
         tool_call_mode = getattr(
             getattr(self._llm, "config", None), "tool_call_mode", "native"
         )

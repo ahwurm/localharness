@@ -220,6 +220,30 @@ class Action(BaseEvent):
     # The max_tokens this llm_response was requested with (the loop's dynamic per-call cap);
     # None when the client's configured cap was used unchanged.
     output_cap: Optional[int] = None
+    # Which model answered, what the provider reported it cost, and how long the call took.
+    # Additive/default-None so every existing construction and old JSONL line stays valid. The
+    # token counts live on the llm_response row only (a tool_call row carries None), so summing
+    # a history file counts each response once.
+    model: Optional[str] = Field(
+        None, description="The model name the request went to (None when the client names none)."
+    )
+    prompt_tokens: Optional[int] = Field(
+        None,
+        description=(
+            "Provider-reported prompt tokens of this response; None when the provider reported "
+            "none, and on tool_call rows so one response's usage is counted once."
+        ),
+    )
+    completion_tokens: Optional[int] = Field(
+        None,
+        description=(
+            "Provider-reported completion tokens of this response; None when the provider "
+            "reported none, and on tool_call rows so one response's usage is counted once."
+        ),
+    )
+    latency_ms: Optional[int] = Field(
+        None, description="Wall time of the completion call that produced the response, in ms."
+    )
     tool_call_id: Optional[ToolCallID] = None
     tool_name: Optional[str] = None
     tool_params: Optional[dict[str, Any]] = None
