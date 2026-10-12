@@ -335,6 +335,7 @@ class OrchestratorREPL:
         harness_config: Any = None,
         on_agent_deployed: Any = None,
         gate: Any = None,
+        instructions: Any = None,
         on_plugin_switch: Any = None,
         mcp_manager: Any = None,
         queued: Sequence[str] = (),
@@ -347,6 +348,9 @@ class OrchestratorREPL:
         # here reaches a running child. Passed explicitly by start_cmd; None in tests without a
         # loop, where /mode says so rather than raising.
         self._gate = gate
+        # The session's per-root project-instructions handle from start, as `gate=` is the session's
+        # gate (D-60). None when the workspace has no instructions file: /instructions then says so.
+        self._instructions = instructions
         self._channel = channel
         self._bus = bus
         self._config_dir = config_dir
@@ -1715,6 +1719,14 @@ class OrchestratorREPL:
             text = "Task record cleared; task.json deleted."
         else:
             text = state.show()
+        await self._channel.send_message(text, metadata={"style": "system.info"})
+
+    async def _slash_instructions(self, args: str, args_lower: str) -> None:
+        """`/instructions off | on | show` — the one shared handler's text, verbatim (D-59, D-60)."""
+        from localharness.config.project_records import run_instructions_command
+
+        arg = args_lower.strip()
+        text = run_instructions_command(self._instructions, arg)
         await self._channel.send_message(text, metadata={"style": "system.info"})
 
     async def _slash_agents(self, args: str, args_lower: str) -> None:

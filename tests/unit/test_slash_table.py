@@ -44,6 +44,7 @@ CORE = [
     ("/approve", "Run a parked call; /approve [N] (default: the oldest)"),
     ("/deny", "Drop a parked call; /deny [N] (default: the oldest)"),
     ("/task", "Show the working task record; /task clear to delete it"),
+    ("/instructions", "The project's instructions file (CLAUDE.md, AGENTS.md); /instructions off|on|show"),
     ("/image", "Attach a picture to your next message; /image <path>, /image (the clipboard), "
                "/image clear — or drop the file onto the terminal, or Ctrl+V"),
     ("/plugins", "List plugins; /plugins enable|disable <name> to switch one in this session"),
@@ -56,23 +57,24 @@ PHONE = [row for row in CORE if row[0] not in TERMINAL_ONLY]  # terminal-only ro
 
 HELP_BEFORE = (
     "Available commands:\n"
-    "  /help       Show this help message\n"
-    "  /agents     List configured agents\n"
-    "  /model      List available models; /model <name|number> to switch\n"
-    "  /reasoning  Stream the model's reasoning while it thinks; /reasoning on|off\n"
-    "  /effort     Reasoning effort for this session; /effort off|low|high|max, /effort show\n"
-    "  /verbose    Show reasoning and every tool call with its arguments; /verbose on|off\n"
-    "  /mode       Permission mode for this session; /mode guarded|trusted|read-only\n"
-    "  /pending    Tool calls parked for you to answer\n"
-    "  /approve    Run a parked call; /approve [N] (default: the oldest)\n"
-    "  /deny       Drop a parked call; /deny [N] (default: the oldest)\n"
-    "  /task       Show the working task record; /task clear to delete it\n"
-    "  /image      Attach a picture to your next message; /image <path>, /image (the clipboard), "
+    "  /help          Show this help message\n"
+    "  /agents        List configured agents\n"
+    "  /model         List available models; /model <name|number> to switch\n"
+    "  /reasoning     Stream the model's reasoning while it thinks; /reasoning on|off\n"
+    "  /effort        Reasoning effort for this session; /effort off|low|high|max, /effort show\n"
+    "  /verbose       Show reasoning and every tool call with its arguments; /verbose on|off\n"
+    "  /mode          Permission mode for this session; /mode guarded|trusted|read-only\n"
+    "  /pending       Tool calls parked for you to answer\n"
+    "  /approve       Run a parked call; /approve [N] (default: the oldest)\n"
+    "  /deny          Drop a parked call; /deny [N] (default: the oldest)\n"
+    "  /task          Show the working task record; /task clear to delete it\n"
+    "  /instructions  The project's instructions file (CLAUDE.md, AGENTS.md); /instructions off|on|show\n"
+    "  /image         Attach a picture to your next message; /image <path>, /image (the clipboard), "
     "/image clear — or drop the file onto the terminal, or Ctrl+V\n"
-    "  /plugins    List plugins; /plugins enable|disable <name> to switch one in this session\n"
-    "  /mcp        Manage MCP servers for the session's agent (list, add, edit, test, remove)\n"
-    "  /quit       Exit LocalHarness\n"
-    "  /exit       Exit LocalHarness\n"
+    "  /plugins       List plugins; /plugins enable|disable <name> to switch one in this session\n"
+    "  /mcp           Manage MCP servers for the session's agent (list, add, edit, test, remove)\n"
+    "  /quit          Exit LocalHarness\n"
+    "  /exit          Exit LocalHarness\n"
     "\n"
     "Everything else is handled by the orchestrator through natural language."
 )
@@ -109,7 +111,7 @@ async def _phone_menu(tmp_path) -> list[dict]:
 
 # ------------------------------------------------------------ no plugin rows: nothing moved
 
-def test_the_core_table_is_sixteen_rows_in_order():
+def test_the_core_table_is_seventeen_rows_in_order():
     assert [tuple(row) for row in SLASH_COMMANDS] == CORE  # a row unpacks as (name, description)
     assert all_rows() == SLASH_COMMANDS
 
@@ -124,7 +126,7 @@ def test_the_completer_offers_the_same_menu():
     assert _completions("/M") == _completions("/m")
 
 
-async def test_the_phone_menu_is_the_same_thirteen_rows_in_order(tmp_path):
+async def test_the_phone_menu_is_the_same_fourteen_rows_in_order(tmp_path):
     assert await _phone_menu(tmp_path) == [{"name": n, "description": d} for n, d in PHONE]
 
 
@@ -145,6 +147,7 @@ PARITY = [
     ("/pending", "_handle_pending_cmd", (), {}),
     ("/Plugins Enable Image", "_handle_plugins_cmd", ("enable image",), {}),
     ("/plugins", "_handle_plugins_cmd", ("",), {}),
+    ("/Instructions SHOW", "_slash_instructions", (" SHOW", " show"), {}),   # the raw tail, then lowered
 ]
 
 
@@ -233,7 +236,7 @@ async def test_a_plugin_row_reaches_every_surface(rows, tmp_path):
     assert rows([_example()]) == []
     assert all_rows()[:-1] == SLASH_COMMANDS and all_rows()[-1].name == "/example"
     assert help_text() == HELP_BEFORE.replace(
-        "\n\nEverything", f"\n  /example    {EXAMPLE_HELP}\n\nEverything")
+        "\n\nEverything", f"\n  /example       {EXAMPLE_HELP}\n\nEverything")
     assert _completions("/e", completer) == [
         *(row for row in CORE if row[0].startswith("/e")), ("/example", EXAMPLE_HELP)]
     channel = RecordingChannel([])
@@ -385,7 +388,7 @@ async def test_memory_is_no_core_row_and_follows_the_core_rows_as_the_memory_plu
     assert rows([_memory_row(handler)]) == []
     names = [r.name for r in all_rows()]
     assert names == [n for n, _ in CORE] + ["/memory"] and names.index("/memory") > names.index("/exit")
-    assert help_text() == HELP_BEFORE.replace("\n\nEverything", f"\n  /memory     {MEMORY_HELP}\n\nEverything")
+    assert help_text() == HELP_BEFORE.replace("\n\nEverything", f"\n  /memory        {MEMORY_HELP}\n\nEverything")
     assert _completions("/me") == [("/memory", MEMORY_HELP)]
     assert (await _phone_menu(tmp_path))[-1] == {"name": "/memory", "description": MEMORY_HELP}
     channel = RecordingChannel([])
