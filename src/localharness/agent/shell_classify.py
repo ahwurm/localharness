@@ -51,7 +51,9 @@ from dataclasses import replace
 from typing import NamedTuple, Optional, Sequence
 
 from .gate_types import (
+    COMMAND_VALUED_ENV_VARS,
     DOTTED_VARIANT_SEPARATOR,
+    ENV_REDIRECT_EXCLUDED,
     GateSettings,
     ShellClassification,
     ShellSegment,
@@ -121,6 +123,12 @@ visible instead of feeding it to a phantom heredoc body (bash(1) "Arithmetic Exp
 
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 """``K=V`` prefix form. PRD §3.2 step 4: ``env`` skips these before the wrapped command."""
+
+OPERAND_PLACEHOLDER = "__lh_operand__"
+"""A plain word (none of ``$*?`{``) appended to a command-valued environment variable's value
+before it is classified (Phase 10, D-38). Git appends its operands to ``GIT_PAGER``,
+``GIT_EXTERNAL_DIFF`` and ``GIT_EDITOR`` — the paths, the file — so ``sort -o`` must be judged
+with an operand present, where it is write-shaped, and ``cat`` stays read-only."""
 
 DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
 """``timeout``'s positional duration (``timeout 30``, ``timeout 1.5m``) — skipped when peeling."""
@@ -723,16 +731,23 @@ class _Cwd:
     Mutable on purpose: ``;``/``&&``/``||``/newline continue one shell, so a ``cd`` in front
     changes what follows it. A ``( … )`` subshell and a function body get a :meth:`copy`, because
     their ``cd`` does not outlive them; a ``{ … }`` group shares this object, because its does.
+
+    ``env_redirect`` rides the same carrier (Phase 10, D-28): the shell's assignment scope is the
+    same scope, so ``PATH=./d; ls`` taints the ``ls`` and ``( PATH=./d ); ls`` does not. It is only
+    ever set, never cleared.
     """
 
-    __slots__ = ("path", "unresolvable")
+    __slots__ = ("path", "unresolvable", "env_redirect")
 
-    def __init__(self, path: str | None = None, unresolvable: bool = False) -> None:
+    def __init__(
+        self, path: str | None = None, unresolvable: bool = False, env_redirect: bool = False
+    ) -> None:
         self.path = path
         self.unresolvable = unresolvable
+        self.env_redirect = env_redirect
 
     def copy(self) -> _Cwd:
-        return _Cwd(self.path, self.unresolvable)
+        return _Cwd(self.path, self.unresolvable, self.env_redirect)
 
 
 def _apply_cd(cwd: _Cwd, argv: list[str]) -> None:
@@ -1153,7 +1168,7 @@ def _classify_one(
     """
     cwd = _Cwd() if cwd is None else cwd
     command_text, redirect_targets = _extract_redirections(text)
-    argv = _strip_prefixes(_tokenize(command_text))
+    argv, prefix_assignments = _strip_prefixes(_tokenize(command_text))
     program = argv[0] if argv else ""  # as written: the verdict's tool-script rule reads the path
     if argv:
         argv = [_basename(argv[0]), *argv[1:]]
@@ -1175,24 +1190,84 @@ def _classify_one(
     if argv[0] in settings.dropped_commands and not redirect_targets:
         return None, [], [text.strip()], argv[0]
 
-    peeled = _peel(argv, settings)
+    peeled, peeled_assignments = _peel(argv, settings)
     if not peeled:
         return None, [], [text.strip()], None
     if len(peeled) < len(argv):
         program = peeled[0]  # only the wrapper's word was shortened; the peeled one is as written
-    return _build(peeled, settings, redirect_targets, cwd, program=program)
+    # `NAME=v cmd` and `env NAME=v cmd` hit one rule (D-27); it applies to this command and to
+    # every payload lifted from it (D-57), never to the commands after it.
+    env_redirect = _assignments_redirect([*prefix_assignments, *peeled_assignments], settings)
+    return _build(
+        peeled, settings, redirect_targets, cwd, program=program, env_redirect=env_redirect
+    )
 
 
-def _strip_prefixes(argv: list[str]) -> list[str]:
+def _strip_prefixes(argv: list[str]) -> tuple[list[str], list[str]]:
     """Drop the leading tokens that are not the command: keywords and ``K=V`` assignments.
 
     ``A=1 rm -rf x`` is a plain shell assignment prefix — the same evasion ``env A=1 rm -rf x``
     uses, without the ``env`` (PRD §3.2 step 4). See :data:`SHELL_KEYWORDS`.
+
+    Returns the remaining argv and the ``K=V`` tokens it skipped (keywords are skipped but not
+    reported), so the caller can ask whether an assignment redirects what runs (D-25).
     """
     index = 0
-    while index < len(argv) and (argv[index] in SHELL_KEYWORDS or ASSIGNMENT_RE.match(argv[index])):
-        index += 1
-    return argv[index:]
+    assignments: list[str] = []
+    while index < len(argv):
+        token = argv[index]
+        if token in SHELL_KEYWORDS:
+            index += 1
+        elif ASSIGNMENT_RE.match(token):
+            assignments.append(token)
+            index += 1
+        else:
+            break
+    return argv[index:], assignments
+
+
+def _is_redirect_env_name(name: str, settings: GateSettings) -> bool:
+    """True when ``name`` is on the settings' env-redirect table and not excluded (D-25, D-26).
+
+    Case-sensitive, unlike :func:`_is_dangerous_git_key`: environment names are."""
+    return name not in ENV_REDIRECT_EXCLUDED and any(
+        fnmatch.fnmatchcase(name, pattern) for pattern in settings.exec_redirect_env_vars
+    )
+
+
+def _value_keeps_tier(value: str, settings: GateSettings) -> bool:
+    """True when a command-valued variable's VALUE is itself a read-only command line (D-38).
+
+    The value goes through the full classifier with :data:`OPERAND_PLACEHOLDER` appended, because
+    git appends its operands; it keeps the tier only when there is at least one segment and every
+    segment is read-only with no write targets, no env redirect and no inline danger. Recursion is
+    bounded by the value's own length: each level classifies a strictly shorter string."""
+    classified = classify_shell(f"{value} {OPERAND_PLACEHOLDER}", settings)
+    return bool(classified.segments) and all(
+        segment.read_only
+        and not segment.write_targets
+        and not segment.env_redirect
+        and not segment.inline_interpreter
+        for segment in classified.segments
+    )
+
+
+def _assignment_redirects(token: str, settings: GateSettings) -> bool:
+    """Does the ``NAME=value`` assignment ``token`` redirect what runs (D-27)?
+
+    A table name sets it on any value, empty included; the six command-valued names are exempt
+    when the value is empty or reads as a read-only command line."""
+    name, _, value = token.partition("=")
+    if not _is_redirect_env_name(name, settings):
+        return False
+    if name in COMMAND_VALUED_ENV_VARS:
+        return bool(value) and not _value_keeps_tier(value, settings)
+    return True
+
+
+def _assignments_redirect(tokens: Sequence[str], settings: GateSettings) -> bool:
+    """True when any of the ``NAME=value`` tokens redirects what runs."""
+    return any(_assignment_redirects(token, settings) for token in tokens)
 
 
 def _basename(token: str) -> str:
@@ -1204,24 +1279,31 @@ def _basename(token: str) -> str:
 
 def _build(
     argv: list[str], settings: GateSettings, redirect_targets: list[str], cwd: _Cwd | None = None,
-    *, program: str = "",
+    *, program: str = "", env_redirect: bool = False,
 ) -> tuple[ShellSegment | None, list[ShellSegment], list[str], str | None]:
     """Signature + payload lifting for a peeled argv (PRD §3.2 steps 5, 7, 8). ``program`` is the
     word ``argv[0]`` was shortened from (:attr:`ShellSegment.program`); a caller whose ``argv[0]`` is
-    still as written leaves it empty."""
+    still as written leaves it empty. ``env_redirect`` is the inline-assignment fact for this
+    command (D-27): it is passed to every payload lifted from it (D-57)."""
     program = program or argv[0]
     argv = [_basename(argv[0]), *argv[1:]]
     head = argv[0]
+    # `git --git-dir=X` repoints the repository exactly as `GIT_DIR=X` does (D-49).
+    env_redirect = env_redirect or (
+        head == "git" and any(t == "--git-dir" or t.startswith("--git-dir=") for t in argv[1:])
+    )
     extras: list[ShellSegment] = []
     cwd = _Cwd() if cwd is None else cwd
 
     runner = _composing_runner(argv, settings)
     if runner is not None:
         prefix, inner_argv = runner
-        host, inner_extras, _, _ = _build(inner_argv, settings, redirect_targets, cwd)
+        host, inner_extras, _, _ = _build(
+            inner_argv, settings, redirect_targets, cwd, env_redirect=env_redirect
+        )
         if host is None:  # pragma: no cover - inner argv is non-empty by construction
             host = _make_segment(prefix, tuple(argv), settings, redirect_targets, cwd=cwd,
-                                 program=program)
+                                 program=program, env_redirect=env_redirect)
         else:
             host = replace(
                 host,
@@ -1273,12 +1355,14 @@ def _build(
         inline = True
 
     for payload in payload_argvs:
-        segment, more, _, _ = _build(payload, settings, [], cwd)
+        segment, more, _, _ = _build(payload, settings, [], cwd, env_redirect=env_redirect)
         if segment is not None:
             extras.append(segment)
         extras.extend(more)
     for payload_text in payload_texts:
-        inner_segments, _ = _classify_text(payload_text, settings, cwd.copy())
+        payload_cwd = cwd.copy()
+        payload_cwd.env_redirect = payload_cwd.env_redirect or env_redirect
+        inner_segments, _ = _classify_text(payload_text, settings, payload_cwd)
         extras.extend(inner_segments)
 
     host = _make_segment(
@@ -1292,6 +1376,7 @@ def _build(
         force_destructive=force_destructive,
         force_read_only=force_read_only,
         program=program,
+        env_redirect=env_redirect,
     )
     return host, extras, [], head
 
@@ -1308,14 +1393,19 @@ def _make_segment(
     force_destructive: bool = False,
     force_read_only: bool = False,
     program: str = "",
+    env_redirect: bool = False,
 ) -> ShellSegment:
     """Assemble the segment: destructive/read-only verdict plus step 8's write targets.
+
+    ``env_redirect`` is the inline-assignment fact; the shell sequence's carried one
+    (:attr:`_Cwd.env_redirect`) is OR'd in here, so the segment records one fact (D-27, D-55).
 
     ``force_destructive`` / ``force_read_only`` are for facts that cannot be read off a signature
     set because the signature is built from the command's own arguments — ``git config
     core.hooksPath`` is destructive and ``git config --get x`` is read-only, and neither key can be
     enumerated in advance.
     """
+    env_redirect = env_redirect or bool(cwd is not None and cwd.env_redirect)
     written = list(redirect_targets) + _write_targets(signature, argv, settings)
     resolved = [_resolve_target(cwd or _Cwd(), target) for target in written]
     targets = [target for target, _ in resolved]
@@ -1334,6 +1424,7 @@ def _make_segment(
         and not destructive
         and not payload_lifted
         and not inline
+        and not env_redirect
     )
     # Owner ruling 2026-09-11: `auto` allows a destructive verb whose danger is entirely its
     # target when every target lands inside the project. Resolved through the same `cd` tracking
@@ -1366,24 +1457,34 @@ def _make_segment(
         target_scoped_destructive=operands is not None,
         destructive_targets=scoped_targets,
         unresolvable_destructive=scoped_unresolvable,
+        env_redirect=env_redirect,
         program=program,
     )
 
 
-def _peel(argv: list[str], settings: GateSettings) -> list[str]:
+def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]]:
     """PRD §3.2 step 4: peel wrappers down to the command they wrap.
 
     ``sudo`` is deliberately absent from ``wrapper_commands``: it keeps its own signature and
     is destructive before any peeling.
+
+    Returns the peeled argv and the ``K=V`` tokens skipped at each FULLY peeled wrapper level
+    (D-25). Every early return of the argv unchanged — no wrapped command, a required subcommand
+    missing — carries only the assignments of levels already peeled, so ``env NAME=v`` with
+    nothing to run reports none and the ``env`` segment (which prints the environment) stays
+    read-only (D-57).
     """
+    assignments: list[str] = []
     while len(argv) > 1 and argv[0] in settings.wrapper_commands:
         head, rest = argv[0], argv[1:]
         value_flags = WRAPPER_HEAD_VALUE_FLAGS.get(head, WRAPPER_VALUE_FLAGS)
         skips = WRAPPER_POSITIONAL_SKIPS.get(head, 0)
         index = 0
+        level: list[str] = []
         while index < len(rest):
             token = rest[index]
             if ASSIGNMENT_RE.match(token):
+                level.append(token)
                 index += 1
                 continue
             if token.startswith("-") and token != "-":
@@ -1400,12 +1501,13 @@ def _peel(argv: list[str], settings: GateSettings) -> list[str]:
         required = WRAPPER_SUBCOMMANDS.get(head)
         if required is not None:
             if index >= len(rest) or rest[index] not in required:
-                return argv
+                return argv, assignments
             index += 1
         if index >= len(rest):
-            return argv
+            return argv, assignments
+        assignments.extend(level)
         argv = rest[index:]
-    return argv
+    return argv, assignments
 
 
 def _composing_runner(
