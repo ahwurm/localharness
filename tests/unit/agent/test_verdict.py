@@ -475,6 +475,17 @@ def test_an_unresolvable_shell_write_target_counts_as_outside(ws, monkeypatch):
     assert result.request.key == "$OUT/f.txt"
 
 
+def test_a_bare_target_written_from_an_unknown_directory_counts_as_outside(ws, monkeypatch):
+    """WR-53: after `cd $HOME` the target stays the bare name `.bashrc`; the segment flag says where it is unknown."""
+    fake_shell(monkeypatch, seg("echo", read_only=True, write_targets=(".bashrc",), unresolvable_write=True))
+    result = evaluate("bash_exec", {"command": "cd $HOME && echo x > .bashrc"}, SHELL_META, make_ctx(ws), SETTINGS)
+    assert result.verdict is Verdict.ASK
+    assert (result.request.klass, result.request.key) == ("edit-outside", ".bashrc")
+    fake_shell(monkeypatch, seg("echo", read_only=True, write_targets=(".bashrc",)))
+    assert evaluate("bash_exec", {"command": "echo x > .bashrc"}, SHELL_META, make_ctx(ws), SETTINGS).verdict \
+        is Verdict.ALLOW
+
+
 def test_an_in_workspace_shell_write_target_does_not_add_an_ask(ws, monkeypatch):
     fake_shell(monkeypatch, seg("ls", read_only=True, write_targets=(str(ws / "out.txt"),)))
     result = evaluate("bash_exec", {"command": "ls > out.txt"}, SHELL_META, make_ctx(ws), SETTINGS)
