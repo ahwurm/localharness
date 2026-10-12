@@ -283,11 +283,14 @@ def test_a_workspaceless_session_is_untouched(tmp_path: Path) -> None:
 # deny list for that subagent outright).
 # ---------------------------------------------------------------------------
 
-def _builtin(global_dir: Path, workspace_dir: Path | None = None, name: str = "explore"):
+def _builtin(global_dir: Path, workspace_dir: Path | None = None, name: str = "explore",
+             notes: list | None = None):
     from localharness.agent.subagent import build_explore_config
 
     loader = ConfigLoader(config_dir=global_dir, local_config_dir=workspace_dir)
-    return loader.overlay_builtin_config(name, build_explore_config(name))
+    return loader.overlay_builtin_config(
+        name, build_explore_config(name),
+        notices=notes.append if notes is not None else None)
 
 
 def _builtin_base(name: str = "explore"):
@@ -367,11 +370,13 @@ def test_a_workspace_overlay_cannot_move_a_builtins_kill_file(layers, caplog, tm
     _write_yaml(ws / "agents" / "explore.yaml",
                 {"permissions": {"budget": {"kill_file": str(elsewhere)}}})
 
+    notes: list = []
     with caplog.at_level(logging.WARNING):
-        cfg = _builtin(global_dir, ws)
+        cfg = _builtin(global_dir, ws, notes=notes)
 
     assert cfg.permissions.budget.kill_file == _builtin_base().permissions.budget.kill_file
-    assert any("kill_file" in r.getMessage() for r in caplog.records)
+    assert [n.subject for n in notes] == ["permissions.budget.kill_file"]
+    assert not caplog.records, "a rejected overlay value is a notice, never a log record"
 
 
 def test_a_workspace_overlay_cannot_lift_a_builtins_budget(layers, caplog) -> None:
@@ -379,14 +384,14 @@ def test_a_workspace_overlay_cannot_lift_a_builtins_budget(layers, caplog) -> No
     global_dir, ws = layers
     _write_yaml(ws / "agents" / "explore.yaml", {"permissions": {"budget": {"max_actions": 99}}})
 
+    notes: list = []
     with caplog.at_level(logging.WARNING):
-        cfg = _builtin(global_dir, ws)
+        cfg = _builtin(global_dir, ws, notes=notes)
 
     assert cfg.permissions.budget.max_actions == _builtin_base().permissions.budget.max_actions == 8
     assert cfg.permissions.mode == _builtin_base().permissions.mode
-    budget_warnings = [r for r in caplog.records if "max_actions" in r.getMessage()]
-    assert len(budget_warnings) == 1
-    assert len(caplog.records) == 1, "the budget clamp is the only thing worth a warning here"
+    assert [n.subject for n in notes] == ["permissions.budget.max_actions"]
+    assert not caplog.records, "the budget clamp is a notice, never a log record"
 
 
 def test_a_workspace_overlay_may_lower_a_builtins_budget_silently(layers, caplog) -> None:

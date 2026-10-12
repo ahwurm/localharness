@@ -602,8 +602,10 @@ def _overlay(loader, name: str = "explore"):
     return loader.overlay_builtin_config(name, build_explore_config(name)).permissions.budget
 
 
-def _budget_warnings(caplog) -> list[str]:
-    return [r.getMessage() for r in caplog.records]
+def _budget_warnings(loader, caplog) -> list[str]:
+    """What the built-in overlay rejected, as the loader's notice texts; nothing is ever logged."""
+    assert caplog.records == []
+    return [n.text for n in loader.notices]
 
 
 def test_an_overlay_cannot_lift_the_operators_file(tmp_path, caplog):
@@ -612,7 +614,7 @@ def test_an_overlay_cannot_lift_the_operators_file(tmp_path, caplog):
                        ws_agents={"explore": {"permissions": {"budget": {"max_actions": 25}}}})
     with caplog.at_level(logging.WARNING):
         assert _overlay(loader).max_actions == 20
-    assert len(_budget_warnings(caplog)) == 1 and "max_actions" in _budget_warnings(caplog)[0]
+    assert len(_budget_warnings(loader, caplog)) == 1 and "max_actions" in _budget_warnings(loader, caplog)[0]
 
 
 def test_an_overlay_may_lower_the_operators_file(tmp_path, caplog):
@@ -621,7 +623,7 @@ def test_an_overlay_may_lower_the_operators_file(tmp_path, caplog):
                        ws_agents={"explore": {"permissions": {"budget": {"max_actions": 15}}}})
     with caplog.at_level(logging.WARNING):
         assert _overlay(loader).max_actions == 15
-    assert _budget_warnings(caplog) == []
+    assert _budget_warnings(loader, caplog) == []
 
 
 @pytest.mark.parametrize("ws_file", [{"permissions": {"mode": "read-only"}},
@@ -632,7 +634,7 @@ def test_an_omission_or_null_restores_the_operators_value_silently(tmp_path, cap
                        ws_agents={"explore": ws_file})
     with caplog.at_level(logging.WARNING):
         assert _overlay(loader).max_actions == 20
-    assert _budget_warnings(caplog) == []
+    assert _budget_warnings(loader, caplog) == []
 
 
 def test_without_an_operator_file_the_base_is_the_baseline(tmp_path, caplog):
@@ -641,7 +643,7 @@ def test_without_an_operator_file_the_base_is_the_baseline(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         budget = _overlay(loader)
     assert (budget.max_actions, budget.max_duration_minutes) == (8, 3.0)
-    assert len(_budget_warnings(caplog)) == 2
+    assert len(_budget_warnings(loader, caplog)) == 2
 
 
 def test_without_an_operator_file_a_lower_value_is_taken(tmp_path, caplog):
@@ -649,7 +651,7 @@ def test_without_an_operator_file_a_lower_value_is_taken(tmp_path, caplog):
         "max_actions": 4}}}})
     with caplog.at_level(logging.WARNING):
         assert _overlay(loader).max_actions == 4
-    assert _budget_warnings(caplog) == []
+    assert _budget_warnings(loader, caplog) == []
 
 
 def test_a_global_null_falls_through_to_the_base(tmp_path):
@@ -665,7 +667,7 @@ def test_a_non_finite_overlay_value_gives_the_baseline_with_a_warning(tmp_path, 
         "max_actions": bad}}}})
     with caplog.at_level(logging.WARNING):
         assert _overlay(loader).max_actions == 8
-    assert len(_budget_warnings(caplog)) == 1
+    assert len(_budget_warnings(loader, caplog)) == 1
 
 
 def test_an_overlay_cannot_set_max_tool_calls(tmp_path, caplog):
@@ -673,7 +675,7 @@ def test_an_overlay_cannot_set_max_tool_calls(tmp_path, caplog):
         "max_tool_calls": 50}}}})
     with caplog.at_level(logging.WARNING):
         assert _overlay(loader).max_tool_calls is None
-    assert len(_budget_warnings(caplog)) == 1 and "max_tool_calls" in _budget_warnings(caplog)[0]
+    assert len(_budget_warnings(loader, caplog)) == 1 and "max_tool_calls" in _budget_warnings(loader, caplog)[0]
 
 
 def test_a_global_overlay_of_a_builtin_keeps_full_authority(tmp_path):
@@ -773,7 +775,7 @@ def test_a_differently_spelled_operator_file_is_the_builtin_baseline(tmp_path, c
                        ws_agents={"explore": {"permissions": {"budget": {"max_actions": 15}}}})
     with caplog.at_level(logging.WARNING):
         assert _overlay(loader).max_actions == 15
-    assert _budget_warnings(caplog) == []
+    assert _budget_warnings(loader, caplog) == []
     loader, _ = _world(tmp_path / "b",
                        g_agents={"explore": {"permissions": {"budget": {"max_actions": spelled}}}},
                        ws_agents={"explore": {"permissions": {"budget": {"max_actions": 25}}}})
@@ -826,7 +828,7 @@ def test_a_huge_integer_in_a_workspace_builtin_overlay_is_refused_not_a_crash(tm
         "max_duration_minutes": _HUGE}}}})
     with caplog.at_level(logging.WARNING):
         assert _overlay(loader).max_duration_minutes == 3.0
-    assert len(_budget_warnings(caplog)) == 1
+    assert len(_budget_warnings(loader, caplog)) == 1
 
 
 def test_finite_number_never_raises_on_a_huge_int():
@@ -846,7 +848,7 @@ def test_an_uncapped_base_is_no_licence_for_a_workspace_value(tmp_path, caplog):
     base.permissions.budget.max_actions = None
     with caplog.at_level(logging.WARNING):
         assert loader.overlay_builtin_config("explore", base).permissions.budget.max_actions is None
-    assert len(_budget_warnings(caplog)) == 1 and "max_actions" in _budget_warnings(caplog)[0]
+    assert len(_budget_warnings(loader, caplog)) == 1 and "max_actions" in _budget_warnings(loader, caplog)[0]
 
 
 def test_the_builtin_doors_budget_warnings_name_the_key_and_the_file(tmp_path, caplog):
@@ -856,10 +858,10 @@ def test_the_builtin_doors_budget_warnings_name_the_key_and_the_file(tmp_path, c
     with caplog.at_level(logging.WARNING):
         _overlay(loader)
     path = repr(str(ws / "agents" / "explore.yaml"))
-    msgs = _budget_warnings(caplog)
+    msgs = _budget_warnings(loader, caplog)
     assert len(msgs) == 2
-    assert any(m.startswith("ignoring permissions.budget.max_actions 99 in " + path) for m in msgs)
-    assert any(m.startswith("ignoring permissions.budget.max_tool_calls 50 in " + path)
+    assert any(m.startswith("ignoring permissions.budget.max_actions in " + path) for m in msgs)
+    assert any(m.startswith("ignoring permissions.budget.max_tool_calls in " + path)
                for m in msgs)
 
 

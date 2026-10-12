@@ -2450,6 +2450,28 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             config_dir=config_dir,
         )
 
+        # --- 9a'. Narrowing notices (D-16, D-55, D-56, D-83, D-89) ---
+        # What the project's files asked for and the loader refused, plus the oversized-file line,
+        # as one set. `unseen()` runs once, after the roster load and the handle; the set is stored
+        # at the summary only when a person is at a terminal (`can_ask`), so a narrowing prints at
+        # the first such start, again when the rejected value changes, and on every start where
+        # nobody records it. A session with no boundary prints the loader's texts every start.
+        from localharness.config.project_records import replace_notices as _replace_notices
+        from localharness.config.project_records import unseen as _unseen_notices
+
+        _start_notices: list = list(dict.fromkeys([
+            *loader.notices,
+            *([instructions_handle.too_large_notice]
+              if instructions_handle is not None and instructions_handle.too_large_notice is not None
+              else []),
+        ]))
+        _unseen: list = []
+        if _boundary is not None:
+            try:
+                _unseen = _unseen_notices(_boundary, _start_notices, config_dir=config_dir)
+            except OSError:
+                _unseen = list(_start_notices)  # an unreadable store: nothing is known to be seen
+
         # --- 9b. Agent delegation tool (ORCH-04 / SUBAGENT-05) ---
         # Bug#1 fix: the runner is built via the module-level make_explore_agent_runner seam (T1)
         # and the AgentTool is registered at GLOBAL scope. The parent loop's agent is the `default`
@@ -2755,10 +2777,23 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             counts.append(entity("tool", mcp_str))
         if plugins_loaded > 0:
             counts.append(entity("tool", f"{plugins_loaded} plugin{'s' if plugins_loaded != 1 else ''}"))
-        if instructions_handle is not None and instructions_handle.summary_entity:
+        if (instructions_handle is not None and instructions_handle.summary_entity
+                and instructions_handle.too_large_notice not in _unseen):
             # D-54: the file in force (or why not) is named in the counts the person already reads;
-            # no new line. "config" is the closest existing entity kind.
+            # no new line. "config" is the closest existing entity kind. The start that prints the
+            # oversized line through the notice set shows the line instead (D-53).
             counts.append(entity("config", instructions_handle.summary_entity))
+        if _boundary is not None:
+            # D-16, D-83: a notice's text leaves the slot where the loader put it, and comes back at
+            # the end only when it is unseen, so nothing prints twice and a seen one is silent.
+            _notice_texts = {n.text for n in _start_notices}
+            warnings[:] = [w for w in warnings if w not in _notice_texts]
+            warnings.extend(dict.fromkeys(n.text for n in _unseen if n.text not in warnings))
+            if can_ask:
+                try:
+                    _replace_notices(_boundary, _start_notices, config_dir=config_dir)
+                except OSError:
+                    pass  # an unwritable store: the notices simply print again next start
         summary_line = " -- ".join(parts + [", ".join(counts)])
         if warnings:
             # escape() via entity(): a warning is an exception string the user's environment
