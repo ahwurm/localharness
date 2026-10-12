@@ -772,7 +772,8 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   check: the repository's toplevel must be the workspace root, its git directory and its common
   directory must be inside it, it must borrow no objects through alternates, and a symbolic link
   anywhere inside the git directories that leads out of the root (objects, packs, refs, config and
-  the rest) is refused like an outside git directory. git is told to stop looking at the root's
+  the rest) is refused like an outside git directory. A link that stays inside the root is followed
+  and what it points at is checked the same way, so a second link hidden behind it is found too. git is told to stop looking at the root's
   parent, so a repository above the workspace is unreachable. Every path is validated before git
   runs (relative to the root, no `..`, no leading `-`, no control characters, absolute paths only
   when they resolve inside the root) and a literal `--` always separates the revision from the

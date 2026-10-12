@@ -87,6 +87,47 @@ def test_symlink_inside_git_dir_to_inside_root_legal(root):
 
 
 @requires_git
+@pytest.mark.parametrize("hop", ["objects", "objects/pack"])
+async def test_two_hop_symlink_through_an_in_root_directory_is_refused(root, outside, hop):
+    """WR-01 / WR-52: `.git/<hop>` -> an in-root directory whose entry leaves the root."""
+    from localharness.tools.builtin.git_read_tool import GitReadTool
+
+    git(outside, "gc", "-q")
+    sha = git(outside, "rev-parse", "HEAD").stdout.strip()
+    link = root / ".git" / hop
+    stage = root / "stage"
+    stage.mkdir()
+    if hop == "objects":
+        # evilobj/pack -> outside pack dir; .git/objects -> ../evilobj
+        evil = root / "evilobj"
+        evil.mkdir()
+        os.symlink(outside / ".git" / "objects" / "pack", evil / "pack")
+        shutil.rmtree(link)
+        os.symlink(evil, link)
+        where = str(evil / "pack")
+    else:
+        for pack in (outside / ".git" / "objects" / "pack").iterdir():
+            os.symlink(pack, stage / pack.name)
+        shutil.rmtree(link)
+        os.symlink(stage, link)
+        where = str(stage) + os.sep
+    pin = git_read_pin_failure(root)
+    assert pin is not None and pin.pin == "git_dir"
+    assert pin.value.startswith(where) or pin.value == where
+    result = await GitReadTool(root).run(subcommand="show", revision=sha)
+    assert result.success is False
+    assert result.error_type == "permission_denied"
+    assert "outside the workspace root" in result.error
+
+
+@requires_git
+def test_a_directory_link_cycle_inside_the_root_ends_the_walk(root):
+    gitdir = root / ".git"
+    os.symlink(gitdir, gitdir / "refs" / "loop")
+    assert git_read_pin_failure(root) is None
+
+
+@requires_git
 def test_walk_cap_fails_closed_and_admits_below(root, monkeypatch):
     entries = sum(len(d) + len(f) for _, d, f in os.walk(root / ".git"))
     monkeypatch.setattr(grt, "GIT_DIR_WALK_MAX_ENTRIES", entries - 5)

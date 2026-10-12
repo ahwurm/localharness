@@ -337,21 +337,22 @@ def _owner_mismatch(path: str) -> bool:
 def _symlink_outside(dirs: Sequence[str], real_root: str) -> GitReadPinFailure | None:
     """D-71 / D-76: any symlink inside the git directories that resolves outside the root.
 
-    An iterative scandir walk that never follows a link: DirEntry.is_symlink() and
-    is_dir(follow_symlinks=False) read the d_type from readdir, so no entry costs a stat, and
-    os.path.realpath runs only for the entries that are symlinks. Every entry is checked, loose object
+    An iterative scandir walk. DirEntry.is_symlink() and is_dir(follow_symlinks=False) read the d_type
+    from readdir, so no entry costs a stat, and os.path.realpath runs only for the entries that are
+    symlinks. A link that resolves inside the root is walked through its resolved target (each directory
+    once, so a cycle ends); one that resolves outside the root fails the pin. Every entry is checked, loose object
     files included (a symlinked loose object leaks that object). Nothing is opened. Reaching the cap, or
     an unreadable directory, fails closed as git_dir.
     """
     seen: set[str] = set()
     count = 0
     for top in dirs:
-        if top in seen:
-            continue
-        seen.add(top)
         stack = [top]
         while stack:
             directory = stack.pop()
+            if directory in seen:  # a directory reached twice (two tops, or a link back into the walk)
+                continue
+            seen.add(directory)
             try:
                 with os.scandir(directory) as it:
                     for entry in it:
@@ -359,8 +360,13 @@ def _symlink_outside(dirs: Sequence[str], real_root: str) -> GitReadPinFailure |
                         if count >= GIT_DIR_WALK_MAX_ENTRIES:
                             return GitReadPinFailure("git_dir", dirs[0])
                         if entry.is_symlink():
-                            if not Path(os.path.realpath(entry.path)).is_relative_to(real_root):
+                            target = os.path.realpath(entry.path)
+                            if not Path(target).is_relative_to(real_root):
                                 return GitReadPinFailure("git_dir", entry.path)
+                            # WR-01 / WR-52: a link that stays inside the root is followed, because a
+                            # second link inside its target can still leave it (a two-hop escape).
+                            if os.path.isdir(target):
+                                stack.append(target)
                         elif entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
             except OSError:
