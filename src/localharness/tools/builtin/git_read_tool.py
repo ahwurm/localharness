@@ -65,13 +65,18 @@ PATH_FORM = "a path relative to the workspace root"
 def _git_env(root: Path) -> dict[str, str]:
     """D-05 / D-74: the environment of every git call, built from scratch.
 
-    PATH keeps only the absolute entries of the inherited one (so `git` can never resolve to a binary
-    inside the workspace), HOME is copied when present, and five keys are fixed. Nothing else is
+    PATH keeps only the absolute entries of the inherited one that lie outside the workspace root (so
+    `git` can never resolve to a binary inside the workspace, e.g. `.venv/bin` or `node_modules/.bin`;
+    WR-53), HOME is copied when present, and five keys are fixed. Nothing else is
     inherited: no other GIT_*, LANG, LC_* or XDG_*. The ceiling comes from the realpath of the root
     because git compares it against the physical cwd (a symlinked root would otherwise never match).
     """
     env: dict[str, str] = {}
-    entries = [e for e in os.environ.get("PATH", "").split(os.pathsep) if e and os.path.isabs(e)]
+    real_root = os.path.realpath(root)
+    entries = [
+        e for e in os.environ.get("PATH", "").split(os.pathsep)
+        if e and os.path.isabs(e) and not Path(os.path.realpath(e)).is_relative_to(real_root)
+    ]
     if entries:
         env["PATH"] = os.pathsep.join(entries)
     if "HOME" in os.environ:
