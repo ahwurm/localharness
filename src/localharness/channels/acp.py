@@ -443,6 +443,16 @@ def _pending_command(text: str) -> tuple[str, str]:
     return parts[0].lower(), parts[1] if len(parts) > 1 else ""
 
 
+def _instructions_command(text: str) -> str | None:
+    """A prompt that is the `/instructions` command → its argument ("" when bare); anything else
+    → None. WHOLE-message and one optional word, case-insensitive, the :func:`_pending_command`
+    shape: "what does /instructions do" is a sentence for the model, not the command."""
+    parts = (text or "").strip().split()
+    if not parts or len(parts) > 2 or parts[0].lower() != "/instructions":
+        return None
+    return parts[1] if len(parts) > 1 else ""
+
+
 class AcpChannel(ChannelAdapter):
     """localharness as an ACP agent, and as the channel that renders its session (PRD §4).
 
@@ -493,6 +503,9 @@ class AcpChannel(ChannelAdapter):
         self._gate: Any = None
         self._registry: Any = None
         self._pending_mode: Optional[str] = None
+        self._instructions: Any = None
+        """The project-instructions handle `start` passed to :meth:`serve` (None: no file here).
+        `/instructions` acts on this and nothing else."""
 
         self._session_task: Optional[asyncio.Task] = None
         self._session_error: Optional[str] = None
@@ -734,6 +747,13 @@ class AcpChannel(ChannelAdapter):
             await self.send_message(self._session_error or BRINGUP_FAILED.format(error="unknown"))
             return PromptResponse(stop_reason="end_turn")
 
+        instructions_arg = _instructions_command(text)
+        if instructions_arg is not None:
+            from localharness.config.project_records import run_instructions_command
+
+            await self.send_message(run_instructions_command(self._instructions, instructions_arg))
+            return PromptResponse(stop_reason="end_turn")
+
         if images:
             from localharness.core.content import ImageError, fit_all
             try:
@@ -839,18 +859,25 @@ class AcpChannel(ChannelAdapter):
             # user watches a status line forever.
             self._ready.set()
 
-    async def serve(self, *, bus: Any, agent_loop: Any, gate: Any, tool_registry: Any) -> None:
+    async def serve(
+        self, *, bus: Any, agent_loop: Any, gate: Any, tool_registry: Any, instructions: Any = None
+    ) -> None:
         """Run this channel in place of the REPL (called by `start_cmd`'s acp branch).
 
         The terminal and Discord let `OrchestratorREPL` pull a line and run a turn; ACP turns
         arrive as JSON-RPC requests instead, so this serves the bus subscriptions and then simply
         waits for the connection to end. Everything a turn needs is handed over here, which is
         also the moment a mode picked before the first prompt takes effect.
+
+        `instructions` is the project-instructions handle `start` opened (the default,
+        `instructions=None`, means this workspace has no instructions file): `/instructions`
+        answers from it in `prompt`.
         """
         self.bus = bus
         self._agent_loop = agent_loop
         self._gate = gate
         self._registry = tool_registry
+        self._instructions = instructions
         self._wire_editor_file_io(tool_registry)
         refused: Optional[str] = None
         if self._pending_mode is not None:

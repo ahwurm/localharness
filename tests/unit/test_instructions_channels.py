@@ -4,6 +4,7 @@ Delivery is the receipt: a channel calls the handle's ``on_delivered`` (here a r
 only after its own send proved a person was reached. The base never does, so a plugin channel that
 knows nothing about instructions writes no record.
 """
+# ruff: noqa: F811  (instructions_home is imported as a fixture and requested by name)
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +17,7 @@ from localharness.channels.acp import AcpChannel
 from localharness.channels.base import ChannelAdapter, _call_receipt
 from localharness.core.bus import EventBus
 from localharness.core.events import InstructionsChanged, NarrowingNotice
+from tests.unit.instructions_support import instructions_home  # noqa: F401
 
 pytestmark = pytest.mark.asyncio
 
@@ -544,3 +546,346 @@ async def test_terminal_subscribes_both_events_in_start_and_drops_them_in_stop(t
     await bus.publish(_narrowing("four"))
 
     assert ch._instructions_status == ""
+
+
+# ------------------------------------------------------------------ Discord (the dispatch plugin)
+
+
+class FakeChatAdapter:
+    """The platform verbs the dispatch channel calls; ``send`` can be told to raise."""
+
+    platform = "fakechat"
+    title = "FakeChat"
+    message_limit = 2000
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[Any, str]] = []
+        self.fail = False
+        self.on_message = None
+
+    async def connect(self, on_message, on_reaction) -> None:
+        self.on_message = on_message
+
+    async def close(self) -> None:
+        pass
+
+    async def send(self, conversation, text: str) -> Any:
+        if self.fail:
+            raise RuntimeError("403 Forbidden")
+        self.sent.append((conversation, text))
+
+    async def react(self, message, emoji: str) -> None:
+        pass
+
+    async def edit(self, handle, text: str) -> None:
+        pass
+
+    async def reply(self, handle, text: str) -> Any:
+        pass
+
+    async def send_file(self, conversation, path, mime: str) -> Any:
+        pass
+
+
+def _inbound(author: str = "42", text: str = "hello", conversation: str = "room-1"):
+    from localharness.dispatch.channel import InboundMessage
+
+    return InboundMessage(author_id=author, conversation_id="c1", text=text, is_bot=False,
+                          handle=object(), conversation=conversation)
+
+
+async def _dispatch(bus: EventBus | None = None):
+    from localharness.dispatch.channel import DispatchChannel
+
+    adapter = FakeChatAdapter()
+    channel = DispatchChannel(bus or EventBus(), {"adapter": adapter, "allow": ["42"]})
+    await channel.start()
+    return channel, adapter
+
+
+async def test_discord_a_line_for_an_answered_message_is_sent_then_called_back():
+    channel, adapter = await _dispatch()
+    receipts = Receipts()
+    await adapter.on_message(_inbound())
+    assert await channel.read_input() == "hello"
+
+    await channel.notice_on_first_contact("T", receipts)
+
+    assert adapter.sent == [("room-1", "T")]
+    assert receipts.calls == 1
+
+
+async def test_discord_with_no_current_message_the_line_waits_for_the_next_read_input():
+    channel, adapter = await _dispatch()
+    receipts = Receipts()
+
+    await channel.notice_on_first_contact("T", receipts)
+
+    assert adapter.sent == [] and receipts.calls == 0
+    await adapter.on_message(_inbound())
+    await channel.read_input()
+    assert adapter.sent == [("room-1", "T")]
+    assert receipts.calls == 1
+    await channel._deliver_first_contact()  # nothing left to deliver
+    assert receipts.calls == 1
+
+
+async def test_discord_a_send_that_raises_keeps_the_text_and_calls_nothing():
+    channel, adapter = await _dispatch()
+    receipts = Receipts()
+    await adapter.on_message(_inbound())
+    await channel.read_input()
+    adapter.fail = True
+
+    await channel.notice_on_first_contact("T", receipts)  # no exception escapes
+
+    assert receipts.calls == 0
+    assert channel._first_contact_pending == [("T", receipts)]
+    adapter.fail = False
+    await adapter.on_message(_inbound(text="again"))
+    await channel.read_input()
+    assert adapter.sent == [("room-1", "T")] and receipts.calls == 1
+
+
+async def test_discord_a_raising_receipt_never_escapes():
+    channel, adapter = await _dispatch()
+    await adapter.on_message(_inbound())
+    await channel.read_input()
+
+    def boom() -> None:
+        raise RuntimeError("store down")
+
+    await channel.notice_on_first_contact("T", boom)
+
+    assert adapter.sent == [("room-1", "T")]
+    assert channel._first_contact_pending == []
+
+
+async def test_discord_a_stranger_never_sets_a_current_message_so_never_a_receipt():
+    channel, adapter = await _dispatch()
+    receipts = Receipts()
+    await adapter.on_message(_inbound(author="666"))
+
+    await channel.notice_on_first_contact("T", receipts)
+
+    assert channel._current_msg is None
+    assert adapter.sent == [] and receipts.calls == 0
+
+
+async def test_discord_a_start_event_reaches_the_conversation_and_the_receipt():
+    bus = EventBus()
+    channel, adapter = await _dispatch(bus)
+    receipts = Receipts()
+    channel.instructions_on_delivered = receipts
+    await adapter.on_message(_inbound())
+    await channel.read_input()
+
+    await bus.publish(_changed("start", text="T"))
+
+    assert adapter.sent == [("room-1", "T")] and receipts.calls == 1
+
+
+async def test_discord_a_change_line_reaches_the_conversation_and_stop_unsubscribes():
+    bus = EventBus()
+    channel, adapter = await _dispatch(bus)
+    await adapter.on_message(_inbound())
+    await channel.read_input()
+
+    await bus.publish(_changed("adopted", text="changed"))
+    await bus.publish(_narrowing("narrowed"))
+    assert [t for _, t in adapter.sent] == ["changed", "narrowed"]
+
+    await channel.stop()
+    await bus.publish(_changed("adopted", text="late"))
+    await bus.publish(_narrowing("late"))
+    assert [t for _, t in adapter.sent] == ["changed", "narrowed"]
+
+
+# ------------------------------------------------------------------ the phone
+
+
+async def _phone(tmp_path):
+    from localharness.channels.mobile.channel import MobileChannel
+
+    bus = EventBus(persist_path=tmp_path / "e.jsonl")
+    channel = MobileChannel(bus=bus, config={})
+    await channel.start()
+    return bus, channel
+
+
+def _frames(client) -> list[str]:
+    import json
+
+    rows = []
+    while not client.queue.empty():
+        name, _seq, payload = client.queue.get_nowait()
+        rows.append((name, json.loads(payload)))
+    return rows
+
+
+async def test_phone_with_an_attached_client_the_event_is_forwarded_once_and_called_back(tmp_path):
+    bus, channel = await _phone(tmp_path)
+    receipts = Receipts()
+    channel.instructions_on_delivered = receipts
+    client = channel.attach_client()
+
+    await bus.publish(_changed("start", text="T"))
+
+    rows = _frames(client)
+    assert [r[0] for r in rows] == ["InstructionsChanged"]  # no second Notice frame
+    assert rows[0][1]["text"] == "T"
+    assert receipts.calls == 1
+    await channel.stop()
+
+
+async def test_phone_with_no_client_attached_the_event_is_forwarded_and_no_receipt(tmp_path):
+    bus, channel = await _phone(tmp_path)
+    receipts = Receipts()
+    channel.instructions_on_delivered = receipts
+
+    await bus.publish(_changed("start", text="T"))
+
+    assert receipts.calls == 0
+    assert channel._first_contact_notice == "T"
+    await channel.stop()
+
+
+async def test_phone_a_too_large_line_is_first_contact_too(tmp_path):
+    bus, channel = await _phone(tmp_path)
+    receipts = Receipts()
+    channel.instructions_on_delivered = receipts
+    client = channel.attach_client()
+
+    await bus.publish(_changed("too_large", text="too large"))
+
+    assert [r[0] for r in _frames(client)] == ["InstructionsChanged"]
+    assert receipts.calls == 1
+    await channel.stop()
+
+
+async def test_phone_a_change_line_is_forwarded_and_never_a_receipt(tmp_path):
+    bus, channel = await _phone(tmp_path)
+    receipts = Receipts()
+    channel.instructions_on_delivered = receipts
+    client = channel.attach_client()
+
+    await bus.publish(_changed("adopted", text="changed"))
+
+    assert [r[0] for r in _frames(client)] == ["InstructionsChanged"]
+    assert receipts.calls == 0
+    await channel.stop()
+
+
+async def test_phone_a_raising_receipt_never_breaks_the_forwarder(tmp_path):
+    bus, channel = await _phone(tmp_path)
+
+    def boom() -> None:
+        raise RuntimeError("store down")
+
+    channel.instructions_on_delivered = boom
+    client = channel.attach_client()
+
+    await bus.publish(_changed("start", text="T"))
+
+    assert [r[0] for r in _frames(client)] == ["InstructionsChanged"]
+    await channel.stop()
+
+
+# ------------------------------------------------------------------ ACP /instructions
+
+
+class _FakeLoop:
+    def __init__(self) -> None:
+        self.turns: list[str] = []
+
+    async def run_turn(self, task, on_token=None, images=None):
+        self.turns.append(task)
+
+    _config = None
+
+
+def _prompt_channel(tmp_path, handle):
+    channel, conn = _acp()
+    channel._boundary = tmp_path
+    channel._agent_loop = _FakeLoop()
+    channel._instructions = handle
+    return channel, conn
+
+
+def _block(text: str):
+    from acp.helpers import text_block
+
+    return [text_block(text)]
+
+
+def _handle(tmp_path):
+    from localharness.config.project_records import open_project_instructions
+    from tests.unit.instructions_support import make_root
+
+    root = make_root(tmp_path, {"CLAUDE.md": "a" * 100 + "\n"})
+    handle = open_project_instructions(
+        root, sitting_id="s1", max_ratio=0.25, basis="layer", no_input=False,
+        window_tokens=65536,
+    )
+    assert handle is not None
+    return handle
+
+
+async def test_acp_instructions_show_is_one_message_and_no_model_turn(tmp_path, instructions_home):
+    from localharness.config.project_records import run_instructions_command
+
+    handle = _handle(tmp_path)
+    channel, conn = _prompt_channel(tmp_path, handle)
+
+    response = await channel.prompt("sess", _block("/instructions show"))
+
+    assert response.stop_reason == "end_turn"
+    assert conn.texts() == [run_instructions_command(handle, "show")]
+    assert channel._agent_loop.turns == []
+
+
+async def test_acp_instructions_off_is_case_insensitive_and_changes_the_state(
+    tmp_path, instructions_home
+):
+    handle = _handle(tmp_path)
+    channel, conn = _prompt_channel(tmp_path, handle)
+
+    await channel.prompt("sess", _block("/Instructions OFF"))
+
+    assert conn.texts()[0].startswith("instructions off for this workspace")
+    assert handle.state.state == "off"
+    assert channel._agent_loop.turns == []
+
+
+async def test_acp_instructions_without_a_handle_says_so(tmp_path):
+    channel, conn = _prompt_channel(tmp_path, None)
+
+    await channel.prompt("sess", _block("/instructions"))
+
+    assert conn.texts() == ["no instructions file in this workspace"]
+    assert channel._agent_loop.turns == []
+
+
+async def test_acp_a_mid_sentence_mention_runs_a_normal_turn(tmp_path):
+    channel, conn = _prompt_channel(tmp_path, None)
+    channel._agent_loop._config = type("C", (), {"context": type("X", (), {"max_image_tokens": 1})()})()
+
+    await channel.prompt("sess", _block("what does /instructions do"))
+
+    assert channel._agent_loop.turns == ["what does /instructions do"]
+
+
+async def test_acp_serve_keeps_the_handle_it_is_given(tmp_path):
+    import types
+
+    channel, conn = _acp()
+    handle = object()
+    gate = types.SimpleNamespace(mode="guarded", set_mode=lambda *a, **k: None)
+    task = asyncio.create_task(channel.serve(
+        bus=channel.bus, agent_loop=_FakeLoop(), gate=gate,
+        tool_registry=types.SimpleNamespace(), instructions=handle,
+    ))
+    await asyncio.wait_for(channel._ready.wait(), timeout=5.0)
+    assert channel._instructions is handle
+    channel._closed.set()
+    await asyncio.wait_for(task, timeout=5.0)
