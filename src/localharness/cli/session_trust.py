@@ -59,6 +59,15 @@ TRUST_QUESTION = (
 """The one question. Both halves of trust in one sentence, because they are one decision (the
 config layer and the permission mode share a record: :func:`trust.is_trusted_tree`)."""
 
+TRUST_QUESTION_WITH_INSTRUCTIONS = (
+    "Trust this workspace? LocalHarness will load its .localharness config and its {name}, and "
+    "run tools here without asking, except for dangerous actions."
+)
+"""The same one question with one more noun, asked when the session holds a project instructions
+file (``CLAUDE.md``, ``AGENTS.md`` or ``.localharness/INSTRUCTIONS.md``). Its yes creates no
+``.localharness/``, so the clause rides here exactly as it rides ``OFFER_PROMPT``: a yes makes the
+file usable, a no declines it for the session. Never a second question."""
+
 TRUST_QUESTION_DETAIL = (
     "Answering yes records {root} and this is not asked here again. Answering no runs this "
     "session in guarded mode, where boundary-crossing and destructive calls ask first."
@@ -117,7 +126,7 @@ def state_store_for(boundary: Optional[Path]) -> Path:
     return Path(boundary) / WORKSPACE_DIR_NAME
 
 
-def _request(root: Path) -> PermissionRequest:
+def _request(root: Path, question: str = TRUST_QUESTION) -> PermissionRequest:
     """The trust question as the :class:`PermissionRequest` every channel already knows how to
     render.
 
@@ -133,13 +142,15 @@ def _request(root: Path) -> PermissionRequest:
         klass="workspace-trust",
         key=str(root),
         grantable=False,
-        reason=TRUST_QUESTION,
-        display=f"{TRUST_QUESTION}\n{detail}",
+        reason=question,
+        display=f"{question}\n{detail}",
         options_legend=TRUST_OPTIONS_LEGEND,
     )
 
 
-async def establish_session_trust(gate: Any, notice: Any = None) -> str:
+async def establish_session_trust(
+    gate: Any, notice: Any = None, *, instructions: Any = None
+) -> str:
     """Settle this session's workspace trust, once, before the first turn.
 
     Returns the mode the session ends up in, so a caller can report it. ``notice`` is a callable
@@ -150,6 +161,12 @@ async def establish_session_trust(gate: Any, notice: Any = None) -> str:
     said), evidence of prior use beats asking (it is what they already did — in the machine's own
     store only), and only a root with neither is worth a question. A run started with
     `--trust-project` (``gate.trusted_for_run``) skips all of it and records nothing.
+
+    ``instructions`` is the session's ``ProjectInstructions`` handle, when the project holds an
+    instructions file: the question then carries one more noun (``TRUST_QUESTION_WITH_INSTRUCTIONS``
+    - still ONE question), a yes also makes the file usable (``set_state("yes")``) and a no, or a
+    recorded no, declines it for the session (``decline()``). With ``instructions=None`` every path behaves
+    exactly as before, and a handle that fails never fails the trust answer.
     """
     if getattr(gate, "mode", None) != TRUST_GATED_MODE:
         return getattr(gate, "mode", TRUST_GATED_MODE)
@@ -162,6 +179,7 @@ async def establish_session_trust(gate: Any, notice: Any = None) -> str:
     if decision is True:
         return gate.mode
     if decision is False:
+        _instructions_call(instructions, "decline")
         return _decline(gate, notice, DECLINED_NOTICE)
 
     # A project's own `.localharness/agents/*/sessions/` can be committed to a repository, so it is
@@ -179,16 +197,34 @@ async def establish_session_trust(gate: Any, notice: Any = None) -> str:
         # interactive session in this directory still gets its one question.
         return _decline(gate, notice, CANNOT_ASK_NOTICE)
 
-    answer = await gate.asker(_request(root))
+    name = getattr(getattr(instructions, "state", None), "name", None)
+    question = (TRUST_QUESTION_WITH_INSTRUCTIONS.format(name=name)
+                if isinstance(name, str) and name else TRUST_QUESTION)
+    answer = await gate.asker(_request(root, question))
     if getattr(answer, "allowed", False):
         # This question never shows the server list, so its Yes approves no server (R18): they
         # are shown and asked about at the next start on a terminal.
         trust.record_trust(root, True, unseen_executables=True)
+        _instructions_call(instructions, "set_state", "yes")
         if trust.executables_snapshot(root / WORKSPACE_DIR_NAME):
             _say(notice, NEXT_START_REVIEW_NOTICE)
         return gate.mode
     trust.record_trust(root, False)
+    _instructions_call(instructions, "decline")
     return _decline(gate, notice, DECLINED_NOTICE)
+
+
+def _instructions_call(instructions: Any, method: str, *args: Any) -> None:
+    """Tell the instructions handle what the one answer decided; never fail the answer.
+
+    The handle's own methods do not raise, but this is the one place a trust decision meets a store
+    that may be unwritable, so a failure is logged and the trust answer stands (T-11-35)."""
+    if instructions is None:
+        return
+    try:
+        getattr(instructions, method)(*args)
+    except Exception:  # noqa: BLE001 - the trust answer outranks the instructions record
+        log.warning("could not apply the trust answer to the project instructions", exc_info=True)
 
 
 def _decline(gate: Any, notice: Any, template: str) -> str:
