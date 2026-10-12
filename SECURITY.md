@@ -715,8 +715,10 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   why a channel that cannot show you one asks about in-project edits instead.
 - **`source FILE` and `. FILE` are keyed like a script too** (`source <script>`), so the same
   caveat applies. Three shapes that looked like this gap are caught instead: a `git config` write
-  to a key that repoints execution (`core.hooksPath`, `core.sshCommand`, `alias.*`, filters, merge
-  drivers, and the rest of a named list) is ungrantable — parked in `auto`, asked every time in
+  to a key that repoints execution (`core.hooksPath`, `core.sshCommand`, `alias.*`, filters
+  including a process filter, merge drivers, a `textconv` driver, a per-command `pager.*`, a
+  URL-scoped credential helper such as `credential.https://host.helper`, and the rest of a named
+  list) is ungrantable — parked in `auto`, asked every time in
   `guarded` — including the
   `-c key=value` spelling on any git command; `eval`'s argument is classified the way `bash -c`'s
   is; and a shell function's body is classified where it is defined, not hidden behind its name.
@@ -725,6 +727,47 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   `&&`, `;`, `|`, newlines and inside groups, peels wrappers, lifts `find -exec` and `xargs`
   payloads, and canonicalizes destructive flags — that is an enumerated set of known shapes, not a
   proof. The ask-once on an unfamiliar signature is the backstop for whatever the list misses.
+- **The classifier reads what a command writes and what it runs, not only its name.** `git diff`,
+  `git log` and `git show` with `--output FILE` write that file, and `git diff --no-index` compares
+  two paths outside any repository (operands on either side of the flag count), so each names its
+  files the way a write does. `find -fprint`, `-fprint0`, `-fprintf` and `-fls`, `sort -o`,
+  `uniq`'s second operand, `sed`'s `w` and `W` commands and `tree -o` are writes to the file they
+  name. `rg --pre` and `--hostname-bin`, `sed`'s `e` command and its `-f` script files, `sort
+  --compress-program` and every spelling of `git grep -O` or `--open-files-in-pager` hand a
+  program to run, so they are keyed as inline code. None of these counts as read-only any more;
+  each is judged as the write or the interpreter it is. A plain `git diff`, `git log` or
+  `git show` and the ordinary reads (`find`, `sort`, `uniq`, `sed -n`, `rg`, `tree`) stay silent.
+- **`git_read` runs no command a repository configures.** It is a structured `diff`, `show` or
+  `log` of the workspace's own repository. It is registered with the other built-in tools, given
+  by default to the agents you define as config children, and it asks nothing. Every call starts
+  from one fixed command line that switches off the fsmonitor, pager, hooks and signature display,
+  turns off external diff and `textconv` drivers, forbids a promisor remote's lazy fetch and keeps
+  a submodule's own filters from running, and from an environment built from scratch: no inherited
+  `GIT_*` variable, no `safe.directory`, no system or global git config, and a `PATH` reduced to
+  its absolute entries so `git` can never resolve to a binary inside the workspace. One thing a
+  repository can still configure is a clean or process filter, which a worktree diff would run to
+  canonicalize files: when the repository configures one, a worktree `diff` reads only the paths
+  no filter binds and ends with one line saying so and naming the key. `diff --cached` and a
+  two-revision diff compare stored objects and include every path.
+- **`git_read` never leaves the workspace root.** Registration, every call and `doctor` share one
+  check: the repository's toplevel must be the workspace root, its git directory and its common
+  directory must be inside it, it must borrow no objects through alternates, and a symbolic link
+  anywhere inside the git directories that leads out of the root (objects, packs, refs, config and
+  the rest) is refused like an outside git directory. git is told to stop looking at the root's
+  parent, so a repository above the workspace is unreachable. Every path is validated before git
+  runs (relative to the root, no `..`, no leading `-`, no control characters, absolute paths only
+  when they resolve inside the root) and a literal `--` always separates the revision from the
+  paths; a revision that names something outside dies on git's own usage error.
+- **`git_read` is simply absent when it cannot promise that, and `localharness doctor` says why.**
+  Nothing is printed at start and no tool is offered when there is no workspace boundary (a session
+  at your home directory or above has none), when the repository is not owned by you (git's
+  "dubious ownership": `git_read` never injects `safe.directory`, so your own `bash git log`
+  remains the way to read that repository), when the git directory or the common directory is
+  outside the root (a linked worktree's usually is), when the repository borrows objects through
+  alternates, or when the workspace root sits below the repository's toplevel. `doctor` prints
+  `git_read not registered:` and a fixed sentence naming the offending path, never git's own
+  output, because that can quote text the repository controls. A `.git` that changes after start
+  is refused on the next call with a fixed sentence of the same shape, instead of being read.
 - **A command whose name comes from a substitution or a variable is unfamiliar, not destructive.**
   A name the shell builds at run time cannot be signed at classification time, so the command is
   asked about as an unknown one rather than as destructive, and a grant on that placeholder
