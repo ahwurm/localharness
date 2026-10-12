@@ -979,6 +979,65 @@ def test_no_input_on_then_a_mark_keeps_the_file_in_use_every_turn(instructions_h
     assert not h._marked
 
 
+def test_no_input_on_then_a_marked_rewrite_is_dropped_with_the_notice_and_nothing_is_written(
+    instructions_home, tmp_path,
+):
+    """WR-57: the person's in-memory yes accepted the bytes they saw; a rewrite a call named is the
+    model's, so it is dropped (D-28 step 7) and offered back, never adopted every turn."""
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _open(root, no_input=True)
+    assert run_instructions_command(h, "on").startswith("using CLAUDE.md")
+    assert h.section(WINDOW) == (TEXT, None)
+    h.mark_pending()
+    _rewrite(root, CHANGED)
+    text, notice = h.section(WINDOW)
+    assert text is None
+    assert notice is not None and notice.cause == "harness_written"
+    assert notice.text == "CLAUDE.md changed by the model; not used — /instructions on"
+    assert h.section(WINDOW) == (None, None)  # the dropped bytes stay out, with no second notice
+    assert h.section(WINDOW) == (None, None)
+    assert not store_file().exists()
+    assert run_instructions_command(h, "on").startswith("using CLAUDE.md")  # offered back
+    assert h.section(WINDOW) == (CHANGED, None)
+    assert not store_file().exists()
+
+
+def test_no_input_on_then_a_second_marked_rewrite_is_dropped_again(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _open(root, no_input=True)
+    run_instructions_command(h, "on")
+    h.mark_pending()
+    _rewrite(root, CHANGED)
+    assert h.section(WINDOW)[0] is None
+    h.mark_pending()
+    _rewrite(root, CHANGED + "and more\n")
+    text, notice = h.section(WINDOW)
+    assert text is None and notice is not None and notice.cause == "harness_written"
+
+
+def test_no_input_on_then_an_unmarked_hand_edit_is_adopted(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _open(root, no_input=True)
+    run_instructions_command(h, "on")
+    assert h.section(WINDOW) == (TEXT, None)
+    _rewrite(root, CHANGED)  # no call named the file: the person's change
+    assert h.section(WINDOW) == (CHANGED, None)
+    assert not store_file().exists()
+
+
+def test_no_input_on_then_a_dropped_rewrite_and_a_later_hand_edit_is_the_persons(
+    instructions_home, tmp_path,
+):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _open(root, no_input=True)
+    run_instructions_command(h, "on")
+    h.mark_pending()
+    _rewrite(root, CHANGED)
+    assert h.section(WINDOW)[0] is None
+    _rewrite(root, "the person's own words\n")
+    assert h.section(WINDOW) == ("the person's own words\n", None)
+
+
 def test_a_mark_does_not_pre_empt_the_not_owned_line(instructions_home, tmp_path, monkeypatch):
     root = make_root(tmp_path, {"CLAUDE.md": TEXT})
     monkeypatch.setattr(os, "geteuid", lambda: os.stat(root / "CLAUDE.md").st_uid + 1)
