@@ -25,7 +25,7 @@ import os
 import stat
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -450,6 +450,56 @@ def unseen(root: Any, notices: Any, *, config_dir: Any = None) -> list[Notice]:
         if notice not in stored and notice not in out:
             out.append(notice)
     return out
+
+
+_NO_DOOR_SUBJECTS = frozenset({"permissions.budget.max_tool_calls"})
+"""Narrowed keys no global file accepts (nothing derives the value), so the note names no file."""
+
+
+class DispatchNoticeSink:
+    """Narrowing notes made while a built-in subagent is dispatched, told once per sitting.
+
+    ``start`` shows every narrowing it can see up front. A dispatch re-reads the overlay file, so a
+    file the model (or a hook) wrote since can narrow a value ``start`` never saw. ``record`` takes
+    such a note synchronously (the loader reports from synchronous code); ``flush`` publishes each
+    one that is not in the start set and was not published already as a ``NarrowingNotice`` on the
+    bus, where a channel shows it on its status line. Nothing here logs: a log record from a
+    running turn lands on the terminal over the input box."""
+
+    def __init__(self, start_notices: Iterable[Notice], *, global_dir: Path) -> None:
+        self._start = frozenset(start_notices)
+        self._global_dir = Path(global_dir)
+        self._pending: list[Notice] = []
+        self._shown: set[Notice] = set()
+
+    def record(self, notice: Notice) -> None:
+        if notice in self._start or notice in self._shown or notice in self._pending:
+            return
+        self._pending.append(notice)
+
+    def _accept_file(self, notice: Notice) -> str:
+        """The global file that would accept the value: ``""`` for a key no door accepts."""
+        if notice.subject in _NO_DOOR_SUBJECTS:
+            return ""
+        file = Path(notice.file)
+        if file.parent.name == "agents":
+            return str(self._global_dir / "agents" / file.name)
+        return str(self._global_dir / "config.yaml")
+
+    async def flush(self, bus: Any, *, agent_id: str, session_id: str) -> None:
+        """Publish each recorded note not shown yet, once for the sitting."""
+        from localharness.core.events import NarrowingNotice
+
+        pending, self._pending = self._pending, []
+        for notice in pending:
+            if notice in self._shown:
+                continue
+            self._shown.add(notice)
+            accept = self._accept_file(notice)
+            text = f"{notice.text} — {accept!r} would accept it" if accept else notice.text
+            await bus.publish(NarrowingNotice(
+                agent_id=agent_id, session_id=session_id, key=notice.subject,
+                file=notice.file, accept_file=accept, text=text))
 
 
 # --------------------------------------------------------------------------- candidates

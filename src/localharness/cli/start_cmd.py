@@ -2459,12 +2459,31 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         from localharness.config.project_records import replace_notices as _replace_notices
         from localharness.config.project_records import unseen as _unseen_notices
 
+        # The built-in subagents' workspace overlays are evaluated here, up front, so what they
+        # reject joins the set printed at the summary; a dispatch re-reads the file and tells the
+        # channel only about a rejection this set did not hold (D-56, D-57). A malformed overlay is
+        # an explicit error at dispatch and is skipped here.
+        from localharness.agent.subagent import builtin_base_config
+        from localharness.config.project_records import DispatchNoticeSink
+
+        _overlay_notices: list = []
+        for _builtin_name in ("explore", "web-researcher", "search-verifier"):
+            try:
+                loader.overlay_builtin_config(
+                    _builtin_name,
+                    builtin_base_config(_builtin_name, harness.org.children_budget),
+                    notices=_overlay_notices.append)
+            except Exception:  # noqa: BLE001 - reported at dispatch, where the model sees it
+                log.debug("overlay of %s skipped at start", _builtin_name, exc_info=True)
+
         _start_notices: list = list(dict.fromkeys([
             *loader.notices,
+            *_overlay_notices,
             *([instructions_handle.too_large_notice]
               if instructions_handle is not None and instructions_handle.too_large_notice is not None
               else []),
         ]))
+        _dispatch_sink = DispatchNoticeSink(_start_notices, global_dir=server_cfg_path)
         _unseen: list = []
         if _boundary is not None:
             try:
@@ -2545,6 +2564,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         available_agent_names = ["explore", "web-researcher", "cruncher",
                                  "search-verifier"] + [c.name for c in card_registry.all_cards()]
 
+        async def _override_builtin(n: str, base: Any) -> Any:
+            """The overlay of a built-in subagent at dispatch. A rejection the start set did not
+            hold reaches the channel's status line once per sitting through the bus; it is awaited
+            here, inside the dispatch, never scheduled and forgotten (D-57)."""
+            cfg = loader.overlay_builtin_config(n, base, notices=_dispatch_sink.record)
+            try:
+                await _dispatch_sink.flush(bus, agent_id=agent_config.name, session_id=sitting_id)
+            except Exception:  # noqa: BLE001 - a lost status line never fails a dispatch
+                log.debug("narrowing note not published", exc_info=True)
+            return cfg
+
         # D-21: ONE supplier for the root loop and every child; the REPL fills the cell below.
         repl_cell: list = []
         server_recovery_fn = _server_recovery_supplier(repl_cell)
@@ -2566,7 +2596,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # Built-in subagents (explore/web-researcher/search-verifier) are TUNABLE: an optional
             # agents/<name>.yaml overlays the code-defined base (e.g. a bigger web-researcher
             # budget) — absent file = built-in defaults, malformed = explicit error, never silent.
-            load_builtin_override=lambda n, base: loader.overlay_builtin_config(n, base),
+            load_builtin_override=_override_builtin,
             # Children inherit the parent's exact /tokenize counter + resolved window so the
             # sub-agent fleet accounts for context correctly instead of bare 131,072 + tiktoken.
             token_counter=token_counter,

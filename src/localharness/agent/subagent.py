@@ -15,6 +15,7 @@ Design:
 from __future__ import annotations
 
 import difflib
+import inspect
 import logging
 import os
 import re
@@ -520,6 +521,18 @@ def build_search_verifier_config(
         role=SEARCH_VERIFIER_ROLE,
         permissions=PermissionConfig(budget=_child_budget_config("search_verifier", budget, kill_file)),
     )
+
+
+def builtin_base_config(name: str, children_budget: ChildrenBudgetConfig | None = None) -> AgentConfig:
+    """The code-defined base config of a built-in subagent, built on the operator's
+    `org.children_budget` exactly as a dispatch builds it. `start` uses it to evaluate the
+    built-ins' workspace overlays up front. Raises KeyError for a name that is not a built-in."""
+    builder = {
+        "explore": build_explore_config,
+        "web-researcher": build_web_researcher_config,
+        "search-verifier": build_search_verifier_config,
+    }[name]
+    return builder(name, budget=_children_budget(children_budget).for_name(name))
 
 
 class _ParentIdBus:
@@ -1763,7 +1776,9 @@ def make_explore_agent_runner(
     gate: Any = None,  # PermissionGate — the PARENT's, shared (PRD §3.4)
     get_parent_session_id: Callable[[], str | None],
     load_agent: Callable[[str], Any] | None = None,
-    load_builtin_override: Callable[[str, AgentConfig], AgentConfig] | None = None,
+    load_builtin_override: (
+        Callable[[str, AgentConfig], AgentConfig | Awaitable[AgentConfig]] | None
+    ) = None,
     token_counter: Any = None,
     max_context_tokens: int | None = None,
     depth: int = 0,
@@ -2029,6 +2044,10 @@ def make_explore_agent_runner(
         cb = _children_budget(children_budget)
         base = base_builder(name, budget=cb.for_name(name))
         built = load_builtin_override(name, base) if load_builtin_override is not None else base
+        if inspect.isawaitable(built):
+            # An async hook (start's: it publishes a dispatch-time narrowing note before returning
+            # the config) is awaited here, never scheduled and forgotten.
+            built = await built
         config_override, budget_fallback, budget_labels = _child_budget(
             built, name, children_budget=children_budget, shape=shape,
             parent_remaining=parent_remaining_fn)
