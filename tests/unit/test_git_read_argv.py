@@ -251,6 +251,19 @@ def test_env_relative_path_entries_dropped(root, monkeypatch):
     assert "PATH" not in _git_env(root)
 
 
+def test_env_path_entries_inside_the_root_dropped(root, tmp_path, monkeypatch):
+    """WR-53: an absolute entry under the workspace root (a venv's bin, node_modules/.bin) is dropped,
+    also when it is reached through a symlink or is the root itself."""
+    inside = root / ".venv" / "bin"
+    inside.mkdir(parents=True)
+    link = tmp_path / "lnk"
+    os.symlink(inside, link)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(inside), str(link), str(root), "/usr/bin", "/bin"]))
+    assert _git_env(root)["PATH"] == "/usr/bin:/bin"
+    monkeypatch.setenv("PATH", str(inside))
+    assert "PATH" not in _git_env(root)
+
+
 def test_env_ceiling_is_realpath_parent(tmp_path):
     real = tmp_path / "DIR" / "sub"
     real.mkdir(parents=True)

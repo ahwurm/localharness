@@ -143,6 +143,24 @@ def test_walk_cap_constant():
 # ------------------------------------------------------------------ PATH handling (D-74)
 
 @requires_git
+async def test_a_git_shim_inside_the_workspace_on_an_absolute_path_is_never_run(root, base, monkeypatch):
+    """WR-53: the pin and the read both resolve git from the filtered PATH, so a workspace shim loses."""
+    from localharness.tools.builtin.git_read_tool import GitReadTool
+
+    shim_dir = root / "node_modules" / ".bin"
+    shim_dir.mkdir(parents=True)
+    marker = base / "shim-ran"
+    shim = shim_dir / "git"
+    shim.write_text(f'#!/bin/sh\necho ran >> "{marker}"\nexec "{shutil.which("git")}" "$@"\n')
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+    assert git_read_pin_failure(root) is None
+    result = await GitReadTool(root).run(subcommand="log")
+    assert result.success is True
+    assert not marker.exists()
+
+
+@requires_git
 def test_workspace_binary_on_relative_path_never_resolved(root, monkeypatch):
     fake_git(root / "bin", "exit 129")
     monkeypatch.setenv("PATH", "bin" + os.pathsep + os.environ["PATH"])
