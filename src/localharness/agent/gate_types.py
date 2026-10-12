@@ -500,7 +500,22 @@ destructive set — exactly the shape ``rm -r`` / ``rm -f`` / ``rm -rf`` has abo
 from the one flag table is what keeps the two in step: a flag added there can never go missing
 here."""
 
-DESTRUCTIVE_SIGNATURES_DEFAULT: frozenset[str] = WINDOWS_DESTRUCTIVE_SIGNATURES | frozenset({
+PRIVILEGE_AND_EXEC_WRAPPERS: frozenset[str] = frozenset({
+    "pkexec", "runuser", "sg", "newgrp", "machinectl", "nsenter", "unshare", "setpriv",
+    "taskset", "chrt", "setarch", "strace", "ltrace", "valgrind", "perf", "numactl", "prlimit",
+    "fakeroot", "faketime", "eatmydata", "bwrap", "firejail", "xvfb-run", "dbus-run-session",
+})
+"""Programs that run the command after their options, as ``sudo`` does, but with an option grammar the
+classifier does not model (review iteration 4, WR-03 / IN-53). Peeling them wrongly signs the wrapper (an
+unfamiliar word, silent in ``auto``) and hides ``rm -rf`` behind it; guessing where their options end is the
+mistake the ``timeout``/``nice`` tables made. So they are filed with ``sudo``/``su``/``doas``: destructive,
+ungrantable, and asked about by ``auto`` wherever they point. The privilege helpers (``pkexec``, ``runuser``,
+``sg``, ``newgrp``, ``machinectl``, ``nsenter``, ``setpriv``, ``unshare``, ``bwrap``, ``firejail``) change who or
+where the command runs; the rest (``strace``, ``taskset``, ``chrt``, ``setarch``, ``numactl``, ``prlimit``,
+``fakeroot``, ``faketime``, ``eatmydata``, ``valgrind``, ``perf``, ``xvfb-run``, ``dbus-run-session``,
+``ltrace``) are pure wrappers that a later iteration may model one by one. Deliberately NOT config-settable."""
+
+DESTRUCTIVE_SIGNATURES_DEFAULT: frozenset[str] = WINDOWS_DESTRUCTIVE_SIGNATURES | PRIVILEGE_AND_EXEC_WRAPPERS | frozenset({
     "rm -r", "rm -f", "rm -rf",
     "format", "diskpart",
     "git push --force", "git reset --hard", "git clean -f",
@@ -617,7 +632,7 @@ in the shell the owner's Windows machine actually runs."""
 
 INTERPRETER_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "python", "python3", "bash", "sh", "zsh", "node", "uv run", "ruby", "perl",
-    "fish", "ksh", "dash", "script",
+    "fish", "ksh", "dash", "script", "csh", "tcsh",
     "powershell", "pwsh", "cmd",
 })
 """Commands whose SIGNATURE carries an interpreter mode (PRD §3.2 step 7, critic finding 5).
@@ -643,6 +658,7 @@ INLINE_CODE_FLAGS_DEFAULT: dict[str, tuple[str, ...]] = {
     "python": ("-c",), "python3": ("-c",), "uv run": ("-c",),
     "bash": ("-c",), "sh": ("-c",), "zsh": ("-c",),
     "fish": ("-c",), "ksh": ("-c",), "dash": ("-c",), "script": ("-c",),
+    "csh": ("-c",), "tcsh": ("-c",),
     "node": ("-e", "--eval", "-p", "--print"),
     "ruby": ("-e",), "perl": ("-e", "-E"),
     "powershell": ("-Command", "-EncodedCommand", "-File"),
@@ -681,7 +697,7 @@ interpreters with a mode. Source: awk(1) ``system()`` and output redirection."""
 WRAPPER_COMMANDS_DEFAULT: frozenset[str] = frozenset({
     "env", "nohup", "time", "nice", "ionice", "command", "builtin", "exec", "timeout", "stdbuf",
     "watch", "flock", "setsid", "chroot", "busybox", "caffeinate", "unbuffer", "systemd-run",
-    "poetry", "pipx", "uvx", "wsl",
+    "poetry", "pipx", "uvx", "wsl", "toybox",
 })
 """PRD §3.2 step 4: peeled so the signature is the wrapped command's. ``sudo`` is NOT a wrapper
 (destructive before peeling).
@@ -1038,7 +1054,7 @@ makes a filesystem was classified as an unfamiliar, grantable command. Restricte
 suffix on an entry that is already a bare name, so it can never widen a flagged entry like
 ``rm -rf`` or a subcommand entry like ``git push --force``."""
 
-AUTO_IRREVERSIBLE_SIGNATURES: frozenset[str] = frozenset({
+AUTO_IRREVERSIBLE_SIGNATURES: frozenset[str] = PRIVILEGE_AND_EXEC_WRAPPERS | frozenset({
     "sudo", "su", "doas",
     "dd", "mkfs", "shred", "format", "diskpart",
     "git push --force", "git push --delete", "git reset --hard", "git clean -f",

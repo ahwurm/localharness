@@ -3019,8 +3019,8 @@ def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]
     """
     assignments: list[str] = []
     directories: list[str] = []
-    while len(argv) > 1 and argv[0] in settings.wrapper_commands:
-        head, rest = argv[0], argv[1:]
+    while len(argv) > 1 and _basename(argv[0]) in settings.wrapper_commands:
+        head, rest = _basename(argv[0]), argv[1:]  # `nice /usr/bin/env rm`: a wrapper spelled as a path is one
         value_flags = WRAPPER_HEAD_VALUE_FLAGS.get(head, WRAPPER_VALUE_FLAGS)
         skips = WRAPPER_POSITIONAL_SKIPS.get(head, 0)
         index = 0
