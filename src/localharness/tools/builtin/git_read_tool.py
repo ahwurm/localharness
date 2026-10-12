@@ -65,18 +65,33 @@ PATH_FORM = "a path relative to the workspace root"
 def _git_env(root: Path) -> dict[str, str]:
     """D-05 / D-74: the environment of every git call, built from scratch.
 
-    PATH keeps only the absolute entries of the inherited one that lie outside the workspace root (so
-    `git` can never resolve to a binary inside the workspace, e.g. `.venv/bin` or `node_modules/.bin`;
-    WR-53), HOME is copied when present, and five keys are fixed. Nothing else is
-    inherited: no other GIT_*, LANG, LC_* or XDG_*. The ceiling comes from the realpath of the root
-    because git compares it against the physical cwd (a symlinked root would otherwise never match).
+    PATH keeps only the absolute entries of the inherited one that lie outside the workspace root, by
+    the path as written AND by where it resolves, and whose `git` (if any) does not resolve into it
+    (so `git` can never run a binary the workspace supplies, e.g. `.venv/bin`, `node_modules/.bin`, a
+    link `ws/bin -> /elsewhere` or a `git` link into the root; WR-53, WR-51, IN-01), HOME is copied
+    when present, and five keys are fixed. Nothing else is inherited: no other GIT_*, LANG, LC_* or
+    XDG_*. The ceiling comes from the realpath of the root because git compares it against the
+    physical cwd (a symlinked root would otherwise never match).
     """
     env: dict[str, str] = {}
     real_root = os.path.realpath(root)
-    entries = [
-        e for e in os.environ.get("PATH", "").split(os.pathsep)
-        if e and os.path.isabs(e) and not Path(os.path.realpath(e)).is_relative_to(real_root)
-    ]
+    roots = (os.path.abspath(root), real_root)
+
+    def inside(path: str) -> bool:
+        return any(Path(path).is_relative_to(r) for r in roots)
+
+    entries = []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue
+        # WR-51 / WR-53: an entry the workspace owns by name (`ws/bin`, even when it is a link out of
+        # the root) or by destination (a link into it) is out; so is one whose `git` is a link into it (IN-01).
+        if inside(os.path.abspath(entry)) or inside(os.path.realpath(entry)):
+            continue
+        found = shutil.which("git", path=entry)
+        if found is not None and inside(os.path.realpath(found)):
+            continue
+        entries.append(entry)
     if entries:
         env["PATH"] = os.pathsep.join(entries)
     if "HOME" in os.environ:
@@ -405,8 +420,8 @@ def _git_read_pin_failure(root: Path) -> GitReadPinFailure | None:
     real_root = os.path.realpath(root)
     env = _git_env(root)
     git_path = shutil.which("git", path=env.get("PATH", ""))
-    if git_path is None:
-        return GitReadPinFailure("git", "")
+    if git_path is None or Path(os.path.realpath(git_path)).is_relative_to(real_root):
+        return GitReadPinFailure("git", "")  # the env filter leaves no such entry; belt and braces (IN-01)
     try:
         if _run_git(root, ["version"]).returncode != 0:
             return GitReadPinFailure("git_version", git_path)

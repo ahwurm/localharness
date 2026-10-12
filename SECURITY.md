@@ -766,7 +766,9 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   a submodule's own filters from running, and from an environment built from scratch: no inherited
   `GIT_*` variable, no `safe.directory`, no system or global git config, and a `PATH` reduced to
   its absolute entries outside the workspace so `git` can never resolve to a binary inside it
-  (`.venv/bin` and `node_modules/.bin` are dropped). One thing a
+  (`.venv/bin` and `node_modules/.bin` are dropped, and so is an entry that is a link into or out of
+  the workspace, whether it is spelled inside it or resolves inside it, and an entry whose `git` is a
+  link to a file inside it). One thing a
   repository can still configure is a clean or process filter, which a worktree diff would run to
   canonicalize files: when the repository configures one, a worktree `diff` reads only the paths
   no filter binds and ends with one line saying so and naming the key. `diff --cached` and a

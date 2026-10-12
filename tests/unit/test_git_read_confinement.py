@@ -161,6 +161,57 @@ async def test_a_git_shim_inside_the_workspace_on_an_absolute_path_is_never_run(
 
 
 @requires_git
+async def test_a_path_entry_in_the_workspace_that_links_out_is_never_searched(root, base, monkeypatch):
+    """WR-51: `ws/bin -> /elsewhere` is in the workspace by name; its realpath is outside, and it was kept."""
+    from localharness.tools.builtin.git_read_tool import GitReadTool
+
+    marker = base / "linked-out-ran"
+    outside_bin = fake_git(base / "outbin", f'echo ran >> "{marker}"')
+    os.symlink(outside_bin, root / "bin")
+    monkeypatch.setenv("PATH", f"{root / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    assert str(root / "bin") not in grt._git_env(root)["PATH"].split(os.pathsep)
+    assert git_read_pin_failure(root) is None
+    assert (await GitReadTool(root).run(subcommand="log")).success is True
+    assert not marker.exists()
+
+
+@requires_git
+async def test_a_git_link_into_the_workspace_from_an_outside_path_entry_is_never_run(root, base, monkeypatch):
+    """IN-01: the directory is outside the root, its `git` is a link to a binary inside it."""
+    from localharness.tools.builtin.git_read_tool import GitReadTool
+
+    marker = base / "git-link-ran"
+    inside_bin = fake_git(root / "bin1", f'echo ran >> "{marker}"')
+    evil_dir = base / "evbin"
+    evil_dir.mkdir()
+    os.symlink(inside_bin / "git", evil_dir / "git")
+    monkeypatch.setenv("PATH", f"{evil_dir}{os.pathsep}{os.environ['PATH']}")
+    assert str(evil_dir) not in grt._git_env(root)["PATH"].split(os.pathsep)
+    assert git_read_pin_failure(root) is None
+    assert (await GitReadTool(root).run(subcommand="log")).success is True
+    assert not marker.exists()
+
+
+@requires_git
+def test_a_path_that_only_offers_a_git_inside_the_workspace_finds_no_git(root, base, monkeypatch):
+    fake_git(root / "bin1", "true")
+    only = base / "evbin"
+    only.mkdir()
+    os.symlink(root / "bin1" / "git", only / "git")
+    monkeypatch.setenv("PATH", str(only))
+    assert git_read_pin_failure(root) == GitReadPinFailure("git", "")
+
+
+@requires_git
+def test_a_symlinked_root_keeps_the_outside_entries(base, monkeypatch):
+    real = make_repo(base / "real")
+    link = base / "link"
+    os.symlink(real, link)
+    monkeypatch.setenv("PATH", f"/usr/bin{os.pathsep}{real / 'bin'}{os.pathsep}{link / 'bin'}")
+    assert grt._git_env(link)["PATH"] == "/usr/bin"
+
+
+@requires_git
 def test_workspace_binary_on_relative_path_never_resolved(root, monkeypatch):
     fake_git(root / "bin", "exit 129")
     monkeypatch.setenv("PATH", "bin" + os.pathsep + os.environ["PATH"])
