@@ -205,6 +205,7 @@ WRAPPER_HEAD_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "command": frozenset(),
     "exec": frozenset({"-a"}),
     "wsl": frozenset({"-d", "--distribution", "-u", "--user", "--cd", "--shell-type"}),
+    "env": frozenset({"-u", "--unset", "-C", "--chdir", "-a", "--argv0", "-P"}),
 }
 """Value-taking options PER wrapper, REPLACING :data:`WRAPPER_VALUE_FLAGS` for these heads.
 
@@ -1560,7 +1561,7 @@ def _classify_one(
     if argv[0] in settings.dropped_commands and not redirect_targets:
         return None, [], [text.strip()], argv[0]
 
-    peeled, peeled_assignments = _peel(argv, settings)
+    peeled, peeled_assignments, directories = _peel(argv, settings)
     if not peeled:
         return None, [], [text.strip()], None
     if peeled is not argv and _sequence_env_redirect(peeled, [], settings):
@@ -1570,6 +1571,14 @@ def _classify_one(
     # `NAME=v cmd` and `env NAME=v cmd` hit one rule (D-27); it applies to this command and to
     # every payload lifted from it (D-57), never to the commands after it.
     env_redirect = _assignments_redirect([*prefix_assignments, *peeled_assignments], settings)
+    if directories:
+        # `env -C DIR cmd` runs `cmd` in DIR and leaves this shell where it is (WR-02).
+        cwd = cwd.copy()
+        for directory in directories:
+            if directory.startswith("-"):
+                cwd.unresolvable = True
+            else:
+                _apply_cd(cwd, ["cd", directory])
     return _build(
         peeled, settings, redirect_targets, cwd, program=program, env_redirect=env_redirect
     )
@@ -1945,9 +1954,10 @@ def _make_segment(
 
 
 ENV_SPLIT_LONG = "split-string"
-ENV_UNPARSED_SPLIT = "<unparsed-env-split-string>"
-"""A word standing in for an ``env -S`` string that cannot be split: an unfamiliar program name, so the
-segment asks instead of reading as a bare ``env``."""
+ENV_UNPARSED_SPLIT = UNPARSED_SHELL_SIGNATURE
+"""A word standing in for an ``env -S`` string that cannot be split. It is the unparsed-shell placeholder
+(destructive, ungrantable, asked about by ``auto`` too), not an unfamiliar name: an unfamiliar program
+is silent in ``auto`` and the string may hold anything (WR-52)."""
 
 
 def _env_split_string(rest: list[str], index: int) -> tuple[list[str], int] | None:
@@ -1982,31 +1992,89 @@ def _env_split_string(rest: list[str], index: int) -> tuple[list[str], int] | No
             return [], consumed
         value = rest[consumed]
         consumed += 1
+    words = _env_split_words(value)
+    return (words if words is not None else [ENV_UNPARSED_SPLIT]), consumed
+
+
+ENV_SPLIT_ESCAPES = frozenset("\\\"'$#_")
+"""The escapes ``env -S`` reads that the splitter understands: ``\\_`` is a blank (WR-52), the rest are
+the quoting ones. ``\\c`` (end of string), ``\\n`` and the other control escapes, and a ``${VAR}`` expansion
+change what runs in ways the classifier does not follow, so a string using one is unparseable."""
+
+
+def _env_split_words(value: str) -> list[str] | None:
+    """The words of an ``env -S`` string, or None when it uses something the classifier cannot follow."""
+    if "${" in value:
+        return None
+    pairs = re.findall(r"\\(.?)", value)
+    if any(second not in ENV_SPLIT_ESCAPES for second in pairs):
+        return None
     try:
-        return shlex.split(value), consumed
+        return shlex.split(re.sub(r"\\(.)", lambda m: " " if m.group(1) == "_" else m.group(0), value))
     except ValueError:
-        return [ENV_UNPARSED_SPLIT], consumed
+        return None
 
 
-def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]]:
+ENV_LONG_VALUE_OPTIONS = ("unset", "chdir", "argv0")
+ENV_SHORT_VALUE_OPTIONS = "uCaP"
+ENV_SHORT_FLAGS = "iv0"
+
+
+def _env_value_option(rest: list[str], index: int) -> tuple[int, str, str] | None:
+    """WR-02: an ``env`` option that takes a value — (tokens used, option, value), else None.
+
+    ``-u NAME``, ``-C DIR``, ``-a NAME``, ``-P PATH`` and their long forms ``--unset``, ``--chdir``,
+    ``--argv0`` (any unique getopt prefix, ``=VALUE`` attached or the next token). A short one may sit
+    last in a cluster (``-iC DIR``) or carry its value (``-CDIR``). Without this the value is read as
+    the command ``env`` runs and the real command is never classified.
+    """
+    token = rest[index]
+    if token.startswith("--") and len(token) > 2:
+        name, equals, attached = token[2:].partition("=")
+        option = next((f"--{long}" for long in ENV_LONG_VALUE_OPTIONS if name and long.startswith(name)), None)
+        if option is None:
+            return None
+        if equals:
+            return 1, option, attached
+    elif token.startswith("-") and len(token) > 1:
+        for position, letter in enumerate(token[1:], start=1):
+            if letter in ENV_SHORT_VALUE_OPTIONS:
+                option = f"-{letter}"
+                if token[position + 1 :]:
+                    return 1, option, token[position + 1 :]
+                break
+            if letter not in ENV_SHORT_FLAGS:
+                return None
+        else:
+            return None
+    else:
+        return None
+    has_value = index + 1 < len(rest)
+    return (2 if has_value else 1), option, rest[index + 1] if has_value else ""
+
+
+def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str], list[str]]:
     """PRD §3.2 step 4: peel wrappers down to the command they wrap.
 
     ``sudo`` is deliberately absent from ``wrapper_commands``: it keeps its own signature and
     is destructive before any peeling.
 
-    Returns the peeled argv and the ``K=V`` tokens skipped at each FULLY peeled wrapper level
-    (D-25). Every early return of the argv unchanged — no wrapped command, a required subcommand
-    missing — carries only the assignments of levels already peeled, so ``env NAME=v`` with
+    Returns the peeled argv, the ``K=V`` tokens skipped at each FULLY peeled wrapper level
+    (D-25), and the directories ``env -C DIR`` / ``--chdir`` moved the wrapped command to
+    (WR-02). Every early return of the argv unchanged — no wrapped command, a required subcommand
+    missing — carries only what levels already peeled contributed, so ``env NAME=v`` with
     nothing to run reports none and the ``env`` segment (which prints the environment) stays
     read-only (D-57).
     """
     assignments: list[str] = []
+    directories: list[str] = []
     while len(argv) > 1 and argv[0] in settings.wrapper_commands:
         head, rest = argv[0], argv[1:]
         value_flags = WRAPPER_HEAD_VALUE_FLAGS.get(head, WRAPPER_VALUE_FLAGS)
         skips = WRAPPER_POSITIONAL_SKIPS.get(head, 0)
         index = 0
         level: list[str] = []
+        level_directories: list[str] = []
         while index < len(rest):
             token = rest[index]
             if head == "env" and token.startswith("-"):
@@ -2014,6 +2082,13 @@ def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]
                 if split is not None:
                     words, after = split
                     rest = [*rest[:index], *words, *rest[after:]]
+                    continue
+                valued = _env_value_option(rest, index)
+                if valued is not None:
+                    used, option, value = valued
+                    if option in ("-C", "--chdir"):
+                        level_directories.append(value)
+                    index += used
                     continue
             if ASSIGNMENT_RE.match(token):
                 level.append(token)
@@ -2033,13 +2108,14 @@ def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]
         required = WRAPPER_SUBCOMMANDS.get(head)
         if required is not None:
             if index >= len(rest) or rest[index] not in required:
-                return argv, assignments
+                return argv, assignments, directories
             index += 1
         if index >= len(rest):
-            return argv, assignments
+            return argv, assignments, directories
         assignments.extend(level)
+        directories.extend(level_directories)
         argv = rest[index:]
-    return argv, assignments
+    return argv, assignments, directories
 
 
 def _composing_runner(
