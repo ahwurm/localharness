@@ -1090,7 +1090,7 @@ class BashExecTool(Tool):
         if not cwd.exists():
             return self.err(f"working_dir does not exist: {cwd}")
 
-        timeout = min(timeout_s, 300.0)
+        timeout = min(timeout_s, BASH_TIMEOUT_MAX_S)  # module constant, 300.0
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
@@ -1103,10 +1103,17 @@ class BashExecTool(Tool):
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.communicate()
+                # The retry sentence appears only below the maximum, on both fields (the loop
+                # shows the model `error` for a failed call):
+                #   "\nretry with timeout_s up to 300 if the command needs longer."
+                suffix = (
+                    f"\nretry with timeout_s up to {BASH_TIMEOUT_MAX_S:g} if the command needs longer."
+                    if timeout < BASH_TIMEOUT_MAX_S else ""
+                )
                 return ToolResult(
-                    output=f"Command timed out after {timeout}s: {command}",
+                    output=f"Command timed out after {timeout}s: {command}" + suffix,
                     success=False,
-                    error=f"Timeout after {timeout}s",
+                    error=f"Timeout after {timeout}s" + suffix,
                     error_type="timeout_error",
                 )
         except OSError as exc:
