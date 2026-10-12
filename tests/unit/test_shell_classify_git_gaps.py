@@ -451,3 +451,70 @@ def test_a_hash_inside_a_word_does_not_hide_the_flags_after_it():
 def test_a_hash_inside_a_word_row_has_the_verdict_of_its_control(command, mode, ws):
     control = command.replace("a#b", "ab").replace("feat#12", "feat12")
     assert _verdict(command, ws, mode).verdict is _verdict(control, ws, mode).verdict
+
+
+# ------------------------------------------------------------------ ANSI-C quoting and ${...} (CR-54, WR-01, CR-53; iteration 2)
+
+ANSI_C_HIDING_ROWS = (
+    "echo $'a\\'' ; rm -rf /etc/x",
+    "echo $'a\\'b' ; rm -rf /etc/x",
+    "echo $'it\\'s'\nrm -rf /etc/x",
+    "echo $'it\\'s' ; rm -rf /etc/x",
+    "echo ${x:-(} ; rm -rf /etc/x",
+    "echo ${x:-{} ; rm -rf /etc/x",
+    "echo ${x:-)} ; rm -rf /etc/x",
+    "echo {a ; rm -rf /etc/x",
+    "echo $'(' ; rm -rf /etc/x",
+)
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+@pytest.mark.parametrize("command", ANSI_C_HIDING_ROWS)
+def test_ansi_c_quotes_and_odd_expansions_hide_nothing(command, mode, ws):
+    """`$'a\\''` is one word, `${x:-(}` opens no group: the `rm -rf` after them is seen and asked about."""
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command,signature", [
+    ("$'rm' -rf /etc/x", "rm -rf"),
+    ("r$''m -rf /etc/x", "rm -rf"),
+    ("git $'push' --force origin main", "git push --force"),
+    ("$'\\x72m' -rf /etc/x", "rm -rf"),
+    ("$'\\162m' -rf /etc/x", "rm -rf"),
+    ("git $'p'$'ush' --force origin main", "git push --force"),
+])
+def test_an_ansi_c_spelled_program_signs_as_the_program(command, signature):
+    assert [s.signature for s in _segments(command)] == [signature]
+
+
+@pytest.mark.parametrize("command", ("cut -d$'\\t' -f1 f", "grep $'a\\tb' f", "echo $'x' \"$'y'\""))
+def test_ordinary_ansi_c_words_stay_read_only(command):
+    assert all(s.read_only for s in _segments(command))
+
+
+@pytest.mark.parametrize("command,joined", [
+    ("echo $'a\\'b' ; ls", "echo 'a'\\''b' ; ls"),
+    ("echo $'a\\tb'", "echo 'a\tb'"),
+    ("echo $'\\x41\\101'", "echo 'AA'"),
+    ('echo "$\'x\'"', 'echo "$\'x\'"'),
+    ("echo '$'\\''x'", "echo '$'\\''x'"),
+    ('echo $"a"', 'echo "a"'),
+])
+def test_ansi_c_words_are_decoded_into_plain_single_quotes(command, joined):
+    from localharness.agent.shell_classify import _join_continuations
+
+    assert _join_continuations(command) == joined
+
+
+def test_an_ansi_c_operator_is_not_a_heredoc():
+    """`<<E` inside `$'…\\''…` is text; a heredoc scanner that closed the string at `\\'` read it as one."""
+    command = "echo $'a\\'<<E'\ntouch y\nE"
+    assert "touch" in [s.signature for s in _segments(command)]
+
+
+def test_a_brace_that_is_not_a_group_does_not_swallow_the_rest():
+    assert "touch" in [s.signature for s in _segments("{#;touch y")]
+    assert "touch" in [s.signature for s in _segments("echo {a; touch y")]
+    assert [s.signature for s in _segments("{ ls; }; touch y")] == ["ls", "touch"]
+    assert [s.signature for s in _segments("f() { echo {a,b}; }; f")] == ["echo", "f"]
