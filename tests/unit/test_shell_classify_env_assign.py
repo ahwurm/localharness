@@ -132,6 +132,13 @@ LEAVES_THE_TIER = [
     "PATH=./d timeout 5 ls",
     "env PATH=./d ls",
     "A=1 PATH=./d ls",
+    # WR-55 / IN-01: a command-valued variable naming a program by path is a file the workspace controls
+    "GIT_EXTERNAL_DIFF=./cat git diff",
+    "GIT_PAGER=bin/cat git -p log",
+    "GIT_SSH_COMMAND=./cat git log",
+    "GIT_PAGER=/tmp/cat git log",
+    "PAGER=./sort git log",
+    "GIT_PAGER='cat; ./x' git log",
 ]
 
 

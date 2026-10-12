@@ -818,7 +818,9 @@ closed is the rule; the warning is what keeps it from being a silent regression 
 - **The environment rule has residuals.** `source` and `.`, assignments made inside `eval`, function
   bodies that assign, aliases and `enable -f` are not followed as environment carriers. An "always"
   answer given to a plain signature such as `ls` also covers a later `PATH=… ls`, because the
-  signature does not change. On the `git_read` side: `remote.*.uploadpack`, `remote.*.receivepack`,
+  signature does not change. A program written as a path signs as its name, so `./d/ls` reads as
+  `ls`; the six command-valued variables above are the one place a path never keeps the read-only
+  tier. On the `git_read` side: `remote.*.uploadpack`, `remote.*.receivepack`,
   `gpg.*.program` and `core.gitProxy` are not on the dangerous git key list; a hard link inside
   `.git` looks exactly like a copy and is not refused (a symbolic link out of the git directories
   is); a worktree-reading `diff` may refresh `.git/index`, git's own stat cache inside the root,
