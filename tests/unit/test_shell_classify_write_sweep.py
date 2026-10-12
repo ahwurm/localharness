@@ -206,3 +206,152 @@ def test_git_grep_without_a_pager_is_not_inline():
 @pytest.mark.parametrize("command", [c for c, _ in ORDINARY_READS])
 def test_ordinary_reads_stay_allow_in_every_mode(command, mode, ws):
     assert _verdict(command, ws, mode).verdict is Verdict.ALLOW
+
+
+# ------------------------------------------------------------------ sed: the script is read
+
+SED_TARGET_ROWS = [
+    ("sed -n 'w out' f", ("out",)),
+    ("sed -n 'W out' f", ("out",)),
+    ("sed 's/a/b/w out' f", ("out",)),
+    ("sed -n '/x/w out' f", ("out",)),
+    ("sed -n -e 'w out' f", ("out",)),
+    ("sed -n --expression='w out' f", ("out",)),
+    ("sed -ne 'w out' f", ("out",)),
+    ("sed -n -e p -e 'w out' f", ("out",)),
+    ("sed -n 'w /dev/stdout' f", ("/dev/stdout",)),
+    ("sed -i 's/a/b/w log' f", ("f", "log")),
+    ("sed -i 's/a/b/' f", ("f",)),
+    ("sed 's/a/b/' f", ()),
+    ("sed -n 'p;w out' f", ("out",)),
+    ("sed -n '1d;$!{w out\n}' f", ("out",)),
+    ("sed -n ': x w out' f", ("out",)),
+]
+
+
+@pytest.mark.parametrize("command,expected", SED_TARGET_ROWS)
+def test_sed_script_targets(command, expected):
+    assert _targets(command) == expected
+
+
+SED_INLINE_ROWS = [
+    "sed -n '1e cmd' f",
+    "sed e f",
+    "sed 's/a/b/e' f",
+    "sed -n -f script.sed f",
+    "sed --file=s.sed f",
+    "sed -nf script.sed f",
+    "sed -n --frobnicate p f",
+    "sed -n 's/a' f",
+    "sed -n 'k' f",
+    "sed -n '/x' f",
+    "sed -n 'y/abc/xy' f",
+    "sed -n 'w' f",
+    "sed --s p f",
+]
+
+
+@pytest.mark.parametrize("command", SED_INLINE_ROWS)
+def test_sed_that_runs_a_command_or_cannot_be_read_is_inline(command):
+    (segment,) = _segments(command)
+    assert segment.inline_interpreter is True
+    assert segment.read_only is False
+
+
+SED_ORDINARY_READS = [
+    "sed -n p f",
+    "sed -n '/where/p' f",
+    "sed -n -e p f",
+    "sed -n '1,40p' f",
+    "sed -n '10,20p;30q' f",
+    "sed -n '/start/,/end/p' f",
+    "sed -n '$p' f",
+    "sed -n '5{p;q}' f",
+    "sed -n '2~3p' f",
+    "sed -n '0,/re/p' f",
+    "sed -n '/a/!p' f",
+    "sed -n 's/x/y/p' f",
+    "sed -n 's|a/b|c|gp' f",
+    r"sed -E -n 's/(a)/\1/p' f",
+    "sed -n '/^#/d; p' f",
+    "sed -n '/re/Ip' f",
+    "sed -n 'l' f",
+    "sed -n '/x/{=;p}' f",
+    "sed -n 'y/abc/xyz/;p' f",
+    "sed --quiet p f",
+    "sed -n '2,+3p' f",
+    "sed -n '/x/,~4p' f",
+    "sed -n 'a hello' f",
+    "sed -n 'q5' f",
+    "sed -n -e '$!N' -e p f",
+]
+
+
+@pytest.mark.parametrize("command", SED_ORDINARY_READS)
+def test_ordinary_sed_reads_keep_their_class(command):
+    (segment,) = _segments(command)
+    assert segment.signature == "sed -n"
+    assert segment.read_only is True
+    assert segment.write_targets == ()
+    assert segment.inline_interpreter is False
+
+
+def test_a_regex_that_contains_a_w_is_not_a_write_command():
+    """Pitfall 11: the script is parsed, never substring-matched."""
+    assert _targets("sed -n '/w out/p' f") == ()
+    assert _targets("sed -n 's/w x/e y/p' f") == ()
+
+
+def test_plain_sed_substitution_keeps_its_bare_signature():
+    (segment,) = _segments("sed 's/a/b/' f")
+    assert segment.signature == "sed"
+    assert segment.write_targets == () and segment.inline_interpreter is False
+
+
+def test_sed_e_asks_interpreter_inline_in_guarded(ws):
+    result = _verdict("sed -n '1e cmd' f", ws, "guarded")
+    assert result.verdict is Verdict.ASK
+    assert result.request is not None and result.request.klass == "interpreter-inline"
+
+
+def test_sed_e_is_denied_read_only(ws):
+    assert _verdict("sed -n '1e cmd' f", ws, "read-only").verdict is Verdict.DENY
+
+
+def test_sed_w_into_a_protected_path_asks_in_auto(ws):
+    result = _verdict("sed -n 'w ~/.bashrc' f", ws, "auto")
+    assert result.verdict is Verdict.ASK
+    assert result.request is not None and result.request.klass == "protected-path"
+
+
+@pytest.mark.parametrize("command", SED_ORDINARY_READS)
+def test_ordinary_sed_reads_stay_allow_in_every_mode(command, ws):
+    for mode in ("auto", "guarded", "trusted", "read-only", "unattended"):
+        assert _verdict(command, ws, mode).verdict is Verdict.ALLOW, (command, mode)
+
+
+def test_sed_append_text_continues_only_over_an_odd_backslash():
+    """`a text\\` continues onto the next line (that line is text); `a text\\\\` does not (the next
+    line is a command, and here a write)."""
+    assert _targets("sed -n 'a foo\\\nw out' f") == ()
+    assert _targets("sed -n 'a foo\\\\\nw out' f") == ("out",)
+
+
+def test_sed_in_place_suffix_ends_the_cluster():
+    """`-ie` is `-i` with the suffix `e`, not an `-e` script; `-i.bak` likewise."""
+    assert _targets("sed -ie 's/a/b/' f") == ("f",)
+    assert _targets("sed -i.bak 's/a/b/' f") == ("f",)
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("echo 'a\\\nb'", ("echo", "a\\\nb")),   # single quotes keep the pair
+    ('echo "a\\\nb"', ("echo", "ab")),        # double quotes drop it
+    ("echo a\\\nb", ("echo", "ab")),          # so does the bare shell
+    ("echo a\\\\\nb", ("echo", "a\\", "b")),  # `\\` is a pair: the newline after it is real
+])
+def test_backslash_newline_is_joined_the_way_the_shell_joins_it(command, expected):
+    """The sed scanner reads quoted scripts, so the pre-pass must not glue their lines together."""
+    argv = tuple(
+        token for segment in _segments(command) for token in segment.argv
+    )
+    assert argv[: len(expected)] == expected
