@@ -39,13 +39,25 @@ from localharness.config.overlay import (
 from localharness.config.paths import resolve_config_dir
 from localharness.config.project_records import Notice, notice_value
 from localharness.config.redact import (
-    SECRET_MASK, at_secret, scrub, secret_values, yaml_problem, yaml_where,
+    SECRET_MASK, at_secret, scrub, secret_paths, secret_values, yaml_problem, yaml_where,
 )
 from localharness.config.plugin_sections import (
     CORE_AGENT_KEYS, CORE_HARNESS_KEYS, split_plugin_keys, unowned_hint,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _narrowing_notice(subject: str, file: Any, value: Any, text: str) -> Notice:
+    """One narrowing as a Notice. A rejected value at (or holding) a secret field, whether the
+    leaf (`provider.api_key`) or a whole section dropped around it (`server`), is stored as a
+    digest rather than its repr: the store is a second at-rest file the redactor does not know."""
+    parts = tuple(subject.split("."))
+    secret = any(
+        all(want in ("*", got) for want, got in zip(path, parts))
+        for model in (HarnessConfig, AgentConfig) for path in secret_paths(model)
+    )
+    return Notice("narrowing", subject, str(file), notice_value(value, secret=secret), text)
 
 
 # ------------------------------------------------------------------ #
@@ -1025,7 +1037,7 @@ class ConfigLoader:
 
     def _add_notice(self, subject: str, file: Any, value: Any, text: str) -> None:
         """Record one narrowing as a Notice, once however often the same value is rejected."""
-        notice = Notice("narrowing", subject, str(file), notice_value(value), text)
+        notice = _narrowing_notice(subject, file, value, text)
         if notice not in self.notices:
             self.notices.append(notice)
 
@@ -2723,7 +2735,7 @@ class ConfigLoader:
                 if notices is None:
                     self._add_notice(subject, file, value, note)
                 else:
-                    notices(Notice("narrowing", subject, str(file), notice_value(value), note))
+                    notices(_narrowing_notice(subject, file, value, note))
             self._narrow_builtin_overlay(merged, base, name, raw, report)
         return self._validate_dict(AgentConfig, merged, str(path), text)
 
