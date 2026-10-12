@@ -2755,6 +2755,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             counts.append(entity("tool", mcp_str))
         if plugins_loaded > 0:
             counts.append(entity("tool", f"{plugins_loaded} plugin{'s' if plugins_loaded != 1 else ''}"))
+        if instructions_handle is not None and instructions_handle.summary_entity:
+            # D-54: the file in force (or why not) is named in the counts the person already reads;
+            # no new line. "config" is the closest existing entity kind.
+            counts.append(entity("config", instructions_handle.summary_entity))
         summary_line = " -- ".join(parts + [", ".join(counts)])
         if warnings:
             # escape() via entity(): a warning is an exception string the user's environment

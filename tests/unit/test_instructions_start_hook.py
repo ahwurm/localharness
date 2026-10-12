@@ -447,3 +447,129 @@ async def test_acp_hands_the_handle_to_the_trust_question_and_to_serve(
     assert trust_kw["instructions"] is handle
     assert serve_kw["instructions"] is handle
     assert acp.instructions_on_delivered == handle.on_delivered
+
+
+# ------------------------------------------------------------------ the summary counts (Task 3)
+
+
+def _summary(printed: list[str]) -> str:
+    """The one startup summary line (it carries the startup timing)."""
+    (line,) = [p for p in printed if "s startup)" in p]
+    return line
+
+
+def _seed_yes(proj: Path):
+    from localharness.config.project_records import accept_instructions, first_candidate
+
+    root = proj.resolve()
+    candidate = first_candidate(root)
+    assert candidate is not None
+    return root, accept_instructions(root, candidate)
+
+
+async def _printed_summary(printed: list[str]) -> str:
+    await _drive()
+    return _summary(printed)
+
+
+def _capture(monkeypatch) -> list[str]:
+    printed: list[str] = []
+    monkeypatch.setattr(
+        start_cmd.console, "print", lambda *a, **k: printed.append(" ".join(str(x) for x in a)))
+    return printed
+
+
+async def test_a_second_start_names_the_file_and_prints_no_instructions_line(
+        tmp_path, monkeypatch, fake_home):
+    proj, _ws = _trusted_project(tmp_path, monkeypatch, fake_home)
+    _seed_yes(proj)
+    printed = _capture(monkeypatch)
+    _install_recorders(monkeypatch)
+
+    summary = await _printed_summary(printed)
+
+    assert "CLAUDE.md" in summary
+    assert "(off)" not in summary and "(too large)" not in summary
+    assert not [p for p in printed if "Using CLAUDE.md" in p]
+
+
+async def test_the_first_start_also_names_the_file_without_a_printed_line(
+        tmp_path, monkeypatch, fake_home):
+    _trusted_project(tmp_path, monkeypatch, fake_home)
+    printed = _capture(monkeypatch)
+    _install_recorders(monkeypatch)
+
+    summary = await _printed_summary(printed)
+
+    assert "CLAUDE.md" in summary
+    assert not [p for p in printed if "Using CLAUDE.md" in p]
+
+
+async def test_a_recorded_off_reads_off(tmp_path, monkeypatch, fake_home):
+    from dataclasses import replace
+
+    from localharness.config.project_records import write_instructions
+
+    proj, _ws = _trusted_project(tmp_path, monkeypatch, fake_home)
+    root, record = _seed_yes(proj)
+    write_instructions(root, replace(record, state="off"))
+    printed = _capture(monkeypatch)
+    _install_recorders(monkeypatch)
+
+    assert "CLAUDE.md (off)" in await _printed_summary(printed)
+
+
+async def test_a_model_edit_reads_model_edit(tmp_path, monkeypatch, fake_home):
+    from dataclasses import replace
+
+    from localharness.config.project_records import write_instructions
+
+    proj, _ws = _trusted_project(tmp_path, monkeypatch, fake_home)
+    root, record = _seed_yes(proj)
+    # The file now holds bytes the model wrote: the record still binds the older digest and
+    # names the new bytes as refused.
+    new_text = "# Rules\nThe model wrote this.\n"
+    (proj / "CLAUDE.md").write_text(new_text, encoding="utf-8")
+    import hashlib
+
+    write_instructions(root, replace(
+        record, harness_written=hashlib.sha256(new_text.encode()).hexdigest()))
+    printed = _capture(monkeypatch)
+    _install_recorders(monkeypatch)
+
+    assert "CLAUDE.md (model edit; /instructions on)" in await _printed_summary(printed)
+
+
+async def test_a_file_over_the_window_share_reads_too_large(tmp_path, monkeypatch, fake_home):
+    _trusted_project(tmp_path, monkeypatch, fake_home, text="x" * 300_000)
+    printed = _capture(monkeypatch)
+    _install_recorders(monkeypatch)
+
+    assert "CLAUDE.md (too large)" in await _printed_summary(printed)
+
+
+async def test_no_candidate_means_no_entity(tmp_path, monkeypatch, fake_home):
+    _home, _g, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
+    trust.record_trust(_project(ws), True)
+    printed = _capture(monkeypatch)
+    _install_recorders(monkeypatch)
+
+    assert "CLAUDE.md" not in await _printed_summary(printed)
+
+
+async def test_a_declined_root_has_no_entity(tmp_path, monkeypatch, fake_home):
+    proj, _ws = _trusted_project(tmp_path, monkeypatch, fake_home)
+    trust.record_trust(proj, False)
+    printed = _capture(monkeypatch)
+    _install_recorders(monkeypatch)
+
+    assert "CLAUDE.md" not in await _printed_summary(printed)
+
+
+async def test_awaiting_trust_with_no_record_has_no_entity(tmp_path, monkeypatch, fake_home):
+    _home, _g, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
+    _put_instructions(_project(ws))
+    printed = _capture(monkeypatch)
+    _install_recorders(monkeypatch)
+
+    assert "CLAUDE.md" not in await _printed_summary(printed)
