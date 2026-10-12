@@ -928,6 +928,52 @@ def test_a_corrupt_store_under_a_running_sitting_is_not_a_fresh_root(instruction
     assert text is None and notice.reason == "record lost"
 
 
+# --------------------------------------------------------------------------- WR-07/WR-55: a mark is not a record seen
+
+
+def test_a_mark_in_a_sitting_that_never_had_a_record_is_not_a_record_lost_awaiting_trust(
+    instructions_home, tmp_path,
+):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _open(root, basis="awaiting_trust")
+    assert h.section(WINDOW) == (None, None)
+    h.mark_pending()  # a call that names the file
+    assert h.section(WINDOW) == (None, None)  # no "record lost": no record ever existed
+
+
+def test_a_mark_under_no_input_without_a_record_is_not_a_record_lost(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _open(root, no_input=True)
+    assert h.section(WINDOW) == (None, None)
+    h.mark_pending()
+    assert h.section(WINDOW) == (None, None)
+    assert not store_file().exists()
+
+
+def test_no_input_on_then_a_mark_keeps_the_file_in_use_every_turn(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    h = _open(root, no_input=True)
+    assert run_instructions_command(h, "on").startswith("using CLAUDE.md")
+    assert h.section(WINDOW) == (TEXT, None)
+    h.mark_pending()  # a harness call that names the file; the person's yes stands
+    assert h.section(WINDOW) == (TEXT, None)
+    assert h.section(WINDOW) == (TEXT, None)  # not dropped from the first turn end on
+    assert run_instructions_command(h, "on").startswith("using CLAUDE.md")
+    assert h.section(WINDOW) == (TEXT, None)
+    assert not h._marked
+
+
+def test_a_mark_does_not_pre_empt_the_not_owned_line(instructions_home, tmp_path, monkeypatch):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT})
+    monkeypatch.setattr(os, "geteuid", lambda: os.stat(root / "CLAUDE.md").st_uid + 1)
+    h = _open(root)
+    h.mark_pending()
+    text, notice = h.section(WINDOW)
+    assert text is None
+    assert notice is not None and notice.reason == "not owned by you"
+    assert notice.text == "CLAUDE.md not used (not owned by you); /instructions on"
+
+
 # --------------------------------------------------------------------------- WR-01: a recorded file that is gone
 
 
