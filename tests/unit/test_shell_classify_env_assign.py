@@ -266,3 +266,118 @@ def test_path_redirected_ls_is_denied_read_only_and_allowed_in_auto(ws):
 @pytest.mark.parametrize("command", ["GIT_PAGER=cat git log", "PAGER= git log", "LANG=C ls"])
 def test_harmless_assignments_stay_allow_in_every_mode(command, mode, ws):
     assert _verdict(command, ws, mode).verdict is Verdict.ALLOW
+
+
+# --------------------------------------------------------------------------- carried forms
+
+CARRIED_LEAVES = [
+    "PATH=./d; ls",
+    "PATH=./d && ls",
+    "PATH=./d\nls",
+    "PATH=./d || ls",
+    "export PATH=./d && ls",
+    "export PATH=./d; ls",
+    "declare PATH=./d; ls",
+    "declare -x PATH=./d; ls",
+    "typeset PATH=./d; ls",
+    "readonly PATH=./d; ls",
+    "local PATH=./d; ls",
+    "printf -v PATH ./d; ls",
+    "printf -vPATH ./d; ls",
+    "printf -v GIT_PAGER x; git log",
+    "read PATH < f; ls",
+    "read -a PATH < f; ls",
+    "read -r PATH < f; ls",
+    "read -p prompt PATH < f; ls",
+    "hash -p ./evil_ls ls; ls",
+    "hash -rp ./evil_ls ls; ls",
+    "builtin export PATH=./d; ls",
+    "command export PATH=./d; ls",
+    "export GIT_CONFIG_PARAMETERS=\"'diff.external'='x'\"; git diff",
+    "PATH=cat; git diff CLAUDE.md",
+    "{ PATH=./d; }; ls",
+    "PATH=./d > out; ls",
+    "export A=1 PATH=./d; ls",
+    "export GIT_PAGER='cat; rm x'; git log",
+]
+
+
+def _tail(command: str):
+    """The segment(s) that follow the assignment: everything that is not the carrier itself."""
+    return [s for s in _segments(command) if s.signature in {"ls", "git log", "git diff"}]
+
+
+@pytest.mark.parametrize("command", CARRIED_LEAVES)
+def test_a_redirecting_assignment_earlier_in_the_sequence_taints_what_follows(command):
+    tail = _tail(command)
+    assert tail, command
+    for segment in tail:
+        assert segment.env_redirect is True and segment.read_only is False, (command, segment)
+
+
+CARRIED_KEEPS = [
+    "export GIT_PAGER=cat; git log",
+    "( PATH=./d ); ls",
+    "f() { PATH=./d; }; ls",
+    "export A=1; ls",
+    "X=1; ls",
+    "export GIT_CONFIG_NOSYSTEM=1; git log",
+    "read REPLY < f; ls",
+    "read -r line < f; ls",
+    "printf -v out x; ls",
+    "printf -v GIT_CONFIG_NOSYSTEM 1; git log",
+    "hash -r; ls",
+    "hash ls; ls",
+    "GIT_PAGER=cat; git log",
+    "echo PATH=./d; ls",
+    "export -n; ls",
+]
+
+
+@pytest.mark.parametrize("command", CARRIED_KEEPS)
+def test_assignments_that_do_not_redirect_or_do_not_outlive_their_scope_keep_the_tier(command):
+    tail = _tail(command)
+    assert tail, command
+    for segment in tail:
+        assert segment.env_redirect is False and segment.read_only is True, (command, segment)
+
+
+def test_an_inline_assignment_does_not_outlive_its_command():
+    first, second = _tail("PATH=./d ls; ls")
+    assert first.env_redirect is True and first.read_only is False
+    assert second.env_redirect is False and second.read_only is True
+
+
+def test_a_subshell_assignment_taints_inside_the_subshell_only():
+    inside, outside = _tail("( PATH=./d; ls ); ls")
+    assert inside.env_redirect is True and inside.read_only is False
+    assert outside.env_redirect is False and outside.read_only is True
+
+
+def test_a_brace_group_shares_the_flag_with_the_rest_of_the_line():
+    (segment,) = _tail("{ PATH=./d; }; ls")
+    assert segment.env_redirect is True
+
+
+def test_dropped_segments_still_drop_only_the_carrier_moved():
+    classified = classify_shell("PATH=cat; git diff CLAUDE.md", SETTINGS)
+    assert classified.dropped == ("PATH=cat",)
+    assert [s.signature for s in classified.segments] == ["git diff"]
+    assert classified.segments[0].env_redirect is True
+
+
+def test_export_with_a_substitution_is_still_classified_by_its_inner_command():
+    segments = _segments("export X=$(rm -rf ~)")
+    assert any(s.destructive for s in segments)
+
+
+def test_a_layer_added_name_is_carried_too():
+    settings = GateSettings(exec_redirect_env_vars=(*EXEC_REDIRECT_ENV_VARS_DEFAULT, "MY_TOOL"))
+    (segment,) = [s for s in _segments("export MY_TOOL=1; ls", settings) if s.signature == "ls"]
+    assert segment.env_redirect is True
+
+
+def test_carried_forms_ask_in_guarded_and_deny_read_only(ws):
+    assert _verdict("PATH=./d; ls", ws, "guarded").verdict is Verdict.ASK
+    assert _verdict("export PATH=./d && ls", ws, "read-only").verdict is Verdict.DENY
+    assert _verdict("export GIT_PAGER=cat; git log", ws, "read-only").verdict is Verdict.ALLOW
