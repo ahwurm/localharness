@@ -357,7 +357,9 @@ HEREDOCS: list[tuple[str, tuple[str, ...]]] = [
     (HEREDOC_BODY_TRAP, ("cat",)),
     ("cat <<'EOF' > /etc/passwd\nrm -rf /\nEOF", ("cat",)),
     ("cat <<-EOF\n\trm -rf /\n\tEOF\nls", ("cat", "ls")),
-    ("cat <<EOF\nrm -rf /\n", ("cat",)),  # unterminated: body runs to the end
+    # unterminated: bash would read the body to the end, but a delimiter this reader got wrong would
+    # look the same, so the lines are classified as the commands they would be (CR-01, iteration 3)
+    ("cat <<EOF\nrm -rf /\n", ("cat", "rm -rf")),
     ("python3 - <<EOF\nimport os\nEOF\nls", ("python3", "ls")),
     ("cat <<EOF\nrm -rf /\nEOF\nrm -rf real", ("cat", "rm -rf")),
 ]

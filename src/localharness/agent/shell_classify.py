@@ -117,11 +117,6 @@ delimiter line. Scanning it as a heredoc is the R1 bug — the scanner skipped `
 ``<`` and then read the SECOND ``<`` as the start of a ``<<`` operator, took the rest of the line
 as a delimiter word, and swallowed every following line as a body (bash(1) "Here Strings")."""
 
-ARITHMETIC_OPENERS = ("$((", "((")
-"""``$((expr))`` and ``((expr))`` are arithmetic, where ``<<`` is the left-shift OPERATOR. Their
-contents are never scanned for heredoc operators, so ``echo $((1<<2)); rm -rf x`` keeps the ``rm``
-visible instead of feeding it to a phantom heredoc body (bash(1) "Arithmetic Expansion")."""
-
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 """``K=V`` prefix form. PRD §3.2 step 4: ``env`` skips these before the wrapped command."""
 
@@ -714,7 +709,7 @@ def classify_shell(command: str, settings: GateSettings) -> ShellClassification:
 
     Pure: the same string and settings always produce the same classification.
     """
-    segments, dropped = _classify_command_text(_strip_heredocs(command), settings)
+    segments, dropped = _classify_command_text(command, settings)
     return ShellClassification(segments=tuple(segments), dropped=tuple(dropped))
 
 
@@ -734,13 +729,15 @@ a ``#`` a comment where bash did not (``[[ a =~ (a|#b) ]]; rm x``, ``shopt -s ex
 ``(( 0 # )); rm x``). The command is then classified a second time with comments left in, and the
 verdicts are the union (:func:`_classify_command_text`). A comment without them has nothing to hide."""
 
-_JOIN_TOP, _JOIN_PAREN, _JOIN_ARITH, _JOIN_BACKTICK, _JOIN_PARAM, _JOIN_FUNSUB = range(6)
+_JOIN_TOP, _JOIN_PAREN, _JOIN_ARITH, _JOIN_BACKTICK, _JOIN_PARAM, _JOIN_FUNSUB, _JOIN_BRACKET = range(7)
 """The contexts :class:`_JoinScan` tells apart: the command text itself; a ``$(…)`` / ``<(…)`` / ``>(…)``
 body; a ``$((…))`` body; a backtick body; a ``${…}`` parameter expansion; a bash 5.3 ``${ cmd; }`` /
-``${| cmd; }`` body. Each is a fresh shell context with its own quote, comment and continuation state."""
+``${| cmd; }`` body; a deprecated ``$[…]`` arithmetic body. Each is a fresh shell context with its own
+quote, comment, continuation and heredoc state."""
 
 _JOIN_CLOSERS = {
     _JOIN_PAREN: ")", _JOIN_ARITH: ")", _JOIN_BACKTICK: "`", _JOIN_PARAM: "}", _JOIN_FUNSUB: "}",
+    _JOIN_BRACKET: "]",
 }
 
 
@@ -811,12 +808,103 @@ def _ansi_c_as_single_quoted(text: str, index: int) -> tuple[str, int, bool]:
     return quoted, end, closed
 
 
+def _is_arithmetic(text: str, first: int) -> bool:
+    """Is the ``((`` whose first ``(`` is at ``first`` arithmetic (CR-54, CR-03)?
+
+    Bash reads ``((…))`` (and ``$((…))``) as arithmetic only when the inner ``(`` closes right before
+    the outer one: ``$((1+2))`` is a number, ``$((ls); rm x)`` is a command substitution that starts
+    with a subshell and ``$((1+2)*3)`` falls back to one too. Anything that does not balance is not
+    arithmetic, so the unbalanced-text ask applies to it."""
+    outer = _matching(text, first)
+    if outer >= len(text):
+        return False
+    return _matching(text, first + 1) + 1 == outer
+
+
+HEREDOC_KINDS = (_JOIN_TOP, _JOIN_PAREN, _JOIN_BACKTICK, _JOIN_FUNSUB)
+"""The contexts in which a ``<<`` is a heredoc operator. In arithmetic, ``$[…]`` and ``${…}`` it is a
+shift or text (CR-03)."""
+
+IDENTIFIER_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+"""What may stand right before the ``[`` of an array subscript, ``a[1<<1]=3``: inside it ``<<`` shifts."""
+
+
+def _read_heredoc_delimiter(text: str, index: int) -> tuple[str, bool, int, bool]:
+    """Read the word after ``<<`` / ``<<-``: (the delimiter, whether any of it was quoted, the end, ok).
+
+    The delimiter is the word with its quoting removed, as bash does: ``'E'``, ``"E"``, ``\\E``,
+    ``$'E'`` (decoded, ``$'E\\x46'`` is ``EF``) and ``$"E"`` all give ``E``; any quoting at all makes
+    the body literal data (``quoted``). A backslash-newline inside the word is a continuation and
+    joins the lines first. The word ends at a blank or an operator (:data:`HEREDOC_WORD_STOPS`), but
+    a newline inside quotes belongs to it. ``ok`` is False when a quote never closes."""
+    chars: list[str] = []
+    quoted = False
+    size = len(text)
+    while index < size:
+        char = text[index]
+        if char in " \t\n" or char in HEREDOC_WORD_STOPS:
+            break
+        if char == "\\":
+            if text[index + 1 : index + 2] == "\n":
+                index += 2
+                continue
+            quoted = True
+            chars.append(text[index + 1 : index + 2])
+            index += 2
+            continue
+        if char == "$" and text[index + 1 : index + 2] == "'":
+            decoded, index, closed = _decode_ansi_c(text, index + 2)
+            quoted = True
+            chars.append(decoded)
+            if not closed:
+                return "".join(chars), quoted, index, False
+            continue
+        if char == "$" and text[index + 1 : index + 2] == '"':
+            index += 1
+            continue
+        if char == "'":
+            end = text.find("'", index + 1)
+            if end == -1:
+                return "".join(chars), True, size, False
+            quoted = True
+            chars.append(text[index + 1 : end])
+            index = end + 1
+            continue
+        if char == '"':
+            index += 1
+            quoted = True
+            while index < size and text[index] != '"':
+                if text[index] == "\\" and text[index + 1 : index + 2] in ('$', '`', '"', "\\", "\n"):
+                    if text[index + 1] != "\n":
+                        chars.append(text[index + 1])
+                    index += 2
+                    continue
+                chars.append(text[index])
+                index += 1
+            if index >= size:
+                return "".join(chars), True, size, False
+            index += 1
+            continue
+        chars.append(char)
+        index += 1
+    return "".join(chars), quoted, index, True
+
+
 class _JoinScan:
-    """One recursive pass over the command text: continuations dropped, comments stripped.
+    """One recursive pass over the command text: continuations dropped, comments stripped, heredoc
+    bodies removed.
 
     ``balanced`` ends False when a quote, a backtick, a ``$(``, a ``${`` is still open at the end of its
-    context. Bash refuses such a line, so nothing the text names would run; the classifier cannot trust
-    its own reading of it either, and :func:`_join_continuations` says so (CR-54 / WR-01).
+    context, or when the scan met a layout it cannot read with certainty (a heredoc whose line carries
+    a newline inside a nested ``$(``). Bash refuses the first and the classifier cannot trust its own
+    reading of either, and :func:`_join_continuations` says so (CR-54 / WR-01).
+
+    Heredocs are read here, in the one pass that already follows quotes, continuations, comments and
+    nested contexts, not by a pass of their own over physical lines (CR-01 / CR-52): an operator seen
+    inside a quote, a comment, arithmetic or a subscript is text; one seen anywhere else queues its
+    delimiter, and the body starts after the next real newline of the SAME context, so a heredoc inside
+    ``"$(cat <<'EOF' … EOF )"`` or a lifted payload is stripped before its text is read as quoting
+    (WR-01 / WR-51).
     """
 
     def __init__(self, text: str, strip_comments: bool = True) -> None:
@@ -837,7 +925,10 @@ class _JoinScan:
         out: list[str] = []
         quote = ""
         word_start = True  # judged on the JOINED text: `a\\` newline `#b` is the word `a#b`
-        nested = 0  # `(` open inside a $( body, or `{` open inside a funsub body
+        nested = 0  # `(` open inside a $( body, `[` inside a $[ body, or `{` open inside a funsub body
+        groups = 0  # bare `( … )` groups open in this context: the `)` that closes one ends a word
+        bracket = 0  # `name[` subscripts open on this line: `<<` inside is a shift
+        pending: list[list] = []  # heredocs whose body starts at the next newline: [delimiter, dash, expand, slot]
         comments = self.strip_comments and kind in (
             _JOIN_TOP, _JOIN_PAREN, _JOIN_BACKTICK, _JOIN_FUNSUB
         )
@@ -861,7 +952,7 @@ class _JoinScan:
                     return "".join(out), True
                 out.append(char)
                 self.index += 1
-                self._nested(out, _JOIN_BACKTICK)
+                self._nested(out, _JOIN_BACKTICK, bool(pending))
                 word_start = False
                 continue
             if char == "$":
@@ -878,10 +969,12 @@ class _JoinScan:
                     self.index += 1  # `$"…"` is the double-quoted string; the `$` is not part of it
                     continue
                 if following == "(":
-                    inner = _JOIN_ARITH if text[index + 2 : index + 3] == "(" else _JOIN_PAREN
+                    inner = _JOIN_PAREN
+                    if text[index + 2 : index + 3] == "(" and _is_arithmetic(text, index + 1):
+                        inner = _JOIN_ARITH
                     out.append("$(")
                     self.index += 2
-                    self._nested(out, inner)
+                    self._nested(out, inner, bool(pending))
                     word_start = False
                     continue
                 if following == "{":
@@ -889,7 +982,13 @@ class _JoinScan:
                     inner = _JOIN_FUNSUB if after and after in " \t\n|" else _JOIN_PARAM
                     out.append("${")
                     self.index += 2
-                    self._nested(out, inner)
+                    self._nested(out, inner, bool(pending))
+                    word_start = False
+                    continue
+                if following == "[":
+                    out.append("$[")  # deprecated arithmetic: `<<` inside is a shift (CR-03)
+                    self.index += 2
+                    self._nested(out, _JOIN_BRACKET, bool(pending))
                     word_start = False
                     continue
             if quote == '"':
@@ -903,14 +1002,50 @@ class _JoinScan:
                 self.index += 1
                 word_start = False
                 continue
+            if char == "<" and text.startswith("<<", index):
+                if text.startswith(HERE_STRING_OPERATOR, index):
+                    out.append(HERE_STRING_OPERATOR)
+                    self.index += len(HERE_STRING_OPERATOR)
+                    word_start = False
+                    continue
+                if kind in HEREDOC_KINDS and not bracket:
+                    self._heredoc_operator(out, pending)
+                    word_start = True
+                    continue
             if char in "<>" and text[index + 1 : index + 2] == "(":
                 out.append(char + "(")
                 self.index += 2
-                self._nested(out, _JOIN_PAREN)
+                self._nested(out, _JOIN_PAREN, bool(pending))
                 word_start = False
+                continue
+            if (
+                char == "(" and word_start and kind in HEREDOC_KINDS
+                and text[index + 1 : index + 2] == "(" and _is_arithmetic(text, index)
+            ):
+                out.append("(")  # `(( 1 << 2 ))`: arithmetic, opaque to comments and heredocs (CR-03)
+                self.index += 1
+                self._nested(out, _JOIN_ARITH, bool(pending))
+                word_start = False
+                continue
+            if char == "\n":
+                out.append(char)
+                self.index += 1
+                word_start = True
+                bracket = 0
+                if pending:
+                    self._heredoc_bodies(out, pending)
+                    pending = []
                 continue
             if kind in (_JOIN_PAREN, _JOIN_ARITH) and char in "()":
                 if char == "(":
+                    nested += 1
+                elif nested:
+                    nested -= 1
+                else:
+                    self.index += 1
+                    return "".join(out), True
+            elif kind == _JOIN_BRACKET and char in "[]":
+                if char == "[":
                     nested += 1
                 elif nested:
                     nested -= 1
@@ -940,21 +1075,86 @@ class _JoinScan:
                     self.hazard = True
                 self.index = end
                 continue
+            previous = out[-1][-1:] if out else ""
+            if char == "[" and previous and previous in IDENTIFIER_CHARS:
+                bracket += 1
+            elif char == "]" and bracket:
+                bracket -= 1
             out.append(char)
             self.index += 1
-            word_start = char in BASH_BLANKS or char in COMMENT_WORD_STARTS
+            group_closed = False
+            if char == "(":
+                groups += 1 if word_start else 0
+            elif char == ")" and groups:
+                groups -= 1
+                group_closed = True
+            # A `)` that closes a bare group ends the word, so a `#` after it is a comment
+            # (`(rm x)#c`, `)#<<E`); one that closes `$(`, `x=(` or `@(` never reaches here as a group.
+            word_start = char in BASH_BLANKS or char in COMMENT_WORD_STARTS or group_closed
         if quote:
             self.balanced = False
         return "".join(out), False
 
-    def _nested(self, out: list[str], kind: int) -> None:
-        """Scan a nested context and append its text and closer to ``out``."""
+    def _nested(self, out: list[str], kind: int, outer_pending: bool = False) -> None:
+        """Scan a nested context and append its text and closer to ``out``.
+
+        A newline inside it while the enclosing line still owes a heredoc body is a layout whose body
+        starts are not certain, so the text is flagged instead of guessed (CR-01)."""
+        start = self.index
         body, closed = self.scan(kind)
         out.append(body)
         if closed:
             out.append(_JOIN_CLOSERS[kind])
         else:
             self.balanced = False
+        if outer_pending and "\n" in self.text[start : self.index]:
+            self.balanced = False
+
+    def _heredoc_operator(self, out: list[str], pending: list[list]) -> None:
+        """A ``<<`` / ``<<-`` at ``self.index`` that is a heredoc operator: queue its delimiter.
+
+        The operator and its word are replaced by a blank; the body is taken at the next newline of
+        this context (:meth:`_heredoc_bodies`)."""
+        text = self.text
+        index = self.index + 2
+        dash = text[index : index + 1] == "-"
+        if dash:
+            index += 1
+        while index < len(text) and text[index] in " \t":
+            index += 1
+        delimiter, quoted, end, ok = _read_heredoc_delimiter(text, index)
+        if end == index and ok:
+            out.append("<<")  # no word at all: bash refuses it, and nothing is queued
+            self.index = index
+            return
+        self.index = end
+        out.append(" ")
+        if not ok:
+            self.balanced = False  # an unclosed quote in the delimiter
+            return
+        pending.append([delimiter, dash, not quoted, len(out) - 1])
+
+    def _heredoc_bodies(self, out: list[str], pending: list[list]) -> None:
+        """Consume the bodies of the queued heredocs, which start at ``self.index`` (after a newline).
+
+        A body line ends its heredoc only when it is exactly the delimiter (tabs stripped for ``<<-``;
+        trailing blanks tolerated, which can only end a body EARLIER than bash does). When the
+        delimiter never appears, nothing is consumed: the lines are classified as the commands they
+        would be if the reading were wrong (CR-01), where the old scanner swallowed the rest of the
+        text."""
+        text, size = self.text, len(self.text)
+        for delimiter, dash, _expand, _slot in pending:
+            position = self.index
+            while position < size:
+                newline = text.find("\n", position)
+                line_end = size if newline == -1 else newline
+                line = text[position:line_end]
+                if (line.strip() if dash else line.rstrip()) == delimiter:
+                    break
+                position = line_end + 1
+            else:
+                return
+            self.index = size if newline == -1 else newline + 1
 
 
 def _join_continuations(text: str) -> str:
@@ -1089,121 +1289,6 @@ def _resolve_target(cwd: _Cwd, target: str) -> tuple[str, bool]:
 def _normalize(path: str) -> str:
     """Collapse ``.`` and ``..`` in a joined path, keeping the spelling (tilde included)."""
     return posixpath.normpath(path) if path else path
-
-
-# --------------------------------------------------------------------------- step 1
-
-def _strip_heredocs(command: str) -> str:
-    """PRD §3.2 step 1: remove heredoc bodies (and their operators) before any scan.
-
-    The body is data the command is *writing*; the naive regex that skipped this step
-    flagged 9 of 68 calls in the corpus (PRD §3.2). A body line ends the heredoc only when
-    it is exactly the delimiter — indented or quoted look-alikes inside the text do not, and
-    an unterminated heredoc swallows the rest of the input.
-    """
-    lines = command.split("\n")
-    kept: list[str] = []
-    index = 0
-    while index < len(lines):
-        line, delimiters = _take_heredoc_operators(lines[index])
-        kept.append(line)
-        index += 1
-        for delimiter, dash in delimiters:
-            while index < len(lines):
-                body = lines[index]
-                index += 1
-                candidate = body.strip() if dash else body.rstrip()
-                if candidate == delimiter:
-                    break
-    return "\n".join(kept)
-
-
-def _take_heredoc_operators(line: str) -> tuple[str, list[tuple[str, bool]]]:
-    """Strip ``<<WORD`` / ``<<-WORD`` / ``<<'WORD'`` from one line, returning the delimiters.
-
-    Three shapes carry a ``<<`` that does NOT open a heredoc and must be stepped over whole,
-    or the scan invents a delimiter and eats the rest of the command as its body (finding R1):
-    the here-string :data:`HERE_STRING_OPERATOR`, the arithmetic left shift inside
-    :data:`ARITHMETIC_OPENERS`, and a quoted literal ``<<`` (handled by the quote state below).
-
-    A comment is a fourth (CR-52): from a ``#`` that opens one (:data:`COMMENT_WORD_STARTS`, the same
-    rule :func:`_join_continuations` applies) to the end of the line, ``<<E`` is text. The comment is
-    kept verbatim for the join to drop. The delimiter word ends at a blank or at a shell operator
-    (CR-55): ``cat <<E; rm x`` has the delimiter ``E`` and goes on to run ``rm x``.
-    """
-    out: list[str] = []
-    delimiters: list[tuple[str, bool]] = []
-    index = 0
-    quote: str | None = None
-    word_start = True
-    while index < len(line):
-        char = line[index]
-        if quote:
-            out.append(char)
-            if char == "\\" and quote == '"' and index + 1 < len(line):
-                out.append(line[index + 1])
-                index += 2
-                continue
-            if char == quote:
-                quote = None
-            index += 1
-            continue
-        if char == "\\" and index + 1 < len(line):
-            out.append(line[index : index + 2])
-            index += 2
-            word_start = False
-            continue
-        if char == "#" and word_start:
-            out.append(line[index:])
-            break
-        if char == "$" and line[index + 1 : index + 2] == "'":
-            _, end, _ = _decode_ansi_c(line, index + 2)  # its `\'` closes nothing
-            out.append(line[index:end])
-            index = end
-            word_start = False
-            continue
-        if char in "'\"`":
-            quote = char
-            out.append(char)
-            index += 1
-            word_start = False
-            continue
-        opener = next((o for o in ARITHMETIC_OPENERS if line.startswith(o, index)), None)
-        if opener is not None:
-            end = _matching(line, index + len(opener) - 2)
-            out.append(line[index : end + 1])
-            index = end + 1
-            word_start = False
-            continue
-        if line.startswith(HERE_STRING_OPERATOR, index):
-            index += len(HERE_STRING_OPERATOR)
-            out.append(HERE_STRING_OPERATOR)
-            while index < len(line) and line[index] in " \t":
-                out.append(line[index])
-                index += 1
-            word, index = _read_word(line, index, HEREDOC_WORD_STOPS)
-            out.append(word)
-            word_start = False
-            continue
-        if line[index : index + 2] == "<<":
-            index += 2
-            dash = line[index : index + 1] == "-"
-            if dash:
-                index += 1
-            while index < len(line) and line[index] in " \t":
-                index += 1
-            word, index = _read_word(line, index, HEREDOC_WORD_STOPS)
-            if word:
-                delimiters.append((_unquote(word), dash))
-                out.append(" ")
-                word_start = True
-                continue
-            out.append("<<")
-            continue
-        out.append(char)
-        index += 1
-        word_start = char in BASH_BLANKS or char in COMMENT_WORD_STARTS
-    return "".join(out), delimiters
 
 
 # --------------------------------------------------------------------------- step 3
