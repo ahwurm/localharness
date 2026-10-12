@@ -542,3 +542,21 @@ def test_a_funsub_body_is_classified_like_a_command_substitution(command, mode, 
 def test_a_funsub_of_a_read_is_read_only_and_a_plain_expansion_is_unchanged():
     assert all(s.read_only for s in _segments("echo ${ ls; } ${x:-a} ${#y}"))
     assert [s.signature for s in _segments("echo ${x:-$(rm -rf /etc/x)}")] == ["rm -rf", "echo"]
+
+
+# ------------------------------------------------------------------ writes from an unknown directory (WR-53; iteration 2)
+
+@pytest.mark.parametrize("command", (
+    "cd $HOME && echo x > .bashrc",
+    'cd "$X"; echo x > f',
+    "cd $(pwd) && echo x > f",
+    "popd; echo x > f",
+    "cd - && echo x > f",
+))
+def test_a_write_after_a_cd_the_classifier_cannot_read_is_never_silent_in_guarded(command, ws):
+    assert _verdict(command, ws, "guarded").verdict is Verdict.ASK
+
+
+@pytest.mark.parametrize("command", ("cd sub && echo x > f", "cd ./sub/.. && echo x > f", "echo x > f"))
+def test_a_write_after_a_readable_cd_inside_the_workspace_is_unchanged(command, ws):
+    assert _verdict(command, ws, "guarded").verdict is Verdict.ALLOW

@@ -1086,8 +1086,11 @@ def _evaluate_shell(
             allowed_in_auto=hit is None, auto_entry=hit, grantable=False if unparsed else None,
         ))
 
+    # A segment whose directory the classifier could not read (`cd $HOME && echo x > .bashrc`) writes
+    # a target it names only relative to somewhere unknown: it is judged unresolvable, outside the
+    # boundary (PRD §3.2 step 8, WR-53), not as the workspace-relative name it is spelled as.
     asks += _target_asks(ctx, settings, tuple(
-        (target, _resolve(target, anchor))
+        (target, None if segment.unresolvable_write else _resolve(target, anchor))
         for segment in classified.segments
         for target in segment.write_targets
     ))
