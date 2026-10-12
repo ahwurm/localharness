@@ -844,6 +844,7 @@ class ProjectInstructions:
         self._declined = False
         self._marked = False
         self._had_record = False
+        self._not_owned = False
         self._taken_over: tuple[str, str, int, str] | None = None
         self._warned: set[tuple] = set()
         self._held: InstructionsNotice | None = None
@@ -1064,6 +1065,19 @@ class ProjectInstructions:
             else:
                 if record is not None:
                     self._set_last(fx, record, marks_open=False, digest=None)
+                elif self._not_owned and not at_start and self._once(
+                    ("refused", "not owned", self._last.path, 0), fx
+                ):
+                    # a trusted root asks no question, so no yes record can come: say why the file
+                    # is out and how to bring it in (D-68, WR-53)
+                    return None, self._notice(
+                        "refused", self._last.name, self._last.path, self._last.size, "none",
+                        reason="not owned by you",
+                        text=(
+                            f"{display_name(self._last.name)} not used (not owned by you); "
+                            "/instructions on"
+                        ),
+                    )
                 return None, None
         if self._awaiting is not None:
             if record is None or (record.state == "yes" and record.digest != self._awaiting.digest):
@@ -1369,6 +1383,8 @@ class ProjectInstructions:
             return display_name(self._awaiting.name)
         state = self._last.state
         if state == "none":
+            if self._not_owned and self._mem_state is None:
+                return f"{display_name(self._last.name)} (not yours; /instructions on)"
             return None
         name = display_name(self._last.name)
         if state == "off":
@@ -1580,6 +1596,7 @@ def open_project_instructions(
     candidate = first_candidate(root_real)
     if candidate is None:
         return None
+    not_owned = False
     if basis in ("layer", "trusted") and hasattr(os, "geteuid"):
         try:
             owned = os.stat(candidate.real).st_uid == os.geteuid()
@@ -1587,11 +1604,13 @@ def open_project_instructions(
             owned = False
         if not owned:
             basis = "awaiting_trust"
+            not_owned = True
     handle = ProjectInstructions(
         root_real, sitting_id=sitting_id, max_ratio=max_ratio, basis=basis, no_input=no_input,
         config_dir=config_dir,
     )
     handle._candidate = candidate
+    handle._not_owned = not_owned
     handle._last = InstructionsState(
         display_name(candidate.name), str(candidate.real), 0, None, "none"
     )
