@@ -754,11 +754,16 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   in this process. It narrows an enumerated set of mistakes and crossings; it does not contain a
   program that has already started running.
 
-**What the model is shown is never edited to hide a refusal.** The request the model receives may
-leave out a failed call that a later identical call fixed, but never a refusal, never a call staged
-for your approval and never a failure of a tool that can act on your machine (`host: dangerous`,
-`bash_exec` among them). The session record, the event log and `history.jsonl` keep every call
-either way.
+**What the model is shown is never edited to hide a gate denial.** The request the model receives
+may leave out a failed call that a later identical call fixed, but never a call the permission gate
+denied, never a call staged for your approval and never a failure of a tool whose declared host is
+`dangerous` (`bash_exec` among them). The guarantee is exactly that and no wider. `host` is the
+capability floor's co-residence class, not a promise of "no side effects": a failed call of a tool
+declared `host: safe` (every MCP tool, the `agent` delegation tool, the memory writers) can leave the
+request once an identical call succeeds, and so can a refusal that is not a gate denial, such as the
+tool-call budget refusal or the remedy sent for a truncated call. A name borne by more than one
+registered tool counts as `safe` only when every one of them is. The session record, the event log
+and `history.jsonl` keep every call either way.
 
 **Being asked too often is itself a security failure.** A gate that interrupts you about ordinary
 work trains you to approve without reading, and an approval nobody read protects nothing — the
