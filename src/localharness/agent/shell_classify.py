@@ -926,6 +926,15 @@ def _read_heredoc_delimiter(text: str, index: int) -> tuple[str, bool, int, bool
         if char == "$" and text[index + 1 : index + 2] == '"':
             index += 1
             continue
+        if char == "`" or (char == "$" and text[index + 1 : index + 2] in ("(", "{")):
+            # A substitution inside the delimiter word is part of the word and is never run:
+            # `<<E$(cat <<F` has the delimiter `E$(cat <<F` and everything up to the `)` in it.
+            end = _skip_word_part(text, index)
+            if end > size:  # it never closes
+                return "".join(chars), quoted, size, False
+            chars.append(text[index:end])
+            index = end
+            continue
         if char == "'":
             end = text.find("'", index + 1)
             if end == -1:
