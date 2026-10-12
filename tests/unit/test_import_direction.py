@@ -39,7 +39,7 @@ _MIXED_DIR_CORE = {
     "channels": ("__init__", "acp", "base", "clipboard", "errors", "input_router", "terminal"),
     "tools": ("__init__", "base", "capabilities", "hooks", "mcp", "registry"),
     "tools/builtin": ("__init__", "agent_tool", "bash_tool", "chunk_tool", "cruncher_exec",
-                      "edit_tool", "glob_tool", "grep_tool", "load_document_tool", "netguard", "paths",
+                      "edit_tool", "git_read_tool", "glob_tool", "grep_tool", "load_document_tool", "netguard", "paths",
                       "python_tool", "read_tool", "task_tool", "tool_result_get_tool", "web_tool", "write_tool"),
 }
 CORE_FILES = frozenset({"__init__.py",
