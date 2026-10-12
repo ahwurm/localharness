@@ -910,3 +910,40 @@ def test_a_corrupt_store_under_a_running_sitting_is_not_a_fresh_root(instruction
     _rewrite(root, CHANGED)
     text, notice = h.section(WINDOW)
     assert text is None and notice.reason == "record lost"
+
+
+# --------------------------------------------------------------------------- WR-01: a recorded file that is gone
+
+
+def test_a_recorded_file_that_is_gone_is_replaced_by_the_next_candidate(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT, "AGENTS.md": CHANGED})
+    h = _recorded(root)
+    (root / "CLAUDE.md").unlink()
+    text, notice = h.section(WINDOW)
+    assert text == CHANGED
+    assert notice is not None and notice.cause == "adopted"
+    assert notice.text == "AGENTS.md changed, using it"
+    record = _record_of(root)
+    assert record["name"] == "AGENTS.md" and record["digest"] == _digest(CHANGED)
+    assert h.section(WINDOW) == (CHANGED, None)
+
+
+def test_a_recorded_file_gone_before_start_takes_the_start_line_for_the_next_one(
+    instructions_home, tmp_path,
+):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT, "AGENTS.md": CHANGED})
+    _recorded(root)
+    (root / "CLAUDE.md").unlink()
+    nxt = _open(root, sitting_id="s2")
+    assert nxt.start_line == "Using AGENTS.md (0.0 KB); /instructions off"
+    assert nxt.section(WINDOW)[0] == CHANGED
+
+
+def test_a_recorded_file_that_is_gone_under_a_mark_is_still_refused(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": TEXT, "AGENTS.md": CHANGED})
+    h = _recorded(root)
+    h.mark_pending()
+    (root / "CLAUDE.md").unlink()
+    text, notice = h.section(WINDOW)
+    assert text is None
+    assert notice is not None and notice.reason == "unreadable"

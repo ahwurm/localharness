@@ -1148,9 +1148,12 @@ class ProjectInstructions:
     ) -> tuple[str | None, InstructionsNotice | None]:
         first = first_candidate(self._root)
         marks = self._marks(pending)
+        # a recorded file that is gone is no competitor: the first present candidate, whatever its
+        # rank, is the person's to be adopted (D-28 step 4)
+        recorded_gone = not os.path.lexists(record.path)
         shadowing = (
             first is not None and str(first.real) != record.path
-            and _name_rank(first.name) <= _name_rank(record.name)
+            and (_name_rank(first.name) <= _name_rank(record.name) or recorded_gone)
         )
         if shadowing and not marks.any:
             assert first is not None
