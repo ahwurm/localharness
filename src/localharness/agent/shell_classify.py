@@ -628,11 +628,13 @@ Per-subcommand because git spells the destination four different ways; the shape
 rather than written as three branches, and the value-flag tables keep an option's argument from
 being read as the destination."""
 
-GIT_OUTPUT_SUBCOMMANDS = frozenset({"diff", "log", "show"})
+GIT_NO_INDEX_SUBCOMMAND = "diff"
 GIT_OUTPUT_FLAG = "--output"
 GIT_NO_INDEX_FLAG = "--no-index"
 """The two git spellings that make a read-only-looking command touch the filesystem (Phase 10,
-D-20, D-51). ``git diff|log|show --output=F`` (or ``--output F``) WRITES F, and ``git diff
+D-20, D-51). ``git --output=F`` (or ``--output F``) WRITES F for EVERY subcommand (CR-09 / CR-53 it4:
+``stash list|show``, ``reflog``, ``shortlog``, ``whatchanged``, ``diff-tree`` and the rest all take
+log or diff options, so the scan keys on the flag, not on a table of subcommands), and ``git diff
 --no-index A B`` compares two arbitrary paths outside any repository. Exact spellings are
 complete: git rejects an abbreviation of either (git-diff(1); RESEARCH row j). Without them
 ``git diff --output=~/.bashrc`` was a plain read in every mode."""
@@ -3489,15 +3491,21 @@ def _git_targets(signature: str, argv: tuple[str, ...]) -> list[str]:
     Every other git signature returns no target: git writes inside the repository it is already
     in, which the workspace boundary already covers — these four choose where the repository goes.
     Besides them, ``git diff|log|show --output`` writes a file and ``git diff --no-index`` diffs
-    arbitrary filesystem paths (:data:`GIT_OUTPUT_SUBCOMMANDS`); those paths are reported too, and
+    arbitrary filesystem paths (:data:`GIT_NO_INDEX_FLAG`); those paths are reported too, and
     a plain ``git diff`` / ``git log`` / ``git show`` still reports nothing.
     """
     words = signature.split()
-    if len(words) >= 2 and words[1] in GIT_OUTPUT_SUBCOMMANDS:
-        return _git_output_targets(words[1], argv)
+    outputs = _git_output_targets(words[1] if len(words) >= 2 else "", argv)
     shape = GIT_DESTINATION_SHAPES.get(signature)
     if shape is None:
-        return []
+        return outputs
+    return outputs + _git_destination_targets(signature, argv, shape)
+
+
+def _git_destination_targets(
+    signature: str, argv: tuple[str, ...], shape: tuple[frozenset[str], str]
+) -> list[str]:
+    """The directory ``clone`` / ``worktree add`` / ``submodule add`` creates (:data:`GIT_DESTINATION_SHAPES`)."""
     value_flags, rule = shape
     rest = list(argv[1:])
     for word in signature.split()[1:]:  # step past `clone` / `worktree add` / `submodule add`
@@ -3902,8 +3910,8 @@ def _git_directory_prefix(args: list[str]) -> str:
 
 
 def _git_output_targets(subcommand: str, argv: tuple[str, ...]) -> list[str]:
-    """The files ``git diff|log|show`` writes (``--output``) or reads outside a repository
-    (``diff --no-index``), read off the arguments that follow the subcommand.
+    """The files any ``git`` subcommand writes with ``--output`` or ``git diff --no-index`` reads outside a
+    repository, read off the arguments that follow the subcommand.
 
     ``--output`` is only honoured before a bare ``--`` (after it, everything is a pathspec).
     With ``--no-index`` every operand is a path: git permutes options, so operands on either side
@@ -3932,7 +3940,7 @@ def _git_output_targets(subcommand: str, argv: tuple[str, ...]) -> list[str]:
                 index += 1
         elif token.startswith(f"{GIT_OUTPUT_FLAG}="):
             outputs.append(token.split("=", 1)[1])
-        elif token == GIT_NO_INDEX_FLAG and subcommand == "diff":
+        elif token == GIT_NO_INDEX_FLAG and subcommand == GIT_NO_INDEX_SUBCOMMAND:
             no_index = True
         elif not token.startswith("-"):
             operands.append(token)

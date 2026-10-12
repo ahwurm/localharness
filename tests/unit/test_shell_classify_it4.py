@@ -285,3 +285,38 @@ def test_greater_ampersand_word_is_a_file_write(ws, command, expected):
     """CR-52 (it4): ``>&WORD`` duplicates a descriptor only when WORD is digits or ``-``; otherwise bash
     writes the file WORD exactly as ``&>WORD`` does."""
     _check(command, expected, ws)
+
+
+# --------------------------------------------------------------------------- CR-09 / CR-53: git --output on any subcommand
+
+@pytest.mark.parametrize(
+    "subcommand",
+    (
+        "stash list", "stash show", "stash show -p", "reflog", "reflog show", "shortlog", "whatchanged",
+        "diff-tree HEAD", "diff-index HEAD", "diff-files", "range-diff a b c", "format-patch -1", "blame f",
+        "log", "diff", "show",
+    ),
+)
+@pytest.mark.parametrize("spelling", ("--output=~/.bashrc", "--output ~/.bashrc"))
+def test_git_output_flag_is_a_write_for_every_subcommand(ws, subcommand, spelling):
+    """CR-09 / CR-53 (it4): ``--output`` is the log / diff machinery's flag and WRITES the file for every
+    subcommand that takes those options, not only ``diff|log|show``."""
+    _check(f"git {subcommand} {spelling}", "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("git stash list --output=/tmp/x", "DENY/ASK/ok"),
+        ("git stash show -p --output /etc/cron.d/x", "DENY/ASKU/ASKU"),
+        ("git -C /etc stash show --output=x", "!ok/!ok/!ok"),
+        ("git stash list", "ok/ok/ok"),
+        ("git stash show", "ok/ok/ok"),
+        ("git reflog", "DENY/ASK/ok"),
+        ("git log --oneline -5", "ok/ok/ok"),
+        ("git log --output=~/.bashrc", "DENY/ASKU/ASKU"),
+        ("git stash list -- --output=x", "ok/ok/ok"),
+    ),
+)
+def test_git_output_flag_controls(ws, command, expected):
+    _check(command, expected, ws)
