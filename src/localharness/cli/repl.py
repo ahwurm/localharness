@@ -1224,7 +1224,7 @@ class OrchestratorREPL:
 
         pending: list[str] = []
         try:
-            await establish_session_trust(gate, pending.append)
+            await establish_session_trust(gate, pending.append, instructions=self._instructions)
         except Exception:  # noqa: BLE001 — a broken trust store costs a notice, never the session
             log.warning("could not settle workspace trust; leaving the configured mode alone",
                         exc_info=True)
@@ -1728,6 +1728,12 @@ class OrchestratorREPL:
         arg = args_lower.strip()
         text = run_instructions_command(self._instructions, arg)
         await self._channel.send_message(text, metadata={"style": "system.info"})
+        if arg == "on":
+            # The terminal keeps a change line for its next input bubble; `on` answers it (D-60).
+            # A channel without the method (Discord, the phone, a test double) has nothing to clear.
+            clear = getattr(self._channel, "clear_instructions_status", None)
+            if callable(clear):
+                clear()
 
     async def _slash_agents(self, args: str, args_lower: str) -> None:
         cards = self._orchestrator._card_registry.all_cards()

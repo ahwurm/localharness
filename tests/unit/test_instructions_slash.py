@@ -4,6 +4,7 @@ Drives the real ``OrchestratorREPL`` with a scripted channel and a real ``Projec
 handle on a tmp root, the store hermetic through ``instructions_home``. The texts are the shared
 handler's, verbatim: no preview of the file and no diff of a change.
 """
+# ruff: noqa: F811  (instructions_home is imported as a fixture and requested by name)
 from __future__ import annotations
 
 import asyncio
@@ -63,3 +64,137 @@ async def test_a_repl_built_without_the_keyword_says_there_is_no_file():
 
     assert channel.sent == [("no instructions file in this workspace", INFO)]
     agent.run_turn.assert_not_called()
+
+
+# --------------------------------------------------------------------------- off and on (D-01, D-33)
+
+class _ClearingChannel(RecordingChannel):
+    """A channel with the terminal's ``clear_instructions_status`` (11-07), counting its calls."""
+
+    def __init__(self, inputs) -> None:
+        super().__init__(inputs)
+        self.cleared = 0
+
+    def clear_instructions_status(self) -> None:
+        self.cleared += 1
+
+
+async def test_off_answers_one_line_records_off_and_stays_off_after_a_hand_edit(
+        tmp_path, instructions_home):
+    handle = _handle(tmp_path)
+    channel = RecordingChannel([])
+    repl, agent, _ = _repl(channel, handle)
+
+    assert await repl._handle_slash("/instructions off") is True
+
+    assert channel.sent == [
+        ("instructions off for this workspace; /instructions on to use CLAUDE.md", INFO)]
+    assert handle.state.state == "off"
+    assert handle.section(WINDOW) == (None, None)
+    (tmp_path / "proj" / "CLAUDE.md").write_text("b" * 300 + "\n", encoding="utf-8")
+    assert handle.section(WINDOW) == (None, None), "off is never re-adopted until on"
+    agent.run_turn.assert_not_called()
+
+
+async def test_on_uses_the_file_records_yes_and_clears_the_channels_pending_line(
+        tmp_path, instructions_home):
+    from tests.unit.instructions_support import load_store
+
+    handle = _handle(tmp_path)
+    channel = _ClearingChannel([])
+    repl, _, _ = _repl(channel, handle)
+    await repl._handle_slash("/instructions off")
+    channel.sent.clear()
+
+    assert await repl._handle_slash("/Instructions ON") is True
+
+    assert channel.sent == [("using CLAUDE.md (5.1 KB)", INFO)]
+    assert channel.cleared == 1
+    assert handle.state.state == "yes"
+    (record,) = (r["instructions"] for r in load_store()["roots"].values())
+    assert record["state"] == "yes" and record["digest"] == handle.state.digest
+
+
+async def test_off_does_not_clear_the_pending_line_and_a_channel_without_the_method_is_fine(
+        tmp_path, instructions_home):
+    handle = _handle(tmp_path)
+    channel = _ClearingChannel([])
+    repl, _, _ = _repl(channel, handle)
+    await repl._handle_slash("/instructions off")
+    assert channel.cleared == 0
+
+    bare = RecordingChannel([])
+    repl, _, _ = _repl(bare, handle)
+    assert await repl._handle_slash("/instructions on") is True
+    assert bare.sent == [("using CLAUDE.md (5.1 KB)", INFO)]
+
+
+async def test_an_unknown_word_gets_the_usage_line_and_writes_nothing(tmp_path, instructions_home):
+    from tests.unit.instructions_support import load_store
+
+    handle = _handle(tmp_path)
+    before = load_store()
+    channel = RecordingChannel([])
+    repl, _, _ = _repl(channel, handle)
+
+    for line in ("/instructions preview", "/instructions"):
+        assert await repl._handle_slash(line) is True
+
+    assert channel.sent == [("usage: /instructions off | on | show", INFO)] * 2
+    assert load_store() == before and handle.state.state != "off"
+
+
+# --------------------------------------------------------------------------- session trust (D-61)
+
+def _trust_repl(channel, handle, gate):
+    repl, _, _ = _build_repl(channel)
+    repl._gate = gate
+    repl._instructions = handle
+    return repl
+
+
+async def test_the_trust_question_gets_the_handle_and_none_without_one(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from localharness.cli import session_trust
+
+    seen: list[dict] = []
+
+    async def _spy(gate, notice=None, **kw):
+        seen.append(kw)
+        return "auto"
+
+    monkeypatch.setattr(session_trust, "establish_session_trust", _spy)
+    handle = MagicMock()
+
+    await _trust_repl(RecordingChannel([]), handle, MagicMock())._establish_workspace_trust()
+    await _trust_repl(RecordingChannel([]), None, MagicMock())._establish_workspace_trust()
+
+    assert [kw["instructions"] for kw in seen[:1]] == [handle]
+    assert seen[1] == {"instructions": None}
+
+
+async def test_a_yes_to_the_session_question_makes_the_file_usable_through_the_handle(
+        tmp_path, instructions_home):
+    from localharness.agent.gate import PermissionGate
+    from localharness.agent.gate_types import Decision
+    from localharness.config import trust
+    from localharness.config.grants import GrantStore
+
+    handle = _handle(tmp_path)
+    root = tmp_path / "proj"
+    asked: list = []
+
+    async def _asker(request):
+        asked.append(request)
+        return Decision(kind="allow_once")
+
+    gate = PermissionGate(boundary=root, workspace=root, grants=GrantStore(tmp_path / "grants.yaml"),
+                          mode="auto", asker=_asker, channel_name="test")
+    channel = RecordingChannel([])
+
+    await _trust_repl(channel, handle, gate)._establish_workspace_trust()
+
+    assert len(asked) == 1 and "CLAUDE.md" in asked[0].reason
+    assert trust.is_trusted_tree(root) is True
+    assert handle.state.state == "yes"
