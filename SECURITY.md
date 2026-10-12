@@ -733,6 +733,10 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   inside quotes, `${…}` or `$((…))`; a `$(…)`, `<(…)`, backtick or bash 5.3 `${ cmd; }` body is a
   shell context of its own, inside double quotes too, and a `<<WORD` in a comment opens no heredoc.
   `$'…'` strings are decoded before classifying, and a heredoc delimiter ends at a shell operator.
+  Where bash reads a `#` as part of a regex, an extglob group or an arithmetic expression and the
+  stripper does not know it, a dropped comment that holds `;`, `&`, `|`, a backtick or `$(` makes the
+  harness classify the command a second time with every `#` kept and ask for the stricter of the two
+  (a real comment such as `# fetch; unpack` can therefore draw a question it would not otherwise).
   A quote, backtick or substitution that never closes (bash refuses such a line) is asked about as
   `__lh_unparsed_shell__` in every mode, `auto` included, and the answer cannot be remembered, as is
   an `env -S` string using an escape or expansion the classifier does not follow.

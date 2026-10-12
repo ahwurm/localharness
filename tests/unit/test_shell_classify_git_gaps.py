@@ -572,3 +572,53 @@ def test_a_write_after_a_readable_cd_inside_the_workspace_is_unchanged(command, 
 ))
 def test_a_brace_group_in_any_ordinary_spelling_is_recursed_into(command):
     assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+
+
+# ------------------------------------------------------------------ the stripper can not hide a command (T-10-16; iteration 2)
+
+CONTEXTS_WHERE_HASH_IS_NOT_A_COMMENT = (
+    "[[ a =~ (a|#b) ]]; rm -rf /etc/x",
+    "[[ a =~ a|#b ]] && rm -rf /etc/x",
+    "shopt -s extglob\necho @(a|#b); rm -rf /etc/x",
+    "shopt -s extglob\necho +(#b); rm -rf /etc/x",
+    "(( 0 # )); rm -rf /etc/x",
+    "(( 1 # x )) && rm -rf /etc/x",
+    'bash -c "[[ a =~ (a|#b) ]]; rm -rf /etc/x"',
+    "echo $(( 1 # x )); rm -rf /etc/x",
+)
+"""Real bash runs the `rm -rf` in each (verified on 5.3.9): the `#` is part of a regex, an extglob group or
+an arithmetic expression, not a comment. The stripper reads it as one; the dropped text holds a `;` or `&`,
+so the command is classified again with every `#` kept and the union is what the verdict sees."""
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+@pytest.mark.parametrize("command", CONTEXTS_WHERE_HASH_IS_NOT_A_COMMENT)
+def test_a_hash_in_a_context_the_stripper_does_not_know_still_shows_the_command_after_it(command, mode, ws):
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command", (
+    "ls # list the directory",
+    "git status # what changed? (short)",
+    "ls -la # a < b > c",
+    "echo a # don't",  # an apostrophe alone leaves the text balanced after the comment is dropped
+    "cat f # the file\ngrep x f # and a match",
+))
+def test_an_ordinary_comment_is_dropped_and_changes_nothing(command):
+    from localharness.agent.shell_classify import _join
+
+    assert _join(command)[1] is False
+    uncommented = "\n".join(line.split(" #")[0] for line in command.split("\n"))
+    assert [s.signature for s in _segments(command)] == [s.signature for s in _segments(uncommented)]
+
+
+def test_a_comment_that_holds_a_separator_is_also_read_with_the_comment_left_in():
+    from localharness.agent.shell_classify import _join
+
+    assert _join("ls # a; b")[1] is True
+    assert _join("ls # a | b")[1] is True
+    assert _join("ls # a `b`")[1] is True
+    assert _join("ls # a $(b)")[1] is True
+    assert _join("ls # ab")[1] is False
+    assert _join("ls # a; b", strip_comments=False)[0] == "ls # a; b"
