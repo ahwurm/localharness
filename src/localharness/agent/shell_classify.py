@@ -1915,7 +1915,8 @@ def _command_position(prefix: str) -> bool:
             if index == len(words) - 1 and IDENTIFIER_RE.match(words[index]):
                 index += 1  # `coproc NAME { … }`: NAME only when a compound command follows
         elif word not in COMMAND_POSITION_WORDS:
-            return False
+            # `{ f() {`, `then f() {`, `function f {`: the head of a definition is where a command may start (CR-03 it4)
+            return bool(FUNCTION_HEAD_RE.match(" ".join(words[index - 1 :])))
     return True
 
 
@@ -2019,6 +2020,8 @@ def _compound_after_prefix(body: str) -> str | None:
         return rest
     if rest.startswith("case") and rest[4:5] in (" ", "\t", "\n"):
         return rest
+    if rest is not body and FUNCTION_DEFINITION_RE.match(rest):
+        return rest  # `then f() { … }`, `! function f { … }`: the definition is what gets classified (CR-03 it4)
     return None
 
 
