@@ -1410,6 +1410,12 @@ def _hash_pins_a_path(argv: Sequence[str]) -> bool:
     return False
 
 
+def _has_computed_name(token: str) -> bool:
+    """Is this ``NAME=value`` operand's NAME built at run time (``$V``, ``${V}``, ``$(…)``, a backtick)?"""
+    name, equals, _ = token.partition("=")
+    return bool(equals) and not token.startswith("-") and ("$" in name or "`" in name)
+
+
 def _sequence_env_redirect(
     argv: Sequence[str], assignments: Sequence[str], settings: GateSettings
 ) -> bool:
@@ -1427,6 +1433,10 @@ def _sequence_env_redirect(
         return _assignments_redirect(assignments, settings)
     head = argv[0]
     if head in ENV_CARRIER_DECLARERS:
+        # WR-56: `export $V=./d` / `export P${x}ATH=./d` set a variable whose NAME is computed. It may be
+        # PATH, and the classifier cannot tell, so it counts as redirecting (the way an unknown value does).
+        if any(_has_computed_name(t) for t in argv[1:]):
+            return True
         return _assignments_redirect([t for t in argv[1:] if ASSIGNMENT_RE.match(t)], settings)
     if head == "printf":
         name = _printf_variable(argv)

@@ -436,3 +436,38 @@ def test_env_split_string_that_cannot_be_split_is_unfamiliar_not_read_only():
 def test_ordinary_env_spellings_do_not_move(command, signature):
     (segment,) = _segments(command)
     assert segment.signature == signature and segment.read_only is True
+
+
+# --------------------------------------------------------------------------- computed export names (WR-56)
+
+COMPUTED_NAMES = [
+    "V=PATH; export $V=./d; ls",
+    "export P${x}ATH=./d; ls",
+    "export ${V}=./d; ls",
+    "export $(echo PATH)=./d; ls",
+    "export `echo PATH`=./d; ls",
+    "declare -x $V=./d; ls",
+    "readonly $V=./d; ls",
+]
+
+
+@pytest.mark.parametrize("command", COMPUTED_NAMES)
+def test_a_computed_variable_name_may_be_path_so_the_next_command_leaves_the_tier(command):
+    last = _segments(command)[-1]
+    assert last.signature == "ls"
+    assert last.read_only is False and last.env_redirect is True
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+def test_a_computed_name_export_before_ls_has_the_verdict_of_the_literal_path_export(mode, ws):
+    """The same as `export PATH=./d; ls`: denied read-only, asked guarded, auto's blacklist does not list ls."""
+    computed = _verdict("V=PATH; export $V=./d; ls", ws, mode).verdict
+    assert computed is _verdict("export PATH=./d; ls", ws, mode).verdict
+    if mode != "auto":
+        assert computed is not Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command", ["export FOO=1; ls", "export $V; ls", "export FOO=$V; ls", "V=PATH; ls $V"])
+def test_literal_names_and_computed_values_keep_the_tier(command):
+    last = _segments(command)[-1]
+    assert last.read_only is True and last.env_redirect is False
