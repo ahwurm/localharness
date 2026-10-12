@@ -1184,10 +1184,18 @@ config turns that off.
 
 The record lives in `project_records.yaml` in the config folder, with its lock sidecar
 `project_records.yaml.lock`. Both are protected config-folder entries (a write of either asks, even
-in `auto`) and the harness creates both owner-only (0600). A project cannot write them, which is
-what stops a model from setting `yes` under its own hash. A record that this session already saw and
-that then vanishes (deleted, damaged) is not a fresh root: nothing is adopted until `/instructions
-on`, and the session says so once. A store that cannot be read (a permission error, a link, not a
+in `auto`, and so does a plain `rm`, `unlink`, `rmdir` or `mv`-away of either, like the `-f` / `-rf` /
+`shred` spellings) and the harness creates both owner-only (0600). A project cannot write them, which
+is what stops a model from setting `yes` under its own hash. A record that this session already saw
+and that then vanishes (deleted, damaged) is not a fresh root: nothing is adopted until `/instructions
+on`, and the session says so once. The fail-closed handle is per process: a record that vanishes
+between sittings is a fresh root at the next start (the file is used under the ordinary first-contact
+line and an earlier `/instructions off` is forgotten). What stops that is the ask above, so it
+remains possible when the person approves the delete, when the delete is done outside the harness, or
+when the path is spelled so the gate cannot place it (a variable, a glob, a `cd` it cannot follow,
+unless a component names a protected entry); the sibling `trusted_workspaces.yaml` fails safe on a
+delete (an absent trust record asks again), the instructions record does not. Recorded as a ruling
+taken on the owner's behalf by the GSD run (it reverses the iteration-1 decline to touch the gate). A store that cannot be read (a permission error, a link, not a
 regular file) is reported as unreadable and never replaced as if it were empty; a store that is
 damaged is kept beside itself as `project_records.yaml.corrupt` before the next write replaces it
 (ruling taken on the owner's behalf by the GSD run).

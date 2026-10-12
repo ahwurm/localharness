@@ -347,6 +347,16 @@ class ShellSegment:
     them, and folding the two together would change what ``guarded`` asks about. Empty on every
     segment whose ``target_scoped_destructive`` is False."""
 
+    removal_targets: tuple[str, ...] = ()
+    """The paths a plain ``rm`` / ``unlink`` / ``rmdir`` deletes or an ``mv`` moves away, joined
+    onto the directory the segment runs in as :attr:`write_targets` are. Read only by the verdict's
+    protected-config-entry check (Phase 11, CR-01 it2): a delete of the instructions record is not
+    a write, and ``rm x`` is not destructive by signature, so neither field above names it."""
+
+    unresolvable_removal: bool = False
+    """True when :attr:`removal_targets` holds a path the classifier cannot place (a variable, a
+    glob, a ``cd`` it could not follow)."""
+
     pipe_to_shell: bool = False
     """True when this segment is the SINK of a ``curl … | sh`` (:data:`PIPE_TO_SHELL_SINKS_DEFAULT`).
 

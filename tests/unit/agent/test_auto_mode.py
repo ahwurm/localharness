@@ -244,6 +244,52 @@ def test_the_global_config_dir_answers_by_the_same_list(project, tmp_path, monke
     assert _verdict("write", {"path": str(config_dir / "coauthor_consent.yaml")}, ctx, WRITE) is Verdict.ALLOW
 
 
+@pytest.mark.parametrize("template", [
+    "rm {p}", "unlink {p}", "mv {p} /tmp/moved", "mv -t /tmp {p}", "rm -- {p}", "rmdir {p}",
+    "rm -f {p}", "rm -rf {p}", "shred -u {p}", "uv run rm {p}", "echo hi && rm {p}",
+])
+@pytest.mark.parametrize("entry", ["project_records.yaml", "project_records.yaml.lock", "config.yaml"])
+def test_a_plain_delete_or_move_away_of_a_protected_config_entry_asks_in_auto(
+        entry, template, project, tmp_path, monkeypatch):
+    """CR-01 it2 (ruling taken on the owner's behalf by the GSD run): a write to the instructions
+    record asks in every mode, but a plain `rm` / `unlink` / `mv` of it was ALLOW, and a deleted
+    record is a fresh root at the next start (the person's `off` forgotten, a rewritten
+    CLAUDE.md adopted under the first-contact line). The plain spellings now agree with the
+    `-f` / `-rf` / `shred` ones. Only classified here, never run."""
+    config_dir = tmp_path / "global"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(config_dir))
+    for base in (config_dir, project / ".localharness"):
+        command = template.format(p=base / entry)
+        assert _shell(command, _ctx(project)) is Verdict.ASK, command
+
+
+def test_a_delete_after_a_cd_into_the_config_folder_asks_too(project, tmp_path, monkeypatch):
+    config_dir = tmp_path / "global"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(config_dir))
+    assert _shell(f"cd {config_dir} && rm project_records.yaml", _ctx(project)) is Verdict.ASK
+    assert _shell(f"cd {config_dir} && unlink project_records.yaml.lock", _ctx(project)) is Verdict.ASK
+    assert _shell("cd .localharness && rm project_records.yaml", _ctx(project)) is Verdict.ASK
+    # a cd the classifier cannot follow: asks only because the name IS a protected entry's
+    assert _shell("cd $SOMEWHERE && rm project_records.yaml", _ctx(project)) is Verdict.ASK
+    assert _shell("cd $SOMEWHERE && rm notes.txt", _ctx(project)) is Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command", [
+    "rm build/x.o", "unlink build/x.o", "mv build/x.o build/y.o", "rm notes.txt",
+    "rm project_records.yaml",            # a workspace file that merely shares the name
+    "rm config.yaml",
+    "mv config.yaml config.yaml.bak",
+    "rm .localharness/agents/reviewer.yaml",
+    "rm .localharness/tools/deploy.sh",
+    "rm .localharness/project_records.yaml.bak",
+    "mv .localharness/agents/a.yaml .localharness/agents/b.yaml",
+])
+def test_an_unrelated_plain_delete_or_move_is_unchanged(command, project):
+    assert _shell(command, _ctx(project)) is Verdict.ALLOW, command
+
+
 # ------------------------------------------------------------- what no longer asks
 
 @pytest.mark.parametrize("command", [
