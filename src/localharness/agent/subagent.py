@@ -14,6 +14,7 @@ Design:
 """
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 import re
@@ -158,6 +159,38 @@ SEARCH_VERIFIER_ROLE = (
 def _sanitize_agent_name(name: str) -> str:
     """AgentConfig.name rejects underscores — map `_` -> `-` (recurring localharness gotcha)."""
     return name.replace("_", "-")
+
+
+def _not_wired_text(agent_id: str, name: str, searched_paths: list[str]) -> str:
+    """The two-line refusal for an agent id nothing can dispatch.
+
+    Line 1 leads with the closest roster names (difflib, else the whole roster); line 2 says where
+    the loader looked. There is no second loader: the directories come from the not-found error
+    the wired loader already raised, so ``searched_paths`` is empty when nothing was searched. The
+    paragraph on building a specialist lives in the ``agent`` tool description, not here.
+    """
+    dirs: list[str] = []
+    for sp in searched_paths:
+        d = str(Path(sp).parent)
+        if d not in dirs:
+            dirs.append(d)
+    stems: set[str] = set()
+    for d in dirs:
+        try:
+            stems.update(f.stem for f in sorted(Path(d).glob("*.yaml")))
+        except OSError:
+            continue
+    roster = ({"explore", "web-researcher", "search-verifier", "cruncher"} | stems) - {
+        "orchestrator",
+        name,
+    }
+    ordered = sorted(roster)
+    closest = difflib.get_close_matches(agent_id, ordered, n=3, cutoff=0.6) or ordered
+    searched = ", ".join(repr(d) for d in dirs) if dirs else "none"
+    return (
+        f"{', '.join(closest)}: the closest available to {agent_id!r}, which is not wired.\n"
+        f"searched: {searched}"
+    )
 
 
 def _child_runtime_paths(cfg: Any, config_dir: Any = None, *, state_dir: Any = None) -> tuple[Path, Path]:
@@ -1768,19 +1801,17 @@ def make_explore_agent_runner(
             dispatch, base_builder = dispatch_search_verifier_subagent, build_search_verifier_config
         else:
             cfg = None
+            searched: list[str] = []
             # Phase 33.1: the root agent is 'orchestrator' — never loadable as a delegation child
             if load_agent is not None and name != "orchestrator":
                 try:
                     cfg = load_agent(name)
-                except Exception:
+                except Exception as exc:
+                    # Duck-typed: ConfigNotFoundError carries the directories it searched.
+                    searched = list(getattr(exc, "searched_paths", None) or [])
                     cfg = None
             if cfg is None:
-                raise ValueError(
-                    f"Agent '{agent_id}' dispatch not wired (available: explore, "
-                    "web-researcher, search-verifier, cruncher, or any agents/<name>.yaml "
-                    "definition — you can CREATE one with the write tool, then delegate "
-                    "to it by name)"
-                )
+                raise ValueError(_not_wired_text(agent_id, name, searched))
             return await dispatch_config_subagent(
                 task,
                 agent_config=cfg,

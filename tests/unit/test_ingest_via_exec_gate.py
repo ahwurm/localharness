@@ -82,7 +82,10 @@ def test_predicate_blocks_ingest_shapes(tool, args):
     with pytest.raises(IngestViaExecError) as exc_info:
         assert_no_ingest_via_exec(_SCHEMAS[tool], args, agent_id="root", has_ingest=False)
     msg = str(exc_info.value)
-    assert "DELEGATE" in msg, "the block must redirect to delegation, not just refuse"
+    assert "delegate the read to web-researcher" in msg, (
+        "the block must redirect to delegation, not just refuse"
+    )
+    assert "\n" not in msg
     assert "web-researcher" in msg
 
 
