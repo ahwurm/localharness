@@ -245,6 +245,40 @@ def test_git_inline_keys_that_run_or_name_something_still_leave_the_tier(ws, com
     _check(command, "DENY/ASK/ok", ws)
 
 
+# --------------------------------------------------------------------------- WR-02 / WR-51: pure wrappers
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "strace -c ls", "strace -o t.out ls", "valgrind ./a.out", "taskset -c 0 python3 bench.py",
+        "xvfb-run pytest", "timeout 60 xvfb-run -a pytest -q", "perf stat -- ls", "ltrace ls",
+        "faketime '2020-01-01 10:00:00' python3 t.py", "numactl --cpunodebind=0 ./llama-server",
+        "fakeroot make", "dbus-run-session -- pytest", "sg run -p 'foo($A)' src", "setarch x86_64 ./a",
+        "prlimit --nofile=10 ls", "chrt -f 1 ./a", "eatmydata make", "xvfb-run -s '-screen 0 1024x768x24' pytest",
+    ),
+)
+def test_an_ordinary_use_of_a_pure_wrapper_is_not_an_ungrantable_ask(ws, command):
+    _check(command, "DENY/ASK/ok", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "taskset -c 0 rm -rf /etc/x", "perf stat -- rm -rf /etc/x", "strace -f -o /tmp/t rm -rf /etc/x",
+        "sg grp -c 'rm -rf /etc/x'", "sg grp 'rm -rf /etc/x'", "xvfb-run -a --server-args=x rm -rf /etc/x",
+        "faketime -f +1d bash -c 'rm -rf /etc/x'",
+        "numactl --interleave=all strace -c rm -rf /etc/x",
+    ),
+)
+def test_a_dangerous_command_behind_a_pure_wrapper_is_still_asked_about(ws, command):
+    _check(command, "!ok/!ok/!ok", ws)
+
+
+def test_the_privilege_helpers_stay_ungrantable(ws):
+    for command in ("pkexec ls", "runuser -u bob -- ls", "nsenter -t 1 -m ls", "unshare -r ls", "newgrp grp"):
+        _check(command, "DENY/ASKU/ASKU", ws)
+
+
 # --------------------------------------------------------------------------- WR-01: the depth guard
 
 NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")
