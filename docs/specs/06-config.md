@@ -1535,7 +1535,8 @@ list — every field is declared there with its own description.
 files, its `config.yaml` or `overrides.yaml`, or its override of a built-in agent) may only lower
 `tool_output_ratio`, `evict_ratio` and `result_cap_ratio`: a larger, zero or non-numeric value is
 ignored with a warning naming the key and the file, and a `null` or missing key keeps the machine's
-value. An explicit size a project writes (`max_tool_output_chars`,
+value; a project's `org.context` that is not a mapping (`null`, a string) is ignored whole, with a
+warning, and the machine's section stands. An explicit size a project writes (`max_tool_output_chars`,
 `tool_result_evict_threshold_chars`) is used as written.
 
 **Three memory keys the schema still accepts but nothing reads.** `memory.sqlite_path`,
