@@ -269,7 +269,9 @@ exec`` execs the argv it is given with no shell at all, so the payload is argv a
 destructive defaults under its own signature, so it is ungrantable and the human sees it."""
 
 SUBCOMMAND_VALUE_FLAGS: dict[str, frozenset[str]] = {
-    "git": frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path"}),
+    "git": frozenset({
+        "-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env", "--super-prefix",
+    }),
 }
 """Global flags that take a value *before* the subcommand. Without this,
 ``git -c core.sshCommand=x push --force`` would read its subcommand as the ``-c`` value
@@ -2524,9 +2526,9 @@ def _build(
     argv = [_basename(argv[0]), *argv[1:]]
     head = argv[0]
     # `git --git-dir=X` repoints the repository exactly as `GIT_DIR=X` does (D-49).
-    env_redirect = env_redirect or (
-        head == "git" and any(t == "--git-dir" or t.startswith("--git-dir=") for t in argv[1:])
-    )
+    # WR-02 (it4): only among git's GLOBAL options, before the subcommand: `git rev-parse --git-dir` prints.
+    # CR-51 (it4): so does an inline `-c KEY=…` the display allow-list does not know, and `--exec-path=DIR`.
+    env_redirect = env_redirect or (head == "git" and _git_redirects_what_runs(argv))
     extras: list[ShellSegment] = []
     cwd = _Cwd() if cwd is None else cwd
 
@@ -3202,6 +3204,72 @@ def _git_inline_config_segments(
         for key in keys
         if _is_dangerous_git_key(key, settings)
     ]
+
+
+GIT_INLINE_CONFIG_SAFE_KEYS: tuple[str, ...] = (
+    "color.*", "column.*", "advice.*", "i18n.*", "status.*", "pretty.*", "grep.*", "diff.*", "log.*",
+    "core.quotepath", "core.abbrev", "core.whitespace", "core.autocrlf", "core.safecrlf", "core.eol",
+    "core.precomposeunicode", "core.filemode", "core.ignorecase", "core.untrackedcache",
+    "core.commentchar", "core.longpaths", "core.preloadindex", "user.name", "user.email",
+    "branch.sort", "tag.sort",
+)
+"""Config keys an inline ``git -c KEY=…`` may set without losing the read-only tier (CR-51 it4): they change
+how output looks, not what git opens or runs. The rule is an allow-list because the program-running keys
+cannot be enumerated (``remote.<n>.uploadpack``, ``gpg.<f>.program``, ``core.gitProxy``, ``url.*.insteadOf``,
+a ``remote.<n>.url`` with an ``ext::`` transport, …): any other key sends the command to the ask tier. A
+key on the dangerous list is checked first and is a destructive segment of its own; ``log.showSignature``
+runs gpg, so it is not here. Not reachable from config: it can only tighten."""
+
+GIT_EXEC_PATH_FLAG = "--exec-path"
+
+
+def _git_global_options(argv: Sequence[str]) -> list[str]:
+    """The tokens of ``git``'s global options: everything between ``git`` and the subcommand, values included."""
+    value_flags = SUBCOMMAND_VALUE_FLAGS.get("git", frozenset())
+    index = 1
+    while index < len(argv) and argv[index].startswith("-"):
+        index += 2 if argv[index] in value_flags else 1
+    return list(argv[1:min(index, len(argv))])
+
+
+def _git_inline_config_keys(argv: Sequence[str]) -> list[str]:
+    """The keys of every ``-c KEY[=V]`` / ``--config-env[=]KEY=ENV`` among git's global options."""
+    options = _git_global_options(argv)
+    keys: list[str] = []
+    index = 0
+    while index < len(options):
+        token = options[index]
+        if token == GIT_INLINE_CONFIG_FLAG and index + 1 < len(options):
+            keys.append(options[index + 1].split("=", 1)[0])
+            index += 2
+        elif token.startswith(f"{GIT_INLINE_CONFIG_ENV_FLAG}="):
+            keys.append(token.split("=", 1)[1].split("=", 1)[0])
+            index += 1
+        elif token == GIT_INLINE_CONFIG_ENV_FLAG and index + 1 < len(options):
+            keys.append(options[index + 1].split("=", 1)[0])
+            index += 2
+        else:
+            index += 1
+    return keys
+
+
+def _git_redirects_what_runs(argv: Sequence[str]) -> bool:
+    """Do git's global options repoint the repository or what git runs (D-49, WR-02 / CR-51 it4)?
+
+    ``--git-dir`` repoints the repository as ``GIT_DIR`` does; ``--exec-path=DIR`` is where
+    git finds its ``git-remote-*`` helpers; an inline config key outside :data:`GIT_INLINE_CONFIG_SAFE_KEYS`
+    may name a program. Read among the global options only, so ``git rev-parse --git-dir`` stays a read."""
+    for token in _git_global_options(argv):
+        name = token.split("=", 1)[0]
+        if name in ("--git-dir", GIT_EXEC_PATH_FLAG):
+            return True
+    for key in _git_inline_config_keys(argv):
+        lowered = key.lower()
+        if lowered == "log.showsignature" or not any(
+            fnmatch.fnmatchcase(lowered, pattern) for pattern in GIT_INLINE_CONFIG_SAFE_KEYS
+        ):
+            return True
+    return False
 
 
 def _is_dangerous_git_key(key: str, settings: GateSettings) -> bool:

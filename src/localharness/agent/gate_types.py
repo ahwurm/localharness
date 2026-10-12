@@ -754,6 +754,9 @@ GIT_CONFIG_DANGEROUS_KEYS_DEFAULT: tuple[str, ...] = (
     "diff.*.command", "diff.external", "filter.*.clean", "filter.*.smudge", "merge.*.driver",
     "sequence.editor", "gpg.program",
     "diff.*.textconv", "pager.*", "credential.*.helper", "filter.*.process",
+    "remote.*.uploadpack", "remote.*.receivepack", "remote.*.vcs", "gpg.*.program", "core.gitProxy",
+    "core.alternateRefsCommand", "uploadpack.packObjectsHook", "trailer.*.cmd", "interactive.diffFilter",
+    "difftool.*.cmd", "mergetool.*.cmd",
 )
 """Git config keys whose VALUE is a command git will run later (PRD §3.1 ``shell-destructive``).
 
@@ -772,7 +775,11 @@ A textconv driver and a per-command pager (``pager.log``) run on a *read*, a URL
 helper (``credential.https://x.helper``, covered by the glob) hands over secrets exactly like
 ``credential.helper``, and a process filter runs a program like a clean one does (Phase 10, D-21).
 Source: git-config(1) and githooks(5); raised by the v0.14 critic as F3(a), because the shipped
-classifier filed all of these under one grantable ``git config`` key.
+classifier filed all of these under one grantable ``git config`` key. Review iteration 4 (CR-51) added
+the program-running keys a READ can reach (``remote.*.uploadpack`` for ``git remote show``,
+``gpg.*.program`` for ``git log --show-signature``, ``core.gitProxy``, the pack-objects hook and the
+alternate-refs command); an inline ``git -c KEY=…`` whose key is on neither this list nor the short
+display-key allow-list in ``shell_classify`` also loses the read-only tier.
 
 ``*`` is a glob over the rest of the key (``alias.*`` covers every alias; ``url.*.insteadOf``
 covers every URL base, dots and slashes included), matched case-insensitively because git treats

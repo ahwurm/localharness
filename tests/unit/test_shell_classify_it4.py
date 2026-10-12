@@ -320,3 +320,97 @@ def test_git_output_flag_is_a_write_for_every_subcommand(ws, subcommand, spellin
 )
 def test_git_output_flag_controls(ws, command, expected):
     _check(command, expected, ws)
+
+
+# --------------------------------------------------------------------------- CR-51: inline git config / --exec-path
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "git -c remote.x.url=/tmp/r -c 'remote.x.uploadpack=touch /tmp/M; git-upload-pack' remote show x",
+        "git -c gpg.openpgp.program=/tmp/gpgx log --show-signature -1 signed",
+        "git -c gpg.ssh.program=/tmp/x log --show-signature",
+        "git -c gpg.x509.program=/tmp/x log --show-signature",
+        "git --exec-path=/tmp/ex -c remote.x.url=evil://foo remote show x",
+        "git --exec-path=/tmp/ex remote show x",
+        "git -c core.gitProxy=/tmp/x remote show origin",
+        "git -c remote.x.vcs=evil remote show x",
+        "git -c uploadpack.packObjectsHook=/tmp/x log",
+        "git -c core.alternateRefsCommand=/tmp/x log",
+        "git -c log.showSignature=true log",
+        "git -c safe.directory='*' log",
+        "git --config-env=remote.x.uploadpack=EVIL remote show x",
+        "git --config-env remote.x.uploadpack=EVIL remote show x",
+        "git -c foo.bar=1 status",
+        "git -c user.name=x -c url.evil.insteadOf=https://github.com/ log",
+    ),
+)
+def test_inline_git_config_that_may_run_a_program_leaves_the_read_only_tier(ws, command):
+    """CR-51 (it4): ``git remote show``, ``git log --show-signature`` and the rest run the program an inline
+    ``-c`` key names; only a short allow-list of display keys keeps the read-only tier."""
+    words = _words(command, ws).split("/")
+    assert words[0] != "ok" and words[1] != "ok", words
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("git -c color.ui=always diff", "ok/ok/ok"),
+        ("git -c core.quotepath=false status", "ok/ok/ok"),
+        ("git -c log.abbrevCommit=true log --oneline", "ok/ok/ok"),
+        ("git -c diff.algorithm=patience diff", "ok/ok/ok"),
+        ("git -c core.pager=/tmp/x log", "DENY/ASKU/ok"),
+        ("git --no-pager -c color.ui=never log", "ok/ok/ok"),
+        ("git --exec-path", "!ok/!ok/ok"),
+    ),
+)
+def test_inline_git_config_controls(ws, command, expected):
+    _check(command, expected, ws)
+
+
+def test_dangerous_key_list_names_the_program_running_keys():
+    from localharness.agent.gate_types import GIT_CONFIG_DANGEROUS_KEYS_DEFAULT
+
+    for glob in ("remote.*.uploadpack", "remote.*.receivepack", "gpg.*.program", "core.gitProxy",
+                 "uploadpack.packObjectsHook", "core.alternateRefsCommand", "trailer.*.cmd"):
+        assert glob in GIT_CONFIG_DANGEROUS_KEYS_DEFAULT
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "git config remote.x.uploadpack 'touch /tmp/M'",
+        "git config gpg.openpgp.program /tmp/x",
+        "git config core.gitProxy /tmp/x",
+    ),
+)
+def test_writing_a_program_running_key_is_ungrantable(ws, command):
+    _check(command, _words("git config core.hooksPath /tmp/x", ws), ws)
+    assert _words(command, ws).split("/")[1] == "ASKU"
+
+
+# --------------------------------------------------------------------------- WR-02: --git-dir only among global options
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "git rev-parse --git-dir",
+        "git rev-parse --git-dir --show-toplevel",
+        "git rev-parse --show-toplevel",
+        "git rev-parse --git-common-dir",
+        "git rev-parse --absolute-git-dir",
+        "git log --git-dir=x",
+    ),
+)
+def test_git_dir_as_a_subcommand_argument_is_a_read(ws, command):
+    """WR-02 (it4): ``--git-dir`` repoints the repository only as a global option before the subcommand."""
+    _check(command, "ok/ok/ok", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("git --git-dir=x log", "git --git-dir x log", "git -C . --git-dir=x log"),
+)
+def test_git_dir_as_a_global_option_still_redirects(ws, command):
+    words = _words(command, ws).split("/")
+    assert words[0] != "ok" and words[1] != "ok", words
