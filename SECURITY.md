@@ -758,7 +758,9 @@ closed is the rule; the warning is what keeps it from being a silent regression 
   `log` of the workspace's own repository. It is registered with the other built-in tools, given
   by default to the agents you define as config children, and it asks nothing. Every call starts
   from one fixed command line that switches off the fsmonitor, pager, hooks and signature display,
-  turns off external diff and `textconv` drivers, forbids a promisor remote's lazy fetch and keeps
+  pins the built-in `medium` format on `log` and `show` (a `format.pretty` or `pretty.*` alias that
+  asks for a signature status, `%G?`, would otherwise make git run `gpg.program`) and sets every
+  `gpg.*.program` to `false`, turns off external diff and `textconv` drivers, forbids a promisor remote's lazy fetch and keeps
   a submodule's own filters from running, and from an environment built from scratch: no inherited
   `GIT_*` variable, no `safe.directory`, no system or global git config, and a `PATH` reduced to
   its absolute entries so `git` can never resolve to a binary inside the workspace. One thing a

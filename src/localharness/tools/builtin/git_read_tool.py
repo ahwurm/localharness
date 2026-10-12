@@ -36,6 +36,11 @@ GIT_READ_PREFIX: tuple[str, ...] = (
     "-c", "core.pager=cat",
     "-c", "core.hooksPath=/dev/null",
     "-c", "log.showSignature=false",
+    "-c", "format.pretty=medium",
+    "-c", "gpg.program=false",
+    "-c", "gpg.openpgp.program=false",
+    "-c", "gpg.ssh.program=false",
+    "-c", "gpg.x509.program=false",
     "-c", "color.ui=never",
     "-c", "diff.submodule=short",
 )
@@ -276,6 +281,11 @@ def _read_argv(call: ValidatedCall, pathspecs: Sequence[str]) -> list[str]:
             argv.append("--stat")
     else:  # log
         argv.append("--stat" if call.stat else "-p")
+    if call.subcommand in ("show", "log"):
+        # CR-02 / CR-51: a configured `format.pretty` or `pretty.*` alias holding `%G?` would verify each
+        # signed commit through gpg.program; the built-in name wins over any alias (the prefix's
+        # gpg.*.program=false is the second layer).
+        argv.append("--pretty=medium")
     if call.revision is not None:
         argv.append(call.revision)
     argv.append("--")

@@ -567,6 +567,31 @@ async def test_gpg_program_never_runs(armed, scripts, kwargs):
     await _tool_leaves_absent(armed, marker, kwargs)
 
 
+@requires_git
+@pytest.mark.parametrize("pretty_key", ["format.pretty", "pretty.mine"])
+async def test_signature_placeholder_in_a_configured_pretty_format_never_runs_gpg(armed, scripts, pretty_key):
+    """CR-02 / CR-51: `%G?` in format.pretty or a pretty.* alias makes bare git run gpg.program per signed
+    commit; the tool pins --pretty=medium and the gpg programs, so the marker stays absent."""
+    script, marker = marker_script(scripts, "gpgfmt")
+    tag = signed_history(armed, "v1")
+    git(armed, "config", "gpg.program", str(script))
+    git(armed, "config", "gpg.openpgp.program", str(script))
+    git(armed, "config", pretty_key, "format:%H %G?")
+    if pretty_key == "pretty.mine":
+        git(armed, "config", "format.pretty", "mine")
+    git(armed, "log", "-1")
+    assert _fires(marker), "control: the fixture must arm the vector under bare git"
+    git(armed, "show", "-s")
+    assert _fires(marker)
+    for kwargs in (
+        {"subcommand": "log"},
+        {"subcommand": "log", "stat": True},
+        {"subcommand": "show", "revision": "HEAD"},
+        {"subcommand": "show", "revision": tag},
+    ):
+        await _tool_leaves_absent(armed, marker, kwargs)
+
+
 # --------------------------------------------------------------------------------------- lazy fetch
 
 @requires_git
