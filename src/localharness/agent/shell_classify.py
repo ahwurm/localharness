@@ -5143,6 +5143,163 @@ def _unquote(word: str) -> str:
     return parts[0] if parts else word
 
 
+BRACE_EXPANSION_LIMIT = 64
+BRACE_SEQUENCE_RE = re.compile(r"^(?:(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z]))(?:\.\.(-?\d+))?$")
+FLAG_AFTER_BRACE_RE = re.compile(r"[{,]-")
+
+
+def _brace_expand(word: str) -> list[str] | None:
+    """The words an unquoted brace expansion (``a{b,c}d``, ``{1..3}``) in one word stands for (bash(1) "Brace
+    Expansion", done before every other expansion). ``[word]`` when it holds none; None when it stands for more
+    than :data:`BRACE_EXPANSION_LIMIT` words. Quotes, escapes and ``${…}`` are stepped over; the quotes stay in the
+    pieces, which are tokenized afterwards."""
+    index = 0
+    size = len(word)
+    quote = ""
+    while index < size:
+        char = word[index]
+        if quote:
+            if char == "\\" and quote == '"':
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char in "'\"":
+            quote = char
+            index += 1
+            continue
+        if char == "$" and word[index + 1 : index + 2] == "{":
+            index = _matching_brace(word, index + 1) + 1
+            continue
+        if char == "{":
+            close, alternatives = _brace_alternatives(word, index)
+            if close is not None:
+                prefix, suffix = word[:index], word[close + 1 :]
+                tails = _brace_expand(suffix)
+                if tails is None:
+                    return None
+                out: list[str] = []
+                for alternative in alternatives:
+                    heads = _brace_expand(alternative)
+                    if heads is None:
+                        return None
+                    for head in heads:
+                        for tail in tails:
+                            out.append(prefix + head + tail)
+                            if len(out) > BRACE_EXPANSION_LIMIT:
+                                return None
+                return out
+        index += 1
+    return [word]
+
+
+def _brace_alternatives(word: str, start: int) -> tuple[int | None, list[str]]:
+    """(index of the ``}`` closing the ``{`` at ``start``, the alternatives) — or (None, []) when it is no expansion.
+
+    It is one when a top-level comma separates alternatives, or the body is a sequence (``1..3``, ``a..e``)."""
+    depth = 0
+    index = start
+    quote = ""
+    commas: list[int] = []
+    size = len(word)
+    while index < size:
+        char = word[index]
+        if quote:
+            if char == "\\" and quote == '"':
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char == "\\":
+            index += 2
+            continue
+        elif char in "'\"":
+            quote = char
+        elif char == "$" and word[index + 1 : index + 2] == "{":
+            index = _matching_brace(word, index + 1)
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                body = word[start + 1 : index]
+                if commas:
+                    bounds = [start, *commas, index]
+                    return index, [word[bounds[i] + 1 : bounds[i + 1]] for i in range(len(bounds) - 1)]
+                sequence = _brace_sequence(body)
+                return (index, sequence) if sequence is not None else (None, [])
+        elif char == "," and depth == 1:
+            commas.append(index)
+        index += 1
+    return None, []
+
+
+def _brace_sequence(body: str) -> list[str] | None:
+    """``1..3``, ``01..03``, ``a..e`` (optionally ``..STEP``) as the list of its words; None if it is no sequence.
+
+    A sequence larger than the limit is not expanded (None): its members are numbers or letters, never flags."""
+    match = BRACE_SEQUENCE_RE.match(body)
+    if match is None:
+        return None
+    first, last, letter_first, letter_last, step_text = match.groups()
+    step = abs(int(step_text)) or 1 if step_text else 1
+    if first is not None:
+        low, high = int(first), int(last)
+        width = max(len(first), len(last)) if (first.lstrip("-").startswith("0") or last.lstrip("-").startswith("0")) else 0
+    else:
+        low, high = ord(letter_first), ord(letter_last)
+        width = 0
+    if abs(high - low) // step + 1 > BRACE_EXPANSION_LIMIT:
+        return None
+    direction = 1 if high >= low else -1
+    values = range(low, high + direction, direction * step)
+    if first is not None:
+        return [str(value).zfill(width) if width else str(value) for value in values]
+    return [chr(value) for value in values]
+
+
+def _expand_flag_braces(text: str) -> str:
+    """Expand the brace expressions of ``text`` whose words include a flag (CR-05 it5).
+
+    ``rm {-r,-f} /etc/x`` runs ``rm -r -f /etc/x`` and ``rm --{recursive,force} x`` runs ``rm --recursive --force x``;
+    the classifier saw one word starting with ``{`` and signed a plain ``rm``. A word is replaced by its expansion only
+    when some member starts with ``-`` (or is the command word of ``{rm,-rf,x}``); every other word is left as it is,
+    so ``cp a b{1,2}`` keeps its ``{`` and stays an unresolvable target. An expansion too large to enumerate that holds
+    a flag makes the whole command the unparsed placeholder."""
+    out: list[str] = []
+    index = 0
+    size = len(text)
+    while index < size:
+        if text[index] in " \t\n":
+            out.append(text[index])
+            index += 1
+            continue
+        word, end = _read_word(text, index)
+        if end == index:  # a lone quote or escape _read_word does not advance over
+            out.append(text[index])
+            index += 1
+            continue
+        index = end
+        if "{" not in word:
+            out.append(word)
+            continue
+        expanded = _brace_expand(word)
+        if expanded is None:
+            if FLAG_AFTER_BRACE_RE.search(word) or word.startswith("{-"):
+                return UNPARSED_SHELL_SIGNATURE
+            out.append(word)
+        elif expanded != [word] and any(piece.startswith("-") for piece in expanded):
+            out.append(" ".join(expanded))
+        else:
+            out.append(word)
+    return "".join(out)
+
+
 def _tokenize(text: str) -> list[str]:
     """``shlex`` one command; fall back to whitespace on bad quoting.
 
@@ -5150,6 +5307,10 @@ def _tokenize(text: str) -> list[str]:
     hide ``git diff a#b --output=x`` or ``{#;rm x``. The real comments are gone by now, dropped by
     :func:`_join_continuations`, which every command text and every lifted payload goes through."""
     text = _collapse_array_literals(text)
+    if "{" in text:
+        text = _expand_flag_braces(text)
+        if text == UNPARSED_SHELL_SIGNATURE:
+            return [UNPARSED_SHELL_SIGNATURE]
     try:
         return shlex.split(text, comments=False)
     except ValueError:

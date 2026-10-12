@@ -585,6 +585,43 @@ def test_ordinary_uses_of_those_wrappers_sign_as_the_wrapped_command(ws, command
     assert _segments(command)[0].signature == signature
 
 
+# --------------------------------------------------------------------------- CR-05: brace expansion of flags
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "rm {-r,-f} /etc/x", "rm --{recursive,force} /etc/x", "rm -{r,f} /etc/x", "rm -rf /etc/x",
+        "rm --recursive --force /etc/x", "rm {-rf,} /etc/x", "{rm,-rf,/etc/x}", "rm -{r,}f /etc/x",
+        "rm {-,}rf /etc/x", "rm {-r,-f}{,} /etc/x",
+    ),
+)
+def test_brace_expansion_of_flags_is_read(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+    assert any(s.signature == "rm -rf" for s in _segments(command))
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("echo {a,b}", "ok/ok/ok"),
+        ("echo {1..3}", "ok/ok/ok"),
+        ("echo {1..1000}", "ok/ok/ok"),
+        ("cp a b{1,2}", "DENY/ASK/ok"),
+        ("ls {src,tests}", "ok/ok/ok"),
+        ("find . -name '*.py' -exec echo {} \\;", "DENY/ASK/ok"),
+        ("echo ${x:-{a,b}}", "ok/ok/ok"),
+        ("git log --format={%H}", "ok/ok/ok"),
+    ),
+)
+def test_brace_expansion_controls_keep_their_verdict(ws, command, expected):
+    _check(command, expected, ws)
+
+
+def test_an_oversized_brace_list_holding_a_flag_is_unparsed(ws):
+    items = ",".join(f"a{n}" for n in range(80))
+    _check("rm {-r," + items + "} /etc/x", "DENY/ASKU/ASKU", ws)
+
+
 # --------------------------------------------------------------------------- WR-01: the depth guard
 
 NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")
