@@ -222,7 +222,14 @@ SED_TARGET_ROWS = [
     ("sed -n 'w /dev/stdout' f", ("/dev/stdout",)),
     ("sed -i 's/a/b/w log' f", ("f", "log")),
     ("sed -i 's/a/b/' f", ("f",)),
+    # WR-51: every getopt prefix of --in-place edits f in place, whatever -n says
+    ("sed -n --in-pl d f", ("f",)),
+    ("sed -n --in d f", ("f",)),
+    ("sed -n --i p f", ("f",)),
+    ("sed --in-place=.bak 's/a/b/' f", ("f",)),
+    ("sed -n --in-place p f", ("f",)),
     ("sed 's/a/b/' f", ()),
+    ("sed -n --quiet p f", ()),
     ("sed -n 'p;w out' f", ("out",)),
     ("sed -n '1d;$!{w out\n}' f", ("out",)),
     ("sed -n ': x w out' f", ("out",)),
@@ -335,6 +342,11 @@ def test_sed_append_text_continues_only_over_an_odd_backslash():
     line is a command, and here a write)."""
     assert _targets("sed -n 'a foo\\\nw out' f") == ()
     assert _targets("sed -n 'a foo\\\\\nw out' f") == ("out",)
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+def test_an_abbreviated_in_place_sed_is_not_a_read(mode, ws):
+    assert _verdict("sed -n --in-pl d /etc/hosts", ws, mode).verdict is not Verdict.ALLOW
 
 
 def test_sed_in_place_suffix_ends_the_cluster():

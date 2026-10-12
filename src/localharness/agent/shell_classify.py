@@ -573,8 +573,14 @@ GIT_CONFIG_WRITE_SUBCOMMANDS = frozenset({
 """git 2.46's subcommand spelling (``git config set core.pager x``) alongside the classic flag
 form. Without these, the modern spelling of exactly the same write would read as a bare key."""
 
+SED_IN_PLACE_SPELLINGS: tuple[str, ...] = (
+    "-i", *(f"--{'in-place'[:length]}" for length in range(1, len("in-place") + 1))
+)
+"""``-i`` and every GNU getopt prefix of ``--in-place`` (``--i`` … ``--in-place``): ``in-place`` is the
+only sed long option starting with ``i``, so ``sed -n --in-pl d f`` empties ``f`` like ``sed -i``."""
+
 SED_MODE_FLAGS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("-i", ("-i", "--in-place")),
+    ("-i", SED_IN_PLACE_SPELLINGS),
     ("-n", ("-n", "--quiet", "--silent")),
 )
 """``sed``'s mode is its flag: ``sed -n`` is the read-only signature listed in
