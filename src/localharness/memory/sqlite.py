@@ -705,6 +705,25 @@ COMMIT;
 # MemoryStore
 # ---------------------------------------------------------------------------
 
+
+def _usage_columns(event: Any) -> dict[str, Any]:
+    """The four accounting keys of a history row, copied from the Action event.
+
+    A value the event does not carry (None, or a foreign event object) keeps the old
+    placeholder ("" / 0) so the row shape and every reader's types are unchanged.
+    """
+    prompt = getattr(event, "prompt_tokens", None)
+    completion = getattr(event, "completion_tokens", None)
+    model = getattr(event, "model", None)
+    latency = getattr(event, "latency_ms", None)
+    return {
+        "tokens_in": prompt if prompt is not None else 0,
+        "tokens_out": completion if completion is not None else 0,
+        "model": model if model is not None else "",
+        "latency_ms": latency if latency is not None else 0,
+    }
+
+
 class MemoryStore:
     """
     Three-tier persistent memory for a single agent.
@@ -2242,10 +2261,7 @@ class MemoryStore:
                     "arguments": event.tool_params or {},
                 }],
                 "finish_reason": "tool_calls",
-                "tokens_in": 0,
-                "tokens_out": 0,
-                "model": "",
-                "latency_ms": 0,
+                **_usage_columns(event),
             }
             await self._history_writer.append(record)
         elif event.action_type == "llm_response":
@@ -2260,10 +2276,7 @@ class MemoryStore:
                 "content": event.content,
                 "tool_calls": [],
                 "finish_reason": getattr(event, "finish_reason", None) or "stop",
-                "tokens_in": 0,
-                "tokens_out": 0,
-                "model": "",
-                "latency_ms": 0,
+                **_usage_columns(event),
             }
             await self._history_writer.append(record)
 

@@ -2,7 +2,7 @@
   "_note": "Regenerate ONLY together with a PROTOCOL_VERSION bump, or for a prose-only correction to a description — which moves a digest without moving the wire, and is said so in the commit. See test_mobile_protocol.py.",
   "protocol_version": 6,
   "types": {
-    "Action": "65edde367f5433b5",
+    "Action": "e048a7657afae88e",
     "AgentCreated": "11d98a7d4a1a385c",
     "AgentDeleted": "e4c318c9ab2e09d5",
     "AskExpired": "a67bf429c96f7005",
