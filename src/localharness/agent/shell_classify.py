@@ -712,29 +712,63 @@ def classify_shell(command: str, settings: GateSettings) -> ShellClassification:
     return ShellClassification(segments=tuple(segments), dropped=tuple(dropped))
 
 
+COMMENT_WORD_STARTS = frozenset(";&|()")
+"""A ``#`` opens a comment when the character before it is whitespace or one of these (or it is the
+start of the text); ``$#``, ``${#x}``, ``a#b`` and ``16#ff`` are not comments."""
+
+
 def _join_continuations(text: str) -> str:
-    """Drop each backslash-newline pair, as the shell does — except inside single quotes.
+    """Drop each backslash-newline pair and each comment, as the shell does.
 
     The old blanket ``text.replace("\\\n", "")`` also removed the pair inside a single-quoted
     word and mis-paired ``\\\\`` + newline, so a ``sed`` script written ``a x\\\\`` newline
     ``w ~/.bashrc`` reached the sed scanner with its second command glued onto the first (Phase 10,
     D-54). A backslash escapes the character after it, so ``\\\\`` is a pair and the newline that
     follows it is a real newline; single quotes keep every character, double quotes drop the pair.
+
+    Comments (CR-03 / CR-52, T-10-16): an unquoted ``#`` at the start of a word runs to the end of the
+    line and no further, so ``ls # c\\`` newline ``rm x`` runs ``rm x`` and ``ls # don't`` newline
+    ``rm x`` does too. The comment text is dropped here, in the same pass that tracks quotes, so an
+    apostrophe, a bracket or a trailing backslash in it can neither swallow the next line nor open a
+    quote the splitter would carry to the end of the text. The newline is kept. A ``#`` inside quotes,
+    escaped, or inside ``${ … }`` is not a comment.
     """
     out: list[str] = []
     quote = ""
+    braces = 0  # depth of ${ ... }, where "#" is a pattern operator
+    word_start = True  # judged on the JOINED text: `a\\` newline `#b` is the word `a#b`, not a comment
     index = 0
     while index < len(text):
         char = text[index]
         if quote == "'":
             quote = "" if char == "'" else quote
+            word_start = False
         elif char == "\\" and index + 1 < len(text):
             if text[index + 1] != "\n":
                 out.append(text[index : index + 2])
+                word_start = False
             index += 2
             continue
         elif char in "'\"":
             quote = "" if quote == char else (quote or char)
+            word_start = False
+        elif quote:
+            word_start = False
+        elif char == "$" and text[index + 1 : index + 2] == "{":
+            braces += 1
+            out.append("${")
+            word_start = False
+            index += 2
+            continue
+        elif char == "}" and braces:
+            braces -= 1
+            word_start = False
+        elif char == "#" and word_start and not braces:
+            while index < len(text) and text[index] != "\n":
+                index += 1
+            continue
+        else:
+            word_start = char.isspace() or char in COMMENT_WORD_STARTS
         out.append(char)
         index += 1
     return "".join(out)

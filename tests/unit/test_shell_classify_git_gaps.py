@@ -195,3 +195,49 @@ def test_ordinary_multiline_commands_classify_as_their_joined_form():
 
 def test_a_continuation_inside_single_quotes_is_kept():
     assert _segments("echo 'a\\\nb'")[0].argv == ("echo", "a\\\nb")
+
+
+# ------------------------------------------------------------------ payloads and comments (CR-01, CR-03)
+
+COMMENT_ROWS = (
+    "echo a # c\\\nrm -rf /etc/x",
+    "ls # don't\nrm -rf /etc/x",
+    'ls # "\nrm -rf /etc/x',
+    "ls # (\nrm -rf /etc/x",
+    "ls # {\nrm -rf /etc/x",
+    "ls # note \\\nrm -rf /etc/x",
+)
+
+
+@pytest.mark.parametrize("command", COMMENT_ROWS)
+def test_a_comment_never_hides_the_next_line(command):
+    """Bash ends a comment at the newline, whatever the comment holds; the next line is a command."""
+    assert [s.signature for s in _segments(command)][-1] == "rm -rf"
+    assert any(s.destructive for s in _segments(command))
+
+
+@pytest.mark.parametrize("mode", ("read-only", "guarded", "auto"))
+@pytest.mark.parametrize("command", COMMENT_ROWS)
+def test_a_comment_row_has_the_verdict_of_its_control(command, mode, ws):
+    control = _verdict("echo a\nrm -rf /etc/x", ws, mode)
+    assert _verdict(command, ws, mode).verdict is control.verdict
+    assert control.verdict is not Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command,joined", [
+    ('echo "a # b"', 'echo "a # b"'),
+    ("echo a#b", "echo a#b"),
+    ("echo '#' x", "echo '#' x"),
+    ("echo \\#x", "echo \\#x"),
+    ("echo $# ${#HOME}", "echo $# ${#HOME}"),
+    ("echo ${HOME/ #x/y} z", "echo ${HOME/ #x/y} z"),
+    ("echo a\\\n#b", "echo a#b"),
+    ("sed 's/a/#b/' f", "sed 's/a/#b/' f"),
+    ("echo $((16#ff))", "echo $((16#ff))"),
+    ("ls # a comment", "ls "),
+    ("ls;# a comment\nls", "ls;\nls"),
+])
+def test_comment_stripping_leaves_non_comments_alone(command, joined):
+    from localharness.agent.shell_classify import _join_continuations
+
+    assert _join_continuations(command) == joined
