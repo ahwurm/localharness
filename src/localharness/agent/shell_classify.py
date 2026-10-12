@@ -1702,6 +1702,21 @@ class _Raw:
         self.piped = piped
 
 
+def _quoted_substitution_end(text: str, index: int) -> int | None:
+    """If a substitution opens at ``index`` inside a double-quoted string, the index just past it, else None.
+
+    ``$(``, ``${`` and a backtick are read with the helpers the unquoted path uses, so the quotes inside them
+    are balanced on their own (CR-07 it4)."""
+    char = text[index]
+    if char == "$" and text[index + 1 : index + 2] == "(":
+        return _matching(text, index + 1) + 1
+    if char == "$" and text[index + 1 : index + 2] == "{":
+        return _matching_brace(text, index + 1) + 1
+    if char == "`":
+        return _closing_backtick(text, index) + 1
+    return None
+
+
 def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
     """PRD §3.2 step 3: split at top-level ``&&``, ``||``, ``;``, ``|``, ``&`` and newline.
 
@@ -1729,6 +1744,12 @@ def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
     while index < len(text):
         char = text[index]
         if quote:
+            if quote == '"' and (end := _quoted_substitution_end(text, index)) is not None:
+                # A `$( … )`, `${ … }` or backtick body inside double quotes is a fresh quote context: a `"` in it
+                # opens and closes inner quotes, it does not end this string, and a `;` there is not ours (CR-07 it4).
+                buffer.append(text[index:end])
+                index = end
+                continue
             buffer.append(char)
             if char == "\\" and quote in ('"', "`") and index + 1 < len(text):
                 buffer.append(text[index + 1])
@@ -2331,6 +2352,9 @@ def _matching(text: str, open_index: int) -> int:
         if quote:
             if char == "\\" and quote == '"' and index + 1 < len(text):
                 index += 2
+                continue
+            if quote == '"' and (end := _quoted_substitution_end(text, index)) is not None:
+                index = end  # a substitution inside the string has quotes of its own (CR-07 it4)
                 continue
             if char == quote:
                 quote = None

@@ -530,3 +530,41 @@ def test_a_wrapper_in_a_payload_is_peeled_to_the_command(ws, command):
 )
 def test_payload_wrapper_controls(ws, command, expected):
     _check(command, expected, ws)
+
+
+# --------------------------------------------------------------------------- CR-07: substitutions inside double quotes
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        'echo "$(echo ";"; rm -rf /etc/x)"',
+        'echo "$(echo "&" && rm -rf /etc/x)"',
+        'echo "$(echo "|"; rm -rf /etc/x)"',
+        'echo "$(echo ";"\nrm -rf /etc/x)"',
+        'x="$(grep "a;b" f; rm -rf /etc/x)"',
+        'echo "`echo ";"; rm -rf /etc/x`"',
+        'echo "${x:-$(echo ";"; rm -rf /etc/x)}"',
+        '"${ ";"\nrm -rf /etc/x;}"',
+        'echo "$(echo ")"; rm -rf /etc/x)"',
+        'echo "$(echo "$(echo ")")"; rm -rf /etc/x)"',
+    ),
+)
+def test_a_substitution_in_double_quotes_has_its_own_quote_context(ws, command):
+    """CR-07 (it4): the ``"`` inside ``"$( … )"`` opens a fresh string, so a ``;`` or ``)`` inside it is not ours and
+    the command after it is still seen."""
+    _check(command, "DENY/ASKU/ASKU", ws)
+    assert any(s.signature == "rm -rf" for s in _segments(command))
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ('echo "$(echo "x"; rm -rf /etc/x)"', "DENY/ASKU/ASKU"),
+        ('echo "$(echo ";"; echo hi)"', "ok/ok/ok"),
+        ('x="$( echo "a b" )" ; ls', "ok/ok/ok"),
+        ('echo "a;b" "c|d"; ls', "ok/ok/ok"),
+        ('git commit -m "$(cat <<\'EOF\'\nmsg\nEOF\n)"', "DENY/ASK/ok"),
+    ),
+)
+def test_double_quote_substitution_controls(ws, command, expected):
+    _check(command, expected, ws)
