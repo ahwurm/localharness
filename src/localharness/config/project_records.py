@@ -846,6 +846,7 @@ class ProjectInstructions:
         self._start_notice_given = False
         self._sitting_digest: str | None = None
         self._dropped_digest: str | None = None
+        self._mem_digest: str | None = None  # the bytes a `--no-input` `/instructions on` accepted (WR-57)
         self._awaiting_too_large: Notice | None = None
         self._too_large_notice: Notice | None = None
         self._start_line: str | None = None
@@ -1103,6 +1104,10 @@ class ProjectInstructions:
             )
             return None, notice
         text = read.data.decode("utf-8", errors="replace")
+        if self._no_input and self._mem_state == "yes":
+            held = self._no_input_yes_step(cand, path, read, fx)
+            if held is not None:
+                return held
         self._set_last(
             fx, None, marks_open=False, digest=read.digest, name=cand.name, path=path,
             size=read.size,
@@ -1120,6 +1125,36 @@ class ProjectInstructions:
             return text, None
         fx.append(lambda: setattr(self, "_start_notice_given", True))
         return text, self._notice("start", cand.name, path, read.size, "none", text=line)
+
+    def _no_input_yes_step(
+        self, cand: Candidate, path: str, read: GuardedRead, fx: list[Callable[[], None]],
+    ) -> tuple[str | None, InstructionsNotice | None] | None:
+        """D-28 step 7 under ``--no-input`` with the person's in-memory yes and no record (WR-57).
+
+        The yes accepted the bytes the person saw (:attr:`_mem_digest`), not whatever the model
+        writes next. A change a call named (this handle's mark) is dropped with the usual notice and
+        its digest pinned out until ``/instructions on``, which accepts the file as it is; nothing is
+        written. A change no call named is the person's and falls through to be adopted. Returns the
+        call's answer when the bytes are dropped (or still the dropped ones), else None."""
+        digest = read.digest
+        if digest is not None and digest == self._dropped_digest:
+            return None, None
+        if self._marked and self._mem_digest is not None and digest != self._mem_digest:
+            fx.append(lambda: setattr(self, "_dropped_digest", digest))
+            fx.append(lambda: setattr(self, "_marked", False))
+            state = InstructionsState(
+                display_name(cand.name), path, read.size, digest or "", "harness_written"
+            )
+            fx.append(lambda: setattr(self, "_last", state))
+            return None, self._notice(
+                "harness_written", cand.name, path, read.size, "harness_written",
+                text=_harness_written_text(cand.name),
+            )
+        if self._marked:  # the bytes in use are unchanged: the mark did not stand for a change
+            fx.append(lambda: setattr(self, "_marked", False))
+        fx.append(lambda: setattr(self, "_mem_digest", digest))
+        fx.append(lambda: setattr(self, "_dropped_digest", None))
+        return None
 
     def _clear_own_marks(
         self, data: dict, key: str, record: InstructionsRecord | None, pending: dict[str, str],
@@ -1493,6 +1528,7 @@ class ProjectInstructions:
             self._set_failure = "too large" if probe.failure == "too_large" else probe.failure
             return
         self._mem_state = "yes"
+        self._mem_digest = probe.digest  # what this yes accepted: a model rewrite is not it (WR-57)
         self._marked = False  # the person adopted the bytes as they are: no mark stands (WR-07)
         self._candidate = cand
         self._last = InstructionsState(
