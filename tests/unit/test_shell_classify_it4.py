@@ -260,3 +260,28 @@ def test_env_split_string_that_env_reads_differently_asks(ws, command):
 )
 def test_env_split_string_controls(ws, command, expected):
     _check(command, expected, ws)
+
+
+# --------------------------------------------------------------------------- CR-52: >&WORD is a file
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("echo x >& ~/.bashrc", "DENY/ASKU/ASKU"),
+        ("echo x >&/etc/cron.d/x", "DENY/ASKU/ASKU"),
+        ("echo x 2>& ~/.bashrc", "DENY/ASKU/ASKU"),
+        ("echo x 1>& ~/.bashrc", "DENY/ASKU/ASKU"),
+        ("echo x >& /tmp/x", "DENY/ASK/ok"),
+        ("echo x >&$FD", "!ok/!ok/ok"),
+        ("echo x &> ~/.bashrc", "DENY/ASKU/ASKU"),
+        ("ls >&2", "ok/ok/ok"),
+        ("ls 2>&1", "ok/ok/ok"),
+        ("ls >&-", "ok/ok/ok"),
+        ("ls >&2-", "ok/ok/ok"),
+        ("ls 2>&1 | head", "ok/ok/ok"),
+    ),
+)
+def test_greater_ampersand_word_is_a_file_write(ws, command, expected):
+    """CR-52 (it4): ``>&WORD`` duplicates a descriptor only when WORD is digits or ``-``; otherwise bash
+    writes the file WORD exactly as ``&>WORD`` does."""
+    _check(command, expected, ws)
