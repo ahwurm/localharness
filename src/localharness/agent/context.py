@@ -124,6 +124,17 @@ TOOL_EVICT_THRESHOLD_CHARS: int = 8_000  # bodies under this aren't worth stubbi
 # oldest members spill back to eviction. The newest result always survives: the model has
 # not seen it yet, and evicting it would turn every oversized read into a restore round trip.
 TOOL_EVICT_PROTECT_BUDGET_FRACTION: float = 0.25
+# Floors of the window-ratio sizes (ContextManager.tool_output_cap_chars / evict_threshold_chars /
+# result_cap_chars): the first two are the config ints' own lower bounds, the third a floor of its
+# own, so a window an overflow has shrunk to a few hundred tokens can never zero a cap.
+TOOL_OUTPUT_FLOOR_CHARS: int = 100
+TOOL_EVICT_FLOOR_CHARS: int = 500
+RESULT_CAP_FLOOR_CHARS: int = 1_000
+# The ratio defaults mirror ContextConfig's (this module does not import the config models); a test
+# pins the equality so they cannot drift.
+TOOL_OUTPUT_RATIO_DEFAULT: float = 1 / 16
+EVICT_RATIO_DEFAULT: float = 1 / 64
+RESULT_CAP_RATIO_DEFAULT: float = 3 / 32
 _TOOL_STUB_PREFIX = "[tool result evicted"
 _TOOL_STUB_SUFFIX = " to restore the full body]"
 # A stub names the call it replaced — tool + first string argument (a path, a url, a query, a
@@ -1252,9 +1263,12 @@ def _head_tail(text: str, max_chars: int) -> str:
 
 class ToolResultCapStage:
     """Stage 1: Pre-clean every tool result (ANSI/whitespace) and cap oversized ones with a
-    head+tail keep (lossy first defense; the restorable page-out is the eviction stage)."""
+    head+tail keep (lossy first defense; the restorable page-out is the eviction stage).
 
-    def __init__(self, max_chars: int = 50_000) -> None:
+    `max_chars` may be a callable returning the cap: it is resolved once per `apply`, which is how
+    `start` and the bench hand the stage the context manager's live `tool_output_cap_chars`."""
+
+    def __init__(self, max_chars: int | Callable[[], int] = 50_000) -> None:
         self.max_chars = max_chars
 
     def apply(
@@ -1263,14 +1277,15 @@ class ToolResultCapStage:
         budget: TokenBudget,
         token_counter: TokenCounter,
     ) -> tuple[list[Message], bool]:
+        cap = self.max_chars() if callable(self.max_chars) else self.max_chars
         result = []
         modified = False
         for m in messages:
             if m.get("role") == "tool":
                 content = m.get("content") or ""
                 cleaned = _clean_tool_output(content)
-                if len(cleaned) > self.max_chars:
-                    cleaned = _head_tail(cleaned, self.max_chars)
+                if len(cleaned) > cap:
+                    cleaned = _head_tail(cleaned, cap)
                 if cleaned != content:
                     result.append({**m, "content": cleaned})
                     modified = True
@@ -1499,12 +1514,15 @@ class CompactionPipeline:
     (ToolResultCapStage, BoundaryGuardStage — cheap, non-LLM) and LLM (SummaryCompactionStage,
     FullAutoCompactStage). build_messages runs the deterministic stages on every over-threshold
     pass, but only the LLM stages consume the per-turn fire budget — so oversized tool results are
-    always capped, even after the fire cap is spent. `run()` still runs ALL stages (back-compat)."""
+    always capped, even after the fire cap is spent. `run()` still runs ALL stages (back-compat).
+
+    `tool_result_cap` may be a callable read on every apply (the context manager's live
+    `tool_output_cap_chars`), so the cap follows the window the model has now."""
 
     def __init__(
         self,
         token_counter: TokenCounter,
-        tool_result_cap: int = 50_000,
+        tool_result_cap: int | Callable[[], int] = 50_000,
         preserve_first_n: int = 4,
         preserve_last_n: int = 8,
         llm_summarize_fn: Any = None,
@@ -1778,6 +1796,20 @@ def make_compaction_summarize_fn(llm: Any, max_input_chars: int | None = None) -
     return summarize
 
 
+def context_size_kwargs(ctx_cfg: Any) -> dict[str, Any]:
+    """The `ContextManager` keywords that carry a ContextConfig-shaped object's tool-output sizes
+    and ratios, read duck-typed (this module does not import the config models). `start`, the
+    bench and the migration test all map config to the manager through this one place; the raw
+    configured values go in (an unset size stays None), never a resolved number."""
+    return {
+        "tool_output_chars": getattr(ctx_cfg, "max_tool_output_chars", None),
+        "tool_output_ratio": getattr(ctx_cfg, "tool_output_ratio", TOOL_OUTPUT_RATIO_DEFAULT),
+        "tool_evict_threshold_chars": getattr(ctx_cfg, "tool_result_evict_threshold_chars", None),
+        "evict_ratio": getattr(ctx_cfg, "evict_ratio", EVICT_RATIO_DEFAULT),
+        "result_cap_ratio": getattr(ctx_cfg, "result_cap_ratio", RESULT_CAP_RATIO_DEFAULT),
+    }
+
+
 class ContextManager:
     """Manages message list preparation for LLM requests.
 
@@ -1796,12 +1828,16 @@ class ContextManager:
         session_id: str = "",
         eviction_store: "ContentStore | None" = None,
         content_store: "ContentStore | None" = None,
-        tool_evict_threshold_chars: int = TOOL_EVICT_THRESHOLD_CHARS,
+        tool_evict_threshold_chars: int | None = TOOL_EVICT_THRESHOLD_CHARS,
         tool_evict_enabled: bool = True,
         token_counter: "TokenCounter | None" = None,
         compaction_trigger_fraction: float = DEFAULT_COMPACTION_TRIGGER_FRACTION,
         max_response_tokens: int | None = None,
         result_origin: Callable[[str], Origin] | None = None,
+        tool_output_chars: int | None = None,
+        tool_output_ratio: float = TOOL_OUTPUT_RATIO_DEFAULT,
+        evict_ratio: float = EVICT_RATIO_DEFAULT,
+        result_cap_ratio: float = RESULT_CAP_RATIO_DEFAULT,
     ) -> None:
         self.max_context_tokens = max_context_tokens
         # The configured per-reply output cap; sizes the shared reply reserve (response_reserve).
@@ -1823,7 +1859,15 @@ class ContextManager:
         self._content_store = content_store if content_store is not None else (
             eviction_store if eviction_store is not None else ContentStore()
         )
+        # The three tool-output sizes. An explicit integer (tool_output_chars /
+        # tool_evict_threshold_chars) is used as written; None means the ratio of the LIVE
+        # max_context_tokens, resolved at use by the methods below — never cached here. A direct
+        # construction that passes no eviction keyword keeps the historical 8,000.
+        self._tool_output_chars = tool_output_chars
+        self._tool_output_ratio = tool_output_ratio
         self._tool_evict_threshold_chars = tool_evict_threshold_chars
+        self._evict_ratio = evict_ratio
+        self._result_cap_ratio = result_cap_ratio
         self._tool_evict_enabled = tool_evict_enabled
         # How an evicted body's origin is read: the producing tool's declared result_origin
         # (ToolRegistry.result_origin, wired by start and bench); unwired, every body is untrusted.
@@ -1854,6 +1898,38 @@ class ContextManager:
     def set_iteration(self, iteration: int) -> None:
         """Allow the agent loop to bump iteration so CompactionTriggered events carry it."""
         self._iteration = int(iteration)
+
+    def tool_output_cap_chars(self) -> int:
+        """The most characters of one tool result the compaction pipeline keeps (head+tail). An
+        explicit `tool_output_chars` is used as written; otherwise `tool_output_ratio` of the live
+        window in characters, never below TOOL_OUTPUT_FLOOR_CHARS. Read on every use, so an
+        overflow shrink or a /model refit changes the next build's cap."""
+        if self._tool_output_chars is not None:
+            return self._tool_output_chars
+        return max(
+            TOOL_OUTPUT_FLOOR_CHARS,
+            int(self.max_context_tokens * self._tool_output_ratio) * APPROX_CHARS_PER_TOKEN,
+        )
+
+    def evict_threshold_chars(self) -> int:
+        """The body size above which a tool result becomes eligible for eviction to a stub. An
+        explicit `tool_evict_threshold_chars` is used as written; otherwise `evict_ratio` of the
+        live window in characters, never below TOOL_EVICT_FLOOR_CHARS."""
+        if self._tool_evict_threshold_chars is not None:
+            return self._tool_evict_threshold_chars
+        return max(
+            TOOL_EVICT_FLOOR_CHARS,
+            int(self.max_context_tokens * self._evict_ratio) * APPROX_CHARS_PER_TOKEN,
+        )
+
+    def result_cap_chars(self) -> int:
+        """What one tool result may put into the conversation at all (the tool registry's result
+        cap): `result_cap_ratio` of the live window in characters, never below
+        RESULT_CAP_FLOOR_CHARS. There is no explicit-integer config for it."""
+        return max(
+            RESULT_CAP_FLOOR_CHARS,
+            int(self.max_context_tokens * self._result_cap_ratio) * APPROX_CHARS_PER_TOKEN,
+        )
 
     def window_overflow(self, served_limit: int | None, request_tokens: int) -> int:
         """The server refused a request as larger than its window: learn the window and keep
@@ -2023,7 +2099,7 @@ class ContextManager:
         ):
             repaired, t_evicted = _evict_large_tool_results(
                 repaired, self._eviction_store,
-                threshold_chars=self._tool_evict_threshold_chars,
+                threshold_chars=self.evict_threshold_chars(),
                 protect_budget_chars=int(
                     self.max_context_tokens * TOOL_EVICT_PROTECT_BUDGET_FRACTION
                 ) * APPROX_CHARS_PER_TOKEN,
