@@ -784,6 +784,8 @@ EXEC_REDIRECT_ENV_VARS_DEFAULT: tuple[str, ...] = (
     "GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_PAGER", "PAGER", "GIT_EDITOR",
     "GIT_SEQUENCE_EDITOR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_*",
     "GIT_DIR", "GIT_COMMON_DIR",
+    "GIT_SSH", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXEC_PATH",
+    "GIT_TRACE*", "GIT_REDIRECT_*",
 )
 """Environment variables whose value redirects WHICH program runs or WHAT config a program loads
 (Phase 10, SHELL-03, D-25, D-48, D-70).
@@ -793,7 +795,10 @@ preload and audit libraries (``LD_PRELOAD``, ``LD_LIBRARY_PATH``, ``LD_AUDIT``),
 config directories git and other tools read (``HOME``, ``*_CONFIG*`` such as
 ``RIPGREP_CONFIG_PATH`` and ``XDG_CONFIG_HOME``), git's external diff, ssh command, pager and
 editors, config injected through the environment (``GIT_CONFIG_PARAMETERS``, ``GIT_CONFIG_COUNT``,
-``GIT_CONFIG_KEY_*``) and an alternate git directory (``GIT_DIR``, ``GIT_COMMON_DIR``). A plain
+``GIT_CONFIG_KEY_*``) and an alternate git directory (``GIT_DIR``, ``GIT_COMMON_DIR``). Also the
+other programs a git read can start (``GIT_SSH``, ``GIT_ASKPASS``, ``SSH_ASKPASS``,
+``GIT_PROXY_COMMAND``, ``GIT_EXEC_PATH``) and the variables that make it append to or redirect into
+a named file (``GIT_TRACE*``, ``GIT_REDIRECT_*``; WR-02 / WR-57). A plain
 ``git diff`` or ``ls`` reads none of them as a command, but each can make a read run one.
 
 ``*`` is an :func:`fnmatch.fnmatchcase` glob over the whole name, matched CASE-SENSITIVELY
