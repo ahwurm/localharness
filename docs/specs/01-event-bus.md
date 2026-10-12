@@ -423,8 +423,9 @@ class Observation(BaseEvent):
 
     output: Optional[str] = None
     """
-    Tool output as string. Capped at max_tool_output_chars by ContextManager
-    before this event is published (default: 32000 chars).
+    Tool output as string. Capped at `result_cap_ratio` of the live window when the registry
+    dispatches the call, then at `max_tool_output_chars` (or `tool_output_ratio` of the window)
+    when the prompt is built.
     """
 
     truncated: bool = False
