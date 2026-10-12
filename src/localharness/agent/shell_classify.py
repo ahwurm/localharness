@@ -4457,6 +4457,10 @@ def removal_operands(signature: str, argv: tuple[str, ...]) -> list[str]:
     """
     if not argv:
         return []
+    if argv[0] == "find":
+        return _find_removal_roots(argv)
+    if argv[0] == "rsync":
+        return _rsync_removal_operands(argv[1:])
     start = 0
     if signature.startswith(tuple(f"{runner} " for runner in COMPOSING_RUNNERS)):
         start = next((i for i, token in enumerate(argv) if token in REMOVAL_VERBS), len(argv))
@@ -4473,6 +4477,43 @@ def removal_operands(signature: str, argv: tuple[str, ...]) -> list[str]:
         elif token == "--":
             options_over = True
     return out
+
+
+def _find_removal_roots(argv: Sequence[str]) -> list[str]:
+    """The start paths of a ``find`` whose ``-exec`` / ``-execdir`` / ``-ok`` / ``-okdir`` runs a plain
+    delete or move (``-exec rm {} \\;``), else nothing (WR-08 it3, ruling taken on the owner's behalf by the
+    GSD run). The command it runs names ``{}``, which no static reading can place, so the places it
+    searches are what the verdict can ask about. ``-delete`` is already a destructive signature."""
+    payloads, _ = _find_payloads(list(argv))
+    for payload in payloads:
+        words = [word for word in payload if _basename(word) not in PURE_EXEC_WRAPPERS]
+        if words and _basename(words[0]) in REMOVAL_VERBS:
+            return _find_operands(list(argv[1:]))
+    return []
+
+
+def _rsync_removal_operands(rest: Sequence[str]) -> list[str]:
+    """What an ``rsync`` removes: every source under ``--remove-source-files``, the destination under
+    ``--delete`` / ``--delete-*`` / ``--del`` (WR-08 it3). The positionals are read as ``_copy_targets`` reads
+    them: the last is the destination and the others are sources."""
+    options = [token for token in rest if token.startswith("--")]
+    positionals = [token for token in rest if not token.startswith("-")]
+    out: list[str] = []
+    if "--remove-source-files" in options:
+        out += positionals[:-1]
+    if any(option in ("--delete", "--del") or option.startswith("--delete-") for option in options):
+        out += positionals[-1:]
+    return out
+
+
+def xargs_runs_a_removal(argv: Sequence[str]) -> bool:
+    """Does this ``xargs`` run a plain ``rm`` / ``unlink`` / ``rmdir`` / ``mv``? (WR-56 it3.) The paths it
+    deletes come from standard input, so the verdict asks when a sibling command of the same line names a
+    config folder (``find <cfg> | xargs rm``)."""
+    if not argv or argv[0] != "xargs":
+        return False
+    words = [word for word in _command_payload(list(argv)) if _basename(word) not in PURE_EXEC_WRAPPERS]
+    return bool(words) and _basename(words[0]) in REMOVAL_VERBS
 
 
 def _find_operands(rest: list[str]) -> list[str]:

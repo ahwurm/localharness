@@ -324,6 +324,16 @@ def test_a_glob_that_could_match_a_protected_entry_in_a_config_folder_asks(
         assert _shell(command, _ctx(project)) is Verdict.ASK, command
 
 
+def test_an_unknown_base_asks_only_after_a_literal_config_folder_name(project):
+    """The base of `$X/…` is unknown, so the operand is read by its names: an entry after a literal
+    `.localharness` asks, the folder itself asks, and a bare entry name under a variable does not."""
+    for command in ("rm $HOME/.localharness/project_records.yaml", "rm $X/.localharness/*",
+                    "mv $X/.localharness /tmp/lh"):
+        assert _shell(command, _ctx(project)) is Verdict.ASK, command
+    for command in ("rm $X/.localharness/agents/a.yaml", "rm $BUILD/project_records.yaml"):
+        assert _shell(command, _ctx(project)) is Verdict.ALLOW, command
+
+
 @pytest.mark.parametrize("template", [
     "rm {c}/agents/*", "rm {c}/*.tmp", "rm {c}/tools/*.sh", "rm {c}/audit.*",
 ])
@@ -335,6 +345,56 @@ def test_a_glob_in_a_config_folder_that_cannot_match_an_entry_is_allowed(
     for base in (str(config_dir), ".localharness"):
         command = template.format(c=base)
         assert _shell(command, _ctx(project)) is Verdict.ALLOW, command
+
+
+@pytest.mark.parametrize("template", [
+    "mv {c} {c}.old", "mv {c}/ /tmp/x", "mv -t /tmp {c}", "mv -T {c} /tmp/x", "rm {c}", "rmdir {c}",
+    "unlink {c}", "cd {c}/.. && mv {name} {name}.old",
+    "find {c} -name project_records.yaml -exec rm {{}} +", "find {c} -name x -exec rm {{}} \\;",
+    "find {c} -execdir mv {{}} /tmp/x \\;", "find {c} -ok rm {{}} \\;",
+    "find {c} | xargs rm", "find {c} -name x | xargs -r rm", "echo {c}/project_records.yaml | xargs rm",
+    "ls {c} | xargs rm -v",
+    "rsync --remove-source-files {c}/project_records.yaml /tmp/", "rsync -a --delete /tmp/empty/ {c}/",
+    "rsync -a --delete-after /tmp/empty/ {c}",
+])
+def test_moving_the_config_folder_away_and_the_indirect_removals_ask_in_auto(
+        template, project, tmp_path, monkeypatch):
+    """WR-08/WR-56 it3: `mv <cfg> /tmp/x` takes the instructions record away with the folder (the
+    next start sees no record), and `find -exec rm`, `xargs rm` and `rsync --delete` do the same
+    through a spelling the verdict could place. They agree with `rm -r <cfg>`. Only classified."""
+    config_dir = tmp_path / "global"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(config_dir))
+    in_project = project / ".localharness"
+    for base, name in ((config_dir, "global"), (in_project, ".localharness")):
+        command = template.format(c=base, name=name)
+        assert _shell(command, _ctx(project)) is Verdict.ASK, command
+    # the in-project folder by its relative name, from the workspace
+    for command in ("mv .localharness /tmp/lh", "rmdir .localharness", "find .localharness | xargs rm",
+                    "find .localharness -exec rm {} +"):
+        assert _shell(command, _ctx(project)) is Verdict.ASK, command
+
+
+@pytest.mark.parametrize("template", [
+    "find {c}/agents -name x -exec rm {{}} \\;", "find {c} -name x -exec grep y {{}} \\;", "find {c} -name x",
+    "find {c} | xargs grep x", "rsync -a {c}/ /tmp/backup/", "mv {c}/agents/a.yaml {c}/agents/b.yaml",
+    "rm {c}/agents/a.yaml",
+])
+def test_the_indirect_removal_rules_do_not_over_ask(template, project, tmp_path, monkeypatch):
+    config_dir = tmp_path / "global"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCALHARNESS_DIR", str(config_dir))
+    command = template.format(c=config_dir)
+    assert _shell(command, _ctx(project)) is Verdict.ALLOW, command
+
+
+@pytest.mark.parametrize("command", [
+    "find build -name x -exec rm {} \\;", "find . -name '*.o' -exec rm {} +", "find build | xargs rm",
+    "ls build | xargs rm", "rsync -a --delete build/ /tmp/out/", "rsync --remove-source-files build/x /tmp/",
+    "mv build build.old", "rm -r build", "mv src dst",
+])
+def test_the_same_removals_outside_a_config_folder_are_unchanged(command, project):
+    assert _shell(command, _ctx(project)) is Verdict.ALLOW, command
 
 
 # ------------------------------------------------------------- what no longer asks
