@@ -893,20 +893,23 @@ IDENTIFIER_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567
 """What may stand right before the ``[`` of an array subscript, ``a[1<<1]=3``: inside it ``<<`` shifts."""
 
 
-def _read_heredoc_delimiter(text: str, index: int) -> tuple[str, bool, int, bool]:
+def _read_heredoc_delimiter(
+    text: str, index: int, closer: str = ""
+) -> tuple[str, bool, int, bool]:
     """Read the word after ``<<`` / ``<<-``: (the delimiter, whether any of it was quoted, the end, ok).
 
     The delimiter is the word with its quoting removed, as bash does: ``'E'``, ``"E"``, ``\\E``,
     ``$'E'`` (decoded, ``$'E\\x46'`` is ``EF``) and ``$"E"`` all give ``E``; any quoting at all makes
     the body literal data (``quoted``). A backslash-newline inside the word is a continuation and
-    joins the lines first. The word ends at a blank or an operator (:data:`HEREDOC_WORD_STOPS`), but
-    a newline inside quotes belongs to it. ``ok`` is False when a quote never closes."""
+    joins the lines first. The word ends at a blank, an operator (:data:`HEREDOC_WORD_STOPS`) or the
+    ``closer`` of the context it is read in (the backtick of a backtick body), but a newline inside
+    quotes belongs to it. ``ok`` is False when a quote never closes."""
     chars: list[str] = []
     quoted = False
     size = len(text)
     while index < size:
         char = text[index]
-        if char in " \t\n" or char in HEREDOC_WORD_STOPS:
+        if char in " \t\n" or char in HEREDOC_WORD_STOPS or (closer and char == closer):
             break
         if char == "\\":
             if text[index + 1 : index + 2] == "\n":
@@ -1091,7 +1094,7 @@ class _JoinScan:
                     tracker.opaque()
                     continue
                 if kind in HEREDOC_KINDS and not bracket:
-                    self._heredoc_operator(out, pending)
+                    self._heredoc_operator(out, pending, "`" if kind == _JOIN_BACKTICK else "")
                     word_start = True
                     tracker.opaque()
                     continue
@@ -1205,7 +1208,7 @@ class _JoinScan:
         if outer_pending and "\n" in self.text[start : self.index]:
             self.balanced = False
 
-    def _heredoc_operator(self, out: list[str], pending: list[list]) -> None:
+    def _heredoc_operator(self, out: list[str], pending: list[list], closer: str = "") -> None:
         """A ``<<`` / ``<<-`` at ``self.index`` that is a heredoc operator: queue its delimiter.
 
         The operator and its word are replaced by a blank; the body is taken at the next newline of
@@ -1217,7 +1220,7 @@ class _JoinScan:
             index += 1
         while index < len(text) and text[index] in " \t":
             index += 1
-        delimiter, quoted, end, ok = _read_heredoc_delimiter(text, index)
+        delimiter, quoted, end, ok = _read_heredoc_delimiter(text, index, closer)
         if end == index and ok:
             out.append("<<")  # no word at all: bash refuses it, and nothing is queued
             self.index = index
