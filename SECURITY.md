@@ -240,6 +240,9 @@ global config, a project's whole `proposer:` section is ignored. These are all o
 - `channels.unattended_max_actions` (the action ceiling for every agent while no one is at the
   terminal, in every permission mode, `auto` included: a remote channel, or a terminal started with
   `--no-input` (cron, CI), from a pipe, or by the model itself; a project cannot raise it)
+- `instructions.max_ratio` (the largest share of the context window a project's instructions file
+  may take)
+- `instructions.children` (whether delegated children receive the project's instructions file)
 - `proposer.base_url`
 - `proposer.api_key`
 - `image.comfyui_url`

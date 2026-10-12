@@ -491,6 +491,7 @@ HARNESS_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({
     "org.audit_log_path", "org.hooks", "org.enforce_capability_floor",
     "org.web_fetch_allow_private", "channels.remote_unattended", "channels.unattended_max_actions",
     "autosense", "effort_budget", "org.default_effort",
+    "instructions.max_ratio", "instructions.children",
     "proposer.base_url", "proposer.api_key"})
 """The core harness keys only the global config (config.yaml or overrides.yaml) may set.
 
@@ -506,6 +507,11 @@ lowered, so only the machine moves it). An address alone is enough to leak:
 every message and every file the agent reads travels to it, key or no key. A member may be a whole
 section or list (`server`, `extra_endpoints`); readers test a dot-path with
 `is_harness_global_only`, which also matches the keys inside a member section.
+
+`instructions.max_ratio` and `instructions.children` bound how much of the window a project's own
+instructions file may take and whether delegated children get it too; a repository must not be able to
+raise its own file's share or push it into every child, so only the machine sets either. They are
+listed as their two leaves, so a workspace block that merely restates the defaults is no warning.
 
 `autosense`, `effort_budget` and `org.default_effort` decide how the harness sizes and bounds what
 it serves on this machine's hardware (memory margins, model folders, the reasoning share of every
