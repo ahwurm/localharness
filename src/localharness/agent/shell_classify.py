@@ -3670,6 +3670,13 @@ GIT_INLINE_CONFIG_SAFE_KEYS: tuple[str, ...] = (
     "core.precomposeunicode", "core.filemode", "core.ignorecase", "core.untrackedcache",
     "core.commentchar", "core.longpaths", "core.preloadindex", "user.name", "user.email",
     "branch.sort", "tag.sort",
+    # IN-51 (it5): display keys that name no program and no file. Not `format.*` (`format.outputDirectory` writes
+    # files, `format.signatureFile` reads one), not `merge.*` (`merge.tool`, `merge.<driver>.driver` run programs),
+    # not `blame.ignoreRevsFile` (reads a file), not `gc.*` (only the threshold).
+    "format.pretty", "format.commitlistformat", "merge.conflictstyle", "merge.verbosity",
+    "blame.coloring", "blame.blankboundary", "blame.showroot", "blame.showemail", "blame.date",
+    "blame.markignoredlines", "blame.markunblamablelines", "help.autocorrect", "rerere.enabled",
+    "rerere.autoupdate", "gc.auto",
 )
 """Config keys an inline ``git -c KEY=…`` may set without losing the read-only tier (CR-51 it4): they change
 how output looks, not what git opens or runs. The rule is an allow-list because the program-running keys
@@ -3706,25 +3713,33 @@ def _git_global_options(argv: Sequence[str]) -> list[str]:
     return list(argv[1:min(index, len(argv))])
 
 
-def _git_inline_config_keys(argv: Sequence[str]) -> list[str]:
-    """The keys of every ``-c KEY[=V]`` / ``--config-env[=]KEY=ENV`` among git's global options."""
+def _git_inline_config_pairs(argv: Sequence[str]) -> list[tuple[str, str | None]]:
+    """(key, value) of every ``-c KEY[=V]`` / ``--config-env[=]KEY=ENV`` among git's global options.
+
+    The value of ``--config-env`` is the NAME of a variable, so it is returned as None (unknown)."""
     options = _git_global_options(argv)
-    keys: list[str] = []
+    pairs: list[tuple[str, str | None]] = []
     index = 0
     while index < len(options):
         token = options[index]
         if token == GIT_INLINE_CONFIG_FLAG and index + 1 < len(options):
-            keys.append(options[index + 1].split("=", 1)[0])
+            key, equals, value = options[index + 1].partition("=")
+            pairs.append((key, value if equals else "true"))
             index += 2
         elif token.startswith(f"{GIT_INLINE_CONFIG_ENV_FLAG}="):
-            keys.append(token.split("=", 1)[1].split("=", 1)[0])
+            pairs.append((token.split("=", 1)[1].split("=", 1)[0], None))
             index += 1
         elif token == GIT_INLINE_CONFIG_ENV_FLAG and index + 1 < len(options):
-            keys.append(options[index + 1].split("=", 1)[0])
+            pairs.append((options[index + 1].split("=", 1)[0], None))
             index += 2
         else:
             index += 1
-    return keys
+    return pairs
+
+
+def _git_inline_config_keys(argv: Sequence[str]) -> list[str]:
+    """The keys of every ``-c KEY[=V]`` / ``--config-env[=]KEY=ENV`` among git's global options."""
+    return [key for key, _ in _git_inline_config_pairs(argv)]
 
 
 def _git_redirects_what_runs(argv: Sequence[str]) -> bool:
@@ -3735,13 +3750,16 @@ def _git_redirects_what_runs(argv: Sequence[str]) -> bool:
     may name a program. Read among the global options only, so ``git rev-parse --git-dir`` stays a read."""
     for token in _git_global_options(argv):
         name = token.split("=", 1)[0]
-        if name in ("--git-dir", GIT_EXEC_PATH_FLAG):
+        # a bare `--exec-path` prints the directory and exits; only `--exec-path=DIR` repoints it (IN-51 it5)
+        if name == "--git-dir" or (name == GIT_EXEC_PATH_FLAG and "=" in token):
             return True
-    for key in _git_inline_config_keys(argv):
+    for key, value in _git_inline_config_pairs(argv):
         lowered = key.lower()
-        if lowered == "log.showsignature" or not any(
-            fnmatch.fnmatchcase(lowered, pattern) for pattern in GIT_INLINE_CONFIG_SAFE_KEYS
-        ):
+        if lowered == "log.showsignature":
+            if value is None or value.lower() not in ("false", "no", "off", "0"):
+                return True  # switched on, it runs gpg
+            continue
+        if not any(fnmatch.fnmatchcase(lowered, pattern) for pattern in GIT_INLINE_CONFIG_SAFE_KEYS):
             return True
     return False
 
