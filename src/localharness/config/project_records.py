@@ -844,6 +844,7 @@ class ProjectInstructions:
         self._declined = False
         self._marked = False
         self._had_record = False
+        self._taken_over: tuple[str, str, int, str] | None = None
         self._warned: set[tuple] = set()
         self._held: InstructionsNotice | None = None
         self._awaiting: _Awaiting | None = None
@@ -984,13 +985,17 @@ class ProjectInstructions:
     def _set_last(
         self, fx: list[Callable[[], None]], record: InstructionsRecord | None, *,
         marks_open: bool, digest: str | None, too_large: bool = False,
-        name: str = "", path: str = "", size: int = 0,
+        name: str = "", path: str = "", size: int = 0, in_use: bool = False,
     ) -> None:
-        if record is not None:
+        """Queue the handle's ``state``. With a record the file is the record's, unless ``in_use``:
+        the file whose text this call returns is a different one (a take-over at start, the file an
+        owed start line described), and ``state`` names that one, so the loop's fence header and
+        ``/instructions show`` never name one file over another's text (WR-02, IN-55)."""
+        if record is not None and not in_use:
             name, path, size = record.name, record.path, record.size
         state = InstructionsState(
             name or self._last.name, path or self._last.path, size,
-            record.digest if record is not None else digest,
+            record.digest if record is not None and not in_use else digest,
             _state_name(record, marks_open=marks_open, digest=digest, too_large=too_large),
         )
         fx.append(lambda: setattr(self, "_last", state))
@@ -1062,7 +1067,7 @@ class ProjectInstructions:
                 return None, None
         if self._awaiting is not None:
             if record is None or (record.state == "yes" and record.digest != self._awaiting.digest):
-                return self._awaiting_step(cap, pending, stored, fx)
+                return self._awaiting_step(record, cap, pending, stored, fx)
             fx.append(self._clear_awaiting)
         if not usable:
             return self._no_record(cap, stored, fx, at_start=at_start)
@@ -1107,8 +1112,8 @@ class ProjectInstructions:
         return text, self._notice("start", cand.name, path, read.size, "none", text=line)
 
     def _awaiting_step(
-        self, cap: int, pending: dict[str, str], stored: frozenset[Notice],
-        fx: list[Callable[[], None]],
+        self, record: InstructionsRecord | None, cap: int, pending: dict[str, str],
+        stored: frozenset[Notice], fx: list[Callable[[], None]],
     ) -> tuple[str | None, InstructionsNotice | None]:
         """A start line is owed: the digest it described is the one in use this sitting."""
         aw = self._awaiting
@@ -1120,7 +1125,9 @@ class ProjectInstructions:
                 at_start=False,
             )
         text = read.data.decode("utf-8", errors="replace")
+        in_use = {"name": aw.name, "path": aw.path, "size": read.size, "in_use": True}
         if read.digest == aw.digest:
+            self._set_last(fx, record, marks_open=False, digest=read.digest, **in_use)
             if self._start_notice_given:
                 return text, None
             fx.append(lambda: setattr(self, "_start_notice_given", True))
@@ -1140,6 +1147,7 @@ class ProjectInstructions:
                 "harness_written", aw.name, aw.path, read.size, "harness_written",
                 text=_harness_written_text(aw.name),
             )
+        self._set_last(fx, record, marks_open=False, digest=read.digest, **in_use)
         return text, None  # the person's own edit in a sitting with no record: no second line
 
     def _with_record(
@@ -1148,6 +1156,7 @@ class ProjectInstructions:
     ) -> tuple[str | None, InstructionsNotice | None]:
         first = first_candidate(self._root)
         marks = self._marks(pending)
+        fx.append(lambda: setattr(self, "_taken_over", None))
         # a recorded file that is gone is no competitor: the first present candidate, whatever its
         # rank, is the person's to be adopted (D-28 step 4)
         recorded_gone = not os.path.lexists(record.path)
@@ -1248,12 +1257,15 @@ class ProjectInstructions:
                 at_start=at_start,
             )
         text = read.data.decode("utf-8", errors="replace")
+        in_use = {"name": first.name, "path": path, "size": read.size, "in_use": True}
         if self._no_input:
-            self._set_last(fx, record, marks_open=False, digest=read.digest)
+            taken = (first.name, path, read.size, read.digest)
+            fx.append(lambda: setattr(self, "_taken_over", taken))
+            self._set_last(fx, record, marks_open=False, digest=read.digest, **in_use)
             return text, None
         if at_start:
             self._arm(fx, first.name, path, read.size, read.digest)
-            self._set_last(fx, record, marks_open=False, digest=read.digest)
+            self._set_last(fx, record, marks_open=False, digest=read.digest, **in_use)
             return text, None
         new = InstructionsRecord(
             path=path, name=display_name(first.name), digest=read.digest, size=read.size,
@@ -1457,7 +1469,15 @@ class ProjectInstructions:
         except (OSError, RuntimeError):
             return
         if record is not None:
-            probe = guarded_read(record.path, self._root, ACCEPT_MAX_BYTES)
+            aw = self._awaiting
+            if self._taken_over is not None and record.state == "yes":
+                shown = self._taken_over  # a --no-input take-over: in use this sitting only
+            elif aw is not None and record.state == "yes" and aw.digest != record.digest:
+                # a take-over at start: the file in use is the one the owed line describes
+                shown = (aw.name, aw.path, aw.size, aw.digest)
+            else:
+                shown = (record.name, record.path, record.size, record.digest)
+            probe = guarded_read(shown[1], self._root, ACCEPT_MAX_BYTES)
             state = _state_name(
                 record, marks_open=bool(pending) or self._marked, digest=probe.digest,
                 too_large=False,
@@ -1465,9 +1485,7 @@ class ProjectInstructions:
             if self._mem_state == "off":
                 state = "off"
             self._recorded_path = record.path
-            self._last = InstructionsState(
-                record.name, record.path, record.size, record.digest, state
-            )
+            self._last = InstructionsState(*shown, state)
         elif self._awaiting is None and self._mem_state is None:
             cand = self._candidate or first_candidate(self._root)
             if cand is None:
