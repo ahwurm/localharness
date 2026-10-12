@@ -23,7 +23,6 @@ from localharness.agent.loop import (
     AgentLoop,
     _fence_instructions,
 )
-from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.models import AgentConfig, PermissionConfig
 from localharness.core.events import InstructionsChanged, InstructionsNotice, TurnCompleted
 from localharness.plugins.api import ContextContribution
@@ -276,3 +275,342 @@ def test_agent_loop_takes_the_keyword_right_after_unattended_max_actions():
     params = list(inspect.signature(AgentLoop.__init__).parameters)
     assert params[params.index("unattended_max_actions") + 1] == "project_instructions"
     assert inspect.signature(AgentLoop.__init__).parameters["project_instructions"].default is None
+
+
+# --- the naming rule (D-34, D-73) -----------------------------------------------------------------
+
+
+def _call(name: str, arguments) -> SimpleNamespace:
+    return SimpleNamespace(name=name, arguments=arguments)
+
+
+@pytest.fixture
+def named(bus, tmp_path):
+    """(loop, handle, root): a loop whose handle records CLAUDE.md under `root`."""
+    root = tmp_path / "root"
+    root.mkdir()
+    handle = _FakeHandle(root)
+    loop, _ = _build(bus, handle, tmp_path=tmp_path)
+    return loop, handle, root
+
+
+@pytest.mark.parametrize("tool", ["write", "edit"])
+def test_a_write_or_edit_of_the_recorded_file_or_any_candidate_is_named(named, tool):
+    loop, _, root = named
+    assert loop._names_instruction_file(tool, {"path": str(root / "CLAUDE.md")}) is True
+    assert loop._names_instruction_file(tool, {"path": str(root / "AGENTS.md")}) is True
+    assert loop._names_instruction_file(tool, {"path": str(root / "INSTRUCTIONS.md")}) is True
+    assert loop._names_instruction_file(tool, {"path": str(root / "notes.md")}) is False
+    assert loop._names_instruction_file(tool, {"path": str(root / "sub" / "CLAUDE.md")}) is False
+
+
+def test_a_path_spelled_around_the_file_still_resolves_to_it(named):
+    loop, _, root = named
+    (root / "sub").mkdir()
+    assert loop._names_instruction_file("write", {"path": str(root / "sub" / ".." / "CLAUDE.md")}) is True
+
+
+def test_a_link_to_the_file_resolves_to_it(named):
+    loop, _, root = named
+    (root / "CLAUDE.md").write_text("x", encoding="utf-8")
+    (root / "alias.md").symlink_to(root / "CLAUDE.md")
+    assert loop._names_instruction_file("write", {"path": str(root / "alias.md")}) is True
+
+
+@pytest.mark.parametrize("command, named_", [
+    ("cat CLAUDE.md", False),
+    ("ls", False),
+    ("cat > CLAUDE.md", True),
+    ('echo x > CLAU""DE.md', True),
+    ("echo x >> AGENTS.md", True),
+    ("sed -i s/a/b/ CLAUDE.md", True),
+])
+def test_a_shell_command_is_named_unless_it_only_reads(named, command, named_):
+    loop, _, _ = named
+    assert loop._names_instruction_file("bash_exec", {"command": command}) is named_
+
+
+def test_the_shell_rule_is_the_phase_ten_predicate_with_the_gates_settings(named, monkeypatch):
+    loop, handle, root = named
+    seen = []
+
+    def fake(command, basenames, settings=None):
+        seen.append((command, set(basenames), settings))
+        return True
+
+    monkeypatch.setattr("localharness.agent.shell_classify.instruction_file_reads_only", fake)
+    assert loop._names_instruction_file("bash_exec", {"command": "anything"}) is False
+    assert seen[0][0] == "anything"
+    assert seen[0][1] == {"CLAUDE.md", "AGENTS.md", "INSTRUCTIONS.md"}
+    assert seen[0][2] is getattr(loop._gate, "settings", None)
+
+
+@pytest.mark.parametrize("code, named_", [
+    ('open("claude.md").read()', True),
+    ("p = 'AGENTS.MD'", True),
+    ("print(1 + 1)", False),
+])
+def test_python_code_is_named_by_a_basename_in_any_case(named, code, named_):
+    loop, _, _ = named
+    assert loop._names_instruction_file("python_exec", {"code": code}) is named_
+
+
+@pytest.mark.parametrize("name, arguments", [
+    ("fs__write_file", {"path": "CLAUDE.md"}),
+    ("agent", {"task": "rewrite CLAUDE.md"}),
+    ("read", {"path": "CLAUDE.md"}),
+    ("task", {"title": "CLAUDE.md"}),
+])
+def test_other_tools_are_never_named(named, name, arguments):
+    loop, _, _ = named
+    assert loop._names_instruction_file(name, arguments) is False
+
+
+@pytest.mark.parametrize("name, arguments", [
+    ("write", {}),
+    ("write", {"path": 5}),
+    ("edit", {"path": None}),
+    ("bash_exec", {"command": None}),
+    ("bash_exec", {}),
+    ("python_exec", {"code": 3}),
+    ("write", "not a dict"),
+    ("bash_exec", None),
+])
+def test_malformed_arguments_of_the_four_tools_fail_toward_marking(named, name, arguments):
+    loop, _, _ = named
+    assert loop._names_instruction_file(name, arguments) is True
+
+
+def test_a_classifier_error_fails_toward_marking(named, monkeypatch):
+    loop, handle, _ = named
+
+    def boom(*a, **k):
+        raise RuntimeError("classifier bug")
+
+    monkeypatch.setattr("localharness.agent.shell_classify.instruction_file_reads_only", boom)
+    loop._mark_instruction_calls(_call("bash_exec", {"command": "cat CLAUDE.md"}))
+    assert handle.marks == 1
+
+
+def test_a_path_that_cannot_resolve_fails_toward_marking(named):
+    loop, handle, _ = named
+    loop._mark_instruction_calls(_call("write", {"path": "bad\x00path"}))
+    assert handle.marks == 1
+
+
+def test_no_handle_means_no_mark_and_no_work(bus, tmp_path):
+    loop = _make_agent_loop(lambda _r: _RecordingLLM([]), [], bus)
+    loop._mark_instruction_calls(_call("write", {"path": "CLAUDE.md"}))  # must not raise
+    assert loop._names_instruction_file("write", {"path": "CLAUDE.md"}) is False
+
+
+# --- the mark seam in the loop (D-74) -------------------------------------------------------------
+
+
+class _Registry:
+    """A registry that records, at dispatch time, how many marks the handle held."""
+
+    def __init__(self, handle: _FakeHandle) -> None:
+        self.handle = handle
+        self.dispatched: list[tuple[str, int]] = []
+
+    def get_tools_for_agent(self, agent_id, division_id, tool_config):
+        return {}
+
+    async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+        from localharness.tools.base import ToolResult
+
+        self.dispatched.append((name, self.handle.marks))
+        return ToolResult(output="ok", success=True)
+
+
+def _calls(name: str, arguments: dict) -> list[FakeLLMResponse]:
+    return [
+        FakeLLMResponse(content=None, tool_calls=[FakeToolCall(id="tc-1", name=name, arguments=arguments)]),
+        FakeLLMResponse(content="Done."),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name, arguments, marks", [
+    ("write", {"path": "ROOT/CLAUDE.md", "content": "x"}, 1),
+    ("edit", {"path": "ROOT/AGENTS.md"}, 1),
+    ("write", {"path": "ROOT/notes.md", "content": "x"}, 0),
+    ("bash_exec", {"command": "cat CLAUDE.md"}, 0),
+    ("bash_exec", {"command": "cat > CLAUDE.md"}, 1),
+    ("python_exec", {"code": "open('claude.md').read()"}, 1),
+    ("write", {"content": "x"}, 1),
+    ("fs__write_file", {"path": "ROOT/CLAUDE.md"}, 0),
+])
+async def test_a_naming_call_is_marked_before_it_dispatches(bus, tmp_path, name, arguments, marks):
+    root = tmp_path / "root"
+    root.mkdir()
+    handle = _FakeHandle(root)
+    registry = _Registry(handle)
+    arguments = {k: (v.replace("ROOT", str(root)) if isinstance(v, str) else v) for k, v in arguments.items()}
+    llm = _RecordingLLM(_calls(name, arguments))
+    loop = _make_agent_loop(lambda _r: llm, [], bus, tool_registry=registry, project_instructions=handle)
+    await loop.run_turn("go")
+    assert registry.dispatched == [(name, marks)], "the mark must already be there when the tool runs"
+    assert handle.marks == marks
+
+
+@pytest.mark.asyncio
+async def test_a_denied_call_never_marks(bus, tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    handle = _FakeHandle(root)
+    registry = _Registry(handle)
+    cfg = AgentConfig(name="ro-agent", role="r", permissions=PermissionConfig(mode="read-only"))
+    llm = _RecordingLLM(_calls("write", {"path": str(root / "CLAUDE.md"), "content": "x"}))
+    loop = _make_agent_loop(lambda _r: llm, [], bus, config=cfg, tool_registry=registry,
+                            project_instructions=handle)
+    await loop.run_turn("go")
+    assert registry.dispatched == [], "the write was meant to be refused"
+    assert handle.marks == 0
+
+
+@pytest.mark.asyncio
+async def test_step_marks_an_allowed_write_before_its_dispatch(bus, tmp_path):
+    from localharness.agent.loop import Session
+
+    root = tmp_path / "root"
+    root.mkdir()
+    handle = _FakeHandle(root)
+    registry = _Registry(handle)
+    llm = _RecordingLLM(_calls("write", {"path": str(root / "CLAUDE.md"), "content": "x"}))
+    loop = _make_agent_loop(lambda _r: llm, [], bus, tool_registry=registry, project_instructions=handle)
+    session = Session(agent_id="test-agent", session_id="s", messages=[{"role": "user", "content": "hi"}])
+    await loop.step(session)
+    assert registry.dispatched == [("write", 1)]
+
+
+# --- the turn-end finally (D-37, D-75) ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_two_step_turn_asks_the_handle_twice(bus, tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    handle = _FakeHandle(root, script=[("Use tabs.", None), (None, None)])
+    registry = _Registry(handle)
+    llm = _RecordingLLM(_calls("write", {"path": str(root / "notes.md"), "content": "x"}))
+    loop = _make_agent_loop(lambda _r: llm, [], bus, tool_registry=registry, project_instructions=handle)
+    await loop.run_turn("go")
+    assert len(llm.roles) == 2, "the turn took two steps"
+    assert [cancelled for _, cancelled in handle.sections] == [False, False]
+    assert len(handle.sections) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_finally_notice_is_published_once_before_turn_completed(bus, tmp_path):
+    notice = _notice()
+    handle = _FakeHandle(script=[(None, None), (None, notice)])
+    loop, _ = _build(bus, handle, tmp_path=tmp_path)
+    await loop.run_turn("hi")
+    kinds = [type(e).__name__ for e in bus.history(event_types=[InstructionsChanged, TurnCompleted])]
+    assert kinds == ["InstructionsChanged", "TurnCompleted"]
+    assert len(bus.history(event_types=[InstructionsChanged])) == 1
+
+
+@pytest.mark.asyncio
+async def test_esc_runs_the_check_with_cancelled_true_and_publishes_nothing(bus, tmp_path):
+    import asyncio
+
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    handle = _FakeHandle(script=[(None, None), (None, _notice())])
+
+    class _Waiting(MockLLMClient):
+        async def stream_complete(self, messages=None, tools=None, on_token=None, **kwargs):
+            started.set()
+            await gate.wait()
+            return await super().stream_complete(messages=messages, tools=tools, on_token=on_token, **kwargs)
+
+    llm = _Waiting([FakeLLMResponse(content="never")])
+    loop = _make_agent_loop(lambda _r: llm, [], bus, project_instructions=handle)
+    task = asyncio.ensure_future(loop.run_turn("hi"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert handle.sections[-1][1] is True
+    assert [c for _, c in handle.sections] == [False, True]
+    assert not bus.history(event_types=[InstructionsChanged])
+
+
+@pytest.mark.asyncio
+async def test_a_crash_in_the_llm_still_runs_the_check_and_publishes_its_notice(bus, tmp_path):
+    from localharness.core.events import TurnFailed
+
+    handle = _FakeHandle(script=[(None, None), (None, _notice())])
+
+    class _Broken:
+        class config:
+            tool_call_mode = "native"
+
+        async def stream_complete(self, **kwargs):
+            raise RuntimeError("catastrophic failure")
+
+    loop = _make_agent_loop(lambda _r: _Broken(), [], bus, project_instructions=handle)
+    summary = await loop.run_turn("hi")
+    assert isinstance(summary, str) and summary
+    assert bus.history(event_types=[TurnFailed])
+    assert [c for _, c in handle.sections][-1] is False
+    assert len(bus.history(event_types=[InstructionsChanged])) == 1
+
+
+@pytest.mark.asyncio
+async def test_keyboard_interrupt_counts_as_cancelled(bus, tmp_path):
+    handle = _FakeHandle(script=[(None, None), (None, _notice())])
+
+    class _Interrupted:
+        class config:
+            tool_call_mode = "native"
+
+        async def stream_complete(self, **kwargs):
+            raise KeyboardInterrupt
+
+    loop = _make_agent_loop(lambda _r: _Interrupted(), [], bus, project_instructions=handle)
+    with pytest.raises(KeyboardInterrupt):
+        await loop.run_turn("hi")
+    assert handle.sections[-1][1] is True
+    assert not bus.history(event_types=[InstructionsChanged])
+
+
+# --- purity (D-03) --------------------------------------------------------------------------------
+
+_NEW_FUNCTIONS = ("_names_instruction_file", "_mark_instruction_calls", "_publish_instructions",
+                  "_fence_instructions")
+_FORBIDDEN = {"hashlib", "open", "read_text", "read_bytes", "write_text", "write_bytes"}
+
+
+def _function_nodes(tree: ast.AST, names) -> dict[str, ast.AST]:
+    return {n.name: n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names}
+
+
+def _forbidden_uses(node: ast.AST) -> set[str]:
+    found: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and sub.id in _FORBIDDEN:
+            found.add(sub.id)
+        elif isinstance(sub, ast.Attribute):
+            if sub.attr in _FORBIDDEN:
+                found.add(sub.attr)
+            if sub.attr == "open" and isinstance(sub.value, ast.Name) and sub.value.id == "os":
+                found.add("os.open")
+    return found
+
+
+def test_the_new_loop_code_never_touches_the_file():
+    tree = ast.parse(LOOP_SRC.read_text(encoding="utf-8"))
+    functions = _function_nodes(tree, _NEW_FUNCTIONS)
+    assert set(functions) == set(_NEW_FUNCTIONS)
+    for name, node in functions.items():
+        assert _forbidden_uses(node) == set(), name
+
+
+def test_the_purity_scan_bites():
+    tree = ast.parse("def _mark_instruction_calls(self):\n    open('x').read()\n")
+    assert _forbidden_uses(_function_nodes(tree, _NEW_FUNCTIONS)["_mark_instruction_calls"]) == {"open"}

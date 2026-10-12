@@ -1352,6 +1352,56 @@ class AgentLoop:
             text=notice.text,
         ))
 
+    def _names_instruction_file(self, name: str, arguments: Any) -> bool:
+        """Whether this call could write the project instructions file (D-34, D-73).
+
+        True for `write`/`edit` whose resolved path is the recorded file or any candidate, for a
+        `bash_exec` command that is not provably a read of an instructions file, for `python_exec`
+        code that names a candidate's basename (case-insensitive), and for any of those four tools
+        with arguments of the wrong shape. False for every other tool: an MCP tool or `agent` is not
+        a writer the loop can name (a child's own loop runs the same rule). It touches no file."""
+        if name not in ("write", "edit", "bash_exec", "python_exec"):
+            return False
+        handle = self._project_instructions
+        if handle is None:
+            return False
+        key = {"write": "path", "edit": "path", "bash_exec": "command", "python_exec": "code"}[name]
+        if not isinstance(arguments, dict) or not isinstance(arguments.get(key), str):
+            return True
+        value = arguments[key]
+        candidates = tuple(handle.candidates)
+        if name in ("write", "edit"):
+            from localharness.tools.builtin.paths import resolve_user_path
+
+            target = resolve_user_path(value).resolve()
+            known = {p.resolve() for p in candidates}
+            recorded = handle.recorded_path
+            if recorded is not None:
+                known.add(Path(recorded).resolve())
+            return target in known
+        basenames = {p.name for p in candidates}
+        if name == "bash_exec":
+            from localharness.agent.shell_classify import instruction_file_reads_only
+
+            return not instruction_file_reads_only(value, basenames, getattr(self._gate, "settings", None))
+        folded = value.casefold()
+        return any(b.casefold() in folded for b in basenames)
+
+    def _mark_instruction_calls(self, tool_call: Any) -> None:
+        """Mark the handle before an allowed call that may write the instructions file runs (D-74).
+
+        Called after the gate allowed the call (a refused call leaves no mark) and before the
+        registry dispatch. An error in the naming rule fails toward marking: a mark can only make the
+        next assembly drop a file, never use one."""
+        handle = self._project_instructions
+        if handle is None:
+            return
+        try:
+            if self._names_instruction_file(tool_call.name, tool_call.arguments):
+                handle.mark_pending()
+        except Exception:
+            handle.mark_pending()
+
     def _read_guardrails(self) -> str:
         """GUARDRAILS.md's text for this turn, or "" when there is none (SAFE-04). Re-read every
         turn, so an edit reaches the next one. No file is the common case and stays silent; a
@@ -1694,6 +1744,9 @@ class AgentLoop:
             # after another inside one root turn share one outage (one bound, one relaunch).
             self._forget_outages(every=True)
         turn_depth = _TURN_DEPTH.set(_TURN_DEPTH.get() + 1)
+        # D-75: True only when the turn ends by something that is not an Exception (Esc's
+        # CancelledError, KeyboardInterrupt): the turn-end check below must not await then.
+        cancelled = False
         try:
             try:
                 summary = await self._execute_loop(session, task, on_token, images)
@@ -1748,6 +1801,20 @@ class AgentLoop:
                 tokens_estimated=session.tokens_estimated,
             ))
             return summary
+        except BaseException:
+            cancelled = True
+            raise
+        finally:
+            # D-37, D-75: the turn-end check of the project instructions file, on every way out (a
+            # normal end, an error, Esc, a crash). `section` is synchronous and owns its own OSErrors,
+            # so the store transition (e.g. harness_written) lands before any await here; a notice from
+            # a cancelled turn is the handle's to keep for the next assembly, never published from here.
+            if self._project_instructions is not None:
+                _text, _notice = self._project_instructions.section(
+                    self._ctx.max_context_tokens, cancelled=cancelled
+                )
+                if _notice is not None and not cancelled:
+                    await self._publish_instructions(_notice, session)
 
         session.summary = summary
         reason = session.terminated_reason or "complete"
@@ -2721,6 +2788,7 @@ class AgentLoop:
                 # sees every refusal, so a model that keeps retrying a disallowed call is still
                 # caught by the stuck ladder.
                 session.actions_taken += 1
+                self._mark_instruction_calls(tool_call)
 
                 # Dispatch the tool call against the agent's registry.
                 result_content = ""
@@ -3436,6 +3504,7 @@ class AgentLoop:
                 continue
             self._open_delegation(tool_call)
             session.actions_taken += 1
+            self._mark_instruction_calls(tool_call)
             result_content = ""
             task_before = self._task_context.revisions() if self._task_context else {}
             success = False
