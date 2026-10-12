@@ -13,6 +13,8 @@ import hashlib
 import logging
 import os
 import stat
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -523,3 +525,181 @@ def test_the_module_calls_no_other_file_writer():
             assert call.func.attr not in banned, ast.unparse(call)
         if isinstance(call.func, ast.Name):
             assert call.func.id != "open", ast.unparse(call)
+
+
+# --------------------------------------------------------------------------- notices
+
+
+def _notice(kind="narrowing", subject="a.b", file="/x/config.yaml", value="10000", text="dropped"):
+    return pr.Notice(kind=kind, subject=subject, file=file, value=value, text=text)
+
+
+def test_unseen_on_an_empty_store_returns_all_and_writes_nothing(instructions_home, tmp_path):
+    root = make_root(tmp_path, {})
+    n1, n2 = _notice(subject="one"), _notice(subject="two")
+    assert pr.unseen(root, [n1, n2]) == [n1, n2]
+    assert not store_file().exists()
+
+
+def test_replaced_notices_are_seen(instructions_home, tmp_path):
+    root = make_root(tmp_path, {})
+    n1, n2 = _notice(subject="one"), _notice(subject="two")
+    pr.replace_notices(root, [n1, n2])
+    assert pr.unseen(root, [n1, n2]) == []
+    assert pr.read_notices(root) == frozenset({n1, n2})
+
+
+def test_a_changed_value_is_unseen_again(instructions_home, tmp_path):
+    root = make_root(tmp_path, {})
+    pr.replace_notices(root, [_notice(value="10000")])
+    changed = _notice(value="20000")
+    assert pr.unseen(root, [changed]) == [changed]
+
+
+def test_a_notice_that_disappears_and_returns_prints_again(instructions_home, tmp_path):
+    root = make_root(tmp_path, {})
+    n1, n2 = _notice(subject="one"), _notice(subject="two")
+    pr.replace_notices(root, [n1])
+    pr.replace_notices(root, [n1, n2])
+    pr.replace_notices(root, [n1])
+    assert pr.unseen(root, [n1, n2]) == [n2]
+
+
+def test_unseen_collapses_a_repeat_and_keeps_the_first_position(instructions_home, tmp_path):
+    root = make_root(tmp_path, {})
+    n1, n2 = _notice(subject="one"), _notice(subject="two")
+    assert pr.unseen(root, [n2, n1, n2, n1]) == [n2, n1]
+
+
+def test_replacing_with_nothing_clears_the_notices(instructions_home, tmp_path):
+    root = make_root(tmp_path, {})
+    pr.replace_notices(root, [_notice()])
+    pr.replace_notices(root, [])
+    assert pr.read_notices(root) == frozenset()
+    assert load_store()["roots"] == {}
+
+
+def test_replace_notices_keeps_the_instructions_and_write_keeps_the_notices(
+    instructions_home, tmp_path
+):
+    root = make_root(tmp_path, {"CLAUDE.md": "x"})
+    record, n1 = _record(root), _notice()
+    write_instructions(root, record)
+    pr.replace_notices(root, [n1])
+    assert read_instructions(root) == record
+    write_instructions(root, _record(root, size=99))
+    assert pr.read_notices(root) == frozenset({n1})
+    pr.replace_notices(root, [])
+    assert read_instructions(root) == _record(root, size=99)
+
+
+def test_malformed_notice_entries_are_skipped(instructions_home, tmp_path):
+    root = make_root(tmp_path, {})
+    good = _notice(subject="good")
+    store_file().write_text(yaml.safe_dump({"version": 1, "roots": {str(root.resolve()): {
+        "notices": [
+            {"kind": "narrowing", "subject": "x", "file": "f", "value": "v"},      # missing text
+            {"kind": "narrowing", "subject": "x", "file": "f", "value": 5, "text": "t"},
+            "not a mapping",
+            {"kind": good.kind, "subject": good.subject, "file": good.file,
+             "value": good.value, "text": good.text},
+        ],
+    }}}), encoding="utf-8")
+    assert pr.read_notices(root) == frozenset({good})
+
+
+def test_a_non_list_notices_field_reads_as_empty(instructions_home, tmp_path):
+    root = make_root(tmp_path, {})
+    store_file().write_text(yaml.safe_dump({"version": 1, "roots": {
+        str(root.resolve()): {"notices": "oops"}}}), encoding="utf-8")
+    assert pr.read_notices(root) == frozenset()
+
+
+def test_stored_notices_are_sorted_so_the_file_is_stable(instructions_home, tmp_path):
+    root = make_root(tmp_path, {})
+    pr.replace_notices(root, [_notice(subject="b"), _notice(subject="a")])
+    first = store_file().read_bytes()
+    pr.replace_notices(root, [_notice(subject="a"), _notice(subject="b")])
+    assert store_file().read_bytes() == first
+
+
+def test_notice_value_is_repr_capped_at_200():
+    assert pr.notice_value(10000) == "10000"
+    assert pr.notice_value("abc") == "'abc'"
+    capped = pr.notice_value("x" * 500)
+    assert len(capped) == 200 and capped.endswith("…")
+    assert pr.notice_value("y" * 198) == repr("y" * 198)  # exactly 200 chars: untouched
+
+
+# --------------------------------------------------------------------------- lock across processes
+
+_HOLD = (
+    "import fcntl, os, sys, time\n"
+    "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+    "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+    "print('locked', flush=True)\n"
+    "time.sleep(float(sys.argv[2]))\n"
+)
+
+
+def _hold_the_lock(seconds: float) -> subprocess.Popen:
+    pr.lock_path().parent.mkdir(parents=True, exist_ok=True)
+    child = subprocess.Popen(
+        [sys.executable, "-c", _HOLD, str(pr.lock_path()), str(seconds)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert child.stdout.readline().strip() == "locked"
+    return child
+
+
+def test_a_write_waits_for_another_process_holding_the_lock(instructions_home, tmp_path):
+    root = make_root(tmp_path, {})
+    child = _hold_the_lock(0.6)
+    try:
+        started = time.monotonic()
+        pr.replace_notices(root, [_notice()])
+        waited = time.monotonic() - started
+    finally:
+        child.wait()
+    assert waited >= 0.5
+    assert pr.read_notices(root) == frozenset({_notice()})
+
+
+def test_a_lock_held_past_the_budget_fails_closed(instructions_home, tmp_path, monkeypatch):
+    root = make_root(tmp_path, {})
+    pr.replace_notices(root, [_notice(subject="before")])
+    before = store_file().read_bytes()
+    monkeypatch.setattr(pr, "LOCK_BUDGET_SECONDS", 0.2)
+    child = _hold_the_lock(2.0)
+    try:
+        started = time.monotonic()
+        with pytest.raises(StoreUnavailable):
+            pr.replace_notices(root, [_notice(subject="after")])
+        assert time.monotonic() - started < 1
+    finally:
+        child.kill()
+        child.wait()
+    assert store_file().read_bytes() == before
+
+
+def test_a_read_also_fails_closed_rather_than_reading_unlocked(instructions_home, tmp_path, monkeypatch):
+    root = make_root(tmp_path, {})
+    monkeypatch.setattr(pr, "LOCK_BUDGET_SECONDS", 0.2)
+    child = _hold_the_lock(2.0)
+    try:
+        with pytest.raises(StoreUnavailable):
+            read_instructions(root)
+        with pytest.raises(StoreUnavailable):
+            pr.unseen(root, [_notice()])
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_lock_left_by_a_dead_process_is_harmless(instructions_home, tmp_path):
+    root = make_root(tmp_path, {})
+    child = _hold_the_lock(30)
+    child.kill()
+    child.wait()
+    pr.replace_notices(root, [_notice()])
+    assert pr.read_notices(root) == frozenset({_notice()})
