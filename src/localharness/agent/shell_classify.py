@@ -1037,7 +1037,14 @@ def _array_literal_is_plain(text: str, open_index: int) -> bool:
         char = text[index]
         if char == ")":
             return True
-        if char in ";&|<>(" or (char == "#" and word_start):
+        if char == "#" and word_start:
+            # bash allows a comment between the elements of a multi-line literal; it runs to the newline
+            newline = text.find("\n", index)
+            if newline < 0:
+                return False
+            index = newline
+            continue
+        if char in ";&|<>(":
             return False
         if char == "$" and text[index + 1 : index + 2] == "'":
             _, index, closed = _decode_ansi_c(text, index + 2)

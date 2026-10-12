@@ -182,6 +182,33 @@ def test_date_that_sets_the_clock_leaves_the_tier(ws, command):
     _check(command, "DENY/ASK/ok", ws)
 
 
+# --------------------------------------------------------------------------- WR-03: commented array literals
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "files=(\n  a.py   # the main one\n  b.py\n)\nls",
+        "files=(\n  # first\n  a.py\n  b.py # it's here\n)\nls",
+        "files=(a b # not a comment? it is, to the newline\n c)\nls",
+    ),
+)
+def test_a_commented_multi_line_array_literal_is_plain(ws, command):
+    _check(command, "ok/ok/ok", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "files=(\n  a.py # comment ) rm -rf /etc/x\n",
+        "files=( a # no newline and no closer",
+        "files=(\n a # c\n ; rm -rf /etc/x\n)",
+        "files=(\n a # c\n b\n;\nrm -rf /etc/x",
+    ),
+)
+def test_a_commented_array_literal_that_is_not_plain_still_asks(ws, command):
+    _check(command, "!ok/!ok/!ok", ws)
+
+
 # --------------------------------------------------------------------------- WR-01: the depth guard
 
 NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")
