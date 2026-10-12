@@ -179,6 +179,12 @@ unfamiliar `f`, where before the whole definition classified as a single command
 `rm` was invisible. Requiring either the `function` keyword or the `()` is what keeps
 `cmd { arg }` — a command with a brace-shaped argument — out of this branch."""
 
+FUNCTION_HEAD_WITH_BODY_RE = re.compile(
+    r"^(?:function\s+[^\s(){}]+\s*(?:\(\s*\))?|[^\s(){}]+\s*\(\s*\))\s*\S", re.DOTALL
+)
+"""The head of a function definition with something after it. When :func:`_function_body` cannot read that
+something as a bare group, the definition is unparsed (CR-54 it5)."""
+
 PATH_SEPARATORS = ("/", "\\")
 """A command may be spelled as a path. ``/bin/rm -rf x`` is ``rm -rf`` for signature purposes:
 the leading directories are dropped so an absolute spelling cannot dodge the rule sets."""
@@ -1732,6 +1738,14 @@ def _cdpath_target(cdpath: str, target: str) -> str | None:
     return None
 
 
+DIRECTORY_WORD_RE = re.compile(r"(?<![\w$./~-])(?:cd|pushd|popd)(?![\w./~-])")
+
+
+def _text_changes_directory(text: str) -> bool:
+    """Does any word of this shell text look like ``cd``, ``pushd`` or ``popd``? Over-reading is the safe direction."""
+    return DIRECTORY_WORD_RE.search(text) is not None
+
+
 def _body_changes_directory(argv: Sequence[str]) -> bool:
     """Is any word of ``alias NAME='…cd…'`` a directory change?"""
     return any(word in DIRECTORY_CHANGE_COMMANDS or word in DIRECTORY_RESTORE_COMMANDS for word in argv)
@@ -2326,6 +2340,14 @@ def _classify_text_level(
         if inner is None:
             inner = _function_body(body)
             subshell = True  # a definition's `cd` runs when the function is CALLED, not here
+            if inner is None and FUNCTION_HEAD_WITH_BODY_RE.match(body):
+                # CR-54 (it5): a definition whose body is not a bare `{ … }` / `( … )` (`f(){ …; } >/dev/null`,
+                # `f() case … esac`): bash runs the body when f is called, and the classifier cannot say what it is.
+                unparsed, _, _, _ = _classify_one(UNPARSED_SHELL_SIGNATURE, settings, cwd)
+                if unparsed is not None:
+                    segments.append(unparsed)
+                previous_head = None
+                continue
             if inner is not None:
                 match = FUNCTION_DEFINITION_RE.match(body)
                 function_name = (match.group("keyword_name") or match.group("name")) if match else ""
@@ -2338,6 +2360,11 @@ def _classify_text_level(
                 if ends and cwd.path and ends.startswith(cwd.path.rstrip("/") + "/"):
                     ends = None  # reached by a relative `cd` from where the definition is: it depends on the caller
                 cwd.cd_functions[function_name] = None if body_cwd.unresolvable else ends
+            if function_name and _text_changes_directory(inner):
+                # CR-55 (it5): bash binds a function name when it is CALLED, so a body that changes directory (also one
+                # reached through another function, a nested definition or `command_not_found_handle`) can move this
+                # shell wherever the text calls it. From the definition on, the directory is not known.
+                cwd.unresolvable = True
             segments.extend(group_segments)
             dropped.extend(group_dropped)
             previous_head = None
@@ -2903,7 +2930,10 @@ def _build(
             extras.append(segment)
         extras.extend(more)
     for payload_text in payload_texts:
-        # `eval 'cd /'` runs in THIS shell, so its directory change outlives the payload (CR-54 it4).
+        # `eval 'cd /'` runs in THIS shell, so its directory change outlives the payload (CR-54 it4). So does a
+        # `trap` action, whenever the signal, DEBUG, ERR or RETURN fires: the directory is unknown from here on (CR-57 it5).
+        if head == "trap" and _text_changes_directory(payload_text):
+            cwd.unresolvable = True
         payload_cwd = cwd if head == "eval" else cwd.copy()
         payload_cwd.env_redirect = payload_cwd.env_redirect or env_redirect
         # CR-01 / WR-54: the shell that runs the payload joins its continuations (and drops its comments).

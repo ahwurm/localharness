@@ -478,6 +478,56 @@ def test_those_git_subcommands_without_a_write_stay_quiet(ws, command):
     assert not _segments(command)[0].write_targets
 
 
+# --------------------------------------------------------------------------- CR-54 / CR-55 / CR-57
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "f(){ rm -rf /etc/x; } >/dev/null; f",
+        "f(){ rm -rf /etc/x; } 2>&1; f",
+        "function f { rm -rf /etc/x; } >/dev/null; f",
+        "f() ( rm -rf /etc/x ) >/dev/null; f",
+        "f() case x in x) rm -rf /etc/x;; esac; f",
+    ),
+)
+def test_a_function_whose_body_is_not_a_bare_group_is_unparsed(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("f(){ ls; }; f", "f() { echo hi; }\nf", "function f { ls; }; f", "f() ( ls ); f", "g() { cat x | wc -l; }; g"),
+)
+def test_a_plain_function_definition_is_still_read(ws, command):
+    _check(command, "DENY/ASK/ok", ws)  # the call `f` is an unfamiliar command, as before
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "g(){ f; }; f(){ cd /; }; g; rm -rf etc",
+        "f(){ g; }; g(){ cd /; }; f; rm -rf etc",
+        "f(){ g(){ cd /; }; }; f; g; rm -rf etc",
+        "trap 'cd /' DEBUG; true; rm -rf etc",
+        "trap 'cd /' ERR; false; rm -rf etc",
+        "trap 'cd /' RETURN; f(){ :; }; f; rm -rf etc",
+        "command_not_found_handle(){ cd /; }; nosuchcmd; rm -rf etc",
+    ),
+)
+def test_a_function_or_trap_that_changes_directory_makes_the_directory_unknown(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("trap 'rm -f x' EXIT; rm -rf build", "f() { echo cdrom; }; f; rm -rf build", "f() { ls; }; f; rm -rf build"),
+)
+def test_a_function_or_trap_without_a_directory_change_leaves_the_directory_alone(ws, command):
+    last = _segments(command)[-1]
+    assert last.signature == "rm -rf"
+    assert not last.unresolvable_destructive
+
+
 # --------------------------------------------------------------------------- WR-01: the depth guard
 
 NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")
