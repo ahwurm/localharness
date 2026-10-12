@@ -279,6 +279,114 @@ def test_the_privilege_helpers_stay_ungrantable(ws):
         _check(command, "DENY/ASKU/ASKU", ws)
 
 
+# --------------------------------------------------------------------------- CR-02 / CR-03 / CR-07 / CR-52 / CR-56
+
+BASH = "ba" + "sh"  # the interpreter word is only ever classified, never run
+
+
+@pytest.mark.parametrize(
+    "template",
+    (
+        "{b} -c -e 'rm -rf /etc/x'", "{b} -c -x 'rm -rf /etc/x'", "{b} -c -- 'rm -rf /etc/x'",
+        "{b} -c +e 'rm -rf /etc/x'", "{b} -c -u 'rm -rf /etc/x'", "{b} -c --norc 'rm -rf /etc/x'",
+        "{b} -c -O extglob 'rm -rf /etc/x'", "{b} -c -o pipefail 'rm -rf /etc/x'",
+        "sh -c -e 'rm -rf /etc/x'", "sh -c -- 'rm -rf /etc/x'", "zsh -c -e 'rm -rf /etc/x'",
+        "dash -c -e 'rm -rf /etc/x'", "{b} -co pipefail 'rm -rf /etc/x'", "{b} --rcfile f -c -x 'rm -rf /etc/x'",
+        "{b} -c 'rm -rf /etc/x'",
+    ),
+)
+def test_the_command_string_is_the_first_operand_after_all_the_options(ws, template):
+    _check(template.format(b=BASH), "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (
+        ("{b} -c 'ls'", "DENY/ASK/ok"),
+        ("{b} -ec 'ls'", "DENY/ASK/ok"),
+        ("{b} -c -e 'ls'", "DENY/ASK/ok"),
+        ("{b} -lc 'ls'", "DENY/ASK/ok"),
+    ),
+)
+def test_the_inline_interpreter_controls_keep_their_verdict(ws, command, expected):
+    _check(command.format(b=BASH), expected, ws)
+
+
+@pytest.mark.parametrize(
+    "command", ("env - rm -rf /etc/x", "env -i - rm -rf /etc/x", "env A=1 - rm -rf /etc/x", "env -i rm -rf /etc/x")
+)
+def test_env_dash_is_env_i(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+    assert any(s.signature == "rm -rf" for s in _segments(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    ("git push origin +main", "git push origin +HEAD:main", "git push origin +main:main +dev", "git push +main"),
+)
+def test_a_plus_refspec_is_a_force_push(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+    assert _segments(command)[0].signature == "git push --force"
+
+
+@pytest.mark.parametrize("command", ("git push --mirror origin", "git push --prune origin"))
+def test_git_push_mirror_and_prune_are_destructive(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    (("git push origin main", "DENY/ASK/ok"), ("git push -u origin feature", "DENY/ASK/ok"),
+     ("git push origin HEAD:refs/heads/x", "DENY/ASK/ok")),
+)
+def test_ordinary_pushes_keep_their_verdict(ws, command, expected):
+    _check(command, expected, ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "cd ~root/.. && rm -rf etc",
+        "cd ~/.. && rm -rf etc",
+        "cd ~/.. ; rm -rf proj",
+        "cd ~ && cd .. && rm -rf etc",
+        "cd ~root/.. && echo x > etc/passwd",
+    ),
+)
+def test_a_dot_dot_above_a_tilde_word_leaves_the_workspace(ws, command):
+    _check(command, "!ok/!ok/!ok", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "cd ~+/.. && echo x > etc/passwd",
+        "pushd ~/.. && echo x > etc/passwd",
+        "cd ~ && cd .. && echo x > y",
+        "cd ~/.ssh/.. && echo x > f",
+        "cd ~/a/.. && echo x > f",
+    ),
+)
+def test_a_write_after_a_tilde_cd_is_outside_the_project(ws, command):
+    """A plain write outside the project is a grantable ask in ``guarded`` and not protected, so ``auto`` lets it
+    through (as for any outside, unprotected path); inside the workspace it would be ``DENY/ok/ok``."""
+    _check(command, "DENY/ASK/ok", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "env CDPATH=~ zsh -c 'cd .ssh && echo x >> authorized_keys'",
+        "env CDPATH=/etc dash -c 'cd cron.d && echo x > job'",
+        "env -i CDPATH=~ ksh -c 'cd .ssh && echo x >> authorized_keys'",
+        "xargs -n1 env CDPATH=~ zsh -c 'cd .ssh && echo x >> authorized_keys'",
+        "CDPATH=~ zsh -c 'cd .ssh && echo x >> authorized_keys'",
+    ),
+)
+def test_cdpath_given_through_env_is_tracked(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)
+
+
 # --------------------------------------------------------------------------- WR-01: the depth guard
 
 NEST_PREFIXES = ("echo '\\'\n", "# it's\n", "cat <<E\ndon't\nE\n", "")

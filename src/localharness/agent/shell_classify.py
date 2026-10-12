@@ -345,7 +345,8 @@ SUBCOMMAND_OPERATION_WORDS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] =
         ("show", ("show",)),
     ),
     "git gc": (("--prune", ("--prune",)),),
-    "git push": (("--delete", ("--delete", "-d")),),
+    # `--mirror` and `--prune` remove the remote refs the local side lacks: the same operation as `--delete` (CR-07 it5)
+    "git push": (("--delete", ("--delete", "-d", "--mirror", "--prune")),),
 }
 """The OPERATION a two-word signature is missing, when the operation is a third word or a flag.
 
@@ -1753,8 +1754,17 @@ def _resolve_target(cwd: _Cwd, target: str) -> tuple[str, bool]:
 
 
 def _normalize(path: str) -> str:
-    """Collapse ``.`` and ``..`` in a joined path, keeping the spelling (tilde included)."""
-    return posixpath.normpath(path) if path else path
+    """Collapse ``.`` and ``..`` in a joined path, keeping the spelling (tilde included).
+
+    A ``..`` never pops the tilde word itself (``~/..`` and ``~root/..`` stay as written): the verdict expands the
+    tilde and resolves the rest, which is the parent of the home directory, not the workspace (CR-52 it5)."""
+    if not path:
+        return path
+    if path.startswith("~"):
+        head, _, rest = path.partition("/")
+        tail = posixpath.normpath(rest) if rest else ""
+        return head if tail in ("", ".") else posixpath.join(head, tail)
+    return posixpath.normpath(path)
 
 
 # --------------------------------------------------------------------------- step 3
@@ -2562,6 +2572,9 @@ def _classify_one(
     peeled, peeled_assignments, directories = _peel(argv, settings)
     if not peeled:
         return None, [], [text.strip()], None
+    peeled_cdpath = _assigned_cdpath([], peeled_assignments)
+    if peeled_cdpath is not None:
+        cwd.cdpath = peeled_cdpath  # `env CDPATH=~ zsh -c 'cd .ssh'` is `CDPATH=~ zsh -c …` (CR-56 it5)
     if peeled[0] != argv[0]:
         cwd.call(peeled[0])
     if len(peeled) < len(argv) and peeled[0] in DIRECTORY_CHANGE_COMMANDS | DIRECTORY_RESTORE_COMMANDS:
@@ -2835,6 +2848,8 @@ def _build(
         signature, force_destructive, force_read_only = _git_config_facts(argv, settings)
     if signature == GIT_PUSH_SIGNATURE and _pushes_a_ref_deletion(argv):
         signature = GIT_PUSH_DELETE_SIGNATURE
+    elif signature == GIT_PUSH_SIGNATURE and _pushes_a_forced_ref(argv):
+        signature = GIT_PUSH_FORCE_SIGNATURE
     if head == "git":
         extras.extend(_git_inline_config_segments(argv, settings))
 
@@ -2870,8 +2885,12 @@ def _build(
         if peeled_payload and len(peeled_payload) < len(payload):
             payload, payload_program = peeled_payload, peeled_payload[0]
             payload_redirect = payload_redirect or _assignments_redirect(payload_assignments, settings)
-            if payload_directories:
+            payload_cdpath = _assigned_cdpath([], payload_assignments)
+            if payload_cdpath is not None:
                 payload_cwd = cwd.copy()
+                payload_cwd.cdpath = payload_cdpath
+            if payload_directories:
+                payload_cwd = payload_cwd.copy()
                 for directory in payload_directories:
                     if directory.startswith("-"):
                         payload_cwd.unresolvable = True
@@ -3187,6 +3206,9 @@ def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]
                         level_directories.append(value)
                     index += used
                     continue
+            if head == "env" and token == "-":
+                index += 1  # env(1): a mere `-` implies `-i` (CR-03 it5)
+                continue
             if ASSIGNMENT_RE.match(token):
                 level.append(token)
                 index += 1
@@ -3358,9 +3380,38 @@ def _inline_payloads(argv: list[str], settings: GateSettings) -> list[str]:
     fold = argv[0] in CASE_FOLDED_FLAG_INTERPRETERS
     payloads: list[str] = []
     for index, token in enumerate(argv[1:], start=1):
-        if _inline_flag(token, flags, fold=fold) and index + 1 < len(argv):
+        if not (_inline_flag(token, flags, fold=fold) and index + 1 < len(argv)):
+            continue
+        if fold:
             payloads.append(argv[index + 1])
+            continue
+        # CR-02 (it5): the command string is the first operand after ALL the options, not the token after `-c`
+        # (`bash -c -e 'cmd'`, `bash -c -- 'cmd'`, `bash -c +e 'cmd'`, `bash -c -o pipefail 'cmd'`). Every `o`/`O`
+        # letter of an option cluster takes the next argument as its name; `--rcfile`/`--init-file` take a file.
+        position = index + 1 + _shell_option_values(token)
+        while position < len(argv):
+            option = argv[position]
+            if option == "--":
+                position += 1
+                break
+            if option and option[0] in "-+" and option not in ("-", "+"):
+                position += 1 + (1 if option in SHELL_LONG_VALUE_OPTIONS else _shell_option_values(option))
+                continue
+            break
+        if position < len(argv):
+            payloads.append(argv[position])
+            break  # later words are positional parameters
     return payloads
+
+
+SHELL_LONG_VALUE_OPTIONS = frozenset({"--rcfile", "--init-file"})
+
+
+def _shell_option_values(option: str) -> int:
+    """How many of the following arguments the option cluster ``option`` consumes (``-o``/``+o``/``-O``/``+O``)."""
+    if not option or option[0] not in "-+" or option.startswith("--") or option[1:2] == "":
+        return 0
+    return sum(1 for letter in option[1:] if letter in "oO")
 
 
 def _inline_by_nature_payload(argv: list[str]) -> list[str]:
@@ -4040,6 +4091,15 @@ def _pushes_a_ref_deletion(argv: tuple[str, ...]) -> bool:
         token.startswith(GIT_REFSPEC_DELETE_PREFIX) and token != GIT_REFSPEC_DELETE_PREFIX
         for token in argv[1:]
     )
+
+
+GIT_PUSH_FORCE_SIGNATURE = "git push --force"
+
+
+def _pushes_a_forced_ref(argv: Sequence[str]) -> bool:
+    """Does this ``git push`` carry a ``+REF`` / ``+SRC:DST`` refspec? git-push(1): a leading ``+`` allows the
+    non-fast-forward update ``--force`` allows, so it is signed the same way (CR-07 it5)."""
+    return any(token.startswith("+") and len(token) > 1 for token in argv[1:])
 
 
 def destructive_targets(
