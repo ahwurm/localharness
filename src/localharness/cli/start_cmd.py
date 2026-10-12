@@ -2456,8 +2456,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # at the summary only when a person is at a terminal (`can_ask`), so a narrowing prints at
         # the first such start, again when the rejected value changes, and on every start where
         # nobody records it. A session with no boundary prints the loader's texts every start.
-        from localharness.config.project_records import replace_notices as _replace_notices
-        from localharness.config.project_records import unseen as _unseen_notices
+        from localharness.config.project_records import replace_notices, unseen
 
         # The built-in subagents' workspace overlays are evaluated here, up front, so what they
         # reject joins the set printed at the summary; a dispatch re-reads the file and tells the
@@ -2487,7 +2486,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _unseen: list = []
         if _boundary is not None:
             try:
-                _unseen = _unseen_notices(_boundary, _start_notices, config_dir=config_dir)
+                _unseen = unseen(_boundary, _start_notices, config_dir=config_dir)
             except OSError:
                 _unseen = list(_start_notices)  # an unreadable store: nothing is known to be seen
 
@@ -2821,7 +2820,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             warnings.extend(dict.fromkeys(n.text for n in _unseen if n.text not in warnings))
             if can_ask:
                 try:
-                    _replace_notices(_boundary, _start_notices, config_dir=config_dir)
+                    replace_notices(_boundary, _start_notices, config_dir=config_dir)
                 except OSError:
                     pass  # an unwritable store: the notices simply print again next start
         summary_line = " -- ".join(parts + [", ".join(counts)])
