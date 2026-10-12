@@ -2709,6 +2709,29 @@ def _sed_script_commands(script: str) -> tuple[list[str], bool]:
     return targets, False
 
 
+def _git_directory_prefix(args: list[str]) -> str:
+    """CR-54: where ``git -C A -C B …`` runs, as written: each ``-C`` is relative to the previous one.
+
+    Only the global flags before the subcommand are read (the same walk as :func:`_first_subcommand`).
+    An absolute or ``~`` value restarts the path; the result is empty when no ``-C`` is given. A value
+    holding ``$`` or a backtick stays in the path, so the target built from it is unresolvable and the
+    verdict treats it as outside, the way it treats any such write target.
+    """
+    value_flags = SUBCOMMAND_VALUE_FLAGS.get("git", frozenset())
+    prefix = ""
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if not token.startswith("-"):
+            break
+        if token == "-C" and index + 1 < len(args):
+            value = args[index + 1]
+            if value:
+                prefix = value if (not prefix or value.startswith(("/", "~"))) else posixpath.join(prefix, value)
+        index += 2 if token in value_flags else 1
+    return prefix
+
+
 def _git_output_targets(subcommand: str, argv: tuple[str, ...]) -> list[str]:
     """The files ``git diff|log|show`` writes (``--output``) or reads outside a repository
     (``diff --no-index``), read off the arguments that follow the subcommand.
@@ -2744,7 +2767,12 @@ def _git_output_targets(subcommand: str, argv: tuple[str, ...]) -> list[str]:
             no_index = True
         elif not token.startswith("-"):
             operands.append(token)
-    return outputs + (operands if no_index else [])
+    targets = outputs + (operands if no_index else [])
+    # git applies `-C DIR` before it opens `--output` or a `--no-index` operand, so a relative one lives under DIR.
+    where = _git_directory_prefix(list(argv[1:]))
+    if where:
+        targets = [t if t.startswith(("/", "~")) else posixpath.join(where, t) for t in targets]
+    return targets
 
 
 def _repository_name(source: str) -> str:
