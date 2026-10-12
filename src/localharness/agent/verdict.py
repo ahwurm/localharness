@@ -671,7 +671,7 @@ def _protected_config_entry(path: Path, ctx: GateContext, settings: GateSettings
     parts = _below_config_folder(path, ctx)
     if parts is None:
         return False
-    return bool(_config_dir_verdict(parts, settings))
+    return not parts or bool(_config_dir_verdict(parts, settings))
 
 
 _GLOB_OR_VARIABLE_CHARS = (*UNRESOLVABLE_TARGET_CHARS, "[", "{")
@@ -719,8 +719,8 @@ def _removal_hit(
     if base is None:
         # Genuinely unknown base: a literal `.localharness` followed by something that could be an entry.
         for index, comp in enumerate(comps):
-            if comp == WORKSPACE_DIR_NAME and index + 1 < len(comps) and _may_name_a_protected_entry(
-                comps[index + 1], settings
+            if comp == WORKSPACE_DIR_NAME and (
+                index == len(comps) - 1 or _may_name_a_protected_entry(comps[index + 1], settings)
             ):
                 return f"({raw}, unresolved)"
         return None
@@ -765,6 +765,16 @@ def _removal_asks(
     for segment in segments:
         for raw in segment.removal_targets:
             _add(raw, segment.unresolvable_removal)
+    if any(segment.argv[:1] == ("xargs",) for segment in siblings):
+        from localharness.agent.shell_classify import xargs_runs_a_removal
+
+        if any(xargs_runs_a_removal(segment.argv) for segment in siblings):
+            for segment in siblings:
+                if xargs_runs_a_removal(segment.argv):
+                    continue
+                for token in segment.argv[1:]:
+                    if token and not token.startswith("-"):
+                        _add(token, False)
     return asks
 
 
