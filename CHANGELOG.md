@@ -4,6 +4,181 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.18.0] — 2026-10-12
+
+A llama.cpp or vLLM model is now a named preset that `init` writes and `/model` switches, and the
+harness senses the served, trained and fitted windows instead of leaving you to read `-c` off a
+unit file. `/effort off|low|high|max` bounds how much a model may think per request. The loop
+also survives a model-server restart (one bounded wait, never the turn), the interactive root
+runs until you stop it, and a project `CLAUDE.md`/`AGENTS.md` is used and named. Nothing needs
+configuring: existing hand-run servers keep working, and the first `start` migrates your config
+(see Migration). Specs 16 and 17.
+
+### Added
+- **Model presets (spec 16).** A `server:` block or an `extra_endpoints[]` peer with a `lifecycle`
+  now fully describes a launchable model: `runtime`, `model` (the GGUF path), `mmproj`,
+  `served_name`, `context`, `cache_type_k`/`cache_type_v`, `cache_ram`, `api_key_file`, `env`,
+  `config_ini` and `effort`. The llama.cpp fields are refused on `runtime: vllm`, and `binary` is
+  optional on llama.cpp (a declared-only record keeps its presets and refuses to launch with
+  `no llama-server — set server.binary`). `localharness model <name>` takes the served name of a
+  peer or the primary, as `/model` does; a llama.cpp `served_name` never reaches `-m`.
+- **One launch decision for every launch path.** Cold `/model`, the swap-back, `start`'s
+  down-server branch, `_restore_incumbent` and the loop's relaunch all ask `launch_decision`
+  first, so an incumbent is never stopped for a launch that cannot happen. llama.cpp and the vLLM
+  binary bind `127.0.0.1` last in argv unless the record says `bind_all: true`; docker publishes
+  `127.0.0.1:`. A key reaches the child's environment only, never argv or `serve.log`.
+- **Window autosense.** `start`, `doctor` and `init` know three numbers (served, trained, fits)
+  and print `window: served 65,536 · trained 262,144 · fits 114,688 (…)` with the undo line when
+  they disagree by more than `autosense.notify_ratio`. `start` prints it, and the fitted-budget
+  line, once per `(runtime, served_name)` and again only when a number moves. A keyed server is
+  probed with its bearer; a probe that returns nothing reads "not verified", never a failed start.
+- **The harness sizes `-c` and `--cache-ram` when it launches llama.cpp.** With `context` unset
+  the launch gets the fit from the GGUF header (a bounded reader that refuses a FIFO, a device
+  symlink and an oversized header), capped at the trained window; an explicit `context` or a `-c`
+  in `extra_args` wins. A fit that cannot be computed launches with no `-c` and the line
+  `window: served by llama-server's --fit`. A launch that dies at the fit is retried once with `-c`
+  halved. `--cache-ram` follows `cache_ram_ratio` of free memory. Every margin lives in the new
+  machine-only `autosense:` section (`compute_margin_ratio`, `template_margin_ratio`,
+  `unified_reserve_ratio`, `cache_ram_ratio`, `cache_ram_ceiling_ratio`, `notify_ratio`,
+  `model_roots`). `doctor` always prints a Window row.
+- **`/effort off | low | high | max`.** An arrow-key picker on the terminal and the phone;
+  `/effort <level>` everywhere (Discord takes only that form); `/effort show` prints the level,
+  the rung it came from and every agent file that sets its own. Resolution is session > agent
+  file > division > the serving endpoint's persisted effort > `org.default_effort` > `high`;
+  children inherit the parent's level per request. `/effort` persists to `server.effort`,
+  `active_endpoint.effort` or `org.default_effort` through the audited overlay. `/reasoning` is
+  unchanged.
+- **Reasoning is bounded per request.** On llama.cpp `low` and `high` send
+  `reasoning_budget_tokens` (the `effort_budget.low_ratio`/`high_ratio` share of the output
+  headroom, capped at a configured `max_tokens`), `max` sends none and `off` turns thinking off.
+  Without a per-request budget (vLLM today) a stream past the budget is cut
+  (`finish_reason="reasoning_cut"`) and re-sent once with thinking off, as is a `length` reply
+  with no cap sent. A server that rejects the budget key is announced once.
+- **`init` imports what is on the box and asks nothing.** It writes `server:` plus peers from the
+  GGUFs under `autosense.model_roots` (projectors and shard 2 are never presets; ranking: unit
+  journal, ledger, a fit above zero, newest), prints one line per preset, and launches nothing.
+  Against a running llama-server (a keyed one included) it reads `/proc` under caps and imports
+  the flags and `LLAMA_ARG_*` environment; against a stopped user unit it imports from the journal
+  or the unit file. No key is ever shown or written (an inline key goes to `provider.api_key`,
+  a key file is recorded as `server.api_key_file` and never opened by `init`). `context` stays
+  unset with a one-line undo. The "Keep the usual settings?" toggle and the `Checked: … refused`
+  list are gone.
+- **`/model` names what holds the GPU.** While a foreign systemd user unit holds the primary's
+  port, `/model <peer>` answers one sentence naming the unit and its `systemctl --user stop …`.
+- **Reconnect and retry (spec 17 G1).** A dropped connection, a mid-stream drop or a 5xx from a
+  restarting server waits up to `provider.reconnect_wait_seconds` (default 1800; 0 keeps one
+  short retry) and re-sends the identical request; no tool call runs twice. A dead launched
+  server is relaunched once, shared by every child under it, under one advisory lock per config
+  dir. `ProviderLost` reaches every channel ("model server unreachable — waiting up to Ns; Esc
+  stops" on the terminal) and is silent for a blip shorter than the queue-visibility window.
+- **Stuck detection counts progress (G2).** A repeated call whose trusted result keeps changing
+  (a `gh run list` poll) is progress until a call-only ceiling
+  (`stuck_detector.call_only_multiplier`, default 3) that escalates regardless of the result.
+  The "[Agent stuck" text no longer leaks into the reply; the person sees one escalation notice.
+- **Derived budgets (G3).** The attended interactive root has no action limit; a remote or
+  headless surface is capped by `channels.unattended_max_actions` (100) in every mode. A child
+  gets `min(share × parent's remaining, own ceiling)` under a finite parent, from the new
+  `org.children_budget` block (`explore`, `web-researcher`, `search-verifier`, `cruncher`,
+  `chunk-summarizer`, `default`, each `actions`/`minutes`, plus `lookup_share`/`review_share`).
+  The `agent` tool takes `shape: lookup | review`, which chooses only the share.
+- **Read-only `git_read` tool (spec 17 §7.3).** `diff`, `show` and `log` from structured
+  parameters only, with a fixed argv prefix and a from-scratch environment: it runs no
+  repository-configured command (textconv, hooks, signature programs, filter drivers), never
+  fetches, and never leaves the workspace (realpath and ownership pins checked on every call);
+  output is capped at 200,000 bytes with a marker. It registers only when the workspace is a git
+  repository the pins accept, `doctor` says why when it is absent, and config children (the
+  critics included) hold it by default.
+- **Project instructions (spec 17 §8.2).** `CLAUDE.md`, then `AGENTS.md`, then
+  `.localharness/INSTRUCTIONS.md` is used, named in one dim line, fenced as project text after
+  Guardrails, and recorded per root in `project_records.yaml`, with no prompt of its own (the
+  trust question for a fresh clone carries the clause). A change is sensed, not asked; a change
+  made by the harness's own call is dropped and `/instructions on` brings it back.
+  `/instructions off | on | show` (a core command, on the phone menu too). `instructions.max_ratio`
+  (default 0.25, at most 0.5 of the live window; a larger file yields a notice, never a silent cut)
+  and `instructions.children` (default true) are machine-only.
+- **Events carry session, model and latency (G6).** `Action` rows and `history.jsonl` (still
+  0600) carry model, token counts and `latency_ms`; `CompactionTriggered` carries its session id.
+
+### Changed
+- **Tool-output caps follow the window (G4).** `context.tool_output_ratio` (1/16),
+  `evict_ratio` (1/64) and `result_cap_ratio` (3/32) apply to the live window, so they track an
+  overflow shrink and a `/model` refit. The registry's result cut ends with a marker counted
+  inside the cap. Explicit integers in `max_tool_output_chars` and
+  `tool_result_evict_threshold_chars` are still honoured.
+- **`max_actions` defaults to null** (no limit for an attended local operator; see G3 above).
+- **Lean error texts (G7).** The `bash_exec` timeout text suggests `timeout_s` up to 300 only
+  when the call was below 300; the `agent` not-wired text is two lines led by the closest roster
+  names (at most 8), with a third text for an agent file that fails to load; the ingest-via-exec
+  refusal is one line ending "do not work around it; report the failure".
+- **Superseded failures leave the model's view, not the record.** A failed call followed by the
+  same call succeeding is dropped at request build; denials, staged calls and `host: dangerous`
+  failures never are.
+- **The shell classifier treats `git diff|log|show --output`, `--no-index`, `find -fprint*`, `sort
+  -o`,
+  `uniq` with an output operand, `sed w` and `tree -o` as writes; `rg --pre`, `sed e`,
+  `sort --compress-program` and `git grep -O` as inline-dangerous; and `PATH=./d ls`,
+  `GIT_EXTERNAL_DIFF=x git diff` and similar assignments (`permissions.ask.exec_redirect_env_vars`,
+  tighten-only) as no longer read-only. Text the classifier cannot parse, including an
+  unterminated heredoc or nesting past 64 levels, asks in every mode and cannot be granted.
+  Ordinary reads keep their 0.17 verdicts (checked against a 29,000-string differential).
+ 
+
+- **Protected config entries ask before deletion.** A plain `rm`, `unlink`, `rmdir` or `mv`-away of
+  a protected entry in the config folder (or of the folder itself, `find -exec rm`, `xargs rm`,
+  `rsync --delete`) now asks, including in `auto`. Ordinary workspace globs do not.
+- **`project_records.yaml`** (plus `.lock`) in the config dir, 0600, holds the per-root instruction
+  records; a damaged store leaves a `.corrupt` copy; a rejected secret is stored as a digest.
+
+### Migration
+- **Run `localharness start` once.** The `init_nulls` migration nulls exactly `init`'s old
+  defaults, `max_actions: 100`, `max_tool_output_chars: 32000` and
+  `tool_result_evict_threshold_chars: 8000`, in `config.yaml`, `overrides.yaml` and agent files
+  (a pre-v0.14 one included), under its own stamp (`org.permissions.init_nulls_revision`).
+  A hand-set `150` or a hand-set `max_actions: 100` is left alone; one backup per file and a
+  receipt line name each file. `init` now writes these as null. A read-only file is retried at the
+  next start.
+- **Machine trust.** Launch keys join the machine record: `launch_model`, `runtime`, `launch`,
+  `bind_all`, `require_api_key`, `local_models`, `binary`, `docker_image`, `extra_args`,
+  `api_key_file`, `config_ini`. An existing record adopts them with at most one question; a
+  changed `binary` or `model` asks.
+- **llama.cpp `bind_all: true` now binds loopback until you say yes.** It was never applied to
+  llama.cpp before. The first terminal start about to launch it asks once; a No writes
+  `bind_all: false`. A 0.17 `--host 0.0.0.0` in `extra_args` converts to `bind_all: true`
+  without a question.
+- **An API key file is read at `start`** only after the machine-trust Yes, and only when
+  `provider.base_url` is literally loopback.
+- **Machine-only fields.** A project `.localharness/` can no longer set (a value is dropped with
+  one warning naming the file). New to the machine-only set in 0.18.0: `autosense`,
+  `effort_budget`, `org.default_effort`, `channels.unattended_max_actions` (plus
+  `instructions.max_ratio` and `instructions.children`); already machine-only since 0.17:
+  `provider.base_url`, `provider.api_key`, `extra_endpoints`, `active_endpoint`, `server`, `org.audit_log_path`,
+  `org.hooks`, `org.enforce_capability_floor`, `org.web_fetch_allow_private`,
+  `channels.remote_unattended`, `proposer.base_url`, `proposer.api_key`. A project agent file cannot
+  set the `stuck_detector` section at
+  all. A project can only lower: `max_actions`, `max_duration_minutes`, `org.children_budget.*`,
+  the shares and `context.*` ratios (a null, a larger value or an omission keeps the global one).
+  A global budget or ratio that is present but invalid now fails the load.
+- **Mobile protocol.** `PROTOCOL_VERSION` moves 6 to 7 with `InstructionsChanged` and
+  `NarrowingNotice`; the page reads what it knows; a phone page built for protocol 6 must reload
+  once.
+  Every config narrowing (a project value dropped or lowered) is now a notice delivered once
+  per surface instead of a log line.
+
+### Security
+- Secret material (credential-named flags, env names, ini keys) never reaches an imported record,
+  the shown block or the audit log; a keyed import goes attach-only without printing the value.
+- A model-launched `localharness start` (no tty, `--no-input` or `LOCALHARNESS_COMMIT`) counts
+  as headless and is capped by `unattended_max_actions`.
+
+### Known
+- **Live verification on the reference box has not been run.** The two logged failures (a
+  90%-full reply that ends empty, a relaunch serving a quarter of the window) are covered by tests and fakes, not
+  yet shown absent on the reference box; the owner's runbook covers it.
+- Rulings taken on the owner's behalf await confirmation: the action knob and a child's budget
+  fallback apply to any gate with no local operator in every mode (WR-70, spec 17 §6/§13), and
+  the `agent` not-wired roster and 8-name bound (D-22, spec 17 §9).
+- A bad proxy URL waits out the reconnect bound before failing.
+
 ## [0.17.2] — 2026-10-09
 
 Phone fix: a chat whose last turn ended without an answer no longer follows you through every
