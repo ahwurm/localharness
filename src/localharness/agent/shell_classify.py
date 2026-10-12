@@ -1372,11 +1372,16 @@ class _Raw:
         self.piped = piped
 
 
-def _split_top_level(text: str) -> list[_Raw]:
+def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
     """PRD §3.2 step 3: split at top-level ``&&``, ``||``, ``;``, ``|``, ``&`` and newline.
 
     Quotes, backslash escapes and backticks suspend splitting (``echo "a; b"`` is one
     command), and ``( )`` / ``{ }`` groups are kept whole for the caller to recurse into.
+
+    A ``{`` opens a group only in command position (:func:`_command_position`) and followed by a blank;
+    anywhere else it is a word (``echo { ; rm x`` prints ``{`` and runs ``rm``). If a group never
+    closes, the text is split again with brace tracking off, so a brace that was wrongly taken for
+    a group can only make the splitter split MORE (CR-04 / CR-53).
     """
     parts: list[_Raw] = []
     buffer: list[str] = []
@@ -1431,8 +1436,13 @@ def _split_top_level(text: str) -> list[_Raw]:
             buffer.append(char)
             index += 1
             continue
-        if char == "{" and previous in GROUP_BRACE_BEFORE and text[index + 1 : index + 2] in GROUP_BRACE_AFTER:
-            # Only a `{` that is a word of its own opens a group; `{#`, `{a,b}` and `x{y` do not.
+        if (
+            char == "{" and track_braces and depth == 0 and previous in GROUP_BRACE_BEFORE
+            and text[index + 1 : index + 2] in GROUP_BRACE_AFTER
+            and _command_position("".join(buffer))
+        ):
+            # Only a `{` that is a word of its own, where a command may start, opens a group;
+            # `{#`, `{a,b}`, `x{y` and the `{` of `echo { ; rm x` do not.
             braces += 1
             buffer.append(char)
             index += 1
@@ -1469,6 +1479,8 @@ def _split_top_level(text: str) -> list[_Raw]:
         buffer.append(char)
         index += 1
     flush(False)
+    if braces and track_braces:
+        return _split_top_level(text, track_braces=False)
     return parts
 
 
@@ -1481,6 +1493,37 @@ GROUP_BRACE_AFTER = (" ", "\t", "\n", "")
 """What may stand either side of the ``{`` / ``}`` of a ``{ … }`` group: it is a word of its own, so a
 blank, an operator or the start of the command before it (``{ ls; }``, ``{ ls;}``), a blank or the end after
 the ``{``. ``{#``, ``{a,b}``, ``x{y`` and ``f}`` are words, not groups."""
+
+
+COMMAND_POSITION_WORDS = frozenset({
+    "if", "then", "elif", "else", "while", "until", "do", "!", "{", "time", "coproc",
+})
+TIME_VALUE_OPTIONS = frozenset({"-f", "-o", "--format", "--output"})
+FUNCTION_HEAD_RE = re.compile(r"^(?:function\s+[^\s(){}]+(?:\s*\(\s*\))?|[^\s(){}]+\s*\(\s*\))$")
+"""What may stand in front of a ``{`` that opens a group, in the text since the last separator: nothing,
+grammar words that expect a command next (``then``, ``do``, ``!``, ``time [-p] [-f FMT]``,
+``coproc [NAME]``, another ``{``) or the head of a function definition (``f()``, ``function f``)."""
+
+
+def _command_position(prefix: str) -> bool:
+    """Is ``prefix`` (the command text so far) only grammar that expects a command next?"""
+    stripped = prefix.strip()
+    if not stripped or FUNCTION_HEAD_RE.match(stripped):
+        return True
+    words = stripped.split()
+    index = 0
+    while index < len(words):
+        word = words[index]
+        index += 1
+        if word == "time":
+            while index < len(words) and words[index].startswith("-"):
+                index += 2 if words[index] in TIME_VALUE_OPTIONS else 1
+        elif word == "coproc":
+            if index == len(words) - 1 and IDENTIFIER_RE.match(words[index]):
+                index += 1  # `coproc NAME { … }`: NAME only when a compound command follows
+        elif word not in COMMAND_POSITION_WORDS:
+            return False
+    return True
 
 
 def _matching_brace(text: str, open_index: int) -> int:

@@ -856,3 +856,49 @@ def test_a_second_reading_that_does_not_balance_adds_nothing():
 
     assert _join("ls # a; it's", strip_comments=False)[0].startswith(UNPARSED_SHELL_SIGNATURE)
     assert [s.signature for s in _segments("ls # a; it's")] == ["ls"]
+
+
+# ------------------------------------------------------------------ a `{` is a group only in command position (CR-04/CR-53; iteration 3)
+
+BRACE_ARGUMENT_ROWS = (
+    f"echo {{ ; {X}",
+    f"echo {{\n{X}",
+    f"echo x {{ && {X}",
+    f"ls {{ | {X}",
+    f"true {{ ; {X}",
+    f"echo a {{ ; {X}",
+    f"a {{ &\\\n{X}",
+    f"echo {{ {{ ; {X}",
+    f"git log --grep {{ ; {X}",
+)
+
+
+@pytest.mark.parametrize("mode", THREE_MODES)
+@pytest.mark.parametrize("command", BRACE_ARGUMENT_ROWS)
+def test_a_brace_that_is_an_argument_opens_no_group(command, mode, ws):
+    """Bash prints the `{` and runs the `rm` (proof run); a phantom group swallowed everything after it."""
+    assert any(s.signature == "rm -rf" and s.destructive for s in _segments(command)), command
+    assert _verdict(command, ws, mode).verdict is not Verdict.ALLOW
+
+
+@pytest.mark.parametrize("command", (
+    f"{{ echo a; {X}",
+    f"f() {{ echo a; {X}",
+    f"if true; then {{ echo a; {X}",
+))
+def test_a_group_that_never_closes_can_only_over_split(command):
+    assert any(s.signature == "rm -rf" for s in _segments(command)), command
+
+
+@pytest.mark.parametrize("command,expected", (
+    ("{ ls; }; touch y", ["ls", "touch"]),
+    ("{ ls; } | wc -l", ["ls", "wc"]),
+    ("true && { ls; touch y; }", ["ls", "touch"]),
+    ("f(){ ls; }; f", ["ls", "f"]),
+    ("function f { ls; }; f", ["ls", "f"]),
+    ("{ { ls; }; }", ["ls"]),
+    ("(echo a; { ls; })", ["echo", "ls"]),
+    ("echo {a,b} {1..3} x{y}", ["echo"]),
+))
+def test_a_brace_group_in_command_position_is_still_a_group(command, expected):
+    assert [s.signature for s in _segments(command)] == expected
