@@ -1,4 +1,6 @@
 """Built-in tools registration."""
+import asyncio
+from pathlib import Path
 from typing import Any
 
 from localharness.tools.registry import ToolRegistry
@@ -8,6 +10,7 @@ async def register_builtin_tools(
     registry: ToolRegistry,
     eviction_store=None,
     workspace_root: str | None = None,
+    boundary: Path | None = None,
 ) -> None:
     """Register all built-in tools at global scope. Call once at harness startup.
 
@@ -15,7 +18,10 @@ async def register_builtin_tools(
     evicted to stubs by the ContextManager); wired only when the store exists so the bench/test
     paths that pass none keep the original builtin set. The memory tools are the memory plugin's.
     `workspace_root`: opt-in confinement (issue #15). When set, write/edit targets and
-    bash_exec working_dir must resolve inside it; None (default) = unconfined."""
+    bash_exec working_dir must resolve inside it; None (default) = unconfined.
+    `boundary`: the gate's effective session boundary (start passes it). When given and git_read's
+    pins pass, `git_read` is registered rooted there; None (no boundary, the bench, components, the
+    mobile replay) registers none; a pin failure registers none and says nothing - doctor explains."""
     from localharness.tools.builtin.bash_tool import BashExecTool
     from localharness.tools.builtin.chunk_tool import ChunkTool
     from localharness.tools.builtin.edit_tool import EditTool
@@ -37,6 +43,15 @@ async def register_builtin_tools(
     if eviction_store is not None:
         from localharness.tools.builtin.tool_result_get_tool import ToolResultGetTool
         await registry.register(ToolResultGetTool(eviction_store), scope="global")
+
+    if boundary is not None:
+        from localharness.tools.builtin import git_read_tool
+
+        # No `.git` at the boundary or above: nothing to read, and no git is run to find out.
+        if git_read_tool.git_read_repository_present(boundary):
+            failure = await asyncio.to_thread(git_read_tool.git_read_pin_failure, boundary)
+            if failure is None:
+                await registry.register(git_read_tool.GitReadTool(boundary), scope="global")
 
 
 def bind_agent_store_tools(registry: ToolRegistry, store: Any) -> None:

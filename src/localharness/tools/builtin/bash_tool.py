@@ -70,7 +70,7 @@ def _could_not_run(rc: int) -> bool:
 _HARNESS_TOOL_NAMES = frozenset({
     "read", "write", "edit", "glob", "grep", "bash_exec", "agent", "remember",
     "memory_get", "memory_search", "web_search", "web_fetch", "web_page_query",
-    "load_document", "chunk", "tool_result_get",
+    "load_document", "chunk", "tool_result_get", "git_read",
 })
 _TOOL_CALL_IN_BASH = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*\(")
 

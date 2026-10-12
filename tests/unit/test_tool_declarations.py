@@ -17,6 +17,7 @@ declarations.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -53,17 +54,20 @@ EXPECTED: dict[str, tuple[str, str, str, str]] = {  # tool name -> DECLARATION v
     "web_search": ("network", "untrusted", "safe", "untrusted"),
     "web_fetch": ("network", "untrusted", "safe", "untrusted"),
     "web_page_query": ("network", "untrusted", "safe", "untrusted"),
+    "git_read": ("allow", "none", "safe", "trusted"),
 }
 
 
 async def _builtin_schemas() -> dict[str, ToolSchema]:
-    """All 18 builtin schemas, offline. `register_builtin_tools` wires 15 — the memory verbs and
+    """All 19 builtin schemas, offline. `register_builtin_tools` wires 15 — the memory verbs and
     tool_result_get only when handed a store, and their constructors merely keep it — and the
-    three the start/subagent paths wire are built directly with the smallest arguments."""
+    four the start/subagent paths wire (git_read only with a boundary) are built directly with the
+    smallest arguments."""
     from localharness.agent.context import ContentStore
     from localharness.tools.builtin import register_builtin_tools
     from localharness.tools.builtin.agent_tool import AgentTool
     from localharness.tools.builtin.cruncher_exec import CruncherExecTool
+    from localharness.tools.builtin.git_read_tool import GitReadTool
     from localharness.tools.builtin.python_tool import PythonExecTool
     from localharness.tools.registry import ToolRegistry
 
@@ -78,9 +82,10 @@ async def _builtin_schemas() -> dict[str, ToolSchema]:
     for _mt in (MemorySearchTool(_mem), MemoryGetTool(_mem), MemoryRememberTool(_mem)):
         await registry.register(_mt, scope="global")
     tools = [*registry._tools["global"].values(),
-             PythonExecTool(), CruncherExecTool(seed={}), AgentTool(agent_runner=_runner)]
+             PythonExecTool(), CruncherExecTool(seed={}), AgentTool(agent_runner=_runner),
+             GitReadTool(Path("."))]
     schemas = {tool.info().name: tool.info() for tool in tools}
-    assert len(tools) == len(schemas) == 18 and set(schemas) == set(EXPECTED), sorted(schemas)
+    assert len(tools) == len(schemas) == 19 and set(schemas) == set(EXPECTED), sorted(schemas)
     return schemas
 
 
