@@ -39,7 +39,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 import acp
 from acp.helpers import (
@@ -65,13 +65,20 @@ from acp.schema import (
     ToolCallUpdate,
 )
 
-from localharness.channels.base import ChannelAdapter, provider_lost_line, sanitize_for_display
+from localharness.channels.base import (
+    ChannelAdapter,
+    _call_receipt,
+    provider_lost_line,
+    sanitize_for_display,
+)
 from localharness.channels.errors import NotInteractiveError
 from localharness.core.events import (
     PENDING_APPROVED_NUDGE,
     PENDING_DENIED_NUDGE,
     Action,
     Escalation,
+    InstructionsChanged,
+    NarrowingNotice,
     Observation,
     ParseFailed,
     PermissionResolved,
@@ -506,7 +513,9 @@ class AcpChannel(ChannelAdapter):
         slash command both answer the same call — one from `PermissionResolved`, one from the
         return value of `gate.approve` — so the line is written by whichever arrives first and
         never twice."""
-        self._pending_notice: Optional[str] = None
+        self._pending_notices: list[tuple[str, Callable[[], None] | None]] = []
+        """Lines owed before the next prompt, each with the receipt to run once it is delivered
+        (the MCP notice has none). A pair whose send failed stays queued for the next prompt."""
         self._handles: list[Any] = []
 
     # ------------------------------------------------------------ ACP: agent side
@@ -646,9 +655,9 @@ class AcpChannel(ChannelAdapter):
         ]
         joined = ", ".join(names)
         log.warning(MCP_SERVERS_NOT_CONNECTED_LOG, len(names), joined)
-        self._pending_notice = MCP_SERVERS_NOT_CONNECTED_NOTICE.format(
-            count=len(names), servers=joined
-        )
+        self._pending_notices.append((
+            MCP_SERVERS_NOT_CONNECTED_NOTICE.format(count=len(names), servers=joined), None,
+        ))
 
     async def set_session_mode(
         self, session_id: str, mode_id: str, **kwargs: Any
@@ -706,9 +715,7 @@ class AcpChannel(ChannelAdapter):
         text, images = _prompt_parts(prompt)
 
         # First prompt only: whatever `session/new` could not say because there was no panel yet.
-        if self._pending_notice is not None:
-            notice, self._pending_notice = self._pending_notice, None
-            await self.send_message(notice)
+        await self._drain_pending_notices()
 
         verb, arg = _pending_command(text)
         if verb:
@@ -1120,6 +1127,8 @@ class AcpChannel(ChannelAdapter):
             self.bus.subscribe(ParseFailed, self.on_parse_failed),
             self.bus.subscribe(Escalation, self.on_escalation),
             self.bus.subscribe(ProviderLost, self.on_provider_lost),  # the base text (no Esc here)
+            self.bus.subscribe(InstructionsChanged, self.on_instructions_changed),
+            self.bus.subscribe(NarrowingNotice, self.on_narrowing_notice),
             # The queue: the only way this channel hears that `auto` parked a call, and the only
             # way it hears the answer once somebody gives one.
             self.bus.subscribe(PermissionStaged, self.on_permission_staged),
@@ -1205,6 +1214,49 @@ class AcpChannel(ChannelAdapter):
         if self._conn is None or self._session_id is None:
             return
         await self._conn.session_update(self._session_id, update)
+
+    async def _update_checked(self, update: Any) -> bool:
+        """Like :meth:`_update`, but False when there is no connection or session (nothing was
+        sent) and True only after ``session_update`` returned. An exception from the client
+        propagates: the caller treats it as "not delivered". This is the proof of delivery a
+        receipt needs; ``_update`` returning silently is never taken as one."""
+        if self._conn is None or self._session_id is None:
+            return False
+        await self._conn.session_update(self._session_id, update)
+        return True
+
+    async def _deliver_notice(
+        self, text: str, on_delivered: Callable[[], None] | None
+    ) -> bool:
+        """Send one owed line through the checked update and run its receipt on success.
+        False (nothing sent, or the send failed) leaves the receipt unrun."""
+        try:
+            sent = await self._update_checked(update_agent_message_text(text))
+        except Exception:  # noqa: BLE001 - a failed send keeps the line queued
+            log.debug("acp first-contact notice not delivered", exc_info=True)
+            return False
+        if sent:
+            _call_receipt(on_delivered)
+        return sent
+
+    async def _drain_pending_notices(self) -> None:
+        """Deliver the owed lines in order; one that fails stays queued, with those after it,
+        for the next prompt."""
+        while self._pending_notices:
+            text, callback = self._pending_notices[0]
+            if not await self._deliver_notice(text, callback):
+                return
+            del self._pending_notices[0]
+
+    async def notice_on_first_contact(
+        self, text: str, on_delivered: Callable[[], None] | None
+    ) -> None:
+        """Send the line now when a connection and session exist, else queue it for the next
+        prompt; the receipt runs only after the editor's update call returned."""
+        if self._conn is not None and self._session_id is not None and not self._pending_notices:
+            if await self._deliver_notice(text, on_delivered):
+                return
+        self._pending_notices.append((text, on_delivered))
 
     async def _on_token(self, token: str) -> None:
         """`on_token` → `agent_message_chunk` (PRD §4).

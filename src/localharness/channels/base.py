@@ -1,10 +1,11 @@
 """ChannelAdapter ABC — pluggable interface for all channel adapters."""
 from __future__ import annotations
 
+import logging
 import math
 import re
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from localharness.core.bus import EventBus
 from localharness.core.events import (
@@ -12,12 +13,31 @@ from localharness.core.events import (
     CompactionTriggered,
     Escalation,
     Heartbeat,
+    InstructionsChanged,
+    NarrowingNotice,
     Observation,
     ParseFailed,
     ProviderLost,
     TaskComplete,
     TurnFailed,
 )
+
+log = logging.getLogger(__name__)
+
+
+def _call_receipt(callback: Callable[[], None] | None) -> None:
+    """Run a delivery-receipt callback so it can never raise into a channel.
+
+    A channel calls this only after its own send (or hint, or attached client) proved a person was
+    reached. The callback writes the instructions record; a failure there costs the record (the
+    line is offered again next time), never the channel's work. ``None`` is the unaware default.
+    """
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception:  # noqa: BLE001 - a receipt must never break a channel
+        log.debug("instructions delivery receipt raised", exc_info=True)
 
 
 PERMISSION_DENIED_LINE = "permission denied — {tool_name}: {reason}"
@@ -547,4 +567,46 @@ class ChannelAdapter(ABC):
             provider_lost_line(event.wait_seconds),
             agent_id=event.agent_id,
             metadata={"style": "system.info"},
+        )
+
+    instructions_on_delivered: Callable[[], None] | None = None
+    """The project-instructions handle's ``on_delivered``, bound by ``start`` the way it binds
+    ``first_prompt_hint``. A surface that can prove a person received the start line calls it
+    (through :func:`_call_receipt`) after its own send returned; the base never does."""
+
+    _first_contact_notice: str | None = None
+    """The first-contact line the base kept because it cannot prove delivery. Class level so a
+    plugin channel whose ``__init__`` skips ``super()`` still has it."""
+
+    async def notice_on_first_contact(
+        self, text: str, on_delivered: Callable[[], None] | None
+    ) -> None:
+        """Hold the line the harness owes a person on first contact; never call back.
+
+        A surface that can prove a person received the text overrides this and calls
+        ``on_delivered`` only after its own send returned. The base cannot prove anything, so an
+        unaware plugin channel writes no record and the line is offered again next session.
+        """
+        self._first_contact_notice = text
+
+    async def on_instructions_changed(self, event: InstructionsChanged) -> None:
+        """Default handler for InstructionsChanged.
+
+        The start and too-large lines are first contact: they go to :meth:`notice_on_first_contact`
+        with the bound receipt and this method renders nothing itself. Every other cause (adopted,
+        harness_written, shadowed, refused) is one system line. Never filters on parent_id: a
+        child loop may publish it and a person must still be told.
+        """
+        if event.cause in ("start", "too_large"):
+            await self.notice_on_first_contact(event.text, self.instructions_on_delivered)
+            return
+        await self.send_message(
+            event.text, agent_id=event.agent_id, metadata={"style": "system.info"}
+        )
+
+    async def on_narrowing_notice(self, event: NarrowingNotice) -> None:
+        """Default handler for NarrowingNotice: the text, already naming the file that would
+        accept the value, as one system line."""
+        await self.send_message(
+            event.text, agent_id=event.agent_id, metadata={"style": "system.info"}
         )
