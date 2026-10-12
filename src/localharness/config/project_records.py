@@ -28,6 +28,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -624,6 +625,10 @@ def _start_text(name: str, size: int) -> str:
     return f"Using {display_name(name)} ({format_kb(size)}); /instructions off"
 
 
+def _harness_written_text(name: str) -> str:
+    return f"{display_name(name)} changed by the model; not used \u2014 /instructions on"
+
+
 def _name_rank(name: str) -> int:
     """Where a candidate name sits in the order it is tried; an unknown name sorts last."""
     try:
@@ -648,6 +653,17 @@ def _put_record(data: dict, key: str, record: InstructionsRecord, pending: dict[
     _entry_for_write(data, key)["instructions"] = _record_to_dict(
         replace(record, pending=_as_pending(pending))
     )
+
+
+def _put_marks_only(data: dict, key: str, pending: dict[str, str]) -> None:
+    """Keep only the open marks for a root with no record (a mark-only instructions mapping)."""
+    if pending:
+        _entry_for_write(data, key)["instructions"] = {"pending": dict(sorted(pending.items()))}
+        return
+    entry = _entry(data, key)
+    if entry is not None:
+        entry.pop("instructions", None)
+        _prune(data, key)
 
 
 @dataclass(frozen=True)
@@ -922,10 +938,14 @@ class ProjectInstructions:
         stored = _stored_notices(_entry(data, key))
         self._recorded_path = record.path if record is not None else None
         usable = record is not None and record.state == "yes"
+        if self._mem_state == "off":
+            return None, None
         if not usable and self._mem_state != "yes":
             if record is None and self._basis in ("layer", "trusted") and not self._no_input:
                 pass  # the no-record sitting: used, with the start line owed
             else:
+                if record is not None:
+                    self._set_last(fx, record, marks_open=False, digest=None)
                 return None, None
         if self._awaiting is not None:
             if record is None or (record.state == "yes" and record.digest != self._awaiting.digest):
@@ -992,12 +1012,38 @@ class ProjectInstructions:
                 return text, None
             fx.append(lambda: setattr(self, "_start_notice_given", True))
             return text, self._notice("start", aw.name, aw.path, aw.size, "none", text=aw.text)
-        return text, None
+        if read.digest == self._dropped_digest:
+            return None, None
+        digest = read.digest
+        if self._marks(pending).any:
+            # a harness call named the file after the line was owed: the bytes the line
+            # described stay the ones in use, the model's are dropped (D-84)
+            fx.append(lambda: setattr(self, "_dropped_digest", digest))
+            state = InstructionsState(
+                display_name(aw.name), aw.path, read.size, digest, "harness_written"
+            )
+            fx.append(lambda: setattr(self, "_last", state))
+            return None, self._notice(
+                "harness_written", aw.name, aw.path, read.size, "harness_written",
+                text=_harness_written_text(aw.name),
+            )
+        return text, None  # the person's own edit in a sitting with no record: no second line
 
     def _with_record(
         self, data: dict, key: str, record: InstructionsRecord, pending: dict[str, str],
         cap: int, stored: frozenset[Notice], fx: list[Callable[[], None]], *, at_start: bool,
     ) -> tuple[str | None, InstructionsNotice | None]:
+        first = first_candidate(self._root)
+        marks = self._marks(pending)
+        shadowing = (
+            first is not None and str(first.real) != record.path
+            and _name_rank(first.name) <= _name_rank(record.name)
+        )
+        if shadowing and not marks.any:
+            assert first is not None
+            return self._take_over(
+                data, key, first, record, pending, cap, stored, fx, at_start=at_start
+            )
         read = guarded_read(record.path, self._root, cap)
         if read.failure is not None or read.data is None or read.digest is None:
             return None, self._failure(
@@ -1005,10 +1051,149 @@ class ProjectInstructions:
                 fx=fx, at_start=at_start,
             )
         text = read.data.decode("utf-8", errors="replace")
-        if read.digest == record.digest:
-            self._set_last(fx, record, marks_open=bool(pending), digest=read.digest)
+        digest = read.digest
+        at_recorded = first is not None and str(first.real) == record.path
+        clear = set(marks.dead) | ({self.sitting_id} & set(pending))
+
+        if digest == record.digest:
+            if shadowing:
+                assert first is not None
+                return text, self._shadowed(
+                    data, key, first, record, pending, read, cap, fx
+                )
+            left = {k: v for k, v in pending.items() if k not in clear} if at_recorded else dict(pending)
+            new = replace(record, shadow=None) if at_recorded else record
+            if not self._no_input and (left != pending or new != record):
+                _put_record(data, key, new, left)
+            if at_recorded:
+                fx.append(lambda: setattr(self, "_marked", False))
+            self._set_last(
+                fx, new, marks_open=bool(left) or (self._marked and not at_recorded), digest=digest
+            )
             return text, None
-        return None, None  # a changed file: the change-sensing rules (task 2)
+
+        if digest == record.harness_written:
+            self._set_last(fx, record, marks_open=bool(pending) or self._marked, digest=digest)
+            return None, None
+
+        if marks.any:
+            if self._no_input:  # nothing is written; the model's bytes stay out this sitting
+                self._set_last(fx, record, marks_open=True, digest=digest)
+                return None, None
+            left = {k: v for k, v in pending.items() if k not in clear}
+            new = replace(record, harness_written=digest)
+            _put_record(data, key, new, left)
+            fx.append(lambda: setattr(self, "_marked", False))
+            self._set_last(fx, new, marks_open=bool(left), digest=digest)
+            return None, self._notice(
+                "harness_written", record.name, record.path, read.size, "harness_written",
+                text=_harness_written_text(record.name),
+            )
+
+        # a change no harness call named: the person's
+        if self._no_input:
+            self._set_last(fx, record, marks_open=False, digest=digest)
+            return text, None
+        if at_start:
+            self._arm(fx, record.name, record.path, read.size, digest)
+            self._set_last(fx, record, marks_open=False, digest=digest)
+            return text, None
+        new = replace(record, digest=digest, size=read.size, harness_written=None, shadow=None)
+        _put_record(data, key, new, pending)
+        self._set_last(fx, new, marks_open=bool(pending), digest=digest)
+        return text, self._notice(
+            "adopted", record.name, record.path, read.size, "yes",
+            text=f"{display_name(record.name)} changed, using it",
+        )
+
+    def _arm(
+        self, fx: list[Callable[[], None]], name: str, path: str, size: int, digest: str
+    ) -> None:
+        """Owe the start line for these bytes: nothing is written until it is delivered."""
+        line = _start_text(name, size)
+        aw = _Awaiting(name, path, size, digest, line)
+
+        def apply() -> None:
+            self._awaiting, self._start_line, self._sitting_digest = aw, line, digest
+
+        fx.append(apply)
+
+    def _take_over(
+        self, data: dict, key: str, first: Candidate, record: InstructionsRecord,
+        pending: dict[str, str], cap: int, stored: frozenset[Notice],
+        fx: list[Callable[[], None]], *, at_start: bool,
+    ) -> tuple[str | None, InstructionsNotice | None]:
+        """A file above the recorded one, with no mark of any kind: the person's, adopted."""
+        path = str(first.real)
+        read = guarded_read(first.real, self._root, cap)
+        if read.failure is not None or read.data is None or read.digest is None:
+            return None, self._failure(
+                read, name=first.name, path=path, record=record, cap=cap, stored=stored, fx=fx,
+                at_start=at_start,
+            )
+        text = read.data.decode("utf-8", errors="replace")
+        if self._no_input:
+            self._set_last(fx, record, marks_open=False, digest=read.digest)
+            return text, None
+        if at_start:
+            self._arm(fx, first.name, path, read.size, read.digest)
+            self._set_last(fx, record, marks_open=False, digest=read.digest)
+            return text, None
+        new = InstructionsRecord(
+            path=path, name=display_name(first.name), digest=read.digest, size=read.size,
+            state="yes",
+        )
+        _put_record(data, key, new, pending)
+        self._set_last(fx, new, marks_open=bool(pending), digest=read.digest)
+        return text, self._notice(
+            "adopted", first.name, path, read.size, "yes",
+            text=f"{display_name(first.name)} changed, using it",
+        )
+
+    def _shadowed(
+        self, data: dict, key: str, first: Candidate, record: InstructionsRecord,
+        pending: dict[str, str], read: GuardedRead, cap: int, fx: list[Callable[[], None]],
+    ) -> InstructionsNotice | None:
+        """A file above the recorded one under a mark: the recorded file stays in use while its
+        own digest holds, the refused file is remembered and one line says so."""
+        other = guarded_read(first.real, self._root, cap)
+        shadow = ShadowRecord(display_name(first.name), str(first.real), other.digest or "")
+        if not self._no_input and record.shadow != shadow:
+            _put_record(data, key, replace(record, shadow=shadow), pending)
+        self._set_last(fx, record, marks_open=True, digest=read.digest)
+        if not self._once(("shadowed", shadow.path, shadow.digest), fx):
+            return None
+        return self._notice(
+            "shadowed", record.name, record.path, read.size, "pending", shadowed=shadow.name,
+            text=(
+                f"{shadow.name} (model edit) not used; using {display_name(record.name)}"
+                " \u2014 /instructions on to switch"
+            ),
+        )
+
+    # ---- marks
+
+    def mark_pending(self) -> None:
+        """A harness call is about to name the file: leave a mark before it runs (D-29).
+
+        The in-memory mark is set first, so a store failure can never turn a model write into a
+        person's change (D-72). Under ``--no-input`` nothing is written."""
+        self._marked = True
+        if self._no_input or self._declined:
+            return
+        try:
+            key = _normalize_root(self._root)
+            with _store_transaction(self._config_dir) as data:
+                raw = _inst_raw(data, key)
+                record = _record_from_dict(raw)
+                pending = dict(_pending_from_dict(raw))
+                pending[self.sitting_id] = datetime.now(timezone.utc).isoformat()
+                if record is not None:
+                    _put_record(data, key, record, pending)
+                else:
+                    _put_marks_only(data, key, pending)
+        except (OSError, RuntimeError) as exc:
+            log.debug("project_instructions_mark_failed", error=str(exc))
 
     # ---- start
 
