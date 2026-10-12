@@ -182,3 +182,111 @@ async def test_build_messages_evicts_at_the_live_threshold(monkeypatch):
     ctx.max_context_tokens = 8_192
     await ctx.build_messages(msgs)
     assert seen[-1] == ctx.evict_threshold_chars() == 512
+
+
+# --------------------------------------------------------------------------- registry cap source
+
+from typing import Any  # noqa: E402
+
+from localharness.config.models import ToolConfig  # noqa: E402
+from localharness.tools import ToolRegistry  # noqa: E402
+from localharness.tools.base import Tool, ToolResult, ToolSchema  # noqa: E402
+from localharness.tools.builtin import bind_agent_store_tools, register_builtin_tools  # noqa: E402
+from localharness.tools.builtin.web_tool import WebPageQueryTool  # noqa: E402
+
+
+class _Big(Tool):
+    def info(self) -> ToolSchema:
+        return ToolSchema(
+            name="big",
+            description="Returns 2,000 characters, or fails with 2,000 characters of error text.",
+            ingest="none",
+            host="safe",
+            parameters={
+                "type": "object",
+                "properties": {"fail": {"type": "boolean"}},
+                "required": [],
+            },
+        )
+
+    async def _execute(self, fail: bool = False, **kw: Any) -> ToolResult:
+        if fail:
+            return ToolResult(output="", success=False, error="e" * 2_000, error_type="execution_error")
+        return self.ok("x" * 2_000)
+
+
+async def _dispatch(reg: ToolRegistry, **args: Any) -> ToolResult:
+    return await reg.dispatch("big", args, "a1", "d1", ToolConfig(inherit=["global"]))
+
+
+def test_a_registry_nobody_wired_caps_at_fifty_thousand():
+    assert ToolRegistry().result_size_cap_chars == 50_000
+    assert ToolRegistry(result_size_cap=500).result_size_cap_chars == 500
+
+
+async def test_the_cap_is_read_per_dispatch_for_output_and_error():
+    caps = iter([500, 1_000, 300])
+    reg = ToolRegistry(result_size_cap=lambda: next(caps))
+    await reg.register(_Big(), scope="global")
+    assert len((await _dispatch(reg)).output) == 500
+    assert len((await _dispatch(reg)).output) == 1_000
+    failed = await _dispatch(reg, fail=True)
+    assert failed.error.startswith("e" * 300) and "e" * 301 not in failed.error
+
+
+async def test_set_result_size_cap_late_binds():
+    reg = ToolRegistry()
+    await reg.register(_Big(), scope="global")
+    assert len((await _dispatch(reg)).output) == 2_000
+    reg.set_result_size_cap(lambda: 700)
+    assert len((await _dispatch(reg)).output) == 700
+
+
+async def test_a_child_registry_follows_the_base_cap_source_not_a_snapshot():
+    base = ToolRegistry()
+    await base.register(_Big(), scope="global")
+    live = [900]
+    base.set_result_size_cap(lambda: live[0])
+    child = ToolRegistry.from_allowed(["big"], base_registry=base)
+    assert child.result_size_cap_chars == 900
+    live[0] = 400
+    assert child.result_size_cap_chars == 400
+    assert len((await _dispatch(child)).output) == 400
+
+
+async def test_a_child_of_an_unwired_base_keeps_fifty_thousand():
+    base = ToolRegistry()
+    await base.register(_Big(), scope="global")
+    assert ToolRegistry.from_allowed(["big"], base_registry=base).result_size_cap_chars == 50_000
+
+
+# --------------------------------------------------------------------------- web query budget
+
+
+def _web_query(reg: ToolRegistry) -> WebPageQueryTool:
+    return reg._tools["global"]["web_page_query"]
+
+
+@pytest.mark.parametrize(("window", "cap", "budget"), [(131_072, 49_152, 44_236), (65_536, 24_576, 22_118)])
+async def test_the_web_query_budget_is_nine_tenths_of_the_registry_cap(window, cap, budget):
+    reg = ToolRegistry()
+    await register_builtin_tools(reg)
+    ctx = ContextManager(max_context_tokens=window)
+    reg.set_result_size_cap(ctx.result_cap_chars)
+    assert reg.result_size_cap_chars == cap
+    assert _web_query(reg)._output_budget() == budget
+    ctx.max_context_tokens = 8_192  # the next call sees the shrunken window
+    assert _web_query(reg)._output_budget() == int(3_072 * 0.9)
+
+
+async def test_a_rebound_child_web_query_reports_the_same_budget_as_the_root():
+    root = ToolRegistry()
+    await register_builtin_tools(root)
+    root.set_result_size_cap(ContextManager(max_context_tokens=65_536).result_cap_chars)
+    child = ToolRegistry.from_allowed(["web_page_query"], base_registry=root)
+    bind_agent_store_tools(child, context_mod.ContentStore())
+    assert _web_query(child)._output_budget() == _web_query(root)._output_budget() == 22_118
+
+
+def test_an_unwired_web_query_tool_keeps_forty_five_thousand():
+    assert WebPageQueryTool()._output_budget() == 45_000

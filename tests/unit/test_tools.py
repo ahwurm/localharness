@@ -245,7 +245,7 @@ async def test_registry_dispatch_truncates_large_output():
         async def _execute(self, **kwargs: Any) -> ToolResult:
             return self.ok("x" * 100_000)
 
-    reg = ToolRegistry(result_size_cap_chars=50_000)
+    reg = ToolRegistry(result_size_cap=50_000)
     await reg.register(_BigTool(), scope="global")
     config = ToolConfig(inherit=["global"])
     result = await reg.dispatch("big", {}, "agent-1", "div-1", config)
@@ -1374,7 +1374,7 @@ class _HugeErrTool(Tool):
 async def test_registry_caps_error_payloads_too():
     """#133 critic finding: .error was never capped at dispatch — MCP tools mirror whole
     server responses into it, and the old event slice bounded it only by accident."""
-    reg = ToolRegistry(result_size_cap_chars=50_000)
+    reg = ToolRegistry(result_size_cap=50_000)
     await reg.register(_HugeErrTool(), scope="global")
     config = ToolConfig(inherit=["global"])
     result = await reg.dispatch("hugeerr", {}, "agent-1", "div-1", config)
