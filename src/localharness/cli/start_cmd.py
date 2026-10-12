@@ -150,6 +150,60 @@ def _first_prompt_hint(is_returning: bool) -> str:
     return "/help for commands." if is_returning else "Describe a task, or /help for commands."
 
 
+def _hint_with_instructions(hint: str, line: str) -> str:
+    """The first-prompt hint with the instructions start line riding in the same slot (D-47).
+
+    The returning default ("/help for commands.") and an empty hint give way to the line alone;
+    any other hint (the first-run text) keeps its words and the line follows after a dot."""
+    if not hint or hint == _first_prompt_hint(True):
+        return line
+    return f"{hint} · {line}"
+
+
+def _open_project_instructions(
+    boundary: Path | None,
+    *,
+    workspace: Path | None,
+    decision: bool | None,
+    trust_flag: bool,
+    sitting_id: str,
+    max_ratio: float,
+    no_input: bool,
+    channel_mode: str,
+    window_tokens: int,
+    config_dir: str | None,
+) -> Any:
+    """The workspace-open hook: the one instructions handle of a session, or None (D-48, D-67, D-69).
+
+    Scoped to the session's effective boundary (the key the gate and session trust use) and built
+    for any root with a candidate file, because a session-trust yes arrives after start returns.
+    None when there is no boundary, when the root was declined (``decision is False``), or when no
+    candidate exists. The basis is ``layer`` for a trusted project whose workspace layer loaded,
+    ``trusted`` for a trusted root without a layer or an unrecorded one under ``--trust-project``,
+    else ``awaiting_trust`` (the file is unused until a yes record exists). ``no_input`` here is the
+    CLI flag only: ACP's own internal no-input is not it, so Zed still uses and records the file
+    (D-06). A broken store never stops a start."""
+    if boundary is None or decision is False:
+        return None
+    if decision is True:
+        basis = "layer" if workspace is not None else "trusted"
+    elif trust_flag:
+        basis = "trusted"
+    else:
+        basis = "awaiting_trust"
+    cli_no_input = bool(no_input) and channel_mode != "acp"
+    try:
+        from localharness.config.project_records import open_project_instructions
+
+        return open_project_instructions(
+            boundary, sitting_id=sitting_id, max_ratio=max_ratio, basis=basis,
+            no_input=cli_no_input, window_tokens=window_tokens, config_dir=config_dir,
+        )
+    except Exception:  # noqa: BLE001 — a broken store costs the instructions, never the session
+        log.warning("could not open the project instructions handle", exc_info=True)
+        return None
+
+
 def _available_hint(names: list[str]) -> str:
     """ENAB-04 / PRD §4: nothing runs because it was installed, and the operator is told how to turn
     it on — once, at start."""
@@ -2377,6 +2431,25 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 pass  # skip agents that fail to load — non-fatal
         orchestrator = AgentCreationFlow(card_registry=card_registry)
 
+        # --- 9a. Project instructions (spec 20; D-48, D-67, D-69) ---
+        # One handle per session on the effective boundary, built above the delegation block so the
+        # runner, the loop, the REPL and ACP all hold the same object. Nothing is built for a
+        # declined root or a root with no instructions file.
+        from localharness.config import trust as _instr_trust
+
+        instructions_handle = _open_project_instructions(
+            _boundary,
+            workspace=workspace,
+            decision=_instr_trust.is_trusted_tree(_boundary) if _boundary is not None else None,
+            trust_flag=trust_flag,
+            sitting_id=sitting_id,
+            max_ratio=harness.instructions.max_ratio,
+            no_input=no_input,
+            channel_mode=channel_mode,
+            window_tokens=ctx_mgr.max_context_tokens,
+            config_dir=config_dir,
+        )
+
         # --- 9b. Agent delegation tool (ORCH-04 / SUBAGENT-05) ---
         # Bug#1 fix: the runner is built via the module-level make_explore_agent_runner seam (T1)
         # and the AgentTool is registered at GLOBAL scope. The parent loop's agent is the `default`
@@ -2554,6 +2627,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # BUDGET-02: the machine's cap for a session with no local operator, in any mode (WR-70);
             # the loop reads it live against the gate, so an interactive terminal root stays unbounded.
             unattended_max_actions=harness.channels.unattended_max_actions,
+            project_instructions=instructions_handle,
             # PAPI-04: the memory slot — the lifecycle's; its occupant (the memory plugin) feeds the
             # prompt's memory section.
             memory_slot=memory_slot,
