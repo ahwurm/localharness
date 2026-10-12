@@ -725,3 +725,40 @@ def test_an_exec_wrapper_the_peel_does_not_model_asks_in_every_mode(ws, command)
 def test_a_wrapper_spelled_as_a_path_in_a_chain_is_still_a_wrapper(ws, command):
     _check(command, "DENY/ASKU/ASKU", ws)
     assert any(s.signature == "rm -rf" for s in _segments(command))
+
+
+# --------------------------------------------------------------------------- WR-52: ordinary comments holding > or ->
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "# Step 1 -> Step 2\nls",
+        "# check status -> then act\ngit status",
+        "ls\n# note -> next\npwd",
+        "ls # a > b",
+        "git status # -> ok",
+        "#!/bin/bash\n# a -> b\nls",
+        "# list files (a > b)\nls -la",
+        "ls # a => b",
+        "ls # (a -> b)",
+        "ls # a < b",
+        "ls # use --force",
+    ),
+)
+def test_an_ordinary_comment_holding_an_arrow_changes_nothing(ws, command):
+    """WR-52 (it4): a ``#`` at the start of a word is a comment in bash too, outside ``[[ ]]``, ``(( ))`` and an
+    extglob group; ``->`` and ``>`` in it are not a redirection and must not draw a question."""
+    _check(command, "ok/ok/ok", ws)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "[[ a =~ (a|#b) ]] > ~/.bashrc",
+        "[[ a =~ (a|#b) ]] >> ~/.ssh/authorized_keys",
+        "[[ a =~ (a|#b) ]] > /etc/cron.d/x",
+        "shopt -s extglob\ngit log @(a|#b) --output ~/.bashrc",
+    ),
+)
+def test_the_uf1_hazards_keep_their_verdict(ws, command):
+    _check(command, "DENY/ASKU/ASKU", ws)

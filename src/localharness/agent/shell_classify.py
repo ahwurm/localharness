@@ -748,10 +748,18 @@ the line. ``$#``, ``${#x}``, ``a#b`` and ``16#ff`` are not comments."""
 
 BASH_BLANKS = " \t\n"
 
-COMMENT_HAZARD_CHARS = ";&|`<>"
+COMMENT_HAZARD_CHARS = ";&|`"
+COMMENT_HAZARD_DELICATE_CHARS = "<>"
 COMMENT_HAZARD_OPENERS = ("$(", "<(", ">(")
 COMMENT_HAZARD_WORD_START = "-"
-"""A dropped comment holding one of these could be hiding a command if the stripper judged a ``#`` a
+EXTGLOB_OPENERS = ("@(", "+(", "!(", "*(", "?(")
+DELICATE_CONSTRUCT_OPENERS = ("[[", "((", *EXTGLOB_OPENERS)
+"""WR-52 (it4): ``<``, ``>`` and a word starting with ``-`` count only in a text that holds a construct where
+the stripper and bash can disagree about a ``#`` (:func:`_has_delicate_construct`: ``[[``, ``((`` or an extglob
+opener). Elsewhere a ``#`` at the start of a word IS a comment in bash too, so ``# Step 1 -> Step 2`` and
+``ls # a > b`` hide nothing and must not be read a second time as a redirection.
+
+A dropped comment holding one of these could be hiding a command if the stripper judged a ``#`` a
 comment where bash did not (``[[ a =~ (a|#b) ]]; rm x``, ``shopt -s extglob`` then ``@(a|#b)``,
 ``+(#) >(rm x)``). ``<`` and ``>`` are there because bash still runs a redirection after such a ``#``
 (``[[ a =~ (a|#b) ]] > ~/.bashrc``), and a word starting with ``-`` because it can be the carrier's own
@@ -1089,11 +1097,12 @@ class _JoinScan:
     (WR-01 / WR-51).
     """
 
-    def __init__(self, text: str, strip_comments: bool = True) -> None:
+    def __init__(self, text: str, strip_comments: bool = True, delicate: bool | None = None) -> None:
         self.text = text
         self.index = 0
         self.balanced = True
         self.strip_comments = strip_comments
+        self.delicate = _has_delicate_construct(text) if delicate is None else delicate
         self.hazard = False  # a comment that could hold a command was dropped; see COMMENT_HAZARD_CHARS
 
     def scan(self, kind: int) -> tuple[str, bool]:
@@ -1290,7 +1299,8 @@ class _JoinScan:
                 if (
                     any(c in dropped for c in COMMENT_HAZARD_CHARS)
                     or any(opener in dropped for opener in COMMENT_HAZARD_OPENERS)
-                    or any(word.startswith(COMMENT_HAZARD_WORD_START) for word in dropped.split())
+                    or (self.delicate and any(c in dropped for c in COMMENT_HAZARD_DELICATE_CHARS))
+                    or (self.delicate and any(w.startswith(COMMENT_HAZARD_WORD_START) for w in dropped.split()))
                 ):
                     self.hazard = True
                 self.index = end
@@ -1388,7 +1398,7 @@ class _JoinScan:
 
         Quotes mean nothing in a body, a backslash escapes the next character (``\\$(`` runs nothing), and
         a plain ``${x}`` is not a substitution."""
-        scan = _JoinScan(body, self.strip_comments)
+        scan = _JoinScan(body, self.strip_comments, self.delicate)
         found: list[str] = []
         while scan.index < len(body):
             index = scan.index
@@ -1456,6 +1466,11 @@ def _join_continuations(text: str) -> str:
     it, and the result leads with :data:`UNPARSED_SHELL_SIGNATURE` as a command of its own.
     """
     return _join(text)[0]
+
+
+def _has_delicate_construct(text: str) -> bool:
+    """Does the text hold a ``[[ ]]``, a ``(( ))`` or an extglob group (:data:`DELICATE_CONSTRUCT_OPENERS`)?"""
+    return any(opener in text for opener in DELICATE_CONSTRUCT_OPENERS)
 
 
 def _join(text: str, *, strip_comments: bool = True) -> tuple[str, bool]:
@@ -1542,7 +1557,7 @@ def _classify_command_text(
             more, _ = _classify_text(kept, settings, second_cwd)
             segments = [*segments, *(
                 segment for segment in more
-                if segment not in segments and (
+                if segment not in segments and not (segment.argv and segment.argv[0].startswith("#")) and (
                     segment.destructive or segment.write_targets or segment.inline_interpreter
                     or segment.pipe_to_shell or segment.env_redirect
                 )

@@ -625,10 +625,16 @@ def test_a_comment_that_holds_a_separator_is_also_read_with_the_comment_left_in(
     assert _join("ls # a `b`")[1] is True
     assert _join("ls # a $(b)")[1] is True
     assert _join("ls # ab")[1] is False
-    # UF-1: a redirection or a flag in the dropped text is also run by bash when the `#` was no comment
-    assert _join("ls # a < b")[1] is True
-    assert _join("ls # a > b")[1] is True
-    assert _join("ls # use -l")[1] is True
+    # UF-1: a redirection or a flag in the dropped text is also run by bash when the `#` was no comment; that can
+    # only happen where the stripper and bash disagree about a `#` (`[[ ]]`, `(( ))`, an extglob group), so only
+    # there do `<`, `>` and a dash-led word count (WR-52 it4: `ls # a > b` is an ordinary comment)
+    assert _join("[[ a =~ (a|#b) ]] # a < b")[1] is True
+    assert _join("[[ a =~ (a|#b) ]] # a > b")[1] is True
+    assert _join("[[ a =~ (a|#b) ]] # use -l")[1] is True
+    assert _join("shopt -s extglob\nls @(a|#b) # a > b")[1] is True
+    assert _join("ls # a < b")[1] is False
+    assert _join("ls # a > b")[1] is False
+    assert _join("ls # use -l")[1] is False
     assert _join("ls # a-b")[1] is False
     assert _join("ls # a; b", strip_comments=False)[0] == "ls # a; b"
 
