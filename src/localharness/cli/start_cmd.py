@@ -2115,9 +2115,20 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
     # --- 2. Core infrastructure ---
     tool_registry = ToolRegistry()
+    # git_read is rooted at the SAME boundary the gate uses below (derived from where you stand;
+    # config may only narrow it - spec 17 section 7.3), so it is computed once, here, and shared.
+    from localharness.agent.gate import derive_session_boundary
+    from localharness.agent.verdict import narrow_boundary
+
+    _derived = derive_session_boundary(cwd=Path.cwd(), local_dir=workspace)
+    _boundary, _boundary_warning = narrow_boundary(
+        _derived, getattr(agent_config.permissions, "workspace_root", None)
+    )
     # workspace_root (issue #15): opt-in; None (default) leaves write/edit/bash unconfined.
     await register_builtin_tools(
-        tool_registry, workspace_root=agent_config.permissions.workspace_root
+        tool_registry,
+        workspace_root=agent_config.permissions.workspace_root,
+        boundary=_boundary,
     )
 
     # --- 3. Hook system (soft) ---
@@ -2388,16 +2399,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         from localharness.agent.gate import (
             PermissionGate,
             deny_fn_from,
-            derive_session_boundary,
             settings_from,
         )
-        from localharness.agent.verdict import narrow_boundary
         from localharness.config.grants import GrantStore
 
-        _derived = derive_session_boundary(cwd=Path.cwd(), local_dir=workspace)
-        _boundary, _boundary_warning = narrow_boundary(
-            _derived, getattr(agent_config.permissions, "workspace_root", None)
-        )
         if _boundary_warning:
             console.print(f"[yellow]{_boundary_warning}[/yellow]")
         if _boundary is None:
