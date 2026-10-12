@@ -739,6 +739,73 @@ _JOIN_CLOSERS = {
 }
 
 
+ANSI_C_ESCAPES = {
+    "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r",
+    "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?",
+}
+"""The one-character escapes of a bash ``$'…'`` string (bash(1) "QUOTING")."""
+
+ANSI_C_NUMERIC_ESCAPES = {"x": 2, "u": 4, "U": 8}
+"""``\\xHH``, ``\\uHHHH`` and ``\\UHHHHHHHH``: the most hexadecimal digits each reads. ``\\NNN`` reads up
+to three octal digits."""
+
+HEX_DIGITS = "0123456789abcdefABCDEF"
+OCTAL_DIGITS = "01234567"
+
+
+def _decode_ansi_c(text: str, index: int) -> tuple[str, int, bool]:
+    """Decode the body of a ``$'…'`` string that starts at ``index`` (just after the ``$'``).
+
+    Returns (the string the shell would pass, the index after the closing quote, whether it closed).
+    A backslash escapes the next character, so ``\\'`` does not end the string (CR-54 / WR-01). An escape
+    bash does not know stays as written, and a NUL is dropped.
+    """
+    chars: list[str] = []
+    size = len(text)
+    while index < size:
+        char = text[index]
+        if char == "'":
+            return "".join(chars), index + 1, True
+        if char != "\\" or index + 1 >= size:
+            chars.append(char)
+            index += 1
+            continue
+        escape = text[index + 1]
+        if escape in ANSI_C_ESCAPES:
+            chars.append(ANSI_C_ESCAPES[escape])
+            index += 2
+            continue
+        octal = escape in OCTAL_DIGITS
+        if octal or escape in ANSI_C_NUMERIC_ESCAPES:
+            start = index + (1 if octal else 2)
+            digits, width = (OCTAL_DIGITS, 3) if octal else (HEX_DIGITS, ANSI_C_NUMERIC_ESCAPES[escape])
+            end = start
+            while end < size and end - start < width and text[end] in digits:
+                end += 1
+            if end > start:
+                try:
+                    code = chr(int(text[start:end], 8 if octal else 16) & (0xFF if octal else 0x1FFFFF))
+                except ValueError:
+                    code = text[index:end]
+                chars.append("" if code == "\x00" else code)
+                index = end
+                continue
+        if escape == "c" and index + 2 < size:
+            chars.append(chr(ord(text[index + 2]) & 0x1F))
+            index += 3
+            continue
+        chars.append(text[index : index + 2])
+        index += 2
+    return "".join(chars), index, False
+
+
+def _ansi_c_as_single_quoted(text: str, index: int) -> tuple[str, int, bool]:
+    """``$'…'`` at ``index`` (the ``$``) as the plain single-quoted word every later scanner reads."""
+    decoded, end, closed = _decode_ansi_c(text, index + 2)
+    quoted = "'" + decoded.replace("'", "'\\''") + ("'" if closed else "")
+    return quoted, end, closed
+
+
 class _JoinScan:
     """One recursive pass over the command text: continuations dropped, comments stripped.
 
@@ -790,6 +857,17 @@ class _JoinScan:
                 continue
             if char == "$":
                 following = text[index + 1 : index + 2]
+                if quote == "" and following == "'":
+                    # CR-54 / WR-01: `$'it\\'s'` is one word. Decoded here into the single-quoted form
+                    # every later scanner reads, so `$'rm'` signs as `rm` and `\\'` closes nothing.
+                    quoted, self.index, closed = _ansi_c_as_single_quoted(text, index)
+                    out.append(quoted)
+                    self.balanced = self.balanced and closed
+                    word_start = False
+                    continue
+                if quote == "" and following == '"':
+                    self.index += 1  # `$"…"` is the double-quoted string; the `$` is not part of it
+                    continue
                 if following == "(":
                     inner = _JOIN_ARITH if text[index + 2 : index + 3] == "(" else _JOIN_PAREN
                     out.append("$(")
@@ -1037,6 +1115,12 @@ def _take_heredoc_operators(line: str) -> tuple[str, list[tuple[str, bool]]]:
         if char == "#" and word_start:
             out.append(line[index:])
             break
+        if char == "$" and line[index + 1 : index + 2] == "'":
+            _, end, _ = _decode_ansi_c(line, index + 2)  # its `\'` closes nothing
+            out.append(line[index:end])
+            index = end
+            word_start = False
+            continue
         if char in "'\"`":
             quote = char
             out.append(char)
@@ -1103,6 +1187,7 @@ def _split_top_level(text: str) -> list[_Raw]:
     buffer: list[str] = []
     piped = False
     depth = 0
+    braces = 0
     index = 0
     quote: str | None = None
 
@@ -1133,17 +1218,36 @@ def _split_top_level(text: str) -> list[_Raw]:
             buffer.append(char)
             index += 1
             continue
-        if char in "({":
+        if char == "$" and text[index + 1 : index + 2] == "{":
+            # A parameter expansion (or a bash 5.3 funsub) is one unit: `${x:-(}` opens no group and
+            # the `;` of `${ cmd; }` splits nothing (WR-01).
+            end = _matching_brace(text, index + 1)
+            buffer.append(text[index : end + 1])
+            index = end + 1
+            continue
+        previous = buffer[-1][-1:] if buffer else ""
+        if char == "(":
             depth += 1
             buffer.append(char)
             index += 1
             continue
-        if char in ")}":
+        if char == ")":
             depth = max(0, depth - 1)
             buffer.append(char)
             index += 1
             continue
-        if depth == 0:
+        if char == "{" and previous in GROUP_BRACE_BEFORE and text[index + 1 : index + 2] in GROUP_BRACE_AFTER:
+            # Only a `{` that is a word of its own opens a group; `{#`, `{a,b}` and `x{y` do not.
+            braces += 1
+            buffer.append(char)
+            index += 1
+            continue
+        if char == "}" and braces and previous in GROUP_BRACE_BEFORE:
+            braces -= 1
+            buffer.append(char)
+            index += 1
+            continue
+        if depth == 0 and braces == 0:
             pair = text[index : index + 2]
             if char in "<>" or (char == "&" and text[index + 1 : index + 2] == ">"):
                 # A redirection operator, fd duplication included: the `&` of `2>&1` or
@@ -1171,6 +1275,55 @@ def _split_top_level(text: str) -> list[_Raw]:
         index += 1
     flush(False)
     return parts
+
+
+GROUP_BRACE_BEFORE = ("", " ", "\t", "\n", ";", "&", "|", "(")
+GROUP_BRACE_AFTER = (" ", "\t", "\n", "")
+"""What may stand either side of the ``{`` / ``}`` of a ``{ … }`` group: it is a word of its own, so a
+blank, an operator or the start of the command before it (``{ ls; }``, ``{ ls;}``), a blank or the end after
+the ``{``. ``{#``, ``{a,b}``, ``x{y`` and ``f}`` are words, not groups."""
+
+
+def _matching_brace(text: str, open_index: int) -> int:
+    """Index of the ``}`` closing the ``{`` at ``open_index``; end of string if unbalanced.
+
+    ``{`` opens ``${…}``; a blank or ``|`` after it makes it a bash 5.3 funsub ``${ cmd; }`` /
+    ``${| cmd; }`` whose body is a command list with groups of its own. Quotes, escapes, ``$(…)`` and
+    nested ``${…}`` are stepped over whole; the first unquoted ``}`` closes a plain expansion.
+    """
+    after = text[open_index + 1 : open_index + 2]
+    funsub = bool(after) and after in " \t\n|"
+    groups = 0
+    index = open_index + 1
+    quote: str | None = None
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == "\\" and quote == '"':
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char in "'\"`":
+            quote = char
+        elif char == "$" and text[index + 1 : index + 2] == "(":
+            index = _matching(text, index + 1)
+        elif char == "$" and text[index + 1 : index + 2] == "{":
+            index = _matching_brace(text, index + 1)
+        elif funsub and char == "{" and text[index - 1 : index] in GROUP_BRACE_BEFORE \
+                and text[index + 1 : index + 2] in GROUP_BRACE_AFTER:
+            groups += 1
+        elif char == "}":
+            if not funsub or not groups:
+                return index
+            groups -= 1
+        index += 1
+    return len(text)
 
 
 def _function_body(text: str) -> str | None:
