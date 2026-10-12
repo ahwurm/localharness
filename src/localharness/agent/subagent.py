@@ -18,7 +18,7 @@ import difflib
 import logging
 import os
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -161,36 +161,60 @@ def _sanitize_agent_name(name: str) -> str:
     return name.replace("_", "-")
 
 
-def _not_wired_text(agent_id: str, name: str, searched_paths: list[str]) -> str:
+# The built-in names the runner dispatches itself; always part of the "closest available" roster.
+_BUILTIN_AGENT_NAMES = ("explore", "web-researcher", "search-verifier", "cruncher")
+# How many roster names the not-wired line leads with when nothing is close (the lean error stays lean).
+_NOT_WIRED_FALLBACK_NAMES = 8
+
+
+def _not_wired_text(
+    agent_id: str,
+    name: str,
+    searched_paths: list[str],
+    available_agents: Iterable[str] | None = None,
+) -> str:
     """The two-line refusal for an agent id nothing can dispatch.
 
-    Line 1 leads with the closest roster names (difflib, else the whole roster); line 2 says where
-    the loader looked. There is no second loader: the directories come from the not-found error
-    the wired loader already raised, so ``searched_paths`` is empty when nothing was searched. The
-    paragraph on building a specialist lives in the ``agent`` tool description, not here.
+    Line 1 leads with the closest roster names (difflib, else the first few of the roster); line 2
+    says where the loader looked. There is no second loader: the directories come from the not-found
+    error the wired loader already raised, so ``searched_paths`` is empty when nothing was searched.
+    The roster is the built-ins plus ``available_agents`` -- the names the session registered and
+    the loader resolves -- never a glob of the directories, which would also name a file that
+    does not parse or whose name the dispatcher renames. The paragraph on building a specialist
+    lives in the ``agent`` tool description, not here.
     """
     dirs: list[str] = []
     for sp in searched_paths:
         d = str(Path(sp).parent)
         if d not in dirs:
             dirs.append(d)
-    stems: set[str] = set()
-    for d in dirs:
-        try:
-            stems.update(f.stem for f in sorted(Path(d).glob("*.yaml")))
-        except OSError:
-            continue
-    roster = ({"explore", "web-researcher", "search-verifier", "cruncher"} | stems) - {
-        "orchestrator",
-        name,
-    }
+    roster = ({*_BUILTIN_AGENT_NAMES, *(available_agents or ())}) - {"orchestrator", name}
     ordered = sorted(roster)
-    closest = difflib.get_close_matches(agent_id, ordered, n=3, cutoff=0.6) or ordered
+    closest = (
+        difflib.get_close_matches(agent_id, ordered, n=3, cutoff=0.6)
+        or ordered[:_NOT_WIRED_FALLBACK_NAMES]
+    )
     searched = ", ".join(repr(d) for d in dirs) if dirs else "none"
     return (
         f"{', '.join(closest)}: the closest available to {agent_id!r}, which is not wired.\n"
         f"searched: {searched}"
     )
+
+
+def _load_failure_text(agent_id: str, exc: BaseException) -> str | None:
+    """The refusal for an agent whose definition EXISTS but would not load (a parse or validation
+    error): its real error, first line, so the model is not told "not wired" about a file that is
+    there. None for a plain not-found (the loader's ``searched_paths``, or ``FileNotFoundError``),
+    which keeps the two-line not-wired text."""
+    if hasattr(exc, "searched_paths") or isinstance(exc, FileNotFoundError):
+        return None
+    lines = [ln.strip() for ln in str(exc).splitlines() if ln.strip()]
+    detail = lines[0] if lines else type(exc).__name__
+    if detail.endswith(":") and len(lines) > 1:  # a validation error's first line is only the path
+        detail = f"{detail} {lines[1]}"
+    if len(detail) > 300:
+        detail = detail[:300] + "..."
+    return f"agent {agent_id!r} could not be loaded: {detail}"
 
 
 def _child_runtime_paths(cfg: Any, config_dir: Any = None, *, state_dir: Any = None) -> tuple[Path, Path]:
@@ -1802,6 +1826,7 @@ def make_explore_agent_runner(
         else:
             cfg = None
             searched: list[str] = []
+            load_failure: str | None = None
             # Phase 33.1: the root agent is 'orchestrator' — never loadable as a delegation child
             if load_agent is not None and name != "orchestrator":
                 try:
@@ -1809,9 +1834,12 @@ def make_explore_agent_runner(
                 except Exception as exc:
                     # Duck-typed: ConfigNotFoundError carries the directories it searched.
                     searched = list(getattr(exc, "searched_paths", None) or [])
+                    load_failure = _load_failure_text(agent_id, exc)
                     cfg = None
             if cfg is None:
-                raise ValueError(_not_wired_text(agent_id, name, searched))
+                if load_failure is not None:
+                    raise ValueError(load_failure)
+                raise ValueError(_not_wired_text(agent_id, name, searched, available_agents))
             return await dispatch_config_subagent(
                 task,
                 agent_config=cfg,

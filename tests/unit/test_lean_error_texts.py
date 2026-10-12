@@ -84,6 +84,7 @@ def test_not_wired_names_the_searched_directories_and_their_agents(tmp_path):
     text = _not_wired_text(
         "data-analyts", "data-analyts",
         [str(ws / "data-analyts.yaml"), str(gl / "data-analyts.yaml")],
+        available_agents=["data-analyst", "orchestrator"],
     )
     line1, line2 = text.split("\n")
     assert line1 == "data-analyst: the closest available to 'data-analyts', which is not wired."
@@ -165,7 +166,96 @@ def test_not_wired_suggestion_never_names_an_absent_agent(tmp_path):
     d = tmp_path / "agents"
     d.mkdir()
     (d / "real-one.yaml").write_text("name: real-one\n")
-    line1 = _not_wired_text("real-oen", "real-oen", [str(d / "real-oen.yaml")]).split("\n")[0]
+    line1 = _not_wired_text(
+        "real-oen", "real-oen", [str(d / "real-oen.yaml")], available_agents=["real-one"]
+    ).split("\n")[0]
     named = line1.split(":")[0].split(", ")
     present = {"cruncher", "explore", "search-verifier", "web-researcher", "real-one"}
     assert named and set(named) <= present
+
+
+def test_not_wired_roster_is_the_registry_not_a_glob_of_the_directories(tmp_path):
+    """A yaml the loader will not load (unparseable, a symlink out of the project, a name the
+    dispatcher renames) sits in the searched directory but is not in the live roster."""
+    from localharness.agent.subagent import _not_wired_text
+
+    d = tmp_path / "agents"
+    d.mkdir()
+    for stem in ("broken", "linked", "my_agent", "real-one"):
+        (d / f"{stem}.yaml").write_text("name: x\n")
+    text = _not_wired_text("real-oen", "real-oen", [str(d / "real-oen.yaml")],
+                           available_agents=["real-one"])
+    line1 = text.split("\n")[0]
+    assert line1.startswith("real-one: the closest available to 'real-oen'")
+    for ghost in ("broken", "linked", "my_agent"):
+        assert ghost not in line1
+    # No roster handed in: the built-ins alone, whatever files sit in the directory.
+    bare = _not_wired_text("zzzz", "zzzz", [str(d / "zzzz.yaml")]).split("\n")[0]
+    assert bare.startswith("cruncher, explore, search-verifier, web-researcher: ")
+
+
+def test_not_wired_fallback_roster_is_bounded():
+    from localharness.agent.subagent import _not_wired_text
+
+    many = [f"agent-{chr(97 + i)}{chr(97 + i)}{chr(97 + i)}" for i in range(20)]
+    line1 = _not_wired_text("zzzz", "zzzz", [], available_agents=many).split("\n")[0]
+    named = line1.split(": the closest")[0].split(", ")
+    assert len(named) == 8
+    assert named == sorted({"explore", "web-researcher", "search-verifier", "cruncher", *many})[:8]
+
+
+async def test_runner_roster_follows_the_live_available_agents_list():
+    from localharness.config.loader import ConfigNotFoundError
+
+    def _load(name):
+        raise ConfigNotFoundError(name, [])
+
+    live = ["real-one"]
+    runner = _runner_with(_load, live)
+    with pytest.raises(ValueError, match="not wired") as ei:
+        await runner("real-oen", "x")
+    assert str(ei.value).startswith("real-one: the closest available to 'real-oen'")
+    live.append("real-owl")  # a deploy later in the session reaches the next refusal
+    with pytest.raises(ValueError, match="not wired") as ei:
+        await runner("real-owx", "x")
+    assert "real-owl" in str(ei.value).split("\n")[0]
+
+
+async def test_runner_surfaces_a_load_error_that_is_not_a_not_found():
+    from localharness.config.loader import ConfigParseError, ConfigValidationError
+
+    def _parse(name):
+        raise ConfigParseError("/w/agents/broken.yaml", 3, 1, "mapping values are not allowed here")
+
+    with pytest.raises(ValueError) as ei:
+        await _runner_with(_parse, ["broken"])("broken", "x")
+    text = str(ei.value)
+    assert "not wired" not in text and "searched" not in text
+    assert text == (
+        "agent 'broken' could not be loaded: "
+        "/w/agents/broken.yaml:3:1: mapping values are not allowed here"
+    )
+
+    def _invalid(name):
+        raise ConfigValidationError("/w/agents/bad.yaml", [])
+
+    with pytest.raises(ValueError) as ei:
+        await _runner_with(_invalid, [])("bad", "x")
+    assert str(ei.value) == "agent 'bad' could not be loaded: /w/agents/bad.yaml:"
+
+    def _boom(name):
+        raise RuntimeError("first line\nsecond line")
+
+    with pytest.raises(ValueError) as ei:
+        await _runner_with(_boom, [])("bad", "x")
+    assert str(ei.value) == "agent 'bad' could not be loaded: first line"
+
+
+def _runner_with(load_agent, available_agents):
+    import localharness.agent.subagent as subagent
+
+    return subagent.make_explore_agent_runner(
+        llm=object(), bus=object(), base_registry=object(),
+        permission_evaluator=object(), get_parent_session_id=lambda: "sid",
+        load_agent=load_agent, available_agents=available_agents,
+    )
