@@ -306,11 +306,15 @@ class ToolRegistry:
         return schema.result_origin if schema is not None else "untrusted"
 
     def host(self, name: str) -> Literal["dangerous", "safe"]:
-        """Whether `name` can touch the host: the tool's declared host; a name no registered tool
-        answers to fails closed (dangerous). Read by the context manager to decide whether a
-        superseded failure may leave the request view."""
-        schema = self.schema_of(name)
-        return schema.host if schema is not None else "dangerous"
+        """Whether `name` can touch the host. The context manager has no agent or division to scope
+        by, so a name borne by several tools (an agent- or division-scoped tool shadowing a global one)
+        is "safe" only when EVERY tool bearing it declares "safe"; any dangerous bearer, or a name no
+        registered tool answers to, fails closed (dangerous). Read by the context manager to decide
+        whether a superseded failure may leave the request view."""
+        tools = self._tools_named(name) or self._tools_named(_bare_name(name))
+        if not tools:
+            return "dangerous"
+        return "safe" if all(t.info().host == "safe" for t in tools) else "dangerous"
 
     def _find_tool_by_name(self, name: str) -> ToolProtocol | None:
         for bucket in [
@@ -322,6 +326,19 @@ class ToolRegistry:
             if name in bucket:
                 return bucket[name]
         return None
+
+    def _tools_named(self, name: str) -> list[ToolProtocol]:
+        """Every registered tool answering to `name`, across all scopes (no early return)."""
+        return [
+            bucket[name]
+            for bucket in [
+                self._tools["global"],
+                self._tools["mcp"],
+                *self._division_tools.values(),
+                *self._agent_tools.values(),
+            ]
+            if name in bucket
+        ]
 
     def _agent_has_ingest(self, agent_id: str, division_id: str, tool_config: Any) -> bool:
         """Does this agent reach a tool that declares ingest: untrusted — i.e. is it DESIGNATED an

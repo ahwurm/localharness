@@ -470,6 +470,25 @@ async def test_the_registry_reports_the_declared_host_and_fails_closed():
     assert ToolRegistry().host("nope") == "dangerous"
 
 
+@pytest.mark.asyncio
+async def test_a_scoped_dangerous_tool_shadowing_a_safe_global_one_reports_dangerous():
+    """The context manager has no agent id, so a name borne by a safe global tool AND a dangerous
+    agent-scoped (or division-scoped) tool must not read as safe: dispatch may run the scoped one."""
+    registry = await _registry(_FlakyProbe(name="t", host="safe"))
+    assert registry.host("t") == "safe"
+    await registry.register(_FlakyProbe(name="t", host="dangerous"), scope="agent", agent_id="a1")
+    assert registry.host("t") == "dangerous"
+
+    divided = await _registry(_FlakyProbe(name="u", host="safe"))
+    await divided.register(_FlakyProbe(name="u", host="dangerous"), scope="division", division_id="d1")
+    assert divided.host("u") == "dangerous"
+
+    # A scoped safe tool beside a safe global one stays safe.
+    agreeing = await _registry(_FlakyProbe(name="v", host="safe"))
+    await agreeing.register(_FlakyProbe(name="v", host="safe"), scope="agent", agent_id="a1")
+    assert agreeing.host("v") == "safe"
+
+
 @pytest.fixture
 async def store(tmp_path: Path):
     s = MemoryStore(agent_id="obs-agent", division_id="", org_id="", base_dir=str(tmp_path))
