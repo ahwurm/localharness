@@ -1620,6 +1620,50 @@ def _make_segment(
     )
 
 
+ENV_SPLIT_LONG = "split-string"
+ENV_UNPARSED_SPLIT = "<unparsed-env-split-string>"
+"""A word standing in for an ``env -S`` string that cannot be split: an unfamiliar program name, so the
+segment asks instead of reading as a bare ``env``."""
+
+
+def _env_split_string(rest: list[str], index: int) -> tuple[list[str], int] | None:
+    """CR-53: the words ``env -S STR`` / ``--split-string[=STR]`` runs, and the index after the option.
+
+    ``env`` re-parses STR as a command line and runs it, so ``env -S'rm -rf x'`` runs ``rm`` although
+    the argv holds no ``rm`` token. The option may be a getopt prefix of the long name (``--split``,
+    ``--s``) or sit last in a short cluster (``-iS'…'``); the string is attached or the next token.
+    Returns None when ``rest[index]`` is not that option. A string that cannot be split gives the
+    unfamiliar placeholder word, never an empty list.
+    """
+    token = rest[index]
+    value: str | None = None
+    if token.startswith("--") and len(token) > 2:
+        name, equals, attached = token[2:].partition("=")
+        if not name or not ENV_SPLIT_LONG.startswith(name):
+            return None
+        if equals:
+            value = attached
+    elif token.startswith("-") and len(token) > 1:
+        for position, letter in enumerate(token[1:], start=1):
+            if letter == "S":
+                value = token[position + 1 :] or None
+                break
+            if letter not in "iv0":
+                return None
+    else:
+        return None
+    consumed = index + 1
+    if value is None:
+        if consumed >= len(rest):
+            return [], consumed
+        value = rest[consumed]
+        consumed += 1
+    try:
+        return shlex.split(value), consumed
+    except ValueError:
+        return [ENV_UNPARSED_SPLIT], consumed
+
+
 def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]]:
     """PRD §3.2 step 4: peel wrappers down to the command they wrap.
 
@@ -1641,6 +1685,12 @@ def _peel(argv: list[str], settings: GateSettings) -> tuple[list[str], list[str]
         level: list[str] = []
         while index < len(rest):
             token = rest[index]
+            if head == "env" and token.startswith("-"):
+                split = _env_split_string(rest, index)
+                if split is not None:
+                    words, after = split
+                    rest = [*rest[:index], *words, *rest[after:]]
+                    continue
             if ASSIGNMENT_RE.match(token):
                 level.append(token)
                 index += 1
