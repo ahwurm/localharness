@@ -1348,3 +1348,20 @@ is not set.
 Discord can still switch the session to `auto` or `trusted`, answer every question once, and answer
 the workspace trust question, whose Yes puts a new workspace in `auto` — so a paired phone or an
 allowlisted account can still run anything `auto` allows.
+
+**The `LOCALHARNESS_COMMIT` marker is cooperative.** It is an environment variable, and a
+command the model runs can drop it: `env -u LOCALHARNESS_COMMIT localharness start …` starts a
+session without it. A Zed (ACP) session started that way needs no tty and reads as a person at the
+machine. A terminal session needs a tty as well, which `bash_exec` never gives (its stdin is
+`/dev/null`), but a command can make one (`script`, a pty from Python). A session that reads as a
+person at the machine runs without `channels.unattended_max_actions` (with no `max_actions` of its
+own it has no action limit) and is not locked by `channels.remote_unattended: false`. What still
+holds: the `bash_exec` or `python_exec` call that starts it passes the gate of the session that
+runs it like any other command, so a mode that asks before a shell command shows you the
+`env -u`; every tool call of the new session passes that session's own gate and deny patterns;
+its stuck detector runs whatever the channel (the hashed window and the per-turn ceiling on
+identical calls); the kill file (`~/.localharness/KILL` by default, set only in your machine
+config) stops it at its next iteration; and the `bash_exec` timeout (300 seconds at most) kills
+the command's process group, unless the command detaches itself (`setsid`, `nohup … &`). The Zed
+caveat above runs the other way: the marker can make a session you start look agent-launched, and
+then it errs on the safe side.
