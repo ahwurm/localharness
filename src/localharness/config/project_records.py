@@ -696,7 +696,7 @@ def format_kb(n: int) -> str:
     """A byte count in KB (1024 bytes): one decimal below 10 KB (``5.1 KB``, ``0.4 KB``), an
     integer from 10 KB (``210 KB``)."""
     kb = n / 1024
-    return f"{kb:.1f} KB" if kb < 10 else f"{kb:.0f} KB"
+    return f"{kb:.1f} KB" if round(kb, 1) < 10 else f"{kb:.0f} KB"
 
 
 def display_name(name: str) -> str:
