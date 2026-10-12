@@ -756,8 +756,8 @@ class ContextConfig(BaseModel):
         le=500_000,
         description=(
             "Maximum characters of a single tool result kept in context. None (the default) means "
-            "today's size, 32000, until the window-ratio rule replaces it; an explicit integer is "
-            "honoured as written. Consumed as the "
+            "`tool_output_ratio` of the live context window (in characters at four per token, "
+            "never below 100); an explicit integer is used exactly as written. Consumed as the "
             "compaction pipeline's tool_result_cap: on every over-threshold build the "
             "deterministic ToolResultCapStage head+tail truncates any tool result longer than this "
             "(keeping both ends, with an elision marker), before the LLM summary/compaction stages "
@@ -784,8 +784,48 @@ class ContextConfig(BaseModel):
         description=(
             "Char size above which a tool result becomes eligible for eviction to a restorable "
             "stub (see `tool_result_eviction`). Smaller results aren't worth stubbing. None (the "
-            "default) means today's size, 8000, until the window-ratio rule replaces it; an "
-            "explicit integer is honoured as written."
+            "default) means `evict_ratio` of the live context window (in characters at four per "
+            "token, never below 500); an explicit integer is used exactly as written."
+        ),
+    )
+
+    tool_output_ratio: float = Field(
+        default=0.0625,
+        gt=0,
+        le=1.0,
+        description=(
+            "The share of the live context window, in characters at four per token, that one "
+            "tool result's output may take when `max_tool_output_chars` is unset (1/16 of the "
+            "window: 32,768 characters at 131,072 tokens). The window is the one in force now: "
+            "it shrinks after a server overflow and follows a /model switch, and so does this "
+            "cap. A project may only lower it."
+        ),
+    )
+
+    evict_ratio: float = Field(
+        default=0.015625,
+        gt=0,
+        le=1.0,
+        description=(
+            "The share of the live context window, in characters at four per token, above which "
+            "a tool result body is evicted to a restorable stub when "
+            "`tool_result_evict_threshold_chars` is unset (1/64 of the window: 8,192 characters "
+            "at 131,072 tokens). The window is the one in force now: it shrinks after a server "
+            "overflow and follows a /model switch, and so does this threshold. A project may "
+            "only lower it."
+        ),
+    )
+
+    result_cap_ratio: float = Field(
+        default=0.09375,
+        gt=0,
+        le=1.0,
+        description=(
+            "The share of the live context window, in characters at four per token, that one "
+            "tool result may put into the conversation at all (the tool registry's result cap; "
+            "3/32 of the window: 49,152 characters at 131,072 tokens). The window is the one in "
+            "force now: it shrinks after a server overflow and follows a /model switch, and so "
+            "does this cap. A project may only lower it."
         ),
     )
 
