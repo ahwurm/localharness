@@ -24,6 +24,7 @@ from .models import (
     BudgetConfig,
     ChildBudget,
     ChildrenBudgetConfig,
+    ContextConfig,
     DivisionConfig,
     HarnessConfig,
     OrgConfig,
@@ -711,18 +712,22 @@ _CHILD_ENTRIES = ("explore", "web_researcher", "search_verifier", "cruncher", "c
 
 HARNESS_LOWER_ONLY_FIELDS: frozenset[str] = frozenset(
     {f"org.children_budget.{entry}.{key}" for entry in _CHILD_ENTRIES for key in ("actions", "minutes")}
-    | {"org.children_budget.lookup_share", "org.children_budget.review_share"})
+    | {"org.children_budget.lookup_share", "org.children_budget.review_share"}
+    | {f"org.context.{name}" for name in ("tool_output_ratio", "evict_ratio", "result_cap_ratio")})
 """The core harness keys a project may make smaller and never larger: each child agent's own
-ceiling and the shares a delegated child takes of its parent's budget. A workspace value is kept
-only when it is a finite number not above what the global layers set (or, where they are silent,
-the shipped default); a larger, non-numeric or out-of-range one is dropped with a warning naming
-the key and the file, and a `null` is dropped quietly. The window-ratio phase adds its paths here."""
+ceiling, the shares a delegated child takes of its parent's budget, and the three window ratios
+(the share of the live context window one tool result may take, the size above which a result is
+evicted, and what one result may put into the conversation). A workspace value is kept only when
+it is a finite number not above what the global layers set (or, where they are silent, the shipped
+default); a larger, non-numeric or out-of-range one (a zero ratio included) is dropped with a
+warning naming the key and the file, and a `null` is dropped quietly."""
 
 # The bounds the models give these fields. Stated once; a workspace value above the baseline is
 # refused whatever its bound, so the upper bound only matters to a value that carries no baseline.
 _ACTIONS_BOUNDS = {"ge": 1, "le": 10_000}
 _MINUTES_BOUNDS = {"gt": 0, "le": 1440.0}
 _SHARE_BOUNDS = {"gt": 0, "le": 1.0}
+_RATIO_BOUNDS = {"gt": 0, "le": 1.0}  # the three window ratios of ContextConfig (tool_output_ratio, ...)
 
 
 def _finite_int(v: Any, *, ge: Optional[int] = None, le: Optional[int] = None) -> bool:
@@ -802,10 +807,25 @@ def _children_budget_default(parts: list[str]) -> int | float:
     return node
 
 
+def _ratio_baseline(parts: list[str], machine: Any) -> float:
+    """What a project may not exceed at an `org.context` ratio path: the global layers' value as
+    `ContextConfig` validates it, else the field's shipped default. Always a finite float in (0, 1]
+    (a global value that is present but unusable falls to the default: the schema refuses it on
+    its own at validation)."""
+    allowed: Any = _INVALID
+    if machine is not _UNSET and machine is not None:
+        allowed = _coerce_global(ContextConfig, parts[-1], machine)
+    if allowed is _INVALID or not _finite_number(allowed, **_RATIO_BOUNDS):
+        allowed = _model_default(HarnessConfig, parts)
+    return float(allowed)
+
+
 def _lower_only_baseline(parts: list[str], machine: Any) -> int | float:
     """What a project may not exceed at this path: the global layers' value as the model validates
     it (a global `"20"` is 20), else the shipped default. Always a finite `int` (actions) or
-    `float` (minutes, shares), so the kind of a value to accept is read off it."""
+    `float` (minutes, shares, ratios), so the kind of a value to accept is read off it."""
+    if parts[:2] == ["org", "context"]:
+        return _ratio_baseline(parts, machine)
     allowed: Any = _INVALID
     if machine is not _UNSET and machine is not None:
         if parts[-1] in ("actions", "minutes"):
