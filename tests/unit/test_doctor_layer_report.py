@@ -392,7 +392,10 @@ def test_the_migration_block_is_deliberately_not_workspace_gated(tmp_path, monke
     out = _run_doctor()
 
     assert "Security defaults:" in out, out
-    assert "workspace" not in out.lower(), out
+    # D-66: the `_layout` project holds an empty `.git`, so doctor's git_read row reports its
+    # toplevel pin ("... is not the workspace root"). That row is not layering vocabulary.
+    checked = "\n".join(ln for ln in out.splitlines() if "git_read" not in ln)
+    assert "workspace" not in checked.lower(), out
 
 
 def test_an_invalid_config_does_not_crash_the_migration_block(tmp_path, monkeypatch, fake_home):

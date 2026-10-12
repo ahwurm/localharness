@@ -265,6 +265,32 @@ def _print_exposure(harness: HarnessConfig) -> None:
                 soft_wrap=True)
 
 
+def _print_git_read(workspace: Path | None, workspace_root: str | None) -> None:
+    """The `git_read` row (D-13): why the read-only git tool is absent, or that it is available.
+
+    `start` prints nothing when `git_read` is not registered (spec 17 section 7.3), so the reason
+    lives here. The boundary is the one `start` computes (the same two helpers, with the root
+    agent's `workspace_root`). No boundary, or no `.git` entry anywhere from it upward (a lexical
+    walk; no git runs), prints nothing. Otherwise the registration's own pin function decides, so
+    doctor and registration cannot disagree; a failure is an info row in fixed wording (never git's
+    stderr) and never a doctor failure.
+    """
+    from localharness.agent.gate import derive_session_boundary
+    from localharness.agent.verdict import narrow_boundary
+    from localharness.tools.builtin import git_read_tool
+
+    boundary, _warning = narrow_boundary(
+        derive_session_boundary(cwd=Path.cwd(), local_dir=workspace), workspace_root
+    )
+    if boundary is None or not git_read_tool.git_read_repository_present(boundary):
+        return
+    failure = git_read_tool.git_read_pin_failure(boundary)
+    if failure is not None:
+        console.print(_INFO + " " + escape(failure.message()), soft_wrap=True)
+    else:
+        console.print(_PASS + " " + escape("git_read: available"), soft_wrap=True)
+
+
 def _read_only(path: Path) -> bool:
     try:
         return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
@@ -468,6 +494,7 @@ def doctor(
 
     # 3. Config file valid
     harness: HarnessConfig | None = None
+    root_agent = None
     from localharness.cli.workspace import resolve_workspace_layer
     workspace = resolve_workspace_layer(config_dir, interactive=False if no_input else None)
     if not configured and workspace is None:
@@ -507,7 +534,7 @@ def doctor(
             # the agent it would run (none discovered is a fresh install: `start` mints one).
             if agents := loader.discover_agents():
                 from localharness.cli.start_cmd import default_root_agent
-                loader.load_agent(default_root_agent(agents).get("name", "orchestrator"))
+                root_agent = loader.load_agent(default_root_agent(agents).get("name", "orchestrator"))
             console.print(f"{_PASS} Config valid")
         except Exception as exc:
             # The message is 43-01's ConfigValidationError and CARRIES THE OWNING FILE'S PATH —
@@ -527,7 +554,8 @@ def doctor(
         _print_migration_state(cfg_path, harness)
         _print_exposure(harness)
         _print_private_files(cfg_path)
-
+    # D-59: computed independently of `harness`; boundary None or no repository prints nothing.
+    _print_git_read(workspace, getattr(getattr(root_agent, "permissions", None), "workspace_root", None))
 
     # 4. LLM endpoint reachable
     if harness is not None:
