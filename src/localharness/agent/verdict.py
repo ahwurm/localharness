@@ -462,7 +462,10 @@ def _resolve(target: str, anchor: Optional[Path]) -> Optional[Path]:
                 return None
             path = Path(anchor) / path
         return path.resolve()
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
+        # RuntimeError: `~+`, `~-` and `~unknownuser` name a directory only the shell knows ("Could not determine
+        # home directory"). Unresolvable, so outside, not a crash that the gate would turn into an unexplained
+        # deny (IN-51 it4).
         return None
 
 
