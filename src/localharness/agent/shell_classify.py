@@ -4177,15 +4177,21 @@ def _extract_redirections(text: str) -> tuple[str, list[str]]:
                 index += 1
             word, index = _read_word(text, index)
             # `N>&M`, `>&M`, `<&M`, `N>&-` move a file descriptor — no file is named, and the
-            # operand (`1`, `-`) is not a command. `&>FILE` and `N>FILE` do name a file.
-            if ">" in operator and not duplicates_fd and word and not word.startswith("&"):
-                targets.append(_unquote(word))
+            # operand (`1`, `-`) is not a command. `&>FILE` and `N>FILE` do name a file, and so
+            # does `>&WORD` when WORD is not digits or `-`: bash reads it as `&>WORD` (CR-52 it4).
+            if ">" in operator and word and not word.startswith("&"):
+                if not duplicates_fd or not FD_DUPLICATION_OPERAND_RE.match(_unquote(word)):
+                    targets.append(_unquote(word))
             out.append(" ")
             continue
         out.append(char)
         index += 1
     return "".join(out), targets
 
+
+FD_DUPLICATION_OPERAND_RE = re.compile(r"^(?:[0-9]+|-)-?$")
+"""The operand of ``>&`` that duplicates, moves or closes a file descriptor (``2``, ``-``, ``2-``); any
+other word after ``>&`` is a file, written like ``&>WORD`` (CR-52 it4)."""
 
 HEREDOC_WORD_STOPS = frozenset(";&|<>()")
 """The characters that end a here-document delimiter or here-string operand besides a blank: the
