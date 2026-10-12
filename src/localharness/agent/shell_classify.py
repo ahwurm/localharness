@@ -308,6 +308,12 @@ SUBCOMMAND_OPERATION_WORDS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] =
     "git branch": (
         ("-D", ("-D",)), ("-d", ("-d", "--delete")), ("-M", ("-M",)), ("-m", ("-m", "--move")),
         ("-C", ("-C",)), ("-c", ("-c", "--copy")),
+        # WR-04 / WR-54 (it4): the other ways `git branch` writes a ref or the repository config. Their own
+        # keys are not read-only signatures, so only the listing forms keep the tier (still grantable).
+        ("-f", ("-f", "--force")), ("-u", ("-u", "--set-upstream-to")),
+        ("--unset-upstream", ("--unset-upstream",)), ("--edit-description", ("--edit-description",)),
+        ("-t", ("-t", "--track")), ("--no-track", ("--no-track",)),
+        ("--create-reflog", ("--create-reflog",)),
     ),
     "git remote": (
         ("set-url", ("set-url",)), ("remove", ("remove",)), ("rm", ("rm",)),
@@ -2702,7 +2708,9 @@ def _build(
     # `git --git-dir=X` repoints the repository exactly as `GIT_DIR=X` does (D-49).
     # WR-02 (it4): only among git's GLOBAL options, before the subcommand: `git rev-parse --git-dir` prints.
     # CR-51 (it4): so does an inline `-c KEY=…` the display allow-list does not know, and `--exec-path=DIR`.
-    env_redirect = env_redirect or (head == "git" and _git_redirects_what_runs(argv))
+    env_redirect = env_redirect or (
+        (head == "git" and _git_redirects_what_runs(argv)) or (head == "docker" and _docker_redirects_daemon(argv))
+    )
     extras: list[ShellSegment] = []
     cwd = _Cwd() if cwd is None else cwd
 
@@ -3313,6 +3321,12 @@ def _signature(
                 operation = _operation_word(base, after)
                 if operation:
                     base = f"{base} {operation}"
+                elif base == "git branch" and _git_branch_creates(after):
+                    base = f"{base} {GIT_BRANCH_CREATE}"  # `git branch NAME [START]` makes a ref
+
+    mutating = _mutating_form(head, rest)
+    if mutating:
+        return mutating, False
 
     if head == "sed":
         for canonical, spellings in SED_MODE_FLAGS:
@@ -3342,6 +3356,72 @@ def _signature(
     verb, _ = _destructive_verb(base, settings)
     flags = _destructive_flags(base, rest, settings)
     return verb + flags, False
+
+
+GIT_BRANCH_CREATE = "--create"
+GIT_BRANCH_LISTING_FLAGS = ("--list", "-l", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+                            "--show-current")
+GIT_BRANCH_VALUE_FLAGS = frozenset({"--sort", "--format", "--abbrev", "--points-at", "--contains", "--no-contains",
+                                    "--merged", "--no-merged"})
+
+
+def _git_branch_creates(after: list[str]) -> bool:
+    """Does ``git branch ARGS`` create a branch? It does when it has a positional and no listing flag.
+
+    git itself lists when there is no positional, or one of ``--list`` / ``--contains`` / ``--merged`` /
+    ``--no-merged`` / ``--points-at`` / ``--show-current`` is given (then the positionals are patterns or commits);
+    anything else with a positional is ``git branch NAME [START]`` (WR-04 / WR-54 it4)."""
+    listing = False
+    positionals = 0
+    index = 0
+    while index < len(after):
+        token = after[index]
+        index += 1
+        if token == "--":
+            positionals += len(after) - index
+            break
+        if token.startswith("--"):
+            name = token.split("=", 1)[0]
+            listing = listing or name in GIT_BRANCH_LISTING_FLAGS
+            if name in GIT_BRANCH_VALUE_FLAGS and "=" not in token and index < len(after):
+                # `--sort KEY`, `--format F`, `--abbrev N` always take the next token; a commit-valued flag
+                # (`--contains [C]`) takes it unless it is another option
+                if name in ("--sort", "--format", "--abbrev") or not after[index].startswith("-"):
+                    index += 1
+        elif token.startswith("-") and token != "-":
+            listing = listing or "l" in token[1:]
+        else:
+            positionals += 1
+    return positionals > 0 and not listing
+
+
+def _mutating_form(head: str, rest: list[str]) -> str:
+    """The distinct, non-read-only key of a read-only command's state-changing form, or ``""`` (WR-04 / WR-54 it4).
+
+    ``file -C`` compiles a magic file to ``NAME.mgc``; ``date -s`` / ``--set`` / a positional date sets the clock;
+    ``hostname NAME`` / ``-F`` sets the host name; ``ss -K`` kills sockets. The plain commands are on the read-only
+    list, and a signature decides the tier, so these forms get a signature of their own."""
+    flags = [token for token in rest if token.startswith("-") and token != "-"]
+    if head == "file" and any(_matches_flag(t, ("-C", "--compile")) for t in flags):
+        return "file -C"
+    if head == "ss" and any(_matches_flag(t, ("-K", "--kill")) for t in flags):
+        return "ss -K"
+    if head == "hostname":
+        positional = any(not t.startswith("-") for t in rest)
+        if positional or any(_matches_flag(t, ("-F", "--file")) for t in flags):
+            return "hostname --set"
+    if head == "date":
+        if any(_matches_flag(t, ("-s", "--set")) for t in flags):
+            return "date -s"
+        index = 0
+        while index < len(rest):
+            token = rest[index]
+            index += 1
+            if token in ("-d", "-f", "-r", "--date", "--file", "--reference") and index < len(rest):
+                index += 1  # the option's value (`-d 'yesterday'`)
+            elif not token.startswith("-") and not token.startswith("+"):
+                return "date -s"  # `date MMDDhhmm`: a bare operand sets the clock
+    return ""
 
 
 def _interpreter_mode(
@@ -3470,6 +3550,22 @@ key on the dangerous list is checked first and is a destructive segment of its o
 runs gpg, so it is not here. Not reachable from config: it can only tighten."""
 
 GIT_EXEC_PATH_FLAG = "--exec-path"
+
+
+DOCKER_DAEMON_FLAGS = ("-H", "--host", "-c", "--context", "--config", "--tlscacert", "--tlscert", "--tlskey")
+
+
+def _docker_redirects_daemon(argv: Sequence[str]) -> bool:
+    """Does a docker GLOBAL option (before the subcommand) point the client at another daemon or config?
+
+    ``docker -H tcp://x ps`` never kept the read-only tier (its value was read as the subcommand);
+    ``docker --host=ssh://x ps`` did. Both are the same question and get the same answer (WR-54 it4)."""
+    index = 1
+    while index < len(argv) and argv[index].startswith("-"):
+        if argv[index].split("=", 1)[0] in DOCKER_DAEMON_FLAGS or argv[index].startswith("-H"):
+            return True
+        index += 1
+    return False
 
 
 def _git_global_options(argv: Sequence[str]) -> list[str]:
