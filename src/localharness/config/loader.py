@@ -2479,6 +2479,7 @@ class ConfigLoader:
         *,
         base_perms: Optional[dict] = None,
         declared: Optional[dict] = None,
+        note: Optional[Callable[[str, Any, str], None]] = None,
     ) -> None:
         """Apply the narrow-only union to `mode`, `workspace_root` and the `ask` rule sets.
 
@@ -2507,6 +2508,11 @@ class ConfigLoader:
         present in `merged` whether the repo mentioned it or not, and narrowing a key the repo
         never wrote would warn about the operator's own value. None (the config-agent path) means
         every key in `merged` is a candidate, which is what that path needs.
+
+        `note(subject, value, text)`: told of each drop instead of the log, so a caller that runs
+        while a person is at a terminal (the built-in overlays, evaluated at start and at every
+        dispatch) reports it as a narrowing Notice; None keeps the `log.warning` the config-agent
+        door has always made.
         """
         perms = merged.get("permissions")
         if not isinstance(perms, dict):
@@ -2521,6 +2527,7 @@ class ConfigLoader:
             perms, stem, div_name,
             base_ask=base_ask,
             declared=declared.get("ask") if isinstance(declared, dict) else declared,
+            note=note,
         )
 
         # --- mode: a project layer may only RAISE strictness.
@@ -2528,11 +2535,10 @@ class ConfigLoader:
         baseline = global_mode if global_mode is not None else DEFAULT_MODE
         effective = _normalize_mode(perms.get("mode")) if _wrote("mode") else None
         if effective is not None and MODE_STRICTNESS[effective] < MODE_STRICTNESS[baseline]:
-            log.warning(
-                "ignoring workspace permissions.mode %r for agent %r: a project layer may only "
-                "tighten the session mode, and the global layer asks for %r",
-                effective, stem, baseline,
-            )
+            self._narrowed(note, "permissions.mode", effective, (
+                f"ignoring workspace permissions.mode {effective!r} for agent {stem!r}: a project "
+                f"layer may only tighten the session mode, and the global layer asks for {baseline!r}"
+            ))
             perms["mode"] = baseline
 
         # --- workspace_root: a project layer may only name a root INSIDE the boundary the
@@ -2549,11 +2555,10 @@ class ConfigLoader:
         except (OSError, RuntimeError):  # unresolvable path: treat as outside, fail closed
             candidate = None
         if candidate is None or not candidate.is_relative_to(boundary):
-            log.warning(
-                "ignoring workspace permissions.workspace_root %r for agent %r: a project layer "
-                "may only confine INSIDE the project it sits in (%s)",
-                configured, stem, boundary,
-            )
+            self._narrowed(note, "permissions.workspace_root", configured, (
+                f"ignoring workspace permissions.workspace_root {configured!r} for agent {stem!r}: "
+                f"a project layer may only confine INSIDE the project it sits in ({boundary})"
+            ))
             perms["workspace_root"] = global_root
 
     def _global_layer_ask(self, stem: str, div_name: Optional[str]) -> dict:
@@ -2598,6 +2603,16 @@ class ConfigLoader:
             declared.update({k: v for k, v in layer.items() if v is not None})
         return declared
 
+    @staticmethod
+    def _narrowed(
+        note: Optional[Callable[[str, Any, str], None]], subject: str, value: Any, text: str,
+    ) -> None:
+        """Tell `note` of one dropped project-layer value, else log it (the config-agent door)."""
+        if note is None:
+            log.warning("%s", text)
+        else:
+            note(subject, value, text)
+
     def _narrow_project_layer_ask(
         self,
         perms: dict,
@@ -2606,6 +2621,7 @@ class ConfigLoader:
         *,
         base_ask: Optional[dict] = None,
         declared: Optional[dict] = None,
+        note: Optional[Callable[[str, Any, str], None]] = None,
     ) -> None:
         """Narrow the project layer's `permissions.ask.*` to what a repo is allowed to ask for.
 
@@ -2646,12 +2662,11 @@ class ConfigLoader:
                 continue
 
             if field in ASK_GLOBAL_ONLY_FIELDS:
-                log.warning(
-                    "ignoring workspace permissions.ask.%s %s for agent %r: the key is a "
-                    "loosening surface, and a project layer may only tighten the gate "
-                    "(the global layer asks for %s)",
-                    field, _short_repr(value), stem, _short_repr(global_val),
-                )
+                self._narrowed(note, f"permissions.ask.{field}", value, (
+                    f"ignoring workspace permissions.ask.{field} {_short_repr(value)} for agent "
+                    f"{stem!r}: the key is a loosening surface, and a project layer may only "
+                    f"tighten the gate (the global layer asks for {_short_repr(global_val)})"
+                ))
                 _restore(field, global_val)
                 continue
 
@@ -2659,11 +2674,11 @@ class ConfigLoader:
                 baseline = global_val if isinstance(global_val, bool) else _gate_default(field)
                 if value is True or value == baseline:
                     continue  # switching the ask ON is tightening; restating it is a no-op
-                log.warning(
-                    "ignoring workspace permissions.ask.network_hosts %r for agent %r: a project "
-                    "layer may only switch the network-host ask ON (the global layer asks for %r)",
-                    value, stem, baseline,
-                )
+                self._narrowed(note, "permissions.ask.network_hosts", value, (
+                    f"ignoring workspace permissions.ask.network_hosts {value!r} for agent "
+                    f"{stem!r}: a project layer may only switch the network-host ask ON (the "
+                    f"global layer asks for {baseline!r})"
+                ))
                 _restore(field, global_val)
                 continue
 
@@ -2677,12 +2692,11 @@ class ConfigLoader:
             removed = [item for item in baseline_seq if item not in value]
             extras = [item for item in value if item not in baseline_seq]
             if removed:
-                log.warning(
-                    "ignoring %d removal(s) from workspace permissions.ask.%s for agent %r: a "
-                    "project layer may only ADD to the gate's rule sets, never subtract from "
-                    "them (dropped: %s)",
-                    len(removed), field, stem, _short_repr(removed),
-                )
+                self._narrowed(note, f"permissions.ask.{field}", removed, (
+                    f"ignoring {len(removed)} removal(s) from workspace permissions.ask.{field} "
+                    f"for agent {stem!r}: a project layer may only ADD to the gate's rule sets, "
+                    f"never subtract from them (dropped: {_short_repr(removed)})"
+                ))
             if extras:
                 ask[field] = [*baseline_seq, *extras]
             else:
@@ -2775,8 +2789,10 @@ class ConfigLoader:
                        f"ignoring {section} in {ws_path!r}: only the global config may set it")
         base_perms = base.model_dump().get("permissions") or {}
         declared = raw.get("permissions") if isinstance(raw.get("permissions"), dict) else {}
+        ws_file = str(self._local_dir / "agents" / f"{name}.yaml")
         self._narrow_project_layer_permissions(
-            merged, name, None, base_perms=base_perms, declared=declared
+            merged, name, None, base_perms=base_perms, declared=declared,
+            note=lambda subject, value, text: report(subject, ws_file, value, text),
         )
         perms = merged.get("permissions")
         if not isinstance(perms, dict):

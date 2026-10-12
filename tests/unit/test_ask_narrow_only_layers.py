@@ -308,8 +308,9 @@ def test_a_workspace_overlay_cannot_loosen_a_builtin(layers, caplog) -> None:
         "ask": {"destructive_signatures": []},
     }})
 
+    notes: list = []
     with caplog.at_level(logging.WARNING):
-        cfg = _builtin(global_dir, ws)
+        cfg = _builtin(global_dir, ws, notes=notes)
 
     base = _builtin_base()
     assert cfg.permissions.mode == base.permissions.mode
@@ -317,9 +318,32 @@ def test_a_workspace_overlay_cannot_loosen_a_builtin(layers, caplog) -> None:
     assert cfg.permissions.ask.to_gate_settings().destructive_signatures == (
         SHIPPED.destructive_signatures
     )
-    warnings = "\n".join(r.getMessage() for r in caplog.records)
+    # WR-06: reported as narrowing Notices, never as a log record (lastResort would print it over
+    # the input box, at start and again at every dispatch)
+    assert not [r for r in caplog.records if r.name == "localharness.config.loader"]
+    warnings = "\n".join(n.text for n in notes)
     for key in ("mode", "workspace_root", "destructive_signatures"):
         assert key in warnings, f"{key} was dropped silently"
+    assert {n.subject for n in notes} >= {
+        "permissions.mode", "permissions.workspace_root", "permissions.ask.destructive_signatures",
+    }
+    assert all(n.kind == "narrowing" and n.file == str(ws / "agents" / "explore.yaml") for n in notes)
+
+
+def test_the_builtin_overlay_drops_reach_the_loader_notices_without_a_reporter(layers, caplog) -> None:
+    """No reporter given: the notices stay on the loader (what `start` and a dispatch read); the
+    log stays silent."""
+    from localharness.agent.subagent import build_explore_config
+
+    global_dir, ws = layers
+    _write_yaml(ws / "agents" / "explore.yaml", {"permissions": {
+        "mode": "unattended", "workspace_root": "/", "ask": {"network_hosts": False},
+    }})
+    loader = ConfigLoader(config_dir=global_dir, local_config_dir=ws)
+    with caplog.at_level(logging.WARNING):
+        loader.overlay_builtin_config("explore", build_explore_config("explore"))
+    assert not [r for r in caplog.records if r.name == "localharness.config.loader"]
+    assert {"permissions.mode", "permissions.workspace_root"} <= {n.subject for n in loader.notices}
 
 
 def test_a_workspace_overlay_may_add_a_deny_pattern(layers) -> None:
