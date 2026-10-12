@@ -46,7 +46,7 @@ def test_every_sse_only_frame_is_handled(page):
     "UserMessage", "TurnStarted", "TurnCompleted", "TurnFailed", "Action", "Observation",
     "TaskComplete", "Heartbeat", "ParseFailed", "CompactionTriggered", "Escalation",
     "InputRouted", "PermissionStaged", "PermissionResolved", "PermissionAsked",
-    "ConsolidationStarted", "ConsolidationFinished", "ProviderLost",
+    "ConsolidationStarted", "ConsolidationFinished", "ProviderLost", "InstructionsChanged", "NarrowingNotice",
 ])
 def test_every_live_bus_event_in_the_vocabulary_is_handled(page, event):
     """§4.2's table, walked. These are the events a client must handle."""

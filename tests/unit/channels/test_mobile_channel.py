@@ -523,6 +523,52 @@ async def test_a_published_provider_lost_reaches_the_phones_stream_with_no_chann
     await channel.stop()
 
 
+async def test_a_published_instructions_changed_reaches_the_phones_stream_with_no_channel_change(tmp_path):
+    """D-46: the forwarder covers every EVENT_TYPE_MAP type, so the project-instructions status
+    line needs no code in the channel. A child-stamped one is forwarded like any other."""
+    from localharness.core.events import InstructionsChanged
+
+    bus = EventBus(persist_path=tmp_path / "e.jsonl")
+    channel = await _channel(bus)
+    client = channel.attach_client()
+
+    await bus.publish(InstructionsChanged(
+        agent_id="a", session_id="s", path="/r/CLAUDE.md", name="CLAUDE.md", size=5,
+        state="yes", cause="adopted", text="CLAUDE.md changed, using it",
+    ))
+    await bus.publish(InstructionsChanged(
+        agent_id="a", session_id="s", path="/r/CLAUDE.md", name="CLAUDE.md", size=5,
+        state="yes", cause="adopted", text="CLAUDE.md changed, using it", parent_id="child-1",
+    ))
+    rows = _drain(client)
+
+    assert [r[0] for r in rows] == ["InstructionsChanged", "InstructionsChanged"]
+    assert rows[0][2]["event_type"] == "InstructionsChanged"
+    assert rows[0][2]["text"] == "CLAUDE.md changed, using it" and rows[0][2]["cause"] == "adopted"
+    assert rows[1][2]["parent_id"] == "child-1"
+    await channel.stop()
+
+
+async def test_a_published_narrowing_notice_reaches_the_phones_stream_with_no_channel_change(tmp_path):
+    """D-46: same for the dispatch-time narrowing note."""
+    from localharness.core.events import NarrowingNotice
+
+    bus = EventBus(persist_path=tmp_path / "e.jsonl")
+    channel = await _channel(bus)
+    client = channel.attach_client()
+
+    await bus.publish(NarrowingNotice(
+        agent_id="a", session_id="s", key="explore.max_actions", file="/w/x.yaml",
+        accept_file="/g/agents/explore.yaml", text="ignoring explore.max_actions in /w/x.yaml",
+    ))
+    rows = _drain(client)
+
+    assert [r[0] for r in rows] == ["NarrowingNotice"]
+    assert rows[0][2]["event_type"] == "NarrowingNotice"
+    assert rows[0][2]["accept_file"] == "/g/agents/explore.yaml"
+    await channel.stop()
+
+
 async def test_stop_releases_every_subscription(tmp_path):
     bus = EventBus(persist_path=tmp_path / "e.jsonl")
     channel = await _channel(bus)

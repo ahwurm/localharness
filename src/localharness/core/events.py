@@ -1,4 +1,4 @@
-"""All 34 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
+"""All 36 LocalHarness event models, BudgetSpec, AnyEvent union, EVENT_TYPE_MAP, deserialize_event.
 
 event_type field values are PascalCase matching the Python class name: the bus keys subscriptions
 and delivery by the class name, and deserialize_event resolves a logged line through EVENT_TYPE_MAP
@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional, Union
 
@@ -451,6 +452,67 @@ class ProviderLost(BaseEvent):
     wait_seconds: float
 
 
+InstructionsCause = Literal[
+    "start", "adopted", "harness_written", "shadowed", "too_large", "refused"
+]
+
+
+@dataclass(frozen=True)
+class InstructionsNotice:
+    """What the project-instructions handle hands the loop when a status line is owed.
+
+    Built by the handle (config.project_records), published by the loop as `InstructionsChanged`;
+    `core` is the one package both `config` and `agent` import, so the shape lives here. It
+    carries the file's name, resolved path, size and state and the rendered line, never the
+    file's bytes. It is not a `BaseEvent` and not in `EVENT_TYPE_MAP`.
+    """
+
+    cause: InstructionsCause
+    name: str
+    path: str
+    size: int
+    state: str
+    shadowed: str | None
+    reason: str | None
+    text: str
+
+
+class InstructionsChanged(BaseEvent):
+    """A project instructions file was used, changed, dropped or refused.
+
+    `text` is the rendered status line. The event carries the file's name, resolved path, size,
+    state and cause, never the file's bytes. A child loop may publish it (it carries parent_id)
+    and no channel filters on that.
+    """
+
+    event_type: str = "InstructionsChanged"
+    agent_id: AgentID
+    session_id: SessionID
+    path: str
+    name: str
+    size: int
+    state: str
+    cause: InstructionsCause
+    shadowed: Optional[str] = None
+    text: str
+
+
+class NarrowingNotice(BaseEvent):
+    """A dispatch-time narrowing of a project value that the start did not show.
+
+    `text` already names the global file that would accept the value, so a channel renders it as
+    is. A child loop may publish it and no channel filters on that.
+    """
+
+    event_type: str = "NarrowingNotice"
+    agent_id: AgentID
+    session_id: SessionID
+    key: str
+    file: str
+    accept_file: str
+    text: str
+
+
 class CompactionTriggered(BaseEvent):
     """Published by ContextManager.build_messages when CompactionPipeline modifies messages.
 
@@ -730,6 +792,8 @@ AnyEvent = Union[
     PermissionResolved,
     Heartbeat,
     ProviderLost,
+    InstructionsChanged,
+    NarrowingNotice,
     CompactionTriggered,
     ScenarioCompleted,
     ParseFailed,
@@ -767,6 +831,8 @@ EVENT_TYPE_MAP: dict[str, type[BaseEvent]] = {
     "PermissionResolved": PermissionResolved,
     "Heartbeat": Heartbeat,
     "ProviderLost": ProviderLost,
+    "InstructionsChanged": InstructionsChanged,
+    "NarrowingNotice": NarrowingNotice,
     "CompactionTriggered": CompactionTriggered,
     "ScenarioCompleted": ScenarioCompleted,
     "ParseFailed": ParseFailed,
