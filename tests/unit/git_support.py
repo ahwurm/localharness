@@ -19,6 +19,7 @@ into a fixture and a fixture never touches `~/.localharness` or the project's ow
 - `signed_history(repo, tag)`: HEAD rewritten to carry a handcrafted `gpgsig` header, plus a signed tag.
 - `partial_clone(tmp, marker_script_path)`: a `--filter=blob:none` clone whose promisor remote runs a marker.
 - `submodule_repo(tmp, filter_script)`: a superproject whose submodule carries its own clean filter.
+- `filter_repo(tmp, kind)`: a repository whose `docs/*` and `vendor/**` are bound to a marker filter.
 
 Later plans only ADD helpers here; none of these signatures changes.
 """
@@ -198,3 +199,41 @@ def submodule_repo(tmp: Path, filter_script: Path) -> Path:
     git(sup, "config", "diff.submodule", "log")
     (sup / "sub" / "f.txt").write_text("changed\n")
     return sup
+
+
+def filter_repo(
+    tmp: Path, kind: str, *, stage: bool = False, driver_key: str | None = None
+) -> tuple[Path, Path]:
+    """RESEARCH rows b, b2: repository `tmp/frepo` plus the marker that proves a filter ran.
+
+    README, docs/a.md and vendor/v.txt are committed twice (two commits, so `HEAD~1..HEAD` touches all
+    three) with `.gitattributes` holding `docs/* filter=x` and `vendor/** filter=x`. Then all three files
+    are modified in the worktree (`stage=True` also stages them) and only THEN is the driver configured, so
+    building history and staging run nothing: `kind` "clean" sets `filter.x.clean`, "process" sets
+    `filter.x.process` (both to a passthrough marker), "none" configures no driver. `driver_key` overrides
+    the config key (a subsection with a space, say). The marker is removed before returning; it exists
+    only if a filter ran afterwards. Returns (repo, marker).
+    """
+    assert kind in ("clean", "process", "none"), kind
+    script, marker = marker_script(tmp / "filters", "drv", passthrough=True)
+    repo = make_repo(
+        tmp / "frepo",
+        {
+            "README": "hello\n",
+            "docs/a.md": "doc one\n",
+            "vendor/v.txt": "vendored one\n",
+            ".gitattributes": "docs/* filter=x\nvendor/** filter=x\n",
+        },
+    )
+    for name in ("README", "docs/a.md", "vendor/v.txt"):
+        (repo / name).write_text((repo / name).read_text() + "second\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "second")
+    for name in ("README", "docs/a.md", "vendor/v.txt"):
+        (repo / name).write_text((repo / name).read_text() + "worktree\n")
+    if stage:
+        git(repo, "add", "-A")
+    if kind != "none":
+        git(repo, "config", driver_key or f"filter.x.{kind}", str(script))
+    marker.unlink(missing_ok=True)
+    return repo, marker
