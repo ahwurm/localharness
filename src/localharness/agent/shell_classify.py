@@ -1444,6 +1444,50 @@ def _join(text: str, *, strip_comments: bool = True) -> tuple[str, bool]:
     return joined, scan.hazard
 
 
+MAX_GROUP_DEPTH = 64
+"""How many groups, subshells and substitutions may be open at once before the text is not read (WR-01 / WR-51
+it4). Splitting a nest of ``{ { { … } } }`` re-reads the text once per level and once per brace in it, so the time
+grows with the cube of the depth (a 4 KB nest took 5 s, a 10 KB one 20 s on the event loop's thread), and no
+command written by a person is anywhere near this deep. Deeper text gets the unparsed-shell placeholder, which
+asks in every mode."""
+
+
+def _nesting_too_deep(text: str) -> bool:
+    """Does the text open more than :data:`MAX_GROUP_DEPTH` ``(`` / ``{`` / ``$(`` / ``${`` at once?
+
+    One pass, quotes and escapes skipped. It only has to be a bound, not a parse: it over-counts a ``(`` that is
+    a literal character, which can only make a very deep text ask."""
+    depth = 0
+    index = 0
+    size = len(text)
+    quote = ""
+    while index < size:
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if quote == "'":
+            quote = "" if char == "'" else quote
+        elif char in "'\"" and not quote:
+            quote = char
+        elif char == '"' and quote == '"':
+            quote = ""
+        elif quote == '"':
+            if char == "$" and text[index + 1 : index + 2] in ("(", "{"):
+                depth += 1
+                index += 1
+            elif char in ")}" and depth:
+                depth -= 1
+        elif char in "({":
+            depth += 1
+        elif char in ")}" and depth:
+            depth -= 1
+        if depth > MAX_GROUP_DEPTH:
+            return True
+        index += 1
+    return False
+
+
 def _classify_command_text(
     text: str, settings: GateSettings, cwd: _Cwd | None = None
 ) -> tuple[list[ShellSegment], list[str]]:
@@ -1461,6 +1505,8 @@ def _classify_command_text(
     the only reading bash can have run), and the words of a comment never add a segment merely for
     being unfamiliar (WR-02 / WR-52, WR-53).
     """
+    if _nesting_too_deep(text):  # before the join, whose scan recurses once per level too
+        return _classify_text(UNPARSED_SHELL_SIGNATURE, settings, cwd)
     joined, hazard = _join(text)
     second_cwd = cwd.copy() if (hazard and cwd is not None) else None
     segments, dropped = _classify_text(joined, settings, cwd)
