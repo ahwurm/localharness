@@ -45,6 +45,9 @@ def test_constants():
         "git", "--no-pager", "--no-lazy-fetch",
         "-c", "core.fsmonitor=false", "-c", "core.pager=cat",
         "-c", "core.hooksPath=/dev/null", "-c", "log.showSignature=false",
+        "-c", "format.pretty=medium",
+        "-c", "gpg.program=false", "-c", "gpg.openpgp.program=false",
+        "-c", "gpg.ssh.program=false", "-c", "gpg.x509.program=false",
         "-c", "color.ui=never", "-c", "diff.submodule=short",
     )
     assert grt.VERB_GUARD_FLAGS == tuple(GUARDS)
@@ -188,10 +191,13 @@ def test_argv_snapshots(root):
     assert _argv(root, "diff", revision="HEAD", paths=["a"], cached=True, stat=True) == [
         *P, "diff", *GUARDS, "--cached", "--stat", "HEAD", "--", "a"]
     assert _argv(root, "diff", cached=True) == [*P, "diff", *GUARDS, "--cached", "--"]
-    assert _argv(root, "show", revision="HEAD") == [*P, "show", *GUARDS, "HEAD", "--"]
-    assert _argv(root, "show", stat=True) == [*P, "show", *GUARDS, "--stat", "--"]
-    assert _argv(root, "log") == [*P, "log", *GUARDS, "-p", "--"]
-    assert _argv(root, "log", stat=True) == [*P, "log", *GUARDS, "--stat", "--"]
+    # CR-02 / CR-51: show and log pin the built-in pretty format, so a configured format.pretty or
+    # pretty.* alias (which may hold %G?) never applies; diff has no pretty format.
+    assert _argv(root, "show", revision="HEAD") == [*P, "show", *GUARDS, "--pretty=medium", "HEAD", "--"]
+    assert _argv(root, "show", stat=True) == [*P, "show", *GUARDS, "--stat", "--pretty=medium", "--"]
+    assert _argv(root, "log") == [*P, "log", *GUARDS, "-p", "--pretty=medium", "--"]
+    assert _argv(root, "log", stat=True) == [*P, "log", *GUARDS, "--stat", "--pretty=medium", "--"]
+    assert not any(t.startswith("--pretty") for t in _argv(root, "diff"))
 
 
 def test_argv_uses_given_pathspecs(root):
