@@ -541,11 +541,20 @@ async def test_a_model_edit_reads_model_edit(tmp_path, monkeypatch, fake_home):
 
 
 async def test_a_file_over_the_window_share_reads_too_large(tmp_path, monkeypatch, fake_home):
+    # The start that prints the oversized line shows the line instead of the entity; the next
+    # terminal start has seen it and reads "(too large)" in the counts.
     _trusted_project(tmp_path, monkeypatch, fake_home, text="x" * 300_000)
-    printed = _capture(monkeypatch)
+    buf = _tty(monkeypatch)
     _install_recorders(monkeypatch)
 
-    assert "CLAUDE.md (too large)" in await _printed_summary(printed)
+    await _drive()
+    first = buf.getvalue()
+    buf.seek(0)
+    buf.truncate(0)
+    await _drive()
+
+    assert "CLAUDE.md (too large)" not in first and "not used" in first
+    assert "CLAUDE.md (too large)" in buf.getvalue()
 
 
 async def test_no_candidate_means_no_entity(tmp_path, monkeypatch, fake_home):

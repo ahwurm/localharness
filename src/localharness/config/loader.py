@@ -37,6 +37,7 @@ from localharness.config.overlay import (
     _resolve_user_overlay_path,
 )
 from localharness.config.paths import resolve_config_dir
+from localharness.config.project_records import Notice, notice_value
 from localharness.config.redact import (
     SECRET_MASK, at_secret, scrub, secret_values, yaml_problem, yaml_where,
 )
@@ -710,15 +711,23 @@ def _narrow_raw(merged: dict, sources: tuple[dict, ...], ws_files: tuple[str, st
 
 
 def _narrow_harness_global_only(merged: dict, sources: tuple[dict, ...],
-                                ws_files: tuple[str, str]) -> tuple[dict, list[str]]:
+                                ws_files: tuple[str, str],
+                                report: Optional[Callable[[str, Any, Any, str], None]] = None,
+                                ) -> tuple[dict, list[str]]:
     """Undo every HARNESS_GLOBAL_ONLY_FIELDS value a workspace source (config.yaml, overrides.yaml)
     set differently from the global layers (or from the field's default, when they are silent); one
-    warning per such path and file. See `_narrow_raw` for the restore."""
+    warning per such path and file. See `_narrow_raw` for the restore. `report(path, file, ws,
+    text)` is told of each warning as it is made (the loader's notice)."""
+    def note(path: str, file: Any, ws: Any) -> str:
+        text = f"ignoring {path} in {file}: only the global config may set it"
+        if report is not None:
+            report(path, file, ws, text)
+        return text
     return _narrow_raw(
         merged, sources, ws_files, HARNESS_GLOBAL_ONLY_FIELDS,
         baseline=lambda parts, machine: _model_default(HarnessConfig, parts) if machine is _UNSET else machine,
         accept=lambda ws, allowed: ws is _UNSET or ws == allowed,
-        note=lambda path, file, ws: f"ignoring {path} in {file}: only the global config may set it")
+        note=note)
 
 
 _CHILD_ENTRIES = ("explore", "web_researcher", "search_verifier", "cruncher", "chunk_summarizer",
@@ -874,13 +883,16 @@ workspace's number and marks it; the schema default for a window ratio, which is
 
 
 def _guard_children_budget_sections(merged: dict, sources: tuple[dict, ...],
-                                    ws_files: tuple[str, str]) -> tuple[dict, list[str]]:
+                                    ws_files: tuple[str, str],
+                                    report: Optional[Callable[[str, Any, Any, str], None]] = None,
+                                    ) -> tuple[dict, list[str]]:
     """Restore `org.children_budget`, one of its entries, or `org.context` to the global layers' when
     a workspace source set it to something that is not a mapping (`5`, a string, `null`): the merged
     config would not validate, and a project's `org.context: null` must not erase the window ratios
     the machine set. Only the offending source gives way: a mapping the other project file wrote at
     the same path is kept (and clamped later by the lower-only rule). The block is judged first,
-    then each entry. One warning per path and file. Never mutates."""
+    then each entry. One warning per path and file. `report(path, file, value, text)` is told of each
+    warning as it is made (the loader's notice). Never mutates."""
     global_view = deep_merge(sources[0], sources[1])
     warnings: list[str] = []
     for parts in ([["org", "children_budget"]] + [["org", "children_budget", e] for e in _CHILD_ENTRIES]
@@ -891,7 +903,10 @@ def _guard_children_budget_sections(merged: dict, sources: tuple[dict, ...],
             value = _dig(source, parts)
             if value is _UNSET or isinstance(value, dict):
                 continue
-            warnings.append(f"ignoring {path} in {file}: a project may only lower it")
+            text = f"ignoring {path} in {file}: a project may only lower it"
+            warnings.append(text)
+            if report is not None:
+                report(path, file, value, text)
             refused = True
         if refused:
             # Only the offending source gives way: the global section, then each project source
@@ -988,6 +1003,10 @@ class ConfigLoader:
         self.harness_warnings: list[str] = []
         # Workspace agent-file values dropped at AGENT_GLOBAL_ONLY_FIELDS paths (start's summary).
         self.agent_warnings: list[str] = []
+        # The same narrowings as the two lists above, one Notice each (subject the dotted key, the
+        # file, the repr of the rejected value, the warning text), for start's print-on-change rule.
+        # The text lists stay as they are; start subtracts a notice's text from them by equality.
+        self.notices: list[Notice] = []
         # Project agent/division files ignored because they link outside the project (also in
         # agent_warnings; kept apart so `validate` can print exactly these lines).
         self.ignored_links: list[str] = []
@@ -1003,6 +1022,21 @@ class ConfigLoader:
     # ---------------------------------------------------------------- #
     # Internal helpers
     # ---------------------------------------------------------------- #
+
+    def _add_notice(self, subject: str, file: Any, value: Any, text: str) -> None:
+        """Record one narrowing as a Notice, once however often the same value is rejected."""
+        notice = Notice("narrowing", subject, str(file), notice_value(value), text)
+        if notice not in self.notices:
+            self.notices.append(notice)
+
+    def _lower_only_note(self, path: str, file: Any, ws: Any) -> Optional[str]:
+        """The harness lower-only walker's warning for one refused value (None for a `null`, which
+        is dropped quietly), with its Notice."""
+        if ws is None:
+            return None
+        text = f"ignoring {path} in {file}: a project may only lower it"
+        self._add_notice(path, file, ws, text)
+        return text
 
     def _search_bases(self) -> tuple[Path, ...]:
         """Config bases in FIRST-WINS order: the workspace layer (when one applies), then global."""
@@ -1242,15 +1276,16 @@ class ConfigLoader:
         # Returned, not logged, as merge_plugin_layers does: start prints them in its summary line,
         # and a log record would reach the terminal a second time through logging.lastResort.
         ws_files = self.plugin_layer_files()[2:]
-        merged, self.harness_warnings = _narrow_harness_global_only(merged, sources, ws_files)
+        merged, self.harness_warnings = _narrow_harness_global_only(
+            merged, sources, ws_files, report=self._add_notice)
         # A project may only lower a child's ceiling or a share (the raw sources, before the
         # merge has folded a `null` into a value). Sections that are not mappings give way first.
-        merged, section_notes = _guard_children_budget_sections(merged, sources, ws_files)
+        merged, section_notes = _guard_children_budget_sections(
+            merged, sources, ws_files, report=self._add_notice)
         merged, lower_notes = _narrow_raw(
             merged, sources, ws_files, HARNESS_LOWER_ONLY_FIELDS,
             baseline=_lower_only_baseline, accept=_accepted_lower,
-            note=lambda path, file, ws: None if ws is None else
-            f"ignoring {path} in {file}: a project may only lower it", keep_accepted=True)
+            note=self._lower_only_note, keep_accepted=True)
         self.harness_warnings += section_notes + lower_notes
         # An overrides.yaml `extra_endpoints` REPLACES config.yaml's list wholesale (lists do not
         # merge), so the peers config.yaml names vanish without a word. Say so once — only over a
@@ -1803,6 +1838,7 @@ class ConfigLoader:
                     merged[section] = restored
                 if _section_tried(section, raw.get(section, _UNSET), restored):
                     note = f"ignoring {section} in {str(path)!r}: only the global config may set it"
+                    self._add_notice(section, path, raw.get(section, _UNSET), note)
                     if note not in self.agent_warnings:
                         self.agent_warnings.append(note)
 
@@ -1968,8 +2004,10 @@ class ConfigLoader:
                     result = decl
                 else:
                     result = baseline
-                    if decl is not _UNSET and note not in self.agent_warnings:
-                        self.agent_warnings.append(note)
+                    if decl is not _UNSET:
+                        self._add_notice(f"permissions.budget.{field}", src, decl, note)
+                        if note not in self.agent_warnings:
+                            self.agent_warnings.append(note)
                 budget[field] = result
             elif decl is _UNSET:
                 continue  # silent global, nothing declared: the cascade's own answer stands
@@ -1978,6 +2016,7 @@ class ConfigLoader:
                 kept.add(field)
             else:
                 budget.pop(field, None)
+                self._add_notice(f"permissions.budget.{field}", src, decl, note)
                 if note not in self.agent_warnings:
                     self.agent_warnings.append(note)
         return kept
@@ -2042,9 +2081,10 @@ class ConfigLoader:
             merged["context"] = {**(ctx if isinstance(ctx, dict) else {}), name: baseline}
             ctx = merged["context"]
             note = f"ignoring context.{name} in {str(src)!r}: a project may only lower it"
-            if (value is not _UNSET and value is not None and src in (path, div_path)
-                    and note not in self.agent_warnings):
-                self.agent_warnings.append(note)
+            if value is not _UNSET and value is not None and src in (path, div_path):
+                self._add_notice(f"context.{name}", src, value, note)
+                if note not in self.agent_warnings:
+                    self.agent_warnings.append(note)
 
     def _without_project_mcp(self, raw: dict, path: Path) -> dict:
         """An untrusted project's agent-file `tools.mcp_servers` is removed before the merge, so no
@@ -2169,6 +2209,7 @@ class ConfigLoader:
             # and a log record would reach the terminal again through logging.lastResort — on
             # every reload of this file, mid-session included.
             note = f"ignoring {dotted} in {path}: only the global config may set it"
+            self._add_notice(dotted, path, section[key], note)
             if note not in self.agent_warnings:
                 self.agent_warnings.append(note)
             kept = {k: v for k, v in section.items() if k != key}
@@ -2635,7 +2676,10 @@ class ConfigLoader:
             else:
                 _restore(field, global_val)
 
-    def overlay_builtin_config(self, name: str, base: AgentConfig) -> AgentConfig:
+    def overlay_builtin_config(
+        self, name: str, base: AgentConfig, *,
+        notices: Optional[Callable[[Notice], None]] = None,
+    ) -> AgentConfig:
         """Overlay an optional agents/<name>.yaml onto a BUILT-IN subagent's base config.
 
         Built-in subagents (explore, web-researcher, search-verifier) ship a code-defined base
@@ -2661,6 +2705,10 @@ class ConfigLoader:
         shipped deny list for that subagent outright. When the file that won is the workspace's,
         the same narrow-only union applies, baselined on the built-in's own code-defined config
         (PRD §3.3). A global `agents/<name>.yaml` and a workspace-less session are untouched.
+
+        A value the overlay rejects is reported as a narrowing Notice, never as a log record (a
+        record would land on the terminal over the input box through `logging.lastResort`):
+        handed to `notices` when given, else kept once on `self.notices`.
         """
         path = self._find_file("agents", name)
         if path is None:
@@ -2671,11 +2719,17 @@ class ConfigLoader:
             raw = self._without_project_mcp(raw, path)
         merged = deep_merge(base.model_dump(), raw)  # base = the defaults; yaml fields win
         if self._local_dir is not None and path == self._local_dir / "agents" / f"{name}.yaml":
-            self._narrow_builtin_overlay(merged, base, name, raw)
+            def report(subject: str, file: Any, value: Any, note: str) -> None:
+                if notices is None:
+                    self._add_notice(subject, file, value, note)
+                else:
+                    notices(Notice("narrowing", subject, str(file), notice_value(value), note))
+            self._narrow_builtin_overlay(merged, base, name, raw, report)
         return self._validate_dict(AgentConfig, merged, str(path), text)
 
     def _narrow_builtin_overlay(
-        self, merged: dict, base: AgentConfig, name: str, raw: dict
+        self, merged: dict, base: AgentConfig, name: str, raw: dict,
+        report: Callable[[str, Any, Any, str], None],
     ) -> None:
         """Narrow a WORKSPACE overlay of a built-in subagent to what a repo may ask for.
 
@@ -2704,9 +2758,9 @@ class ConfigLoader:
             # The one predicate both doors use (IN-01): only a declared key that changes what is
             # restored is "tried".
             if _section_tried(section, raw.get(section, _UNSET), restored):
-                log.warning(
-                    "ignoring %s in %r: only the global config may set it",
-                    section, str(self._local_dir / "agents" / f"{name}.yaml"))
+                ws_path = str(self._local_dir / "agents" / f"{name}.yaml")
+                report(section, ws_path, raw.get(section, _UNSET),
+                       f"ignoring {section} in {ws_path!r}: only the global config may set it")
         base_perms = base.model_dump().get("permissions") or {}
         declared = raw.get("permissions") if isinstance(raw.get("permissions"), dict) else {}
         self._narrow_project_layer_permissions(
@@ -2736,11 +2790,10 @@ class ConfigLoader:
                 name, None, getattr(base.permissions, "budget", None)
             )
             if budget.get("kill_file") != baseline:
-                log.warning(
-                    "ignoring workspace kill_file %r for agent %r: the kill switch resolves from "
-                    "the global config layer only (%r)",
-                    budget.get("kill_file"), name, baseline,
-                )
+                kill_file = str(self._local_dir / "agents" / f"{name}.yaml")
+                report("permissions.budget.kill_file", kill_file, budget.get("kill_file"),
+                       f"ignoring permissions.budget.kill_file in {kill_file!r}: the kill switch "
+                       "resolves from the global config only")
                 budget["kill_file"] = baseline
 
         # The budget: lower-only against the operator's own `agents/<name>.yaml` when it holds a
@@ -2776,16 +2829,14 @@ class ConfigLoader:
             if value is not None:
                 # SECURITY.md promises the key AND the file (IN-08), as the stuck_detector note
                 # above names it.
-                log.warning(
-                    "ignoring permissions.budget.%s %r in %r: a project may only lower it (%r)",
-                    field, value, ws_file, baseline,
-                )
+                report(f"permissions.budget.{field}", ws_file, value,
+                       f"ignoring permissions.budget.{field} in {ws_file!r}: "
+                       "a project may only lower it")
             budget[field] = baseline
         if declared_budget.get("max_tool_calls") is not None:
-            log.warning(
-                "ignoring permissions.budget.max_tool_calls %r in %r: a project cannot set it",
-                declared_budget["max_tool_calls"], ws_file,
-            )
+            report("permissions.budget.max_tool_calls", ws_file, declared_budget["max_tool_calls"],
+                   f"ignoring permissions.budget.max_tool_calls in {ws_file!r}: "
+                   "a project cannot set it")
         budget["max_tool_calls"] = getattr(base_budget, "max_tool_calls", None)
 
         # The window ratios: lower-only against the operator's own `agents/<name>.yaml` ratio when
@@ -2810,10 +2861,8 @@ class ConfigLoader:
             else:
                 final = baseline
                 if value is not None:
-                    log.warning(
-                        "ignoring workspace %s %r for agent %r: a project may only lower it (%r)",
-                        key_path, value, name, baseline,
-                    )
+                    report(key_path, ws_file, value,
+                           f"ignoring {key_path} in {ws_file!r}: a project may only lower it")
             ctx[ratio] = final
 
     def _global_layer_agent_value(self, stem: str, path: str) -> Any:

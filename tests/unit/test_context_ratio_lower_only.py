@@ -331,12 +331,24 @@ def _builtin(tmp_path, *, g=None, ws=None, name="explore"):
     if ws is not None:
         _put(wd / "agents" / f"{name}.yaml", ws)
     return ConfigLoader(config_dir=gd, local_config_dir=wd).overlay_builtin_config(
-        name, build_explore_config(name))
+        name, build_explore_config(name), notices=_OVERLAY_NOTICES.append)
+
+
+_OVERLAY_NOTICES: list = []
+"""What the built-in overlay handed to its notice reporter during the current test."""
+
+
+@pytest.fixture(autouse=True)
+def _fresh_overlay_notices():
+    _OVERLAY_NOTICES.clear()
+    yield
+    _OVERLAY_NOTICES.clear()
 
 
 def _ratio_warnings(caplog) -> list[str]:
-    return [r.getMessage() for r in caplog.records if "a project may only lower it" in r.getMessage()
-            and "context." in r.getMessage()]
+    """The overlay's ratio notice texts; the overlay never logs a rejected value."""
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    return [n.text for n in _OVERLAY_NOTICES if n.subject.startswith("context.")]
 
 
 def test_a_workspace_overlay_may_lower_a_builtins_ratio(tmp_path, caplog):
@@ -352,7 +364,7 @@ def test_a_workspace_overlay_cannot_raise_a_builtins_ratio(tmp_path, caplog, bad
         cfg = _builtin(tmp_path, ws={"context": {TOR: bad}})
     assert cfg.context.tool_output_ratio == DEF
     [warning] = _ratio_warnings(caplog)
-    assert "context.tool_output_ratio" in warning and "'explore'" in warning
+    assert "context.tool_output_ratio" in warning and "explore.yaml" in warning
 
 
 def test_a_workspace_null_overlay_ratio_is_the_baseline_silently(tmp_path, caplog):

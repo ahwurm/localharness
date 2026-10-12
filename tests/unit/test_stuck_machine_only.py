@@ -241,15 +241,27 @@ def _builtin_base(name: str = "explore"):
     return build_explore_config(name)
 
 
+_OVERLAY_NOTICES: list = []
+"""What the built-in overlay handed to its notice reporter during the current test."""
+
+
+@pytest.fixture(autouse=True)
+def _fresh_overlay_notices():
+    _OVERLAY_NOTICES.clear()
+    yield
+    _OVERLAY_NOTICES.clear()
+
+
 def _builtin(global_dir: Path, ws: Path | None, name: str = "explore"):
     loader = ConfigLoader(config_dir=global_dir, local_config_dir=ws)
-    return loader.overlay_builtin_config(name, _builtin_base(name))
+    return loader.overlay_builtin_config(name, _builtin_base(name), notices=_OVERLAY_NOTICES.append)
 
 
 def _stuck_warnings(caplog) -> list[str]:
-    return [r.getMessage() for r in caplog.records
-            if r.levelno == logging.WARNING and NOTE in r.getMessage()
-            and "stuck_detector" in r.getMessage()]
+    """The overlay's stuck_detector notice texts; the overlay never logs a rejected value."""
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    return [n.text for n in _OVERLAY_NOTICES
+            if NOTE in n.text and n.subject == "stuck_detector"]
 
 
 def test_a_workspace_overlay_cannot_loosen_a_builtins_ladder(layers, caplog) -> None:
