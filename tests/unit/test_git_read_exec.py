@@ -321,6 +321,20 @@ async def test_the_byte_cap_does_not_cut_a_multibyte_character(root, base, monke
     assert "\ufffd" in (await GitReadTool(root).run(subcommand="log")).output
 
 
+def test_complete_characters_trims_a_half_character_whatever_comes_before_it():
+    """IN-52 (it5): an earlier invalid byte made the whole-text decode fail with another reason, so the cut was kept."""
+    complete = grt._complete_characters
+    assert complete(b"abc\xc3") == b"abc"  # 2-byte lead alone
+    assert complete(b"abc\xe2\x82") == b"abc"  # 3-byte lead, one continuation
+    assert complete(b"abc\xf0\x9f\x92") == b"abc"  # 4-byte lead, two continuations
+    assert complete(b"\xe9latin1 \xc3") == b"\xe9latin1 "  # an invalid byte earlier on
+    assert complete(b"abc\xc3\xa9") == b"abc\xc3\xa9"  # a whole character stays
+    assert complete(b"abc\xe2\x82\xac") == b"abc\xe2\x82\xac"
+    assert complete(b"abc") == b"abc"
+    assert complete(b"") == b""
+    assert complete(b"\x80\x80") == b"\x80\x80"  # stray continuations are not a cut character
+
+
 @requires_git
 async def test_output_exactly_at_the_byte_cap_gets_no_marker(root, base, monkeypatch):
     body = 'case " $* " in *" log "*) printf "aaaa\\nbbbb\\n"; exit 0 ;; esac'
