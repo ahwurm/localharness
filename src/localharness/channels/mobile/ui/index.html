@@ -1395,6 +1395,20 @@ function renderSpine(lines, container) {
       if (container === log) { S.lastRow = lost; $("greet").hidden = true; }
       continue;
     }
+    // The project-instructions line and a dispatch-time narrowing note: a child loop may publish
+    // either, so each is drawn before the skip below. Text through el() (textContent), never markup.
+    if (d.event_type === "InstructionsChanged") {
+      const note = el("div", "row sys", d.text);
+      container.appendChild(note);
+      if (container === log) { S.lastRow = note; $("greet").hidden = true; }
+      continue;
+    }
+    if (d.event_type === "NarrowingNotice") {
+      const note = el("div", "row sys", d.text);
+      container.appendChild(note);
+      if (container === log) { S.lastRow = note; $("greet").hidden = true; }
+      continue;
+    }
     if (d.parent_id) continue;               // a subagent's traffic collapses to nothing here
     let r = null;
     if (d.event_type === "UserMessage") {

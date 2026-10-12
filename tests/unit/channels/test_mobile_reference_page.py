@@ -756,6 +756,71 @@ console.log(JSON.stringify(hist.children.map((r) => ({ cls: r.className, text: t
     assert any(r["cls"].startswith("row answer") for r in rendered)
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_an_InstructionsChanged_draws_its_text_as_a_system_row_live_even_when_child_stamped(page, tmp_path):
+    """D-46 / T-11-09: the status line reaches the phone as a `row sys` whose text is exactly
+    data.text; markup characters render as text, never as elements."""
+    line = "<b>CLAUDE.md</b> changed, using it"
+    rendered = _drive(page, """
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
+                  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
+onEvent("InstructionsChanged", {event_type: "InstructionsChanged", agent_id: "a", session_id: "s",
+                                path: "/r/CLAUDE.md", name: "CLAUDE.md", size: 5, state: "yes",
+                                cause: "adopted", parent_id: "p",
+                                text: "<b>CLAUDE.md</b> changed, using it"});
+report();
+""", tmp_path)
+    rows = [r for r in rendered if "changed, using it" in r["text"]]
+    assert len(rows) == 1, rendered
+    assert rows[0]["cls"].startswith("row sys")
+    assert rows[0]["text"] == line
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_a_NarrowingNotice_draws_its_text_as_a_system_row_live(page, tmp_path):
+    """D-46: the dispatch-time narrowing note is the same row shape."""
+    line = "ignoring x in y: only the global config may set it \u2014 '/g/config.yaml' would accept it"
+    rendered = _drive(page, """
+onFrame("Hello", {session_id: "s", mode: "repl", turn_in_progress: true,
+                  protocol_version: PROTOCOL_VERSION, synthetic: false, model_state: "ready"});
+onEvent("NarrowingNotice", {event_type: "NarrowingNotice", agent_id: "a", session_id: "s",
+                            key: "x", file: "y", accept_file: "/g/config.yaml",
+                            text: "ignoring x in y: only the global config may set it \u2014 '/g/config.yaml' would accept it"});
+report();
+""", tmp_path)
+    rows = [r for r in rendered if "would accept it" in r["text"]]
+    assert len(rows) == 1, rendered
+    assert rows[0]["cls"].startswith("row sys")
+    assert rows[0]["text"] == line
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this box")
+def test_both_instruction_events_are_drawn_in_history_for_root_and_child_lines(page, tmp_path):
+    """D-46 / D-76: renderSpine draws each row before its generic parent_id skip, so a
+    child-stamped line is not lost from a finished turn's replay."""
+    rendered = _drive(page, """
+const hist = document.getElementById("hist");
+renderSpine([
+  JSON.stringify({seq: 1, event_type: "UserMessage", content: "go"}),
+  JSON.stringify({seq: 2, event_type: "InstructionsChanged", text: "CLAUDE.md changed, using it"}),
+  JSON.stringify({seq: 3, event_type: "NarrowingNotice", parent_id: "child-1",
+                  text: "ignoring k in f: only the global config may set it"}),
+  JSON.stringify({seq: 4, event_type: "Heartbeat", parent_id: "child-1"}),
+  JSON.stringify({seq: 5, event_type: "TaskComplete", summary: "done", success: true,
+                  duration_seconds: 1.0}),
+], hist);
+const text = (n) => (n.textContent || "") + n.children.map(text).join("");
+console.log(JSON.stringify(hist.children.map((r) => ({ cls: r.className, text: text(r) }))));
+""", tmp_path)
+    sys_rows = [r for r in rendered if r["cls"].startswith("row sys")]
+    assert [r["text"] for r in sys_rows] == [
+        "CLAUDE.md changed, using it",
+        "ignoring k in f: only the global config may set it",
+    ], rendered
+    assert any(r["cls"].startswith("row user") for r in rendered)
+    assert any(r["cls"].startswith("row answer") for r in rendered)
+
+
 # --- D-67: a stuck root turn is announced once, live and in history -------------------------
 
 _ESC = ('{seq: 2, reason: "stuck_detected", '
