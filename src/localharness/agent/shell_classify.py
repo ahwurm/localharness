@@ -1401,7 +1401,7 @@ def _split_top_level(text: str, track_braces: bool = True) -> list[_Raw]:
         char = text[index]
         if quote:
             buffer.append(char)
-            if char == "\\" and quote == '"' and index + 1 < len(text):
+            if char == "\\" and quote in ('"', "`") and index + 1 < len(text):
                 buffer.append(text[index + 1])
                 index += 2
                 continue
@@ -1541,7 +1541,7 @@ def _matching_brace(text: str, open_index: int) -> int:
     while index < len(text):
         char = text[index]
         if quote:
-            if char == "\\" and quote == '"':
+            if char == "\\" and quote in ('"', "`"):
                 index += 2
                 continue
             if char == quote:
@@ -1711,9 +1711,8 @@ def _lift_substitutions(
             index = end + 1
             continue
         if char == "`":
-            end = text.find("`", index + 1)
-            end = len(text) if end == -1 else end
-            recurse(text[index + 1 : end])
+            end = _closing_backtick(text, index)
+            recurse(BACKTICK_ESCAPED_RE.sub(r"\1", text[index + 1 : end]))
             out.append(SUBSTITUTION_SENTINEL)
             index = end + 1
             continue
@@ -1728,6 +1727,24 @@ def _lift_substitutions(
     return "".join(out), lifted
 
 
+BACKTICK_ESCAPED_RE = re.compile(r"\\([$`\\])")
+"""Inside backticks a backslash is literal except before ``$``, `` ` `` and ``\\``, where the shell drops it
+before it runs the body (bash(1) "Command Substitution"): `` `echo \\`rm x\\`` `` runs ``echo `rm x` ``."""
+
+
+def _closing_backtick(text: str, open_index: int) -> int:
+    """Index of the backtick closing the one at ``open_index``, skipping backslash pairs; end if none (CR-55)."""
+    index = open_index + 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+        elif text[index] == "`":
+            return index
+        else:
+            index += 1
+    return len(text)
+
+
 def _matching(text: str, open_index: int) -> int:
     """Index of the ``)`` closing the ``(`` at ``open_index``; end of string if unbalanced."""
     depth = 0
@@ -1736,7 +1753,7 @@ def _matching(text: str, open_index: int) -> int:
     while index < len(text):
         char = text[index]
         if quote:
-            if char == "\\" and quote == '"' and index + 1 < len(text):
+            if char == "\\" and quote in ('"', "`") and index + 1 < len(text):
                 index += 2
                 continue
             if char == quote:
@@ -3604,7 +3621,7 @@ def _extract_redirections(text: str) -> tuple[str, list[str]]:
         char = text[index]
         if quote:
             out.append(char)
-            if char == "\\" and quote == '"' and index + 1 < len(text):
+            if char == "\\" and quote in ('"', "`") and index + 1 < len(text):
                 out.append(text[index + 1])
                 index += 2
                 continue
