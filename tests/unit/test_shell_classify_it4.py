@@ -7,6 +7,7 @@ its plain neighbour, held at its verdict.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -155,3 +156,36 @@ def test_an_array_literal_with_a_destructive_substitution_still_lifts_it(ws):
 def test_an_append_assignment_prefix_is_not_the_command(ws, command, expected):
     """``NAME+=value`` is an assignment word: the command after it is what runs (it4, with CR-01)."""
     _check(command, expected, ws)
+
+
+# --------------------------------------------------------------------------- G3: nesting depth
+
+PERF_LIMIT_SECONDS = 5.0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "{ " * 980 + "true" + "; }" * 980,
+        "time { " * 980 + "true" + "; }" * 980,
+        "! { " * 980 + "true" + "; }" * 980,
+        "{ " * 1200 + "ls; " + "} " * 1200,
+        "( " * 600 + "true" + " )" * 600,
+        "$(" * 600 + "true" + ")" * 600,
+    ),
+)
+def test_a_deep_nest_is_cheap_and_asks(ws, command):
+    """WR-01 / WR-51 (it4): no text under 10 KB may take 5 s in one ``evaluate``; one nested deeper than the
+    bound is not read, so it asks (or is denied) in every mode."""
+    assert len(command) < 10_000
+    started = time.monotonic()
+    words = _words(command, ws)
+    assert time.monotonic() - started < PERF_LIMIT_SECONDS
+    assert "ok" not in words.split("/")
+
+
+def test_a_nest_inside_the_bound_is_still_read(ws):
+    depth = 20
+    command = "{ " * depth + "rm -rf /etc/x" + "; }" * depth
+    _check(command, "DENY/ASKU/ASKU", ws)
+    _check("{ " * depth + "ls" + "; }" * depth, "ok/ok/ok", ws)
