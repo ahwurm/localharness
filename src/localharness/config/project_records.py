@@ -25,21 +25,26 @@ import os
 import stat
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+import structlog
 import yaml
 
+from localharness.config import session_presence
 from localharness.config.overlay import atomic_write_overlay
 from localharness.config.paths import global_config_dir
+from localharness.core.events import InstructionsCause, InstructionsNotice
 
 try:  # POSIX only; elsewhere the store falls back to an in-process lock (documented degradation)
     import fcntl
 except ImportError:  # pragma: no cover - exercised on Windows only
     fcntl = None  # type: ignore[assignment]
+
+log = structlog.get_logger(__name__)
 
 PROJECT_RECORDS_FILE = "project_records.yaml"
 """The store's file name inside the global config dir."""
@@ -609,3 +614,506 @@ def display_name(name: str) -> str:
     from localharness.channels.base import sanitize_for_display
 
     return sanitize_for_display(name)
+
+
+# --------------------------------------------------------------------------- the handle
+
+
+def _start_text(name: str, size: int) -> str:
+    """The dim line owed when a file starts being used (D-40)."""
+    return f"Using {display_name(name)} ({format_kb(size)}); /instructions off"
+
+
+def _name_rank(name: str) -> int:
+    """Where a candidate name sits in the order it is tried; an unknown name sorts last."""
+    try:
+        return CANDIDATE_NAMES.index(name)
+    except ValueError:
+        return len(CANDIDATE_NAMES)
+
+
+def _as_pending(marks: dict[str, str]) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted(marks.items()))
+
+
+def _inst_raw(data: dict, key: str) -> dict | None:
+    """The root's raw instructions mapping (a record, a mark-only mapping, or None)."""
+    entry = _entry(data, key)
+    raw = entry.get("instructions") if entry is not None else None
+    return raw if isinstance(raw, dict) else None
+
+
+def _put_record(data: dict, key: str, record: InstructionsRecord, pending: dict[str, str]) -> None:
+    """Write ``record`` carrying exactly the open marks in ``pending``."""
+    _entry_for_write(data, key)["instructions"] = _record_to_dict(
+        replace(record, pending=_as_pending(pending))
+    )
+
+
+@dataclass(frozen=True)
+class InstructionsState:
+    """What the handle knows about the root's file right now (read-only).
+
+    ``state`` is one of ``yes``, ``off``, ``pending`` (a record with an open mark),
+    ``harness_written`` (the file currently holds bytes a harness call wrote and the record
+    refused), ``too_large`` and ``none`` (no record)."""
+
+    name: str
+    path: str
+    size: int
+    digest: str | None
+    state: str
+
+
+@dataclass(frozen=True)
+class _Awaiting:
+    """The bytes a start line described: written as the yes record only once the line was
+    delivered (D-32)."""
+
+    name: str
+    path: str
+    size: int
+    digest: str
+    text: str
+
+
+@dataclass(frozen=True)
+class _Marks:
+    """Open marks seen at one call: this handle's own, other sessions' live ones, dead ones.
+
+    Under ``--no-input`` the dead ones are treated as absent (and never cleared)."""
+
+    own: bool
+    live: frozenset[str]
+    dead: frozenset[str]
+
+    @property
+    def any(self) -> bool:
+        return self.own or bool(self.live) or bool(self.dead)
+
+
+def _state_name(
+    record: InstructionsRecord | None, *, marks_open: bool, digest: str | None, too_large: bool
+) -> str:
+    if too_large:
+        return "too_large"
+    if record is None:
+        return "none"
+    if record.state == "off":
+        return "off"
+    if digest is not None and record.harness_written == digest:
+        return "harness_written"
+    return "pending" if marks_open else "yes"
+
+
+class ProjectInstructions:
+    """The one object the loop, the trust prompts, the channels and ``/instructions`` hold.
+
+    ``section()`` answers "use this text" or "skip" at every call; the store is read (and, on a
+    transition, written) under one lock acquisition per call. The constructor does no I/O.
+    ``basis`` is ``layer`` (the project you stand in: the file is used by default with one dim
+    line), ``trusted`` (same, a root trusted before there was a record) or ``awaiting_trust``
+    (used only once a ``yes`` record exists). ``no_input`` is the CLI flag: nothing is ever
+    written and no start line is owed. The handle never opens a candidate for writing."""
+
+    def __init__(
+        self,
+        root: Any,
+        *,
+        sitting_id: str,
+        max_ratio: float,
+        basis: str,
+        no_input: bool,
+        config_dir: Any = None,
+    ) -> None:
+        self._root = Path(os.fspath(root))
+        self.sitting_id = sitting_id
+        self._max_ratio = max_ratio
+        self._basis = basis
+        self._no_input = no_input
+        self._config_dir = config_dir
+        self._candidate: Candidate | None = None
+        self._declined = False
+        self._marked = False
+        self._warned: set[tuple] = set()
+        self._held: InstructionsNotice | None = None
+        self._awaiting: _Awaiting | None = None
+        self._start_notice_given = False
+        self._sitting_digest: str | None = None
+        self._dropped_digest: str | None = None
+        self._awaiting_too_large: Notice | None = None
+        self._too_large_notice: Notice | None = None
+        self._start_line: str | None = None
+        self._summary_entity: str | None = None
+        self._recorded_path: str | None = None
+        self._mem_state: Literal["yes", "off"] | None = None
+        self._set_failure: str | None = None
+        self._last = InstructionsState("", "", 0, None, "none")
+
+    # ---- the public surface
+
+    @property
+    def candidates(self) -> tuple[Path, Path, Path]:
+        return instruction_candidates(self._root)
+
+    @property
+    def recorded_path(self) -> Path | None:
+        return Path(self._recorded_path) if self._recorded_path else None
+
+    @property
+    def state(self) -> InstructionsState:
+        return self._last
+
+    @property
+    def start_line(self) -> str | None:
+        return self._start_line
+
+    @property
+    def summary_entity(self) -> str | None:
+        return self._summary_entity
+
+    @property
+    def too_large_notice(self) -> Notice | None:
+        return self._too_large_notice
+
+    # ---- section
+
+    def section(self, window_tokens: int, *, cancelled: bool = False) -> tuple[
+        str | None, InstructionsNotice | None
+    ]:
+        """The text to put in the role (or None) and the status line this call owes (or None).
+
+        Never raises: a store failure is a ``refused`` line with reason ``unreadable store`` and
+        no text. With ``cancelled=True`` the transition is still written but the line is held
+        and returned by the next call that has none of its own."""
+        if self._declined:
+            return None, None
+        try:
+            text, notice = self._run(window_tokens, at_start=False)
+        except (OSError, RuntimeError) as exc:
+            log.debug("project_instructions_store_unavailable", error=str(exc))
+            text, notice = None, self._store_refusal()
+        if cancelled:
+            if notice is not None:
+                self._held = notice
+            return text, None
+        if notice is None:
+            held, self._held = self._held, None
+            return text, held
+        self._held = None
+        return text, notice
+
+    def _run(
+        self, window_tokens: int, *, at_start: bool
+    ) -> tuple[str | None, InstructionsNotice | None]:
+        cap = int(self._max_ratio * window_tokens * _APPROX_CHARS_PER_TOKEN)
+        key = _normalize_root(self._root)
+        fx: list[Callable[[], None]] = []
+        with _store_transaction(self._config_dir) as data:
+            result = self._decide(data, key, cap, fx, at_start=at_start)
+        for effect in fx:
+            effect()
+        return result
+
+    def _store_refusal(self) -> InstructionsNotice | None:
+        """The ``unreadable store`` line, once per handle."""
+        name, path = self._last.name, self._last.path
+        key = ("refused", "unreadable store", path, 0)
+        if key in self._warned:
+            return None
+        self._warned.add(key)
+        return self._notice(
+            "refused", name, path, self._last.size, self._last.state,
+            reason="unreadable store",
+            text=f"{display_name(name)} not used this turn (unreadable store)",
+        )
+
+    @staticmethod
+    def _notice(
+        cause: InstructionsCause, name: str, path: str, size: int, state: str, *,
+        text: str, shadowed: str | None = None, reason: str | None = None,
+    ) -> InstructionsNotice:
+        return InstructionsNotice(
+            cause=cause, name=display_name(name), path=path, size=size, state=state,
+            shadowed=shadowed, reason=reason, text=text,
+        )
+
+    def _once(self, key: tuple, fx: list[Callable[[], None]]) -> bool:
+        """True the first time ``key`` is seen; remembered only if the call's writes succeed."""
+        if key in self._warned:
+            return False
+        fx.append(lambda: self._warned.add(key))
+        return True
+
+    def _marks(self, pending: dict[str, str]) -> _Marks:
+        own = self._marked or self.sitting_id in pending
+        foreign = {sid for sid in pending if sid != self.sitting_id}
+        live, dead = set(foreign), set()
+        if foreign:
+            try:
+                alive = {s.session_id for s in session_presence.live_sessions(self._config_dir)}
+            except Exception:  # noqa: BLE001 — cannot tell who is alive: nobody's mark is dead
+                alive = set(foreign)
+            live, dead = foreign & alive, foreign - alive
+        if self._no_input:
+            dead = set()
+        return _Marks(own, frozenset(live), frozenset(dead))
+
+    def _set_last(
+        self, fx: list[Callable[[], None]], record: InstructionsRecord | None, *,
+        marks_open: bool, digest: str | None, too_large: bool = False,
+        name: str = "", path: str = "", size: int = 0,
+    ) -> None:
+        if record is not None:
+            name, path, size = record.name, record.path, record.size
+        state = InstructionsState(
+            name or self._last.name, path or self._last.path, size,
+            record.digest if record is not None else digest,
+            _state_name(record, marks_open=marks_open, digest=digest, too_large=too_large),
+        )
+        fx.append(lambda: setattr(self, "_last", state))
+
+    def _failure(
+        self, read: GuardedRead, *, name: str, path: str, record: InstructionsRecord | None,
+        cap: int, stored: frozenset[Notice], fx: list[Callable[[], None]], at_start: bool,
+    ) -> InstructionsNotice | None:
+        """The line for a guard failure, once per ``(cause, reason, path, size)``."""
+        shown = display_name(name)
+        if read.failure == "too_large":
+            size = read.size
+            text = (
+                f"{shown} ({format_kb(size)}) over the {format_kb(cap)} limit "
+                "(instructions.max_ratio); not used"
+            )
+            row = Notice("instructions_too_large", path, path, repr(size), text)
+            self._set_last(
+                fx, record, marks_open=False, digest=None, too_large=True,
+                name=name, path=path, size=size,
+            )
+            if at_start:
+                fx.append(lambda: setattr(self, "_too_large_notice", row))
+                return None
+            if any(
+                n.kind == row.kind and n.subject == path and n.value == row.value for n in stored
+            ):
+                return None
+            if not self._once(("too_large", None, path, size), fx):
+                return None
+            fx.append(lambda: setattr(self, "_awaiting_too_large", row))
+            return self._notice("too_large", name, path, size, "too_large", text=text)
+        if at_start:
+            return None
+        reason = read.failure or "unreadable"
+        if not self._once(("refused", reason, path, 0), fx):
+            return None
+        return self._notice(
+            "refused", name, path, record.size if record is not None else 0,
+            self._last.state, reason=reason, text=f"{shown} not used this turn ({reason})",
+        )
+
+    def _decide(
+        self, data: dict, key: str, cap: int, fx: list[Callable[[], None]], *, at_start: bool
+    ) -> tuple[str | None, InstructionsNotice | None]:
+        """One call of the D-28 state machine, inside the store transaction. Everything that
+        changes the handle itself is queued in ``fx`` and applied only if the writes succeed."""
+        raw = _inst_raw(data, key)
+        record = _record_from_dict(raw)
+        pending = dict(_pending_from_dict(raw))
+        stored = _stored_notices(_entry(data, key))
+        self._recorded_path = record.path if record is not None else None
+        usable = record is not None and record.state == "yes"
+        if not usable and self._mem_state != "yes":
+            if record is None and self._basis in ("layer", "trusted") and not self._no_input:
+                pass  # the no-record sitting: used, with the start line owed
+            else:
+                return None, None
+        if self._awaiting is not None:
+            if record is None or (record.state == "yes" and record.digest != self._awaiting.digest):
+                return self._awaiting_step(cap, pending, stored, fx)
+            fx.append(self._clear_awaiting)
+        if not usable:
+            return self._no_record(cap, stored, fx, at_start=at_start)
+        return self._with_record(data, key, record, pending, cap, stored, fx, at_start=at_start)
+
+    def _clear_awaiting(self) -> None:
+        self._awaiting = None
+        self._start_line = None
+
+    def _no_record(
+        self, cap: int, stored: frozenset[Notice], fx: list[Callable[[], None]], *, at_start: bool
+    ) -> tuple[str | None, InstructionsNotice | None]:
+        """No record: the file is used this sitting and its line is owed (D-28 step 9)."""
+        cand = self._candidate or first_candidate(self._root)
+        if cand is None:
+            return None, None
+        path = str(cand.real)
+        read = guarded_read(cand.real, self._root, cap)
+        if read.failure is not None or read.data is None or read.digest is None:
+            notice = self._failure(
+                read, name=cand.name, path=path, record=None, cap=cap, stored=stored, fx=fx,
+                at_start=at_start,
+            )
+            return None, notice
+        text = read.data.decode("utf-8", errors="replace")
+        self._set_last(
+            fx, None, marks_open=False, digest=read.digest, name=cand.name, path=path,
+            size=read.size,
+        )
+        if self._no_input or self._basis not in ("layer", "trusted"):
+            return text, None
+        line = _start_text(cand.name, read.size)
+        aw = _Awaiting(cand.name, path, read.size, read.digest, line)
+
+        def arm() -> None:
+            self._awaiting, self._start_line, self._sitting_digest = aw, line, aw.digest
+
+        fx.append(arm)
+        if at_start:
+            return text, None
+        fx.append(lambda: setattr(self, "_start_notice_given", True))
+        return text, self._notice("start", cand.name, path, read.size, "none", text=line)
+
+    def _awaiting_step(
+        self, cap: int, pending: dict[str, str], stored: frozenset[Notice],
+        fx: list[Callable[[], None]],
+    ) -> tuple[str | None, InstructionsNotice | None]:
+        """A start line is owed: the digest it described is the one in use this sitting."""
+        aw = self._awaiting
+        assert aw is not None
+        read = guarded_read(aw.path, self._root, cap)
+        if read.failure is not None or read.data is None or read.digest is None:
+            return None, self._failure(
+                read, name=aw.name, path=aw.path, record=None, cap=cap, stored=stored, fx=fx,
+                at_start=False,
+            )
+        text = read.data.decode("utf-8", errors="replace")
+        if read.digest == aw.digest:
+            if self._start_notice_given:
+                return text, None
+            fx.append(lambda: setattr(self, "_start_notice_given", True))
+            return text, self._notice("start", aw.name, aw.path, aw.size, "none", text=aw.text)
+        return text, None
+
+    def _with_record(
+        self, data: dict, key: str, record: InstructionsRecord, pending: dict[str, str],
+        cap: int, stored: frozenset[Notice], fx: list[Callable[[], None]], *, at_start: bool,
+    ) -> tuple[str | None, InstructionsNotice | None]:
+        read = guarded_read(record.path, self._root, cap)
+        if read.failure is not None or read.data is None or read.digest is None:
+            return None, self._failure(
+                read, name=record.name, path=record.path, record=record, cap=cap, stored=stored,
+                fx=fx, at_start=at_start,
+            )
+        text = read.data.decode("utf-8", errors="replace")
+        if read.digest == record.digest:
+            self._set_last(fx, record, marks_open=bool(pending), digest=read.digest)
+            return text, None
+        return None, None  # a changed file: the change-sensing rules (task 2)
+
+    # ---- start
+
+    def _precheck(self, window_tokens: int) -> None:
+        """The start hook's own check (D-48): one pass of the state machine in start mode.
+
+        It decides the start line, the summary entity and the too-large notice. In start mode a
+        change found with no mark is adopted through the start line (written only by
+        ``on_delivered``), so one change never draws two lines."""
+        try:
+            self._run(window_tokens, at_start=True)
+        except (OSError, RuntimeError) as exc:
+            log.debug("project_instructions_precheck_failed", error=str(exc))
+            self._summary_entity = None
+            self._start_line = None
+            self._awaiting = None
+            return
+        self._summary_entity = self._entity()
+
+    def _entity(self) -> str | None:
+        """The counts entity text for the summary line (D-54)."""
+        if self._awaiting is not None:
+            return display_name(self._awaiting.name)
+        name = display_name(self._last.name)
+        if self._last.state == "none":
+            return None
+        return name
+
+    # ---- delivery
+
+    def on_delivered(self) -> None:
+        """The start line (or the oversized line) reached a person: write what it described.
+
+        Writes the ``yes`` record for the digest the line described, plus ``harness_written``
+        for a digest dropped in the same sitting, and the oversized notice off the terminal.
+        A second call, ``--no-input`` or a declined sitting writes nothing; it never raises."""
+        if self._no_input or self._declined:
+            return
+        aw, big = self._awaiting, self._awaiting_too_large
+        if aw is None and big is None:
+            return
+        try:
+            key = _normalize_root(self._root)
+            with _store_transaction(self._config_dir) as data:
+                raw = _inst_raw(data, key)
+                current = _record_from_dict(raw)
+                pending = dict(_pending_from_dict(raw))
+                if aw is not None and not (current is not None and current.state == "off"):
+                    record = InstructionsRecord(
+                        path=aw.path, name=display_name(aw.name), digest=aw.digest, size=aw.size,
+                        state="yes", harness_written=self._dropped_digest,
+                    )
+                    pending.pop(self.sitting_id, None)
+                    _put_record(data, key, record, pending)
+                if big is not None:
+                    entry = _entry_for_write(data, key)
+                    rows = set(_stored_notices(entry)) | {big}
+                    entry["notices"] = [
+                        _notice_to_dict(n)
+                        for n in sorted(rows, key=lambda n: (n.kind, n.subject, n.file, n.value, n.text))
+                    ]
+        except Exception as exc:  # noqa: BLE001 — a receipt must never raise into a channel
+            log.debug("project_instructions_receipt_failed", error=str(exc))
+            return
+        self._awaiting = None
+        self._start_line = None
+        self._awaiting_too_large = None
+        if aw is not None and self._dropped_digest is not None:
+            self._marked = False
+        self._dropped_digest = None
+
+
+def open_project_instructions(
+    root: Any,
+    *,
+    sitting_id: str,
+    max_ratio: float,
+    basis: str,
+    no_input: bool,
+    window_tokens: int,
+    config_dir: Any = None,
+) -> ProjectInstructions | None:
+    """The handle for ``root``, or None when no instructions file resolves there (D-67).
+
+    A default-use basis (``layer`` / ``trusted``) is demoted to ``awaiting_trust`` when the file
+    is not owned by this account (D-68). The start-time pre-check runs before the handle is
+    returned: it decides the start line, the summary entity and the too-large notice."""
+    root_real = Path(root).resolve()
+    candidate = first_candidate(root_real)
+    if candidate is None:
+        return None
+    if basis in ("layer", "trusted") and hasattr(os, "geteuid"):
+        try:
+            owned = os.stat(candidate.real).st_uid == os.geteuid()
+        except OSError:
+            owned = False
+        if not owned:
+            basis = "awaiting_trust"
+    handle = ProjectInstructions(
+        root_real, sitting_id=sitting_id, max_ratio=max_ratio, basis=basis, no_input=no_input,
+        config_dir=config_dir,
+    )
+    handle._candidate = candidate
+    handle._last = InstructionsState(
+        display_name(candidate.name), str(candidate.real), 0, None, "none"
+    )
+    handle._precheck(window_tokens)
+    return handle
