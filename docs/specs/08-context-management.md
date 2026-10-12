@@ -603,8 +603,11 @@ of these hold:
 
 - the assistant message carries only that one tool call and no other content;
 - the result is a failure that the permission gate neither refused nor staged for a human;
-- the tool declares `host: safe` (a tool that can touch the host is never dropped, and a tool the
-  manager cannot look up counts as one that can);
+- the tool declares `host: safe` (a tool declared `dangerous` is never dropped, and a tool the
+  manager cannot look up, or a name that any `dangerous` tool also bears, counts as `dangerous`;
+  `host` is a co-residence class, not a promise of no side effects, so a failed MCP, `agent` or
+  memory-writer call, and a refusal stamped failed but not denied such as the tool-call budget
+  refusal, can leave the request once an identical call succeeds);
 - a later call with the same call-only signature (the tool name plus its canonical arguments)
   succeeded.
 
