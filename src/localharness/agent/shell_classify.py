@@ -1519,7 +1519,8 @@ def _build(
     for payload_text in payload_texts:
         payload_cwd = cwd.copy()
         payload_cwd.env_redirect = payload_cwd.env_redirect or env_redirect
-        inner_segments, _ = _classify_text(payload_text, settings, payload_cwd)
+        # CR-01 / WR-54: the shell that runs the payload joins its continuations (and drops its comments).
+        inner_segments, _ = _classify_text(_join_continuations(payload_text), settings, payload_cwd)
         extras.extend(inner_segments)
 
     host = _make_segment(
