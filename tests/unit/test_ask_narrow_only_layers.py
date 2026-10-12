@@ -132,6 +132,7 @@ def test_a_project_layer_unions_onto_the_global_layers_own_list(layers) -> None:
 @pytest.mark.parametrize("field,added", [
     ("source_commands", "include"),
     ("git_config_dangerous_keys", "deploy.command"),
+    ("exec_redirect_env_vars", "MY_TOOL_CONFIG_X"),
 ])
 def test_the_new_rule_sets_union_and_cannot_be_emptied(layers, caplog, field, added) -> None:
     """Both critic-F3 rule sets flag MORE calls as the list grows, so a project layer may add to
@@ -147,6 +148,17 @@ def test_the_new_rule_sets_union_and_cannot_be_emptied(layers, caplog, field, ad
         gate = _gate(global_dir, ws)
     assert dropped in getattr(gate, field), "a project layer subtracted from the rule set"
     assert any(field in r.getMessage() for r in caplog.records)
+
+
+def test_a_project_layer_cannot_take_path_off_the_env_redirect_table(layers, caplog) -> None:
+    """SHELL-03 / T-10-43: the table is grow-only; a list missing PATH keeps PATH and warns."""
+    global_dir, ws = layers
+    without_path = [n for n in SHIPPED.exec_redirect_env_vars if n != "PATH"]
+    _project_ask(ws, {"exec_redirect_env_vars": without_path})
+    with caplog.at_level(logging.WARNING):
+        gate = _gate(global_dir, ws)
+    assert "PATH" in gate.exec_redirect_env_vars
+    assert any("exec_redirect_env_vars" in r.getMessage() for r in caplog.records)
 
 
 def test_network_hosts_may_only_be_switched_on(layers, caplog) -> None:

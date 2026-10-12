@@ -361,6 +361,14 @@ class ShellSegment:
     ``auto`` reads it as "ask": the whole narrowing rests on knowing where the command points,
     so not knowing is the one answer that cannot be allowed."""
 
+    env_redirect: bool = False
+    """True when an environment assignment on this command, or earlier in its shell sequence,
+    redirects what runs or what config it loads (:data:`EXEC_REDIRECT_ENV_VARS_DEFAULT`; Phase 10,
+    D-27, D-41).
+
+    Never read-only: ``PATH=./d ls`` signs as ``ls`` but is not the ``ls`` the tier assumed. This
+    is the fact the read-only tier and Phase 11's reader predicate read."""
+
     program: str = field(default="", compare=False, repr=False)
     """The program word as the command line wrote it, directory kept (`~/.localharness/tools/a.sh`,
     `/usr/bin/python3`) — after a wrapper is peeled, the peeled program's word. `argv[0]` is its
@@ -771,6 +779,43 @@ covers every URL base, dots and slashes included), matched case-insensitively be
 section and variable names that way. Over-matching is the safe direction: it asks.
 """
 
+EXEC_REDIRECT_ENV_VARS_DEFAULT: tuple[str, ...] = (
+    "PATH", "BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "HOME", "*_CONFIG*",
+    "GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_PAGER", "PAGER", "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_*",
+    "GIT_DIR", "GIT_COMMON_DIR",
+)
+"""Environment variables whose value redirects WHICH program runs or WHAT config a program loads
+(Phase 10, SHELL-03, D-25, D-48, D-70).
+
+Covers the executable search path (``PATH``), shell startup scripts (``BASH_ENV``, ``ENV``),
+preload and audit libraries (``LD_PRELOAD``, ``LD_LIBRARY_PATH``, ``LD_AUDIT``), the home and
+config directories git and other tools read (``HOME``, ``*_CONFIG*`` such as
+``RIPGREP_CONFIG_PATH`` and ``XDG_CONFIG_HOME``), git's external diff, ssh command, pager and
+editors, config injected through the environment (``GIT_CONFIG_PARAMETERS``, ``GIT_CONFIG_COUNT``,
+``GIT_CONFIG_KEY_*``) and an alternate git directory (``GIT_DIR``, ``GIT_COMMON_DIR``). A plain
+``git diff`` or ``ls`` reads none of them as a command, but each can make a read run one.
+
+``*`` is an :func:`fnmatch.fnmatchcase` glob over the whole name, matched CASE-SENSITIVELY
+(environment names are). The list is grow-only from a project layer. Over-matching asks, which is
+the safe direction."""
+
+COMMAND_VALUED_ENV_VARS: frozenset[str] = frozenset({
+    "GIT_PAGER", "PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_EXTERNAL_DIFF",
+    "GIT_SSH_COMMAND",
+})
+"""The table names whose value is itself a command line (D-26).
+
+An empty value, or one the full classifier judges read-only, keeps the read-only tier
+(``GIT_PAGER=cat git log``); any other value takes the command out of it. The one exemption, fixed
+in code: it is not a ``GateSettings`` or ``AskConfig`` field, so no layer can move a name into it."""
+
+ENV_REDIRECT_EXCLUDED: frozenset[str] = frozenset({"GIT_CONFIG_NOSYSTEM"})
+"""Names that never set the redirect fact even though ``*_CONFIG*`` matches them (D-26).
+
+``GIT_CONFIG_NOSYSTEM`` is a boolean that only drops ``/etc/gitconfig``; it names no file and no
+command. Exact and case-sensitive, fixed in code, and no layer extends it."""
+
 SOURCE_COMMANDS_DEFAULT: frozenset[str] = frozenset({"source", "."})
 """Shell builtins that run a FILE's contents in the current shell (PRD §3.2 step 7).
 
@@ -1073,6 +1118,7 @@ class GateSettings:
     inline_by_nature: frozenset[str] = INLINE_BY_NATURE_DEFAULT
     source_commands: frozenset[str] = SOURCE_COMMANDS_DEFAULT
     git_config_dangerous_keys: tuple[str, ...] = GIT_CONFIG_DANGEROUS_KEYS_DEFAULT
+    exec_redirect_env_vars: tuple[str, ...] = EXEC_REDIRECT_ENV_VARS_DEFAULT
     wrapper_commands: frozenset[str] = WRAPPER_COMMANDS_DEFAULT
     dropped_commands: frozenset[str] = DROPPED_COMMANDS_DEFAULT
     subcommand_tools: frozenset[str] = SUBCOMMAND_TOOLS_DEFAULT
