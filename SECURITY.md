@@ -1180,7 +1180,9 @@ of the file, a shell write the classifier reads, or a child agent's) is dropped 
 marked, and offered back through `/instructions on`, so a model cannot rewrite its own standing
 orders in the middle of a session and have them adopted unseen. `/instructions off` records a no
 that no later edit overturns until `on`. Delegated children receive the file unless the machine
-config turns that off.
+config turns that off; a child it opted out
+(`instructions.children: false`) still marks its own writes to the file, so its rewrite is dropped the
+same way, and it just never sees the text.
 
 The record lives in `project_records.yaml` in the config folder, with its lock sidecar
 `project_records.yaml.lock`. Both are protected config-folder entries (a write of either asks, even

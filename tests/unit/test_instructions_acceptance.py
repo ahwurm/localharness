@@ -247,6 +247,102 @@ async def test_a_childs_write_under_a_parent_that_only_dispatched_agent_is_marke
     assert "push to main" not in "".join(parent_llm.roles)
 
 
+class _ShellWritingRegistry(_Registry):
+    """Like `_Registry`, but a `bash_exec` rewrites the file (the double never runs a command)."""
+
+    def __init__(self, root: Path, text: str, **kw) -> None:
+        super().__init__(root, **kw)
+        self._text = text
+
+    async def dispatch(self, name, arguments, agent_id, division_id, tool_config):
+        if name == "bash_exec":
+            from localharness.tools.base import ToolResult
+
+            record = read_instructions(self.root)
+            marks = tuple(sid for sid, _ in record.pending) if record is not None else ()
+            self.marks_at_dispatch.append((name, marks))
+            (self.root / "CLAUDE.md").write_text(self._text, encoding="utf-8")
+            return ToolResult(output="ok", success=True)
+        return await super().dispatch(name, arguments, agent_id, division_id, tool_config)
+
+
+def _shell_call(root: Path, call_id: str = "child-1"):
+    return FakeLLMResponse(content=None, tool_calls=[
+        FakeToolCall(id=call_id, name="bash_exec", arguments={"command": f"cat > {root / 'CLAUDE.md'}"})])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["write", "bash_exec"])
+async def test_an_opted_out_childs_rewrite_is_marked_and_not_adopted(
+        instructions_home, bus, tmp_path, how):
+    """`instructions.children: false` (W-1): the child holds the mark-only view of the handle."""
+    root = make_root(tmp_path, {"CLAUDE.md": OLD})
+    handle = _handle(root)
+    first = _write_call(root, NEW, call_id="child-1") if how == "write" else _shell_call(root)
+    child_llm = _RoleLLM([first, _done("child done")])
+    child_registry = _ShellWritingRegistry(root, NEW)
+
+    async def _run_child(arguments):
+        child = _loop(bus, child_llm, handle.mark_only(), child_registry,
+                      session_id="sit-A-child", name="child")
+        await child.run_turn(arguments["task"])
+
+    parent_registry = _Registry(root, on_agent=_run_child)
+    agent_call = FakeLLMResponse(content=None, tool_calls=[
+        FakeToolCall(id="p-1", name="agent", arguments={"agent": "explore", "task": "tidy the rules"})])
+    parent_llm = _RoleLLM([agent_call, _done("parent done"), _done("later")])
+    parent = _loop(bus, parent_llm, handle, parent_registry)
+
+    await parent.run_turn("delegate")
+
+    # the child named the file through the view: the mark is in the shared store before it ran
+    assert child_registry.marks_at_dispatch == [(how, ("sit-A",))]
+    assert (root / "CLAUDE.md").read_text(encoding="utf-8") == NEW
+    assert handle.state.state == "harness_written"
+    # and the child's prompt carried no instructions at all (no fence, no text)
+    assert HEADER not in "".join(child_llm.roles) and OLD not in "".join(child_llm.roles)
+    assert _lines(bus) == ["CLAUDE.md changed by the model; not used — /instructions on"]
+
+    await parent.run_turn("what changed?")
+
+    assert HEADER not in parent_llm.roles[-1], "the root's next assembly dropped the changed file"
+    assert "push to main" not in "".join(parent_llm.roles)
+    assert "changed, using it" not in "".join(_lines(bus))
+    assert _stored(root)["harness_written"] == _sha(NEW)
+    assert run_instructions_command(handle, "on").startswith("using CLAUDE.md (")
+
+
+@pytest.mark.asyncio
+async def test_a_full_handle_child_still_sees_the_fence_and_marks(instructions_home, bus, tmp_path):
+    """`instructions.children: true` (the default) is unchanged: the child gets the text and marks."""
+    root = make_root(tmp_path, {"CLAUDE.md": OLD})
+    handle = _handle(root)
+    child_llm = _RoleLLM([_write_call(root, NEW, call_id="child-1"), _done("child done")])
+    child_registry = _Registry(root)
+    child = _loop(bus, child_llm, handle, child_registry, session_id="sit-A-child", name="child")
+
+    await child.run_turn("tidy the rules")
+
+    assert child_registry.marks_at_dispatch == [("write", ("sit-A",))]
+    assert HEADER in child_llm.roles[0] and OLD in child_llm.roles[0]
+
+
+def test_the_mark_only_view_exposes_no_text_and_leaves_the_store_alone(instructions_home, tmp_path):
+    root = make_root(tmp_path, {"CLAUDE.md": OLD})
+    handle = _handle(root)
+    view = handle.mark_only()
+    before = store_file().read_bytes()
+
+    assert view.section(WINDOW) == (None, None)
+    assert view.section(WINDOW, cancelled=True) == (None, None)
+    assert store_file().read_bytes() == before, "the view never reads or writes the store on its own"
+    assert view.candidates == handle.candidates and view.recorded_path == handle.recorded_path
+    assert not hasattr(view, "state") and not hasattr(view, "set_state")
+
+    view.mark_pending()
+    assert set(dict(read_instructions(root).pending)) == {"sit-A"}, "a mark lands through the one handle"
+
+
 # ---------------------------------------------------------------------------- shadowing
 
 

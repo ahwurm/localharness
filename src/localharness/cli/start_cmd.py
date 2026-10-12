@@ -204,6 +204,14 @@ def _open_project_instructions(
         return None
 
 
+def _children_instructions(handle: Any, children: bool) -> Any:
+    """What the runner hands each child loop: the handle itself, or (``instructions.children:
+    false``) its mark-only view; None when there is no handle (W-1)."""
+    if handle is None or children:
+        return handle
+    return handle.mark_only()
+
+
 def _available_hint(names: list[str]) -> str:
     """ENAB-04 / PRD §4: nothing runs because it was installed, and the operator is told how to turn
     it on — once, at start."""
@@ -2580,8 +2588,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _run_agent = make_explore_agent_runner(
             llm=llm,
             # D-51: children get the instructions too unless the machine opted out
-            # (`instructions.children`, machine-only); the loop keeps the handle either way.
-            project_instructions=(instructions_handle if harness.instructions.children else None),
+            # (`instructions.children`, machine-only); the loop keeps the handle either way. An
+            # opted-out child still holds a mark-only view (W-1): no text, no notice, but its
+            # write to the file is marked so the root never adopts it as the person's edit.
+            project_instructions=_children_instructions(instructions_handle, harness.instructions.children),
             bus=bus,
             base_registry=tool_registry,
             permission_evaluator=perm_eval,

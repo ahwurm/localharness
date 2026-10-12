@@ -1406,6 +1406,12 @@ class ProjectInstructions:
         except (OSError, RuntimeError) as exc:
             log.debug("project_instructions_mark_failed", error=str(exc))
 
+    def mark_only(self) -> "MarkOnlyInstructions":
+        """The view an opted-out child loop holds (``instructions.children: false``, W-1): it marks
+        exactly like the handle, so a child's rewrite of the file is never adopted as the person's
+        edit, but it receives no text and no notice."""
+        return MarkOnlyInstructions(self)
+
     # ---- start
 
     def _precheck(self, window_tokens: int) -> None:
@@ -1628,6 +1634,36 @@ class ProjectInstructions:
         if aw is not None and self._dropped_digest is not None:
             self._marked = False
         self._dropped_digest = None
+
+
+class MarkOnlyInstructions:
+    """A child loop's view of the handle when the machine opted its children out (W-1).
+
+    It exposes only the marking surface the loop uses to name a write (``candidates``,
+    ``recorded_path``, ``mark_pending``), all through the one real handle, so the root's next
+    assembly sees the mark. ``section()`` answers no text and no notice and never touches the store:
+    the child's prompt carries no fence and the child publishes nothing."""
+
+    __slots__ = ("_handle",)
+
+    def __init__(self, handle: ProjectInstructions) -> None:
+        self._handle = handle
+
+    @property
+    def candidates(self) -> tuple[Path, Path, Path]:
+        return self._handle.candidates
+
+    @property
+    def recorded_path(self) -> Path | None:
+        return self._handle.recorded_path
+
+    def mark_pending(self) -> None:
+        self._handle.mark_pending()
+
+    def section(self, window_tokens: int, *, cancelled: bool = False) -> tuple[
+        str | None, InstructionsNotice | None
+    ]:
+        return None, None
 
 
 def open_project_instructions(

@@ -375,7 +375,7 @@ async def test_the_runner_and_the_repl_hold_the_same_handle(tmp_path, monkeypatc
     assert _one(rec, "repl")["instructions"] is handle
 
 
-async def test_children_false_takes_the_handle_from_the_runner_only(
+async def test_children_false_hands_the_runner_a_mark_only_view_of_the_handle(
         tmp_path, monkeypatch, fake_home):
     _home, g, ws = _workspace_start(tmp_path, monkeypatch, fake_home)
     proj = _project(ws)
@@ -391,8 +391,19 @@ async def test_children_false_takes_the_handle_from_the_runner_only(
 
     handle = _handle_of(rec)
     assert handle is not None
-    assert _one(rec, "runner")["project_instructions"] is None
+    view = _one(rec, "runner")["project_instructions"]
+    assert view is not None and view is not handle, "W-1: the opted-out child still marks"
+    assert view.section(1000) == (None, None), "but it is handed no text and no notice"
     assert _one(rec, "repl")["instructions"] is handle
+
+
+def test_children_true_hands_the_handle_itself_and_no_handle_stays_none():
+    from localharness.cli.start_cmd import _children_instructions
+
+    sentinel = object()
+    assert _children_instructions(sentinel, True) is sentinel
+    assert _children_instructions(None, True) is None
+    assert _children_instructions(None, False) is None
 
 
 async def test_a_declined_root_hands_nothing_to_the_runner_the_repl_or_the_channel(
