@@ -137,12 +137,13 @@ def test_serve_command_llamacpp_exact_argv():
 )
 def test_start_stop_lifecycle(tmp_path):
     cmd = [sys.executable, "-c", "import time; print('up', flush=True); time.sleep(60)"]
-    pid = server.start_server(tmp_path, cmd)
+    pid = server.start_server(tmp_path, cmd, port=8099)
     try:
         assert server.server_pid(tmp_path) == pid
         assert server.pid_path(tmp_path).exists()
-        pid_text, start_text = server.pid_path(tmp_path).read_text(encoding="utf-8").split()
-        assert int(pid_text) == pid and int(start_text) > 0  # `<pid> <starttime>` (D-17)
+        pid_text, start_text, port_text = server.pid_path(tmp_path).read_text(encoding="utf-8").split()
+        # `<pid> <starttime> <port>` (D-17, D-23)
+        assert int(pid_text) == pid and int(start_text) > 0 and port_text == "8099"
     finally:
         assert server.stop_server(tmp_path) is True
     deadline = time.monotonic() + 5
