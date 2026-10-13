@@ -1,9 +1,10 @@
 """What a launch derives from the model's own header and the machine's knobs (spec 20 §6.0-6.2).
 
-Pure: this module reads nothing but its arguments (a later plan adds the one bounded config.json
-reader for vLLM parsers), runs no process, and executes nothing from any file. `derive` decides the
-K/V cache type and MTP drafting of a llama.cpp launch; it never writes a record and never raises on
-a hostile header. Every derived field carries one reason (`Tuned.reasons`, keyed by field name) so
+Pure but for one read: `derive` touches nothing but its arguments, and the only file this module
+opens is a vLLM checkpoint's `config.json`, through `read_model_config` (bounded, `open_regular`,
+never raises). It runs no process and executes nothing from any file. `derive` decides the K/V cache
+type and MTP drafting of a llama.cpp launch and the reasoning / tool-call parsers of a vLLM launch;
+it never writes a record and never raises on a hostile header or config. Every derived field carries one reason (`Tuned.reasons`, keyed by field name) so
 the launch can say why.
 
 Precedence, for every derived flag: the record field > `extra_args` / `env:` in any spelling >
@@ -11,11 +12,14 @@ the derivation. A derivation is the fallback for a person who said nothing.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
+import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from localharness.core.private_files import open_regular
 from localharness.provider.autosense import (
     flash_attn_off,
     has_cache_type_flag,
@@ -24,6 +28,32 @@ from localharness.provider.autosense import (
 
 # llama-server's own default; deriving it would change the 0.18 argv, so it derives nothing (D-08).
 _LLAMA_DEFAULT_CACHE_TYPE = "f16"
+
+
+# vLLM parsers by the checkpoint's config.json `model_type` (spec 20 §6.3): (reasoning, tool-call),
+# None where the family has no reasoning parser. The ONLY place a parser name is chosen: a
+# `model_type` read from a file is a lookup key here and is never emitted (D-12).
+MODEL_TYPE_PARSERS: Mapping[str, tuple[str | None, str | None]] = MappingProxyType({
+    "qwen3": ("qwen3", "qwen3_coder"),
+    "qwen3_moe": ("qwen3", "qwen3_coder"),
+    "qwen3_next": ("qwen3", "qwen3_coder"),
+    "qwen3_5": ("qwen3", "qwen3_coder"),
+    "qwen3_5_moe": ("qwen3", "qwen3_coder"),
+    "gemma4": ("gemma4", "gemma4"),
+    "glm4_moe": ("glm45", "glm45"),
+    "glm4v_moe": ("glm45", "glm45"),
+    "deepseek_v3": ("deepseek_r1", "deepseek_v3"),
+    "gpt_oss": ("openai_gptoss", "openai"),
+    "llama": (None, "llama3_json"),
+    "llama4": (None, "llama4_json"),
+    "mistral": (None, "mistral"),
+    "mistral3": (None, "mistral"),
+    "kimi_k2": (None, "kimi_k2"),
+})
+
+MODEL_CONFIG_CAP = 1 << 20  # a config.json larger than this derives nothing
+
+_PARSER_FLAGS = ("--reasoning-parser", "--tool-call-parser", "--enable-auto-tool-choice")
 
 
 def _empty_reasons() -> Mapping[str, str]:
@@ -76,6 +106,77 @@ def draft_share(header: Mapping[str, Any]) -> float:
     return 1.0 if n is None else 1 + n / header["block_count"]
 
 
+def has_parser_flag(extra_args: Sequence[str]) -> bool:
+    """True when `extra_args` carries `--reasoning-parser`, `--tool-call-parser` or
+    `--enable-auto-tool-choice`, as a bare flag or in `--flag=value` form."""
+    return any(isinstance(a, str) and a.split("=", 1)[0] in _PARSER_FLAGS for a in extra_args)
+
+
+def _checkpoint_config_path(spec: Any) -> str | None:
+    """Where the checkpoint's config.json would be: the registry entry's directory, a model that is
+    itself a directory, else the Hugging Face cache snapshot (a local cache lookup, no network)."""
+    entry = spec.entry_for(spec.model)
+    if entry is not None:
+        return os.path.join(os.path.expanduser(entry.path), "config.json")
+    model = os.path.expanduser(spec.model)
+    if os.path.isdir(model):
+        return os.path.join(model, "config.json")
+    from huggingface_hub import try_to_load_from_cache
+
+    found = try_to_load_from_cache(repo_id=spec.model, filename="config.json")
+    return found if isinstance(found, str) else None
+
+
+def read_model_config(spec: Any) -> Mapping[str, Any] | None:
+    """The parsed config.json of a vLLM record's checkpoint, or None.
+
+    Bounded and failure-tolerant (D-12, D-22): `open_regular` (a FIFO or a directory is refused
+    without blocking), at most `MODEL_CONFIG_CAP` bytes, `json.loads` only (no import, nothing run),
+    and the value kept only when it is an object. A missing, unreadable, oversized, malformed or
+    deeply nested file, or any other runtime, gives None; this never raises."""
+    try:
+        if getattr(spec, "runtime", None) != "vllm":
+            return None
+        path = _checkpoint_config_path(spec)
+        if path is None:
+            return None
+        fd = open_regular(path)
+        with os.fdopen(fd, "rb") as fh:
+            raw = fh.read(MODEL_CONFIG_CAP + 1)
+        if len(raw) > MODEL_CONFIG_CAP:
+            return None
+        value = json.loads(raw)
+    except (OSError, ValueError, RecursionError):  # missing, not a file, unreadable, malformed, too deep
+        return None
+    except Exception:  # the hub library on an odd repo id, an odd spec: derive nothing, never raise
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _derive_vllm(spec: Any, model_config: Mapping[str, Any] | None) -> Tuned:
+    if not isinstance(model_config, dict):
+        return NOTHING_DERIVED
+    model_type = model_config.get("model_type")
+    row = MODEL_TYPE_PARSERS.get(model_type) if isinstance(model_type, str) else None
+    if row is None:
+        return NOTHING_DERIVED
+    entry = spec.entry_for(spec.model)
+    extra = [*(getattr(spec, "extra_args", None) or []), *(entry.extra_args if entry is not None else [])]
+    if has_parser_flag(extra):
+        return NOTHING_DERIVED
+    reasoning = row[0] if spec.reasoning_parser is None else None
+    tool = row[1] if spec.tool_call_parser is None else None
+    fields: dict[str, Any] = {}
+    reasons: dict[str, str] = {}
+    if reasoning is not None:
+        fields["reasoning_parser"] = reasoning
+        reasons["reasoning_parser"] = f"model_type={model_type}"
+    if tool is not None:
+        fields["tool_call_parser"] = tool
+        reasons["tool_call_parser"] = f"model_type={model_type}"
+    return Tuned(reasons=reasons, **fields) if fields else NOTHING_DERIVED
+
+
 def derive(spec: Any, header: Mapping[str, Any], autosense: Any, *,
            model_config: Mapping[str, Any] | None = None) -> Tuned:
     """The flags a launch of `spec` derives (llama.cpp side; `model_config` is the vLLM side's input).
@@ -84,7 +185,11 @@ def derive(spec: Any, header: Mapping[str, Any], autosense: Any, *,
     `env` pin one in any spelling, flash attention is switched off, or the knob is `f16`.
     `spec_type` is `draft-mtp` (with `autosense.draft_p_min`) only when `autosense.draft_mtp` is on,
     the record's `speculative` is unset, no speculative flag is set by hand, and the header declares
-    MTP layers. Any other runtime derives nothing here."""
+    MTP layers. A vLLM record derives its reasoning / tool-call parsers from `model_config`'s
+    `model_type` (the table above) unless the record's field or a parser flag in `extra_args` says
+    otherwise. Any other runtime derives nothing."""
+    if getattr(spec, "runtime", None) == "vllm":
+        return _derive_vllm(spec, model_config)
     if getattr(spec, "runtime", None) != "llamacpp":
         return NOTHING_DERIVED
     extra = list(getattr(spec, "extra_args", None) or [])

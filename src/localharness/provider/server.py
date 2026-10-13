@@ -612,6 +612,8 @@ def serve_command(
     cache_type: str | None = None,
     spec_type: str | None = None,
     draft_p_min: float | None = None,
+    reasoning_parser: str | None = None,
+    tool_call_parser: str | None = None,
 ) -> list[str]:
     """Build the launch command for srv.model. Pure: list argv, no shell, no I/O.
 
@@ -641,7 +643,13 @@ def serve_command(
     (`speculative: draft-mtp` emits `--spec-type draft-mtp` alone, `off` emits nothing); `~` in
     the model, mmproj and key-file paths is expanded as a string (no stat); the key file rides argv
     only when `key_file_ok`. A GGUF file IS the model, so there is no docker mount /
-    --served-model-name registry indirection."""
+    --served-model-name registry indirection.
+
+    vLLM (binary and docker) emits `--reasoning-parser X --tool-call-parser Y
+    --enable-auto-tool-choice` just before the shared `extra_args`: each side is the record's own
+    `reasoning_parser` / `tool_call_parser` when it is a name, nothing when it is `off`, else the
+    keyword (`reasoning_parser`, `tool_call_parser`); `--enable-auto-tool-choice` rides with a
+    tool-call parser unless `extra_args` already carry it, and never with a reasoning parser alone."""
     loop = loopback or not srv.bind_all
     if srv.runtime == "llamacpp":
         ctx = srv.context if srv.context is not None else context
@@ -683,6 +691,16 @@ def serve_command(
         return [*env, str(srv.binary) if srv.binary else "ollama", "serve"]
     entry = srv.entry_for(srv.model)
     extra = [*srv.extra_args, *(entry.extra_args if entry is not None else [])]
+    rp = srv.reasoning_parser if srv.reasoning_parser is not None else reasoning_parser
+    tp = srv.tool_call_parser if srv.tool_call_parser is not None else tool_call_parser
+    rp = None if rp == "off" else rp
+    tp = None if tp == "off" else tp
+    parsers = [
+        *(["--reasoning-parser", rp] if rp is not None else []),
+        *(["--tool-call-parser", tp] if tp is not None else []),
+        *(["--enable-auto-tool-choice"]
+          if tp is not None and "--enable-auto-tool-choice" not in extra else []),
+    ]
     if srv.launch == "docker":
         hf_cache = str(Path("~/.cache/huggingface").expanduser())
         model_arg = srv.model
@@ -701,11 +719,12 @@ def serve_command(
             str(srv.docker_image),
             "--model", model_arg,
             *served,
+            *parsers,
             *extra,
         ]
     model_arg = str(Path(entry.path).expanduser()) if entry is not None else srv.model
     served = ["--served-model-name", entry.name] if entry is not None else []
-    return [str(srv.binary), "serve", model_arg, "--port", str(srv.port), *served, *extra,
+    return [str(srv.binary), "serve", model_arg, "--port", str(srv.port), *served, *parsers, *extra,
             *(["--host", "127.0.0.1"] if loop else [])]
 
 
