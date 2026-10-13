@@ -54,6 +54,7 @@ class Box:
         self.ready_script: list = [["qwen"]]
         self.probe_result = WindowProbe(14950, 262144)
         self.stops: list[tuple] = []
+        self.stop_kw: list[dict] = []
         mem = FreeMemory(24 * GIB, 32 * GIB, "nvidia-smi")
         self.mem: FreeMemory | None = mem
         self.meminfo: dict | None = dict(MEMINFO)
@@ -79,9 +80,10 @@ class Box:
             self.probe_calls.append((base_url, model, provider_type, api_key))
             return self.probe_result
 
-        def stop_server(config_dir, launch="binary", timeout_seconds=30.0):
+        def stop_server(config_dir, launch="binary", timeout_seconds=30.0, **kw):
             self.events.append("stop_server")
             self.stops.append((config_dir, launch))
+            self.stop_kw.append(kw)
             return True
 
         monkeypatch.setattr(server, "wait_ready", wait_ready)
@@ -431,7 +433,7 @@ async def test_a_failing_second_stop_keeps_the_second_death_tail_as_the_message(
     box.ready_script = [RuntimeError(DEAD), RuntimeError(DEAD)]
     stops: list[int] = []
 
-    def stop_server(config_dir, launch="binary", timeout_seconds=30.0):
+    def stop_server(config_dir, launch="binary", timeout_seconds=30.0, **kw):
         stops.append(1)
         if len(stops) == 2:
             raise RuntimeError("pid 4242 survived SIGKILL")
@@ -447,7 +449,7 @@ async def test_a_failing_first_stop_surfaces_the_original_death_and_does_not_rel
     calls = _launches(box, monkeypatch)
     box.ready_script = [RuntimeError(DEAD)]
 
-    def stop_server(config_dir, launch="binary", timeout_seconds=30.0):
+    def stop_server(config_dir, launch="binary", timeout_seconds=30.0, **kw):
         raise RuntimeError("pid 4242 survived SIGKILL")
 
     monkeypatch.setattr(server, "stop_server", stop_server)

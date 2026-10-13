@@ -245,7 +245,8 @@ class ManagedVllmStrategy:
             if retry is None:
                 raise
             try:
-                await asyncio.to_thread(server.stop_server, config_dir, launch=spec.launch)
+                await asyncio.to_thread(
+                    server.stop_server, config_dir, launch=spec.launch, expect=self.launch_identity(spec))
             except RuntimeError:
                 raise died from None  # a server that survived its stop: never relaunch beside it
             _say_plan(on_plan, retry)
@@ -254,7 +255,9 @@ class ManagedVllmStrategy:
                 served = await ready()
             except RuntimeError as again:
                 with contextlib.suppress(RuntimeError):
-                    await asyncio.to_thread(server.stop_server, config_dir, launch=spec.launch)
+                    await asyncio.to_thread(
+                        server.stop_server, config_dir, launch=spec.launch,
+                        expect=self.launch_identity(spec))
                 where = f"extra_endpoints.{peer}.lifecycle" if peer else "server"
                 raise RuntimeError(f"{again}\n{parser_pin_hint(retry, record_prefix=where)}") from None
             plan = retry
@@ -275,7 +278,8 @@ class ManagedVllmStrategy:
         # name-free poll + rm -f), and a synchronous call inside this `async def` would freeze
         # the whole loop — heartbeats, the Discord adapter, idle consolidation. `server.stop_server`
         # is looked up at CALL time (module-attribute), so the harness's monkeypatches still fire.
-        await asyncio.to_thread(server.stop_server, config_dir, launch=spec.launch)
+        await asyncio.to_thread(
+            server.stop_server, config_dir, launch=spec.launch, expect=self.launch_identity(spec))
 
     def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness:
         if spec.launch == "docker":
@@ -810,7 +814,8 @@ class SpawnedProcessStrategy:
             if retry is None:
                 raise
             try:
-                await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
+                await asyncio.to_thread(
+                    server.stop_server, config_dir, launch="binary", expect=self.launch_identity(spec))
             except RuntimeError:
                 # A pid that survived SIGKILL makes a relaunch unsafe; the load failure with its log
                 # tail is the message the user needs, not the stop's.
@@ -822,7 +827,8 @@ class SpawnedProcessStrategy:
             except RuntimeError:
                 # Best-effort: the second death's log tail stays the message even when the stop fails.
                 with contextlib.suppress(RuntimeError):
-                    await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
+                    await asyncio.to_thread(
+                        server.stop_server, config_dir, launch="binary", expect=self.launch_identity(spec))
                 raise
             plan = retry
         report = plan.report if plan is not None else None
@@ -935,7 +941,8 @@ class DaemonStrategy:
         # OWNER RULING: stop the WHOLE daemon (verified GPU-free), NOT keep_alive:0. A spawned daemon
         # leads its own process group (start_new_session=True), so stop_server's killpg SIGTERM→SIGKILL
         # reaps the daemon AND its runner children (which hold the weights), off the loop.
-        await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
+        await asyncio.to_thread(
+            server.stop_server, config_dir, launch="binary", expect=self.launch_identity(spec))
 
     def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness:
         pid = server.server_pid(config_dir)

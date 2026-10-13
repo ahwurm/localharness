@@ -243,7 +243,7 @@ async def test_model_managed_restart_path(tmp_path, monkeypatch):
 
     calls: list[str] = []
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
-    monkeypatch.setattr(managed_server, "stop_server", lambda cfg, launch="binary": calls.append("stop") or True)
+    monkeypatch.setattr(managed_server, "stop_server", lambda cfg, launch="binary", **kw: calls.append("stop") or True)
     monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: calls.append("start") or 1234)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
@@ -274,7 +274,7 @@ async def test_model_managed_restart_on_llamacpp_answers_a_non_gguf_name_in_one_
 
     calls: list[str] = []
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
-    monkeypatch.setattr(managed_server, "stop_server", lambda cfg, launch="binary": calls.append("stop") or True)
+    monkeypatch.setattr(managed_server, "stop_server", lambda cfg, launch="binary", **kw: calls.append("stop") or True)
     monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: calls.append("start") or 1234)
 
     srv = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server",
@@ -389,7 +389,7 @@ async def test_model_managed_restart_rebinds_token_counter(tmp_path, monkeypatch
 
     monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 3)
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
-    monkeypatch.setattr(managed_server, "stop_server", lambda cfg, launch="binary": True)
+    monkeypatch.setattr(managed_server, "stop_server", lambda cfg, launch="binary", **kw: True)
     monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: 1234)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
@@ -942,7 +942,7 @@ async def test_model_cold_peer_heavy_swap_stops_incumbent_launches_rebinds(
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: [])
     calls: list[str] = []
     monkeypatch.setattr(managed_server, "stop_server",
-                        lambda cfg, launch="binary": calls.append(f"stop:{launch}") or True)
+                        lambda cfg, launch="binary", **kw: calls.append(f"stop:{launch}") or True)
     monkeypatch.setattr(managed_server, "start_server",
                         lambda cfg, cmd, **kw: calls.append("start") or 4321)
 
@@ -996,7 +996,7 @@ async def test_model_cold_peer_launch_failure_restores_incumbent(
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: [])
     events: list[str] = []
     monkeypatch.setattr(managed_server, "stop_server",
-                        lambda cfg, launch="binary": events.append(f"stop:{launch}") or True)
+                        lambda cfg, launch="binary", **kw: events.append(f"stop:{launch}") or True)
     monkeypatch.setattr(managed_server, "start_server",
                         lambda cfg, cmd, **kw: events.append("start") or 4321)
 
@@ -1044,7 +1044,7 @@ async def test_model_swap_back_to_primary_stops_cold_peer_first(tmp_path, monkey
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     stops: list[str] = []
     monkeypatch.setattr(managed_server, "stop_server",
-                        lambda cfg, launch="binary": stops.append(launch) or True)
+                        lambda cfg, launch="binary", **kw: stops.append(launch) or True)
     monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: 1234)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
@@ -1078,7 +1078,7 @@ async def test_model_swap_back_free_fail_reports_no_change(tmp_path, monkeypatch
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     started: list = []
 
-    def _boom_stop(cfg, launch="binary"):
+    def _boom_stop(cfg, launch="binary", **kw):
         if launch == "binary":                       # the peer we're trying to free won't die
             raise RuntimeError("llama-server won't die")
         return True

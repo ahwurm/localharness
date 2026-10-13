@@ -185,11 +185,13 @@ async def test_stop_delegates_to_verified_stop_server(tmp_path, monkeypatch):
 
     def fake_stop(config_dir, launch="binary", **kw):
         seen["args"] = (config_dir, launch)
+        seen["expect"] = kw["expect"]
         return True
 
     monkeypatch.setattr(server, "stop_server", fake_stop)
     await ManagedVllmStrategy().stop(_docker_srv(), tmp_path)
     assert seen["args"] == (tmp_path, "docker")
+    assert seen["expect"] == ManagedVllmStrategy().launch_identity(_docker_srv())  # D-27
 
 
 # ---------------------------------------------------------------------------
@@ -283,11 +285,13 @@ async def test_spawned_stop_uses_binary_verified_stop(tmp_path, monkeypatch):
 
     def fake_stop(config_dir, launch="binary", **kw):
         seen["args"] = (config_dir, launch)
+        seen["expect"] = kw["expect"]
         return True
 
     monkeypatch.setattr(server, "stop_server", fake_stop)
     await SpawnedProcessStrategy().stop(_llamacpp_srv(), tmp_path)
     assert seen["args"] == (tmp_path, "binary")
+    assert seen["expect"] == SpawnedProcessStrategy().launch_identity(_llamacpp_srv())  # D-27
 
 
 def test_spawned_liveness_is_pid_based_never_docker(tmp_path, monkeypatch):
@@ -471,9 +475,10 @@ async def test_daemon_stop_kills_whole_daemon_not_keepalive(tmp_path, monkeypatc
     from localharness.provider import lifecycle
     seen: dict = {}
     monkeypatch.setattr(server, "stop_server",
-                        lambda cd, launch="binary": seen.setdefault("args", (cd, launch)) or True)
+                        lambda cd, launch="binary", **kw: seen.setdefault("args", (cd, launch, kw)) or True)
     await lifecycle.DaemonStrategy().stop(_ollama_srv(), tmp_path)
-    assert seen["args"] == (tmp_path, "binary")
+    assert seen["args"][:2] == (tmp_path, "binary")
+    assert seen["args"][2] == {"expect": lifecycle.DaemonStrategy().launch_identity(_ollama_srv())}  # D-27
 
 
 def test_daemon_liveness_is_daemon_pid(tmp_path, monkeypatch):

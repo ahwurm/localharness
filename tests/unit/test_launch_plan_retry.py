@@ -73,6 +73,18 @@ async def test_a_dead_swift_launch_is_relaunched_without_the_draft_and_at_half_t
     assert tuple(second) == plans[1].argv and live.tuned == plans[1].tuned
 
 
+async def test_both_retry_stops_name_the_identity_they_must_stop(tmp_path, box, monkeypatch):
+    """D-27: the stops inside `activate` pass `expect=self.launch_identity(spec)` like `stop` does."""
+    _launches(box, monkeypatch)
+    box.ready_script = [RuntimeError(DEATH_1), RuntimeError(DEATH_2)]
+    spec = _gguf_spec(tmp_path, SWIFT)
+    with pytest.raises(RuntimeError, match="second death"):
+        await _activate(tmp_path, spec, [])
+    identity = lifecycle.SpawnedProcessStrategy().launch_identity(spec)
+    assert identity is not None
+    assert box.stop_kw == [{"expect": identity}, {"expect": identity}]
+
+
 async def test_the_retry_reuses_the_sensed_facts(tmp_path, box, monkeypatch):
     _launches(box, monkeypatch)
     box.ready_script = [RuntimeError(DEATH_1), ["qwen"]]
@@ -97,7 +109,7 @@ async def test_a_failing_first_stop_surfaces_the_original_death_and_does_not_rel
     calls = _launches(box, monkeypatch)
     box.ready_script = [RuntimeError(DEATH_1)]
 
-    def stop_server(config_dir, launch="binary", timeout_seconds=30.0):
+    def stop_server(config_dir, launch="binary", timeout_seconds=30.0, **kw):
         raise RuntimeError("pid 4242 survived SIGKILL")
 
     monkeypatch.setattr(server, "stop_server", stop_server)
