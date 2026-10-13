@@ -1314,11 +1314,14 @@ class AgentConfig(BaseModel):
     def _effort_yaml_bool(cls, v: Any) -> Any:
         return coerce_yaml_effort(v)
 
-    temperature: float = Field(
-        default=0.6,
+    temperature: Optional[float] = Field(
+        default=None,
         ge=0.0,
         le=2.0,
-        description="LLM sampling temperature for this agent.",
+        description=(
+            "LLM sampling temperature for this agent. Unset (the default) sends no temperature: "
+            "the server's own defaults (the model's) apply."
+        ),
     )
 
     max_tokens: Optional[int] = Field(
@@ -1522,7 +1525,15 @@ class DivisionConfig(BaseModel):
     def _effort_yaml_bool(cls, v: Any) -> Any:
         return coerce_yaml_effort(v)
 
-    temperature: float = Field(default=0.6, ge=0.0, le=2.0)
+    temperature: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description=(
+            "Default sampling temperature for the division's agents; unset sends no temperature "
+            "and passes through to the next rung."
+        ),
+    )
     # None, not 4096: a schema default here SHADOWS the org rung below it for every agent in the
     # division — the same bug the org comment in loader.py describes, one level down. "Not set"
     # has to be spellable or inheritance cannot pass through a division.
@@ -1691,9 +1702,17 @@ class OrgConfig(BaseModel):
         ),
     )
 
-    # Optional so the init-nulls revision 2 (config/migrate.py) can write null over init's dumped
-    # 0.6 and the config still validate; the default itself moves with the temperature rung.
-    default_temperature: Optional[float] = Field(default=0.6, ge=0.0, le=2.0)
+    # None: nobody chose one. The machine/project default for the root agent's sampling
+    # temperature; unset sends no temperature and the server's (the model's) defaults apply.
+    default_temperature: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description=(
+            "The machine/project default sampling temperature for the root agent. Unset (the "
+            "default) sends no temperature: the server's own defaults, the model's, apply."
+        ),
+    )
     default_effort: Optional[EffortLevel] = Field(
         default=None,
         description=(

@@ -1832,6 +1832,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         api_key=provider.api_key,
         timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
         queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling
+        temperature=agent_config.temperature,  # None unless a person set one (spec 20 §7)
     )
     # detect_capabilities SEEDS CapabilityResult.context_window from this config value and only
     # overwrites it from a vLLM-shape /v1/models answer (and MUTATES config.context_window as it
@@ -2112,6 +2113,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         max_tokens=clamp_response_tokens(_cfg_window, _output_cap),
         tool_call_mode=probed_mode or "native",
         queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling
+        temperature=agent_config.temperature,  # None unless a person set one (spec 20 §7)
         # D-41: the reconnect bound reaches the client the root loop and every child share; without
         # this line a real session keeps the LLMConfig default 0.0 (reconnect off).
         reconnect_wait_seconds=provider.reconnect_wait_seconds,
