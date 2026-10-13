@@ -46,6 +46,7 @@ except ImportError:  # non-POSIX: the launch lock degrades to an in-process asyn
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import autosense as _auto
 from localharness.provider import server, speed_stats, tuning, units
+from localharness.provider.procfs import LaunchIdentity
 from localharness.provider.tuning import Tuned
 
 log = logging.getLogger(__name__)
@@ -746,7 +747,8 @@ class SpawnedProcessStrategy:
             names: list[str] = []
             pid = server.start_server(
                 config_dir, cmd, runtime=spec.runtime, record_env=getattr(spec, "env", None),
-                dropped_out=names, xdg_config_home=str(home), **server.key_kwargs(api_key))
+                dropped_out=names, xdg_config_home=str(home), port=spec.port,
+                **server.key_kwargs(api_key))
             return pid, names
 
         async def ready() -> list[str]:
@@ -813,6 +815,17 @@ class SpawnedProcessStrategy:
     def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness:
         pid = server.server_pid(config_dir)
         return Liveness(alive=pid is not None, detail=f"pid {pid}" if pid is not None else "no live pidfile")
+
+    def launch_identity(self, spec: ManagedServerConfig) -> LaunchIdentity | None:
+        """What a `llama-server` launch of `spec` looks like in `/proc` (D-25): the binary's own
+        basename and its resolved target's (a symlinked binary runs under the target's name), the
+        record's port from `--port` or `LLAMA_ARG_PORT`, no extra argv token."""
+        binary = getattr(spec, "binary", None)
+        if binary is None:
+            names = {"llama-server"}
+        else:
+            names = {os.path.basename(str(binary)), os.path.basename(os.path.realpath(str(binary)))}
+        return LaunchIdentity(frozenset(names), spec.port, (), "LLAMA_ARG_PORT")
 
 
 class DaemonStrategy:

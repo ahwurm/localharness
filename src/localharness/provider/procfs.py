@@ -18,6 +18,9 @@ parser and the pidfile names live here), never the reverse: this module imports 
 `lifecycle`, `units` or `cli`. `pwd` is not imported at module level and the directory-open flag is
 read with `getattr`, so the module still imports where those are absent.
 
+Only `localharness.core.private_files` (stdlib-only) is imported besides: the pidfile is read through
+its no-follow directory open and bounded reader.
+
 It also judges identity: `LaunchIdentity` is plain data a strategy supplies, and `identity_mismatch`
 is the one pure function that says why a process is not a harness launch. A pidfile is a claim;
 the `/proc` facts decide.
@@ -27,9 +30,12 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
+
+from localharness.core import private_files
 
 __all__ = [
     "PROC_ROOT", "NET_TCP_CAP", "PID_SCAN_CAP", "FD_SCAN_CAP", "FD_TOTAL_CAP", "PROC_ENTRY_CAP",
@@ -39,7 +45,7 @@ __all__ = [
     "read_process", "parent_pid", "is_self_or_descendant",
     "SERVER_DIR_NAME", "PIDFILE_NAME", "HARNESS_UNIT", "LaunchIdentity",
     "start_time_from_stat", "session_from_stat", "parse_pidfile", "port_of", "identity_mismatch",
-    "serve_starting",
+    "serve_starting", "PIDFILE_CAP", "PIDFILE_PATTERN", "Launch", "read_pidfile", "read_launch",
 ]
 
 SERVER_DIR_NAME = "vllm"
@@ -580,3 +586,96 @@ def serve_starting(record: ProcRecord, *, main_pid: int | None) -> bool:
     width = len(_SERVE_TOKENS)
     argv = record.argv
     return any(argv[i:i + width] == _SERVE_TOKENS for i in range(len(argv) - width + 1))
+
+
+# ------------------------------------------------------------------------------- the launch reader
+
+PIDFILE_CAP = 64
+"""Most bytes of `server.pid` read; a longer file is not one the harness wrote."""
+PIDFILE_PATTERN = re.compile(r"[0-9]+( [0-9]+){0,2}")
+"""`<pid>`, `<pid> <start>` or `<pid> <start> <port>`, single-space separated: the three shapes
+the harness has written (0.17, 0.18, 0.19)."""
+
+
+@dataclass(frozen=True)
+class Launch:
+    """The launch the pidfile names, as far as `/proc` backs it.
+
+    `start` and `port` are the file's (None for a 0.17 or 0.18 file; `port` is then the verified
+    process's own when `verified`); `owner` is `"unit"` only for the harness unit's main process and
+    `"spawned"` otherwise; `verified` says the process passed `identity_mismatch` against the `expect`
+    given; `starting` is the starting rule: the unit's own `localharness serve` process, not yet a
+    server."""
+
+    pid: int
+    start: int | None
+    port: int | None
+    owner: str
+    verified: bool
+    starting: bool = False
+
+
+def read_pidfile(config_dir: Path | str) -> tuple[int, int | None, int | None] | None:
+    """`(pid, start, port)` from `<config_dir>/vllm/server.pid`, or None when the file is missing,
+    not a regular file, over `PIDFILE_CAP`, not the pidfile shape or not a process the harness could
+    have launched. The directory is opened no-follow and the file through it: a planted link is never
+    read through. Nothing is unlinked."""
+    try:
+        fd = private_files.open_private_dir(Path(config_dir) / SERVER_DIR_NAME, create=False)
+    except OSError:
+        return None
+    try:
+        text = private_files.read_private_text(
+            PIDFILE_NAME, dir_fd=fd, cap=PIDFILE_CAP, pattern=PIDFILE_PATTERN)
+    finally:
+        os.close(fd)
+    if text is None:
+        return None
+    try:
+        return parse_pidfile(text)
+    except ValueError:
+        return None
+
+
+def _stat_bytes(pid: int) -> bytes | None:
+    """The raw `<PROC_ROOT>/<pid>/stat`, or None when unreadable or over `STAT_CAP`."""
+    try:
+        with open(_proc_path(str(pid), "stat"), "rb") as fh:
+            raw = fh.read(STAT_CAP + 1)
+    except OSError:
+        return None
+    return None if len(raw) > STAT_CAP else raw
+
+
+def read_launch(config_dir: Path | str, *, expect: LaunchIdentity | None = None,
+                main_pid: int | None = None,
+                stat_reader: Callable[[int], bytes | None] | None = None) -> Launch | None:
+    """The launch the pidfile under `config_dir` names, or None when there is none to name.
+
+    None: no readable pidfile (see `read_pidfile`), or a start time recorded that the process's own
+    `stat` (read by `stat_reader`, default `<PROC_ROOT>/<pid>/stat`) does not repeat or cannot give
+    - a reused pid. The file is never unlinked here; deleting is the caller's decision.
+
+    With `expect` or `main_pid` the process is read (`read_process`); a refusal leaves `verified`
+    False. `owner` is `"unit"` only when the process is in `HARNESS_UNIT`'s cgroup and is `main_pid`.
+    `verified` needs `expect` and `identity_mismatch` finding nothing. A file with no port (0.17,
+    0.18) takes the verified process's port; an unverified process never lends one."""
+    recorded = read_pidfile(config_dir)
+    if recorded is None:
+        return None
+    pid, start, port = recorded
+    if start is not None:
+        raw = (stat_reader or _stat_bytes)(pid)
+        if raw is None or start_time_from_stat(raw) != start:
+            return None
+    if expect is None and main_pid is None:
+        return Launch(pid, start, port, "spawned", False)
+    rec = read_process(pid)
+    owner = "unit" if rec.unit == HARNESS_UNIT and main_pid == pid else "spawned"
+    if isinstance(rec, ProcRefusal):
+        return Launch(pid, start, port, owner, False)
+    verified = expect is not None and identity_mismatch(
+        rec, expect, owner=owner, main_pid=main_pid) is None
+    if port is None and verified and expect is not None:
+        port = port_of(rec, expect)
+    return Launch(pid, start, port, owner, verified, serve_starting(rec, main_pid=main_pid))
