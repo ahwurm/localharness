@@ -411,14 +411,15 @@ async def test_start_launches_a_converted_0_17_host_with_its_first_line_and_the_
 
     assert await _drive(tmp_path) == 1  # the probe never answers; the launch is what is under test
 
+    # the real `_start_async` launches with the default autosense, so the line names the derived KV type (D-23)
     starting = [line for line in seen.out if "starting it" in line]
-    assert starting == [CONVERTED_LINE]
+    assert starting == [CONVERTED_LINE.replace("; model load", "; kv q8_0; model load")]
     cmd, _ = seen.started[0]
     assert "0.0.0.0" in cmd and cmd[-2:] != ["--host", "127.0.0.1"]
     assert not [pair for pair in seen.err if "restores it" in str(pair[0])]
     assert await _drive(tmp_path) == 1
     starting = [line for line in seen.out if "starting it" in line]
-    assert starting[1:] == [f"Managed llama.cpp is not running — starting it ({PHRASE}; "
+    assert starting[1:] == [f"Managed llama.cpp is not running — starting it ({PHRASE}; kv q8_0; "
                             "model load can take several minutes)..."]
 
 

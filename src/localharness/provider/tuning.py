@@ -218,3 +218,52 @@ def derive(spec: Any, header: Mapping[str, Any], autosense: Any, *,
         reasons["spec_type"] = f"nextn_predict_layers={n}"
 
     return Tuned(reasons=reasons, **fields) if fields else NOTHING_DERIVED
+
+
+_RETRIED_DEATH = "(retried: the full shape died)"
+
+
+def _full_parts(tuned: Tuned) -> list[str]:
+    """The words for what a full-shape launch derived, in the order the launch line reads them."""
+    parts: list[str] = []
+    if tuned.cache_type is not None:
+        parts.append(f"kv {tuned.cache_type}")
+    if tuned.spec_type == "draft-mtp":
+        n = tuned.mtp_layers
+        parts.append("mtp" if n is None else f"mtp ({n} layer{'' if n == 1 else 's'})")
+    if tuned.reasoning_parser is not None:
+        parts.append(f"reasoning {tuned.reasoning_parser}")
+    if tuned.tool_call_parser is not None:
+        parts.append(f"tools {tuned.tool_call_parser}")
+    return parts
+
+
+def derived_clause(
+    tuned: Tuned, *, shape: str = "full", cause: str | None = None, dropped: Sequence[str] = (),
+    remembered_at: str | None = None, context: int | None = None,
+    undo_field: str = "server.speculative",
+) -> str:
+    """What a launch derived, as the clause of `start`'s launch line (spec 20 §6.5, D-23). The one place
+    these words are composed. Pure string building from closed values: the cache type, `draft-mtp`, a
+    table parser, ints and the first ten characters of the ledger's ISO `at`.
+
+    A full shape reads `kv q8_0 · mtp (1 layer)` (vLLM: `reasoning qwen3 · tools qwen3_coder`) and never
+    carries the fitted `-c`: the window line prints that. A retry shape says what it dropped and, when
+    the draft was dropped, how to keep the full window (`undo_field: off`). `context` is the retry's
+    halved `-c`. Nothing derived gives an empty string."""
+    if shape != "retry":
+        return " · ".join(_full_parts(tuned))
+    drafted_off = "draft-mtp" in dropped
+    undo = f"{undo_field}: off keeps the full window"
+    if cause == "boot":
+        dropping = (["mtp off"] if drafted_off else []) + ["-c halved"]
+        text = f"retried at boot: {', '.join(dropping)}"
+        return f"{text} · {undo}" if drafted_off else text
+    if cause == "remembered":
+        date = f" {remembered_at[:10]}" if remembered_at else ""
+        what = "mtp off" if drafted_off else "window halved"
+        kv = [f"kv {tuned.cache_type}"] if tuned.cache_type is not None else []
+        return " · ".join([*kv, f"{what} (remembered{date})"])
+    dropping = (["mtp off"] if drafted_off else []) + ([f"-c {context}"] if context is not None else [])
+    text = f"{', '.join(dropping)} {_RETRIED_DEATH}" if dropping else _RETRIED_DEATH
+    return f"{text} · {undo}" if drafted_off else text

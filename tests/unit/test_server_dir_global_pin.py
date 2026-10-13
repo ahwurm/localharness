@@ -113,7 +113,9 @@ def test_start_cmd_lifecycle_sites_name_the_global_pin():
     assert "_managed_server_running(strategy, harness.server, cfg_path)" not in text
     # The two launch calls carry the key the launched server requires (`**launch_key`, which is {}
     # unless server.require_api_key is on) — the pin is unchanged: both still name the handed dir.
-    assert "activate(srv, global_dir, base_url, autosense=autosense, **launch_key)" in text  # launch
+    # (`**launch_kw` is the launch line's `on_plan` for a planning strategy, {} for any other.)
+    assert "activate(srv, global_dir, base_url, autosense=autosense, **launch_kw," in text  # launch
+    assert "**launch_key)" in text
     assert "wait_ready(base_url, config_dir=strategy.recovery_config_dir(global_dir)," in text
     assert "wait_ready(provider.base_url, config_dir=cfg_path)" not in text
     # The helper states which layer it expects, so a caller cannot hand it a workspace by accident.
