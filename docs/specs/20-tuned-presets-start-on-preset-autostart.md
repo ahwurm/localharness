@@ -233,7 +233,7 @@ unset**. Header ints are validated (`block_count > 0`, `0 ≤ nextn_predict_laye
 
 ### 6.1 KV cache type (llama.cpp)
 
-Neither `cache_type_k/v` set, no cache type in `extra_args`/`env:`/`config_ini`, no `-fa off` (in any of
+Neither `cache_type_k/v` set, no cache type in `extra_args`/`env:`/`config_ini`, no `-fa off` (off, 0, false or disabled, any case, in any of
 the three) → `cache_type =
 autosense.kv_cache_type` (default `q8_0`) for K and V; the fit prices it. `f16` reproduces 0.18.
 
