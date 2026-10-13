@@ -1564,10 +1564,21 @@ class DivisionConfig(BaseModel):
 
 LLAMACPP_ONLY_FIELDS: tuple[str, ...] = (
     "mmproj", "served_name", "cache_type_k", "cache_type_v", "cache_ram", "api_key_file", "env",
-    "config_ini",
+    "config_ini", "speculative",
 )
 """The `ManagedServerConfig` fields refused on every runtime but llamacpp (vllm, ollama and
 lmstudio alike); `context` and `effort` are accepted everywhere."""
+
+VLLM_ONLY_FIELDS: tuple[str, ...] = ("reasoning_parser", "tool_call_parser")
+"""The `ManagedServerConfig` fields refused on every runtime but vllm (llamacpp, ollama and
+lmstudio alike): the parsers the harness hands a vLLM launch."""
+
+KV_CACHE_TYPES: tuple[str, ...] = (
+    "f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1")
+"""llama.cpp's cache type list. It must equal `provider/autosense.KV_BYTES` (a literal tuple here
+to avoid an import cycle); a test pins the two together."""
+
+_PARSER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
 _CHILD_BUDGET_DEFAULTS: dict[str, tuple[int, float]] = {
@@ -2146,6 +2157,15 @@ class ManagedServerConfig(BaseModel):
     cache_ram: Optional[int] = Field(default=None, ge=0, description=(
         "llama.cpp only: host prompt-cache size in MiB (`--cache-ram`); 0 turns it off. Unset "
         "means the harness computes it."))
+    speculative: Optional[Literal["off", "draft-mtp"]] = Field(default=None, description=(
+        "llama.cpp only: speculative decoding. Unset = derived at launch (MTP drafting when the "
+        "model has MTP layers and autosense.draft_mtp is on); off = never; draft-mtp = always."))
+    reasoning_parser: Optional[str] = Field(default=None, description=(
+        "vLLM only: the --reasoning-parser. Unset = derived from the checkpoint's config.json "
+        "model_type; off = none."))
+    tool_call_parser: Optional[str] = Field(default=None, description=(
+        "vLLM only: the --tool-call-parser. Unset = derived from the checkpoint's config.json "
+        "model_type; off = none."))
     api_key_file: Optional[str] = Field(default=None, description=(
         "llama.cpp only: an absolute path (`~` allowed) to the file holding the server's API key, "
         "passed as `--api-key-file`. Requires `require_api_key: true`. The harness checks only "
@@ -2174,6 +2194,18 @@ class ManagedServerConfig(BaseModel):
             return v
         if not v.strip() or "\x00" in v or "\n" in v or "\r" in v:
             raise ValueError(f"{info.field_name} must be a non-empty single line with no NUL byte")
+        return v
+
+    @field_validator("reasoning_parser", "tool_call_parser")
+    @classmethod
+    def _parser_name_clean(cls, v: Optional[str], info: Any) -> Optional[str]:
+        """These strings become argv values of the vLLM launch; a leading `-` would be read as a
+        flag, so only `off` or a plain parser name is accepted."""
+        if v is None or v == "off":
+            return v
+        if not _PARSER_NAME_RE.match(v):
+            raise ValueError(
+                f"{info.field_name} must be a parser name (letters, digits, _ . -) or off")
         return v
 
     @field_validator("api_key_file")
@@ -2282,6 +2314,13 @@ class ManagedServerConfig(BaseModel):
                 raise ValueError(
                     f"runtime={self.runtime}: {', '.join(set_names)} {verb} llama.cpp-only "
                     "(runtime: llamacpp)")
+        if self.runtime != "vllm":
+            vllm_names = [n for n in VLLM_ONLY_FIELDS if getattr(self, n) is not None]
+            if vllm_names:
+                verb = "is" if len(vllm_names) == 1 else "are"
+                raise ValueError(
+                    f"runtime={self.runtime}: {', '.join(vllm_names)} {verb} vLLM-only "
+                    "(runtime: vllm)")
         if self.api_key_file is not None and self.require_api_key is not True:
             raise ValueError("api_key_file requires require_api_key: true")
         if self.runtime in ("ollama", "lmstudio"):

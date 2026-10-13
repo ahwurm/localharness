@@ -282,8 +282,8 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 236, (
-        "catalogue should be 236 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 239, (
+        "catalogue should be 239 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -296,8 +296,9 @@ def test_self_check_leaves_enumerate(components_home):
         "plus org.web_fetch_allow_private, server.bind_all, server.require_api_key and "
         "channels.remote_unattended x4 (the machine-level fetch allowlist, the launched server's "
         "bind and key switches, and the remote-channel lock) "
-        "plus the ten server.* preset fields (mmproj, served_name, context, cache_type_k, "
-        "cache_type_v, cache_ram, api_key_file, env, config_ini, effort) "
+        "plus the thirteen server.* preset fields (mmproj, served_name, context, cache_type_k, "
+        "cache_type_v, cache_ram, api_key_file, env, config_ini, effort, speculative, "
+        "reasoning_parser, tool_call_parser) "
         "plus autosense.* x7, effort_budget.* x2 and org.default_effort (the machine-level "
         "sizing and effort sections) plus active_endpoint.effort x1 (the "
         "reasoning-effort enum on the persisted endpoint selection; agent.effort is withheld, the "
@@ -397,8 +398,8 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 236, (
-        "catalogue should be 236 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 239, (
+        "catalogue should be 239 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -411,8 +412,9 @@ def test_role_sections_leaves_enumerate(components_home):
         "plus org.web_fetch_allow_private, server.bind_all, server.require_api_key and "
         "channels.remote_unattended x4 (the machine-level fetch allowlist, the launched server's "
         "bind and key switches, and the remote-channel lock) "
-        "plus the ten server.* preset fields (mmproj, served_name, context, cache_type_k, "
-        "cache_type_v, cache_ram, api_key_file, env, config_ini, effort) "
+        "plus the thirteen server.* preset fields (mmproj, served_name, context, cache_type_k, "
+        "cache_type_v, cache_ram, api_key_file, env, config_ini, effort, speculative, "
+        "reasoning_parser, tool_call_parser) "
         "plus autosense.* x7, effort_budget.* x2 and org.default_effort (the machine-level "
         "sizing and effort sections) plus active_endpoint.effort x1 (the "
         "reasoning-effort enum on the persisted endpoint selection; agent.effort is withheld, the "

@@ -37,7 +37,8 @@ def test_the_launch_key_table_is_the_eleven_keys_in_order():
 
 def test_the_launch_model_table_and_kind():
     assert trust.LAUNCH_MODEL_KEYS == (
-        "model", "mmproj", "served_name", "context", "cache_type_k", "cache_type_v", "cache_ram")
+        "model", "mmproj", "served_name", "context", "cache_type_k", "cache_type_v", "cache_ram",
+        "speculative", "reasoning_parser", "tool_call_parser")
     assert trust.LAUNCH_MODEL_KIND == "launch_model"
     assert "launch_model" in trust.MACHINE_KINDS
 
