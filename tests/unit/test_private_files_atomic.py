@@ -117,3 +117,23 @@ def test_open_regular_with_dir_fd_refuses_a_link(tmp_path):
             private_files.open_regular("ln", dir_fd=fd)
     finally:
         os.close(fd)
+
+
+def test_read_private_text_bounds_and_charset(tmp_path):
+    import re
+    pat = re.compile(r"[a-z]+")
+    (tmp_path / "ok").write_text(" abc \n")
+    (tmp_path / "big").write_text("a" * 11)
+    (tmp_path / "bad").write_text("AB")
+    (tmp_path / "nul").write_bytes(b"ab\x00")
+    (tmp_path / "bin").write_bytes(b"\xff")
+    os.mkfifo(tmp_path / "fifo")
+    (tmp_path / "ln").symlink_to(tmp_path / "ok")
+    fd = private_files.open_private_dir(tmp_path, create=False)
+    try:
+        def read(name):
+            return private_files.read_private_text(name, dir_fd=fd, cap=10, pattern=pat)
+        assert read("ok") == "abc"
+        assert [read(n) for n in ("big", "bad", "nul", "bin", "fifo", "ln", "missing")] == [None] * 7
+    finally:
+        os.close(fd)
