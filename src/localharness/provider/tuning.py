@@ -68,6 +68,14 @@ def mtp_layers(header: Mapping[str, Any]) -> int | None:
     return nextn
 
 
+def draft_share(header: Mapping[str, Any]) -> float:
+    """The multiple of the main context's KV a drafting launch holds: the MTP draft context keeps
+    its own KV for nextn_predict_layers layers, so `1 + nextn / block_count`; 1.0 when the header
+    declares no valid MTP layers."""
+    n = mtp_layers(header)
+    return 1.0 if n is None else 1 + n / header["block_count"]
+
+
 def derive(spec: Any, header: Mapping[str, Any], autosense: Any, *,
            model_config: Mapping[str, Any] | None = None) -> Tuned:
     """The flags a launch of `spec` derives (llama.cpp side; `model_config` is the vLLM side's input).

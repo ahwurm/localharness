@@ -212,12 +212,18 @@ def weights_bytes(model: str, mmproj: str | None = None) -> int | None:
 def fit(header: Mapping[str, Any], free_bytes: int | None, ratios: Any,
         attached_served: int | None = None, *, cache_type_k: str | None = None,
         cache_type_v: str | None = None, weights: int | None = None, offload: str = "gpu",
-        runtime: str = "llamacpp") -> int | None:
+        runtime: str = "llamacpp", draft_share: float = 1.0) -> int | None:
     """The largest window the free memory holds, capped at the trained window; None when it cannot
     be known or is not above zero. Beside a running server (`attached_served`) the window already
     served is counted as served plus what the free memory adds; otherwise the weights and a
-    `compute_margin_ratio` of them come off the free bytes first."""
+    `compute_margin_ratio` of them come off the free bytes first.
+
+    `draft_share` multiplies the KV bytes per token: the MTP draft context holds its own KV for
+    nextn_predict_layers layers, so a drafting launch costs `1 + nextn / block_count` of the main
+    context's KV (1.0, the default, with drafting off)."""
     kv = kv_bytes_per_token(header, cache_type_k, cache_type_v)
+    if kv is not None:
+        kv *= draft_share
     trained = _pos_int(header.get("context_length"))
     if runtime != "llamacpp" or offload != "gpu" or free_bytes is None or kv is None or trained is None:
         return None
@@ -341,14 +347,16 @@ class FitInputs:
 
 
 def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None, size: bool = True,
-                meminfo: bool = False, memory: FreeMemory | None = _UNSET) -> FitInputs:
+                meminfo: bool = False, memory: FreeMemory | None = _UNSET,
+                cache_type: str | None = None, draft_share: float = 1.0) -> FitInputs:
     """The fit for a llama.cpp `server:` record, in one place for every caller (D-04): `activate`
     sizes a launch with it, `start` reports an attach and `doctor` prints its row.
 
     Reads the GGUF header (through `fit_header`, so every value is an int or absent), works out the
     GPU residency from `extra_args`, probes free memory and stats the weights, then calls `fit` with
-    the KV cache types (the record's, else the ones `extra_args` set with `-ctk` / `-ctv`; unset is
-    f16). `attached_served` is the window an already-running server serves.
+    the KV cache types (the record's, else the ones `extra_args` set with `-ctk` / `-ctv`, else
+    `cache_type`, the type a launch derives; unset is f16) and the `draft_share` of a drafting launch.
+    `attached_served` is the window an already-running server serves.
     `size=False` stops after the header and the offload (no memory probe: a caller that has no served
     window to add to wants only the header); `meminfo=True` also reads `/proc/meminfo` for
     `--cache-ram`. `memory=` replaces the probe (D-49): `init` runs `free_memory` once and passes that
@@ -371,8 +379,9 @@ def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None,
     extra_k, extra_v = extra_cache_types(extra)
     fits = fit(
         header, mem.free_bytes if mem else None, ratios, attached_served,
-        cache_type_k=server.cache_type_k or extra_k, cache_type_v=server.cache_type_v or extra_v,
-        weights=weights, offload=offload, runtime=server.runtime)
+        cache_type_k=server.cache_type_k or extra_k or cache_type,
+        cache_type_v=server.cache_type_v or extra_v or cache_type,
+        weights=weights, offload=offload, runtime=server.runtime, draft_share=draft_share)
     return FitInputs(header, offload, mem, weights, mi, fits)
 
 

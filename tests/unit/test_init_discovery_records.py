@@ -203,7 +203,7 @@ def test_a_model_that_fits_outranks_a_newer_one_that_does_not(box, monkeypatch):
     memory = SimpleNamespace(free_bytes=24 << 30)
     seen = []
 
-    def fake_fit(spec, ratios, *, memory):
+    def fake_fit(spec, ratios, *, memory, **kw):
         seen.append(memory)
         return SimpleNamespace(fits=8192 if spec.model == str(box.swift) else None)
 
@@ -248,7 +248,7 @@ def test_free_memory_is_not_probed_when_no_gguf_exists(tmp_path, monkeypatch, fa
 
 
 def test_a_size_that_cannot_be_computed_leaves_that_model_ranked_without_a_fit(box, monkeypatch):
-    def fake_fit(spec, ratios, *, memory):
+    def fake_fit(spec, ratios, *, memory, **kw):
         if spec.model == str(box.qwen):
             raise OSError("unreadable")
         return SimpleNamespace(fits=4096)
