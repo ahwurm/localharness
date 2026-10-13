@@ -746,6 +746,67 @@ def clear_pending_preset(harness: Any, *, config_dir: Any = None) -> None:
     harness.pending_preset = None
 
 
+# --------------------------------------------------------------------------- landing / selection writers
+# `persist_landed` is the ONE writer of a landing's outcome (D-07): start, the REPL wrapper and the
+# autostart unit's immediate swap all call it. `select_pending` is the CLI's SELECTION write (D-10):
+# the intent the next start's ladder reads, not an outcome.
+
+LANDING_OUTCOMES = frozenset({"launch", "swap", "attach"})
+SELECTED_NEXT_START_LINE = "Selected {name} — the next start serves it"
+
+
+async def persist_landed(
+    harness: Any,
+    record: ServingRecord,
+    *,
+    outcome: str,
+    rung: str | None = None,
+    served: str | None = None,
+    config_dir: Any = None,
+) -> None:
+    """Write what a landing on ``record`` decided. ``outcome`` is ``"launch"`` or ``"swap"`` (this
+    process made ``record`` the served one) or ``"attach"`` (it found ``record`` already serving).
+
+    ``last_served`` is always recorded (best effort, like every ledger write). ``active_endpoint`` is
+    written for a launch or swap only (a peer's, or cleared for the primary): an attach, including an
+    attach to another record, never persists a selection (D-15). ``pending_preset`` is removed after a
+    launch or swap, and after an attach that resolved on the ``pending_preset`` rung (D-08). Raises
+    what the overlay writers raise; the caller words it."""
+    if outcome not in LANDING_OUTCOMES:
+        raise ValueError(
+            f"unknown landing outcome {outcome!r} (one of {', '.join(sorted(LANDING_OUTCOMES))})")
+    moved = outcome in ("launch", "swap")
+    if moved:
+        if record.peer is not None:
+            await persist_active_endpoint(
+                harness, record.peer, served or record.served or record.name, config_dir=config_dir)
+        else:
+            clear_active_endpoint(harness, config_dir=config_dir)
+    from localharness.provider import speed_stats
+
+    try:
+        speed_stats.record_last_served(
+            speed_stats.default_speed_stats_path(global_config_dir(config_dir)), record.name)
+    except OSError:
+        pass
+    if moved or (outcome == "attach" and rung == RUNG_PENDING):
+        clear_pending_preset(harness, config_dir=config_dir)
+
+
+async def select_pending(
+    harness: Any, record: ServingRecord, *, served: str | None = None, config_dir: Any = None
+) -> None:
+    """Record ``record`` as what the next start serves (D-10): a peer is persisted as the
+    ``active_endpoint`` as ``/model`` does, the primary clears one, then ``pending_preset`` names the
+    record. Global overlay only; raises what the overlay writers raise."""
+    if record.peer is not None:
+        await persist_active_endpoint(
+            harness, record.peer, served or record.served or record.name, config_dir=config_dir)
+    else:
+        clear_active_endpoint(harness, config_dir=config_dir)
+    write_pending_preset(harness, record.name, config_dir=config_dir)
+
+
 async def persist_effort(
     harness: Any,
     level: str,

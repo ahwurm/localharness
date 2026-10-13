@@ -196,8 +196,12 @@ def test_model_swap_in_a_workspace_session_writes_only_the_global_overlay(tmp_pa
         "workspace; an overlay or config file here would fork the one physical GPU daemon's "
         f"server.model. changed under the workspace={sorted(str(p) for p in ws_changed)}"
     )
-    assert changed == {overrides, ws_dir / "audit.jsonl"}, (
-        "a model swap must touch the global overlay (+ the audit log, which follows the work) and "
+    # Phase 13 (D-09): a switch decides machine trust as `start` does, and the first decision on a
+    # machine adopts its files into the global trust store (`trusted_workspaces.yaml`), exactly as
+    # the first `start` does. That is the one write beyond the overlay and the audit log.
+    assert changed == {overrides, global_dir / "trusted_workspaces.yaml", ws_dir / "audit.jsonl"}, (
+        "a model swap must touch the global overlay (+ the audit log, which follows the work, + the "
+        "global trust store the machine-trust decision adopts into) and "
         f"NOTHING else; changed={sorted(str(p) for p in changed)}"
     )
 
