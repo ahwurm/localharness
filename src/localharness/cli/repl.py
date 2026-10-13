@@ -18,6 +18,7 @@ from rich.protocol import is_renderable
 
 from localharness.agent.gate_types import MODE_STRICTNESS
 from localharness.channels import input_router
+from localharness.cli.model_ops import _hold_peer_session_key, _launch_key, _peer_session_key
 from localharness.cli.slash_commands import SlashCommand, find_row, help_text
 from localharness.config.effort import EFFORT_UNENFORCED_LINE, LEVELS, resolve_effort
 from localharness.core.content import ImageError, describe, fit_all, fit_to_tokens
@@ -178,86 +179,6 @@ _FRAMEWORK_LABELS = {
 def _framework_label(provider_type: str | None) -> str:
     """Human framework name for an endpoint's provider_type (tree header + menu meta)."""
     return _FRAMEWORK_LABELS.get(provider_type or "", provider_type or "server")
-
-
-def _launch_key(harness: Any, base_url: str, spec: Any = None) -> dict[str, str]:
-    """What a launch of, or a probe to, the server at ``base_url`` sends as its key:
-    ``{"api_key": <raw>}`` only when the server the harness launches there is set to require one
-    (``spec``, else the primary's ``server`` or that peer's ``lifecycle``), with the primary
-    provider's key or that peer's own; else ``{}`` — the keyless call it always was. A URL that is
-    neither the primary nor a configured peer gets no key. A function of the harness, not a
-    method: the swap's helpers are also driven with a bare stand-in for the session."""
-    from localharness.provider.server import required_key_kwargs
-    provider = getattr(harness, "provider", None)
-    if provider is not None and base_url == provider.base_url:
-        return required_key_kwargs(getattr(harness, "server", None) if spec is None else spec,
-                                   provider.api_key)
-    ep = next((e for e in getattr(harness, "extra_endpoints", None) or [] if e.base_url == base_url), None)
-    if ep is None:
-        return {}
-    return required_key_kwargs(getattr(ep, "lifecycle", None) if spec is None else spec,
-                               getattr(ep, "api_key", None))
-
-
-def _peer_session_key(ep: Any) -> "tuple[Any, str | None]":
-    """The key a cold peer's ``lifecycle.api_key_file`` holds, read once at its launch: ``(SecretStr,
-    None)`` on success; ``(None, line)`` when the file fails the byte rule, with the one line to
-    show (``extra_endpoints[<name>].lifecycle.api_key_file <path>: <reason> — this session sends no
-    key``, or ``— the file is not used; this peer keeps sending the key it is configured with`` when
-    the peer is configured with one); ``(None, None)`` when the lifecycle names no file or does not
-    require a key. The caller runs it only for a lifecycle the loader kept (a withheld one is already
-    None), so the file is opened only once the record covers the entry. The key stays in memory: it is
-    never written, printed or logged, and the line carries the reason, never any of the file's content.
-
-    The outcome is also recorded on the lifecycle (``mark_key_file``), so the launch decision keeps a
-    refused file off argv and on loopback; a read that succeeds, or names no file, clears it."""
-    from pydantic import SecretStr
-
-    from localharness.cli.workspace import visible_text
-    from localharness.provider.server import (
-        KeyFileError,
-        key_destination,
-        key_kwargs,
-        mark_key_file,
-        read_key_file,
-    )
-    lifecycle = getattr(ep, "lifecycle", None)
-    path = getattr(lifecycle, "api_key_file", None)
-    if not path or getattr(lifecycle, "require_api_key", False) is not True:
-        mark_key_file(lifecycle, False)
-        return None, None
-
-    def refused(reason: object) -> "tuple[None, str]":
-        mark_key_file(lifecycle, True)
-        # the peer's name, its path and a reason come from settings files: shown through visible_text
-        head = (f"extra_endpoints[{visible_text(ep.name)}].lifecycle.api_key_file "
-                f"{visible_text(path)}: {visible_text(reason)} — ")
-        configured = getattr(ep, "configured_api_key", getattr(ep, "api_key", None))
-        if key_kwargs(configured):
-            return None, head + "the file is not used; this peer keeps sending the key it is configured with"
-        return None, head + "this session sends no key"
-
-    # The key goes to the peer's base_url; only a destination that is this machine gets one out of a
-    # file (WR-06).
-    here, shown = key_destination(getattr(ep, "base_url", ""))
-    if not here:
-        return refused(f"base_url {shown} is not this machine, so the file is not read")
-    try:
-        key = SecretStr(read_key_file(path))
-    except KeyFileError as exc:
-        return refused(exc)
-    mark_key_file(lifecycle, False)
-    return key, None
-
-
-def _hold_peer_session_key(ep: Any, peer_key: Any) -> None:
-    """Put this launch's key on the peer: the file's key when it was read, else the key the peer is
-    CONFIGURED with - never the key an earlier launch's file left behind."""
-    setter = getattr(ep, "set_session_key", None)
-    if callable(setter):
-        setter(peer_key)
-    elif peer_key is not None:
-        ep.api_key = peer_key
 
 
 def _endpoint_host(base_url: str) -> str:
