@@ -9,9 +9,10 @@ robust to a one-off stall while still tracking real drift (decode slows as the K
 cache grows, so samples legitimately spread).
 
 Storage: one small JSON file in the harness state dir, written atomically (a PER-WRITER tmp
-+ os.replace — a shared tmp name is not atomic across processes). A corrupt or missing file
-reads as empty. Concurrent sessions may race the file — last writer wins, acceptable for a
-QOL stat.
++ os.replace — a shared tmp name is not atomic across processes). A missing or empty file reads
+as empty and is written; a corrupt, oversized or otherwise unreadable one reads as empty and is
+never written over (every writer skips it with one warning naming the path, WR-03). Concurrent
+sessions may race the file — last writer wins, acceptable for a QOL stat.
 
 The same entry also carries additive fields written by other call sites (window_report,
 model_path, the launch `retry` record and the `sampling` record), and reserved top-level keys hold
@@ -36,7 +37,11 @@ from statistics import median
 from typing import NamedTuple
 from uuid import uuid4
 
+import structlog
+
 from localharness.core.private_files import open_regular, touch_private
+
+log = structlog.get_logger(__name__)
 
 SAMPLE_CAP = 10
 # #130: the ceiling above which a "measured" rate is a timing artifact, not a decode speed.
@@ -112,19 +117,43 @@ def speed_key(provider_type: str, model: str) -> str:
     return f"{provider_type}:{model}"
 
 
-def _load(path: Path) -> dict:
-    """The ledger as a dict, `{}` for anything unreadable. The file sits where agent-run code can
-    write, so it is opened through `open_regular` (a FIFO, directory or device symlink is refused
-    without blocking) and read at most LEDGER_CAP + 1 bytes: a longer file is not read at all."""
+def _read(path: Path) -> tuple[dict | None, str | None]:
+    """`(ledger, None)` for a ledger that reads, or is absent or empty (`{}`); `(None, reason)` for one
+    that is present but refused. The file sits where agent-run code can write, so it is opened through
+    `open_regular` (a FIFO, directory or device symlink is refused without blocking) and read at most
+    LEDGER_CAP + 1 bytes: a longer file is not read at all. Never raises."""
     try:
         with os.fdopen(open_regular(path), "rb") as fh:
             raw = fh.read(LEDGER_CAP + 1)
-        if len(raw) > LEDGER_CAP:
-            return {}
+    except FileNotFoundError:
+        return {}, None
+    except OSError as exc:
+        return None, f"not readable ({exc.strerror or type(exc).__name__})"
+    if len(raw) > LEDGER_CAP:
+        return None, f"larger than {LEDGER_CAP} bytes"
+    if not raw.strip():
+        return {}, None
+    try:
         data = json.loads(raw)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError, RecursionError):
-        return {}
+    except (ValueError, RecursionError):
+        return None, "not valid JSON"
+    return (data, None) if isinstance(data, dict) else (None, "not a JSON object")
+
+
+def _load(path: Path) -> dict:
+    """The ledger as a dict for a reader, `{}` for anything absent or unreadable."""
+    data, _reason = _read(path)
+    return {} if data is None else data
+
+
+def _load_for_write(path: Path) -> dict | None:
+    """The ledger as a dict for a writer, or None when the file is present but unreadable (over the cap,
+    not valid JSON, not a regular file, not readable). A writer then writes nothing: replacing the file
+    would silently drop every entry it holds (WR-03). One structured warning names the path."""
+    data, reason = _read(path)
+    if data is None:
+        log.warning("speed_ledger_unreadable", path=str(path), reason=reason, action="not written")
+    return data
 
 
 def _write(path: Path, data: dict) -> None:
@@ -150,7 +179,9 @@ def _update_entry(path: Path, key: str, **fields) -> None:
     A wholesale `data[key] = {...}` drops every other field on that entry — it silently ate the
     `tokens_per_chunk` written microseconds earlier in the same _note_gen_speed call, so the ratio
     never survived to seed the next session. Every writer of a model's entry goes through here."""
-    data = _load(path)
+    data = _load_for_write(path)
+    if data is None:
+        return
     entry = data.get(key)
     entry = entry if isinstance(entry, dict) else {}
     entry.update(fields)
@@ -292,7 +323,9 @@ def record_dropped_env(path: Path, runtime: str, names: Iterable[str]) -> None:
 
     Lives under the reserved top-level DROPPED_ENV_KEY, not on a model entry: a dropped name is a
     property of the launch environment. Other runtimes' lists and every model entry are kept."""
-    data = _load(path)
+    data = _load_for_write(path)
+    if data is None:
+        return
     dropped = data.get(DROPPED_ENV_KEY)
     dropped = dropped if isinstance(dropped, dict) else {}
     dropped[runtime] = sorted(set(names))
@@ -400,8 +433,8 @@ def last_retry(path: Path, record_key: str) -> RetryRecord | None:
 def clear_retry(path: Path, record_key: str) -> None:
     """Drop the retry field from `record_key`'s entry, keeping every other field. Writes nothing
     when there is no retry to drop. Its only production caller is `lifecycle.confirm_launch`."""
-    data = _load(path)
-    entry = data.get(record_key)
+    data = _load_for_write(path)
+    entry = data.get(record_key) if data is not None else None
     if not isinstance(entry, dict) or "retry" not in entry:
         return
     del entry["retry"]
@@ -454,7 +487,9 @@ def last_sampling(path: Path, provider_type: str, model: str) -> SamplingRecord 
 def record_last_served(path: Path, name: str) -> None:
     """Record the record name last served, under the reserved top-level LAST_SERVED_KEY. Read by
     spec 20 §8.2's resume clause through `last_served`."""
-    data = _load(path)
+    data = _load_for_write(path)
+    if data is None:
+        return
     data[LAST_SERVED_KEY] = {"name": name, "recorded_at": datetime.now(timezone.utc).isoformat()}
     _write(path, data)
 
