@@ -357,6 +357,8 @@ def boot_prior_death(
         return False
     try:
         at = datetime.fromisoformat(marker.at)
+        if at.tzinfo is None or now.tzinfo is None:  # IN-02: never a naive comparison, whatever `now` is
+            return False
         age = (now - at).total_seconds()
     except (TypeError, ValueError, OverflowError):
         return False
