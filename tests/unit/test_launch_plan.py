@@ -135,6 +135,21 @@ async def test_a_launch_that_derived_nothing_calls_serve_command_with_the_0_18_k
     assert live.tuned == plan.tuned == tuning.NOTHING_DERIVED
 
 
+def test_the_0_18_parity_covers_the_keywords_and_an_env_cache_type_is_priced_as_intended(tmp_path, box):
+    """IN-03: with f16 + draft_mtp false the keywords are 0.18's, and the fit of a record whose `env:`
+    pins a cache type is priced at that type (0.18 priced f16 there): the documented, intended change."""
+    spec = _gguf_spec(tmp_path, SWIFT, env={"LLAMA_ARG_CACHE_TYPE_K": "q8_0", "LLAMA_ARG_CACHE_TYPE_V": "q8_0"})
+    plan = lifecycle.plan_launch(spec, _sense(spec, tmp_path), server.launch_decision(spec, False),
+                                 autosense=PRE_TUNING, api_key_held=False)
+    assert set(plan.serve_kwargs) == {"keyed", "loopback", "key_file_ok", "context", "cache_ram"}
+    header = fit_header(gguf_header.read_header(spec.model, FIT_KEYS))
+    q8 = fit(header, box.mem.free_bytes, PRE_TUNING, cache_type_k="q8_0", cache_type_v="q8_0",
+             weights=box.weights, offload="gpu")
+    f16 = fit(header, box.mem.free_bytes, PRE_TUNING, cache_type_k="f16", cache_type_v="f16",
+              weights=box.weights, offload="gpu")
+    assert plan.full_fit == q8 != f16
+
+
 async def test_a_callback_that_raises_does_not_stop_the_launch(tmp_path, popen, box):
     spec = _gguf_spec(tmp_path, SWIFT)
 
