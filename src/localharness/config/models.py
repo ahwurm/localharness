@@ -2445,9 +2445,11 @@ class InstructionsConfig(BaseModel):
 
 
 class AutosenseConfig(BaseModel):
-    """How the harness sizes the window and prompt cache of a server it launches. Machine-level
-    only: these set memory margins and the folders searched for model files on this machine's
-    hardware, so a project may not move them. Every ratio is a share bounded to (0, 1]."""
+    """How the harness sizes and tunes the server it launches. Machine-level only: these set
+    memory margins and the folders searched for model files on this machine's hardware, and steer
+    the flags derived at launch, so a project may not move them. Each ratio is a share bounded to
+    (0, 1]. `kv_cache_type`, `draft_mtp` and `draft_p_min` are not fingerprinted by machine trust:
+    each selects among closed values, and the section is machine-only."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
     compute_margin_ratio: float = Field(default=0.10, gt=0.0, le=1.0, description=(
@@ -2469,6 +2471,21 @@ class AutosenseConfig(BaseModel):
         default_factory=lambda: ["~/models", "~/.cache/huggingface"],
         description="The folders searched for GGUF files.",
     )
+    kv_cache_type: str = Field(default="q8_0", description=(
+        "The K and V cache type the harness gives a llama.cpp launch whose record sets none; f16 "
+        "restores the 0.18 launch."))
+    draft_mtp: bool = Field(default=True, description=(
+        "Whether a model with MTP layers drafts with them (llama.cpp --spec-type draft-mtp)."))
+    draft_p_min: float = Field(default=0.6, ge=0.0, le=1.0, description=(
+        "--spec-draft-p-min for a derived draft-mtp (llama.cpp's own default is 0.0)."))
+
+    @field_validator("kv_cache_type")
+    @classmethod
+    def _kv_cache_type_known(cls, v: str) -> str:
+        if v not in KV_CACHE_TYPES:
+            raise ValueError(
+                f"kv_cache_type must be one of {', '.join(KV_CACHE_TYPES)} (got {v!r})")
+        return v
 
 
 class EffortBudgetConfig(BaseModel):
@@ -2500,6 +2517,11 @@ class HarnessConfig(BaseModel):
         description="Set when the session has switched to a NON-primary endpoint+model via /model "
         "(cross-endpoint). Recorded additively so it never mutates provider/server. None = the "
         "primary provider is active.",
+    )
+    pending_preset: Optional[str] = Field(
+        default=None,
+        description="The preset the next start serves, recorded by `localharness model <name>` "
+        "from the shell. Machine-level only.",
     )
     terminal: TerminalConfig = Field(
         default_factory=TerminalConfig,
@@ -2535,6 +2557,16 @@ class HarnessConfig(BaseModel):
     sentinel: SentinelConfig = Field(
         default_factory=SentinelConfig,
         description="Eval-sentinel thresholds (REP-03/04). Addressable via `sentinel.{overfit_gap_threshold,duplicate_similarity,duplicate_consecutive_k,saturation_k,saturation_ceiling}`.")
+
+    @field_validator("pending_preset")
+    @classmethod
+    def _pending_preset_clean(cls, v: Optional[str]) -> Optional[str]:
+        """The same rule as `_argv_text_clean`: a blank, NUL-bearing or multi-line name is refused."""
+        if v is None:
+            return v
+        if not v.strip() or "\x00" in v or "\n" in v or "\r" in v:
+            raise ValueError("pending_preset must be a non-empty single line with no NUL byte")
+        return v
 
     @model_validator(mode="after")
     def _peer_inherits_primary_binary(self) -> "HarnessConfig":
