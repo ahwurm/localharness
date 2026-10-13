@@ -74,6 +74,14 @@ def _no_model_download(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_hf_cache_lookup(monkeypatch):
+    """A vLLM launch looks a repo id's config.json up in the Hugging Face cache, and the suite's fake
+    HOME does not cover an absolute HF_HOME inherited from the developer's shell. The lookup finds
+    nothing unless a test that means to exercise the snapshot path patches it itself."""
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda *args, **kwargs: None)
+
+
+@pytest.fixture(autouse=True)
 def _pin_terminal_color_env(monkeypatch):
     """#131: color-rendering tests build consoles with force_terminal=True but never pin
     color_system, so Rich still consults the AMBIENT environment for whether color is allowed.
