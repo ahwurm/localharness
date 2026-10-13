@@ -175,8 +175,8 @@ org:
 ```
 
 Every new record field is `Optional`, `None` = derived, runtime-gated in `_launch_target_present`; the
-pin-off word is `off`. Precedence for every derived flag: **record field > `extra_args`/`env:` flag (any
-spelling) > derivation** (the `has_ctx_arg` rule). `speculative`, `reasoning_parser`, `tool_call_parser`
+pin-off word is `off`. Precedence for every derived flag: **record field > `extra_args`/`env:`/`config_ini`
+flag (any spelling) > derivation** (the `has_ctx_arg` rule). `speculative`, `reasoning_parser`, `tool_call_parser`
 join `LAUNCH_MODEL_KEYS` (a `None` yields no entry); `pending_preset` joins `HARNESS_GLOBAL_ONLY_FIELDS`;
 `kv_cache_type` is validated against llama.cpp's type list; `draft_p_min` in `[0, 1]`.
 
@@ -233,13 +233,14 @@ unset**. Header ints are validated (`block_count > 0`, `0 ≤ nextn_predict_laye
 
 ### 6.1 KV cache type (llama.cpp)
 
-Neither `cache_type_k/v` set, no cache type in `extra_args`/`env:`, no `-fa off` → `cache_type =
+Neither `cache_type_k/v` set, no cache type in `extra_args`/`env:`/`config_ini`, no `-fa off` (in any of
+the three) → `cache_type =
 autosense.kv_cache_type` (default `q8_0`) for K and V; the fit prices it. `f16` reproduces 0.18.
 
 ### 6.2 MTP drafting (llama.cpp)
 
 `autosense.draft_mtp` true, `speculative` unset, no `--spec-type`/`-md`/`--spec-draft-*`/`-hfd`/
-`LLAMA_ARG_SPEC_*`, header `nextn_predict_layers ≥ 1` → `--spec-type draft-mtp --spec-draft-p-min
+`LLAMA_ARG_SPEC_*` (in `extra_args`, `env:` or `config_ini`), header `nextn_predict_layers ≥ 1` → `--spec-type draft-mtp --spec-draft-p-min
 <autosense.draft_p_min>`. `speculative: off` pins off; `speculative: draft-mtp` is a record value the retry
 never drops. **The fit counts the draft context:** `kv_bytes_per_token × (1 + nextn_predict_layers /
 block_count)` with drafting on (`66/65` on the 27B). Verified live (§14).

@@ -85,6 +85,14 @@ KV_SUPPRESSED = [
     pytest.param({"extra_args": ["-fa", "OFF"]}, id="spelling--fa-OFF"),
     *[pytest.param({"env": {"LLAMA_ARG_FLASH_ATTN": v}}, id=f"spelling-env-flash-attn-{v}")
       for v in ("off", "0", "false", "disabled", "OFF", "False", "Disabled")],
+    # CR-01: the record's config_ini is an explicit setting too (key = flag name or env name, any case)
+    pytest.param({"config_ini": "flash-attn = off\n"}, id="config_ini-flash-attn-off"),
+    pytest.param({"config_ini": "[*]\nfa = OFF ; no fa here\n"}, id="config_ini-fa-off-commented"),
+    pytest.param({"config_ini": "LLAMA_ARG_FLASH_ATTN = false\n"}, id="config_ini-env-name-flash-attn"),
+    pytest.param({"config_ini": "cache-type-k = f16\n"}, id="config_ini-cache-type-k"),
+    pytest.param({"config_ini": "CTV = q4_0\n"}, id="config_ini-ctv-upper"),
+    pytest.param({"config_ini": "llama_arg_cache_type_v = q4_0\n"}, id="config_ini-env-name-cache-type-v"),
+    pytest.param({"config_ini": "flash-attn = off\ncache-type-k = f16\n"}, id="config_ini-the-review-probe"),
 ]
 
 
@@ -104,6 +112,13 @@ def test_precedence_fa_on_or_auto_does_not_suppress(flags):
 @pytest.mark.parametrize("value", ["on", "1", "true", "auto"])
 def test_precedence_env_fa_on_does_not_suppress(value):
     assert derive(_spec(env={"LLAMA_ARG_FLASH_ATTN": value}), SWIFT_HEADER, KNOBS).cache_type == "q8_0"
+
+
+@pytest.mark.parametrize("ini", ["flash-attn = on\n", "; flash-attn = off\n", "# cache-type-k = f16\n",
+                                 "flash-attn\n", "jinja = true\nctx-size = 4096\n"])
+def test_precedence_a_config_ini_without_a_kv_or_spec_setting_suppresses_nothing(ini):
+    tuned = derive(_spec(config_ini=ini), SWIFT_HEADER, KNOBS)
+    assert tuned.cache_type == "q8_0" and tuned.spec_type == "draft-mtp"
 
 
 def test_precedence_the_f16_knob_derives_no_cache_type():
@@ -131,6 +146,10 @@ SPEC_SUPPRESSED = [
     pytest.param({"env": {"LLAMA_ARG_SPEC_TYPE": "ngram"}}, id="spelling-env-spec-type"),
     pytest.param({"env": {"LLAMA_ARG_SPEC_DRAFT_N_MAX": "3"}}, id="spelling-env-spec-draft-n-max"),
     pytest.param({"env": {"LLAMA_ARG_MODEL_DRAFT": "/m/d.gguf"}}, id="spelling-env-model-draft"),
+    pytest.param({"config_ini": "spec-type = ngram\n"}, id="config_ini-spec-type"),
+    pytest.param({"config_ini": "md = /m/d.gguf\n"}, id="config_ini-md"),
+    pytest.param({"config_ini": "spec-draft-n-max = 3\n"}, id="config_ini-spec-draft-n-max"),
+    pytest.param({"config_ini": "LLAMA_ARG_SPEC_TYPE = ngram\n"}, id="config_ini-env-name-spec-type"),
 ]
 
 
