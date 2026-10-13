@@ -19,16 +19,20 @@ imports where it is absent.
 """
 from __future__ import annotations
 
+import dataclasses
 import errno
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
-from localharness.core.private_files import open_regular
+from localharness.core.private_files import (
+    atomic_write_text, open_private_dir, open_regular, read_private_text,
+)
 from localharness.core.which import which_outside_cwd
 from localharness.provider.procfs import ProcRecord
 from localharness.provider.server import server_dir
@@ -39,6 +43,8 @@ __all__ = [
     "Skip", "UnitState", "unit_file_state", "user_units", "read_journal",
     "read_unit", "unit_record", "journal_environment_gap",
     "BOOT_MARKER_NAME", "Marker", "UnitRuntimeState", "remove_marker",
+    "TARGET_NAME", "TARGET_NAME_PATTERN", "TARGET_CAP", "MARKER_CAP", "MARKER_CAUSES",
+    "MARKER_SHAPES", "MARKER_DROPS", "write_target", "read_target", "remove_target", "read_marker",
 ]
 
 JOURNAL_LINES = 200
@@ -52,6 +58,13 @@ UNIT_TOKEN_CAP = 512
 UNITS_SCANNED_CAP = 64
 
 BOOT_MARKER_NAME = "boot-attempt"
+TARGET_NAME = "unit-target"
+TARGET_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+:-]{0,127}")
+TARGET_CAP = 256
+MARKER_CAP = 4096
+MARKER_CAUSES = frozenset({"death", "remembered", "none"})
+MARKER_SHAPES = frozenset({"full", "retry"})
+MARKER_DROPS = frozenset({"draft-mtp", "parsers"})
 
 _LLAMA_SERVER = "llama-server"
 _SHOW_FIELDS = "Id,LoadState,FragmentPath,UnitFileState,DropInPaths"
@@ -537,6 +550,32 @@ def unit_record(state: UnitState) -> tuple[str, ProcRecord] | Skip:
     return first if first.names_model else second
 
 
+def _open_server_dir(config_dir, *, create: bool) -> int:
+    """A descriptor for `<config dir>/vllm`, opened `O_DIRECTORY | O_NOFOLLOW` (see
+    `private_files.open_private_dir`). The directory sits where agent-run code can write, so it is
+    never followed through a link; OSError (ELOOP, ENOTDIR, ENOENT, ...) propagates."""
+    return open_private_dir(server_dir(config_dir), create=create)
+
+
+def _unlink_in_server_dir(config_dir, name: str) -> bool:
+    """Unlink `name` inside the server directory by descriptor; True when a file was removed, False
+    when there was none or the directory is missing, not a directory or a link. Any other OSError
+    propagates."""
+    try:
+        fd = _open_server_dir(config_dir, create=False)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.ENOENT):
+            return False
+        raise
+    try:
+        os.unlink(name, dir_fd=fd)
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
 def remove_marker(config_dir) -> bool:
     """Unlink `<server dir>/boot-attempt`; True when a file was removed, False when there was none.
 
@@ -545,18 +584,98 @@ def remove_marker(config_dir) -> bool:
     followed (False), and a link planted in the file's place is unlinked itself, never what it
     points at. Any other OSError propagates. Its only production caller is
     `lifecycle.confirm_launch`."""
-    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-             | getattr(os, "O_CLOEXEC", 0))
+    return _unlink_in_server_dir(config_dir, BOOT_MARKER_NAME)
+
+
+# ------------------------------------------------------------------------------ the unit target
+
+
+def write_target(config_dir, name: str) -> None:
+    """Record `name` (a launch-record name) as the unit's target in `<server dir>/unit-target`.
+
+    ValueError when `name` is not one record name (`TARGET_NAME_PATTERN`). The file is written
+    through `atomic_write_text(dir_fd=)` inside the no-follow server directory, created if missing:
+    a symlinked directory is refused with OSError, and a link planted at `unit-target` is replaced,
+    never followed. Its only caller is `UnitStrategy.activate` (RULING W3); the structural test
+    pins that."""
+    if not isinstance(name, str) or not TARGET_NAME_PATTERN.fullmatch(name):
+        raise ValueError(f"not a record name: {name!r}")
+    fd = _open_server_dir(config_dir, create=True)
     try:
-        fd = os.open(server_dir(config_dir), flags)
-    except OSError as exc:
-        if exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.ENOENT):
-            return False
-        raise
-    try:
-        os.unlink(BOOT_MARKER_NAME, dir_fd=fd)
-    except FileNotFoundError:
-        return False
+        atomic_write_text(TARGET_NAME, name + "\n", dir_fd=fd)
     finally:
         os.close(fd)
-    return True
+
+
+def read_target(config_dir) -> str | None:
+    """The record name in `<server dir>/unit-target`, or None: no file, no directory, a link, a FIFO,
+    more than `TARGET_CAP` bytes, bytes that are not UTF-8, or a body that is not one record name.
+    The ladder reads it (and still resolves it against fingerprinted records)."""
+    try:
+        fd = _open_server_dir(config_dir, create=False)
+    except OSError:
+        return None
+    try:
+        return read_private_text(TARGET_NAME, dir_fd=fd, cap=TARGET_CAP, pattern=TARGET_NAME_PATTERN)
+    finally:
+        os.close(fd)
+
+
+def remove_target(config_dir) -> bool:
+    """Unlink `<server dir>/unit-target`; True when a file was removed, False when there was none.
+    The same no-follow rules as `remove_marker`: a planted link is unlinked itself."""
+    return _unlink_in_server_dir(config_dir, TARGET_NAME)
+
+
+# ------------------------------------------------------------------------------ the boot marker
+
+_MARKER_FIELDS = frozenset(f.name for f in dataclasses.fields(Marker))
+
+
+def _opt_int(value) -> bool:
+    return value is None or (isinstance(value, int) and not isinstance(value, bool))
+
+
+def _marker_from(data) -> Marker | None:
+    """A `Marker` from a decoded JSON value, or None when it is off the closed shape of spec 20 §9.3."""
+    if not isinstance(data, dict) or set(data) != _MARKER_FIELDS:
+        return None
+    for key in ("record", "binary", "at"):
+        if not isinstance(data[key], str) or not data[key]:
+            return None
+    if data["invocation"] is not None and not isinstance(data["invocation"], str):
+        return None
+    if data["cause"] not in MARKER_CAUSES or data["shape"] not in MARKER_SHAPES:
+        return None
+    if not all(_opt_int(data[k]) for k in ("planned_context", "full_fit", "free_bytes")):
+        return None
+    dropped = data["dropped"]
+    if not isinstance(dropped, list) or not all(isinstance(d, str) and d in MARKER_DROPS for d in dropped):
+        return None
+    return Marker(record=data["record"], binary=data["binary"], invocation=data["invocation"],
+                  cause=data["cause"], shape=data["shape"], planned_context=data["planned_context"],
+                  full_fit=data["full_fit"], free_bytes=data["free_bytes"], dropped=tuple(dropped),
+                  at=data["at"])
+
+
+def read_marker(config_dir) -> Marker | None:
+    """The boot marker at `<server dir>/boot-attempt`, or None: no file, no directory, a link, a FIFO,
+    more than `MARKER_CAP` bytes, invalid JSON, or anything off `Marker`'s closed shape. Read only;
+    the writer belongs to the autostart unit's `serve` (spec 20 §9.3) and the confirm removes it."""
+    try:
+        fd = _open_server_dir(config_dir, create=False)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(open_regular(BOOT_MARKER_NAME, dir_fd=fd), "rb") as fh:
+            raw = fh.read(MARKER_CAP + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(raw) > MARKER_CAP:
+        return None
+    try:
+        return _marker_from(json.loads(raw.decode("utf-8")))
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError are both ValueErrors
+        return None
