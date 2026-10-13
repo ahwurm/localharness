@@ -112,6 +112,16 @@ def has_parser_flag(extra_args: Sequence[str]) -> bool:
     return any(isinstance(a, str) and a.split("=", 1)[0] in _PARSER_FLAGS for a in extra_args)
 
 
+def _hf_cached_config(repo_id: str) -> str | None:
+    """The cached snapshot's config.json for a Hugging Face repo id: a local cache lookup, never the
+    network. A non-path answer (the library's cached-as-missing sentinel) is None. Its own function so
+    the suite can make the lookup hermetic at one seam (tests/conftest.py)."""
+    from huggingface_hub import try_to_load_from_cache
+
+    found = try_to_load_from_cache(repo_id=repo_id, filename="config.json")
+    return found if isinstance(found, str) else None
+
+
 def _checkpoint_config_path(spec: Any) -> str | None:
     """Where the checkpoint's config.json would be: the registry entry's directory, a model that is
     itself a directory, else the Hugging Face cache snapshot (a local cache lookup, no network)."""
@@ -121,10 +131,7 @@ def _checkpoint_config_path(spec: Any) -> str | None:
     model = os.path.expanduser(spec.model)
     if os.path.isdir(model):
         return os.path.join(model, "config.json")
-    from huggingface_hub import try_to_load_from_cache
-
-    found = try_to_load_from_cache(repo_id=spec.model, filename="config.json")
-    return found if isinstance(found, str) else None
+    return _hf_cached_config(spec.model)
 
 
 def read_model_config(spec: Any) -> Mapping[str, Any] | None:
