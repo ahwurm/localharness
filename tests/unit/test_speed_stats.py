@@ -49,10 +49,20 @@ def test_record_caps_rolling_window(tmp_path):
     assert median_tps(path, "vllm", "q") == 9.5
 
 
-def test_corrupt_file_reads_empty_and_recovers(tmp_path):
+def test_corrupt_file_reads_empty_and_is_never_written_over(tmp_path):
+    """WR-03 (orchestrator ruling): an unparsable ledger reads as empty but is not replaced by the
+    next write, which would drop whatever the person can still recover from it."""
     path = tmp_path / "speed_stats.json"
     path.write_text("{not json")
     assert median_tps(path, "vllm", "q") is None
+    record_tps(path, "vllm", "q", 25.0)
+    assert path.read_text() == "{not json"
+    assert median_tps(path, "vllm", "q") is None
+
+
+def test_an_empty_file_is_written_like_a_missing_one(tmp_path):
+    path = tmp_path / "speed_stats.json"
+    path.write_text("  \n")
     record_tps(path, "vllm", "q", 25.0)
     assert median_tps(path, "vllm", "q") == 25.0
 

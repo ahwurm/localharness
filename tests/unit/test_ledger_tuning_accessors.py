@@ -256,3 +256,67 @@ def test_last_served_keeps_the_model_entries(tmp_path):
     ss.record_tps(p, "llamacpp", "qwen", 50.0)
     ss.record_last_served(p, "flash-next")
     assert ss.median_tps(p, "llamacpp", "qwen") == 50.0
+
+
+# --- an unreadable ledger is never written over (WR-03) ----------------------------------------
+
+_WRITERS = {
+    "record_tps": lambda p: ss.record_tps(p, "llamacpp", "qwen", 40.0),
+    "record_tokens_per_chunk": lambda p: ss.record_tokens_per_chunk(p, "llamacpp", "qwen", 2.0),
+    "record_window_report": lambda p: ss.record_window_report(p, "llamacpp", "qwen", 1, 2, 3),
+    "record_rejected_effort_keys": lambda p: ss.record_rejected_effort_keys(p, "llamacpp", "qwen", ["k"]),
+    "record_model_path": lambda p: ss.record_model_path(p, "llamacpp", "qwen", "/m.gguf"),
+    "record_dropped_env": lambda p: ss.record_dropped_env(p, "llamacpp", ["X"]),
+    "record_retry": lambda p: _retry(p),
+    "clear_retry": lambda p: ss.clear_retry(p, KEY),
+    "record_sampling": lambda p: ss.record_sampling(p, "llamacpp", "qwen", temperature=None, rung=None,
+                                                    server_default=1.0),
+    "record_last_served": lambda p: ss.record_last_served(p, "qwen"),
+}
+
+
+def _over_cap_with_a_retry(p):
+    """A ledger one byte over the cap whose content holds a retry record the writers must not lose."""
+    body = {KEY: {"retry": {"full_fit": 1}, "pad": ""}}
+    head = json.dumps(body)
+    body[KEY]["pad"] = "x" * (ss.LEDGER_CAP + 1 - len(head))
+    p.write_text(json.dumps(body))
+    assert p.stat().st_size == ss.LEDGER_CAP + 1
+
+
+@pytest.mark.parametrize("writer", sorted(_WRITERS))
+@pytest.mark.parametrize("kind", ["over-cap", "malformed", "non-dict"])
+def test_no_writer_replaces_an_unreadable_ledger_and_each_warns_once(tmp_path, writer, kind):
+    from structlog.testing import capture_logs
+
+    p = tmp_path / "speed_stats.json"
+    if kind == "over-cap":
+        _over_cap_with_a_retry(p)
+    else:
+        p.write_text("{not json" if kind == "malformed" else "[1, 2]")
+    before = p.read_bytes()
+    with capture_logs() as logs:
+        _WRITERS[writer](p)
+    assert p.read_bytes() == before
+    warnings = [e for e in logs if e.get("event") == "speed_ledger_unreadable"]
+    assert len(warnings) == 1 and warnings[0]["path"] == str(p) and warnings[0]["log_level"] == "warning"
+    assert ss._load(p) == {}  # readers still read it as empty
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+def test_no_writer_replaces_a_fifo(tmp_path):
+    p = tmp_path / "speed_stats.json"
+    os.mkfifo(p)
+    for write in _WRITERS.values():
+        write(p)
+    import stat
+    assert stat.S_ISFIFO(os.lstat(p).st_mode)
+
+
+def test_a_missing_ledger_is_written_without_a_warning(tmp_path):
+    from structlog.testing import capture_logs
+
+    p = tmp_path / "speed_stats.json"
+    with capture_logs() as logs:
+        _retry(p)
+    assert ss.last_retry(p, KEY) is not None and logs == []
