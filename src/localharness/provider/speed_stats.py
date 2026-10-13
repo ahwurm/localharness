@@ -32,7 +32,7 @@ from statistics import median
 from typing import NamedTuple
 from uuid import uuid4
 
-from localharness.core.private_files import touch_private
+from localharness.core.private_files import open_regular, touch_private
 
 SAMPLE_CAP = 10
 # #130: the ceiling above which a "measured" rate is a timing artifact, not a decode speed.
@@ -55,6 +55,9 @@ _LEDGER_NAME = "speed_stats.json"
 # Reserved top-level key (leading underscore): a per-runtime map of the env names a launch dropped.
 # It holds no samples, so the speed readers skip it; model entries are keyed "provider:model".
 DROPPED_ENV_KEY = "_dropped_env"
+# The largest ledger file `_load` will read. A real ledger is a handful of model entries (a few
+# KiB); 1 MiB is far above that and far below anything that costs memory or time to parse.
+LEDGER_CAP = 1 << 20
 
 
 def default_speed_stats_path(config_dir: "str | Path | None" = None) -> Path:
@@ -103,10 +106,17 @@ def speed_key(provider_type: str, model: str) -> str:
 
 
 def _load(path: Path) -> dict:
+    """The ledger as a dict, `{}` for anything unreadable. The file sits where agent-run code can
+    write, so it is opened through `open_regular` (a FIFO, directory or device symlink is refused
+    without blocking) and read at most LEDGER_CAP + 1 bytes: a longer file is not read at all."""
     try:
-        data = json.loads(path.read_text())
+        with os.fdopen(open_regular(path), "rb") as fh:
+            raw = fh.read(LEDGER_CAP + 1)
+        if len(raw) > LEDGER_CAP:
+            return {}
+        data = json.loads(raw)
         return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
 
 
@@ -309,3 +319,80 @@ def all_median_tps(path: Path) -> dict[str, float]:
         if samples:
             out[key] = median(samples)
     return out
+
+
+# The only thing a launch retry may remember dropping. A hand-edited ledger can therefore move the
+# next launch's threshold only as far as the spec allows (spec 20 §6.4); anything else reads absent.
+RETRY_DROPPABLE = frozenset({"draft-mtp"})
+
+
+class RetryRecord(NamedTuple):
+    """What the last launch of one record settled on after a failed full-fit attempt (spec 20 §6.4):
+    the fit it measured, the free memory it saw, what it dropped, the binary and the tuning knobs it
+    launched with, and when (ISO-8601 UTC)."""
+
+    full_fit: int
+    free_bytes: int | None
+    dropped: tuple[str, ...]
+    binary: str
+    kv_cache_type: str
+    draft_p_min: float
+    at: str
+
+
+def record_retry(
+    path: Path, record_key: str, *, full_fit: int, free_bytes: int | None,
+    dropped: Iterable[str], binary: str, kv_cache_type: str, draft_p_min: float,
+) -> None:
+    """Record the retry on `record_key`'s entry (the `speed_key(runtime, served id)` form).
+
+    Its only production caller is `lifecycle.confirm_launch`, the one writer of the retry record.
+    A `dropped` outside RETRY_DROPPABLE raises ValueError and writes nothing."""
+    drop = sorted(set(dropped))
+    if not set(drop) <= RETRY_DROPPABLE:
+        raise ValueError(f"retry may only record dropping {sorted(RETRY_DROPPABLE)}, got {drop}")
+    _update_entry(path, record_key, retry={
+        "full_fit": full_fit, "free_bytes": free_bytes, "dropped": drop, "binary": binary,
+        "kv_cache_type": kv_cache_type, "draft_p_min": draft_p_min,
+        "at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def _plain_int(v: object) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def last_retry(path: Path, record_key: str) -> RetryRecord | None:
+    """The recorded retry, or None when never recorded or hand-edited out of shape (a non-positive
+    or bool `full_fit`, a `dropped` outside RETRY_DROPPABLE, any wrong type)."""
+    entry = _load(path).get(record_key)
+    rec = entry.get("retry") if isinstance(entry, dict) else None
+    if not isinstance(rec, dict):
+        return None
+    full_fit, free, dropped = rec.get("full_fit"), rec.get("free_bytes"), rec.get("dropped")
+    p_min = rec.get("draft_p_min")
+    if not _plain_int(full_fit) or full_fit <= 0:
+        return None
+    if free is not None and (not _plain_int(free) or free < 0):
+        return None
+    if isinstance(p_min, bool) or not isinstance(p_min, (int, float)) or not 0 <= p_min <= 1:
+        return None
+    if not isinstance(dropped, list) or not all(isinstance(d, str) for d in dropped):
+        return None
+    if not set(dropped) <= RETRY_DROPPABLE:
+        return None
+    strs = [rec.get(k) for k in ("binary", "kv_cache_type", "at")]
+    if not all(isinstance(v, str) for v in strs):
+        return None
+    return RetryRecord(full_fit, free, tuple(dropped), strs[0], strs[1], float(p_min), strs[2])
+
+
+def clear_retry(path: Path, record_key: str) -> None:
+    """Drop the retry field from `record_key`'s entry, keeping every other field. Writes nothing
+    when there is no retry to drop. Its only production caller is `lifecycle.confirm_launch`."""
+    data = _load(path)
+    entry = data.get(record_key)
+    if not isinstance(entry, dict) or "retry" not in entry:
+        return
+    del entry["retry"]
+    _write(path, data)
