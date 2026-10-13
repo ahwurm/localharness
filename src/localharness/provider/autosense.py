@@ -31,6 +31,7 @@ from localharness.provider.speed_stats import WindowRecord
 # What callers hand to `agent.gguf_header.read_header` so the header holds exactly the fit's inputs.
 FIT_KEYS = frozenset({
     "block_count", "head_count_kv", "key_length", "embedding_length", "head_count", "context_length",
+    "nextn_predict_layers", "expert_count",
 })
 
 # Bytes per element of a KV cache type, from ggml's block sizes (bytes per block / elements per block).
@@ -273,6 +274,54 @@ def extra_cache_types(extra_args: Sequence[str]) -> tuple[str | None, str | None
     None when absent. The record's own `cache_type_k` / `cache_type_v` win over these."""
     return (_flag_value(extra_args, ("-ctk", "--cache-type-k")),
             _flag_value(extra_args, ("-ctv", "--cache-type-v")))
+
+
+def _has_flag(extra_args: Sequence[str], flags: Sequence[str]) -> bool:
+    """Whether any of `flags` appears in `extra_args`, bare (value in the next token) or `flag=value`."""
+    return any(t == f or t.startswith(f"{f}=") for t in extra_args for f in flags)
+
+
+_CACHE_TYPE_FLAGS = ("-ctk", "-ctv", "--cache-type-k", "--cache-type-v")
+_CACHE_TYPE_ENV = ("LLAMA_ARG_CACHE_TYPE_K", "LLAMA_ARG_CACHE_TYPE_V")
+_FLASH_ATTN_FLAGS = ("-fa", "--flash-attn")
+_FLASH_ATTN_OFF_ENV = frozenset({"off", "0", "false", "disabled"})
+_SPEC_FLAGS = ("--spec-type", "-md", "--model-draft", "-hfd", "--hf-repo-draft", "-hfrd")
+
+
+def has_cache_type_flag(extra_args: Sequence[str], env: Mapping[str, str]) -> bool:
+    """Whether the person already pinned a KV cache type: `-ctk` / `-ctv` / `--cache-type-k` /
+    `--cache-type-v` (two-token or `=` form) in `extra_args`, or `LLAMA_ARG_CACHE_TYPE_K` / `_V` in `env`."""
+    return _has_flag(extra_args, _CACHE_TYPE_FLAGS) or any(name in env for name in _CACHE_TYPE_ENV)
+
+
+def flash_attn_off(extra_args: Sequence[str], env: Mapping[str, str]) -> bool:
+    """Whether flash attention is switched off: `-fa` / `--flash-attn` with the value `off` (next
+    token or `=` form) in `extra_args`, or `LLAMA_ARG_FLASH_ATTN` in `env` set to off / 0 / false /
+    disabled (any case). A quantized V cache needs flash attention, so off suppresses the KV derivation."""
+    value = _flag_value(extra_args, _FLASH_ATTN_FLAGS)
+    if value is not None and value.strip().lower() == "off":
+        return True
+    raw = env.get("LLAMA_ARG_FLASH_ATTN")
+    return raw is not None and str(raw).strip().lower() in _FLASH_ATTN_OFF_ENV
+
+
+def has_spec_flag(extra_args: Sequence[str], env: Mapping[str, str]) -> bool:
+    """Whether speculative decoding is already set by hand: `--spec-type`, `-md` / `--model-draft`,
+    `-hfd` / `--hf-repo-draft` / `-hfrd` (two-token or `=` form) or any `--spec-draft-*` flag in
+    `extra_args`, or any `LLAMA_ARG_SPEC_*` / `LLAMA_ARG_MODEL_DRAFT` name in `env`."""
+    if _has_flag(extra_args, _SPEC_FLAGS) or any(t.startswith("--spec-draft-") for t in extra_args):
+        return True
+    return any(name.startswith("LLAMA_ARG_SPEC_") or name == "LLAMA_ARG_MODEL_DRAFT" for name in env)
+
+
+def spec_type_flag(extra_args: Sequence[str], env: Mapping[str, str]) -> str | None:
+    """The value of the last `--spec-type` in `extra_args`, else env `LLAMA_ARG_SPEC_TYPE`, else None
+    (a hand-set `draft-mtp` drafts, so the fit must price it)."""
+    value = _flag_value(extra_args, ("--spec-type",))
+    if value is not None:
+        return value
+    raw = env.get("LLAMA_ARG_SPEC_TYPE")
+    return str(raw) if raw is not None else None
 
 
 _UNSET: Any = object()  # compute_fit's `memory=` default: probe free memory as before
