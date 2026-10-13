@@ -25,7 +25,7 @@ from tests.unit.gguf_support import write_gguf
 from tests.unit.launch_support import PopenRecorder, popen, record_chain  # noqa: F401
 
 GIB = 2**30
-RATIOS = AutosenseConfig()
+RATIOS = AutosenseConfig(kv_cache_type="f16", draft_mtp=False)  # the 0.18 shape these tests pin
 BASE = "http://127.0.0.1:8080/v1"
 
 HEADER_A = {"general.architecture": "qwen3", "qwen3.block_count": 64, "qwen3.attention.head_count_kv": 8,
