@@ -868,7 +868,7 @@ def _plan_clause(plan: Any) -> str:
     return tuning.derived_clause(
         plan.tuned, shape=plan.shape, cause=plan.cause, dropped=plan.dropped,
         remembered_at=plan.remembered_at, context=report.asked if halved else None, halved=halved,
-        undo_field="server.speculative")
+        undo_field="server.speculative", parser_fields=getattr(plan, "dropped_parser_fields", ()))
 
 
 _POSTURE_KEYS = ("bind_all", "require_api_key")

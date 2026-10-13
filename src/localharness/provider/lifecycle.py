@@ -176,6 +176,9 @@ class ManagedVllmStrategy:
 
     With `autosense` set the launch is a `LaunchPlan` (`sense_launch` → `plan_launch`) and the argv
     started is `plan.argv`; `plans_launch` tells `start` the `on_plan` callback prints the launch line.
+    A planned launch that derived its parsers and died before readiness is stopped (verified) and
+    relaunched once as `plan.retry()`, without the derived parsers (D-37); a second death is raised
+    with its log tail and the record fields that pin the parsers off.
     """
 
     plans_launch = True
@@ -208,19 +211,48 @@ class ManagedVllmStrategy:
                 spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
                 context=None, cache_ram=None)
         _say_plan(on_plan, plan)
-        dropped: list[str] = []
-        pid = server.start_server(
-            config_dir, cmd, runtime=spec.runtime, record_env=getattr(spec, "env", None),
-            dropped_out=dropped, **server.key_kwargs(api_key))
-        served = await server.wait_ready(
-            base_url,
-            config_dir=config_dir,
-            timeout_seconds=timeout_seconds,
-            on_poll=on_poll,
-            **server.key_kwargs(api_key),
-        )
+
+        def launch(argv: list[str]) -> tuple[int, list[str]]:
+            names: list[str] = []
+            started = server.start_server(
+                config_dir, argv, runtime=spec.runtime, record_env=getattr(spec, "env", None),
+                dropped_out=names, **server.key_kwargs(api_key))
+            return started, names
+
+        async def ready() -> list[str]:
+            return await server.wait_ready(
+                base_url,
+                config_dir=config_dir,
+                timeout_seconds=timeout_seconds,
+                on_poll=on_poll,
+                **server.key_kwargs(api_key),
+            )
+
+        pid, dropped = launch(cmd)
+        try:
+            served = await ready()
+        except RuntimeError as died:
+            # D-37: a launch that dies before readiness with a DERIVED parser pair is retried once
+            # without them (`LaunchPlan.retry`); no plan, no derived parser or a TimeoutError re-raise.
+            retry = plan.retry() if plan is not None else None
+            if retry is None:
+                raise
+            try:
+                await asyncio.to_thread(server.stop_server, config_dir, launch=spec.launch)
+            except RuntimeError:
+                raise died from None  # a server that survived its stop: never relaunch beside it
+            _say_plan(on_plan, retry)
+            pid, dropped = launch(list(retry.argv))
+            try:
+                served = await ready()
+            except RuntimeError as again:
+                with contextlib.suppress(RuntimeError):
+                    await asyncio.to_thread(server.stop_server, config_dir, launch=spec.launch)
+                where = f"extra_endpoints.{peer}.lifecycle" if peer else "server"
+                raise RuntimeError(f"{again}\n{parser_pin_hint(retry, record_prefix=where)}") from None
+            plan = retry
         handle = server.DOCKER_CONTAINER_NAME if spec.launch == "docker" else pid
-        # No fit for vLLM (D-10): the plan derives the parsers only, `window` stays None, no retry.
+        # No fit for vLLM (D-10): the plan derives the parsers only and `window` stays None.
         live = LiveEndpoint(base_url=base_url, served_models=served, handle=handle, note=decision.note,
                             dropped_env=tuple(dropped), tuned=plan.tuned if plan else None)
         if plan is not None:
@@ -244,6 +276,15 @@ class ManagedVllmStrategy:
             return Liveness(alive=server.docker_container_running(name), detail=f"container {name}")
         pid = server.server_pid(config_dir)
         return Liveness(alive=pid is not None, detail=f"pid {pid}" if pid is not None else "no live pidfile")
+
+
+def parser_pin_hint(plan: "LaunchPlan", *, record_prefix: str = "server") -> str:
+    """The give-up line after a parser retry also died (D-37): it was retried once without the derived
+    parsers, and the record fields that pin them off. `record_prefix` is where the record lives
+    (`server`, or a peer's `extra_endpoints.<name>.lifecycle`)."""
+    fields = plan.dropped_parser_fields or ("reasoning_parser", "tool_call_parser")
+    pins = " / ".join(f"{record_prefix}.{f}: off" for f in fields)
+    return f"Retried once without the derived parsers; {pins} keeps them pinned off."
 
 
 def record_key(spec: ManagedServerConfig) -> str:
@@ -352,32 +393,53 @@ class LaunchPlan:
         object.__setattr__(self, "serve_kwargs", MappingProxyType(dict(self.serve_kwargs)))
 
     def retry(self) -> "LaunchPlan | None":
-        """The one relaunch after a death (D-16, D-35): the derived spec type dropped and the fit `-c`
-        halved (`max(1, full_fit // 2)`), each only when the plan has it. None for a plan already in
-        the retry shape and for one with neither (a KV-only launch). A record or `extra_args` value is
-        never touched. Pure: the same plan gives an equal retry."""
-        return self._shaped("death", drop_spec=True)
+        """The one relaunch after a death (D-16, D-35, D-37): the derived spec type dropped and the fit
+        `-c` halved (`max(1, full_fit // 2)`), each only when the plan has it; for vLLM, both derived
+        parsers dropped (and with them `--enable-auto-tool-choice`, unless the record's own tool-call
+        parser keeps it), `dropped` then naming "parsers". None for a plan already in the retry shape
+        and for one with none of these (a KV-only launch, a vLLM launch that derived no parser). A
+        record or `extra_args` value is never touched. Pure: the same plan gives an equal retry."""
+        return self._shaped("death", drop_spec=True, drop_parsers=True)
 
-    def _shaped(self, cause: str, *, drop_spec: bool, remembered_at: str | None = None) -> "LaunchPlan | None":
+    @property
+    def dropped_parser_fields(self) -> tuple[str, ...]:
+        """The record fields (`reasoning_parser`, `tool_call_parser`) whose derived value a parser retry
+        dropped, re-derived from the plan's own inputs (pure); empty when no parser was dropped."""
+        if "parsers" not in self.dropped or self.inputs is None:
+            return ()
+        spec, sensed, _decision, autosense, _held = self.inputs
+        full = tuning.derive(spec, sensed.header, autosense, model_config=sensed.model_config)
+        return tuple(f for f in ("reasoning_parser", "tool_call_parser") if getattr(full, f) is not None)
+
+    def _shaped(self, cause: str, *, drop_spec: bool, drop_parsers: bool = False,
+                remembered_at: str | None = None) -> "LaunchPlan | None":
         """The retry shape of this full plan, the one builder behind `retry()` and the remembered and
         boot branches of `plan_launch` (D-17): the derived spec type dropped when `drop_spec` and the
-        plan has one, the fit `-c` halved from this plan's own fit when its mode is "fit". None when
-        neither applies or the plan is not a full one."""
+        plan has one, the derived vLLM parsers dropped when `drop_parsers` and the plan has any (D-37),
+        the fit `-c` halved from this plan's own fit when its mode is "fit". None when none applies or
+        the plan is not a full one."""
         if self.shape != "full" or self.inputs is None:
             return None
         spec, sensed, decision, autosense, held = self.inputs
         kw = dict(self.serve_kwargs)
         report, tuned, dropped = self.report, self.tuned, ()
         drops_spec = drop_spec and tuned.spec_type is not None
+        drops_parsers = drop_parsers and (tuned.reasoning_parser is not None or tuned.tool_call_parser is not None)
         halves = report is not None and report.mode == "fit" and self.full_fit is not None
-        if not drops_spec and not halves:
+        if not drops_spec and not halves and not drops_parsers:
             return None
+        if drops_parsers:
+            kw.pop("reasoning_parser", None)
+            kw.pop("tool_call_parser", None)
+            reasons = {k: v for k, v in tuned.reasons.items() if k not in ("reasoning_parser", "tool_call_parser")}
+            tuned = dataclasses.replace(tuned, reasoning_parser=None, tool_call_parser=None, reasons=reasons)
+            dropped = ("parsers",)
         if drops_spec:
             kw.pop("spec_type", None)
             kw.pop("draft_p_min", None)
             reasons = {k: v for k, v in tuned.reasons.items() if k != "spec_type"}
             tuned = dataclasses.replace(tuned, spec_type=None, draft_p_min=None, mtp_layers=None, reasons=reasons)
-            dropped = ("draft-mtp",)
+            dropped = (*dropped, "draft-mtp")
         if halves:
             halved = max(1, self.full_fit // 2)
             kw["context"] = halved

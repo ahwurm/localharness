@@ -263,7 +263,7 @@ def _full_parts(tuned: Tuned) -> list[str]:
 def derived_clause(
     tuned: Tuned, *, shape: str = "full", cause: str | None = None, dropped: Sequence[str] = (),
     remembered_at: str | None = None, context: int | None = None, halved: bool = True,
-    undo_field: str = "server.speculative",
+    undo_field: str = "server.speculative", parser_fields: Sequence[str] = (),
 ) -> str:
     """What a launch derived, as the clause of `start`'s launch line (spec 20 §6.5, D-23). The one place
     these words are composed. Pure string building from closed values: the cache type, `draft-mtp`, a
@@ -274,9 +274,16 @@ def derived_clause(
     the draft was dropped, the `undo_field: off` that pins drafting off. `context` is a death retry's
     halved `-c` and `halved` says whether a boot retry halved one; only a retry that halved a window
     says `off` keeps the full window (a record `context:` is never halved, so its retry only pins
-    drafting off, WR-05). Nothing derived gives an empty string."""
+    drafting off, WR-05). A vLLM retry that dropped its derived parsers (`dropped` holds "parsers",
+    D-37) names the record fields that pin them off, `parser_fields` (both when not given), under
+    `undo_field`'s section. Nothing derived gives an empty string."""
     if shape != "retry":
         return " · ".join(_full_parts(tuned))
+    if "parsers" in dropped:
+        # D-37: a vLLM retry without its derived parsers; the pin is the record's own fields
+        prefix = undo_field.rsplit(".", 1)[0]
+        pins = " / ".join(f"{prefix}.{f}: off" for f in (parser_fields or ("reasoning_parser", "tool_call_parser")))
+        return f"parsers off {_RETRIED_DEATH} · {pins} keeps them pinned off"
     drafted_off = "draft-mtp" in dropped
 
     def undo(window_halved: bool) -> str:
