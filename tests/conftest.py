@@ -77,8 +77,9 @@ def _no_model_download(monkeypatch):
 def _no_real_hf_cache_lookup(monkeypatch):
     """A vLLM launch looks a repo id's config.json up in the Hugging Face cache, and the suite's fake
     HOME does not cover an absolute HF_HOME inherited from the developer's shell. The lookup finds
-    nothing unless a test that means to exercise the snapshot path patches it itself."""
-    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda *args, **kwargs: None)
+    nothing unless a test that means to exercise the snapshot path patches it itself. Patched at
+    tuning's own seam, not on `huggingface_hub`: memory's tests rely on the real library function."""
+    monkeypatch.setattr("localharness.provider.tuning._hf_cached_config", lambda repo_id: None)
 
 
 @pytest.fixture(autouse=True)

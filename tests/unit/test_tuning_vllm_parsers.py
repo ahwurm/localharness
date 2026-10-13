@@ -12,6 +12,15 @@ from localharness.provider.server import serve_command
 from localharness.provider.tuning import MODEL_CONFIG_CAP, NOTHING_DERIVED, derive, read_model_config
 
 
+_REAL_SEAM = tuning._hf_cached_config  # captured at import, before the autouse fixture replaces it
+
+
+def _hf_cache(monkeypatch, lookup) -> None:
+    """Exercise the real snapshot lookup, with the library function replaced by `lookup`."""
+    monkeypatch.setattr(tuning, "_hf_cached_config", _REAL_SEAM)
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lookup)
+
+
 def _checkpoint(tmp_path, config: object = None, *, name: str = "ckpt"):
     d = tmp_path / name
     d.mkdir(exist_ok=True)
@@ -176,7 +185,7 @@ def test_a_repo_id_reads_config_json_from_the_cache_snapshot(tmp_path, monkeypat
         seen.update(kw)
         return str(path)
 
-    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lookup)
+    _hf_cache(monkeypatch, lookup)
     spec = _spec("org/repo")
     tuned = derive(spec, {}, AutosenseConfig(), model_config=read_model_config(spec))
     assert seen == {"repo_id": "org/repo", "filename": "config.json"}
@@ -191,15 +200,15 @@ def _raises(**kw):
     lambda **kw: None, lambda **kw: object(), lambda **kw: 7, _raises,
 ], ids=["none", "sentinel-object", "int", "raises"])
 def test_a_cache_lookup_with_no_usable_path_derives_nothing(monkeypatch, lookup):
-    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lookup)
+    _hf_cache(monkeypatch, lookup)
     spec = _spec("org/repo")
     assert read_model_config(spec) is None
     assert derive(spec, {}, AutosenseConfig(), model_config=read_model_config(spec)) == NOTHING_DERIVED
 
 
 def test_the_default_cache_lookup_in_the_suite_finds_nothing():
-    import huggingface_hub
-    assert huggingface_hub.try_to_load_from_cache(repo_id="org/repo", filename="config.json") is None
+    assert tuning._hf_cached_config("org/repo") is None
+    assert read_model_config(_spec("org/repo")) is None
 
 
 # ---- every bad config.json ---------------------------------------------------------------------
@@ -276,7 +285,7 @@ def test_docker_emits_the_derived_flags_after_model_and_served_name_before_extra
 
 def test_docker_with_a_repo_id_derives_from_the_cache_snapshot(tmp_path, monkeypatch):
     path = _checkpoint(tmp_path, {"model_type": "mistral3"}) / "config.json"
-    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda **kw: str(path))
+    _hf_cache(monkeypatch, lambda **kw: str(path))
     spec = ManagedServerConfig(runtime="vllm", launch="docker", docker_image="img", model="org/repo")
     argv = _argv(spec)
     assert argv[argv.index("--model"):] == ["--model", "org/repo", "--tool-call-parser", "mistral",
