@@ -10,10 +10,24 @@ from pathlib import Path
 import pytest
 
 from localharness.config.models import HarnessConfig, ManagedServerConfig, ProviderConfig
-from localharness.provider import server
+from localharness.provider import procfs, server
+from localharness.provider.procfs import LaunchIdentity, ProcRecord
 from localharness.provider.refarch import REF_ARCHS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# What a stop expects (R-13-15): a real child of this test is a python interpreter with `-c` on its
+# command line; the faked-pid tests answer a matching record through `proc_matches`.
+REAL_IDENT = LaunchIdentity(frozenset({"python*"}), None, ("-c",), None)
+FAKE_IDENT = LaunchIdentity(frozenset({"python*"}), None, (), None)
+DOCKER_IDENT = LaunchIdentity(frozenset({"docker"}), None, ("--name", server.DOCKER_CONTAINER_NAME), None)
+
+
+def proc_matches(monkeypatch) -> None:
+    monkeypatch.setattr(
+        procfs, "read_process",
+        lambda pid, **kw: ProcRecord(pid, os.getuid(), ("python3",), "/usr/bin/python3", None, 777,
+                                     None, None, (), sid=pid))
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +149,8 @@ def test_serve_command_llamacpp_exact_argv():
     os.name == "nt",
     reason="managed server lifecycle uses POSIX process groups; Windows support tracked separately",
 )
-def test_start_stop_lifecycle(tmp_path):
+def test_start_stop_lifecycle(tmp_path, monkeypatch):
+    monkeypatch.setattr(procfs, "PROC_ROOT", "/proc")  # the suite points it at an empty dir; this child is the test's own
     cmd = [sys.executable, "-c", "import time; print('up', flush=True); time.sleep(60)"]
     pid = server.start_server(tmp_path, cmd, port=8099)
     try:
@@ -145,7 +160,7 @@ def test_start_stop_lifecycle(tmp_path):
         # `<pid> <starttime> <port>` (D-17, D-23)
         assert int(pid_text) == pid and int(start_text) > 0 and port_text == "8099"
     finally:
-        assert server.stop_server(tmp_path) is True
+        assert server.stop_server(tmp_path, expect=REAL_IDENT) is True
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and server.server_pid(tmp_path) is not None:
         time.sleep(0.1)
@@ -183,9 +198,10 @@ def test_stop_binary_raises_when_the_process_outlives_sigkill(tmp_path, monkeypa
     monkeypatch.setattr(server, "_alive", lambda _pid: True)  # never dies
     monkeypatch.setattr(server.os, "killpg", lambda pid, sig: signals.append(sig))
     monkeypatch.setattr(server.time, "sleep", lambda s: None)
+    proc_matches(monkeypatch)
 
     with pytest.raises(RuntimeError, match="4242"):
-        server.stop_server(tmp_path, launch="binary", timeout_seconds=0.5)
+        server.stop_server(tmp_path, launch="binary", timeout_seconds=0.5, expect=FAKE_IDENT)
 
     assert signals == [signal.SIGTERM, signal.SIGKILL]
     assert server.pid_path(tmp_path).exists()  # still ours to reclaim — never report it gone
@@ -195,16 +211,17 @@ def test_stop_binary_raises_when_the_process_outlives_sigkill(tmp_path, monkeypa
     os.name == "nt",
     reason="managed server lifecycle uses POSIX process groups; Windows support tracked separately",
 )
-def test_stop_binary_confirms_death_after_sigkill(tmp_path):
+def test_stop_binary_confirms_death_after_sigkill(tmp_path, monkeypatch):
     """The positive half, on a REAL process that ignores SIGTERM: the grace expires, SIGKILL
     lands, the confirm poll sees the corpse and only then reports stopped + drops the pidfile."""
     cmd = [
         sys.executable, "-c",
         "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
     ]
+    monkeypatch.setattr(procfs, "PROC_ROOT", "/proc")  # the suite points it at an empty dir; this child is the test's own
     pid = server.start_server(tmp_path, cmd)
     time.sleep(0.3)  # let the handler install before the SIGTERM lands
-    assert server.stop_server(tmp_path, launch="binary", timeout_seconds=1.0) is True
+    assert server.stop_server(tmp_path, launch="binary", timeout_seconds=1.0, expect=REAL_IDENT) is True
     assert not server._alive(pid)
     assert not server.pid_path(tmp_path).exists()
 
@@ -401,7 +418,7 @@ def _stop_docker(monkeypatch, tmp_path, inspect_rcs):
     fake = _FakeDocker(inspect_rcs)
     monkeypatch.setattr(server.subprocess, "run", fake)
     monkeypatch.setattr(server.time, "sleep", lambda s: None)
-    server.stop_server(tmp_path, launch="docker")
+    server.stop_server(tmp_path, launch="docker", expect=DOCKER_IDENT)
     return fake
 
 
@@ -429,7 +446,7 @@ def test_docker_stop_raises_when_name_never_frees(monkeypatch, tmp_path):
     monkeypatch.setattr(server.subprocess, "run", fake)
     monkeypatch.setattr(server.time, "sleep", lambda s: None)
     with pytest.raises(RuntimeError, match="still exists"):
-        server.stop_server(tmp_path, launch="docker")
+        server.stop_server(tmp_path, launch="docker", expect=DOCKER_IDENT)
 
 
 # ---------------------------------------------------------------------------

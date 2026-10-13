@@ -5,6 +5,7 @@ every liveness check and every signal, so a reused pid is never signalled (D-17,
 """
 from __future__ import annotations
 
+import os
 import signal
 import sys
 from pathlib import Path
@@ -12,8 +13,22 @@ from pathlib import Path
 import pytest
 
 from localharness.config.models import ManagedServerConfig
-from localharness.provider import lifecycle, server
+from localharness.provider import lifecycle, procfs, server
+from localharness.provider.procfs import LaunchIdentity, ProcRecord
 from tests.unit.launch_support import PopenRecorder, popen  # noqa: F401
+
+# What a stop expects here: any python process leading its own session (R-13-15). The real children
+# below add the `-c` token their command line carries.
+IDENT = LaunchIdentity(frozenset({"python*"}), None, (), None)
+REAL_IDENT = LaunchIdentity(frozenset({"python*"}), None, ("-c",), None)
+
+
+def proc_matches(monkeypatch) -> None:
+    """`/proc` says every pid is a python session leader of this user: the identity verdict passes."""
+    monkeypatch.setattr(
+        procfs, "read_process",
+        lambda pid, **kw: ProcRecord(pid, os.getuid(), ("python3",), "/usr/bin/python3", None, 777,
+                                     None, None, (), sid=pid))
 
 
 def stat_line(pid: int, start: int, *, comm: str = "llama-server", state: str = "S") -> bytes:
@@ -150,7 +165,7 @@ def test_stop_server_signals_nothing_when_the_pid_was_reused(tmp_path, monkeypat
     monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)
     pidfile(tmp_path, "4242 777")
     proc_says(monkeypatch, 778)
-    assert server.stop_server(tmp_path) is False
+    assert server.stop_server(tmp_path, expect=IDENT) is False
     assert signals == []
 
 
@@ -160,7 +175,7 @@ def test_the_sigterm_gate_holds_even_when_server_pid_is_faked(tmp_path, monkeypa
     pidfile(tmp_path, "4242 777")
     monkeypatch.setattr(server, "server_pid", lambda _cd: 4242)
     proc_says(monkeypatch, 778)
-    assert server.stop_server(tmp_path) is False
+    assert server.stop_server(tmp_path, expect=IDENT) is False
     assert signals == []
 
 
@@ -177,7 +192,8 @@ def test_a_pid_reused_during_the_sigterm_grace_gets_no_sigkill(tmp_path, monkeyp
     monkeypatch.setattr(server.time, "sleep", lambda s: None)
     monkeypatch.setattr(server, "_read_proc_stat", lambda pid: stat_line(pid, state["start"]))
     pidfile(tmp_path, "4242 777")
-    assert server.stop_server(tmp_path, timeout_seconds=0.5) is True
+    proc_matches(monkeypatch)
+    assert server.stop_server(tmp_path, timeout_seconds=0.5, expect=IDENT) is True
     assert signals == [signal.SIGTERM]
     assert not server.pid_path(tmp_path).exists()
 
@@ -197,7 +213,8 @@ def test_the_sigkill_gate_holds_when_liveness_is_faked_true(tmp_path, monkeypatc
     monkeypatch.setattr(server, "_alive", lambda pid, start=None: True)
     monkeypatch.setattr(server, "_wait_dead", lambda pid, attempts, poll_seconds=0.5, *, start=None: True)
     pidfile(tmp_path, "4242 777")
-    assert server.stop_server(tmp_path, timeout_seconds=0.2) is True
+    proc_matches(monkeypatch)
+    assert server.stop_server(tmp_path, timeout_seconds=0.2, expect=IDENT) is True
     assert signals == [signal.SIGTERM]
 
 
@@ -211,7 +228,8 @@ def test_a_matching_process_still_gets_term_then_kill(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(server, "_wait_dead", wait_dead)
-    assert server.stop_server(tmp_path, timeout_seconds=0.1) is True
+    proc_matches(monkeypatch)
+    assert server.stop_server(tmp_path, timeout_seconds=0.1, expect=IDENT) is True
     assert signals == [signal.SIGTERM, signal.SIGKILL]
 
 
@@ -240,7 +258,8 @@ async def test_free_accelerator_signals_no_process_whose_start_time_differs(tmp_
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/<pid>/stat")
-def test_a_real_child_records_its_real_start_time_and_stops(tmp_path):
+def test_a_real_child_records_its_real_start_time_and_stops(tmp_path, monkeypatch):
+    monkeypatch.setattr(procfs, "PROC_ROOT", "/proc")  # the suite points it at an empty dir; this child is the test's own
     pid = server.start_server(tmp_path, [sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         tokens = server.pid_path(tmp_path).read_text(encoding="utf-8").split()
@@ -249,7 +268,7 @@ def test_a_real_child_records_its_real_start_time_and_stops(tmp_path):
             assert tokens[1] == fh.read().rsplit(b")", 1)[1].split()[19].decode()
         assert server.server_pid(tmp_path) == pid
     finally:
-        assert server.stop_server(tmp_path) is True
+        assert server.stop_server(tmp_path, expect=REAL_IDENT) is True
     assert not server._alive(pid)
 
 
@@ -289,6 +308,6 @@ def test_stop_server_signals_nothing_for_a_pidfile_that_is_not_a_process(tmp_pat
     signalled: list[tuple] = []
     monkeypatch.setattr(server.os, "killpg", lambda pid, sig: signalled.append((pid, sig)))
     pidfile(tmp_path, text)
-    assert server.stop_server(tmp_path) is False
+    assert server.stop_server(tmp_path, expect=IDENT) is False
     assert signalled == []
     assert not server.pid_path(tmp_path).exists()

@@ -990,8 +990,35 @@ def server_pid(config_dir: Path) -> int | None:
         return None
 
 
-def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float = 30.0) -> bool:
+NOT_A_LAUNCH_LINE = "pidfile names pid {pid} ({exe}), which is not a harness launch — not signalled; stop it, or remove {pidfile}"
+"""The one line a refused stop raises (D-27): the pidfile is a claim, not proof, and `exe` is the
+basename of the process's executable (`?` when `/proc` refused the read)."""
+
+NOT_THIS_LAUNCH_LINE = "{label}: the live launch (pid {pid}) is not this record's — not waited on"
+"""What `wait_ready(expect=)` raises when the live launch is not the record's (D-18)."""
+
+
+def _launch_refusal(config_dir: Path, pid: int, expect: procfs.LaunchIdentity | None) -> str | None:
+    """None when `pid` is proven to be a launch of `expect`; otherwise the refusal line. Nothing is
+    proven without `expect` (`expect=None` never authorises a signal), and a process `/proc` will not
+    show is not proven either (D-27)."""
+    record = procfs.read_process(pid)
+    exe = "?"
+    if isinstance(record, procfs.ProcRecord):
+        if record.exe is not None:
+            exe = os.path.basename(record.exe)
+        if expect is not None and procfs.identity_mismatch(record, expect) is None:
+            return None
+    return NOT_A_LAUNCH_LINE.format(pid=pid, exe=exe, pidfile=pid_path(config_dir))
+
+
+def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float = 30.0, *, expect: procfs.LaunchIdentity | None) -> bool:
     """SIGTERM the process group, SIGKILL on timeout. Docker: also stop by name.
+
+    `expect` is required (D-27): nothing is signalled unless the pidfile's live process matches it
+    (`procfs.identity_mismatch`); `expect=None` never authorises a signal. A mismatch raises
+    `NOT_A_LAUNCH_LINE` and leaves the pidfile; the docker name-based stop runs only after that verdict
+    passed or when no pid is live.
 
     Returns True if something was stopped — and ONLY once death is confirmed: raises
     RuntimeError (naming the surviving pid / container) rather than report a false free."""
@@ -1000,6 +1027,9 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
     start = recorded[1] if recorded is not None and recorded[0] == pid else None
     stopped = False
     if pid is not None and _same_process(pid, start):
+        refusal = _launch_refusal(config_dir, pid, expect)
+        if refusal is not None:
+            raise RuntimeError(refusal)
         try:
             os.killpg(pid, signal.SIGTERM)  # start_new_session=True → pid == pgid
         except (ProcessLookupError, PermissionError):
@@ -1116,6 +1146,7 @@ async def wait_ready(
     api_key: str | None = None,
     runtime: str | None = None,
     liveness: bool = False,
+    expect: procfs.LaunchIdentity | None = None,
 ) -> list[str]:
     """Poll {base_url}/models until the server answers; return served model ids.
 
@@ -1132,6 +1163,10 @@ async def wait_ready(
     hides `/models`), and a 200 whose body is not the OpenAI shape still counts; the ids are then
     best-effort (possibly empty). The re-sent request reports the server's real status. A 5xx (503
     while a model loads) is still not ready. Launch-time callers keep requiring a well-formed 200.
+
+    `expect` (with `config_dir`) is the proof the live launch is the record's (D-18): when the pidfile's
+    process is live but does not match it the wait raises `NOT_THIS_LAUNCH_LINE` at once, so a waiting
+    start never polls one record's port on another launch's pid. Unset, nothing changes.
     """
     label = RUNTIME_LABELS.get(runtime, "vLLM") if runtime else "vLLM"
     start = time.monotonic()
@@ -1143,6 +1178,11 @@ async def wait_ready(
                 raise RuntimeError(
                     f"{label} exited during startup. Log tail:\n" + log_tail(config_dir)
                 )
+            if config_dir is not None and expect is not None:
+                live = procfs.read_launch(
+                    config_dir, expect=expect, stat_reader=lambda pid: _read_proc_stat(pid))
+                if live is not None and not live.verified:
+                    raise RuntimeError(NOT_THIS_LAUNCH_LINE.format(label=label, pid=live.pid))
             try:
                 resp = await client.get(f"{base_url.rstrip('/')}/models", timeout=3.0,
                                         **({"headers": headers} if headers else {}))

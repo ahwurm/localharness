@@ -847,8 +847,10 @@ class SpawnedProcessStrategy:
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
         # OFF the event loop (same reason as ManagedVllmStrategy.stop): a SIGTERM→SIGKILL grace
         # window blocks, so run it in a worker thread. `launch="binary"` ALWAYS here — a spawned
-        # server is a single tracked process, never a docker-run client.
-        await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
+        # server is a single tracked process, never a docker-run client. `expect` is what that
+        # process must be (D-27): a pidfile is a claim, not proof.
+        await asyncio.to_thread(
+            server.stop_server, config_dir, launch="binary", expect=self.launch_identity(spec))
 
     def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness:
         pid = server.server_pid(config_dir)
