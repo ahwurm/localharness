@@ -187,6 +187,19 @@ def test_an_explicit_context_length_wins_over_the_header_in_the_clamp(tmp_path):
     assert _recorded(tmp_path, spec).full_fit == 100_000
 
 
+@pytest.mark.parametrize("over", [
+    dict(header={}),                                     # an unreadable header, no context_length given
+    dict(header={"block_count": 65, "nextn_predict_layers": 1}),
+    dict(header={"context_length": True}),
+    dict(context_length=0),
+    dict(context_length=-1),
+])
+def test_a_full_fit_that_cannot_be_clamped_is_not_recorded(tmp_path, over):
+    spec = _spec(tmp_path)
+    _confirm(tmp_path, spec, _marker(spec, full_fit=10**12), **over)
+    assert _recorded(tmp_path, spec) is None
+
+
 def test_a_planted_free_bytes_is_clamped_to_total_memory(tmp_path):
     spec = _spec(tmp_path)
     _confirm(tmp_path, spec, _marker(spec, free_bytes=10**15))

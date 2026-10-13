@@ -542,7 +542,8 @@ def confirm_launch(
     live `process` given. `dropped` is `draft-mtp` only when the record's own `derive` (over the
     caller's `header` and `autosense`, never sensed here) would emit a spec type and the live argv has
     none; the marker's own `dropped` is never read. `full_fit` is clamped to `context_length` (default
-    the header's) and `free_bytes` to `total_bytes`. A marker whose invocation matches is removed
+    the header's), and with no positive context length known nothing is recorded; `free_bytes` is
+    clamped to `total_bytes`. A marker whose invocation matches is removed
     whatever the outcome; one that does not is left for the run it belongs to."""
     ledger = speed_stats.default_speed_stats_path(config_dir)
     if plan is not None:
@@ -568,10 +569,13 @@ def confirm_launch(
              and marker.invocation == unit.invocation_id)
     try:
         served = live.window.served if live is not None and live.window is not None else None
-        full_fit = marker.full_fit
         known = context_length if context_length is not None else (header or {}).get("context_length")
-        if _plain_int(known) and known > 0 and _plain_int(full_fit):
-            full_fit = min(full_fit, known)
+        # A planted full_fit is only ever recorded clamped (D-18): with no positive context length to
+        # clamp it to, nothing is recorded (WR-02).
+        if _plain_int(known) and known > 0 and _plain_int(marker.full_fit):
+            full_fit = min(marker.full_fit, known)
+        else:
+            full_fit = None
         if (bound and unit.n_restarts >= 1 and marker.cause == "death" and process is not None
                 and spec is not None and autosense is not None
                 and marker.record == record_key and marker.binary == str(spec.binary)
