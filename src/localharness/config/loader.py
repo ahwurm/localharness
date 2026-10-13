@@ -507,7 +507,7 @@ HARNESS_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({
     "provider.base_url", "provider.api_key", "extra_endpoints", "active_endpoint", "server",
     "org.audit_log_path", "org.hooks", "org.enforce_capability_floor",
     "org.web_fetch_allow_private", "channels.remote_unattended", "channels.unattended_max_actions",
-    "autosense", "effort_budget", "org.default_effort",
+    "autosense", "effort_budget", "org.default_effort", "pending_preset",
     "instructions.max_ratio", "instructions.children",
     "proposer.base_url", "proposer.api_key"})
 """The core harness keys only the global config (config.yaml or overrides.yaml) may set.
@@ -529,6 +529,9 @@ section or list (`server`, `extra_endpoints`); readers test a dot-path with
 instructions file may take and whether delegated children get it too; a repository must not be able to
 raise its own file's share or push it into every child, so only the machine sets either. They are
 listed as their two leaves, so a workspace block that merely restates the defaults is no warning.
+
+`pending_preset` is the selection the next start serves, which is the machine's: a project's value
+is dropped.
 
 `autosense`, `effort_budget` and `org.default_effort` decide how the harness sizes and bounds what
 it serves on this machine's hardware (memory margins, model folders, the reasoning share of every

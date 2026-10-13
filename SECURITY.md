@@ -225,6 +225,7 @@ global config, a project's whole `proposer:` section is ignored. These are all o
 - `provider.api_key`
 - `extra_endpoints` (the whole list of peer endpoints)
 - `active_endpoint`
+- `pending_preset` (the preset the next `localharness start` serves, recorded by `localharness model <name>`)
 - `server` (the whole section: what the harness launches, with which arguments and on which
   address)
 - `autosense` (the whole section: the memory margins a launched server's window and prompt cache

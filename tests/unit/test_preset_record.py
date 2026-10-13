@@ -34,6 +34,7 @@ GATE_VALUES = {
     "cache_type_k": "q8_0",
     "cache_type_v": "q8_0",
     "cache_ram": 0,
+    "speculative": "off",
     "api_key_file": "/x/k",
     "env": {"LLAMA_ARG_N_GPU_LAYERS": "99"},
     "config_ini": "",
@@ -215,10 +216,10 @@ def test_unset_llamacpp_only_field_validates_on_vllm(field):
     assert getattr(srv, field) is None
 
 
-def test_llamacpp_only_fields_are_the_eight():
+def test_llamacpp_only_fields_are_the_nine():
     assert set(LLAMACPP_ONLY_FIELDS) == {
         "mmproj", "served_name", "cache_type_k", "cache_type_v", "cache_ram",
-        "api_key_file", "env", "config_ini"}
+        "api_key_file", "env", "config_ini", "speculative"}
 
 
 # ---------------------------------------------------------------------------
