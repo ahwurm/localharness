@@ -127,12 +127,13 @@ def _hf_cached_config(repo_id: str) -> str | None:
 
 def _checkpoint_config_path(spec: Any) -> str | None:
     """Where the checkpoint's config.json would be: the registry entry's directory, a model that is
-    itself a directory, else the Hugging Face cache snapshot (a local cache lookup, no network)."""
+    itself a directory (an absolute path after `~`: what is derived never depends on the working
+    directory, IN-04), else the Hugging Face cache snapshot (a local cache lookup, no network)."""
     entry = spec.entry_for(spec.model)
     if entry is not None:
         return os.path.join(os.path.expanduser(entry.path), "config.json")
     model = os.path.expanduser(spec.model)
-    if os.path.isdir(model):
+    if os.path.isabs(model) and os.path.isdir(model):
         return os.path.join(model, "config.json")
     return _hf_cached_config(spec.model)
 
