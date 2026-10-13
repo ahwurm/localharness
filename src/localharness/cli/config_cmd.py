@@ -223,14 +223,14 @@ def migrate(
     if cleaned:
         removed_note += f"; cleaned {cleaned} agent/division file(s)"
     if plan.nulled:
-        removed_note += _migrate.INIT_NULLS_CLAUSE + " (config.yaml)"
+        removed_note += _migrate.init_nulls_clauses(plan.nulled) + " (config.yaml)"
     elif plan.init_nulls_due:
         removed_note += _migrate.INIT_NULLS_STAMP_CLAUSE
     for sidecar in plan.sidecars:
         if sidecar.nulled:
             removed_note += (
-                _migrate.INIT_NULLS_CLAUSE
-                + " (" + escape(f"{sidecar.path.parent.name}/{sidecar.path.name}") + ")"
+                _migrate.init_nulls_clauses(sidecar.nulled)
+                + " (" + escape(_migrate.sidecar_label(sidecar.path)) + ")"
             )
     if plan.bind_all_paths:
         removed_note += "; set " + escape(", ".join(f"{p}.bind_all: true" for p in plan.bind_all_paths))

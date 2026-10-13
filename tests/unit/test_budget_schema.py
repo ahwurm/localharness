@@ -160,7 +160,7 @@ def test_the_init_nulls_stamp_and_its_revision():
     assert PermissionConfig().init_nulls_revision == 0
     with pytest.raises(ValidationError):
         PermissionConfig(init_nulls_revision=-1)
-    assert CURRENT_INIT_NULLS_REVISION == 1
+    assert CURRENT_INIT_NULLS_REVISION == 2
     assert CURRENT_DEFAULTS_REVISION == 3
 
 

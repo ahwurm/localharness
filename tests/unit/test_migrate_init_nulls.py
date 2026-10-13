@@ -154,7 +154,7 @@ def test_a_deny_default_the_person_deleted_stays_deleted(tmp_path):
 
 
 def test_a_pre_v014_agent_gets_one_plan_one_write_and_one_backup_equal_to_the_original(tmp_path):
-    cfg = _write(tmp_path, _v017(stamp=CURRENT_INIT_NULLS_REVISION - 1))
+    cfg = _write(tmp_path, _v017())
     agent = _sidecar(tmp_path, "agents", NAME, _pre_v014_agent())
     original = agent.read_bytes()
 

@@ -1297,14 +1297,14 @@ def _migration_clauses(plan: Any, config_file: Path,
     # init's own 100 / 32000 / 8000, cleared once under its own stamp: one clause per file, each
     # naming it (a stamp-only rewrite of config.yaml says nothing — no value was changed).
     if config_done and plan.nulled:
-        removed_note += _migrate.INIT_NULLS_CLAUSE + " (config.yaml)"
+        removed_note += _migrate.init_nulls_clauses(plan.nulled) + " (config.yaml)"
     elif config_done and plan.init_nulls_due:
         removed_note += _migrate.INIT_NULLS_STAMP_CLAUSE  # IN-03: say why config.yaml was rewritten
     for sidecar in plan.sidecars:
         if sidecar.nulled and done(sidecar.path) and not nulls_held:
             removed_note += (
-                _migrate.INIT_NULLS_CLAUSE
-                + " (" + escape(f"{sidecar.path.parent.name}/{sidecar.path.name}") + ")"
+                _migrate.init_nulls_clauses(sidecar.nulled)
+                + " (" + escape(_migrate.sidecar_label(sidecar.path)) + ")"
             )
     # A launched vLLM server that predates server.bind_all keeps listening on every interface, as
     # it did: written for the user once, said once, and doctor's row says how to undo it.

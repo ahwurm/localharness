@@ -157,6 +157,8 @@ def test_migrate_leaves_other_keys_semantically_unchanged(tmp_path):
         d["org"]["permissions"].pop("init_nulls_revision", None)
     # ...and this stale fixture carries init's old `max_actions: 100`, which the init-nulls step clears
     before["org"]["permissions"]["budget"]["max_actions"] = None
+    # revision 2 clears init's dumped temperature (it was never applied) the same way
+    before["org"]["default_temperature"] = None
     assert after == before
 
 
@@ -428,6 +430,7 @@ def test_migrate_leaves_other_keys_unchanged_when_stripping_the_dead_key(tmp_pat
         d["org"]["permissions"].pop("defaults_revision", None)
         d["org"]["permissions"].pop("init_nulls_revision", None)
     before["org"]["permissions"]["budget"]["max_actions"] = None  # init's old 100, cleared once
+    before["org"]["default_temperature"] = None  # revision 2: init's dumped 0.6, cleared once
     assert after == before
 
 
