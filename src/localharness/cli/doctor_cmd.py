@@ -109,7 +109,8 @@ def _doctor_fit(
     from localharness.provider import autosense as _auto
 
     # No served window to add to means no memory probe: only the header (for `trained`) is read.
-    fi = _auto.compute_fit(server, harness.autosense, attached_served=served, size=bool(served))
+    fi = _auto.compute_fit(server, harness.autosense, attached_served=served, size=bool(served),
+                           as_launched=True)  # priced as the launch is (WR-06)
     trained = trained or fi.header.get("context_length")
     return (fi.fits if served else None), trained
 

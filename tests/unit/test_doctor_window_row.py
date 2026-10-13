@@ -38,6 +38,8 @@ HEADER_A = {
     "qwen3.attention.key_length": 128,
     "qwen3.context_length": 262144,
 }
+# The 0.18 launch: the tracer's hand-computed f16 numbers hold only when the launch runs f16 (WR-06).
+F16 = "autosense:\n  kv_cache_type: f16\n"
 ROW = re.compile(r"Window: served (\S+) · trained (\S+) · fits (\S+)")
 
 
@@ -110,7 +112,7 @@ def _gguf_a(tmp_path: Path) -> Path:
 
 
 def test_a_llamacpp_record_prints_the_attached_fit_once_and_never_writes_the_ledger(tmp_path, mock_httpx):
-    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)))
+    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)), autosense=F16)
     with _probe(65536, 262144), _memory(6.0), \
             patch("localharness.provider.autosense.weights_bytes", return_value=int(18.5 * GIB)):
         result = _doctor(tmp_path)
@@ -120,7 +122,7 @@ def test_a_llamacpp_record_prints_the_attached_fit_once_and_never_writes_the_led
 
 
 def test_the_probe_is_called_once_with_the_root_agents_model(tmp_path, mock_httpx):
-    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)))
+    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)), autosense=F16)
     with _probe(65536, 262144) as probe, _memory():
         _doctor(tmp_path)
     probe.assert_called_once_with("http://localhost:8080/v1", "m", "llamacpp")
@@ -136,7 +138,7 @@ def test_an_unreported_window_prints_dashes_and_the_not_reported_line(tmp_path, 
 
 
 def test_an_unreported_served_keeps_the_header_trained_and_has_no_fit(tmp_path, mock_httpx):
-    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)))
+    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)), autosense=F16)
     with _probe(None, None), _memory():
         result = _doctor(tmp_path)
     assert "Window: served — · trained 262,144 · fits —" in result.output
@@ -167,7 +169,7 @@ def test_the_row_prints_even_when_the_model_is_not_served(tmp_path, mock_httpx):
 
 
 def test_a_trained_the_probe_did_not_report_comes_from_the_header(tmp_path, mock_httpx):
-    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)))
+    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)), autosense=F16)
     with _probe(65536, None), _memory(6.0):
         result = _doctor(tmp_path)
     assert _row(result.output) == ("65,536", "262,144", "90,112")
@@ -312,7 +314,7 @@ def test_every_number_carries_thousands_separators(tmp_path, mock_httpx):
 
 
 def test_doctor_twice_prints_the_row_twice_and_leaves_no_ledger(tmp_path, mock_httpx):
-    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)))
+    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)), autosense=F16)
     ledger = default_speed_stats_path(tmp_path)
     with _probe(65536, 262144), _memory(6.0):
         first = _doctor(tmp_path)
@@ -370,7 +372,7 @@ def test_a_header_without_its_head_dimension_is_not_computed(tmp_path, mock_http
 
 
 def test_unknown_free_memory_is_not_computed(tmp_path, mock_httpx):
-    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)))
+    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)), autosense=F16)
     with _probe(65536, 262144), patch("localharness.provider.autosense.free_memory", return_value=None):
         result = _doctor(tmp_path)
     assert _row(result.output) == ("65,536", "262,144", "—")
@@ -381,7 +383,7 @@ def test_an_existing_ledger_is_left_byte_for_byte_and_mtime_for_mtime(tmp_path, 
     ledger.write_text('{"keep": "me"}\n', encoding="utf-8")
     os.utime(ledger, (1_700_000_000, 1_700_000_000))
     before = (ledger.read_bytes(), ledger.stat().st_mtime_ns)
-    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)))
+    _config(tmp_path, server=_llamacpp_server(_gguf_a(tmp_path)), autosense=F16)
     with _probe(65536, 262144), _memory(6.0):
         _doctor(tmp_path)
         _doctor(tmp_path)
@@ -394,3 +396,25 @@ def test_the_row_comes_before_the_reconciliation_verdict(tmp_path, mock_httpx):
     with _probe(65536, 262144):
         result = _doctor(tmp_path)
     assert result.output.index("Window: served") < result.output.index("far BELOW")
+
+
+# --- the row is priced as the launch is (WR-06) ---------------------------------------------------
+
+HEADER_MTP = {**HEADER_A, "qwen3.nextn_predict_layers": 1}
+
+
+def test_the_row_prices_the_derived_kv_type_and_the_draft_share(tmp_path, mock_httpx):
+    from localharness.agent.gguf_header import read_header
+    from localharness.config.models import AutosenseConfig
+    from localharness.provider import autosense as _auto
+
+    gguf = write_gguf(tmp_path / "mtp.gguf", HEADER_MTP)
+    _config(tmp_path, server=_llamacpp_server(gguf))
+    header = _auto.fit_header(read_header(str(gguf), _auto.FIT_KEYS))
+    expected = _auto.fit(header, 6 * GIB, AutosenseConfig(), 65536, cache_type_k="q8_0",
+                         cache_type_v="q8_0", weights=None, draft_share=1 + 1 / 64)
+    f16 = _auto.fit(header, 6 * GIB, AutosenseConfig(), 65536, cache_type_k="f16", cache_type_v="f16")
+    assert expected != f16
+    with _probe(65536, 262144), _memory(6.0):
+        result = _doctor(tmp_path)
+    assert _row(result.output) == ("65,536", "262,144", f"{expected:,}")

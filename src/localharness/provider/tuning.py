@@ -21,10 +21,12 @@ from typing import Any
 
 from localharness.core.private_files import open_regular
 from localharness.provider.autosense import (
+    extra_cache_types,
     flash_attn_off,
     hand_set_options,
     has_cache_type_flag,
     has_spec_flag,
+    spec_type_flag,
 )
 
 # llama-server's own default; deriving it would change the 0.18 argv, so it derives nothing (D-08).
@@ -221,6 +223,23 @@ def derive(spec: Any, header: Mapping[str, Any], autosense: Any, *,
         reasons["spec_type"] = f"nextn_predict_layers={n}"
 
     return Tuned(reasons=reasons, **fields) if fields else NOTHING_DERIVED
+
+
+def launch_pricing(spec: Any, header: Mapping[str, Any], tuned: Tuned) -> tuple[str | None, str | None, float]:
+    """What a llama.cpp launch of `spec` is priced at: `(cache_type_k, cache_type_v, draft_share)`. The KV
+    types are the record's, else `extra_args` `-ctk` / `-ctv`, else a `config_ini` cache-type key (as a
+    flag name), else env `LLAMA_ARG_CACHE_TYPE_K` / `_V` (the record's `env:`, then a `config_ini` key
+    spelled as the env name), else `tuned`'s derived type (R-08e, CR-01). The share is the MTP draft
+    context's (`draft_share`) when the launch drafts with MTP (derived, `speculative: draft-mtp` or a
+    hand-set `--spec-type draft-mtp`), else 1.0. The one pricing rule for the launch, the attach report
+    and doctor's row (WR-06). Pure."""
+    args, env = hand_set_options(spec)
+    extra_k, extra_v = extra_cache_types(args)
+    k = spec.cache_type_k or extra_k or env.get("LLAMA_ARG_CACHE_TYPE_K") or tuned.cache_type
+    v = spec.cache_type_v or extra_v or env.get("LLAMA_ARG_CACHE_TYPE_V") or tuned.cache_type
+    drafting = (tuned.spec_type == "draft-mtp" or getattr(spec, "speculative", None) == "draft-mtp"
+                or spec_type_flag(args, env) == "draft-mtp")
+    return k, v, draft_share(header) if drafting else 1.0
 
 
 _RETRIED_DEATH = "(retried: the full shape died)"

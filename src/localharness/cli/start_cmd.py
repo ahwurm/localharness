@@ -1082,7 +1082,7 @@ def _attach_window_report(harness: Any, provider_type: str, served: int | None, 
     undo: str | None = None
     mode = "not-computed"
     if srv is not None and srv.runtime == "llamacpp" and srv.model:
-        fi = _auto.compute_fit(srv, harness.autosense, attached_served=served)
+        fi = _auto.compute_fit(srv, harness.autosense, attached_served=served, as_launched=True)
         fits, weights = fi.fits, fi.weights
         if fi.memory is not None:
             free, total = fi.memory.free_bytes, fi.memory.total_bytes
