@@ -151,6 +151,12 @@ class LifecycleStrategy(Protocol):
 
     def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness: ...
 
+    def launch_identity(self, spec: ManagedServerConfig) -> LaunchIdentity | None:
+        """What a launch of `spec` by THIS strategy looks like in `/proc`, as plain data
+        (`procfs.LaunchIdentity`), or None when the strategy owns no process to recognise (LM Studio's
+        daemon). The strategy, not a caller, knows its own argv, executable and port source (D-25)."""
+        ...
+
     def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
         """The config dir a reconnect poll for a server THIS strategy launched should hand to
         `wait_ready`: with it a dead process is known at once from its pidfile and its log tail is
@@ -217,7 +223,7 @@ class ManagedVllmStrategy:
             names: list[str] = []
             started = server.start_server(
                 config_dir, argv, runtime=spec.runtime, record_env=getattr(spec, "env", None),
-                dropped_out=names, **server.key_kwargs(api_key))
+                dropped_out=names, port=spec.port, **server.key_kwargs(api_key))
             return started, names
 
         async def ready() -> list[str]:
@@ -278,6 +284,15 @@ class ManagedVllmStrategy:
         pid = server.server_pid(config_dir)
         return Liveness(alive=pid is not None, detail=f"pid {pid}" if pid is not None else "no live pidfile")
 
+    def launch_identity(self, spec: ManagedServerConfig) -> LaunchIdentity | None:
+        """docker: the `docker run` client under the container's fixed name; binary: the `vllm`
+        entry point (or the interpreter running it) with `serve` on its command line and the record's
+        port (D-25)."""
+        if spec.launch == "docker":
+            return LaunchIdentity(
+                frozenset({"docker"}), None, ("--name", server.DOCKER_CONTAINER_NAME), None)
+        return LaunchIdentity(frozenset({"vllm", "python*"}), spec.port, ("serve",), None)
+
 
 def parser_pin_hint(plan: "LaunchPlan", *, record_prefix: str = "server") -> str:
     """The give-up line after a parser retry also died (D-37): it was retried once without the derived
@@ -286,6 +301,29 @@ def parser_pin_hint(plan: "LaunchPlan", *, record_prefix: str = "server") -> str
     fields = plan.dropped_parser_fields or ("reasoning_parser", "tool_call_parser")
     pins = " / ".join(f"{record_prefix}.{f}: off" for f in fields)
     return f"Retried once without the derived parsers; {pins} keeps them pinned off."
+
+
+def record_identity(spec: ManagedServerConfig) -> LaunchIdentity | None:
+    """`strategy_for(spec).launch_identity(spec)` with the RECORD's own tokens added to
+    `argv_contains`, so two records on one binary and port can be told apart (R-13-07): llama.cpp
+    `-a <served_name>` when the record has one, else `-m <model>` as the launch spells it (`~`
+    expanded); vLLM binary the model argument (`serve <model>`); docker, Ollama and LM Studio add
+    nothing."""
+    identity = strategy_for(spec).launch_identity(spec)
+    if identity is None:
+        return None
+    tokens: tuple[str, ...] = ()
+    if spec.runtime == "llamacpp":
+        if spec.served_name is not None:
+            tokens = ("-a", spec.served_name)
+        else:
+            tokens = ("-m", os.path.expanduser(str(spec.model)))
+    elif spec.runtime == "vllm" and spec.launch != "docker":
+        entry = spec.entry_for(spec.model)
+        tokens = (str(Path(entry.path).expanduser()) if entry is not None else str(spec.model),)
+    if not tokens:
+        return identity
+    return dataclasses.replace(identity, argv_contains=identity.argv_contains + tokens)
 
 
 def record_key(spec: ManagedServerConfig) -> str:
@@ -877,7 +915,7 @@ class DaemonStrategy:
                 "starts; stop the existing one first (attach-and-own is deferred)."
             )
         cmd = server.serve_command(spec)                 # env-prefixed `ollama serve`
-        pid = server.start_server(config_dir, cmd, runtime=spec.runtime)
+        pid = server.start_server(config_dir, cmd, runtime=spec.runtime, port=spec.port)
         available = await server.wait_ready(             # daemon up; returns PULLED model ids
             v1, config_dir=config_dir, timeout_seconds=timeout_seconds, on_poll=on_poll,
             **server.key_kwargs(api_key),
@@ -903,6 +941,10 @@ class DaemonStrategy:
             alive=pid is not None,
             detail=f"ollama daemon pid {pid}" if pid is not None else "no daemon",
         )
+
+    def launch_identity(self, spec: ManagedServerConfig) -> LaunchIdentity | None:
+        """The `ollama` daemon (`env` execs it), the port from `OLLAMA_HOST` (D-25)."""
+        return LaunchIdentity(frozenset({"ollama"}), spec.port, (), "OLLAMA_HOST")
 
     @staticmethod
     def _v1(base_url: str) -> str:
@@ -1075,6 +1117,11 @@ class LmsStrategy:
         except Exception:  # noqa: BLE001 — boolean probe (see _server_already_up): any error = down
             alive = False
         return Liveness(alive=alive, detail=f"lms endpoint {v1}" if alive else "lms endpoint down")
+
+    def launch_identity(self, spec: ManagedServerConfig) -> LaunchIdentity | None:
+        """None: LM Studio's daemon is not a process the harness launched or can tell apart (it owns
+        no pidfile), so there is no identity to verify and nothing to signal (D-25)."""
+        return None
 
     @staticmethod
     def _v1(base_url: str) -> str:
