@@ -498,7 +498,9 @@ def plan_launch(
     """The launch of `spec` as a value (D-15): derive, fit, build the `serve_command` keywords and the
     argv. Pure — every read happened in `sense_launch`, nothing is written, and `api_key_held` is a
     bool so the key itself never enters a plan. The derived keywords reach `serve_command` only when
-    not None, so a launch that derived nothing calls it with exactly the 0.18 keywords (R-08c)."""
+    not None, so a launch that derived nothing calls it with exactly the 0.18 keywords (R-08c). The
+    fit `-c` matches 0.18 only for a record with no `env:` / `config_ini` cache type and no hand-set
+    MTP drafting: those are now priced at the types the launch runs with, as intended (IN-03)."""
     tuned = tuning.derive(spec, sensed.header, autosense, model_config=sensed.model_config)
     kw: dict[str, Any] = {
         "keyed": api_key_held, "loopback": decision.loopback, "key_file_ok": decision.key_file_ok,

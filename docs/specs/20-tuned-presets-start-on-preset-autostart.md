@@ -235,7 +235,9 @@ unset**. Header ints are validated (`block_count > 0`, `0 ≤ nextn_predict_laye
 
 Neither `cache_type_k/v` set, no cache type in `extra_args`/`env:`/`config_ini`, no `-fa off` (off, 0, false or disabled, any case, in any of
 the three) → `cache_type =
-autosense.kv_cache_type` (default `q8_0`) for K and V; the fit prices it. `f16` reproduces 0.18.
+autosense.kv_cache_type` (default `q8_0`) for K and V; the fit prices it. `f16` (with `draft_mtp: false`)
+reproduces 0.18's argv keywords; the fit of a record whose `env:`/`config_ini` sets a cache type, or that
+drafts with MTP by hand, is now priced at those types (intended), so its `-c` can differ from 0.18's.
 
 ### 6.2 MTP drafting (llama.cpp)
 
