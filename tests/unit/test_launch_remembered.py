@@ -290,6 +290,15 @@ def test_boot_prior_death_refuses_an_unparsable_naive_or_future_time(tmp_path, a
     assert _verdict(spec, tmp_path, marker=_marker(spec, tmp_path, at=at)) is False
 
 
+def test_a_naive_now_never_accepts_a_naive_marker_time(tmp_path):
+    """IN-02: the aware/naive rejection does not rely on the caller passing an aware `now`."""
+    spec = _gguf_spec(tmp_path, SWIFT)
+    naive_now = NOW.replace(tzinfo=None)
+    naive_at = (naive_now - timedelta(seconds=30)).isoformat()
+    assert _verdict(spec, tmp_path, marker=_marker(spec, tmp_path, at=naive_at), now=naive_now) is False
+    assert _verdict(spec, tmp_path, now=naive_now) is False
+
+
 def test_the_invocation_plays_no_part_in_the_boot_verdict(tmp_path):
     spec = _gguf_spec(tmp_path, SWIFT)
     assert _verdict(spec, tmp_path, marker=_marker(spec, tmp_path, invocation=None)) is True
