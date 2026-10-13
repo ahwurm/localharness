@@ -245,12 +245,13 @@ async def test_a_fit_by_server_restart_sends_its_line_and_records_it(tmp_path, f
 async def test_a_restart_with_no_window_sends_no_line(tmp_path, fake, monkeypatch):
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     fake.live = LiveEndpoint(base_url=PRIMARY_URL, served_models=["cached-b"], handle=1)
-    _, repl, channel, _ = _session(tmp_path, _launchable_peer())
+    harness, repl, channel, _ = _session(tmp_path, _launchable_peer())
 
     await repl._handle_slash("/model cached-b")
 
     assert _window_lines(channel) == []
-    assert not default_speed_stats_path(tmp_path).exists()
+    # no window was recorded; the landing's own `last_served` entry (persist_landed) may be in the file
+    assert _ledger(tmp_path, harness.provider.provider_type, "cached-b") is None
 
 
 # --- _restore_incumbent ------------------------------------------------------------------------- #

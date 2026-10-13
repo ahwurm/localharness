@@ -136,6 +136,13 @@ TYPED_SWAP_NOTE = " (this session only — the saved default is unchanged)"
 # A llama.cpp primary restarts on a weights file: anything else a person typed (a local_models name,
 # an HF-cache repo id) is answered here, before anything is stopped (D-58).
 NOT_A_GGUF_LINE = "{target} is not a GGUF file — /model <path.gguf> or a preset name"
+# The launch line of a swap that stopped an incumbent says which one held the GPU (D-21): carried
+# right after "the swap can take several minutes..." so every check that the line STARTS with
+# "Launching <peer>" still holds.
+GPU_HOLDER_CLAUSE = " {holder} was stopped to free the GPU."
+# A landing's selection (active_endpoint / last_served / pending_preset) that could not be written:
+# the in-session switch already happened (D-07).
+PERSIST_SELECTION_FAILED = "Switched for this session, but persisting the selection failed: {exc}"
 
 PLUGINS_USAGE = "Usage: /plugins, /plugins enable <name> or /plugins disable <name>"
 PLUGINS_TERMINAL_ONLY = ("/plugins works only in a terminal session. From a shell: "
@@ -237,6 +244,52 @@ def _generation_system_prompt() -> str:
     )
 
 
+class _ReplSwapReporter:
+    """What the REPL says and remembers while `lifecycle.swap` runs (spec 20 §8.2, D-19, D-21).
+
+    `freed` — after the accelerator is free, and again if a cancellation stopped the target — forgets
+    the heavy the session tracked; the first call also sends the launch line (today's text plus the
+    holds-the-GPU clause when an incumbent was stopped, R-13-24), after the session's first-launch
+    lines and before the launch, and the decision's note. `launched` / `restored` move `_active_heavy`
+    to what is now running. `line` shows a failure sentence, masked here again (R-13-26) on top of the
+    swap's own masking."""
+
+    def __init__(self, repl: "OrchestratorREPL", *, target: Any, incumbent: Any, launch_head: str,
+                 tradeoff: str, note: str | None, redact: Any) -> None:
+        self._repl = repl
+        self._target = target
+        self._incumbent = incumbent
+        self._launch_head = launch_head
+        self._tradeoff = tradeoff
+        self._note = note
+        self._redact = redact
+        self._said = False
+
+    async def freed(self) -> None:
+        repl = self._repl
+        repl._active_heavy = None
+        if self._said:
+            return
+        self._said = True
+        from localharness.provider import lifecycle as _lifecycle
+        holder = ""
+        if self._incumbent is not None and self._incumbent.spec is not self._target.spec:
+            holder = GPU_HOLDER_CLAUSE.format(holder=_lifecycle.heavy_label(self._incumbent))
+        await repl._flush_launch_lines()
+        await repl._send_info(f"{self._launch_head}{holder}{self._tradeoff}", colorize=True)
+        if self._note:
+            await repl._send_info(self._note)
+
+    async def launched(self, live: Any) -> None:
+        self._repl._active_heavy = (self._target.spec, self._target.base_url)
+
+    async def restored(self, spec: Any) -> None:
+        self._repl._active_heavy = (spec, self._incumbent.base_url)
+
+    async def line(self, text: str) -> None:
+        await self._repl._channel.send_message(self._redact(text), metadata={"style": "system.error"})
+
+
 class OrchestratorREPL:
     """Interactive REPL for the orchestrator layer.
 
@@ -261,7 +314,10 @@ class OrchestratorREPL:
         mcp_manager: Any = None,
         queued: Sequence[str] = (),
         launch_lines: Sequence[str] = (),
+        machine_trust: Any = None,
+        serving_heavy: tuple[Any, str] | None = None,
     ) -> None:
+        from localharness.cli.workspace import MachineTrust
         self._orchestrator = orchestrator
         self._agent = agent_loop
         # The session's PermissionGate (PRD §3.4) — what `/mode` switches. Defaults to the
@@ -306,6 +362,10 @@ class OrchestratorREPL:
         # The withheld-posture / conversion lines `start` composed but did not print itself (D-15,
         # D-17, D-26): the session's FIRST launch announcement prints them once and clears the list.
         self._pending_launch_lines: list[str] = list(launch_lines)
+        # What `start` withheld from the machine's own files (D-11): a swap target is resolved
+        # against it, so the swap path cannot run without a trust in hand. A session built without
+        # one (a test, a stand-in) has nothing withheld.
+        self._machine_trust = machine_trust if machine_trust is not None else MachineTrust()
         # (verb, plugin name) once /plugins asked for a restart; start_cmd reads it after run().
         self.restart_request: tuple[str, str] | None = None
         # --- Type-anytime input box (box mode); inert on the classic path ---
@@ -367,8 +427,21 @@ class OrchestratorREPL:
         # nothing is up, and a foreign process on its port is not ours to stop. So the seed asks the
         # strategy's own liveness (a pidfile, a container, or — LM Studio — a 2 s HTTP probe, P6, at
         # construction). Any error is "not up" (D-58); no config dir means nothing to ask about.
-        if (_srv is not None and getattr(_srv, "gpu", False) and _prov is not None
-                and config_dir is not None):
+        # `start` hands over what it attached to or launched (`serving_heavy`, D-19): when that
+        # server's own liveness says it is up it IS the accelerator occupant, whichever record it is
+        # (a peer chosen by --preset, say); otherwise today's seed from the primary runs.
+        if serving_heavy is not None and config_dir is not None:
+            _held_spec = serving_heavy[0]
+            try:
+                from localharness.provider.lifecycle import strategy_for
+                _held_alive = bool(strategy_for(_held_spec).liveness(
+                    _held_spec, self._server_config_dir).alive)
+            except Exception:  # noqa: BLE001 — a liveness that cannot be asked is "not launched"
+                _held_alive = False
+            if _held_alive:
+                self._active_heavy = (serving_heavy[0], serving_heavy[1])
+        if (self._active_heavy is None and _srv is not None and getattr(_srv, "gpu", False)
+                and _prov is not None and config_dir is not None):
             try:
                 from localharness.provider.lifecycle import strategy_for
                 _alive = bool(strategy_for(_srv).liveness(_srv, self._server_config_dir).alive)
@@ -2014,64 +2087,46 @@ class OrchestratorREPL:
                 return
             if key_line:
                 await self._send_info(key_line)
+            # The swap's target is the record the trust-resolved ladder chose for this peer (D-11,
+            # SEC-02): a record the machine withholds is refused here, with spec 16's line, and
+            # nothing is stopped or launched. The incumbent is what the session tracks as running.
+            serving = model_ops.resolve_serving(
+                self._harness, self._machine_trust, ep.name, config_dir=self._config_dir)
+            if isinstance(serving, model_ops.ServingRefusal):
+                await self._channel.send_message(serving.line, metadata={"style": "system.error"})
+                return
+            swap_target = model_ops.heavy_for(serving, self._harness)
+            swap_incumbent = (model_ops.incumbent_heavy(self._active_heavy, self._harness)
+                              if self._active_heavy is not None else None)
             box_note = getattr(self._channel, "box_activity", None)
 
             def _cold_progress(elapsed: float) -> None:
                 if box_note is not None:
                     box_note(f"launching {ep.name} · {int(elapsed)}s")
 
+            tradeoff = self._swap_tradeoff_note(cur_ptype, current, ep.provider_type, target)
+            _, posture = effective_posture(ep.lifecycle, keyed=keyed, decision=decision)
+            redact = self._channel_redactor(ep.api_key)
+            reporter = _ReplSwapReporter(
+                self, target=swap_target, incumbent=swap_incumbent,
+                launch_head=(f"Launching {ep.name}{f' ({posture})' if posture else ''} — "
+                             "the swap can take several minutes..."),
+                tradeoff=tradeoff, note=decision.note, redact=redact)
             async with self._launch_lock():
-                stopped = None
                 try:
-                    stopped = await _lifecycle.free_accelerator(
-                        self._active_heavy, ep.lifecycle, self._server_config_dir
+                    # free the accelerator, launch the peer with its own key (only when its lifecycle
+                    # is set to require one), restore the incumbent on a failed launch (D-19, D-20)
+                    outcome = await _lifecycle.swap(
+                        swap_incumbent, swap_target, config_dir=self._server_config_dir,
+                        autosense=getattr(self._harness, "autosense", None), reporter=reporter,
+                        redact=redact, on_poll=_cold_progress,
                     )
-                except (RuntimeError, TimeoutError) as exc:
-                    # The incumbent would not stop → we launched NOTHING and it is still up (the
-                    # verified-stop only raises when the server survives). Leave the session as-is.
-                    await self._channel.send_message(
-                        f"Could not free the GPU for {ep.name}: {exc}. No change made — the current "
-                        "model should still be serving.", metadata={"style": "system.error"}
-                    )
-                    return
-                if stopped is not None:
-                    self._active_heavy = None
-                tradeoff = self._swap_tradeoff_note(cur_ptype, current, ep.provider_type, target)
-                _, posture = effective_posture(ep.lifecycle, keyed=keyed, decision=decision)
-                await self._flush_launch_lines()
-                await self._send_info(
-                    f"Launching {ep.name}{f' ({posture})' if posture else ''} — "
-                    f"the swap can take several minutes...{tradeoff}",
-                    colorize=True,
-                )
-                if decision.note:
-                    await self._send_info(decision.note)
-                try:
-                    # the peer's own key, only when its lifecycle is set to require one (default off)
-                    live_ep = await _lifecycle.strategy_for(ep.lifecycle).activate(
-                        ep.lifecycle, self._server_config_dir, ep.base_url, on_poll=_cold_progress,
-                        peer=ep.name, autosense=getattr(self._harness, "autosense", None), **launch_kw,
-                    )
-                except (RuntimeError, TimeoutError) as exc:
-                    # The peer half-started (a TimeoutError means its process is still ALIVE, per
-                    # server.py wait_ready). Tear it down FIRST — the shared pidfile means the restore's
-                    # own launch would otherwise clobber its handle and orphan it as a 2nd heavy — THEN
-                    # restore the incumbent we stopped.
-                    await self._safe_stop(ep.lifecycle)
-                    restored, why = await self._restore_incumbent(stopped)
-                    tail = (f" Restored {restored}." + (f" {why}" if why else "") if restored
-                            else f" Could not restore it: {why}" if why
-                            else " The box now has NO model serving — manual attention needed."
-                            if stopped
-                            else "")
-                    await self._channel.send_message(
-                        f"Launch of {ep.name} failed: {exc}{tail}", metadata={"style": "system.error"}
-                    )
-                    return
                 finally:
                     if box_note is not None:
                         box_note(None)
-                self._active_heavy = (ep.lifecycle, ep.base_url)
+            if outcome.error is not None:
+                return  # the reporter already said why, redacted
+            live_ep = outcome.live
             served = live_ep.served_models[0] if live_ep.served_models else target
             # the launch's window line, on the success path and OUTSIDE the try above: a reporting
             # fault must never read as a failed launch and tear a healthy server down (D-22, D-36)
@@ -2140,6 +2195,8 @@ class OrchestratorREPL:
                                 provider_type=_prim.provider_type)
         from localharness.provider.lifecycle import free_accelerator, strategy_for
         strategy = strategy_for(managed)
+        # a failure line carries a launch's tail: it is masked before any channel shows it (D-22)
+        redact_failure = self._channel_redactor()
         label = RUNTIME_LABELS.get(managed.runtime, managed.runtime)
         _, posture = effective_posture(managed, keyed=bool(launch_kw), decision=decision)
         await self._flush_launch_lines()
@@ -2168,8 +2225,8 @@ class OrchestratorREPL:
                 if box_note is not None:
                     box_note(None)
                 await self._channel.send_message(
-                    f"Could not free the GPU: {exc}. No change made — the previous model should still "
-                    "be serving.", metadata={"style": "system.error"}
+                    redact_failure(f"Could not free the GPU: {exc}. No change made — the previous "
+                                   "model should still be serving."), metadata={"style": "system.error"}
                 )
                 return
             if freed is not None:
@@ -2217,7 +2274,7 @@ class OrchestratorREPL:
                         if freed
                         else " The managed server is down — retry /model to relaunch.")
                 await self._channel.send_message(
-                    f"Model swap failed: {exc}{tail}", metadata={"style": "system.error"}
+                    redact_failure(f"Model swap failed: {exc}{tail}"), metadata={"style": "system.error"}
                 )
                 return
             except BaseException:
@@ -2416,15 +2473,12 @@ class OrchestratorREPL:
         return cold
 
     async def _safe_stop(self, spec) -> None:
-        """Best-effort verified-stop of a server, swallowing errors. Used to tear a HALF-STARTED
-        target down before restoring an incumbent: the pidfile is one-per-config_dir (shared across
-        primary and peer), so a still-alive orphan would be clobbered-and-lost by the restore's own
-        launch (server.py start_server overwrites the pidfile) — leaving a second, untracked heavy."""
+        """Best-effort verified-stop of a server, swallowing errors: tears a HALF-STARTED target down
+        before an incumbent is restored (the pidfile is one-per-config_dir, so a still-alive orphan
+        would be clobbered-and-lost by the restore's own launch). The body is `lifecycle.safe_stop`,
+        the one every surface's swap shares."""
         from localharness.provider import lifecycle as _lifecycle
-        try:
-            await _lifecycle.strategy_for(spec).stop(spec, self._server_config_dir)
-        except Exception:  # noqa: BLE001 — cleanup is best-effort
-            pass
+        await _lifecycle.safe_stop(spec, self._server_config_dir)
 
     async def _announce_window(self, live: Any, provider_type: str, model_id: str) -> None:
         """The swap report names the window a launch got — what ``activate`` asked and the probe
@@ -2458,36 +2512,33 @@ class OrchestratorREPL:
         ``note`` is the launch decision's one line when it withheld a widening — and
         ``(None, why)`` when the decision refuses the relaunch or the launch itself fails, so the caller
         reports the cause instead of "nothing serving" (D-08). ``(None, None)`` is nothing to restore:
-        the caller then reports the box needs manual attention."""
+        the caller then reports the box needs manual attention.
+
+        The relaunch is `lifecycle.restore_incumbent`; this wrapper keeps the REPL's part: the
+        session's first-launch lines go out first, and the launch lock is held around the relaunch
+        (re-entrant for a caller that already holds it). A cold swap does not come through here: its
+        restore runs inside `lifecycle.swap`, under the one lock the swap's caller holds."""
         if stopped is None:
             return None, None
         spec, base_url = stopped
+        from localharness.cli import model_ops
         from localharness.provider import lifecycle as _lifecycle
-        from localharness.provider.server import LaunchRefused, launch_decision
-        # the peer's name only when the spec IS that peer's own lifecycle (identity, not equality), so
-        # a refusal names `extra_endpoints[<name>]` exactly for a peer and `server` for the primary
-        peer = self._peer_name_for(spec, base_url)
+        from localharness.provider.server import launch_decision
+        heavy = model_ops.incumbent_heavy(stopped, self._harness)
         try:
-            launch_kw = _launch_key(self._harness, base_url, spec)
             if self._pending_launch_lines and launch_decision(
-                    spec, bool(launch_kw), peer=peer).refusal is None:
+                    spec, bool(heavy.launch_kw), peer=heavy.peer).refusal is None:
                 await self._flush_launch_lines()  # a restore that is the session's first launch
             async with self._launch_lock():
-                live = await _lifecycle.strategy_for(spec).activate(
-                    spec, self._server_config_dir, base_url, peer=peer,
-                    autosense=getattr(self._harness, "autosense", None), **launch_kw)
-                self._active_heavy = (spec, base_url)
-            return spec.model, getattr(live, "note", None)
-        except LaunchRefused as exc:
-            return None, str(exc)
+                label, note = await _lifecycle.restore_incumbent(
+                    heavy, config_dir=self._server_config_dir,
+                    autosense=getattr(self._harness, "autosense", None))
+                if label is not None:
+                    self._active_heavy = (spec, base_url)
+            return label, note
         except Exception as exc:  # noqa: BLE001 — restore is best-effort; the caller surfaces the failure
-            # The same (None, why) shape as a refusal, so the caller's "Could not restore it: <why>"
-            # names the cause (a bad binary, a timeout, a port clash) instead of hiding it. The
-            # activate contract's own failures (RuntimeError / TimeoutError) are already one readable
-            # line; anything else keeps its type name so it is not an empty or cryptic string.
+            # a fault in the REPL's own part (the line flush, the lock): the same (None, why) shape
             text = str(exc)
-            if isinstance(exc, (RuntimeError, TimeoutError)) and text:
-                return None, text
             return None, f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
     def server_recovery(self):
@@ -2565,6 +2616,26 @@ class OrchestratorREPL:
         from localharness.provider.lifecycle import launch_lock, launch_lock_wait_line
         # the line is chosen when it is said: a holder in this very process is not "another LocalHarness"
         return launch_lock(cfg, on_wait=lambda: self._send_info(launch_lock_wait_line(cfg)))
+
+    def _channel_redactor(self, *keys: Any):
+        """The one-argument masking function a failure line goes through before any channel shows it
+        (D-22, SEC-04): `model_ops.redact_for_channel` with the session's keys — the ones given
+        (a peer's held session key) and the harness provider's (R-13-26). The literal "none" is a
+        proposer's "no key", never a secret: masking it would hide every "none" around it."""
+        from localharness.cli import model_ops
+        provider = getattr(self._harness, "provider", None)
+        held = []
+        for key in (*keys, getattr(provider, "api_key", None)):
+            raw = key.get_secret_value() if hasattr(key, "get_secret_value") else key
+            if isinstance(raw, str) and raw and raw != "none":
+                held.append(raw)
+
+        def redact(text: str) -> str:
+            for key in held or [None]:
+                text = model_ops.redact_for_channel(text, self._harness, key)
+            return text
+
+        return redact
 
     def _peer_name_for(self, spec: Any, base_url: str) -> str | None:
         """The configured peer's name for ``base_url``, only when ``spec`` IS that peer's own lifecycle
@@ -2667,18 +2738,21 @@ class OrchestratorREPL:
         return ep.provider_type if ep is not None else None
 
     async def _persist_landed(self, base_url: str, model: str) -> bool:
-        """Persist a completed switch by WHERE it landed. The primary provider endpoint keeps
-        today's default-model overlay path (issue #22); a PEER endpoint records an additive
-        active-endpoint selection that never mutates provider/server. (Restart-resume that reads a
-        peer selection back is a scoped follow-up — see model_ops.persist_active_endpoint.)
+        """Persist a completed switch by WHERE it landed, through `model_ops.persist_landed` — the
+        one writer of a landing's outcome (D-07): `active_endpoint` (a peer's, or cleared for the
+        primary), `last_served`, and the removal of `pending_preset`. Every REPL landing is a "swap":
+        a `/model` switch always changes the selection. The primary keeps today's default-model
+        overlay path too (issue #22); a PEER records the additive active-endpoint selection that
+        never mutates provider/server.
 
         Returns True only when a new DEFAULT MODEL actually landed on disk — #129: the caller
         announces persistence, so the flag must never be optimistic."""
+        from localharness.cli import model_ops
         provider = getattr(self._harness, "provider", None)
-        if provider is None or base_url == provider.base_url:
+        if provider is None:
             return await self._persist_default_model(model)
-        ep = self._peer_by_base_url(base_url)
-        if ep is None:
+        record = model_ops.record_for_base_url(self._harness, base_url)
+        if record is None:
             # #6: an unknown base_url is NEITHER the primary NOR a configured peer. Persisting it via
             # persist_default_model is the EXACT corruption persist_active_endpoint exists to prevent
             # — it would rewrite provider/server.model, so the next `start` builds `vllm serve
@@ -2691,21 +2765,37 @@ class OrchestratorREPL:
                 base_url, model,
             )
             return False
-        await self._persist_active_endpoint(ep, model)
-        return False   # a peer selection is not a persisted default model
+        if record.peer is not None:
+            await self._persist_active_endpoint(record.peer, model)
+            return False   # a peer selection is not a persisted default model
+        try:
+            await model_ops.persist_landed(
+                self._harness, record, outcome="swap", served=model, config_dir=self._config_dir)
+        except Exception as exc:  # noqa: BLE001 — the in-session switch already succeeded
+            await self._channel.send_message(
+                PERSIST_SELECTION_FAILED.format(exc=self._channel_redactor()(str(exc))),
+                metadata={"style": "system.error"},
+            )
+        return await self._persist_default_model(model)
 
     async def _persist_active_endpoint(self, endpoint, model: str) -> None:
         """Persist a cross-endpoint (peer) switch to the atomic user overlay as an additive
-        active_endpoint record — never corrupts the primary provider/server. Best-effort: a failure
-        is surfaced but never crashes the live session, which has already switched."""
+        active_endpoint record — never corrupts the primary provider/server — through
+        `model_ops.persist_landed` with the landing's other effects (`last_served`, the removal of
+        `pending_preset`). Best-effort: a failure is surfaced but never crashes the live session,
+        which has already switched."""
         from localharness.cli import model_ops
         try:
-            await model_ops.persist_active_endpoint(
-                self._harness, endpoint, model, config_dir=self._config_dir
+            record = model_ops.record_for_base_url(self._harness, endpoint.base_url)
+            if record is None:
+                raise ValueError(f"{endpoint.base_url} is not a configured endpoint")
+            await model_ops.persist_landed(
+                self._harness, record, outcome="swap", served=model, config_dir=self._config_dir
             )
         except Exception as exc:  # noqa: BLE001 — the in-session switch already succeeded
             await self._channel.send_message(
-                f"Switched for this session, but persisting the active endpoint failed: {exc}",
+                "Switched for this session, but persisting the active endpoint failed: "
+                f"{self._channel_redactor(getattr(endpoint, 'api_key', None))(str(exc))}",
                 metadata={"style": "system.error"},
             )
 
