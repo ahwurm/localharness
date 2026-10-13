@@ -795,7 +795,6 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     exposed, posture = managed_server.effective_posture(srv, keyed=keyed, decision=decision)
     if notes is not None and notes.suffix and exposed:
         posture = f"{posture or 'every interface'} — {notes.suffix}"
-    detail = f"{posture}; " if posture else ""
 
     async def _say_launch_lock_wait() -> None:
         err_console.print(LAUNCH_LOCK_WAIT_LINE, markup=False, soft_wrap=True)
@@ -808,23 +807,64 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
         if _managed_server_running(strategy, srv, global_dir):
             loading = True  # someone else brought it up while we waited for the lock: attach, never launch
         else:
-            console.print(
-                f"Managed {label} is not running — starting it ({detail}model load can take several minutes)...",
-                markup=False)
-            if notes is not None:
-                for line in notes.lines:
-                    err_console.print(line, markup=False, soft_wrap=True)
-                notes.printed = True
-            if decision.note:
-                err_console.print(decision.note, markup=False, soft_wrap=True)
+            def _announce(clause: str = "") -> None:
+                """The one launch line (D-23): the posture phrase first, then what was derived, then the
+                load warning. Plain text, never markup: the clause is built from closed plan values."""
+                inside = "; ".join(part for part in (posture, clause) if part)
+                inside = f"{inside}; " if inside else ""
+                console.print(
+                    f"Managed {label} is not running — starting it ({inside}model load can take several minutes)...",
+                    markup=False)
+
+            def _say_notes() -> None:
+                if notes is not None:
+                    for line in notes.lines:
+                        err_console.print(line, markup=False, soft_wrap=True)
+                    notes.printed = True
+                if decision.note:
+                    err_console.print(decision.note, markup=False, soft_wrap=True)
+
+            launch_kw: dict[str, Any] = {}
+            if getattr(strategy, "plans_launch", False):
+                # A planning strategy hands each plan it runs to `on_plan` right before that plan's launch
+                # (the first plan, then a retry), so the line names the shape that really starts. The
+                # notes and the decision note follow the first line only.
+                said: list[bool] = []
+
+                def on_plan(plan: Any) -> None:
+                    _announce(_plan_clause(plan))
+                    if not said:
+                        said.append(True)
+                        _say_notes()
+
+                launch_kw = dict(on_plan=on_plan)
+            else:
+                # R-10e: a strategy that plans nothing keeps today's order, with no clause.
+                _announce()
+                _say_notes()
             # activate = serve_command → start_server → wait_ready (launch + readiness) via the lifecycle
             # strategy. The off-loop verified-stop wrapper lives in the strategy, not this launch path.
-            live = await strategy.activate(srv, global_dir, base_url, autosense=autosense, **launch_key)
+            live = await strategy.activate(srv, global_dir, base_url, autosense=autosense, **launch_kw,
+                                           **launch_key)
             if endpoint_out is not None:
                 endpoint_out.append(live)
     if loading:
         await _wait_for_loading_server()
     return None
+
+
+def _plan_clause(plan: Any) -> str:
+    """The derived clause of the launch line for the plan a launch is about to run (D-23); empty for an
+    untuned launch (`None`). The undo field is `server.speculative`: `start` launches the primary."""
+    if plan is None:
+        return ""
+    from localharness.provider import tuning
+
+    report = getattr(plan, "report", None)
+    return tuning.derived_clause(
+        plan.tuned, shape=plan.shape, cause=plan.cause, dropped=plan.dropped,
+        remembered_at=plan.remembered_at, context=getattr(report, "asked", None),
+        undo_field="server.speculative")
 
 
 _POSTURE_KEYS = ("bind_all", "require_api_key")
