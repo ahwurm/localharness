@@ -13,9 +13,14 @@ the uid it checked is the uid of the directory it reads, whatever happens to the
 the start time is read before and after as the second guard. `exe` and `cwd` are only ever
 `readlink`-ed, never opened. `PROC_ROOT` is read at call time, so a test points it at a tmp tree.
 
-Pure standard library (os, re, dataclasses); the one cross-module use is the start-time parser the
-pidfile code in `provider.server` already owns. `pwd` is not imported at module level and
-the directory-open flag is read with `getattr`, so the module still imports where those are absent.
+Pure standard library (os, re, dataclasses). `provider.server` imports this module (the start-time
+parser and the pidfile names live here), never the reverse: this module imports nothing from `server`,
+`lifecycle`, `units` or `cli`. `pwd` is not imported at module level and the directory-open flag is
+read with `getattr`, so the module still imports where those are absent.
+
+It also judges identity: `LaunchIdentity` is plain data a strategy supplies, and `identity_mismatch`
+is the one pure function that says why a process is not a harness launch. A pidfile is a claim;
+the `/proc` facts decide.
 """
 from __future__ import annotations
 
@@ -26,15 +31,22 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from localharness.provider import server
-
 __all__ = [
     "PROC_ROOT", "NET_TCP_CAP", "PID_SCAN_CAP", "FD_SCAN_CAP", "FD_TOTAL_CAP", "PROC_ENTRY_CAP",
     "CMDLINE_CAP", "ENVIRON_CAP",
     "STAT_CAP", "CGROUP_CAP", "MAPS_LINE_CAP", "MAPPED_PATHS_CAP",
     "Listener", "ProcRecord", "ProcRefusal", "listeners", "reachable_first", "pid_for_inode",
     "read_process", "parent_pid", "is_self_or_descendant",
+    "SERVER_DIR_NAME", "PIDFILE_NAME", "HARNESS_UNIT", "LaunchIdentity",
+    "start_time_from_stat", "session_from_stat", "parse_pidfile", "port_of", "identity_mismatch",
+    "serve_starting",
 ]
+
+SERVER_DIR_NAME = "vllm"
+"""The directory under the config dir that holds `server.pid`, the lock and the log."""
+PIDFILE_NAME = "server.pid"
+HARNESS_UNIT = "localharness-llm.service"
+"""The systemd user unit the harness's own server runs as."""
 
 PROC_ROOT = "/proc"
 """The /proc mount. Read through `os.path.join(PROC_ROOT, ...)` at call time, never captured."""
@@ -91,7 +103,8 @@ class Listener:
 class ProcRecord:
     """What `/proc` says about one process of this user. `environ=None` and `cwd=None` mean
     "unknown" (the sources that cannot know them); `unit` is the systemd user unit or None;
-    `mapped_ggufs` are the candidate model paths from `maps`, in maps order, not yet typed."""
+    `mapped_ggufs` are the candidate model paths from `maps`, in maps order, not yet typed;
+    `sid` is the session id from `stat` (None when `stat` could not name it)."""
 
     pid: int
     uid: int
@@ -102,6 +115,7 @@ class ProcRecord:
     unit: str | None
     environ: Mapping[str, str] | None
     mapped_ggufs: tuple[str, ...]
+    sid: int | None = None
 
 
 @dataclass(frozen=True)
@@ -343,14 +357,41 @@ def _link(name: str, dir_fd: int) -> str | None:
         return None
 
 
-def _start_time(dir_fd: int) -> int | None:
+def start_time_from_stat(raw: bytes) -> int | None:
+    """Field 22 of a `/proc/<pid>/stat` line (clock ticks since boot): the process's start time.
+
+    The comm field may contain spaces and parentheses, so the parse starts after the LAST ")":
+    the tokens that follow begin at field 3 (the state), which puts field 22 at index 19.
+    None when the bytes are not shaped like a stat line. The one parser the pidfile code in
+    `provider.server` imports from here."""
+    try:
+        return int(raw.rsplit(b")", 1)[1].split()[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def session_from_stat(raw: bytes) -> int | None:
+    """Field 6 (the session id) of a `/proc/<pid>/stat` line, parsed after the last ")" like
+    `start_time_from_stat`: index 3 of the tokens that follow. None when not shaped like a stat line."""
+    try:
+        return int(raw.rsplit(b")", 1)[1].split()[3])
+    except (IndexError, ValueError):
+        return None
+
+
+def _stat_raw(dir_fd: int) -> bytes | None:
     try:
         raw = _read_at("stat", dir_fd, STAT_CAP)
     except OSError:
         return None
     if len(raw) > STAT_CAP:
         return None
-    return server.start_time_from_stat(raw)
+    return raw
+
+
+def _start_time(dir_fd: int) -> int | None:
+    raw = _stat_raw(dir_fd)
+    return None if raw is None else start_time_from_stat(raw)
 
 
 def read_process(pid: int) -> ProcRecord | ProcRefusal:
@@ -378,9 +419,11 @@ def _read_process_at(pid: int, fd: int) -> ProcRecord | ProcRefusal:
     if owner != os.getuid():
         return ProcRefusal("is owned by another uid")
 
-    start = _start_time(fd)
-    if start is None:
+    stat_raw = _stat_raw(fd)
+    start = None if stat_raw is None else start_time_from_stat(stat_raw)
+    if stat_raw is None or start is None:
         return ProcRefusal("is gone")
+    sid = session_from_stat(stat_raw)
 
     unit: str | None = None
     try:
@@ -423,4 +466,117 @@ def _read_process_at(pid: int, fd: int) -> ProcRecord | ProcRefusal:
         unit=unit,
         environ=_parse_environ(environ_raw),
         mapped_ggufs=mapped,
+        sid=sid,
     )
+
+
+# ------------------------------------------------------------------------------- identity
+
+
+@dataclass(frozen=True)
+class LaunchIdentity:
+    """What a harness launch of one strategy looks like in `/proc`, as plain data.
+
+    `exe_names` are executable basenames (an entry ending `*` matches as a basename prefix, so
+    `python*` covers `python3.12`); `port` is the port the record names, or None when the identity
+    does not check one; `argv_contains` are tokens that must each be a whole argv element;
+    `port_env` is the environment variable that carries the port when argv does not."""
+
+    exe_names: frozenset[str]
+    port: int | None
+    argv_contains: tuple[str, ...]
+    port_env: str | None
+
+
+def parse_pidfile(text: str) -> tuple[int, int | None, int | None]:
+    """`<pid>`, `<pid> <start>` or `<pid> <start> <port>` -> (pid, start, port). A bare pid is the
+    0.17 file and a pid and start the 0.18 file; the missing parts read as None. A port outside
+    1-65535 reads as absent. Anything else (no token, more than three, a non-integer) and any pid
+    <= 1 raises ValueError."""
+    tokens = text.split()
+    if not 1 <= len(tokens) <= 3:
+        raise ValueError(f"pidfile holds {len(tokens)} tokens")
+    pid = int(tokens[0])
+    if pid <= 1:
+        # 0 and negatives are not a process: os.kill(0, 0) succeeds and os.killpg(0, SIGTERM) would
+        # signal the harness's own process group. 1 is init. Read as malformed, the pidfile is
+        # dropped as stale and nothing is ever signalled.
+        raise ValueError(f"pidfile holds pid {pid}, which is not a process the harness launched")
+    start = int(tokens[1]) if len(tokens) >= 2 else None
+    port: int | None = None
+    if len(tokens) == 3:
+        number = int(tokens[2])
+        port = number if 1 <= number <= 65535 else None
+    return pid, start, port
+
+
+def _as_port(text: str) -> int | None:
+    try:
+        number = int(text)
+    except ValueError:
+        return None
+    return number if 1 <= number <= 65535 else None
+
+
+def port_of(record: ProcRecord, expect: LaunchIdentity) -> int | None:
+    """The port `record` serves: `--port N` / `--port=N` in argv first, then the environment variable
+    `expect.port_env` (a bare port, or `host:port` as `OLLAMA_HOST` holds). None when it names none."""
+    argv = record.argv
+    for index, token in enumerate(argv):
+        if token == "--port":
+            if index + 1 < len(argv):
+                return _as_port(argv[index + 1])
+            return None
+        if token.startswith("--port="):
+            return _as_port(token[len("--port="):])
+    if expect.port_env is not None and record.environ is not None:
+        value = record.environ.get(expect.port_env)
+        if value:
+            return _as_port(value.rpartition(":")[2])
+    return None
+
+
+def _exe_matches(exe: str, names: frozenset[str]) -> bool:
+    base = os.path.basename(exe)
+    return any(base.startswith(name[:-1]) if name.endswith("*") else base == name for name in names)
+
+
+def identity_mismatch(record: ProcRecord, expect: LaunchIdentity, *, owner: str = "spawned",
+                      main_pid: int | None = None) -> str | None:
+    """Why `record` is not a harness launch of `expect` (a phrase that follows the process's name),
+    or None when it is. Checked in order: uid, executable basename, each argv token, the port, session
+    leader, and for `owner == "unit"` the unit's cgroup and `MainPID`. Pure: reads nothing."""
+    if record.uid != os.getuid():
+        return "is owned by another uid"
+    if record.exe is None:
+        return "has no readable executable"
+    if not _exe_matches(record.exe, expect.exe_names):
+        return f"runs {os.path.basename(record.exe)}, not {'/'.join(sorted(expect.exe_names))}"
+    for token in expect.argv_contains:
+        if token not in record.argv:
+            return f"has no {token} on its command line"
+    if expect.port is not None:
+        got = port_of(record, expect)
+        if got is None:
+            return "names no port"
+        if got != expect.port:
+            return f"serves port {got}, not {expect.port}"
+    if record.sid != record.pid:
+        return "is not its own session leader"
+    if owner == "unit" and (record.unit != HARNESS_UNIT or main_pid != record.pid):
+        return f"is not the main process of {HARNESS_UNIT}"
+    return None
+
+
+_SERVE_TOKENS = ("-I", "-m", "localharness", "serve")
+
+
+def serve_starting(record: ProcRecord, *, main_pid: int | None) -> bool:
+    """True when `record` is the harness's own `localharness serve` unit process: argv holds the
+    consecutive tokens `-I -m localharness serve`, its cgroup unit is `HARNESS_UNIT` and it is the
+    unit's `MainPID`."""
+    if main_pid is None or record.pid != main_pid or record.unit != HARNESS_UNIT:
+        return False
+    width = len(_SERVE_TOKENS)
+    argv = record.argv
+    return any(argv[i:i + width] == _SERVE_TOKENS for i in range(len(argv) - width + 1))

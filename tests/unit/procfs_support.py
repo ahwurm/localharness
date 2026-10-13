@@ -18,10 +18,13 @@ _NET_HEADER = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->wh
                "timeout inode\n")
 
 
-def stat_bytes(pid: int, start: int, *, comm: str = "llama-server", state: str = "S") -> bytes:
+def stat_bytes(pid: int, start: int, *, comm: str = "llama-server", state: str = "S",
+               sid: int | None = None) -> bytes:
     """A `/proc/<pid>/stat` line with `start` as field 22: after the last ")" the tokens begin at
-    field 3, so the state is index 0 and the start time index 19 (17 fields lie between)."""
+    field 3, so the state is index 0, the session id index 3 (`sid`; None is the pid itself, a
+    session leader) and the start time index 19 (17 fields lie between)."""
     fields = [state, "1", *(["0"] * 17), str(start), "0", "0"]
+    fields[3] = str(pid if sid is None else sid)
     return f"{pid} ({comm}) {' '.join(fields)}\n".encode()
 
 
@@ -58,13 +61,13 @@ class FakeProc:
                 fds: Mapping[int, int] | None = None, start_time: int = 777,
                 comm: str = "llama-server", stat: bytes | None = None,
                 cmdline: bytes | None = None, environ_raw: bytes | None = None,
-                maps_text: str | None = None) -> Path:
+                maps_text: str | None = None, sid: int | None = None) -> Path:
         """Write `<root>/<pid>/` and return it. `fds` maps an fd number to a socket inode;
         `maps` are bare pathnames (rendered as maps lines); the `*_raw`/`*_text`/`stat`/`cmdline`
-        knobs write the file verbatim."""
+        knobs write the file verbatim; `sid` is the stat session id (None: the pid, a session leader)."""
         d = self.root / str(pid)
         d.mkdir(parents=True, exist_ok=True)
-        (d / "stat").write_bytes(stat if stat is not None else stat_bytes(pid, start_time, comm=comm))
+        (d / "stat").write_bytes(stat if stat is not None else stat_bytes(pid, start_time, comm=comm, sid=sid))
         (d / "cmdline").write_bytes(
             cmdline if cmdline is not None else b"".join(a.encode() + b"\0" for a in argv))
         if environ_raw is not None:

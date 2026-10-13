@@ -242,6 +242,7 @@ def test_read_process_returns_the_frozen_record(fake_proc):
         unit="llama-server.service",
         environ={"LLAMA_ARG_CTX_SIZE": "65536"},
         mapped_ggufs=("/m/a.gguf",),
+        sid=4242,  # the fake process is its own session leader
     )
     with pytest.raises(AttributeError):
         rec.pid = 1  # frozen

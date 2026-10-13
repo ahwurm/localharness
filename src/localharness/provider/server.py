@@ -36,6 +36,7 @@ from typing import Any, Callable, Mapping
 from localharness.config.models import ManagedServerConfig
 from localharness.core.private_files import NotRegularFile, open_regular, private_opener, touch_private
 from localharness.core.which import which_outside_cwd
+from localharness.provider import procfs
 
 logger = structlog.get_logger(__name__)
 """The module logger. Named `logger`, not `log`: `start_server` holds its serve.log handle as `log`."""
@@ -403,7 +404,7 @@ def key_destination(base_url: Any) -> tuple[bool, str]:
 
 
 def server_dir(config_dir: Path) -> Path:
-    return Path(config_dir) / "vllm"
+    return Path(config_dir) / procfs.SERVER_DIR_NAME
 
 
 def config_ini_home(config_dir: Path, port: int) -> Path:
@@ -493,7 +494,7 @@ def log_path(config_dir: Path) -> Path:
 
 
 def pid_path(config_dir: Path) -> Path:
-    return server_dir(config_dir) / "server.pid"
+    return server_dir(config_dir) / procfs.PIDFILE_NAME
 
 
 def lock_path(config_dir: Path) -> Path:
@@ -882,17 +883,9 @@ def _is_zombie(pid: int) -> bool:
         return False
 
 
-def start_time_from_stat(raw: bytes) -> int | None:
-    """Field 22 of a `/proc/<pid>/stat` line (clock ticks since boot): the process's start time.
-
-    The comm field may contain spaces and parentheses, so the parse starts after the LAST ")":
-    the tokens that follow begin at field 3 (the state), which puts field 22 at index 19.
-    None when the bytes are not shaped like a stat line. The one parser the pidfile code and
-    `provider.procfs` share."""
-    try:
-        return int(raw.rsplit(b")", 1)[1].split()[19])
-    except (IndexError, ValueError):
-        return None
+# The one parser the pidfile code and `provider.procfs` share lives in procfs (server imports it,
+# never the reverse); the name stays importable from here.
+start_time_from_stat = procfs.start_time_from_stat
 
 
 def _proc_start_time(pid: int) -> int | None:
