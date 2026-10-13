@@ -61,7 +61,10 @@ def _assert_raw_only_in_log(tmp_path, planted: str, text: str, what: str) -> str
     assert end["path"] == str(server.log_path(tmp_path))
     log = server.log_path(tmp_path).read_text(encoding="utf-8")
     assert log.startswith(planted)
-    assert log[len(planted):].strip() == f"=== ref {end['ref']}: {what} ==="
+    # what was appended is reference lines only (a recovery's inner wait_ready adds its own), ours last
+    added = [line for line in log[len(planted):].splitlines() if line]
+    assert all(re.fullmatch(r"=== ref [0-9a-f]{8}: .* ===", line) for line in added), added
+    assert added[-1] == f"=== ref {end['ref']}: {what} ==="
     return end["ref"]
 
 
@@ -138,3 +141,98 @@ def test_scrubbed_tail_masks_every_form_and_log_reference_is_a_pure_append(tmp_p
 def test_log_reference_without_a_server_dir_is_best_effort(tmp_path):
     ref = server.log_reference(tmp_path / "nowhere", "x")  # the directory is absent: still returns an id
     assert re.fullmatch(r"[0-9a-f]{8}", ref)
+
+
+# ------------------------------------------------------------------------------- the timeout message
+
+
+async def test_wait_ready_timeout_carries_the_scrubbed_tail_and_a_reference(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "server_pid", lambda config_dir: 1)  # alive: only the clock ends it
+    planted = _plant(tmp_path)
+    with pytest.raises(TimeoutError) as late:
+        await server.wait_ready(BASE, config_dir=tmp_path, timeout_seconds=0, runtime="llamacpp", api_key=HELD)
+    text = str(late.value)
+    assert text.startswith("llama.cpp not ready after 0s. Log tail:\n")
+    _clean(text)
+    _assert_raw_only_in_log(tmp_path, planted, text, "llama.cpp not ready after 0s")
+
+
+async def test_wait_ready_timeout_without_a_config_dir_has_no_tail_and_no_reference(monkeypatch):
+    with pytest.raises(TimeoutError) as late:
+        await server.wait_ready(BASE, timeout_seconds=0, runtime="llamacpp")
+    assert str(late.value) == "llama.cpp not ready after 0s."
+
+
+# ------------------------------------------------------------------------------- the reconnect's tails
+
+
+@pytest.fixture
+def models(monkeypatch):
+    def install(endpoint: ModelsEndpoint) -> ModelsEndpoint:
+        monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(endpoint))
+        return endpoint
+
+    return install
+
+
+class _Announce:
+    async def __call__(self) -> None:
+        return None
+
+
+async def test_recovery_ending_on_a_dead_process_carries_the_scrubbed_tail(models, tmp_path):
+    models(ModelsEndpoint())
+    planted = _plant(tmp_path)
+    with pytest.raises(RuntimeError) as info:
+        await asyncio.wait_for(ServerRecovery(URL, tmp_path, None).recover(
+            base_url=URL, api_key=HELD, wait_seconds=60, on_lost=_Announce()), 2.0)
+    text = str(info.value)
+    assert text.startswith("the model server exited. Log tail:\n")
+    _clean(text)
+    _assert_raw_only_in_log(tmp_path, planted, text, "the model server exited")
+
+
+async def test_recovery_ending_on_a_second_death_carries_the_scrubbed_tail(models, tmp_path):
+    models(ModelsEndpoint(down=lambda: True))
+    planted = _plant(tmp_path)
+    relaunch = RecordingRelaunch(lambda: write_dead_pidfile(tmp_path))
+    with pytest.raises(RuntimeError) as info:
+        await asyncio.wait_for(ServerRecovery(URL, tmp_path, relaunch).recover(
+            base_url=URL, api_key=HELD, wait_seconds=5, on_lost=_Announce()), 4.0)
+    text = str(info.value)
+    assert text.startswith("the model server exited; it was restarted once and exited again. Log tail:\n")
+    _clean(text)
+    _assert_raw_only_in_log(tmp_path, planted, text, "the model server exited again")
+    assert relaunch.calls == 1
+
+
+async def test_recovery_bound_carries_the_scrubbed_tail_and_masks_the_held_key(models, tmp_path):
+    models(ModelsEndpoint(down=lambda: True))
+    write_live_pidfile(tmp_path)
+    planted = _plant(tmp_path)
+    with pytest.raises(TimeoutError) as info:
+        await ServerRecovery(URL, tmp_path, None).recover(
+            base_url=URL, api_key=HELD, wait_seconds=0.1, on_lost=_Announce())
+    text = str(info.value)
+    assert text.startswith("the model server did not come back within 1s. Log tail:\n")
+    _clean(text)
+    ref = _assert_raw_only_in_log(tmp_path, planted, text, "the model server did not come back within 1s")
+    assert re.search(rf"ref {ref}\)$", text)
+
+
+async def test_recovery_with_no_config_dir_has_no_tail_and_no_reference(models):
+    models(ModelsEndpoint(down=lambda: True))
+    with pytest.raises(TimeoutError) as info:
+        await ServerRecovery(None, None, None).recover(
+            base_url=URL, api_key=HELD, wait_seconds=0.1, on_lost=_Announce())
+    assert str(info.value) == "the model server did not come back within 1s"
+
+
+def test_reference_lines_are_not_server_output_and_stay_out_of_a_later_tail(tmp_path):
+    _plant(tmp_path, "loading weights 40%")  # no trailing newline: the reference still starts its own line
+    server.log_reference(tmp_path, "first")
+    server.log_reference(tmp_path, "second")
+    assert server.log_tail(tmp_path) == "loading weights 40%"
+    write_serve_log(tmp_path, "")
+    server.log_reference(tmp_path, "only")
+    assert server.log_tail(tmp_path) == "(no log)"  # bookkeeping alone is no log

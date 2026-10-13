@@ -1238,9 +1238,19 @@ def _tail_block(config_dir: Path, what: str, api_key: Any = None) -> str:
     return tail + "\n" + LOG_REF_LINE.format(path=log_path(config_dir), ref=ref)
 
 
+_REF_MARK = re.compile(r"\n?=== ref [0-9a-f]{8}: [^\n]* ===(?:\n|$)")
+
+
 def log_tail(config_dir: Path, lines: int = 15) -> str:
+    """The raw last `lines` of serve.log. Read ONLY by `scrubbed_tail` (a structural test pins it): no
+    message quotes it as it is. The `=== ref <id>: … ===` lines `log_reference` appends are bookkeeping
+    for the reader of the file, not server output, so they are left out; a log holding nothing else
+    reads "(no log)"."""
     try:
         content = log_path(config_dir).read_text(encoding="utf-8", errors="replace")
-        return "\n".join(content.splitlines()[-lines:])
+        kept = _REF_MARK.sub("", content)
+        if content and not kept.strip():
+            return "(no log)"
+        return "\n".join(kept.splitlines()[-lines:])
     except OSError:
         return "(no log)"

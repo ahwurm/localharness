@@ -757,7 +757,7 @@ class SpawnedProcessStrategy:
         "A dead process or a load failure in the log's last lines" (AUTO-05, ROADMAP SC4) is one
         trigger (D-37): llama-server exits on a load failure, so the load failure IS the dead
         process `wait_ready` already detects (the pidfile pid and its start time are gone). No log
-        text is parsed; the abandon message quotes `log_tail`."""
+        text is parsed; the abandon message quotes the scrubbed tail (`scrubbed_tail`) and a log reference."""
         keyed = bool(api_key)
         decision = server.launch_decision(spec, keyed, peer=peer)
         if decision.refusal is not None:
@@ -1613,7 +1613,7 @@ class ServerRecovery:
                 if not window.expired():
                     raise  # the flight's own failure, not this caller's bound
                 left = True
-                raise TimeoutError(self._bound_text(own)) from None
+                raise TimeoutError(self._bound_text(own, api_key)) from None
         finally:
             timer.cancel()
             run.awaiters -= 1
@@ -1651,7 +1651,7 @@ class ServerRecovery:
                 return
             if issubclass(outage.failed[0], TimeoutError):
                 # the bound passed: say THIS loop's bound, not the seconds an earlier loop was told
-                raise TimeoutError(self._bound_text(wait_seconds)) from None
+                raise TimeoutError(self._bound_text(wait_seconds, api_key)) from None
             raise _again(outage.failed) from None
         # what the outage's one relaunch already came to, when an earlier loop spent it and failed
         earlier = outage.failed if outage.relaunched else None
@@ -1659,7 +1659,7 @@ class ServerRecovery:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(self._bound_text(wait_seconds))
+                raise TimeoutError(self._bound_text(wait_seconds, api_key))
             try:
                 await server.wait_ready(
                     base_url,
@@ -1672,10 +1672,10 @@ class ServerRecovery:
                 )
                 return
             except TimeoutError as late:
-                raise TimeoutError(self._bound_text(wait_seconds)) from late
+                raise TimeoutError(self._bound_text(wait_seconds, api_key)) from late
             except RuntimeError as died:  # the launched process is gone (wait_ready's own signal)
                 if self.relaunch is None:
-                    raise RuntimeError(EXITED_TEXT + self._tail()) from died
+                    raise RuntimeError(EXITED_TEXT + self._tail("the model server exited", api_key)) from died
                 if relaunched:
                     # The one relaunch is spent (here, or by an earlier loop of the turn), but the person
                     # may have restarted the server by hand: look at the address before giving up.
@@ -1685,7 +1685,8 @@ class ServerRecovery:
                     if earlier is not None and (issubclass(earlier[0], server.LaunchRefused)
                                                 or earlier[1].startswith(RESTART_FAILED_TEXT)):
                         raise _again(earlier) from died  # the one relaunch was refused or failed
-                    raise RuntimeError(EXITED_AGAIN_TEXT + self._tail()) from died
+                    raise RuntimeError(
+                        EXITED_AGAIN_TEXT + self._tail("the model server exited again", api_key)) from died
                 relaunched = True
             # The launched process is gone, but something may already serve at the address (the
             # person restarted the server by hand): the pidfile check runs before any request, so
@@ -1715,7 +1716,7 @@ class ServerRecovery:
                 if window.expired():
                     if self.config_dir is not None and server.server_pid(self.config_dir) is not None:
                         outage.relaunched = True  # a process was started before the bound passed
-                    raise TimeoutError(self._bound_text(wait_seconds)) from failed
+                    raise TimeoutError(self._bound_text(wait_seconds, api_key)) from failed
                 outage.relaunched = True
                 raise RuntimeError(RESTART_FAILED_TEXT + str(failed)) from failed
             except (RuntimeError, OSError) as failed:  # OSError: e.g. the server binary is gone
@@ -1751,15 +1752,21 @@ class ServerRecovery:
         except (TimeoutError, RuntimeError):
             return False
 
-    def _tail(self) -> str:
-        return server.log_tail(self.config_dir) if self.config_dir is not None else ""
+    def _tail(self, what: str, api_key: Any = None) -> str:
+        """The scrubbed tail of the server log and where its raw lines are (D-22), or "" without a log
+        directory. `api_key` is the key this recovery holds, masked wherever the log echoes it."""
+        if self.config_dir is None:
+            return ""
+        tail = server.scrubbed_tail(self.config_dir, secrets=(api_key,))
+        ref = server.log_reference(self.config_dir, what)
+        return tail + "\n" + server.LOG_REF_LINE.format(path=server.log_path(self.config_dir), ref=ref)
 
-    def _bound_text(self, wait_seconds: float) -> str:
+    def _bound_text(self, wait_seconds: float, api_key: Any = None) -> str:
         # rounded UP, as the ProviderLost line is (channels.base.provider_lost_seconds): a child with
         # 12.4 s left is told "up to 13s" and must not end "within 12s", nor a 0.3 s clamp "within 0s"
         text = BOUND_TEXT.format(seconds=math.ceil(wait_seconds))
         if self.config_dir is not None:
-            text += ". Log tail:\n" + server.log_tail(self.config_dir)
+            text += ". Log tail:\n" + self._tail(text, api_key)
         return text
 
 
