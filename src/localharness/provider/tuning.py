@@ -243,7 +243,7 @@ def _full_parts(tuned: Tuned) -> list[str]:
 
 def derived_clause(
     tuned: Tuned, *, shape: str = "full", cause: str | None = None, dropped: Sequence[str] = (),
-    remembered_at: str | None = None, context: int | None = None,
+    remembered_at: str | None = None, context: int | None = None, halved: bool = True,
     undo_field: str = "server.speculative",
 ) -> str:
     """What a launch derived, as the clause of `start`'s launch line (spec 20 §6.5, D-23). The one place
@@ -252,16 +252,21 @@ def derived_clause(
 
     A full shape reads `kv q8_0 · mtp (1 layer)` (vLLM: `reasoning qwen3 · tools qwen3_coder`) and never
     carries the fitted `-c`: the window line prints that. A retry shape says what it dropped and, when
-    the draft was dropped, how to keep the full window (`undo_field: off`). `context` is the retry's
-    halved `-c`. Nothing derived gives an empty string."""
+    the draft was dropped, the `undo_field: off` that pins drafting off. `context` is a death retry's
+    halved `-c` and `halved` says whether a boot retry halved one; only a retry that halved a window
+    says `off` keeps the full window (a record `context:` is never halved, so its retry only pins
+    drafting off, WR-05). Nothing derived gives an empty string."""
     if shape != "retry":
         return " · ".join(_full_parts(tuned))
     drafted_off = "draft-mtp" in dropped
-    undo = f"{undo_field}: off keeps the full window"
+
+    def undo(window_halved: bool) -> str:
+        return f"{undo_field}: off " + ("keeps the full window" if window_halved else "keeps drafting pinned off")
+
     if cause == "boot":
-        dropping = (["mtp off"] if drafted_off else []) + ["-c halved"]
-        text = f"retried at boot: {', '.join(dropping)}"
-        return f"{text} · {undo}" if drafted_off else text
+        dropping = (["mtp off"] if drafted_off else []) + (["-c halved"] if halved else [])
+        text = f"retried at boot: {', '.join(dropping)}" if dropping else "retried at boot"
+        return f"{text} · {undo(halved)}" if drafted_off else text
     if cause == "remembered":
         # The ledger sits where agent-run code can write: only printable ASCII of its `at` reaches the
         # terminal, so no escape sequence rides the line (WR-04, T-12-35).
@@ -272,4 +277,4 @@ def derived_clause(
         return " · ".join([*kv, f"{what} (remembered{date})"])
     dropping = (["mtp off"] if drafted_off else []) + ([f"-c {context}"] if context is not None else [])
     text = f"{', '.join(dropping)} {_RETRIED_DEATH}" if dropping else _RETRIED_DEATH
-    return f"{text} · {undo}" if drafted_off else text
+    return f"{text} · {undo(context is not None)}" if drafted_off else text

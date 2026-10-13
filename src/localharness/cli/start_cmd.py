@@ -861,9 +861,13 @@ def _plan_clause(plan: Any) -> str:
     from localharness.provider import tuning
 
     report = getattr(plan, "report", None)
+    # Only a fit `-c` is ever halved: a record `context:` or an extra_args `-c` rides the retry as it was,
+    # so the clause names no `-c` and no window it kept (WR-05).
+    halved = (plan.shape == "retry" and report is not None and report.mode == "fit"
+              and plan.full_fit is not None)
     return tuning.derived_clause(
         plan.tuned, shape=plan.shape, cause=plan.cause, dropped=plan.dropped,
-        remembered_at=plan.remembered_at, context=getattr(report, "asked", None),
+        remembered_at=plan.remembered_at, context=report.asked if halved else None, halved=halved,
         undo_field="server.speculative")
 
 

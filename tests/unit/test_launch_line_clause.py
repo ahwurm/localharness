@@ -63,9 +63,19 @@ def test_a_retry_that_only_halved_the_window_has_no_mtp_undo():
     assert clause == "-c 40000 (retried: the full shape died)"
 
 
+PINNED = "server.speculative: off keeps drafting pinned off"
+
+
 def test_a_retry_that_dropped_mtp_with_no_halved_window():
+    """WR-05: no window was halved, so `off` keeps nothing but drafting off (no "full window")."""
     clause = derived_clause(NOTHING_DERIVED, shape="retry", cause="death", dropped=("draft-mtp",))
-    assert clause == f"mtp off (retried: the full shape died) · {UNDO}"
+    assert clause == f"mtp off (retried: the full shape died) · {PINNED}"
+
+
+def test_a_boot_retry_that_halved_no_window_says_so():
+    clause = derived_clause(Tuned(cache_type="q8_0"), shape="retry", cause="boot", dropped=("draft-mtp",),
+                            halved=False)
+    assert clause == f"retried at boot: mtp off · {PINNED}"
 
 
 def test_a_remembered_shape_with_mtp_dropped_says_when_it_was_learned():
@@ -253,6 +263,26 @@ async def test_a_retry_that_could_only_halve_the_window_names_no_undo(tmp_path, 
     halved = _argv_c(world.cmds[1])
     assert world.out[1] == _line(f"-c {halved} (retried: the full shape died); ")
     assert "server.speculative" not in world.out[1]
+
+
+async def test_a_retry_of_a_record_context_names_no_window_and_pins_drafting_off(tmp_path, world, box):
+    """WR-05 (R-10 ruling): the record's own `context:` is never halved, so the retry drops only the
+    derived spec type and the line carries no `-c` and no "keeps the full window"."""
+    box.ready_script = [RuntimeError(DEATH), ["qwen"]]
+    await _start(tmp_path, _gguf_spec(tmp_path, SWIFT, context=65536))
+    assert _argv_c(world.cmds[1]) == _argv_c(world.cmds[0]) == 65536
+    assert "--spec-type" in world.cmds[0] and "--spec-type" not in world.cmds[1]
+    assert world.out[1] == _line(f"mtp off (retried: the full shape died) · {PINNED}; ")
+
+
+async def test_a_boot_plan_of_a_record_context_names_no_halved_window(tmp_path, box):
+    spec = _gguf_spec(tmp_path, SWIFT, context=65536)
+    sensed = lifecycle.sense_launch(spec, tmp_path, KNOBS)
+    sensed = lifecycle.dataclasses.replace(sensed, prior_death=True)
+    plan = lifecycle.plan_launch(spec, sensed, server.launch_decision(spec, False), autosense=KNOBS,
+                                 api_key_held=False)
+    assert plan.cause == "boot"
+    assert start_cmd._plan_clause(plan) == f"retried at boot: mtp off · {PINNED}"
 
 
 # ------------------------------------------------------------------- the remembered line
