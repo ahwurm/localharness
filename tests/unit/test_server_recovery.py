@@ -13,6 +13,7 @@ import dataclasses
 import gc
 import logging
 import os
+import re
 
 import httpx
 import pytest
@@ -35,6 +36,8 @@ from tests.unit.reconnect_support import (
 fcntl = pytest.importorskip("fcntl")
 
 URL = "http://127.0.0.1:9/v1"
+# the reference line a message quoting the log ends with (D-22): where the raw lines are
+_REF_LINE = r"\(see log {tmp}/vllm/serve\.log, ref [0-9a-f]{{8}}\)"
 SENTINEL = "sk-sentinel-4f2a9c71-never-in-a-log"
 
 
@@ -364,7 +367,8 @@ async def test_a_dead_process_with_no_relaunch_fails_at_once_with_the_log_tail(m
     with pytest.raises(RuntimeError) as info:
         await asyncio.wait_for(ServerRecovery(URL, tmp_path, None).recover(
             base_url=URL, api_key="none", wait_seconds=60, on_lost=Announce()), 2.0)
-    assert str(info.value) == "the model server exited. Log tail:\nit crashed"
+    assert re.fullmatch(r"the model server exited\. Log tail:\nit crashed\n" + _REF_LINE.format(tmp=tmp_path),
+                        str(info.value))
 
 
 async def test_a_relaunch_that_fails_is_named_as_a_failed_restart(models, tmp_path):
@@ -501,7 +505,8 @@ async def test_the_bound_with_a_config_dir_carries_the_log_tail(models, tmp_path
     with pytest.raises(TimeoutError) as info:
         await ServerRecovery(URL, tmp_path, None).recover(
             base_url=URL, api_key="none", wait_seconds=0.1, on_lost=Announce())
-    assert str(info.value) == "the model server did not come back within 1s. Log tail:\nloading weights 40%"
+    assert re.fullmatch(r"the model server did not come back within 1s\. Log tail:\nloading weights 40%\n"
+                        + _REF_LINE.format(tmp=tmp_path), str(info.value))
 
 
 async def test_a_config_dir_with_no_log_still_says_the_whole_sentence(models, tmp_path):
@@ -511,7 +516,7 @@ async def test_a_config_dir_with_no_log_still_says_the_whole_sentence(models, tm
         await ServerRecovery(URL, tmp_path, None).recover(
             base_url=URL, api_key="none", wait_seconds=0.1, on_lost=Announce())
     assert str(info.value).startswith("the model server did not come back within 1s. Log tail:\n")
-    assert str(info.value).endswith("(no log)")
+    assert "Log tail:\n(no log)\n(see log " in str(info.value)
 
 
 @pytest.mark.parametrize(("seconds", "rendered"), [(30.0, "30s"), (1800.0, "1800s"), (0.4, "1s"), (0.6, "1s"),
