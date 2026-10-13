@@ -1016,6 +1016,8 @@ class ConfigLoader:
         # Workspace agent files whose MCP servers start's trust decision withheld (start's one stderr line).
         self.project_mcp_skipped: dict[str, list[str]] = {}
         self._agent_cache: dict[str, AgentConfig] = {}
+        # Which rung set each loaded agent's temperature (see temperature_rung), by agent name.
+        self._temperature_rungs: dict[str, Optional[str]] = {}
         self._division_cache: dict[str, DivisionConfig] = {}
         self._harness_cache: Optional[HarnessConfig] = None
         # Workspace values load_harness() dropped at HARNESS_GLOBAL_ONLY_FIELDS paths (start's summary).
@@ -1600,6 +1602,14 @@ class ConfigLoader:
         self._agent_cache[name] = result
         return result
 
+    def temperature_rung(self, agent_name: str) -> Optional[str]:
+        """The rung that set `agent_name`'s temperature, as a label for the sampling line, or None
+        when no rung set one (the model's own sampling applies). One of
+        `temperature in agents/<name>.yaml`, `temperature in divisions/<division>.yaml`,
+        `org.default_temperature`, `agent.temperature in overrides.yaml`. Only meaningful after
+        `load_agent(agent_name)`: a name never loaded has no rung."""
+        return self._temperature_rungs.get(agent_name)
+
     def load_agent_file(self, path: Path) -> AgentConfig:
         """Resolve and validate the agent yaml AT THIS PATH — no stem re-resolution, no cache.
 
@@ -1665,9 +1675,22 @@ class ConfigLoader:
         agent_temp = raw.get("temperature")
         div_temp = division.temperature if division else None
         org_temp = self._layered_raw_org().get("default_temperature", org.default_temperature)
-        merged["temperature"] = _resolve_scalar(
-            "temperature", agent_temp, div_temp, org_temp,
-            _overlay_default(overlay_agent, "temperature", None),
+        overlay_temp = _overlay_default(overlay_agent, "temperature", None)
+        merged["temperature"] = _resolve_scalar("temperature", agent_temp, div_temp, org_temp, overlay_temp)
+        # Which rung set it, for the sampling line `start` prints (spec 20 §7): the same walk, in
+        # the same order, as `_resolve_scalar` above, naming the first rung that is not unset.
+        self._temperature_rungs[path.stem] = next(
+            (
+                label
+                for value, label in (
+                    (agent_temp, f"temperature in agents/{path.name}"),
+                    (div_temp, f"temperature in divisions/{div_name}.yaml"),
+                    (org_temp, "org.default_temperature"),
+                    (overlay_temp, "agent.temperature in overrides.yaml"),
+                )
+                if value not in (None, "inherit")
+            ),
+            None,
         )
 
         # max_tokens needs no `model_fields_set` guard: its unset spelling is None at every rung

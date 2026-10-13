@@ -113,6 +113,8 @@ def _build_bench_client(entry: MatrixEntry) -> Any:
         # conservative when it does: the runner's own budget may be smaller than num_ctx, which
         # only leaves MORE room than this assumes, never less.
         max_tokens=clamp_response_tokens(_window, DEFAULT_MAX_TOKENS),
+        # No temperature is sent: LLMConfig leaves it None, so the model's own sampling applies
+        # (spec 20 §7) and every matrix entry is measured the way it would actually run.
         is_local=True,
     )
     return LLMClient(cfg)

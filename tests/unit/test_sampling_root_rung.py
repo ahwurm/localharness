@@ -165,3 +165,126 @@ def test_every_llm_config_in_start_hands_over_the_resolved_root_temperature():
         kw = {k.arg: k.value for k in call.keywords}
         assert "temperature" in kw
         assert ast.unparse(kw["temperature"]) == "agent_config.temperature"
+
+
+# ---------------------------------------------------------------------------
+# Task 2: the rung is live: precedence and its label
+# ---------------------------------------------------------------------------
+
+
+def _root_world(tmp_path: Path, *, agent=None, division=None, config_org=None, overrides_org=None,
+                legacy_org=None, overlay_agent=None) -> ConfigLoader:
+    g = _global(tmp_path, org=config_org)
+    root_fields: dict = {"role": "r"}
+    if agent is not None:
+        root_fields["temperature"] = agent
+    if division is not None:
+        _seed(g, "divisions", "ops", temperature=division)
+        root_fields["division"] = "ops"
+    _seed(g, "agents", "root", **root_fields)
+    over: dict = {}
+    if overrides_org is not None:
+        over["org"] = overrides_org
+    if overlay_agent is not None:
+        over["agent"] = overlay_agent
+    if over:
+        _write_yaml(g / "overrides.yaml", over)
+    if legacy_org is not None:
+        _write_yaml(g / "org.yaml", {"name": "o", "default_temperature": legacy_org})
+    return ConfigLoader(config_dir=g)
+
+
+def test_agent_file_beats_division_beats_org_beats_legacy_beats_overlay(tmp_path):
+    world = dict(config_org={"default_temperature": 0.2}, legacy_org=0.45, overlay_agent={"temperature": 0.3})
+
+    cases = [
+        (dict(agent=0.9, division=0.5), 0.9, "temperature in agents/root.yaml"),
+        (dict(division=0.5), 0.5, "temperature in divisions/ops.yaml"),
+        ({}, 0.2, "org.default_temperature"),
+    ]
+    for i, (extra, expected, label) in enumerate(cases):
+        loader = _root_world(tmp_path / f"c{i}", **world, **extra)
+        assert loader.load_agent("root").temperature == expected
+        assert loader.temperature_rung("root") == label
+
+
+def test_overrides_org_wins_over_config_org(tmp_path):
+    loader = _root_world(
+        tmp_path, config_org={"default_temperature": 0.2}, overrides_org={"default_temperature": 0.8},
+    )
+    assert loader.load_agent("root").temperature == 0.8
+    assert loader.temperature_rung("root") == "org.default_temperature"
+
+
+def test_legacy_org_yaml_is_the_second_org_source(tmp_path):
+    loader = _root_world(tmp_path, legacy_org=0.45, overlay_agent={"temperature": 0.3})
+    assert loader.load_agent("root").temperature == 0.45
+    assert loader.temperature_rung("root") == "org.default_temperature"
+
+
+def test_the_overrides_agent_section_is_the_last_rung(tmp_path):
+    loader = _root_world(tmp_path, overlay_agent={"temperature": 0.3})
+    assert loader.load_agent("root").temperature == 0.3
+    assert loader.temperature_rung("root") == "agent.temperature in overrides.yaml"
+
+
+def test_no_rung_names_none(tmp_path):
+    loader = _root_world(tmp_path)
+    assert loader.load_agent("root").temperature is None
+    assert loader.temperature_rung("root") is None
+
+
+def test_a_name_never_loaded_has_no_rung(tmp_path):
+    loader = _root_world(tmp_path, agent=0.9)
+    assert loader.temperature_rung("root") is None
+    loader.load_agent("root")
+    assert loader.temperature_rung("root") == "temperature in agents/root.yaml"
+
+
+def test_a_division_without_a_temperature_loads_with_none(tmp_path):
+    g = _global(tmp_path)
+    _seed(g, "divisions", "ops")
+    assert ConfigLoader(config_dir=g).load_division("ops").temperature is None
+
+
+def test_an_out_of_range_temperature_is_still_refused(tmp_path):
+    from localharness.config.loader import ConfigValidationError
+
+    g = _global(tmp_path)
+    _seed(g, "agents", "root", role="r", temperature=2.5)
+    with pytest.raises(ConfigValidationError):
+        ConfigLoader(config_dir=g).load_agent("root")
+
+
+# ---------------------------------------------------------------------------
+# Task 2: a child's temperature stays inert; the bench sends none; init writes null
+# ---------------------------------------------------------------------------
+
+
+def test_inert_child_temperature_only_start_and_the_proposer_build_llm_config_with_one():
+    holders: set[str] = set()
+    for path in SRC.rglob("*.py"):
+        if any(k.arg == "temperature" for call in _llm_config_calls(path) for k in call.keywords):
+            holders.add(path.relative_to(SRC).as_posix())
+    assert holders == {"cli/start_cmd.py", "autoresearch/proposer.py"}
+
+
+def test_bench_client_sends_no_temperature():
+    from localharness.bench.orchestrator import _build_bench_client
+    from localharness.bench.config import MatrixEntry
+
+    entry = MatrixEntry(name="m", provider="vllm", model_id="some-model", base_url="http://localhost:0/v1")
+    client = _build_bench_client(entry)
+    assert client.config.temperature is None
+
+
+def test_init_writes_a_null_default_temperature(tmp_path):
+    from localharness.cli.init_cmd import _write_harness
+    from localharness.config.models import HarnessConfig, OrgConfig, ProviderConfig
+
+    harness = HarnessConfig(version="1", org=OrgConfig(default_model="m"), provider=ProviderConfig(
+        provider_type="vllm", base_url="http://127.0.0.1:9/v1", api_key="sk-x", default_model="m"))
+    path = _write_harness(tmp_path, harness, True)
+    org = yaml.safe_load(path.read_text(encoding="utf-8"))["org"]
+    assert "default_temperature" in org
+    assert org["default_temperature"] is None
