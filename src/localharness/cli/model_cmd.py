@@ -19,7 +19,10 @@ from rich.console import Console
 from rich.markup import escape
 
 from localharness.cli import model_ops
+from localharness.cli.workspace import MachineTrust, decide_machine_trust
 from localharness.config.loader import ConfigLoader
+from localharness.config.paths import global_config_dir, resolve_config_dir
+from localharness.provider.units import read_target
 
 console = Console()
 err_console = Console(stderr=True)
@@ -76,6 +79,62 @@ def _download(repo_id: str, filename: Optional[str]) -> None:
     )
 
 
+def _select_preset(harness, record, current, loader, audit_dir, ws) -> None:
+    """Record ``record`` as what the next start serves (D-10, R-13-18): ``select_pending`` writes the
+    peer's ``active_endpoint`` (the primary clears one) and ``pending_preset``; the primary's served
+    name also becomes the default when it differs, without writing ``server.model`` (an alias must
+    not become the model the next start loads, D-70, WR-54). The CLI never launches (D-10)."""
+    if (
+        record.peer is None and record.served == current
+        and harness.active_endpoint is None and not getattr(harness, "pending_preset", None)
+        and not read_target(global_config_dir(loader._config_dir))
+    ):
+        # The primary is already the default and nothing else is selected: nothing to switch, and
+        # nothing is written (an overlay's bytes stay as they were).
+        console.print(escape(f"{record.served} is already the default."), soft_wrap=True)
+        return
+    try:
+        asyncio.run(model_ops.select_pending(harness, record, config_dir=loader._config_dir))
+    except Exception as exc:
+        err_console.print(
+            "[bold red]Error:[/bold red] " + escape(f"failed to select {record.name!r}: {exc}"),
+            soft_wrap=True,
+        )
+        raise typer.Exit(2)
+    audit_warning = None
+    if record.peer is None and record.served != current:
+        try:
+            audit_warning = asyncio.run(
+                model_ops.persist_default_model(
+                    harness, record.served, config_dir=loader._config_dir, audit_base_dir=audit_dir,
+                    local_operator=_is_local_operator(), write_server_model=False,
+                )
+            )
+        except Exception as exc:
+            err_console.print(
+                "[bold red]Error:[/bold red] "
+                + escape(f"failed to persist {record.served!r}: {exc}"),
+                soft_wrap=True,
+            )
+            raise typer.Exit(2)
+    console.print(
+        model_ops.SELECTED_NEXT_START_LINE.format(name=record.name), markup=False, soft_wrap=True)
+    if audit_warning:
+        console.print("[yellow]Note:[/yellow] " + escape(str(audit_warning)), soft_wrap=True)
+    _pin_notes(loader, ws)
+
+
+def _pin_notes(loader, ws) -> None:
+    # Pin trap: a persisted default won't reach an agent whose yaml pins a concrete model.
+    for aname, pin in model_ops.pinned_agents(loader._config_dir, local_config_dir=ws):
+        console.print(
+            "[yellow]Note:[/yellow] "
+            + escape(f"agent {aname!r} pins model={pin!r} in its yaml")
+            + " — this won't reach it on next start until that pin changes.",
+            soft_wrap=True,
+        )
+
+
 def model(
     name: Optional[str] = typer.Argument(
         None,
@@ -116,7 +175,20 @@ def model(
     # LOCALHARNESS_DIR isolates the overlay to that dir.
     # local_config_dir carries the workspace layer, or None.
     from localharness.cli.workspace import resolve_workspace_layer
-    loader = ConfigLoader(config_dir=config_dir, local_config_dir=resolve_workspace_layer(config_dir))
+    # D-09 / D-10: a switch decides machine trust exactly as `start` does, before anything loads, and
+    # loads with what that decision withheld. A person at a terminal is asked; a pipe, a script or an
+    # agent's command (LOCALHARNESS_COMMIT) is not, so a piped `y` adopts nothing and an EOF records
+    # no No. `will_launch` is False in this release (the CLI never launches, D-10). The list and
+    # `--download` decide nothing (R-13-16).
+    machine_trust = MachineTrust()
+    if name is not None and name.strip():
+        cfg_path = resolve_config_dir(config_dir)
+        machine_trust = decide_machine_trust(cfg_path, ask=_is_local_operator(), launching=False)
+        if machine_trust.line:
+            err_console.print(machine_trust.line, markup=False, soft_wrap=True)
+    loader = ConfigLoader(
+        config_dir=config_dir, local_config_dir=resolve_workspace_layer(config_dir),
+        machine_withheld=machine_trust.withheld)
     # v0.13: two values, two jobs. `loader._config_dir` is machine-wide truth (the overlay target,
     # one GPU daemon); `_ws` is the workspace layer, or None. The audit record follows the WORK
     # (MEMS-04) and falls back to the session's config dir — NOT to None, which would re-resolve
@@ -197,58 +269,26 @@ def model(
         err_console.print("[bold red]Error:[/bold red] model name cannot be empty.")
         raise typer.Exit(2)
 
-    # D-35: a preset name resolves before today's served/downloaded resolution. A lifecycle peer is
-    # selected by its name or served name (the persisted `active_endpoint`, as `/model` does).
-    for ep in harness.extra_endpoints:
-        if ep.lifecycle is None:
-            continue
-        served = model_ops.peer_served_name(ep)
-        if name != ep.name and name != served:
-            continue
-        try:
-            asyncio.run(
-                model_ops.persist_active_endpoint(
-                    harness, ep, served, config_dir=loader._config_dir)
-            )
-        except Exception as exc:
-            err_console.print(
-                "[bold red]Error:[/bold red] " + escape(f"failed to persist {served!r}: {exc}"),
-                soft_wrap=True,
-            )
-            raise typer.Exit(2)
-        console.print(
-            f"Selected {served} on {ep.name} ({ep.base_url})", markup=False, soft_wrap=True
-        )
-        return
-
-    # D-35/D-58: the primary's served name swaps back to the primary: it clears a persisted peer
-    # selection, then the ordinary default persistence below sets the default (on a llama.cpp
-    # primary `persist_default_model` never writes `server.model`, so an alias cannot become `-m`; on
-    # any other runtime the call below is told not to, so a `--served-model-name` alias cannot become
-    # the model the next start loads, D-70, WR-54).
-    # A primary already selected and already the default has nothing to switch, so that name falls
-    # through to today's path unchanged.
-    target: Optional[str] = None
-    primary_swap_back = False
-    if (
-        harness.server is not None
-        and name == model_ops.primary_served_name(harness.server, provider)
-        and (harness.active_endpoint is not None or name != current)
-    ):
-        if harness.active_endpoint is not None:
-            try:
-                model_ops.clear_active_endpoint(harness, config_dir=loader._config_dir)
-            except Exception as exc:
+    # D-03 / R-13-17: a number keeps its list meaning; any other name goes through the ladder's
+    # preset resolution first. A `Serving` is a preset selection; a withheld or ambiguous name is
+    # refused with exit 2; an unknown name falls through to today's served / downloaded / checkpoint
+    # resolution and its messages, unchanged.
+    if not (name.isdigit() and 1 <= int(name) <= len(choices)):
+        serving = model_ops.resolve_serving(
+            harness, machine_trust, name, config_dir=loader._config_dir)
+        if isinstance(serving, model_ops.ServingRefusal) and serving.kind != "unknown":
+            # The withheld line was already printed once as `machine_trust.line`; say a refusal
+            # that is not that line (an ambiguous name, or a withheld record start composed no line for).
+            if serving.line != machine_trust.line:
                 err_console.print(
-                    "[bold red]Error:[/bold red] "
-                    + escape(f"failed to clear the peer selection: {exc}"),
-                    soft_wrap=True,
-                )
-                raise typer.Exit(2)
-            console.print("Cleared the peer selection.", markup=False, soft_wrap=True)
-        target = name
-        primary_swap_back = True
-    elif name.isdigit() and 1 <= int(name) <= len(choices):
+                    "[bold red]Error:[/bold red] " + escape(serving.line), soft_wrap=True)
+            raise typer.Exit(serving.exit_code)
+        if isinstance(serving, model_ops.Serving):
+            _select_preset(harness, serving.record, current, loader, _audit_dir, _ws)
+            return
+
+    target: Optional[str] = None
+    if name.isdigit() and 1 <= int(name) <= len(choices):
         target = choices[int(name) - 1]
     elif name in choices:
         target = name
@@ -301,7 +341,7 @@ def model(
         audit_warning = asyncio.run(
             model_ops.persist_default_model(
                 harness, target, config_dir=loader._config_dir, audit_base_dir=_audit_dir,
-                local_operator=_is_local_operator(), write_server_model=not primary_swap_back,
+                local_operator=_is_local_operator(),
             )
         )
     except Exception as exc:
@@ -322,11 +362,4 @@ def model(
     if audit_warning:
         console.print("[yellow]Note:[/yellow] " + escape(str(audit_warning)), soft_wrap=True)
 
-    # Pin trap: a persisted default won't reach an agent whose yaml pins a concrete model.
-    for aname, pin in model_ops.pinned_agents(loader._config_dir, local_config_dir=_ws):
-        console.print(
-            "[yellow]Note:[/yellow] "
-            + escape(f"agent {aname!r} pins model={pin!r} in its yaml")
-            + " — this won't reach it on next start until that pin changes.",
-            soft_wrap=True,
-        )
+    _pin_notes(loader, _ws)

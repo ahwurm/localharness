@@ -76,7 +76,9 @@ def test_peer_by_name_selects_active_endpoint(components_home, monkeypatch):
     }
     assert "effort" not in overlay["active_endpoint"]
     assert "server" not in overlay and "provider" not in overlay
-    assert "Selected flash-next on flash-next" in result.output.replace("\n", " ")
+    assert overlay["pending_preset"] == "flash-next"
+    assert "Selected flash-next — the next start serves it" in result.output.replace("\n", " ")
+    assert "Selected flash-next on" not in result.output
 
 
 def test_peer_by_served_name_selects_that_peer(components_home, monkeypatch):
