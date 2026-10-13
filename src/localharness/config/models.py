@@ -1589,7 +1589,7 @@ KV_CACHE_TYPES: tuple[str, ...] = (
 """llama.cpp's cache type list. It must equal `provider/autosense.KV_BYTES` (a literal tuple here
 to avoid an import cycle); a test pins the two together."""
 
-_PARSER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_PARSER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # used with fullmatch: no trailing newline
 
 
 _CHILD_BUDGET_DEFAULTS: dict[str, tuple[int, float]] = {
@@ -2224,7 +2224,7 @@ class ManagedServerConfig(BaseModel):
         flag, so only `off` or a plain parser name is accepted."""
         if v is None or v == "off":
             return v
-        if not _PARSER_NAME_RE.match(v):
+        if not _PARSER_NAME_RE.fullmatch(v):
             raise ValueError(
                 f"{info.field_name} must be a parser name (letters, digits, _ . -) or off")
         return v

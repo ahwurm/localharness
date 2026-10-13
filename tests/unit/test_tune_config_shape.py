@@ -78,7 +78,8 @@ def test_a_parser_on_ollama_or_lmstudio_is_refused_before_their_early_return(run
 
 
 @pytest.mark.parametrize("field", ["reasoning_parser", "tool_call_parser"])
-@pytest.mark.parametrize("bad", ["--foo", "a b", "", "x" * 65, "-x", ".x", "a\nb", "a\x00"])
+@pytest.mark.parametrize("bad", ["--foo", "a b", "", "x" * 65, "-x", ".x", "a\nb", "a\x00",
+                                 "qwen3\n", "qwen3\r\n", "\nqwen3"])
 def test_a_bad_parser_name_is_refused(field, bad):
     with pytest.raises(ValidationError, match=r"must be a parser name \(letters, digits, _ \. -\) or off"):
         _vllm(**{field: bad})
