@@ -387,15 +387,6 @@ class LaunchPlan:
             shape="retry", cause=cause, dropped=dropped, remembered_at=remembered_at)
 
 
-def _effective_cache_types(spec: ManagedServerConfig, tuned: Tuned) -> tuple[str | None, str | None]:
-    """The KV cache types the launch runs with: the record's, else `extra_args` `-ctk` / `-ctv`, else a
-    `config_ini` cache-type key (as a flag name), else env `LLAMA_ARG_CACHE_TYPE_K` / `_V` (the record's
-    `env:`, then a `config_ini` key spelled as the env name), else the derived one (R-08e, CR-01)."""
-    args, env = _auto.hand_set_options(spec)
-    extra_k, extra_v = _auto.extra_cache_types(args)
-    return (spec.cache_type_k or extra_k or env.get("LLAMA_ARG_CACHE_TYPE_K") or tuned.cache_type,
-            spec.cache_type_v or extra_v or env.get("LLAMA_ARG_CACHE_TYPE_V") or tuned.cache_type)
-
 
 def _size_llamacpp(
     spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, autosense: "AutosenseConfig",
@@ -411,13 +402,10 @@ def _size_llamacpp(
     computed", never a guess. Pure."""
     extra = list(spec.extra_args or [])
     header, mem, weights, mi = sensed.header, sensed.memory, sensed.weights, sensed.meminfo
-    k, v = _effective_cache_types(spec, tuned)
-    drafting = (tuned.spec_type == "draft-mtp" or spec.speculative == "draft-mtp"
-                or _auto.spec_type_flag(*_auto.hand_set_options(spec)) == "draft-mtp")
+    k, v, share = tuning.launch_pricing(spec, header, tuned)
     fits = _auto.fit(
         header, mem.free_bytes if mem else None, autosense, cache_type_k=k, cache_type_v=v,
-        weights=weights, offload=sensed.offload, runtime="llamacpp",
-        draft_share=tuning.draft_share(header) if drafting else 1.0)
+        weights=weights, offload=sensed.offload, runtime="llamacpp", draft_share=share)
     has_c = _auto.has_ctx_arg(extra)
     cache_set = spec.cache_ram is not None or _auto.has_cache_ram_arg(extra)
     cache_kw = None if cache_set else _auto.cache_ram_mib(

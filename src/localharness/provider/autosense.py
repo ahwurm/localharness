@@ -393,7 +393,8 @@ class FitInputs:
 
 def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None, size: bool = True,
                 meminfo: bool = False, memory: FreeMemory | None = _UNSET,
-                cache_type: str | None = None, draft_share: float = 1.0) -> FitInputs:
+                cache_type: str | None = None, draft_share: float = 1.0,
+                as_launched: bool = False) -> FitInputs:
     """The fit for a llama.cpp `server:` record, in one place for every caller (D-04): `activate`
     sizes a launch with it, `start` reports an attach and `doctor` prints its row.
 
@@ -401,6 +402,10 @@ def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None,
     GPU residency from `extra_args`, probes free memory and stats the weights, then calls `fit` with
     the KV cache types (the record's, else the ones `extra_args` set with `-ctk` / `-ctv`, else
     `cache_type`, the type a launch derives; unset is f16) and the `draft_share` of a drafting launch.
+    `as_launched=True` prices exactly what a harness launch of the record runs with instead: the header
+    just read and `ratios` (the machine's autosense knobs) go through `tuning.derive`, and
+    `tuning.launch_pricing` names the KV types and the draft share (WR-06: the attach report and
+    doctor's row agree with the launch; nothing is sensed beyond the header read here).
     `attached_served` is the window an already-running server serves.
     `size=False` stops after the header and the offload (no memory probe: a caller that has no served
     window to add to wants only the header); `meminfo=True` also reads `/proc/meminfo` for
@@ -421,11 +426,16 @@ def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None,
     mem = free_memory(ratios) if memory is _UNSET else memory
     weights = weights_bytes(server.model, server.mmproj)
     mi = _read_meminfo() if meminfo else None
-    extra_k, extra_v = extra_cache_types(extra)
+    if as_launched:
+        from localharness.provider import tuning  # function-local: tuning imports this module
+
+        k, v, draft_share = tuning.launch_pricing(server, header, tuning.derive(server, header, ratios))
+    else:
+        extra_k, extra_v = extra_cache_types(extra)
+        k, v = server.cache_type_k or extra_k or cache_type, server.cache_type_v or extra_v or cache_type
     fits = fit(
         header, mem.free_bytes if mem else None, ratios, attached_served,
-        cache_type_k=server.cache_type_k or extra_k or cache_type,
-        cache_type_v=server.cache_type_v or extra_v or cache_type,
+        cache_type_k=k, cache_type_v=v,
         weights=weights, offload=offload, runtime=server.runtime, draft_share=draft_share)
     return FitInputs(header, offload, mem, weights, mi, fits)
 

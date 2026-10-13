@@ -81,13 +81,16 @@ class World:
         self.gguf = write_gguf(tmp_path / "model.gguf", HEADER_A)
 
     def config(self, *, provider_type="llamacpp", record: dict | None | bool = True,
-               budget: int | None = None, **server_over) -> None:
+               budget: int | None = None, kv_cache_type: str = "f16", **server_over) -> None:
+        """`kv_cache_type` defaults to f16 (the 0.18 launch), so the hand-computed f16 numbers above hold:
+        the attach fit is priced as a harness launch of the record would run (WR-06)."""
         data: dict = {"version": "1",
                       "provider": {"provider_type": provider_type, "base_url": URL, "api_key": "none",
                                    "default_model": "qwen"}}
         if record:
             data["server"] = {"runtime": "llamacpp", "binary": "/x/llama-server",
                               "model": str(self.gguf), "port": 8080, **server_over}
+            data["autosense"] = {"kv_cache_type": kv_cache_type}
         if budget is not None:
             data["org"] = {"context": {"max_context_tokens": budget}}
         (self.tmp_path / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
@@ -149,6 +152,22 @@ async def test_start_probes_the_window_exactly_once(world):
     assert len(world.probe_calls) == 1
     base_url, model, provider_type, api_key = world.probe_calls[0]
     assert (model, provider_type) == ("qwen", "llamacpp")
+
+
+async def test_the_attach_fit_is_priced_at_the_kv_type_the_launch_derives(world):
+    """WR-06: with the default knobs a harness launch runs q8_0, so the attach fit and the `-c` its undo
+    names are priced at q8_0, not f16."""
+    from localharness.agent.gguf_header import read_header
+    from localharness.config.models import AutosenseConfig
+
+    world.config(kv_cache_type="q8_0")
+    header = autosense.fit_header(read_header(str(world.gguf), autosense.FIT_KEYS))
+    q8 = autosense.fit(header, world.free.free_bytes, AutosenseConfig(), 65536,
+                       cache_type_k="q8_0", cache_type_v="q8_0", weights=WEIGHTS_A)
+    assert q8 is not None and q8 > 90112
+    lines = world.window(await world.start())
+    assert f"fits {q8:,}" in lines[0] and lines[1] == f"  → the next harness launch uses -c {q8}"
+    assert world.last().fits == q8
 
 
 # ------------------------------------------------------------------------------- D-38 the undo
