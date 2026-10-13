@@ -579,8 +579,11 @@ entry's `lifecycle:`, the record a start checks holds eleven launch keys: `binar
 `extra_args`, `runtime`, `launch`, `bind_all`, `require_api_key`, `api_key_file`, `env`,
 `local_models` and `config_ini`, each by name and per file, so a change to any of them asks at the
 next start on a terminal. The model keys are an entry kind of their own, `launch_model`: `model`,
-`mmproj`, `served_name`, `context`, `cache_type_k`, `cache_type_v` and `cache_ram`, because a
-changed model is not a changed command. A model you switch yourself with `/model` on a terminal
+`mmproj`, `served_name`, `context`, `cache_type_k`, `cache_type_v`, `cache_ram`, `speculative`,
+`reasoning_parser` and `tool_call_parser`, because a changed model is not a changed command. The
+harness also derives flags at launch from the model file and the machine's `autosense` settings
+(`kv_cache_type`, `draft_mtp`, `draft_p_min`); those settings and the derived flags are not part of
+the record, because each picks among closed values, and a record field set to a value pins it. A model you switch yourself with `/model` on a terminal
 (or in Zed), or with `localharness model` typed at a terminal, is re-recorded as you set it and
 asks nothing; one switched from a remote channel, or by a command the agent ran in the shell
 tool or from `python_exec`, is not, and asks at the next start. (Both tools mark the commands they
@@ -645,9 +648,9 @@ environment, `.git`) are not tracked — that is where `npm install` and a virtu
 thousands of files; the scripts and files a confirmed command reads are not hashed; of
 `config.yaml` and `overrides.yaml`, the record a start checks holds the looser `org:` permissions,
 eleven `server:` launch keys (`binary`, `docker_image`, `extra_args`, `runtime`, `launch`,
-`bind_all`, `require_api_key`, `api_key_file`, `env`, `local_models`, `config_ini`) with the seven
+`bind_all`, `require_api_key`, `api_key_file`, `env`, `local_models`, `config_ini`) with the ten
 `launch_model` keys (`model`, `mmproj`, `served_name`, `context`, `cache_type_k`, `cache_type_v`,
-`cache_ram`) and the same keys of each peer's `lifecycle:`, and `overrides.yaml`'s `agent:`
+`cache_ram`, `speculative`, `reasoning_parser`, `tool_call_parser`) and the same keys of each peer's `lifecycle:`, and `overrides.yaml`'s `agent:`
 section, nothing else, so code the agent runs can change any other setting in those files, such as
 `effort`, and the change takes effect at the next start without a question; and
 the record itself is an ordinary file that code the agent runs can

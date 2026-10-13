@@ -199,8 +199,11 @@ _POSTURE_KEYS: tuple[str, ...] = ("bind_all", "require_api_key")
 
 LAUNCH_MODEL_KIND = "launch_model"
 LAUNCH_MODEL_KEYS: tuple[str, ...] = (
-    "model", "mmproj", "served_name", "context", "cache_type_k", "cache_type_v", "cache_ram")
-"""The model keys of `server:` and of every peer `lifecycle:`. They are their own kind because a
+    "model", "mmproj", "served_name", "context", "cache_type_k", "cache_type_v", "cache_ram",
+    "speculative", "reasoning_parser", "tool_call_parser")
+"""The model keys of `server:` and of every peer `lifecycle:`, including the three record fields
+(`speculative`, `reasoning_parser`, `tool_call_parser`) that pin what the harness would otherwise
+derive at launch; an unset one yields no entry. They are their own kind because a
 changed model is not a changed command: the first start that knows this kind adopts the current
 values once with no question (a record made before a kind existed adopts that kind silently), and
 a later change is a change like any other entry."""
