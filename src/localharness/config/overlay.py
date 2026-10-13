@@ -17,7 +17,6 @@ from typing import Any, Optional  # noqa: F401  (Any kept for downstream typing 
 import yaml
 
 from localharness.config.paths import resolve_overlay_path
-from localharness.core.private_files import atomic_write_text, refuse_unwritable  # noqa: F401  (re-exported)
 
 log = logging.getLogger(__name__)
 
@@ -121,4 +120,20 @@ def load_overlay(path: Path) -> dict:
 
 def atomic_write_overlay(path: Path, data: dict) -> None:
     """Write `data` as YAML through :func:`atomic_write_text`. POSIX + Windows compatible."""
+    from localharness.core.private_files import atomic_write_text  # see __getattr__ below
+
     atomic_write_text(path, yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
+
+
+
+def __getattr__(name: str):
+    """`atomic_write_text` and `refuse_unwritable` live in `core/private_files.py` (D-28) and are
+    re-exported here, so `migrate`, `project_records` and every other importer keep getting the same
+    objects. Resolved on first use rather than bound at import: importing `localharness.core` runs
+    its `__init__`, which reaches `config.trust`, which imports `atomic_write_overlay` from this
+    module, so a module-level import here would turn every fresh import of a config module that
+    starts at the overlay into a circular one."""
+    if name in ("atomic_write_text", "refuse_unwritable"):
+        from localharness.core import private_files
+        return getattr(private_files, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
