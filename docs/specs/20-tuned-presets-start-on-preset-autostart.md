@@ -790,7 +790,7 @@ Zero asks. Preset lines carry `mtp`. HF-cache text-generation checkpoints become
   `pending_preset` dropped from a workspace layer; the four protected directories and the deny bundle; the
   harness's own writes never through a verdict; `doctor`'s rows; `init`'s clause and vLLM peers. **No test
   runs `systemctl`, `loginctl`, `journalctl`, `busctl` or a unit.**
-- Live, on the reference box (a runbook, as spec 16 Phase 6): (1) `init` after the 0.18 import — `mtp` on
+- Live, on the reference box (a runbook, as spec 16's live check was): (1) `init` after the 0.18 import — `mtp` on
   both 27B lines; (2) `start` on the Swift preset launches with `q8_0` KV, `draft-mtp`, a fitted `-c`;
   `/props` shows `speculative.types: draft-mtp` and the asked window; decode in the profile's band; (3) a
   `--debug` body carries no `temperature`; `/props` `temperature 1.0`; (4) `/model flash-next`, `quit`,
