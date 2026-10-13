@@ -214,3 +214,233 @@ async def test_a_swap_target_the_machine_withholds_is_refused_before_anything_is
     assert seen.calls == [] and rig.events == []
     assert channel.styled[-1] == (trust.line, "system.error")
     assert repl._active_heavy == (primary, PRIMARY_URL)
+
+
+# --- failure, restore, cancellation, redaction -------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_an_incumbent_that_will_not_stop_is_reported_and_nothing_launches(tmp_path, rig):
+    harness, repl, channel, agent, peer, primary = _build(tmp_path)
+    rig.stop_raises.append(RuntimeError("won't die"))
+
+    await asyncio.wait_for(repl._handle_slash("/model flash-next"), 5)
+
+    assert channel.styled[-1] == (
+        "Could not free the GPU for flash-next: won't die. No change made — the current model "
+        "should still be serving.", "system.error")
+    assert rig.starts == [] and rig.waits == []
+    assert repl._active_heavy == (primary, PRIMARY_URL)
+    assert not any(m.startswith("Launching") for m in channel.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_launch_restores_the_incumbent_and_the_planted_secrets_never_reach_the_channel(
+        tmp_path, rig, monkeypatch):
+    harness, repl, channel, agent, peer, primary = _build(tmp_path, provider_key=PROVIDER_KEY)
+    rig.wait_raises[PEER_URL] = RuntimeError(PLANTED_TAIL)
+    seen = _spy_swap(monkeypatch, repl)
+
+    await asyncio.wait_for(repl._handle_slash("/model flash-next"), 5)
+
+    text, style = channel.styled[-1]
+    assert style == "system.error"
+    assert text.startswith("Launch of flash-next failed:")
+    assert f" Restored {primary.model}." in text
+    for secret in PLANTED:
+        assert secret not in text
+        assert not any(secret in m for m in channel.messages)
+    # the swap's own outcome carries no secret and no raw tail either
+    (outcome,) = seen.outcomes
+    for secret in PLANTED:
+        assert secret not in str(outcome.error) and secret not in repr(outcome.error)
+    assert outcome.error.__cause__ is None and outcome.error.__context__ is None
+    assert repl._active_heavy == (primary, PRIMARY_URL)
+    assert agent._llm.rebinds == []
+
+
+@pytest.mark.asyncio
+async def test_a_planted_key_in_a_timeout_is_masked_too(tmp_path, rig):
+    harness, repl, channel, agent, peer, primary = _build(tmp_path, provider_key=PROVIDER_KEY)
+    rig.wait_raises[PEER_URL] = TimeoutError(PLANTED_TAIL)
+
+    await asyncio.wait_for(repl._handle_slash("/model flash-next"), 5)
+
+    text = channel.messages[-1]
+    assert text.startswith("Launch of flash-next failed:")
+    assert not any(secret in text for secret in PLANTED)
+
+
+@pytest.mark.asyncio
+async def test_the_managed_restart_failure_is_redacted_the_same_way(tmp_path, rig, monkeypatch):
+    harness, repl, channel, agent, peer, primary = _build(
+        tmp_path, provider_key=PROVIDER_KEY, primary=_heavy_primary())
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    rig.wait_raises[PRIMARY_URL] = RuntimeError(PLANTED_TAIL)
+    repl._active_heavy = (primary, PRIMARY_URL)
+
+    await asyncio.wait_for(repl._handle_slash("/model cached-b"), 5)
+
+    text, style = channel.styled[-1]
+    assert style == "system.error" and text.startswith("Model swap failed:")
+    assert not any(secret in text for secret in PLANTED)
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_during_the_peers_wait_leaves_nothing_of_the_target_behind(
+        tmp_path, rig):
+    harness, repl, channel, agent, peer, primary = _build(tmp_path)
+    rig.wait_raises[PEER_URL] = asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await repl._handle_slash("/model flash-next")
+
+    assert repl._active_heavy is None
+    assert rig.starts and len(rig.starts) == 1          # the peer's start only: no restore launched
+    assert rig.waits == [f"wait:{PEER_URL}"]
+    assert rig.events.count("stop") == 2                # the primary freed, the half-started peer stopped
+    assert agent._llm.rebinds == []
+    assert lifecycle._HELD == {}
+
+
+# --- the seed ------------------------------------------------------------------------------------- #
+
+
+def _liveness(monkeypatch, up):
+    """Every strategy's liveness answered by `up(spec)` (no docker, pidfile or HTTP is asked)."""
+    asked: list = []
+
+    def liveness(self, spec, config_dir=None, **kw):
+        asked.append(spec)
+        alive = bool(up(spec))
+        return lifecycle.Liveness(alive, "pid 1" if alive else None)
+
+    for cls in (lifecycle.SpawnedProcessStrategy, lifecycle.ManagedVllmStrategy,
+                lifecycle.DaemonStrategy, lifecycle.LmsStrategy):
+        monkeypatch.setattr(cls, "liveness", liveness)
+    return asked
+
+
+def test_serving_heavy_that_is_alive_seeds_the_accelerator_occupant(tmp_path, monkeypatch):
+    peer = _launchable_peer(name="flash-next", served="flash-next")
+    harness = _harness(server=_llama_primary(), extra_endpoints=[peer])
+    _liveness(monkeypatch, lambda spec: True)
+
+    repl, _, _, _ = _xrepl(tmp_path, harness, {}, serving_heavy=(peer.lifecycle, PEER_URL))
+
+    assert repl._active_heavy == (peer.lifecycle, PEER_URL)
+
+
+def test_serving_heavy_that_is_dead_falls_back_to_the_primary_seed(tmp_path, monkeypatch):
+    peer = _launchable_peer(name="flash-next", served="flash-next")
+    primary = _llama_primary()
+    harness = _harness(server=primary, extra_endpoints=[peer])
+    asked = _liveness(monkeypatch, lambda spec: spec is primary)
+
+    repl, _, _, _ = _xrepl(tmp_path, harness, {}, serving_heavy=(peer.lifecycle, PEER_URL))
+
+    assert repl._active_heavy == (primary, PRIMARY_URL)
+    assert asked[0] is peer.lifecycle
+
+
+def test_no_serving_heavy_keeps_todays_seed_and_no_trust_means_a_machine_trust(tmp_path, monkeypatch):
+    primary = _llama_primary()
+    harness = _harness(server=primary)
+    _liveness(monkeypatch, lambda spec: True)
+
+    repl, _, _, _ = _xrepl(tmp_path, harness, {})
+
+    assert repl._active_heavy == (primary, PRIMARY_URL)
+    assert repl._machine_trust == MachineTrust()
+
+
+def test_a_machine_trust_passed_in_is_the_one_the_session_holds(tmp_path):
+    trust = MachineTrust(line="withheld")
+    repl, _, _, _ = _xrepl(tmp_path, _harness(), {}, machine_trust=trust)
+    assert repl._machine_trust is trust
+
+
+# --- the wrappers delegate ------------------------------------------------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_restore_and_safe_stop_delegate_to_lifecycle(tmp_path, rig, monkeypatch):
+    harness, repl, channel, agent, peer, primary = _build(tmp_path)
+    calls: list = []
+    real_restore, real_stop = lifecycle.restore_incumbent, lifecycle.safe_stop
+
+    async def restore(heavy, **kw):
+        calls.append(("restore", heavy.spec, heavy.base_url, heavy.peer))
+        return await real_restore(heavy, **kw)
+
+    async def stop(spec, config_dir):
+        calls.append(("stop", spec, config_dir))
+        return await real_stop(spec, config_dir)
+
+    monkeypatch.setattr(lifecycle, "restore_incumbent", restore)
+    monkeypatch.setattr(lifecycle, "safe_stop", stop)
+    repl._active_heavy = None
+
+    label, note = await repl._restore_incumbent((primary, PRIMARY_URL))
+    await repl._safe_stop(primary)
+
+    assert label == primary.model and note is None
+    assert calls[0] == ("restore", primary, PRIMARY_URL, None)
+    assert calls[1] == ("stop", primary, repl._server_config_dir)
+    assert repl._active_heavy == (primary, PRIMARY_URL)
+    assert await repl._restore_incumbent(None) == (None, None)
+
+
+# --- persistence ---------------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_base_url_persists_nothing(tmp_path):
+    harness, repl, channel, agent, peer, primary = _build(tmp_path)
+
+    saved = await repl._persist_landed("http://elsewhere.invalid:9/v1", "x")
+
+    assert saved is False
+    assert not (tmp_path / "overrides.yaml").exists()
+    assert last_served(default_speed_stats_path(tmp_path)) is None
+
+
+@pytest.mark.asyncio
+async def test_a_primary_landing_clears_the_active_endpoint_and_records_last_served(tmp_path):
+    harness, repl, channel, agent, peer, primary = _build(tmp_path)
+    await model_ops.persist_active_endpoint(harness, peer, "flash-next", config_dir=tmp_path)
+    assert "active_endpoint" in load_overlay(tmp_path / "overrides.yaml")
+
+    saved = await repl._persist_landed(PRIMARY_URL, "model-b")
+
+    assert saved is True
+    overlay = load_overlay(tmp_path / "overrides.yaml")
+    assert "active_endpoint" not in overlay
+    assert overlay["provider"]["default_model"] == "model-b"
+    assert last_served(default_speed_stats_path(tmp_path)) == PRIMARY_SERVED
+
+
+@pytest.mark.asyncio
+async def test_a_failed_selection_write_is_said_redacted_and_the_session_carries_on(
+        tmp_path, monkeypatch):
+    harness, repl, channel, agent, peer, primary = _build(tmp_path, provider_key=PROVIDER_KEY)
+
+    async def boom(*a, **kw):
+        raise ValueError(f"cannot write {PROVIDER_KEY}")
+
+    monkeypatch.setattr(model_ops, "persist_landed", boom)
+    seen_default: list = []
+
+    async def default(model):
+        seen_default.append(model)
+        return True
+
+    repl._persist_default_model = default
+
+    saved = await repl._persist_landed(PRIMARY_URL, "model-b")
+
+    assert saved is True and seen_default == ["model-b"]
+    text, style = channel.styled[-1]
+    assert style == "system.error"
+    assert text.startswith(PERSIST_SELECTION_FAILED.split("{")[0])
+    assert PROVIDER_KEY not in text
