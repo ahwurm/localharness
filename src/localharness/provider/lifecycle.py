@@ -33,6 +33,7 @@ import time
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
@@ -44,7 +45,7 @@ except ImportError:  # non-POSIX: the launch lock degrades to an in-process asyn
 
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import autosense as _auto
-from localharness.provider import server, tuning
+from localharness.provider import server, speed_stats, tuning, units
 from localharness.provider.tuning import Tuned
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ log = logging.getLogger(__name__)
 if TYPE_CHECKING:  # annotations only: autosense imports nothing from here, but the dataclass stays import-light
     from localharness.config.models import AutosenseConfig
     from localharness.provider.autosense import WindowReport
+    from localharness.provider.procfs import ProcRecord
 
 
 async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
@@ -219,8 +221,11 @@ class ManagedVllmStrategy:
         )
         handle = server.DOCKER_CONTAINER_NAME if spec.launch == "docker" else pid
         # No fit for vLLM (D-10): the plan derives the parsers only, `window` stays None, no retry.
-        return LiveEndpoint(base_url=base_url, served_models=served, handle=handle, note=decision.note,
+        live = LiveEndpoint(base_url=base_url, served_models=served, handle=handle, note=decision.note,
                             dropped_env=tuple(dropped), tuned=plan.tuned if plan else None)
+        if plan is not None:
+            confirm_launch(config_dir, record_key(spec), plan=plan, live=live)
+        return live
 
     def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
         """The config dir `activate` polls with, so a reconnect poll reads the same pidfile and log."""
@@ -241,12 +246,21 @@ class ManagedVllmStrategy:
         return Liveness(alive=pid is not None, detail=f"pid {pid}" if pid is not None else "no live pidfile")
 
 
+def record_key(spec: ManagedServerConfig) -> str:
+    """The ledger entry a record's retry lives on: `speed_key(runtime, served id)` (R-09a), the same
+    key its speed samples use. A boot marker's `record` must equal it."""
+    return speed_stats.speed_key(spec.runtime, spec.served_name or str(spec.model))
+
+
 @dataclass(frozen=True)
 class Sensed:
     """Everything one launch reads from the machine, gathered once by `sense_launch` and handed to the
     pure `plan_launch` (spec 20 §6.0, D-14): the model header (a typed, bounded dict), the GPU
-    residency of the weights (`offload`), the free memory, the weights' size, `/proc/meminfo` and a
-    vLLM checkpoint's `config.json`. Every field is None / empty when it could not be known."""
+    residency of the weights (`offload`), the free memory, the weights' size, `/proc/meminfo`, a
+    vLLM checkpoint's `config.json` and the ledger's `remembered` retry record. `marker` is the boot
+    marker and `prior_death` the verdict `boot_prior_death` drew from it; the autostart phase reads the
+    marker file, so `sense_launch` leaves both at their defaults. Every field is None / empty when it
+    could not be known."""
 
     runtime: str
     config_dir: Path
@@ -256,19 +270,56 @@ class Sensed:
     weights: int | None = None
     meminfo: Mapping[str, int] | None = None
     model_config: Mapping[str, Any] | None = None
+    remembered: "speed_stats.RetryRecord | None" = None
+    marker: "units.Marker | None" = None
+    prior_death: bool = False
 
 
-def sense_launch(spec: ManagedServerConfig, config_dir: Path, autosense: "AutosenseConfig") -> Sensed:
-    """Every read a launch needs, once: the GGUF header, free memory, the weights and `/proc/meminfo`
-    for llama.cpp; a checkpoint's `config.json` for vLLM; nothing for any other runtime. Writes nothing
-    and never raises on bad input (the readers return None / `{}`). Run it off the event loop: it shells
-    out to nvidia-smi."""
+def sense_launch(
+    spec: ManagedServerConfig, config_dir: Path, autosense: "AutosenseConfig", *,
+    unit: "units.UnitRuntimeState | None" = None,
+) -> Sensed:
+    """Every read a launch needs, once: the GGUF header, free memory, the weights, `/proc/meminfo` and
+    the ledger's remembered retry for llama.cpp; a checkpoint's `config.json` for vLLM; nothing for any
+    other runtime. Writes nothing and never raises on bad input (the readers return None / `{}`; the
+    ledger read is bounded by `speed_stats._load`). Run it off the event loop: it shells out to
+    nvidia-smi.
+
+    `unit` is accepted for the autostart phase (D-19): the boot marker and the unit's `NRestarts`
+    are read there, so here `marker` stays None and `prior_death` False."""
     if spec.runtime == "llamacpp":
         fi = _auto.compute_fit(spec, autosense, meminfo=True)  # its `fits` is priced without the derived types: unused
-        return Sensed(spec.runtime, config_dir, fi.header, fi.offload, fi.memory, fi.weights, fi.meminfo)
+        remembered = speed_stats.last_retry(speed_stats.default_speed_stats_path(config_dir), record_key(spec))
+        return Sensed(spec.runtime, config_dir, fi.header, fi.offload, fi.memory, fi.weights, fi.meminfo,
+                      remembered=remembered)
     if spec.runtime == "vllm":
         return Sensed(spec.runtime, config_dir, model_config=tuning.read_model_config(spec))
     return Sensed(spec.runtime, config_dir)
+
+
+def boot_prior_death(
+    marker: "units.Marker | None", unit: "units.UnitRuntimeState | None", *, record_key: str,
+    binary: str, now: datetime, max_age_seconds: float,
+) -> bool:
+    """Does the boot marker say the last full shape died (spec 20 §9.3, D-17)? True only when a marker
+    exists for this record and binary, its cause is `death` or it was written with `shape: full`, it is
+    younger than `max_age_seconds` (the unit's load window), and the unit's `NRestarts` is at least 1.
+    The marker's `invocation` plays no part: a `Restart=` is a new invocation. An unparsable or naive
+    `at`, a future one, a missing marker or a missing unit is False. Pure."""
+    if marker is None or unit is None:
+        return False
+    if marker.record != record_key or marker.binary != binary:
+        return False
+    if marker.cause != "death" and marker.shape != "full":
+        return False
+    if unit.n_restarts < 1:
+        return False
+    try:
+        at = datetime.fromisoformat(marker.at)
+        age = (now - at).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return 0 <= age < max_age_seconds
 
 
 @dataclass(frozen=True)
@@ -277,8 +328,9 @@ class LaunchPlan:
     (`serve_kwargs`), the NAMES of the environment variables the child gets that the harness sets
     (`env_names` — never a value, never the key), the config.ini home a llama.cpp launch prepares
     (`config_ini_home`, a path only), the window `report`, what the launch `tuned`, and how this plan
-    came about: `shape` is "full" or "retry", `cause` why a retry was planned ("death"), `dropped` the
-    derived names the retry gave up, `full_fit` the fit `-c` a retry halves from.
+    came about: `shape` is "full" or "retry", `cause` why a retry was planned ("death", "remembered" or
+    "boot"), `dropped` the derived names the retry gave up, `full_fit` the fit `-c` a retry halves from,
+    `remembered_at` the `at` of the ledger record a "remembered" retry follows.
 
     `inputs` is what `retry()` rebuilds from; it is neither compared nor shown, so two plans of the
     same `Sensed` are equal and a repr carries nothing but the plan."""
@@ -293,23 +345,30 @@ class LaunchPlan:
     cause: str | None = None
     dropped: tuple[str, ...] = ()
     full_fit: int | None = None
+    remembered_at: str | None = None
     inputs: tuple | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "serve_kwargs", MappingProxyType(dict(self.serve_kwargs)))
 
     def retry(self) -> "LaunchPlan | None":
-        """The one relaunch after a death (D-16, D-35), chosen here and nowhere else: the derived
-        spec type dropped and the fit `-c` halved (`max(1, full_fit // 2)`), each only when the plan
-        has it. None for a plan already in the retry shape and for one with neither (a KV-only
-        launch). A record or `extra_args` value is never touched. Pure: the same plan gives an equal
-        retry."""
+        """The one relaunch after a death (D-16, D-35): the derived spec type dropped and the fit `-c`
+        halved (`max(1, full_fit // 2)`), each only when the plan has it. None for a plan already in
+        the retry shape and for one with neither (a KV-only launch). A record or `extra_args` value is
+        never touched. Pure: the same plan gives an equal retry."""
+        return self._shaped("death", drop_spec=True)
+
+    def _shaped(self, cause: str, *, drop_spec: bool, remembered_at: str | None = None) -> "LaunchPlan | None":
+        """The retry shape of this full plan, the one builder behind `retry()` and the remembered and
+        boot branches of `plan_launch` (D-17): the derived spec type dropped when `drop_spec` and the
+        plan has one, the fit `-c` halved from this plan's own fit when its mode is "fit". None when
+        neither applies or the plan is not a full one."""
         if self.shape != "full" or self.inputs is None:
             return None
         spec, sensed, decision, autosense, held = self.inputs
         kw = dict(self.serve_kwargs)
         report, tuned, dropped = self.report, self.tuned, ()
-        drops_spec = tuned.spec_type is not None
+        drops_spec = drop_spec and tuned.spec_type is not None
         halves = report is not None and report.mode == "fit" and self.full_fit is not None
         if not drops_spec and not halves:
             return None
@@ -325,7 +384,7 @@ class LaunchPlan:
             report = dataclasses.replace(report, asked=halved, retried=True)
         return dataclasses.replace(
             self, argv=tuple(server.serve_command(spec, **kw)), serve_kwargs=kw, report=report, tuned=tuned,
-            shape="retry", cause="death", dropped=dropped)
+            shape="retry", cause=cause, dropped=dropped, remembered_at=remembered_at)
 
 
 def _effective_cache_types(spec: ManagedServerConfig, tuned: Tuned) -> tuple[str | None, str | None]:
@@ -406,10 +465,40 @@ def plan_launch(
             kw[name] = value
     if api_key_held and spec.runtime in server.KEY_ENV:
         names.append(server.KEY_ENV[spec.runtime])
-    return LaunchPlan(
+    full = LaunchPlan(
         argv=tuple(server.serve_command(spec, **kw)), serve_kwargs=kw,
         env_names=tuple(dict.fromkeys(names)), config_ini_home=home, report=report, tuned=tuned,
         full_fit=full_fit, inputs=(spec, sensed, decision, autosense, api_key_held))
+    # The retry shape is chosen here and nowhere else (D-17): first a remembered record that still
+    # applies, then the boot marker's verdict. Either gives the full plan back when it has nothing
+    # to drop or halve.
+    rem = sensed.remembered
+    if rem is not None and _remembered_applies(spec, rem, autosense, full_fit):
+        shaped = full._shaped("remembered", drop_spec="draft-mtp" in rem.dropped, remembered_at=rem.at)
+        if shaped is not None:
+            return shaped
+    if sensed.prior_death:
+        shaped = full._shaped("boot", drop_spec=True)
+        if shaped is not None:
+            return shaped
+    return full
+
+
+def _remembered_applies(
+    spec: ManagedServerConfig, rem: "speed_stats.RetryRecord", autosense: "AutosenseConfig",
+    fresh_fit: int | None,
+) -> bool:
+    """Is the ledger's retry record still the shape to plan (spec 20 §6.4)? Not when the binary, the KV
+    cache type knob or `draft_p_min` changed since, or the record now sets `context` / `speculative`
+    (the person chose); not when the fresh fit is above the recorded one (the full shape is tried
+    again). An unknown fresh fit counts as not larger (R-09c). Pure."""
+    if rem.binary != str(spec.binary):
+        return False
+    if rem.kv_cache_type != autosense.kv_cache_type or rem.draft_p_min != autosense.draft_p_min:
+        return False
+    if spec.context is not None or spec.speculative is not None:
+        return False
+    return fresh_fit is None or fresh_fit <= rem.full_fit
 
 
 def _say_plan(on_plan: "Callable[[LaunchPlan | None], None] | None", plan: "LaunchPlan | None") -> None:
@@ -421,6 +510,92 @@ def _say_plan(on_plan: "Callable[[LaunchPlan | None], None] | None", plan: "Laun
         on_plan(plan)
     except Exception:  # noqa: BLE001 - the callback is display only
         log.debug("on_plan callback raised", exc_info=True)
+
+
+def _plain_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def confirm_launch(
+    config_dir: Path, record_key: str, *,
+    plan: "LaunchPlan | None" = None, marker: "units.Marker | None" = None,
+    live: "LiveEndpoint | None" = None, process: "ProcRecord | None" = None,
+    unit: "units.UnitRuntimeState | None" = None, context_length: int | None = None,
+    spec: ManagedServerConfig | None = None, autosense: "AutosenseConfig | None" = None,
+    header: Mapping[str, Any] | None = None, total_bytes: int | None = None,
+) -> None:
+    """Confirm a launch that answered, and remember what worked (spec 20 §6.0, §6.4, D-18). This is the
+    only writer of the ledger's `retry` record and the only remover of the boot marker, and it never
+    senses: after a load the free memory is the loaded machine's and would say nothing true about the
+    fit. It returns None and never raises, since the ledger is a convenience and a launch that served
+    must not fail on it.
+
+    From a `plan` (`activate`, which still holds the `Sensed` taken before the launch): a served
+    death-retry whose fit is known writes the record from the plan's pre-launch values; a served full
+    shape clears the record when `Sensed.remembered` was set; a remembered- or boot-shaped plan leaves
+    it as it is.
+
+    From a `marker` (`start`'s attach and the unit's wait, later phases): the ledger is written only
+    when the marker is bound to the run that is serving, `marker.invocation` equal to the unit's live
+    `InvocationID`, the served window equal to the marker's `planned_context`, the unit's `NRestarts`
+    at least 1, `cause` `death`, and the marker's record and binary this record's, with the verified
+    live `process` given. `dropped` is `draft-mtp` only when the record's own `derive` (over the
+    caller's `header` and `autosense`, never sensed here) would emit a spec type and the live argv has
+    none; the marker's own `dropped` is never read. `full_fit` is clamped to `context_length` (default
+    the header's) and `free_bytes` to `total_bytes`. A marker whose invocation matches is removed
+    whatever the outcome; one that does not is left for the run it belongs to."""
+    ledger = speed_stats.default_speed_stats_path(config_dir)
+    if plan is not None:
+        if plan.inputs is None:
+            return
+        plan_spec, sensed, _, plan_autosense, _ = plan.inputs
+        try:
+            if plan.shape == "retry" and plan.cause == "death":
+                if plan.full_fit is not None:
+                    speed_stats.record_retry(
+                        ledger, record_key, full_fit=plan.full_fit,
+                        free_bytes=sensed.memory.free_bytes if sensed.memory else None,
+                        dropped=plan.dropped, binary=str(plan_spec.binary),
+                        kv_cache_type=plan_autosense.kv_cache_type, draft_p_min=plan_autosense.draft_p_min)
+            elif plan.shape == "full" and sensed.remembered is not None:
+                speed_stats.clear_retry(ledger, record_key)
+        except (OSError, ValueError):
+            pass
+        return
+    if marker is None:
+        return
+    bound = (unit is not None and marker.invocation is not None
+             and marker.invocation == unit.invocation_id)
+    try:
+        served = live.window.served if live is not None and live.window is not None else None
+        full_fit = marker.full_fit
+        known = context_length if context_length is not None else (header or {}).get("context_length")
+        if _plain_int(known) and known > 0 and _plain_int(full_fit):
+            full_fit = min(full_fit, known)
+        if (bound and unit.n_restarts >= 1 and marker.cause == "death" and process is not None
+                and spec is not None and autosense is not None
+                and marker.record == record_key and marker.binary == str(spec.binary)
+                and _plain_int(served) and served == marker.planned_context
+                and _plain_int(full_fit) and full_fit > 0):
+            derived = tuning.derive(spec, header or {}, autosense)
+            hand_set = any(t == "--spec-type" or t.startswith("--spec-type=") for t in process.argv)
+            dropped = ("draft-mtp",) if derived.spec_type is not None and not hand_set else ()
+            free = marker.free_bytes
+            if _plain_int(free) and free >= 0 and _plain_int(total_bytes) and total_bytes >= 0:
+                free = min(free, total_bytes)
+            else:
+                free = None
+            speed_stats.record_retry(
+                ledger, record_key, full_fit=full_fit, free_bytes=free, dropped=dropped,
+                binary=str(spec.binary), kv_cache_type=autosense.kv_cache_type,
+                draft_p_min=autosense.draft_p_min)
+    except (OSError, ValueError):
+        pass
+    if bound:
+        try:
+            units.remove_marker(config_dir)
+        except OSError:
+            pass
 
 
 class SpawnedProcessStrategy:
@@ -561,8 +736,11 @@ class SpawnedProcessStrategy:
             report = dataclasses.replace(
                 report, served=probe.served, trained=probe.trained or report.trained,
                 verified=probe.served is not None)
-        return LiveEndpoint(base_url=base_url, served_models=served, handle=pid, note=decision.note,
+        live = LiveEndpoint(base_url=base_url, served_models=served, handle=pid, note=decision.note,
                             window=report, dropped_env=tuple(dropped), tuned=plan.tuned if plan else None)
+        if plan is not None:
+            confirm_launch(config_dir, record_key(spec), plan=plan, live=live)
+        return live
 
     def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
         """The config dir `activate` polls with, so a reconnect poll reads the same pidfile and log."""
