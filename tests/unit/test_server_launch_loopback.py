@@ -323,7 +323,7 @@ async def test_a_keyed_vllm_activation_threads_the_key_through_launch_and_readin
                                                    api_key=KEY)
     assert calls == {"serve_command": {"keyed": True, "loopback": True, "key_file_ok": False,
                                        "context": None, "cache_ram": None},
-                     "start_server": {"runtime": "vllm", "record_env": None, "api_key": KEY},
+                     "start_server": {"runtime": "vllm", "record_env": None, "api_key": KEY, "port": 8081},
                      "wait_ready": {"api_key": KEY}}
 
 
@@ -332,7 +332,7 @@ async def test_a_keyless_vllm_activation_calls_everything_as_before(tmp_path, mo
     await lifecycle.ManagedVllmStrategy().activate(_docker(), tmp_path, "http://127.0.0.1:8081/v1")
     assert calls == {"serve_command": {"keyed": False, "loopback": True, "key_file_ok": False,
                                        "context": None, "cache_ram": None},
-                     "start_server": {"runtime": "vllm", "record_env": None}, "wait_ready": {}}
+                     "start_server": {"runtime": "vllm", "record_env": None, "port": 8081}, "wait_ready": {}}
 
 
 async def test_a_spawned_server_gets_the_key_in_its_launch_environment_and_readiness_probe(tmp_path, monkeypatch):
