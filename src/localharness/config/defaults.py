@@ -9,7 +9,6 @@
 # LLMConfig.timeout_seconds and ProviderConfig.timeout_seconds.
 DEFAULT_TIMEOUT_SECONDS: float = 600.0
 DEFAULT_CONNECT_TIMEOUT_SECONDS: float = 5.0
-DEFAULT_TEMPERATURE: float = 0.6
 # An EXPLICIT per-reply cap for callers that need a bounded, comparable reply — the bench
 # harness (bench/orchestrator.py), where every scenario must run on the same output budget or
 # the numbers are not comparable. It is NOT a session default and no longer a floor under one:
@@ -57,5 +56,6 @@ CURRENT_DEFAULTS_REVISION: int = 3
 # Revision of the one-shot step that clears the three values `init` used to dump (the two context
 # sizes and `max_actions`). It is its own stamp, recorded in `org.permissions.init_nulls_revision`:
 # bumping CURRENT_DEFAULTS_REVISION instead would re-run the deny-list union and restore deny
-# defaults a person deleted.
-CURRENT_INIT_NULLS_REVISION: int = 1
+# defaults a person deleted. Revision 2 also clears the dumped `org.default_temperature: 0.6`
+# (never applied; the model's own sampling governs unless the person sets one).
+CURRENT_INIT_NULLS_REVISION: int = 2

@@ -1691,7 +1691,9 @@ class OrgConfig(BaseModel):
         ),
     )
 
-    default_temperature: float = Field(default=0.6, ge=0.0, le=2.0)
+    # Optional so the init-nulls revision 2 (config/migrate.py) can write null over init's dumped
+    # 0.6 and the config still validate; the default itself moves with the temperature rung.
+    default_temperature: Optional[float] = Field(default=0.6, ge=0.0, le=2.0)
     default_effort: Optional[EffortLevel] = Field(
         default=None,
         description=(

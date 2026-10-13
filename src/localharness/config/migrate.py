@@ -60,6 +60,13 @@ file, a link into a read-only store) no agent file has init's values cleared eit
 stamp that would record it cannot land, so the next start would match that file again and clear a
 `100` the owner had put back. The step runs whole on the first start that can write config.yaml.
 
+Revision 2 of that step nulls the one more value `init` dumped: `org.default_temperature: 0.6`,
+which was never applied and which the temperature rung would otherwise start applying. It is
+keyed by revision and scope: a config stamped at N gets only the keys with a revision above N (so
+nothing revision 1 cleared is cleared again, and a `max_actions: 100` the owner set after revision
+1 stays), and the temperature key reaches only the `org:` section of config.yaml and of
+`overrides.yaml` -- an agent or division file's own `temperature` is the person's.
+
 The updated config is validated through the real HarnessConfig model before anything is
 written — a migrate that writes an invalid config is worse than none.
 """
@@ -158,15 +165,21 @@ R10). Named as a tuple rather than globbed from the dir because migrate must onl
 files whose shape it knows; a future sibling directory is opted in here, deliberately."""
 
 
-INIT_NULL_KEYS: tuple[tuple[tuple[str, ...], int], ...] = (
-    (("permissions", "budget", "max_actions"), 100),
-    (("context", "max_tool_output_chars"), 32000),
-    (("context", "tool_result_evict_threshold_chars"), 8000),
+INIT_NULL_KEYS: tuple[tuple[int, str, tuple[str, ...], "int | float"], ...] = (
+    (1, "any", ("permissions", "budget", "max_actions"), 100),
+    (1, "any", ("context", "max_tool_output_chars"), 32000),
+    (1, "any", ("context", "tool_result_evict_threshold_chars"), 8000),
+    (2, "org", ("default_temperature",), 0.6),
 )
-"""The three values older `init` dumped as if chosen, each as (path relative to a section, the
-value init wrote). The section is `org` in config.yaml and the file's root in an agent/division
-file. Constant keys and constant values: an equality match, so nothing a file contains can steer
+"""The values older `init` dumped as if chosen, each as (the revision that clears it, its scope,
+the path relative to a section, the value init wrote). The scope is "org" (only the `org:` section
+of config.yaml or overrides.yaml), "sidecar" (only an agent/division file's root) or "any" (both).
+Constant keys and constant values: a typed equality match, so nothing a file contains can steer
 which key the step touches."""
+
+OVERRIDES_FILE = "overrides.yaml"
+"""The global overlay beside config.yaml. A migration target for revision 2's key alone; its line in
+:data:`INIT_NULLS_PENDING_FILE` is this bare name."""
 
 INIT_NULLS_STAMP_CLAUSE = "; recorded org.permissions.init_nulls_revision in config.yaml (nothing of init's to clear there)"  # noqa: E501
 """The receipt clause when config.yaml is rewritten only to record the init-nulls stamp (IN-03): a
@@ -175,9 +188,28 @@ rewrite (one backup, one YAML round-trip) never goes unexplained."""
 INIT_NULLS_CLAUSE = "; cleared init's max_actions: 100 and tool-output sizes — no action limit on a terminal, sizes follow the window"  # noqa: E501
 """The receipt clause for one rewritten file, verbatim; the caller appends the file's name."""
 
+INIT_NULLS_TEMPERATURE_CLAUSE = "; org.default_temperature nulled (it was never applied; the model's own sampling now governs — set org.default_temperature: 0.6 to restore)"  # noqa: E501
+"""The receipt clause when revision 2 nulls `org.default_temperature` in a file, verbatim; the
+caller appends the file's name."""
+
+_TEMPERATURE_PATHS = frozenset({"org.default_temperature", "default_temperature"})
+
+
+def init_nulls_clauses(nulled: "tuple[str, ...]") -> str:
+    """The receipt clause(s) for one rewritten file whose init-nulls step nulled `nulled`: revision
+    1's :data:`INIT_NULLS_CLAUSE` when any of its keys is among them, then
+    :data:`INIT_NULLS_TEMPERATURE_CLAUSE` when the temperature is. Empty when nothing was nulled."""
+    out = ""
+    if any(p not in _TEMPERATURE_PATHS for p in nulled):
+        out += INIT_NULLS_CLAUSE
+    if any(p in _TEMPERATURE_PATHS for p in nulled):
+        out += INIT_NULLS_TEMPERATURE_CLAUSE
+    return out
+
+
 INIT_NULLS_PENDING_FILE = "init-nulls-pending.txt"
 """Beside config.yaml: the agent/division files the init-nulls step still owes, one
-`<dir>/<name>.yaml` per line (CR-30). Written when such a file could be read but not written (a
+`<dir>/<name>.yaml` per line (CR-30), and the bare `overrides.yaml` for the overlay. Written when such a file could be read but not written (a
 read-only file, a root-owned one, a read-only store link), removed once none is owed. The step's
 stamp has moved by then, so config.yaml and every file written are never matched again: a `100`
 the owner sets afterwards stays. Only a file listed here, under :data:`SIDECAR_DIRS`, is retried,
@@ -185,8 +217,16 @@ and only for exactly init's values."""
 
 
 def _sidecar_name(path: Path) -> str:
-    """`agents/<name>.yaml` — how a sidecar is named in :data:`INIT_NULLS_PENDING_FILE`."""
+    """`agents/<name>.yaml` — how a sidecar is named in :data:`INIT_NULLS_PENDING_FILE`; the global
+    overlay is the bare :data:`OVERRIDES_FILE`."""
+    if path.name == OVERRIDES_FILE and path.parent.name not in SIDECAR_DIRS:
+        return OVERRIDES_FILE
     return f"{path.parent.name}/{path.name}"
+
+
+def sidecar_label(path: Path) -> str:
+    """How a receipt names a rewritten sidecar: `agents/x.yaml`, or `overrides.yaml`."""
+    return _sidecar_name(path)
 
 
 def read_init_nulls_pending(config_dir: Path) -> tuple[str, ...]:
@@ -210,20 +250,25 @@ def write_init_nulls_pending(config_dir: Path, owed: "list[str] | tuple[str, ...
         marker.unlink(missing_ok=True)
 
 
-def _init_nulls(section: dict) -> tuple[dict, tuple[str, ...]]:
+def _init_nulls(section: dict, *, scope: str, since: int) -> tuple[dict, tuple[str, ...]]:
     """`section` with each :data:`INIT_NULL_KEYS` value that equals what init wrote set to None.
 
-    Returns (the copy, the dotted paths nulled). Pure: the input is never mutated and no section
-    is created. A match is `type(v) is int and v == value`, so a bool, a float, a string or a
-    different number is the person's and is left as it is."""
+    `scope` is "org" (an `org:` section) or "sidecar" (an agent/division root); `since` is the
+    revision the file's stamp already records, so only a key with a higher revision is considered
+    and nothing an earlier revision cleared is cleared twice. Returns (the copy, the dotted paths
+    nulled). Pure: the input is never mutated and no section is created. A match is
+    `type(leaf) is type(value) and leaf == value`, so a bool is never an int, an int is never 0.6,
+    a string is never a number, and a different number is the person's: left as it is."""
     out = dict(section)
     nulled: list[str] = []
-    for path, value in INIT_NULL_KEYS:
+    for revision, key_scope, path, value in INIT_NULL_KEYS:
+        if revision <= since or key_scope not in ("any", scope):
+            continue
         node: object = out
         for key in path[:-1]:
             node = node.get(key) if isinstance(node, dict) else None
         leaf = node.get(path[-1]) if isinstance(node, dict) else None
-        if type(leaf) is not int or leaf != value:
+        if type(leaf) is not type(value) or leaf != value:
             continue
         parent = out
         for key in path[:-1]:  # copy down the path so the original nested mappings stay untouched
@@ -234,13 +279,18 @@ def _init_nulls(section: dict) -> tuple[dict, tuple[str, ...]]:
     return out, tuple(nulled)
 
 
-def _init_nulls_due(data: dict) -> bool:
-    """True while `org.permissions.init_nulls_revision` (a plain int, else 0) is below the current
-    revision. The only trigger for the step: content alone never runs it."""
+def _init_nulls_stamp(data: dict) -> int:
+    """`org.permissions.init_nulls_revision` as a plain int, else 0: the revisions already run."""
     org = data.get("org") if isinstance(data.get("org"), dict) else {}
     perms = org.get("permissions") if isinstance(org.get("permissions"), dict) else {}
     stamped = perms.get("init_nulls_revision")
-    return (stamped if type(stamped) is int else 0) < CURRENT_INIT_NULLS_REVISION
+    return stamped if type(stamped) is int else 0
+
+
+def _init_nulls_due(data: dict) -> bool:
+    """True while `org.permissions.init_nulls_revision` (a plain int, else 0) is below the current
+    revision. The only trigger for the step: content alone never runs it."""
+    return _init_nulls_stamp(data) < CURRENT_INIT_NULLS_REVISION
 
 
 @dataclass(frozen=True)
@@ -310,7 +360,8 @@ class MigrationPlan:
 
 
 def scan_sidecars(config_dir: Path, *, init_nulls_due: bool = False,
-                  init_nulls_owed: "tuple[str, ...]" = ()) -> list[SidecarPlan]:
+                  init_nulls_owed: "tuple[str, ...]" = (),
+                  init_nulls_since: int = 0) -> list[SidecarPlan]:
     """Every `agents/*.yaml` and `divisions/*.yaml` under `config_dir` still carrying the dead key,
     and, when `init_nulls_due` (or for a file named in `init_nulls_owed`), carrying any of init's
     three values.
@@ -321,7 +372,10 @@ def scan_sidecars(config_dir: Path, *, init_nulls_due: bool = False,
     step's stamp has moved, a file that later becomes readable keeps init's values, the stricter
     direction (a cap stays), until the owner clears them. Sorted so the CLI's listing (and its
     backups) are in a stable order. Nothing outside the global config dir is ever considered
-    (review finding R10)."""
+    (review finding R10). `init_nulls_since` is the revision config.yaml's stamp already records:
+    a due file is matched only for keys above it; a file named in `init_nulls_owed` (a write that
+    failed earlier, listed in the pending file, whether or not a newer revision is due now) is
+    matched from 0, because a sidecar only ever carries revision 1's keys."""
     found: list[SidecarPlan] = []
     for name in SIDECAR_DIRS:
         for path in sorted((config_dir / name).glob("*.yaml")):
@@ -342,11 +396,37 @@ def scan_sidecars(config_dir: Path, *, init_nulls_due: bool = False,
             stripped = updated if removed is not None else None  # _init_nulls never mutates it
             nulled: tuple[str, ...] = ()
             if init_nulls_due or _sidecar_name(path) in init_nulls_owed:
-                updated, nulled = _init_nulls(updated)
+                owed_file = _sidecar_name(path) in init_nulls_owed
+                updated, nulled = _init_nulls(
+                    updated, scope="sidecar", since=0 if owed_file else init_nulls_since)
             if removed is None and not nulled:
                 continue
             found.append(SidecarPlan(path, removed, updated, nulled, stripped))
     return found
+
+
+def scan_overrides(config_dir: Path, *, since: int, owed: bool) -> Optional[SidecarPlan]:
+    """The global `overrides.yaml` as a plan when its `org:` section carries revision 2's dumped
+    `default_temperature: 0.6`, else None (absent, unparsable, not a mapping, no such value).
+
+    `since` is the revision config.yaml's stamp records; `owed` says the file is listed in
+    :data:`INIT_NULLS_PENDING_FILE` (the stamp is current and a previous write failed), when it is
+    matched from 0. Either way the overlay was never a target of revision 1, so a hand-set
+    `max_actions: 100` in it is not touched: only keys of revision 2 or later are considered.
+    Read-only; the write is `apply`'s, with the same backup recipe as every sidecar."""
+    path = Path(config_dir) / OVERRIDES_FILE
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+    org = data.get("org") if isinstance(data, dict) else None
+    if not isinstance(org, dict):
+        return None
+    new_org, paths = _init_nulls(org, scope="org", since=max(0 if owed else since, 1))
+    if not paths:
+        return None
+    return SidecarPlan(path, None, {**data, "org": new_org},
+                       tuple(f"org.{p}" for p in paths), None)
 
 
 def clear_sidecars_before_restamp(
@@ -381,7 +461,8 @@ def clear_sidecars_before_restamp(
             continue
         try:
             original = sidecar.path.read_bytes()
-            updated, _ = _init_nulls(yaml.safe_load(original.decode("utf-8")))
+            updated, _ = _init_nulls(
+                yaml.safe_load(original.decode("utf-8")), scope="sidecar", since=0)
             written.append((sidecar.path, _write_with_backup(sidecar.path, original, updated)))
         except OSError as exc:
             unwritten.append((sidecar.path, exc))
@@ -469,7 +550,7 @@ def plan(data: dict, sidecars: tuple[SidecarPlan, ...] = (), *,
     nulled: tuple[str, ...] = ()
     if nulls_due:  # its own stamp; the deny half above and `defaults_revision` are never consulted
         current_org = updated["org"] if isinstance(updated.get("org"), dict) else org
-        new_org, paths = _init_nulls(current_org)
+        new_org, paths = _init_nulls(current_org, scope="org", since=_init_nulls_stamp(data))
         new_perms = dict(new_org["permissions"]) if isinstance(new_org.get("permissions"), dict) else {}
         new_perms["init_nulls_revision"] = CURRENT_INIT_NULLS_REVISION
         new_org["permissions"] = new_perms
@@ -510,8 +591,15 @@ def load_plan(config_file: Path) -> tuple[bytes, Optional[MigrationPlan]]:
     if not isinstance(data, dict):
         raise MigrationError(f"{config_file} is not a valid config mapping.")
     due = _init_nulls_due(data)
-    owed = () if due else read_init_nulls_pending(config_file.parent)
-    sidecars = scan_sidecars(config_file.parent, init_nulls_due=due, init_nulls_owed=owed)
+    listed = read_init_nulls_pending(config_file.parent)
+    owed = () if due else listed
+    since = _init_nulls_stamp(data)
+    sidecars = scan_sidecars(config_file.parent, init_nulls_due=due, init_nulls_owed=listed,
+                             init_nulls_since=since)
+    overrides = scan_overrides(config_file.parent, since=since, owed=OVERRIDES_FILE in listed) \
+        if due or OVERRIDES_FILE in listed else None
+    if overrides is not None:
+        sidecars.append(overrides)
     return original, plan(data, tuple(sidecars), init_nulls_owed=owed)
 
 
