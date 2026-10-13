@@ -164,3 +164,95 @@ def test_clear_retry_with_nothing_to_clear_writes_nothing(tmp_path):
     absent = tmp_path / "absent.json"
     ss.clear_retry(absent, KEY)
     assert not absent.exists()
+
+
+# --- the sampling record ------------------------------------------------------------------------
+
+def test_sampling_round_trips(tmp_path):
+    p = tmp_path / "s.json"
+    ss.record_sampling(p, "llamacpp", "qwen", temperature=0.6, rung="org.default_temperature",
+                       server_default=1.0)
+    rec = ss.last_sampling(p, "llamacpp", "qwen")
+    assert rec == ss.SamplingRecord(0.6, "org.default_temperature", 1.0, rec.recorded_at)
+    assert isinstance(rec.recorded_at, str)
+
+
+def test_sampling_none_values_round_trip_as_none(tmp_path):
+    p = tmp_path / "s.json"
+    ss.record_sampling(p, "llamacpp", "qwen", temperature=None, rung=None, server_default=None)
+    rec = ss.last_sampling(p, "llamacpp", "qwen")
+    assert (rec.temperature, rec.rung, rec.server_default) == (None, None, None)
+
+
+def test_sampling_keeps_the_other_fields(tmp_path):
+    p = tmp_path / "s.json"
+    ss.record_tps(p, "llamacpp", "qwen", 55.0)
+    ss.record_sampling(p, "llamacpp", "qwen", temperature=0.7, rung="r", server_default=None)
+    ss.record_tps(p, "llamacpp", "qwen", 57.0)
+    assert ss.last_sampling(p, "llamacpp", "qwen").temperature == 0.7
+    assert ss.median_tps(p, "llamacpp", "qwen") == 56.0
+
+
+@pytest.mark.parametrize("field,bad", [
+    ("temperature", True), ("temperature", "0.6"), ("server_default", "1.0"),
+    ("server_default", False), ("rung", 3), ("recorded_at", None), ("recorded_at", 5),
+])
+def test_a_hand_edited_sampling_record_reads_as_none(tmp_path, field, bad):
+    p = tmp_path / "s.json"
+    ss.record_sampling(p, "llamacpp", "qwen", temperature=0.6, rung="r", server_default=1.0)
+    data = json.loads(p.read_text())
+    data["llamacpp:qwen"]["sampling"][field] = bad
+    p.write_text(json.dumps(data))
+    assert ss.last_sampling(p, "llamacpp", "qwen") is None
+
+
+def test_sampling_absent_or_not_a_dict_reads_as_none(tmp_path):
+    p = tmp_path / "s.json"
+    assert ss.last_sampling(p, "a", "b") is None
+    p.write_text(json.dumps({"a:b": {"sampling": [1]}}))
+    assert ss.last_sampling(p, "a", "b") is None
+
+
+# --- the last-served record ---------------------------------------------------------------------
+
+def test_last_served_round_trips(tmp_path):
+    p = tmp_path / "s.json"
+    assert ss.last_served(p) is None
+    ss.record_last_served(p, "flash-next")
+    assert ss.last_served(p) == "flash-next"
+    assert ss.LAST_SERVED_KEY == "_last_served"
+    ss.record_last_served(p, "other")
+    assert ss.last_served(p) == "other"
+
+
+@pytest.mark.parametrize("bad", [7, "", None, ["x"], {"x": 1}])
+def test_a_non_string_last_served_name_reads_as_none(tmp_path, bad):
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"_last_served": {"name": bad}}))
+    assert ss.last_served(p) is None
+    p.write_text(json.dumps({"_last_served": "flash-next"}))
+    assert ss.last_served(p) is None
+
+
+def test_the_reserved_key_never_appears_among_model_entries(tmp_path):
+    p = tmp_path / "s.json"
+    ss.record_tps(p, "llamacpp", "qwen", 50.0)
+    ss.record_model_path(p, "llamacpp", "qwen", "/m/q.gguf")
+    ss.record_last_served(p, "flash-next")
+    ss.record_dropped_env(p, "llamacpp", ["FOO"])
+    assert set(ss.all_median_tps(p)) == {"llamacpp:qwen"}
+    assert ss.model_paths(p) == {"/m/q.gguf"}
+    # even an entry the reserved key was hand-edited to carry samples or a path stays out
+    data = json.loads(p.read_text())
+    data["_last_served"].update(samples=[99.0], model_path="/evil")
+    p.write_text(json.dumps(data))
+    assert set(ss.all_median_tps(p)) == {"llamacpp:qwen"}
+    assert ss.model_paths(p) == {"/m/q.gguf"}
+    assert ss.last_served(p) == "flash-next"
+
+
+def test_last_served_keeps_the_model_entries(tmp_path):
+    p = tmp_path / "s.json"
+    ss.record_tps(p, "llamacpp", "qwen", 50.0)
+    ss.record_last_served(p, "flash-next")
+    assert ss.median_tps(p, "llamacpp", "qwen") == 50.0

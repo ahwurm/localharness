@@ -14,10 +14,14 @@ reads as empty. Concurrent sessions may race the file — last writer wins, acce
 QOL stat.
 
 The same entry also carries additive fields written by other call sites (window_report,
-model_path), and a reserved top-level `_dropped_env` map holds per-runtime dropped env names. They
+model_path, the launch `retry` record and the `sampling` record), and reserved top-level keys hold
+per-runtime dropped env names (`_dropped_env`) and the last-served record name (`_last_served`). They
 share this one file and this one write recipe; no second file exists (AUTO-08). `rejected_effort_keys`
 is the AUTO-08 rejected-effort-key field 02-CONTEXT D-24 deferred: the reasoning-effort request keys a
 server answered with a 400, per (provider_type, model).
+
+The file is read through `open_regular` under LEDGER_CAP: it sits where agent-run code can write, so a
+FIFO, a directory, a device symlink, an oversized file or pathological JSON reads as empty.
 """
 
 from __future__ import annotations
@@ -55,6 +59,9 @@ _LEDGER_NAME = "speed_stats.json"
 # Reserved top-level key (leading underscore): a per-runtime map of the env names a launch dropped.
 # It holds no samples, so the speed readers skip it; model entries are keyed "provider:model".
 DROPPED_ENV_KEY = "_dropped_env"
+# Reserved top-level key: the name of the record `start` last served, for spec 20 §8.2's resume
+# clause. Not a model entry, so the speed readers skip it.
+LAST_SERVED_KEY = "_last_served"
 # The largest ledger file `_load` will read. A real ledger is a handful of model entries (a few
 # KiB); 1 MiB is far above that and far below anything that costs memory or time to parse.
 LEDGER_CAP = 1 << 20
@@ -273,7 +280,8 @@ def model_paths(path: Path) -> set[str]:
     reserved `_dropped_env` map and any entry without a string `model_path` are skipped."""
     found: set[str] = set()
     for key, entry in _load(path).items():
-        value = entry.get("model_path") if key != DROPPED_ENV_KEY and isinstance(entry, dict) else None
+        reserved = key in (DROPPED_ENV_KEY, LAST_SERVED_KEY)
+        value = entry.get("model_path") if not reserved and isinstance(entry, dict) else None
         if isinstance(value, str):
             found.add(value)
     return found
@@ -310,10 +318,12 @@ def median_tps(path: Path, provider_type: str, model: str) -> float | None:
 def all_median_tps(path: Path) -> dict[str, float]:
     """{speed_key: median tok/s} for every model with at least one sample.
 
-    Reserved keys (leading underscore, e.g. DROPPED_ENV_KEY) hold no samples and fall out of the
-    same `samples` check as any entry without one."""
+    Reserved keys (leading underscore, e.g. DROPPED_ENV_KEY, LAST_SERVED_KEY) are not model entries
+    and are skipped by name."""
     out: dict[str, float] = {}
     for key, entry in _load(path).items():
+        if key in (DROPPED_ENV_KEY, LAST_SERVED_KEY):
+            continue
         samples = entry.get("samples", []) if isinstance(entry, dict) else []
         samples = [s for s in samples if isinstance(s, (int, float))]
         if samples:
@@ -396,3 +406,61 @@ def clear_retry(path: Path, record_key: str) -> None:
         return
     del entry["retry"]
     _write(path, data)
+
+
+class SamplingRecord(NamedTuple):
+    """The sampling line `start` last printed for one model: the temperature it applied (None when
+    the server's own default stood), the rung of the ladder that chose it, the server default seen
+    (each None when unknown), and when it was recorded (ISO-8601 UTC)."""
+
+    temperature: float | None
+    rung: str | None
+    server_default: float | None
+    recorded_at: str
+
+
+def record_sampling(
+    path: Path, provider_type: str, model: str, *,
+    temperature: float | None, rung: str | None, server_default: float | None,
+) -> None:
+    """Record the sampling decision on this model's entry. Read by `start`'s sampling line, which
+    prints a change once, the way the window report does."""
+    _update_entry(path, speed_key(provider_type, model), sampling={
+        "temperature": temperature, "rung": rung, "server_default": server_default,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def _number_or_none(v: object) -> bool:
+    return v is None or (isinstance(v, (int, float)) and not isinstance(v, bool) and isfinite(v))
+
+
+def last_sampling(path: Path, provider_type: str, model: str) -> SamplingRecord | None:
+    """The recorded sampling decision, or None when never recorded or hand-edited out of shape."""
+    entry = _load(path).get(speed_key(provider_type, model))
+    rec = entry.get("sampling") if isinstance(entry, dict) else None
+    if not isinstance(rec, dict):
+        return None
+    temp, rung, default, at = (rec.get(k) for k in ("temperature", "rung", "server_default",
+                                                    "recorded_at"))
+    if not (_number_or_none(temp) and _number_or_none(default)):
+        return None
+    if (rung is not None and not isinstance(rung, str)) or not isinstance(at, str):
+        return None
+    return SamplingRecord(None if temp is None else float(temp), rung,
+                          None if default is None else float(default), at)
+
+
+def record_last_served(path: Path, name: str) -> None:
+    """Record the record name last served, under the reserved top-level LAST_SERVED_KEY. Read by
+    spec 20 §8.2's resume clause through `last_served`."""
+    data = _load(path)
+    data[LAST_SERVED_KEY] = {"name": name, "recorded_at": datetime.now(timezone.utc).isoformat()}
+    _write(path, data)
+
+
+def last_served(path: Path) -> str | None:
+    """The record name last served, or None when never recorded or not a non-empty string."""
+    rec = _load(path).get(LAST_SERVED_KEY)
+    name = rec.get("name") if isinstance(rec, dict) else None
+    return name if isinstance(name, str) and name else None

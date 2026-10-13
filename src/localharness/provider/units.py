@@ -19,6 +19,7 @@ imports where it is absent.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shlex
@@ -30,12 +31,14 @@ from types import MappingProxyType
 from localharness.core.private_files import open_regular
 from localharness.core.which import which_outside_cwd
 from localharness.provider.procfs import ProcRecord
+from localharness.provider.server import server_dir
 
 __all__ = [
     "JOURNAL_LINES", "JOURNAL_TIMEOUT_S", "JOURNAL_OUTPUT_CAP", "SYSTEMCTL_TIMEOUT_S",
     "SYSTEMCTL_OUTPUT_CAP", "UNIT_FILE_CAP", "UNIT_LINE_CAP", "UNIT_TOKEN_CAP", "UNITS_SCANNED_CAP",
     "Skip", "UnitState", "unit_file_state", "user_units", "read_journal",
     "read_unit", "unit_record", "journal_environment_gap",
+    "BOOT_MARKER_NAME", "Marker", "UnitRuntimeState", "remove_marker",
 ]
 
 JOURNAL_LINES = 200
@@ -47,6 +50,8 @@ UNIT_FILE_CAP = 64 << 10
 UNIT_LINE_CAP = 16 << 10
 UNIT_TOKEN_CAP = 512
 UNITS_SCANNED_CAP = 64
+
+BOOT_MARKER_NAME = "boot-attempt"
 
 _LLAMA_SERVER = "llama-server"
 _SHOW_FIELDS = "Id,LoadState,FragmentPath,UnitFileState,DropInPaths"
@@ -61,6 +66,34 @@ class Skip:
 
     reason: str
     names_model: bool = True
+
+
+@dataclass(frozen=True)
+class Marker:
+    """The boot marker `serve` writes at `<server dir>/boot-attempt` before a launch it did not
+    confirm (spec 20 §9.3): which record, which binary and invocation, the cause and shape of the
+    attempt, the window it planned, the fit and free memory it measured, what it dropped, and when
+    (ISO-8601 UTC). Its reader and writer belong to the autostart phase; the confirm removes it."""
+
+    record: str
+    binary: str
+    invocation: str | None
+    cause: str
+    shape: str
+    planned_context: int | None
+    full_fit: int | None
+    free_bytes: int | None
+    dropped: tuple[str, ...]
+    at: str
+
+
+@dataclass(frozen=True)
+class UnitRuntimeState:
+    """The live `InvocationID` (None when the unit has none) and `NRestarts` of a running unit,
+    which the confirm reads to tell one boot attempt from the next (spec 20 §6.0)."""
+
+    invocation_id: str | None
+    n_restarts: int
 
 
 @dataclass(frozen=True)
@@ -502,3 +535,28 @@ def unit_record(state: UnitState) -> tuple[str, ProcRecord] | Skip:
     if isinstance(second, ProcRecord):
         return "unit", second
     return first if first.names_model else second
+
+
+def remove_marker(config_dir) -> bool:
+    """Unlink `<server dir>/boot-attempt`; True when a file was removed, False when there was none.
+
+    The server directory sits where agent-run code can write, so it is opened `O_DIRECTORY |
+    O_NOFOLLOW` and the file unlinked by that descriptor: a symlinked or missing directory is never
+    followed (False), and a link planted in the file's place is unlinked itself, never what it
+    points at. Any other OSError propagates. Its only production caller is
+    `lifecycle.confirm_launch`."""
+    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_CLOEXEC", 0))
+    try:
+        fd = os.open(server_dir(config_dir), flags)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.ENOENT):
+            return False
+        raise
+    try:
+        os.unlink(BOOT_MARKER_NAME, dir_fd=fd)
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(fd)
+    return True
