@@ -220,3 +220,117 @@ def test_a_sidecar_owed_since_revision_1_is_still_retried_when_revision_2_is_due
 
     assert _disk(locked)["permissions"]["budget"]["max_actions"] is None
     assert not (tmp_path / migrate.INIT_NULLS_PENDING_FILE).exists()
+
+
+# ------------------------------------------------------------------------------- overrides.yaml
+
+
+def test_overrides_yaml_holding_the_dumped_temperature_is_nulled_with_a_backup_and_the_clause(tmp_path):
+    cfg = _write(tmp_path, _config(stamp=1))
+    overrides = _put(tmp_path, "overrides.yaml", {"org": {"default_temperature": 0.6, "default_model": "m"},
+                                                  "agent": {"temperature": 0.6}})
+    original = overrides.read_bytes()
+
+    plan, _ = _migrate(cfg)
+
+    assert [s.path for s in plan.sidecars] == [overrides]
+    written = _disk(overrides)
+    assert written["org"] == {"default_temperature": None, "default_model": "m"}
+    assert written["agent"] == {"temperature": 0.6}  # the overlay's agent section is never a target
+    (backup,) = _backups(tmp_path, "overrides.yaml")
+    assert backup.read_bytes() == original
+    assert _disk(cfg)["org"]["permissions"]["init_nulls_revision"] == 2
+
+
+def test_the_first_start_receipt_names_overrides_yaml(tmp_path):
+    cfg = _write(tmp_path, _config(stamp=1))
+    _put(tmp_path, "overrides.yaml", {"org": {"default_temperature": 0.6}})
+
+    out = _start_receipt(cfg)
+
+    assert CLAUSE + " (config.yaml)" in out and CLAUSE + " (overrides.yaml)" in out
+
+
+def test_the_config_cmd_receipt_names_overrides_yaml(tmp_path):
+    _write(tmp_path, _config(stamp=1))
+    _put(tmp_path, "overrides.yaml", {"org": {"default_temperature": 0.6}})
+
+    result = runner.invoke(app, ["config", "migrate", "--config-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert CLAUSE + " (overrides.yaml)" in " ".join(result.output.split())
+
+
+@pytest.mark.parametrize("content", [
+    {"org": {"default_temperature": 0.7}},
+    {"org": {"default_model": "m"}},
+    {"agent": {"temperature": 0.6}},
+    {"org": {"permissions": {"budget": {"max_actions": 100}}}},  # revision 1 never targeted the overlay
+])
+def test_overrides_yaml_without_the_dumped_value_is_not_rewritten(tmp_path, content):
+    cfg = _write(tmp_path, _config(stamp=None))
+    overrides = _put(tmp_path, "overrides.yaml", content)
+    before = overrides.read_bytes()
+
+    plan, _ = _migrate(cfg)
+
+    assert all(s.path != overrides for s in plan.sidecars)
+    assert overrides.read_bytes() == before and _backups(tmp_path, "overrides.yaml") == []
+
+
+def test_an_unparsable_overrides_yaml_is_not_rewritten(tmp_path):
+    cfg = _write(tmp_path, _config(stamp=1))
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text("org: [unclosed\n", encoding="utf-8")
+    before = overrides.read_bytes()
+
+    _migrate(cfg)
+
+    assert overrides.read_bytes() == before and _backups(tmp_path, "overrides.yaml") == []
+
+
+def test_a_config_stamped_2_never_touches_overrides_yaml(tmp_path):
+    cfg = _write(tmp_path, _config(stamp=2))
+    overrides = _put(tmp_path, "overrides.yaml", {"org": {"default_temperature": 0.6}})
+    before = overrides.read_bytes()
+
+    assert migrate.load_plan(cfg)[1] is None
+    assert overrides.read_bytes() == before
+
+
+@_not_root
+def test_a_read_only_overrides_yaml_is_owed_and_retried_on_the_next_run(tmp_path):
+    cfg = _write(tmp_path, _config(stamp=1))
+    overrides = _put(tmp_path, "overrides.yaml", {"org": {"default_temperature": 0.6}})
+    overrides.chmod(0o444)
+    original, plan = migrate.load_plan(cfg)
+
+    with pytest.raises(migrate.PartialMigrationError) as caught:
+        migrate.apply(cfg, original, plan)
+
+    assert caught.value.failed == overrides and cfg in caught.value.written
+    assert _disk(cfg)["org"]["default_temperature"] is None
+    assert _disk(cfg)["org"]["permissions"]["init_nulls_revision"] == 2
+    assert migrate.read_init_nulls_pending(tmp_path) == ("overrides.yaml",)
+    assert _disk(overrides)["org"]["default_temperature"] == 0.6
+
+    overrides.chmod(0o644)
+    again, retry = migrate.load_plan(cfg)
+    assert retry is not None and [s.path for s in retry.sidecars] == [overrides] and retry.config_unchanged
+    migrate.apply(cfg, again, retry)
+    assert _disk(overrides)["org"]["default_temperature"] is None
+    assert not (tmp_path / migrate.INIT_NULLS_PENDING_FILE).exists()
+    assert migrate.load_plan(cfg)[1] is None
+
+
+@_not_root
+def test_a_hand_set_max_actions_in_a_retried_overrides_yaml_is_not_cleared(tmp_path):
+    cfg = _write(tmp_path, _config(stamp=2))
+    overrides = _put(tmp_path, "overrides.yaml", {"org": {"default_temperature": 0.6,
+                                                         "permissions": {"budget": {"max_actions": 100}}}})
+    (tmp_path / migrate.INIT_NULLS_PENDING_FILE).write_text("overrides.yaml\n", encoding="utf-8")
+
+    _migrate(cfg)
+
+    org = _disk(overrides)["org"]
+    assert org["default_temperature"] is None and org["permissions"]["budget"]["max_actions"] == 100
