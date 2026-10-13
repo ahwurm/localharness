@@ -334,16 +334,16 @@ def redact_for_channel(text: str, harness: Any, key_file_key: Any = None) -> str
     every secret the config holds, the key a key file supplied (a ``SecretStr`` or a str), ``Bearer``
     tokens, llama-server's ``api_keys: ****wxyz`` line and URL credentials all masked (D-22, SEC-04).
     The one channel-side redaction; ``lifecycle.swap`` takes it, bound, as its ``redact``. Redaction
-    never raises into a channel: when the config cannot be read for its secrets, the key and the
-    patterns are still scrubbed."""
+    never raises into a channel: when the config cannot be read for its secrets, the key, the
+    patterns and the URL credentials are still scrubbed."""
+    from localharness.provider.server import strip_url_credentials
     raw = key_file_key.get_secret_value() if hasattr(key_file_key, "get_secret_value") else key_file_key
     held = [raw] if isinstance(raw, str) and raw else []
     try:
-        from localharness.provider.server import strip_url_credentials
         held += secret_values(HarnessConfig, harness.model_dump(mode="python"))
-        return strip_url_credentials(redact.scrub(text, held, patterns=redact.LOGGED_KEY_PATTERNS))
-    except Exception:  # noqa: BLE001 — a channel must always get its text, redacted as far as it can be
-        return redact.scrub(text, held, patterns=redact.LOGGED_KEY_PATTERNS)
+    except Exception:  # noqa: BLE001 — a config that cannot be read for secrets: the key and patterns remain
+        pass
+    return strip_url_credentials(redact.scrub(text, held, patterns=redact.LOGGED_KEY_PATTERNS))
 
 
 def heavy_for(serving: "Serving", harness: Any) -> Any:
