@@ -31,8 +31,10 @@ import math
 import os
 import time
 import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
 
 try:
@@ -41,7 +43,9 @@ except ImportError:  # non-POSIX: the launch lock degrades to an in-process asyn
     fcntl = None  # type: ignore[assignment]
 
 from localharness.config.models import ManagedServerConfig
-from localharness.provider import server
+from localharness.provider import autosense as _auto
+from localharness.provider import server, tuning
+from localharness.provider.tuning import Tuned
 
 log = logging.getLogger(__name__)
 
@@ -80,13 +84,15 @@ class LiveEndpoint:
 
     `window` is the launch's window report (served / trained / fits / asked, D-20) for the caller to
     print, None when no fit was asked for or the runtime has none (vLLM, a daemon); `dropped_env` is
-    the environment names scrubbed from the launched server's environment (D-25)."""
+    the environment names scrubbed from the launched server's environment (D-25); `tuned` is the
+    `Tuned` of the plan that served (what the launch derived), None for an untuned launch (D-21)."""
     base_url: str
     served_models: list[str]
     handle: Any
     note: str | None = None
     window: "WindowReport | None" = None
     dropped_env: tuple[str, ...] = ()
+    tuned: Tuned | None = None
 
 
 @dataclass
@@ -117,6 +123,11 @@ class LifecycleStrategy(Protocol):
     `autosense` is the machine's window-autosense ratios, or None. The fit and `--cache-ram` are
     computed inside `activate` because every launch path goes through it (five paths, one place);
     with None nothing is sized and `activate` behaves exactly as it did before the autosense.
+
+    `on_plan` is the caller's printer for the launch line: a planning strategy (`plans_launch = True`)
+    calls it once with each `LaunchPlan` right before that plan's launch (the first plan, then the
+    retry plan), and with None before an untuned launch; it must not raise into the launch. A strategy
+    that plans nothing accepts it and never calls it.
     """
 
     async def activate(
@@ -130,6 +141,7 @@ class LifecycleStrategy(Protocol):
         api_key: str | None = None,
         peer: str | None = None,
         autosense: "AutosenseConfig | None" = None,
+        on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
     ) -> LiveEndpoint: ...
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None: ...
@@ -159,7 +171,12 @@ class ManagedVllmStrategy:
                  (docker: stop → poll name-free → `rm -f` fallback → raise if still stuck).
     - liveness = NAME-based for docker (`docker_container_running` via `docker inspect`), the
                  fix; pid-based for binary (`server_pid`, correct there).
+
+    With `autosense` set the launch is a `LaunchPlan` (`sense_launch` → `plan_launch`) and the argv
+    started is `plan.argv`; `plans_launch` tells `start` the `on_plan` callback prints the launch line.
     """
+
+    plans_launch = True
 
     async def activate(
         self,
@@ -172,14 +189,23 @@ class ManagedVllmStrategy:
         api_key: str | None = None,
         peer: str | None = None,
         autosense: "AutosenseConfig | None" = None,
+        on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
     ) -> LiveEndpoint:
         keyed = bool(api_key)
         decision = server.launch_decision(spec, keyed, peer=peer)
         if decision.refusal is not None:
             raise server.LaunchRefused(decision.refusal)
-        cmd = server.serve_command(
-            spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
-            context=None, cache_ram=None)
+        plan: LaunchPlan | None = None
+        if autosense is not None:
+            # OFF the event loop: sensing opens the checkpoint's config.json.
+            sensed = await asyncio.to_thread(sense_launch, spec, config_dir, autosense)
+            plan = plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed)
+            cmd = list(plan.argv)
+        else:
+            cmd = server.serve_command(
+                spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
+                context=None, cache_ram=None)
+        _say_plan(on_plan, plan)
         dropped: list[str] = []
         pid = server.start_server(
             config_dir, cmd, runtime=spec.runtime, record_env=getattr(spec, "env", None),
@@ -192,9 +218,9 @@ class ManagedVllmStrategy:
             **server.key_kwargs(api_key),
         )
         handle = server.DOCKER_CONTAINER_NAME if spec.launch == "docker" else pid
-        # No fit for vLLM (D-10): `autosense` is accepted and unused, `window` stays None.
+        # No fit for vLLM (D-10): the plan derives the parsers only, `window` stays None, no retry.
         return LiveEndpoint(base_url=base_url, served_models=served, handle=handle, note=decision.note,
-                            dropped_env=tuple(dropped))
+                            dropped_env=tuple(dropped), tuned=plan.tuned if plan else None)
 
     def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
         """The config dir `activate` polls with, so a reconnect poll reads the same pidfile and log."""
@@ -215,27 +241,129 @@ class ManagedVllmStrategy:
         return Liveness(alive=pid is not None, detail=f"pid {pid}" if pid is not None else "no live pidfile")
 
 
-def _size_llamacpp_launch(
-    spec: ManagedServerConfig, autosense: "AutosenseConfig",
-) -> "tuple[WindowReport, int | None, int | None]":
-    """What a llama.cpp launch asks for: `(report, context, cache_ram)`.
+@dataclass(frozen=True)
+class Sensed:
+    """Everything one launch reads from the machine, gathered once by `sense_launch` and handed to the
+    pure `plan_launch` (spec 20 §6.0, D-14): the model header (a typed, bounded dict), the GPU
+    residency of the weights (`offload`), the free memory, the weights' size, `/proc/meminfo` and a
+    vLLM checkpoint's `config.json`. Every field is None / empty when it could not be known."""
+
+    runtime: str
+    config_dir: Path
+    header: Mapping[str, Any] = field(default_factory=dict)
+    offload: str = "unknown"
+    memory: "_auto.FreeMemory | None" = None
+    weights: int | None = None
+    meminfo: Mapping[str, int] | None = None
+    model_config: Mapping[str, Any] | None = None
+
+
+def sense_launch(spec: ManagedServerConfig, config_dir: Path, autosense: "AutosenseConfig") -> Sensed:
+    """Every read a launch needs, once: the GGUF header, free memory, the weights and `/proc/meminfo`
+    for llama.cpp; a checkpoint's `config.json` for vLLM; nothing for any other runtime. Writes nothing
+    and never raises on bad input (the readers return None / `{}`). Run it off the event loop: it shells
+    out to nvidia-smi."""
+    if spec.runtime == "llamacpp":
+        fi = _auto.compute_fit(spec, autosense, meminfo=True)  # its `fits` is priced without the derived types: unused
+        return Sensed(spec.runtime, config_dir, fi.header, fi.offload, fi.memory, fi.weights, fi.meminfo)
+    if spec.runtime == "vllm":
+        return Sensed(spec.runtime, config_dir, model_config=tuning.read_model_config(spec))
+    return Sensed(spec.runtime, config_dir)
+
+
+@dataclass(frozen=True)
+class LaunchPlan:
+    """The launch a strategy runs, as a value: the exact `argv`, the keywords that built it
+    (`serve_kwargs`), the NAMES of the environment variables the child gets that the harness sets
+    (`env_names` — never a value, never the key), the config.ini home a llama.cpp launch prepares
+    (`config_ini_home`, a path only), the window `report`, what the launch `tuned`, and how this plan
+    came about: `shape` is "full" or "retry", `cause` why a retry was planned ("death"), `dropped` the
+    derived names the retry gave up, `full_fit` the fit `-c` a retry halves from.
+
+    `inputs` is what `retry()` rebuilds from; it is neither compared nor shown, so two plans of the
+    same `Sensed` are equal and a repr carries nothing but the plan."""
+
+    argv: tuple[str, ...]
+    serve_kwargs: Mapping[str, Any]
+    env_names: tuple[str, ...]
+    config_ini_home: Path | None
+    report: "_auto.WindowReport | None"
+    tuned: Tuned
+    shape: str = "full"
+    cause: str | None = None
+    dropped: tuple[str, ...] = ()
+    full_fit: int | None = None
+    inputs: tuple | None = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "serve_kwargs", MappingProxyType(dict(self.serve_kwargs)))
+
+    def retry(self) -> "LaunchPlan | None":
+        """The one relaunch after a death (D-16, D-35), chosen here and nowhere else: the derived
+        spec type dropped and the fit `-c` halved (`max(1, full_fit // 2)`), each only when the plan
+        has it. None for a plan already in the retry shape and for one with neither (a KV-only
+        launch). A record or `extra_args` value is never touched. Pure: the same plan gives an equal
+        retry."""
+        if self.shape != "full" or self.inputs is None:
+            return None
+        spec, sensed, decision, autosense, held = self.inputs
+        kw = dict(self.serve_kwargs)
+        report, tuned, dropped = self.report, self.tuned, ()
+        drops_spec = tuned.spec_type is not None
+        halves = report is not None and report.mode == "fit" and self.full_fit is not None
+        if not drops_spec and not halves:
+            return None
+        if drops_spec:
+            kw.pop("spec_type", None)
+            kw.pop("draft_p_min", None)
+            reasons = {k: v for k, v in tuned.reasons.items() if k != "spec_type"}
+            tuned = dataclasses.replace(tuned, spec_type=None, draft_p_min=None, mtp_layers=None, reasons=reasons)
+            dropped = ("draft-mtp",)
+        if halves:
+            halved = max(1, self.full_fit // 2)
+            kw["context"] = halved
+            report = dataclasses.replace(report, asked=halved, retried=True)
+        return dataclasses.replace(
+            self, argv=tuple(server.serve_command(spec, **kw)), serve_kwargs=kw, report=report, tuned=tuned,
+            shape="retry", cause="death", dropped=dropped)
+
+
+def _effective_cache_types(spec: ManagedServerConfig, tuned: Tuned) -> tuple[str | None, str | None]:
+    """The KV cache types the planned argv carries: the record's, else `extra_args` `-ctk` / `-ctv`,
+    else env `LLAMA_ARG_CACHE_TYPE_K` / `_V` (the record's `env:`), else the derived one (R-08e)."""
+    extra_k, extra_v = _auto.extra_cache_types(list(spec.extra_args or []))
+    env = dict(getattr(spec, "env", None) or {})
+    return (spec.cache_type_k or extra_k or env.get("LLAMA_ARG_CACHE_TYPE_K") or tuned.cache_type,
+            spec.cache_type_v or extra_v or env.get("LLAMA_ARG_CACHE_TYPE_V") or tuned.cache_type)
+
+
+def _size_llamacpp(
+    spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, autosense: "AutosenseConfig",
+) -> "tuple[_auto.WindowReport, int | None, int | None, int | None]":
+    """What a llama.cpp launch asks for, from what was sensed: `(report, context, cache_ram, full_fit)`.
 
     `context` and `cache_ram` are the fit keywords for `serve_command`: the fit's `-c` only when
     the record sets no `context` and `extra_args` carry no `-c` / `--ctx-size`, and the formula's
-    `--cache-ram` only when neither the record nor `extra_args` set one. An unknown or non-positive
-    fit gives no `-c` (llama-server's own `--fit` sizes the window, mode "fit-by-server"); a header
-    that cannot be read, a missing key or an unknown memory is "not computed", never a guess. Reads
-    the header, the free memory and `/proc/meminfo`; starts nothing."""
-    from localharness.provider import autosense as _auto
-
+    `--cache-ram` only when neither the record nor `extra_args` set one. The fit is priced at the
+    KV types the argv carries and, when the argv drafts with MTP, at the draft context's share. An
+    unknown or non-positive fit gives no `-c` (llama-server's own `--fit` sizes the window, mode
+    "fit-by-server"); a header that cannot be read, a missing key or an unknown memory is "not
+    computed", never a guess. Pure."""
     extra = list(spec.extra_args or [])
-    fi = _auto.compute_fit(spec, autosense, meminfo=True)
-    header, mem, weights, mi, fits = fi.header, fi.memory, fi.weights, fi.meminfo, fi.fits
+    env = dict(getattr(spec, "env", None) or {})
+    header, mem, weights, mi = sensed.header, sensed.memory, sensed.weights, sensed.meminfo
+    k, v = _effective_cache_types(spec, tuned)
+    drafting = (tuned.spec_type == "draft-mtp" or spec.speculative == "draft-mtp"
+                or _auto.spec_type_flag(extra, env) == "draft-mtp")
+    fits = _auto.fit(
+        header, mem.free_bytes if mem else None, autosense, cache_type_k=k, cache_type_v=v,
+        weights=weights, offload=sensed.offload, runtime="llamacpp",
+        draft_share=tuning.draft_share(header) if drafting else 1.0)
     has_c = _auto.has_ctx_arg(extra)
     cache_set = spec.cache_ram is not None or _auto.has_cache_ram_arg(extra)
     cache_kw = None if cache_set else _auto.cache_ram_mib(
         mi["MemAvailable"] if mi else None, mi["MemTotal"] if mi else None,
-        weights, fi.offload, extra, autosense)
+        weights, sensed.offload, extra, autosense)
     if spec.context is not None:
         mode, asked, ctx_kw = "record", spec.context, None
     elif has_c:
@@ -249,7 +377,50 @@ def _size_llamacpp_launch(
         free_bytes=mem.free_bytes if mem else None, total_bytes=mem.total_bytes if mem else None,
         weights_bytes=weights, asked=asked, mode=mode, attached=False, retried=False,
         verified=False, runtime="llamacpp")
-    return report, ctx_kw, cache_kw
+    return report, ctx_kw, cache_kw, (fits if mode == "fit" else None)
+
+
+def plan_launch(
+    spec: ManagedServerConfig, sensed: Sensed, decision: "server.LaunchDecision", *,
+    autosense: "AutosenseConfig", api_key_held: bool,
+) -> LaunchPlan:
+    """The launch of `spec` as a value (D-15): derive, fit, build the `serve_command` keywords and the
+    argv. Pure — every read happened in `sense_launch`, nothing is written, and `api_key_held` is a
+    bool so the key itself never enters a plan. The derived keywords reach `serve_command` only when
+    not None, so a launch that derived nothing calls it with exactly the 0.18 keywords (R-08c)."""
+    tuned = tuning.derive(spec, sensed.header, autosense, model_config=sensed.model_config)
+    kw: dict[str, Any] = {
+        "keyed": api_key_held, "loopback": decision.loopback, "key_file_ok": decision.key_file_ok,
+        "context": None, "cache_ram": None}
+    report = None
+    full_fit = None
+    home = None
+    names = sorted(getattr(spec, "env", None) or {})
+    if spec.runtime == "llamacpp":
+        report, kw["context"], kw["cache_ram"], full_fit = _size_llamacpp(spec, sensed, tuned, autosense)
+        home = server.config_ini_home(sensed.config_dir, spec.port)
+        names.append("XDG_CONFIG_HOME")
+    for name in ("cache_type", "spec_type", "draft_p_min", "reasoning_parser", "tool_call_parser"):
+        value = getattr(tuned, name)
+        if value is not None:
+            kw[name] = value
+    if api_key_held and spec.runtime in server.KEY_ENV:
+        names.append(server.KEY_ENV[spec.runtime])
+    return LaunchPlan(
+        argv=tuple(server.serve_command(spec, **kw)), serve_kwargs=kw,
+        env_names=tuple(dict.fromkeys(names)), config_ini_home=home, report=report, tuned=tuned,
+        full_fit=full_fit, inputs=(spec, sensed, decision, autosense, api_key_held))
+
+
+def _say_plan(on_plan: "Callable[[LaunchPlan | None], None] | None", plan: "LaunchPlan | None") -> None:
+    """Hand a plan to the caller's printer right before its launch. The printer is the caller's, and a
+    printer that raises must not stop a launch."""
+    if on_plan is None:
+        return
+    try:
+        on_plan(plan)
+    except Exception:  # noqa: BLE001 - the callback is display only
+        log.debug("on_plan callback raised", exc_info=True)
 
 
 class SpawnedProcessStrategy:
@@ -274,6 +445,8 @@ class SpawnedProcessStrategy:
     strategies is Phase C (keeps this new spawn path out of the monkeypatch-sensitive rewire).
     """
 
+    plans_launch = True
+
     async def activate(
         self,
         spec: ManagedServerConfig,
@@ -285,22 +458,25 @@ class SpawnedProcessStrategy:
         api_key: str | None = None,
         peer: str | None = None,
         autosense: "AutosenseConfig | None" = None,
+        on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
     ) -> LiveEndpoint:
         """Bring the spawned server up and return its endpoint.
 
-        This is where the fit and `--cache-ram` are computed, because every launch path goes through
-        `activate` (five paths, one place). With `autosense` set and the record leaving `context` and
-        `cache_ram` unset, `serve_command` gets the fit as `-c` and the formula as `--cache-ram`;
-        after readiness the served window is read back (`probe_window`) into `LiveEndpoint.window`,
-        and a window smaller than asked is a mismatch to report, never a failure. With
-        `autosense=None` the Phase 1 behaviour is unchanged: no probe, no fit keyword, no retry.
+        With `autosense` set the launch is planned: `sense_launch` reads everything once (off the event
+        loop), the pure `plan_launch` derives the KV type and MTP drafting, fits the window priced for
+        them and builds `plan.argv`, which is exactly what is started (the config.ini home is the one
+        write, prepared just before). `on_plan` is called with the plan right before its launch. After
+        readiness the served window is read back (`probe_window`) into `LiveEndpoint.window`, and a
+        window smaller than asked is a mismatch to report, never a failure. With `autosense=None` the
+        launch is untuned: no sense, no plan, no probe, no retry, `on_plan(None)`.
 
-        A wrong fit costs exactly one retry. When the launch carried a fit `-c` and the process died
-        before it answered, the stale process is stopped (verified, by `stop_server`), the server is
-        relaunched once at half the window (`max(1, fit // 2)`), and a second death is raised with
-        the server's log tail after stopping again so no half-started process is left. A dead
-        process is the only trigger: a `TimeoutError` is never retried, and nothing is halved
-        without a fit keyword (a record `context`, an `extra_args` `-c`, an unknown fit).
+        A launch the plan derived a shape for costs exactly one retry. When it carried a derived spec
+        type or a fit `-c` and the process died before it answered, the stale process is stopped
+        (verified, by `stop_server`) and `plan.retry()` is launched once, from the same `Sensed`: the
+        derived spec type dropped, the fit `-c` halved (`max(1, fit // 2)`). A second death is raised
+        with the server's log tail after stopping again so no half-started process is left. A dead
+        process is the only trigger: a `TimeoutError` is never retried, and nothing is retried when the
+        plan has neither (a KV-only launch, a record `context`, an `extra_args` `-c`, an unknown fit).
 
         "A dead process or a load failure in the log's last lines" (AUTO-05, ROADMAP SC4) is one
         trigger (D-37): llama-server exits on a load failure, so the load failure IS the dead
@@ -310,18 +486,20 @@ class SpawnedProcessStrategy:
         decision = server.launch_decision(spec, keyed, peer=peer)
         if decision.refusal is not None:
             raise server.LaunchRefused(decision.refusal)
-        # OFF the event loop: the sizing reads the header, stats the weights and shells out to
+        # OFF the event loop: sensing reads the header, stats the weights and shells out to
         # nvidia-smi (up to 5 s on a wedged driver), none of which may freeze the REPL's loop.
-        report, ctx_kw, cache_kw = (
-            await asyncio.to_thread(_size_llamacpp_launch, spec, autosense)
-            if autosense is not None and spec.runtime == "llamacpp" else (None, None, None))
-
-        def command(context: int | None) -> list[str]:
-            return server.serve_command(
+        plan: LaunchPlan | None = None
+        if autosense is not None and spec.runtime == "llamacpp":
+            sensed = await asyncio.to_thread(sense_launch, spec, config_dir, autosense)
+            plan = plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed)
+            argv = list(plan.argv)
+        else:
+            argv = server.serve_command(
                 spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
-                context=context, cache_ram=cache_kw)
+                context=None, cache_ram=None)
+        _say_plan(on_plan, plan)
 
-        # Once per activate (the halve-once retry reuses it): the llama.cpp config the child reads is
+        # Once per activate (the retry reuses it): the llama.cpp config the child reads is
         # the record's bytes in a harness-owned directory, never the person's real file (D-30).
         try:
             home = server.prepare_config_ini_home(config_dir, spec.port, getattr(spec, "config_ini", None))
@@ -348,14 +526,15 @@ class SpawnedProcessStrategy:
                 **server.key_kwargs(api_key),
             )
 
-        pid, dropped = launch(command(ctx_kw))
+        pid, dropped = launch(argv)
         try:
             served = await ready()
         except RuntimeError as died:
-            # A dead process on a -c the harness chose is the one case worth a second try; a record
-            # or extra_args -c, no -c at all and autosense=None re-raise at once (D-18). A
-            # TimeoutError is not a RuntimeError and is never caught here.
-            if report is None or report.mode != "fit" or not ctx_kw:
+            # The plan alone says whether a death is worth a second try (`LaunchPlan.retry`, D-16):
+            # a derived spec type or a fit `-c`. A launch with neither, a record value, an
+            # extra_args value, no plan at all and a TimeoutError (not a RuntimeError) re-raise at once.
+            retry = plan.retry() if plan is not None else None
+            if retry is None:
                 raise
             try:
                 await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
@@ -363,8 +542,8 @@ class SpawnedProcessStrategy:
                 # A pid that survived SIGKILL makes a relaunch unsafe; the load failure with its log
                 # tail is the message the user needs, not the stop's.
                 raise died from None
-            halved = max(1, ctx_kw // 2)
-            pid, dropped = launch(command(halved))
+            _say_plan(on_plan, retry)
+            pid, dropped = launch(list(retry.argv))
             try:
                 served = await ready()
             except RuntimeError:
@@ -372,7 +551,8 @@ class SpawnedProcessStrategy:
                 with contextlib.suppress(RuntimeError):
                     await asyncio.to_thread(server.stop_server, config_dir, launch="binary")
                 raise
-            report = dataclasses.replace(report, asked=halved, retried=True)
+            plan = retry
+        report = plan.report if plan is not None else None
         if report is not None:
             from localharness.agent.context import probe_window
 
@@ -382,7 +562,7 @@ class SpawnedProcessStrategy:
                 report, served=probe.served, trained=probe.trained or report.trained,
                 verified=probe.served is not None)
         return LiveEndpoint(base_url=base_url, served_models=served, handle=pid, note=decision.note,
-                            window=report, dropped_env=tuple(dropped))
+                            window=report, dropped_env=tuple(dropped), tuned=plan.tuned if plan else None)
 
     def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
         """The config dir `activate` polls with, so a reconnect poll reads the same pidfile and log."""
@@ -431,6 +611,7 @@ class DaemonStrategy:
         api_key: str | None = None,
         peer: str | None = None,
         autosense: "AutosenseConfig | None" = None,
+        on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
     ) -> LiveEndpoint:
         # CONTRACT: like every LifecycleStrategy.activate, this raises ONLY RuntimeError/TimeoutError
         # on failure — the /model swap callers catch exactly those to tear down + restore. _load
@@ -579,6 +760,7 @@ class LmsStrategy:
         api_key: str | None = None,
         peer: str | None = None,
         autosense: "AutosenseConfig | None" = None,
+        on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
     ) -> LiveEndpoint:
         v1 = self._v1(base_url)
         if await self._server_already_up(v1):
