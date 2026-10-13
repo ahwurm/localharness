@@ -10,6 +10,7 @@ reach because their per-agent yaml pins a concrete model.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from localharness.config.plugin_sections import core_harness_view
 from localharness.config.redact import secret_values, validation_text
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
+from localharness.provider.units import TARGET_NAME, read_target
 from localharness.registry import set_value_in_dict
 
 _AGENT_KEY = "agent"
@@ -385,6 +387,173 @@ def clear_active_endpoint(harness: Any, *, config_dir: Any = None) -> None:
     _validated(harness, {k: v for k, v in new_overlay.items() if k != _AGENT_KEY})
     atomic_write_overlay(overlay_path, new_overlay)
     harness.active_endpoint = None
+
+
+# --------------------------------------------------------------------------- the selection ladder
+# One ladder every surface reads (spec 20 §8.1, D-01): an explicit --preset, then the intent the shell
+# recorded (`pending_preset`), then the unit's own target (`unit-target`), then the last success
+# (`active_endpoint`), then the primary (`server:`). Every rung hands back the RECORD the loaded config
+# holds, never a store's own fields: a store contributes a name (or, for `active_endpoint`, a match
+# key) and nothing it says can become a URL or an argument (T-13-13).
+
+RUNG_PRESET = "--preset"
+RUNG_PENDING = "pending_preset"
+RUNG_UNIT = TARGET_NAME  # the store's own name: units.py is the one place that spells it
+RUNG_ACTIVE = "active_endpoint"
+RUNG_DEFAULT = "server:"
+
+UNKNOWN_PRESET_LINE = "unknown preset '{name}' — presets: {names}"
+AMBIGUOUS_PRESET_LINE = "preset '{name}' is ambiguous — it matches {first} and {second}"
+GONE_SELECTION_LINE = "{store} names {name}, which is no longer a preset — removed"
+
+
+@dataclass(frozen=True)
+class ServingRecord:
+    """One launch record the loaded config holds: the primary (``peer`` None, ``prefix`` "server") or
+    a peer (``prefix`` "extra_endpoints.<name>.lifecycle"). ``spec`` is its ``ManagedServerConfig``,
+    None for an attach-only record. ``served`` is the model id it answers to."""
+    name: str
+    served: str
+    base_url: str
+    provider_type: str
+    peer: Any
+    spec: Any
+    prefix: str
+
+
+@dataclass(frozen=True)
+class Serving:
+    """What the ladder chose: the record, the rung that named it, and whether a person asked for it
+    (``--preset`` and ``pending_preset`` are asks; the rest are what happened last). ``gone`` lists
+    the stored selections that named nothing, for the caller to remove through ``clear_gone``."""
+    record: ServingRecord
+    rung: str
+    explicit: bool
+    gone: tuple = ()
+
+
+@dataclass(frozen=True)
+class ServingRefusal:
+    """A name the ladder will not serve. ``kind`` is "unknown", "ambiguous" or "withheld"; ``line`` is
+    the one line to show; ``exit_code`` is what a command exits with."""
+    line: str
+    kind: str
+    exit_code: int = 2
+
+
+@dataclass(frozen=True)
+class GoneSelection:
+    """A stored selection (``store`` "pending_preset" or "unit-target") naming no record."""
+    store: str
+    name: str
+    line: str
+
+
+def _norm_url(url: Any) -> str:
+    return str(url or "").rstrip("/")
+
+
+def _primary_record(harness: Any) -> ServingRecord:
+    provider = harness.provider
+    server = getattr(harness, "server", None)
+    served = primary_served_name(server, provider) or getattr(provider, "default_model", "") or ""
+    return ServingRecord(
+        name=served, served=served, base_url=provider.base_url,
+        provider_type=provider.provider_type, peer=None, spec=server, prefix="server")
+
+
+def serving_records(harness: Any) -> tuple[ServingRecord, ...]:
+    """Every record the loaded config can serve or attach to: the primary first, then each peer in
+    config order. An attach-only record is here (an ``active_endpoint`` can name it) but is not a
+    preset; see ``_preset_records``."""
+    records = [_primary_record(harness)]
+    for ep in getattr(harness, "extra_endpoints", None) or []:
+        records.append(ServingRecord(
+            name=ep.name, served=peer_served_name(ep), base_url=ep.base_url,
+            provider_type=ep.provider_type, peer=ep, spec=getattr(ep, "lifecycle", None),
+            prefix=f"extra_endpoints.{ep.name}.lifecycle"))
+    return tuple(records)
+
+
+def record_for_base_url(harness: Any, base_url: str) -> ServingRecord | None:
+    """The record whose own ``base_url`` is ``base_url`` (a trailing slash does not matter)."""
+    want = _norm_url(base_url)
+    return next((r for r in serving_records(harness) if _norm_url(r.base_url) == want), None)
+
+
+def _preset_records(harness: Any, trust: Any) -> tuple[ServingRecord, ...]:
+    return tuple(r for r in serving_records(harness) if r.spec is not None)
+
+
+def _candidates(record: ServingRecord) -> tuple[str, ...]:
+    return (record.name,) if record.served == record.name else (record.name, record.served)
+
+
+def resolve_preset(harness: Any, trust: Any, name: str) -> ServingRecord | ServingRefusal:
+    """The preset record ``name`` stands for. Exact name first (D-03)."""
+    records = _preset_records(harness, trust)
+    hits = [r for r in records if name in _candidates(r)]
+    if len(hits) == 1:
+        return hits[0]
+    names = ", ".join(sorted({r.name for r in records}))
+    return ServingRefusal(UNKNOWN_PRESET_LINE.format(name=name, names=names), "unknown")
+
+
+def _stored(harness: Any, trust: Any, store: str, name: str, config_dir: Any) -> Any:
+    """A stored name resolved: its record, a refusal, or a ``GoneSelection`` when it names nothing."""
+    got = resolve_preset(harness, trust, name)
+    if isinstance(got, ServingRefusal) and got.kind == "unknown":
+        return GoneSelection(store, name, GONE_SELECTION_LINE.format(store=store, name=name))
+    return got
+
+
+def _active_record(harness: Any) -> ServingRecord | None:
+    """The record ``active_endpoint`` names: by ``base_url``, then by a ``model`` exactly one record
+    serves. None when it matches nothing (the rung is passed over; the store is left as it is)."""
+    active = getattr(harness, "active_endpoint", None)
+    if active is None:
+        return None
+    by_url = record_for_base_url(harness, active.base_url)
+    if by_url is not None:
+        return by_url
+    by_model = [r for r in serving_records(harness) if r.served == active.model]
+    return by_model[0] if len(by_model) == 1 else None
+
+
+def resolve_serving(
+    harness: Any, trust: Any, preset: str | None, *, config_dir: Any = None
+) -> Serving | ServingRefusal:
+    """Walk the ladder: ``--preset`` > ``pending_preset`` > ``unit-target`` > ``active_endpoint`` >
+    ``server:``. Writes nothing; a stored selection that names nothing comes back on ``Serving.gone``
+    for the caller to pass to ``clear_gone`` (R-13-11)."""
+    gone: list[GoneSelection] = []
+    if preset is not None:
+        got = resolve_preset(harness, trust, preset)
+        if isinstance(got, ServingRefusal):
+            return got
+        return Serving(got, RUNG_PRESET, True)
+    pending = getattr(harness, "pending_preset", None)
+    if pending:
+        got = _stored(harness, trust, RUNG_PENDING, pending, config_dir)
+        if isinstance(got, GoneSelection):
+            gone.append(got)
+        elif isinstance(got, ServingRefusal):
+            return got
+        else:
+            return Serving(got, RUNG_PENDING, True, tuple(gone))
+    target = read_target(global_config_dir(config_dir))
+    if target:
+        got = _stored(harness, trust, RUNG_UNIT, target, config_dir)
+        if isinstance(got, GoneSelection):
+            gone.append(got)
+        elif isinstance(got, ServingRefusal):
+            return got
+        else:
+            return Serving(got, RUNG_UNIT, False, tuple(gone))
+    record = _active_record(harness)
+    if record is not None:
+        return Serving(record, RUNG_ACTIVE, False, tuple(gone))
+    return Serving(_primary_record(harness), RUNG_DEFAULT, False, tuple(gone))
 
 
 async def persist_effort(
