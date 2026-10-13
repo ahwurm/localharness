@@ -443,7 +443,7 @@ class LaunchPlan:
         if halves:
             halved = max(1, self.full_fit // 2)
             kw["context"] = halved
-            report = dataclasses.replace(report, asked=halved, retried=True)
+            report = dataclasses.replace(report, asked=halved, retried=cause == "death")  # IN-01: only a death retried
         return dataclasses.replace(
             self, argv=tuple(server.serve_command(spec, **kw)), serve_kwargs=kw, report=report, tuned=tuned,
             shape="retry", cause=cause, dropped=dropped, remembered_at=remembered_at)

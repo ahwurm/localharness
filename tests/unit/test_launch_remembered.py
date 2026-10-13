@@ -314,3 +314,21 @@ def test_a_prior_death_with_nothing_to_drop_or_halve_is_the_full_plan(tmp_path, 
     spec = _gguf_spec(tmp_path, FLASH_NEXT, context=32768)
     plan = _plan(spec, dataclasses.replace(_sense(spec, tmp_path), prior_death=True))
     assert plan.shape == "full"
+
+
+# ------------------------------------------------------------------- IN-01: only a death is "after one retry"
+
+
+def test_a_remembered_or_boot_plan_is_not_reported_as_retried(tmp_path, box):
+    from localharness.provider.autosense import window_lines
+
+    spec = _gguf_spec(tmp_path, SWIFT)
+    full = _plan(spec, _sense(spec, tmp_path))
+    remembered = _plan(spec, _remembered(spec, tmp_path, full_fit=full.full_fit))
+    boot = full._shaped("boot", drop_spec=True)
+    for plan in (remembered, boot):
+        assert plan.report.asked == full.full_fit // 2 and plan.report.retried is False
+        assert "after one retry" not in window_lines(plan.report, KNOBS)[0]
+    death = full.retry()
+    assert death.report.retried is True
+    assert "after one retry" in window_lines(death.report, KNOBS)[0]
