@@ -318,3 +318,14 @@ def test_table_derivation_never_touches_sizing_flags(tmp_path, model_type):
 def test_a_model_type_from_the_file_is_never_emitted_as_a_value(tmp_path):
     spec = _spec(_checkpoint(tmp_path, {"model_type": "--evil", "architectures": ["--x"]}))
     assert "--evil" not in _argv(spec) and "--x" not in _argv(spec)
+
+
+def test_a_relative_model_never_reads_a_config_json_from_the_working_directory(tmp_path, monkeypatch):
+    """IN-04: `Qwen/Qwen3-8B` is a repo id; a same-named directory under the cwd is never read."""
+    (tmp_path / "Qwen").mkdir()
+    _checkpoint(tmp_path / "Qwen", name="Qwen3-8B")
+    monkeypatch.chdir(tmp_path)
+    looked_up: list[str] = []
+    monkeypatch.setattr(tuning, "_hf_cached_config", lambda repo_id: looked_up.append(repo_id))
+    assert read_model_config(_spec("Qwen/Qwen3-8B")) is None
+    assert looked_up == ["Qwen/Qwen3-8B"]
