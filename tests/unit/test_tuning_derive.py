@@ -83,6 +83,11 @@ KV_SUPPRESSED = [
     pytest.param({"extra_args": ["--flash-attn", "off"]}, id="spelling---flash-attn-off"),
     pytest.param({"extra_args": ["--flash-attn=off"]}, id="spelling---flash-attn=off"),
     pytest.param({"extra_args": ["-fa", "OFF"]}, id="spelling--fa-OFF"),
+    # CR-02: every falsey spelling the env check accepts, in each argv form
+    *[pytest.param({"extra_args": form}, id=f"spelling-{'='.join(form) if len(form) == 1 else ' '.join(form)}")
+      for v in ("0", "false", "disabled", "False", "DISABLED")
+      for form in (["-fa", v], [f"-fa={v}"], ["--flash-attn", v], [f"--flash-attn={v}"])],
+    pytest.param({"config_ini": "fa = 0\n"}, id="config_ini-fa-0"),
     *[pytest.param({"env": {"LLAMA_ARG_FLASH_ATTN": v}}, id=f"spelling-env-flash-attn-{v}")
       for v in ("off", "0", "false", "disabled", "OFF", "False", "Disabled")],
     # CR-01: the record's config_ini is an explicit setting too (key = flag name or env name, any case)

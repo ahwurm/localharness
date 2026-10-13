@@ -301,11 +301,12 @@ def has_cache_type_flag(extra_args: Sequence[str], env: Mapping[str, str]) -> bo
 
 
 def flash_attn_off(extra_args: Sequence[str], env: Mapping[str, str]) -> bool:
-    """Whether flash attention is switched off: `-fa` / `--flash-attn` with the value `off` (next
-    token or `=` form) in `extra_args`, or `LLAMA_ARG_FLASH_ATTN` in `env` set to off / 0 / false /
-    disabled (any case). A quantized V cache needs flash attention, so off suppresses the KV derivation."""
+    """Whether flash attention is switched off: `-fa` / `--flash-attn` (next token or `=` form) in
+    `extra_args`, or `LLAMA_ARG_FLASH_ATTN` in `env`, set to off / 0 / false / disabled in any case
+    (llama.cpp's falsey set, one table for both). A quantized V cache needs flash attention, so off
+    suppresses the KV derivation."""
     value = _flag_value(extra_args, _FLASH_ATTN_FLAGS)
-    if value is not None and value.strip().lower() == "off":
+    if value is not None and value.strip().lower() in _FLASH_ATTN_OFF_ENV:
         return True
     raw = env.get("LLAMA_ARG_FLASH_ATTN")
     return raw is not None and str(raw).strip().lower() in _FLASH_ATTN_OFF_ENV
