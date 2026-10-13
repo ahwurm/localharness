@@ -103,6 +103,20 @@ def test_first_start_prints_and_records_second_is_silent(tmp_path):
     assert again is not None and again.recorded_at >= first_at  # recorded both times (R-07c)
 
 
+def test_the_default_printer_prints_the_line_as_plain_text_never_markup(tmp_path, monkeypatch):
+    """T-12-24: the rung label rides the line verbatim, so the console must not read it as markup."""
+    from localharness.cli import start_cmd
+
+    printed: list[tuple[tuple, dict]] = []
+    monkeypatch.setattr(start_cmd.console, "print", lambda *a, **k: printed.append((a, k)))
+    _say_sampling(WindowProbe(65536, 262144, 1.0), temperature=0.6, rung="[bold]agents.x.temperature",
+                  ledger=tmp_path / "speed.json", provider_type="llamacpp", model="qwen")
+    assert len(printed) == 1
+    (args, kwargs), = printed
+    assert args[0].startswith("sampling: temperature 0.6 from [bold]agents.x.temperature")
+    assert kwargs.get("markup") is False
+
+
 def test_a_probe_that_reported_no_default_prints_and_records_nothing(tmp_path):
     said: list[str] = []
     _say(tmp_path, WindowProbe(65536, 262144), said)
