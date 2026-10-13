@@ -87,8 +87,10 @@ def test_peer_by_served_name_selects_that_peer(components_home, monkeypatch):
     for arg in ("fn-q3", "flash-next"):
         result = runner.invoke(app, ["model", arg, "--config-dir", str(components_home)])
         assert result.exit_code == 0, result.output
-        active = _overlay(components_home)["active_endpoint"]
+        overlay = _overlay(components_home)
+        active = overlay["active_endpoint"]
         assert active["name"] == "flash-next" and active["model"] == "fn-q3"
+        assert overlay["pending_preset"] == "flash-next"
 
 
 def test_peer_served_name_from_extra_args_alias(components_home, monkeypatch):
@@ -178,6 +180,10 @@ def test_primary_served_name_clears_selection_and_sets_default(components_home, 
     assert overlay["provider"]["default_model"] == PRIMARY_SERVED
     # a llama.cpp primary: the alias would become `-m`, so server.model is never written
     assert "server" not in overlay
+    # the swap-back is a selection too: the next start's ladder reads the primary by name
+    assert overlay["pending_preset"] == PRIMARY_SERVED
+    assert f"Selected {PRIMARY_SERVED} — the next start serves it" in result.output.replace("\n", " ")
+    assert "Cleared the peer selection." not in result.output
 
 
 def test_primary_switch_back_with_default_already_served_name(components_home, monkeypatch):
@@ -189,6 +195,8 @@ def test_primary_switch_back_with_default_already_served_name(components_home, m
     overlay = _overlay(components_home)
     assert "active_endpoint" not in overlay
     assert "server" not in overlay
+    assert overlay["pending_preset"] == PRIMARY_SERVED
+    assert "the next start serves it" in result.output.replace("\n", " ")
 
 
 def test_primary_served_name_passes_local_operator_both_ways(components_home, monkeypatch):
