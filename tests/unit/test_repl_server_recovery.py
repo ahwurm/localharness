@@ -356,9 +356,12 @@ async def test_a_failed_cold_launch_restores_inside_the_held_lock_without_deadlo
 
     await asyncio.wait_for(repl._handle_slash("/model qwen-gguf"), 5)
 
-    assert watch.entries == 2  # the swap, and the nested ask of _restore_incumbent
-    assert watch.opens == 1    # ... which opened nothing
-    assert watch.held_at_start == [{watch.key}, {watch.key}]
+    # One entry: `lifecycle.swap` restores the incumbent itself, inside the REPL's lock, without
+    # asking for it again (R-13-25). The managed swap-back below still restores through
+    # `_restore_incumbent`, which nests, so its count stays 2.
+    assert watch.entries == 1
+    assert watch.opens == 1
+    assert watch.held_at_start == [{watch.key}, {watch.key}]  # the peer's start, and the restore's
     assert "Launch of llamacpp-local failed" in channel.messages[-1] and "Restored" in channel.messages[-1]
     assert repl._active_heavy == (primary, PRIMARY_URL)
     assert lifecycle._HELD == {}
