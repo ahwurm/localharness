@@ -69,7 +69,9 @@ class LLMConfig:
     # threaded from ProviderConfig.reconnect_wait_seconds by `start`. 0.0 is off, so every caller
     # that does not thread it (bench, probes, tests) is reconnect-off.
     reconnect_wait_seconds: float = 0.0
-    temperature: float = 0.6
+    # None sends NO temperature, so the server's own defaults apply (on llama.cpp, the model's
+    # `general.sampling.*`). A number is a choice somebody made and is sent on every request.
+    temperature: float | None = None
     # None = NO cap: the request omits max_tokens and the model generates until it is done,
     # bounded only by the window the server serves. That is the default, and it is what a
     # long-running task needs — a number here is honored exactly and sent on every request.
@@ -490,6 +492,16 @@ def _presence_penalty_kwarg(value: float | None) -> dict[str, float]:
     degenerate (repeating) generation; never sent otherwise, so the common request is
     byte-identical and a server that does not know the field is never shown it."""
     return {"presence_penalty": value} if value is not None else {}
+
+
+def _sampling_kwargs(config: "LLMConfig") -> dict[str, float]:
+    """`{"temperature": t}` when a person set one — or NOTHING at all.
+
+    Splatted into the request kwargs so "unset" is the ABSENCE of the parameter: the server's own
+    sampling (the model's `general.sampling.temp` on llama.cpp) governs. The two capability probes
+    pin a zero temperature explicitly and do not come through here.
+    """
+    return {"temperature": config.temperature} if config.temperature is not None else {}
 
 
 def _max_tokens_kwarg(cap: int | None) -> dict[str, int]:
@@ -1248,7 +1260,7 @@ class LLMClient:
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": provider_messages(messages),
-            "temperature": self.config.temperature,
+            **_sampling_kwargs(self.config),
             **_max_tokens_kwarg(max_tokens or self.config.max_tokens),
             **_presence_penalty_kwarg(presence_penalty),
         }
@@ -1758,7 +1770,7 @@ class LLMClient:
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": injected_messages,
-            "temperature": self.config.temperature,
+            **_sampling_kwargs(self.config),
             **_max_tokens_kwarg(max_tokens or self.config.max_tokens),
             **_presence_penalty_kwarg(presence_penalty),
         }
@@ -1838,7 +1850,7 @@ class LLMClient:
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": msgs,
-            "temperature": self.config.temperature,
+            **_sampling_kwargs(self.config),
             **_max_tokens_kwarg(max_tokens or self.config.max_tokens),
             **_presence_penalty_kwarg(presence_penalty),
         }

@@ -1657,17 +1657,17 @@ class ConfigLoader:
         # rungs live in config/effort.py::resolve_effort; the overlay does not carry this field.
         merged["effort"] = _resolve_scalar("effort", raw.get("effort"), division.effort if division else None, None, "inherit")
 
-        # `model_fields_set`: OrgConfig's temperature/max_tokens carry SCHEMA defaults (0.6, 4096),
-        # never None — so reading them straight made the org layer "set" on every install and the
-        # rung below it (the overlay, and the shipped default it stands on) unreachable. Only a
-        # value the org config actually declared counts as org inheritance. `default_model` needs
-        # no such guard: its unset spelling is the empty string, already handled above.
+        # Temperature: every rung's unset spelling is None, so an undeclared value falls through
+        # and None all the way down is the answer "nobody chose one" — it stays None to the wire,
+        # where the request omits `temperature` and the model's own sampling applies (spec 20 §7).
+        # The org rung reads the layered raw `org:` section first and the legacy org.yaml second,
+        # exactly as `default_max_tokens` does below.
         agent_temp = raw.get("temperature")
         div_temp = division.temperature if division else None
-        org_temp = org.default_temperature if "default_temperature" in org.model_fields_set else None
+        org_temp = self._layered_raw_org().get("default_temperature", org.default_temperature)
         merged["temperature"] = _resolve_scalar(
             "temperature", agent_temp, div_temp, org_temp,
-            _overlay_default(overlay_agent, "temperature", 0.6),
+            _overlay_default(overlay_agent, "temperature", None),
         )
 
         # max_tokens needs no `model_fields_set` guard: its unset spelling is None at every rung
@@ -1682,10 +1682,9 @@ class ConfigLoader:
         # actually have never reached this resolution at all, exactly as the deny-pattern union
         # below documents for its own field. Read the layered raw `org:` section first (the same
         # precedence `_raw_org_context` uses for `context:`), legacy org.yaml second.
-        # `default_temperature` and `default_model` have the identical hole and are deliberately
-        # NOT changed here: switching on a temperature that has been inert in someone's
-        # config.yaml is a behaviour change that needs its own decision, not a silent ride along
-        # with a fix about the output cap.
+        # The temperature rung above is live for the root for the same reason (spec 20 §7), after
+        # init-nulls revision 2 nulled the 0.6 init once dumped; `default_model` keeps its own
+        # handling (its unset spelling is the empty string, read from the legacy org only).
         org_mt = self._layered_raw_org().get("default_max_tokens", org.default_max_tokens)
         merged["max_tokens"] = _resolve_scalar(
             "max_tokens", agent_mt, div_mt, org_mt,

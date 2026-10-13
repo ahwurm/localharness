@@ -193,10 +193,10 @@ async def test_thinking_off_is_sent_on_every_runtime(mode, ptype):
 async def test_no_budget_and_no_thinking_off_is_byte_identical_to_today(mode, ptype):
     client, server = make(mode, ptype)
     await client.stream_complete(MSGS)
-    assert set(server.calls[0]) == {"model", "messages", "temperature", "stream", "stream_options"}
+    assert set(server.calls[0]) == {"model", "messages", "stream", "stream_options"}
     server.calls.clear()
     await client.complete(MSGS)
-    assert set(server.calls[0]) == {"model", "messages", "temperature"}
+    assert set(server.calls[0]) == {"model", "messages"}
 
 
 @pytest.mark.parametrize("mode", MODES)

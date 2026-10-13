@@ -28,7 +28,7 @@ def test_llm_config_defaults():
     # #10: default synced to 600s — a 4096-token completion at ~10 tok/s single-stream is
     # ~410s, which the old 300s default killed mid-generation (e.g. bench/orchestrator.py).
     assert config.timeout_seconds == 600.0
-    assert config.temperature == 0.6
+    assert config.temperature is None  # unset sends none: the model's own sampling applies
     # No cap by default: the request omits max_tokens entirely and the model generates until it
     # is done. A number here is a deliberate choice, never a shipped guess.
     assert config.max_tokens is None
