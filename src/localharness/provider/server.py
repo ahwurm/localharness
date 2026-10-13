@@ -609,6 +609,9 @@ def serve_command(
     key_file_ok: bool = False,
     context: int | None = None,
     cache_ram: int | None = None,
+    cache_type: str | None = None,
+    spec_type: str | None = None,
+    draft_p_min: float | None = None,
 ) -> list[str]:
     """Build the launch command for srv.model. Pure: list argv, no shell, no I/O.
 
@@ -630,10 +633,12 @@ def serve_command(
     Otherwise srv.model passes through untouched (HF repo id resolved via the cache).
 
     runtime='llamacpp' (0.11 Phase B) is a separate, simpler shape the harness spawns directly:
-    `llama-server -m <gguf> [-a <alias>] [--mmproj <p>] [--cache-type-k/-v <t>] [-c <n>]
-    [--cache-ram <n>] [--api-key-file <p>] --port <p> [--host 0.0.0.0] <extra_args>
-    [--host 127.0.0.1]` — every item from the record, in that order, each only when set; the
-    record's own `context` / `cache_ram` win over the fit keywords, which fill an unset one; `~` in
+    `llama-server -m <gguf> [-a <alias>] [--mmproj <p>] [--cache-type-k/-v <t>]
+    [--spec-type <t> [--spec-draft-p-min <p>]] [-c <n>] [--cache-ram <n>] [--api-key-file <p>]
+    --port <p> [--host 0.0.0.0] <extra_args> [--host 127.0.0.1]` — every item from the record, in that order, each only when set; the
+    record's own `context` / `cache_ram` / `cache_type_*` / `speculative` win over the keywords
+    (`context`, `cache_ram`, `cache_type`, `spec_type`, `draft_p_min`), which fill an unset one
+    (`speculative: draft-mtp` emits `--spec-type draft-mtp` alone, `off` emits nothing); `~` in
     the model, mmproj and key-file paths is expanded as a string (no stat); the key file rides argv
     only when `key_file_ok`. A GGUF file IS the model, so there is no docker mount /
     --served-model-name registry indirection."""
@@ -642,12 +647,22 @@ def serve_command(
         ctx = srv.context if srv.context is not None else context
         ram = srv.cache_ram if srv.cache_ram is not None else cache_ram
         key_file = os.path.expanduser(srv.api_key_file) if srv.api_key_file else None
+        k = srv.cache_type_k if srv.cache_type_k is not None else cache_type
+        v = srv.cache_type_v if srv.cache_type_v is not None else cache_type
+        if srv.speculative == "draft-mtp":
+            spec = ["--spec-type", "draft-mtp"]
+        elif srv.speculative is None and spec_type is not None:
+            spec = ["--spec-type", spec_type,
+                    *(["--spec-draft-p-min", str(float(draft_p_min))] if draft_p_min is not None else [])]
+        else:
+            spec = []
         return [
             str(srv.binary), "-m", os.path.expanduser(srv.model),
             *(["-a", srv.served_name] if srv.served_name is not None else []),
             *(["--mmproj", os.path.expanduser(srv.mmproj)] if srv.mmproj is not None else []),
-            *(["--cache-type-k", srv.cache_type_k] if srv.cache_type_k is not None else []),
-            *(["--cache-type-v", srv.cache_type_v] if srv.cache_type_v is not None else []),
+            *(["--cache-type-k", k] if k is not None else []),
+            *(["--cache-type-v", v] if v is not None else []),
+            *spec,
             *(["-c", str(ctx)] if ctx is not None else []),
             *(["--cache-ram", str(ram)] if ram is not None else []),
             *(["--api-key-file", key_file] if key_file_ok and key_file else []),
