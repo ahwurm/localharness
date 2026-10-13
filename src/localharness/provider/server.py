@@ -25,14 +25,16 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from secrets import token_hex
 
 import httpx
 import structlog
 from pydantic import SecretStr
 
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
+from localharness.config import redact
 from localharness.config.models import ManagedServerConfig
 from localharness.core import private_files
 from localharness.core.private_files import NotRegularFile, open_regular, private_opener
@@ -1176,7 +1178,8 @@ async def wait_ready(
         while time.monotonic() < deadline:
             if config_dir is not None and server_pid(config_dir) is None:
                 raise RuntimeError(
-                    f"{label} exited during startup. Log tail:\n" + log_tail(config_dir)
+                    f"{label} exited during startup. Log tail:\n"
+                    + _tail_block(config_dir, f"{label} exited during startup", api_key)
                 )
             if config_dir is not None and expect is not None:
                 live = procfs.read_launch(
@@ -1198,8 +1201,41 @@ async def wait_ready(
             if on_poll is not None:
                 on_poll(time.monotonic() - start)
             await asyncio.sleep(poll_seconds)
-    tail = f" Log tail:\n{log_tail(config_dir)}" if config_dir is not None else ""
+    tail = (f" Log tail:\n{_tail_block(config_dir, f'{label} not ready after {timeout_seconds:.0f}s', api_key)}"
+            if config_dir is not None else "")
     raise TimeoutError(f"{label} not ready after {timeout_seconds:.0f}s.{tail}")
+
+
+LOG_REF_LINE = "(see log {path}, ref {ref})"
+"""Where an error that quotes the log sends the reader: the raw lines are in serve.log, under this ref."""
+
+
+def log_reference(config_dir: Path, what: str) -> str:
+    """Record that an error quoted the log's tail (`=== ref <id>: <what> ===`, appended to serve.log,
+    best effort, 0600) and return the id the error names. The raw lines stay in serve.log and nowhere
+    else: no exception carries them (D-22)."""
+    ref = token_hex(4)
+    try:
+        with open(log_path(config_dir), "ab", opener=private_opener) as log:
+            log.write(f"\n=== ref {ref}: {what} ===\n".encode("utf-8", errors="replace"))
+    except OSError:
+        pass  # the reference still names the log; a missing line there is not worth another failure
+    return ref
+
+
+def scrubbed_tail(config_dir: Path, *, secrets: Iterable[Any] = (), lines: int = 15) -> str:
+    """The log's tail as an error may quote it: `Bearer` tokens, llama-server's `api_keys:` line, the
+    key(s) in `secrets` and URL credentials all masked (D-22, SEC-04). The only reader of `log_tail`."""
+    held = [raw for raw in map(_raw_key, secrets) if raw]
+    return strip_url_credentials(
+        redact.scrub(log_tail(config_dir, lines), held, patterns=redact.LOGGED_KEY_PATTERNS))
+
+
+def _tail_block(config_dir: Path, what: str, api_key: Any = None) -> str:
+    """The scrubbed tail followed by `(see log <path>, ref <id>)`, for an error about `what`."""
+    tail = scrubbed_tail(config_dir, secrets=(api_key,))
+    ref = log_reference(config_dir, what)
+    return tail + "\n" + LOG_REF_LINE.format(path=log_path(config_dir), ref=ref)
 
 
 def log_tail(config_dir: Path, lines: int = 15) -> str:

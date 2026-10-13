@@ -52,11 +52,23 @@ def reveal(node: Any) -> Any:
     return node
 
 
-def scrub(text: str, secrets: Any) -> str:
-    """Replace every non-empty secret string in `text` with SECRET_MASK (error texts may echo input)."""
+LOGGED_KEY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(Bearer\s+)\S+", re.IGNORECASE),
+    re.compile(r"(api_keys?\s*[:=]\s*)\S+", re.IGNORECASE),
+)
+"""The two forms llama-server logs a key in: an `Authorization: Bearer <key>` header line and its
+startup `api_keys: ****wxyz` line (a masked suffix of the key). Group 1 is kept, the rest masked."""
+
+
+def scrub(text: str, secrets: Any, *, patterns: Iterable[re.Pattern[str]] = ()) -> str:
+    """Replace every non-empty secret string in `text` with SECRET_MASK (error texts may echo input),
+    then mask what each of `patterns` matches: the whole match, or everything after its first group
+    when it has one (`LOGGED_KEY_PATTERNS`: text a log quotes whose value is not known here)."""
     for secret in secrets:
         if isinstance(secret, str) and secret:
             text = text.replace(secret, SECRET_MASK)
+    for pattern in patterns:
+        text = pattern.sub(lambda m, g=pattern.groups: (m.group(1) if g else "") + SECRET_MASK, text)
     return text
 
 
