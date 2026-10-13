@@ -111,6 +111,17 @@ def test_a_date_that_filters_to_nothing_prints_no_date():
     assert clause == "mtp off (remembered)"
 
 
+def test_a_vllm_parser_retry_names_the_fields_that_pin_the_parsers_off():
+    clause = derived_clause(NOTHING_DERIVED, shape="retry", cause="death", dropped=("parsers",),
+                            parser_fields=("reasoning_parser", "tool_call_parser"))
+    assert clause == ("parsers off (retried: the full shape died) · server.reasoning_parser: off / "
+                      "server.tool_call_parser: off keeps them pinned off")
+    one = derived_clause(NOTHING_DERIVED, shape="retry", cause="death", dropped=("parsers",),
+                         parser_fields=("tool_call_parser",),
+                         undo_field="extra_endpoints.x.lifecycle.speculative")
+    assert one.endswith("· extra_endpoints.x.lifecycle.tool_call_parser: off keeps them pinned off")
+
+
 def test_a_boot_retry_uses_the_spec_wording():
     clause = derived_clause(Tuned(cache_type="q8_0"), shape="retry", cause="boot", dropped=("draft-mtp",))
     assert clause == f"retried at boot: mtp off, -c halved · {UNDO}"
@@ -283,6 +294,16 @@ async def test_a_boot_plan_of_a_record_context_names_no_halved_window(tmp_path, 
                                  api_key_held=False)
     assert plan.cause == "boot"
     assert start_cmd._plan_clause(plan) == f"retried at boot: mtp off · {PINNED}"
+
+
+async def test_a_vllm_parser_retry_prints_its_line_before_the_second_start(tmp_path, world, box):
+    box.ready_script = [RuntimeError("vLLM exited during startup. Log tail:\nx"), ["qwen"]]
+    await _start(tmp_path, _vllm_spec(tmp_path))
+    assert len(world.cmds) == 2 and "--reasoning-parser" not in world.cmds[1]
+    assert world.out[1] == (
+        "Managed vLLM is not running — starting it (parsers off (retried: the full shape died) · "
+        "server.reasoning_parser: off / server.tool_call_parser: off keeps them pinned off; "
+        "model load can take several minutes)...")
 
 
 # ------------------------------------------------------------------- the remembered line

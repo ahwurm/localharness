@@ -285,10 +285,80 @@ def test_the_live_endpoint_defaults_to_no_tuning():
     assert lifecycle.LiveEndpoint(base_url="u", served_models=[], handle=1).tuned is None
 
 
-async def test_a_vllm_plan_has_no_retry(tmp_path, popen, box):
+# ------------------------------------------------------------------- a vLLM parser retry (D-37, WR-08)
+
+PARSER_FLAGS = ("--reasoning-parser", "--tool-call-parser", "--enable-auto-tool-choice")
+VLLM_DEATH = "vLLM exited during startup. Log tail:\nunknown parser"
+
+
+def _vllm_plan(tmp_path, **over):
+    spec = _vllm_spec(tmp_path, **over)
+    return lifecycle.plan_launch(spec, _sense(spec, tmp_path), server.launch_decision(spec, False),
+                                 autosense=KNOBS, api_key_held=False)
+
+
+def test_a_vllm_plan_with_derived_parsers_retries_without_them(tmp_path, box):
+    plan = _vllm_plan(tmp_path)
+    assert all(f in plan.argv for f in PARSER_FLAGS)
+    retry = plan.retry()
+    assert retry is not None and retry.shape == "retry" and retry.cause == "death"
+    assert retry.dropped == ("parsers",)
+    assert not any(f in retry.argv for f in PARSER_FLAGS)
+    assert retry.tuned.reasoning_parser is None and retry.tuned.tool_call_parser is None
+    assert retry.dropped_parser_fields == ("reasoning_parser", "tool_call_parser")
+    assert plan.retry() == retry and retry.retry() is None  # pure, and only once
+
+
+def test_a_record_parser_is_never_dropped_by_the_retry(tmp_path, box):
+    retry = _vllm_plan(tmp_path, tool_call_parser="hermes").retry()
+    assert retry.dropped == ("parsers",) and retry.dropped_parser_fields == ("reasoning_parser",)
+    argv = list(retry.argv)
+    assert "--reasoning-parser" not in argv
+    assert _has_pair(argv, "--tool-call-parser", "hermes") and "--enable-auto-tool-choice" in argv
+
+
+def test_a_vllm_plan_that_derived_no_parser_has_no_retry(tmp_path, box):
+    assert _vllm_plan(tmp_path, reasoning_parser="off", tool_call_parser="off").retry() is None
+    assert _vllm_plan(tmp_path, extra_args=["--tool-call-parser", "x"]).retry() is None
+
+
+async def test_a_vllm_death_with_derived_parsers_is_retried_once_without_them(tmp_path, popen, box):
+    box.ready_script = [RuntimeError(VLLM_DEATH), ["qwen"]]
     plans: list = []
-    await _activate(tmp_path, _vllm_spec(tmp_path), plans)
-    assert plans[0].retry() is None
+    live = await _activate(tmp_path, _vllm_spec(tmp_path), plans)
+    assert [p.shape for p in plans] == ["full", "retry"]
+    assert box.stops == [(tmp_path, "binary")]
+    assert all(f in popen[0]["cmd"] for f in PARSER_FLAGS)
+    assert not any(f in popen[1]["cmd"] for f in PARSER_FLAGS)
+    assert live.served_models == ["qwen"] and live.tuned == plans[1].tuned
+    assert speed_stats.last_retry(speed_stats.default_speed_stats_path(tmp_path),
+                                  lifecycle.record_key(_vllm_spec(tmp_path))) is None  # nothing remembered
+
+
+async def test_a_second_vllm_death_names_the_record_fields_that_pin_the_parsers_off(tmp_path, popen, box):
+    box.ready_script = [RuntimeError(VLLM_DEATH), RuntimeError("vLLM exited during startup. Log tail:\nagain")]
+    with pytest.raises(RuntimeError) as caught:
+        await _activate(tmp_path, _vllm_spec(tmp_path))
+    text = str(caught.value)
+    assert "Log tail:\nagain" in text
+    assert "server.reasoning_parser: off / server.tool_call_parser: off" in text
+    assert len(box.stops) == 2 and len(popen) == 2
+
+
+async def test_a_peer_parser_retry_names_the_peers_fields(tmp_path, popen, box):
+    box.ready_script = [RuntimeError(VLLM_DEATH), RuntimeError("again")]
+    with pytest.raises(RuntimeError, match=r"extra_endpoints\.deckard\.lifecycle\.tool_call_parser: off"):
+        await _activate(tmp_path, _vllm_spec(tmp_path), peer="deckard")
+
+
+async def test_a_vllm_timeout_or_an_untuned_death_is_not_retried(tmp_path, popen, box):
+    box.ready_script = [TimeoutError("slow")]
+    with pytest.raises(TimeoutError):
+        await _activate(tmp_path, _vllm_spec(tmp_path))
+    box.ready_script = [RuntimeError(VLLM_DEATH)]
+    with pytest.raises(RuntimeError, match="unknown parser"):
+        await _activate(tmp_path, _vllm_spec(tmp_path), autosense=None)
+    assert box.stops == [] and len(popen) == 2
 
 
 # ------------------------------------------------------------------- config_ini is a hand setting (CR-01)
