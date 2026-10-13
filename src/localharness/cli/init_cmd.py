@@ -1645,11 +1645,23 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
     config_file = config_path / "config.yaml"
     # IN-04: the stamp written below also gates the sidecar walk, so an agent/division file older
     # than it is cleared of init's values now (once; nothing when the step has already run).
-    from localharness.config.migrate import INIT_NULLS_CLAUSE, clear_sidecars_before_restamp
+    from localharness.config.migrate import (
+        INIT_NULLS_CLAUSE,
+        INIT_NULLS_TEMPERATURE_CLAUSE,
+        OVERRIDES_FILE,
+        clear_sidecars_before_restamp,
+        null_overlay_org,
+        sidecar_label,
+    )
     cleared_sidecars, unwritten = clear_sidecars_before_restamp(config_path)
+    overlay_nulled = False
     for path, backup in cleared_sidecars:
+        # WR-07: overrides.yaml is cleared of revision 2's temperature alone, agent files of revision 1's keys
+        label = sidecar_label(path)
+        overlay_nulled = overlay_nulled or label == OVERRIDES_FILE
+        clause = INIT_NULLS_TEMPERATURE_CLAUSE if label == OVERRIDES_FILE else INIT_NULLS_CLAUSE
         console.print("[cyan]i[/cyan]  " + escape(
-            f"Updated {path.parent.name}/{path.name}{INIT_NULLS_CLAUSE} — backup at {backup}"),
+            f"Updated {label}{clause} — backup at {backup}"),
             soft_wrap=True)
     # WR-21: a file init cannot write is named and passed over, never a traceback. CR-30: it is
     # recorded as owed (migrate.INIT_NULLS_PENDING_FILE), so the stamp below is still written as
@@ -1657,10 +1669,11 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
     # written; config.yaml and the files written here are never matched again.
     for path, exc in unwritten:
         reason = exc.strerror or str(exc) or type(exc).__name__
+        kept, them = (("org.default_temperature: 0.6", "it") if sidecar_label(path) == OVERRIDES_FILE
+                      else ("init's max_actions: 100 and tool-output sizes", "them"))
         console.print("[yellow]⚠[/yellow]  " + escape(
-            f"Could not update {path}: {reason}. It keeps init's max_actions: 100 and tool-output "
-            "sizes for now; 'localharness start' or 'localharness config migrate' clears them once "
-            "the file can be written."), soft_wrap=True)
+            f"Could not update {path}: {reason}. It keeps {kept} for now; 'localharness start' or "
+            f"'localharness config migrate' clears {them} once the file can be written."), soft_wrap=True)
     if force and config_file.exists():
         # --force starts over; the config it replaces stays beside it, owner-only, so it can be
         # undone. A distinct infix: never counted or pruned as one of migrate's backups.
@@ -1707,6 +1720,8 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
         plugins_readme.write_text(GLOBAL_PLUGINS_README, encoding="utf-8")
     if reset:
         overlay_path, overlay, cleared = reset
+        if overlay_nulled:  # read before the clear above: write it back without the nulled temperature
+            overlay, _ = null_overlay_org(overlay, since=0)
         atomic_write_overlay(overlay_path, overlay)  # an emptied overrides.yaml stays, as {}
         console.print(
             "[green]✓[/green] "

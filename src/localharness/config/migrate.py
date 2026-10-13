@@ -419,14 +419,24 @@ def scan_overrides(config_dir: Path, *, since: int, owed: bool) -> Optional[Side
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return None
-    org = data.get("org") if isinstance(data, dict) else None
-    if not isinstance(org, dict):
-        return None
-    new_org, paths = _init_nulls(org, scope="org", since=max(0 if owed else since, 1))
+    updated, paths = null_overlay_org(data, since=0 if owed else since)
     if not paths:
         return None
-    return SidecarPlan(path, None, {**data, "org": new_org},
-                       tuple(f"org.{p}" for p in paths), None)
+    return SidecarPlan(path, None, updated, paths, None)
+
+
+def null_overlay_org(data: object, *, since: int) -> tuple[object, tuple[str, ...]]:
+    """An overrides.yaml mapping with the init values of revision 2 or later in its `org:` section set
+    to None (`_init_nulls`, scope "org", above `since` and never revision 1's keys: the overlay was
+    never their target). Returns (the copy, the `org.` paths nulled); `data` itself, and `()`, when
+    nothing matched or it is not a mapping with an `org:` mapping. Pure."""
+    org = data.get("org") if isinstance(data, dict) else None
+    if not isinstance(org, dict):
+        return data, ()
+    new_org, paths = _init_nulls(org, scope="org", since=max(since, 1))
+    if not paths:
+        return data, ()
+    return {**data, "org": new_org}, tuple(f"org.{p}" for p in paths)
 
 
 def clear_sidecars_before_restamp(
@@ -445,8 +455,14 @@ def clear_sidecars_before_restamp(
     file that fails is passed over, never a crash of `init` (WR-21), and is recorded in
     :data:`INIT_NULLS_PENDING_FILE`, so `init` still writes its stamp as current (D-25) and the
     start-time migration retries that file alone (CR-30). Both are empty, and the pending file is
-    left as it is, when config.yaml's stamp is already current, because the step has run."""
+    left as it is, when config.yaml's stamp is already current, because the step has run.
+
+    The global `overrides.yaml` gets the same pass for the revisions above config.yaml's old stamp
+    (WR-07): after the re-init its stamp is current, so no later migration would null the
+    `org.default_temperature: 0.6` an older harness dumped there. Same backup, same receipt, and a
+    file that cannot be written is owed as the bare `overrides.yaml`, as `apply` records it."""
     config_file = config_dir / "config.yaml"
+    data = None
     if config_file.exists():
         try:
             data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
@@ -454,6 +470,7 @@ def clear_sidecars_before_restamp(
             data = None
         if isinstance(data, dict) and not _init_nulls_due(data):
             return [], []
+    since = _init_nulls_stamp(data) if isinstance(data, dict) else 0
     written: list[tuple[Path, Path]] = []
     unwritten: list[tuple[Path, OSError]] = []
     for sidecar in scan_sidecars(config_dir, init_nulls_due=True):
@@ -466,6 +483,14 @@ def clear_sidecars_before_restamp(
             written.append((sidecar.path, _write_with_backup(sidecar.path, original, updated)))
         except OSError as exc:
             unwritten.append((sidecar.path, exc))
+    if scan_overrides(config_dir, since=since, owed=False) is not None:
+        overlay = Path(config_dir) / OVERRIDES_FILE
+        try:
+            original = overlay.read_bytes()
+            updated, _ = null_overlay_org(yaml.safe_load(original.decode("utf-8")), since=since)
+            written.append((overlay, _write_with_backup(overlay, original, updated)))
+        except OSError as exc:
+            unwritten.append((overlay, exc))
     try:
         write_init_nulls_pending(config_dir, [_sidecar_name(p) for p, _ in unwritten])
     except OSError:  # the files then keep init's values: the stricter direction, never a crash
