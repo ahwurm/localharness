@@ -314,12 +314,13 @@ class _Observed:
 
     async def __call__(self, base_url: str, config_dir: Any = None, timeout_seconds: float = 1800.0,
                        poll_seconds: float = 3.0, on_poll: Any = None, *, api_key: Any = None,
-                       runtime: Any = None, liveness: bool = False, **kw: Any) -> None:
+                       runtime: Any = None, liveness: bool = False, expect: Any = None, **kw: Any) -> None:
         # wait_ready's own signature (IN-56), so a misspelled keyword lands in `kw` and is caught below
         assert not kw, f"wait_ready has no keyword {sorted(kw)}"
         self.calls.append({"base_url": base_url, "config_dir": config_dir,
                            "timeout_seconds": timeout_seconds, "poll_seconds": poll_seconds,
-                           "api_key": api_key, "runtime": runtime, "liveness": liveness})
+                           "api_key": api_key, "runtime": runtime, "liveness": liveness,
+                           "expect": expect})
 
 
 @pytest.fixture
