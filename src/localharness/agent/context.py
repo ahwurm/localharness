@@ -1133,6 +1133,21 @@ class WindowProbe(NamedTuple):
 
     served: int | None
     trained: int | None
+    # The server's own default temperature, llama.cpp only (read from the one /props response); None
+    # when the runtime did not report one. Spec 20 §7's "what is said" compares it to a configured rung.
+    sampling: float | None = None
+
+
+def _float(v: Any) -> float | None:
+    """`v` as a finite, non-negative float, or None: a server body steers numbers only, never types
+    (a bool, a string, a list, NaN, infinity or a negative is not a temperature)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    try:
+        f = float(v)
+    except (OverflowError, ValueError):
+        return None
+    return f if math.isfinite(f) and f >= 0 else None
 
 
 def _int(v: Any) -> int | None:
@@ -1165,8 +1180,10 @@ def probe_window(
 
     Disclose, never fabricate: every number the runtime did not report is None, and this never
     raises (blocking httpx with 3 s timeouts, so callers run it OFF the event loop, #32).
-    llama.cpp: ONE GET /v1/models, the id-matched (or only) entry's meta.n_ctx (served) and
-    meta.n_ctx_train (trained); GET /props n_ctx is the fallback for served. vLLM / OpenAI-compat:
+    llama.cpp: GET /v1/models, the id-matched (or only) entry's meta.n_ctx (served) and
+    meta.n_ctx_train (trained), then ONE GET /props: its n_ctx is the fallback for served and its
+    default temperature (`default_generation_settings.params.temperature`, else `.temperature`) is
+    `sampling`; every other runtime leaves `sampling` None. vLLM / OpenAI-compat:
     the id-matched entry's max_model_len|context_length is both. Any other provider type (unknown,
     None) takes that route and falls back to the same entry's llama.cpp-shaped `meta`, so a
     llama-server behind the wrong provider_type keeps its window. Ollama: GET /api/ps context_length
@@ -1193,13 +1210,22 @@ def probe_window(
             served, trained = _int(meta.get("n_ctx")), _int(meta.get("n_ctx_train"))
         except Exception:
             served = trained = None
-        if served is None:
-            try:
-                props = httpx.get(f"{root.removesuffix('/v1')}/props", timeout=3.0, **hk).json()
-                served = _int(props.get("default_generation_settings", {}).get("n_ctx") or props.get("n_ctx"))
-            except Exception:
-                served = None
-        return WindowProbe(served, trained)
+        # ONE /props GET per probe: the fallback for `served` and the server's default temperature
+        # both come from this body (D-31).
+        sampling = None
+        try:
+            props = httpx.get(f"{root.removesuffix('/v1')}/props", timeout=3.0, **hk).json()
+            dgs = props.get("default_generation_settings")
+            dgs = dgs if isinstance(dgs, dict) else {}
+            if served is None:
+                served = _int(dgs.get("n_ctx") or props.get("n_ctx"))
+            params = dgs.get("params")
+            sampling = _float(params.get("temperature")) if isinstance(params, dict) else None
+            if sampling is None:
+                sampling = _float(dgs.get("temperature"))
+        except Exception:
+            pass
+        return WindowProbe(served, trained, sampling)
     if ptype == "ollama":
         # Ollama's SERVED window is num_ctx (default 4096), NOT the model's trained max. /api/ps
         # reports the LOADED model's context_length = the actual served window (what truncates /

@@ -57,6 +57,10 @@ RESTARTED_LINE = "Restarted with {name} {state}. Your conversation continues."
 # The two start-summary lines for a server that refused an effort request key (spec 16 §7.4, D-19, D-22);
 # the first is spelled once in config/effort.py (imported above), shared with /effort show.
 EFFORT_CUT_OFF_LINE = "effort: thinking-off rejected by this server; the reasoning cut is off"
+# Said once when a configured temperature overrides the model's own default (spec 20 §7, D-27): the
+# rung's own label names what to unset. A fixed template filled with numbers and the loader's label.
+SAMPLING_LINE = ("sampling: temperature {temp} from {rung} "
+                 "(the model's own is {own} — unset {rung} to use it)")
 RESUMED_LINE = "Awake again, continuing the conversation that went to sleep (sitting {previous})."
 WAKING_DETAIL = "waking the chat you left"
 
@@ -969,6 +973,49 @@ def _props_model_path(base_url: str, launch_key: Mapping[str, str]) -> str | Non
             and not _PROPS_CONTROL.search(value)):
         return value
     return None
+
+
+def _fmt_temp(x: float) -> str:
+    """A temperature as the line prints it: 0.6 -> "0.6", 1.0 -> "1.0", float32 0.8000000119 -> "0.8"."""
+    return str(round(x, 3))
+
+
+def _sampling_line(last: Any, *, temperature: float | None, rung: str | None,
+                   server_default: float | None) -> str | None:
+    """The sampling line, or None when there is nothing to say (D-27): no rung set a temperature, the
+    server's default is unknown, the two agree (within 1e-3), or `last` already holds these facts."""
+    if temperature is None or not rung or server_default is None:
+        return None
+    if abs(temperature - server_default) <= 1e-3:
+        return None
+    if last is not None and (last.temperature, last.rung, last.server_default) == (
+            temperature, rung, server_default):
+        return None
+    return SAMPLING_LINE.format(temp=_fmt_temp(temperature), rung=rung, own=_fmt_temp(server_default))
+
+
+def _say_sampling(probe: Any, *, temperature: float | None, rung: str | None, ledger: Path,
+                  provider_type: str, model: str, say: Callable[[str], None] | None = None) -> None:
+    """Print the sampling line once on change and record the facts (R-07c). `probe.sampling` None
+    means the server did not say (a flaked probe, another runtime): nothing to compare, nothing
+    recorded, so a good baseline is never replaced by Nones. The ledger is a convenience: a start
+    never fails on it."""
+    server_default = getattr(probe, "sampling", None)
+    if server_default is None:
+        return
+    from localharness.provider.speed_stats import last_sampling, record_sampling
+    try:
+        last = last_sampling(ledger, provider_type, model)
+    except OSError:
+        last = None
+    line = _sampling_line(last, temperature=temperature, rung=rung, server_default=server_default)
+    if line is not None:
+        (say or (lambda text: console.print(text, markup=False, soft_wrap=True)))(line)
+    try:
+        record_sampling(ledger, provider_type, model,
+                        temperature=temperature, rung=rung, server_default=server_default)
+    except OSError:
+        pass  # the ledger is a convenience: a start never fails on it
 
 
 def _attach_window_report(harness: Any, provider_type: str, served: int | None, trained: int | None,
@@ -2001,6 +2048,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 _ledger, provider.provider_type, resolved_model, report.served, report.trained, report.fits)
         except OSError:
             pass  # the ledger is a convenience: a start never fails on it
+    # D-27: a configured temperature that overrides the model's own default, said once on change.
+    _say_sampling(
+        _probe, temperature=agent_config.temperature, rung=loader.temperature_rung(agent_name_str),
+        ledger=_ledger, provider_type=provider.provider_type, model=resolved_model)
     # D-25: the names the launch scrubbed from the server's environment, said again only when the
     # list changed. Names only, never values.
     # Every launch this start made records its list, an empty one included: a launch that dropped
