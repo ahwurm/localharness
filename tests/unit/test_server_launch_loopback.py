@@ -343,7 +343,7 @@ async def test_a_spawned_server_gets_the_key_in_its_launch_environment_and_readi
     assert calls == {"serve_command": {"keyed": True, "loopback": True, "key_file_ok": False,
                                        "context": None, "cache_ram": None},
                      "start_server": {"runtime": "llamacpp", "record_env": None, "api_key": KEY,
-                                      "xdg_config_home": str(tmp_path / "xdg" / "8080")},
+                                      "xdg_config_home": str(tmp_path / "xdg" / "8080"), "port": 8080},
                      "wait_ready": {"api_key": KEY}}
 
 

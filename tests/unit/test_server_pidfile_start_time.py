@@ -50,13 +50,15 @@ def test_the_start_time_is_none_when_the_entry_is_missing_or_short(monkeypatch):
     assert server._proc_start_time(4242) is None
 
 
-@pytest.mark.parametrize("text,expected", [("4242", (4242, None)), ("4242 777", (4242, 777)),
-                                           ("  4242   777\n", (4242, 777))])
-def test_a_pidfile_is_a_bare_pid_or_a_pid_and_a_start_time(text, expected):
+@pytest.mark.parametrize("text,expected", [("4242", (4242, None, None)), ("4242 777", (4242, 777, None)),
+                                           ("  4242   777\n", (4242, 777, None)),
+                                           ("4242 777 8080", (4242, 777, 8080)),
+                                           ("4242 777 0", (4242, 777, None))])
+def test_a_pidfile_is_a_bare_pid_a_pid_and_start_or_a_pid_start_and_port(text, expected):
     assert server._parse_pidfile(text) == expected
 
 
-@pytest.mark.parametrize("text", ["", "   ", "4242 x", "x", "1 2 3", "0", "-1", "1", "0 777", "-5 777", "1 777"])
+@pytest.mark.parametrize("text", ["", "   ", "4242 x", "x", "1 2 3", "0", "-1", "1", "0 777", "-5 777", "1 777", "4242 777 8080 9"])
 def test_a_malformed_pidfile_does_not_parse(text):
     with pytest.raises(ValueError):
         server._parse_pidfile(text)

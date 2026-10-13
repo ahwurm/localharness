@@ -34,7 +34,8 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from localharness.config.models import ManagedServerConfig
-from localharness.core.private_files import NotRegularFile, open_regular, private_opener, touch_private
+from localharness.core import private_files
+from localharness.core.private_files import NotRegularFile, open_regular, private_opener
 from localharness.core.which import which_outside_cwd
 from localharness.provider import procfs
 
@@ -812,8 +813,14 @@ def start_server(
     record_env: Mapping[str, str] | None = None,
     dropped_out: list[str] | None = None,
     xdg_config_home: str | None = None,
+    port: int | None = None,
 ) -> int:
     """Launch detached (new session), append stdout+stderr to serve.log, write pidfile.
+
+    The pidfile is `<pid> <start> <port>` (the start time and `port`, when known; two tokens without
+    a port, one without a start time), written through `atomic_write_text` by descriptor into the
+    server directory, which is opened no-follow BEFORE anything starts: a planted link at the pidfile
+    is replaced, never followed, and a symlinked server directory stops the launch.
 
     `api_key` (a server set to require one) goes into the child's copied environment as
     `KEY_ENV[runtime]` — never into `cmd`, so it is in neither the process list nor the launch line
@@ -832,31 +839,43 @@ def start_server(
         inherited = sorted(n for n in os.environ if n.startswith("VLLM_") and n != "VLLM_API_KEY")
         if inherited:
             logger.info("launch environment inherits VLLM_ settings", runtime=runtime, names=inherited)
-    server_dir(config_dir).mkdir(parents=True, exist_ok=True)
-    log = open(log_path(config_dir), "ab", opener=private_opener)
-    log.write(f"\n=== launch: {' '.join(cmd)} ===\n".encode())
-    log.flush()
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            env=env,
-        )
+        dir_fd = private_files.open_private_dir(server_dir(config_dir))
     except OSError as exc:
-        # A binary that is set but missing or not executable passes `launch_decision` (it never
-        # checks the disk) and fails only here. Raise the failure every `activate` caller already
-        # prints and restores the incumbent from (RuntimeError), not a bare OSError that escapes
-        # them after the incumbent was stopped; and do not leak the serve.log handle.
-        log.close()
-        raise RuntimeError(f"could not launch {cmd[0]}: {exc.strerror or exc}") from exc
-    start = _proc_start_time(proc.pid)
-    touch_private(pid_path(config_dir))
-    pid_path(config_dir).write_text(
-        f"{proc.pid} {start}" if start is not None else str(proc.pid), encoding="utf-8")
-    return proc.pid
+        # A launch with no pidfile would be an untracked heavy: nothing starts without one.
+        raise RuntimeError(
+            f"could not open the server directory {server_dir(config_dir)}: {exc.strerror or exc}"
+        ) from exc
+    try:
+        log = open(log_path(config_dir), "ab", opener=private_opener)
+        log.write(f"\n=== launch: {' '.join(cmd)} ===\n".encode())
+        log.flush()
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                env=env,
+            )
+        except OSError as exc:
+            # A binary that is set but missing or not executable passes `launch_decision` (it never
+            # checks the disk) and fails only here. Raise the failure every `activate` caller already
+            # prints and restores the incumbent from (RuntimeError), not a bare OSError that escapes
+            # them after the incumbent was stopped; and do not leak the serve.log handle.
+            log.close()
+            raise RuntimeError(f"could not launch {cmd[0]}: {exc.strerror or exc}") from exc
+        start = _proc_start_time(proc.pid)
+        tokens = [str(proc.pid)]
+        if start is not None:
+            tokens.append(str(start))
+            if port is not None and 1 <= port <= 65535:
+                tokens.append(str(port))
+        private_files.atomic_write_text(procfs.PIDFILE_NAME, " ".join(tokens), dir_fd=dir_fd)
+        return proc.pid
+    finally:
+        os.close(dir_fd)
 
 
 def _read_proc_stat(pid: int) -> bytes | None:
@@ -897,31 +916,32 @@ def _proc_start_time(pid: int) -> int | None:
     return start_time_from_stat(raw)
 
 
-def _parse_pidfile(text: str) -> tuple[int, int | None]:
-    """`<pid> <starttime>` -> (pid, start); a bare `<pid>` (the 0.17 format) -> (pid, None), which
-    means "match by pid only" (D-26). Anything else, and any pid <= 1, raises ValueError."""
-    tokens = text.split()
-    if len(tokens) == 1:
-        start = None
-    elif len(tokens) == 2:
-        start = int(tokens[1])
-    else:
-        raise ValueError(f"pidfile holds {len(tokens)} tokens")
-    pid = int(tokens[0])
-    if pid <= 1:
-        # 0 and negatives are not a process: os.kill(0, 0) succeeds and os.killpg(0, SIGTERM) would
-        # signal the harness's own process group. 1 is init. Read as malformed, the pidfile is
-        # dropped as stale and nothing is ever signalled.
-        raise ValueError(f"pidfile holds pid {pid}, which is not a process the harness launched")
-    return pid, start
+def _parse_pidfile(text: str) -> tuple[int, int | None, int | None]:
+    """`<pid>`, `<pid> <start>` or `<pid> <start> <port>` -> (pid, start, port); the missing parts read
+    as None, and a bare pid means "match by pid only" (D-26). Anything else, and any pid <= 1, raises
+    ValueError. One parser: `procfs.parse_pidfile`."""
+    return procfs.parse_pidfile(text)
 
 
-def _read_pidfile(config_dir: Path) -> tuple[int, int | None] | None:
-    """The pidfile's (pid, start), or None when it is missing or malformed."""
+def _read_pidfile(config_dir: Path) -> tuple[int, int | None, int | None] | None:
+    """The pidfile's (pid, start, port), or None when it is missing or malformed. Read by descriptor
+    in a no-follow server directory (see `procfs.read_pidfile`)."""
+    return procfs.read_pidfile(config_dir)
+
+
+def _drop_pidfile(config_dir: Path) -> None:
+    """Unlink the pidfile by descriptor in a no-follow server directory; a missing file or directory,
+    or a symlinked directory, is nothing to remove."""
     try:
-        return _parse_pidfile(pid_path(config_dir).read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError):
-        return None
+        dir_fd = private_files.open_private_dir(server_dir(config_dir), create=False)
+    except OSError:
+        return
+    try:
+        os.unlink(procfs.PIDFILE_NAME, dir_fd=dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
 
 
 def _same_process(pid: int, start: int | None) -> bool:
@@ -945,24 +965,26 @@ def server_pid(config_dir: Path) -> int | None:
     A zombie counts as dead (#99): reap it opportunistically if it's ours, drop the
     pidfile, report None — so wait_ready fails fast with the crash log tail instead of
     polling a corpse for half an hour. A pid whose start time differs from the recorded one
-    was reused by an unrelated process: the harness's own is gone, so the pidfile is dropped."""
-    path = pid_path(config_dir)
+    was reused by an unrelated process: the harness's own is gone, so the pidfile is dropped.
+    Built on `procfs.read_launch`; the start-time test it applies reads `/proc` through
+    `_read_proc_stat`."""
+    launch = procfs.read_launch(config_dir, stat_reader=lambda pid: _read_proc_stat(pid))
+    if launch is None:  # missing, malformed, or a reused pid
+        _drop_pidfile(config_dir)
+        return None
+    pid = launch.pid
     try:
-        pid, start = _parse_pidfile(path.read_text(encoding="utf-8"))
         os.kill(pid, 0)
         if _is_zombie(pid):
             try:
                 os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:
                 pass
-            path.unlink(missing_ok=True)
-            return None
-        if not _same_process(pid, start):
-            path.unlink(missing_ok=True)
+            _drop_pidfile(config_dir)
             return None
         return pid
-    except (FileNotFoundError, ValueError, ProcessLookupError):
-        path.unlink(missing_ok=True)
+    except ProcessLookupError:
+        _drop_pidfile(config_dir)
         return None
     except PermissionError:  # alive, owned by another user
         return None
@@ -1024,7 +1046,7 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
                     "refusing to race a relaunch into the name conflict"
                 )
         stopped = True
-    pid_path(config_dir).unlink(missing_ok=True)
+    _drop_pidfile(config_dir)
     return stopped
 
 
