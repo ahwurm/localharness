@@ -11,6 +11,7 @@ import os
 import signal
 from pathlib import Path
 
+import httpx
 import pytest
 
 from localharness.config.models import ManagedServerConfig
@@ -155,3 +156,63 @@ def test_a_refused_docker_stop_does_not_stop_the_container_by_name(tmp_path, pro
 def test_no_live_pid_is_nothing_to_refuse(tmp_path, proc):
     assert server.stop_server(tmp_path, expect=None) is False
     assert proc.killpg == []
+
+
+# ------------------------------------------------------------------------------- wait_ready(expect=)
+
+
+def models_transport(monkeypatch) -> list[str]:
+    """Answer `/models` with one served id through the `_TRANSPORT` seam; the list records each poll."""
+    polls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        polls.append(str(request.url))
+        return httpx.Response(200, json={"data": [{"id": "qwen"}]})
+
+    monkeypatch.setattr(server, "_TRANSPORT", httpx.MockTransport(handler))
+    return polls
+
+
+async def test_wait_ready_refuses_a_live_launch_that_is_not_the_records_before_any_poll(
+        tmp_path, proc, monkeypatch):
+    proc.state["read"] = record(exe="/usr/bin/sleep", argv=("sleep", "60"))
+    write_pidfile(tmp_path)
+    polls = models_transport(monkeypatch)
+
+    with pytest.raises(RuntimeError) as refused:
+        await server.wait_ready("http://127.0.0.1:8080/v1", config_dir=tmp_path, expect=LLAMA,
+                                runtime="llamacpp")
+
+    assert str(refused.value) == f"llama.cpp: the live launch (pid {PID}) is not this record's — not waited on"
+    assert polls == []
+
+
+async def test_wait_ready_polls_as_today_when_the_live_launch_is_the_records(tmp_path, proc, monkeypatch):
+    write_pidfile(tmp_path)
+    polls = models_transport(monkeypatch)
+
+    served = await server.wait_ready("http://127.0.0.1:8080/v1", config_dir=tmp_path, expect=LLAMA,
+                                     runtime="llamacpp")
+
+    assert served == ["qwen"] and polls == ["http://127.0.0.1:8080/v1/models"]
+
+
+async def test_wait_ready_without_expect_reads_no_process(tmp_path, proc, monkeypatch):
+    write_pidfile(tmp_path)
+    polls = models_transport(monkeypatch)
+    monkeypatch.setattr(procfs, "read_process",
+                        lambda pid, **kw: pytest.fail("expect=None must not read the process"))
+
+    served = await server.wait_ready("http://127.0.0.1:8080/v1", config_dir=tmp_path, runtime="llamacpp")
+
+    assert served == ["qwen"] and len(polls) == 1
+
+
+async def test_wait_ready_with_no_launch_keeps_the_exited_during_startup_text(tmp_path, proc, monkeypatch):
+    polls = models_transport(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="llama.cpp exited during startup"):
+        await server.wait_ready("http://127.0.0.1:8080/v1", config_dir=tmp_path, expect=LLAMA,
+                                runtime="llamacpp")
+
+    assert polls == []

@@ -63,7 +63,7 @@ def boundaries(monkeypatch):
     monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: [])
     monkeypatch.setattr(managed_server, "stop_server",
-                        lambda cfg, launch="binary": b.stops.append(launch) or True)
+                        lambda cfg, launch="binary", **kw: b.stops.append(launch) or True)
     monkeypatch.setattr(managed_server, "start_server",
                         lambda cfg, cmd, **kw: b.cmds.append(list(cmd)) or 4321)
 
