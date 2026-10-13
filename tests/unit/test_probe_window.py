@@ -37,19 +37,21 @@ def _serve(monkeypatch, bodies: dict[str, object]) -> list[tuple[str, dict]]:
 
 
 LLAMA = "http://127.0.0.1:8080/v1"
+PROPS = "http://127.0.0.1:8080/props"
 META = {"data": [{"id": "qwen", "meta": {"n_ctx": 65536, "n_ctx_train": 262144}}]}
 
 
-def test_llamacpp_one_models_call_carries_the_bearer(monkeypatch):
+def test_llamacpp_models_then_one_props_call_both_carry_the_bearer(monkeypatch):
     calls = _serve(monkeypatch, {f"{LLAMA}/models": META})
     assert probe_window(LLAMA, "qwen", "llamacpp", api_key="K") == WindowProbe(65536, 262144)
-    assert calls == [(f"{LLAMA}/models", {"headers": {"Authorization": "Bearer K"}})]
+    assert calls == [(f"{LLAMA}/models", {"headers": {"Authorization": "Bearer K"}}),
+                     (PROPS, {"headers": {"Authorization": "Bearer K"}})]
 
 
 def test_llamacpp_without_a_key_sends_no_headers(monkeypatch):
     calls = _serve(monkeypatch, {f"{LLAMA}/models": META})
     assert probe_window(LLAMA, "qwen", "llamacpp") == WindowProbe(65536, 262144)
-    assert calls == [(f"{LLAMA}/models", {})]
+    assert calls == [(f"{LLAMA}/models", {}), (PROPS, {})]
 
 
 def test_llamacpp_props_fallback_for_served_also_carries_the_bearer(monkeypatch):
