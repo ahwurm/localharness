@@ -320,6 +320,50 @@ def has_spec_flag(extra_args: Sequence[str], env: Mapping[str, str]) -> bool:
     return any(name.startswith("LLAMA_ARG_SPEC_") or name == "LLAMA_ARG_MODEL_DRAFT" for name in env)
 
 
+# llama.cpp's config.ini grammar (common/preset.cpp): a trailing comment starts at a blank then `;`/`#`.
+_INI_TRAILING_COMMENT = re.compile(r"[ \t][;#]")
+# The flag spellings the checks above know, by their config.ini key (the flag with its dashes removed).
+# Built from the tables above, so no second spelling list exists.
+_INI_FLAG_BY_KEY = MappingProxyType({
+    flag.lstrip("-").lower(): flag for flag in (*_CACHE_TYPE_FLAGS, *_FLASH_ATTN_FLAGS, *_SPEC_FLAGS)})
+
+
+def config_ini_items(text: str | None) -> list[tuple[str, str]]:
+    """The `key = value` lines of config.ini text, in order: blank lines, comments (`;`, `#`), section
+    headers and lines without `=` are skipped, a trailing comment is cut from the value, and key and value
+    are stripped. The one walker over a record's `config_ini`: its validator reads the keys, the
+    derivation the keys and values. Pure, never raises."""
+    items: list[tuple[str, str]] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line[0] in ";#[" or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        items.append((key.strip(), _INI_TRAILING_COMMENT.split(value, 1)[0].strip()))
+    return items
+
+
+def hand_set_options(spec: Any) -> tuple[list[str], dict[str, str]]:
+    """Every llama-server option a llama.cpp record sets by hand, as `(argv, env)` for the checks above
+    (D-06: record field > any explicit flag, in argv, env or config.ini > derivation).
+
+    llama-server reads a config.ini key as an env name verbatim or as a flag name with its dashes removed,
+    in any letter case. A `LLAMA_ARG_*` key therefore joins `env` (the record's own `env:` wins a name
+    both set) and any other key joins argv as `--key=value` (`-fa=value` for the short spellings the
+    tables above know); the config.ini tokens come before `extra_args`, so an argv flag wins a key both
+    set, as at launch. Pure."""
+    args: list[str] = []
+    ini_env: dict[str, str] = {}
+    for key, value in config_ini_items(getattr(spec, "config_ini", None)):
+        if key.upper().startswith("LLAMA_ARG_"):
+            ini_env[key.upper()] = value
+        else:
+            name = key.lower().lstrip("-")
+            args.append(f"{_INI_FLAG_BY_KEY.get(name, f'--{name}')}={value}")
+    args += [t for t in (getattr(spec, "extra_args", None) or []) if isinstance(t, str)]
+    return args, {**ini_env, **dict(getattr(spec, "env", None) or {})}
+
+
 def spec_type_flag(extra_args: Sequence[str], env: Mapping[str, str]) -> str | None:
     """The value of the last `--spec-type` in `extra_args`, else env `LLAMA_ARG_SPEC_TYPE`, else None
     (a hand-set `draft-mtp` drafts, so the fit must price it)."""

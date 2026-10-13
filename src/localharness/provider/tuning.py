@@ -7,8 +7,8 @@ type and MTP drafting of a llama.cpp launch and the reasoning / tool-call parser
 it never writes a record and never raises on a hostile header or config. Every derived field carries one reason (`Tuned.reasons`, keyed by field name) so
 the launch can say why.
 
-Precedence, for every derived flag: the record field > `extra_args` / `env:` in any spelling >
-the derivation. A derivation is the fallback for a person who said nothing.
+Precedence, for every derived flag: the record field > `extra_args` / `env:` / `config_ini` in any
+spelling > the derivation. A derivation is the fallback for a person who said nothing.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from typing import Any
 from localharness.core.private_files import open_regular
 from localharness.provider.autosense import (
     flash_attn_off,
+    hand_set_options,
     has_cache_type_flag,
     has_spec_flag,
 )
@@ -189,7 +190,8 @@ def derive(spec: Any, header: Mapping[str, Any], autosense: Any, *,
     """The flags a launch of `spec` derives (llama.cpp side; `model_config` is the vLLM side's input).
 
     `cache_type` is `autosense.kv_cache_type` unless the record sets a cache type, `extra_args` /
-    `env` pin one in any spelling, flash attention is switched off, or the knob is `f16`.
+    `env` / `config_ini` pin one in any spelling, flash attention is switched off in any of them, or
+    the knob is `f16`.
     `spec_type` is `draft-mtp` (with `autosense.draft_p_min`) only when `autosense.draft_mtp` is on,
     the record's `speculative` is unset, no speculative flag is set by hand, and the header declares
     MTP layers. A vLLM record derives its reasoning / tool-call parsers from `model_config`'s
@@ -199,8 +201,9 @@ def derive(spec: Any, header: Mapping[str, Any], autosense: Any, *,
         return _derive_vllm(spec, model_config)
     if getattr(spec, "runtime", None) != "llamacpp":
         return NOTHING_DERIVED
-    extra = list(getattr(spec, "extra_args", None) or [])
-    env = dict(getattr(spec, "env", None) or {})
+    # `extra_args`, `env:` and the record's `config_ini` in one argv / env view: a cache type, a
+    # flash-attention off or a speculative option set in any of them is the person's choice (CR-01).
+    extra, env = hand_set_options(spec)
     fields: dict[str, Any] = {}
     reasons: dict[str, str] = {}
 

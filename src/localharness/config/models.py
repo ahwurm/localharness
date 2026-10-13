@@ -2292,17 +2292,15 @@ class ManagedServerConfig(BaseModel):
         """The INI text may not set an option `env` refuses, by env name or by flag name with its
         dashes stripped, in any section and any letter case. Comments, blank lines and section
         headers are skipped; a line without `=` is left to llama-server's own parser."""
-        # Function-local: provider/server.py imports this module at module level.
+        # Function-local: provider/server.py imports this module at module level. The walker is the
+        # one the KV / MTP derivation reads the same text with (CR-01).
+        from localharness.provider.autosense import config_ini_items
         from localharness.provider.server import excluded_option
 
         if v is None:
             return v
         offences = []
-        for raw in v.splitlines():
-            line = raw.strip()
-            if not line or line[0] in ";#[" or "=" not in line:
-                continue
-            key = line.split("=", 1)[0].strip()
+        for key, _value in config_ini_items(v):
             category = excluded_option(key)
             if category is not None:
                 offences.append(f"config_ini refuses {key} (a {category} option)")

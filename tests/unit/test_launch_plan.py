@@ -289,3 +289,33 @@ async def test_a_vllm_plan_has_no_retry(tmp_path, popen, box):
     plans: list = []
     await _activate(tmp_path, _vllm_spec(tmp_path), plans)
     assert plans[0].retry() is None
+
+
+# ------------------------------------------------------------------- config_ini is a hand setting (CR-01)
+
+
+async def test_a_config_ini_cache_type_is_priced_and_not_overridden(tmp_path, popen, box):
+    spec = _gguf_spec(tmp_path, SWIFT, config_ini="cache-type-k = f16\nLLAMA_ARG_CACHE_TYPE_V = f16\n")
+    plans: list = []
+    await _activate(tmp_path, spec, plans)
+    plan = plans[0]
+    assert plan.tuned.cache_type is None and "--cache-type-k" not in plan.argv
+    header = fit_header(gguf_header.read_header(spec.model, FIT_KEYS))
+    assert plan.full_fit == fit(header, box.mem.free_bytes, KNOBS, cache_type_k="f16", cache_type_v="f16",
+                                weights=box.weights, offload="gpu", draft_share=SHARE)
+
+
+async def test_a_config_ini_flash_attention_off_launches_no_quantized_cache(tmp_path, popen, box):
+    spec = _gguf_spec(tmp_path, SWIFT, config_ini="flash-attn = off\n")
+    plans: list = []
+    await _activate(tmp_path, spec, plans)
+    assert plans[0].tuned.cache_type is None
+    assert "--cache-type-k" not in plans[0].argv and "--cache-type-v" not in plans[0].argv
+
+
+def test_a_config_ini_spec_type_draft_mtp_is_priced_with_the_draft_share(tmp_path, box):
+    spec = _gguf_spec(tmp_path, SWIFT, config_ini="spec-type = draft-mtp\n")
+    plan = lifecycle.plan_launch(spec, _sense(spec, tmp_path), server.launch_decision(spec, False),
+                                 autosense=KNOBS, api_key_held=False)
+    assert plan.tuned.spec_type is None and "--spec-type" not in plan.argv
+    assert plan.full_fit == _expected_fit(spec, box, share=SHARE)
