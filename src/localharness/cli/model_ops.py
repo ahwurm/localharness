@@ -27,9 +27,10 @@ from localharness.config import trust
 from localharness.config.paths import global_config_dir, resolve_runtime_path
 from localharness.config.plugin_sections import core_harness_view
 from localharness.config.redact import secret_values, validation_text
+from localharness.config.trust import LAUNCH_KIND, LAUNCH_MODEL_KIND
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
-from localharness.provider.units import TARGET_NAME, read_target
+from localharness.provider.units import TARGET_NAME, read_target, remove_target
 from localharness.registry import set_value_in_dict
 
 _AGENT_KEY = "agent"
@@ -481,28 +482,93 @@ def record_for_base_url(harness: Any, base_url: str) -> ServingRecord | None:
     return next((r for r in serving_records(harness) if _norm_url(r.base_url) == want), None)
 
 
+# Launch keys that narrow a record (a withheld one is applied as false/true) rather than drop it.
+_NARROWING_KEYS = frozenset({"bind_all", "require_api_key"})
+
+
+def _withheld_entries(trust: Any, record: ServingRecord) -> list[tuple[str, str]]:
+    """The ``(file, name)`` of every withheld launch entry that drops ``record`` (R-13-10)."""
+    out: list[tuple[str, str]] = []
+    for file, items in sorted((getattr(trust, "withheld", None) or {}).items()):
+        for kind, name in sorted(items):
+            if kind not in (LAUNCH_KIND, LAUNCH_MODEL_KIND):
+                continue
+            if name != record.prefix and not name.startswith(record.prefix + "."):
+                continue
+            if name.rsplit(".", 1)[-1] in _NARROWING_KEYS:
+                continue
+            out.append((file, name))
+    return out
+
+
+def record_withheld(trust: Any, record: ServingRecord) -> bool:
+    """True when start withheld a launch entry of ``record``: the loader dropped its launch spec, so
+    it must not be served, and a selection naming it must not be cleared. A withheld ``bind_all`` or
+    ``require_api_key`` narrows the record, it does not withhold it."""
+    return bool(_withheld_entries(trust, record))
+
+
+def _withheld_refusal(trust: Any, record: ServingRecord, config_dir: Any) -> ServingRefusal:
+    """Spec 16's withheld line: ``trust.line`` when start composed one, else the same format built
+    from this record's own withheld names (R-13-12)."""
+    line = getattr(trust, "line", "")
+    if not line:
+        from localharness.cli.workspace import MACHINE_UNASKED, MACHINE_WITHHELD_LINE, visible_text
+
+        entries = _withheld_entries(trust, record)
+        names = ", ".join(f"{visible_text(n)} ({visible_text(f)})" for f, n in entries)
+        line = MACHINE_WITHHELD_LINE.format(
+            n=len(entries), global_dir=global_config_dir(config_dir), names=names, why=MACHINE_UNASKED)
+    return ServingRefusal(line, "withheld")
+
+
 def _preset_records(harness: Any, trust: Any) -> tuple[ServingRecord, ...]:
-    return tuple(r for r in serving_records(harness) if r.spec is not None)
+    """The records a name can select: those with a launch spec, plus a record start withheld (the
+    loader kept it without a spec, and it resolves by name so it can be refused as withheld, R-13-09)."""
+    return tuple(r for r in serving_records(harness) if r.spec is not None or record_withheld(trust, r))
 
 
 def _candidates(record: ServingRecord) -> tuple[str, ...]:
     return (record.name,) if record.served == record.name else (record.name, record.served)
 
 
-def resolve_preset(harness: Any, trust: Any, name: str) -> ServingRecord | ServingRefusal:
-    """The preset record ``name`` stands for. Exact name first (D-03)."""
+def resolve_preset(
+    harness: Any, trust: Any, name: str, *, config_dir: Any = None
+) -> ServingRecord | ServingRefusal:
+    """The preset record ``name`` stands for (D-03, D-04): exact name or served name first, then
+    case-folded, then a unique prefix (counted in records, not names). Two records at a tier is
+    ``ambiguous`` and names both; none is ``unknown`` and lists the presets. Names resolve FIRST, then
+    ``trust`` is checked: a withheld record is refused with spec 16's line (``withheld``)."""
     records = _preset_records(harness, trust)
-    hits = [r for r in records if name in _candidates(r)]
-    if len(hits) == 1:
-        return hits[0]
+    folded = name.casefold()
+    tiers = (
+        lambda c: c == name,
+        lambda c: c.casefold() == folded,
+        lambda c: bool(folded) and c.casefold().startswith(folded),
+    )
+    for matches in tiers:
+        hits = [r for r in records if any(matches(c) for c in _candidates(r))]
+        if len(hits) == 1:
+            if record_withheld(trust, hits[0]):
+                return _withheld_refusal(trust, hits[0], config_dir)
+            return hits[0]
+        if hits:
+            return ServingRefusal(
+                AMBIGUOUS_PRESET_LINE.format(name=name, first=hits[0].name, second=hits[1].name),
+                "ambiguous")
     names = ", ".join(sorted({r.name for r in records}))
     return ServingRefusal(UNKNOWN_PRESET_LINE.format(name=name, names=names), "unknown")
 
 
 def _stored(harness: Any, trust: Any, store: str, name: str, config_dir: Any) -> Any:
-    """A stored name resolved: its record, a refusal, or a ``GoneSelection`` when it names nothing."""
-    got = resolve_preset(harness, trust, name)
+    """A stored name resolved: its record, a refusal, or a ``GoneSelection`` when it names nothing.
+    When the primary is withheld its own names cannot be read, so a name that matches nothing is
+    treated as the primary's and refused as withheld, never gone (R-13-10)."""
+    got = resolve_preset(harness, trust, name, config_dir=config_dir)
     if isinstance(got, ServingRefusal) and got.kind == "unknown":
+        primary = _primary_record(harness)
+        if record_withheld(trust, primary):
+            return _withheld_refusal(trust, primary, config_dir)
         return GoneSelection(store, name, GONE_SELECTION_LINE.format(store=store, name=name))
     return got
 
@@ -528,7 +594,7 @@ def resolve_serving(
     for the caller to pass to ``clear_gone`` (R-13-11)."""
     gone: list[GoneSelection] = []
     if preset is not None:
-        got = resolve_preset(harness, trust, preset)
+        got = resolve_preset(harness, trust, preset, config_dir=config_dir)
         if isinstance(got, ServingRefusal):
             return got
         return Serving(got, RUNG_PRESET, True)
@@ -552,8 +618,52 @@ def resolve_serving(
             return Serving(got, RUNG_UNIT, False, tuple(gone))
     record = _active_record(harness)
     if record is not None:
+        if record_withheld(trust, record):
+            return _withheld_refusal(trust, record, config_dir)
         return Serving(record, RUNG_ACTIVE, False, tuple(gone))
     return Serving(_primary_record(harness), RUNG_DEFAULT, False, tuple(gone))
+
+
+def clear_gone(harness: Any, gone: Any, *, config_dir: Any = None) -> list[str]:
+    """Remove each stored selection in ``gone`` (``Serving.gone``) and return their lines. Prints
+    nothing; the caller shows the lines."""
+    lines: list[str] = []
+    for entry in gone:
+        if entry.store == RUNG_PENDING:
+            clear_pending_preset(harness, config_dir=config_dir)
+        elif entry.store == RUNG_UNIT:
+            remove_target(global_config_dir(config_dir))
+        else:
+            continue
+        lines.append(entry.line)
+    return lines
+
+
+def write_pending_preset(harness: Any, name: str, *, config_dir: Any = None) -> None:
+    """Record ``name`` as the preset the next start serves (D-31): the one writer of
+    ``pending_preset``. Touches ONLY that key of the GLOBAL overlay (the machine's own file, never a
+    workspace layer); the ``agent:`` slice and every other key stay. The merged config is validated
+    BEFORE the atomic write, so a bad name (``ValueError``) writes nothing."""
+    overlay_path = _resolve_user_overlay_path(global_config_dir(config_dir))
+    new_overlay = dict(load_overlay(overlay_path))
+    new_overlay["pending_preset"] = name
+    _validated(harness, {k: v for k, v in new_overlay.items() if k != _AGENT_KEY})
+    atomic_write_overlay(overlay_path, new_overlay)
+    harness.pending_preset = name
+
+
+def clear_pending_preset(harness: Any, *, config_dir: Any = None) -> None:
+    """Remove ``pending_preset`` from the GLOBAL overlay (the one remover), writing nothing when the
+    overlay holds none; every other key and the ``agent:`` slice stay as they were."""
+    overlay_path = _resolve_user_overlay_path(global_config_dir(config_dir))
+    existing = load_overlay(overlay_path)
+    if "pending_preset" not in existing:
+        harness.pending_preset = None
+        return
+    new_overlay = {k: v for k, v in existing.items() if k != "pending_preset"}
+    _validated(harness, {k: v for k, v in new_overlay.items() if k != _AGENT_KEY})
+    atomic_write_overlay(overlay_path, new_overlay)
+    harness.pending_preset = None
 
 
 async def persist_effort(
