@@ -1269,6 +1269,190 @@ async def free_accelerator(
 
 
 # ---------------------------------------------------------------------------
+# The swap: free the accelerator, launch the target, restore on failure (spec 20 §8.2)
+# ---------------------------------------------------------------------------
+SWAP_FREE_FAILED = ("Could not free the GPU for {name}: {exc}. No change made — the current model "
+                    "should still be serving.")
+SWAP_LAUNCH_FAILED = "Launch of {name} failed: {exc}{tail}"
+SWAP_RESTORED_TAIL = " Restored {label}."
+SWAP_NOT_RESTORED_TAIL = " Could not restore it: {why}"
+SWAP_NOTHING_SERVING_TAIL = " The box now has NO model serving — manual attention needed."
+
+
+@dataclass(frozen=True)
+class Heavy:
+    """One GPU-heavy server a swap stops or starts: its record `spec`, the `base_url` it answers at,
+    the configured `peer` name (None for the primary) and the `launch_kw` its launch carries (the
+    key, `{"api_key": …}`, only when the record requires one). The CALLER builds it (the provider
+    layer imports no cli): `model_ops.heavy_for` from a trust-resolved `Serving`,
+    `model_ops.incumbent_heavy` for what runs now. `launch_kw` is a read-only copy, left out of the
+    hash and of the repr (it holds the raw key)."""
+    spec: ManagedServerConfig
+    base_url: str
+    peer: str | None = None
+    launch_kw: Mapping[str, str] = field(default_factory=dict, hash=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "launch_kw", MappingProxyType(dict(self.launch_kw)))
+
+
+def heavy_label(heavy: Heavy) -> str:
+    """What a swap line calls `heavy`: its peer name, else the name it serves, else its model."""
+    return heavy.peer or getattr(heavy.spec, "served_name", None) or heavy.spec.model
+
+
+class SwapReporter(Protocol):
+    """What a surface says while a swap runs. `swap` awaits `freed` after the accelerator is free
+    (every time the free succeeds, and again after a cancellation stopped the target), `launched`
+    after the target answered, `restored` after the incumbent was relaunched, and `line` for the two
+    failure sentences it composes (already redacted)."""
+
+    async def freed(self) -> None: ...
+
+    async def launched(self, live: LiveEndpoint) -> None: ...
+
+    async def restored(self, spec: ManagedServerConfig) -> None: ...
+
+    async def line(self, text: str) -> None: ...
+
+
+@dataclass(frozen=True)
+class SwapOutcome:
+    """How a swap ended, for a failure that was handled: `live` the target's endpoint (None unless it
+    came up), `stopped` the incumbent the swap freed, `restored` that incumbent when it came back,
+    `error` the failure — a NEW exception whose text is the redacted one, with no cause and no
+    context — and `stage` where it happened ("free" or "launch"; None on success)."""
+    live: LiveEndpoint | None
+    stopped: Heavy | None
+    restored: Heavy | None
+    error: BaseException | None
+    stage: str | None
+
+
+def _redacted_error(exc: BaseException, redact: Callable[[str], str]) -> BaseException:
+    """A new exception of `exc`'s type (a subclass whose constructor will not take one message falls
+    back to its RuntimeError / TimeoutError base) whose text is `redact(str(exc))`. It is never
+    raised, so it has no traceback; `__cause__` is None and `__suppress_context__` is True with no
+    `__context__`, so nothing reachable from it holds the original (the raw tail) (D-22, SEC-04)."""
+    text = redact(str(exc))
+    try:
+        new = type(exc)(text)
+    except Exception:  # noqa: BLE001 — a subclass with its own constructor
+        new = (TimeoutError if isinstance(exc, TimeoutError) else RuntimeError)(text)
+    new.__cause__ = None
+    new.__context__ = None
+    new.__suppress_context__ = True
+    return new
+
+
+async def safe_stop(spec: ManagedServerConfig, config_dir: Path) -> None:
+    """Best-effort verified-stop of a server, swallowing errors. Used to tear a HALF-STARTED target
+    down before restoring an incumbent: the pidfile is one-per-config_dir (shared across primary and
+    peer), so a still-alive orphan would be clobbered-and-lost by the restore's own launch
+    (server.py start_server overwrites the pidfile) — leaving a second, untracked heavy."""
+    try:
+        await strategy_for(spec).stop(spec, config_dir)
+    except Exception:  # noqa: BLE001 — cleanup is best-effort
+        pass
+
+
+async def restore_incumbent(
+    stopped: Heavy | None, *, config_dir: Path, autosense: "AutosenseConfig | None",
+) -> tuple[str | None, str | None]:
+    """Best-effort re-launch of a heavy incumbent stopped for a swap that then FAILED, so the box is
+    never left with nothing serving. Returns `(label, note)` on success — `note` is the launch
+    decision's one line when it withheld a widening — and `(None, why)` when the decision refuses the
+    relaunch or the launch itself fails, so the caller reports the cause instead of "nothing serving"
+    (D-08). `(None, None)` is nothing to restore: the caller then reports the box needs manual
+    attention. Takes no launch lock and flushes no line: the caller holds the lock around the whole
+    swap (D-21)."""
+    if stopped is None:
+        return None, None
+    try:
+        live = await strategy_for(stopped.spec).activate(
+            stopped.spec, config_dir, stopped.base_url, peer=stopped.peer, autosense=autosense,
+            **stopped.launch_kw)
+        return stopped.spec.model, getattr(live, "note", None)
+    except server.LaunchRefused as exc:
+        return None, str(exc)
+    except Exception as exc:  # noqa: BLE001 — restore is best-effort; the caller surfaces the failure
+        # The same (None, why) shape as a refusal, so the caller's "Could not restore it: <why>"
+        # names the cause (a bad binary, a timeout, a port clash) instead of hiding it. The activate
+        # contract's own failures (RuntimeError / TimeoutError) are already one readable line;
+        # anything else keeps its type name so it is not an empty or cryptic string.
+        text = str(exc)
+        if isinstance(exc, (RuntimeError, TimeoutError)) and text:
+            return None, text
+        return None, f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+async def swap(
+    incumbent: Heavy | None,
+    target: Heavy,
+    *,
+    config_dir: Path,
+    autosense: "AutosenseConfig | None",
+    unit: Any = None,
+    reporter: SwapReporter,
+    redact: Callable[[str], str],
+    on_poll: Callable[[float], None] | None = None,
+    on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
+    timeout_seconds: float = 1800.0,
+) -> SwapOutcome:
+    """Free the accelerator of `incumbent`, launch `target`, tell `reporter`; a failed launch stops the
+    half-started target and restores the incumbent (the REPL's cold branch, moved here so every
+    surface runs the same sequence — spec 20 §8.2).
+
+    The CALLER holds the launch lock around the whole call (this module is where the strategies
+    define `activate`; the lock is the caller's, D-21) and builds both `Heavy` values.
+
+    A failure comes back as a `SwapOutcome` (`stage` "free" or "launch"), never raised. `redact` is
+    required: `outcome.error` is rebuilt from `redact(str(exc))` and every line handed to
+    `reporter.line` goes through it, so nothing `swap` returns or says carries the raw tail (D-22).
+    A cancellation after the incumbent was freed stops the target (verified), awaits `freed()`, runs
+    no restore and re-raises (D-20). `swap` never writes or removes `unit-target`: `unit` is accepted
+    and not read in this release (RULING W3, D-32)."""
+    try:
+        freed = await free_accelerator(
+            (incumbent.spec, incumbent.base_url) if incumbent is not None else None,
+            target.spec, config_dir)
+    except (RuntimeError, TimeoutError) as exc:
+        # The incumbent would not stop → we launched NOTHING and it is still up (the verified-stop
+        # only raises when the server survives).
+        await reporter.line(redact(SWAP_FREE_FAILED.format(name=heavy_label(target), exc=exc)))
+        return SwapOutcome(None, None, None, _redacted_error(exc, redact), "free")
+    stopped = incumbent if freed is not None else None
+    await reporter.freed()
+    try:
+        live = await strategy_for(target.spec).activate(
+            target.spec, config_dir, target.base_url, timeout_seconds=timeout_seconds,
+            on_poll=on_poll, peer=target.peer, autosense=autosense, on_plan=on_plan,
+            **target.launch_kw)
+    except asyncio.CancelledError:
+        # Nothing half-started stays behind, and nothing is restored: the person walked away.
+        await safe_stop(target.spec, config_dir)
+        await reporter.freed()
+        raise
+    except (RuntimeError, TimeoutError) as exc:
+        # The target half-started (a TimeoutError means its process is still ALIVE, per server.py
+        # wait_ready). Tear it down FIRST — the shared pidfile means the restore's own launch would
+        # otherwise clobber its handle and orphan it as a 2nd heavy — THEN restore the incumbent.
+        await safe_stop(target.spec, config_dir)
+        label, why = await restore_incumbent(stopped, config_dir=config_dir, autosense=autosense)
+        if label is not None and stopped is not None:
+            await reporter.restored(stopped.spec)
+        tail = (SWAP_RESTORED_TAIL.format(label=label) + (f" {why}" if why else "") if label
+                else SWAP_NOT_RESTORED_TAIL.format(why=why) if why
+                else SWAP_NOTHING_SERVING_TAIL if stopped is not None
+                else "")
+        await reporter.line(redact(SWAP_LAUNCH_FAILED.format(name=heavy_label(target), exc=exc, tail=tail)))
+        return SwapOutcome(None, stopped, stopped if label is not None else None,
+                           _redacted_error(exc, redact), "launch")
+    await reporter.launched(live)
+    return SwapOutcome(live, stopped, None, None, None)
+
+
+# ---------------------------------------------------------------------------
 # The cross-process launch lock
 # ---------------------------------------------------------------------------
 LAUNCH_LOCK_WAIT_LINE = "another LocalHarness is launching the model server — waiting"

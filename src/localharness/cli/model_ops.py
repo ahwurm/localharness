@@ -23,7 +23,7 @@ from localharness.config.overlay import (
     deep_merge,
     load_overlay,
 )
-from localharness.config import trust
+from localharness.config import redact, trust
 from localharness.config.paths import global_config_dir, resolve_runtime_path
 from localharness.config.plugin_sections import core_harness_view
 from localharness.config.redact import secret_values, validation_text
@@ -327,6 +327,49 @@ def _launch_key(harness: Any, base_url: str, spec: Any = None) -> dict[str, str]
         return {}
     return required_key_kwargs(getattr(ep, "lifecycle", None) if spec is None else spec,
                                getattr(ep, "api_key", None))
+
+
+def redact_for_channel(text: str, harness: Any, key_file_key: Any = None) -> str:
+    """`text` as any channel (the REPL, Discord, the phone, start's console) may show a launch's tail:
+    every secret the config holds, the key a key file supplied (a ``SecretStr`` or a str), ``Bearer``
+    tokens, llama-server's ``api_keys: ****wxyz`` line and URL credentials all masked (D-22, SEC-04).
+    The one channel-side redaction; ``lifecycle.swap`` takes it, bound, as its ``redact``. Redaction
+    never raises into a channel: when the config cannot be read for its secrets, the key and the
+    patterns are still scrubbed."""
+    raw = key_file_key.get_secret_value() if hasattr(key_file_key, "get_secret_value") else key_file_key
+    held = [raw] if isinstance(raw, str) and raw else []
+    try:
+        from localharness.provider.server import strip_url_credentials
+        held += secret_values(HarnessConfig, harness.model_dump(mode="python"))
+        return strip_url_credentials(redact.scrub(text, held, patterns=redact.LOGGED_KEY_PATTERNS))
+    except Exception:  # noqa: BLE001 — a channel must always get its text, redacted as far as it can be
+        return redact.scrub(text, held, patterns=redact.LOGGED_KEY_PATTERNS)
+
+
+def heavy_for(serving: "Serving", harness: Any) -> Any:
+    """The ``lifecycle.Heavy`` a swap launches for the record ``serving`` chose: its spec, address,
+    peer name and launch key. ``serving`` comes from ``resolve_serving`` (trust already applied), so
+    a record the machine withholds never reaches here. A record with no launch record (attach-only)
+    cannot be launched: ValueError."""
+    from localharness.provider.lifecycle import Heavy
+    record = serving.record
+    if record.spec is None:
+        raise ValueError(f"{record.name} has no launch record — there is nothing to launch")
+    return Heavy(record.spec, record.base_url, record.peer.name if record.peer else None,
+                 _launch_key(harness, record.base_url, record.spec))
+
+
+def incumbent_heavy(active: tuple[Any, str], harness: Any) -> Any:
+    """The ``lifecycle.Heavy`` for what runs now, ``active`` being the ``(spec, base_url)`` the session
+    tracks. The peer is named only when ``spec`` IS that peer's own lifecycle (identity, not
+    equality), so a restore's refusal names ``extra_endpoints[<name>]`` exactly for a peer and
+    ``server`` for the primary."""
+    from localharness.provider.lifecycle import Heavy
+    spec, base_url = active
+    peer_ep = next((e for e in getattr(harness, "extra_endpoints", None) or []
+                    if e.base_url == base_url), None)
+    peer = peer_ep.name if peer_ep is not None and getattr(peer_ep, "lifecycle", None) is spec else None
+    return Heavy(spec, base_url, peer, _launch_key(harness, base_url, spec))
 
 
 def _peer_session_key(ep: Any) -> "tuple[Any, str | None]":
