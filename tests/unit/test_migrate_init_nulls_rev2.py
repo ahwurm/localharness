@@ -334,3 +334,91 @@ def test_a_hand_set_max_actions_in_a_retried_overrides_yaml_is_not_cleared(tmp_p
 
     org = _disk(overrides)["org"]
     assert org["default_temperature"] is None and org["permissions"]["budget"]["max_actions"] == 100
+
+
+# ------------------------------------------------------------------------------- a re-init (WR-07)
+
+
+def _reinit(tmp_path: Path, *, force: bool = True) -> str:
+    """`init`'s write over `tmp_path` with the stamp current (what a re-init writes); its output."""
+    from rich.console import Console
+
+    from localharness.cli import init_cmd
+    from localharness.config.models import OrgConfig
+
+    out = io.StringIO()
+    original_console = init_cmd.console
+    init_cmd.console = Console(file=out, width=400)
+    try:
+        init_cmd._write_harness(tmp_path, HarnessConfig.model_validate({
+            "version": "1", "provider": dict(PROVIDER),
+            "org": OrgConfig(permissions=PermissionConfig(
+                init_nulls_revision=CURRENT_INIT_NULLS_REVISION)).model_dump()}), True, force=force)
+    finally:
+        init_cmd.console = original_console
+    return " ".join(out.getvalue().split())
+
+
+@pytest.mark.parametrize("stamp", [None, 1])
+def test_a_reinit_below_revision_2_nulls_the_dumped_temperature_in_overrides_yaml(tmp_path, stamp):
+    _write(tmp_path, _config(stamp=stamp))
+    overrides = _put(tmp_path, "overrides.yaml", {"org": {"default_temperature": 0.6, "default_model": "m"}})
+    original = overrides.read_bytes()
+
+    out = _reinit(tmp_path, force=False)
+
+    assert _disk(overrides)["org"] == {"default_temperature": None, "default_model": "m"}
+    (backup,) = _backups(tmp_path, "overrides.yaml")
+    assert backup.read_bytes() == original
+    assert f"Updated overrides.yaml{CLAUSE} — backup at {backup}" in out
+    later = migrate.load_plan(tmp_path / "config.yaml")[1]  # nothing about overrides.yaml is left owed
+    assert later is None or (all(s.path != overrides for s in later.sidecars) and not later.init_nulls_due)
+    assert migrate.read_init_nulls_pending(tmp_path) == ()
+
+
+def test_a_force_reinit_that_resets_saved_choices_keeps_the_temperature_nulled(tmp_path):
+    _write(tmp_path, _config(stamp=1))
+    overrides = _put(tmp_path, "overrides.yaml", {
+        "org": {"default_temperature": 0.6}, "provider": {"default_model": "saved"}})
+
+    _reinit(tmp_path, force=True)
+
+    assert (_disk(overrides).get("org") or {}).get("default_temperature") is None
+
+
+def test_a_reinit_over_a_stamp_2_config_leaves_overrides_yaml_alone(tmp_path):
+    _write(tmp_path, _config(stamp=2))
+    overrides = _put(tmp_path, "overrides.yaml", {"org": {"default_temperature": 0.6}})
+    before = overrides.read_bytes()
+
+    _reinit(tmp_path, force=False)
+
+    assert overrides.read_bytes() == before  # a 0.6 set after revision 2 ran is the person's
+
+
+def test_a_reinit_leaves_revision_1_keys_in_overrides_yaml_alone(tmp_path):
+    _write(tmp_path, _config(stamp=None))
+    overrides = _put(tmp_path, "overrides.yaml", {"org": {"default_temperature": 0.6,
+                                                         "permissions": {"budget": {"max_actions": 100}}}})
+
+    _reinit(tmp_path, force=False)
+
+    org = _disk(overrides)["org"]
+    assert org["default_temperature"] is None and org["permissions"]["budget"]["max_actions"] == 100
+
+
+@_not_root
+def test_a_reinit_over_a_read_only_overrides_yaml_warns_and_owes_it(tmp_path):
+    _write(tmp_path, _config(stamp=1))
+    overrides = _put(tmp_path, "overrides.yaml", {"org": {"default_temperature": 0.6}})
+    overrides.chmod(0o444)
+    before = overrides.read_bytes()
+
+    out = _reinit(tmp_path, force=False)
+
+    assert f"Could not update {overrides}" in out and "org.default_temperature: 0.6" in out
+    assert overrides.read_bytes() == before and _backups(tmp_path, "overrides.yaml") == []
+    assert migrate.read_init_nulls_pending(tmp_path) == ("overrides.yaml",)
+    overrides.chmod(0o644)
+    _migrate(tmp_path / "config.yaml")  # the next start's migration retries it alone
+    assert _disk(overrides)["org"]["default_temperature"] is None
