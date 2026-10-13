@@ -234,3 +234,80 @@ def test_probe_served_window_delegates(monkeypatch):
     monkeypatch.setattr(ctxmod, "probe_window", _fake)
     assert ctxmod.probe_served_window("http://b/v1", "m", "vllm", api_key="K") == 123
     assert seen == {"args": ("http://b/v1", "m", "vllm"), "kw": {"api_key": "K"}}
+
+
+# --- the server's default temperature rides the one /props GET (SAMPLE-04, D-31) -----------------
+
+def _with_props(monkeypatch, props, **kw):
+    _serve(monkeypatch, {f"{LLAMA}/models": META, PROPS: props})
+    return probe_window(LLAMA, "qwen", "llamacpp", **kw)
+
+
+def test_sampling_reads_params_temperature(monkeypatch):
+    got = _with_props(monkeypatch, {"default_generation_settings": {"params": {"temperature": 0.8}}})
+    assert got == WindowProbe(65536, 262144, 0.8)
+
+
+def test_sampling_falls_back_to_temperature_beside_params(monkeypatch):
+    got = _with_props(monkeypatch, {"default_generation_settings": {"temperature": 0.7, "params": {}}})
+    assert got.sampling == 0.7
+
+
+def test_sampling_an_int_reads_as_a_float(monkeypatch):
+    got = _with_props(monkeypatch, {"default_generation_settings": {"params": {"temperature": 1}}})
+    assert got.sampling == 1.0 and isinstance(got.sampling, float)
+
+
+@pytest.mark.parametrize("bad", [True, "1.0", [1], float("nan"), float("inf"), 1e999, -0.5, None])
+def test_sampling_hostile_values_are_none(monkeypatch, bad):
+    got = _with_props(monkeypatch, {"default_generation_settings": {"params": {"temperature": bad}}})
+    assert got.sampling is None and got.served == 65536
+
+
+@pytest.mark.parametrize("props", [
+    {}, {"default_generation_settings": {}}, {"default_generation_settings": "oops"},
+    {"default_generation_settings": {"params": "oops"}}, {"default_generation_settings": [1]}, [],
+])
+def test_sampling_missing_or_malformed_props_is_none(monkeypatch, props):
+    assert _with_props(monkeypatch, props).sampling is None
+
+
+def test_sampling_props_raising_is_none_and_served_survives(monkeypatch):
+    _serve(monkeypatch, {f"{LLAMA}/models": META, PROPS: httpx.ConnectError("refused")})
+    assert probe_window(LLAMA, "qwen", "llamacpp") == WindowProbe(65536, 262144, None)
+
+
+def test_sampling_props_down_and_models_silent_is_all_none(monkeypatch):
+    _serve(monkeypatch, {f"{LLAMA}/models": httpx.ConnectError("x"), PROPS: httpx.ConnectError("y")})
+    assert probe_window(LLAMA, "qwen", "llamacpp") == WindowProbe(None, None, None)
+
+
+def test_sampling_exactly_one_props_call_even_when_models_gave_the_window(monkeypatch):
+    calls = _serve(monkeypatch, {f"{LLAMA}/models": META,
+                                 PROPS: {"default_generation_settings": {"params": {"temperature": 1.0}}}})
+    probe_window(LLAMA, "qwen", "llamacpp", api_key="K")
+    assert [u for u, _ in calls] == [f"{LLAMA}/models", PROPS]
+    assert calls[1][1] == {"headers": {"Authorization": "Bearer K"}}
+
+
+def test_sampling_props_also_supplies_the_served_fallback_in_the_same_call(monkeypatch):
+    calls = _serve(monkeypatch, {
+        f"{LLAMA}/models": {"data": [{"id": "qwen", "meta": {"n_ctx_train": 262144}}]},
+        PROPS: {"default_generation_settings": {"n_ctx": 32768, "params": {"temperature": 0.5}}}})
+    assert probe_window(LLAMA, "qwen", "llamacpp") == WindowProbe(32768, 262144, 0.5)
+    assert [u for u, _ in calls].count(PROPS) == 1
+
+
+def test_sampling_other_runtimes_leave_it_none(monkeypatch, tmp_path):
+    monkeypatch.setattr("localharness.agent.gguf_tokenizer.resolve_gguf_path", lambda m, p: None)
+    body = {"default_generation_settings": {"params": {"temperature": 0.5}}}
+    for ptype, bodies, base in [
+        ("vllm", {"http://h:8000/v1/models": {"data": [{"id": "m", "max_model_len": 32768}]}}, "http://h:8000/v1"),
+        ("ollama", {"http://h:11434/api/ps": {"models": [{"model": "m", "context_length": 4096}]}},
+         "http://h:11434/v1"),
+        ("lmstudio", {"http://h:1234/api/v0/models": {"data": [{"id": "m", "loaded_context_length": 8192}]}},
+         "http://h:1234/v1"),
+    ]:
+        calls = _serve(monkeypatch, {**bodies, "http://h:8000/props": body})
+        assert probe_window(base, "m", ptype).sampling is None
+        assert not any(u.endswith("/props") for u, _ in calls)

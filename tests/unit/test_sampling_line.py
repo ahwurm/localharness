@@ -7,6 +7,7 @@ change and records the facts. Nothing here touches a real server; the ledger liv
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from localharness.agent.context import WindowProbe, probe_window
 from localharness.cli.start_cmd import SAMPLING_LINE, _fmt_temp, _say_sampling, _sampling_line
@@ -128,3 +129,40 @@ def test_unsetting_then_resetting_says_it_again(tmp_path):
     assert said == [LINE]
     _say(tmp_path, probe, said)  # set again
     assert said == [LINE, LINE]
+
+
+# --- every no-line case, the labels, and every change that says it again -------------------------
+
+@pytest.mark.parametrize("kw", [
+    dict(temperature=None, rung=RUNG, server_default=1.0),
+    dict(temperature=0.6, rung=None, server_default=1.0),
+    dict(temperature=0.6, rung=RUNG, server_default=None),
+    dict(temperature=0.6, rung=RUNG, server_default=0.6),
+    dict(temperature=0.6, rung=RUNG, server_default=0.6004),
+    dict(temperature=None, rung=None, server_default=None),
+])
+def test_no_line_cases(kw):
+    assert _sampling_line(None, **kw) is None
+
+
+@pytest.mark.parametrize("label", [
+    "temperature in agents/orchestrator.yaml", "temperature in divisions/core.yaml",
+    "agent.temperature in overrides.yaml"])
+def test_the_rungs_own_label_names_the_value_and_the_undo(label):
+    assert _sampling_line(None, temperature=0.6, rung=label, server_default=1.0) == (
+        f"sampling: temperature 0.6 from {label} (the model's own is 1.0 — unset {label} to use it)")
+
+
+@pytest.mark.parametrize("now", [
+    dict(temperature=0.7, rung=RUNG, server_default=1.0),
+    dict(temperature=0.6, rung="temperature in agents/orchestrator.yaml", server_default=1.0),
+    dict(temperature=0.6, rung=RUNG, server_default=0.8),
+])
+def test_a_change_in_any_of_the_three_facts_says_it_again(now):
+    last = SamplingRecord(0.6, RUNG, 1.0, "2026-10-13T00:00:00+00:00")
+    assert _sampling_line(last, **now) is not None
+
+
+def test_a_recorded_baseline_of_no_temperature_does_not_hide_a_new_one():
+    last = SamplingRecord(None, None, 1.0, "2026-10-13T00:00:00+00:00")
+    assert _sampling_line(last, temperature=0.6, rung=RUNG, server_default=1.0) == LINE
