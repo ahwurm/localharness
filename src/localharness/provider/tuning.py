@@ -248,7 +248,7 @@ def derived_clause(
 ) -> str:
     """What a launch derived, as the clause of `start`'s launch line (spec 20 §6.5, D-23). The one place
     these words are composed. Pure string building from closed values: the cache type, `draft-mtp`, a
-    table parser, ints and the first ten characters of the ledger's ISO `at`.
+    table parser, ints and the first ten printable ASCII characters of the ledger's ISO `at`.
 
     A full shape reads `kv q8_0 · mtp (1 layer)` (vLLM: `reasoning qwen3 · tools qwen3_coder`) and never
     carries the fitted `-c`: the window line prints that. A retry shape says what it dropped and, when
@@ -263,7 +263,10 @@ def derived_clause(
         text = f"retried at boot: {', '.join(dropping)}"
         return f"{text} · {undo}" if drafted_off else text
     if cause == "remembered":
-        date = f" {remembered_at[:10]}" if remembered_at else ""
+        # The ledger sits where agent-run code can write: only printable ASCII of its `at` reaches the
+        # terminal, so no escape sequence rides the line (WR-04, T-12-35).
+        shown = "".join(c for c in remembered_at or "" if " " <= c <= "~")[:10].strip()
+        date = f" {shown}" if shown else ""
         what = "mtp off" if drafted_off else "window halved"
         kv = [f"kv {tuned.cache_type}"] if tuned.cache_type is not None else []
         return " · ".join([*kv, f"{what} (remembered{date})"])

@@ -86,6 +86,21 @@ def test_the_remembered_date_is_sliced_to_ten_characters():
     assert clause == "mtp off (remembered 2026-10-01)"
 
 
+@pytest.mark.parametrize("planted", ["\x1b[2J\x1b[H\x1b]0;x", "2026-10-01\x1b[2J", "\x07\x9b2026-10-01T",
+                                     "‮2026-10-01", "\x00\r\n\t"])
+def test_a_planted_ledger_date_reaches_the_line_as_printable_ascii_only(planted):
+    clause = derived_clause(NOTHING_DERIVED, shape="retry", cause="remembered", dropped=("draft-mtp",),
+                            remembered_at=planted)
+    assert clause.startswith("mtp off (remembered") and clause.endswith(")")
+    assert all(" " <= c <= "~" or c == "·" for c in clause)
+
+
+def test_a_date_that_filters_to_nothing_prints_no_date():
+    clause = derived_clause(NOTHING_DERIVED, shape="retry", cause="remembered", dropped=("draft-mtp",),
+                            remembered_at="\x1b\x1b\x07")
+    assert clause == "mtp off (remembered)"
+
+
 def test_a_boot_retry_uses_the_spec_wording():
     clause = derived_clause(Tuned(cache_type="q8_0"), shape="retry", cause="boot", dropped=("draft-mtp",))
     assert clause == f"retried at boot: mtp off, -c halved · {UNDO}"
