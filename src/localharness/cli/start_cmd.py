@@ -300,6 +300,29 @@ def _session_endpoint(harness: Any, record: Any) -> "tuple[Any, dict[str, str], 
     return provider, model_ops._launch_key(harness, ep.base_url, record.spec), dict(ep.extra_headers)
 
 
+def _boot_marker_present(global_dir: Path) -> bool:
+    """Is there a boot marker for the autostart unit's run to confirm? (D-14) A start with none never
+    reaches `confirm_launch`."""
+    from localharness.provider import units
+    try:
+        return units.read_marker(global_dir) is not None
+    except OSError:
+        return False
+
+
+def _record_fit_header(spec: Any) -> Any:
+    """The fit-relevant fields of ``spec``'s GGUF header, or None when it has no readable one: the
+    context length a boot retry's recorded fit is clamped to."""
+    if getattr(spec, "runtime", None) != "llamacpp" or not getattr(spec, "model", None):
+        return None
+    try:
+        from localharness.agent.gguf_header import read_header
+        from localharness.provider.autosense import FIT_KEYS, fit_header
+        return fit_header(read_header(spec.model, FIT_KEYS))
+    except Exception:  # noqa: BLE001 — a header that cannot be read clamps nothing: no clause is said
+        return None
+
+
 def _managed_server_running(strategy: Any, srv: Any, global_dir: Path) -> bool:
     """Is the harness-managed server ALREADY serving? ``global_dir`` is the GLOBAL config dir, not
     whatever layer the session is otherwise reading: the pidfile/log/venv under ``<global>/vllm/``
@@ -312,8 +335,25 @@ def _managed_server_running(strategy: Any, srv: Any, global_dir: Path) -> bool:
     ignored `srv.runtime`, so a managed LM Studio — which by design writes NO pidfile — always
     read False and start took the "not running" branch into LmsStrategy.activate, whose
     pre-existing-server fail-fast then raised on the server that was in fact already up.
-    Called inside the autostart try, so an OSError from the pid path degrades as before."""
-    return strategy.liveness(srv, global_dir).alive
+    Called inside the autostart try, so an OSError from the pid path degrades as before.
+
+    The pidfile names ONE launch for the whole box, and a peer's launch is as live as the primary's: so
+    "alive" is also asked of the record (D-18). When the pidfile's launch is verifiably NOT this record's
+    (`read_launch(expect=record_identity)` finds it live but unverified), it is not this record
+    "already serving" and start must not wait on it as if it were. No readable pidfile, a strategy with no
+    launch identity, a managed LM Studio (no pidfile) or a docker container (named, not pid-keyed) keep
+    today's answer."""
+    if not strategy.liveness(srv, global_dir).alive:
+        return False
+    if (getattr(strategy, "launch_identity", None) is None or srv.runtime == "lmstudio"
+            or srv.launch == "docker"):
+        return True
+    from localharness.provider import lifecycle, procfs
+    identity = lifecycle.record_identity(srv)
+    if identity is None:
+        return True
+    launch = procfs.read_launch(global_dir, expect=identity)
+    return launch is None or launch.verified
 
 
 def _read_session_key(harness: Any) -> str | None:
@@ -800,6 +840,7 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     makes, the primary's or a peer's, comes through here, so the one `activate` below stays the only
     launch site of this module and sits inside the launch lock."""
     from localharness.provider import server as managed_server
+    from localharness.provider import lifecycle
     from localharness.provider.lifecycle import LAUNCH_LOCK_WAIT_LINE, launch_lock, strategy_for
     strategy = strategy_for(srv)
     label = managed_server.RUNTIME_LABELS.get(srv.runtime, srv.runtime)
@@ -812,8 +853,10 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
         # Already launched (a live pidfile / running container) — only wait for readiness. The dir is
         # the strategy's own: LM Studio writes no pidfile, so with the raw dir a server another
         # process brought up would read "exited during startup" at once.
+        # `expect` is the proof the live launch is THIS record's: a pidfile whose process is another
+        # record's raises at once instead of polling this record's port on its pid (D-18).
         await managed_server.wait_ready(base_url, config_dir=strategy.recovery_config_dir(global_dir),
-                                        **launch_key)
+                                        expect=lifecycle.record_identity(srv), **launch_key)
 
     if _managed_server_running(strategy, srv, global_dir):
         await _wait_for_loading_server()
@@ -2063,6 +2106,95 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     _launched: list = []
     _pending_warnings: list[str] = []
     _attached: Any = None  # the attach Decision (kind "attach" / "attach_other") this start settles
+
+    async def _land(rec: Any, outcome: str, rung: str | None) -> None:
+        """The landing's one writer (`persist_landed`); a failed write is said and the session goes on."""
+        try:
+            await model_ops.persist_landed(harness, rec, outcome=outcome, rung=rung, config_dir=server_cfg_path)
+        except Exception as exc:  # noqa: BLE001 — the server is up; the selection is a convenience
+            err_console.print(
+                model_ops.redact_for_channel(PERSIST_FAILED_LINE.format(exc=exc), harness, provider.api_key),
+                markup=False, soft_wrap=True)
+
+    async def _stop_start(code: int) -> None:
+        await _probe_client.aclose()
+        raise typer.Exit(code)
+
+    async def _swap_start(incumbent: Any) -> None:
+        """Stop ``incumbent`` (a record whose server runs, or None) and launch the selected record, the
+        way `/model <name>` does: `start_serving.run_swap` holds the launch lock around `lifecycle.swap`.
+        The launch decision is asked BEFORE anything is stopped (a refused launch leaves the incumbent
+        serving); the launch line names who is stopped and what starts, before the wait (D-21, R-13-36).
+        A failed swap exits 1 after the reporter's redacted line; a success lands as a swap."""
+        from localharness.provider import server as managed_server
+        from localharness.provider.lifecycle import LAUNCH_LOCK_WAIT_LINE, strategy_for
+        peer_name = record.peer.name if record.peer is not None else None
+        keyed = bool(launch_key)
+        launch_decision = managed_server.launch_decision(_serving_spec, keyed, peer=peer_name)
+        if launch_decision.refusal is not None:
+            found = (f" (PATH has {path_llama_server})"
+                     if path_llama_server and _serving_spec.runtime == "llamacpp" else "")
+            err_console.print(launch_decision.refusal + found, markup=False, soft_wrap=True)
+            await _stop_start(1)
+        exposed, posture = managed_server.effective_posture(_serving_spec, keyed=keyed, decision=launch_decision)
+        if launch_notes.suffix and exposed:
+            posture = f"{posture or 'every interface'} — {launch_notes.suffix}"
+        undo_field = f"extra_endpoints.{peer_name}.lifecycle.speculative" if peer_name else "server.speculative"
+        said: list[bool] = []
+
+        def say_line(clause: str = "") -> None:
+            inside = "; ".join(part for part in (posture, clause) if part)
+            console.print(
+                start_serving.swap_launch_line(
+                    incumbent=visible_text(incumbent.name) if incumbent is not None else None,
+                    target=visible_text(record.name), inside=f"{inside}; " if inside else ""),
+                markup=False, soft_wrap=True)
+            if not said:
+                said.append(True)
+                for note in launch_notes.lines:
+                    err_console.print(note, markup=False, soft_wrap=True)
+                launch_notes.printed = True
+                if launch_decision.note:
+                    err_console.print(launch_decision.note, markup=False, soft_wrap=True)
+
+        def on_plan(plan: Any) -> None:
+            say_line(_plan_clause(plan, undo_field=undo_field))
+
+        async def say_lock_wait() -> None:
+            err_console.print(LAUNCH_LOCK_WAIT_LINE, markup=False, soft_wrap=True)
+
+        if not getattr(strategy_for(_serving_spec), "plans_launch", False):
+            say_line()  # a strategy that plans nothing never calls `on_plan`: the line is said up front
+        reporter = start_serving.ConsoleSwapReporter(err_console.print, harness, provider.api_key)
+        outcome = await start_serving.run_swap(
+            harness, incumbent, serving, config_dir=server_cfg_path, autosense=harness.autosense,
+            reporter=reporter, redact=reporter.redact, on_plan=on_plan, on_wait=say_lock_wait)
+        if outcome.error is not None:
+            await _stop_start(1)  # the reporter already said why, redacted
+        _launched.append(outcome.live)
+        await _land(record, "swap", serving.rung)
+
+    if decision.kind == "swap":
+        # A hand-run (foreign) server in the incumbent's place is never stopped and never launched
+        # beside: the start attaches to it and says whose it is (D-17).
+        _foreign = await asyncio.to_thread(
+            start_serving.foreign_incumbent_line, decision.incumbent, record, server_cfg_path)
+        if _foreign:
+            err_console.print(_foreign, markup=False, soft_wrap=True)
+            decision = start_serving.Decision("attach_other", decision.incumbent, None, (), None)
+    _verdict: Any = None
+    _unit_state: Any = None
+    if decision.kind == "launch" and not probe_ok and _serving_spec is not None:
+        # Nothing answers: before launching, prove what holds the box (D-18). The pidfile is a claim,
+        # verified against /proc; a launch of another record is the swap's incumbent, never waited on.
+        # A config with one record and no autostart unit has no other holder to find: today's flow.
+        _unit_state = start_serving.unit_runtime_state()
+        if len(_all_records) > 1 or _unit_state is not None:
+            _verdict = await asyncio.to_thread(
+                lambda: start_serving.liveness_verdict(
+                    harness, machine_trust, record, server_cfg_path,
+                    main_pid=getattr(_unit_state, "main_pid", None)))
+
     if decision.kind in ("attach", "attach_other"):
         # The one clause this attach carries, if any (D-13, D-15): said once, on stdout.
         for line in decision.lines:
@@ -2080,7 +2212,40 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 err_console.print(
                     model_ops.redact_for_channel(PERSIST_FAILED_LINE.format(exc=exc), harness, provider.api_key),
                     markup=False, soft_wrap=True)
-    elif not probe_ok and _serving_spec is not None:
+    elif decision.kind == "swap":
+        await _swap_start(decision.incumbent)
+        probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
+    elif probe_ok:
+        # Nothing the sensor could name at a shared address, yet the selected record answers: it serves.
+        _attached = start_serving.Decision("attach", record, None, (), serving.rung)
+        await _land(record, "attach", serving.rung)
+    elif _serving_spec is not None and _verdict is not None and _verdict.kind == "foreign":
+        err_console.print(_verdict.line, markup=False, soft_wrap=True)  # the incumbent sentence
+        await _stop_start(1)
+    elif _serving_spec is not None and _verdict is not None and _verdict.kind == "starting":
+        # The autostart unit's own `serve` is bringing the selected record up: wait for it, bounded,
+        # and never signal it (D-18).
+        _wait_seconds = start_serving.starting_seconds(_unit_state)
+        console.print(_verdict.line, markup=False, soft_wrap=True)
+
+        async def _selected_answers_now() -> bool:
+            return bool((await model_ops.sense_serving(harness, (record,))).answering)
+
+        if not await start_serving.wait_starting(_selected_answers_now, seconds=_wait_seconds):
+            err_console.print(
+                start_serving.STARTING_GAVE_UP_LINE.format(pid=_verdict.pid, seconds=_wait_seconds),
+                markup=False, soft_wrap=True)
+            await _stop_start(1)
+        probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
+        _attached = start_serving.Decision("attach", record, None, (), serving.rung)
+        if probe_ok:
+            await _land(record, "attach", serving.rung)
+    elif _serving_spec is not None and _verdict is not None and _verdict.kind == "other":
+        # A verified live launch of ANOTHER record answers nowhere: it holds the box, so it is the
+        # swap's incumbent and is stopped before the selected record starts (no wait on its pid).
+        await _swap_start(_verdict.record)
+        probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
+    elif _serving_spec is not None:
         # Harness-managed server (init guided setup) — start it instead of erroring
         # (covers reboots). If a pid is alive, it's mid-load: just wait.
         refusal: str | None = None
@@ -2092,15 +2257,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if refusal is None:
                 probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
                 if probe_ok:
-                    try:
-                        await model_ops.persist_landed(
-                            harness, record, outcome="launch" if _launched else "attach",
-                            rung=serving.rung, config_dir=server_cfg_path)
-                    except Exception as exc:  # noqa: BLE001 — the server is up; the selection is a convenience
-                        err_console.print(
-                            model_ops.redact_for_channel(
-                                PERSIST_FAILED_LINE.format(exc=exc), harness, provider.api_key),
-                            markup=False, soft_wrap=True)
+                    # a launch this start made lands as a launch; a wait on a loading one settles as an
+                    # attach of the rung (R-13-29, R-13-33)
+                    await _land(record, "launch" if _launched else "attach", serving.rung)
         except (RuntimeError, TimeoutError, OSError) as exc:
             # OSError: server_pid()'s os.kill(pid, 0) liveness probe is POSIX-only semantics —
             # on Windows a stale pidfile raises a plain OSError instead of ProcessLookupError.
@@ -2181,6 +2340,19 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         probe_window, provider.base_url, resolved_model, provider.provider_type, **launch_key
     )
     _served = _probe.served or _probe_window
+    if _attached is not None and record.spec is not None and _boot_marker_present(server_cfg_path):
+        # D-14: an attach with a boot marker on disk closes the boot's retry through `confirm_launch(marker=)`
+        # and says it once; with no marker (or no unit state, this release) nothing is confirmed. The
+        # record's own GGUF header is what the recorded fit is clamped to.
+        _boot_clause = await asyncio.to_thread(
+            lambda: start_serving.boot_clause(
+                server_cfg_path, record, autosense=harness.autosense,
+                unit_state=start_serving.unit_runtime_state(), served_window=_probe.served,
+                header=_record_fit_header(record.spec)))
+        if _boot_clause:
+            console.print(
+                start_serving.ATTACH_LINE.format(name=record.name, clause=_boot_clause),
+                markup=False, soft_wrap=True)
     _bound = _effective_max_context(_served, _cfg_window)
     # The window block (AUTO-02). `last` is read ONCE, before anything this start records, and one
     # verdict (`changed`) gates both the block and the #127 line below (D-35).
@@ -3357,6 +3529,8 @@ def start_app(
     )] = "terminal",
     subagents: Annotated[bool, typer.Option("--subagents", help="Show the agent picker on startup when multiple agents are configured")] = False,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Use this model for THIS session only (never persisted). Must already be served — a harness-managed single-model server (llama.cpp/vLLM) cannot be hot-switched this way; use `localharness model <name>` or the REPL `/model` command instead.")] = None,
+    preset: Annotated[str | None, typer.Option("--preset", "-p", help="Serve this preset (a launch record, by name) now, ahead of what the last session ended on. Another preset serving is swapped for it as /model <name> does; --model keeps its session-only meaning beside it. Without it, start serves the preset the last /model chose.")] = None,
+    scripts: Annotated[str | None, typer.Option("--scripts", hidden=True, help="Alias of --preset (an older scripts spelling).")] = None,
     list_models: Annotated[bool, typer.Option("--list-models", help="List models available at the configured provider, then exit")] = False,
     no_input: Annotated[
         bool,
@@ -3379,6 +3553,10 @@ def start_app(
     )] = False,
 ) -> None:
     """Launch the agent REPL. Zero to chatting in one command."""
+    if preset is not None and scripts is not None and preset != scripts:
+        err_console.print(PRESET_CONFLICT_LINE.format(a=preset, b=scripts), markup=False, soft_wrap=True)
+        raise typer.Exit(2)
+    wanted = preset if preset is not None else scripts
     from localharness.config.paths import resolve_config_dir
     if not list_models and not (resolve_config_dir(config_dir) / "config.yaml").exists():
         # First start: no config. On a terminal, run init's core setup here and go on into the
@@ -3402,7 +3580,9 @@ def start_app(
             restart = asyncio.run(_start_async(
                 resume.agent_name if resume is not None else agent, verbose, debug, config_dir,
                 channel, subagents and resume is None, model, list_models, no_input,
-                show_reasoning=show_reasoning, resume=resume, trust_project=trust_project))
+                show_reasoning=show_reasoning, resume=resume, trust_project=trust_project,
+                # the preset is asked for once: a restart for /plugins rebuilds on whatever now serves
+                preset=wanted if resume is None else None))
             if restart is None or channel != "terminal":
                 return
             # The REPL ended for /plugins and the session is fully torn down: run the plugin's
