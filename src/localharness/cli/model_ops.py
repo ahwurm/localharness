@@ -10,9 +10,13 @@ reach because their per-agent yaml pins a concrete model.
 """
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
@@ -787,6 +791,103 @@ def clear_pending_preset(harness: Any, *, config_dir: Any = None) -> None:
     _validated(harness, {k: v for k, v in new_overlay.items() if k != _AGENT_KEY})
     atomic_write_overlay(overlay_path, new_overlay)
     harness.pending_preset = None
+
+
+# --------------------------------------------------------------------------- the sensor
+# `sense_serving` is the one probe `start` and `/model` share (spec 20 §8.2, D-12): which launch record
+# answers at its own address right now. It asks loopback addresses only (T-13-29): a record whose
+# `base_url` is a remote host is never probed from here, so `start` cannot be turned into a way to
+# reach an address a config merely names.
+
+SENSE_TIMEOUT_SECONDS = 2.0
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+@dataclass(frozen=True)
+class ServingSense:
+    """What the sensor found: ``answering`` the records that answer at their own address (record
+    order, each once), ``ids`` the model ids each answering address reported, keyed by the address
+    probed and present only for addresses that answered (a reply that was not a model list answers
+    with no ids)."""
+    answering: tuple[ServingRecord, ...]
+    ids: Mapping[str, tuple[str, ...]]
+
+
+def is_loopback(base_url: Any) -> bool:
+    """True when ``base_url`` names ``127.0.0.1``, ``::1`` or ``localhost``. Anything else, an
+    unparseable value included, is not loopback."""
+    try:
+        host = urlsplit(str(base_url)).hostname
+    except ValueError:
+        return False
+    return host is not None and host.lower() in _LOOPBACK_HOSTS
+
+
+def launchable_loopback_others(harness: Any, trust: Any, selected: ServingRecord) -> tuple[ServingRecord, ...]:
+    """The records other than ``selected`` the sensor probes: those the harness can launch (a launch
+    spec, not withheld by ``trust``) whose address is loopback. An attach-only peer, a withheld one
+    and a remote one are never in it."""
+    return tuple(
+        r for r in serving_records(harness)
+        if r.prefix != selected.prefix and r.spec is not None
+        and not record_withheld(trust, r) and is_loopback(r.base_url))
+
+
+def shares_base_url(record: ServingRecord, records: Any) -> bool:
+    """True when a record in ``records`` other than ``record`` itself has ``record``'s address."""
+    want = _norm_url(record.base_url)
+    return any(r.prefix != record.prefix and _norm_url(r.base_url) == want for r in records)
+
+
+def _attribute(on_url: list[ServingRecord], ids: tuple[str, ...]) -> ServingRecord | None:
+    """The record an answering address belongs to (R-13-27): the one whose served name is among the
+    ``ids``; else the only record there; else the primary when it is there; else none."""
+    named = next((r for r in on_url if r.served in ids), None)
+    if named is not None:
+        return named
+    if len(on_url) == 1:
+        return on_url[0]
+    return next((r for r in on_url if r.peer is None), None)
+
+
+async def sense_serving(
+    harness: Any, records: Any, *, timeout: float = SENSE_TIMEOUT_SECONDS
+) -> ServingSense:
+    """Probe the address of every record in ``records`` once (records sharing an address share one
+    probe), in parallel and off the event loop, with the launch key of the server there. A probe that
+    cannot connect, times out or fails any other way answers nothing; a reply that is not an OpenAI
+    model list answers with no ids (the server IS there). An answering address is attributed to one
+    record by ``_attribute``. Writes nothing."""
+    records = tuple(records)
+    by_url: dict[str, list[ServingRecord]] = {}
+    for record in records:
+        by_url.setdefault(_norm_url(record.base_url), []).append(record)
+    probes = [(group[0].base_url, group) for group in by_url.values()]
+
+    async def _probe(url: str) -> tuple[str, ...] | None:
+        try:
+            ids, reachable = await asyncio.to_thread(
+                list_live_models, url, timeout, **_launch_key(harness, url))
+        except MalformedModelListError:
+            return ()
+        except Exception:  # noqa: BLE001 — a probe never raises into start: it answers nothing
+            return None
+        return tuple(i for i in ids if isinstance(i, str)) if reachable else None
+
+    results = await asyncio.gather(*(_probe(url) for url, _ in probes))
+    answering: dict[str, ServingRecord] = {}
+    ids_by_url: dict[str, tuple[str, ...]] = {}
+    for (url, group), got in zip(probes, results):
+        if got is None:
+            continue
+        ids_by_url[url] = got
+        owner = _attribute(group, got)
+        if owner is not None:
+            answering.setdefault(owner.prefix, owner)
+    order = {r.prefix: i for i, r in enumerate(records)}
+    return ServingSense(
+        tuple(sorted(answering.values(), key=lambda r: order[r.prefix])),
+        MappingProxyType(ids_by_url))
 
 
 # --------------------------------------------------------------------------- landing / selection writers
