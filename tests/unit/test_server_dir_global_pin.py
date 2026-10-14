@@ -107,14 +107,18 @@ def test_start_cmd_lifecycle_sites_name_the_global_pin():
     # The down-server branch hands the PINNED dir to the one launch-or-wait helper (launch path 1),
     # and the helper's own liveness, launch and wait calls all name the dir it was handed. Named in
     # full so reverting the call site to the raw cfg_path (or the helper's liveness alone) fails.
-    assert "harness.server, server_cfg_path, provider.base_url, launch_key," in text
+    # (the record the ladder chose: `_serving_spec` is `harness.server` for the primary, a peer's lifecycle else)
+    assert "_serving_spec, server_cfg_path, provider.base_url, launch_key," in text
+    assert "_serving_spec, cfg_path, provider.base_url" not in text
     assert "harness.server, cfg_path, provider.base_url" not in text
     assert "_managed_server_running(strategy, srv, global_dir)" in text
     assert "_managed_server_running(strategy, harness.server, cfg_path)" not in text
     # The two launch calls carry the key the launched server requires (`**launch_key`, which is {}
     # unless server.require_api_key is on) — the pin is unchanged: both still name the handed dir.
     # (`**launch_kw` is the launch line's `on_plan` for a planning strategy, {} for any other.)
-    assert "activate(srv, global_dir, base_url, autosense=autosense, **launch_kw," in text  # launch
+    # (`peer` rides only for a peer's launch, so the primary's call is the one it always was)
+    assert "activate(srv, global_dir, base_url, autosense=autosense," in text  # launch
+    assert "**launch_kw, **launch_key)" in text
     assert "**launch_key)" in text
     assert "wait_ready(base_url, config_dir=strategy.recovery_config_dir(global_dir)," in text
     assert "wait_ready(provider.base_url, config_dir=cfg_path)" not in text

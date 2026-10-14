@@ -61,6 +61,10 @@ EFFORT_CUT_OFF_LINE = "effort: thinking-off rejected by this server; the reasoni
 # rung's own label names what to unset. A fixed template filled with numbers and the loader's label.
 SAMPLING_LINE = ("sampling: temperature {temp} from {rung} "
                  "(the model's own is {own} — unset {rung} to use it)")
+# A landing's selection (last_served / active_endpoint / pending_preset) that could not be written: the
+# server is up and the session goes on (D-07).
+PERSIST_FAILED_LINE = "Serving, but persisting the selection failed: {exc}"
+PRESET_CONFLICT_LINE = "--preset and --scripts name different presets ({a}, {b})"
 RESUMED_LINE = "Awake again, continuing the conversation that went to sleep (sitting {previous})."
 WAKING_DETAIL = "waking the chat you left"
 
@@ -277,6 +281,23 @@ def _agent_roster_table(agents: list[dict[str, Any]]) -> Table:
     for i, a in enumerate(agents, start=1):
         table.add_row(str(i), entity_text("agent", a.get("name", "")), Text(a.get("role", "")))
     return table
+
+
+def _session_endpoint(harness: Any, record: Any) -> "tuple[Any, dict[str, str], dict]":
+    """The endpoint a session runs on when it serves ``record`` (D-13, D-29): ``(provider, launch_key,
+    extra_headers)``. The primary's is the harness's own provider; a peer's is a COPY of it carrying the
+    peer's address, runtime, key and served name, so the primary's identity is never rewritten and every
+    ``provider.*`` read below sees the record the session is on. ``launch_key`` is what a launch of, or a
+    probe to, that address sends (``{}`` unless the server there is set to require one)."""
+    from localharness.cli import model_ops
+    if record.peer is None:
+        return harness.provider, model_ops._launch_key(harness, record.base_url, record.spec), {}
+    ep = record.peer
+    served = record.served or record.name
+    provider = harness.provider.model_copy(update={
+        "base_url": ep.base_url, "provider_type": ep.provider_type, "api_key": ep.api_key,
+        "default_model": served, "available_models": [served]})
+    return provider, model_ops._launch_key(harness, ep.base_url, record.spec), dict(ep.extra_headers)
 
 
 def _managed_server_running(strategy: Any, srv: Any, global_dir: Path) -> bool:
@@ -753,7 +774,8 @@ def _server_recovery_supplier(repl_cell: list) -> Callable[[], ServerRecovery]:
 async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launch_key: dict[str, str],
                                 *, path_binary: str | None = None, autosense: Any = None,
                                 endpoint_out: list | None = None,
-                                notes: LaunchNotes | None = None) -> str | None:
+                                notes: LaunchNotes | None = None,
+                                peer: str | None = None) -> str | None:
     """Launch path 1 of the five: `start`'s down-server branch. Wait for a server that is already
     loading, or ask the launch decision BEFORE announcing anything and launch through the lifecycle
     strategy. Returns the decision's refusal line when the launch is refused (nothing stopped,
@@ -770,11 +792,20 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
 
     ``notes`` is what start's own launch prints beside the announcement (D-17, D-16): its ``suffix``
     joins the posture phrase when the launch really binds beyond loopback, its ``lines`` follow the
-    announcement once, and ``printed`` is set. The waiting and refused branches print none of it."""
+    announcement once, and ``printed`` is set. The waiting and refused branches print none of it.
+
+    ``peer`` is the configured name of a lifecycle peer when ``srv`` is that peer's launch record
+    (None for the primary): it names the peer in the lines, in the launch decision and in the undo
+    field of a retried launch (``extra_endpoints.<peer>.lifecycle.speculative``). Every launch `start`
+    makes, the primary's or a peer's, comes through here, so the one `activate` below stays the only
+    launch site of this module and sits inside the launch lock."""
     from localharness.provider import server as managed_server
     from localharness.provider.lifecycle import LAUNCH_LOCK_WAIT_LINE, launch_lock, strategy_for
     strategy = strategy_for(srv)
     label = managed_server.RUNTIME_LABELS.get(srv.runtime, srv.runtime)
+    if peer:
+        label = f"{label} ({peer})"
+    undo_field = f"extra_endpoints.{peer}.lifecycle.speculative" if peer else "server.speculative"
 
     async def _wait_for_loading_server() -> None:
         console.print(f"Managed {label} is still loading — waiting...")
@@ -788,7 +819,7 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
         await _wait_for_loading_server()
         return None
     keyed = bool(launch_key)
-    decision = managed_server.launch_decision(srv, keyed)
+    decision = managed_server.launch_decision(srv, keyed, peer=peer)
     if decision.refusal is not None:
         found = f" (PATH has {path_binary})" if path_binary and srv.runtime == "llamacpp" else ""
         return decision.refusal + found
@@ -832,7 +863,7 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
                 said: list[bool] = []
 
                 def on_plan(plan: Any) -> None:
-                    _announce(_plan_clause(plan))
+                    _announce(_plan_clause(plan, undo_field=undo_field))
                     if not said:
                         said.append(True)
                         _say_notes()
@@ -844,8 +875,9 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
                 _say_notes()
             # activate = serve_command → start_server → wait_ready (launch + readiness) via the lifecycle
             # strategy. The off-loop verified-stop wrapper lives in the strategy, not this launch path.
-            live = await strategy.activate(srv, global_dir, base_url, autosense=autosense, **launch_kw,
-                                           **launch_key)
+            # a peer's name rides only for a peer: the primary's launch is called exactly as it always was
+            live = await strategy.activate(srv, global_dir, base_url, autosense=autosense,
+                                           **({"peer": peer} if peer else {}), **launch_kw, **launch_key)
             if endpoint_out is not None:
                 endpoint_out.append(live)
     if loading:
@@ -853,9 +885,10 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     return None
 
 
-def _plan_clause(plan: Any) -> str:
+def _plan_clause(plan: Any, *, undo_field: str = "server.speculative") -> str:
     """The derived clause of the launch line for the plan a launch is about to run (D-23); empty for an
-    untuned launch (`None`). The undo field is `server.speculative`: `start` launches the primary."""
+    untuned launch (`None`). ``undo_field`` is the record field that keeps drafting off: the primary's
+    `server.speculative` by default, a peer's `extra_endpoints.<name>.lifecycle.speculative`."""
     if plan is None:
         return ""
     from localharness.provider import tuning
@@ -868,7 +901,7 @@ def _plan_clause(plan: Any) -> str:
     return tuning.derived_clause(
         plan.tuned, shape=plan.shape, cause=plan.cause, dropped=plan.dropped,
         remembered_at=plan.remembered_at, context=report.asked if halved else None, halved=halved,
-        undo_field="server.speculative", parser_fields=getattr(plan, "dropped_parser_fields", ()))
+        undo_field=undo_field, parser_fields=getattr(plan, "dropped_parser_fields", ()))
 
 
 _POSTURE_KEYS = ("bind_all", "require_api_key")
@@ -1062,8 +1095,12 @@ def _say_sampling(probe: Any, *, temperature: float | None, rung: str | None, le
         pass  # the ledger is a convenience: a start never fails on it
 
 
+_PRIMARY_SPEC = object()  # "the harness's own `server:`" — the default of `_attach_window_report(spec=)`
+
+
 def _attach_window_report(harness: Any, provider_type: str, served: int | None, trained: int | None,
-                          *, harness_launched: bool) -> "tuple[Any, str | None]":
+                          *, harness_launched: bool, spec: Any = _PRIMARY_SPEC
+                          ) -> "tuple[Any, str | None]":
     """The window report for a start that ATTACHES to a server, and the undo kind its second line names.
 
     A llama.cpp record with a model file gets the fit computed beside the running server (the window
@@ -1074,10 +1111,13 @@ def _attach_window_report(harness: Any, provider_type: str, served: int | None, 
 
     The undo, by precedence (D-38): `"record"` when the record sets `context`; `"extra_args"` when a
     `-c` rides `extra_args`; `None` when the harness launched the incumbent and `context` is unset
-    (nothing to undo); else `"hand"`, a foreign incumbent that the next harness launch replaces."""
+    (nothing to undo); else `"hand"`, a foreign incumbent that the next harness launch replaces.
+
+    ``spec`` is the launch record of the server the session attached to: the primary's `server:` by
+    default, a peer's `lifecycle` when the session serves a peer (None for an attach-only record)."""
     from localharness.provider import autosense as _auto
 
-    srv = harness.server
+    srv = harness.server if spec is _PRIMARY_SPEC else spec
     fits = free = total = weights = None
     undo: str | None = None
     mode = "not-computed"
@@ -1513,11 +1553,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                        no_input: bool = False, show_reasoning: bool = False,
                        acp_channel: Any = None, mobile_channel: Any = None,
                        resume: Resume | None = None, trust_project: bool = False,
-                       fresh_thread: bool = False) -> Restart | None:
+                       fresh_thread: bool = False, preset: str | None = None) -> Restart | None:
     """Async entry point: discover agent, wire dependencies, run REPL.
 
     `trust_project`: `--trust-project` — this run trusts the project it stands in, recording
     nothing (the machine's own files are decided as always).
+
+    `preset`: `--preset` — the launch record this start serves, ahead of every stored selection. The
+    ladder (`model_ops.resolve_serving`) runs after the trust decision and names the record; the
+    session then runs on that record's endpoint (D-01, D-16).
 
     Returns a `Restart` when the REPL ended for `/plugins enable|disable` (a terminal session):
     start_app runs the plugin's step, then calls this again with `resume` — the conversation, the
@@ -1567,6 +1611,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.agent.loop import AgentLoop
     from localharness.agent.permissions import PermissionEvaluator
     from localharness.channels.terminal import TerminalChannel
+    from localharness.cli import model_ops, start_serving
     from localharness.cli.agent_cmd import _build_agent_yaml
     from localharness.cli.slash_commands import set_plugin_rows
     from localharness.config.loader import ConfigLoader
@@ -1577,6 +1622,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.plugins.lifecycle import start_plugins, stop_plugins
     from localharness.plugins.slot import MemorySlot
     from localharness.plugins.resolve import resolve
+    from localharness.provider import speed_stats as _speed_stats
     from localharness.provider.client import LLMClient, LLMConfig
     from localharness.tools.hooks import HookSystem
     from localharness.tools.registry import ToolRegistry
@@ -1757,6 +1803,48 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         )
         raise typer.Exit(0)
 
+    # What this start serves (spec 20 §8.1, D-01, D-13): the ladder runs AFTER the trust decision, so a
+    # record the machine withholds is refused here with spec 16's line (printed once: `machine_trust.line`
+    # already said it) before anything is launched, stopped or cleared. A stored selection that names
+    # nothing is removed and said (R-13-11).
+    serving = model_ops.resolve_serving(harness, machine_trust, preset, config_dir=server_cfg_path)
+    if isinstance(serving, model_ops.ServingRefusal):
+        if serving.kind != "withheld" or serving.line != machine_trust.line:
+            err_console.print(serving.line, markup=False, soft_wrap=True)
+        raise typer.Exit(serving.exit_code)
+    for _gone_line in model_ops.clear_gone(harness, serving.gone, config_dir=server_cfg_path):
+        err_console.print(_gone_line, markup=False, soft_wrap=True)
+    record = serving.record
+    if record.peer is not None and record.spec is None:
+        # An attach-only peer the `active_endpoint` rung names is no launch record: when it does not
+        # answer there is nothing to launch, so the start continues on the primary as a start always
+        # did (R-13-33, T-13-36). Nothing is stopped or written.
+        if not (await model_ops.sense_serving(harness, (record,))).answering:
+            err_console.print(
+                start_serving.NOT_LAUNCHABLE_LINE.format(
+                    name=visible_text(record.name), base_url=visible_text(record.base_url)),
+                markup=False, soft_wrap=True)
+            serving = model_ops.Serving(
+                model_ops.serving_records(harness)[0], model_ops.RUNG_DEFAULT, False, serving.gone)
+            record = serving.record
+    # A peer's key file is read here, once, at the session's first use of that peer (D-23): the key is
+    # held in memory on the endpoint and rides every probe and request of the session.
+    _held_keys: set[str] = set()
+
+    def _hold_record_key(rec: Any) -> None:
+        if rec.peer is None or rec.spec is None or rec.prefix in _held_keys:
+            return
+        _held_keys.add(rec.prefix)
+        peer_key, key_line = model_ops._peer_session_key(rec.peer)
+        model_ops._hold_peer_session_key(rec.peer, peer_key)
+        if key_line:
+            err_console.print(key_line, markup=False, soft_wrap=True)
+
+    _hold_record_key(record)
+    primary_launch_key = launch_key  # the primary's own, for the lines that are about the primary
+    provider, launch_key, _peer_headers = _session_endpoint(harness, record)
+    _serving_spec = record.spec
+
     _ensure_packaged_tools(cfg_path)
 
     # Discover agents (migrate the legacy root-agent YAML first so discovery reads the
@@ -1860,8 +1948,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.tools.capabilities import set_floor_enabled
     set_floor_enabled(harness.org.enforce_capability_floor)
 
-    # Wire dependencies
-    provider = harness.provider
+    # Wire dependencies. `provider` is the session's endpoint, bound above to the record the ladder
+    # chose: the primary's own, or a copy carrying the peer's address, runtime and key.
     resolved_model = (
         agent_config.model
         if agent_config.model != "inherit"
@@ -1891,7 +1979,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 f"[bold red]Error:[/bold red] --model {model_override!r} is not currently "
                 f"served at {provider.base_url}.{avail_hint}"
             )
-            if harness.server is not None:
+            if _serving_spec is not None:
                 err_console.print(
                     "This is a harness-managed single-model server — switching models restarts "
                     "it. Use `localharness model <name>` to persist + restart, or the REPL "
@@ -1899,7 +1987,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 )
             raise typer.Exit(1)
         resolved_model = model_override
-    elif harness.server is None:
+    elif _serving_spec is None:
         # ATTACH mode with no --model: reconcile the configured name against the live endpoint
         # BEFORE probing. Probing a stale name burns three retries and prints the alarming
         # "falling back to xml" warning before any correction could apply; fixing the name first
@@ -1924,6 +2012,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
         queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling
         temperature=agent_config.temperature,  # None unless a person set one (spec 20 §7)
+        extra_headers=_peer_headers,  # a peer's own headers; {} for the primary
     )
     # detect_capabilities SEEDS CapabilityResult.context_window from this config value and only
     # overwrites it from a vLLM-shape /v1/models answer (and MUTATES config.context_window as it
@@ -1931,30 +2020,93 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     _seed_window = _initial_cfg.context_window
     _probe_client = LLMClient(_initial_cfg)
 
+    async def _rebind_session(new_record: Any) -> None:
+        """Move the session onto ``new_record`` (the one that answers): its endpoint, key, model, probe
+        client. The old probe client is released first (#154)."""
+        nonlocal record, provider, launch_key, _peer_headers, _serving_spec, resolved_model
+        nonlocal _initial_cfg, _probe_client
+        await _probe_client.aclose()
+        record = new_record
+        _hold_record_key(record)
+        provider, launch_key, _peer_headers = _session_endpoint(harness, record)
+        _serving_spec = record.spec
+        if not model_override and agent_config.model == "inherit":
+            resolved_model = provider.default_model
+        _initial_cfg = LLMConfig(
+            base_url=provider.base_url,
+            model=resolved_model,
+            api_key=provider.api_key,
+            timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
+            queue_wait_seconds=provider.inference_queue_wait_seconds,
+            temperature=agent_config.temperature,
+            extra_headers=_peer_headers,
+        )
+        _probe_client = LLMClient(_initial_cfg)
+
     # Startup probe — local LLMs may need warm-up; probe returns the real tool_call_mode (FIDEL-04)
-    # AND the served context window (single source of truth for the budget).
-    probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
+    # AND the served context window (single source of truth for the budget). The sensor asks, beside
+    # it, which OTHER launch record answers at its own address (D-12); with no peer it asks nothing.
+    _all_records = model_ops.serving_records(harness)
+    _shared = model_ops.shares_base_url(record, _all_records)
+    _sensed_records = model_ops.launchable_loopback_others(harness, machine_trust, record)
+    if _shared:
+        _sensed_records = (*_sensed_records, record)  # a shared address needs the sensor to name its owner
+    (probe_ok, probed_mode, served_window, probe_error), _sense = await asyncio.gather(
+        _probe_llm(_probe_client), model_ops.sense_serving(harness, _sensed_records))
+    decision = start_serving.decide(
+        serving,
+        selected_answers=start_serving.selected_answers(probe_ok, record, _sense, shared=_shared),
+        sense=_sense,
+        last_served=_speed_stats.last_served(_speed_stats.default_speed_stats_path(server_cfg_path)))
     # What a launch THIS start makes hands back (its LiveEndpoint: the window it got, the environment
     # names it dropped); empty when the server was already up or only loading — that start attaches.
     _launched: list = []
     _pending_warnings: list[str] = []
-    if not probe_ok and harness.server is not None:
+    _attached: Any = None  # the attach Decision (kind "attach" / "attach_other") this start settles
+    if decision.kind in ("attach", "attach_other"):
+        # The one clause this attach carries, if any (D-13, D-15): said once, on stdout.
+        for line in decision.lines:
+            console.print(line, markup=False, soft_wrap=True)
+        if decision.kind == "attach_other":
+            # Another record answers and nothing explicit asked otherwise: serve that one, never launch
+            # beside it (D-15). The session moves onto it and the probe runs once more, there.
+            await _rebind_session(decision.record)
+            probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
+        _attached = decision
+        if probe_ok:
+            try:
+                await start_serving.settle_attach(harness, decision, config_dir=server_cfg_path)
+            except Exception as exc:  # noqa: BLE001 — the attach happened; the selection is a convenience
+                err_console.print(
+                    model_ops.redact_for_channel(PERSIST_FAILED_LINE.format(exc=exc), harness, provider.api_key),
+                    markup=False, soft_wrap=True)
+    elif not probe_ok and _serving_spec is not None:
         # Harness-managed server (init guided setup) — start it instead of erroring
         # (covers reboots). If a pid is alive, it's mid-load: just wait.
         refusal: str | None = None
         try:
             refusal = await _start_managed_server(
-                harness.server, server_cfg_path, provider.base_url, launch_key,
+                _serving_spec, server_cfg_path, provider.base_url, launch_key,
                 path_binary=path_llama_server, autosense=harness.autosense, endpoint_out=_launched,
-                notes=launch_notes)
+                notes=launch_notes, peer=record.peer.name if record.peer is not None else None)
             if refusal is None:
                 probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
+                if probe_ok:
+                    try:
+                        await model_ops.persist_landed(
+                            harness, record, outcome="launch" if _launched else "attach",
+                            rung=serving.rung, config_dir=server_cfg_path)
+                    except Exception as exc:  # noqa: BLE001 — the server is up; the selection is a convenience
+                        err_console.print(
+                            model_ops.redact_for_channel(
+                                PERSIST_FAILED_LINE.format(exc=exc), harness, provider.api_key),
+                            markup=False, soft_wrap=True)
         except (RuntimeError, TimeoutError, OSError) as exc:
             # OSError: server_pid()'s os.kill(pid, 0) liveness probe is POSIX-only semantics —
             # on Windows a stale pidfile raises a plain OSError instead of ProcessLookupError.
             # Managed-server lifecycle is POSIX-only for now; degrade to a message, not a traceback.
             from localharness.provider.server import RUNTIME_LABELS
-            label = RUNTIME_LABELS.get(harness.server.runtime, harness.server.runtime)
+            label = RUNTIME_LABELS.get(_serving_spec.runtime, _serving_spec.runtime)
             # escape(): `exc` can quote llama-server's own log tail (wait_ready) or a path — a
             # bracketed fragment there is not markup, and a stray `[/x]` raises MarkupError here.
             err_console.print(
@@ -2049,17 +2201,18 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # Was the serving process launched by the harness (a live pidfile)? Only the undo sentence of
         # an attach report asks (D-38), and only a llama.cpp record has one; a failure reads "no".
         _harness_launched = False
-        if harness.server is not None and harness.server.runtime == "llamacpp":
+        if _serving_spec is not None and _serving_spec.runtime == "llamacpp":
             try:
                 from localharness.provider.lifecycle import strategy_for
                 _harness_launched = _managed_server_running(
-                    strategy_for(harness.server), harness.server, server_cfg_path)
+                    strategy_for(_serving_spec), _serving_spec, server_cfg_path)
             except Exception:  # noqa: BLE001 — wording only: degrade to a foreign incumbent
                 _harness_launched = False
         # Off the event loop: the attach report reads the header, stats the weights and runs nvidia-smi.
         report, undo = await asyncio.to_thread(
             _attach_window_report,
-            harness, provider.provider_type, _served, _probe.trained, harness_launched=_harness_launched)
+            harness, provider.provider_type, _served, _probe.trained, harness_launched=_harness_launched,
+            spec=_serving_spec)
         launched_here = False
         # D-08: every llama.cpp attach stores the weights path the server reports beside the alias it
         # serves, so a later `init` ranks the model that served before. Silent on any failure; a
@@ -2100,9 +2253,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     # list changed. Names only, never values.
     # Every launch this start made records its list, an empty one included: a launch that dropped
     # nothing must reset the record, or a later repeat of an earlier drop goes unannounced.
-    if _launched and harness.server is not None:
+    if _launched and _serving_spec is not None:
         from localharness.provider.speed_stats import last_dropped_env, record_dropped_env
-        _runtime = harness.server.runtime
+        _runtime = _serving_spec.runtime
         _names = sorted(set(_launched[0].dropped_env))
         if _names != (last_dropped_env(_ledger, _runtime) or []):
             if _names:
@@ -2125,8 +2278,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _pending_warnings.append(EFFORT_UNENFORCED_LINE.format(key=_key))
     if "chat_template_kwargs" in _rejected_keys and EFFORT_BUDGET_KEY.get(provider.provider_type) is None:
         _pending_warnings.append(EFFORT_CUT_OFF_LINE)
-    # The session agent's level: `start` runs on the primary and never reads `active_endpoint`
-    # (spec 16 §7.2), so the endpoint rung is the primary's own `server.effort`.
+    # The session agent's level (spec 16 §7.2): the endpoint rung is the SERVING record's own, keyed on the
+    # session endpoint's live base_url: the primary's `server.effort`, or for a resumed peer the
+    # `active_endpoint.effort` the person chose there (else the peer's lifecycle default, D-29).
     from localharness.config.effort import resolve_effort
     _effort_level, _effort_rung = resolve_effort(None, agent_config.effort, harness, provider.base_url)
     _effort_ratios = (harness.effort_budget.low_ratio, harness.effort_budget.high_ratio)
@@ -2209,6 +2363,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         tool_call_mode=probed_mode or "native",
         queue_wait_seconds=provider.inference_queue_wait_seconds,  # #62 gate-wait ceiling
         temperature=agent_config.temperature,  # None unless a person set one (spec 20 §7)
+        extra_headers=_peer_headers,  # a peer's own headers; {} for the primary
         # D-41: the reconnect bound reaches the client the root loop and every child share; without
         # this line a real session keeps the LLMConfig default 0.0 (reconnect off).
         reconnect_wait_seconds=provider.reconnect_wait_seconds,
@@ -3086,7 +3241,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
 
         if launch_notes.printed:
             pending = []  # start's own launch said it all; the REPL has nothing to add
-        elif (conversion := _conversion_launch_line(harness, launch_key, sensed.converted)):
+        elif (conversion := _conversion_launch_line(harness, primary_launch_key, sensed.converted)):
             pending.insert(0, conversion)  # D-17: the conversion's line leads the first launch
         repl = OrchestratorREPL(
             orchestrator=orchestrator,
@@ -3109,6 +3264,10 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             on_plugin_switch=_plugin_switch if mobile_channel is None and acp_channel is None else None,
             queued=resume.queued if resume is not None else (),
             launch_lines=tuple(pending),
+            # What the machine decided and what runs (D-19, D-11): the REPL's cold swap resolves its target
+            # through the same trust, and its accelerator lock starts on the server this start serves.
+            machine_trust=machine_trust,
+            serving_heavy=(record.spec, record.base_url) if record.spec is not None else None,
         )
 
         repl_cell.append(repl)  # late binding: the supplier now answers repl.server_recovery()
