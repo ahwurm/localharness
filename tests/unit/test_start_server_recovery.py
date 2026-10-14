@@ -233,7 +233,9 @@ async def test_a_server_another_process_brought_up_meanwhile_is_waited_on_not_la
     os.close(holder)
     assert await asyncio.wait_for(task, 2) is None
     assert seen.cmds == [], "start launched over a server another process brought up"
-    assert waited == [(LLAMA_URL, {"config_dir": tmp_path})]
+    # the loading wait carries the proof it waits on THIS record's launch (D-18): `expect` is its identity
+    assert waited == [(LLAMA_URL, {"config_dir": tmp_path,
+                                   "expect": lifecycle.record_identity(_llama())})]
     assert out == []
     assert [line for line in seen.err_lines if line == LAUNCH_LOCK_WAIT_LINE] == [LAUNCH_LOCK_WAIT_LINE]
     assert "Managed llama.cpp is still loading — waiting..." in seen.lines
@@ -254,7 +256,7 @@ async def test_an_lm_studio_server_already_up_is_waited_on_with_no_pidfile_check
     monkeypatch.setattr(server, "wait_ready", wait_ready)
     lms = ManagedServerConfig(runtime="lmstudio", model="qwen", port=1234)
     assert await _start_managed_server(lms, tmp_path, "http://localhost:1234/v1", {}) is None
-    assert waited == [("http://localhost:1234/v1", {"config_dir": None})]
+    assert waited == [("http://localhost:1234/v1", {"config_dir": None, "expect": None})]  # LM Studio has no identity
 
 
 async def test_a_free_lock_prints_no_wait_line(tmp_path, monkeypatch):
