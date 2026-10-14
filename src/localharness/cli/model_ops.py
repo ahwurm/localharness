@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from pydantic import ValidationError
@@ -36,6 +36,9 @@ from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
 from localharness.provider.units import TARGET_NAME, read_target, remove_target
 from localharness.registry import set_value_in_dict
+
+if TYPE_CHECKING:
+    from localharness.cli.workspace import MachineTrust
 
 _AGENT_KEY = "agent"
 
@@ -714,7 +717,7 @@ def _active_record(harness: Any) -> ServingRecord | None:
 
 
 def resolve_serving(
-    harness: Any, trust: Any, preset: str | None, *, config_dir: Any = None
+    harness: Any, trust: MachineTrust, preset: str | None, *, config_dir: Any = None
 ) -> Serving | ServingRefusal:
     """Walk the ladder: ``--preset`` > ``pending_preset`` > ``unit-target`` > ``active_endpoint`` >
     ``server:``. Writes nothing; a stored selection that names nothing comes back on ``Serving.gone``
@@ -749,6 +752,13 @@ def resolve_serving(
             return _withheld_refusal(trust, record, config_dir)
         return Serving(record, RUNG_ACTIVE, False, tuple(gone))
     return Serving(_primary_record(harness), RUNG_DEFAULT, False, tuple(gone))
+
+
+def default_serving(harness: Any, gone: tuple = ()) -> Serving:
+    """The ladder's last rung as a ``Serving``: the primary ``server:`` record, nothing asked for. For a
+    caller whose chosen record turned out not launchable and which falls back to what a start always
+    served (R-13-33); a ``Serving`` is built here and in ``resolve_serving`` only (D-11)."""
+    return Serving(serving_records(harness)[0], RUNG_DEFAULT, False, gone)
 
 
 def clear_gone(harness: Any, gone: Any, *, config_dir: Any = None) -> list[str]:
