@@ -197,6 +197,41 @@ def liveness_verdict(
     return LivenessVerdict("none", None, None, None)
 
 
+def foreign_incumbent_line(
+    incumbent: ServingRecord, target: ServingRecord, config_dir: Any
+) -> str | None:
+    """The imperative incumbent sentence when ``incumbent`` answers but is no harness launch, else None
+    (D-17, the 13-09 hand-off). ``run_swap`` stops the incumbent through its strategy's verified stop; a
+    hand-run server (or the unit's, or another user's) in that place is never ours to stop, and a launch
+    beside it would be answered by it and reported ready. The caller attaches to the incumbent instead.
+
+    A record's own launch is proven against ``/proc`` (``read_launch(expect=record_identity)``); a
+    record with no identity (LM Studio) is the strategy's own liveness. A port with no listener, or one
+    ``workspace.port_holder`` cannot name, says nothing. Reads only: nothing is stopped or signalled."""
+    spec = incumbent.spec
+    port = _port_of(incumbent.base_url)
+    if spec is None or port is None or not model_ops.is_loopback(incumbent.base_url):
+        return None
+    if not procfs.listeners(port):
+        return None
+    try:
+        identity = lifecycle.record_identity(spec)
+        if identity is not None:
+            launch = procfs.read_launch(config_dir, expect=identity)
+            owned = launch is not None and launch.verified
+        else:
+            owned = bool(lifecycle.strategy_for(spec).liveness(spec, config_dir).alive)
+    except Exception:  # noqa: BLE001 — what cannot be read claims nothing: the swap's own checks stand
+        return None
+    if owned:
+        return None
+    holder = workspace.port_holder(port)
+    if holder is None:
+        return None
+    return workspace.incumbent_sentence(
+        holder, port=port, form="imperative", served=incumbent.served, target=target.name)
+
+
 async def wait_starting(probe: Callable[[], Any], *, seconds: float, poll_seconds: float = 3.0) -> bool:
     """Poll ``probe`` (a callable returning a bool, or an awaitable of one) until it is true or
     ``seconds`` have passed; True when it turned true. A probe that raises counts as not yet. It only
