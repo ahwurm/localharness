@@ -7,6 +7,8 @@ fakes take `**kw`.
 """
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 
 import pytest
@@ -35,12 +37,16 @@ from localharness.cli.start_serving import (
 )
 from localharness.cli.workspace import MachineTrust
 from localharness.config.overlay import load_overlay
-from localharness.provider import procfs, server, speed_stats
+from localharness.config.models import AutosenseConfig
+from localharness.provider import lifecycle, procfs, server, speed_stats, units
+from localharness.provider import server as managed_server
+from tests.unit.gguf_support import write_gguf
 from tests.unit.procfs_support import fake_proc  # noqa: F401
 from tests.unit.test_sense_serving import (  # noqa: F401
     FLASH_ACTIVE,
     PEER_URL,
     PRIMARY,
+    PROVIDER_KEY,
     PRIMARY_URL,
     Probes,
     home,
@@ -494,3 +500,371 @@ async def test_wait_starting_never_signals_anything(slept, monkeypatch):
     monkeypatch.setattr(os, "kill", forbidden)
     monkeypatch.setattr(os, "killpg", forbidden)
     assert await start_serving.wait_starting(lambda: False, seconds=3, poll_seconds=3) is False
+
+
+# ------------------------------------------------------------------------------------- the boot clause
+
+KNOBS = AutosenseConfig()
+CLAUSE = ("retried at boot: mtp off, -c halved · "
+          "extra_endpoints.flash-next.lifecycle.speculative: off keeps the full window")
+
+
+class Boot:
+    """A `flash-next` peer whose model is a real (tiny) Swift-shaped GGUF header, a verified launch of
+    it in the fake `/proc`, and helpers to plant a boot marker and a retry record."""
+
+    def __init__(self, home, tmp_path, fake_proc) -> None:
+        from tests.unit.test_tuning_derive import SWIFT
+
+        self.home = home
+        self.model = write_gguf(tmp_path / "flash.gguf", SWIFT)
+        seed(home, peers=[peer("flash-next", served_name="flash-next", model=str(self.model))])
+        self.harness = load(home)
+        self.record = record(self.harness, "flash-next")
+        self.key = lifecycle.record_key(self.record.spec)
+        from localharness.agent.gguf_header import read_header
+        from localharness.provider.autosense import FIT_KEYS, fit_header
+
+        self.header = fit_header(read_header(self.record.spec.model, FIT_KEYS))
+        fake_proc.process(4242, argv=(LLAMA, "-a", "flash-next", "--port", "8081"), exe=LLAMA,
+                          start_time=777)
+        _pidfile(home, "4242 777 8081")
+
+    def marker(self, **over) -> units.Marker:
+        fields = dict(record=self.key, binary=str(self.record.spec.binary), invocation="inv-1",
+                      cause="death", shape="retry", planned_context=40_000, full_fit=80_000,
+                      free_bytes=20 * 2**30, dropped=("draft-mtp",), at="2026-10-13T11:59:30+00:00")
+        fields.update(over)
+        return units.Marker(**fields)
+
+    def plant(self, **over):
+        directory = server.server_dir(self.home)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / units.BOOT_MARKER_NAME
+        data = {k: (list(v) if isinstance(v, tuple) else v) for k, v in vars(self.marker(**over)).items()}
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def clause(self, *, unit_state="default", served=40_000):
+        state = units.UnitRuntimeState("inv-1", 1) if unit_state == "default" else unit_state
+        return start_serving.boot_clause(
+            self.home, self.record, autosense=KNOBS, unit_state=state, served_window=served,
+            header=self.header)
+
+    def retry(self):
+        return speed_stats.last_retry(ledger(self.home), self.key)
+
+
+@pytest.fixture
+def boot(home, tmp_path, fake_proc):  # noqa: F811
+    return Boot(home, tmp_path, fake_proc)
+
+
+def test_boot_clause_with_no_marker_is_none_and_writes_nothing(boot):
+    assert boot.clause() is None
+    assert boot.retry() is None
+
+
+def test_boot_clause_for_a_death_marker_says_what_was_retried_once(boot):
+    marker_path = boot.plant()
+    assert boot.clause() == CLAUSE
+    assert not marker_path.exists()  # the confirm removed the marker it served
+    got = boot.retry()
+    assert got is not None and (got.full_fit, got.dropped) == (80_000, ("draft-mtp",))
+    assert boot.clause() is None  # nothing left to confirm: the clause prints once
+
+
+def test_boot_clause_is_none_when_the_ledger_already_held_a_retry(boot):
+    speed_stats.record_retry(ledger(boot.home), boot.key, full_fit=70_000, free_bytes=None,
+                             dropped=["draft-mtp"], binary="/x/llama-server", kv_cache_type="q8_0",
+                             draft_p_min=0.6)
+    marker_path = boot.plant()
+    assert boot.clause() is None
+    assert not marker_path.exists()
+
+
+def test_boot_clause_for_a_remembered_marker_is_none_and_the_marker_is_removed(boot):
+    marker_path = boot.plant(cause="remembered", shape="full", dropped=())
+    assert boot.clause() is None
+    assert not marker_path.exists()
+    assert boot.retry() is None
+
+
+def test_boot_clause_without_a_unit_state_is_none_and_leaves_the_marker(boot):
+    marker_path = boot.plant()
+    assert boot.clause(unit_state=None) is None
+    assert marker_path.exists()
+    assert boot.retry() is None
+
+
+def test_boot_clause_for_the_seam_that_answers_none_in_this_release(boot):
+    marker_path = boot.plant()
+    assert start_serving.unit_runtime_state() is None
+    assert boot.clause(unit_state=start_serving.unit_runtime_state()) is None
+    assert marker_path.exists()
+
+
+def test_boot_clause_with_a_marker_bound_to_another_run_leaves_it_and_says_nothing(boot):
+    marker_path = boot.plant(invocation="inv-other")
+    assert boot.clause() is None
+    assert marker_path.exists() and boot.retry() is None
+
+
+def test_boot_clause_with_a_marker_for_another_record_says_nothing(boot):
+    boot.plant(record="llamacpp:another")
+    assert boot.clause() is None
+    assert boot.retry() is None
+
+
+def test_boot_clause_without_a_verified_process_records_nothing(boot, fake_proc):  # noqa: F811
+    boot.plant()
+    fake_proc.process(4242, argv=("/usr/bin/sleep", "600"), exe="/usr/bin/sleep", start_time=777)
+    assert boot.clause() is None
+    assert boot.retry() is None
+
+
+def test_boot_clause_is_not_fooled_by_a_marker_that_claims_dropped_work(boot):
+    """The clause is built from the recorded retry (the live argv decides `dropped`), never from the
+    marker's own claims: a hand-set spec type on the live process records no mtp drop."""
+    boot.plant(dropped=("draft-mtp",))
+    server_dir = server.server_dir(boot.home)
+    assert (server_dir / units.BOOT_MARKER_NAME).exists()
+    proc_dir = os.path.join(procfs.PROC_ROOT, "4242")
+    with open(os.path.join(proc_dir, "cmdline"), "wb") as fh:
+        fh.write(b"\0".join(a.encode() for a in (
+            LLAMA, "-a", "flash-next", "--port", "8081", "--spec-type", "draft-mtp")) + b"\0")
+    got = boot.clause()
+    assert got is not None and "mtp off" not in got
+    assert got.startswith("retried at boot: -c halved")
+
+
+def test_boot_clause_for_the_primary_names_server_speculative(home, tmp_path, fake_proc):  # noqa: F811
+    from tests.unit.test_tuning_derive import SWIFT
+
+    model = write_gguf(tmp_path / "primary.gguf", SWIFT)
+    seed(home)
+    data = (home / "config.yaml").read_text(encoding="utf-8")
+    (home / "config.yaml").write_text(data.replace("/m/a.gguf", str(model)), encoding="utf-8")
+    harness = load(home)
+    primary = record(harness, PRIMARY)
+    key = lifecycle.record_key(primary.spec)
+    fake_proc.process(4242, argv=(LLAMA, "-a", PRIMARY, "--port", "8080"), exe=LLAMA, start_time=777)
+    _pidfile(home, "4242 777 8080")
+    from localharness.agent.gguf_header import read_header
+    from localharness.provider.autosense import FIT_KEYS, fit_header
+
+    directory = server.server_dir(home)
+    directory.mkdir(parents=True, exist_ok=True)
+    fields = dict(record=key, binary=str(primary.spec.binary), invocation="inv-1", cause="death",
+                  shape="retry", planned_context=40_000, full_fit=80_000, free_bytes=None,
+                  dropped=["draft-mtp"], at="2026-10-13T11:59:30+00:00")
+    (directory / units.BOOT_MARKER_NAME).write_text(json.dumps(fields), encoding="utf-8")
+    got = start_serving.boot_clause(
+        home, primary, autosense=KNOBS, unit_state=units.UnitRuntimeState("inv-1", 1),
+        served_window=40_000, header=fit_header(read_header(primary.spec.model, FIT_KEYS)))
+    assert got == ("retried at boot: mtp off, -c halved · server.speculative: off "
+                   "keeps the full window")
+
+
+# ------------------------------------------------------------------------------------------- the swap
+
+
+class SwapRig:
+    """The three process boundaries a swap crosses, recorded in order, plus the launch lock."""
+
+    def __init__(self, harness, home) -> None:
+        self.harness = harness
+        self.home = home
+        self.events: list[str] = []
+        self.stops: list[dict] = []
+        self.waits: list[dict] = []
+        self.alive = {"flash-next": False, PRIMARY: False}
+        self.wait_raises: dict[str, BaseException] = {}
+        self.printed: list[str] = []
+
+    def print_err(self, text, **kw):
+        self.printed.append(text)
+
+    def reporter(self, key=None) -> start_serving.ConsoleSwapReporter:
+        return start_serving.ConsoleSwapReporter(self.print_err, self.harness, key)
+
+
+@pytest.fixture
+def swap_rig(home, monkeypatch):
+    seed(home, peers=[peer("flash-next", served_name="flash-next")])
+    rig = SwapRig(load(home), home)
+    monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: [])
+
+    def fake_stop(config_dir, launch="binary", timeout_seconds=30.0, **kw):
+        rig.events.append("stop")
+        rig.stops.append(kw)
+        rig.alive["flash-next"] = False
+        rig.alive[PRIMARY] = False
+        return True
+
+    def fake_start(config_dir, cmd, **kw):
+        joined = " ".join(cmd)
+        rig.events.append("start:" + joined)
+        name = "flash-next" if "flash-next.gguf" in joined else PRIMARY
+        rig.alive[name] = True
+        return 4321
+
+    async def fake_wait(base_url, config_dir=None, **kw):
+        rig.events.append(f"wait:{base_url}")
+        rig.waits.append({"url": base_url, "kw": kw, "flash_alive": rig.alive["flash-next"]})
+        if base_url in rig.wait_raises:
+            raise rig.wait_raises[base_url]
+        return [PRIMARY if base_url == PRIMARY_URL else "flash-next"]
+
+    @contextlib.asynccontextmanager
+    async def spy_lock(config_dir, *, on_wait=None):
+        rig.events.append("lock-enter")
+        try:
+            yield
+        finally:
+            rig.events.append("lock-exit")
+
+    monkeypatch.setattr(managed_server, "stop_server", fake_stop)
+    monkeypatch.setattr(managed_server, "start_server", fake_start)
+    monkeypatch.setattr(managed_server, "wait_ready", fake_wait)
+    monkeypatch.setattr(lifecycle, "launch_lock", spy_lock)
+    return rig
+
+
+async def _run(rig: SwapRig, incumbent_name, target_name, **kw):
+    incumbent = record(rig.harness, incumbent_name) if incumbent_name else None
+    target = resolve_serving(rig.harness, MachineTrust(), target_name, config_dir=rig.home)
+    assert isinstance(target, Serving), target
+    reporter = kw.pop("reporter", None) or rig.reporter()
+    return await start_serving.run_swap(
+        rig.harness, incumbent, target, config_dir=rig.home, autosense=None, reporter=reporter,
+        redact=reporter.redact, **kw)
+
+
+@pytest.mark.asyncio
+async def test_run_swap_stops_then_starts_then_waits_inside_the_launch_lock(swap_rig):
+    swap_rig.alive[PRIMARY] = True
+    outcome = await _run(swap_rig, PRIMARY, "flash-next")
+    events = swap_rig.events
+    assert events[0] == "lock-enter" and events[-1] == "lock-exit"
+    assert [e.split(":")[0] for e in events[1:-1]] == ["stop", "start", "wait"]
+    assert "/m/flash-next.gguf" in events[2]
+    assert outcome.error is None and outcome.live.base_url == PEER_URL
+    assert outcome.stopped is not None and outcome.stopped.peer is None
+    assert swap_rig.printed == []  # a success prints nothing: the launch line is the caller's
+
+
+@pytest.mark.asyncio
+async def test_run_swap_with_nothing_to_stop_just_launches(swap_rig):
+    outcome = await _run(swap_rig, None, "flash-next")
+    assert [e.split(":")[0] for e in swap_rig.events] == ["lock-enter", "start", "wait", "lock-exit"]
+    assert outcome.stopped is None and outcome.error is None
+
+
+@pytest.mark.asyncio
+async def test_run_swap_to_a_record_that_cannot_be_launched_stops_nothing(home, monkeypatch, swap_rig):
+    seed(home, peers=[peer("flash-next", served_name="flash-next"), peer("remote", 8082, lifecycle=False)])
+    swap_rig.harness = load(home)
+    target = model_ops.Serving(record(swap_rig.harness, "remote"), RUNG_PRESET, True)
+    reporter = swap_rig.reporter()
+    with pytest.raises(ValueError):
+        await start_serving.run_swap(
+            swap_rig.harness, record(swap_rig.harness, PRIMARY), target, config_dir=home,
+            autosense=None, reporter=reporter, redact=reporter.redact)
+    assert swap_rig.events == []  # not even the lock, and certainly no stop
+
+
+@pytest.mark.asyncio
+async def test_a_planted_key_in_a_failed_launch_tail_never_reaches_the_console_or_the_error(swap_rig):
+    tail = f"the model server exited. Log tail:\nBearer sk-planted ... {PROVIDER_KEY} ... done"
+    swap_rig.wait_raises[PEER_URL] = RuntimeError(tail)
+    swap_rig.alive[PRIMARY] = True
+    outcome = await _run(swap_rig, PRIMARY, "flash-next")
+    assert outcome.stage == "launch" and outcome.error is not None
+    failed = [line for line in swap_rig.printed if line.startswith("Launch of flash-next failed:")]
+    assert len(failed) == 1
+    for secret in ("sk-planted", PROVIDER_KEY):
+        assert secret not in failed[0]
+        assert secret not in str(outcome.error)
+        assert not any(secret in line for line in swap_rig.printed)
+
+
+@pytest.mark.asyncio
+async def test_the_console_reporter_redacts_the_key_file_key_and_prints_with_markup_off(swap_rig):
+    seen: list[dict] = []
+
+    def print_err(text, **kw):
+        seen.append({"text": text, **kw})
+
+    rep = start_serving.ConsoleSwapReporter(print_err, swap_rig.harness, "k-from-a-file-9")
+    await rep.line("log: k-from-a-file-9 and https://user:hunter2@host/x [bold]")
+    await rep.freed()
+    await rep.launched(None)
+    await rep.restored(None)
+    assert len(seen) == 1
+    assert "k-from-a-file-9" not in seen[0]["text"] and "hunter2" not in seen[0]["text"]
+    assert seen[0]["markup"] is False and seen[0]["soft_wrap"] is True
+    assert rep.redact("Bearer sk-planted") == model_ops.redact_for_channel(
+        "Bearer sk-planted", swap_rig.harness, "k-from-a-file-9")
+
+
+# ---------------------------------------------------------------- stop then launch (D-18, the 30-minute hang)
+
+
+@pytest.mark.asyncio
+async def test_stop_then_launch_another_records_live_launch_is_stopped_before_the_selected_is_started(
+        swap_rig, home, fake_proc, probes):  # noqa: F811
+    """`/model flash-next` then quit leaves flash-next running on :8081 with its pidfile. A later
+    `start` selects the primary on `server:`, nothing answers, and a verified launch of flash-next
+    names the pidfile: the swap's incumbent, stopped first. No wait on :8080 is ever entered while
+    flash-next lives."""
+    fake_proc.process(4242, argv=(LLAMA, "-a", "flash-next", "--port", "8081"), exe=LLAMA, start_time=777)
+    _pidfile(home, "4242 777 8081")
+    swap_rig.alive["flash-next"] = True
+    harness = swap_rig.harness
+    serving = resolve_serving(harness, MachineTrust(), None, config_dir=home)
+    assert (serving.record.name, serving.rung) == (PRIMARY, RUNG_DEFAULT)
+    sense = await sense_serving(harness, launchable_loopback_others(harness, MachineTrust(), serving.record))
+    assert decide(serving, selected_answers=False, sense=sense, last_served=None).kind == "launch"
+
+    verdict = start_serving.liveness_verdict(harness, MachineTrust(), serving.record, home)
+    assert (verdict.kind, verdict.record.name) == ("other", "flash-next")
+    outcome = await start_serving.run_swap(
+        harness, verdict.record, serving, config_dir=home, autosense=None,
+        reporter=swap_rig.reporter(), redact=swap_rig.reporter().redact)
+
+    events = [e.split(":")[0] for e in swap_rig.events if not e.startswith("lock")]
+    assert events == ["stop", "start", "wait"]
+    flash = verdict.record.spec
+    assert swap_rig.stops[0]["expect"] == lifecycle.strategy_for(flash).launch_identity(flash)
+    primary_start = next(e for e in swap_rig.events if e.startswith("start:"))
+    assert "/m/a.gguf" in primary_start and "flash-next.gguf" not in primary_start
+    primary_waits = [w for w in swap_rig.waits if w["url"] == PRIMARY_URL]
+    assert primary_waits and all(not w["flash_alive"] for w in primary_waits)
+    assert all("expect" not in w["kw"] for w in swap_rig.waits)  # no "still loading" wait was entered
+    assert outcome.error is None and outcome.stopped.peer == "flash-next"
+
+
+# ------------------------------------------------------------------------------------------ the line
+
+
+def test_the_swap_launch_line_names_who_is_stopped_and_what_is_started():
+    line = start_serving.swap_launch_line(
+        incumbent=PRIMARY, target="flash-next", inside="kv q8_0 · mtp (1 layer); ")
+    assert line == ("stopping qwen-27b-swift-1.5…, starting flash-next "
+                    "(kv q8_0 · mtp (1 layer); model load can take several minutes)...")
+
+
+def test_the_launch_line_with_nothing_to_stop_is_the_plain_start_form():
+    line = start_serving.swap_launch_line(incumbent=None, target="flash-next", inside="")
+    assert line == "starting flash-next (model load can take several minutes)..."
+    assert line == start_serving.START_TARGET_LINE.format(target="flash-next", inside="")
+
+
+def test_the_remaining_start_strings_are_the_spec_wording():
+    assert start_serving.STARTING_GAVE_UP_LINE.format(pid=7, seconds=600) == (
+        "autostart's server (pid 7) did not answer within 600s — not touched")
+    assert start_serving.NOT_LAUNCHABLE_LINE.format(name="gemma", base_url="http://h/v1") == (
+        "gemma (http://h/v1) is not answering and the harness does not launch it — starting on the primary")
+    assert start_serving.STARTING_WAIT_SECONDS == 600
