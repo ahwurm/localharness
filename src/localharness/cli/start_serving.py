@@ -15,17 +15,22 @@ answers None in this release (D-14, D-32).
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
-from localharness.cli import model_ops
+from localharness.cli import model_ops, workspace
 from localharness.cli.model_ops import (
     RUNG_ACTIVE,
     Serving,
     ServingRecord,
     ServingSense,
 )
-from localharness.provider import units
+from localharness.provider import lifecycle, procfs, units
 
 # ------------------------------------------------------------------------------------------ strings
 
@@ -114,3 +119,100 @@ async def settle_attach(harness: Any, decision: Decision, *, config_dir: Any = N
         raise ValueError(f"settle_attach is for an attach, not {decision.kind!r}")
     await model_ops.persist_landed(
         harness, decision.record, outcome="attach", rung=decision.rung, config_dir=config_dir)
+
+
+# ------------------------------------------------------------------------------------------ liveness
+
+
+@dataclass(frozen=True)
+class LivenessVerdict:
+    """Why nothing answers. ``kind``: ``"none"`` (no launch is live), ``"this"`` (a verified live
+    launch of the selected record: still loading), ``"other"`` (a verified live launch of another
+    record, ``record``: the swap's incumbent), ``"starting"`` (the autostart unit's own
+    ``localharness serve``), ``"foreign"`` (something that is no harness launch holds the selected
+    record's port; ``line`` names it). ``pid`` is the process the verdict is about."""
+    kind: str
+    pid: int | None
+    record: ServingRecord | None
+    line: str | None
+
+
+def starting_seconds(unit_state: Any = None) -> int:
+    """How long `start` waits for the autostart unit: the unit state's ``timeout_start_seconds`` when
+    it holds a positive number, else ``STARTING_WAIT_SECONDS``."""
+    bound = getattr(unit_state, "timeout_start_seconds", None)
+    if isinstance(bound, (int, float)) and not isinstance(bound, bool) and bound > 0:
+        return int(bound)
+    return STARTING_WAIT_SECONDS
+
+
+def _port_of(base_url: str) -> int | None:
+    try:
+        return urlsplit(base_url).port
+    except ValueError:
+        return None
+
+
+def _launchable_others(harness: Any, trust: Any, selected: ServingRecord) -> tuple[ServingRecord, ...]:
+    return tuple(
+        r for r in model_ops.serving_records(harness)
+        if r.prefix != selected.prefix and r.spec is not None and not model_ops.record_withheld(trust, r))
+
+
+def liveness_verdict(
+    harness: Any, trust: Any, selected: ServingRecord, config_dir: Any, *, main_pid: int | None = None
+) -> LivenessVerdict:
+    """The test behind "nothing answers" (D-18, R-13-30). The pidfile is a claim: a launch counts
+    only when its process is verified against a record's own identity, so a planted pidfile can never
+    make `start` wait or stop anything.
+
+    A ``localharness serve`` process of the harness unit (its cgroup and ``main_pid``) is "starting".
+    Otherwise a verified live launch of ``selected`` is "this", of another launchable record
+    "other". With no verified launch, a listener on the selected record's loopback port that
+    ``workspace.port_holder`` can name is "foreign"; else "none"."""
+    started = procfs.read_launch(config_dir, main_pid=main_pid)
+    if started is not None and started.starting:
+        return LivenessVerdict(
+            "starting", started.pid, selected,
+            STARTING_LINE.format(name=workspace.visible_text(selected.name), pid=started.pid,
+                                 seconds=starting_seconds(unit_runtime_state())))
+    for record, kind in [(selected, "this"), *((r, "other") for r in _launchable_others(harness, trust, selected))]:
+        if record.spec is None:
+            continue
+        identity = lifecycle.record_identity(record.spec)
+        if identity is None:
+            continue
+        launch = procfs.read_launch(config_dir, expect=identity, main_pid=main_pid)
+        if launch is not None and launch.verified:
+            return LivenessVerdict(kind, launch.pid, record, None)
+    port = _port_of(selected.base_url)
+    if port is not None and model_ops.is_loopback(selected.base_url) and procfs.listeners(port):
+        holder = workspace.port_holder(port)
+        if holder is not None:
+            line = workspace.incumbent_sentence(
+                holder, port=port, form="imperative", served=selected.served, target=selected.name)
+            return LivenessVerdict("foreign", holder.pid, None, line)
+    return LivenessVerdict("none", None, None, None)
+
+
+async def wait_starting(probe: Callable[[], Any], *, seconds: float, poll_seconds: float = 3.0) -> bool:
+    """Poll ``probe`` (a callable returning a bool, or an awaitable of one) until it is true or
+    ``seconds`` have passed; True when it turned true. A probe that raises counts as not yet. It only
+    waits: nothing is signalled, so a process that never answers is named by the caller and left
+    alone."""
+    began = time.monotonic()
+    waited = 0.0
+    while True:
+        try:
+            got = probe()
+            if inspect.isawaitable(got):
+                got = await got
+        except Exception:  # noqa: BLE001 — a failed look is "not yet"
+            got = False
+        if got:
+            return True
+        if waited >= seconds:
+            return False
+        step = min(poll_seconds, seconds - waited)
+        await asyncio.sleep(step)
+        waited = max(waited + step, time.monotonic() - began)
