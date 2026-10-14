@@ -32,11 +32,11 @@ PROVIDER_KEY = "sk-prov-7d3f9a"
 
 
 def peer(name: str, port: int | None = 8081, *, url: str | None = None, lifecycle: bool = True,
-         served_name: str | None = None) -> dict:
+         served_name: str | None = None, model: str | None = None) -> dict:
     ep = {"name": name, "base_url": url or f"http://127.0.0.1:{port}/v1", "provider_type": "llamacpp"}
     if lifecycle:
         lc = {"gpu": True, "runtime": "llamacpp", "binary": "/x/llama-server",
-              "model": f"/m/{name}.gguf", "port": port or 8081}
+              "model": model or f"/m/{name}.gguf", "port": port or 8081}
         if served_name:
             lc["served_name"] = served_name
         ep["gpu"] = True

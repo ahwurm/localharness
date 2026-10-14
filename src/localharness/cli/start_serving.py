@@ -20,6 +20,7 @@ import inspect
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -30,7 +31,8 @@ from localharness.cli.model_ops import (
     ServingRecord,
     ServingSense,
 )
-from localharness.provider import lifecycle, procfs, units
+from localharness.provider import lifecycle, procfs, speed_stats, units
+from localharness.provider.autosense import WindowReport
 
 # ------------------------------------------------------------------------------------------ strings
 
@@ -216,3 +218,124 @@ async def wait_starting(probe: Callable[[], Any], *, seconds: float, poll_second
         step = min(poll_seconds, seconds - waited)
         await asyncio.sleep(step)
         waited = max(waited + step, time.monotonic() - began)
+
+
+# ---------------------------------------------------------------------------------------- the boot clause
+
+
+def _plain_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def boot_clause(
+    config_dir: Any, record: ServingRecord, *, autosense: Any, unit_state: Any,
+    served_window: int | None, header: Any = None,
+) -> str | None:
+    """Close a boot retry on attach (D-14, D-32, R-13-31). With a boot marker on disk and the unit's
+    runtime state, ``confirm_launch(marker=)`` runs with the verified process, and the clause comes
+    back only for a ``cause: death`` marker when the ledger held no ``retry`` for this record before.
+    The clause is built from the RECORDED retry, never from the marker's own claims. No marker, no
+    unit state (None in this release: the marker is left for the run it belongs to), no launch spec
+    or nothing dropped or halved: None."""
+    marker = units.read_marker(config_dir)
+    if marker is None or unit_state is None or record.spec is None:
+        return None
+    key = lifecycle.record_key(record.spec)
+    ledger = speed_stats.default_speed_stats_path(config_dir)
+    before = speed_stats.last_retry(ledger, key)
+    process = None
+    launch = procfs.read_launch(
+        config_dir, expect=lifecycle.record_identity(record.spec),
+        main_pid=getattr(unit_state, "main_pid", None))
+    if launch is not None and launch.verified:
+        got = procfs.read_process(launch.pid)
+        process = None if isinstance(got, procfs.ProcRefusal) else got
+    live = lifecycle.LiveEndpoint(
+        base_url=record.base_url, served_models=[], handle=None,
+        window=WindowReport(served=served_window, trained=None, fits=None, free_bytes=None,
+                            total_bytes=None, weights_bytes=None, asked=None, mode="not-computed",
+                            attached=True))
+    lifecycle.confirm_launch(
+        config_dir, key, marker=marker, live=live, process=process, unit=unit_state, spec=record.spec,
+        autosense=autosense, header=header)
+    after = speed_stats.last_retry(ledger, key)
+    if before is not None or after is None or marker.cause != "death":
+        return None
+    parts: list[str] = []
+    if "draft-mtp" in after.dropped:
+        parts.append("mtp off")
+    if _plain_int(marker.planned_context) and _plain_int(after.full_fit) \
+            and marker.planned_context < after.full_fit:
+        parts.append("-c halved")
+    if not parts:
+        return None
+    return BOOT_RETRY_CLAUSE.format(
+        parts=", ".join(parts), undo=f"{record.prefix}.speculative",
+        keeps="keeps the full window" if "-c halved" in parts else "keeps drafting pinned off")
+
+
+# ----------------------------------------------------------------------------------------------- the swap
+
+
+class ConsoleSwapReporter:
+    """What `start` says while a swap runs (a ``lifecycle.SwapReporter``). ``line`` prints a failure
+    sentence masked by ``model_ops.redact_for_channel`` through ``print_err`` (called as
+    ``print_err(text, markup=False, soft_wrap=True)``, so a rich console's ``print`` is one); the
+    other events print nothing: the launch line is the caller's, said through ``on_plan``. ``redact``
+    is the same masking, bound, for the caller to hand ``run_swap``."""
+
+    def __init__(self, print_err: Callable[..., Any], harness: Any, key_file_key: Any = None) -> None:
+        self._print_err = print_err
+        self._harness = harness
+        self._key = key_file_key
+
+    def redact(self, text: str) -> str:
+        return model_ops.redact_for_channel(text, self._harness, self._key)
+
+    async def freed(self) -> None:
+        return None
+
+    async def launched(self, live: Any) -> None:
+        return None
+
+    async def restored(self, spec: Any) -> None:
+        return None
+
+    async def line(self, text: str) -> None:
+        self._print_err(self.redact(text), markup=False, soft_wrap=True)
+
+
+def swap_launch_line(*, incumbent: str | None, target: str, inside: str) -> str:
+    """The launch line of a swap, or of a plain start when nothing is stopped (``incumbent`` None).
+    ``inside`` is the plan's tuning text with its trailing separator (or empty)."""
+    if incumbent is None:
+        return START_TARGET_LINE.format(target=target, inside=inside)
+    return SWAP_LINE.format(incumbent=incumbent, target=target, inside=inside)
+
+
+async def run_swap(
+    harness: Any,
+    incumbent: ServingRecord | None,
+    target: Serving,
+    *,
+    config_dir: Path,
+    autosense: Any,
+    reporter: Any,
+    redact: Callable[[str], str],
+    on_plan: Callable[[Any], None] | None = None,
+    on_poll: Callable[[float], None] | None = None,
+    on_wait: Callable[[], Any] | None = None,
+) -> lifecycle.SwapOutcome:
+    """Stop ``incumbent`` (a record whose server runs, or None) and launch ``target`` (the trust-
+    resolved ``Serving``), holding the launch lock around the whole swap (D-21). ``redact`` is handed
+    to the swap so neither its lines nor its outcome's error carry a secret (D-22); the stop is the
+    verified one every strategy does. A record with no launch record is ``ValueError`` from
+    ``heavy_for``, before anything is stopped."""
+    target_heavy = model_ops.heavy_for(target, harness)
+    incumbent_heavy = (
+        model_ops.incumbent_heavy((incumbent.spec, incumbent.base_url), harness)
+        if incumbent is not None and incumbent.spec is not None else None)
+    async with lifecycle.launch_lock(config_dir, on_wait=on_wait):
+        return await lifecycle.swap(
+            incumbent_heavy, target_heavy, config_dir=config_dir, autosense=autosense,
+            reporter=reporter, redact=redact, on_poll=on_poll, on_plan=on_plan)
