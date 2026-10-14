@@ -1867,8 +1867,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 start_serving.NOT_LAUNCHABLE_LINE.format(
                     name=visible_text(record.name), base_url=visible_text(record.base_url)),
                 markup=False, soft_wrap=True)
-            serving = model_ops.Serving(
-                model_ops.serving_records(harness)[0], model_ops.RUNG_DEFAULT, False, serving.gone)
+            serving = model_ops.default_serving(harness, serving.gone)
             record = serving.record
     # A peer's key file is read here, once, at the session's first use of that peer (D-23): the key is
     # held in memory on the endpoint and rides every probe and request of the session.
