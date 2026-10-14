@@ -96,6 +96,7 @@ class World:
         monkeypatch.setattr(
             "localharness.agent.context.probe_window",
             lambda base_url, model, provider_type=None, **kw: WindowProbe(self.window_served, 262144))
+        self.real_wait_ready = managed_server.wait_ready  # for the test that runs the real death path
         self.sensor = Probes()
         monkeypatch.setattr(model_ops, "list_live_models", self._list_live_models)
 
@@ -699,3 +700,131 @@ async def test_a_foreign_holder_of_the_selected_port_ends_the_start_with_the_inc
     (sentence,) = [x for x in world.err_lines if "not by the harness" in x]
     assert sentence.startswith("flash-next is served by ")
     assert world.events == [] and world.starts == []
+
+
+# ------------------------------------------------------------------------------- the loading gate (D-18)
+
+
+def _running(spec, home) -> bool:
+    return start_cmd._managed_server_running(lifecycle.strategy_for(spec), spec, home)
+
+
+def test_a_live_launch_of_another_record_is_not_this_record_already_serving(world, fake_proc, monkeypatch):
+    stub_liveness(monkeypatch, True)
+    world.config()
+    _flash_launch(fake_proc, world.home)
+    assert _running(_primary_record(world.home).spec, world.home) is False  # the pidfile is flash-next's
+    assert _running(_flash(world.home).spec, world.home) is True
+
+
+def test_a_live_pidfile_that_cannot_be_read_keeps_todays_answer(world, monkeypatch):
+    stub_liveness(monkeypatch, True)
+    world.config()
+    assert _running(_primary_record(world.home).spec, world.home) is True  # alive, no pidfile to read
+
+
+def test_a_dead_strategy_is_not_running_whatever_the_pidfile_says(world, fake_proc, monkeypatch):
+    stub_liveness(monkeypatch, False)
+    world.config()
+    _flash_launch(fake_proc, world.home)
+    assert _running(_flash(world.home).spec, world.home) is False
+
+
+def test_a_strategy_with_no_launch_identity_and_a_managed_lm_studio_keep_todays_answer(world, fake_proc):
+    from localharness.config.models import ManagedServerConfig
+
+    world.config()
+    _flash_launch(fake_proc, world.home)
+    bare = SimpleNamespace(liveness=lambda spec, d: lifecycle.Liveness(True))  # no launch_identity at all
+    assert start_cmd._managed_server_running(bare, _primary_record(world.home).spec, world.home) is True
+    lms = ManagedServerConfig(runtime="lmstudio", model="qwen", port=1234)
+    assert start_cmd._managed_server_running(bare, lms, world.home) is True
+
+
+# ------------------------------------------------------------------------------- the console is a channel (SEC-04)
+
+PLANTED_LOG = (
+    "request: Authorization: Bearer sk-planted\n"
+    "main: api_keys: ****abcd\n"
+    "GET http://u:p@127.0.0.1:8080/v1 200\n"
+    f"the key {PROVIDER_KEY} was here\n"
+)
+SECRETS = ("sk-planted", "abcd", "u:p", PROVIDER_KEY)
+
+
+async def test_a_start_time_launch_that_dies_over_a_planted_log_shows_only_a_scrubbed_tail_in_the_error_and_on_the_console(
+        world, monkeypatch):
+    """The REAL `wait_ready` over a planted serve.log: the RuntimeError `_start_managed_server` raises and
+    the line `start` prints carry no secret and end with the log reference; serve.log keeps the raw lines."""
+    import re
+
+    monkeypatch.setattr(managed_server, "wait_ready", world.real_wait_ready)
+    world.config()  # a keyed primary: require_api_key: true, the provider key is the session's
+    log = managed_server.log_path(world.home)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(PLANTED_LOG, encoding="utf-8")
+    raised: list[BaseException] = []
+    real = start_cmd._start_managed_server
+
+    async def spy(*a, **kw):
+        try:
+            return await real(*a, **kw)
+        except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised for start to word
+            raised.append(exc)
+            raise
+
+    monkeypatch.setattr(start_cmd, "_start_managed_server", spy)
+
+    assert await world.start_exit() == 1
+
+    (exc,) = raised
+    text = str(exc)
+    assert isinstance(exc, RuntimeError)
+    for secret in SECRETS:
+        assert secret not in text, secret
+    assert re.search(re.escape(f"(see log {log}, ref ") + r"[0-9a-f]{8}\)$", text), text
+    (failed,) = [x for x in world.err_lines if "failed to start:" in x]
+    assert "managed llama.cpp failed to start:" in failed
+    for secret in SECRETS:
+        assert secret not in failed, secret
+    raw = log.read_text(encoding="utf-8")
+    for secret in SECRETS:
+        assert secret in raw, secret  # the raw lines stay in serve.log
+
+
+async def test_the_channel_redacts_the_start_failure_line_even_when_the_error_text_is_not_scrubbed(
+        world, monkeypatch):
+    """The channel's own second pass: a launch error that still quotes a configured secret is masked."""
+    world.config()
+    world.wait_raises[PRIMARY_URL] = RuntimeError(f"llama.cpp exited. tail: Bearer sk-planted {PROVIDER_KEY}")
+    assert await world.start_exit() == 1
+    (failed,) = [x for x in world.err_lines if "failed to start:" in x]
+    assert "sk-planted" not in failed and PROVIDER_KEY not in failed
+
+
+async def test_a_failed_explicit_swap_redacts_the_planted_token_and_key_in_the_line_and_the_error(
+        world, monkeypatch):
+    world.config(last_served=PRIMARY)
+    world.answering = {PRIMARY_URL}
+    world.wait_raises[PEER_URL] = RuntimeError(
+        f"the model server exited. Log tail:\nBearer sk-planted ... {PROVIDER_KEY} ... done")
+    outcomes: list = []
+    real = start_serving.run_swap
+
+    async def spy(*a, **kw):
+        out = await real(*a, **kw)
+        outcomes.append(out)
+        return out
+
+    monkeypatch.setattr(start_serving, "run_swap", spy)
+
+    assert await world.start_exit(preset="flash-next") == 1
+
+    (outcome,) = outcomes
+    assert outcome.error is not None and outcome.stage == "launch"
+    failed = [x for x in world.err_lines if x.startswith("Launch of flash-next failed:")]
+    assert len(failed) == 1
+    for secret in ("sk-planted", PROVIDER_KEY):
+        assert secret not in failed[0] and secret not in str(outcome.error)
+        assert not any(secret in line for line in world.err_lines)
+    assert world.last_served == PRIMARY and "active_endpoint" not in world.overlay  # nothing landed

@@ -2075,15 +2075,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         _serving_spec = record.spec
         if not model_override and agent_config.model == "inherit":
             resolved_model = provider.default_model
-        _initial_cfg = LLMConfig(
-            base_url=provider.base_url,
-            model=resolved_model,
-            api_key=provider.api_key,
-            timeout_seconds=_resolve_timeout(agent_config.timeout_seconds, provider.timeout_seconds),
-            queue_wait_seconds=provider.inference_queue_wait_seconds,
-            temperature=agent_config.temperature,
-            extra_headers=_peer_headers,
-        )
+        # the same probe config moved to the answering record's address; its timeouts, queue bound and
+        # temperature are the session's, not the record's
+        _initial_cfg = replace(
+            _initial_cfg, base_url=provider.base_url, model=resolved_model, api_key=provider.api_key,
+            extra_headers=_peer_headers)
         _probe_client = LLMClient(_initial_cfg)
 
     # Startup probe — local LLMs may need warm-up; probe returns the real tool_call_mode (FIDEL-04)
@@ -2268,8 +2264,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             label = RUNTIME_LABELS.get(_serving_spec.runtime, _serving_spec.runtime)
             # escape(): `exc` can quote llama-server's own log tail (wait_ready) or a path — a
             # bracketed fragment there is not markup, and a stray `[/x]` raises MarkupError here.
+            # The console is a channel (D-22, SEC-04): the exception is scrubbed where it is built
+            # (`wait_ready` quotes only a masked tail and a log reference), and this is the channel's
+            # own second pass with every secret the config holds and the session key.
             err_console.print(
-                "[bold red]Error:[/bold red] " + escape(f"managed {label} failed to start: {exc}"),
+                "[bold red]Error:[/bold red] " + escape(model_ops.redact_for_channel(
+                    f"managed {label} failed to start: {exc}", harness, provider.api_key)),
                 soft_wrap=True)
         if refusal is not None:
             # The one refusal line is the whole answer: no `Error:` line, no `doctor` pointer.
