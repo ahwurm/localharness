@@ -1015,18 +1015,23 @@ NOT_THIS_LAUNCH_LINE = "{label}: the live launch (pid {pid}) is not this record'
 """What `wait_ready(expect=)` raises when the live launch is not the record's (D-18)."""
 
 
-def _launch_refusal(config_dir: Path, pid: int, expect: procfs.LaunchIdentity | None) -> str | None:
-    """None when `pid` is proven to be a launch of `expect`; otherwise the refusal line. Nothing is
-    proven without `expect` (`expect=None` never authorises a signal), and a process `/proc` will not
-    show is not proven either (D-27)."""
+def _launch_refusal(
+    config_dir: Path, pid: int, expect: procfs.LaunchIdentity | None, start: int | None = None
+) -> tuple[str | None, procfs.ProcRecord | None]:
+    """`(None, the process record)` when `pid` is proven to be a launch of `expect`; otherwise
+    `(the refusal line, None)`. Nothing is proven without `expect` (`expect=None` never authorises a
+    signal), and a process `/proc` will not show is not proven either (D-27). When the pidfile recorded
+    a start time, the process read here must repeat it: a pid reused between the caller's check and this
+    read is another process, and it is refused. The returned record is what the rest of a stop pins."""
     record = procfs.read_process(pid)
     exe = "?"
     if isinstance(record, procfs.ProcRecord):
         if record.exe is not None:
             exe = os.path.basename(record.exe)
-        if expect is not None and procfs.identity_mismatch(record, expect) is None:
-            return None
-    return NOT_A_LAUNCH_LINE.format(pid=pid, exe=exe, pidfile=pid_path(config_dir))
+        if ((start is None or record.start_time == start)
+                and expect is not None and procfs.identity_mismatch(record, expect) is None):
+            return None, record
+    return NOT_A_LAUNCH_LINE.format(pid=pid, exe=exe, pidfile=pid_path(config_dir)), None
 
 
 def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float = 30.0, *, expect: procfs.LaunchIdentity | None) -> bool:
@@ -1044,9 +1049,13 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
     start = recorded[1] if recorded is not None and recorded[0] == pid else None
     stopped = False
     if pid is not None and _same_process(pid, start):
-        refusal = _launch_refusal(config_dir, pid, expect)
+        refusal, verified = _launch_refusal(config_dir, pid, expect, start)
         if refusal is not None:
             raise RuntimeError(refusal)
+        if start is None and verified is not None:
+            # A 0.17 one-token pidfile recorded no start time: the process just verified is the one
+            # the grace loop and the SIGKILL re-check must keep meaning, so its start time is adopted.
+            start = verified.start_time
         try:
             os.killpg(pid, signal.SIGTERM)  # start_new_session=True → pid == pgid
         except (ProcessLookupError, PermissionError):

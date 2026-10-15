@@ -674,8 +674,8 @@ def read_launch(config_dir: Path | str, *, expect: LaunchIdentity | None = None,
     owner = "unit" if rec.unit == HARNESS_UNIT and main_pid == pid else "spawned"
     if isinstance(rec, ProcRefusal):
         return Launch(pid, start, port, owner, False)
-    verified = expect is not None and identity_mismatch(
-        rec, expect, owner=owner, main_pid=main_pid) is None
+    verified = (expect is not None and (start is None or rec.start_time == start)
+                and identity_mismatch(rec, expect, owner=owner, main_pid=main_pid) is None)
     if port is None and verified and expect is not None:
         port = port_of(rec, expect)
     return Launch(pid, start, port, owner, verified, serve_starting(rec, main_pid=main_pid))
