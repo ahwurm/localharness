@@ -98,8 +98,12 @@ def find_row(lowered: str) -> SlashCommand | None:
                  or (row.takes_args and lowered.startswith(row.name + " "))), None)
 
 
-def help_text() -> str:
-    """Render the /help body from `all_rows()`."""
+def help_text(keys_block: str | None = None) -> str:
+    """Render the /help body from `all_rows()`.
+
+    `keys_block`, when given, is printed after the closing sentence, one blank line between
+    (spec 21 section 6.7). The REPL passes it only while the persistent input box is live, so
+    every other surface reads as it always did."""
     rows = all_rows()
     width = max(len(name) for name, _ in rows)
     lines = ["Available commands:"]
@@ -107,4 +111,7 @@ def help_text() -> str:
         lines.append(f"  {name.ljust(width)}  {desc}")
     lines.append("")
     lines.append("Everything else is handled by the orchestrator through natural language.")
+    if keys_block:
+        lines.append("")
+        lines.append(keys_block)
     return "\n".join(lines)

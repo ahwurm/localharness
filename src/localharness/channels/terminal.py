@@ -1108,10 +1108,16 @@ class TerminalChannel(ChannelAdapter):
         history_file: str = ".repl_history",
         *,
         no_input: bool = False,
+        keys: TerminalKeysConfig | None = None,
     ) -> None:
         # A bare relative default; start_cmd resolves it UNDER the active config dir (#35, so
         # --config-dir isolates REPL history). Absolute/~ values are honored as-is at use.
         super().__init__(bus, config)
+        # The machine's `terminal.keys`, fixed for the session (they apply at the next start).
+        self.keys: TerminalKeysConfig = keys if keys is not None else TerminalKeysConfig()
+        # True once a Shift+Enter has broken a line. It lives here, not in the input app,
+        # because a permission question suspends and rebuilds the box (spec 21 section 7).
+        self.shift_enter_seen: bool = False
         # CR-52: what the gate reads as `local_operator`, the person this session answers to.
         self.local_operator = is_local_operator(no_input=no_input)
         self._console = Console(theme=TERMINAL_THEME, highlight=False)
@@ -1814,6 +1820,14 @@ class TerminalChannel(ChannelAdapter):
         finally:
             if restart is not None:
                 await self.start_input_box(*restart)
+
+    def keys_help_state(self) -> tuple[TerminalKeysConfig, bool] | None:
+        """The one accessor `/help` reads: the configured keys and whether a Shift+Enter has
+        broken a line this session. None means the persistent box is not live, so `/help` shows
+        no Keys block (spec 21 section 6.7)."""
+        if not self._box_active:
+            return None
+        return (self.keys, self.shift_enter_seen)
 
     async def stop_input_box(self) -> None:
         """Tear the box down: stop the ticker, exit the app, release patch_stdout. Idempotent."""

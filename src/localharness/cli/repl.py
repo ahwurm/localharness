@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import os
 import re
 import shlex
 import signal
@@ -1604,8 +1605,18 @@ class OrchestratorREPL:
         raise EOFError()
 
     async def _slash_help(self, args: str, args_lower: str) -> None:
-        # Rendered when typed, so plugin rows added after import are listed.
-        await self._channel.send_message(help_text(), metadata={"style": "system.info"})
+        # Rendered when typed, so plugin rows added after import are listed. The Keys block is
+        # added only while the terminal's persistent box is live: a channel without the accessor
+        # (the phone, Discord, Zed, test doubles) or with the box off reads as it always did.
+        from localharness.channels.keys import detect_terminal, help_block
+
+        block = None
+        state_fn = getattr(self._channel, "keys_help_state", None)
+        state = state_fn() if callable(state_fn) else None
+        if state is not None:
+            keys, seen = state
+            block = help_block(keys, terminal=detect_terminal(os.environ), shift_enter_seen=seen)
+        await self._channel.send_message(help_text(keys_block=block), metadata={"style": "system.info"})
 
     async def _slash_model(self, args: str, args_lower: str) -> None:
         # The ORIGINAL case — model ids are case-sensitive.
