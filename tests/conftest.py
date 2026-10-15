@@ -43,6 +43,28 @@ def _isolate_memory_logger():
 
 
 @pytest.fixture(autouse=True)
+def _restore_prompt_toolkit_key_table():
+    """Spec 21 §10: prompt_toolkit's key table is process-wide. `install_wire_sequences()` writes two
+    Shift+Enter encodings into `ANSI_SEQUENCES` (and clears the vt100 parser's prefix cache), so an
+    install in one test must not reach the next, and the premise test must see prompt_toolkit's own
+    table. Snapshot the dict, and after the test put it back IN PLACE (vt100_parser imported the same
+    dict object, so rebinding would restore nothing it reads) and clear the cache again."""
+    from prompt_toolkit.input import vt100_parser
+    from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+
+    snapshot = dict(ANSI_SEQUENCES)
+    try:
+        yield
+    finally:
+        if ANSI_SEQUENCES != snapshot:
+            ANSI_SEQUENCES.clear()
+            ANSI_SEQUENCES.update(snapshot)
+            cache = getattr(vt100_parser, "_IS_PREFIX_OF_LONGER_MATCH_CACHE", None)
+            if cache is not None:
+                cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def _embedding_model_cached(request, monkeypatch):
     """47-06: memory is a bundled plugin, so every `doctor` run now carries its `memory-embedding`
     row — and under the suite's fake HOME the Hugging Face cache is empty, so a doctor test that
