@@ -301,3 +301,23 @@ async def test_nothing_to_probe_probes_nothing(home, probes):
     seed(home)
     sense = await sense_serving(load(home), ())
     assert sense.answering == () and probes.calls == []
+
+
+def test_a_peer_at_the_primarys_address_sends_its_own_key_for_its_own_spec():
+    """`_launch_key` goes by the launch record when it is given: the peer's key and rule, never the
+    primary's, though both stand at one address."""
+    from types import SimpleNamespace
+
+    from pydantic import SecretStr
+
+    primary_spec = SimpleNamespace(require_api_key=True)
+    peer_spec = SimpleNamespace(require_api_key=True)
+    harness = SimpleNamespace(
+        provider=SimpleNamespace(base_url=PRIMARY_URL, api_key=SecretStr("primary-key")),
+        server=primary_spec,
+        extra_endpoints=[SimpleNamespace(
+            base_url=PRIMARY_URL, api_key=SecretStr("peer-key"), lifecycle=peer_spec)])
+
+    assert model_ops._launch_key(harness, PRIMARY_URL) == {"api_key": "primary-key"}
+    assert model_ops._launch_key(harness, PRIMARY_URL, primary_spec) == {"api_key": "primary-key"}
+    assert model_ops._launch_key(harness, PRIMARY_URL, peer_spec) == {"api_key": "peer-key"}

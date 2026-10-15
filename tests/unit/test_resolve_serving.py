@@ -345,3 +345,24 @@ def test_an_ambiguous_stored_name_is_refused_and_kept(home):
     got = _serve(home)
     assert isinstance(got, ServingRefusal) and got.kind == "ambiguous"
     assert load_overlay(home / "overrides.yaml")["pending_preset"] == "qwen"
+
+
+def test_an_active_endpoint_naming_a_peer_at_the_primarys_address_resumes_the_peer(home):
+    """Shared addresses are supported: the stored name tells the peer from the primary, which the
+    address alone cannot."""
+    shared = _peer("flash-next", 8080)
+    _seed(home, peers=[shared], overrides={"active_endpoint": _active(peer_url=shared["base_url"])})
+
+    got = _serve(home)
+
+    assert isinstance(got, Serving) and got.rung == RUNG_ACTIVE
+    assert got.record.name == "flash-next" and got.record.peer is not None
+
+
+def test_an_active_endpoint_with_no_peer_of_its_name_still_matches_by_address(home):
+    _seed(home, overrides={"active_endpoint": {**_active(peer_url="http://127.0.0.1:8080/v1"),
+                                               "name": "renamed", "model": PRIMARY}})
+
+    got = _serve(home)
+
+    assert isinstance(got, Serving) and (got.rung, got.record.name) == (RUNG_ACTIVE, PRIMARY)
