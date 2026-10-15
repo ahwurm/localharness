@@ -236,3 +236,68 @@ def test_reference_lines_are_not_server_output_and_stay_out_of_a_later_tail(tmp_
     write_serve_log(tmp_path, "")
     server.log_reference(tmp_path, "only")
     assert server.log_tail(tmp_path) == "(no log)"  # bookkeeping alone is no log
+
+
+# --- the read side of serve.log: no-follow, regular files only, capped ------------------------------ #
+
+
+def test_a_link_planted_at_serve_log_is_not_read_through(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("victim secret line\n", encoding="utf-8")
+    server.server_dir(tmp_path).mkdir(parents=True)
+    server.log_path(tmp_path).symlink_to(victim)
+
+    assert server.log_tail(tmp_path) == "(no log)"
+    assert "victim secret" not in server.scrubbed_tail(tmp_path)
+
+
+def test_a_symlinked_server_directory_is_not_read_through(tmp_path):
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    (real / "serve.log").write_text("not the launch's log\n", encoding="utf-8")
+    server.server_dir(tmp_path).symlink_to(real)
+
+    assert server.log_tail(tmp_path) == "(no log)"
+
+
+def test_a_fifo_at_serve_log_is_refused_without_blocking(tmp_path):
+    import os
+    import threading
+
+    server.server_dir(tmp_path).mkdir(parents=True)
+    os.mkfifo(server.log_path(tmp_path))
+    out: list[str] = []
+    reader = threading.Thread(target=lambda: out.append(server.log_tail(tmp_path)), daemon=True)
+    reader.start()
+    reader.join(timeout=5)
+
+    assert not reader.is_alive(), "log_tail blocked on a FIFO"
+    assert out == ["(no log)"]
+
+
+def test_only_the_last_bytes_of_a_long_log_are_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "LOG_TAIL_BYTES", 64)
+    body = "HEAD-ONLY-MARKER\n" + "".join(f"line {i:03d}\n" for i in range(200))
+    write_serve_log(tmp_path, body)
+    reads: list[int] = []
+    real_fdopen = server.os.fdopen
+
+    def counting_fdopen(fd, *args, **kw):
+        fh = real_fdopen(fd, *args, **kw)
+        real_read = fh.read
+        fh.read = lambda n=-1: (reads.append(n), real_read(n))[1]
+        return fh
+
+    monkeypatch.setattr(server.os, "fdopen", counting_fdopen)
+
+    tail = server.log_tail(tmp_path, lines=3)
+
+    assert tail == "line 197\nline 198\nline 199"
+    assert reads == [64]                          # one capped read, never the whole file
+    assert "HEAD-ONLY" not in server.log_tail(tmp_path, lines=1000)
+
+
+def test_a_short_log_is_returned_whole_and_a_missing_one_reads_no_log(tmp_path):
+    assert server.log_tail(tmp_path) == "(no log)"
+    write_serve_log(tmp_path, "one\ntwo\nthree\n")
+    assert server.log_tail(tmp_path, lines=2) == "two\nthree"
