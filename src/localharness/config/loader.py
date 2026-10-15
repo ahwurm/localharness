@@ -508,7 +508,7 @@ HARNESS_GLOBAL_ONLY_FIELDS: frozenset[str] = frozenset({
     "org.audit_log_path", "org.hooks", "org.enforce_capability_floor",
     "org.web_fetch_allow_private", "channels.remote_unattended", "channels.unattended_max_actions",
     "autosense", "effort_budget", "org.default_effort", "pending_preset",
-    "instructions.max_ratio", "instructions.children",
+    "instructions.max_ratio", "instructions.children", "terminal.keys",
     "proposer.base_url", "proposer.api_key"})
 """The core harness keys only the global config (config.yaml or overrides.yaml) may set.
 
@@ -537,6 +537,11 @@ is dropped.
 it serves on this machine's hardware (memory margins, model folders, the reasoning share of every
 reply), so a project may not move them. A whole-section workspace value is warned even when it
 restates the defaults, because the comparison is against the section's default object.
+
+`terminal.keys` says what your own keys do in the terminal box: which chord sends a line into a
+running turn and which breaks the line. A repository must not be able to rebind them on your
+keyboard, so only the machine sets the section. It is listed as the one section, not its two leaves,
+so a workspace block that merely restates the defaults is warned too, as for `autosense`.
 
 `org.enforce_capability_floor` is the capability floor's off switch. No direction of it belongs
 to a repository: a cloned repo must not be able to switch the floor off for the sessions started

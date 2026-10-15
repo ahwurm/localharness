@@ -1688,12 +1688,19 @@ def _write_harness(config_path: Path, harness: HarnessConfig, memory_on: bool, *
     # WR-06: the child ceilings, the shares and the unattended action ceiling are written only
     # where they differ from the shipped default. Dumped whole they would read as the operator's
     # choice (`config show`, the lower-only baseline) and no later retune of a default would ever
-    # reach this install, the very init-dump problem the init-nulls migration undoes.
+    # reach this install, the very init-dump problem the init-nulls migration undoes. The same goes
+    # for the terminal chord lists: a dumped list would read as set by the person, and the
+    # precedence rule would then refuse the documented one-key change (spec 21 §5), so only a list
+    # the person set (`exclude_unset`) is written back.
     data = reveal(harness.model_dump(mode="python", exclude={
-        "org": {"memory_enabled", "children_budget"}, "channels": {"unattended_max_actions"}}))
+        "org": {"memory_enabled", "children_budget"}, "channels": {"unattended_max_actions"},
+        "terminal": {"keys"}}))
     children = harness.org.children_budget.model_dump(mode="python", exclude_defaults=True)
     if children:
         data["org"]["children_budget"] = children
+    chords = harness.terminal.keys.model_dump(mode="python", exclude_unset=True)
+    if chords:
+        data["terminal"]["keys"] = chords
     knob = harness.channels.unattended_max_actions
     if knob != type(harness.channels).model_fields["unattended_max_actions"].default:
         data["channels"]["unattended_max_actions"] = knob

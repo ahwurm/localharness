@@ -21,6 +21,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import (
     AfterInput, AppendAutoSuggestion, BeforeInput, ConditionalProcessor,
@@ -43,7 +44,10 @@ from localharness.channels.base import (
     sanitize_for_display,
 )
 from localharness.channels.errors import ChannelStartError
+from localharness.channels.keys import KEYS, install_wire_sequences, nudge_legend
 from localharness.cli.theme import ENTITY_STYLES, SITE_INK
+from localharness.config.chords import ChordName
+from localharness.config.models import TerminalKeysConfig
 from localharness.core.bus import EventBus
 from localharness.core.private_files import touch_private
 from localharness.channels.input_router import FORCE_PREFIX
@@ -342,6 +346,58 @@ def _is_model_pick(comp) -> bool:
     return comp is not None and "model-pick" in (comp.style or "")
 
 
+def _break_on_trailing_backslash(buf: Buffer) -> bool:
+    """Backslash then Enter: turn one trailing backslash into a line break (spec 21 §6.1).
+
+    The one line-break spelling that works on every terminal with nothing configured. It fires only
+    when the caret is at the end of the text and the text ends in exactly one backslash (a text of
+    just one backslash qualifies): that backslash is deleted and a line feed inserted, and True is
+    returned so the caller does not submit. Anything else returns False and changes nothing. A
+    double backslash is literal and submits as typed; a trailing space is the escape for a message
+    that must end in one backslash (the space is stripped on submit, as every trailing space is)."""
+    text = buf.text
+    if (
+        buf.cursor_position == len(text)
+        and text.endswith("\\")
+        and not text.endswith("\\\\")
+    ):
+        buf.delete_before_cursor(1)
+        buf.insert_text("\n")
+        return True
+    return False
+
+
+def _wants_wire_sequences(keys: TerminalKeysConfig) -> bool:
+    """Shift+Enter's wire forms are installed only for a person who gave it a job (spec 21 §7):
+    anyone who took `shift-enter` out of both lists keeps prompt_toolkit's own table."""
+    return "shift-enter" in keys.nudge or "shift-enter" in keys.newline
+
+
+def _bind_newline_chords(
+    kb: KeyBindings, buf: Buffer, names: Sequence[ChordName], on_newline_chord: Callable[[str], None],
+    *, injected_prefix: str = "",
+) -> None:
+    """Bind each configured newline chord from the `KEYS` table (spec 21 §6.2). A chord means
+    "break here", never "accept": an open completion menu is closed the way Escape closes it (the
+    highlighted item is not taken) and a line feed goes in at the caret. `on_newline_chord` gets the
+    chord's name, so the channel can tell a `shift-enter` arrival from the others. While the
+    `/model ` picker's pre-fill is still on loan (`injected_prefix`, the box only), the chord is
+    typing over the loan (#135): the loan goes and the line feed takes its place, so no `/model `
+    prefix is stranded in front of the next line."""
+    for name in names:
+
+        def _newline(event, name: ChordName = name) -> None:
+            if _picker_loan_live(buf, injected_prefix):
+                _replace_picker_loan(buf, "\n")
+            else:
+                if buf.complete_state is not None:
+                    buf.cancel_completion()
+                buf.insert_text("\n")
+            on_newline_chord(name)
+
+        kb.add(*KEYS[name])(_newline)
+
+
 # What the /model picker pre-fills into the box (box_open_model_menu). Named here because the
 # menu-dismiss Esc must be able to take it back OUT again — declining the picker may not strand
 # a `/model ` prefix that turns the user's next line into "Unknown model '<their sentence>'".
@@ -626,8 +682,16 @@ def _build_input_app(
     history: FileHistory, prompt: str, hint: str, context_pct: float | None = None,
     model_names_fn: Callable[[], list[str]] | None = None,
     on_paste_image: Callable[[], Any] | None = None,
+    keys: TerminalKeysConfig | None = None,
+    on_newline_chord: Callable[[str], None] = lambda _name: None,
 ) -> Application:
-    """Inline application: ╭─╮ │ > input │ ╰─ hint ──── meter ─╯. Exits with the entered line."""
+    """Inline application: ╭─╮ │ > input │ ╰─ hint ──── meter ─╯. Exits with the entered line.
+
+    Binds the newline chords of `keys` only: this app has no running turn to steer, so a nudge
+    chord is unbound here and an Alt+Enter is a plain submit (spec 21 §6.3)."""
+    keys = keys if keys is not None else TerminalKeysConfig()
+    if _wants_wire_sequences(keys):
+        install_wire_sequences()
     buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False,
                  completer=SlashCommandCompleter(model_names_fn), complete_while_typing=True)
     control = BufferControl(
@@ -640,12 +704,15 @@ def _build_input_app(
 
     kb = KeyBindings()
     _add_menu_keys(kb, buf)
+    _bind_newline_chords(kb, buf, keys.newline, on_newline_chord)
 
     @kb.add("enter")
     def _accept(event) -> None:
         comp = _accept_completion(buf)
         if comp is not None and not _is_model_pick(comp):
             return  # command accepted into the line; don't submit yet
+        if comp is None and _break_on_trailing_backslash(buf):
+            return  # backslash then Enter: a line break, nothing submitted (spec 21 §6.1)
         # no completion applied, or a model was picked -> submit in this stroke
         buf.append_to_history()
         event.app.exit(result=buf.text)
@@ -683,7 +750,7 @@ def _build_input_app(
     bottom.append(_wall("╯"))
     body = HSplit([
         VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
-        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, style="class:input"), _wall("│")]),
+        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, height=Dimension(max=8), style="class:input"), _wall("│")]),
         VSplit(bottom),
     ], style="class:frame")
 
@@ -711,6 +778,8 @@ def _build_persistent_input_app(
     on_pending_answer: Callable[[bool], None] = lambda _approve: None,
     on_keystroke: Callable[[], None] = lambda: None,
     on_paste_image: Callable[[], Any] | None = None,
+    keys: TerminalKeysConfig | None = None,
+    on_newline_chord: Callable[[str], None] = lambda _name: None,
 ) -> Application:
     """Long-lived input box that stays usable while turn output streams above it.
 
@@ -734,6 +803,9 @@ def _build_persistent_input_app(
          on_pending_answer. Every key press also stamps on_keystroke, which is how the channel
          knows whether anybody is still at the keyboard.
     """
+    keys = keys if keys is not None else TerminalKeysConfig()
+    if _wants_wire_sequences(keys):
+        install_wire_sequences()
     buf = Buffer(history=history, auto_suggest=AutoSuggestFromHistory(), multiline=False,
                  completer=SlashCommandCompleter(model_names_fn), complete_while_typing=True)
     control = BufferControl(
@@ -760,6 +832,8 @@ def _build_persistent_input_app(
         comp = _accept_completion(buf)
         if comp is not None and not _is_model_pick(comp):
             return  # command accepted into the line; don't submit yet
+        if comp is None and _break_on_trailing_backslash(buf):
+            return  # backslash then Enter: a line break, nothing submitted (spec 21 §6.1)
         # no completion applied, or a model was picked -> submit in this stroke
         text = buf.text
         if text.strip():
@@ -767,20 +841,25 @@ def _build_persistent_input_app(
             on_submit(text)
         buf.reset()  # ready for the next line; the app stays alive
 
-    @kb.add("escape", "enter")  # Alt+Enter (ESC-prefix Meta — works on every terminal)
     def _submit_nudge(event) -> None:
         # Chord-level twin of the `!` force prefix: submit the line as a FORCED NUDGE, steering
         # the RUNNING turn past the nudge/queue classifier; when no turn runs, strip_force makes
-        # it an ordinary submit. Shift+Enter cannot carry this: prompt_toolkit remaps the xterm
-        # Shift+Enter sequence to plain Enter (ansi_escape_sequences: "currently unsupported"),
-        # and Ctrl+J cannot either (it IS Enter on LF terminals, see above), so ESC-prefixed
-        # Alt+Enter is the one reliable cross-terminal spelling. No completion-accept here —
-        # the chord means "send exactly this line, now".
+        # it an ordinary submit. The chords come from KEYS (channels/keys.py) for the names in
+        # `keys.nudge`; Shift+Enter reaches the box as the borrowed key once the wire sequences
+        # are installed. Ctrl+J cannot be a chord (it IS Enter on LF terminals, see above). A
+        # chord in neither list is unbound, so an unbound ESC then CR is Escape followed by Enter,
+        # a plain submit; with the menu open the eager Escape resolves first, which is why
+        # alt-enter as either kind of chord dismisses the menu and submits. No completion-accept
+        # here: the chord means "send exactly this line, now".
         text = buf.text
         if text.strip():
             buf.append_to_history()  # history keeps what was typed, without the synthetic prefix
             on_submit(FORCE_PREFIX + text)
         buf.reset()
+
+    for _name in keys.nudge:
+        kb.add(*KEYS[_name])(_submit_nudge)
+    _bind_newline_chords(kb, buf, keys.newline, on_newline_chord, injected_prefix=_MODEL_PICK_PREFIX)
 
     @kb.add("c-c")
     def _interrupt(event) -> None:
@@ -817,7 +896,7 @@ def _build_persistent_input_app(
 
     frame = HSplit([
         VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
-        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, style="class:input"), _wall("│")]),
+        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, height=Dimension(max=8), style="class:input"), _wall("│")]),
         VSplit([_wall("╰"), Window(char="─", height=1), _wall("╯")]),
     ], style="class:frame")
     # Footer UNDER the closed box — where Claude Code / Codex / Gemini / Cline put the key hints
@@ -1037,10 +1116,16 @@ class TerminalChannel(ChannelAdapter):
         history_file: str = ".repl_history",
         *,
         no_input: bool = False,
+        keys: TerminalKeysConfig | None = None,
     ) -> None:
         # A bare relative default; start_cmd resolves it UNDER the active config dir (#35, so
         # --config-dir isolates REPL history). Absolute/~ values are honored as-is at use.
         super().__init__(bus, config)
+        # The machine's `terminal.keys`, fixed for the session (they apply at the next start).
+        self.keys: TerminalKeysConfig = keys if keys is not None else TerminalKeysConfig()
+        # True once a Shift+Enter has broken a line. It lives here, not in the input app,
+        # because a permission question suspends and rebuilds the box (spec 21 section 7).
+        self.shift_enter_seen: bool = False
         # CR-52: what the gate reads as `local_operator`, the person this session answers to.
         self.local_operator = is_local_operator(no_input=no_input)
         self._console = Console(theme=TERMINAL_THEME, highlight=False)
@@ -1529,6 +1614,7 @@ class TerminalChannel(ChannelAdapter):
         app = _build_input_app(
             self._history, prompt, hint=hint, context_pct=self._context_pct,
             model_names_fn=self._model_names_for_menu, on_paste_image=self.on_paste_image,
+            keys=self.keys, on_newline_chord=self._note_newline_chord,
         )
         try:
             line = await app.run_async()
@@ -1601,6 +1687,7 @@ class TerminalChannel(ChannelAdapter):
             model_names_fn=self._model_names_for_menu,
             pending_fn=self._box_pending_frags, on_pending_answer=_on_pending_answer,
             on_keystroke=self._note_keystroke, on_paste_image=self.on_paste_image,
+            keys=self.keys, on_newline_chord=self._note_newline_chord,
         )
         self._box_patch = patch_stdout(raw=True)
         self._box_patch.__enter__()
@@ -1744,6 +1831,21 @@ class TerminalChannel(ChannelAdapter):
             if restart is not None:
                 await self.start_input_box(*restart)
 
+    def _note_newline_chord(self, name: str) -> None:
+        """The input apps call this each time a newline chord fires as a line break. Only a
+        Shift+Enter counts: a `shift-enter` nudge chord never calls it, and another chord's line
+        break says nothing about whether Shift+Enter reaches the harness (spec 21 section 7)."""
+        if name == "shift-enter":
+            self.shift_enter_seen = True
+
+    def keys_help_state(self) -> tuple[TerminalKeysConfig, bool] | None:
+        """The one accessor `/help` reads: the configured keys and whether a Shift+Enter has
+        broken a line this session. None means the persistent box is not live, so `/help` shows
+        no Keys block (spec 21 section 6.7)."""
+        if not self._box_active:
+            return None
+        return (self.keys, self.shift_enter_seen)
+
     async def stop_input_box(self) -> None:
         """Tear the box down: stop the ticker, exit the app, release patch_stdout. Idempotent."""
         self._box_active = False
@@ -1779,15 +1881,20 @@ class TerminalChannel(ChannelAdapter):
     def _box_hint_frags(self) -> list[tuple[str, str]]:
         """Footer-left: the transient routing-decision flash, else the key legend for the box's
         CURRENT mode — the type-anytime semantics are invisible otherwise. While a turn runs:
-        `queued (N)` when lines wait, then the two keys that matter (alt+enter forces a nudge,
-        ctrl+c stops the turn); idle: tab lists the commands. (The first-run hint moved into
-        the box as its placeholder — _box_placeholder.)"""
+        `queued (N)` when lines wait, then the nudge spellings (the typed `!text` form plus the
+        configured chords' labels, via `nudge_legend`) and ctrl+c to stop; idle: tab lists the
+        commands, `/help`, and the backslash line break. (The first-run hint moved into the box
+        as its placeholder — _box_placeholder.)"""
         if self._decision_flash:
             return [("class:caret", f"  {self._decision_flash}")]
         parts: list[str] = []
         if self._queued_count:
             parts.append(f"queued ({self._queued_count})")
-        parts.append("alt+enter nudge · ctrl+c stop" if self._box_working else "tab commands · /help")
+        parts.append(
+            nudge_legend(self.keys.nudge) + " · ctrl+c stop"
+            if self._box_working
+            else "tab commands · /help · \\ then enter newline"
+        )
         return [("class:hint", "  " + " · ".join(parts))]
 
     def _box_pending_frags(self) -> list[tuple[str, str]]:
