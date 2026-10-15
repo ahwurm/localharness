@@ -1098,7 +1098,7 @@ NOT_A_LAUNCH_LINE = "pidfile names pid {pid} ({exe}), which is not a harness lau
 """The one line a refused stop raises (D-27): the pidfile is a claim, not proof, and `exe` is the
 basename of the process's executable (`?` when `/proc` refused the read)."""
 
-LIVE_LAUNCH_LINE = "pidfile {pidfile} names a live process (pid {pid}, {exe}) — not starting a second server beside it; stop it, or remove {pidfile}"
+LIVE_LAUNCH_LINE = "pidfile {pidfile} names a live process (pid {pid}, {exe}) — not starting a second server beside it; stop that process first (deleting {pidfile} would leave it running with nothing able to stop it)"
 """What `start_server` raises when the pidfile's process is still alive: a launch would replace the pidfile
 and leave that process running with nothing able to reach it."""
 
