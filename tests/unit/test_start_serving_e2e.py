@@ -702,6 +702,22 @@ async def test_a_foreign_holder_of_the_selected_port_ends_the_start_with_the_inc
     assert world.events == [] and world.starts == []
 
 
+async def test_a_foreign_holder_is_named_in_a_config_with_one_record_too(world, fake_proc):
+    """The most common config has a single record: a hand-run server on its port that answers nothing is
+    named, not launched into."""
+    fake_proc.listen(8080, 556, os.getuid())
+    fake_proc.process(5001, argv=("/usr/bin/python3", "-m", "http.server", "8080"),
+                      exe="/usr/bin/python3", fds={3: 556})
+    world.config(peers=[])
+    assert len(model_ops.serving_records(load(world.home))) == 1
+
+    assert await world.start_exit() == 1
+
+    (sentence,) = [x for x in world.err_lines if "not by the harness" in x]
+    assert sentence.startswith(f"{PRIMARY} is served by ")
+    assert world.events == [] and world.starts == []
+
+
 # ------------------------------------------------------------------------------- the loading gate (D-18)
 
 

@@ -2188,13 +2188,14 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     if decision.kind == "launch" and not probe_ok and _serving_spec is not None:
         # Nothing answers: before launching, prove what holds the box (D-18). The pidfile is a claim,
         # verified against /proc; a launch of another record is the swap's incumbent, never waited on.
-        # A config with one record and no autostart unit has no other holder to find: today's flow.
+        # Asked for every config, one record included: a hand-run server on the selected record's port
+        # that answers nothing (still loading, a key, not an OpenAI server) is named here, whoever else
+        # the config holds, instead of being launched into as an "exited during startup" (D-17).
         _unit_state = start_serving.unit_runtime_state()
-        if len(_all_records) > 1 or _unit_state is not None:
-            _verdict = await asyncio.to_thread(
-                lambda: start_serving.liveness_verdict(
-                    harness, machine_trust, record, server_cfg_path,
-                    main_pid=getattr(_unit_state, "main_pid", None)))
+        _verdict = await asyncio.to_thread(
+            lambda: start_serving.liveness_verdict(
+                harness, machine_trust, record, server_cfg_path,
+                main_pid=getattr(_unit_state, "main_pid", None)))
 
     if decision.kind in ("attach", "attach_other"):
         # The one clause this attach carries, if any (D-13, D-15): said once, on stdout.
