@@ -19,16 +19,23 @@ from contextlib import contextmanager
 from io import StringIO
 
 from prompt_toolkit.application import create_app_session
+from pathlib import Path
+
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.input.defaults import create_pipe_input
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.output import DummyOutput
 
+import localharness.channels.terminal as terminal_module
 from localharness.channels.terminal import (
     PRESENCE_WINDOW_S,
     TERMINAL_THEME,
     TerminalChannel,
+    _build_input_app,
     _build_persistent_input_app,
 )
+from localharness.config.models import TerminalKeysConfig
 from localharness.core.bus import EventBus
 from localharness.core.events import ConsolidationFinished, ConsolidationStarted
 
@@ -304,6 +311,20 @@ async def _drive_box(feed: str, *, models=None, keys=None, newline_fires=None, h
     return subs, interrupts, eofs
 
 
+async def _drive_classic(feed: str, *, keys=None, newline_fires=None) -> str:
+    """Run the classic one-shot input app on a pipe input and return the line it exits with."""
+    extra: dict = {}
+    if keys is not None:
+        extra["keys"] = keys
+    if newline_fires is not None:
+        extra["on_newline_chord"] = newline_fires.append
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()):
+            app = _build_input_app(InMemoryHistory(), ">", "", **extra)
+            inp.send_text(feed)
+            return await asyncio.wait_for(app.run_async(), timeout=10.0)
+
+
 class TestPersistentAppKeybindings:
     async def _drive(self, feed: str, models: list[str] | None = None):
         return await _drive_box(feed, models=models)
@@ -413,6 +434,143 @@ class TestBoxLineBreak:
         # then `z` + Enter submits `/x\z`.
         subs, _i, _e = await _drive_box("/x\t\rz\r\x04")
         assert subs == ["/x\\z"]
+
+
+# The two encodings of Shift+Enter that channels/keys.py installs (spec 21 §7).
+_KITTY_SHIFT_ENTER = "\x1b[13;2u"
+_XTERM_SHIFT_ENTER = "\x1b[27;2;13~"
+_CTRL_O = "\x0f"
+_CTRL_G = "\x07"
+_ALT_ENTER = "\x1b\r"
+
+
+class TestBoxChords:
+    """The nudge and line-break chords come from the table in channels/keys.py (spec 21 §6.2-§6.3)."""
+
+    async def test_shift_enter_both_encodings_make_one_message(self):
+        fires: list[str] = []
+        subs, _i, _e = await _drive_box(
+            f"a{_KITTY_SHIFT_ENTER}b{_XTERM_SHIFT_ENTER}c\r\x04", newline_fires=fires
+        )
+        assert subs == ["a\nb\nc"]
+        assert "\r" not in subs[0]
+        assert fires == ["shift-enter", "shift-enter"]
+
+    async def test_ctrl_o_nudge_chord_forces_and_alt_enter_submits_plainly(self):
+        keys = TerminalKeysConfig(nudge=["ctrl-o"])
+        subs, _i, _e = await _drive_box(f"go{_CTRL_O}go{_ALT_ENTER}\x04", keys=keys)
+        assert subs == ["!go", "go"]
+
+    async def test_ctrl_g_nudge_chord_forces(self):
+        keys = TerminalKeysConfig(nudge=["ctrl-g"])
+        subs, _i, _e = await _drive_box(f"go{_CTRL_G}\x04", keys=keys)
+        assert subs == ["!go"]
+
+    async def test_alt_enter_as_newline_breaks_and_with_menu_open_submits(self):
+        keys = TerminalKeysConfig(newline=["alt-enter"])
+        assert keys.nudge == []  # precedence took alt-enter out of the defaulted nudge list
+        fires: list[str] = []
+        subs, _i, _e = await _drive_box(
+            f"a{_ALT_ENTER}b\r\x04", keys=keys, newline_fires=fires
+        )
+        assert subs == ["a\nb"]
+        assert fires == ["alt-enter"]
+        # With the menu open the eager Escape dismisses it and the Enter submits, as for the nudge.
+        subs, _i, _e = await _drive_box(f"/m\t{_ALT_ENTER}\x04", keys=keys)
+        assert subs == ["/m"]
+
+    async def test_no_nudge_chord_leaves_bang_and_plain_alt_enter(self):
+        keys = TerminalKeysConfig(nudge=[])
+        subs, _i, _e = await _drive_box(f"go{_ALT_ENTER}!x\r\x04", keys=keys)
+        assert subs == ["go", "!x"]
+
+    async def test_shift_enter_as_nudge_forces_and_does_not_report_a_newline(self):
+        keys = TerminalKeysConfig(nudge=["shift-enter"])
+        assert keys.newline == []
+        fires: list[str] = []
+        subs, _i, _e = await _drive_box(
+            f"go{_KITTY_SHIFT_ENTER}\x04", keys=keys, newline_fires=fires
+        )
+        assert subs == ["!go"]
+        assert fires == []
+
+    async def test_without_shift_enter_the_table_is_untouched_and_xterm_form_is_enter(self):
+        keys = TerminalKeysConfig(newline=["alt-enter"], nudge=["ctrl-o"])
+        subs, _i, _e = await _drive_box(f"a{_XTERM_SHIFT_ENTER}\x04", keys=keys)
+        assert subs == ["a"]
+        assert ANSI_SEQUENCES[_XTERM_SHIFT_ENTER] == Keys.ControlM
+
+    async def test_without_the_prefix_cache_the_other_chords_still_work(self, monkeypatch):
+        # Simulate a prompt_toolkit that renamed the private prefix cache: the install writes
+        # nothing and says so. (Deleting the real attribute would break the parser itself, which
+        # reads it on every key.)
+        monkeypatch.setattr(terminal_module, "install_wire_sequences", lambda: False)
+        keys = TerminalKeysConfig(newline=["shift-enter", "ctrl-o"])
+        subs, _i, _e = await _drive_box(
+            f"a{_CTRL_O}b\\\rc\rx{_ALT_ENTER}\x04", keys=keys
+        )
+        assert subs == ["a\nb\nc", "!x"]
+        assert ANSI_SEQUENCES[_XTERM_SHIFT_ENTER] == Keys.ControlM
+
+    async def test_two_newline_chords_in_a_row(self):
+        keys = TerminalKeysConfig(newline=["shift-enter", "ctrl-o"])
+        subs, _i, _e = await _drive_box(f"a{_CTRL_O}{_CTRL_O}b\r\x04", keys=keys)
+        assert subs == ["a\n\nb"]
+
+    async def test_a_newline_chord_on_an_empty_line_submits_nothing(self):
+        keys = TerminalKeysConfig(newline=["shift-enter", "ctrl-o"])
+        subs, _i, eofs = await _drive_box(f"{_CTRL_O}\r\x04", keys=keys)
+        assert subs == []
+        assert eofs == [True]
+
+    async def test_a_newline_chord_inserts_at_the_caret(self):
+        keys = TerminalKeysConfig(newline=["shift-enter", "ctrl-o"])
+        subs, _i, _e = await _drive_box(f"ab\x1b[D{_CTRL_O}\r\x04", keys=keys)
+        assert subs == ["a\nb"]
+
+    async def test_a_newline_chord_with_a_highlighted_item_does_not_accept_it(self):
+        keys = TerminalKeysConfig(newline=["shift-enter", "ctrl-o"])
+        subs, _i, _e = await _drive_box(f"/m\t{_CTRL_O}x\r\x04", keys=keys)
+        assert subs == ["/m\nx"]
+
+    async def test_two_nudge_chords_both_force(self):
+        keys = TerminalKeysConfig(nudge=["alt-enter", "ctrl-o"])
+        subs, _i, _e = await _drive_box(f"a{_ALT_ENTER}b{_CTRL_O}\x04", keys=keys)
+        assert subs == ["!a", "!b"]
+
+    async def test_a_nudge_chord_on_a_blank_line_is_a_noop(self):
+        keys = TerminalKeysConfig(nudge=["alt-enter", "ctrl-o"])
+        subs, _i, eofs = await _drive_box(f"{_CTRL_O}   {_ALT_ENTER}\x04", keys=keys)
+        assert subs == []
+        assert eofs == [True]
+
+    async def test_a_nudge_chord_keeps_a_typed_bang(self):
+        subs, _i, _e = await _drive_box(f"!x{_ALT_ENTER}\x04")
+        assert subs == ["!!x"]
+
+    def test_no_literal_alt_enter_binding_outside_the_table(self):
+        import re
+
+        source = Path(terminal_module.__file__).read_text(encoding="utf-8")
+        assert not re.search(r"""["']escape["']\s*,\s*["']enter["']""", source)
+        assert "KEYS[" in source
+
+
+class TestClassicAppKeys:
+    """The classic app binds the newline chords only: it has no turn to steer (spec 21 §6.3)."""
+
+    async def test_alt_enter_is_a_plain_submit(self):
+        assert await _drive_classic(f"go{_ALT_ENTER}") == "go"
+
+    async def test_shift_enter_breaks_the_line(self):
+        fires: list[str] = []
+        got = await _drive_classic(f"a{_KITTY_SHIFT_ENTER}b\r", newline_fires=fires)
+        assert got == "a\nb"
+        assert fires == ["shift-enter"]
+
+    async def test_ctrl_o_newline_breaks_the_line(self):
+        keys = TerminalKeysConfig(newline=["ctrl-o"])
+        assert await _drive_classic(f"a{_CTRL_O}b\r", keys=keys) == "a\nb"
 
 
 class TestModelPickerBox:
