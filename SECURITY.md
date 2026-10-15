@@ -213,12 +213,11 @@ says where a request or a credential goes, which credential is sent, what progra
 or imports, which file outside the project it writes, or what your own keys do (a project must not
 be able to rebind which key sends a line into a running turn on your terminal) belongs to your
 machine, so only your machine-level (global) `config.yaml` or `overrides.yaml` may set it. A
-repository you cloned must
-not be able to send your API key or your conversation to an address it picks, start a program of
-its choosing, or switch a protection off — and the address alone is enough to leak, because every
-message and every file the agent reads travels to it. A project's value for one of these settings
-is ignored, the harness prints a warning naming the key and the file, and your global value stands;
-if your global config sets no model server at all, `start` stops with one line naming the file to
+repository you cloned must not be able to send your API key or your conversation to an address it
+picks, start a program of its choosing, or switch a protection off — and the address alone is enough
+to leak, because every message and every file the agent reads travels to it. A project's value for
+one of these settings is ignored, the harness prints a warning naming the key and the file, and your
+global value stands; if your global config sets no model server at all, `start` stops with one line naming the file to
 set `provider.base_url` in. The autoresearch proposer's address and key are two of them, because
 `plugins enable autoresearch` sends the key to that address; with no proposer address in your
 global config, a project's whole `proposer:` section is ignored. These are all of them:
