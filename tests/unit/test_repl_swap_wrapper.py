@@ -331,6 +331,20 @@ def test_serving_heavy_that_is_alive_seeds_the_accelerator_occupant(tmp_path, mo
     assert repl._active_heavy == (peer.lifecycle, PEER_URL)
 
 
+def test_a_cpu_only_serving_record_is_not_the_accelerator_occupant(tmp_path, monkeypatch):
+    """D-33: the lock tracks GPU heavies. A live `gpu: false` server must not be seeded, or the next
+    cold `/model <gpu peer>` would stop a CPU server it was never meant to touch."""
+    peer = _launchable_peer(name="flash-next", served="flash-next")
+    cpu_spec = peer.lifecycle.model_copy(update={"gpu": False})
+    harness = _harness(server=None, extra_endpoints=[peer])
+    asked = _liveness(monkeypatch, lambda spec: True)
+
+    repl, _, _, _ = _xrepl(tmp_path, harness, {}, serving_heavy=(cpu_spec, PEER_URL))
+
+    assert repl._active_heavy is None
+    assert asked == []
+
+
 def test_serving_heavy_that_is_dead_falls_back_to_the_primary_seed(tmp_path, monkeypatch):
     peer = _launchable_peer(name="flash-next", served="flash-next")
     primary = _llama_primary()
