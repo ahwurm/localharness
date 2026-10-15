@@ -817,7 +817,9 @@ def start_server(
     xdg_config_home: str | None = None,
     port: int | None = None,
 ) -> int:
-    """Launch detached (new session), append stdout+stderr to serve.log, write pidfile.
+    """Launch detached (new session), append stdout+stderr to serve.log, write pidfile. Refuses
+    (RuntimeError, nothing started) while the pidfile names a live process: a second launch would
+    replace its only handle (`LIVE_LAUNCH_LINE`).
 
     The pidfile is `<pid> <start> <port>` (the start time and `port`, when known; two tokens without
     a port, one without a start time), written through `atomic_write_text` by descriptor into the
@@ -831,6 +833,15 @@ def start_server(
     wants them for the ledger and the start summary passes `dropped_out`, which they extend.
     `xdg_config_home` is the llama.cpp config directory `prepare_config_ini_home` made for this
     launch; it rides the child environment only, so argv and the logged launch line are unchanged."""
+    # One pidfile names one launch for the box. A live process there that nothing stopped is a heavy
+    # this launch would orphan: the atomic replace below would drop its only handle, and no stop could
+    # reach it again. Refuse instead (the caller holds the launch lock, so this check cannot race a
+    # second launch). A dead or reused pid is stale and `server_pid` drops it.
+    live = server_pid(config_dir)
+    if live is not None:
+        held = procfs.read_process(live)
+        exe = os.path.basename(held.exe) if isinstance(held, procfs.ProcRecord) and held.exe else "?"
+        raise RuntimeError(LIVE_LAUNCH_LINE.format(pid=live, exe=exe, pidfile=pid_path(config_dir)))
     env, dropped = child_environment(
         runtime, os.environ, record_env=record_env, api_key=api_key, xdg_config_home=xdg_config_home)
     if dropped_out is not None:
@@ -995,6 +1006,10 @@ def server_pid(config_dir: Path) -> int | None:
 NOT_A_LAUNCH_LINE = "pidfile names pid {pid} ({exe}), which is not a harness launch — not signalled; stop it, or remove {pidfile}"
 """The one line a refused stop raises (D-27): the pidfile is a claim, not proof, and `exe` is the
 basename of the process's executable (`?` when `/proc` refused the read)."""
+
+LIVE_LAUNCH_LINE = "pidfile {pidfile} names a live process (pid {pid}, {exe}) — not starting a second server beside it; stop it, or remove {pidfile}"
+"""What `start_server` raises when the pidfile's process is still alive: a launch would replace the pidfile
+and leave that process running with nothing able to reach it."""
 
 NOT_THIS_LAUNCH_LINE = "{label}: the live launch (pid {pid}) is not this record's — not waited on"
 """What `wait_ready(expect=)` raises when the live launch is not the record's (D-18)."""
