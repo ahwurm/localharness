@@ -17,6 +17,7 @@ from localharness.config.loader import ConfigLoader
 from localharness.provider import lifecycle, units
 from localharness.provider import server as managed_server
 from localharness.provider.lifecycle import Heavy, SwapOutcome, swap
+from tests.unit.procfs_support import fake_proc  # noqa: F401 — the fixture
 
 PRIMARY = "qwen-27b-swift-1.5"
 PRIMARY_URL = "http://127.0.0.1:8080/v1"
@@ -270,6 +271,40 @@ async def test_a_restore_the_launch_decision_refuses_names_the_refusal(rig):
     assert "binary" in rec.lines[0] and "NO model serving" not in rec.lines[0]
     assert outcome.restored is None
     assert _launches(rig) == [rig.events[1]]  # the refusal launched nothing: only the target started
+
+
+def _plant_live_launch(rig, fake_proc, *, model: str) -> None:
+    """A live llama-server on :8081 under the pidfile, serving `model` (the record's own is
+    /m/flash-next.gguf): the binary and the port are the target's, the record may not be."""
+    fake_proc.process(4242, argv=("/x/llama-server", "-m", model, "--port", "8081"),
+                      exe="/x/llama-server", start_time=777)
+    directory = managed_server.server_dir(rig.home)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "server.pid").write_text("4242 777 8081", encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_target_does_not_stop_another_records_launch_on_the_same_binary_and_port(
+        rig, fake_proc):
+    """The strategy's stop proves a binary and a port, which two records can share: the teardown after a
+    refused or failed target leaves a live launch that is not this record's running."""
+    _plant_live_launch(rig, fake_proc, model="/m/other.gguf")
+    rig.wait_raises[PEER_URL] = RuntimeError("boom")
+
+    outcome = await _swap(rig, None, rig.target(), Reporter())
+
+    assert outcome.stage == "launch"
+    assert "stop" not in rig.events
+
+
+@pytest.mark.asyncio
+async def test_a_failed_target_that_is_the_live_launch_is_still_torn_down(rig, fake_proc):
+    _plant_live_launch(rig, fake_proc, model="/m/flash-next.gguf")
+    rig.wait_raises[PEER_URL] = RuntimeError("boom")
+
+    await _swap(rig, None, rig.target(), Reporter())
+
+    assert rig.events[-1] == "stop"
 
 
 @pytest.mark.asyncio

@@ -45,7 +45,7 @@ except ImportError:  # non-POSIX: the launch lock degrades to an in-process asyn
 
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import autosense as _auto
-from localharness.provider import server, speed_stats, tuning, units
+from localharness.provider import procfs, server, speed_stats, tuning, units
 from localharness.provider.procfs import LaunchIdentity
 from localharness.provider.tuning import Tuned
 
@@ -1349,7 +1349,20 @@ async def safe_stop(spec: ManagedServerConfig, config_dir: Path) -> None:
     """Best-effort verified-stop of a server, swallowing errors. Used to tear a HALF-STARTED target
     down before restoring an incumbent: the pidfile is one-per-config_dir (shared across primary and
     peer), so a still-alive orphan would be clobbered-and-lost by the restore's own launch
-    (server.py start_server overwrites the pidfile) — leaving a second, untracked heavy."""
+    (server.py start_server overwrites the pidfile) — leaving a second, untracked heavy.
+
+    Only the TARGET's own launch is torn down: the strategy's stop proves a binary and a port, which a
+    second record on that binary and port shares. So when the pidfile names a live process that is
+    verifiably not this RECORD's (`record_identity`: its served name or model), nothing half-started
+    here is that process, and it is left running."""
+    try:
+        identity = record_identity(spec)
+        if identity is not None:
+            launch = await asyncio.to_thread(procfs.read_launch, config_dir, expect=identity)
+            if launch is not None and not launch.verified:
+                return
+    except Exception:  # noqa: BLE001 — a look that fails changes nothing: the strategy's own stop decides
+        pass
     try:
         await strategy_for(spec).stop(spec, config_dir)
     except Exception:  # noqa: BLE001 — cleanup is best-effort
