@@ -1169,7 +1169,7 @@ def build_session() -> PromptSession:
       Up/Down: History navigation
       Tab: Auto-complete from history (AutoSuggestFromHistory)
       Enter: Submit input
-      Alt-Enter: Insert newline (multi-line input)
+      Enter: submit · \ then Enter (Shift+Enter when the terminal sends it): newline · Alt+Enter: nudge — spec 21
     """
     kb = KeyBindings()
 
