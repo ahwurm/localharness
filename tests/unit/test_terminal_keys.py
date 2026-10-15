@@ -631,3 +631,30 @@ def test_help_block_never_points_to_the_readme_or_alt_enter():
                 if set(newline) & {"ctrl-o", "ctrl-g", "alt-enter"}:
                     assert "(or give" not in block
     assert cases == 324
+
+
+async def test_input_routed_preview_collapses_whitespace():
+    """Spec 21 §6.5: a multi-line message previews as one audit row, at both publish sites."""
+    from tests.unit.test_repl_tier2_late_upgrade import _repl
+
+    from localharness.channels import input_router
+    from localharness.core.events import InputRouted
+
+    def previews(repl) -> list[str]:
+        events = [c.args[0] for c in repl._bus.publish.await_args_list]
+        return [e.text_preview for e in events if isinstance(e, InputRouted)]
+
+    repl, _ch, _agent = _repl()
+    queue = input_router.Decision(input_router.Route.QUEUE, "tier1", "abstain-default-queue")
+    await repl._deliver_route("a\n\nb", queue)
+    assert previews(repl) == ["a b"]
+
+    repl, _ch, _agent = _repl()
+    tier2 = input_router.Decision(input_router.Route.QUEUE, "tier2", "tier2-queue")
+    await repl._apply_tier2_result("a\n\nb", tier2)
+    assert previews(repl) == ["a b"]
+
+    # a single long line keeps the plain 80-character cut
+    repl, _ch, _agent = _repl()
+    await repl._deliver_route("x" * 200, queue)
+    assert previews(repl) == ["x" * 80]
