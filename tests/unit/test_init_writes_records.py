@@ -306,6 +306,24 @@ def test_a_fresh_init_accepts_the_one_command_line_break_change(tmp_path):
     assert reloaded.terminal.keys.nudge == []
 
 
+def test_init_force_accepts_an_overrides_file_that_moved_a_chord(tmp_path):
+    """`init --force` validates the fresh harness's dump merged with the saved overrides. The dump
+    carries both defaulted lists; an overrides file holding the documented one-command change must
+    not turn them into a collision (spec 21 §5: a list at its default value yields)."""
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text(yaml.safe_dump({
+        "provider": {"default_model": "saved"},
+        "terminal": {"keys": {"newline": "alt-enter"}},
+    }), encoding="utf-8")
+
+    reset = init_cmd._saved_choices_reset(tmp_path, _harness())
+
+    assert reset is not None
+    _path, overlay, cleared = reset
+    assert cleared == ["provider.default_model"]
+    assert overlay["terminal"]["keys"] == {"newline": "alt-enter"}
+
+
 # ------------------------------------------------------------------ the carrier
 
 
