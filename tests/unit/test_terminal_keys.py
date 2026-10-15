@@ -1,9 +1,11 @@
 """`terminal.keys` — the person's own chords for the nudge and the line break (spec 21 §5, §10).
 
-This half pins the config and the loader: the closed vocabulary, the string-or-list reading, the
-precedence of a list the person set over one left at its default, the one refusal for two set lists
-that share a chord, and the machine-only drop. Everything here is hermetic: pydantic and the
-loader's layers on `tmp_path`, no tty, no network.
+Pins the config and the loader (the closed vocabulary, the string-or-list reading, the precedence of
+a list set away from its default over one at its default, the one refusal for two such lists that
+share a chord, and the machine-only drop) and the rest of the feature: the chord table in
+`channels/keys.py`, the wire sequences, the legend, `/help`, terminal detection and the router
+preview. Everything here is hermetic: pydantic and the loader's layers on `tmp_path`, no tty, no
+network.
 """
 from __future__ import annotations
 
@@ -150,9 +152,10 @@ def test_the_chord_a_set_list_names_leaves_the_defaulted_list_silently(recwarn):
 
 @pytest.mark.parametrize("kwargs, line", [
     pytest.param(
-        {"nudge": ["alt-enter"], "newline": ["alt-enter"]}, SPEC_REFUSAL, id="spec-alt-enter"),
+        {"nudge": ["alt-enter", "ctrl-g"], "newline": ["alt-enter"]}, SPEC_REFUSAL,
+        id="spec-alt-enter"),
     pytest.param(
-        {"nudge": ["shift-enter"], "newline": ["shift-enter"]},
+        {"nudge": ["shift-enter"], "newline": ["shift-enter", "ctrl-g"]},
         "terminal.keys: shift-enter is in both nudge and newline — set one list without it first "
         "(e.g. localharness components set terminal.keys.newline ctrl-o), then retry",
         id="shift-enter-names-newline"),
@@ -180,7 +183,7 @@ def test_two_set_lists_sharing_a_chord_are_refused_with_the_fix(kwargs, line):
 
 def test_the_spec_refusal_is_the_whole_message():
     with pytest.raises(ValidationError) as exc:
-        TerminalKeysConfig(nudge=["alt-enter"], newline=["alt-enter"])
+        TerminalKeysConfig(nudge=["alt-enter", "ctrl-g"], newline=["alt-enter"])
     messages = [e["msg"] for e in exc.value.errors()]
     assert messages == [f"Value error, {SPEC_REFUSAL}"]
 
@@ -190,6 +193,48 @@ def test_two_set_disjoint_lists_are_accepted():
     assert (keys.nudge, keys.newline) == (["ctrl-o"], ["alt-enter"])
     both_default_values = TerminalKeysConfig(nudge=["alt-enter"], newline=["shift-enter"])
     assert (both_default_values.nudge, both_default_values.newline) == (["alt-enter"], ["shift-enter"])
+
+
+# --- a list at its default value yields, however it got there (CR-01) -----------------------------
+
+
+def test_a_dump_of_the_defaults_merged_with_a_newline_overlay_does_not_refuse():
+    dumped = TerminalKeysConfig().model_dump()
+    assert dumped == {"nudge": ["alt-enter"], "newline": ["shift-enter"]}
+    keys = TerminalKeysConfig.model_validate({**dumped, "newline": "alt-enter"})
+    assert keys.nudge == []
+    assert keys.newline == ["alt-enter"]
+
+
+def test_the_terminal_dump_merged_with_a_terminal_keys_overlay_does_not_refuse():
+    from localharness.config.models import TerminalConfig
+    from localharness.config.overlay import deep_merge
+
+    dumped = TerminalConfig().model_dump(mode="python")
+    merged = deep_merge(dumped, {"keys": {"newline": "alt-enter"}})
+    keys = TerminalConfig.model_validate(merged).keys
+    assert keys.nudge == []
+    assert keys.newline == ["alt-enter"]
+    merged = deep_merge(dumped, {"keys": {"nudge": "shift-enter"}})
+    keys = TerminalConfig.model_validate(merged).keys
+    assert (keys.nudge, keys.newline) == (["shift-enter"], [])
+
+
+def test_a_dump_of_the_defaults_round_trips():
+    keys = TerminalKeysConfig()
+    again = TerminalKeysConfig.model_validate(keys.model_dump())
+    assert again == keys
+    assert (again.nudge, again.newline) == (["alt-enter"], ["shift-enter"])
+
+
+def test_a_hand_written_config_restating_both_defaults_still_yields_to_the_one_changed():
+    keys = TerminalKeysConfig.model_validate(
+        {"nudge": ["alt-enter"], "newline": ["alt-enter"]}
+    )
+    assert keys.nudge == []
+    assert keys.newline == ["alt-enter"]
+    keys = TerminalKeysConfig.model_validate({"nudge": ["shift-enter"], "newline": ["shift-enter"]})
+    assert (keys.nudge, keys.newline) == (["shift-enter"], [])
 
 
 @pytest.mark.parametrize("kwargs, written", [

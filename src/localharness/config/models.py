@@ -2337,8 +2337,8 @@ class TerminalKeysConfig(BaseModel):
         description=(
             "Chords that send the typed line into the running turn now (a nudge): alt-enter, "
             "shift-enter, ctrl-g or ctrl-o. A list or a comma-separated string is read. An empty "
-            "list leaves the typed `!` prefix as the only way to nudge. A list you set takes its "
-            "chords from the newline list when that one is at its default. Applies at the next "
+            "list leaves the typed `!` prefix as the only way to nudge. A list you set away from "
+            "its default takes its chords from the newline list when that one is at its default. Applies at the next "
             "start. Mutable via `localharness components set terminal.keys.nudge <chords>`. "
             "Machine-level only."
         ),
@@ -2348,8 +2348,8 @@ class TerminalKeysConfig(BaseModel):
         description=(
             "Chords that insert a line break in the box: alt-enter, shift-enter, ctrl-g or "
             "ctrl-o. A list or a comma-separated string is read. An empty list leaves "
-            "backslash-then-Enter as the only way to break a line. A list you set takes its "
-            "chords from the nudge list when that one is at its default. Applies at the next "
+            "backslash-then-Enter as the only way to break a line. A list you set away from "
+            "its default takes its chords from the nudge list when that one is at its default. Applies at the next "
             "start. Mutable via `localharness components set terminal.keys.newline <chords>`. "
             "Machine-level only."
         ),
@@ -2373,22 +2373,31 @@ class TerminalKeysConfig(BaseModel):
 
     @model_validator(mode="after")
     def _resolve_precedence(self) -> "TerminalKeysConfig":
-        """A list the person set wins over a list still at its default: the chords it names leave
-        the defaulted list, silently. Two set lists that share a chord are refused. `model_fields_set`
-        is read before anything is written, and the trimmed list goes in with `object.__setattr__`:
-        a plain assignment would add the field to that set and make it look as if the person wrote
-        it, so a later validation of the dump would see both lists as set."""
+        """A list counts as set only when it is in `model_fields_set` and its value differs from the
+        field's default. A set list wins over a list that is not set: the chords it names leave the
+        other list, silently. A list at its default value always yields, whether it was left out,
+        dumped by `model_dump()` or written out by hand, so a dump that is merged with an overlay
+        and validated again never refuses. Two lists set away from their defaults that share a
+        chord are refused. `model_fields_set` is read before anything is written, and the trimmed
+        list goes in with `object.__setattr__`: a plain assignment would add the field to that set."""
         fields_set = set(self.model_fields_set)
-        if "nudge" in fields_set and "newline" in fields_set:
+        fields = type(self).model_fields
+        nudge_set = "nudge" in fields_set and self.nudge != fields["nudge"].get_default(
+            call_default_factory=True
+        )
+        newline_set = "newline" in fields_set and self.newline != fields["newline"].get_default(
+            call_default_factory=True
+        )
+        if nudge_set and newline_set:
             shared = next((c for c in self.nudge if c in self.newline), None)
             if shared is not None:
                 raise ValueError(_keys_collision_line(shared, self.nudge, self.newline))
             return self
-        if "nudge" in fields_set:
+        if nudge_set:
             trimmed = [c for c in self.newline if c not in self.nudge]
             if trimmed != self.newline:
                 object.__setattr__(self, "newline", trimmed)
-        elif "newline" in fields_set:
+        elif newline_set:
             trimmed = [c for c in self.nudge if c not in self.newline]
             if trimmed != self.nudge:
                 object.__setattr__(self, "nudge", trimmed)
