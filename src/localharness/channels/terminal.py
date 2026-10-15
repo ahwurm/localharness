@@ -342,6 +342,27 @@ def _is_model_pick(comp) -> bool:
     return comp is not None and "model-pick" in (comp.style or "")
 
 
+def _break_on_trailing_backslash(buf: Buffer) -> bool:
+    """Backslash then Enter: turn one trailing backslash into a line break (spec 21 §6.1).
+
+    The one line-break spelling that works on every terminal with nothing configured. It fires only
+    when the caret is at the end of the text and the text ends in exactly one backslash (a text of
+    just one backslash qualifies): that backslash is deleted and a line feed inserted, and True is
+    returned so the caller does not submit. Anything else returns False and changes nothing. A
+    double backslash is literal and submits as typed; a trailing space is the escape for a message
+    that must end in one backslash (the space is stripped on submit, as every trailing space is)."""
+    text = buf.text
+    if (
+        buf.cursor_position == len(text)
+        and text.endswith("\\")
+        and not text.endswith("\\\\")
+    ):
+        buf.delete_before_cursor(1)
+        buf.insert_text("\n")
+        return True
+    return False
+
+
 # What the /model picker pre-fills into the box (box_open_model_menu). Named here because the
 # menu-dismiss Esc must be able to take it back OUT again — declining the picker may not strand
 # a `/model ` prefix that turns the user's next line into "Unknown model '<their sentence>'".
@@ -760,6 +781,8 @@ def _build_persistent_input_app(
         comp = _accept_completion(buf)
         if comp is not None and not _is_model_pick(comp):
             return  # command accepted into the line; don't submit yet
+        if comp is None and _break_on_trailing_backslash(buf):
+            return  # backslash then Enter: a line break, nothing submitted (spec 21 §6.1)
         # no completion applied, or a model was picked -> submit in this stroke
         text = buf.text
         if text.strip():

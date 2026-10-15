@@ -263,38 +263,50 @@ class TestPromptEcho:
         assert "[bold]not markup[/bold]" in self._out(ch)
 
 
+async def _drive_box(feed: str, *, models=None, keys=None, newline_fires=None, history=None):
+    """Run the persistent box on a pipe input and return (submissions, interrupts, eofs)."""
+    subs: list[str] = []
+    interrupts: list[bool] = []
+    eofs: list[bool] = []
+    holder: dict = {}
+
+    def on_submit(t: str) -> None:
+        subs.append(t)
+
+    def on_interrupt() -> None:
+        interrupts.append(True)
+
+    def on_eof() -> None:
+        eofs.append(True)
+        holder["app"].exit()
+
+    extra: dict = {}
+    if keys is not None:
+        extra["keys"] = keys
+    if newline_fires is not None:
+        extra["on_newline_chord"] = newline_fires.append
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()):
+            app = _build_persistent_input_app(
+                history if history is not None else InMemoryHistory(), ">",
+                on_submit=on_submit, on_interrupt=on_interrupt, on_eof=on_eof,
+                hint_fn=lambda: [("class:hint", " ")], right_fn=lambda: [],
+                status_fn=lambda: [],
+                model_names_fn=(lambda: list(models)) if models is not None else None,
+                **extra,
+            )
+            holder["app"] = app
+            inp.send_text(feed)
+            # wait_for guard: a feed that never reaches an exit key would otherwise hang the
+            # whole suite on this app instead of failing this one test.
+            await asyncio.wait_for(app.run_async(), timeout=10.0)
+    return subs, interrupts, eofs
+
+
 class TestPersistentAppKeybindings:
     async def _drive(self, feed: str, models: list[str] | None = None):
-        subs: list[str] = []
-        interrupts: list[bool] = []
-        eofs: list[bool] = []
-        holder: dict = {}
-
-        def on_submit(t: str) -> None:
-            subs.append(t)
-
-        def on_interrupt() -> None:
-            interrupts.append(True)
-
-        def on_eof() -> None:
-            eofs.append(True)
-            holder["app"].exit()
-
-        with create_pipe_input() as inp:
-            with create_app_session(input=inp, output=DummyOutput()):
-                app = _build_persistent_input_app(
-                    InMemoryHistory(), ">",
-                    on_submit=on_submit, on_interrupt=on_interrupt, on_eof=on_eof,
-                    hint_fn=lambda: [("class:hint", " ")], right_fn=lambda: [],
-                    status_fn=lambda: [],
-                    model_names_fn=(lambda: list(models)) if models is not None else None,
-                )
-                holder["app"] = app
-                inp.send_text(feed)
-                # wait_for guard: a feed that never reaches an exit key would otherwise hang the
-                # whole suite on this app instead of failing this one test.
-                await asyncio.wait_for(app.run_async(), timeout=10.0)
-        return subs, interrupts, eofs
+        return await _drive_box(feed, models=models)
 
     async def test_enter_submits_without_exiting_and_resets(self):
         # two Enter-terminated lines then Ctrl+D — the app stays alive across both submits.
@@ -362,6 +374,45 @@ class TestPersistentAppKeybindings:
             "/model \t\x1brewrite the parser tests\r\x04", models=["qwen-a", "qwen-b"]
         )
         assert subs == ["rewrite the parser tests"]
+
+
+class TestBoxLineBreak:
+    """Backslash then Enter breaks the line with nothing configured (spec 21 §6.1)."""
+
+    async def test_backslash_enter_breaks_the_line(self):
+        subs, _i, _e = await _drive_box("x\\\ry\r\x04")
+        assert subs == ["x\ny"]
+
+    async def test_backslash_then_lf_breaks_the_line_too(self):
+        # Ctrl+J shares Enter's handler (it is Return on LF terminals), so it gets the rule too.
+        subs, _i, _e = await _drive_box("x\\\ny\n\x04")
+        assert subs == ["x\ny"]
+
+    async def test_double_backslash_submits_as_typed(self):
+        subs, _i, _e = await _drive_box("x\\\\\r\x04")
+        assert subs == ["x\\\\"]
+
+    async def test_backslash_space_submits_and_strips_to_one_backslash(self):
+        subs, _i, _e = await _drive_box("x\\ \r\x04")
+        assert subs == ["x\\ "]
+        assert subs[0].strip() == "x\\"
+
+    async def test_a_lone_backslash_becomes_a_line_break(self):
+        subs, _i, _e = await _drive_box("\\\ry\r\x04")
+        assert subs == ["\ny"]
+
+    async def test_backslash_enter_with_the_caret_mid_line_submits_as_typed(self):
+        # The caret is not at the end: the rule is off and the text goes as typed.
+        subs, _i, _e = await _drive_box("x\\\x1b[D\r\x04")
+        assert subs == ["x\\"]
+
+    async def test_a_completion_accepted_by_enter_wins_over_the_backslash(self, monkeypatch):
+        rows = [("/x\\", "first"), ("/x\\y", "second")]
+        monkeypatch.setattr("localharness.cli.slash_commands.all_rows", lambda: rows)
+        # `/x` + Tab opens the menu on `/x\`; the first Enter applies it (no break, no submit),
+        # then `z` + Enter submits `/x\z`.
+        subs, _i, _e = await _drive_box("/x\t\rz\r\x04")
+        assert subs == ["/x\\z"]
 
 
 class TestModelPickerBox:
