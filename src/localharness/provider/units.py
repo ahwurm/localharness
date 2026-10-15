@@ -827,6 +827,8 @@ def capture_shell_env(environ: Mapping[str, str], cwd: str) -> CapturedShell:
     absolutized: list[tuple[str, str, str]] = []
     for name in CAPTURED_NAMES:
         raw = environ.get(name)
+        if name == "PATH" and raw is None:
+            raw = ""  # an unset PATH has no absolute entry, which is refused below
         if raw is None or (raw == "" and name != "PATH"):
             continue
         if name == "HF_HOME":

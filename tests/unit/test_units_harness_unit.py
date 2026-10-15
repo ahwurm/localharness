@@ -202,3 +202,263 @@ def test_write_then_read_the_unit_file():
     assert path.read_text(encoding="utf-8") == GOLDEN
     assert (path.stat().st_mode & 0o777) == 0o600
     assert u.read_harness_unit() == GOLDEN
+
+
+# ------------------------------------------------------------------------- what `on` captures
+
+
+def test_capture_drops_empty_and_relative_elements_and_names_them():
+    got = u.capture_shell_env({"PATH": "./bin:/usr/bin::/bin", "LD_LIBRARY_PATH": "./lib:/opt/cuda/lib"}, HOME)
+    assert got.env == {"PATH": "/usr/bin:/bin", "LD_LIBRARY_PATH": "/opt/cuda/lib"}
+    assert got.dropped == (("PATH", "./bin"), ("PATH", ""), ("LD_LIBRARY_PATH", "./lib"))
+    assert got.absolutized == ()
+    assert "HF_HOME" not in got.env
+
+
+def test_capture_takes_only_path_when_nothing_else_is_set():
+    got = u.capture_shell_env({"PATH": "/usr/bin", "HOME": "/x", "PYTHONPATH": "/evil"}, HOME)
+    assert got.env == {"PATH": "/usr/bin"}
+    assert got.dropped == () and got.absolutized == ()
+
+
+def test_capture_makes_a_relative_hf_home_absolute_against_the_shell_cwd_and_reports_it():
+    got = u.capture_shell_env({"PATH": "/usr/bin", "HF_HOME": "models/hf"}, HOME)
+    assert got.env["HF_HOME"] == "/home/u/models/hf"
+    assert got.absolutized == (("HF_HOME", "models/hf", "/home/u/models/hf"),)
+    again = u.capture_shell_env({"PATH": "/usr/bin", "HF_HOME": "../hf"}, "/home/u/work")
+    assert again.env["HF_HOME"] == "/home/u/hf"
+
+
+def test_capture_keeps_an_absolute_hf_home_as_written():
+    got = u.capture_shell_env({"PATH": "/usr/bin", "HF_HOME": "/data/hf"}, HOME)
+    assert got.env["HF_HOME"] == "/data/hf" and got.absolutized == ()
+
+
+def test_capture_omits_an_ld_library_path_with_no_absolute_element_and_an_empty_one():
+    got = u.capture_shell_env({"PATH": "/usr/bin", "LD_LIBRARY_PATH": "./lib"}, HOME)
+    assert "LD_LIBRARY_PATH" not in got.env and got.dropped == (("LD_LIBRARY_PATH", "./lib"),)
+    quiet = u.capture_shell_env({"PATH": "/usr/bin", "LD_LIBRARY_PATH": "", "HF_HOME": ""}, HOME)
+    assert quiet.env == {"PATH": "/usr/bin"} and quiet.dropped == ()
+
+
+def test_capture_refuses_a_kept_value_outside_the_charset_naming_it():
+    with pytest.raises(ValueError) as exc:
+        u.capture_shell_env({"PATH": "/usr/bin:/opt/my tools"}, "/")
+    assert "/opt/my tools" in str(exc.value)
+    with pytest.raises(ValueError) as exc:
+        u.capture_shell_env({"PATH": "/usr/bin", "LD_LIBRARY_PATH": "/opt/a$b"}, "/")
+    assert "/opt/a$b" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["/data/$HOME/hf", "/data/50%", "/data/a b"])
+def test_capture_refuses_an_hf_home_outside_the_charset(value):
+    with pytest.raises(ValueError):
+        u.capture_shell_env({"PATH": "/usr/bin", "HF_HOME": value}, HOME)
+    with pytest.raises(ValueError):  # a relative one is judged after it is made absolute
+        u.capture_shell_env({"PATH": "/usr/bin", "HF_HOME": value.lstrip("/")}, HOME)
+
+
+@pytest.mark.parametrize("environ", [{}, {"PATH": ""}, {"PATH": "./a:b"}, {"PATH": ":"}])
+def test_capture_refuses_a_path_with_no_absolute_entry(environ):
+    with pytest.raises(ValueError) as exc:
+        u.capture_shell_env(environ, HOME)
+    assert "PATH" in str(exc.value)
+
+
+def test_capture_refuses_a_relative_cwd_for_a_relative_hf_home():
+    with pytest.raises(ValueError):
+        u.capture_shell_env({"PATH": "/usr/bin", "HF_HOME": "hf"}, "work")
+
+
+def test_what_capture_returns_the_render_accepts_and_the_parse_returns():
+    got = u.capture_shell_env({"PATH": "./b:/usr/bin", "HF_HOME": "hf", "LD_LIBRARY_PATH": "/l"}, HOME)
+    assert u.captured_env(render(got.env)) == got.env
+
+
+# ------------------------------------------------------------------------ what `serve` will read
+
+UNPARSABLE = {
+    "duplicate_path": lambda b: b.replace("# env HF_HOME=/home/u/hf\n", "# env PATH=/bin\n"),
+    "unknown_name": lambda b: b.replace("# env HF_HOME=/home/u/hf\n", "# env HOME=/x\n"),
+    "relative_element": lambda b: b.replace("PATH=/usr/bin:/bin", "PATH=/usr/bin:relative"),
+    "empty_element": lambda b: b.replace("PATH=/usr/bin:/bin", "PATH=/usr/bin::/bin"),
+    "trailing_empty_element": lambda b: b.replace("PATH=/usr/bin:/bin", "PATH=/usr/bin:/bin:"),
+    "relative_hf_home": lambda b: b.replace("HF_HOME=/home/u/hf", "HF_HOME=hf"),
+    "relative_ld_library_path": lambda b: b.replace("HF_HOME=/home/u/hf", "LD_LIBRARY_PATH=/a:b"),
+    "comment_in_the_block": lambda b: b.replace("# env HF_HOME=/home/u/hf\n", "# a comment\n"),
+    "blank_line_in_the_block": lambda b: b.replace("# env HF_HOME=/home/u/hf\n", "\n"),
+    "no_path_line": lambda b: b.replace("# env PATH=/usr/bin:/bin\n", ""),
+    "empty_block": lambda b: b.replace("# env PATH=/usr/bin:/bin\n# env HF_HOME=/home/u/hf\n", ""),
+    "no_unit_line": lambda b: b.replace("[Unit]\n", "[Unix]\n"),
+    "not_the_header": lambda b: b.replace("# written by localharness", "# edited by someone"),
+    "value_with_a_space": lambda b: b.replace("PATH=/usr/bin:/bin", "PATH=/usr/bin:/my bin"),
+    "empty_value": lambda b: b.replace("PATH=/usr/bin:/bin", "PATH="),
+    "no_equals_sign": lambda b: b.replace("PATH=/usr/bin:/bin", "PATH /usr/bin"),
+    "carriage_return": lambda b: b.replace("PATH=/usr/bin:/bin", "PATH=/usr/bin:/bin\r"),
+    "lowercase_name": lambda b: b.replace("# env PATH=", "# env path="),
+    "double_space": lambda b: b.replace("# env PATH=", "# env  PATH="),
+}
+
+
+@pytest.mark.parametrize("name", sorted(UNPARSABLE))
+def test_captured_env_is_none_for_an_unparsable_block(name):
+    assert u.captured_env(GOLDEN) == {"PATH": PATH_VALUE, "HF_HOME": HF}
+    broken = UNPARSABLE[name](GOLDEN)
+    assert broken != GOLDEN
+    assert u.captured_env(broken) is None
+
+
+def test_captured_env_none_for_a_body_that_is_not_text():
+    assert u.captured_env(None) is None  # type: ignore[arg-type]
+    assert u.captured_env("") is None
+
+
+def test_captured_env_never_reads_an_env_line_after_the_unit_section():
+    base = render({"PATH": PATH_VALUE})
+    assert u.captured_env(base + "# env HF_HOME=/after\n") == {"PATH": PATH_VALUE}
+    only_after = base.replace("# env PATH=/usr/bin:/bin\n", "") + "# env PATH=/usr/bin\n"
+    assert u.captured_env(only_after) is None
+
+
+def test_captured_env_returns_the_fixed_order_whatever_the_file_order():
+    body = GOLDEN.replace("# env PATH=/usr/bin:/bin\n# env HF_HOME=/home/u/hf\n",
+                          "# env LD_LIBRARY_PATH=/l\n# env HF_HOME=/home/u/hf\n# env PATH=/usr/bin\n")
+    assert list(u.captured_env(body)) == ["PATH", "HF_HOME", "LD_LIBRARY_PATH"]
+
+
+# ---------------------------------------------------------------------------------- unit_serves
+
+
+def test_unit_serves_the_dir_the_body_was_rendered_with():
+    body = render()
+    assert u.unit_serves(CONFIG_DIR, body) is True
+    assert u.unit_serves(CONFIG_DIR + "/", body) is True  # normalised
+    assert u.unit_serves("/home/u/other", body) is False
+    assert u.unit_serves("/home/u/.localharness/sub", body) is False
+
+
+def test_unit_serves_expands_a_tilde_dir(tmp_path):
+    body = u.render_harness_unit(INTERPRETER, "~/.localharness", {"PATH": PATH_VALUE}, home=HOME,
+                                 version="0.19.0")
+    assert u.unit_serves("~/.localharness", body) is True
+    assert u.unit_serves(tmp_path / "home" / ".localharness", body) is True
+
+
+def test_unit_serves_is_false_without_config_dir_on_the_exec_start():
+    body = render().replace(" --config-dir /home/u/.localharness", "")
+    assert u.unit_serves(CONFIG_DIR, body) is False
+    twice = render().replace("serve --config-dir", "serve --config-dir /x --config-dir")
+    assert u.unit_serves(CONFIG_DIR, twice) is False
+    assert u.unit_serves(CONFIG_DIR, render().replace("ExecStart=", "ExecStart=\"")) is False  # unsplittable
+
+
+def test_unit_serves_needs_one_exec_start_in_the_service_section():
+    body = render()
+    assert u.unit_serves(CONFIG_DIR, body.replace("[Install]", "ExecStart=/bin/true\n[Install]")) is False
+    only_in_unit = body.replace("ExecStart=", "NotExec=").replace("[Unit]\n", "[Unit]\nExecStart=/x --config-dir "
+                                                                  "/home/u/.localharness\n")
+    assert u.unit_serves(CONFIG_DIR, only_in_unit) is False
+
+
+def test_unit_serves_reads_the_file_when_no_body_is_given():
+    assert u.unit_serves(CONFIG_DIR) is False  # no file
+    u.write_harness_unit(render())
+    assert u.unit_serves(CONFIG_DIR) is True
+    assert u.unit_serves("/home/u/other") is False
+
+
+# ------------------------------------------------------------- the hostile filesystem, all three verbs
+
+NAME = procfs.HARNESS_UNIT
+
+
+def _unit_dir(tmp_path):
+    d = tmp_path / "cfg" / "systemd" / "user"
+    d.mkdir(parents=True)
+    return d
+
+
+def test_a_symlinked_systemd_user_dir_is_never_followed(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / NAME).write_text("victim\n")
+    parent = tmp_path / "cfg" / "systemd"
+    parent.mkdir(parents=True)
+    (parent / "user").symlink_to(real)
+    with pytest.raises(OSError):
+        u.write_harness_unit(GOLDEN)
+    assert (real / NAME).read_text() == "victim\n"
+    assert sorted(p.name for p in real.iterdir()) == [NAME]
+    assert u.read_harness_unit() is None
+    assert u.remove_harness_unit() is False
+    assert (real / NAME).exists()
+
+
+def test_a_link_planted_at_the_unit_name_is_replaced_not_followed(tmp_path):
+    d = _unit_dir(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("untouched\n")
+    (d / NAME).symlink_to(elsewhere)
+    assert u.read_harness_unit() is None
+    u.write_harness_unit(GOLDEN)
+    assert not (d / NAME).is_symlink()
+    assert u.read_harness_unit() == GOLDEN
+    assert elsewhere.read_text() == "untouched\n"
+
+
+def test_remove_unlinks_a_planted_link_itself_not_its_target(tmp_path):
+    d = _unit_dir(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("untouched\n")
+    (d / NAME).symlink_to(elsewhere)
+    assert u.remove_harness_unit() is True
+    assert not os.path.lexists(d / NAME)
+    assert elsewhere.read_text() == "untouched\n"
+
+
+def test_remove_reports_true_once_then_false(tmp_path):
+    assert u.remove_harness_unit() is False  # no directory at all
+    u.write_harness_unit(GOLDEN)
+    assert u.remove_harness_unit() is True
+    assert u.remove_harness_unit() is False
+    assert u.read_harness_unit() is None
+    assert (tmp_path / "cfg" / "systemd" / "user").is_dir()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_a_fifo_at_the_unit_name_reads_none_without_blocking(tmp_path):
+    d = _unit_dir(tmp_path)
+    os.mkfifo(d / NAME)
+    result = []
+    t = threading.Thread(target=lambda: result.append(u.read_harness_unit()), daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "reading a FIFO blocked"
+    assert result == [None]
+
+
+def test_a_unit_file_over_the_cap_reads_none(tmp_path):
+    d = _unit_dir(tmp_path)
+    (d / NAME).write_bytes(b"#" * (u.UNIT_FILE_CAP + 1))
+    assert u.read_harness_unit() is None
+    (d / NAME).write_bytes(b"#" * u.UNIT_FILE_CAP)
+    assert u.read_harness_unit() == "#" * u.UNIT_FILE_CAP
+
+
+def test_a_unit_file_that_is_not_utf8_reads_none(tmp_path):
+    d = _unit_dir(tmp_path)
+    (d / NAME).write_bytes(b"[Unit]\n\xff\xfe\n")
+    assert u.read_harness_unit() is None
+
+
+def test_a_failed_write_keeps_the_old_unit_file(monkeypatch):
+    u.write_harness_unit("old\n")
+
+    def boom(*a, **kw):
+        raise OSError("simulated")
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "fsync", boom)
+        with pytest.raises(OSError):
+            u.write_harness_unit("new\n")
+    assert u.read_harness_unit() == "old\n"
+    assert [p.name for p in u.harness_unit_path().parent.iterdir()] == [procfs.HARNESS_UNIT]
