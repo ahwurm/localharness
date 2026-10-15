@@ -232,6 +232,26 @@ def test_primary_served_name_already_default_does_not_rewrite(components_home, m
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
 
 
+def test_primary_already_default_still_selects_when_a_peer_is_serving(components_home, monkeypatch):
+    """After an attach to a peer (nothing stored) or a failed write, the peer serves while the primary
+    reads as the default: `model <primary>` must still record the swap back, not say nothing."""
+    _seed(components_home)
+
+    def live(url, *a, **k):
+        return (["flash-next"], True) if ":8082" in str(url) else ([], False)
+
+    monkeypatch.setattr(model_ops, "list_live_models", live, raising=False)
+    calls = _record_persist_default(monkeypatch)
+
+    result = runner.invoke(app, ["model", PRIMARY_SERVED, "--config-dir", str(components_home)])
+
+    assert result.exit_code == 0, result.output
+    assert "already the default" not in result.output.replace("\n", " ")
+    assert "the next start serves it" in result.output.replace("\n", " ")
+    assert _overlay(components_home)["pending_preset"] == PRIMARY_SERVED
+    assert calls == []
+
+
 def test_clear_active_endpoint_without_the_key_writes_nothing(tmp_path):
     from localharness.config.loader import ConfigLoader
 
