@@ -486,12 +486,15 @@ class LaunchIdentity:
     `exe_names` are executable basenames (an entry ending `*` matches as a basename prefix, so
     `python*` covers `python3.12`); `port` is the port the record names, or None when the identity
     does not check one; `argv_contains` are tokens that must each be a whole argv element;
-    `port_env` is the environment variable that carries the port when argv does not."""
+    `port_env` is the environment variable that carries the port when argv does not;
+    `argv_one_of` are groups of tokens of which at least one per group must be an argv element (a
+    value the launch spells in one of several forms)."""
 
     exe_names: frozenset[str]
     port: int | None
     argv_contains: tuple[str, ...]
     port_env: str | None
+    argv_one_of: tuple[tuple[str, ...], ...] = ()
 
 
 def parse_pidfile(text: str) -> tuple[int, int | None, int | None]:
@@ -561,6 +564,9 @@ def identity_mismatch(record: ProcRecord, expect: LaunchIdentity, *, owner: str 
     for token in expect.argv_contains:
         if token not in record.argv:
             return f"has no {token} on its command line"
+    for group in expect.argv_one_of:
+        if not any(token in record.argv for token in group):
+            return f"has none of {' / '.join(group)} on its command line"
     if expect.port is not None:
         got = port_of(record, expect)
         if got is None:

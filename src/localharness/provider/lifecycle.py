@@ -311,12 +311,21 @@ def record_identity(spec: ManagedServerConfig) -> LaunchIdentity | None:
     """`strategy_for(spec).launch_identity(spec)` with the RECORD's own tokens added to
     `argv_contains`, so two records on one binary and port can be told apart (R-13-07): llama.cpp
     `-a <served_name>` when the record has one, else `-m <model>` as the launch spells it (`~`
-    expanded); vLLM binary the model argument (`serve <model>`); docker, Ollama and LM Studio add
-    nothing."""
+    expanded); vLLM binary the model argument (`serve <model>`); vLLM docker the model it serves and the port it
+    publishes; Ollama and LM Studio add nothing."""
     identity = strategy_for(spec).launch_identity(spec)
     if identity is None:
         return None
     tokens: tuple[str, ...] = ()
+    if spec.runtime == "vllm" and spec.launch == "docker":
+        # Every docker record runs under the one container name, so the record is told apart by what
+        # the `docker run` line says of it: the model it mounts and serves, and the port it publishes
+        # (127.0.0.1:<port>:8000 when bound to loopback, <port>:8000 otherwise).
+        entry = spec.entry_for(spec.model)
+        tokens = ("/models/serving", entry.name) if entry is not None else (str(spec.model),)
+        return dataclasses.replace(
+            identity, argv_contains=identity.argv_contains + tokens,
+            argv_one_of=((f"127.0.0.1:{spec.port}:8000", f"{spec.port}:8000"),))
     if spec.runtime == "llamacpp":
         if spec.served_name is not None:
             tokens = ("-a", spec.served_name)
