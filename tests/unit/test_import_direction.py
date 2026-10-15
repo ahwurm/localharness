@@ -34,6 +34,7 @@ _MIXED_DIR_CORE = {
     "cli": ("__init__", "acp_cmd", "agent_cmd", "app", "askrate_cmd", "bench_cmd", "coauthor", "components_cmd",
             "config_cmd", "doctor_cmd", "errors", "init_cmd", "init_import", "mcp_cmd", "model_cmd", "model_ops",
             "picker", "plugin_mount", "plugins_cmd", "repl",
+            "serve_cmd", "autostart",  # arrive in the autostart phase; named now so those plans leave this file alone
             "session_accumulator", "session_resume", "session_trust", "slash_commands", "start_cmd", "start_serving", "theme", "ui",
             "update_cmd", "validate_cmd", "workspace"),
     "channels": ("__init__", "acp", "base", "clipboard", "errors", "input_router", "keys", "terminal"),
@@ -42,7 +43,7 @@ _MIXED_DIR_CORE = {
                       "edit_tool", "git_read_tool", "glob_tool", "grep_tool", "load_document_tool", "netguard", "paths",
                       "python_tool", "read_tool", "task_tool", "tool_result_get_tool", "web_tool", "write_tool"),
 }
-CORE_FILES = frozenset({"__init__.py",
+CORE_FILES = frozenset({"__init__.py", "__main__.py",
                         *(f"{d}/{n}.py" for d, ns in _MIXED_DIR_CORE.items() for n in ns)})
 # "Only the bundled-plugin list and config routing may reference plugins" (CORE-02).
 ALLOWED_PLUGIN_IMPORTERS = frozenset({"plugins/builtin.py"})
@@ -125,6 +126,12 @@ def test_every_source_file_is_classified():
     assert unclassified == [], (
         "classify these explicitly — CORE-02 classifies by list, not by directory:"
         + "".join(f"\n  {rel}" for rel in unclassified))
+
+
+def test_the_autostart_phase_files_are_core():
+    assert classify("__main__.py") == "core"
+    assert classify("cli/serve_cmd.py") == "core"
+    assert classify("cli/autostart.py") == "core"
 
 
 def test_files_are_classified_by_explicit_list_not_directory():
