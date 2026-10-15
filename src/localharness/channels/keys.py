@@ -20,7 +20,7 @@ from prompt_toolkit.input import vt100_parser
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.keys import Keys
 
-from localharness.config.chords import LABELS
+from localharness.config.chords import LABELS, ChordName
 
 if TYPE_CHECKING:
     from localharness.config.models import TerminalKeysConfig
@@ -50,7 +50,7 @@ SHIFT_ENTER_SEQUENCES: tuple[str, str] = (
 )
 """The two wire encodings of Shift+Enter that `install_wire_sequences` maps to `SHIFT_ENTER_KEY`."""
 
-KEYS: dict[str, tuple[Keys | str, ...]] = {
+KEYS: dict[ChordName, tuple[Keys | str, ...]] = {
     "alt-enter": ("escape", "enter"),
     "shift-enter": (SHIFT_ENTER_KEY,),
     "ctrl-g": ("c-g",),
@@ -85,7 +85,7 @@ def install_wire_sequences() -> bool:
     return True
 
 
-def nudge_legend(names: Sequence[str]) -> str:
+def nudge_legend(names: Sequence[ChordName]) -> str:
     """The working-state legend's nudge clause (spec 21 §6.6); the caller appends ` · ctrl+c stop`.
 
     The spellings are `!text` and the configured chords' labels, in the configured order:
@@ -161,10 +161,10 @@ def detect_terminal(env: Mapping[str, str]) -> tuple[str, str] | None:
     return name, _SETUP[name]
 
 
-_EVERY_TERMINAL = ("ctrl-o", "ctrl-g", "alt-enter")
+_EVERY_TERMINAL: tuple[ChordName, ...] = ("ctrl-o", "ctrl-g", "alt-enter")
 """Chords every terminal sends: one of them as a newline chord is a working line break."""
 
-_ROUTE_CHORDS = ("ctrl-o", "ctrl-g")
+_ROUTE_CHORDS: tuple[ChordName, ...] = ("ctrl-o", "ctrl-g")
 """The two chords the route may name, in the order it tries them; Alt+Enter is never the route."""
 
 _MIN_LABEL_WIDTH = 19
