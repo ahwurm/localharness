@@ -136,6 +136,47 @@ def test_start_server_refuses_while_the_pidfile_names_a_live_process(tmp_path, m
     assert not server.log_path(tmp_path).exists()
 
 
+def test_a_pidfile_write_that_fails_takes_the_child_down_and_raises_runtimeerror(tmp_path, monkeypatch):
+    """The child already runs when the pidfile cannot be written: it is signalled and reaped, the log handle
+    is closed, and the failure is the RuntimeError every swap guard already handles."""
+    import errno
+
+    events: list = []
+
+    class Child:
+        pid = 4242
+
+        def __init__(self, cmd, **kwargs):
+            pass
+
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            return 0
+
+    opened: list = []
+    real_open = open
+
+    def recording_open(*args, **kwargs):
+        handle = real_open(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    def full_disk(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(server.subprocess, "Popen", Child)
+    monkeypatch.setattr(server, "open", recording_open, raising=False)
+    monkeypatch.setattr(server.os, "killpg", lambda pid, sig: events.append(("killpg", pid, sig)))
+    monkeypatch.setattr(server.private_files, "atomic_write_text", full_disk)
+    proc_says(monkeypatch, 777)
+
+    with pytest.raises(RuntimeError, match="could not record the launch: No space left on device"):
+        server.start_server(tmp_path, ["true"])
+
+    assert events == [("killpg", 4242, signal.SIGTERM), ("wait", 5.0)]
+    assert len(opened) == 1 and opened[0].closed
+
+
 def test_start_server_launches_over_a_stale_pidfile(tmp_path, monkeypatch, popen):  # noqa: F811
     """A reused pid (a different start time) is the harness's own server gone: nothing live to protect."""
     monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)

@@ -885,10 +885,34 @@ def start_server(
             tokens.append(str(start))
             if port is not None and 1 <= port <= 65535:
                 tokens.append(str(port))
-        private_files.atomic_write_text(procfs.PIDFILE_NAME, " ".join(tokens), dir_fd=dir_fd)
+        try:
+            private_files.atomic_write_text(procfs.PIDFILE_NAME, " ".join(tokens), dir_fd=dir_fd)
+        except OSError as exc:
+            # The child is running and nothing records it (a directory planted at the pidfile, a full
+            # disk): no handle would ever reach it again. Take it down with the launch, say why as the
+            # failure every `activate` caller already restores the incumbent from, and drop the log.
+            _reap_unrecorded(proc)
+            log.close()
+            raise RuntimeError(f"could not record the launch: {exc.strerror or exc}") from exc
         return proc.pid
     finally:
         os.close(dir_fd)
+
+
+def _reap_unrecorded(proc: "subprocess.Popen[bytes]") -> None:
+    """SIGTERM the just-launched group (it leads its own session), SIGKILL when it outlasts a short
+    grace, and reap it. Best effort: a group already gone, or one this user may not signal, is nothing
+    more to do."""
+    for sig, grace in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 5.0)):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def _read_proc_stat(pid: int) -> bytes | None:
