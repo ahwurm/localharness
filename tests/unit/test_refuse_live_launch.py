@@ -205,3 +205,27 @@ def test_write_pidfile_replaces_a_planted_link_and_propagates_oserror(tmp_path, 
     server.pid_path(tmp_path).mkdir()  # a directory at the pidfile: the replace cannot succeed
     with pytest.raises(OSError):
         server.write_pidfile(tmp_path, 4242, port=None)
+
+
+# ------------------------------------------------------------------------------- the exec seam
+
+
+def test_no_test_can_reach_execve_through_the_exec_seam():
+    """tests/conftest.py replaces `server.exec_server` for every test with a function that raises."""
+    with pytest.raises(AssertionError, match="reached os.execve"):
+        server.exec_server("/bin/true", ["true"], {})
+
+
+def test_exec_server_is_one_execve_and_nothing_else():
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(server))
+    (func,) = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "exec_server"]
+    body = [n for n in func.body if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
+    assert len(body) == 1 and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Call)
+    call = body[0].value
+    assert ast.unparse(call.func) == "os.execve"
+    assert [ast.unparse(a) for a in call.args] == ["path", "argv", "env"]
+    executes = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "os.execve"]
+    assert len(executes) == 1
