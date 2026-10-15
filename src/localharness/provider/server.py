@@ -37,7 +37,7 @@ from typing import Any, Callable, Iterable, Mapping
 from localharness.config import redact
 from localharness.config.models import ManagedServerConfig
 from localharness.core import private_files
-from localharness.core.private_files import NotRegularFile, open_regular, private_opener
+from localharness.core.private_files import NotRegularFile, open_regular
 from localharness.core.which import which_outside_cwd
 from localharness.provider import procfs
 
@@ -492,8 +492,11 @@ def prepare_config_ini_home(config_dir: Path, port: int, config_ini: str | None)
     return home
 
 
+LOG_NAME = "serve.log"
+
+
 def log_path(config_dir: Path) -> Path:
-    return server_dir(config_dir) / "serve.log"
+    return server_dir(config_dir) / LOG_NAME
 
 
 def pid_path(config_dir: Path) -> Path:
@@ -860,7 +863,13 @@ def start_server(
             f"could not open the server directory {server_dir(config_dir)}: {exc.strerror or exc}"
         ) from exc
     try:
-        log = open(log_path(config_dir), "ab", opener=private_opener)
+        try:
+            # Inside the no-follow server directory, by name: a link planted at serve.log (the
+            # directory is agent-writable) is refused, so the launch line and the server's output
+            # can never be appended to whatever file it points at.
+            log = open(LOG_NAME, "ab", opener=private_files.nofollow_opener(dir_fd))
+        except OSError as exc:
+            raise RuntimeError(f"could not open {log_path(config_dir)}: {exc.strerror or exc}") from exc
         log.write(f"\n=== launch: {' '.join(cmd)} ===\n".encode())
         log.flush()
         try:
@@ -1264,10 +1273,16 @@ def log_reference(config_dir: Path, what: str) -> str:
     else: no exception carries them (D-22)."""
     ref = token_hex(4)
     try:
-        with open(log_path(config_dir), "ab", opener=private_opener) as log:
+        dir_fd = private_files.open_private_dir(server_dir(config_dir), create=False)
+    except OSError:
+        return ref  # no directory to write into (or a link in its place): the reference still names the log
+    try:
+        with open(LOG_NAME, "ab", opener=private_files.nofollow_opener(dir_fd)) as log:
             log.write(f"\n=== ref {ref}: {what} ===\n".encode("utf-8", errors="replace"))
     except OSError:
         pass  # the reference still names the log; a missing line there is not worth another failure
+    finally:
+        os.close(dir_fd)
     return ref
 
 
