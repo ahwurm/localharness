@@ -154,9 +154,10 @@ def _no_box_processes(request, monkeypatch, _empty_proc_root):
     every test (no test dials a port for it; the socket guard below is the second line); the module is
     imported here, not looked up in `sys.modules`, so the stub never depends on import order
     (IN-02, IN-51). test_start_props_model_path holds the real function by its own import and drives it
-    through a faked `httpx.get`."""
+    through a faked `httpx.get`. Plan 14-02 (D-27): `server.exec_server`, the one `os.execve` of a launch,
+    raises AssertionError for every test, so none can replace the pytest process with a server."""
     import localharness.cli.start_cmd  # noqa: F401  (imported so the stub below can never be skipped)
-    from localharness.provider import procfs, units
+    from localharness.provider import procfs, server, units
 
     monkeypatch.setattr(procfs, "PROC_ROOT", _empty_proc_root)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
@@ -164,6 +165,11 @@ def _no_box_processes(request, monkeypatch, _empty_proc_root):
         monkeypatch.setattr(units, "_run", lambda argv, *, timeout, cap: None)
     monkeypatch.setattr("localharness.cli.start_cmd._props_model_path", lambda base_url, launch_key: None,
                         raising=True)
+
+    def _refuse_exec(*args, **kwargs):
+        raise AssertionError("a test reached os.execve through server.exec_server")
+
+    monkeypatch.setattr(server, "exec_server", _refuse_exec, raising=True)
     yield
 
 
