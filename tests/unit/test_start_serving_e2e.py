@@ -858,3 +858,21 @@ async def test_a_fallback_to_the_primary_forgets_nothing_the_person_chose(world,
     assert [w["url"] for w in world.waits] == [PRIMARY_URL]
     assert world.overlay["active_endpoint"]["name"] == "flash-next"  # the selection is not cleared
     assert world.last_served == PRIMARY
+
+
+def test_a_loading_docker_container_of_another_record_is_not_this_record_already_serving(world, fake_proc, monkeypatch):
+    """The container name is shared by every docker record, so the pidfile's `docker run` line decides
+    whose launch is loading, or the wait on this record's port would run its full half hour."""
+    from localharness.config.models import ManagedServerConfig
+
+    stub_liveness(monkeypatch, True)
+    world.config()
+    fake_proc.process(4242, argv=("docker", "run", "--rm", "--name", "localharness-vllm", "-p",
+                                  "127.0.0.1:8000:8000", "img", "--model", "org/a"),
+                      exe="/usr/bin/docker", start_time=777)
+    _pidfile(world.home, "4242 777")
+    mine = ManagedServerConfig(runtime="vllm", launch="docker", docker_image="img", model="org/a", port=8000)
+    other = ManagedServerConfig(runtime="vllm", launch="docker", docker_image="img", model="org/b", port=8001)
+
+    assert _running(mine, world.home) is True
+    assert _running(other, world.home) is False

@@ -341,12 +341,12 @@ def _managed_server_running(strategy: Any, srv: Any, global_dir: Path) -> bool:
     "alive" is also asked of the record (D-18). When the pidfile's launch is verifiably NOT this record's
     (`read_launch(expect=record_identity)` finds it live but unverified), it is not this record
     "already serving" and start must not wait on it as if it were. No readable pidfile, a strategy with no
-    launch identity, a managed LM Studio (no pidfile) or a docker container (named, not pid-keyed) keep
-    today's answer."""
+    launch identity or a managed LM Studio (no pidfile) keep today's answer. A docker record is asked
+    too: the container name is shared by every docker record, so its `docker run` line (model, published
+    port) is what tells them apart."""
     if not strategy.liveness(srv, global_dir).alive:
         return False
-    if (getattr(strategy, "launch_identity", None) is None or srv.runtime == "lmstudio"
-            or srv.launch == "docker"):
+    if getattr(strategy, "launch_identity", None) is None or srv.runtime == "lmstudio":
         return True
     from localharness.provider import lifecycle, procfs
     identity = lifecycle.record_identity(srv)

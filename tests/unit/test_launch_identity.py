@@ -104,10 +104,41 @@ def test_record_identity_adds_the_model_to_a_vllm_binary_and_nothing_to_the_rest
     vllm = ManagedServerConfig(runtime="vllm", launch="binary", binary="/x/vllm", model="org/m", port=8000)
     got = lifecycle.record_identity(vllm)
     assert got is not None and got.argv_contains == ("serve", "org/m")
-    for spec in (ManagedServerConfig(runtime="vllm", launch="docker", docker_image="img", model="org/m",
-                                     port=8000),
-                 ManagedServerConfig(runtime="ollama", model="qwen", port=11434)):
-        assert lifecycle.record_identity(spec) == identity(spec)
+    ollama = ManagedServerConfig(runtime="ollama", model="qwen", port=11434)
+    assert lifecycle.record_identity(ollama) == identity(ollama)
+
+
+def docker(model: str, port: int) -> ManagedServerConfig:
+    return ManagedServerConfig(runtime="vllm", launch="docker", docker_image="img", model=model, port=port)
+
+
+def _docker_run(fake_proc: FakeProc, spec: ManagedServerConfig, *, loopback: bool = True) -> procfs.ProcRecord:  # noqa: F811
+    """The `docker run` client of `spec` as `serve_command` spells it (the fixed container name)."""
+    published = f"127.0.0.1:{spec.port}:8000" if loopback else f"{spec.port}:8000"
+    fake_proc.process(4242, argv=("docker", "run", "--rm", "--name", "localharness-vllm", "--gpus", "all",
+                                  "-p", published, "img", "--model", spec.model),
+                      exe="/usr/bin/docker")
+    record = procfs.read_process(4242)
+    assert isinstance(record, procfs.ProcRecord)
+    return record
+
+
+def test_two_docker_records_are_told_apart_by_their_model_and_published_port(fake_proc):  # noqa: F811
+    """They all run under one container name; the `docker run` line is what differs."""
+    a, b = docker("org/a", 8000), docker("org/b", 8001)
+    record = _docker_run(fake_proc, a)
+    id_a, id_b = lifecycle.record_identity(a), lifecycle.record_identity(b)
+    assert procfs.identity_mismatch(record, id_a) is None
+    assert procfs.identity_mismatch(record, id_b) == "has no org/b on its command line"
+    same_model_other_port = lifecycle.record_identity(docker("org/a", 8001))
+    assert "has none of 127.0.0.1:8001:8000 / 8001:8000" in procfs.identity_mismatch(
+        record, same_model_other_port)
+
+
+def test_a_docker_record_matches_its_launch_bound_beyond_loopback_too(fake_proc):  # noqa: F811
+    spec = docker("org/a", 8000)
+    record = _docker_run(fake_proc, spec, loopback=False)
+    assert procfs.identity_mismatch(record, lifecycle.record_identity(spec)) is None
 
 
 def _launched(fake_proc: FakeProc, spec: ManagedServerConfig) -> procfs.ProcRecord:  # noqa: F811
