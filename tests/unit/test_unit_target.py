@@ -1,6 +1,8 @@
 """The `unit-target` store and the boot marker reader under `<global>/vllm/` (D-06, D-14, D-28)."""
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import os
 import stat
@@ -186,7 +188,92 @@ def test_marker_off_its_closed_shape_reads_none(tmp_path, payload):
     assert read_marker(tmp_path) is None
 
 
-def test_nothing_in_units_writes_a_marker():
-    import inspect
+# ------------------------------------------------------------- who may reach the marker file's name
+
+_MARKER_HELPERS = frozenset({"write_marker", "read_marker", "remove_marker"})
+_MARKER_LITERAL = "boot-attempt"
+
+
+def _walk_with_function(node, current=None):
+    """(node, name of the nearest enclosing function or None) for every node under `node`."""
+    for child in ast.iter_child_nodes(node):
+        name = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else current
+        yield child, name
+        yield from _walk_with_function(child, name)
+
+
+def _is_marker_name(node) -> bool:
+    return ((isinstance(node, ast.Name) and node.id == "BOOT_MARKER_NAME")
+            or (isinstance(node, ast.Constant) and node.value == _MARKER_LITERAL))
+
+
+def stray_marker_writes(source: str) -> list[str]:
+    """Calls of `atomic_write_text` that carry the marker's name (by constant or literal) anywhere
+    but inside `write_marker`."""
+    found = []
+    for node, fn in _walk_with_function(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+        if callee == "atomic_write_text" and any(_is_marker_name(n) for a in node.args for n in ast.walk(a)):
+            if fn != "write_marker":
+                found.append(f"{fn or '<module>'}:{node.lineno}")
+    return found
+
+
+def stray_marker_uses(source: str) -> list[str]:
+    """Every load of the name `BOOT_MARKER_NAME` outside the three helpers, and every string constant
+    spelling the file's name (whole or inside a longer path) other than the one `BOOT_MARKER_NAME = `
+    assignment and docstrings."""
+    tree = ast.parse(source)
+    found = []
+    for node, fn in _walk_with_function(tree):
+        if isinstance(node, ast.Name) and node.id == "BOOT_MARKER_NAME" and isinstance(node.ctx, ast.Load):
+            if fn not in _MARKER_HELPERS:
+                found.append(f"name in {fn or '<module>'}:{node.lineno}")
+    assigned = [n for n in tree.body if isinstance(n, ast.Assign) and any(
+        isinstance(t, ast.Name) and t.id == "BOOT_MARKER_NAME" for t in n.targets)]
+    allowed = {id(a.value) for a in assigned}
+    for node in ast.walk(tree):  # a docstring may name the file; nothing else may spell it
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            doc = node.body[0] if node.body else None
+            if isinstance(doc, ast.Expr) and isinstance(doc.value, ast.Constant):
+                allowed.add(id(doc.value))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and _MARKER_LITERAL in node.value and id(node) not in allowed):
+            found.append(f"literal:{node.lineno}")
+    return found
+
+
+def test_write_marker_is_the_one_writer_of_the_boot_marker():
     src = inspect.getsource(units)
-    assert "def write_marker" not in src
+    assert "def write_marker(" in src
+    assert stray_marker_writes(src) == []
+    body = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "write_marker")
+    calls = [n for n in ast.walk(body) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", "") == "atomic_write_text"]
+    assert len(calls) == 1
+
+
+def test_the_marker_name_is_reached_only_by_its_three_helpers():
+    src = inspect.getsource(units)
+    assert stray_marker_uses(src) == []
+    assert src.count(f'"{_MARKER_LITERAL}"') == 1  # the BOOT_MARKER_NAME assignment, nothing else
+
+
+def test_a_stray_marker_name_use_is_reported():
+    other_function = "def other(fd):\n    return os.open(BOOT_MARKER_NAME, 0, dir_fd=fd)\n"
+    assert stray_marker_uses(other_function) == ["name in other:2"]
+    literal_write = 'def other(fd):\n    atomic_write_text("boot-attempt", "x", dir_fd=fd)\n'
+    assert stray_marker_uses(literal_write) == ["literal:2"]
+    assert stray_marker_writes(literal_write) == ["other:2"]
+    name_write = "def other(fd):\n    atomic_write_text(BOOT_MARKER_NAME, 'x', dir_fd=fd)\n"
+    assert stray_marker_writes(name_write) == ["other:2"]
+    assert stray_marker_uses(name_write) == ["name in other:2"]
+    hand_built = 'def other(d):\n    return d + "/boot-attempt"\n'
+    assert stray_marker_uses(hand_built) == ["literal:2"]  # a hand-built path spells the name too
+    clean = ('BOOT_MARKER_NAME = "boot-attempt"\n'
+             "def write_marker(fd):\n    atomic_write_text(BOOT_MARKER_NAME, 'x', dir_fd=fd)\n"
+             "def read_marker(fd):\n    return open_regular(BOOT_MARKER_NAME, dir_fd=fd)\n")
+    assert stray_marker_uses(clean) == [] and stray_marker_writes(clean) == []
