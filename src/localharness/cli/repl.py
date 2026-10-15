@@ -437,7 +437,10 @@ class OrchestratorREPL:
         # `start` hands over what it attached to or launched (`serving_heavy`, D-19): when that
         # server's own liveness says it is up it IS the accelerator occupant, whichever record it is
         # (a peer chosen by --preset, say); otherwise today's seed from the primary runs.
-        if serving_heavy is not None and config_dir is not None:
+        # Only a GPU record is the accelerator's occupant (D-33): a CPU-only server that happens to be
+        # serving is not ours to stop for the next cold `/model`.
+        if (serving_heavy is not None and getattr(serving_heavy[0], "gpu", False)
+                and config_dir is not None):
             _held_spec = serving_heavy[0]
             try:
                 from localharness.provider.lifecycle import strategy_for
