@@ -32,7 +32,7 @@ import structlog
 from pydantic import SecretStr
 
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, NoReturn
 
 from localharness.config import redact
 from localharness.config.models import ManagedServerConfig
@@ -836,24 +836,8 @@ def start_server(
     wants them for the ledger and the start summary passes `dropped_out`, which they extend.
     `xdg_config_home` is the llama.cpp config directory `prepare_config_ini_home` made for this
     launch; it rides the child environment only, so argv and the logged launch line are unchanged."""
-    # One pidfile names one launch for the box. A live process there that nothing stopped is a heavy
-    # this launch would orphan: the atomic replace below would drop its only handle, and no stop could
-    # reach it again. Refuse instead (the caller holds the launch lock, so this check cannot race a
-    # second launch). A dead or reused pid is stale and `server_pid` drops it.
-    stale_note: str | None = None
-    live = server_pid(config_dir)
-    if live is not None:
-        held = procfs.read_process(live)
-        exe = os.path.basename(held.exe) if isinstance(held, procfs.ProcRecord) and held.exe else "?"
-        if _reused_bare_pid(config_dir, live, held, cmd):
-            # A 0.17 pidfile (or one written while /proc was unreadable) holds no start time, so a
-            # reused pid cannot be told by it: the live process is judged by what it runs. Not an
-            # executable any launch strategy declares, so it is not the harness's server.
-            stale_note = f"=== dropped pidfile: pid {live} runs {exe}, not a server launch ===\n"
-            logger.info("dropped a bare-pid pidfile naming a reused pid", pid=live, exe=exe)
-            _drop_pidfile(config_dir)
-        else:
-            raise RuntimeError(LIVE_LAUNCH_LINE.format(pid=live, exe=exe, pidfile=pid_path(config_dir)))
+    # The live-pidfile rule is `refuse_live_launch`, shared with `serve` (which writes its own pidfile).
+    stale_note = refuse_live_launch(config_dir, cmd)
     env, dropped = child_environment(
         runtime, os.environ, record_env=record_env, api_key=api_key, xdg_config_home=xdg_config_home)
     if dropped_out is not None:
@@ -899,14 +883,8 @@ def start_server(
             # them after the incumbent was stopped; and do not leak the serve.log handle.
             log.close()
             raise RuntimeError(f"could not launch {cmd[0]}: {exc.strerror or exc}") from exc
-        start = _proc_start_time(proc.pid)
-        tokens = [str(proc.pid)]
-        if start is not None:
-            tokens.append(str(start))
-            if port is not None and 1 <= port <= 65535:
-                tokens.append(str(port))
         try:
-            private_files.atomic_write_text(procfs.PIDFILE_NAME, " ".join(tokens), dir_fd=dir_fd)
+            write_pidfile(config_dir, proc.pid, port=port, dir_fd=dir_fd)
         except OSError as exc:
             # The child is running and nothing records it (a directory planted at the pidfile, a full
             # disk): no handle would ever reach it again. Take it down with the launch, say why as the
@@ -917,6 +895,65 @@ def start_server(
         return proc.pid
     finally:
         os.close(dir_fd)
+
+
+def refuse_live_launch(config_dir: Path, cmd: list[str]) -> str | None:
+    """The one live-pidfile guard, called by `start_server` and by `serve` before either writes a
+    pidfile. One pidfile names one launch for the box. A live process there that nothing stopped is a
+    heavy this launch would orphan: the atomic replace would drop its only handle, and no stop could
+    reach it again. So it raises `RuntimeError` (`LIVE_LAUNCH_LINE`, or `LIVE_UNIT_LAUNCH_LINE` when
+    the process sits in the autostart unit's cgroup) and leaves the pidfile as it is. The caller holds
+    the launch lock, so this check cannot race a second launch. A dead or reused pid is stale and
+    `server_pid` drops it. A bare-pid pidfile (no start time) whose live process runs no executable a
+    launch strategy declares is dropped, and the `=== dropped pidfile … ===` note is returned for the
+    caller to write to the log; `cmd` is the argv about to run (its basename is the one executable
+    accepted besides the declared ones). Returns None when there is nothing live in the way."""
+    live = server_pid(config_dir)
+    if live is None:
+        return None
+    held = procfs.read_process(live)
+    exe = os.path.basename(held.exe) if isinstance(held, procfs.ProcRecord) and held.exe else "?"
+    if _reused_bare_pid(config_dir, live, held, cmd):
+        # A 0.17 pidfile (or one written while /proc was unreadable) holds no start time, so a
+        # reused pid cannot be told by it: the live process is judged by what it runs. Not an
+        # executable any launch strategy declares, so it is not the harness's server.
+        logger.info("dropped a bare-pid pidfile naming a reused pid", pid=live, exe=exe)
+        _drop_pidfile(config_dir)
+        return f"=== dropped pidfile: pid {live} runs {exe}, not a server launch ===\n"
+    line = LIVE_LAUNCH_LINE
+    if held.unit == procfs.HARNESS_UNIT:  # a ProcRecord or a ProcRefusal that had already read the cgroup
+        line = LIVE_UNIT_LAUNCH_LINE
+    raise RuntimeError(line.format(pid=live, exe=exe, pidfile=pid_path(config_dir)))
+
+
+def write_pidfile(config_dir: Path, pid: int, *, port: int | None, dir_fd: int | None = None) -> None:
+    """The one writer of the pidfile: `<pid> <start> <port>`, the start time and `port` when known
+    (two tokens without a port, one without a start time; a port outside 1-65535 is not written).
+    The start time is read from `/proc/<pid>/stat`, so a `serve` that writes its own pid before it
+    `execve`s names the process the exec'd server will be (an exec keeps the pid and the start time).
+    Written through `atomic_write_text` by descriptor into the no-follow server directory: `dir_fd`
+    is that directory when the caller already holds it open, else it is opened here and closed here.
+    OSError propagates. Every caller goes through `refuse_live_launch` first (a structural test pins it)."""
+    start = _proc_start_time(pid)
+    tokens = [str(pid)]
+    if start is not None:
+        tokens.append(str(start))
+        if port is not None and 1 <= port <= 65535:
+            tokens.append(str(port))
+    own = dir_fd is None
+    fd = private_files.open_private_dir(server_dir(config_dir)) if dir_fd is None else dir_fd
+    try:
+        private_files.atomic_write_text(procfs.PIDFILE_NAME, " ".join(tokens), dir_fd=fd)
+    finally:
+        if own:
+            os.close(fd)
+
+
+def exec_server(path: str, argv: list[str], env: dict[str, str]) -> NoReturn:
+    """The one `os.execve` of a launch: `serve` calls it after releasing the launch lock, and it
+    never returns. Tests replace it (tests/conftest.py makes it raise), so none can exec away the
+    test runner."""
+    os.execve(path, argv, env)
 
 
 def _reused_bare_pid(
@@ -1099,8 +1136,12 @@ NOT_A_LAUNCH_LINE = "pidfile names pid {pid} ({exe}), which is not a harness lau
 basename of the process's executable (`?` when `/proc` refused the read)."""
 
 LIVE_LAUNCH_LINE = "pidfile {pidfile} names a live process (pid {pid}, {exe}) — not starting a second server beside it; stop that process first (deleting {pidfile} would leave it running with nothing able to stop it)"
-"""What `start_server` raises when the pidfile's process is still alive: a launch would replace the pidfile
-and leave that process running with nothing able to reach it."""
+"""What `refuse_live_launch` raises when the pidfile's process is still alive: a launch would replace the
+pidfile and leave that process running with nothing able to reach it."""
+
+LIVE_UNIT_LAUNCH_LINE = "pidfile {pidfile} names autostart's server (pid {pid}, {exe}) — not starting a second server beside it; localharness model <preset> switches it through the unit"
+"""What `refuse_live_launch` raises instead when that live process sits in the `localharness-llm.service`
+cgroup: it is autostart's server, so the advice is the command that switches it through the unit."""
 
 NOT_THIS_LAUNCH_LINE = "{label}: the live launch (pid {pid}) is not this record's — not waited on"
 """What `wait_ready(expect=)` raises when the live launch is not the record's (D-18)."""
