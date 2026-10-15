@@ -1544,10 +1544,14 @@ def launch_lock_wait_line(config_dir: Path) -> str:
     return LAUNCH_LOCK_LOCAL_WAIT_LINE if held is not None else LAUNCH_LOCK_WAIT_LINE
 
 _HELD: dict[Path, list] = {}
-"""Resolved lock path -> [owning asyncio task, depth]. Re-entrancy is per TASK identity
+"""Resolved lock path -> `[owning asyncio task, depth, fd | None, lent]`. Re-entrancy is per TASK identity
 (`asyncio.current_task()`), never a ContextVar: `create_task` copies the context, so a task spawned
-inside the lock would otherwise believe it holds it. Entries exist only while a lock is held and are
-removed on every exit path."""
+inside the lock would otherwise believe it holds it. `fd` is the holder's flock descriptor (None on the
+in-process fallback) and `lent` is True only while `lend_launch_lock` has the flock released for the
+autostart unit's `serve` (R-14-09). The entry names the OWNING task for the whole life of a lock, loan
+included: another task of this process waits while any entry names a different task (R-14-36), so the
+flock being released during a loan never lets it overwrite or pop the lender's entry. Entries exist only
+while a lock is held and are removed on every exit path."""
 
 _CONTENDED = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
 """The `flock(LOCK_NB)` errnos that mean "another holder has it". Any other errno is a filesystem that
@@ -1558,6 +1562,12 @@ _FALLBACK_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[Path
 )
 """The in-process stand-in when the flock is unavailable, keyed by running loop because an
 `asyncio.Lock` binds to the loop it is first contended in (one loop per test, one per process)."""
+
+LAUNCH_LOCK_TIMEOUT_LINE = "another LocalHarness is launching the model server — gave up after {seconds}s"
+"""What `launch_lock_sync` raises (as a `TimeoutError`) when the lock stays held past its timeout."""
+
+LAUNCH_LOCK_LENT_LINE = "the launch lock is lent to the autostart unit — a launch inside the loan would race it"
+"""What a nested `launch_lock` by the lender raises while its loan is open (R-14-36)."""
 
 
 def _in_process_lock(key: Path, cause: str) -> asyncio.Lock:
@@ -1584,11 +1594,17 @@ async def launch_lock(config_dir: Path, *, on_wait: Callable[[], Awaitable[None]
 
     Who takes it: every launch through `activate` from the harness's own code (a structural test pins
     that). It is re-entrant per owning asyncio task (D-47): a nested acquire by the holder is free,
-    any other task waits. The fd is not inheritable, so the long-lived server spawned inside the lock
-    never holds it. With no `fcntl`, a lock path that cannot be opened (a planted symlink is
-    refused by `O_NOFOLLOW`), or a filesystem whose `flock` fails with anything but contention,
-    launches serialise through an in-process lock and one warning names the cause. The file is not a protected config-dir entry (D-29): a replaced file costs only the
+    any other task waits, for as long as `_HELD` names a different task, whether or not the flock is
+    lent at that moment (R-14-36). A nested acquire by the holder WHILE it has lent the flock raises
+    `RuntimeError(LAUNCH_LOCK_LENT_LINE)`: a loan's block must not launch. The fd is not inheritable,
+    so the long-lived server spawned inside the lock never holds it. With no `fcntl`, a lock path that
+    cannot be opened (a planted symlink is refused by `O_NOFOLLOW`), or a filesystem whose `flock`
+    fails with anything but contention, launches serialise through an in-process lock and one warning
+    names the cause. The file is not a protected config-dir entry (D-29): a replaced file costs only the
     exclusion, which the pidfile re-check still narrows.
+
+    `launch_lock_sync` is the same lock for a synchronous caller (`serve`), and `lend_launch_lock`
+    lets this lock's holder hand the flock to that caller for a while (spec 20 §9.3).
     """
     from localharness.provider import client as _client
 
@@ -1597,6 +1613,8 @@ async def launch_lock(config_dir: Path, *, on_wait: Callable[[], Awaitable[None]
     me = asyncio.current_task()
     held = _HELD.get(key)
     if held is not None and held[0] is me:  # nested acquire by the owner: nothing to take
+        if held[3]:
+            raise RuntimeError(LAUNCH_LOCK_LENT_LINE)
         held[1] += 1
         try:
             yield
@@ -1614,46 +1632,151 @@ async def launch_lock(config_dir: Path, *, on_wait: Callable[[], Awaitable[None]
             cause = str(exc)
     fallback: asyncio.Lock | None = None
     got_fallback = False
+    entry: list | None = None
     try:
-        if fd is not None:
-            started = time.monotonic()
-            told = False
-            while True:
+        started = time.monotonic()
+        told = False
+
+        async def pause() -> None:
+            """One 50 ms wait, and the once-only "someone else is launching" announcement."""
+            nonlocal told
+            await asyncio.sleep(0.05)
+            if (on_wait is not None and not told
+                    and time.monotonic() - started >= _client._QUEUE_VISIBILITY_SECONDS):
+                told = True
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    await on_wait()
+                except Exception:  # noqa: BLE001 - telling the person never aborts the launch
+                    log.debug("launch lock: the wait announcement failed", exc_info=True)
+
+        while fd is not None:
+            if key in _HELD:  # another task of this process owns it (lent or not): wait for it first
+                await pause()
+                continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in _CONTENDED:
+                    # Not "someone else holds it": this filesystem cannot flock (NFS mounted
+                    # nolock, some FUSE or overlay mounts). Every retry would fail the same way,
+                    # so degrade exactly as an unopenable lock file does.
+                    os.close(fd)
+                    fd = None
+                    cause = f"flock failed: {exc}"
                     break
-                except OSError as exc:
-                    if exc.errno not in _CONTENDED:
-                        # Not "someone else holds it": this filesystem cannot flock (NFS mounted
-                        # nolock, some FUSE or overlay mounts). Every retry would fail the same way,
-                        # so degrade exactly as an unopenable lock file does.
-                        os.close(fd)
-                        fd = None
-                        cause = f"flock failed: {exc}"
-                        break
-                    await asyncio.sleep(0.05)
-                    if (on_wait is not None and not told
-                            and time.monotonic() - started >= _client._QUEUE_VISIBILITY_SECONDS):
-                        told = True
-                        try:
-                            await on_wait()
-                        except Exception:  # noqa: BLE001 - telling the person never aborts the launch
-                            log.debug("launch lock: the wait announcement failed", exc_info=True)
+                await pause()
         if fd is None:
             fallback = _in_process_lock(key, cause)
             await fallback.acquire()
             got_fallback = True
-        _HELD[key] = [me, 1]
+        # No await between the successful flock (or the fallback acquire) and this assignment, and it is
+        # written only when no entry exists: it can neither overwrite nor later pop another task's.
+        if key not in _HELD:
+            entry = _HELD[key] = [me, 1, fd, False]
         try:
             yield
         finally:
-            if _HELD.get(key, [None])[0] is me:
+            if entry is not None and _HELD.get(key) is entry:
                 _HELD.pop(key, None)
     finally:
         if got_fallback and fallback is not None:
             fallback.release()
         if fd is not None:
             os.close(fd)  # releases the flock; the kernel also does when a holder dies
+
+
+@contextlib.contextmanager
+def launch_lock_sync(config_dir: Path, *, timeout_seconds: float):
+    """The launch lock for a synchronous caller: `serve` takes it with no event loop (spec 20 §9.3, D-14,
+    "one lock, two entry points" with `launch_lock`).
+
+    The SAME advisory `flock(LOCK_EX | LOCK_NB)` on `server.lock_path(config_dir)` with the same
+    `_CONTENDED` errnos, polled every 50 ms with `time.sleep`. It raises `TimeoutError(LAUNCH_LOCK_TIMEOUT_LINE)`
+    when the lock is still held after `timeout_seconds`. A lock file that cannot be opened (a planted
+    symlink is refused by `O_NOFOLLOW`), no `fcntl`, or a filesystem whose `flock` fails with anything
+    but contention gives no cross-process lock, with one warning naming the cause: the pidfile guard
+    still refuses to replace a live launch. The fd is not inheritable and is closed on every exit path,
+    so the server `serve` execs never holds the lock."""
+    path = server.lock_path(config_dir)
+    fd: int | None = None
+    cause = "no fcntl on this platform"
+    if fcntl is not None:
+        try:
+            server.server_dir(config_dir).mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        except OSError as exc:
+            cause = str(exc)
+    try:
+        if fd is not None:
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if exc.errno not in _CONTENDED:
+                        os.close(fd)
+                        fd = None
+                        cause = f"flock failed: {exc}"
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(LAUNCH_LOCK_TIMEOUT_LINE.format(seconds=int(timeout_seconds))) from None
+                    time.sleep(0.05)
+        if fd is None:
+            log.warning("launch lock unavailable (%s) — cross-process launch exclusion disabled", cause)
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+@contextlib.asynccontextmanager
+async def lend_launch_lock(config_dir: Path):
+    """Let the task that holds `launch_lock` release the flock for the length of a block and take it back
+    afterwards (spec 20 §9.3, R-14-09, R-14-36).
+
+    `UnitStrategy.activate` runs inside its caller's launch lock (the v0.18 structural rule) while the
+    unit's `serve` must take that same lock to write the pidfile: without a loan the two would wait on
+    each other until the 30-minute timeout. Inside the block the flock is free, so `serve` (a
+    `launch_lock_sync` in another process) can take it; afterwards the lender polls the same fd back
+    every 50 ms, so a second holder taking the lock during the loan makes the reclaim wait, never break.
+    Correctness against that second launcher is the live-pidfile guard: whoever takes the flock second
+    and finds a live pidfile refuses, so no pidfile is replaced while its process lives.
+
+    The loan has no clock of its own: the block decides when it ends (the caller ends it on an event).
+    `_HELD[key]` keeps naming the lending task and is marked lent, so another task of this process still
+    waits and the lender's nested `launch_lock` raises `LAUNCH_LOCK_LENT_LINE`. A task that does not hold
+    the lock, a lock on the in-process fallback and a nested loan are no-ops."""
+    key = server.lock_path(config_dir).resolve()
+    entry = _HELD.get(key)
+    if (fcntl is None or entry is None or entry[0] is not asyncio.current_task()
+            or entry[2] is None or entry[3]):
+        yield
+        return
+    fd = entry[2]
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError as exc:
+        log.warning("launch lock: could not lend it (%s) — the autostart unit may wait", exc)
+        yield
+        return
+    entry[3] = True
+    try:
+        yield
+    finally:
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if exc.errno not in _CONTENDED:
+                        log.warning("launch lock: could not take it back (%s) — continuing without the flock", exc)
+                        break
+                    await asyncio.sleep(0.05)
+        finally:
+            entry[3] = False
 
 
 # ---------------------------------------------------------------------------
