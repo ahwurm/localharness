@@ -27,14 +27,18 @@ import re
 import shlex
 import stat
 import subprocess
+import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 from types import MappingProxyType
 
+from localharness import resolved_version
 from localharness.core.private_files import (
     atomic_write_text, open_private_dir, open_regular, read_private_text,
 )
 from localharness.core.which import which_outside_cwd
-from localharness.provider.procfs import ProcRecord
+from localharness.provider.procfs import HARNESS_UNIT, ProcRecord
 from localharness.provider.server import server_dir
 
 __all__ = [
@@ -45,6 +49,11 @@ __all__ = [
     "BOOT_MARKER_NAME", "Marker", "UnitRuntimeState", "remove_marker",
     "TARGET_NAME", "TARGET_NAME_PATTERN", "TARGET_CAP", "MARKER_CAP", "MARKER_CAUSES",
     "MARKER_SHAPES", "MARKER_DROPS", "write_target", "read_target", "remove_target", "read_marker",
+    "write_marker", "PRIMARY_TARGET", "TIMEOUT_START_SECONDS", "UNIT_VALUE_PATTERN", "UNIT_HEADER_PREFIX",
+    "UNIT_VERSION_PATTERN", "CAPTURED_NAMES", "CapturedShell", "harness_unit_path", "harness_home",
+    "unit_config_dir", "render_harness_unit", "captured_env", "capture_shell_env", "unit_serves",
+    "read_harness_unit", "write_harness_unit", "remove_harness_unit", "harness_unit_failure",
+    "is_harness_unit",
 ]
 
 JOURNAL_LINES = 200
@@ -59,6 +68,19 @@ UNITS_SCANNED_CAP = 64
 
 BOOT_MARKER_NAME = "boot-attempt"
 TARGET_NAME = "unit-target"
+PRIMARY_TARGET = "server:"
+"""The reserved `unit-target` token for the primary record (spec 20 §8.1's `server:` rung). The provider
+layer cannot compute the primary record's name (it depends on `provider.default_model`), so the target
+file names the primary with this token and `resolve_serving` maps it back. It fullmatches
+`TARGET_NAME_PATTERN`."""
+TIMEOUT_START_SECONDS = 1800
+"""`TimeoutStartSec=` of the harness unit and the window a boot marker stays current (spec 20 §9.2)."""
+UNIT_VALUE_PATTERN = re.compile(r"[A-Za-z0-9/._+@:=-]+")
+"""Every path and value on the unit's `ExecStart` / `WorkingDirectory` / `# env` lines fullmatches this."""
+CAPTURED_NAMES = ("PATH", "HF_HOME", "LD_LIBRARY_PATH")
+"""The only environment names the unit captures from the shell, in the order the body carries them."""
+UNIT_HEADER_PREFIX = "# written by localharness "
+UNIT_VERSION_PATTERN = re.compile(r"[0-9A-Za-z.+-]{1,64}")
 TARGET_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+:-]{0,127}")
 TARGET_CAP = 256
 MARKER_CAP = 4096
@@ -86,7 +108,7 @@ class Marker:
     """The boot marker `serve` writes at `<server dir>/boot-attempt` before a launch it did not
     confirm (spec 20 §9.3): which record, which binary and invocation, the cause and shape of the
     attempt, the window it planned, the fit and free memory it measured, what it dropped, and when
-    (ISO-8601 UTC). Its reader and writer belong to the autostart phase; the confirm removes it."""
+    (ISO-8601 UTC). `write_marker` is its one writer, `read_marker` its reader; the confirm removes it."""
 
     record: str
     binary: str
@@ -102,11 +124,24 @@ class Marker:
 
 @dataclass(frozen=True)
 class UnitRuntimeState:
-    """The live `InvocationID` (None when the unit has none) and `NRestarts` of a running unit,
-    which the confirm reads to tell one boot attempt from the next (spec 20 §6.0)."""
+    """What the service manager says about the harness unit: the live `InvocationID` (None when the
+    unit has none) and `NRestarts`, which the confirm reads to tell one boot attempt from the next
+    (spec 20 §6.0), and, filled from the manager's `show` by the autostart phase, the `MainPID`, the
+    states, the `FragmentPath` and `DropInPaths` the identity test reads, the last exit status and
+    result, and `TimeoutStartSec`. Every added field is defaulted, so the two-field form stays valid.
+    `own` is True once the harness's-own-unit test passed for this state."""
 
     invocation_id: str | None
     n_restarts: int
+    main_pid: int | None = None
+    active_state: str = ""
+    unit_file_state: str = ""
+    fragment_path: str = ""
+    drop_in_paths: str = ""
+    exec_main_status: int | None = None
+    result: str = ""
+    timeout_start_seconds: int = TIMEOUT_START_SECONDS
+    own: bool = False
 
 
 @dataclass(frozen=True)
@@ -561,8 +596,15 @@ def _unlink_in_server_dir(config_dir, name: str) -> bool:
     """Unlink `name` inside the server directory by descriptor; True when a file was removed, False
     when there was none or the directory is missing, not a directory or a link. Any other OSError
     propagates."""
+    return _unlink_in_dir(server_dir(config_dir), name)
+
+
+def _unlink_in_dir(directory, name: str) -> bool:
+    """`_unlink_in_server_dir` over any directory path: opened `O_DIRECTORY | O_NOFOLLOW`, `name`
+    unlinked by that descriptor, so a link planted at `name` is removed itself and never what it
+    points at."""
     try:
-        fd = _open_server_dir(config_dir, create=False)
+        fd = open_private_dir(directory, create=False)
     except OSError as exc:
         if exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.ENOENT):
             return False
@@ -627,6 +669,316 @@ def remove_target(config_dir) -> bool:
     return _unlink_in_server_dir(config_dir, TARGET_NAME)
 
 
+# ---------------------------------------------------------------------------- the harness unit
+
+_UNSET_ENVIRONMENT = (
+    "LOCALHARNESS_DIR", "LOCALHARNESS_HOME", "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH", "GCONV_PATH",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
+)
+_UNIT_HEADER_TAIL = " — `localharness model --autostart off` removes it"
+_UNIT_ENV_PREFIX = "# env "
+_UNIT_DESCRIPTION = "LocalHarness model server (serves the preset `localharness model` selected)"
+
+
+def harness_unit_path() -> Path:
+    """`$XDG_CONFIG_HOME/systemd/user/localharness-llm.service`, else
+    `~/.config/systemd/user/localharness-llm.service`, read at call time (spec 20 §9.2). An empty or
+    relative `XDG_CONFIG_HOME` is ignored, as the XDG specification says."""
+    xdg = os.environ.get("XDG_CONFIG_HOME", "")
+    base = Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / ".config"
+    return base / "systemd" / "user" / HARNESS_UNIT
+
+
+def harness_home() -> str:
+    """The absolute home directory the unit's `WorkingDirectory=` names."""
+    return os.path.expanduser("~")
+
+
+def unit_config_dir(config_dir) -> str:
+    """The global config dir as the unit pins it: `~` expanded, absolute, normalised."""
+    return os.path.abspath(os.path.expanduser(str(config_dir)))
+
+
+def _unit_value(value) -> str:
+    """`value` when it is a non-empty string made only of `UNIT_VALUE_PATTERN` characters; else
+    ValueError naming it. One space, `$`, `%`, quote or newline in a unit line would change what systemd
+    runs, so none is ever escaped: it is refused."""
+    if not isinstance(value, str) or not UNIT_VALUE_PATTERN.fullmatch(value):
+        raise ValueError(f"not allowed in the unit: {value!r}")
+    return value
+
+
+def _absolute_unit_path(value) -> str:
+    value = _unit_value(value)
+    if not value.startswith("/"):
+        raise ValueError(f"not an absolute path: {value!r}")
+    return value
+
+
+def render_harness_unit(interpreter: str, config_dir, captured_env: Mapping[str, str], *, home: str,
+                        version: str | None = None) -> str:
+    """The text of the autostart unit, exactly spec 20 §9.2: fixed text plus the interpreter, the pinned
+    config dir, the home and the captured `# env` lines. Pure: it reads no environment and no file, so
+    the identity test can compare this render to the file byte for byte.
+
+    `captured_env` holds only `CAPTURED_NAMES`; the lines are written in that order, for the names
+    present (PATH is expected, the render does not insist: `captured_env()` does). `version` defaults to
+    the running version. ValueError when the interpreter, the config dir or the home is not an absolute
+    path, when any value (including `version`) is outside `UNIT_VALUE_PATTERN` / `UNIT_VERSION_PATTERN`,
+    or when `captured_env` holds a name outside `CAPTURED_NAMES`."""
+    interp = _absolute_unit_path(interpreter)
+    cfg = _absolute_unit_path(unit_config_dir(config_dir))
+    wd = _absolute_unit_path(home)
+    shown = resolved_version() if version is None else version
+    if not isinstance(shown, str) or not UNIT_VERSION_PATTERN.fullmatch(shown):
+        raise ValueError(f"not a version the unit header can carry: {shown!r}")
+    unknown = [name for name in captured_env if name not in CAPTURED_NAMES]
+    if unknown:
+        raise ValueError(f"not a captured name: {unknown[0]!r}")
+    lines = [f"{UNIT_HEADER_PREFIX}{shown}{_UNIT_HEADER_TAIL}"]
+    for name in CAPTURED_NAMES:
+        if name in captured_env:
+            lines.append(f"{_UNIT_ENV_PREFIX}{name}={_unit_value(captured_env[name])}")
+    lines += [
+        "[Unit]",
+        f"Description={_UNIT_DESCRIPTION}",
+        "After=network.target",
+        "StartLimitIntervalSec=5400",
+        "StartLimitBurst=3",
+        "",
+        "[Service]",
+        f"WorkingDirectory={wd}",
+        f"ExecStart={interp} -I -m localharness serve --config-dir {cfg}",
+        f"UnsetEnvironment={' '.join(_UNSET_ENVIRONMENT)}",
+        "Restart=on-failure",
+        "RestartSec=5",
+        "RestartPreventExitStatus=78",
+        f"TimeoutStartSec={TIMEOUT_START_SECONDS}",
+        "KillSignal=SIGINT",
+        "",
+        "[Install]",
+        "WantedBy=default.target",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _captured_value_ok(name: str, value: str) -> bool:
+    """One captured value as `captured_env` accepts it: in the charset, and absolute (every element of
+    `PATH` and `LD_LIBRARY_PATH`, the whole of `HF_HOME`)."""
+    if not UNIT_VALUE_PATTERN.fullmatch(value):
+        return False
+    if name == "HF_HOME":
+        return value.startswith("/")
+    return all(element.startswith("/") for element in value.split(":"))
+
+
+def captured_env(body: str) -> dict[str, str] | None:
+    """The inverse of `render_harness_unit`: the `# env NAME=value` lines between the header line and
+    `[Unit]`, in `CAPTURED_NAMES` order, or None.
+
+    Only that block is read (an `# env` line after `[Unit]` is a comment and nothing more). None for: no
+    header line, no `[Unit]` line, any line in the block that is not exactly `# env NAME=value`, a name
+    outside `CAPTURED_NAMES`, a duplicate, a value outside `UNIT_VALUE_PATTERN`, an empty or relative
+    element of `PATH` / `LD_LIBRARY_PATH`, a relative `HF_HOME`, or no `PATH` (the render always writes
+    it, so an empty block is unparsable)."""
+    if not isinstance(body, str):
+        return None
+    lines = body.split("\n")
+    if not lines[0].startswith(UNIT_HEADER_PREFIX):
+        return None
+    try:
+        end = lines.index("[Unit]", 1)
+    except ValueError:
+        return None
+    found: dict[str, str] = {}
+    for line in lines[1:end]:
+        if not line.startswith(_UNIT_ENV_PREFIX):
+            return None
+        name, eq, value = line[len(_UNIT_ENV_PREFIX):].partition("=")
+        if not eq or name not in CAPTURED_NAMES or name in found or not _captured_value_ok(name, value):
+            return None
+        found[name] = value
+    if "PATH" not in found:
+        return None
+    return {name: found[name] for name in CAPTURED_NAMES if name in found}
+
+
+@dataclass(frozen=True)
+class CapturedShell:
+    """What `capture_shell_env` took from a shell: the values to render (`env`), each dropped
+    `(variable, element)` of `PATH` / `LD_LIBRARY_PATH` that was empty or relative, and each
+    `(variable, as written, made absolute)` of a relative `HF_HOME` (the receipt names both)."""
+
+    env: dict[str, str]
+    dropped: tuple[tuple[str, str], ...]
+    absolutized: tuple[tuple[str, str, str], ...]
+
+
+def capture_shell_env(environ: Mapping[str, str], cwd: str) -> CapturedShell:
+    """The shell's `PATH` (always) and `HF_HOME` / `LD_LIBRARY_PATH` (when set and non-empty) as the unit
+    will carry them (spec 20 §9.2). An empty or relative element of `PATH` / `LD_LIBRARY_PATH` would
+    resolve against the user's home at boot, so it is dropped and reported with its variable; a relative
+    `HF_HOME` is one whole value the shell meant against its working directory, so it is made absolute
+    against `cwd` and reported. ValueError, naming the value, for a kept value outside
+    `UNIT_VALUE_PATTERN` and for a `PATH` left with no element."""
+    env: dict[str, str] = {}
+    dropped: list[tuple[str, str]] = []
+    absolutized: list[tuple[str, str, str]] = []
+    for name in CAPTURED_NAMES:
+        raw = environ.get(name)
+        if raw is None or (raw == "" and name != "PATH"):
+            continue
+        if name == "HF_HOME":
+            value = raw
+            if not raw.startswith("/"):
+                value = os.path.normpath(os.path.join(cwd, raw))
+                absolutized.append((name, raw, value))
+            if not value.startswith("/"):
+                raise ValueError(f"not an absolute path: {value!r}")
+            env[name] = _unit_value(value)
+            continue
+        kept: list[str] = []
+        for element in raw.split(":"):
+            if element.startswith("/"):
+                kept.append(_unit_value(element))
+            else:
+                dropped.append((name, element))
+        if kept:
+            env[name] = ":".join(kept)
+        elif name == "PATH":
+            raise ValueError("this shell's PATH has no absolute entry")
+    return CapturedShell(env, tuple(dropped), tuple(absolutized))
+
+
+def _exec_start_tokens(body: str) -> list[str] | None:
+    """The words of the single `ExecStart=` line of `[Service]`, or None (none, several, unsplittable)."""
+    section = ""
+    values: list[str] = []
+    for line in body.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped
+        elif section == "[Service]" and stripped.startswith("ExecStart="):
+            values.append(stripped[len("ExecStart="):])
+    if len(values) != 1:
+        return None
+    try:
+        return shlex.split(values[0])
+    except ValueError:
+        return None
+
+
+def unit_serves(config_dir, body: str | None = None) -> bool:
+    """True only when the harness unit file's `ExecStart=` carries `--config-dir` equal to
+    `unit_config_dir(config_dir)`. `body` is read from `read_harness_unit()` when None; an absent or
+    unreadable file is False."""
+    if body is None:
+        body = read_harness_unit()
+    if body is None:
+        return False
+    tokens = _exec_start_tokens(body)
+    if tokens is None or tokens.count("--config-dir") != 1:
+        return False
+    at = tokens.index("--config-dir")
+    return at + 1 < len(tokens) and tokens[at + 1] == unit_config_dir(config_dir)
+
+
+def read_harness_unit() -> str | None:
+    """The harness unit file's text, or None: no file, no `systemd/user` directory, a link, a FIFO, more
+    than `UNIT_FILE_CAP` bytes, or bytes that are not UTF-8. The directory is opened `O_NOFOLLOW` and the
+    file by `open_regular(dir_fd=)`, so nothing planted there is followed or blocks."""
+    path = harness_unit_path()
+    try:
+        dir_fd = open_private_dir(path.parent, create=False)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(open_regular(path.name, dir_fd=dir_fd), "rb") as fh:
+            raw = fh.read(UNIT_FILE_CAP + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(dir_fd)
+    if len(raw) > UNIT_FILE_CAP:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def write_harness_unit(body: str) -> Path:
+    """Write `body` as the harness unit file (0600) and return its path. The `systemd/user` directory is
+    created if missing and opened `O_NOFOLLOW` (a symlinked one is refused with OSError, its target
+    untouched); the file goes through `atomic_write_text(dir_fd=)`, so a link planted at the name is
+    replaced, never followed. OSError propagates."""
+    path = harness_unit_path()
+    dir_fd = open_private_dir(path.parent, create=True)
+    try:
+        atomic_write_text(path.name, body, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+    return path
+
+
+def remove_harness_unit() -> bool:
+    """Unlink the harness unit file by directory descriptor; True when a file was removed, False when
+    there was none or the directory is missing, not a directory or a link. A link planted at the name
+    is unlinked itself, never what it points at."""
+    path = harness_unit_path()
+    return _unlink_in_dir(path.parent, path.name)
+
+
+def harness_unit_failure(state, config_dir, *, body: str | None = None, interpreter: str | None = None,
+                         home: str | None = None) -> str | None:
+    """None when the unit is the harness's own; else the phrase naming the FIRST test it failed (spec 20
+    §9.2, a predicate on the unit: `status` prints `<unit> <phrase>`). In order: the service manager was
+    asked, `FragmentPath` is `harness_unit_path()`, `DropInPaths` is empty, and the file is byte-equal to
+    `render_harness_unit` for this interpreter, config dir and the file's own `# env` block.
+
+    The header's version is read from the body like the captured values (it is a comment that runs
+    nothing): a package upgrade that leaves the template alone keeps the unit the harness's own, while a
+    change to any executable line, or to the template, still fails the byte comparison. `body` is read
+    from `read_harness_unit()` when None; `interpreter` defaults to `sys.executable`, `home` to
+    `harness_home()`."""
+    if state is None:
+        return "could not be asked: the service manager did not answer"
+    expected = str(harness_unit_path())
+    fragment = getattr(state, "fragment_path", "")
+    if fragment != expected:
+        if not fragment:
+            return f"is not loaded from {expected} (FragmentPath is empty)"
+        return f"is loaded from {fragment}, not {expected} (FragmentPath)"
+    drop_ins = getattr(state, "drop_in_paths", "")
+    if drop_ins:
+        return f"has drop-ins ({drop_ins})"
+    if body is None:
+        body = read_harness_unit()
+    if body is None:
+        return "has no readable unit file"
+    captured = captured_env(body)
+    if captured is None:
+        return "has an unparsable # env block"
+    version, sep, _ = body.split("\n", 1)[0][len(UNIT_HEADER_PREFIX):].partition(" — ")
+    differs = "differs from what localharness writes"
+    if not sep or not UNIT_VERSION_PATTERN.fullmatch(version):
+        return differs
+    try:
+        rendered = render_harness_unit(sys.executable if interpreter is None else interpreter, config_dir,
+                                       captured, home=harness_home() if home is None else home,
+                                       version=version)
+    except ValueError:
+        return differs
+    return None if rendered == body else differs
+
+
+def is_harness_unit(state, config_dir, *, body: str | None = None, interpreter: str | None = None,
+                    home: str | None = None) -> bool:
+    """`harness_unit_failure(...) is None`."""
+    return harness_unit_failure(state, config_dir, body=body, interpreter=interpreter, home=home) is None
+
+
 # ------------------------------------------------------------------------------ the boot marker
 
 _MARKER_FIELDS = frozenset(f.name for f in dataclasses.fields(Marker))
@@ -660,8 +1012,10 @@ def _marker_from(data) -> Marker | None:
 
 def read_marker(config_dir) -> Marker | None:
     """The boot marker at `<server dir>/boot-attempt`, or None: no file, no directory, a link, a FIFO,
-    more than `MARKER_CAP` bytes, invalid JSON, or anything off `Marker`'s closed shape. Read only;
-    the writer belongs to the autostart unit's `serve` (spec 20 §9.3) and the confirm removes it."""
+    more than `MARKER_CAP` bytes, invalid JSON, or anything off `Marker`'s closed shape. Read only:
+    an unparsable marker is left in place and is replaced by the next marker `serve` writes
+    (`write_marker`), because `remove_marker` may be called only inside `lifecycle.confirm_launch` and
+    sensing writes nothing (spec 20 §6.0, §9.3)."""
     try:
         fd = _open_server_dir(config_dir, create=False)
     except OSError:
@@ -679,3 +1033,29 @@ def read_marker(config_dir) -> Marker | None:
         return _marker_from(json.loads(raw.decode("utf-8")))
     except ValueError:  # JSONDecodeError and UnicodeDecodeError are both ValueErrors
         return None
+
+
+def write_marker(config_dir, marker: Marker) -> None:
+    """Write `marker` as JSON (all ten keys, `dropped` a list) to `<server dir>/boot-attempt`: the one
+    writer of the boot marker (spec 20 §9.3). ValueError, with nothing written, when `read_marker` would
+    not read the marker back equal (a cause, shape or drop off the closed sets, an empty required string,
+    a non-integer count) or its JSON is longer than `MARKER_CAP`. The file goes through
+    `atomic_write_text(dir_fd=)` inside the no-follow server directory, created if missing: a symlinked
+    directory is refused with OSError, and a link planted at the name is replaced, never followed."""
+    if not isinstance(marker, Marker):
+        raise ValueError(f"not a boot marker: {marker!r}")
+    data = dataclasses.asdict(marker)
+    data["dropped"] = list(marker.dropped)
+    try:
+        text = json.dumps(data, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"not a boot marker: {exc}") from exc
+    if _marker_from(json.loads(text)) != marker:
+        raise ValueError("not a boot marker `read_marker` would read back")
+    if len(text.encode("utf-8")) > MARKER_CAP:
+        raise ValueError(f"boot marker over {MARKER_CAP} bytes")
+    fd = _open_server_dir(config_dir, create=True)
+    try:
+        atomic_write_text(BOOT_MARKER_NAME, text, dir_fd=fd)
+    finally:
+        os.close(fd)
