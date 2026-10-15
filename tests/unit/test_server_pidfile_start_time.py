@@ -173,8 +173,80 @@ def test_a_pidfile_write_that_fails_takes_the_child_down_and_raises_runtimeerror
     with pytest.raises(RuntimeError, match="could not record the launch: No space left on device"):
         server.start_server(tmp_path, ["true"])
 
-    assert events == [("killpg", 4242, signal.SIGTERM), ("wait", 5.0)]
+    assert events == [("killpg", 4242, signal.SIGTERM), ("wait", server.REAP_GRACE_SECONDS[0])]
     assert len(opened) == 1 and opened[0].closed
+
+
+def _unrecordable_launch(monkeypatch, *, ignores_sigterm: bool):
+    """A launch whose pidfile cannot be written; `events` records every signal, wait and runner call."""
+    import errno
+    import subprocess
+
+    events: list = []
+
+    class Child:
+        pid = 4242
+
+        def __init__(self, cmd, **kwargs):
+            pass
+
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            if ignores_sigterm and ("killpg", 4242, signal.SIGKILL) not in events:
+                raise subprocess.TimeoutExpired("child", timeout)
+            return 0
+
+    def full_disk(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def runner(cmd, **kw):
+        events.append(("run", list(cmd), kw.get("timeout")))
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(server.subprocess, "Popen", Child)
+    monkeypatch.setattr(server.os, "killpg", lambda pid, sig: events.append(("killpg", pid, sig)))
+    monkeypatch.setattr(server.subprocess, "run", runner)
+    monkeypatch.setattr(server.private_files, "atomic_write_text", full_disk)
+    proc_says(monkeypatch, 777)
+    return events
+
+
+def test_an_unrecordable_child_that_ignores_sigterm_is_killed_after_a_short_bounded_wait(
+        tmp_path, monkeypatch):
+    """The reap holds the event loop (start_server is synchronous): each wait is the short bounded grace,
+    never the old five seconds, and a child that outlasts SIGTERM gets SIGKILL."""
+    events = _unrecordable_launch(monkeypatch, ignores_sigterm=True)
+
+    with pytest.raises(RuntimeError, match="could not record the launch"):
+        server.start_server(tmp_path, ["true"])
+
+    term, kill = server.REAP_GRACE_SECONDS
+    assert events == [("killpg", 4242, signal.SIGTERM), ("wait", term),
+                      ("killpg", 4242, signal.SIGKILL), ("wait", kill)]
+    assert term + kill <= 5.0                            # the most a failed record write holds the loop
+    assert not [e for e in events if e[0] == "run"]     # no docker call for a binary launch
+
+
+def test_an_unrecordable_docker_launch_also_force_removes_the_container_by_its_name(
+        tmp_path, monkeypatch):
+    """Taking the `docker run` client down leaves the container running: it is removed by the name on the
+    launch line, through the runner stop_server uses, with a bounded timeout."""
+    events = _unrecordable_launch(monkeypatch, ignores_sigterm=False)
+    cmd = ["docker", "run", "--rm", "--name", server.DOCKER_CONTAINER_NAME, "vllm:latest"]
+
+    with pytest.raises(RuntimeError, match="could not record the launch"):
+        server.start_server(tmp_path, cmd)
+
+    assert events[-1] == ("run", ["docker", "rm", "-f", server.DOCKER_CONTAINER_NAME],
+                          server.REAP_DOCKER_TIMEOUT)
+    assert events.index(("killpg", 4242, signal.SIGTERM)) < len(events) - 1   # the client first
+
+
+def test_the_container_of_a_launch_line_is_only_a_docker_runs_name():
+    assert server._container_of(["docker", "run", "--name", "n1", "img"]) == "n1"
+    assert server._container_of(["/usr/bin/docker", "run", "img", "--name"]) is None
+    assert server._container_of(["llama-server", "--name", "n1"]) is None
+    assert server._container_of([]) is None
 
 
 def test_a_link_planted_at_serve_log_is_refused_not_appended_through(tmp_path, monkeypatch, popen):  # noqa: F811
