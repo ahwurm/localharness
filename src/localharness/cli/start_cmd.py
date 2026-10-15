@@ -1858,6 +1858,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     for _gone_line in model_ops.clear_gone(harness, serving.gone, config_dir=server_cfg_path):
         err_console.print(_gone_line, markup=False, soft_wrap=True)
     record = serving.record
+    _fell_back = False  # the primary serves only because the selected peer cannot be served from here
     if record.peer is not None and record.spec is None:
         # An attach-only peer the `active_endpoint` rung names is no launch record: when it does not
         # answer there is nothing to launch, so the start continues on the primary as a start always
@@ -1869,6 +1870,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 markup=False, soft_wrap=True)
             serving = model_ops.default_serving(harness, serving.gone)
             record = serving.record
+            _fell_back = True
     # A peer's key file is read here, once, at the session's first use of that peer (D-23): the key is
     # held in memory on the endpoint and rides every probe and request of the session.
     _held_keys: set[str] = set()
@@ -2105,7 +2107,11 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     async def _land(rec: Any, outcome: str, rung: str | None) -> None:
         """The landing's one writer (`persist_landed`); a failed write is said and the session goes on."""
         try:
-            await model_ops.persist_landed(harness, rec, outcome=outcome, rung=rung, config_dir=server_cfg_path)
+            # A fallback to the primary records what served (`last_served`) and forgets nothing: the
+            # peer the person chose is only offline (R-13-33).
+            await model_ops.persist_landed(
+                harness, rec, outcome=outcome, rung=rung, config_dir=server_cfg_path,
+                keep_selection=_fell_back)
         except Exception as exc:  # noqa: BLE001 — the server is up; the selection is a convenience
             err_console.print(
                 model_ops.redact_for_channel(PERSIST_FAILED_LINE.format(exc=exc), harness, provider.api_key),

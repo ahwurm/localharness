@@ -172,3 +172,16 @@ def test_landing_on_a_different_peer_still_drops_the_old_level(components_home):
     overlay = load_overlay(components_home / "overrides.yaml")
     assert overlay["active_endpoint"] == PEER_ACTIVE
     assert harness.active_endpoint.effort is None
+
+
+@pytest.mark.parametrize("outcome", ["launch", "swap"])
+def test_keep_selection_leaves_the_stored_endpoint_alone_on_a_landing(components_home, outcome):
+    harness, records = _setup(
+        components_home, overlay={"active_endpoint": PEER_ACTIVE, "pending_preset": "gemma"})
+
+    _land(harness, records[PRIMARY_SERVED], components_home, outcome=outcome, keep_selection=True)
+
+    overlay = load_overlay(components_home / "overrides.yaml")
+    assert overlay["active_endpoint"] == PEER_ACTIVE
+    assert "pending_preset" not in overlay  # the landing's other effects stand
+    assert speed_stats.last_served(_ledger(components_home)) == PRIMARY_SERVED
