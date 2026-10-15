@@ -79,7 +79,21 @@ def _download(repo_id: str, filename: Optional[str]) -> None:
     )
 
 
-def _select_preset(harness, record, current, loader, audit_dir, ws) -> None:
+def _another_record_serves(harness, machine_trust, record) -> bool:
+    """True when a launchable loopback record other than ``record`` answers at its own address now (the
+    sensor `start` uses; loopback only, off the network). A failed look says False: it only decides
+    whether "already the default" may stay silent."""
+    others = model_ops.launchable_loopback_others(harness, machine_trust, record)
+    if not others:
+        return False
+    try:
+        sense = asyncio.run(model_ops.sense_serving(harness, (*others, record)))
+    except Exception:  # noqa: BLE001 — an unreadable look is "nothing else answers"
+        return False
+    return any(r.prefix != record.prefix for r in sense.answering)
+
+
+def _select_preset(harness, record, current, loader, audit_dir, ws, machine_trust=None) -> None:
     """Record ``record`` as what the next start serves (D-10, R-13-18): ``select_pending`` writes the
     peer's ``active_endpoint`` (the primary clears one) and ``pending_preset``; the primary's served
     name also becomes the default when it differs, without writing ``server.model`` (an alias must
@@ -88,9 +102,11 @@ def _select_preset(harness, record, current, loader, audit_dir, ws) -> None:
         record.peer is None and record.served == current
         and harness.active_endpoint is None and not getattr(harness, "pending_preset", None)
         and not read_target(global_config_dir(loader._config_dir))
+        and not _another_record_serves(harness, machine_trust, record)
     ):
-        # The primary is already the default and nothing else is selected: nothing to switch, and
-        # nothing is written (an overlay's bytes stay as they were).
+        # The primary is already the default, nothing else is selected and no other record is serving
+        # (one that is, after an attach or a failed write, still has to be swapped back from): nothing
+        # to switch, and nothing is written (an overlay's bytes stay as they were).
         console.print(escape(f"{record.served} is already the default."), soft_wrap=True)
         return
     try:
@@ -284,7 +300,7 @@ def model(
                     "[bold red]Error:[/bold red] " + escape(serving.line), soft_wrap=True)
             raise typer.Exit(serving.exit_code)
         if isinstance(serving, model_ops.Serving):
-            _select_preset(harness, serving.record, current, loader, _audit_dir, _ws)
+            _select_preset(harness, serving.record, current, loader, _audit_dir, _ws, machine_trust)
             return
 
     target: Optional[str] = None
