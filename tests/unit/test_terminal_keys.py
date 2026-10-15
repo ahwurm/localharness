@@ -7,9 +7,32 @@ loader's layers on `tmp_path`, no tty, no network.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
+import re
+from pathlib import Path
+
 import pytest
+from prompt_toolkit.application import Application, create_app_session
+from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.input import vt100_parser
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+from prompt_toolkit.input.defaults import create_pipe_input
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.controls import BufferControl
+from prompt_toolkit.output import DummyOutput
 from pydantic import ValidationError
 
+from localharness.channels.keys import (
+    KEYS,
+    SHIFT_ENTER_KEY,
+    SHIFT_ENTER_SEQUENCES,
+    install_wire_sequences,
+)
+from localharness.config.chords import CHORD_NAMES, LABELS
 from localharness.config.loader import (
     HARNESS_GLOBAL_ONLY_FIELDS,
     ConfigValidationError,
@@ -300,3 +323,109 @@ def test_both_lists_are_catalogue_paths(components_home):
     )
     assert "terminal.keys.nudge" in entries
     assert "terminal.keys.newline" in entries
+
+
+# --- the chords in code: the table, the borrowed key and the guarded install ----------------------
+
+XTERM_FORM = "\x1b[27;2;13~"
+KITTY_FORM = "\x1b[13;2u"
+SRC = Path(__file__).resolve().parents[2] / "src" / "localharness"
+
+
+def test_keys_table_covers_the_vocabulary_and_every_name_has_a_label():
+    assert KEYS.keys() == set(CHORD_NAMES)
+    assert set(LABELS) == set(CHORD_NAMES)
+    assert CHORD_NAMES == ("alt-enter", "shift-enter", "ctrl-g", "ctrl-o")
+    assert len(set(KEYS.values())) == 4
+    assert KEYS["alt-enter"] == ("escape", "enter")
+    assert KEYS["shift-enter"] == (SHIFT_ENTER_KEY,)
+    assert KEYS["ctrl-g"] == ("c-g",)
+    assert KEYS["ctrl-o"] == ("c-o",)
+    assert SHIFT_ENTER_KEY is Keys.ControlF3
+
+
+def test_premise_controlf3_unproduced_and_prefix_cache_present():
+    # The borrowed key is only safe while no table entry yields it, and the install only works
+    # while prompt_toolkit keeps the private prefix cache: an upgrade that changes either must fail
+    # here, not in the person's input.
+    assert Keys.ControlF3 not in ANSI_SEQUENCES.values()
+    assert hasattr(vt100_parser, "_IS_PREFIX_OF_LONGER_MATCH_CACHE")
+    assert ANSI_SEQUENCES[XTERM_FORM] == Keys.ControlM
+    assert KITTY_FORM not in ANSI_SEQUENCES
+
+
+def test_install_wire_sequences_is_idempotent():
+    assert install_wire_sequences() is True
+    assert install_wire_sequences() is True
+    assert sorted(k for k, v in ANSI_SEQUENCES.items() if v == SHIFT_ENTER_KEY) == sorted(
+        SHIFT_ENTER_SEQUENCES
+    )
+    assert sum(1 for v in ANSI_SEQUENCES.values() if v == SHIFT_ENTER_KEY) == 2
+    assert len(vt100_parser._IS_PREFIX_OF_LONGER_MATCH_CACHE) == 0
+
+
+def test_install_replaces_the_xterm_entry_and_leaves_ctrl_enter():
+    install_wire_sequences()
+    assert ANSI_SEQUENCES[XTERM_FORM] == SHIFT_ENTER_KEY
+    assert ANSI_SEQUENCES[KITTY_FORM] == SHIFT_ENTER_KEY
+    assert ANSI_SEQUENCES["\x1b[27;5;13~"] == Keys.ControlM
+    assert ANSI_SEQUENCES["\x1b[27;6;13~"] == Keys.ControlM
+
+
+def test_install_without_the_prefix_cache_installs_nothing_and_logs_once(monkeypatch, caplog):
+    monkeypatch.delattr(vt100_parser, "_IS_PREFIX_OF_LONGER_MATCH_CACHE")
+    before = dict(ANSI_SEQUENCES)
+    with caplog.at_level(logging.INFO, logger="localharness.channels.keys"):
+        assert install_wire_sequences() is False
+    assert ANSI_SEQUENCES == before
+    records = [r for r in caplog.records if r.name == "localharness.channels.keys"]
+    assert len(records) == 1
+    assert "shift+enter" in records[0].getMessage().lower()
+
+
+async def test_both_shift_enter_encodings_reach_a_binding_on_the_borrowed_key():
+    assert install_wire_sequences() is True
+    lines: list[str] = []
+    buf = Buffer(multiline=False)
+    kb = KeyBindings()
+
+    @kb.add(*KEYS["shift-enter"])
+    def _newline(event):
+        event.current_buffer.insert_text("\n")
+
+    @kb.add("enter")
+    def _submit(event):
+        lines.append(event.current_buffer.text)
+        event.current_buffer.reset()
+
+    @kb.add("c-d")
+    def _exit(event):
+        event.app.exit()
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()):
+            app = Application(
+                layout=Layout(Window(BufferControl(buf))), key_bindings=kb,
+                input=inp, output=DummyOutput(),
+            )
+            inp.send_text("a" + KITTY_FORM + "b" + XTERM_FORM + "c" + "\r" + "\x04")
+            await asyncio.wait_for(app.run_async(), timeout=10.0)
+    assert lines == ["a\nb\nc"]
+
+
+def test_ctrl_f3_is_named_only_in_channels_keys():
+    named = sorted(
+        str(p.relative_to(SRC)) for p in SRC.rglob("*.py") if "ControlF3" in p.read_text("utf-8")
+    )
+    assert named == ["channels/keys.py"]
+
+
+def test_the_chord_module_never_reads_a_device_or_sets_a_keyboard_mode():
+    source = (SRC / "channels" / "keys.py").read_text("utf-8")
+    imports = [ln for ln in source.splitlines() if re.match(r"\s*(import|from)\s", ln)]
+    assert not [ln for ln in imports if re.search(r"evdev|pyudev|uinput", ln)]
+    assert "/dev/input" not in source
+    assert not re.search(r"\bopen\(", source)
+    assert "sys.stdout.write" not in source
+    assert "os.write" not in source
+    assert "\x1b[>" not in source and "\x1b[=" not in source
