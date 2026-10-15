@@ -395,6 +395,9 @@ class Launching:
             def liveness(self, spec, d):
                 return lifecycle.Liveness(False)
 
+            def launch_identity(self, spec):
+                return None  # no launch to verify: the liveness verdict finds no holder
+
             async def activate(self, spec, d, base_url, **kw):
                 owner.activations.append(kw)
                 return live
