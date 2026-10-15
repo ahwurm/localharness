@@ -900,7 +900,7 @@ def start_server(
             # The child is running and nothing records it (a directory planted at the pidfile, a full
             # disk): no handle would ever reach it again. Take it down with the launch, say why as the
             # failure every `activate` caller already restores the incumbent from, and drop the log.
-            _reap_unrecorded(proc)
+            _reap_unrecorded(proc, _container_of(cmd))
             log.close()
             raise RuntimeError(f"could not record the launch: {exc.strerror or exc}") from exc
         return proc.pid
@@ -908,20 +908,48 @@ def start_server(
         os.close(dir_fd)
 
 
-def _reap_unrecorded(proc: "subprocess.Popen[bytes]") -> None:
+REAP_GRACE_SECONDS = (1.0, 2.0)
+"""How long `_reap_unrecorded` waits after SIGTERM and then after SIGKILL. `start_server` is a
+synchronous call that async launch paths make directly, so this is the whole time a failed record
+write can hold the event loop; the launch it takes down has loaded nothing worth a long drain."""
+REAP_DOCKER_TIMEOUT = 10.0
+"""Longest the container force-removal of `_reap_unrecorded` runs."""
+
+
+def _container_of(cmd: list[str]) -> str | None:
+    """The container name a `docker run` launch line gives itself (`--name <name>`), or None for any
+    other launch. Read from the line that was started, so it is whatever `serve_command` built."""
+    if not cmd or os.path.basename(cmd[0]) != "docker":
+        return None
+    try:
+        return cmd[cmd.index("--name") + 1]
+    except (ValueError, IndexError):
+        return None
+
+
+def _reap_unrecorded(proc: "subprocess.Popen[bytes]", container: str | None = None) -> None:
     """SIGTERM the just-launched group (it leads its own session), SIGKILL when it outlasts a short
-    grace, and reap it. Best effort: a group already gone, or one this user may not signal, is nothing
-    more to do."""
-    for sig, grace in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 5.0)):
+    grace (`REAP_GRACE_SECONDS`), and reap it. A docker launch is a `docker run --rm` CLIENT: taking
+    the client's group down does not stop the container, so `container` (the name on its launch line)
+    is then force-removed through `subprocess.run`, the runner `stop_server` uses; `docker rm -f`
+    is a no-op when the container was never created. Best effort: a group already gone, one this user
+    may not signal, or a runner that fails is nothing more to do."""
+    for sig, grace in zip((signal.SIGTERM, signal.SIGKILL), REAP_GRACE_SECONDS):
         try:
             os.killpg(proc.pid, sig)
         except (ProcessLookupError, PermissionError):
             pass
         try:
             proc.wait(timeout=grace)
-            return
+            break
         except subprocess.TimeoutExpired:
             continue
+    if container is not None:
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", container], capture_output=True, timeout=REAP_DOCKER_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def _read_proc_stat(pid: int) -> bytes | None:
