@@ -177,6 +177,38 @@ def test_a_pidfile_write_that_fails_takes_the_child_down_and_raises_runtimeerror
     assert len(opened) == 1 and opened[0].closed
 
 
+def test_a_link_planted_at_serve_log_is_refused_not_appended_through(tmp_path, monkeypatch, popen):  # noqa: F811
+    """The server directory is agent-writable: a link at serve.log must not make the launch line (or the
+    server's output) land in the file it points at."""
+    victim = tmp_path / "victim"
+    victim.write_text("keep\n", encoding="utf-8")
+    server.server_dir(tmp_path).mkdir(parents=True)
+    server.log_path(tmp_path).symlink_to(victim)
+
+    with pytest.raises(RuntimeError, match="could not open .*serve.log"):
+        server.start_server(tmp_path, ["true"])
+
+    assert victim.read_text(encoding="utf-8") == "keep\n"
+    assert popen == [] and not server.pid_path(tmp_path).exists()
+
+
+def test_a_log_reference_is_not_written_through_a_planted_link(tmp_path):
+    victim = tmp_path / "victim"
+    victim.write_text("keep\n", encoding="utf-8")
+    server.server_dir(tmp_path).mkdir(parents=True)
+    server.log_path(tmp_path).symlink_to(victim)
+
+    ref = server.log_reference(tmp_path, "the launch failed")
+
+    assert len(ref) == 8 and victim.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_a_log_reference_lands_in_the_log(tmp_path):
+    server.server_dir(tmp_path).mkdir(parents=True)
+    ref = server.log_reference(tmp_path, "the launch failed")
+    assert f"=== ref {ref}: the launch failed ===" in server.log_path(tmp_path).read_text(encoding="utf-8")
+
+
 def test_start_server_launches_over_a_stale_pidfile(tmp_path, monkeypatch, popen):  # noqa: F811
     """A reused pid (a different start time) is the harness's own server gone: nothing live to protect."""
     monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)

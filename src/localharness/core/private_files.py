@@ -15,6 +15,7 @@ import re
 import secrets
 import stat
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 
@@ -229,6 +230,15 @@ def _atomic_write_in_dir(name: str, text: str, refuse_read_only: bool, follow_li
 def private_opener(path: str, flags: int) -> int:
     """For open()/anyio.open_file(opener=...): a file this call creates is 0600."""
     return os.open(path, flags, PRIVATE_FILE_MODE)
+
+
+def nofollow_opener(dir_fd: int) -> Callable[[str, int], int]:
+    """For open(name, opener=...): `name` is opened inside the directory `dir_fd` with `O_NOFOLLOW`
+    (a link planted at the name is refused with ELOOP, never followed), and a file this call creates
+    is 0600."""
+    def opener(name: str, flags: int) -> int:
+        return os.open(name, flags | getattr(os, "O_NOFOLLOW", 0), PRIVATE_FILE_MODE, dir_fd=dir_fd)
+    return opener
 
 
 def write_private_bytes(path: Path, data: bytes) -> None:
