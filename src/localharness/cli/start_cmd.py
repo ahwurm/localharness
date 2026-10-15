@@ -2736,7 +2736,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # so every mode caps them at channels.unattended_max_actions (WR-70).
             channel = TerminalChannel(
                 bus=bus, config={}, history_file=str(resolve_runtime_path(".repl_history", state_dir)),
-                no_input=no_input,
+                no_input=no_input, keys=harness.terminal.keys,
             )
         # PRD §3.5: the channel decides how an ASK is rendered and whether it can be rendered at
         # all. A channel that cannot ask leaves the gate with no asker, which is the fail-closed

@@ -1200,7 +1200,7 @@ class TestKeysOnTheChannel:
     def test_idle_legend_names_the_backslash_line_break(self):
         ch = _keyed_channel()
         ch._box_active = True
-        assert self._text(ch) == "  tab commands · /help · \\ then enter newline"
+        assert self._text(ch) == r"  tab commands · /help · \ then enter newline"
 
     def test_start_passes_the_machine_keys_to_the_channel(self):
         source = (Path(__file__).parents[2] / "src" / "localharness" / "cli" / "start_cmd.py").read_text(
