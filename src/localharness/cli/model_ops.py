@@ -925,6 +925,7 @@ async def persist_landed(
     rung: str | None = None,
     served: str | None = None,
     config_dir: Any = None,
+    keep_selection: bool = False,
 ) -> None:
     """Write what a landing on ``record`` decided. ``outcome`` is ``"launch"`` or ``"swap"`` (this
     process made ``record`` the served one) or ``"attach"`` (it found ``record`` already serving).
@@ -933,12 +934,16 @@ async def persist_landed(
     written for a launch or swap only (a peer's, or cleared for the primary): an attach, including an
     attach to another record, never persists a selection (D-15). ``pending_preset`` is removed after a
     launch or swap, and after an attach that resolved on the ``pending_preset`` rung (D-08). Raises
-    what the overlay writers raise; the caller words it."""
+    what the overlay writers raise; the caller words it.
+
+    ``keep_selection`` leaves the stored ``active_endpoint`` as it is on a launch or swap: for a landing
+    on the primary because the selected peer could not be served from here (an attach-only peer that is
+    down), which must not make the person forget the peer they chose."""
     if outcome not in LANDING_OUTCOMES:
         raise ValueError(
             f"unknown landing outcome {outcome!r} (one of {', '.join(sorted(LANDING_OUTCOMES))})")
     moved = outcome in ("launch", "swap")
-    if moved:
+    if moved and not keep_selection:
         if record.peer is not None:
             await persist_active_endpoint(
                 harness, record.peer, served or record.served or record.name, config_dir=config_dir)

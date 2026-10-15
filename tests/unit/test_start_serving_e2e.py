@@ -828,3 +828,17 @@ async def test_a_failed_explicit_swap_redacts_the_planted_token_and_key_in_the_l
         assert secret not in failed[0] and secret not in str(outcome.error)
         assert not any(secret in line for line in world.err_lines)
     assert world.last_served == PRIMARY and "active_endpoint" not in world.overlay  # nothing landed
+
+
+async def test_a_fallback_to_the_primary_forgets_nothing_the_person_chose(world, fake_proc):
+    """The selected peer is attach-only and offline: the primary is launched in its place, and the
+    stored `active_endpoint` stays (a tailnet box that is briefly down is still the person's choice)."""
+    world.config(peers=[peer("flash-next", lifecycle=False)], active=FLASH_ACTIVE, last_served=PRIMARY)
+    assert world.overlay["active_endpoint"]["name"] == "flash-next"
+
+    await world.start()
+
+    assert world.kinds() == ["start", "wait"] and "/m/a.gguf" in world.events[1]
+    assert [w["url"] for w in world.waits] == [PRIMARY_URL]
+    assert world.overlay["active_endpoint"]["name"] == "flash-next"  # the selection is not cleared
+    assert world.last_served == PRIMARY
