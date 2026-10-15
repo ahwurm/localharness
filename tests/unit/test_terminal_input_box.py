@@ -670,6 +670,44 @@ class TestModelPickerBox:
             assert buf.complete_state is not None
             assert buf.complete_state.current_completion is not None
 
+    async def test_a_single_key_newline_chord_takes_the_loan_back_and_strands_no_prefix(self):
+        """A newline chord pressed while the pre-fill is on loan is typing over it (#135): the
+        loan goes and the line feed takes its place, so the next line is not a /model command."""
+        ch = _channel()
+        ch._box_active = True
+        ch.model_names_fn = lambda: ["qwen-a", "qwen-b"]
+        subs: list[str] = []
+        holder: dict = {}
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            app = _build_persistent_input_app(
+                InMemoryHistory(), ">",
+                on_submit=subs.append, on_interrupt=lambda: None,
+                on_eof=lambda: holder["app"].exit(),
+                hint_fn=lambda: [], right_fn=lambda: [], status_fn=lambda: [],
+                model_names_fn=ch._model_names_for_menu,
+                keys=TerminalKeysConfig(newline=["ctrl-o"]),
+            )
+            holder["app"] = app
+            ch._box_app = app
+            buf = app._lh_input_buffer
+            task = asyncio.ensure_future(app.run_async())
+            await asyncio.sleep(0.05)
+            ch.box_open_model_menu()
+            await asyncio.sleep(0.05)
+            assert buf.text.startswith("/model ")
+            inp.send_text(_CTRL_O)
+            await asyncio.sleep(0.1)
+            assert "/model" not in buf.text
+            assert buf.text == "\n"
+            assert buf.complete_state is None
+            inp.send_text("hello\r")
+            await asyncio.sleep(0.1)
+            inp.send_text("\x04")
+            await asyncio.wait_for(task, timeout=10.0)
+        assert len(subs) == 1
+        assert not subs[0].lstrip().startswith("/model")
+        assert subs[0].strip() == "hello"
+
     async def test_picker_never_overwrites_a_line_being_typed(self):
         with self._box(["qwen-a", "qwen-b"]) as (ch, buf):
             buf.text = "summarize the last three commits"  # typed while the listing was fetched
