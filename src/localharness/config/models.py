@@ -557,6 +557,40 @@ class PermissionConfig(BaseModel):
             "python_exec(*facts_archive*)",
             "python_exec(*memory-archive*)",
             "python_exec(*localharness memory *)",
+            # --- autostart: what runs at the next login (spec 20 §12, owner-confirmed
+            # 2026-10-13). The user manager's environment, link/edit/set-property/add-wants/
+            # add-requires verbs and `enable` of a unit given by PATH are how an agent would
+            # change what starts at login, so they are refused; `localharness model --autostart`
+            # is the owner's switch. `restart` / `start` / `stop` / `status` of the harness's own
+            # unit, `show-environment` and `enable` of a bare unit name stay allowed: the agent
+            # gains nothing beyond what spec 20 §8.1 says it already has.
+            #
+            # The evaluator fnmatches the RAW command text (no shlex, no whitespace
+            # collapsing), and `*` crosses newlines. So the word verbs are delimited on both
+            # sides by the negated set `[!A-Za-z0-9_.@-]` — any character that cannot be part of
+            # a unit name or a verb (space, tab, newline, a backslash-newline continuation, a
+            # quote, `;`, `&`, `|`) — not by a literal space, which a tab or a quote would walk
+            # past. A name that merely contains the letters (`credit.service`, `x-edit`) has a
+            # name character next to them and is not matched. The environment verbs are not
+            # words of ordinary text and need no delimiter. `enable` is refused only with a `/`
+            # after it (an honest over-match: the list errs closed for what runs at login).
+            #
+            # HONEST SCOPE: the gate covers the agent's tools only. A verb the shell assembles
+            # at run time (quotes inside the word, a variable, an alias), python_exec and the
+            # D-Bus route by other means are residuals the pattern text cannot see.
+            "bash_exec(*systemctl*set-environment*)",
+            "bash_exec(*systemctl*import-environment*)",
+            "bash_exec(*systemctl*unset-environment*)",
+            "bash_exec(*systemctl*[!A-Za-z0-9_.@-]link[!A-Za-z0-9_.@-]*)",
+            "bash_exec(*systemctl*[!A-Za-z0-9_.@-]edit[!A-Za-z0-9_.@-]*)",
+            "bash_exec(*systemctl*[!A-Za-z0-9_.@-]set-property[!A-Za-z0-9_.@-]*)",
+            "bash_exec(*systemctl*[!A-Za-z0-9_.@-]add-wants[!A-Za-z0-9_.@-]*)",
+            "bash_exec(*systemctl*[!A-Za-z0-9_.@-]add-requires[!A-Za-z0-9_.@-]*)",
+            "bash_exec(*systemctl*[!A-Za-z0-9_.@-]enable[!A-Za-z0-9_.@-]*/*)",
+            "bash_exec(*busctl*org.freedesktop.systemd1*)",
+            "bash_exec(*gdbus*org.freedesktop.systemd1*)",
+            "bash_exec(*dbus-send*org.freedesktop.systemd1*)",
+            "bash_exec(*localharness*model*--autostart*)",
         ],
         description=(
             "List of deny patterns. Each pattern is in the form: "
@@ -572,6 +606,9 @@ class PermissionConfig(BaseModel):
             "-wal/-shm/backup siblings, the facts_archive table, memory-archive, and the "
             "owner-only `localharness memory` CLI): an agent reads memory through its memory "
             "tools, never through a shell, and a stale store file must not re-enter as fact. "
+            "They also refuse what changes what runs at the next login: the user manager's "
+            "environment, link, edit, set-property, add-wants/add-requires and enable-with-a-path "
+            "verbs, their D-Bus twins, and `localharness model --autostart`. "
             "The deny list is evaluated after inheritance resolution — "
             "an agent's deny list is the UNION of its own list and all inherited lists. "
             "Agents can add to the deny list but never remove inherited entries."

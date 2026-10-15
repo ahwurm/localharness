@@ -68,8 +68,10 @@ def test_permission_config_deny_patterns_default_count():
     # memory-archive, `localharness memory ` — across BOTH exec surfaces, bash_exec and
     # python_exec. `write(*/agents/*.yaml)` left the defaults for new installs: the agent may
     # write agent files, and what one starts, loads or loosens waits for the user at the next
-    # start; a config written before keeps it.
-    assert len(cfg.deny_patterns) == 32
+    # start; a config written before keeps it. Spec 20 §12 added 13 (revision 4): the user
+    # manager's set/import/unset-environment, link, edit, set-property, add-wants, add-requires,
+    # enable-with-a-path, the busctl / gdbus / dbus-send twins, and `localharness model --autostart`.
+    assert len(cfg.deny_patterns) == 45
     assert "write(*/agents/*.yaml)" not in cfg.deny_patterns
 
 

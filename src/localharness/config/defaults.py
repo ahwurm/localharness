@@ -49,9 +49,12 @@ COAUTHOR_EMAIL: str = "localharness.agent@gmail.com"
 #        memory-archive, and the owner-only `localharness memory` CLI. An existing config
 #        picks these up on the next `config migrate` / first `start` — the union is additive,
 #        so a user's own entries are kept and nothing they deleted is smuggled back.
+#   4 -> the autostart bundle: the user manager's environment, link, edit, set-property,
+#        add-wants/add-requires and enable-with-a-path verbs, their D-Bus twins and
+#        localharness model --autostart (spec 20 §12, owner-confirmed 2026-10-13)
 # A REMOVAL from the shipped list needs no bump: plan() only adds, and a config that already holds
 # the pattern keeps it (write(*/agents/*.yaml) left the defaults this way).
-CURRENT_DEFAULTS_REVISION: int = 3
+CURRENT_DEFAULTS_REVISION: int = 4
 
 # Revision of the one-shot step that clears the three values `init` used to dump (the two context
 # sizes and `max_actions`). It is its own stamp, recorded in `org.permissions.init_nulls_revision`:
