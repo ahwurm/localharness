@@ -885,9 +885,20 @@ PROTECTED_PATHS_HOME_DEFAULT: tuple[str, ...] = (
     "~/.config/gcloud", "~/.azure",
     "~/AppData/Roaming/GitHub CLI", "~/AppData/Local/Microsoft/Credentials",
     "~/Documents/PowerShell", "~/Documents/WindowsPowerShell",
+    # spec 20 §12: what runs at the next login (the user manager's units and environment, the
+    # desktop autostart entries) — a write below any of these changes a later session.
+    "~/.config/systemd",
+    "~/.local/share/systemd/user",
+    "~/.config/environment.d",
+    "~/.config/autostart",
 )
 """PRD §3.1 ``protected-path`` (ungrantable). Source: Claude Code "protected paths" tier + PRD
 critic finding 1.
+
+The last block is spec 20's ruling (owner-confirmed 2026-10-13): the four login-time
+directories. A file below any of them decides what the user's session starts, so a write there is
+a ``protected-path`` ask in every mode; a sibling with a longer name (``~/.config/systemd-backup``)
+is outside, the test being component-wise.
 
 ``~/.localharness`` used to be an entry here — the WHOLE tree, with a hand-listed exemption for
 the handful of files the harness writes as it runs. It is gone, replaced by
