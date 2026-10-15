@@ -21,9 +21,9 @@ sees nothing over ssh, in tmux or on the phone (spec 21 §12). Spec 21.
   `alt-enter` and `newline` to `shift-enter`; each takes any of the four names (`alt-enter`,
   `shift-enter`, `ctrl-o`, `ctrl-g`) as a list or a comma string. A list you set wins over one left
   at its default, so `localharness components set terminal.keys.newline ctrl-o` works as one
-  command; two lists you wrote that share a chord are refused with the fix. A change applies at the
-  next `localharness start`, and the receipt says so. Machine-level only: a workspace's
-  `terminal.keys` is dropped. (#168)
+  command; two lists you set away from their defaults that share a chord are refused with the
+  fix. A change applies at the next `localharness start`, and the receipt says so. Machine-level
+  only: a workspace's `terminal.keys` is dropped. (#168)
 
 ### Changed
 - **Enter after a line ending in a single `\` now breaks the line instead of submitting.** A double
