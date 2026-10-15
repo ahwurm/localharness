@@ -4,6 +4,36 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.18.1] — 2026-10-15
+
+A line break in the input box on every terminal, and a nudge chord of your own. Both were proposed
+by @eode in #167 and #168, with thanks. #167 came with a working evdev sample; the harness reads
+the terminal's own encoding instead, because reading the keyboard device needs the `input` group
+(every keystroke on the machine becomes readable), races the Enter that has already arrived, and
+sees nothing over ssh, in tmux or on the phone (spec 21 §12). Spec 21.
+
+### Added
+- **A line break in the terminal box.** `\` then Enter breaks the line anywhere, in the box and in
+  the classic prompt. Shift+Enter breaks it too on a terminal set up to send it: the README has the
+  one-line setup per terminal, and `/help` shows the one for your terminal. One message is one
+  history entry, and the box grows to eight rows before it scrolls. (#167)
+- **`terminal.keys`, the chords for the nudge and the line break.** `nudge` defaults to
+  `alt-enter` and `newline` to `shift-enter`; each takes any of the four names (`alt-enter`,
+  `shift-enter`, `ctrl-o`, `ctrl-g`) as a list or a comma string. A list you set wins over one left
+  at its default, so `localharness components set terminal.keys.newline ctrl-o` works as one
+  command; two lists you wrote that share a chord are refused with the fix. A change applies at the
+  next `localharness start`, and the receipt says so. Machine-level only: a workspace's
+  `terminal.keys` is dropped. (#168)
+
+### Changed
+- **Enter after a line ending in a single `\` now breaks the line instead of submitting.** A double
+  backslash submits as typed, and a space after the backslash sends a message that ends in one.
+- **`/help` names the two keys, and the box's legend names the configured nudge chord and the `!`
+  prefix.** The Keys block appears only while the terminal box is live; other channels read the
+  same `/help` as before.
+- **`init` writes only the chord lists you set**, so a fresh install carries none and the one-key
+  change above is never refused against restated defaults.
+
 ## [0.18.0] — 2026-10-12
 
 A llama.cpp or vLLM model is now a named preset that `init` writes and `/model` switches, and the
