@@ -294,8 +294,8 @@ class ManagedVllmStrategy:
         port (D-25)."""
         if spec.launch == "docker":
             return LaunchIdentity(
-                frozenset({"docker"}), None, ("--name", server.DOCKER_CONTAINER_NAME), None)
-        return LaunchIdentity(frozenset({"vllm", "python*"}), spec.port, ("serve",), None)
+                procfs.DOCKER_EXES, None, ("--name", server.DOCKER_CONTAINER_NAME), None)
+        return LaunchIdentity(procfs.VLLM_EXES, spec.port, ("serve",), None)
 
 
 def parser_pin_hint(plan: "LaunchPlan", *, record_prefix: str = "server") -> str:
@@ -877,7 +877,7 @@ class SpawnedProcessStrategy:
         record's port from `--port` or `LLAMA_ARG_PORT`, no extra argv token."""
         binary = getattr(spec, "binary", None)
         if binary is None:
-            names = {"llama-server"}
+            names = {procfs.LLAMA_EXE}
         else:
             names = {os.path.basename(str(binary)), os.path.basename(os.path.realpath(str(binary)))}
         return LaunchIdentity(frozenset(names), spec.port, (), "LLAMA_ARG_PORT")
@@ -962,7 +962,7 @@ class DaemonStrategy:
 
     def launch_identity(self, spec: ManagedServerConfig) -> LaunchIdentity | None:
         """The `ollama` daemon (`env` execs it), the port from `OLLAMA_HOST` (D-25)."""
-        return LaunchIdentity(frozenset({"ollama"}), spec.port, (), "OLLAMA_HOST")
+        return LaunchIdentity(procfs.OLLAMA_EXES, spec.port, (), "OLLAMA_HOST")
 
     @staticmethod
     def _v1(base_url: str) -> str:

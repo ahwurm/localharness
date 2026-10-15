@@ -16,6 +16,7 @@ from localharness.config.models import ManagedServerConfig
 from localharness.provider import lifecycle, procfs, server
 from localharness.provider.procfs import LaunchIdentity, ProcRecord
 from tests.unit.launch_support import PopenRecorder, popen  # noqa: F401
+from tests.unit.procfs_support import fake_proc  # noqa: F401 — the fixture
 
 # What a stop expects here: any python process leading its own session (R-13-15). The real children
 # below add the `-c` token their command line carries.
@@ -134,6 +135,92 @@ def test_start_server_refuses_while_the_pidfile_names_a_live_process(tmp_path, m
     assert popen == []
     assert server.pid_path(tmp_path).read_text(encoding="utf-8") == "4242 777"
     assert not server.log_path(tmp_path).exists()
+
+
+# ------------------------------------------------------------------------------- a bare-pid pidfile
+
+
+def _live(fake_proc, monkeypatch, *, exe: str, pid: int = 5151) -> None:
+    """A live process `pid` running `exe`, as a (fake) `/proc` shows it; the pid answers a signal."""
+    fake_proc.process(pid, argv=(os.path.basename(exe),), exe=exe, comm=os.path.basename(exe))
+    monkeypatch.setattr(server.os, "kill", lambda p, sig: None)
+    proc_says(monkeypatch, 777)
+
+
+def test_a_bare_pid_naming_a_live_unrelated_process_is_stale_and_the_launch_proceeds(
+        tmp_path, monkeypatch, popen, fake_proc):  # noqa: F811
+    """A 0.17 pidfile records no start time, so a reused pid cannot be told by it. A live `bash` is no
+    server any strategy launches: the file is dropped, the launch overwrites it and the log says so."""
+    _live(fake_proc, monkeypatch, exe="/usr/bin/bash")
+    pidfile(tmp_path, "5151")
+
+    assert server.start_server(tmp_path, ["true"]) == 4242
+
+    assert server.pid_path(tmp_path).read_text(encoding="utf-8") == "4242 777"
+    log = server.log_path(tmp_path).read_text(encoding="utf-8")
+    assert "=== dropped pidfile: pid 5151 runs bash, not a server launch ===" in log
+    assert log.index("dropped pidfile") < log.index("=== launch:")
+
+
+@pytest.mark.parametrize("exe", ["/x/llama-server", "/usr/bin/vllm", "/usr/bin/python3.12",
+                                 "/usr/bin/docker", "/usr/bin/ollama"])
+def test_a_bare_pid_naming_a_live_server_launch_is_refused(
+        tmp_path, monkeypatch, popen, fake_proc, exe):  # noqa: F811
+    _live(fake_proc, monkeypatch, exe=exe)
+    pidfile(tmp_path, "5151")
+
+    with pytest.raises(RuntimeError, match=r"names a live process \(pid 5151, .*\) — not starting a second"):
+        server.start_server(tmp_path, ["true"])
+
+    assert popen == []
+    assert server.pid_path(tmp_path).read_text(encoding="utf-8") == "5151"
+
+
+def test_a_bare_pid_naming_the_binary_this_launch_runs_is_refused_whatever_it_is_called(
+        tmp_path, monkeypatch, popen, fake_proc):  # noqa: F811
+    """A record's own `binary:` has any name: the binary about to be launched is a launch too."""
+    _live(fake_proc, monkeypatch, exe="/opt/llama/my-server")
+    pidfile(tmp_path, "5151")
+
+    with pytest.raises(RuntimeError, match="names a live process"):
+        server.start_server(tmp_path, ["/opt/llama/my-server", "--port", "8081"])
+
+
+def test_a_pidfile_with_a_start_time_keeps_its_refusal_whatever_the_process_runs(
+        tmp_path, monkeypatch, popen, fake_proc):  # noqa: F811
+    """The start time already proves the process is the launched one (server_pid drops a mismatch), so
+    the executable is not second-guessed."""
+    _live(fake_proc, monkeypatch, exe="/usr/bin/bash")
+    pidfile(tmp_path, "5151 777")
+
+    with pytest.raises(RuntimeError, match="names a live process"):
+        server.start_server(tmp_path, ["true"])
+
+    assert server.pid_path(tmp_path).read_text(encoding="utf-8") == "5151 777"
+
+
+def test_a_bare_pid_naming_a_process_proc_will_not_show_is_refused(
+        tmp_path, monkeypatch, popen, fake_proc):  # noqa: F811
+    """Nothing proves the pid reused when /proc says nothing of it: the refusal stands."""
+    monkeypatch.setattr(server.os, "kill", lambda p, sig: None)
+    proc_says(monkeypatch, 777)
+    pidfile(tmp_path, "5151")                      # no such pid under the fake /proc
+
+    with pytest.raises(RuntimeError, match="names a live process"):
+        server.start_server(tmp_path, ["true"])
+
+
+def test_the_launch_strategies_declare_the_executables_a_bare_pid_is_judged_by(tmp_path):
+    from localharness.config.models import ManagedServerConfig
+
+    declared: set[str] = set()
+    for spec in (ManagedServerConfig(launch="docker", docker_image="vllm:latest", model="m"),
+                 ManagedServerConfig(launch="binary", binary="/usr/bin/vllm", model="m"),
+                 ManagedServerConfig(runtime="llamacpp", model="/m/x.gguf"),
+                 ManagedServerConfig(runtime="ollama", model="m")):
+        identity = lifecycle.strategy_for(spec).launch_identity(spec)
+        declared |= set(identity.exe_names)
+    assert declared == set(procfs.LAUNCH_EXES)
 
 
 def test_a_pidfile_write_that_fails_takes_the_child_down_and_raises_runtimeerror(tmp_path, monkeypatch):
