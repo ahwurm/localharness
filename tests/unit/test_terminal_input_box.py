@@ -13,6 +13,7 @@ is the first of its kind in this repo.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import types
 from contextlib import contextmanager
@@ -21,10 +22,12 @@ from io import StringIO
 from prompt_toolkit.application import create_app_session
 from pathlib import Path
 
-from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.history import FileHistory, InMemoryHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout.controls import BufferControl
+from prompt_toolkit.layout.dimension import to_dimension
 from prompt_toolkit.output import DummyOutput
 
 import localharness.channels.terminal as terminal_module
@@ -261,6 +264,15 @@ class TestPromptEcho:
         out = self._out(ch)
         assert "stop, wrong file" in out
         assert "→ nudge" in out
+
+    async def test_a_multi_line_echo_prints_its_rows(self):
+        ch = _channel()
+        ch._box_active = True
+        await ch.box_echo_prompt("a\nb")
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", self._out(ch))
+        rows = [row.strip() for row in plain.splitlines() if row.strip()]
+        assert rows[-2].endswith("a")
+        assert rows[-1] == "b"
 
     async def test_echo_escapes_user_markup(self):
         ch = _channel()
@@ -571,6 +583,57 @@ class TestClassicAppKeys:
     async def test_ctrl_o_newline_breaks_the_line(self):
         keys = TerminalKeysConfig(newline=["ctrl-o"])
         assert await _drive_classic(f"a{_CTRL_O}b\r", keys=keys) == "a\nb"
+
+    async def test_backslash_enter_breaks_the_line(self):
+        assert await _drive_classic("x\\\ry\r") == "x\ny"
+
+    async def test_double_backslash_submits_as_typed(self):
+        assert await _drive_classic("x\\\\\r") == "x\\\\"
+
+
+def _input_window(app):
+    """The one Window of the app whose content is the input BufferControl."""
+    found = [w for w in app.layout.find_all_windows() if isinstance(w.content, BufferControl)]
+    assert len(found) == 1
+    return found[0]
+
+
+class TestBoxHeightAndHistory:
+    """The input box stops growing at eight rows, and a multi-line message is one submission and one
+    history entry (spec 21 §6.4, §6.5)."""
+
+    def test_input_window_is_capped_at_eight_rows(self):
+        with create_pipe_input() as inp:
+            with create_app_session(input=inp, output=DummyOutput()):
+                classic = _build_input_app(InMemoryHistory(), ">", "")
+                persistent = _build_persistent_input_app(
+                    InMemoryHistory(), ">",
+                    on_submit=lambda _t: None, on_interrupt=lambda: None, on_eof=lambda: None,
+                    hint_fn=lambda: [], right_fn=lambda: [], status_fn=lambda: [],
+                )
+                for app in (classic, persistent):
+                    window = _input_window(app)
+                    assert to_dimension(window.height).max == 8
+                    # multiline stays off: prompt_toolkit's own Enter default is overridden anyway
+                    assert not window.content.buffer.multiline()
+
+    async def test_a_multi_line_message_is_one_history_entry(self, tmp_path):
+        feed = f"a{_KITTY_SHIFT_ENTER}b{_KITTY_SHIFT_ENTER}c\r\x04"
+        memory = InMemoryHistory()
+        subs, _i, _e = await _drive_box(feed, history=memory)
+        assert subs == ["a\nb\nc"]
+        assert memory.get_strings() == ["a\nb\nc"]
+        path = tmp_path / "history"
+        subs, _i, _e = await _drive_box(feed, history=FileHistory(str(path)))
+        assert subs == ["a\nb\nc"]
+        assert list(FileHistory(str(path)).load_history_strings()) == ["a\nb\nc"]
+
+    async def test_a_message_of_only_line_breaks_submits_nothing(self):
+        subs, _i, eofs = await _drive_box(
+            f"{_KITTY_SHIFT_ENTER}{_KITTY_SHIFT_ENTER}\r\x04"
+        )
+        assert subs == []
+        assert eofs == [True]
 
 
 class TestModelPickerBox:
