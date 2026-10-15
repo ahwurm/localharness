@@ -112,6 +112,12 @@ BARE_MODE_COMMAND = "mode"
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 
+def _route_preview(text: str) -> str:
+    """The audit preview of a routed message: whitespace runs collapsed to one space, then the first
+    80 characters, so a multi-line message stays one audit row (spec 21 §6.5)."""
+    return " ".join(text.split())[:80]
+
+
 def _dropped_image_path(line: str) -> str | None:
     """The path when the whole line is ONE token naming an existing picture — what a terminal
     pastes for a file dragged onto it (shell-quoted when the name has spaces). Anything else,
@@ -943,7 +949,7 @@ class OrchestratorREPL:
             agent_id=self._agent._config.name,
             session_id=self._agent.current_session_id,
             decision=decision.route.value, tier=decision.tier,
-            rule_or_reason=decision.reason, text_preview=clean[:80],
+            rule_or_reason=decision.reason, text_preview=_route_preview(clean),
         ))
         if decision.route is input_router.Route.NUDGE:
             self._agent.push_user_nudge(clean)
@@ -990,7 +996,7 @@ class OrchestratorREPL:
                 agent_id=self._agent._config.name,
                 session_id=self._agent.current_session_id,
                 decision=decision.route.value, tier=decision.tier,
-                rule_or_reason=decision.reason, text_preview=clean[:80],
+                rule_or_reason=decision.reason, text_preview=_route_preview(clean),
             ))
 
     async def _play_next_from_fifo(self) -> None:

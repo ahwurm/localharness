@@ -742,7 +742,7 @@ def _build_input_app(
     bottom.append(_wall("╯"))
     body = HSplit([
         VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
-        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, style="class:input"), _wall("│")]),
+        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, height=Dimension(max=8), style="class:input"), _wall("│")]),
         VSplit(bottom),
     ], style="class:frame")
 
@@ -888,7 +888,7 @@ def _build_persistent_input_app(
 
     frame = HSplit([
         VSplit([_wall("╭"), Window(char="─", height=1), _wall("╮")]),
-        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, style="class:input"), _wall("│")]),
+        VSplit([_wall("│"), Window(control, wrap_lines=True, dont_extend_height=True, height=Dimension(max=8), style="class:input"), _wall("│")]),
         VSplit([_wall("╰"), Window(char="─", height=1), _wall("╯")]),
     ], style="class:frame")
     # Footer UNDER the closed box — where Claude Code / Codex / Gemini / Cline put the key hints
