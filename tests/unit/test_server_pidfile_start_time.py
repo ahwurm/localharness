@@ -121,6 +121,31 @@ def test_start_server_writes_a_bare_pid_when_proc_cannot_be_read(tmp_path, monke
     assert server.pid_path(tmp_path).read_text(encoding="utf-8") == "4242"
 
 
+def test_start_server_refuses_while_the_pidfile_names_a_live_process(tmp_path, monkeypatch, popen):  # noqa: F811
+    """A second launch would replace the pidfile and orphan the first heavy: nothing starts, and the
+    pidfile (the only handle on the live process) is left as it was."""
+    monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)
+    pidfile(tmp_path, "4242 777")
+    proc_says(monkeypatch, 777)
+
+    with pytest.raises(RuntimeError, match=r"names a live process \(pid 4242, .*\) — not starting a second server"):
+        server.start_server(tmp_path, ["true"])
+
+    assert popen == []
+    assert server.pid_path(tmp_path).read_text(encoding="utf-8") == "4242 777"
+    assert not server.log_path(tmp_path).exists()
+
+
+def test_start_server_launches_over_a_stale_pidfile(tmp_path, monkeypatch, popen):  # noqa: F811
+    """A reused pid (a different start time) is the harness's own server gone: nothing live to protect."""
+    monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)
+    pidfile(tmp_path, "4242 777")
+    proc_says(monkeypatch, 778)
+
+    assert server.start_server(tmp_path, ["true"]) == 4242
+    assert len(popen) == 1
+
+
 # ------------------------------------------------------------------------------- server_pid
 
 
