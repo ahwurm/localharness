@@ -19,6 +19,7 @@ import types
 from contextlib import contextmanager
 from io import StringIO
 
+import pytest
 from prompt_toolkit.application import create_app_session
 from pathlib import Path
 
@@ -103,7 +104,7 @@ class TestHintFrame:
         assert "working" not in self._text(ch._box_hint_frags()), "footer no longer carries it"
         assert "working" in self._text(ch._box_status_frags()), "status row does"
         # the legend follows the mode: a running turn is when nudge/stop matter
-        assert "queued (2) · alt+enter nudge · ctrl+c stop" in self._text(ch._box_hint_frags())
+        assert "queued (2) · !text or alt+enter nudge · ctrl+c stop" in self._text(ch._box_hint_frags())
         ch.box_notify_working(False)
         assert "nudge" not in self._text(ch._box_hint_frags())
 
@@ -349,7 +350,9 @@ class TestPersistentAppKeybindings:
         assert interrupts == []
 
     async def test_bang_prefix_passed_through_untouched(self):
-        # the box does not strip '!'; that is the router's job (kept out of help/docs).
+        # the box does not strip '!'; that is the router's job. The `!` form is documented now
+        # (the legend, /help and the README; spec 21 DEC21-bang-documented), and the box still
+        # passes it through untouched.
         subs, _i, _e = await self._drive("!keep going\r\x04")
         assert subs == ["!keep going"]
 
@@ -1072,3 +1075,142 @@ class TestPendingHotkeys:
                 assert ch._present() is True, "the key press reached the presence hook"
             finally:
                 await ch.stop_input_box()
+
+
+def _keyed_channel(keys: TerminalKeysConfig | None = None) -> TerminalChannel:
+    ch = _channel()
+    if keys is not None:
+        ch.keys = keys
+    ch._history = InMemoryHistory()
+    return ch
+
+
+async def _run_live_box(ch: TerminalChannel, feed: str, *, expect: int = 1) -> list:
+    """Start the real persistent box on a pipe input, feed it, return the first `expect` events."""
+    q: asyncio.Queue = asyncio.Queue()
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        await ch.start_input_box(q, on_interrupt=lambda: None)
+        try:
+            inp.send_text(feed)
+            return [await asyncio.wait_for(q.get(), timeout=10.0) for _ in range(expect)]
+        finally:
+            await ch.stop_input_box()
+
+
+_WORKING_LEGENDS = [
+    (["alt-enter"], "  !text or alt+enter nudge · ctrl+c stop"),
+    (["ctrl-o"], "  !text or ctrl+o nudge · ctrl+c stop"),
+    ([], "  !text nudge · ctrl+c stop"),
+    (["shift-enter", "ctrl-o"], "  !text, shift+enter or ctrl+o nudge · ctrl+c stop"),
+]
+
+
+class TestKeysOnTheChannel:
+    """The channel carries the machine's keys, the Shift+Enter flag and the legend (spec 21 §6.6, §7)."""
+
+    def _text(self, ch: TerminalChannel) -> str:
+        return "".join(t for _style, t in ch._box_hint_frags())
+
+    def test_channel_keys_default_to_the_model_defaults(self):
+        ch = TerminalChannel(EventBus(), {})
+        assert ch.keys == TerminalKeysConfig()
+        assert ch.shift_enter_seen is False
+        mine = TerminalKeysConfig(nudge=["ctrl-o"])
+        assert TerminalChannel(EventBus(), {}, keys=mine).keys is mine
+
+    def test_keys_help_state_is_none_while_the_box_is_off(self):
+        ch = _channel()
+        assert ch._box_active is False
+        assert ch.keys_help_state() is None
+        ch._box_active = True
+        assert ch.keys_help_state() == (ch.keys, False)
+
+    def test_note_newline_chord_counts_only_shift_enter(self):
+        ch = _channel()
+        for other in ("alt-enter", "ctrl-g", "ctrl-o"):
+            ch._note_newline_chord(other)
+        assert ch.shift_enter_seen is False
+        ch._note_newline_chord("shift-enter")
+        assert ch.shift_enter_seen is True
+
+    async def test_shift_enter_seen_survives_a_box_restart(self):
+        ch = _keyed_channel()
+        q: asyncio.Queue = asyncio.Queue()
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            await ch.start_input_box(q, on_interrupt=lambda: None)
+            try:
+                assert ch.keys_help_state() == (ch.keys, False)
+                inp.send_text(f"a{_KITTY_SHIFT_ENTER}b\r")
+                assert await asyncio.wait_for(q.get(), timeout=10.0) == ("submit", "a\nb")
+                assert ch.keys_help_state() == (ch.keys, True)
+            finally:
+                await ch.stop_input_box()
+        assert ch.keys_help_state() is None
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            await ch.start_input_box(q, on_interrupt=lambda: None)
+            try:
+                assert ch.keys_help_state() == (ch.keys, True)
+            finally:
+                await ch.stop_input_box()
+
+    async def test_a_shift_enter_nudge_does_not_count_as_seen(self):
+        ch = _keyed_channel(TerminalKeysConfig(nudge=["shift-enter"]))
+        events = await _run_live_box(ch, f"go{_KITTY_SHIFT_ENTER}")
+        assert events == [("submit", "!go")]
+        assert ch.shift_enter_seen is False
+
+    async def test_a_ctrl_o_line_break_does_not_count_as_shift_enter(self):
+        ch = _keyed_channel(TerminalKeysConfig(newline=["shift-enter", "ctrl-o"]))
+        events = await _run_live_box(ch, f"a{_CTRL_O}b\r")
+        assert events == [("submit", "a\nb")]
+        assert ch.shift_enter_seen is False
+
+    async def test_read_input_hands_the_keys_to_the_classic_app(self, monkeypatch):
+        seen: dict = {}
+
+        class _App:
+            async def run_async(self):
+                return "typed"
+
+        def _fake(history, prompt, **kw):
+            seen.update(kw)
+            return _App()
+
+        monkeypatch.setattr(terminal_module, "_build_input_app", _fake)
+        ch = _keyed_channel(TerminalKeysConfig(nudge=["ctrl-o"]))
+        ch._history = InMemoryHistory()
+        assert await ch.read_input(">") == "typed"
+        assert seen["keys"] is ch.keys
+        assert seen["on_newline_chord"] == ch._note_newline_chord
+
+    @pytest.mark.parametrize(("nudge", "expected"), _WORKING_LEGENDS)
+    def test_working_legend_names_the_configured_nudge_chords(self, nudge, expected):
+        ch = _keyed_channel(TerminalKeysConfig(nudge=nudge))
+        ch._box_active = True
+        ch.box_notify_working(True)
+        assert self._text(ch) == expected
+
+    def test_a_queued_working_legend_keeps_the_count_first(self):
+        ch = _keyed_channel()
+        ch._box_active = True
+        ch.box_notify_working(True)
+        ch.box_set_queued(2)
+        assert "queued (2) · !text or alt+enter nudge · ctrl+c stop" in self._text(ch)
+
+    def test_idle_legend_names_the_backslash_line_break(self):
+        ch = _keyed_channel()
+        ch._box_active = True
+        assert self._text(ch) == "  tab commands · /help · \\ then enter newline"
+
+    def test_start_passes_the_machine_keys_to_the_channel(self):
+        source = (Path(__file__).parents[2] / "src" / "localharness" / "cli" / "start_cmd.py").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("= TerminalChannel(") + len("= TerminalChannel")
+        depth = 0
+        for end, char in enumerate(source[start:], start):
+            depth += char == "("
+            depth -= char == ")"
+            if depth == 0:
+                break
+        assert "keys=harness.terminal.keys" in source[start:end]
