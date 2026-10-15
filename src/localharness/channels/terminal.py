@@ -46,6 +46,7 @@ from localharness.channels.base import (
 from localharness.channels.errors import ChannelStartError
 from localharness.channels.keys import KEYS, install_wire_sequences, nudge_legend
 from localharness.cli.theme import ENTITY_STYLES, SITE_INK
+from localharness.config.chords import ChordName
 from localharness.config.models import TerminalKeysConfig
 from localharness.core.bus import EventBus
 from localharness.core.private_files import touch_private
@@ -373,7 +374,7 @@ def _wants_wire_sequences(keys: TerminalKeysConfig) -> bool:
 
 
 def _bind_newline_chords(
-    kb: KeyBindings, buf: Buffer, names: Sequence[str], on_newline_chord: Callable[[str], None],
+    kb: KeyBindings, buf: Buffer, names: Sequence[ChordName], on_newline_chord: Callable[[str], None],
     *, injected_prefix: str = "",
 ) -> None:
     """Bind each configured newline chord from the `KEYS` table (spec 21 §6.2). A chord means
@@ -385,7 +386,7 @@ def _bind_newline_chords(
     prefix is stranded in front of the next line."""
     for name in names:
 
-        def _newline(event, name: str = name) -> None:
+        def _newline(event, name: ChordName = name) -> None:
             if _picker_loan_live(buf, injected_prefix):
                 _replace_picker_loan(buf, "\n")
             else:

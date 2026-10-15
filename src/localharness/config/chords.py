@@ -15,7 +15,7 @@ ChordName = Literal["alt-enter", "shift-enter", "ctrl-g", "ctrl-o"]
 
 CHORD_NAMES: tuple[str, ...] = get_args(ChordName)
 
-LABELS: dict[str, str] = {
+LABELS: dict[ChordName, str] = {
     "alt-enter": "alt+enter",
     "shift-enter": "shift+enter",
     "ctrl-g": "ctrl+g",
