@@ -58,7 +58,7 @@ A terminal with no such binding (GNOME Terminal, Konsole, xterm), or anything un
 localharness components set terminal.keys.newline ctrl-o
 ```
 
-If you would rather have Alt+Enter break the line, `localharness components set terminal.keys.newline alt-enter` does that in one command too. A list you set wins over one left at its default ([spec 21](docs/specs/21-terminal-keys.md) §5), so it takes Alt+Enter from the nudge (the `!` prefix remains), and `localharness components set terminal.keys.nudge ctrl-o` gives the nudge a chord again. A change applies at the next `localharness start`. If you wrote both lists into `config.yaml` yourself, the order matters: move a chord out of one list before you add it to the other.
+If you would rather have Alt+Enter break the line, `localharness components set terminal.keys.newline alt-enter` does that in one command too. A list you set wins over one left at its default ([spec 21](docs/specs/21-terminal-keys.md) §5), so it takes Alt+Enter from the nudge (the `!` prefix remains), and `localharness components set terminal.keys.nudge ctrl-o` gives the nudge a chord again. A change applies at the next `localharness start`.
 
 ## Supported runtimes
 
