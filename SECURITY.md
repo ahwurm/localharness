@@ -210,8 +210,10 @@ lower](#settings-a-project-may-only-lower)), prompts and agent structure, memory
 stricter permissions. The share of the model's window a tool result may fill is the same kind of
 setting: a project may only lower it. A setting that
 says where a request or a credential goes, which credential is sent, what program the harness starts
-or imports, or which file outside the project it writes belongs to your machine, so only your
-machine-level (global) `config.yaml` or `overrides.yaml` may set it. A repository you cloned must
+or imports, which file outside the project it writes, or what your own keys do (a project must not
+be able to rebind which key sends a line into a running turn on your terminal) belongs to your
+machine, so only your machine-level (global) `config.yaml` or `overrides.yaml` may set it. A
+repository you cloned must
 not be able to send your API key or your conversation to an address it picks, start a program of
 its choosing, or switch a protection off — and the address alone is enough to leak, because every
 message and every file the agent reads travels to it. A project's value for one of these settings
@@ -231,6 +233,7 @@ global config, a project's whole `proposer:` section is ignored. These are all o
   are sized by, and the folders searched for model files)
 - `effort_budget` (the whole section: the share of a reply's output headroom each reasoning level
   may spend)
+- `terminal.keys` (the whole section: which keys send a line into a running turn and which break the line)
 - `org.audit_log_path`
 - `org.hooks`
 - `org.enforce_capability_floor`
