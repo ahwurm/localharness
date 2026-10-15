@@ -25,6 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -303,3 +304,129 @@ def test_build_loader_is_untouched_so_its_six_external_callers_are_too():
         "_build_loader() must stay a bare ConfigLoader() — six external callers read it for the "
         f"GLOBAL harness config: {ast.unparse(call)}"
     )
+
+
+# ------------------------------------------------------------------ #
+# Spec 21 §5 / §10: `terminal.keys` changes apply at the next start, and say so
+# ------------------------------------------------------------------ #
+
+
+def test_set_terminal_keys_newline_says_it_applies_at_the_next_start(tmp_path, monkeypatch, fake_home):
+    """The box is built once, so the receipt adds the clause inside its existing parenthetical,
+    after the file note and a semicolon."""
+    layout = _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+
+    result = runner.invoke(app, ["components", "set", "terminal.keys.newline", "ctrl-o"])
+
+    assert result.exit_code == 0, result.output
+    assert "(the global overrides.yaml; applies at the next start)" in result.stdout, result.stdout
+    written = yaml.safe_load(layout.global_ovl.read_text())
+    assert written["terminal"]["keys"]["newline"] == "ctrl-o"
+
+
+def test_set_terminal_keys_json_says_applies_next_start(tmp_path, monkeypatch, fake_home):
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+
+    result = runner.invoke(app, ["components", "set", "--json", "terminal.keys.nudge", "ctrl-g"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["path"] == "terminal.keys.nudge"
+    assert payload["applies"] == "next-start"
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [("org.name", "SET-BY-CLI"), ("terminal.inputbox_enabled", "false")],
+)
+def test_set_another_path_has_no_next_start_clause(tmp_path, monkeypatch, fake_home, path, value):
+    """Only `terminal.keys` paths get the clause and the field; every other receipt, human and
+    JSON, is exactly what scripts have always read."""
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+
+    human = runner.invoke(app, ["components", "set", path, value])
+    assert human.exit_code == 0, human.output
+    assert "applies at the next start" not in human.stdout, human.stdout
+    assert "(the global overrides.yaml)" in human.stdout, human.stdout
+
+    as_json = runner.invoke(app, ["components", "set", "--json", path, value])
+    assert as_json.exit_code == 0, as_json.output
+    payload = json.loads(as_json.stdout)
+    assert "applies" not in payload
+    assert sorted(payload) == ["after", "before", "layer", "path", "target"]
+
+
+def _read_keys(path: str):
+    """`components get --json <path>` -> the effective value."""
+    result = runner.invoke(app, ["components", "get", "--json", path])
+    assert result.exit_code == 0, result.output
+    return json.loads(result.stdout)["value"]
+
+
+def test_set_terminal_keys_receipt_reports_the_effective_list_as_after(tmp_path, monkeypatch, fake_home):
+    """`before` and `after` are one type for a chord list: the effective list, not the string typed."""
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+
+    as_json = runner.invoke(app, ["components", "set", "--json", "terminal.keys.newline", "alt-enter"])
+
+    assert as_json.exit_code == 0, as_json.output
+    payload = json.loads(as_json.stdout)
+    assert payload["before"] == ["shift-enter"]
+    assert payload["after"] == ["alt-enter"]
+    assert sorted(payload) == ["after", "applies", "before", "layer", "path", "target"]
+
+    human = runner.invoke(app, ["components", "set", "terminal.keys.nudge", "ctrl-o"])
+    assert human.exit_code == 0, human.output
+    assert "terminal.keys.nudge = ['ctrl-o']" in human.stdout, human.stdout
+
+
+def test_set_terminal_keys_one_at_a_time(tmp_path, monkeypatch, fake_home):
+    """DEC21-precedence through the real CLI: the first key set leaves the other list empty of the
+    chord it took, and the second set is then free to give that list a chord again."""
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+
+    first = runner.invoke(app, ["components", "set", "terminal.keys.newline", "alt-enter"])
+    assert first.exit_code == 0, first.output
+    assert _read_keys("terminal.keys.nudge") == []
+    assert _read_keys("terminal.keys.newline") == ["alt-enter"]
+
+    second = runner.invoke(app, ["components", "set", "terminal.keys.nudge", "ctrl-o"])
+    assert second.exit_code == 0, second.output
+    assert _read_keys("terminal.keys.nudge") == ["ctrl-o"]
+    assert _read_keys("terminal.keys.newline") == ["alt-enter"]
+
+
+def test_set_newline_ctrl_o_keeps_the_nudge(tmp_path, monkeypatch, fake_home):
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+
+    result = runner.invoke(app, ["components", "set", "terminal.keys.newline", "ctrl-o"])
+
+    assert result.exit_code == 0, result.output
+    assert _read_keys("terminal.keys.nudge") == ["alt-enter"]
+    assert _read_keys("terminal.keys.newline") == ["ctrl-o"]
+
+
+def test_set_newline_alt_enter_against_restated_defaults_succeeds(tmp_path, monkeypatch, fake_home):
+    """A config.yaml that restates both defaults has set neither list away from its default, so the
+    one-key change wins and takes Alt+Enter from the nudge (a list at its default value yields)."""
+    layout = _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+    config = dict(_GLOBAL_CONFIG)
+    config["terminal"] = {"keys": {"nudge": ["alt-enter"], "newline": ["shift-enter"]}}
+    (layout.global_dir / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    result = runner.invoke(app, ["components", "set", "terminal.keys.newline", "alt-enter"])
+
+    assert result.exit_code == 0, result.output
+    assert _read_keys("terminal.keys.nudge") == []
+    assert _read_keys("terminal.keys.newline") == ["alt-enter"]
+
+
+def test_set_terminal_keys_nudge_empty_string_empties_the_list(tmp_path, monkeypatch, fake_home):
+    layout = _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+
+    result = runner.invoke(app, ["components", "set", "terminal.keys.nudge", ""])
+
+    assert result.exit_code == 0, result.output
+    assert "applies at the next start" in result.stdout, result.stdout
+    assert _read_keys("terminal.keys.nudge") == []
+    assert yaml.safe_load(layout.global_ovl.read_text())["terminal"]["keys"]["nudge"] == ""

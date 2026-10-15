@@ -17,7 +17,15 @@ import yaml
 
 import localharness.cli.init_cmd as init_cmd
 from localharness.config.loader import ConfigLoader
-from localharness.config.models import ContextConfig, EndpointRef, HarnessConfig, ManagedServerConfig
+from localharness.config.models import (
+    ContextConfig,
+    EndpointRef,
+    HarnessConfig,
+    ManagedServerConfig,
+    TerminalConfig,
+    TerminalKeysConfig,
+)
+from localharness.config.overlay import deep_merge
 from localharness.provider import server as managed_server
 from localharness.provider.refarch import DGX_SPARK
 from tests.unit.test_init_core_setup import (
@@ -262,6 +270,58 @@ def test_a_harness_with_no_server_still_writes_server_null_and_empty_peers(tmp_p
     cfg = _written(tmp_path)
     assert cfg["server"] is None
     assert cfg["extra_endpoints"] == []
+
+
+def test_init_never_writes_a_defaulted_chord_list(tmp_path):
+    """A dumped chord list would read as the person's own and make the documented one-key change
+    refuse itself (spec 21 §5), so a default harness writes a terminal section with no `keys`."""
+    init_cmd._write_harness(tmp_path, _harness(), True)
+
+    terminal = _written(tmp_path)["terminal"]
+    assert "keys" not in terminal
+    assert terminal["inputbox_enabled"] is True
+
+
+def test_init_keeps_a_chord_list_the_person_set(tmp_path):
+    """A list the person set survives a re-init; the trimmed list beside it is not written."""
+    harness = _harness().model_copy(update={"terminal": TerminalConfig(
+        keys=TerminalKeysConfig(newline=["alt-enter"]))})
+    assert harness.terminal.keys.nudge == []  # trimmed, never set
+
+    init_cmd._write_harness(tmp_path, harness, True)
+
+    assert _written(tmp_path)["terminal"]["keys"] == {"newline": ["alt-enter"]}
+
+
+def test_a_fresh_init_accepts_the_one_command_line_break_change(tmp_path):
+    """After a default write, `components set terminal.keys.newline alt-enter` validates: the
+    overlay is merged into what init wrote, exactly as the setter's validation does."""
+    init_cmd._write_harness(tmp_path, _harness(), True)
+    written = _written(tmp_path)
+
+    merged = deep_merge(written, {"terminal": {"keys": {"newline": "alt-enter"}}})
+    reloaded = HarnessConfig.model_validate(merged)
+
+    assert reloaded.terminal.keys.newline == ["alt-enter"]
+    assert reloaded.terminal.keys.nudge == []
+
+
+def test_init_force_accepts_an_overrides_file_that_moved_a_chord(tmp_path):
+    """`init --force` validates the fresh harness's dump merged with the saved overrides. The dump
+    carries both defaulted lists; an overrides file holding the documented one-command change must
+    not turn them into a collision (spec 21 §5: a list at its default value yields)."""
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text(yaml.safe_dump({
+        "provider": {"default_model": "saved"},
+        "terminal": {"keys": {"newline": "alt-enter"}},
+    }), encoding="utf-8")
+
+    reset = init_cmd._saved_choices_reset(tmp_path, _harness())
+
+    assert reset is not None
+    _path, overlay, cleared = reset
+    assert cleared == ["provider.default_model"]
+    assert overlay["terminal"]["keys"] == {"newline": "alt-enter"}
 
 
 # ------------------------------------------------------------------ the carrier

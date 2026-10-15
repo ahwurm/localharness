@@ -242,6 +242,8 @@ def test_repl_slash_help():
     # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
     # AsyncMock answers truthy to every attribute it has never heard of.
     mock_channel.streams_tokens = False
+    # Likewise `/help` asks the channel for `keys_help_state`; only the terminal has one (None: no box).
+    mock_channel.keys_help_state = None
     mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()
@@ -949,6 +951,8 @@ def test_repl_slash_commands_no_user_message():
     # (`ChannelAdapter.streams_tokens`, default False, which is what the terminal keeps), and an
     # AsyncMock answers truthy to every attribute it has never heard of.
     mock_channel.streams_tokens = False
+    # Likewise `/help` asks the channel for `keys_help_state`; only the terminal has one (None: no box).
+    mock_channel.keys_help_state = None
     mock_loop = _make_mock_agent_loop()
     mock_bus = AsyncMock()
     mock_orch = _make_mock_orchestrator()

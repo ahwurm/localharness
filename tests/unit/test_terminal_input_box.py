@@ -13,22 +13,33 @@ is the first of its kind in this repo.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import types
 from contextlib import contextmanager
 from io import StringIO
 
+import pytest
 from prompt_toolkit.application import create_app_session
-from prompt_toolkit.history import InMemoryHistory
+from pathlib import Path
+
+from prompt_toolkit.history import FileHistory, InMemoryHistory
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.input.defaults import create_pipe_input
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout.controls import BufferControl
+from prompt_toolkit.layout.dimension import to_dimension
 from prompt_toolkit.output import DummyOutput
 
+import localharness.channels.terminal as terminal_module
 from localharness.channels.terminal import (
     PRESENCE_WINDOW_S,
     TERMINAL_THEME,
     TerminalChannel,
+    _build_input_app,
     _build_persistent_input_app,
 )
+from localharness.config.models import TerminalKeysConfig
 from localharness.core.bus import EventBus
 from localharness.core.events import ConsolidationFinished, ConsolidationStarted
 
@@ -93,7 +104,7 @@ class TestHintFrame:
         assert "working" not in self._text(ch._box_hint_frags()), "footer no longer carries it"
         assert "working" in self._text(ch._box_status_frags()), "status row does"
         # the legend follows the mode: a running turn is when nudge/stop matter
-        assert "queued (2) · alt+enter nudge · ctrl+c stop" in self._text(ch._box_hint_frags())
+        assert "queued (2) · !text or alt+enter nudge · ctrl+c stop" in self._text(ch._box_hint_frags())
         ch.box_notify_working(False)
         assert "nudge" not in self._text(ch._box_hint_frags())
 
@@ -255,6 +266,15 @@ class TestPromptEcho:
         assert "stop, wrong file" in out
         assert "→ nudge" in out
 
+    async def test_a_multi_line_echo_prints_its_rows(self):
+        ch = _channel()
+        ch._box_active = True
+        await ch.box_echo_prompt("a\nb")
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", self._out(ch))
+        rows = [row.strip() for row in plain.splitlines() if row.strip()]
+        assert rows[-2].endswith("a")
+        assert rows[-1] == "b"
+
     async def test_echo_escapes_user_markup(self):
         ch = _channel()
         ch._box_active = True
@@ -263,38 +283,64 @@ class TestPromptEcho:
         assert "[bold]not markup[/bold]" in self._out(ch)
 
 
+async def _drive_box(feed: str, *, models=None, keys=None, newline_fires=None, history=None):
+    """Run the persistent box on a pipe input and return (submissions, interrupts, eofs)."""
+    subs: list[str] = []
+    interrupts: list[bool] = []
+    eofs: list[bool] = []
+    holder: dict = {}
+
+    def on_submit(t: str) -> None:
+        subs.append(t)
+
+    def on_interrupt() -> None:
+        interrupts.append(True)
+
+    def on_eof() -> None:
+        eofs.append(True)
+        holder["app"].exit()
+
+    extra: dict = {}
+    if keys is not None:
+        extra["keys"] = keys
+    if newline_fires is not None:
+        extra["on_newline_chord"] = newline_fires.append
+
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()):
+            app = _build_persistent_input_app(
+                history if history is not None else InMemoryHistory(), ">",
+                on_submit=on_submit, on_interrupt=on_interrupt, on_eof=on_eof,
+                hint_fn=lambda: [("class:hint", " ")], right_fn=lambda: [],
+                status_fn=lambda: [],
+                model_names_fn=(lambda: list(models)) if models is not None else None,
+                **extra,
+            )
+            holder["app"] = app
+            inp.send_text(feed)
+            # wait_for guard: a feed that never reaches an exit key would otherwise hang the
+            # whole suite on this app instead of failing this one test.
+            await asyncio.wait_for(app.run_async(), timeout=10.0)
+    return subs, interrupts, eofs
+
+
+async def _drive_classic(feed: str, *, keys=None, newline_fires=None) -> str:
+    """Run the classic one-shot input app on a pipe input and return the line it exits with."""
+    extra: dict = {}
+    if keys is not None:
+        extra["keys"] = keys
+    if newline_fires is not None:
+        extra["on_newline_chord"] = newline_fires.append
+    with create_pipe_input() as inp:
+        with create_app_session(input=inp, output=DummyOutput()):
+            app = _build_input_app(InMemoryHistory(), ">", "", **extra)
+            inp.send_text(feed)
+            return await asyncio.wait_for(app.run_async(), timeout=10.0)
+
+
 class TestPersistentAppKeybindings:
     async def _drive(self, feed: str, models: list[str] | None = None):
-        subs: list[str] = []
-        interrupts: list[bool] = []
-        eofs: list[bool] = []
-        holder: dict = {}
-
-        def on_submit(t: str) -> None:
-            subs.append(t)
-
-        def on_interrupt() -> None:
-            interrupts.append(True)
-
-        def on_eof() -> None:
-            eofs.append(True)
-            holder["app"].exit()
-
-        with create_pipe_input() as inp:
-            with create_app_session(input=inp, output=DummyOutput()):
-                app = _build_persistent_input_app(
-                    InMemoryHistory(), ">",
-                    on_submit=on_submit, on_interrupt=on_interrupt, on_eof=on_eof,
-                    hint_fn=lambda: [("class:hint", " ")], right_fn=lambda: [],
-                    status_fn=lambda: [],
-                    model_names_fn=(lambda: list(models)) if models is not None else None,
-                )
-                holder["app"] = app
-                inp.send_text(feed)
-                # wait_for guard: a feed that never reaches an exit key would otherwise hang the
-                # whole suite on this app instead of failing this one test.
-                await asyncio.wait_for(app.run_async(), timeout=10.0)
-        return subs, interrupts, eofs
+        return await _drive_box(feed, models=models)
 
     async def test_enter_submits_without_exiting_and_resets(self):
         # two Enter-terminated lines then Ctrl+D — the app stays alive across both submits.
@@ -304,7 +350,9 @@ class TestPersistentAppKeybindings:
         assert interrupts == []
 
     async def test_bang_prefix_passed_through_untouched(self):
-        # the box does not strip '!'; that is the router's job (kept out of help/docs).
+        # the box does not strip '!'; that is the router's job. The `!` form is documented now
+        # (the legend, /help and the README; spec 21 DEC21-bang-documented), and the box still
+        # passes it through untouched.
         subs, _i, _e = await self._drive("!keep going\r\x04")
         assert subs == ["!keep going"]
 
@@ -364,6 +412,233 @@ class TestPersistentAppKeybindings:
         assert subs == ["rewrite the parser tests"]
 
 
+class TestBoxLineBreak:
+    """Backslash then Enter breaks the line with nothing configured (spec 21 §6.1)."""
+
+    async def test_backslash_enter_breaks_the_line(self):
+        subs, _i, _e = await _drive_box("x\\\ry\r\x04")
+        assert subs == ["x\ny"]
+
+    async def test_backslash_then_lf_breaks_the_line_too(self):
+        # Ctrl+J shares Enter's handler (it is Return on LF terminals), so it gets the rule too.
+        subs, _i, _e = await _drive_box("x\\\ny\n\x04")
+        assert subs == ["x\ny"]
+
+    async def test_double_backslash_submits_as_typed(self):
+        subs, _i, _e = await _drive_box("x\\\\\r\x04")
+        assert subs == ["x\\\\"]
+
+    async def test_backslash_space_submits_and_strips_to_one_backslash(self):
+        subs, _i, _e = await _drive_box("x\\ \r\x04")
+        assert subs == ["x\\ "]
+        assert subs[0].strip() == "x\\"
+
+    async def test_a_lone_backslash_becomes_a_line_break(self):
+        subs, _i, _e = await _drive_box("\\\ry\r\x04")
+        assert subs == ["\ny"]
+
+    async def test_backslash_enter_with_the_caret_mid_line_submits_as_typed(self):
+        # The caret is not at the end: the rule is off and the text goes as typed.
+        subs, _i, _e = await _drive_box("x\\\x1b[D\r\x04")
+        assert subs == ["x\\"]
+
+    async def test_a_completion_accepted_by_enter_wins_over_the_backslash(self, monkeypatch):
+        rows = [("/x\\", "first"), ("/x\\y", "second")]
+        monkeypatch.setattr("localharness.cli.slash_commands.all_rows", lambda: rows)
+        # `/x` + Tab opens the menu on `/x\`; the first Enter applies it (no break, no submit),
+        # then `z` + Enter submits `/x\z`.
+        subs, _i, _e = await _drive_box("/x\t\rz\r\x04")
+        assert subs == ["/x\\z"]
+
+
+# The two encodings of Shift+Enter that channels/keys.py installs (spec 21 §7).
+_KITTY_SHIFT_ENTER = "\x1b[13;2u"
+_XTERM_SHIFT_ENTER = "\x1b[27;2;13~"
+_CTRL_O = "\x0f"
+_CTRL_G = "\x07"
+_ALT_ENTER = "\x1b\r"
+
+
+class TestBoxChords:
+    """The nudge and line-break chords come from the table in channels/keys.py (spec 21 §6.2-§6.3)."""
+
+    async def test_shift_enter_both_encodings_make_one_message(self):
+        fires: list[str] = []
+        subs, _i, _e = await _drive_box(
+            f"a{_KITTY_SHIFT_ENTER}b{_XTERM_SHIFT_ENTER}c\r\x04", newline_fires=fires
+        )
+        assert subs == ["a\nb\nc"]
+        assert "\r" not in subs[0]
+        assert fires == ["shift-enter", "shift-enter"]
+
+    async def test_ctrl_o_nudge_chord_forces_and_alt_enter_submits_plainly(self):
+        keys = TerminalKeysConfig(nudge=["ctrl-o"])
+        subs, _i, _e = await _drive_box(f"go{_CTRL_O}go{_ALT_ENTER}\x04", keys=keys)
+        assert subs == ["!go", "go"]
+
+    async def test_ctrl_g_nudge_chord_forces(self):
+        keys = TerminalKeysConfig(nudge=["ctrl-g"])
+        subs, _i, _e = await _drive_box(f"go{_CTRL_G}\x04", keys=keys)
+        assert subs == ["!go"]
+
+    async def test_alt_enter_as_newline_breaks_and_with_menu_open_submits(self):
+        keys = TerminalKeysConfig(newline=["alt-enter"])
+        assert keys.nudge == []  # precedence took alt-enter out of the defaulted nudge list
+        fires: list[str] = []
+        subs, _i, _e = await _drive_box(
+            f"a{_ALT_ENTER}b\r\x04", keys=keys, newline_fires=fires
+        )
+        assert subs == ["a\nb"]
+        assert fires == ["alt-enter"]
+        # With the menu open the eager Escape dismisses it and the Enter submits, as for the nudge.
+        subs, _i, _e = await _drive_box(f"/m\t{_ALT_ENTER}\x04", keys=keys)
+        assert subs == ["/m"]
+
+    async def test_no_nudge_chord_leaves_bang_and_plain_alt_enter(self):
+        keys = TerminalKeysConfig(nudge=[])
+        subs, _i, _e = await _drive_box(f"go{_ALT_ENTER}!x\r\x04", keys=keys)
+        assert subs == ["go", "!x"]
+
+    async def test_shift_enter_as_nudge_forces_and_does_not_report_a_newline(self):
+        keys = TerminalKeysConfig(nudge=["shift-enter"])
+        assert keys.newline == []
+        fires: list[str] = []
+        subs, _i, _e = await _drive_box(
+            f"go{_KITTY_SHIFT_ENTER}\x04", keys=keys, newline_fires=fires
+        )
+        assert subs == ["!go"]
+        assert fires == []
+
+    async def test_without_shift_enter_the_table_is_untouched_and_xterm_form_is_enter(self):
+        keys = TerminalKeysConfig(newline=["alt-enter"], nudge=["ctrl-o"])
+        subs, _i, _e = await _drive_box(f"a{_XTERM_SHIFT_ENTER}\x04", keys=keys)
+        assert subs == ["a"]
+        assert ANSI_SEQUENCES[_XTERM_SHIFT_ENTER] == Keys.ControlM
+
+    async def test_without_the_prefix_cache_the_other_chords_still_work(self, monkeypatch):
+        # Simulate a prompt_toolkit that renamed the private prefix cache: the install writes
+        # nothing and says so. (Deleting the real attribute would break the parser itself, which
+        # reads it on every key.)
+        monkeypatch.setattr(terminal_module, "install_wire_sequences", lambda: False)
+        keys = TerminalKeysConfig(newline=["shift-enter", "ctrl-o"])
+        subs, _i, _e = await _drive_box(
+            f"a{_CTRL_O}b\\\rc\rx{_ALT_ENTER}\x04", keys=keys
+        )
+        assert subs == ["a\nb\nc", "!x"]
+        assert ANSI_SEQUENCES[_XTERM_SHIFT_ENTER] == Keys.ControlM
+
+    async def test_two_newline_chords_in_a_row(self):
+        keys = TerminalKeysConfig(newline=["shift-enter", "ctrl-o"])
+        subs, _i, _e = await _drive_box(f"a{_CTRL_O}{_CTRL_O}b\r\x04", keys=keys)
+        assert subs == ["a\n\nb"]
+
+    async def test_a_newline_chord_on_an_empty_line_submits_nothing(self):
+        keys = TerminalKeysConfig(newline=["shift-enter", "ctrl-o"])
+        subs, _i, eofs = await _drive_box(f"{_CTRL_O}\r\x04", keys=keys)
+        assert subs == []
+        assert eofs == [True]
+
+    async def test_a_newline_chord_inserts_at_the_caret(self):
+        keys = TerminalKeysConfig(newline=["shift-enter", "ctrl-o"])
+        subs, _i, _e = await _drive_box(f"ab\x1b[D{_CTRL_O}\r\x04", keys=keys)
+        assert subs == ["a\nb"]
+
+    async def test_a_newline_chord_with_a_highlighted_item_does_not_accept_it(self):
+        keys = TerminalKeysConfig(newline=["shift-enter", "ctrl-o"])
+        subs, _i, _e = await _drive_box(f"/m\t{_CTRL_O}x\r\x04", keys=keys)
+        assert subs == ["/m\nx"]
+
+    async def test_two_nudge_chords_both_force(self):
+        keys = TerminalKeysConfig(nudge=["alt-enter", "ctrl-o"])
+        subs, _i, _e = await _drive_box(f"a{_ALT_ENTER}b{_CTRL_O}\x04", keys=keys)
+        assert subs == ["!a", "!b"]
+
+    async def test_a_nudge_chord_on_a_blank_line_is_a_noop(self):
+        keys = TerminalKeysConfig(nudge=["alt-enter", "ctrl-o"])
+        subs, _i, eofs = await _drive_box(f"{_CTRL_O}   {_ALT_ENTER}\x04", keys=keys)
+        assert subs == []
+        assert eofs == [True]
+
+    async def test_a_nudge_chord_keeps_a_typed_bang(self):
+        subs, _i, _e = await _drive_box(f"!x{_ALT_ENTER}\x04")
+        assert subs == ["!!x"]
+
+    def test_no_literal_alt_enter_binding_outside_the_table(self):
+        import re
+
+        source = Path(terminal_module.__file__).read_text(encoding="utf-8")
+        assert not re.search(r"""["']escape["']\s*,\s*["']enter["']""", source)
+        assert "KEYS[" in source
+
+
+class TestClassicAppKeys:
+    """The classic app binds the newline chords only: it has no turn to steer (spec 21 §6.3)."""
+
+    async def test_alt_enter_is_a_plain_submit(self):
+        assert await _drive_classic(f"go{_ALT_ENTER}") == "go"
+
+    async def test_shift_enter_breaks_the_line(self):
+        fires: list[str] = []
+        got = await _drive_classic(f"a{_KITTY_SHIFT_ENTER}b\r", newline_fires=fires)
+        assert got == "a\nb"
+        assert fires == ["shift-enter"]
+
+    async def test_ctrl_o_newline_breaks_the_line(self):
+        keys = TerminalKeysConfig(newline=["ctrl-o"])
+        assert await _drive_classic(f"a{_CTRL_O}b\r", keys=keys) == "a\nb"
+
+    async def test_backslash_enter_breaks_the_line(self):
+        assert await _drive_classic("x\\\ry\r") == "x\ny"
+
+    async def test_double_backslash_submits_as_typed(self):
+        assert await _drive_classic("x\\\\\r") == "x\\\\"
+
+
+def _input_window(app):
+    """The one Window of the app whose content is the input BufferControl."""
+    found = [w for w in app.layout.find_all_windows() if isinstance(w.content, BufferControl)]
+    assert len(found) == 1
+    return found[0]
+
+
+class TestBoxHeightAndHistory:
+    """The input box stops growing at eight rows, and a multi-line message is one submission and one
+    history entry (spec 21 §6.4, §6.5)."""
+
+    def test_input_window_is_capped_at_eight_rows(self):
+        with create_pipe_input() as inp:
+            with create_app_session(input=inp, output=DummyOutput()):
+                classic = _build_input_app(InMemoryHistory(), ">", "")
+                persistent = _build_persistent_input_app(
+                    InMemoryHistory(), ">",
+                    on_submit=lambda _t: None, on_interrupt=lambda: None, on_eof=lambda: None,
+                    hint_fn=lambda: [], right_fn=lambda: [], status_fn=lambda: [],
+                )
+                for app in (classic, persistent):
+                    window = _input_window(app)
+                    assert to_dimension(window.height).max == 8
+                    # multiline stays off: prompt_toolkit's own Enter default is overridden anyway
+                    assert not window.content.buffer.multiline()
+
+    async def test_a_multi_line_message_is_one_history_entry(self, tmp_path):
+        feed = f"a{_KITTY_SHIFT_ENTER}b{_KITTY_SHIFT_ENTER}c\r\x04"
+        memory = InMemoryHistory()
+        subs, _i, _e = await _drive_box(feed, history=memory)
+        assert subs == ["a\nb\nc"]
+        assert memory.get_strings() == ["a\nb\nc"]
+        path = tmp_path / "history"
+        subs, _i, _e = await _drive_box(feed, history=FileHistory(str(path)))
+        assert subs == ["a\nb\nc"]
+        assert list(FileHistory(str(path)).load_history_strings()) == ["a\nb\nc"]
+
+    async def test_a_message_of_only_line_breaks_submits_nothing(self):
+        subs, _i, eofs = await _drive_box(
+            f"{_KITTY_SHIFT_ENTER}{_KITTY_SHIFT_ENTER}\r\x04"
+        )
+        assert subs == []
+        assert eofs == [True]
+
+
 class TestModelPickerBox:
     """box_open_model_menu writes into the LIVE box buffer — and it lands SECONDS after the user
     typed /model (the listing runs live probes first) or at an arbitrary moment when a queued
@@ -394,6 +669,44 @@ class TestModelPickerBox:
             # buffer shows its preview — Esc restores '/model ' and then clears it.
             assert buf.complete_state is not None
             assert buf.complete_state.current_completion is not None
+
+    async def test_a_single_key_newline_chord_takes_the_loan_back_and_strands_no_prefix(self):
+        """A newline chord pressed while the pre-fill is on loan is typing over it (#135): the
+        loan goes and the line feed takes its place, so the next line is not a /model command."""
+        ch = _channel()
+        ch._box_active = True
+        ch.model_names_fn = lambda: ["qwen-a", "qwen-b"]
+        subs: list[str] = []
+        holder: dict = {}
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            app = _build_persistent_input_app(
+                InMemoryHistory(), ">",
+                on_submit=subs.append, on_interrupt=lambda: None,
+                on_eof=lambda: holder["app"].exit(),
+                hint_fn=lambda: [], right_fn=lambda: [], status_fn=lambda: [],
+                model_names_fn=ch._model_names_for_menu,
+                keys=TerminalKeysConfig(newline=["ctrl-o"]),
+            )
+            holder["app"] = app
+            ch._box_app = app
+            buf = app._lh_input_buffer
+            task = asyncio.ensure_future(app.run_async())
+            await asyncio.sleep(0.05)
+            ch.box_open_model_menu()
+            await asyncio.sleep(0.05)
+            assert buf.text.startswith("/model ")
+            inp.send_text(_CTRL_O)
+            await asyncio.sleep(0.1)
+            assert "/model" not in buf.text
+            assert buf.text == "\n"
+            assert buf.complete_state is None
+            inp.send_text("hello\r")
+            await asyncio.sleep(0.1)
+            inp.send_text("\x04")
+            await asyncio.wait_for(task, timeout=10.0)
+        assert len(subs) == 1
+        assert not subs[0].lstrip().startswith("/model")
+        assert subs[0].strip() == "hello"
 
     async def test_picker_never_overwrites_a_line_being_typed(self):
         with self._box(["qwen-a", "qwen-b"]) as (ch, buf):
@@ -800,3 +1113,142 @@ class TestPendingHotkeys:
                 assert ch._present() is True, "the key press reached the presence hook"
             finally:
                 await ch.stop_input_box()
+
+
+def _keyed_channel(keys: TerminalKeysConfig | None = None) -> TerminalChannel:
+    ch = _channel()
+    if keys is not None:
+        ch.keys = keys
+    ch._history = InMemoryHistory()
+    return ch
+
+
+async def _run_live_box(ch: TerminalChannel, feed: str, *, expect: int = 1) -> list:
+    """Start the real persistent box on a pipe input, feed it, return the first `expect` events."""
+    q: asyncio.Queue = asyncio.Queue()
+    with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+        await ch.start_input_box(q, on_interrupt=lambda: None)
+        try:
+            inp.send_text(feed)
+            return [await asyncio.wait_for(q.get(), timeout=10.0) for _ in range(expect)]
+        finally:
+            await ch.stop_input_box()
+
+
+_WORKING_LEGENDS = [
+    (["alt-enter"], "  !text or alt+enter nudge · ctrl+c stop"),
+    (["ctrl-o"], "  !text or ctrl+o nudge · ctrl+c stop"),
+    ([], "  !text nudge · ctrl+c stop"),
+    (["shift-enter", "ctrl-o"], "  !text, shift+enter or ctrl+o nudge · ctrl+c stop"),
+]
+
+
+class TestKeysOnTheChannel:
+    """The channel carries the machine's keys, the Shift+Enter flag and the legend (spec 21 §6.6, §7)."""
+
+    def _text(self, ch: TerminalChannel) -> str:
+        return "".join(t for _style, t in ch._box_hint_frags())
+
+    def test_channel_keys_default_to_the_model_defaults(self):
+        ch = TerminalChannel(EventBus(), {})
+        assert ch.keys == TerminalKeysConfig()
+        assert ch.shift_enter_seen is False
+        mine = TerminalKeysConfig(nudge=["ctrl-o"])
+        assert TerminalChannel(EventBus(), {}, keys=mine).keys is mine
+
+    def test_keys_help_state_is_none_while_the_box_is_off(self):
+        ch = _channel()
+        assert ch._box_active is False
+        assert ch.keys_help_state() is None
+        ch._box_active = True
+        assert ch.keys_help_state() == (ch.keys, False)
+
+    def test_note_newline_chord_counts_only_shift_enter(self):
+        ch = _channel()
+        for other in ("alt-enter", "ctrl-g", "ctrl-o"):
+            ch._note_newline_chord(other)
+        assert ch.shift_enter_seen is False
+        ch._note_newline_chord("shift-enter")
+        assert ch.shift_enter_seen is True
+
+    async def test_shift_enter_seen_survives_a_box_restart(self):
+        ch = _keyed_channel()
+        q: asyncio.Queue = asyncio.Queue()
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            await ch.start_input_box(q, on_interrupt=lambda: None)
+            try:
+                assert ch.keys_help_state() == (ch.keys, False)
+                inp.send_text(f"a{_KITTY_SHIFT_ENTER}b\r")
+                assert await asyncio.wait_for(q.get(), timeout=10.0) == ("submit", "a\nb")
+                assert ch.keys_help_state() == (ch.keys, True)
+            finally:
+                await ch.stop_input_box()
+        assert ch.keys_help_state() is None
+        with create_pipe_input() as inp, create_app_session(input=inp, output=DummyOutput()):
+            await ch.start_input_box(q, on_interrupt=lambda: None)
+            try:
+                assert ch.keys_help_state() == (ch.keys, True)
+            finally:
+                await ch.stop_input_box()
+
+    async def test_a_shift_enter_nudge_does_not_count_as_seen(self):
+        ch = _keyed_channel(TerminalKeysConfig(nudge=["shift-enter"]))
+        events = await _run_live_box(ch, f"go{_KITTY_SHIFT_ENTER}")
+        assert events == [("submit", "!go")]
+        assert ch.shift_enter_seen is False
+
+    async def test_a_ctrl_o_line_break_does_not_count_as_shift_enter(self):
+        ch = _keyed_channel(TerminalKeysConfig(newline=["shift-enter", "ctrl-o"]))
+        events = await _run_live_box(ch, f"a{_CTRL_O}b\r")
+        assert events == [("submit", "a\nb")]
+        assert ch.shift_enter_seen is False
+
+    async def test_read_input_hands_the_keys_to_the_classic_app(self, monkeypatch):
+        seen: dict = {}
+
+        class _App:
+            async def run_async(self):
+                return "typed"
+
+        def _fake(history, prompt, **kw):
+            seen.update(kw)
+            return _App()
+
+        monkeypatch.setattr(terminal_module, "_build_input_app", _fake)
+        ch = _keyed_channel(TerminalKeysConfig(nudge=["ctrl-o"]))
+        ch._history = InMemoryHistory()
+        assert await ch.read_input(">") == "typed"
+        assert seen["keys"] is ch.keys
+        assert seen["on_newline_chord"] == ch._note_newline_chord
+
+    @pytest.mark.parametrize(("nudge", "expected"), _WORKING_LEGENDS)
+    def test_working_legend_names_the_configured_nudge_chords(self, nudge, expected):
+        ch = _keyed_channel(TerminalKeysConfig(nudge=nudge))
+        ch._box_active = True
+        ch.box_notify_working(True)
+        assert self._text(ch) == expected
+
+    def test_a_queued_working_legend_keeps_the_count_first(self):
+        ch = _keyed_channel()
+        ch._box_active = True
+        ch.box_notify_working(True)
+        ch.box_set_queued(2)
+        assert "queued (2) · !text or alt+enter nudge · ctrl+c stop" in self._text(ch)
+
+    def test_idle_legend_names_the_backslash_line_break(self):
+        ch = _keyed_channel()
+        ch._box_active = True
+        assert self._text(ch) == r"  tab commands · /help · \ then enter newline"
+
+    def test_start_passes_the_machine_keys_to_the_channel(self):
+        source = (Path(__file__).parents[2] / "src" / "localharness" / "cli" / "start_cmd.py").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("= TerminalChannel(") + len("= TerminalChannel")
+        depth = 0
+        for end, char in enumerate(source[start:], start):
+            depth += char == "("
+            depth -= char == ")"
+            if depth == 0:
+                break
+        assert "keys=harness.terminal.keys" in source[start:end]
