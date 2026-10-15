@@ -457,9 +457,9 @@ async def persist_active_endpoint(
     writing (so a bad record can never brick the next config load), then ``atomic_write_overlay``.
     Also mutates the in-memory ``harness`` so the live session view stays consistent.
 
-    NOTE (follow-up): the ``start`` path does not yet READ ``active_endpoint`` back — a restart
-    currently resumes on the primary provider. Wiring that resume entangles the managed-server
-    fallback in ``start_cmd`` and is a separate step; this write is the durable, reversible half.
+    ``start`` reads ``active_endpoint`` back as the ladder's last-success rung (spec 20 §8.1); this
+    write is the durable, reversible half. A landing on the peer the record already names keeps its
+    ``effort``; any other switch drops it.
     """
     from localharness.config.models import ActiveSelection
 
@@ -475,12 +475,20 @@ async def persist_active_endpoint(
     # No key in this record: the key stays with the endpoint it belongs to, `active_endpoint` is not
     # read back at start, and a SecretStr cannot be written to YAML. A key an earlier version wrote
     # here would now sit beside another endpoint's address, so it goes.
-    # Nor an `effort`: the level belongs to the endpoint it was chosen on, so a switch drops the
-    # previous one and the new endpoint starts from its own record's default (spec §7.2).
-    if isinstance(new_overlay.get("active_endpoint"), dict):
+    # Nor an `effort` from ANOTHER endpoint: the level belongs to the endpoint it was chosen on, so a
+    # switch drops the previous one and the new endpoint starts from its own record's default (spec
+    # §7.2). Landing again on the peer the record already names is not a switch: its level stays
+    # (spec 20 §8.4, D-29), or a cold `start` would erase what `/effort` stored.
+    prior = new_overlay.get("active_endpoint")
+    keep_effort = (
+        isinstance(prior, dict)
+        and prior.get("name", "") == getattr(endpoint, "name", "")
+        and _norm_url(prior.get("base_url")) == _norm_url(endpoint.base_url))
+    kept_effort = prior.get("effort") if keep_effort else None
+    if isinstance(prior, dict):
         new_overlay["active_endpoint"] = {
-            k: v for k, v in new_overlay["active_endpoint"].items()
-            if k not in ("api_key", "effort")}
+            k: v for k, v in prior.items()
+            if k != "api_key" and (k != "effort" or keep_effort)}
     set_value_in_dict(new_overlay, "active_endpoint.name", getattr(endpoint, "name", ""))
     set_value_in_dict(new_overlay, "active_endpoint.base_url", endpoint.base_url)
     set_value_in_dict(new_overlay, "active_endpoint.provider_type", endpoint.provider_type)
@@ -498,7 +506,7 @@ async def persist_active_endpoint(
         provider_type=endpoint.provider_type,
         model=model,
         api_key=getattr(endpoint, "api_key", "none"),
-        effort=None,
+        effort=kept_effort,
     )
     return None
 

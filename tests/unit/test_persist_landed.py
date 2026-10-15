@@ -145,3 +145,30 @@ def test_an_unknown_outcome_is_refused_before_anything_is_written(components_hom
     assert _overlay_bytes(components_home) == before
     assert speed_stats.last_served(_ledger(components_home)) is None
     assert model_ops.LANDING_OUTCOMES == frozenset({"launch", "swap", "attach"})
+
+
+@pytest.mark.parametrize("outcome", ["launch", "swap"])
+def test_landing_on_the_peer_the_record_names_keeps_its_effort(components_home, outcome):
+    """A resumed peer's level is the person's: landing on the peer `active_endpoint` already names
+    is not a switch, so the stored effort survives the landing on disk and in the live harness."""
+    stored = {**PEER_ACTIVE, "effort": "low"}
+    harness, records = _setup(components_home, overlay={"active_endpoint": stored})
+    assert harness.active_endpoint.effort == "low"
+
+    _land(harness, records["flash-next"], components_home, outcome=outcome)
+
+    overlay = load_overlay(components_home / "overrides.yaml")
+    assert overlay["active_endpoint"] == stored
+    assert harness.active_endpoint.effort == "low"
+
+
+def test_landing_on_a_different_peer_still_drops_the_old_level(components_home):
+    """A real switch (spec 16 §7.2): the level belongs to the endpoint it was chosen on."""
+    other = {**PEER_ACTIVE, "name": "elsewhere", "base_url": "http://127.0.0.1:9999/v1", "effort": "low"}
+    harness, records = _setup(components_home, overlay={"active_endpoint": other})
+
+    _land(harness, records["flash-next"], components_home, outcome="launch")
+
+    overlay = load_overlay(components_home / "overrides.yaml")
+    assert overlay["active_endpoint"] == PEER_ACTIVE
+    assert harness.active_endpoint.effort is None
