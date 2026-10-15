@@ -258,6 +258,60 @@ def test_a_matching_process_still_gets_term_then_kill(tmp_path, monkeypatch):
     assert signals == [signal.SIGTERM, signal.SIGKILL]
 
 
+def test_a_process_read_whose_start_differs_from_the_pidfiles_is_refused_not_signalled(tmp_path, monkeypatch):
+    """A pid reused between the stat check and the identity read: the record read is another process,
+    and it matches the identity by chance. The pidfile's start time is the pin."""
+    signals = _signals(monkeypatch)
+    monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)
+    proc_says(monkeypatch, 777)  # the stat gate passes
+    pidfile(tmp_path, "4242 777")
+    monkeypatch.setattr(
+        procfs, "read_process",
+        lambda pid, **kw: ProcRecord(pid, os.getuid(), ("python3",), "/usr/bin/python3", None, 888,
+                                     None, None, (), sid=pid))
+
+    with pytest.raises(RuntimeError, match="not a harness launch"):
+        server.stop_server(tmp_path, expect=IDENT)
+
+    assert signals == []
+    assert server.pid_path(tmp_path).exists()
+
+
+def test_a_bare_pid_pidfile_adopts_the_verified_start_for_the_rest_of_the_stop(tmp_path, monkeypatch):
+    """A 0.17 pidfile has no start time: the one just verified is pinned, so the SIGKILL re-check and the
+    confirm poll cannot reach a pid that was reused during the grace."""
+    signals = _signals(monkeypatch)
+    monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)
+    proc_says(monkeypatch, 777)
+    pidfile(tmp_path, "4242")
+    proc_matches(monkeypatch)  # the process read has start time 777
+    seen: list = []
+    monkeypatch.setattr(server, "_alive", lambda pid, start=None: seen.append(start) or True)
+
+    def wait_dead(pid, attempts, poll_seconds=0.5, *, start=None):
+        seen.append(("wait", start))
+        return True
+
+    monkeypatch.setattr(server, "_wait_dead", wait_dead)
+    assert server.stop_server(tmp_path, timeout_seconds=0.1, expect=IDENT) is True
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert set(seen) == {777, ("wait", 777)}
+
+
+def test_a_launch_whose_process_start_differs_from_the_pidfiles_is_not_verified(tmp_path, monkeypatch):
+    proc_says(monkeypatch, 777)
+    pidfile(tmp_path, "4242 777 8080")
+    proc_matches(monkeypatch)
+    assert procfs.read_launch(tmp_path, expect=IDENT, stat_reader=lambda pid: stat_line(pid, 777)).verified
+    monkeypatch.setattr(
+        procfs, "read_process",
+        lambda pid, **kw: ProcRecord(pid, os.getuid(), ("python3",), "/usr/bin/python3", None, 888,
+                                     None, None, (), sid=pid))
+    launch = procfs.read_launch(tmp_path, expect=IDENT, stat_reader=lambda pid: stat_line(pid, 777))
+    assert launch is not None and launch.verified is False
+
+
 def test_alive_is_false_for_a_reused_pid_and_true_for_the_recorded_one(monkeypatch):
     monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)
     proc_says(monkeypatch, 777)

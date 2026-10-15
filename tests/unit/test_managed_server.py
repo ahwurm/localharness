@@ -195,7 +195,9 @@ def test_stop_binary_raises_when_the_process_outlives_sigkill(tmp_path, monkeypa
     server.server_dir(tmp_path).mkdir(parents=True)
     server.pid_path(tmp_path).write_text("4242")
     monkeypatch.setattr(server, "server_pid", lambda _cd: 4242)
-    monkeypatch.setattr(server, "_alive", lambda _pid: True)  # never dies
+    monkeypatch.setattr(server, "_alive", lambda _pid, **kw: True)  # never dies
+    # a bare-pid pidfile adopts the start time of the process just verified, which stays the same one
+    monkeypatch.setattr(server, "_proc_start_time", lambda _pid: 777)
     monkeypatch.setattr(server.os, "killpg", lambda pid, sig: signals.append(sig))
     monkeypatch.setattr(server.time, "sleep", lambda s: None)
     proc_matches(monkeypatch)
