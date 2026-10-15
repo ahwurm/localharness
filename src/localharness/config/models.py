@@ -19,6 +19,7 @@ from pydantic import (
 )
 
 from localharness.agent.gate_types import DEFAULT_MODE, GateSettings, Mode
+from localharness.config.chords import ChordName
 from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS, MAX_CONFIGURABLE_MAX_TOKENS
 
 HOSTNAME_RE = re.compile(
@@ -2311,6 +2312,89 @@ class ManagedServerConfig(BaseModel):
         return self
 
 
+def _keys_collision_line(chord: str, nudge: list[str], newline: list[str]) -> str:
+    """The one refusal line for a chord that two set lists share (spec 21 §5).
+
+    It offers the first of `ctrl-o`, `ctrl-g` that neither list uses, as the list the colliding
+    chord calls home (`newline` for `shift-enter`, `nudge` for every other chord), so following
+    the example and then retrying the person's own change succeeds. With neither free the example
+    is left out. Only vocabulary names and constants go into the line."""
+    head = f"terminal.keys: {chord} is in both nudge and newline — set one list without it first"
+    free = next((c for c in ("ctrl-o", "ctrl-g") if c not in nudge and c not in newline), None)
+    if free is None:
+        return f"{head}, then retry"
+    home = "newline" if chord == "shift-enter" else "nudge"
+    return f"{head} (e.g. localharness components set terminal.keys.{home} {free}), then retry"
+
+
+class TerminalKeysConfig(BaseModel):
+    """The chords for the nudge and the line break in the terminal box (spec 21 §5). Nested on
+    `TerminalConfig` as `keys`; machine-level only."""
+    model_config = ConfigDict(frozen=False, extra="forbid")
+
+    nudge: list[ChordName] = Field(
+        default_factory=lambda: ["alt-enter"],
+        description=(
+            "Chords that send the typed line into the running turn now (a nudge): alt-enter, "
+            "shift-enter, ctrl-g or ctrl-o. A list or a comma-separated string is read. An empty "
+            "list leaves the typed `!` prefix as the only way to nudge. A list you set takes its "
+            "chords from the newline list when that one is at its default. Applies at the next "
+            "start. Mutable via `localharness components set terminal.keys.nudge <chords>`. "
+            "Machine-level only."
+        ),
+    )
+    newline: list[ChordName] = Field(
+        default_factory=lambda: ["shift-enter"],
+        description=(
+            "Chords that insert a line break in the box: alt-enter, shift-enter, ctrl-g or "
+            "ctrl-o. A list or a comma-separated string is read. An empty list leaves "
+            "backslash-then-Enter as the only way to break a line. A list you set takes its "
+            "chords from the nudge list when that one is at its default. Applies at the next "
+            "start. Mutable via `localharness components set terminal.keys.newline <chords>`. "
+            "Machine-level only."
+        ),
+    )
+
+    @field_validator("nudge", "newline", mode="before")
+    @classmethod
+    def _read_comma_string(cls, v: Any) -> Any:
+        """A string reads as a comma-separated list; blank pieces are dropped, so a blank string
+        is the empty list. Anything else goes to pydantic unchanged."""
+        if isinstance(v, str):
+            return [piece.strip() for piece in v.split(",") if piece.strip()]
+        return v
+
+    @field_validator("nudge", "newline", mode="after")
+    @classmethod
+    def _keep_each_chord_once(cls, v: list[str]) -> list[str]:
+        """A chord repeated in one list is kept once, in first-seen order. Done after element
+        validation, so a non-hashable raw element is a validation error, never a TypeError."""
+        return list(dict.fromkeys(v))
+
+    @model_validator(mode="after")
+    def _resolve_precedence(self) -> "TerminalKeysConfig":
+        """A list the person set wins over a list still at its default: the chords it names leave
+        the defaulted list, silently. Two set lists that share a chord are refused. `model_fields_set`
+        is read before anything is written, and the trimmed list goes in with `object.__setattr__`:
+        a plain assignment would add the field to that set and make it look as if the person wrote
+        it, so a later validation of the dump would see both lists as set."""
+        fields_set = set(self.model_fields_set)
+        if "nudge" in fields_set and "newline" in fields_set:
+            shared = next((c for c in self.nudge if c in self.newline), None)
+            if shared is not None:
+                raise ValueError(_keys_collision_line(shared, self.nudge, self.newline))
+            return self
+        if "nudge" in fields_set:
+            trimmed = [c for c in self.newline if c not in self.nudge]
+            if trimmed != self.newline:
+                object.__setattr__(self, "newline", trimmed)
+        elif "newline" in fields_set:
+            trimmed = [c for c in self.nudge if c not in self.newline]
+            if trimmed != self.nudge:
+                object.__setattr__(self, "nudge", trimmed)
+        return self
+
+
 class TerminalConfig(BaseModel):
     """Interactive terminal-REPL behavior (type-anytime input box). Nested on HarnessConfig
     as `terminal`; both switches default ON."""
@@ -2342,6 +2426,13 @@ class TerminalConfig(BaseModel):
             "think); without one the thinking arrives as inline <think> text that the harness "
             "strips. `localharness start --show-reasoning` turns it on for one session; "
             "/reasoning toggles it live."
+        ),
+    )
+    keys: TerminalKeysConfig = Field(
+        default_factory=TerminalKeysConfig,
+        description=(
+            "The chords for the nudge and the line break in the terminal box (spec 21 §5). "
+            "Machine-level only."
         ),
     )
 
