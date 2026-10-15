@@ -44,7 +44,7 @@ from localharness.channels.base import (
     sanitize_for_display,
 )
 from localharness.channels.errors import ChannelStartError
-from localharness.channels.keys import KEYS, install_wire_sequences
+from localharness.channels.keys import KEYS, install_wire_sequences, nudge_legend
 from localharness.cli.theme import ENTITY_STYLES, SITE_INK
 from localharness.config.models import TerminalKeysConfig
 from localharness.core.bus import EventBus
@@ -1606,6 +1606,7 @@ class TerminalChannel(ChannelAdapter):
         app = _build_input_app(
             self._history, prompt, hint=hint, context_pct=self._context_pct,
             model_names_fn=self._model_names_for_menu, on_paste_image=self.on_paste_image,
+            keys=self.keys, on_newline_chord=self._note_newline_chord,
         )
         try:
             line = await app.run_async()
@@ -1678,6 +1679,7 @@ class TerminalChannel(ChannelAdapter):
             model_names_fn=self._model_names_for_menu,
             pending_fn=self._box_pending_frags, on_pending_answer=_on_pending_answer,
             on_keystroke=self._note_keystroke, on_paste_image=self.on_paste_image,
+            keys=self.keys, on_newline_chord=self._note_newline_chord,
         )
         self._box_patch = patch_stdout(raw=True)
         self._box_patch.__enter__()
@@ -1821,6 +1823,13 @@ class TerminalChannel(ChannelAdapter):
             if restart is not None:
                 await self.start_input_box(*restart)
 
+    def _note_newline_chord(self, name: str) -> None:
+        """The input apps call this each time a newline chord fires as a line break. Only a
+        Shift+Enter counts: a `shift-enter` nudge chord never calls it, and another chord's line
+        break says nothing about whether Shift+Enter reaches the harness (spec 21 section 7)."""
+        if name == "shift-enter":
+            self.shift_enter_seen = True
+
     def keys_help_state(self) -> tuple[TerminalKeysConfig, bool] | None:
         """The one accessor `/help` reads: the configured keys and whether a Shift+Enter has
         broken a line this session. None means the persistent box is not live, so `/help` shows
@@ -1864,15 +1873,20 @@ class TerminalChannel(ChannelAdapter):
     def _box_hint_frags(self) -> list[tuple[str, str]]:
         """Footer-left: the transient routing-decision flash, else the key legend for the box's
         CURRENT mode — the type-anytime semantics are invisible otherwise. While a turn runs:
-        `queued (N)` when lines wait, then the two keys that matter (alt+enter forces a nudge,
-        ctrl+c stops the turn); idle: tab lists the commands. (The first-run hint moved into
-        the box as its placeholder — _box_placeholder.)"""
+        `queued (N)` when lines wait, then the nudge spellings (the typed `!text` form plus the
+        configured chords' labels, via `nudge_legend`) and ctrl+c to stop; idle: tab lists the
+        commands, `/help`, and the backslash line break. (The first-run hint moved into the box
+        as its placeholder — _box_placeholder.)"""
         if self._decision_flash:
             return [("class:caret", f"  {self._decision_flash}")]
         parts: list[str] = []
         if self._queued_count:
             parts.append(f"queued ({self._queued_count})")
-        parts.append("alt+enter nudge · ctrl+c stop" if self._box_working else "tab commands · /help")
+        parts.append(
+            nudge_legend(self.keys.nudge) + " · ctrl+c stop"
+            if self._box_working
+            else "tab commands · /help · \\ then enter newline"
+        )
         return [("class:hint", "  " + " · ".join(parts))]
 
     def _box_pending_frags(self) -> list[tuple[str, str]]:
