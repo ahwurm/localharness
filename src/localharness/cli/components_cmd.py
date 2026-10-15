@@ -598,21 +598,24 @@ def components_set(
     # 8. Confirm, and SAY WHERE IT WENT. The write target has always been the global
     #    overrides.yaml; F4 is that nothing said so at the moment it happened, so a user standing
     #    in a project could reconfigure the whole machine believing they had touched this project.
+    # Spec 21 §5: the input box is built once, so a `terminal.keys` change only takes effect at
+    # the next `localharness start`; the receipt says so (a human clause and a JSON field), and no
+    # other path's output changes.
+    applies_next_start = path == "terminal.keys" or path.startswith("terminal.keys.")
     if json_output:
-        typer.echo(
-            _json.dumps(
-                {
-                    "path": path,
-                    "before": _serialize_value(before, secret),
-                    "after": _serialize_value(typed_value, secret),
-                    # `layer` is the ComponentMutated audit event's own, older vocabulary and is
-                    # NOT the registry band — renaming it would change a persisted log's schema.
-                    # `target` is the honest addition: the file that was actually written.
-                    "layer": "user",
-                    "target": str(overlay_path),
-                }
-            )
-        )
+        receipt = {
+            "path": path,
+            "before": _serialize_value(before, secret),
+            "after": _serialize_value(typed_value, secret),
+            # `layer` is the ComponentMutated audit event's own, older vocabulary and is
+            # NOT the registry band — renaming it would change a persisted log's schema.
+            # `target` is the honest addition: the file that was actually written.
+            "layer": "user",
+            "target": str(overlay_path),
+        }
+        if applies_next_start:
+            receipt["applies"] = "next-start"
+        typer.echo(_json.dumps(receipt))
     else:
         # `layer: user` used to close this line. It is dropped, not renamed: `user` is the audit
         # EVENT's vocabulary (kept in the JSON and in ComponentMutated), and as a band name shown
@@ -628,9 +631,10 @@ def components_set(
         )
         # escape(): a path is data, not markup — a folder named `[old] proj` must not be parsed
         # (41-06's measured lesson, same reason doctor and validate escape theirs).
-        console.print(
-            f"  wrote: {escape(str(overlay_path))}  [dim](the global overrides.yaml)[/dim]"
-        )
+        wrote_note = "the global overrides.yaml"
+        if applies_next_start:
+            wrote_note += "; applies at the next start"
+        console.print(f"  wrote: {escape(str(overlay_path))}  [dim]({wrote_note})[/dim]")
         if workspace is not None:
             console.print(
                 "  [yellow]note:[/yellow] this is a MACHINE-WIDE setting. It applies in every "

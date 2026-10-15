@@ -25,6 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -303,3 +304,53 @@ def test_build_loader_is_untouched_so_its_six_external_callers_are_too():
         "_build_loader() must stay a bare ConfigLoader() — six external callers read it for the "
         f"GLOBAL harness config: {ast.unparse(call)}"
     )
+
+
+# ------------------------------------------------------------------ #
+# Spec 21 §5 / §10: `terminal.keys` changes apply at the next start, and say so
+# ------------------------------------------------------------------ #
+
+
+def test_set_terminal_keys_newline_says_it_applies_at_the_next_start(tmp_path, monkeypatch, fake_home):
+    """The box is built once, so the receipt adds the clause inside its existing parenthetical,
+    after the file note and a semicolon."""
+    layout = _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+
+    result = runner.invoke(app, ["components", "set", "terminal.keys.newline", "ctrl-o"])
+
+    assert result.exit_code == 0, result.output
+    assert "(the global overrides.yaml; applies at the next start)" in result.stdout, result.stdout
+    written = yaml.safe_load(layout.global_ovl.read_text())
+    assert written["terminal"]["keys"]["newline"] == "ctrl-o"
+
+
+def test_set_terminal_keys_json_says_applies_next_start(tmp_path, monkeypatch, fake_home):
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+
+    result = runner.invoke(app, ["components", "set", "--json", "terminal.keys.nudge", "ctrl-g"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["path"] == "terminal.keys.nudge"
+    assert payload["applies"] == "next-start"
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [("org.name", "SET-BY-CLI"), ("terminal.inputbox_enabled", "false")],
+)
+def test_set_another_path_has_no_next_start_clause(tmp_path, monkeypatch, fake_home, path, value):
+    """Only `terminal.keys` paths get the clause and the field; every other receipt, human and
+    JSON, is exactly what scripts have always read."""
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+
+    human = runner.invoke(app, ["components", "set", path, value])
+    assert human.exit_code == 0, human.output
+    assert "applies at the next start" not in human.stdout, human.stdout
+    assert "(the global overrides.yaml)" in human.stdout, human.stdout
+
+    as_json = runner.invoke(app, ["components", "set", "--json", path, value])
+    assert as_json.exit_code == 0, as_json.output
+    payload = json.loads(as_json.stdout)
+    assert "applies" not in payload
+    assert sorted(payload) == ["after", "before", "layer", "path", "target"]
