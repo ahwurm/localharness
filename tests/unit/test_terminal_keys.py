@@ -26,6 +26,7 @@ from prompt_toolkit.layout.controls import BufferControl
 from prompt_toolkit.output import DummyOutput
 from pydantic import ValidationError
 
+from localharness.channels import keys as keys_mod
 from localharness.channels.keys import (
     KEYS,
     SHIFT_ENTER_KEY,
@@ -429,3 +430,196 @@ def test_the_chord_module_never_reads_a_device_or_sets_a_keyboard_mode():
     assert "sys.stdout.write" not in source
     assert "os.write" not in source
     assert "\x1b[>" not in source and "\x1b[=" not in source
+
+
+# --- the legend, the /help block and terminal detection (spec 21 §6.6, §6.7, §7, §8) ---------------
+
+KITTY_LINE = r"kitty.conf: map shift+enter send_text all \x1b[13;2u"
+GHOSTTY_LINE = r"config: keybind = shift+enter=text:\x1b[13;2u"
+WEZTERM_LINE = (
+    r'keys: { key = "Enter", mods = "SHIFT", action = wezterm.action.SendString("\x1b[13;2u") }'
+)
+ALACRITTY_LINE = r'[[keyboard.bindings]] key = "Enter", mods = "Shift", chars = "\u001b[13;2u"'
+FOOT_LINE = r"[text-bindings]: \x1b[13;2u=Shift+Return"
+ITERM_LINE = "Profiles → Keys → add Shift+Enter → Send Escape Sequence → [13;2u"
+VSCODE_LINE = (
+    r'keybindings.json: { "key": "shift+enter", "command": "workbench.action.terminal.sendSequence", '
+    r'"args": { "text": "\u001b[13;2u" }, "when": "terminalFocus" }'
+)
+WT_LINE = (
+    r'actions: { "command": { "action": "sendInput", "input": "\u001b[13;2u" }, '
+    r'"keys": "shift+enter" }'
+)
+ESC = "\x1b"
+COUNT = "send the line into the running turn (a nudge)"
+
+
+def _keys(**kw):
+    return TerminalKeysConfig(**kw)
+
+
+def _rows(block: str) -> list[str]:
+    lines = block.split("\n")
+    assert len(lines) == 3 and lines[0] == "Keys:"
+    assert lines[1].startswith("  ") and lines[2].startswith("  ")
+    return [lines[1][2:], lines[2][2:]]
+
+
+def test_nudge_legend_for_one_two_and_zero_names():
+    assert keys_mod.nudge_legend(["alt-enter"]) == "!text or alt+enter nudge"
+    assert keys_mod.nudge_legend(["shift-enter", "ctrl-o"]) == "!text, shift+enter or ctrl+o nudge"
+    assert keys_mod.nudge_legend([]) == "!text nudge"
+    assert keys_mod.nudge_legend(["alt-enter", "ctrl-g", "ctrl-o"]) == (
+        "!text, alt+enter, ctrl+g or ctrl+o nudge"
+    )
+
+
+@pytest.mark.parametrize(
+    ("env", "name", "line"),
+    [
+        ({"KITTY_WINDOW_ID": "1"}, "kitty", KITTY_LINE),
+        ({"TERM": "xterm-kitty"}, "kitty", KITTY_LINE),
+        ({"TERM_PROGRAM": "ghostty"}, "Ghostty", GHOSTTY_LINE),
+        ({"TERM": "xterm-ghostty"}, "Ghostty", GHOSTTY_LINE),
+        ({"TERM_PROGRAM": "WezTerm"}, "WezTerm", WEZTERM_LINE),
+        ({"TERM": "alacritty"}, "Alacritty", ALACRITTY_LINE),
+        ({"ALACRITTY_WINDOW_ID": "1234"}, "Alacritty", ALACRITTY_LINE),
+        ({"TERM": "foot"}, "foot", FOOT_LINE),
+        ({"TERM": "foot-extra"}, "foot", FOOT_LINE),
+        ({"TERM_PROGRAM": "iTerm.app"}, "iTerm2", ITERM_LINE),
+        ({"TERM_PROGRAM": "vscode"}, "VS Code", VSCODE_LINE),
+        ({"WT_SESSION": "abc"}, "Windows Terminal", WT_LINE),
+    ],
+)
+def test_detect_terminal_names_each_terminal(env, name, line):
+    assert keys_mod.detect_terminal(env) == (name, line)
+
+
+def test_detect_terminal_tmux_first():
+    assert keys_mod.detect_terminal({"TMUX": "/tmp/tmux-1/default,1,0", "KITTY_WINDOW_ID": "1"}) is None
+    assert keys_mod.detect_terminal({"TERM_PROGRAM": "tmux", "WT_SESSION": "abc"}) is None
+    # a variable present with an empty value counts as unset
+    assert keys_mod.detect_terminal({"TMUX": "", "KITTY_WINDOW_ID": "1"}) == ("kitty", KITTY_LINE)
+
+
+def test_detect_terminal_empty_environment():
+    assert keys_mod.detect_terminal({}) is None
+    assert keys_mod.detect_terminal({"TERM": "xterm-256color"}) is None
+    assert keys_mod.detect_terminal({"KITTY_WINDOW_ID": ""}) is None
+    assert keys_mod.detect_terminal({"TERM": "gnome-256color", "TERM_PROGRAM": "unknown"}) is None
+
+
+def test_every_setup_line_is_plain_text():
+    lines = [KITTY_LINE, GHOSTTY_LINE, WEZTERM_LINE, ALACRITTY_LINE, FOOT_LINE, ITERM_LINE,
+             VSCODE_LINE, WT_LINE]
+    seen = set()
+    for env in ({"KITTY_WINDOW_ID": "1"}, {"TERM_PROGRAM": "ghostty"}, {"TERM_PROGRAM": "WezTerm"},
+                {"TERM": "alacritty"}, {"TERM": "foot"}, {"TERM_PROGRAM": "iTerm.app"},
+                {"TERM_PROGRAM": "vscode"}, {"WT_SESSION": "x"}):
+        found = keys_mod.detect_terminal(env)
+        assert found is not None
+        name, line = found
+        assert line.isprintable() and ESC not in line
+        assert name.isprintable() and ESC not in name
+        seen.add(line)
+    assert seen == set(lines)
+
+
+def test_help_block_named_terminal_form():
+    block = keys_mod.help_block(
+        _keys(), terminal=keys_mod.detect_terminal({"KITTY_WINDOW_ID": "1"}), shift_enter_seen=False
+    )
+    assert block == (
+        "Keys:\n"
+        r"  \ then enter       line break. shift+enter submits until kitty is set up — "
+        r"kitty.conf: map shift+enter send_text all \x1b[13;2u"
+        "\n"
+        "  !text, alt+enter   send the line into the running turn (a nudge)"
+    )
+
+
+def test_help_block_seen_form():
+    block = keys_mod.help_block(
+        _keys(), terminal=keys_mod.detect_terminal({"KITTY_WINDOW_ID": "1"}), shift_enter_seen=True
+    )
+    assert _rows(block)[0] == r"\ then enter       line break — shift+enter too"
+    # seen outranks an unnamed terminal too
+    assert _rows(keys_mod.help_block(_keys(), terminal=None, shift_enter_seen=True))[0] == (
+        r"\ then enter       line break — shift+enter too"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kw", "row1"),
+    [
+        ({}, r"\ then enter       line break (or give ctrl+o to it: "
+             r"localharness components set terminal.keys.newline ctrl-o)"),
+        ({"nudge": ["ctrl-o"]}, r"\ then enter       line break (or give ctrl+g to it: "
+                                r"localharness components set terminal.keys.newline ctrl-g)"),
+        ({"nudge": ["ctrl-o", "ctrl-g"]}, r"\ then enter       line break"),
+        ({"newline": ["shift-enter", "ctrl-o"]}, r"\ then enter, ctrl+o   line break"),
+        ({"newline": ["ctrl-g"]}, r"\ then enter, ctrl+g   line break"),
+        ({"newline": ["alt-enter"]}, r"\ then enter, alt+enter   line break"),
+    ],
+)
+def test_help_block_route_form(kw, row1):
+    assert _rows(keys_mod.help_block(_keys(**kw), terminal=None, shift_enter_seen=False))[0] == row1
+
+
+def test_help_block_route_form_second_row_follows_the_nudge_list():
+    rows = _rows(keys_mod.help_block(_keys(nudge=["ctrl-o"]), terminal=None, shift_enter_seen=False))
+    assert rows[1] == f"!text, ctrl+o      {COUNT}"
+
+
+def test_help_block_with_empty_lists():
+    rows = _rows(
+        keys_mod.help_block(_keys(nudge=[], newline=[]), terminal=None, shift_enter_seen=False)
+    )
+    assert rows[1] == f"!text              {COUNT}"
+    assert rows[0].startswith(r"\ then enter")
+    assert "shift+enter" not in rows[0]
+
+
+def test_help_block_shift_enter_as_nudge_only():
+    kitty = keys_mod.detect_terminal({"KITTY_WINDOW_ID": "1"})
+    rows = _rows(keys_mod.help_block(_keys(nudge=["shift-enter"]), terminal=kitty,
+                                     shift_enter_seen=False))
+    assert "shift+enter" not in rows[0]
+    assert "(or give ctrl+o to it:" in rows[0]
+    assert rows[1].startswith("!text, shift+enter ")
+
+
+def test_help_block_names_other_newline_chords():
+    rows = _rows(keys_mod.help_block(_keys(newline=["shift-enter", "ctrl-g", "alt-enter"],
+                                           nudge=["ctrl-o"]),
+                                     terminal=None, shift_enter_seen=True))
+    assert rows[0].startswith(r"\ then enter, ctrl+g, alt+enter ")
+    assert rows[0].endswith("line break — shift+enter too")
+    # both columns share the one width
+    assert rows[0].index("line break") == rows[1].index("send the line")
+
+
+def test_help_block_never_points_to_the_readme_or_alt_enter():
+    import itertools
+
+    kitty = keys_mod.detect_terminal({"KITTY_WINDOW_ID": "1"})
+    cases = 0
+    for assignment in itertools.product(("nudge", "newline", None), repeat=4):
+        nudge = [n for n, a in zip(CHORD_NAMES, assignment) if a == "nudge"]
+        newline = [n for n, a in zip(CHORD_NAMES, assignment) if a == "newline"]
+        for terminal in (None, kitty):
+            for seen in (False, True):
+                cases += 1
+                block = keys_mod.help_block(_keys(nudge=nudge, newline=newline),
+                                            terminal=terminal, shift_enter_seen=seen)
+                assert len(block.split("\n")) == 3
+                assert "README" not in block
+                assert ESC not in block
+                row1 = _rows(block)[0]
+                routes = re.findall(r"\(or give (\S+) to it: .*? terminal\.keys\.newline (\S+)\)", row1)
+                for label, name in routes:
+                    assert name in ("ctrl-o", "ctrl-g") and label == LABELS[name]
+                    assert name not in nudge and name not in newline
+                if set(newline) & {"ctrl-o", "ctrl-g", "alt-enter"}:
+                    assert "(or give" not in block
+    assert cases == 324
