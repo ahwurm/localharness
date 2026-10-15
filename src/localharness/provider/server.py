@@ -1332,16 +1332,40 @@ def _tail_block(config_dir: Path, what: str, api_key: Any = None) -> str:
 _REF_MARK = re.compile(r"\n?=== ref [0-9a-f]{8}: [^\n]* ===(?:\n|$)")
 
 
+LOG_TAIL_BYTES = 64 * 1024
+"""Most bytes `log_tail` reads from the end of serve.log; fifteen lines of server output fit many times."""
+
+
 def log_tail(config_dir: Path, lines: int = 15) -> str:
     """The raw last `lines` of serve.log. Read ONLY by `scrubbed_tail` (a structural test pins it): no
     message quotes it as it is. The `=== ref <id>: … ===` lines `log_reference` appends are bookkeeping
     for the reader of the file, not server output, so they are left out; a log holding nothing else
-    reads "(no log)"."""
+    reads "(no log)".
+
+    The file is read the way the launch writes it: by name inside the no-follow server directory, so a
+    link planted at serve.log is refused, through `open_regular`, so a FIFO or device is refused without
+    blocking, and only its last `LOG_TAIL_BYTES` are read. A log that cannot be read that way reads
+    "(no log)"."""
     try:
-        content = log_path(config_dir).read_text(encoding="utf-8", errors="replace")
-        kept = _REF_MARK.sub("", content)
-        if content and not kept.strip():
-            return "(no log)"
-        return "\n".join(kept.splitlines()[-lines:])
+        dir_fd = private_files.open_private_dir(server_dir(config_dir), create=False)
     except OSError:
         return "(no log)"
+    try:
+        with os.fdopen(private_files.open_regular(LOG_NAME, dir_fd=dir_fd), "rb") as fh:
+            size = os.fstat(fh.fileno()).st_size
+            cut = size > LOG_TAIL_BYTES
+            if cut:
+                fh.seek(size - LOG_TAIL_BYTES)
+            raw = fh.read(LOG_TAIL_BYTES)
+    except OSError:
+        return "(no log)"
+    finally:
+        os.close(dir_fd)
+    content = raw.decode("utf-8", errors="replace")
+    if cut:  # the window starts mid-line: that first piece is not a line of its own
+        _, newline, rest = content.partition("\n")
+        content = rest if newline else content
+    kept = _REF_MARK.sub("", content)
+    if content and not kept.strip():
+        return "(no log)"
+    return "\n".join(kept.splitlines()[-lines:])
