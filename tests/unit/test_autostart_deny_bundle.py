@@ -209,3 +209,60 @@ def test_the_negated_set_delimiter_is_the_unit_name_alphabet():
         assert fnmatch.fnmatchcase(f"systemctl --user{ch}edit{ch}x", pattern)
     for ch in "abcZ09_.@-":
         assert not fnmatch.fnmatchcase(f"systemctl --user {ch}edit{ch} x", pattern)
+
+
+# --------------------------------------------------------------------------- the revision-4 migration
+
+def _config(deny: list[str], *, revision: int) -> dict:
+    return {
+        "version": "1",
+        "org": {
+            "name": "default",
+            "permissions": {
+                "mode": "auto",
+                "deny_patterns": list(deny),
+                "defaults_revision": revision,
+                "init_nulls_revision": defaults.CURRENT_INIT_NULLS_REVISION,
+            },
+        },
+    }
+
+
+def test_a_config_stamped_three_gains_exactly_the_thirteen_patterns_and_is_stamped_four():
+    from localharness.config.migrate import plan
+
+    earlier = PermissionConfig().deny_patterns[:-13]
+    assert len(earlier) == 32
+    p = plan(_config(earlier, revision=3))
+
+    assert p is not None
+    assert p.added == NEW_PATTERNS
+    assert (p.from_revision, p.to_revision) == (3, 4)
+    perms = p.updated["org"]["permissions"]
+    assert perms["defaults_revision"] == 4
+    assert perms["deny_patterns"][:32] == earlier  # every earlier pattern kept, in place
+    assert perms["deny_patterns"][32:] == NEW_PATTERNS
+
+
+def test_a_config_stamped_three_keeps_the_users_own_entry_and_adds_nothing_twice():
+    from localharness.config.migrate import plan
+
+    earlier = [*PermissionConfig().deny_patterns[:-13], "bash_exec(*my-own-thing*)"]
+    p = plan(_config(earlier, revision=3))
+
+    assert p is not None
+    deny = p.updated["org"]["permissions"]["deny_patterns"]
+    assert "bash_exec(*my-own-thing*)" in deny
+    assert len(deny) == len(set(deny))
+
+
+def test_a_deleted_bundle_pattern_stays_deleted_at_revision_four():
+    from localharness.config.migrate import plan
+
+    edit = "bash_exec(*systemctl*[!A-Za-z0-9_.@-]edit[!A-Za-z0-9_.@-]*)"
+    deny = [p for p in PermissionConfig().deny_patterns if p != edit]
+    p = plan(_config(deny, revision=4))
+
+    assert p is None or p.added == []
+    if p is not None:
+        assert edit not in p.updated["org"]["permissions"]["deny_patterns"]
