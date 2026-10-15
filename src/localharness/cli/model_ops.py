@@ -326,6 +326,13 @@ def _launch_key(harness: Any, base_url: str, spec: Any = None) -> dict[str, str]
     method: the swap's helpers are also driven with a bare stand-in for the session."""
     from localharness.provider.server import required_key_kwargs
     provider = getattr(harness, "provider", None)
+    if spec is not None:
+        # A peer that shares the primary's address is told apart by its own launch record: its spec
+        # is its key's rule, and the peer's key is the one it sends (never the primary's).
+        owner = next((e for e in getattr(harness, "extra_endpoints", None) or []
+                      if getattr(e, "lifecycle", None) is spec), None)
+        if owner is not None:
+            return required_key_kwargs(spec, getattr(owner, "api_key", None))
     if provider is not None and base_url == provider.base_url:
         return required_key_kwargs(getattr(harness, "server", None) if spec is None else spec,
                                    provider.api_key)
@@ -717,6 +724,12 @@ def _active_record(harness: Any) -> ServingRecord | None:
     active = getattr(harness, "active_endpoint", None)
     if active is None:
         return None
+    # A peer may share the primary's address; its own name tells them apart, so the name is asked first.
+    by_name = next((r for r in serving_records(harness)
+                    if r.peer is not None and active.name and r.name == active.name
+                    and _norm_url(r.base_url) == _norm_url(active.base_url)), None)
+    if by_name is not None:
+        return by_name
     by_url = record_for_base_url(harness, active.base_url)
     if by_url is not None:
         return by_url

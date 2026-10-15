@@ -458,3 +458,29 @@ async def test_a_failed_selection_write_is_said_redacted_and_the_session_carries
     assert style == "system.error"
     assert text.startswith(PERSIST_SELECTION_FAILED.split("{")[0])
     assert PROVIDER_KEY not in text
+
+
+@pytest.mark.asyncio
+async def test_a_peer_sharing_the_primarys_address_is_persisted_as_the_peer(tmp_path):
+    """The address names the primary first, so a `/model <peer>` landing at a shared address must go by
+    the endpoint switched to, or it would clear the selection instead of writing the peer."""
+    harness, repl, channel, agent, peer, primary = _build(tmp_path)
+    peer.base_url = PRIMARY_URL  # the peer shares the primary's address
+
+    saved = await repl._persist_landed(PRIMARY_URL, "flash-next", endpoint=peer)
+
+    assert saved is False  # a peer selection is not a persisted default model
+    active = load_overlay(tmp_path / "overrides.yaml")["active_endpoint"]
+    assert (active["name"], active["model"]) == ("flash-next", "flash-next")
+    assert last_served(default_speed_stats_path(tmp_path)) == "flash-next"
+
+
+@pytest.mark.asyncio
+async def test_persisting_an_active_endpoint_at_a_shared_address_lands_the_peer(tmp_path):
+    harness, repl, channel, agent, peer, primary = _build(tmp_path)
+    peer.base_url = PRIMARY_URL
+
+    await repl._persist_active_endpoint(peer, "flash-next")
+
+    assert load_overlay(tmp_path / "overrides.yaml")["active_endpoint"]["name"] == "flash-next"
+    assert last_served(default_speed_stats_path(tmp_path)) == "flash-next"

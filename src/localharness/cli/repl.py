@@ -2059,7 +2059,7 @@ class OrchestratorREPL:
             note = await self._refresh_token_counter(
                 target, base_url=ep.base_url, provider_type=ep.provider_type
             )
-            saved = await self._persist_landed(ep.base_url, target)
+            saved = await self._persist_landed(ep.base_url, target, endpoint=ep)
             rate = self._measured_note(medians, ep.provider_type, target)
             await self._send_info(
                 f"Switched to {target} on {ep.name} — {ep.base_url} "
@@ -2160,7 +2160,7 @@ class OrchestratorREPL:
             note = await self._refresh_token_counter(
                 served, base_url=ep.base_url, provider_type=ep.provider_type
             )
-            saved = await self._persist_landed(ep.base_url, served)
+            saved = await self._persist_landed(ep.base_url, served, endpoint=ep)
             rate = self._measured_note(medians, ep.provider_type, served)
             await self._send_info(
                 f"Switched to {served} on {ep.name} — {ep.base_url} "
@@ -2757,7 +2757,7 @@ class OrchestratorREPL:
         ep = self._peer_by_base_url(base_url)
         return ep.provider_type if ep is not None else None
 
-    async def _persist_landed(self, base_url: str, model: str) -> bool:
+    async def _persist_landed(self, base_url: str, model: str, *, endpoint: Any = None) -> bool:
         """Persist a completed switch by WHERE it landed, through `model_ops.persist_landed` — the
         one writer of a landing's outcome (D-07): `active_endpoint` (a peer's, or cleared for the
         primary), `last_served`, and the removal of `pending_preset`. Every REPL landing is a "swap":
@@ -2771,7 +2771,11 @@ class OrchestratorREPL:
         provider = getattr(self._harness, "provider", None)
         if provider is None:
             return await self._persist_default_model(model)
-        record = model_ops.record_for_base_url(self._harness, base_url)
+        # A peer that shares the primary's address is told apart by being the very endpoint switched to.
+        record = next((r for r in model_ops.serving_records(self._harness)
+                       if endpoint is not None and r.peer is endpoint), None)
+        if record is None:
+            record = model_ops.record_for_base_url(self._harness, base_url)
         if record is None:
             # #6: an unknown base_url is NEITHER the primary NOR a configured peer. Persisting it via
             # persist_default_model is the EXACT corruption persist_active_endpoint exists to prevent
@@ -2806,7 +2810,9 @@ class OrchestratorREPL:
         which has already switched."""
         from localharness.cli import model_ops
         try:
-            record = model_ops.record_for_base_url(self._harness, endpoint.base_url)
+            record = next((r for r in model_ops.serving_records(self._harness) if r.peer is endpoint), None)
+            if record is None:
+                record = model_ops.record_for_base_url(self._harness, endpoint.base_url)
             if record is None:
                 raise ValueError(f"{endpoint.base_url} is not a configured endpoint")
             await model_ops.persist_landed(
