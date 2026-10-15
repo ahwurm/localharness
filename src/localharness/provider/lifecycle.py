@@ -351,9 +351,9 @@ class Sensed:
     pure `plan_launch` (spec 20 §6.0, D-14): the model header (a typed, bounded dict), the GPU
     residency of the weights (`offload`), the free memory, the weights' size, `/proc/meminfo`, a
     vLLM checkpoint's `config.json` and the ledger's `remembered` retry record. `marker` is the boot
-    marker and `prior_death` the verdict `boot_prior_death` drew from it; the autostart phase reads the
-    marker file, so `sense_launch` leaves both at their defaults. Every field is None / empty when it
-    could not be known."""
+    marker `sense_launch` read when it was given the unit's state, and `prior_death` the verdict
+    `boot_prior_death` drew from it; without a unit both stay at their defaults. Every field is None /
+    empty when it could not be known."""
 
     runtime: str
     config_dir: Path
@@ -370,7 +370,7 @@ class Sensed:
 
 def sense_launch(
     spec: ManagedServerConfig, config_dir: Path, autosense: "AutosenseConfig", *,
-    unit: "units.UnitRuntimeState | None" = None,
+    unit: "units.UnitRuntimeState | None" = None, now: datetime | None = None,
 ) -> Sensed:
     """Every read a launch needs, once: the GGUF header, free memory, the weights, `/proc/meminfo` and
     the ledger's remembered retry for llama.cpp; a checkpoint's `config.json` for vLLM; nothing for any
@@ -378,16 +378,28 @@ def sense_launch(
     ledger read is bounded by `speed_stats._load`). Run it off the event loop: it shells out to
     nvidia-smi.
 
-    `unit` is accepted for the autostart phase (D-19): the boot marker and the unit's `NRestarts`
-    are read there, so here `marker` stays None and `prior_death` False."""
+    `unit` is the autostart unit's runtime state (spec 20 §9.3, D-17, AUTO-08). Given one, a llama.cpp or
+    vLLM launch also reads the boot marker (`units.read_marker`, read only: a marker for another record,
+    another binary or past the window is ignored here and replaced by the next one `serve` writes, never
+    removed by sensing) and sets `marker` and `prior_death` from `boot_prior_death`, with the unit's own
+    `TimeoutStartSec` as the window. `now` is the clock for that age test (UTC now when None)."""
     if spec.runtime == "llamacpp":
         fi = _auto.compute_fit(spec, autosense, meminfo=True)  # its `fits` is priced without the derived types: unused
         remembered = speed_stats.last_retry(speed_stats.default_speed_stats_path(config_dir), record_key(spec))
-        return Sensed(spec.runtime, config_dir, fi.header, fi.offload, fi.memory, fi.weights, fi.meminfo,
-                      remembered=remembered)
-    if spec.runtime == "vllm":
-        return Sensed(spec.runtime, config_dir, model_config=tuning.read_model_config(spec))
-    return Sensed(spec.runtime, config_dir)
+        sensed = Sensed(spec.runtime, config_dir, fi.header, fi.offload, fi.memory, fi.weights, fi.meminfo,
+                        remembered=remembered)
+    elif spec.runtime == "vllm":
+        sensed = Sensed(spec.runtime, config_dir, model_config=tuning.read_model_config(spec))
+    else:
+        return Sensed(spec.runtime, config_dir)
+    if unit is None:
+        return sensed
+    marker = units.read_marker(config_dir)
+    prior = boot_prior_death(
+        marker, unit, record_key=record_key(spec), binary=str(spec.binary),
+        now=now or datetime.now(timezone.utc),
+        max_age_seconds=getattr(unit, "timeout_start_seconds", units.TIMEOUT_START_SECONDS))
+    return dataclasses.replace(sensed, marker=marker, prior_death=prior)
 
 
 def boot_prior_death(
@@ -445,6 +457,14 @@ class LaunchPlan:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "serve_kwargs", MappingProxyType(dict(self.serve_kwargs)))
+
+    def boot_retry(self) -> "LaunchPlan | None":
+        """The retry shape of a boot that died (spec 20 §9.3, D-17): the derived spec type dropped and the
+        fit `-c` halved, each only when this full plan has it; the cause is "boot". None for a plan already
+        in the retry shape and for one with nothing to drop or halve (a KV-only launch, a vLLM launch:
+        nothing is dropped at boot there). `plan_launch` returns this for a prior death, and a caller asks
+        it whether the unit's own retry would change anything. Pure."""
+        return self._shaped("boot", drop_spec=True)
 
     def retry(self) -> "LaunchPlan | None":
         """The one relaunch after a death (D-16, D-35, D-37): the derived spec type dropped and the fit
@@ -584,7 +604,7 @@ def plan_launch(
         if shaped is not None:
             return shaped
     if sensed.prior_death:
-        shaped = full._shaped("boot", drop_spec=True)
+        shaped = full.boot_retry()
         if shaped is not None:
             return shaped
     return full
@@ -1238,6 +1258,37 @@ def strategy_for(spec: ManagedServerConfig) -> LifecycleStrategy:
     if spec.runtime == "lmstudio":
         return LmsStrategy()
     return ManagedVllmStrategy()
+
+
+NOT_SERVED_BY_UNIT_LINE = "{name} is {kind} — not served by the unit"
+"""What `serve`, `--autostart status` and the doctor row say for a record the autostart unit cannot
+serve (spec 20 §9.1, D-02); `kind` comes from `unit_kind`."""
+
+
+def unit_servable(spec: ManagedServerConfig | None) -> bool:
+    """Can the autostart unit serve this record (spec 20 §9.1, D-02)? Only llama.cpp and a vLLM
+    `launch: binary` record: the unit runs `serve`, which execs a binary. A docker, Ollama or LM Studio
+    record, and no record at all (attach-only), are not."""
+    if spec is None:
+        return False
+    if spec.runtime == "llamacpp":
+        return True
+    return spec.runtime == "vllm" and spec.launch == "binary"
+
+
+def unit_kind(spec: ManagedServerConfig | None) -> str:
+    """What a record is, for `NOT_SERVED_BY_UNIT_LINE` and the scope refusal (R-14-10): `docker` for a vLLM
+    docker record, `Ollama`, `LM Studio`, `attach-only` for no record, and `llama.cpp` / `vLLM binary`
+    for the two the unit serves."""
+    if spec is None:
+        return "attach-only"
+    if spec.runtime == "llamacpp":
+        return "llama.cpp"
+    if spec.runtime == "ollama":
+        return "Ollama"
+    if spec.runtime == "lmstudio":
+        return "LM Studio"
+    return "vLLM binary" if spec.launch == "binary" else "docker"
 
 
 GPU_FREE_SETTLE_SECONDS = 3.0
