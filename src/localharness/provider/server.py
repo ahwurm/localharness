@@ -840,11 +840,20 @@ def start_server(
     # this launch would orphan: the atomic replace below would drop its only handle, and no stop could
     # reach it again. Refuse instead (the caller holds the launch lock, so this check cannot race a
     # second launch). A dead or reused pid is stale and `server_pid` drops it.
+    stale_note: str | None = None
     live = server_pid(config_dir)
     if live is not None:
         held = procfs.read_process(live)
         exe = os.path.basename(held.exe) if isinstance(held, procfs.ProcRecord) and held.exe else "?"
-        raise RuntimeError(LIVE_LAUNCH_LINE.format(pid=live, exe=exe, pidfile=pid_path(config_dir)))
+        if _reused_bare_pid(config_dir, live, held, cmd):
+            # A 0.17 pidfile (or one written while /proc was unreadable) holds no start time, so a
+            # reused pid cannot be told by it: the live process is judged by what it runs. Not an
+            # executable any launch strategy declares, so it is not the harness's server.
+            stale_note = f"=== dropped pidfile: pid {live} runs {exe}, not a server launch ===\n"
+            logger.info("dropped a bare-pid pidfile naming a reused pid", pid=live, exe=exe)
+            _drop_pidfile(config_dir)
+        else:
+            raise RuntimeError(LIVE_LAUNCH_LINE.format(pid=live, exe=exe, pidfile=pid_path(config_dir)))
     env, dropped = child_environment(
         runtime, os.environ, record_env=record_env, api_key=api_key, xdg_config_home=xdg_config_home)
     if dropped_out is not None:
@@ -870,6 +879,8 @@ def start_server(
             log = open(LOG_NAME, "ab", opener=private_files.nofollow_opener(dir_fd))
         except OSError as exc:
             raise RuntimeError(f"could not open {log_path(config_dir)}: {exc.strerror or exc}") from exc
+        if stale_note is not None:
+            log.write(f"\n{stale_note}".encode())
         log.write(f"\n=== launch: {' '.join(cmd)} ===\n".encode())
         log.flush()
         try:
@@ -906,6 +917,25 @@ def start_server(
         return proc.pid
     finally:
         os.close(dir_fd)
+
+
+def _reused_bare_pid(
+    config_dir: Path, pid: int, held: "procfs.ProcRecord | procfs.ProcRefusal", cmd: list[str]
+) -> bool:
+    """True when the live `pid` is certainly not a harness launch although the pidfile names it: the
+    pidfile records no start time (so `server_pid` could not drop a reused pid) AND `/proc` shows the
+    process as another user's or as an executable no launch strategy declares (`procfs.LAUNCH_EXES`,
+    plus the basename of the binary this launch is about to run). A pidfile with a start time, or a
+    process `/proc` will not show, is never judged here: the refusal stands."""
+    recorded = _read_pidfile(config_dir)
+    if recorded is None or recorded[0] != pid or recorded[1] is not None:
+        return False
+    if not isinstance(held, procfs.ProcRecord) or held.exe is None:
+        return False
+    if held.uid != os.getuid():
+        return True
+    own = os.path.basename(cmd[0]) if cmd else ""
+    return not procfs.exe_is_launch(held.exe, (own,) if own and own != "env" else ())
 
 
 REAP_GRACE_SECONDS = (1.0, 2.0)

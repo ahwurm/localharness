@@ -30,7 +30,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -495,6 +495,23 @@ class LaunchIdentity:
     argv_contains: tuple[str, ...]
     port_env: str | None
     argv_one_of: tuple[tuple[str, ...], ...] = ()
+
+
+LLAMA_EXE = "llama-server"
+VLLM_EXES = frozenset({"vllm", "python*"})
+DOCKER_EXES = frozenset({"docker"})
+OLLAMA_EXES = frozenset({"ollama"})
+LAUNCH_EXES = frozenset({LLAMA_EXE}) | VLLM_EXES | DOCKER_EXES | OLLAMA_EXES
+"""The executable basenames the launch strategies declare in their `LaunchIdentity` (an entry ending
+`*` is a basename prefix): the one place they are spelled. A live process whose executable matches none
+of them (`exe_is_launch`) cannot be a server the harness started; a strategy may add its record's own
+binary on top (llama.cpp's `binary:`)."""
+
+
+def exe_is_launch(exe: str, extra: Iterable[str] = ()) -> bool:
+    """True when the executable path `exe` has a basename a launch strategy declares (`LAUNCH_EXES`),
+    or one of the `extra` basenames."""
+    return _exe_matches(exe, LAUNCH_EXES | frozenset(extra))
 
 
 def parse_pidfile(text: str) -> tuple[int, int | None, int | None]:
