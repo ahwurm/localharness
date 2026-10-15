@@ -147,6 +147,20 @@ def _live(fake_proc, monkeypatch, *, exe: str, pid: int = 5151) -> None:
     proc_says(monkeypatch, 777)
 
 
+def test_the_live_launch_refusal_names_the_process_and_never_advises_deleting_its_only_handle(
+        tmp_path, monkeypatch, popen):  # noqa: F811
+    monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)
+    pidfile(tmp_path, "4242 777")
+    proc_says(monkeypatch, 777)
+
+    with pytest.raises(RuntimeError) as refused:
+        server.start_server(tmp_path, ["true"])
+
+    text = str(refused.value)
+    assert "pid 4242" in text and "stop that process first" in text
+    assert "or remove" not in text
+
+
 def test_a_bare_pid_naming_a_live_unrelated_process_is_stale_and_the_launch_proceeds(
         tmp_path, monkeypatch, popen, fake_proc):  # noqa: F811
     """A 0.17 pidfile records no start time, so a reused pid cannot be told by it. A live `bash` is no
