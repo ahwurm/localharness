@@ -602,11 +602,21 @@ def components_set(
     # the next `localharness start`; the receipt says so (a human clause and a JSON field), and no
     # other path's output changes.
     applies_next_start = path == "terminal.keys" or path.startswith("terminal.keys.")
+    after = typed_value
+    if applies_next_start:
+        # `before` is the effective list, so `after` is too: the validated model's list, which is
+        # also where the other list's trimmed chord shows (spec 21 §5), not the string typed.
+        try:
+            after = loader.load_harness()
+            for part in path.split("."):
+                after = getattr(after, part)
+        except Exception:  # noqa: BLE001 — the receipt falls back to what was typed
+            after = typed_value
     if json_output:
         receipt = {
             "path": path,
             "before": _serialize_value(before, secret),
-            "after": _serialize_value(typed_value, secret),
+            "after": _serialize_value(after, secret),
             # `layer` is the ComponentMutated audit event's own, older vocabulary and is
             # NOT the registry band — renaming it would change a persisted log's schema.
             # `target` is the honest addition: the file that was actually written.
@@ -625,7 +635,7 @@ def components_set(
         # like `[dim]` renders as nothing at all — this receipt would confirm setting a key to an
         # empty string. Same lesson as the path lines, applied to values (41-06 / doctor's rows).
         console.print(
-            "[green]set[/green] " + escape(f"{path} = {shown(typed_value, entry.annotation)} "
+            "[green]set[/green] " + escape(f"{path} = {shown(after, entry.annotation)} "
                                           f"(was: {shown(before, entry.annotation)})"),
             soft_wrap=True,
         )

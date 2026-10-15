@@ -363,6 +363,23 @@ def _read_keys(path: str):
     return json.loads(result.stdout)["value"]
 
 
+def test_set_terminal_keys_receipt_reports_the_effective_list_as_after(tmp_path, monkeypatch, fake_home):
+    """`before` and `after` are one type for a chord list: the effective list, not the string typed."""
+    _layout(tmp_path, monkeypatch, fake_home, workspace=False)
+
+    as_json = runner.invoke(app, ["components", "set", "--json", "terminal.keys.newline", "alt-enter"])
+
+    assert as_json.exit_code == 0, as_json.output
+    payload = json.loads(as_json.stdout)
+    assert payload["before"] == ["shift-enter"]
+    assert payload["after"] == ["alt-enter"]
+    assert sorted(payload) == ["after", "applies", "before", "layer", "path", "target"]
+
+    human = runner.invoke(app, ["components", "set", "terminal.keys.nudge", "ctrl-o"])
+    assert human.exit_code == 0, human.output
+    assert "terminal.keys.nudge = ['ctrl-o']" in human.stdout, human.stdout
+
+
 def test_set_terminal_keys_one_at_a_time(tmp_path, monkeypatch, fake_home):
     """DEC21-precedence through the real CLI: the first key set leaves the other list empty of the
     chord it took, and the second set is then free to give that list a chord again."""
