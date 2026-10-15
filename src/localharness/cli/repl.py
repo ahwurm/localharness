@@ -2282,11 +2282,14 @@ class OrchestratorREPL:
                 )
                 models = ep.served_models
             except (RuntimeError, TimeoutError) as exc:
-                managed.model, managed.served_name = before
                 # The primary half-started (still alive on a TimeoutError) — tear it down before restoring
-                # a peer incumbent (shared pidfile → else it orphans). If we freed a peer (b2 swap-back),
-                # restore it; otherwise the primary is simply down (the pre-existing restart-failure mode).
-                await self._safe_stop(managed)
+                # a peer incumbent (shared pidfile → else it orphans). It is stopped as LAUNCHED: `spec`
+                # (the copy for a typed .gguf, else `managed` still carrying the new model), because the
+                # stop proves the record's own launch from its model / served name, and the reset below
+                # would hand it the old ones. If we freed a peer (b2 swap-back), restore it; otherwise
+                # the primary is simply down (the pre-existing restart-failure mode).
+                await self._safe_stop(spec)
+                managed.model, managed.served_name = before
                 restored, why = await self._restore_incumbent(freed)
                 tail = (f" Restored {restored}." + (f" {why}" if why else "") if restored
                         else f" Could not restore it: {why}" if why

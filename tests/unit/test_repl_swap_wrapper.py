@@ -30,6 +30,7 @@ from tests.unit.test_launch_paths_repl import (
     _llama_primary,
     _no_machine_probes,
 )
+from tests.unit.procfs_support import fake_proc  # noqa: F401 — the fixture
 from tests.unit.test_repl_model_cmd import FakeChannel, _harness, _heavy_primary, _xrepl
 
 PROVIDER_KEY = "sk-prov-7d3f9a"
@@ -284,6 +285,53 @@ async def test_the_managed_restart_failure_is_redacted_the_same_way(tmp_path, ri
     text, style = channel.styled[-1]
     assert style == "system.error" and text.startswith("Model swap failed:")
     assert not any(secret in text for secret in PLANTED)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_cold_restart_stops_the_launched_model_before_the_record_is_reset(
+        tmp_path, rig, monkeypatch, fake_proc):
+    """The REPL's cold `/model <other model>` restart mutates the shared record to the new model, then
+    the launch dies (or times out, the process still alive). The half-started target is stopped as it
+    was launched: the verified stop reads the record's own model, so it runs BEFORE the reset to the old
+    one. The pidfile is gone before any incumbent is restored, and the record ends on its old model."""
+    harness, repl, channel, agent, peer, primary = _build(tmp_path, primary=_heavy_primary())
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    pidfile = managed_server.server_dir(repl._server_config_dir) / "server.pid"
+    launched: list[str] = []
+
+    def fake_start(cfg, cmd, **kw):
+        rig.events.append("start")
+        launched.append(cmd[cmd.index("--model") + 1])
+        fake_proc.process(4321, argv=tuple(cmd), exe="/usr/bin/docker", start_time=900)
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("4321 900", encoding="utf-8")
+        return 4321
+
+    def fake_stop(cfg, launch="binary", **kw):
+        rig.events.append("stop")
+        pidfile.unlink(missing_ok=True)
+        return True
+
+    gone_at_restore: list[bool] = []
+
+    async def spy_restore(freed):
+        gone_at_restore.append(not pidfile.exists())
+        return None, None
+
+    monkeypatch.setattr(managed_server, "start_server", fake_start)
+    monkeypatch.setattr(managed_server, "stop_server", fake_stop)
+    repl._restore_incumbent = spy_restore
+    rig.wait_raises[PRIMARY_URL] = TimeoutError("not ready")
+    repl._active_heavy = (primary, PRIMARY_URL)
+
+    await asyncio.wait_for(repl._handle_slash("/model cached-b"), 5)
+
+    assert launched == ["cached-b"]
+    # the strategy's own stop before the launch, then the half-started target's after the failure
+    assert rig.events[0] == "stop" and rig.events[-1] == "stop" and rig.events.count("stop") == 2
+    assert not pidfile.exists() and gone_at_restore == [True]
+    assert primary.model == "model-a"                   # reset only after the target was stopped
+    assert channel.styled[-1][0].startswith("Model swap failed:")
 
 
 @pytest.mark.asyncio
