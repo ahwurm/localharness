@@ -374,17 +374,24 @@ def _wants_wire_sequences(keys: TerminalKeysConfig) -> bool:
 
 def _bind_newline_chords(
     kb: KeyBindings, buf: Buffer, names: Sequence[str], on_newline_chord: Callable[[str], None],
+    *, injected_prefix: str = "",
 ) -> None:
     """Bind each configured newline chord from the `KEYS` table (spec 21 §6.2). A chord means
     "break here", never "accept": an open completion menu is closed the way Escape closes it (the
     highlighted item is not taken) and a line feed goes in at the caret. `on_newline_chord` gets the
-    chord's name, so the channel can tell a `shift-enter` arrival from the others."""
+    chord's name, so the channel can tell a `shift-enter` arrival from the others. While the
+    `/model ` picker's pre-fill is still on loan (`injected_prefix`, the box only), the chord is
+    typing over the loan (#135): the loan goes and the line feed takes its place, so no `/model `
+    prefix is stranded in front of the next line."""
     for name in names:
 
         def _newline(event, name: str = name) -> None:
-            if buf.complete_state is not None:
-                buf.cancel_completion()
-            buf.insert_text("\n")
+            if _picker_loan_live(buf, injected_prefix):
+                _replace_picker_loan(buf, "\n")
+            else:
+                if buf.complete_state is not None:
+                    buf.cancel_completion()
+                buf.insert_text("\n")
             on_newline_chord(name)
 
         kb.add(*KEYS[name])(_newline)
@@ -851,7 +858,7 @@ def _build_persistent_input_app(
 
     for _name in keys.nudge:
         kb.add(*KEYS[_name])(_submit_nudge)
-    _bind_newline_chords(kb, buf, keys.newline, on_newline_chord)
+    _bind_newline_chords(kb, buf, keys.newline, on_newline_chord, injected_prefix=_MODEL_PICK_PREFIX)
 
     @kb.add("c-c")
     def _interrupt(event) -> None:
