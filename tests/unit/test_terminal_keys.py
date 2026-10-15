@@ -556,7 +556,6 @@ def test_help_block_seen_form():
              r"localharness components set terminal.keys.newline ctrl-o)"),
         ({"nudge": ["ctrl-o"]}, r"\ then enter       line break (or give ctrl+g to it: "
                                 r"localharness components set terminal.keys.newline ctrl-g)"),
-        ({"nudge": ["ctrl-o", "ctrl-g"]}, r"\ then enter       line break"),
         ({"newline": ["shift-enter", "ctrl-o"]}, r"\ then enter, ctrl+o   line break"),
         ({"newline": ["ctrl-g"]}, r"\ then enter, ctrl+g   line break"),
         ({"newline": ["alt-enter"]}, r"\ then enter, alt+enter   line break"),
@@ -564,6 +563,15 @@ def test_help_block_seen_form():
 )
 def test_help_block_route_form(kw, row1):
     assert _rows(keys_mod.help_block(_keys(**kw), terminal=None, shift_enter_seen=False))[0] == row1
+
+
+def test_help_block_route_form_with_both_route_chords_taken():
+    # both columns widen to the longer left label (`!text, ctrl+o, ctrl+g` + 3), so row 1 pads more
+    rows = _rows(keys_mod.help_block(_keys(nudge=["ctrl-o", "ctrl-g"]), terminal=None,
+                                     shift_enter_seen=False))
+    assert rows[0] == "\\ then enter" + " " * 12 + "line break"
+    assert "(or give" not in rows[0]
+    assert rows[1] == "!text, ctrl+o, ctrl+g   " + COUNT
 
 
 def test_help_block_route_form_second_row_follows_the_nudge_list():
