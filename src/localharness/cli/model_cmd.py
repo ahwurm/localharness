@@ -315,9 +315,11 @@ def _swap_now(
 
     if _answers_now(harness, machine_trust, record):
         say(start_serving.ALREADY_SERVING_TARGET_LINE.format(name=visible_text(record.name)))
+        # The name typed here is the shell's own intent, so the attach lands on the ``pending_preset`` rung:
+        # an earlier selection (an agent's, naming a third record) must not outlive an explicit choice.
         with _landing_write(harness, record):
             asyncio.run(model_ops.persist_landed(
-                harness, record, outcome="attach", rung=serving.rung, config_dir=config_dir))
+                harness, record, outcome="attach", rung=model_ops.RUNG_PENDING, config_dir=config_dir))
         return
     incumbent = _incumbent(harness, config_dir, unit, record)
     peer_name = record.peer.name if record.peer is not None else None
