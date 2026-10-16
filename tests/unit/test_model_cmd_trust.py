@@ -160,34 +160,27 @@ def test_a_withheld_primary_is_refused_with_nothing_cleared(components_home, mon
     assert (components_home / "overrides.yaml").read_bytes() == held
 
 
-def test_the_question_is_asked_on_a_terminal_only(components_home, monkeypatch):
-    """`ask` is `_is_local_operator()`: a tty and no agent-command marker, never an argument."""
-    import types
-
+def test_the_question_is_asked_on_a_terminal_at_both_ends_only(components_home, monkeypatch):
     _seed(components_home)
     _unreachable(monkeypatch)
-    seen: list[bool] = []
-
-    def decide(global_dir, **kw):
-        seen.append(kw["ask"])
-        return MachineTrust()
-
-    monkeypatch.setattr(model_cmd, "decide_machine_trust", decide)
-
-    class Tty:
-        def isatty(self):
-            return True
-
-    # CliRunner swaps sys.stdin during the call, so the terminal is stood in at the module's `sys`.
-    monkeypatch.setattr(model_cmd, "sys", types.SimpleNamespace(stdin=Tty()))
+    decided = _spy_decide(monkeypatch)
+    args = ["model", "flash-next", "--config-dir", str(components_home)]
     monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
-    assert runner.invoke(
-        app, ["model", "flash-next", "--config-dir", str(components_home)]).exit_code == 0
-    monkeypatch.setenv("LOCALHARNESS_COMMIT", "abc")
-    assert runner.invoke(
-        app, ["model", "flash-next", "--config-dir", str(components_home)]).exit_code == 0
+    monkeypatch.setattr(workspace, "_stdin_is_a_terminal", lambda: True)
 
-    assert seen == [True, False]
+    monkeypatch.setattr(workspace, "_stdout_is_a_terminal", lambda: True)
+    assert runner.invoke(app, args).exit_code == 0
+    monkeypatch.setattr(workspace, "_stdout_is_a_terminal", lambda: False)
+    assert runner.invoke(app, args).exit_code == 0
+    monkeypatch.setattr(workspace, "_stdout_is_a_terminal", lambda: True)
+    monkeypatch.setenv("LOCALHARNESS_COMMIT", "abc")
+    assert runner.invoke(app, args).exit_code == 0
+
+    assert [c["ask"] for c in decided] == [True, False, False]
+
+
+def test_model_cmd_has_no_private_operator_check():
+    assert not hasattr(model_cmd, "_is_local_operator")
 
 
 def test_list_and_download_decide_nothing(components_home, monkeypatch):
