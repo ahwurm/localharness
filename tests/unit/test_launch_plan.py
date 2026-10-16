@@ -2,20 +2,20 @@
 """TUNE-06 / TUNE-03 / TUNE-04 (spec 20 §6.0, §6.4, D-14, D-15): `activate` is sense -> plan -> prepare ->
 execute, and the argv it starts is exactly `plan.argv`.
 
-The identical-argv test starts here, with `activate`; `serve` has joined it (below), `doctor` and `--script`
-join it in later phases. Nothing here starts a process or reads the host: `subprocess.Popen` is the `PopenRecorder`, free
+One test pins `activate`, `serve`, `doctor` and `--script` (minus the fit's `-c` pair) to one argv. Nothing here starts a process or reads the host: `subprocess.Popen` is the `PopenRecorder`, free
 memory, `/proc/meminfo`, the weights and the probe are faked through their module seams (`Box`), and
 `wait_ready` is the scripted fake.
 """
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
 
 from localharness.agent import gguf_header
-from localharness.cli import serve_cmd
+from localharness.cli import doctor_cmd, serve_cmd
 from localharness.config.models import AutosenseConfig, ManagedServerConfig
 from localharness.provider import autosense, lifecycle, server, speed_stats, tuning, units
 from localharness.provider.autosense import FIT_KEYS, FreeMemory, fit, fit_header
@@ -112,24 +112,38 @@ async def test_activate_launches_exactly_the_planned_argv(tmp_path, popen, box, 
         assert box.events.count("free_memory") == 0
 
 
+def _script_argv(plan, spec) -> list[str]:
+    text = tuning.render_script(
+        plan, spec, name="rec", version="0", key_placeholder="provider.api_key", home_shown="", visible=str)
+    body = [ln for ln in text.splitlines() if not ln.startswith(("#", "export "))]
+    return shlex.split("\n".join(body).replace("\\\n", " "))[1:]
+
+
 @pytest.mark.parametrize("kind", ["swift-gguf", "vllm-binary"])
-async def test_serve_plans_exactly_the_argv_activate_launches(tmp_path, popen, box, kind):
-    """TUNE-06 for `serve` (spec 20 §9.3): the unit's body plans through the same sense -> plan the
-    strategy's `activate` runs, so for one record on one sensed machine the two argvs are equal."""
+async def test_every_renderer_of_the_plan_gives_the_argv_activate_launches(tmp_path, popen, box, kind):
+    """Spec 20 §14: `activate`, `serve` (the unit's body), `doctor`'s row and `--script` plan through the same
+    sense -> plan, so for one record on one sensed machine the argvs are equal; the script leaves the fit's
+    own `-c` pair to `--fit`."""
     spec = _gguf_spec(tmp_path, SWIFT) if kind == "swift-gguf" else _vllm_spec(tmp_path)
     strategy = lifecycle.ManagedVllmStrategy() if spec.runtime == "vllm" else lifecycle.SpawnedProcessStrategy()
     await strategy.activate(spec, tmp_path, BASE, autosense=KNOBS)
     launched = list(_argv(popen))
 
     decision = server.launch_decision(spec, False)
-    argv, plan, sensed = serve_cmd._planned_argv(spec, tmp_path, KNOBS, decision, keyed=False, unit=None)
+    served, plan, sensed = serve_cmd._planned_argv(spec, tmp_path, KNOBS, decision, keyed=False, unit=None)
+    doctor_plan = doctor_cmd._tuning_plan(spec, tmp_path, KNOBS, keyed=False, peer=None)
 
-    assert argv == launched and tuple(argv) == plan.argv
+    assert served == launched and tuple(served) == plan.argv
+    assert list(doctor_plan.argv) == launched
     assert sensed is not None and sensed.runtime == spec.runtime
+    scripted = _script_argv(doctor_plan, spec)
     if kind == "swift-gguf":
-        assert _has_pair(argv, "--spec-type", "draft-mtp") and plan.shape == "full"
+        at = launched.index("-c")
+        assert scripted == launched[:at] + launched[at + 2:]
+        assert _has_pair(served, "--spec-type", "draft-mtp") and plan.shape == "full"
     else:
-        assert _has_pair(argv, "--tool-call-parser", "qwen3_coder")
+        assert scripted == launched
+        assert _has_pair(served, "--tool-call-parser", "qwen3_coder")
 
 
 async def test_serve_without_autosense_knobs_builds_the_0_18_command(tmp_path):
