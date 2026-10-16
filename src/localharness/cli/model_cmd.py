@@ -145,15 +145,21 @@ def _autostart_on(cfg_path: Path) -> None:
         harness, record, cfg_path, environ=os.environ, cwd=os.getcwd(), out=out, err=err))
 
 
-def _download(repo_id: str, filename: Optional[str]) -> None:
+def _download(repo_id: str, filename: Optional[str], config_dir: Optional[str]) -> None:
     """`localharness model --download <repo_id> [--file <name>]` — standalone HF fetch, no
     running server / config required (unlike `init`'s guided-setup download, which is tied to
     the vLLM install flow). Whole-repo snapshot by default; --file fetches exactly one sibling
-    file (the GGUF case, where a repo ships several quantizations side by side)."""
+    file (the GGUF case, where a repo ships several quantizations side by side). One `.gguf` the
+    hub vouches for, with a config and a person at the terminal, is recorded as a preset."""
     from localharness.provider import server as managed_server
 
+    gguf = bool(filename) and filename.lower().endswith(".gguf")
+    facts = managed_server.hub_file(repo_id, filename) if gguf else None
     try:
-        if filename:
+        if gguf:
+            console.print(f"Downloading {filename!r} from {repo_id}...")
+            path = managed_server.download_file(repo_id, filename, revision=facts.commit if facts else None)
+        elif filename:
             console.print(f"Downloading {filename!r} from {repo_id}...")
             path = managed_server.download_file(repo_id, filename)
         else:
@@ -170,6 +176,8 @@ def _download(repo_id: str, filename: Optional[str]) -> None:
     # that does not exist right where the user is told what to copy (39-05). soft_wrap keeps a
     # deep path on one line for the copy.
     console.print("[green]✓[/green] " + escape(f"Downloaded to {path}"), soft_wrap=True)
+    if gguf and _record_download(path, facts, filename, config_dir):
+        return
     console.print(
         "To use it: point a llama.cpp profile's `server.model` at this path in config.yaml "
         "(single-model managed server), or run `localharness model "
@@ -177,6 +185,24 @@ def _download(repo_id: str, filename: Optional[str]) -> None:
         + " once it's being served, to set it as the default.",
         soft_wrap=True,
     )
+
+
+def _record_download(path: str, facts: server.HubFile | None, filename: str, config_dir: Optional[str]) -> bool:
+    """Record a downloaded `.gguf` as a preset when the hub vouched for its bytes; else say why not. True when recorded."""
+    cfg = resolve_config_dir(config_dir)
+    checked = ("no config yet" if not (cfg / "config.yaml").exists()
+               else "no person at this terminal" if not local_operator(False)
+               else "the hub gave no file metadata" if facts is None
+               else library.verify_download(path, size=facts.size, sha256=facts.sha256))
+    if isinstance(checked, str):
+        console.print(library.START_FINDS_IT_LINE.format(why=visible_text(checked)), markup=False, soft_wrap=True)
+        return False
+    console.print(library.VERIFIED_LINE.format(file=visible_text(filename), commit=facts.commit, sha256=facts.sha256),
+                  markup=False, soft_wrap=True)
+    if library.record_path(cfg, checked, first_run=False, adopt=True) is None:
+        console.print(library.START_FINDS_IT_LINE.format(why="no preset was added"), markup=False, soft_wrap=True)
+        return False
+    return True
 
 
 def _another_record_serves(harness, machine_trust, record) -> bool:
@@ -538,7 +564,7 @@ def model(
             with_other_arguments=name is not None or download is not None or file is not None)
         return
     if download is not None:
-        _download(download, file)
+        _download(download, file, config_dir)
         return
     if file is not None:
         err_console.print("[bold red]Error:[/bold red] --file requires --download <repo_id>.")

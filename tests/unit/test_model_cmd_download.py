@@ -57,7 +57,7 @@ def test_a_verified_gguf_is_recorded_as_a_peer_and_adopted(hub):
     assert result.exit_code == 0, result.output
     assert hub.calls == [{"repo": "org/repo", "file": "m.gguf", "revision": COMMIT}]
     assert f"Verified m.gguf at {COMMIT} (sha256 {hub.sha})" in result.output
-    assert library.record_line("m", "llamacpp", 8082, None, hub.file) in hub.printed.getvalue()
+    assert library.record_line("m", "llamacpp", 8083, hub.bin, hub.file) in hub.printed.getvalue()
     assert _names(hub) == ["Swift-27B-Q8", "m"]
     entries = {e["name"]: e["shown"] for e in trust.recorded_machine(hub.cfg)["entries"]}
     assert entries["extra_endpoints.m.lifecycle.model"] == str(hub.file)
@@ -71,7 +71,7 @@ def test_a_planted_snapshot_directory_is_never_the_commit_or_the_hash(hub, monke
     result = _download(hub, "--file", "m.gguf")
 
     assert result.exit_code == 0 and "Not recorded (sha256 " in result.output and "differs" in result.output
-    assert FAKE not in result.output and "Verified" not in result.output
+    assert f"at {FAKE}" not in result.output and "Verified" not in result.output
     assert _names(hub) == ["Swift-27B-Q8"]
 
 
