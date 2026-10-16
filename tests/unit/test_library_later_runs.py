@@ -162,6 +162,16 @@ def test_a_busy_overlay_keeps_the_files_new_so_they_are_asked_again(later, monke
     assert [a.question for a in again.asked] == ["New model C — set it up?"]
 
 
+def test_a_library_that_cannot_be_saved_says_one_line(later, monkeypatch):
+    _add(later, "C")
+    scripted(monkeypatch, "not-now")
+    monkeypatch.setattr(model_library.Library, "save", lambda self, path, **kw: False)
+
+    _sync(later)
+
+    assert later.printed.getvalue().count(library.LIBRARY_NOT_SAVED_LINE) == 1
+
+
 def test_an_interview_that_cannot_be_asked_writes_nothing_and_keeps_the_file_new(later, monkeypatch):
     _add(later, "C")
     scripted(monkeypatch, UNREACHED)
