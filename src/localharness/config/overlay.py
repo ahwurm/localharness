@@ -11,6 +11,10 @@ from __future__ import annotations
 import logging
 import os
 import tempfile  # noqa: F401  (tests spy on overlay.tempfile; the writer itself lives in private_files)
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional  # noqa: F401  (Any kept for downstream typing imports)
 
@@ -18,7 +22,22 @@ import yaml
 
 from localharness.config.paths import resolve_overlay_path
 
+try:  # POSIX only; elsewhere the lock falls back to an in-process one
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on Windows only
+    fcntl = None  # type: ignore[assignment]
+
 log = logging.getLogger(__name__)
+
+OVERLAY_LOCK_FILE = "overrides.yaml.lock"
+OVERLAY_LOCK_BUDGET_SECONDS = 2.0
+OVERLAY_LOCK_POLL_SECONDS = 0.02
+_THREAD_LOCK = threading.Lock()
+_HELD = threading.local()
+
+
+class OverlayBusy(OSError):
+    """The overlay lock could not be taken in time, or its sidecar could not be opened."""
 
 
 CONFIG_FILE_MODE = 0o600
@@ -124,6 +143,53 @@ def atomic_write_overlay(path: Path, data: dict) -> None:
 
     atomic_write_text(path, yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
 
+
+
+@contextmanager
+def overlay_lock(global_dir: Path | str) -> Iterator[None]:
+    """Hold an exclusive flock on the sidecar beside overrides.yaml, failing closed with `OverlayBusy`
+    once the budget is spent. A second acquisition on the same thread raises RuntimeError."""
+    if getattr(_HELD, "depth", 0):
+        raise RuntimeError("overlay_lock is held already on this thread")
+    _HELD.depth = 1
+    try:
+        if fcntl is None:  # pragma: no cover - Windows
+            with _THREAD_LOCK:
+                yield
+            return
+        fd = _open_lock_file(Path(global_dir))
+        try:
+            deadline = time.monotonic() + OVERLAY_LOCK_BUDGET_SECONDS
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise OverlayBusy(f"{OVERLAY_LOCK_FILE} is held by another process") from None
+                    time.sleep(OVERLAY_LOCK_POLL_SECONDS)
+                except OSError as exc:
+                    raise OverlayBusy(f"cannot lock {OVERLAY_LOCK_FILE}: {exc}") from exc
+            yield
+        finally:
+            os.close(fd)
+    finally:
+        _HELD.depth = 0
+
+
+def _open_lock_file(global_dir: Path) -> int:
+    flags = (os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0))
+    try:
+        global_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(global_dir / OVERLAY_LOCK_FILE, flags, CONFIG_FILE_MODE)
+    except OSError as exc:
+        raise OverlayBusy(f"cannot open {OVERLAY_LOCK_FILE}: {exc}") from exc
+    try:
+        os.fchmod(fd, CONFIG_FILE_MODE)
+    except (AttributeError, OSError):
+        pass
+    return fd
 
 
 def __getattr__(name: str):

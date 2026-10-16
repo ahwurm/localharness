@@ -23,13 +23,14 @@ import re
 import stat
 import struct
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from localharness.core.private_files import NotRegularFile, open_regular
 
-__all__ = ["GgufHeaderError", "NotRegularFile", "read_header", "MAGIC", "MAX_KV", "MAX_STRING",
+__all__ = ["GgufHeaderError", "NotRegularFile", "read_header", "read_header_from", "FileKind", "model_of", "MAGIC", "MAX_KV", "MAX_STRING",
            "MAX_ARRAY_ELEMENTS", "HEADER_BYTE_BUDGET", "DISCOVERY_MAX_DEPTH", "DISCOVERY_MAX_FILES",
            "DISCOVERY_MAX_ENTRIES", "DISCOVERY_KEYS", "DiscoveredModel", "Discovery", "walk_ggufs",
            "discover", "preset_name", "unique_preset_name", "rank_models", "served_model"]
@@ -124,45 +125,50 @@ def read_header(path: str | os.PathLike[str], want: Iterable[str]) -> dict[str, 
 
     Raises NotRegularFile (an OSError) for a FIFO, device or directory, other OSErrors as the open
     raises them, and GgufHeaderError for a malformed or over-bound header."""
-    wanted = set(want)
     with os.fdopen(open_regular(path), "rb") as f:
-        c = _Cursor(f)
-        if c.read(len(MAGIC)) != MAGIC:
-            raise GgufHeaderError("bad magic")
-        version = c.unpack("<I")
-        if version not in (2, 3):
-            raise GgufHeaderError(f"unsupported GGUF version {version}")
-        c.unpack("<Q")  # n_tensors: the tensor infos are never read
-        n_kv = c.unpack("<Q")
-        if n_kv > MAX_KV:
-            raise GgufHeaderError("too many KV pairs")
-        if not wanted:
-            return {}
-        exact = {name for name in wanted if "." in name}  # D-47: a dotted name is an exact key
-        suffixes = wanted - exact
-        found: dict[str, Any] = {}
-        seen: dict[str, Any] = {}  # candidate keys, buffered until general.architecture is known
-        arch: str | None = None
-        for _ in range(n_kv):
-            key = c.string() or ""
-            is_exact = key in exact
-            keep = key == _ARCH_KEY or is_exact or _wanted_key(key, suffixes, arch)
-            value = _value(c, c.unpack("<I"), keep)
-            if key == _ARCH_KEY and isinstance(value, str):
-                arch = value
-            if is_exact:
-                found[key] = value
-            elif keep:
-                seen[key] = value
-            if arch is not None:
-                for name in suffixes - found.keys():
-                    for candidate in _forms(arch, name):
-                        if candidate in seen:
-                            found[name] = seen[candidate]
-                            break
-            if found.keys() == wanted:
-                return found
-        return found
+        return read_header_from(f, want)
+
+
+def read_header_from(f, want: Iterable[str]) -> dict[str, Any]:
+    """`read_header` over an already-open binary file positioned at its start."""
+    wanted = set(want)
+    c = _Cursor(f)
+    if c.read(len(MAGIC)) != MAGIC:
+        raise GgufHeaderError("bad magic")
+    version = c.unpack("<I")
+    if version not in (2, 3):
+        raise GgufHeaderError(f"unsupported GGUF version {version}")
+    c.unpack("<Q")  # n_tensors: the tensor infos are never read
+    n_kv = c.unpack("<Q")
+    if n_kv > MAX_KV:
+        raise GgufHeaderError("too many KV pairs")
+    if not wanted:
+        return {}
+    exact = {name for name in wanted if "." in name}  # D-47: a dotted name is an exact key
+    suffixes = wanted - exact
+    found: dict[str, Any] = {}
+    seen: dict[str, Any] = {}  # candidate keys, buffered until general.architecture is known
+    arch: str | None = None
+    for _ in range(n_kv):
+        key = c.string() or ""
+        is_exact = key in exact
+        keep = key == _ARCH_KEY or is_exact or _wanted_key(key, suffixes, arch)
+        value = _value(c, c.unpack("<I"), keep)
+        if key == _ARCH_KEY and isinstance(value, str):
+            arch = value
+        if is_exact:
+            found[key] = value
+        elif keep:
+            seen[key] = value
+        if arch is not None:
+            for name in suffixes - found.keys():
+                for candidate in _forms(arch, name):
+                    if candidate in seen:
+                        found[name] = seen[candidate]
+                        break
+        if found.keys() == wanted:
+            return found
+    return found
 
 
 # ---- discovery (D-01..D-05, D-07, D-47, D-48): what `init` finds under the model roots --------------
@@ -182,11 +188,19 @@ _PRESET_BAD = re.compile(r"[^A-Za-z0-9._+-]")
 _PROJECTOR_LEAD = re.compile(r"^mmproj[-_.]", re.IGNORECASE)
 
 
+class FileKind(str, Enum):
+    MODEL = "model"
+    PROJECTOR = "projector"
+    SHARD = "shard"
+    OTHER = "other"
+    UNREADABLE = "unreadable"
+
+
 @dataclass(frozen=True)
 class DiscoveredModel:
     """One preset-worthy GGUF: the path as written (a split model's is its first shard), its resolved
-    path, the D-05 name (not yet unique), the typed header values discovery used, the file's mtime and
-    the projector paired with it, if any."""
+    path, the D-05 name (not yet unique), the typed header values discovery used, the file's mtime,
+    the projector paired with it, if any, and its MTP layer count (None without valid MTP layers)."""
 
     path: Path
     real: str
@@ -196,14 +210,17 @@ class DiscoveredModel:
     context_length: int | None
     mtime: float
     mmproj: Path | None
+    mtp: int | None = None
 
 
 @dataclass(frozen=True)
 class Discovery:
-    """`models` in path order; `projectors` are the projectors no model claimed."""
+    """`models` in path order; `projectors` are the projectors no model claimed; `kinds` holds one
+    `FileKind` per input path string."""
 
     models: tuple[DiscoveredModel, ...]
     projectors: tuple[Path, ...]
+    kinds: Mapping[str, FileKind] = field(default_factory=dict)
 
 
 def _stem(path: str | os.PathLike[str]) -> str:
@@ -297,37 +314,65 @@ def discover(paths: Iterable[str | os.PathLike[str]],
     """Type every candidate with one read each, admit the models and pair them with projectors.
 
     A projector is `general.type == "mmproj"` or architecture `clip`; a model has `general.type`
-    absent or `model`; any other type (`adapter`, `imatrix`, …) is skipped, as is a header the reader
-    refuses (GgufHeaderError, NotRegularFile, any OSError)."""
+    absent or `model`; any other type (`adapter`, `imatrix`, …) is `other`, a later shard or an
+    incomplete split is `shard`, and a header the reader refuses (GgufHeaderError, NotRegularFile,
+    any OSError) is `unreadable`; only models and projectors are returned."""
     from localharness.provider.autosense import FIT_KEYS
 
     keys = DISCOVERY_KEYS | FIT_KEYS
     models: list[dict[str, Any]] = []
     projectors: list[dict[str, Any]] = []
+    kinds: dict[str, FileKind] = {}
     for raw in sorted({os.fspath(p) for p in paths}):
         try:
             header = read(raw, keys)
             mtime = os.stat(raw).st_mtime
         except (GgufHeaderError, OSError):
+            kinds[raw] = FileKind.UNREADABLE
             continue
-        kind, arch = header.get("type"), header.get("architecture")
-        item = {"path": Path(raw), "arch": arch if isinstance(arch, str) else None, "mtime": mtime,
-                "dim": _int(header.get("clip.vision.projection_dim")),
-                "embedding": _int(header.get("embedding_length")),
-                "context_length": _int(header.get("context_length"))}
-        if kind == "mmproj" or arch == "clip":
-            projectors.append(item)
-        elif (kind is None or kind == "model") and _admitted(
-                raw, _int(header.get("split.no")), _int(header.get("split.count"))):
-            models.append(item)
+        kinds[raw] = kind = _kind(raw, header)
+        if kind is FileKind.PROJECTOR:
+            projectors.append(_item(raw, header, mtime))
+        elif kind is FileKind.MODEL:
+            models.append(_item(raw, header, mtime))
     paired = _pair(models, projectors)
-    found = tuple(
-        DiscoveredModel(path=m["path"], real=os.path.realpath(m["path"]), name=preset_name(m["path"]),
-                        arch=m["arch"], embedding=m["embedding"], context_length=m["context_length"],
-                        mtime=m["mtime"], mmproj=paired.get(m["path"]))
-        for m in models)
+    found = tuple(_model(m, paired.get(m["path"])) for m in models)
     claimed = set(paired.values())
-    return Discovery(found, tuple(p["path"] for p in projectors if p["path"] not in claimed))
+    return Discovery(found, tuple(p["path"] for p in projectors if p["path"] not in claimed), kinds)
+
+
+def model_of(path: str | os.PathLike[str], header: Mapping[str, Any], *,
+             mtime: float) -> DiscoveredModel | None:
+    """The model a header read with `discover`'s keys describes, unpaired, or None when it is not one."""
+    raw = os.fspath(path)
+    return _model(_item(raw, header, mtime), None) if _kind(raw, header) is FileKind.MODEL else None
+
+
+def _kind(raw: str, header: Mapping[str, Any]) -> FileKind:
+    kind, arch = header.get("type"), header.get("architecture")
+    if kind == "mmproj" or arch == "clip":
+        return FileKind.PROJECTOR
+    if kind is None or kind == "model":
+        admitted = _admitted(raw, _int(header.get("split.no")), _int(header.get("split.count")))
+        return FileKind.MODEL if admitted else FileKind.SHARD
+    return FileKind.OTHER
+
+
+def _item(raw: str, header: Mapping[str, Any], mtime: float) -> dict[str, Any]:
+    from localharness.provider.tuning import mtp_layers
+
+    arch = header.get("architecture")
+    return {"path": Path(raw), "arch": arch if isinstance(arch, str) else None, "mtime": mtime,
+            "dim": _int(header.get("clip.vision.projection_dim")),
+            "embedding": _int(header.get("embedding_length")),
+            "context_length": _int(header.get("context_length")), "mtp": mtp_layers(header)}
+
+
+def _model(item: dict[str, Any], mmproj: Path | None) -> DiscoveredModel:
+    return DiscoveredModel(path=item["path"], real=os.path.realpath(item["path"]),
+                           name=preset_name(item["path"]), arch=item["arch"], embedding=item["embedding"],
+                           context_length=item["context_length"], mtime=item["mtime"], mmproj=mmproj,
+                           mtp=item["mtp"])
 
 
 def _admitted(path: str, split_no: int | None, split_count: int | None) -> bool:

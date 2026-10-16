@@ -552,3 +552,62 @@ def test_served_model_with_the_real_reader_refuses_a_non_gguf_and_a_fifo(tmp_pat
         assert served_model([tmp_path / "text", tmp_path / "pipe", real]) == str(real)
     finally:
         signal.alarm(0)
+
+
+# ---- file kinds, the MTP layer count, and the open-file reader ----------------------------------------
+
+def test_every_input_path_gets_one_file_kind(tmp_path):
+    root = tmp_path / "models"
+    root.mkdir()
+    a = model_file(root / "A.gguf")
+    proj = projector_file(root / "mmproj-A.gguf")
+    shard = write_gguf(root / "B-00002-of-00002.gguf", {"general.architecture": "llama", "split.no": u16(1),
+                                                         "split.count": u16(2)})
+    adapter = write_gguf(root / "lora.gguf", {"general.architecture": "llama", "general.type": "adapter"})
+    fifo = root / "pipe.gguf"
+    os.mkfifo(fifo)
+
+    found = discover([a, proj, shard, adapter, fifo])
+
+    assert dict(found.kinds) == {
+        str(a): gguf_header.FileKind.MODEL, str(proj): gguf_header.FileKind.PROJECTOR,
+        str(shard): gguf_header.FileKind.SHARD, str(adapter): gguf_header.FileKind.OTHER,
+        str(fifo): gguf_header.FileKind.UNREADABLE}
+
+
+def test_a_split_head_without_its_siblings_is_a_shard_kind(tmp_path):
+    head = write_gguf(tmp_path / "C-00001-of-00002.gguf", {"general.architecture": "llama",
+                                                            "split.no": u16(0), "split.count": u16(2)})
+    found = discover([head])
+    assert found.models == () and found.kinds[str(head)] is gguf_header.FileKind.SHARD
+
+
+@pytest.mark.parametrize("extra,expected", [
+    ({"llama.block_count": 65, "llama.nextn_predict_layers": 1}, 1),
+    ({"llama.block_count": 65}, None),
+    ({"llama.block_count": 4, "llama.nextn_predict_layers": 5}, None),
+    ({"llama.block_count": 4, "llama.nextn_predict_layers": 0}, None),
+    ({"llama.block_count": 4, "llama.nextn_predict_layers": True}, None),
+])
+def test_the_mtp_layer_count_is_the_one_the_launch_derives(tmp_path, extra, expected):
+    path = model_file(tmp_path / "m.gguf", **extra)
+    assert discover([path]).models[0].mtp == expected
+
+
+def test_read_header_from_reads_an_open_file_as_read_header_does(tmp_path):
+    path = model_file(tmp_path / "m.gguf", **{"llama.block_count": 65})
+    want = {"architecture", "block_count", "context_length"}
+    with open(path, "rb") as f:
+        assert gguf_header.read_header_from(f, want) == gguf_header.read_header(path, want)
+
+
+def test_model_of_describes_an_admitted_model_header_unpaired_and_nothing_else(tmp_path):
+    path = model_file(tmp_path / "Some Model.gguf", **{"llama.block_count": 8, "llama.nextn_predict_layers": 2})
+    header = gguf_header.read_header(path, gguf_header.DISCOVERY_KEYS | {"block_count", "nextn_predict_layers"})
+
+    described = gguf_header.model_of(path, header, mtime=12.5)
+
+    assert (described.name, described.mtime, described.mmproj, described.mtp, described.real) == (
+        "Some-Model", 12.5, None, 2, str(path.resolve()))
+    assert gguf_header.model_of(path, {**header, "type": "adapter"}, mtime=1.0) is None
+    assert gguf_header.model_of(path, {**header, "architecture": "clip"}, mtime=1.0) is None
