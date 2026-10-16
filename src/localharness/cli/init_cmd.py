@@ -1663,12 +1663,11 @@ def _guided_setup(config_path: Path, ra: RefArch) -> InitRecords:
         extra_args=list(ra.serve_extra_args),
         refarch=ra.key,
     )
-    # The preset block (D-14), every value through visible_text: the binary was just found or
-    # installed in front of the person, so its clause carries no provenance.
+    # every value through visible_text; the binary was just found or installed in front of the person, so no provenance
     how = f"binary: {shown_path(binary)}" if binary else f"docker_image: {visible_text(image)}"
     lines = [f"serving {visible_text(model)} ({RUNTIME_LABELS['vllm']}) "
              f"\u2190 {shown_path(model)} \u00b7 {how}"]
-    if srv.extra_args:  # D-68: the flags the record launches with are shown before they are adopted
+    if srv.extra_args:  # the flags the record launches with are shown before they are adopted
         lines.append("flags: " + visible_text(shlex.join(srv.extra_args)))
     return InitRecords(server=srv, served=model, lines=lines)
 
