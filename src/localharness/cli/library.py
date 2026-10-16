@@ -7,7 +7,7 @@ import json
 import os
 import platform
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -24,6 +24,7 @@ from localharness.agent.gguf_header import (
     FileKind,
     GgufHeaderError,
     model_of,
+    preset_name,
     rank_models,
     read_header,
     read_header_from,
@@ -182,7 +183,8 @@ class PeerFragment:
                 update["base_url"] = peer.base_url.replace(f":{_port_of(peer.base_url)}", f":{port}", 1)
             if life is not None:
                 update["lifecycle"] = life.model_copy(update={
-                    "port": port, "served_name": name if life.served_name in (None, peer.name) else life.served_name})
+                    "port": port, "served_name": name if life.runtime == "llamacpp" and life.served_name in (None, peer.name)
+                    else life.served_name})
             record = _record_dicts_of(None, [peer.model_copy(update=update)])[1][0]
             listed.append(record)
             self.written.append(record)
@@ -295,21 +297,36 @@ def _clause(runtime: str, *, mtp: bool, mmproj: str | os.PathLike[str] | None) -
 
 def preset_clause(server: ManagedServerConfig) -> str:
     """`(llama.cpp, mtp, +<projector basename>)`: the runtime, `mtp` when the model has it, the projector."""
-    return f"({_clause(server.runtime, mtp=bool(server.model and model_mtp(server.model)), mmproj=server.mmproj)})"
+    mtp = bool(server.runtime == "llamacpp" and server.model and model_mtp(server.model))
+    return f"({_clause(server.runtime, mtp=mtp, mmproj=server.mmproj)})"
+
+
+def _model_text(server: ManagedServerConfig) -> str:
+    return visible_text(server.model) if server.runtime == "vllm" else shown_path(server.model)
+
+
+def vllm_peer(checkpoint: model_library.Checkpoint, *, name: str, port: int, binary: str) -> EndpointRef:
+    """A launchable vLLM peer for a cached checkpoint: the repo id, served by the shown binary."""
+    return EndpointRef(
+        name=name, base_url=f"http://127.0.0.1:{port}/v1", provider_type="vllm", gpu=True,
+        lifecycle=ManagedServerConfig(runtime="vllm", launch="binary", binary=binary, model=checkpoint.repo_id,
+                                      port=port, gpu=True))
 
 
 def preset_lines(server: ManagedServerConfig, served: str, peers: Sequence[EndpointRef], *,
-                 binary_from: str, extras: Sequence[str] = ()) -> list[str]:
+                 binary_from: str, extras: Sequence[str] = (), vllm_from: str = "on PATH") -> list[str]:
     """The primary's line with its binary and where it came from, the escaped ``extras``, then one line per peer."""
-    primary = f"serving {visible_text(served)} {preset_clause(server)} ← {shown_path(server.model)}"
+    primary = f"serving {visible_text(served)} {preset_clause(server)} ← {_model_text(server)}"
     if server.binary:
         primary += f" · binary: {shown_path(server.binary)} ({binary_from})"
     lines = [primary, *extras]
     for peer in peers:
         life = peer.lifecycle
         if life is not None:
-            lines.append(f"/model switches to {visible_text(peer.name)} {preset_clause(life)} "
-                         f"← {shown_path(life.model)}")
+            line = f"/model switches to {visible_text(peer.name)} {preset_clause(life)} ← {_model_text(life)}"
+            if life.runtime == "vllm" and life.binary:
+                line += f" · binary: {shown_path(life.binary)} ({vllm_from})"
+            lines.append(line)
     return lines
 
 
@@ -389,14 +406,16 @@ def _result_from_record(recs: InitRecords) -> DetectorResult:
 
 
 def recorded_paths(global_dir: Path) -> frozenset[str]:
-    """The realpaths of every model and projector the machine's two files name in a record."""
+    """The realpaths of every model and projector the machine's two files name in a record, and the raw model of each vLLM one."""
     records: list = []
     for raw in workspace.raw_settings(global_dir):
         peers = raw.get("extra_endpoints")
         records += [raw.get("server"), *(p.get("lifecycle") for p in peers if isinstance(p, dict))] \
             if isinstance(peers, list) else [raw.get("server")]
-    return frozenset(os.path.realpath(os.path.expanduser(str(r[key])))
-                     for r in records if isinstance(r, dict) for key in ("model", "mmproj") if r.get(key))
+    live = [r for r in records if isinstance(r, dict)]
+    return frozenset({os.path.realpath(os.path.expanduser(str(r[key]))) for r in live
+                      for key in ("model", "mmproj") if r.get(key)}
+                     | {str(r["model"]) for r in live if r.get("runtime", "vllm") == "vllm" and r.get("model")})
 
 
 def prune_recorded(config_path: Path) -> bool:
@@ -436,7 +455,9 @@ def counts(config_path: Path) -> Counts:
     global_dir = global_config_dir(config_path)
     recorded = recorded_paths(global_dir)
     lib = model_library.Library.load(model_library.library_path(global_dir)).unrecorded(recorded)
-    here = [e for key, e in lib.entries.items() if e.verdict is FileKind.MODEL and os.path.lexists(key)]
+    vllm = managed_server.vllm_binary(global_dir) is not None
+    here = [e for key, e in lib.entries.items()
+            if e.verdict is FileKind.MODEL and os.path.lexists(key) and (vllm or e.repo is None)]
     server, peers = _merged(global_dir)
     lives = [p.get("lifecycle") for p in peers if isinstance(p, dict)]
     set_up = sum(isinstance(r, dict) and bool(r.get("model")) for r in (server, *lives))
@@ -492,7 +513,7 @@ def baseline(config_path: Path, *, person: bool) -> None:
     global_dir = global_config_dir(config_path)
     path = model_library.library_path(global_dir)
     found = model_library.scan(_machine_autosense(config_path).model_roots, recorded_paths(global_dir), path,
-                               scope="new", rank=list)
+                               scope="new", rank=list, checkpoints=_vllm_world(global_dir)[0])
     if found.changed:
         found.library.save(path)
 
@@ -524,12 +545,61 @@ class _Choice:
     skipped: bool = False
 
 
-def _bullets(listed: Sequence[model_library.Shown], names: dict[str, str]) -> None:
+def _vllm_world(global_dir: Path) -> tuple[tuple[model_library.Checkpoint, ...], tuple[str, str] | None]:
+    """The vLLM binary and its source, and the cached checkpoints it could serve: none without a binary."""
+    vllm = managed_server.vllm_binary(global_dir)
+    return (model_library.checkpoints() if vllm else ()), vllm
+
+
+def _listable(shown: Sequence[model_library.Shown]) -> list[model_library.Shown]:
+    return [s for s in shown if s.model is not None or s.checkpoint is not None]
+
+
+def _label(s: model_library.Shown) -> str:
+    return s.model.name if s.model else preset_name(s.checkpoint.repo_id.rsplit("/", 1)[-1])
+
+
+def _origin(s: model_library.Shown) -> str:
+    return visible_text(s.checkpoint.repo_id) if s.checkpoint else shown_path(s.path)
+
+
+def _ranked(config_path: Path, auto: AutosenseConfig, shown: Sequence[model_library.Shown]) -> list[model_library.Shown]:
+    """The GGUFs best first, then the checkpoints in repo-id order."""
+    ggufs = [s for s in shown if s.model]
+    by_path = {str(s.model.path): s for s in ggufs}
+    ranked = [by_path[str(m.path)] for m in _ranker(config_path, auto)([s.model for s in ggufs])] if ggufs else []
+    return ranked + sorted((s for s in shown if s.checkpoint), key=lambda s: s.checkpoint.repo_id)
+
+
+def _bullets(listed: Sequence[model_library.Shown], names: dict[str, str],
+             vllm: tuple[str, str] | None = None) -> None:
     for s in listed:
-        clause = _clause("llamacpp", mtp=bool(s.model.mtp), mmproj=s.model.mmproj)
-        line = BULLET.format(name=visible_text(names[s.real]), clause=clause, path=shown_path(s.path),
-                             size=format_size(s.size), date=s.first_seen)
+        if s.checkpoint:
+            line = BULLET.format(name=visible_text(names[s.real]), clause=_clause("vllm", mtp=False, mmproj=None),
+                                 path=_origin(s), size=format_size(s.size), date=s.first_seen)
+            line += f" · binary: {shown_path(vllm[0])} ({vllm[1]})"
+        else:
+            clause = _clause("llamacpp", mtp=bool(s.model.mtp), mmproj=s.model.mmproj)
+            line = BULLET.format(name=visible_text(names[s.real]), clause=clause, path=shown_path(s.path),
+                                 size=format_size(s.size), date=s.first_seen)
         console.print(line + (DECLINED_TAG if s.declined else ""), markup=False, soft_wrap=True)
+
+
+def _peers(chosen: Sequence[model_library.Shown], names: dict[str, str], *, start: int, taken_names: Collection[str],
+           taken_ports: Collection[int], vllm: tuple[str, str] | None) -> list[EndpointRef]:
+    """One launchable peer per chosen file: the GGUFs first, then the checkpoints on the next free ports."""
+    peers = model_library.peers_for([replace(s.model, name=names[s.real]) for s in chosen if s.model],
+                                    start=start, taken_names=taken_names, taken_ports=taken_ports)
+    ports = {*taken_ports, *(p.lifecycle.port for p in peers)}
+    used = {*taken_names, *(p.name for p in peers)}
+    for s in chosen:
+        if s.checkpoint is None or vllm is None or not (free := model_library.free_ports(start, 1, taken=ports)):
+            continue
+        name = unique_preset_name(names[s.real], used)
+        peers.append(vllm_peer(s.checkpoint, name=name, port=free[0], binary=vllm[0]))
+        ports.add(free[0])
+        used.add(name)
+    return peers
 
 
 def _first_of(files: Sequence[model_library.Shown], named: model_library.Shown | None) -> list[model_library.Shown]:
@@ -564,7 +634,7 @@ def _interview(listed: Sequence[model_library.Shown], names: dict[str, str],
         return skip
     if answer.keys == ("all",):
         return _Choice(_first_of(eligible, named), [])
-    picked = interview.ask(SET_UP_WHICH, [Option(s.real, visible_text(names[s.real]), shown_path(s.path))
+    picked = interview.ask(SET_UP_WHICH, [Option(s.real, visible_text(names[s.real]), _origin(s))
                                           for s in listed],
                            default={s.real for s in eligible}, cancel="cancel", multi=True)
     if not picked.reached:
@@ -574,7 +644,7 @@ def _interview(listed: Sequence[model_library.Shown], names: dict[str, str],
     chosen = [s for s in listed if s.real in picked.keys]
     declined = [s for s in listed if s.real not in picked.keys]
     if len(chosen) > 1 and named not in chosen:
-        first = interview.ask(SERVE_WHICH_FIRST, [Option(s.real, visible_text(names[s.real]), shown_path(s.path))
+        first = interview.ask(SERVE_WHICH_FIRST, [Option(s.real, visible_text(names[s.real]), _origin(s))
                                                   for s in chosen], default=0, cancel="cancel")
         if not first.reached:
             return None
@@ -594,17 +664,24 @@ def _named(listed: Sequence[model_library.Shown], names: dict[str, str],
 
 
 def _records(config_path: Path, order: Sequence[model_library.Shown], names: dict[str, str], *,
-             confirmed: bool) -> InitRecords:
+             confirmed: bool, vllm: tuple[str, str] | None = None) -> InitRecords:
     """The first file serves on `PRIMARY_PORT`, the rest are launchable peers above it."""
-    first, rest = order[0].model, [s.model for s in order[1:]]
-    served = names[order[0].real]
-    server = ManagedServerConfig(runtime="llamacpp", model=str(first.path),
-                                 mmproj=str(first.mmproj) if first.mmproj else None, served_name=served,
-                                 port=PRIMARY_PORT, binary=which_outside_cwd("llama-server"))
-    peers = model_library.peers_for(rest, start=PRIMARY_PORT + 1, taken_names={served}, taken_ports={PRIMARY_PORT})
-    lines = preset_lines(server, served, peers, binary_from="on PATH")
+    first = order[0]
+    if first.checkpoint:
+        served = first.checkpoint.repo_id
+        server = ManagedServerConfig(runtime="vllm", launch="binary", binary=vllm[0], model=served,
+                                     port=PRIMARY_PORT, gpu=True)
+    else:
+        served = names[first.real]
+        server = ManagedServerConfig(runtime="llamacpp", model=str(first.model.path),
+                                     mmproj=str(first.model.mmproj) if first.model.mmproj else None,
+                                     served_name=served, port=PRIMARY_PORT, binary=which_outside_cwd("llama-server"))
+    peers = _peers(order[1:], names, start=PRIMARY_PORT + 1, taken_names={names[first.real]},
+                   taken_ports={PRIMARY_PORT}, vllm=vllm)
+    lines = preset_lines(server, served, peers, binary_from=vllm[1] if first.checkpoint else "on PATH",
+                         vllm_from=vllm[1] if vllm else "on PATH")
     if server.binary is None:
-        lines.append(no_binary_line([s.model for s in order], _machine_autosense(config_path).model_roots))
+        lines.append(no_binary_line([s.model for s in order if s.model], _machine_autosense(config_path).model_roots))
     return InitRecords(server=server, served=served, peers=peers, lines=lines, block_in_receipt=True, confirmed=confirmed)
 
 
@@ -613,25 +690,26 @@ def _first_run(config_path: Path, *, scope: Literal["new", "all"], person: bool,
     global_dir = global_config_dir(config_path)
     auto = _machine_autosense(config_path)
     lib_path = model_library.library_path(global_dir)
-    found = model_library.scan(auto.model_roots, frozenset(), lib_path, scope=scope, rank=list, first_run=True)
-    shown = [s for s in (*found.new, *found.seen, *found.declined) if s.model is not None]
+    checkpoints, vllm = _vllm_world(global_dir)
+    found = model_library.scan(auto.model_roots, frozenset(), lib_path, scope=scope, rank=list, first_run=True,
+                               checkpoints=checkpoints)
+    shown = _listable((*found.new, *found.seen, *found.declined))
     if not shown:
         return Sync()
-    by_path = {str(s.model.path): s for s in shown}
-    listed = [by_path[str(m.path)] for m in _ranker(config_path, auto)([s.model for s in shown])]
+    listed = _ranked(config_path, auto, shown)
     names: dict[str, str] = {}
     for s in listed:
-        names[s.real] = unique_preset_name(s.model.name, names.values())
+        names[s.real] = unique_preset_name(_label(s), names.values())
     wanted = _named(listed, names, preset)
     if person:
-        _bullets(listed, names)
+        _bullets(listed, names, vllm)
     choice = _interview(listed, names, wanted, person=person)
     if choice is None:
         if person:
             _say(NEXT_START_LINE)
         order = _first_of([s for s in listed if not s.declined], wanted)
         if order:
-            return Sync(_records(config_path, order, names, confirmed=False), shown=len(listed))
+            return Sync(_records(config_path, order, names, confirmed=False, vllm=vllm), shown=len(listed))
         choice = _Choice([], [s for s in listed if s.declined])
     elif choice.skipped:
         _say(SKIP_LINE)
@@ -639,7 +717,7 @@ def _first_run(config_path: Path, *, scope: Literal["new", "all"], person: bool,
     else:
         found.library.marked(declined=[s.real for s in choice.declined]).save(lib_path)
     if choice.order:
-        records = _records(config_path, choice.order, names, confirmed=True)
+        records = _records(config_path, choice.order, names, confirmed=True, vllm=vllm)
         return Sync(records, tuple(records.lines), 0, tuple(s.real for s in choice.declined), len(listed))
     _say(DECLINED_ALL_LINE.format(n=len(choice.declined), library=shown_path(lib_path)))
     return Sync(declined=tuple(s.real for s in choice.declined), shown=len(listed))
@@ -670,7 +748,7 @@ def _later_interview(shown: Sequence[model_library.Shown], new: Sequence[model_l
             return _Choice(list(new), [])
     picked = interview.ask(
         SET_UP_WHICH,
-        [Option(s.real, visible_text(names[s.real]) + (DECLINED_TAG if s.declined else ""), shown_path(s.path))
+        [Option(s.real, visible_text(names[s.real]) + (DECLINED_TAG if s.declined else ""), _origin(s))
          for s in shown],
         default={s.real for s in new} | ({wanted.real} if wanted else set()), cancel="cancel", multi=True)
     if not picked.reached:
@@ -688,10 +766,11 @@ def _later_run(config_path: Path, *, scope: Literal["new", "all"], person: bool,
     global_dir = global_config_dir(config_path)
     auto = _machine_autosense(config_path)
     lib_path = model_library.library_path(global_dir)
+    checkpoints, vllm = _vllm_world(global_dir)
     found = model_library.scan(auto.model_roots, recorded_paths(global_dir), lib_path, scope=scope,
-                               rank=_ranker(config_path, auto))
-    shown = [s for s in (*found.new, *found.seen, *found.declined) if s.model is not None]
-    new = [s for s in found.new if s.model is not None]
+                               rank=_ranker(config_path, auto), checkpoints=checkpoints)
+    shown = _listable((*found.new, *found.seen, *found.declined))
+    new = _listable(found.new)
     if not (shown if choose else new):
         if found.changed:
             found.library.save(lib_path)
@@ -701,15 +780,15 @@ def _later_run(config_path: Path, *, scope: Literal["new", "all"], person: bool,
     taken_names, taken_ports = recorded_names_ports(global_dir)
     names: dict[str, str] = {}
     for s in shown:
-        names[s.real] = unique_preset_name(s.model.name, {*taken_names, *names.values()})
-    _bullets(shown, names)
+        names[s.real] = unique_preset_name(_label(s), {*taken_names, *names.values()})
+    _bullets(shown, names, vllm)
     choice = _later_interview(shown, new, names, _named(shown, names, preset), choose=choose, person=person)
     if choice is None:
         return Sync(shown=len(shown))
     written: list[dict] = []
     if choice.order:
-        peers = model_library.peers_for([replace(s.model, name=names[s.real]) for s in choice.order],
-                                        start=PRIMARY_PORT + 1, taken_names=taken_names, taken_ports=taken_ports)
+        peers = _peers(choice.order, names, start=PRIMARY_PORT + 1, taken_names=taken_names, taken_ports=taken_ports,
+                       vllm=vllm)
         if (written := append_peers(config_path, peers, adopt=True)) is None:
             return Sync(shown=len(shown))
         for peer in written:
