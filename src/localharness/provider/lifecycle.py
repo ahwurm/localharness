@@ -43,6 +43,7 @@ try:
 except ImportError:  # non-POSIX: the launch lock degrades to an in-process asyncio.Lock
     fcntl = None  # type: ignore[assignment]
 
+from localharness.config import redact as _redact
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import autosense as _auto
 from localharness.provider import procfs, server, speed_stats, tuning, units
@@ -1243,21 +1244,33 @@ class LmsStrategy:
             )
 
 
-def strategy_for(spec: ManagedServerConfig) -> LifecycleStrategy:
+def strategy_for(
+    spec: ManagedServerConfig, *, unit: "units.UnitRuntimeState | None" = None,
+) -> LifecycleStrategy:
     """Map a managed-server spec to its launch strategy by `runtime` (the launch-STRATEGY axis,
     orthogonal to provider_type): 'llamacpp' → SpawnedProcessStrategy (the harness spawns
     llama-server itself), 'ollama' → DaemonStrategy (the harness spawns + owns the `ollama serve`
     daemon), 'lmstudio' → LmsStrategy (the harness drives LM Studio's headless `lms` CLI), anything
     else ('vllm', the default) → ManagedVllmStrategy (docker/binary vLLM). The single construction
     point the callers — the REPL /model swap and `start` autostart — route through, so the strategy,
-    not the caller, owns HOW a backend is launched/stopped."""
+    not the caller, owns HOW a backend is launched/stopped.
+
+    `unit` is the autostart unit's state (spec 20 §9.4, D-19). Only a state that is the harness's OWN
+    unit (`own=True`, made by `units.own_unit` / `harness_unit_state` after the identity tests passed) and
+    a record the unit can serve (`unit_servable`: llama.cpp or a vLLM binary) wrap the strategy above in a
+    `UnitStrategy`; a raw state, a foreign unit and a docker / Ollama / LM Studio record get the strategy
+    above unchanged."""
     if spec.runtime == "llamacpp":
-        return SpawnedProcessStrategy()
-    if spec.runtime == "ollama":
-        return DaemonStrategy()
-    if spec.runtime == "lmstudio":
-        return LmsStrategy()
-    return ManagedVllmStrategy()
+        base: LifecycleStrategy = SpawnedProcessStrategy()
+    elif spec.runtime == "ollama":
+        base = DaemonStrategy()
+    elif spec.runtime == "lmstudio":
+        base = LmsStrategy()
+    else:
+        base = ManagedVllmStrategy()
+    if isinstance(unit, units.UnitRuntimeState) and unit.own and unit_servable(spec):
+        return UnitStrategy(base, unit, spec)
+    return base
 
 
 NOT_SERVED_BY_UNIT_LINE = "{name} is {kind} — not served by the unit"
@@ -1289,6 +1302,281 @@ def unit_kind(spec: ManagedServerConfig | None) -> str:
     if spec.runtime == "lmstudio":
         return "LM Studio"
     return "vLLM binary" if spec.launch == "binary" else "docker"
+
+
+# ---------------------------------------------------------------------------
+# Launching through the harness's own autostart unit (spec 20 §9.4)
+# ---------------------------------------------------------------------------
+UNIT_TYPED_LINE = ("under autostart /model takes preset names — put {path} under autosense.model_roots "
+                   "and run localharness init to add it as a peer")
+"""The refusal for a typed `.gguf` restart (or a model swapped in memory) under the unit: the unit serves
+the records the machine record fingerprinted, so the model must be a record first (D-20)."""
+
+UNIT_NAME_LINE = ("the autostart unit takes a record name of letters, digits and . _ @ + : - (and not "
+                  "server:); {name!r} is not one")
+"""The refusal for a peer name `unit-target` cannot hold (R-14-23)."""
+
+UNIT_FOREIGN_LINE = "{unit} {why} — it is not the unit localharness wrote, so it was not restarted"
+"""The refusal when the unit failed its identity re-check before a restart (D-13, T-14-22); `why` is
+`units.harness_unit_failure`'s phrase."""
+
+UNIT_FAILED_LINE = "{label} did not come up under the autostart unit"
+UNIT_EXITED_LINE = "{label}: the autostart unit exited without starting a server"
+UNIT_TIMEOUT_LINE = "{label}: the autostart unit's server was not ready after {seconds}s"
+
+LEND_POLL_SECONDS = 0.25
+"""How often the lent launch lock's holder looks at the unit. A poll interval, never a bound: the loan
+ends on an event or on the activate's own deadline (R-14-21)."""
+
+
+def _unit_failure_text(head: str, invocation: str | None, api_key: Any) -> str:
+    """`head`, the unit's journal tail for `invocation` and the reference line, every character scrubbed of
+    the held key, `Bearer` tokens, `api_keys:` values and URL credentials (T-14-24). Blocking: it runs the
+    journal reader, so callers run it off the event loop. The raw lines stay in the journal."""
+    held = [raw] if (raw := server.key_kwargs(api_key).get("api_key")) else []
+    try:
+        tail = units.journal_tail(invocation=invocation, secrets=held)
+    except ValueError:  # an id the manager reported that is not one: ask for the unit's latest lines
+        invocation = None
+        tail = units.journal_tail(secrets=held)
+    head = server.strip_url_credentials(_redact.scrub(head, held, patterns=_redact.LOGGED_KEY_PATTERNS))
+    return f"{head}\n{tail}\n{units.JOURNAL_REF_LINE.format(invocation=invocation or 'latest')}"
+
+
+def _manager_words(done: "units.ManagerResult | None", api_key: Any) -> str:
+    """What the service manager said when a verb failed, scrubbed and one line long."""
+    if done is None:
+        return "the service manager did not answer"
+    held = [raw] if (raw := server.key_kwargs(api_key).get("api_key")) else []
+    said = _redact.scrub(done.err.strip() or f"exit {done.code}", held, patterns=_redact.LOGGED_KEY_PATTERNS)
+    return server.strip_url_credentials(" ".join(said.split())[:300])
+
+
+async def _lend_until_recorded(config_dir: Path, deadline: float) -> None:
+    """Lend the launch lock to the unit's `serve` until it has recorded its pidfile (R-14-21, D-14).
+
+    `UnitStrategy.activate` runs inside its caller's launch lock while `serve` takes that same lock to write
+    the pidfile and the boot marker, so the lock is lent for the block. The loan ends on an EVENT, read from
+    a fresh state every `LEND_POLL_SECONDS`: the pidfile names a live process whose pid is the unit's
+    current MainPID (`serve` wrote it under the lock), or the unit is `failed` or `inactive` (no `serve`
+    will take the lock), or `deadline` (the activate's own, on `time.monotonic`) has passed, which is the
+    only backstop. A MainPID of none (the unit between its own restarts) keeps the loan open. Nothing here
+    counts seconds to decide the loan is long enough, because a clock-ended loan strands a slow `serve`
+    outside the lock while the lender waits on its server."""
+    async with lend_launch_lock(config_dir):
+        while True:
+            state = await asyncio.to_thread(units.unit_runtime_state)
+            if state is not None:
+                if state.active_state in ("failed", "inactive"):
+                    return
+                if state.main_pid is not None:
+                    launch = await asyncio.to_thread(procfs.read_launch, config_dir, main_pid=state.main_pid)
+                    if launch is not None and launch.pid == state.main_pid:
+                        return
+            if time.monotonic() >= deadline:
+                return
+            await asyncio.sleep(LEND_POLL_SECONDS)
+
+
+class UnitStrategy:
+    """Launch a llama.cpp or vLLM binary record THROUGH the harness's own autostart unit (spec 20 §9.4,
+    D-19, D-20, AUTO-09), wrapping the strategy a launch outside the unit would use.
+
+    `strategy_for(spec, unit=state)` makes one when `state` is the harness's own unit and the record is one
+    the unit can serve. `activate` does not start a process: it names the record in `unit-target`, re-checks
+    that the unit is still the harness's, resets and restarts it, lends the launch lock to the unit's
+    `serve` until that `serve` has recorded its pidfile, and waits with the unit as the judge of death.
+    `liveness`, `launch_identity` and `recovery_config_dir` are the wrapped strategy's, so a record is
+    recognised in `/proc` exactly as before. Only this class writes `unit-target` (RULING W3)."""
+
+    plans_launch = True
+
+    def __init__(self, inner: LifecycleStrategy, unit: "units.UnitRuntimeState", spec: ManagedServerConfig) -> None:
+        self._inner = inner
+        self._unit = unit
+        self._spec = spec
+        self._launch = (spec.model, spec.served_name)
+
+    @property
+    def inner(self) -> LifecycleStrategy:
+        return self._inner
+
+    @property
+    def unit(self) -> "units.UnitRuntimeState":
+        return self._unit
+
+    async def activate(
+        self,
+        spec: ManagedServerConfig,
+        config_dir: Path,
+        base_url: str,
+        *,
+        timeout_seconds: float = 1800.0,
+        on_poll: Callable[[float], None] | None = None,
+        api_key: str | None = None,
+        peer: str | None = None,
+        autosense: "AutosenseConfig | None" = None,
+        on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
+    ) -> LiveEndpoint:
+        """Restart the unit for `spec` and wait until its `serve` has the server answering.
+
+        In order, with nothing written before the refusals: the record check (`spec` must be the record
+        this strategy was chosen for, with the model and served name it had, else `UNIT_TYPED_LINE`; a peer
+        name `unit-target` cannot hold is `UNIT_NAME_LINE`), the launch decision (`LaunchRefused`), the
+        local plan for the launch line (`on_plan`), then `units.write_target`, the own-unit re-check,
+        `reset-failed`, `restart` (each verb off the event loop), the loan of the launch lock until the
+        unit's `serve` has recorded, and `server.wait_ready(unit_poll=)`. The wait tolerates exactly one
+        automatic restart of the unit when the plan's boot retry would change the launch (the unit's own
+        retry) and none otherwise; a second rise of `NRestarts` or `ActiveState=failed` raises a
+        RuntimeError carrying the SCRUBBED journal tail of that invocation and a reference line, never a raw
+        line. A cancellation, or a refusal before the restart, puts `unit-target` back as it was (RULING W3,
+        R-14-22). This never starts a process and never stops one outside the unit."""
+        if spec is not self._spec or (spec.model, spec.served_name) != self._launch:
+            raise server.LaunchRefused(UNIT_TYPED_LINE.format(path=spec.model))
+        name = units.PRIMARY_TARGET if peer is None else peer
+        if peer is not None and (peer == units.PRIMARY_TARGET or not units.TARGET_NAME_PATTERN.fullmatch(peer)):
+            raise server.LaunchRefused(UNIT_NAME_LINE.format(name=peer))
+        keyed = bool(api_key)
+        decision = server.launch_decision(spec, keyed, peer=peer)
+        if decision.refusal is not None:
+            raise server.LaunchRefused(decision.refusal)
+        deadline = time.monotonic() + timeout_seconds
+        plan: LaunchPlan | None = None
+        sensed: Sensed | None = None
+        if autosense is not None:
+            # Sensed as the restarted unit will: a manual restart resets `NRestarts`, so the unit's own
+            # `serve` plans the full shape (or the remembered one) and the harness predicts the same.
+            sensed = await asyncio.to_thread(sense_launch, spec, config_dir, autosense)
+            plan = plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed)
+        _say_plan(on_plan, plan)
+        tolerated = 1 if (plan is not None and plan.shape == "full" and plan.boot_retry() is not None) else 0
+        label = server.RUNTIME_LABELS.get(spec.runtime, "vLLM")
+        record_name = peer or spec.served_name or label
+
+        prior = units.read_target(config_dir)
+        try:
+            units.write_target(config_dir, name)
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not record the unit target: {getattr(exc, 'strerror', None) or type(exc).__name__}"
+            ) from None
+        restarted = False
+        try:
+            if await asyncio.to_thread(units.harness_unit_state, config_dir) is None:
+                raw = await asyncio.to_thread(units.unit_runtime_state)
+                why = units.harness_unit_failure(raw, config_dir) or "could not be confirmed as the harness's own"
+                raise server.LaunchRefused(UNIT_FOREIGN_LINE.format(unit=procfs.HARNESS_UNIT, why=why))
+            for verb in ("reset-failed", "restart"):
+                done = await asyncio.to_thread(units.systemctl_user, verb, procfs.HARNESS_UNIT)
+                if done is None or done.code != 0:
+                    raise RuntimeError(f"{verb} of {procfs.HARNESS_UNIT} failed: {_manager_words(done, api_key)}")
+            restarted = True
+            after = await asyncio.to_thread(units.unit_runtime_state)
+            base = after.n_restarts if after is not None else 0
+            identity = record_identity(spec)
+
+            async def failure(state: "units.UnitRuntimeState", head: str) -> str:
+                said = units.translate_exit(state, record_name=record_name)
+                return await asyncio.to_thread(
+                    _unit_failure_text, f"{head}: {said}" if said else head, state.invocation_id, api_key)
+
+            async def poll() -> str | None:
+                """The unit decides death (R-14-20): `failed`, or more automatic restarts than the plan's
+                boot retry accounts for, ends the wait with the scrubbed tail; a launch that is neither this
+                record's nor the unit's own `serve` ends it too. A unit whose current process has not
+                recorded its pidfile (a tolerated restart) gets the lock lent again first."""
+                state = await asyncio.to_thread(units.unit_runtime_state)
+                if state is None:
+                    return None
+                if state.active_state == "failed" or state.n_restarts - base > tolerated:
+                    return await failure(state, UNIT_FAILED_LINE.format(label=record_name))
+                launch = await asyncio.to_thread(
+                    procfs.read_launch, config_dir, expect=identity, main_pid=state.main_pid)
+                if state.main_pid is None:
+                    if state.active_state == "inactive" and (launch is None or not launch.verified):
+                        return await failure(state, UNIT_EXITED_LINE.format(label=record_name))
+                    return None
+                if launch is None or launch.pid != state.main_pid:
+                    await _lend_until_recorded(config_dir, deadline)
+                    return None
+                if not (launch.verified or launch.starting):
+                    return server.NOT_THIS_LAUNCH_LINE.format(label=label, pid=launch.pid)
+                return None
+
+            async def timed_out() -> TimeoutError:
+                state = await asyncio.to_thread(units.unit_runtime_state)
+                head = UNIT_TIMEOUT_LINE.format(label=record_name, seconds=int(timeout_seconds))
+                return TimeoutError(await asyncio.to_thread(
+                    _unit_failure_text, head, state.invocation_id if state else None, api_key))
+
+            await _lend_until_recorded(config_dir, deadline)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise (await timed_out()) from None
+            try:
+                served = await server.wait_ready(
+                    base_url, timeout_seconds=remaining, on_poll=on_poll, runtime=spec.runtime,
+                    unit_poll=poll, **server.key_kwargs(api_key))
+            except RuntimeError as died:
+                raise died from None  # the poll's text is already scrubbed; nothing chains to it
+            except TimeoutError:
+                raise (await timed_out()) from None
+
+            final = await asyncio.to_thread(units.unit_runtime_state)
+            main_pid = final.main_pid if final is not None else None
+            launch = await asyncio.to_thread(procfs.read_launch, config_dir, expect=identity, main_pid=main_pid)
+            process = None
+            if launch is not None and launch.verified:
+                found = await asyncio.to_thread(procfs.read_process, launch.pid)
+                process = found if isinstance(found, procfs.ProcRecord) else None
+            if tolerated and final is not None and final.n_restarts - base >= 1 and plan is not None:
+                plan = plan.boot_retry() or plan  # the unit's own retry is what answered
+            report = plan.report if plan is not None else None
+            if report is not None and spec.runtime == "llamacpp":
+                from localharness.agent.context import probe_window
+
+                model_id = served[0] if served else spec.served_name
+                probe = await asyncio.to_thread(probe_window, base_url, model_id, "llamacpp", api_key=api_key)
+                report = dataclasses.replace(
+                    report, served=probe.served, trained=probe.trained or report.trained,
+                    verified=probe.served is not None)
+            live = LiveEndpoint(
+                base_url=base_url, served_models=served,
+                handle=launch.pid if launch is not None else main_pid, note=decision.note,
+                window=report, tuned=plan.tuned if plan is not None else None)
+            confirm_launch(
+                config_dir, record_key(spec), marker=units.read_marker(config_dir), live=live, process=process,
+                unit=final, spec=spec, autosense=autosense, header=sensed.header if sensed is not None else None,
+                total_bytes=sensed.memory.total_bytes if sensed is not None and sensed.memory is not None else None)
+            return live
+        except asyncio.CancelledError:
+            try:
+                if prior is not None:
+                    units.write_target(config_dir, prior)
+                else:
+                    units.remove_target(config_dir)
+            except OSError:
+                log.debug("could not restore unit-target after a cancelled launch", exc_info=True)
+            raise
+        except Exception:
+            if not restarted:  # nothing was launched: the in-flight store must not claim otherwise
+                try:
+                    if prior is not None:
+                        units.write_target(config_dir, prior)
+                    else:
+                        units.remove_target(config_dir)
+                except OSError:
+                    log.debug("could not restore unit-target after a refused launch", exc_info=True)
+            raise
+
+    def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
+        return self._inner.recovery_config_dir(config_dir)
+
+    def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> Liveness:
+        return self._inner.liveness(spec, config_dir)
+
+    def launch_identity(self, spec: ManagedServerConfig) -> LaunchIdentity | None:
+        return self._inner.launch_identity(spec)
 
 
 GPU_FREE_SETTLE_SECONDS = 3.0

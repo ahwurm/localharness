@@ -32,7 +32,7 @@ import structlog
 from pydantic import SecretStr
 
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, NoReturn
+from typing import Any, Awaitable, Callable, Iterable, Mapping, NoReturn
 
 from localharness.config import redact
 from localharness.config.models import ManagedServerConfig
@@ -1305,6 +1305,7 @@ async def wait_ready(
     runtime: str | None = None,
     liveness: bool = False,
     expect: procfs.LaunchIdentity | None = None,
+    unit_poll: "Callable[[], Awaitable[str | None]] | None" = None,
 ) -> list[str]:
     """Poll {base_url}/models until the server answers; return served model ids.
 
@@ -1325,6 +1326,13 @@ async def wait_ready(
     `expect` (with `config_dir`) is the proof the live launch is the record's (D-18): when the pidfile's
     process is live but does not match it the wait raises `NOT_THIS_LAUNCH_LINE` at once, so a waiting
     start never polls one record's port on another launch's pid. Unset, nothing changes.
+
+    `unit_poll` is the autostart unit's judge of the wait (spec 20 §9.4, R-14-20): an async callable awaited
+    once per iteration before the HTTP request. A string it returns ends the wait with `RuntimeError(that
+    string)`; None keeps waiting. While it is given the pidfile death check and the `expect` test are
+    skipped, because under the unit the pidfile is absent between the unit's own restarts and names its
+    `serve` process (not yet the server) for a moment before the exec: the unit, not the pidfile, decides
+    death, and the identity proof moves into the poll. Unset, nothing changes.
     """
     label = RUNTIME_LABELS.get(runtime, "vLLM") if runtime else "vLLM"
     start = time.monotonic()
@@ -1332,12 +1340,16 @@ async def wait_ready(
     headers = auth_headers(api_key)
     async with httpx.AsyncClient(**({} if _TRANSPORT is None else {"transport": _TRANSPORT})) as client:
         while time.monotonic() < deadline:
-            if config_dir is not None and server_pid(config_dir) is None:
+            if unit_poll is not None:
+                verdict = await unit_poll()
+                if verdict is not None:
+                    raise RuntimeError(verdict)
+            if unit_poll is None and config_dir is not None and server_pid(config_dir) is None:
                 raise RuntimeError(
                     f"{label} exited during startup. Log tail:\n"
                     + _tail_block(config_dir, f"{label} exited during startup", api_key)
                 )
-            if config_dir is not None and expect is not None:
+            if unit_poll is None and config_dir is not None and expect is not None:
                 live = procfs.read_launch(
                     config_dir, expect=expect, stat_reader=lambda pid: _read_proc_stat(pid))
                 if live is not None and not live.verified:
