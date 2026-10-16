@@ -155,8 +155,11 @@ def test_an_inline_key_is_a_placeholder_and_never_its_value(tmp_path, box):
 @pytest.mark.parametrize("extra, shown", [
     (["--api-key", "sk-x"], "--api-key '<key>'"),
     (["--api-key=sk-y"], "'--api-key=<key>'"),
+    (["--hf-token", "sk-x"], "--hf-token '<key>'"),
+    (["-hft", "sk-x"], "-hft '<key>'"),
+    (["--hf-token=sk-y"], "'--hf-token=<key>'"),
 ])
-def test_an_extra_args_api_key_value_is_replaced_by_key(tmp_path, box, extra, shown):
+def test_an_extra_args_key_or_token_value_is_replaced_by_key(tmp_path, box, extra, shown):
     spec = _spec(tmp_path, extra_args=extra)
     plan = _plan(tmp_path, spec)
 
@@ -164,6 +167,15 @@ def test_an_extra_args_api_key_value_is_replaced_by_key(tmp_path, box, extra, sh
 
     assert shown in script
     assert "sk-x" not in script and "sk-y" not in script
+
+
+def test_a_url_in_extra_args_loses_its_userinfo(tmp_path, box):
+    spec = _spec(tmp_path, extra_args=["--model-url", "https://user:sk-x@host.example/m.gguf"])
+    plan = _plan(tmp_path, spec)
+
+    script = _render(plan, spec)
+
+    assert "https://host.example/m.gguf" in script and "sk-x" not in script and "@host" not in script
 
 
 def test_a_key_file_stays_its_path(tmp_path, box):
