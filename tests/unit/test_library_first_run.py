@@ -17,12 +17,10 @@ from localharness.config import trust
 from localharness.provider import model_library
 from tests.unit.interview_support import CANCEL, UNREACHED, scripted
 from tests.unit.test_init_core_setup import _exited, _flat, _hermetic, _init  # noqa: F401  (autouse fixture)
-from tests.unit.test_init_discovery_records import (  # noqa: F401  (fixtures and helpers)
-    _model,
-    _peers,
-    _written,
-    box,
-)
+from tests.unit import test_init_discovery_records as world
+from tests.unit.test_init_discovery_records import _model, _peers, _written
+
+box = world.box
 
 
 def _first_run(box, **kw) -> library.Sync:
