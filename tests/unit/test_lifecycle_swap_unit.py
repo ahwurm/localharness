@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
 
 import pytest
 import yaml
@@ -165,7 +164,7 @@ def pending_in_overlay(g):
 
 def failing_then_serving(world, serving_first: FakeServe | None, serving_second: FakeServe) -> dict:
     """The first restart makes the unit fail (the target never comes up; `serving_first`, when given, is the
-    `serve` that restart ran and is let go at the second restart); the second brings `serving_second` up as the
+    `serve` that restart ran, which reads the ladder and leaves nothing in `/proc`); the second brings `serving_second` up as the
     unit's main process. `restarts["n"]` counts the restarts and gates the HTTP answer."""
     restarts = {"n": 0}
 
@@ -173,10 +172,10 @@ def failing_then_serving(world, serving_first: FakeServe | None, serving_second:
         restarts["n"] += 1
         if restarts["n"] == 1:
             if serving_first is not None:
-                serving_first.start()
-                deadline = time.monotonic() + 5
-                while serving_first.chosen is None and time.monotonic() < deadline:
-                    time.sleep(0.002)  # the unit's `serve` has read the ladder before the unit fails
+                # The unit's `serve` has read the ladder before the unit fails. It is read here, on this thread,
+                # and `serving_first` never becomes a process: a failed unit has none in its cgroup, and a thread
+                # racing the loan of the launch lock would leave one there with the manager saying `failed` (WR-11).
+                serving_first.choose_now()
             world.manager.base.update(ActiveState="failed", ExecMainStatus=1)
         else:
             if serving_first is not None:
@@ -472,3 +471,38 @@ def test_a_swap_whose_incumbent_runs_in_the_unit_while_the_manager_cannot_be_ask
     assert rep.events == [] and world.events == []                   # nothing freed, nothing launched
     assert rep.lines == [lifecycle.SWAP_FREE_FAILED.format(name="flash-next", exc=outcome.error)]
     assert isinstance(procfs.read_process(INCUMBENT_PID), procfs.ProcRecord)   # still running, never signalled
+
+
+# ------------------------------------------------------------------------------------------ WR-09, WR-11
+
+
+def test_a_half_started_target_in_the_units_cgroup_with_no_main_pid_is_torn_down_through_the_unit(world, monkeypatch):
+    """The unit is `failed` and reports MainPID 0 while a server of the target still sits in its cgroup: the
+    teardown before a restore asks the unit to stop, and signals nothing (WR-09)."""
+    flash = world.peer("flash-next")
+    install_process(world.proc, 4242, argv=FakeServe.record_argv(flash), exe=str(flash.binary), start_time=5000,
+                    cgroup=UNIT_CGROUP)
+    server.pid_path(world.g).parent.mkdir(parents=True, exist_ok=True)
+    server.pid_path(world.g).write_text(f"4242 5000 {flash.port}", encoding="utf-8")
+    world.manager.base.update(ActiveState="failed", ExecMainStatus=1, MainPID=0)
+    monkeypatch.setattr(server, "stop_server", lambda *a, **kw: pytest.fail("the unit's server was stopped by the harness"))
+    manager = world.manager
+
+    def run(argv, *, timeout, cap, **kw):
+        done = manager(argv, timeout=timeout, cap=cap, **kw)
+        if tuple(argv)[:3] == ("systemctl", "--user", "stop") and done is not None and done.code == 0:
+            vanish(world.proc, 4242)
+        return done
+
+    monkeypatch.setattr(units, "_run_manager", run)
+    asyncio.run(lifecycle.safe_stop(flash, world.g, unit=world.state))
+    assert manager.verbs == [("reset-failed", UNIT), ("stop", UNIT)]
+    assert procfs.read_process(4242).__class__ is procfs.ProcRefusal
+
+
+def test_a_fake_serve_that_was_never_started_is_stopped_and_joined_without_raising(world):
+    """The teardown must not mask the error that ended a test with a `serve` it never needed (WR-11)."""
+    idle = world.serve(world.primary, pid=4343)
+    idle.stop()
+    idle.join()
+    assert idle.error is None and idle.chosen is None
