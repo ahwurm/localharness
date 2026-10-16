@@ -1,6 +1,6 @@
 """init writes a record instead of launching a server (Phase 5, D-12, D-13, D-39, D-55, D-59, D-68).
 
-The guided vLLM setup keeps its install and download questions but starts nothing and waits for
+The guided vLLM setup runs on a row the offer chose, asks nothing, starts nothing and waits for
 nothing: it hands back an `InitRecords`, which core_setup shows, writes as a loadable config.yaml
 without probing a server that is not up, and reports as ready when the first `start` can launch it.
 Every call that would launch, wait or probe is booby-trapped, so "launched nothing" is proven.
@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 import localharness.cli.init_cmd as init_cmd
+from localharness.cli import library
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import (
     ContextConfig,
@@ -26,8 +27,10 @@ from localharness.config.models import (
     TerminalKeysConfig,
 )
 from localharness.config.overlay import deep_merge
+from localharness.provider import autosense
 from localharness.provider import server as managed_server
 from localharness.provider.refarch import DGX_SPARK
+from tests.unit.interview_support import UNREACHED, scripted
 from tests.unit.test_init_core_setup import (
     _Asked,
     _detect,
@@ -51,28 +54,25 @@ def _boom(name: str):
 
 @pytest.fixture
 def guided(tmp_path, monkeypatch):
-    """A terminal, nothing detected, the guided setup answered (yes, hardware 1, a local path as
-    the model so nothing downloads), and every launch / wait / probe / spawn booby-trapped."""
+    """A terminal, nothing detected, the Spark row offered (an nvidia box with vllm found) and taken on Enter, the
+    checkpoint already cached, every launch / wait / probe / spawn and every old prompt booby-trapped."""
     _detect(monkeypatch, found=False)
     _terminal(monkeypatch)
-    confirm = MagicMock()
-    confirm.ask.return_value = True
-    monkeypatch.setattr(init_cmd, "Confirm", confirm)
-    int_prompt = MagicMock()
-    int_prompt.ask.return_value = 1
-    monkeypatch.setattr(init_cmd, "IntPrompt", int_prompt)
-    model = tmp_path / "checkpoint"
-    model.mkdir()
-    prompt = MagicMock()
-    prompt.ask.return_value = str(model)
-    monkeypatch.setattr(init_cmd, "Prompt", prompt)
+    for name in ("Confirm", "IntPrompt", "Prompt"):
+        monkeypatch.setattr(init_cmd, name, _Asked)
+    monkeypatch.setattr(autosense, "_run_nvidia_smi", lambda: "100000, 131072\n")
+    monkeypatch.setattr(library, "which_outside_cwd", lambda _n: None)
+    monkeypatch.setattr(managed_server, "vllm_binary", lambda _d: (VLLM, "on PATH"))
     monkeypatch.setattr(managed_server, "find_vllm", lambda _d: VLLM)
+    monkeypatch.setattr(managed_server, "is_model_cached", lambda _r: True)
+    monkeypatch.setattr(managed_server, "download_model", _boom("download_model"))
     for name in ("start_server", "wait_ready"):
         monkeypatch.setattr(managed_server, name, _boom(name))
     monkeypatch.setattr(init_cmd, "_probe_capabilities", _boom("_probe_capabilities"))
     monkeypatch.setattr(init_cmd, "_served_window", _boom("_served_window"))
     monkeypatch.setattr(subprocess, "Popen", _boom("subprocess.Popen"))
-    return str(model)
+    scripted(monkeypatch, "download")
+    return DGX_SPARK.repo
 
 
 def _written(tmp_path) -> dict:
@@ -124,7 +124,9 @@ def test_the_guided_record_reports_a_server_ready_for_the_first_start(tmp_path, 
 
 def test_the_docker_route_writes_a_docker_record(tmp_path, guided, monkeypatch):
     monkeypatch.setattr(managed_server, "find_vllm", lambda _d: None)
+    monkeypatch.setattr(managed_server, "vllm_binary", lambda _d: None)
     monkeypatch.setattr(init_cmd, "which_outside_cwd", lambda _name: "/usr/bin/docker")
+    scripted(monkeypatch, *["rows", "dgx-spark", "download"] * 2)
 
     result = _init(tmp_path)
 
@@ -154,7 +156,7 @@ def test_the_preset_line_and_the_flags_line_are_shown_before_the_write(tmp_path,
 
 
 def test_no_flags_line_when_the_profile_has_no_extra_args(tmp_path, guided, monkeypatch):
-    monkeypatch.setattr(init_cmd, "REF_ARCHS", (replace(DGX_SPARK, serve_extra_args=()),))
+    monkeypatch.setattr(library, "REF_ARCHS", (replace(DGX_SPARK, serve_extra_args=()),))
 
     result = _init(tmp_path)
 
@@ -163,31 +165,36 @@ def test_no_flags_line_when_the_profile_has_no_extra_args(tmp_path, guided, monk
     assert "flags:" not in result.output
 
 
-def test_a_hostile_model_name_is_shown_escaped(tmp_path, guided, monkeypatch):
-    hostile = tmp_path / "ev\x1b[31mil\nname"
-    hostile.mkdir()
-    monkeypatch.setattr(init_cmd.Prompt, "ask", staticmethod(lambda *a, **k: str(hostile)))
-
-    recs = init_cmd._guided_setup(tmp_path)
+def test_a_hostile_model_name_is_shown_escaped(tmp_path, guided):
+    recs = init_cmd._guided_setup(tmp_path, replace(DGX_SPARK, repo="ev\x1b[31mil\nname"))
 
     shown = "\n".join(recs.lines)
     assert "\x1b" not in shown and "ev\\x1b[31mil\\x0aname" in shown
     assert len(recs.lines) == 2  # a newline in the name did not fake a third line
 
 
+def test_the_reduced_guided_setup_asks_nothing(tmp_path, guided, monkeypatch):
+    monkeypatch.setattr(managed_server, "is_model_cached", lambda _r: False)
+    fetched: list[str] = []
+    monkeypatch.setattr(managed_server, "download_model", lambda repo: fetched.append(repo) or "/cache")
+
+    recs = init_cmd._guided_setup(tmp_path, DGX_SPARK)
+
+    assert fetched == [DGX_SPARK.repo] and recs.server.refarch == "dgx-spark" and recs.server.port == 8081
+
+
 # ------------------------------------------------------------------ the not-found outcome
 
 
-def test_declining_the_guided_setup_still_says_nothing_was_found(tmp_path, monkeypatch):
+def test_an_offer_nobody_could_answer_still_says_nothing_was_found(tmp_path, monkeypatch):
     _detect(monkeypatch, found=False)
     _terminal(monkeypatch)
-    confirm = MagicMock()
-    confirm.ask.return_value = False
-    monkeypatch.setattr(init_cmd, "Confirm", confirm)
+    scripted(monkeypatch, UNREACHED)
     prompt = MagicMock()
     prompt.ask.side_effect = ["http://localhost:8081/v1", "my-model"]
     monkeypatch.setattr(init_cmd, "Prompt", prompt)
     monkeypatch.setattr(init_cmd, "IntPrompt", _Asked)
+    monkeypatch.setattr(init_cmd, "Confirm", _Asked)
 
     result = _init(tmp_path)
 

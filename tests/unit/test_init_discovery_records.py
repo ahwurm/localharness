@@ -446,7 +446,6 @@ def test_the_lm_studio_and_ollama_stores_are_not_walked(tmp_path, monkeypatch, f
     _model(home / ".lmstudio" / "models" / "pub" / "repo" / "m.gguf")
     _model(home / ".ollama" / "models" / "blobs" / "b.gguf")
     monkeypatch.setattr(init_cmd, "detect_provider", _not_found())
-    monkeypatch.setattr(init_cmd, "_guided_setup", lambda _p: None)
     _bin_dir(tmp_path, monkeypatch)
 
     result = _init(tmp_path / "cfg", "--no-input")

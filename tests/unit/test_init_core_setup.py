@@ -26,6 +26,7 @@ from localharness.cli.app import app
 from localharness.cli.model_ops import persist_active_endpoint, persist_default_model
 from localharness.config.loader import ConfigLoader
 from localharness.config.overlay import atomic_write_overlay, load_overlay
+from tests.unit.interview_support import UNREACHED, scripted
 from tests.unit.test_init_cmd import _make_capability_result, _make_detector_result
 
 runner = CliRunner()
@@ -413,13 +414,14 @@ def test_force_still_regenerates_config_yaml(tmp_path, monkeypatch):
 
 
 def _no_server_on_a_terminal(monkeypatch, *answers: str) -> tuple[MagicMock, MagicMock]:
-    """Detection finds nothing, a terminal is attached, the guided vLLM offer is declined, and
+    """Detection finds nothing, a terminal is attached, the download offer cannot be answered, and
     Prompt answers `answers` in order. Returns (Prompt, LLMClient) — the probe must not run."""
     _detect(monkeypatch, found=False)
     client_cls = MagicMock()
     monkeypatch.setattr(init_cmd, "LLMClient", client_cls)
     _terminal(monkeypatch)
-    _answers(monkeypatch, False)  # "Set up vLLM and a model now?" — no
+    _silent(monkeypatch)
+    scripted(monkeypatch, UNREACHED)  # the download offer cannot be asked, so skip for now follows
     prompt = MagicMock()
     prompt.ask.side_effect = list(answers)
     monkeypatch.setattr(init_cmd, "Prompt", prompt)
@@ -768,7 +770,7 @@ def test_force_writes_nothing_when_the_reset_cannot_be_written(overlay_text, sai
 
 
 def test_force_then_skip_for_now_also_clears_the_saved_choices(tmp_path, monkeypatch):
-    """The other fresh write: --force on a terminal, no server, guided setup declined, a model named
+    """The other fresh write: --force on a terminal, no server, download offer unanswered, a model named
     — the config saved unchecked is the one the next start reads, not overrides.yaml's old choice."""
     _seed(tmp_path)
     overlay_path = tmp_path / "overrides.yaml"

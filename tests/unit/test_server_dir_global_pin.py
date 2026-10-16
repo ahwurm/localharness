@@ -180,13 +180,14 @@ def test_init_guided_setup_names_the_global_pin():
     assert "server_config_path = global_config_dir(config_path)" in text
     for pinned in (
         "managed_server.find_vllm(server_config_path)",
-        "managed_server.server_dir(server_config_path)",
         "managed_server.install_vllm_venv(server_config_path",
     ):
         assert pinned in text, f"guided setup lost its pin: {pinned}"
     assert "managed_server.start_server(" not in text
     assert "wait_ready(" not in text
     assert "managed_server.find_vllm(config_path)" not in text
+    offer = (SRC / "library.py").read_text(encoding="utf-8")
+    assert "global_dir = global_config_dir(config_path)" in offer and "managed_server.server_dir(global_dir)" in offer
 
 
 def test_the_llamacpp_activation_prepares_its_config_dir_under_the_global_dir_it_was_handed():

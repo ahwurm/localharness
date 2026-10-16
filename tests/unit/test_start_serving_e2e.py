@@ -268,7 +268,7 @@ async def test_a_config_with_no_peers_and_no_stores_starts_exactly_as_before(tmp
 
     seen = _boot(tmp_path, monkeypatch, server_block=DECLARED_ONLY)
     assert await _drive(tmp_path) == 1
-    assert [x for x in _err_text(seen.err) if "llama-server" in x] == [REFUSAL]
+    assert [x for x in _err_text(seen.err) if x.startswith("no llama-server")] == [REFUSAL]
     assert seen.started == []
 
 
