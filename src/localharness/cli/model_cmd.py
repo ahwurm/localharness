@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import sys
 from pathlib import Path
 from typing import NoReturn, Optional
 
@@ -23,7 +22,7 @@ from rich.markup import escape
 
 from localharness import resolved_version
 from localharness.cli import autostart, model_ops, start_serving
-from localharness.cli.workspace import MachineTrust, decide_machine_trust, shown_path, visible_text
+from localharness.cli.workspace import MachineTrust, decide_machine_trust, local_operator, shown_path, visible_text
 from localharness.config import session_presence, trust
 from localharness.config.loader import ConfigLoader
 from localharness.config.paths import global_config_dir, resolve_config_dir
@@ -38,23 +37,6 @@ SCRIPT_ALONE_LINE = "--script takes a preset name or --all, nothing else"
 SCRIPT_NOTHING_LINE = "nothing to render — no record launches a server (llama.cpp or vLLM)"
 SCRIPT_KIND_LINE = "{name} is {kind} — --script renders llama.cpp and vLLM launches"
 SCRIPT_SKIP_LINE = "# {name}: {why}"
-
-
-def _is_local_operator() -> bool:
-    """Is a person at this terminal making the switch (D-19, TRUST-09)? True only on a tty without
-    the agent-command ``LOCALHARNESS_COMMIT`` marker: `bash_tool` sets it in every agent command's
-    environment and `python_exec` sets it in the process environment for the length of each call (so
-    a child it spawns inherits it), hence an agent running `localharness model` from either tool is
-    never a local operator, and a pipe or a script has no tty. The one signal is the environment,
-    never an argument or a message. Not a sandbox: agent code that deliberately clears the variable
-    or spawns with its own ``env=`` is outside what this can see (`python_exec` can already rewrite
-    the trust file, which SECURITY.md accepts)."""
-    if "LOCALHARNESS_COMMIT" in os.environ:
-        return False
-    try:
-        return sys.stdin is not None and bool(sys.stdin.isatty())
-    except (AttributeError, ValueError, OSError):
-        return False
 
 
 def _refuse_autostart(line: str) -> None:
@@ -76,7 +58,7 @@ def _autostart(mode: str, config_dir: Optional[str], *, with_other_arguments: bo
         _refuse_autostart(autostart.AUTOSTART_MODE_LINE)
     if mode == "status":
         _autostart_status(resolve_config_dir(config_dir))
-    if not _is_local_operator():
+    if not local_operator(False):
         _refuse_autostart(autostart.AUTOSTART_TERMINAL_LINE.format(mode=mode))
     if mode == "off":
         _autostart_off(resolve_config_dir(config_dir))
@@ -233,7 +215,7 @@ def _select_preset(harness, record, current, loader, audit_dir, ws, machine_trus
             audit_warning = asyncio.run(
                 model_ops.persist_default_model(
                     harness, record.served, config_dir=loader._config_dir, audit_base_dir=audit_dir,
-                    local_operator=_is_local_operator(), write_server_model=False,
+                    local_operator=local_operator(False), write_server_model=False,
                 )
             )
         except Exception as exc:
@@ -560,7 +542,7 @@ def model(
         # The question is gated on the terminal (`ask`), the action is not (`will_launch`).
         unit = _own_unit(cfg_path)
         will_launch = _will_launch(unit, cfg_path)
-        machine_trust = decide_machine_trust(cfg_path, ask=_is_local_operator(), launching=will_launch)
+        machine_trust = decide_machine_trust(cfg_path, ask=local_operator(False), launching=will_launch)
         if machine_trust.line:
             err_console.print(machine_trust.line, markup=False, soft_wrap=True)
     loader = ConfigLoader(
@@ -723,7 +705,7 @@ def model(
         audit_warning = asyncio.run(
             model_ops.persist_default_model(
                 harness, target, config_dir=loader._config_dir, audit_base_dir=_audit_dir,
-                local_operator=_is_local_operator(),
+                local_operator=local_operator(False),
             )
         )
     except Exception as exc:
