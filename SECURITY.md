@@ -420,7 +420,10 @@ read and argue with. Each step below says what it does in `auto`.
      which `guarded` still asks about.
      The home and system protected sets apply in full on top of this: `~/.ssh`, `~/.aws`,
      `~/.gnupg`, `~/.config/gh`, `~/.kube`, `~/.docker`, `~/.git-credentials`, `~/.netrc`,
-     `~/.npmrc`, `~/.pypirc`, `~/.config/gcloud`, `~/.azure`, your shell rc and profile files and
+     `~/.npmrc`, `~/.pypirc`, `~/.config/gcloud`, `~/.azure`, your shell rc and profile files, the four
+     directories that decide what your next login starts (`~/.config/systemd`,
+     `~/.local/share/systemd/user`, `~/.config/environment.d` and `~/.config/autostart`, followed
+     to `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME` when those are absolute paths) and
      the Windows credential folders. `~/.localharness` is no longer protected as a whole tree:
      **one ten-entry list protects each harness config directory a session uses** — `config.yaml`,
      `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`, `declined_workspace_offers.yaml`,
@@ -1022,19 +1025,23 @@ The files the harness creates there are owner-only (0600) from their first byte 
 that mode, never written first and changed after: `config.yaml` and its backups
 (`config.yaml.bak-<stamp>` from the security-defaults update, `config.yaml.before-init-<stamp>`
 from `init --force`), `overrides.yaml`, `grants.yaml`, `trusted_workspaces.yaml`, `project_records.yaml` (and its
-`project_records.yaml.lock`), the phone token,
+`project_records.yaml.lock`), `overrides.yaml.lock`, `model-library.json`, the phone token,
 the push key and the push subscriptions, `audit.jsonl`, each agent's `bus-events.jsonl`, session
 logs, the phone session's `sessions/asleep.json` while it sleeps, `history.jsonl`, `memory.db`
 (and its `-wal` and `-shm` files), `MEMORY.md`, `compact.md` and
 `memory.log`, `.repl_history`, the speed ledger, the live-session files, `vllm/serve.log`,
-`vllm/server.pid` and `vllm/launch.lock` (empty, never read), agent files written by `agent create`, by a start (the root agent) or by the
+`vllm/server.pid`, `vllm/launch.lock` (empty, never read), `vllm/unit-target` and the boot marker
+`vllm/boot-attempt` (each written through the no-follow atomic writer inside the `vllm/` folder, which is
+not a protected path), agent files written by `agent create`, by a start (the root agent) or by the
 in-session creation workflow, autoresearch's archive, run journals and budget file, and
 `plugins/README.md`. Each model response's row in `history.jsonl` records the model name, the
 server-reported prompt and completion token counts and the call's duration (numbers and a name,
 nothing else from the response), and the file stays owner-only (0600). The same writers make the
 same files owner-only in a project's `.localharness/` (its sessions, history and memory). The one script `start` installs,
 `tools/design-screenshot.js`, is owner-only and executable (0700). `init --force` saves the old
-`config.yaml` beside the new one before it writes, and says where.
+`config.yaml` beside the new one before it writes, and says where. `localharness model --autostart on` writes
+one file outside the config folder, the user unit `~/.config/systemd/user/localharness-llm.service`, through
+the same no-follow writer (see [Autostart](#autostart-the-harnesss-own-user-unit)).
 
 The phone session's `sessions/asleep.json` carries the sleeping conversation — text at the trust
 level of the session log beside it — and never authority: the permission mode it records is applied
@@ -1350,8 +1357,9 @@ variable you exported for some other run cannot reconfigure it: every `LLAMA_ARG
 and `MTMD_BACKEND_DEVICE` for llama.cpp, and `VLLM_API_KEY` for vLLM. What it gets is that environment,
 the record's own `env:` entries and, when a key is required, the one key variable. The dropped names
 are logged, never their values. Stopping or replacing a launched server acts only on the process the
-harness started: the pidfile records its start time, so a process id since reused by another program
-is never signalled.
+harness started: the pidfile records its start time and port, and the process must still be the
+launch the harness expects, so a process id since reused by another program is never signalled (see
+[Who may start, switch or stop a launched server](#who-may-start-switch-or-stop-a-launched-server)).
 
 **What this does NOT cover.** As vLLM's source reads, its key guards the `/v1/` routes only, so
 its `/tokenize` answers without a key, and the harness's token counter and doctor's tokenizer
@@ -1371,6 +1379,248 @@ launch listens on every interface without `--host`, that it reads `VLLM_API_KEY`
 its key guards are vLLM's behaviour as read from its source, not measured here. The same holds for
 `llama-server`: that it keeps the last `--host` it is given and reads `LLAMA_API_KEY` is its
 behaviour as read from its source.
+
+### Who may start, switch or stop a launched server
+
+A launch is a command the harness runs on your machine, so every surface that can start one asks
+the same question before it does: the trust decision on the machine record (the launch keys and
+the `launch_model` keys above, plus the autostart unit's captured environment below). They differ
+in who they may ask.
+
+- **`localharness start`** asks only on the terminal channel with a terminal on stdin and without
+  `--no-input`; every other start is not asked.
+- **`localharness serve`**, the body of the autostart unit, never asks and never adopts. A
+  record it cannot cover is a refusal with exit 78, which the unit's restart policy does not retry.
+- **`localharness model`** asks only a person: a terminal on both stdin and stdout, no
+  `LOCALHARNESS_COMMIT` marker and no `--no-input`. A piped stdout is nobody to ask. Without a
+  person only the entries the record does not yet cover are withheld, and a withheld target is
+  refused with the line that tells you to run `localharness start` on a terminal (exit 2).
+- **`localharness model --autostart on`** is the one place that asks after its own gate has proved
+  a terminal.
+
+That gate is aimed at the agent's own tools. It is not a sandbox: a command that clears the
+marker and puts a pty under a program can answer its own questions, which is the same residual
+the paragraph on the marker above names. Without a person, `init` writes the records it could not confirm unadopted and `start` on
+a machine with no configuration prints the welcome message and writes nothing; a later terminal
+`start` asks.
+
+**What the selection can be.** One ladder serves `start`, `serve`, `localharness model` and
+`--script`: `--preset <name>`, then `pending_preset`, then an in-flight `unit-target`, then
+`active_endpoint`, then the `server:` section. `pending_preset` is the choice made by
+`localharness model <name>` when nothing could be swapped at once; `unit-target` is the choice a
+swap through the autostart unit has requested and not yet landed; `active_endpoint` is the last
+one that served. A live in-flight `unit-target` outranks a stale `pending_preset`, and only while
+the process that requested it is alive and has the start time recorded with it. Both `--autostart
+status` and `doctor` print that line, naming the target, the requesting process and the choice it
+outranks. A name is matched against every record, exact first, then case-folded, then a unique
+prefix, before a served or downloaded model id is read; an ambiguous prefix is refused. A name
+that matches a record the machine record withholds is refused and nothing stored is cleared; only
+a name that matches no record at all is dropped, with one line. `start` on a withheld
+non-explicit selection stops with exit 2 and clears nothing.
+
+The state that carries these choices lives in the `vllm/` folder of the config directory:
+`server.pid`, `launch.lock`, `serve.log`, `unit-target` and the boot marker `boot-attempt`. That folder is
+**not** a protected path, so the agent's file tools can write it. Each of those files is read
+under a size cap and a name check, selects only among records the machine record has confirmed
+(and `serve` refuses the rest), and carries no command. What a planted `unit-target` can do is
+name a live process of yours as the requester so that its target outranks your `pending_preset`
+for as long as that process lives; it cannot name a process of another account, a kernel thread
+or anything that survives a reboot, any swap through the unit overwrites it, and the line above
+makes it visible rather than silent. That remains a named residual.
+
+**One harness-launched server per config directory** is the contract. The pidfile and the launch
+lock are per directory, so a cold `/model` to a GPU peer beside a live CPU server is refused with
+the live-launch line rather than started beside it.
+
+**A pidfile is a claim, not proof.** It records `<pid> <start time> <port>`. Before the harness
+signals the process it names, it checks that the process is the launch it expects: the strategy's
+own identity (the binary's name, the record's port, the `serve` token for vLLM), the same uid, a
+session leader of its own, and for a launch through the autostart unit the unit's cgroup and its
+`MainPID`. A pid that fails is named and never signalled:
+`pidfile names pid 4242 (<exe>), which is not a harness launch — not signalled; stop it, or
+remove <pidfile>`. Every stop passes the identity it expects; a stop without one signals nothing.
+**What this does NOT cover:** a server of yours started with `setsid` on the record's port with
+the record's own binary, named by a pidfile the agent planted, passes every one of those tests and
+would be stopped by an explicit swap. A binary that is a wrapper script fails the executable-name
+test and is named instead of stopped.
+
+**Logs and tails are redacted where they leave the harness.** The tail of a server's log that an
+error quotes, on the terminal, in a swap's progress lines and in the REPL, is scrubbed at that
+channel with the secrets the config holds, the key read from any `api_key_file` the session
+holds, `Bearer` tokens, llama-server's `api_keys:` line and credentials inside URLs. The
+`--script` output prints a placeholder for every key and runs nothing. What this does NOT cover:
+a secret that a server logs in a form none of these patterns match.
+
+The three keys of `launch_model` that select a launch's behaviour, `speculative`,
+`reasoning_parser` and `tool_call_parser`, are part of the record the trust decision covers like
+the other model keys, so a changed parser or speculation setting asks at the next terminal
+`start`. The flags the harness derives itself (`kv_cache_type`, `draft_mtp`, `draft_p_min`) are
+not part of the record: each picks among closed values from the model file's header and the
+machine's memory, and a record field set to a value pins it.
+
+### Autostart: the harness's own user unit
+
+`localharness model --autostart on` writes one systemd user unit,
+`~/.config/systemd/user/localharness-llm.service` (under `$XDG_CONFIG_HOME` when that is an
+absolute path), so the model you last chose is serving at login, and at boot too once
+`loginctl enable-linger` is on. It serves llama.cpp and a vLLM binary launch; another kind is
+refused with a line saying so. `off` disables the unit and removes the file when it is the
+harness's own. `on` and `off` need a person; `status` is open to anyone and prints the unit's state, the target, linger, the captured `PATH`, any second
+launcher on a preset's port, the boot marker of the run serving now, and the unit's last exit in
+words.
+
+**What the unit is.** `ExecStart` runs the interpreter the harness itself runs under, with `-I`,
+the module `localharness serve`, and `--config-dir` pinned to the configuration directory.
+`WorkingDirectory=` is your home. `UnsetEnvironment=` removes `LOCALHARNESS_DIR`,
+`LOCALHARNESS_HOME`, `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, `GCONV_PATH`, `PYTHONPATH`,
+`PYTHONHOME`, `PYTHONSTARTUP` and `PYTHONUSERBASE` from the interpreter's start (the manager applies
+it last, so a value cannot be put back by an `Environment=` line, which is why the captured values
+below are comments). `serve` then sets `LOCALHARNESS_DIR` to the pinned directory before anything
+reads it, ahead of every resolver. `Restart=on-failure` with `RestartPreventExitStatus=78`, a start
+limit of three failures in 5400 seconds and `TimeoutStartSec=1800` bound an unattended load loop.
+Every path and value written into the unit matches `[A-Za-z0-9/._+@:=-]+` or `--autostart on`
+refuses to write it.
+
+**The captured environment.** Your shell's `PATH` always, and `HF_HOME` and `LD_LIBRARY_PATH` when
+set, are written at `on` as `# env NAME=value` comment lines in the unit body. A relative
+element of `PATH` or `LD_LIBRARY_PATH` is dropped and named in the receipt; a relative `HF_HOME` is
+made absolute against your shell's directory and named. `serve` reads the values from the unit
+file it has just verified, never from its own environment, and the machine record carries them as
+an `autostart.env` entry of the `launch` kind that the snapshot reads from the unit file. A changed
+`# env` line is an ordinary uncovered entry: asked about at the next terminal `start`, withheld
+under `serve` (exit 78). A unit file that exists with no usable entry is also exit 78.
+
+**The server's environment.** `serve` replaces itself with the server through `execve` and an
+environment built from an allowlist, not from the service manager's: `HOME` from the pinned home;
+`PATH`, `HF_HOME` and `LD_LIBRARY_PATH` from the captured values only; and from the manager
+exactly `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`, `XDG_RUNTIME_DIR`,
+`CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_ORDER`, `NVIDIA_VISIBLE_DEVICES` and
+`NVIDIA_DRIVER_CAPABILITIES`, named one by one with no wildcard. The runtime's own blocklist,
+the record's `env:` entries and the key variable apply on top, as for a launch from the shell.
+
+**When the unit is the harness's own.** The harness runs or stops the unit only when it is
+provably its own: the manager's `FragmentPath` is the unit file the harness would write, `DropInPaths` is
+empty, and the file is byte-equal to what the harness renders for this interpreter, configuration
+directory and captured values. The test is re-run before every `restart` and every `stop`. A unit
+that fails it is foreign: `off` leaves it, no swap goes through it, and its process is named and
+never stopped. Every stop or restart the harness issues is preceded by `reset-failed`, so your
+own switches never count toward the start limit.
+
+**Who owns the running server.** The unit owns a launch only when the process sits in the unit's
+cgroup and its pid is the unit's `MainPID`, with the start time compared so a reused pid does not
+pass. Such a launch is stopped through the unit. A server in the unit's cgroup while the manager
+reports `MainPID=0` (failed, or between restarts) is also stopped through the unit, with the same
+checks and proof that the pid is gone. A mismatched `MainPID`, or a manager that does not answer,
+is named and nothing is signalled. A launch outside the unit's cgroup goes to the stopper of the
+strategy that started it.
+
+**Exit codes.** `serve` exits 78 when the machine record is missing, withholds the target or the
+captured environment, when the unit is not the harness's own or differs from the record, or when a
+captured value is missing, unparsable or not absolute; 75 when a live process holds the pidfile
+(retried within the start limit); 1 on a transient failure; and 0 when there is nothing to do,
+meaning the target is already serving or is a kind the unit does not serve. `status` translates
+them: 78 as `stopped: the machine record withholds <record> — run localharness start in a
+terminal`, the start limit as `stopped after 3 failed loads` with the command that reads the
+journal.
+
+**The boot marker.** Before it launches, `serve` writes `vllm/boot-attempt`: the record, the
+binary, the unit invocation, whether the launch is the full shape or the retry shape, the planned
+window and the fit values. A marker for another record or binary, or older than the load window,
+is removed and ignored, so a server that died hours after a good load does not come back degraded.
+A marker younger than the window whose launch died, with the unit restarted at least once, makes
+the next launch the retry shape (speculation off, window halved). The next `start` that attaches to
+that run confirms the marker and removes it. The fit values in it are clamped before they move
+anything.
+
+**The deny bundle.** Defaults revision 5 adds the refusals that keep the agent's shell from
+changing what starts at login: `systemctl --user set-environment`, `import-environment` and
+`unset-environment`; `link`, `edit`, `set-property`, `add-wants` and `add-requires`; `enable`,
+`reenable` and `preset` given a path; the three D-Bus clients `busctl`, `gdbus` and `dbus-send`
+aimed at `org.freedesktop.systemd1`; and `localharness model --autostart`. `restart`, `start`,
+`stop` and `status` of the harness's own unit, and `enable` of a bare unit name, stay allowed.
+Each word verb is delimited by a character that cannot be part of a unit name or a verb, so a tab,
+a newline, a quote or a continuation does not walk past it. The bundle reaches your config as
+every newly-shipped deny pattern does (see "What `localharness start` writes without asking").
+
+**Protected login-time directories.** `~/.config/systemd`, `~/.local/share/systemd/user`,
+`~/.config/environment.d` and `~/.config/autostart` are protected paths in every mode, because a
+file below any of them changes what your next login starts. When `XDG_CONFIG_HOME` or
+`XDG_DATA_HOME` is set to an absolute path, the same entries below it are protected too (a
+relative value is ignored, as the XDG specification says).
+
+**Disabling.** `--autostart off` on a unit file that was never loaded runs a plain `disable`
+first, on a best-effort basis, to clear a boot link an earlier install left; a failure there does
+not stop the removal.
+
+**What this does NOT cover.** The deny patterns and the protected paths bind the agent's own
+tools. They do not close: the D-Bus route to the user manager by other means; a command the shell
+assembles at run time, for example a quote inside a word, a variable or an alias; and
+`python_exec`, which runs in-process (the same residual the trust boundaries above name). The
+unit relies on its byte-equal body, the identity test and the allowlisted environment, not on a
+closed directory. The harness's own install tree and the user-writable entries of the captured
+`PATH` run at boot exactly as they run when you start a launch from the shell. A plain `start`
+that attaches to a preset other than the selected one leaves `unit-target`, and so the next boot,
+on the older choice, and says so. A server that dies after readiness is confirmed by nothing until
+the next attach. `--autostart status`, and `doctor`'s `Autostart:` row, which prints every line
+`status` prints, show the captured `PATH`, so a `PATH` you would not want in a screenshot or a
+pasted bug report is in them, and a second launcher by name.
+
+### The model library and the first run
+
+`localharness start` on a machine with no configuration finds a model or offers one to fetch,
+sets up every model it found on one Enter with the best first, and says what to run later. A model
+that arrives afterwards is found at the next terminal `start`. Two files make that possible:
+`model-library.json` in the config directory, which remembers what the library has shown you and
+what you declined, and the overlay's lock file `overrides.yaml.lock`. Both are protected entries
+(see the ten-entry list above), so a plain delete or move asks like the config files do.
+
+**The library file is deny-only.** An entry in it hides a file from the question; it adopts and
+launches nothing. An entry the agent plants hides a file it could have deleted; a removed entry
+makes that file new again; a missing or corrupt file is rebuilt as a baseline (nothing is asked at
+`start` until `init`, a loss of convenience that `doctor`'s `Models:` row shows, not of security).
+It is read under a size cap, at most 256 entries are accepted, and each field is validated.
+
+**Only a person is asked, walks or writes.** Every question, every write to the library and
+`start`'s walk of the model folders run only for a person (a terminal on stdin and stdout, no
+`LOCALHARNESS_COMMIT`, no `--no-input`), and the question component refuses a pipe, a dumb
+terminal or a window under 3 rows by 20 columns by itself, whoever called it. Without a person a
+first run writes its records unadopted, no library file, and a run on an existing configuration
+appends nothing. That is a gate against the agent's own tools, not a sandbox.
+
+**The record shown is the record adopted, never the file's content.** A file planted under a model
+folder is listed with its path, size, first-seen date and what its header says, and asked about on
+the next terminal run; the record it becomes is built from a fresh read of the header at that
+moment, and a projector is paired only where the pairing is shown. The 0.18 list of peers in
+`config.yaml` is copied once into `overrides.yaml` through the library's one peer writer, and only
+a peer whose `config.yaml` twin you had confirmed is adopted again; `config.yaml` itself is left
+unchanged.
+
+**The download offer fetches from a fixed table.** When nothing is found, the question lists this
+platform's reference models. For the llama.cpp row, one named file is fetched at a pinned commit,
+then its size and `sha256` are verified on the returned file through one open descriptor before any
+record exists, because the Hugging Face cache is a folder the agent can write under and a pinned
+download can be served from the cache without a network round trip. The record is built from that
+descriptor's own header. `localharness model --download <repo> --file <name>.gguf` records a file
+only when the hub's commit, size and hash vouch for it, resolved from the hub and never from the
+cache path, and only for a person with a configuration. What the hash does not cover: the author of
+the row, and a compromised repository at that commit.
+
+**A cached checkpoint becomes a vLLM peer only with a binary.** A text-generation checkpoint in
+the Hugging Face cache is listed and set up (`runtime: vllm`, `launch: binary`) only when a `vllm`
+binary is found, and the line shown names the binary and whether it is on `PATH` or in the
+harness's own environment. Nothing launches that binary before the one machine-trust question on a
+launching surface. The cache's `config.json` is read under a cap and parsed as data only.
+
+**What this does NOT cover.** A file whose bytes are swapped after its record was adopted is not
+shown again: the fingerprint covers the record, and the record's path can be a Hugging Face
+snapshot link the agent can retarget, which also covers the gap between verifying and launching. Files
+planted early in a model folder can crowd real ones past the discovery cap, and a flood of planted
+valid models is listed in full within it. The later-run question's highlighted default is to set
+the model up, so a file you did not bring is accepted by Enter on a default you can see. The
+vLLM rows of the offer fetch the whole repository without a pin, and a cached directory counts as
+fetched by its name, so a planted blob under a cached name is taken as cached; the model in that
+record is a repository id resolved when it launches. The row's author is trusted for the llama.cpp
+row as above.
 
 ### `localharness mobile`
 
