@@ -435,9 +435,9 @@ async def test_restore_and_safe_stop_delegate_to_lifecycle(tmp_path, rig, monkey
         calls.append(("restore", heavy.spec, heavy.base_url, heavy.peer))
         return await real_restore(heavy, **kw)
 
-    async def stop(spec, config_dir):
+    async def stop(spec, config_dir, **kw):
         calls.append(("stop", spec, config_dir))
-        return await real_stop(spec, config_dir)
+        return await real_stop(spec, config_dir, **kw)
 
     monkeypatch.setattr(lifecycle, "restore_incumbent", restore)
     monkeypatch.setattr(lifecycle, "safe_stop", stop)
