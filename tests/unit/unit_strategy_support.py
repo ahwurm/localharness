@@ -186,11 +186,21 @@ class FakeServe:
         self._thread.start()
         return self
 
+    def choose_now(self) -> ManagedServerConfig:
+        """Only the ladder's answer, on the caller's thread: `chosen` is set and nothing else happens (no
+        process in `/proc`, no lock, no pidfile). The unit that fails before its `serve` records anything."""
+        self.chosen = self.choose() if self.choose is not None else self.spec
+        return self.chosen
+
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=5)
+        self.join(timeout=5)
 
     def join(self, timeout: float = 10.0) -> None:
+        """Wait for the thread; one that was never started has nothing to wait for (a teardown must never
+        raise over a `serve` the test did not need, and so mask the error that ended the test)."""
+        if self._thread.ident is None:
+            return
         self._thread.join(timeout=timeout)
 
     def _run(self) -> None:
