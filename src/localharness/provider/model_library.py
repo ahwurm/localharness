@@ -5,7 +5,7 @@ import json
 import os
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -83,6 +83,15 @@ class Library:
         if not isinstance(entries, dict) or len(entries) > DISCOVERY_MAX_FILES:
             return cls(corrupt=True)
         return cls({key: e for key, value in entries.items() if (e := _entry(key, value))})
+
+    def unrecorded(self, recorded: Collection[str]) -> Library:
+        """The entries no record names: the one test of recorded-ness the scan, the first run and the counts share."""
+        return replace(self, entries={k: e for k, e in self.entries.items() if k not in recorded})
+
+    def marked(self, *, declined: Iterable[str] = (), dropped: Iterable[str] = ()) -> Library:
+        gone, no = set(dropped), set(declined)
+        return replace(self, entries={k: replace(e, declined=True) if k in no else e
+                                      for k, e in self.entries.items() if k not in gone})
 
     def save(self, path: str | os.PathLike[str]) -> bool:
         """Write the entries whose files still exist under the overlay lock; False when the lock is busy."""
@@ -176,7 +185,7 @@ def scan(roots: Iterable[str | os.PathLike[str]], recorded: Collection[str],
             found[real] = (path, os.stat(path).st_size)
         except OSError:
             continue
-    entries = dict(lib.entries)
+    entries = dict(lib.unrecorded(recorded).entries)
     typed = _typed(entries, found, scope)
     models = {str(m.path): m for m in typed.models}
     new: list[Shown] = []
