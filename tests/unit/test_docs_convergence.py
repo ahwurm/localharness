@@ -691,10 +691,13 @@ def test_plugins_table_readme_live():
 
 
 def test_index_md_lists_the_bundled_plugins():
-    """INDEX.md (internal, git-ignored) carries the same plugins table under its source section."""
+    """INDEX.md (internal, git-ignored) names every bundled plugin under its generated plugins section."""
     if not (_REPO / "INDEX.md").is_file():
         pytest.skip("INDEX.md is git-ignored; checked locally at close-out")
-    assert check_plugins_table(_read("INDEX.md"), heading="## src/localharness/") == []
+    body = section(_read("INDEX.md"), "## Bundled plugins")
+    assert body is not None, "no '## Bundled plugins' section"
+    rows = tables(body)[0][1:]
+    assert sorted(_norm(r[0]) for r in rows) == sorted(P.manifest.name for P in BUILTIN_PLUGINS)
 
 
 def _good_table() -> str:
