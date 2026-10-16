@@ -317,6 +317,8 @@ def _swap_now(
         # An earlier selection still stored (an agent's, naming a third record) is read before the landing
         # removes it, so the receipt can say that it is gone: the attach records no selection of its own.
         older = getattr(harness, "pending_preset", None)
+        if older and str(older) == record.name:
+            older = None  # the selection of this very record: "was cleared" would read as undoing the choice
         if not older:
             say(start_serving.ALREADY_SERVING_TARGET_LINE.format(name=visible_text(record.name)))
         # The name typed here is the shell's own intent, so the attach lands on the ``pending_preset`` rung:

@@ -514,6 +514,19 @@ def test_an_already_serving_target_clears_a_stale_pending_preset_that_names_a_th
     assert cli.last_served == "flash-next"
 
 
+def test_an_already_serving_target_whose_own_selection_was_stored_says_only_that_it_is_serving(cli):
+    cli.answering.add(PEER_URLS["flash-next"])
+    model_ops.write_pending_preset(cli.world.harness, "flash-next", config_dir=cli.world.g)
+
+    result = cli.run("flash-next")
+
+    assert result.exit_code == 0, result.output
+    assert lines_of(result.output) == ["flash-next is already serving"]      # not "the older selection flash-next was cleared"
+    assert "cleared" not in result.output
+    assert "pending_preset" not in cli.overlay                          # and the stored selection is still removed
+    assert cli.last_served == "flash-next"
+
+
 def test_an_already_serving_target_with_no_older_selection_says_only_that_it_is_serving(cli):
     cli.answering.add(PEER_URLS["flash-next"])
 
