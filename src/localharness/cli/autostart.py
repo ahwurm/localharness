@@ -5,8 +5,9 @@ question. Everything after the question lives here, so `status` and the doctor r
 
 - the lines (the gate's, the scope refusal's, the receipt's, the failures', the status's);
 - `turn_on`: capture the shell, render the unit, and under the launch lock write it, adopt its captured
-  environment into the machine record, `daemon-reload`, re-check that the manager loaded the harness's own
-  unit, and `enable` it (`--now` only when nothing of the harness's is serving; a running server is kept);
+  environment (the entry of the text written, not of a re-read) into the machine record, `daemon-reload`,
+  re-read the file and require it byte-equal to the text written, re-check that the manager loaded the
+  harness's own unit, and `enable` it (`--now` only when nothing of the harness's is serving; a running server is kept);
 - `turn_off`: the undo. Only the harness's own unit (all three identity tests, before and again under the
   lock) is disabled, removed and pruned from the machine record; anything else is left as it is and named;
 - `status_lines` / `doctor_row`: what autostart is doing, read once and never written (D-11). Anyone may ask
@@ -50,6 +51,8 @@ VERB_FAILED_LINE = "autostart {mode}: {verb} failed (exit {code}): {err}"
 VERB_NO_ANSWER_LINE = "autostart {mode}: {verb} failed: the service manager did not answer"
 WRITE_FAILED_LINE = "autostart {mode}: could not write {path}: {why}"
 REWRITE_LINE = "rewriting {path}; it now reads:"
+CHANGED_SINCE_WRITE_LINE = ("autostart on: {path} changed after localharness wrote it — "
+                            "nothing was enabled; look at the file, then run it again")
 LOADED_ELSEWHERE_LINE = "autostart on: {unit} {why} — nothing was enabled"
 OFF_RECEIPT = "autostart off: removed {path}; nothing starts at login"
 OFF_NOTHING = "autostart is off — {path} does not exist"
@@ -150,15 +153,24 @@ def turn_on(harness: Any, record: Any, config_dir: Path, *, environ: Mapping[str
                 out(REWRITE_LINE.format(path=display_path(path)))
                 out(body)
             # The unit file now holds an environment nobody confirmed. Until this adoption lands, the
-            # next terminal `start` asks about it and `serve` exits 78: nothing launches unconfirmed.
-            trust.adopt_entries(config_dir, trust.autostart_entries(config_dir))
+            # next terminal `start` asks about it and `serve` exits 78: nothing launches unconfirmed. The
+            # entry is the one the text just written holds, never a re-read of the disk: the record
+            # changes by exactly what this act wrote, even when something else replaced the file.
+            trust.adopt_entries(config_dir, trust.autostart_entries_for_body(config_dir, body))
 
             reloaded = units.systemctl_user("daemon-reload")
             if reloaded is None or reloaded.code != 0:
                 err(_verb_error("on", "daemon-reload", reloaded, harness))
                 return 1
             state = units.unit_runtime_state()
-            failure = units.harness_unit_failure(state, config_dir, body=body)
+            # The manager loaded whatever was on disk at the reload. Read the file again and require it to
+            # be the text written above before anything is enabled (a residual window remains between this
+            # read and the manager's own, which `serve` closes at every start by comparing the record).
+            on_disk = units.read_harness_unit()
+            if on_disk != body:
+                err(CHANGED_SINCE_WRITE_LINE.format(path=display_path(path)))
+                return 1
+            failure = units.harness_unit_failure(state, config_dir, body=on_disk)
             if failure is not None:
                 err(LOADED_ELSEWHERE_LINE.format(unit=units.HARNESS_UNIT, why=visible_text(failure)))
                 return 1

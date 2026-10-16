@@ -632,7 +632,17 @@ def autostart_entries(global_dir: Path) -> list[dict]:
     provider layer at import time."""
     from localharness.provider import units
 
-    body = units.read_harness_unit()
+    return autostart_entries_for_body(global_dir, units.read_harness_unit())
+
+
+def autostart_entries_for_body(global_dir: Path, body: str | None) -> list[dict]:
+    """`autostart_entries` for a unit text the caller already holds instead of the file on disk: the entry
+    ``body`` itself would produce, or none when ``body`` is None, does not name ``global_dir`` as
+    `--config-dir` or has an unparsable `# env` block. `--autostart on` adopts through this with the text it
+    just wrote, so the record changes by exactly what the act wrote and never by what a later reader finds
+    on disk."""
+    from localharness.provider import units
+
     if body is None or not units.unit_serves(global_dir, body):
         return []
     captured = units.captured_env(body)
