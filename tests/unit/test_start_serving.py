@@ -397,8 +397,8 @@ def _serve_process(fake_proc, home, *, cgroup=UNIT_CGROUP) -> None:
 def test_liveness_the_units_serve_process_is_starting_with_the_default_bound(
         named_peers, home, fake_proc, monkeypatch):  # noqa: F811
     _serve_process(fake_proc, home)
-    monkeypatch.setattr(start_serving, "unit_runtime_state", lambda: None)
-    got = _verdict(named_peers, home, "flash-next", main_pid=4242)
+    monkeypatch.setattr(start_serving, "unit_runtime_state", lambda: pytest.fail("the verdict asked the seam again"))
+    got = _verdict(named_peers, home, "flash-next", main_pid=4242, unit_state=None)
     assert (got.kind, got.pid, got.record.name) == ("starting", 4242, "flash-next")
     assert got.line == "autostart is starting flash-next (pid 4242) — waiting up to 600s"
 
@@ -410,8 +410,28 @@ def test_liveness_the_starting_bound_is_the_units_timeout_start_when_it_has_one(
     class State:
         timeout_start_seconds = 90
 
-    monkeypatch.setattr(start_serving, "unit_runtime_state", lambda: State())
-    assert _verdict(named_peers, home, "flash-next", main_pid=4242).line.endswith("waiting up to 90s")
+    monkeypatch.setattr(start_serving, "unit_runtime_state", lambda: pytest.fail("the verdict asked the seam again"))
+    got = _verdict(named_peers, home, "flash-next", main_pid=4242, unit_state=State())
+    assert got.line.endswith("waiting up to 90s")
+
+
+def test_liveness_a_real_unit_state_with_the_main_pid_and_the_default_timeout_waits_1800s(
+        named_peers, home, fake_proc):  # noqa: F811
+    """The sensed state is a `UnitRuntimeState`: its MainPID marks the unit's own `serve` as starting and its
+    `TimeoutStartSec` (1800 s unless the manager says otherwise) is the bound."""
+    _serve_process(fake_proc, home)
+    state = units.UnitRuntimeState(None, 0, main_pid=4242)
+    got = _verdict(named_peers, home, "flash-next", main_pid=state.main_pid, unit_state=state)
+    assert (got.kind, got.pid) == ("starting", 4242)
+    assert got.line == "autostart is starting flash-next (pid 4242) — waiting up to 1800s"
+
+
+def test_liveness_a_serve_process_that_is_not_the_units_main_pid_is_not_starting(
+        named_peers, home, fake_proc):  # noqa: F811
+    _serve_process(fake_proc, home)
+    state = units.UnitRuntimeState(None, 0, main_pid=9999)
+    got = _verdict(named_peers, home, "flash-next", main_pid=state.main_pid, unit_state=state)
+    assert got.kind != "starting"
 
 
 @pytest.mark.parametrize("bad", [None, 0, -5, True, "90", float("nan")])
@@ -597,11 +617,16 @@ def test_boot_clause_without_a_unit_state_is_none_and_leaves_the_marker(boot):
     assert boot.retry() is None
 
 
-def test_boot_clause_for_the_seam_that_answers_none_in_this_release(boot):
+def test_the_seam_delegates_to_the_units_runner_and_answers_none_under_the_hermetic_stub(boot, monkeypatch):
     marker_path = boot.plant()
-    assert start_serving.unit_runtime_state() is None
+    assert start_serving.unit_runtime_state() is None  # the suite's stub of the manager runner answers nothing
     assert boot.clause(unit_state=start_serving.unit_runtime_state()) is None
     assert marker_path.exists()
+    asked: list = []
+    sentinel = units.UnitRuntimeState("inv-9", 3)
+    monkeypatch.setattr(units, "unit_runtime_state", lambda: asked.append(1) or sentinel)
+    assert start_serving.unit_runtime_state() is sentinel and asked == [1]  # one ask per call, no memo
+    assert start_serving.unit_runtime_state() is sentinel and asked == [1, 1]
 
 
 def test_boot_clause_with_a_marker_bound_to_another_run_leaves_it_and_says_nothing(boot):
