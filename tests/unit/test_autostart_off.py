@@ -214,7 +214,10 @@ def _on_that_failed_at_the_reload(world: World) -> None:
     world.manager.calls.clear()
 
 
-def test_a_file_on_wrote_and_the_manager_never_loaded_is_removed_reloaded_and_pruned_without_a_disable(world):
+DISABLE = ("systemctl", "--user", "disable", UNIT)
+
+
+def test_a_file_on_wrote_and_the_manager_never_loaded_is_disabled_removed_reloaded_and_pruned_without_a_stop(world):
     decide_machine_trust(world.g, ask=False)
     _on_that_failed_at_the_reload(world)
     assert trust.recorded_autostart_entry(world.g) is not None
@@ -222,11 +225,42 @@ def test_a_file_on_wrote_and_the_manager_never_loaded_is_removed_reloaded_and_pr
     result = world.run(mode="off")
 
     assert result.exit_code == 0, (result.output, result.exception)
-    assert world.manager.calls == [STATE_SHOW, STATE_SHOW, RELOAD]  # no reset-failed, no disable --now
+    # no reset-failed and no `--now` (nothing runs); a plain disable clears a boot link an earlier `on` left,
+    # while the file it reads is still there
+    assert world.manager.calls == [STATE_SHOW, STATE_SHOW, DISABLE, RELOAD]
     assert not world.unit_path.exists()
     assert trust.recorded_autostart_entry(world.g) is None
-    assert stdout_lines(result) == [f"autostart off: removed {DISPLAY}; nothing starts at login"]
+    assert stdout_lines(result) == [
+        f"autostart off: removed {DISPLAY}; nothing starts at login"
+        " (the service manager had not loaded it; its boot link was cleared)"]
     assert lock_is_free(world.g)
+
+
+def test_an_unloaded_file_whose_boot_link_the_manager_will_not_clear_is_still_removed_and_says_a_link_may_remain(world):
+    decide_machine_trust(world.g, ask=False)
+    _on_that_failed_at_the_reload(world)
+    world.manager.answer_prefix("systemctl", "--user", "disable", out="", code=1, err="Failed to disable unit")
+
+    result = world.run(mode="off")
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert not world.unit_path.exists() and trust.recorded_autostart_entry(world.g) is None
+    assert world.manager.calls == [STATE_SHOW, STATE_SHOW, DISABLE, RELOAD]
+    (line,) = stdout_lines(result)
+    assert line.startswith(f"autostart off: removed {DISPLAY}; nothing starts at login")
+    assert "a dangling link may remain" in line and "boot link was cleared" not in line
+
+
+def test_an_unloaded_file_with_a_manager_that_cannot_run_the_disable_is_still_removed(world):
+    decide_machine_trust(world.g, ask=False)
+    _on_that_failed_at_the_reload(world)
+    world.manager.answer_prefix("systemctl", "--user", "disable", out=None)
+
+    result = world.run(mode="off")
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert not world.unit_path.exists()
+    assert "a dangling link may remain" in stdout_lines(result)[0]
 
 
 def test_an_unloaded_file_that_is_not_byte_equal_to_the_render_stays_refused_as_foreign(world):

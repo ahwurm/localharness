@@ -55,6 +55,9 @@ CHANGED_SINCE_WRITE_LINE = ("autostart on: {path} changed after localharness wro
                             "nothing was enabled; look at the file, then run it again")
 LOADED_ELSEWHERE_LINE = "autostart on: {unit} {why} — nothing was enabled"
 OFF_RECEIPT = "autostart off: removed {path}; nothing starts at login"
+OFF_UNLOADED_CLEARED = " (the service manager had not loaded it; its boot link was cleared)"
+OFF_UNLOADED_LINK = (" (the service manager had not loaded it and would not clear its boot link: a dangling link "
+                     "may remain, which systemd ignores)")
 OFF_NOTHING = "autostart is off — {path} does not exist"
 OFF_FOREIGN = "autostart off: {path} is not the unit localharness wrote ({why}) — left as it is"
 SECOND_LAUNCHER_LINE = "{unit} ({state}) also launches a server on port {port} — two launchers race at login"
@@ -227,7 +230,8 @@ def turn_off(config_dir: Path, *, out: Say, err: Say, harness: Any = None) -> in
     once up front and again under the launch lock, before anything is stopped; any other unit is left as it
     is and named (exit 1). The one exception is the file `on` wrote and the manager never loaded (a failing
     reload): empty `FragmentPath`, no drop-ins, the file byte-equal to the render. Nothing runs, so it is
-    removed and pruned with no `disable`. No file and nothing loaded is already off (exit 0). A failing
+    removed and pruned with no `disable --now`; a plain `disable`, best effort, clears a boot link an earlier
+    `on` left (IN-06), and the receipt says whether it did. No file and nothing loaded is already off (exit 0). A failing
     `disable --now` removes nothing and prunes nothing. ``harness`` only scrubs a failing verb's stderr of the config's
     secrets; it is never asked about trust and `unit-target` is left as it is (R-14-26). Returns the exit
     code (see the module doc)."""
@@ -251,12 +255,19 @@ def turn_off(config_dir: Path, *, out: Say, err: Say, harness: Any = None) -> in
             if why is not None:
                 return _foreign(path, why, err)
 
+            tail = ""
             if not unloaded:
                 units.systemctl_user("reset-failed", units.HARNESS_UNIT)  # best effort: a clean slate, never a gate
                 disabled = units.systemctl_user("disable", "--now", units.HARNESS_UNIT)
                 if disabled is None or disabled.code != 0:
                     err(_verb_error("off", "disable", disabled, harness))
                     return 1
+            else:
+                # Nothing runs, but an earlier `on` may have left the boot link the manager no longer maps to a
+                # loaded unit. `disable` reads the file on disk, so it clears that link while the file exists;
+                # a manager that will not is no reason to keep the file (nothing starts from a dangling link).
+                cleared = units.systemctl_user("disable", units.HARNESS_UNIT)
+                tail = OFF_UNLOADED_CLEARED if cleared is not None and cleared.code == 0 else OFF_UNLOADED_LINK
             units.remove_harness_unit()
             reloaded = units.systemctl_user("daemon-reload")
             trust.forget_entries(config_dir, [trust.AUTOSTART_KEY])
@@ -270,7 +281,7 @@ def turn_off(config_dir: Path, *, out: Say, err: Say, harness: Any = None) -> in
         err(REFUSED_LINE.format(mode="off", why=visible_text(exc)))
         return 1
 
-    out(OFF_RECEIPT.format(path=display_path(path)))
+    out(OFF_RECEIPT.format(path=display_path(path)) + tail)
     return 0
 
 
