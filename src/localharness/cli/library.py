@@ -849,7 +849,7 @@ def verify_download(path: str | os.PathLike[str], *, size: int, sha256: str) -> 
                 count += len(chunk)
                 digest.update(chunk)
             if count != size:
-                return f"size is {'more than ' if count > size else ''}{count} bytes, expected {size}"
+                return f"size is more than {size} bytes" if count > size else f"size is {count} bytes, expected {size}"
             if digest.hexdigest() != sha256:
                 return f"sha256 {digest.hexdigest()} differs from {sha256}"
             f.seek(0)

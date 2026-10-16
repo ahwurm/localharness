@@ -300,7 +300,7 @@ def test_a_longer_file_is_named_without_hashing_the_rest(box, monkeypatch, capsy
     longer.write_bytes((box.hf / "model.gguf").read_bytes() + b"x" * 4096)
     _serve(box, monkeypatch, longer)
 
-    _expect_nothing_recorded(box, monkeypatch, capsys, f"more than {box.row.bytes + 1} bytes")
+    _expect_nothing_recorded(box, monkeypatch, capsys, f"more than {box.row.bytes} bytes")
 
 
 def test_a_fifo_at_the_returned_path_is_refused_without_blocking(box, monkeypatch, capsys):
@@ -362,6 +362,14 @@ def test_a_swap_after_the_hash_cannot_change_what_the_header_says(box, monkeypat
     checked = library.verify_download(path, size=box.row.bytes, sha256=box.row.sha256)
 
     assert checked.embedding == 5120
+
+
+def test_a_file_larger_than_the_row_says_more_than_the_expected_size_and_a_short_one_says_its_size(tmp_path):
+    path = tmp_path / "m.gguf"
+    path.write_bytes(b"x" * 5000)
+
+    assert library.verify_download(path, size=100, sha256="0" * 64) == "size is more than 100 bytes"
+    assert library.verify_download(path, size=6000, sha256="0" * 64) == "size is 5000 bytes, expected 6000"
 
 
 # ------------------------------------------------------------------ a vLLM row carries its own consent
