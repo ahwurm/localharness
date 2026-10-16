@@ -339,3 +339,48 @@ def test_init_without_a_person_walks_nothing_appends_nothing_and_keeps_the_confi
 
     _exited(result, 0)
     assert "Kept" in _flat_out(result) and len(_peers(later.cfg)) == 1
+
+
+# ------------------------------------------------------------------ counts
+
+
+def test_counts_read_the_config_and_the_library_alone(later, monkeypatch):
+    _add(later, "B", 3_000_000)
+    scripted(monkeypatch, "not-now")
+    _sync(later)
+    d = _add(later, "D", 2_000_000)
+    e = _add(later, "E", 1_000_000)
+    scripted(monkeypatch, "choose", set())
+    _sync(later)
+    e.unlink()
+    assert _declined(later) == {"D.gguf", "E.gguf"}
+
+    def boom(*_a, **_k):
+        raise AssertionError("counts walked a root or read a header")
+
+    monkeypatch.setattr(model_library, "walk_ggufs", boom)
+    monkeypatch.setattr(model_library.gguf_header, "read_header", boom)
+
+    assert library.counts(later.cfg) == library.Counts(set_up=2, found=1, declined=1)
+    assert d.exists()
+
+
+def test_counts_count_a_server_and_each_peer_with_a_model(later):
+    overrides = later.cfg / "overrides.yaml"
+    raw = yaml.safe_load(overrides.read_text(encoding="utf-8"))
+    raw["extra_endpoints"].append({"name": "remote", "base_url": "http://10.0.0.2:8000/v1"})
+    overrides.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    assert library.counts(later.cfg).set_up == 2
+
+
+def test_counts_and_scan_agree_that_the_servers_own_file_is_not_found(later, monkeypatch):
+    qwen = os.path.realpath(later.qwen)
+    path = model_library.library_path(later.cfg)
+    lib = model_library.Library.load(path)
+    entry = model_library.Entry("2026-01-01", later.qwen.stat().st_size, model_library.gguf_header.FileKind.MODEL)
+    model_library.Library({**lib.entries, qwen: entry}).save(path)
+    asked = scripted(monkeypatch)
+
+    assert library.counts(later.cfg).found == 0
+    assert _sync(later) == library.Sync() and asked.asked == []
