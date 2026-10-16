@@ -1100,33 +1100,44 @@ def _run_sync(coro) -> None:
 
 
 def write_overlay_validated(global_dir: Path, mutate: Callable[[dict], None],
-                             audit: Sequence[tuple[str, Any, Any]], *, actor_detail: str) -> bool:
-    """The one writer of overrides.yaml for the machine-trust acts (D-28): ``mutate`` a deep copy of
+                             audit: Sequence[tuple[str, Any, Any]], *, actor_detail: str,
+                             on_busy: Callable[[], None] | None = None) -> bool:
+    """The one writer of overrides.yaml for the machine-trust acts: ``mutate`` a deep copy of
     the overlay, validate the config the next start would read (config.yaml raw merged with the new
     overlay minus its `agent:` section, as `persist_default_model` does), write it atomically, then
     publish one `ComponentMutated` (`layer="user"`, `actor="cli"`) per ``audit`` triple
     `(dotted path, before, after)` to the configured `org.audit_log_path`.
 
-    Returns False — nothing written, nothing emitted — when the overlay will not parse, the result
-    will not validate (no `provider:` block in config.yaml is one such case) or the file cannot be
-    written. An emit that fails is logged at debug and never undoes the write. Callers adopt only
-    after True. Paths are entry names, never a whole list, so a peer's `api_key` stays out of the
-    audit log."""
+    The raw read, ``mutate``, the validation and the write happen under `overlay_lock`; the audit is
+    published after it is released. A busy lock writes nothing and calls ``on_busy`` once.
+
+    Returns False — nothing written, nothing emitted — when the lock is busy, the overlay will not
+    parse, the result will not validate (no `provider:` block in config.yaml is one such case) or the
+    file cannot be written. An emit that fails is logged at debug and never undoes the write. Callers
+    adopt only after True. Paths are entry names, never a whole list, so a peer's `api_key` stays out
+    of the audit log."""
     from localharness.config.loader import ConfigParseError
     from localharness.config.models import HarnessConfig
     from localharness.config.overlay import (
-        _resolve_user_overlay_path, atomic_write_overlay, deep_merge, load_overlay)
+        OverlayBusy, _resolve_user_overlay_path, atomic_write_overlay, deep_merge, load_overlay,
+        overlay_lock)
     from localharness.config.paths import resolve_runtime_path
     from localharness.config.plugin_sections import core_harness_view
 
     overlay_path = _resolve_user_overlay_path(global_dir)
-    config_raw, _ = raw_settings(global_dir)
     try:
-        new = copy.deepcopy(load_overlay(overlay_path))
-        mutate(new)
-        cfg = HarnessConfig.model_validate(core_harness_view(
-            deep_merge(config_raw, {k: v for k, v in new.items() if k != "agent"})))
-        atomic_write_overlay(overlay_path, new)
+        with overlay_lock(global_dir):
+            config_raw, _ = raw_settings(global_dir)
+            new = copy.deepcopy(load_overlay(overlay_path))
+            mutate(new)
+            cfg = HarnessConfig.model_validate(core_harness_view(
+                deep_merge(config_raw, {k: v for k, v in new.items() if k != "agent"})))
+            atomic_write_overlay(overlay_path, new)
+    except OverlayBusy:
+        log.debug("overrides.yaml is locked; nothing was written", exc_info=True)
+        if on_busy is not None:
+            on_busy()
+        return False
     except (ConfigParseError, ValueError, TypeError, AttributeError, OSError):
         log.debug("the overlay write was refused or failed; nothing was written", exc_info=True)
         return False
