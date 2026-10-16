@@ -651,6 +651,34 @@ def autostart_entries_for_body(global_dir: Path, body: str | None) -> list[dict]
     return _launch_entries(AUTOSTART_FILE, "autostart.", {"env": captured})
 
 
+AUTOSTART_ENV_MISSING = "no environment is recorded for it"
+AUTOSTART_ENV_UNREADABLE = "its # env block cannot be read"
+AUTOSTART_ENV_CHANGED = "its # env block is not the one recorded for this machine"
+
+
+def autostart_env_failure(global_dir: Path) -> str | None:
+    """None when the machine record covers the autostart unit's captured environment exactly as `serve` will
+    ask for it at its start: the unit file reads, its `# env` block parses, the recorded `autostart.env`
+    entry exists and holds the very values the file holds now. Else the phrase naming what is missing. This
+    is the check `serve` makes before it execs (exit 78 on a miss), read-only and without a trust decision,
+    so a surface that is about to restart the unit can refuse BEFORE it stops anything. A recorded entry the
+    person declined is the old one and fails the comparison, as a withheld one does at `serve`."""
+    from localharness.provider import units
+
+    body = units.read_harness_unit()
+    captured = units.captured_env(body) if body is not None else None
+    if captured is None:
+        return AUTOSTART_ENV_UNREADABLE
+    recorded = recorded_autostart_entry(global_dir)
+    if recorded is None or not autostart_entries_for_body(global_dir, body):
+        return AUTOSTART_ENV_MISSING
+    try:
+        confirmed = json.loads(recorded.get("shown", ""))
+    except (TypeError, ValueError):
+        confirmed = None
+    return None if confirmed == captured else AUTOSTART_ENV_CHANGED
+
+
 def machine_snapshot(global_dir: Path) -> list[dict]:
     """What your machine's own files would start, load or loosen: for every `<global>/agents/*.yaml`
     each `tools.mcp_servers` entry ({kind: "mcp_server", file: "agents/<f>", name, shown: command +

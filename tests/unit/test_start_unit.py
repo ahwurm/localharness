@@ -21,6 +21,7 @@ import yaml
 
 from localharness.cli import model_ops, start_cmd, start_serving
 from localharness.cli.start_cmd import _start_async
+from localharness.config import trust
 from localharness.config.overlay import load_overlay
 from localharness.provider import lifecycle, server, speed_stats, units
 from tests.unit.launch_support import stub_liveness
@@ -165,6 +166,7 @@ def add_docker_peer(world) -> None:
         "lifecycle": {"gpu": True, "runtime": "vllm", "launch": "docker", "docker_image": "vllm/vllm-openai:x",
                       "model": "/m/ckpt", "port": 8090}})
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    trust.record_machine(world.g, trust.machine_snapshot(world.g))  # the person confirmed the new peer too
 
 
 def docker_activate(sw):

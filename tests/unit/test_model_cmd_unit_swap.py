@@ -145,6 +145,22 @@ def test_a_script_run_swaps_the_units_server_to_flash_next_and_says_so_before_an
     assert cli.last_served == "flash-next"
 
 
+def test_a_script_run_with_an_autostart_env_the_record_does_not_cover_leaves_the_incumbent_serving(cli):
+    w = cli.world
+    unit_incumbent(w)
+    trust.forget_entries(w.g, [trust.AUTOSTART_KEY])             # `serve` would exit 78 on the restart
+
+    result = cli.run("flash-next")
+
+    assert result.exit_code == 1
+    refusal = lifecycle.UNIT_ENV_LINE.format(why=trust.AUTOSTART_ENV_MISSING)
+    assert lifecycle.SWAP_REFUSED.format(name="flash-next", why=refusal) in " ".join(result.output.split())
+    assert "localharness model --autostart on" in result.output
+    assert cli.verbs == [] and w.events == []                    # nothing reset, stopped or restarted
+    assert units.read_target(w.g) is None and "active_endpoint" not in cli.overlay
+    assert cli.last_served is None
+
+
 def test_start_and_the_cli_build_the_launch_clause_with_the_same_function():
     import inspect
 
