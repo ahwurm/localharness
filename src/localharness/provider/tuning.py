@@ -30,7 +30,7 @@ from localharness.provider.autosense import (
     has_spec_flag,
     spec_type_flag,
 )
-from localharness.provider.server import KEY_ENV
+from localharness.provider.server import KEY_ENV, strip_url_credentials
 
 # llama-server's own default; deriving it would change the 0.18 argv, so it derives nothing (D-08).
 _LLAMA_DEFAULT_CACHE_TYPE = "f16"
@@ -344,6 +344,9 @@ def _window_clause(plan: Any) -> str | None:
     return "-c from extra_args"
 
 
+_SECRET_FLAGS = frozenset({"--api-key", "--hf-token", "-hft"})
+
+
 def _script_argv(plan: Any) -> list[str]:
     argv = list(plan.argv)
     if plan.report is not None and plan.report.mode == "fit":
@@ -355,10 +358,12 @@ def _script_argv(plan: Any) -> list[str]:
     for tok in argv:
         if hide:
             tok, hide = "<key>", False
-        elif tok == "--api-key":
+        elif tok in _SECRET_FLAGS:
             hide = True
-        elif tok.startswith("--api-key="):
-            tok = "--api-key=<key>"
+        elif tok.partition("=")[0] in _SECRET_FLAGS:
+            tok = f"{tok.partition('=')[0]}=<key>"
+        else:
+            tok = strip_url_credentials(tok)
         shown.append(tok)
     return shown
 
