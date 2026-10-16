@@ -16,6 +16,7 @@ from localharness.cli.init_cmd import init_app
 from localharness.cli.model_cmd import model
 from localharness.cli.plugin_mount import PluginCommandGroup
 from localharness.cli.plugins_cmd import plugins_app
+from localharness.cli.serve_cmd import serve
 from localharness.cli.start_cmd import start_app
 from localharness.cli.update_cmd import update
 from localharness.cli.validate_cmd import validate
@@ -42,6 +43,8 @@ app.command("update")(update)
 app.command("acp")(acp_cmd)
 # Internal instrument for the permission classifier, not a marketed verb (PRD §10).
 app.command("ask-rate", hidden=True)(ask_rate)
+# The autostart unit's body (spec 20 §9.3): its `ExecStart` runs it, a person never does.
+app.command("serve", hidden=True)(serve)
 app.add_typer(agent_app, name="agent")
 app.add_typer(bench_app, name="bench")
 app.add_typer(components_app, name="components")
