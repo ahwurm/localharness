@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from localharness.cli import workspace as ws_mod
+from localharness.config import loader as loader_mod
 from localharness.config import trust
 from localharness.provider import units as u
 from tests.unit.trust_support import g, never_asked, write_yaml  # noqa: F401 — g is a fixture
@@ -179,3 +181,213 @@ def test_recorded_autostart_entry_returns_the_recorded_one(g):
     trust.record_machine(g, trust.machine_snapshot(g))
 
     assert trust.recorded_autostart_entry(g) == _entry({"PATH": PATH_VALUE, "HF_HOME": HF})
+
+
+# ------------------------------------------------------------------ the entry through every decision
+
+
+def _decide(g, *, ask=False):
+    return ws_mod.decide_machine_trust(g, ask=ask)
+
+
+def _adopted_unit(g, captured=None) -> None:
+    """A record made first (no unit), the unit written, its entry adopted by the act that wrote it."""
+    assert _decide(g) == ws_mod.MachineTrust()
+    _install(g, captured)
+    trust.adopt_entries(g, trust.autostart_entries(g))
+
+
+def _edit_path_line(new: str) -> None:
+    body = u.read_harness_unit()
+    u.write_harness_unit(body.replace(f"# env PATH={PATH_VALUE}", f"# env PATH={new}"))
+
+
+@pytest.fixture(autouse=True)
+def _fresh_declines():
+    ws_mod._DECLINED.clear()
+    yield
+    ws_mod._DECLINED.clear()
+
+
+def test_an_adopted_entry_is_recorded_and_survives_every_re_record(g, monkeypatch):
+    never_asked(monkeypatch)
+    _adopted_unit(g)
+    snap_entry = _mine(trust.machine_snapshot(g))[0]
+    assert trust.recorded_autostart_entry(g) == snap_entry
+
+    for _ in range(2):
+        result = _decide(g)
+        assert result.withheld == {} and result.line == ""
+        assert trust.recorded_autostart_entry(g) == snap_entry
+
+
+def test_a_planted_unit_is_withheld_with_the_real_path_in_the_line(g, monkeypatch):
+    never_asked(monkeypatch)
+    assert _decide(g) == ws_mod.MachineTrust()
+    _install(g)
+
+    result = _decide(g)
+
+    assert result.withheld == {FILE: frozenset({("launch", "autostart.env")})}
+    assert f"autostart.env ({u.harness_unit_path()})" in result.line
+    assert FILE not in result.line.replace(str(u.harness_unit_path()), "")
+    assert trust.recorded_autostart_entry(g) is None
+
+
+def test_the_withheld_line_names_the_path_under_a_redirected_config_home(g, tmp_path, monkeypatch):
+    never_asked(monkeypatch)
+    _decide(g)
+    _install(g)
+
+    line = _decide(g).line
+
+    assert f"autostart.env ({tmp_path / 'cfg' / 'systemd' / 'user' / 'localharness-llm.service'})" in line
+
+
+def test_a_planted_unit_is_still_withheld_at_the_upgrade_start(g, monkeypatch):
+    """A record without `launch_model` in its kinds is the upgrade start: `confirmed_at_upgrade`
+    counts what governed 0.17's launches as confirmed, and never this entry."""
+    never_asked(monkeypatch)
+    trust.record_machine(g, trust.machine_snapshot(g),
+                         kinds=frozenset(trust.MACHINE_KINDS - {trust.LAUNCH_MODEL_KIND}))
+    _install(g)
+
+    result = _decide(g)
+
+    assert result.withheld == {FILE: frozenset({("launch", "autostart.env")})}
+    assert trust.recorded_autostart_entry(g) is None
+    assert trust.LAUNCH_MODEL_KIND in trust.recorded_machine(g)["kinds"]
+
+
+def test_a_changed_env_line_is_withheld_without_a_terminal(g, monkeypatch):
+    never_asked(monkeypatch)
+    _adopted_unit(g)
+    adopted = trust.recorded_autostart_entry(g)
+    _edit_path_line("/evil/bin:/usr/bin")
+
+    result = _decide(g)
+
+    assert result.withheld == {FILE: frozenset({("launch", "autostart.env")})}
+    assert f"autostart.env ({u.harness_unit_path()})" in result.line
+    assert trust.recorded_autostart_entry(g) == adopted
+
+
+def test_a_changed_env_line_is_asked_with_the_unit_path_and_a_no_withholds_it(g, monkeypatch):
+    _adopted_unit(g)
+    _edit_path_line("/evil/bin:/usr/bin")
+    questions: list[str] = []
+
+    def no(question: str) -> bool:
+        questions.append(question)
+        return False
+
+    monkeypatch.setattr(ws_mod, "_confirm_or_no", no)
+
+    result = _decide(g, ask=True)
+
+    assert len(questions) == 1
+    question = questions[0]
+    assert f"(the unit file {u.harness_unit_path()})" in question
+    line = next(row for row in question.splitlines() if "autostart.env" in row)
+    assert line.lstrip().startswith("~ autostart.env")
+    assert "/evil/bin:/usr/bin" in line
+    assert result.withheld == {FILE: frozenset({("launch", "autostart.env")})}
+
+
+def test_a_yes_records_the_changed_environment(g, monkeypatch):
+    _adopted_unit(g)
+    _edit_path_line("/new/bin:/usr/bin")
+    monkeypatch.setattr(ws_mod, "_confirm_or_no", lambda question: True)
+
+    result = _decide(g, ask=True)
+
+    assert result.withheld == {}
+    assert json.loads(trust.recorded_autostart_entry(g)["shown"])["PATH"] == "/new/bin:/usr/bin"
+
+
+def test_the_pseudo_file_is_never_part_of_the_question_without_the_real_path(g, monkeypatch):
+    _adopted_unit(g)
+    _edit_path_line("/evil/bin:/usr/bin")
+    seen: list[str] = []
+    monkeypatch.setattr(ws_mod, "_confirm_or_no", lambda q: seen.append(q) or False)
+
+    _decide(g, ask=True)
+
+    assert str(u.harness_unit_path()) in seen[0]
+
+
+def _harness_view(g, withheld=None):
+    harness = loader_mod.ConfigLoader(config_dir=g, machine_withheld=withheld).load_harness()
+    return (harness.server.model_dump(), [p.model_dump() for p in harness.extra_endpoints],
+            harness.org.model_dump())
+
+
+def test_a_withheld_autostart_entry_drops_nothing_the_loader_reads(g):
+    write_yaml(g / "config.yaml", {
+        "provider": {"provider_type": "vllm", "base_url": "http://127.0.0.1:8000/v1",
+                     "default_model": "m"},
+        "server": {"runtime": "vllm", "binary": "/usr/bin/vllm", "model": "m"},
+        "extra_endpoints": [{"name": "peer", "base_url": "http://127.0.0.1:9/v1", "gpu": True,
+                             "lifecycle": {"runtime": "vllm", "binary": "/usr/bin/vllm", "model": "p", "gpu": True}}],
+        "org": {"permissions": {"mode": "unattended"}}})
+    write_yaml(g / "overrides.yaml", {"server": {"port": 8123}})
+    _install(g)
+
+    whole = _harness_view(g)
+    withheld = _harness_view(g, {FILE: frozenset({("launch", "autostart.env")})})
+
+    assert withheld == whole
+    assert whole[0]["port"] == 8123 and whole[1][0]["name"] == "peer"
+
+
+def test_the_pseudo_file_matches_no_real_settings_file_name():
+    assert FILE not in ("config.yaml", "overrides.yaml", "org.yaml")
+    assert not FILE.startswith(("agents/", "divisions/", "tools/"))
+
+
+def test_removing_the_unit_records_the_removal_without_a_question(g, monkeypatch):
+    never_asked(monkeypatch)
+    _adopted_unit(g)
+    assert u.remove_harness_unit() is True
+
+    result = _decide(g)
+
+    assert result == ws_mod.MachineTrust()
+    assert trust.recorded_autostart_entry(g) is None
+    assert KEY not in {(e["file"], e["kind"], e["name"]) for e in trust.recorded_machine(g)["entries"]}
+
+
+def test_forget_entries_removes_exactly_the_named_entries(g):
+    write_yaml(g / "config.yaml", {"server": {"runtime": "vllm"}})
+    _install(g)
+    trust.record_machine(g, trust.machine_snapshot(g))
+    before = trust.recorded_machine(g)
+
+    trust.forget_entries(g, [KEY])
+
+    after = trust.recorded_machine(g)
+    assert [e for e in before["entries"] if e not in after["entries"]] == [
+        e for e in before["entries"] if (e["file"], e["kind"], e["name"]) == KEY]
+    assert after["entries"] == [e for e in before["entries"] if (e["file"], e["kind"], e["name"]) != KEY]
+    assert after["kinds"] == before["kinds"]
+    assert after["fingerprint"] == trust.fingerprint(after["entries"])
+    assert after["fingerprint"] != before["fingerprint"]
+
+
+def test_forget_entries_with_no_record_is_a_no_op(g):
+    existed = trust.trust_store_path().exists()
+
+    trust.forget_entries(g, [KEY])
+
+    assert trust.recorded_machine(g) is None
+    assert trust.trust_store_path().exists() == existed
+
+
+def test_forget_entries_ignores_keys_that_are_not_recorded(g):
+    write_yaml(g / "config.yaml", {"server": {"runtime": "vllm"}})
+    trust.record_machine(g, trust.machine_snapshot(g))
+    before = trust.recorded_machine(g)
+
+    trust.forget_entries(g, [KEY, ("nowhere.yaml", "launch", "server.binary")])
+
+    assert trust.recorded_machine(g) == before
