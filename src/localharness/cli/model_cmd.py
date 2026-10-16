@@ -53,18 +53,38 @@ def _refuse_autostart(line: str) -> None:
 
 
 def _autostart(mode: str, config_dir: Optional[str], *, with_other_arguments: bool) -> None:
-    """`localharness model --autostart <mode>` (spec 20 §9.1, D-01). Only `on` exists in this release of the
-    command; any other value is refused with the line that names all three modes. Turning autostart on
-    changes what runs at every login, so it needs a person at a terminal: the check comes BEFORE anything is
-    decided, asked, loaded or written, and `_autostart_on` below is the one place under `cli/` that puts the
-    machine-trust question (D-03)."""
+    """`localharness model --autostart <mode>` (spec 20 §9.1, D-01). `on` and `off` exist in this release of
+    the command; any other value is refused with the line that names all three modes. Changing what runs at
+    every login needs a person at a terminal: the check comes BEFORE anything is decided, asked, loaded or
+    written, and `_autostart_on` below is the one place under `cli/` that puts the machine-trust question
+    (D-03); `off` removes and never asks."""
     if with_other_arguments:
         _refuse_autostart(autostart.AUTOSTART_ALONE_LINE)
-    if mode != "on":
+    if mode not in ("on", "off"):
         _refuse_autostart(autostart.AUTOSTART_MODE_LINE)
     if not _is_local_operator():
         _refuse_autostart(autostart.AUTOSTART_TERMINAL_LINE.format(mode=mode))
+    if mode == "off":
+        _autostart_off(resolve_config_dir(config_dir))
     _autostart_on(resolve_config_dir(config_dir))
+
+
+def _autostart_off(cfg_path: Path) -> None:
+    """`--autostart off` after the gate: remove the harness's own unit and its machine-record entry. It asks
+    no trust question (it removes, never adopts). The config is read only so a failing verb's stderr is
+    scrubbed of its secrets; one that cannot be read scrubs by pattern alone."""
+    try:
+        harness = ConfigLoader(config_dir=cfg_path, local_config_dir=None).load_harness()
+    except Exception:  # noqa: BLE001 — undoing autostart must not depend on a readable config
+        harness = None
+
+    def out(line: str) -> None:
+        console.print(line, markup=False, soft_wrap=True)
+
+    def err(line: str) -> None:
+        err_console.print(line, markup=False, soft_wrap=True)
+
+    raise typer.Exit(autostart.turn_off(cfg_path, out=out, err=err, harness=harness))
 
 
 def _autostart_on(cfg_path: Path) -> None:

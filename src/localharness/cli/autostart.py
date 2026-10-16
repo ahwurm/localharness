@@ -1,4 +1,4 @@
-"""`localharness model --autostart on` — the body of the switch (spec 20 §9.1, §9.2, §12; D-01..D-10).
+"""`localharness model --autostart on|off` — the body of the switch (spec 20 §9.1, §9.2, §12; D-01..D-13).
 
 `cli/model_cmd.py` owns the command surface: the option, the local-operator gate and the one machine-trust
 question. Everything after the question lives here, so `status` (a later plan) and the doctor row share one
@@ -7,7 +7,9 @@ module with `on`:
 - the lines (the gate's, the scope refusal's, the receipt's, the failures');
 - `turn_on`: capture the shell, render the unit, and under the launch lock write it, adopt its captured
   environment into the machine record, `daemon-reload`, re-check that the manager loaded the harness's own
-  unit, and `enable` it (`--now` only when nothing of the harness's is serving; a running server is kept).
+  unit, and `enable` it (`--now` only when nothing of the harness's is serving; a running server is kept);
+- `turn_off`: the undo. Only the harness's own unit (all three identity tests, before and again under the
+  lock) is disabled, removed and pruned from the machine record; anything else is left as it is and named.
 
 Exit codes: 2 when the person can fix the call (a value the unit cannot carry); 1 when the system could not
 do it (no service manager, a failing verb, a file that could not be written, a unit the manager loaded from
@@ -16,6 +18,7 @@ is read from the filesystem and the command that would turn it on is only named 
 """
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -45,6 +48,9 @@ VERB_NO_ANSWER_LINE = "autostart {mode}: {verb} failed: the service manager did 
 WRITE_FAILED_LINE = "autostart {mode}: could not write {path}: {why}"
 REWRITE_LINE = "rewriting {path}; it now reads:"
 LOADED_ELSEWHERE_LINE = "autostart on: {unit} {why} — nothing was enabled"
+OFF_RECEIPT = "autostart off: removed {path}; nothing starts at login"
+OFF_NOTHING = "autostart is off — {path} does not exist"
+OFF_FOREIGN = "autostart off: {path} is not the unit localharness wrote ({why}) — left as it is"
 SECOND_LAUNCHER_LINE = "{unit} ({state}) also launches a server on port {port} — two launchers race at login"
 
 LOCK_WAIT_SECONDS = 60
@@ -162,4 +168,60 @@ def turn_on(harness: Any, record: Any, config_dir: Path, *, environ: Mapping[str
              if r.spec is not None and isinstance(getattr(r.spec, "port", None), int)}
     for other in units.other_launchers(ports):
         err(SECOND_LAUNCHER_LINE.format(unit=visible_text(other.unit), state=other.state, port=other.port))
+    return 0
+
+
+def _foreign(path: Path, why: str, err: Say) -> int:
+    err(OFF_FOREIGN.format(path=display_path(path), why=visible_text(why)))
+    return 1
+
+
+def turn_off(config_dir: Path, *, out: Say, err: Say, harness: Any = None) -> int:
+    """Disable and remove the harness's own autostart unit for ``config_dir`` and prune its `autostart.env`
+    entry (spec 20 §9.2 `off`, D-11, D-13). It acts only on a unit that passes all three identity tests —
+    loaded from `harness_unit_path()`, no drop-ins, the file byte-equal to what localharness renders — read
+    once up front and again under the launch lock, before anything is stopped; any other unit is left as it
+    is and named (exit 1). No file and nothing loaded is already off (exit 0). A failing `disable --now`
+    removes nothing and prunes nothing. ``harness`` only scrubs a failing verb's stderr of the config's
+    secrets; it is never asked about trust and `unit-target` is left as it is (R-14-26). Returns the exit
+    code (see the module doc)."""
+    if units.systemctl_path() is None:
+        err(NO_MANAGER_LINE)
+        return 1
+    path = units.harness_unit_path()
+    state = units.unit_runtime_state()
+    if not os.path.lexists(path) and not getattr(state, "fragment_path", ""):
+        out(OFF_NOTHING.format(path=display_path(path)))
+        return 0
+    why = units.harness_unit_failure(state, config_dir)
+    if why is not None:
+        return _foreign(path, why, err)
+
+    try:
+        with lifecycle.launch_lock_sync(config_dir, timeout_seconds=LOCK_WAIT_SECONDS):
+            # The first read may be stale by the time the lock is ours (another `on` or `off`, an edit):
+            # nothing is stopped on a unit the fresh state does not prove to be the harness's own.
+            why = units.harness_unit_failure(units.unit_runtime_state(), config_dir)
+            if why is not None:
+                return _foreign(path, why, err)
+
+            units.systemctl_user("reset-failed", units.HARNESS_UNIT)  # best effort: a clean slate, never a gate
+            disabled = units.systemctl_user("disable", "--now", units.HARNESS_UNIT)
+            if disabled is None or disabled.code != 0:
+                err(_verb_error("off", "disable", disabled, harness))
+                return 1
+            units.remove_harness_unit()
+            reloaded = units.systemctl_user("daemon-reload")
+            trust.forget_entries(config_dir, [trust.AUTOSTART_KEY])
+            if reloaded is None or reloaded.code != 0:
+                err(_verb_error("off", "daemon-reload", reloaded, harness))
+                return 1
+    except TimeoutError as exc:
+        err(REFUSED_LINE.format(mode="off", why=visible_text(exc)))
+        return 1
+    except OSError as exc:
+        err(REFUSED_LINE.format(mode="off", why=visible_text(exc)))
+        return 1
+
+    out(OFF_RECEIPT.format(path=display_path(path)))
     return 0
