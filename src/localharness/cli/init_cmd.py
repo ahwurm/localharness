@@ -3,20 +3,18 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
 import os
 import shlex
 import shutil
 import sys
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
 from urllib.parse import urlparse
 
 import typer
-from pydantic import SecretStr
 from rich.console import Console
 from rich.markup import escape
 from rich.prompt import Confirm, IntPrompt, Prompt
@@ -30,10 +28,18 @@ from localharness.agent.gguf_header import (
     unique_preset_name,
     walk_ggufs,
 )
-from localharness.cli import init_import, workspace
+from localharness.cli import init_import, library, workspace
+from localharness.cli.library import (
+    InitRecords,
+    _adopt_written,
+    _machine_autosense,
+    _record_dicts_of,
+    _result_from_record,
+    preset_lines,
+    show_records,
+)
 from localharness.cli.errors import _HANDLED, report_filesystem_error
 from localharness.cli.workspace import shown_path, visible_text
-from localharness.config import trust
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.migrate import BACKUP_STAMP_FORMAT
@@ -448,30 +454,6 @@ class SetupResult:
     server_ready: bool
 
 
-@dataclass
-class InitRecords:
-    """A model server init writes as a record instead of finding it running: the primary launch
-    record, its peers, the block shown before the write, and what the write needs besides. The
-    guided setup returns one; discovery and the imports build the same carrier."""
-    server: ManagedServerConfig
-    served: str
-    peers: list[EndpointRef] = field(default_factory=list)
-    lines: list[str] = field(default_factory=list)  # the shown block, printed before the write
-    api_key: SecretStr | None = field(default=None, repr=False)  # an inline key bound for provider.api_key; unwrapped only where it is written
-    deferred: list[Callable[[], None]] = field(default_factory=list)  # ledger writes, after the write
-    base_url: str | None = None  # None: http://127.0.0.1:<server.port>/v1
-    serving: bool = False  # a server already answers for it
-    label: str = ""  # who it was imported from (the unit, or pid and command), for the audit detail
-
-    def __post_init__(self) -> None:
-        if isinstance(self.api_key, str):  # a caller that still hands the key over as text
-            self.api_key = SecretStr(self.api_key)
-
-    @property
-    def launchable(self) -> bool:
-        return bool(self.server.binary or self.server.docker_image)
-
-
 @dataclass(frozen=True)
 class Attached:
     """A model server init attaches to and writes no `server:` record for (D-25, INIT-10): the one
@@ -572,7 +554,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
         changing = endpoint is not None or model is not None
         imported = None if changing else _imported_by_an_existing_install(config_path)
         if isinstance(imported, InitRecords):  # D-36: the change is the import — overrides.yaml, no question
-            _show_records(imported)
+            show_records(imported)
             if _write_overlay_records(config_path, imported, adopt=_adopts(interactive)):
                 overlay_file = ConfigLoader(config_dir=config_path).user_overlay_path
                 console.print("[green]✓[/green] "
@@ -608,7 +590,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
             _receipt(config_file, starting)
             outcome = SetupResult(config_file, picked.server_ready)
         elif isinstance(picked, InitRecords):  # a record: shown, written, launched by the first start
-            _show_records(picked)
+            show_records(picked)
             config_file = _write_records(config_path, picked, force=force,
                                         adopt=_adopts(interactive))
             _receipt(config_file, starting)
@@ -791,20 +773,6 @@ def _say_not_detected() -> None:
 PRIMARY_PORT = 8081
 
 
-def _machine_autosense(config_path: Path) -> AutosenseConfig:
-    """The `autosense:` section the machine's files set (its `model_roots` decide where init looks),
-    else the defaults; a config that cannot be read never stops discovery (D-51)."""
-    try:
-        return ConfigLoader(config_dir=config_path).load_harness().autosense
-    except Exception:  # noqa: BLE001 — no config yet, or an unreadable one: never a traceback
-        pass
-    try:  # a fresh machine has no config.yaml, but may already have an overrides.yaml saying where
-        raw = load_overlay(config_path / "overrides.yaml").get("autosense")
-        return AutosenseConfig.model_validate(raw) if isinstance(raw, dict) else AutosenseConfig()
-    except Exception:  # noqa: BLE001 — whatever stops that read leaves the defaults
-        return AutosenseConfig()
-
-
 def _found_models(config_path: Path, *, unit_model: str | None = None) -> list[DiscoveredModel]:
     """The GGUF models under the machine's `model_roots`, best first (D-07): the unit's model, one the
     speed ledger recorded, one that fits the free memory, the newest. Free memory is probed once for
@@ -862,31 +830,6 @@ def _peer_records(models: Sequence[DiscoveredModel], *, start: int, taken_names:
     return peers
 
 
-def _preset_clause(server: ManagedServerConfig) -> str:
-    """`(llama.cpp)` or `(llama.cpp, +<projector basename>)`, every value through visible_text."""
-    clause = RUNTIME_LABELS.get(server.runtime, server.runtime)
-    if server.mmproj:
-        clause += ", +" + visible_text(os.path.basename(server.mmproj))
-    return f"({clause})"
-
-
-def _preset_lines(server: ManagedServerConfig, served: str, peers: Sequence[EndpointRef], *,
-                  binary_from: str, extras: Sequence[str] = ()) -> list[str]:
-    """D-14: the primary's line, with its binary and where it came from when one was found, then
-    the import's `extras` (already escaped lines), then one line per peer saying what `/model`
-    switches to. Every value is escaped; printed `markup=False`."""
-    primary = f"serving {visible_text(served)} {_preset_clause(server)} ← {shown_path(server.model)}"
-    if server.binary:
-        primary += f" · binary: {shown_path(server.binary)} ({binary_from})"
-    lines = [primary, *extras]
-    for peer in peers:
-        life = peer.lifecycle
-        if life is not None:
-            lines.append(f"/model switches to {visible_text(peer.name)} {_preset_clause(life)} "
-                         f"← {shown_path(life.model)}")
-    return lines
-
-
 def _no_binary_line(models: Sequence[DiscoveredModel], roots: Sequence[str]) -> str:
     """D-24: the models were found and there is no llama-server to launch them with — the roots
     that hold one are named, and the record is written declared (`server.binary` unset)."""
@@ -904,28 +847,6 @@ def _unit_skip_line(unit: str, reason: str) -> str:
     """D-24, first form: a unit that names a model could not be imported and no llama-server is on
     PATH either — the unit's own reason (a predicate from units.py) folded into the one line."""
     return f"{visible_text(unit)} {visible_text(reason)}; no llama-server found — set server.binary"
-
-
-def _daemon_lines() -> list[str]:
-    """D-41, D-54: an Ollama or LM Studio that answers holds models of its own; say how many and
-    which (the first three), that they stay there and that no preset was written for them. Each
-    daemon is asked on its own port: `detect_provider(timeout_seconds=1.0, ports=[11434])`, then
-    `ports=[1234]`."""
-    lines: list[str] = []
-    for ports in ([11434], [1234]):
-        try:
-            found = asyncio.run(detect_provider(timeout_seconds=1.0, ports=ports))
-        except Exception:  # noqa: BLE001, S112 — a probe that fails says nothing
-            continue
-        if not found.found or found.provider_type not in ("ollama", "lmstudio") or not found.models:
-            continue
-        label = RUNTIME_LABELS[found.provider_type]
-        names = ", ".join(visible_text(m) for m in found.models[:3])
-        if len(found.models) > 3:
-            names += ", …"
-        count = f"{len(found.models)} model{'s' if len(found.models) != 1 else ''}"
-        lines.append(f"{label} holds {count} ({names}) — left in {label}, no preset written")
-    return lines
 
 
 def _unit_import(config_path: Path, *, only_port: int | None = None
@@ -985,7 +906,7 @@ def _discover_presets(config_path: Path) -> InitRecords | None:
         served_name=served, port=PRIMARY_PORT, binary=binary)
     peers = _peer_records(rest, start=PRIMARY_PORT + 1, taken_names={served},
                           taken_ports={PRIMARY_PORT})
-    lines = _preset_lines(server, served, peers, binary_from="on PATH")
+    lines = preset_lines(server, served, peers, binary_from="on PATH")
     if binary is None:  # D-24: one line, naming the unit that could not be used when there is one
         lines.append(_unit_skip_line(*skipped) if skipped is not None
                      else _no_binary_line(models, _machine_autosense(config_path).model_roots))
@@ -1165,7 +1086,7 @@ def _records_from_import(config_path: Path, imp: init_import.Imported, holder: w
     line, fit, trained = _second_line(imp, holder, port=port, running=running,
                                       autosense=_machine_autosense(config_path))
     extras = (*imp.shown, line) if line else imp.shown
-    lines = _preset_lines(spec, spec.served_name, peers, binary_from=binary_from, extras=extras)
+    lines = preset_lines(spec, spec.served_name, peers, binary_from=binary_from, extras=extras)
     ledger = speed_stats.default_speed_stats_path(config_path)
     served = spec.served_name
     deferred: list[Callable[[], None]] = []
@@ -1190,16 +1111,6 @@ def _records_from_import(config_path: Path, imp: init_import.Imported, holder: w
         api_key=imp.api_key,
         deferred=deferred, base_url=base_url, serving=running,
         label=workspace.incumbent_subject(holder, port=port))
-
-
-def _show_records(recs: InitRecords) -> None:
-    """Print the block a record path shows before it writes (markup off: a name from a file is
-    text). A llama.cpp record also says which models an Ollama or LM Studio holds (D-41)."""
-    lines = list(recs.lines)
-    if recs.server.runtime == "llamacpp":
-        lines += _daemon_lines()
-    for line in lines:
-        console.print(line, markup=False, soft_wrap=True)
 
 
 def _skip_for_now(config_path: Path, model: str | None, *, force: bool = False) -> SetupResult:
@@ -1445,14 +1356,6 @@ def _overlay_shadows(config_path: Path) -> None:
         )
 
 
-def _record_dicts_of(server: ManagedServerConfig | None,
-                     peers: Sequence[EndpointRef]) -> tuple[dict | None, list[dict]]:
-    """The server record and every peer as written to config.yaml: exclude_none dumps with the keys
-    as typed, so no `null` preset field and no invented `effort` lands in a record init writes."""
-    return (reveal(server.model_dump(mode="python", exclude_none=True)) if server is not None else None,
-            [reveal(peer.model_dump(mode="python", exclude_none=True)) for peer in peers])
-
-
 def _record_dicts(harness: HarnessConfig) -> tuple[dict | None, list[dict]]:
     """`_record_dicts_of` over a config's own server and peers."""
     return _record_dicts_of(harness.server, harness.extra_endpoints)
@@ -1463,49 +1366,6 @@ def _adopts(interactive: bool) -> bool:
     not a run without a tty, not a command the shell tool started (it carries LOCALHARNESS_COMMIT),
     so an agent running `init` cannot approve a launch for the next start."""
     return interactive and "LOCALHARNESS_COMMIT" not in os.environ
-
-
-def _adopt_written(global_dir: Path, file: str, server: dict | None, peers: Sequence[dict]) -> None:
-    """Record, as already approved, the launch entries init just wrote and showed (D-37, INIT-12):
-    the primary's `server.` keys and each peer's `lifecycle.` keys, built from the dicts that went
-    into ``file`` (never a re-read of the launch keys), and the posture entries (`bind_all`,
-    `require_api_key`) the machine's files give under exactly those prefixes — those, only while
-    they still say what was written (a value another file or a concurrent write changed is left for
-    the next start to ask about). With no machine record the first one is made, of the launch kinds
-    only; with one, these entries are added or replaced and nothing else changes (`adopt_entries`
-    never re-snapshots). No key is ever an entry."""
-    written: dict[str, dict] = {}  # entry-name prefix -> the dict written under it
-    if server is not None:
-        written["server."] = server
-    for peer in peers:
-        if isinstance(peer.get("lifecycle"), dict):
-            written[f"extra_endpoints.{peer['name']}.lifecycle."] = peer["lifecycle"]
-    entries = [e for prefix, mapping in written.items()
-               for e in trust._launch_entries(file, prefix, mapping)]
-    posture = {prefix + key: json.dumps(mapping.get(key))
-               for prefix, mapping in written.items() for key in trust._POSTURE_KEYS}
-    # `shown` is `<runtime>:<true|false>:<keyed|open>`: the middle part is the value in effect.
-    entries += [e for e in trust.machine_snapshot(global_dir)
-                if e["kind"] == trust.LAUNCH_KIND and e["name"] in posture
-                and str(e.get("shown", "")).split(":")[1:2] == [posture[e["name"]]]]
-    if trust.recorded_machine(global_dir) is not None:
-        trust.adopt_entries(global_dir, entries)
-    else:
-        trust.record_machine(global_dir, sorted(entries, key=trust._entry_key),
-                             kinds=frozenset({trust.LAUNCH_KIND, trust.LAUNCH_MODEL_KIND}))
-
-
-def _result_from_record(recs: InitRecords) -> DetectorResult:
-    """The detection-shaped answer for a record: nothing was probed, so the address is the one the
-    record will serve on and the one model is the name it will be served under."""
-    return DetectorResult(
-        found=True,
-        provider_type=recs.server.runtime,
-        base_url=recs.base_url or f"http://127.0.0.1:{recs.server.port}/v1",
-        models=[recs.served],
-        suggested_model=recs.served,
-        probe_duration_ms=0.0,
-    )
 
 
 def _write_records(config_path: Path, recs: InitRecords, *, force: bool = False,
@@ -1585,36 +1445,21 @@ def _existing_install_import(config_path: Path, harness: HarnessConfig) -> InitR
 
 
 def _write_overlay_records(config_path: Path, recs: InitRecords, *, adopt: bool) -> bool:
-    """D-36, D-37, D-60: an existing install's import goes to overrides.yaml through the one validated
-    overlay write: `server:` (exclude_none), discovery's peers only while the merged `extra_endpoints`
-    is still empty when the write happens (checked inside `mutate`, T-5-69), and an inline key as
-    `provider.api_key`. config.yaml is not touched. The audit triples name entries, never the key's
-    value. True: written — the ledger writes run and, when `adopt`, exactly the dicts written are
-    adopted (file `overrides.yaml`). False: nothing written."""
+    """An existing install's import goes to overrides.yaml in one validated write: `server:`, the peers through
+    the one peer writer, and an inline key as `provider.api_key`. A 0.18 peer list in config.yaml is copied once
+    into overrides.yaml; config.yaml itself is not touched. The audit names entries, never the key's value.
+    True: written, the ledger writes run and, when `adopt`, exactly the dicts written are adopted."""
     global_dir = global_config_dir(config_path)
-    server_dict, peer_dicts = _record_dicts_of(recs.server, recs.peers)
-    wrote: dict[str, list[dict]] = {"peers": []}
-    audit: list[tuple[str, object, object]] = []  # filled by mutate: what was written, not what was meant
-
-    def entries(prefix: str, mapping: dict) -> list[tuple[str, object, object]]:
-        found = [(e["name"], None, e["shown"]) for e in trust._launch_entries("overrides.yaml", prefix, mapping)]
-        found += [(prefix + key, None, json.dumps(mapping[key])) for key in trust._POSTURE_KEYS
-                  if key in mapping]
-        return found
+    server_dict, _ = _record_dicts_of(recs.server, [])
+    fragment = library.PeerFragment(global_dir, recs.peers)
+    audit: list[tuple[str, object, object]] = []
 
     def mutate(overlay: dict) -> None:
         audit.clear()
-        wrote["peers"] = []
         overlay["server"] = copy.deepcopy(server_dict)
-        audit.extend(entries("server.", server_dict or {}))
-        merged = (overlay["extra_endpoints"] if "extra_endpoints" in overlay
-                  else workspace.raw_settings(global_dir)[0].get("extra_endpoints"))
-        if peer_dicts and not merged:
-            overlay["extra_endpoints"] = copy.deepcopy(peer_dicts)
-            wrote["peers"] = peer_dicts
-            for peer in peer_dicts:
-                audit.extend(entries(f"extra_endpoints.{peer['name']}.lifecycle.", peer.get("lifecycle")
-                                     or {}))
+        audit.extend(library.audit_entries("server.", server_dict or {}))
+        fragment.mutate(overlay)
+        audit.extend(fragment.audit)
         if recs.api_key:
             provider = overlay.get("provider")
             overlay["provider"] = {**(provider if isinstance(provider, dict) else {}),
@@ -1628,8 +1473,7 @@ def _write_overlay_records(config_path: Path, recs: InitRecords, *, adopt: bool)
         return False
     for thunk in recs.deferred:  # only now that overrides.yaml is on disk
         thunk()
-    if adopt:  # D-37: exactly the dicts that were written, not a fresh look at the disk
-        _adopt_written(global_dir, "overrides.yaml", server_dict, wrote["peers"])
+    library.finish_peers(global_dir, server_dict, fragment, adopt=adopt)
     return True
 
 

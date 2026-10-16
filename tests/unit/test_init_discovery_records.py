@@ -18,6 +18,7 @@ import pytest
 import yaml
 
 import localharness.cli.init_cmd as init_cmd
+from localharness.cli import library
 from localharness.config.loader import ConfigLoader
 from localharness.provider import autosense, speed_stats
 from localharness.provider.detector import DetectorResult
@@ -84,6 +85,7 @@ def box(tmp_path, monkeypatch, fake_home):
     bin_dir = _bin_dir(tmp_path, monkeypatch)
     detect = _not_found()
     monkeypatch.setattr(init_cmd, "detect_provider", detect)
+    monkeypatch.setattr(library, "detect_provider", detect)
     monkeypatch.setattr(autosense, "_run_nvidia_smi", lambda: None)
     _terminal(monkeypatch)
     for name in ("Confirm", "IntPrompt", "Prompt"):
@@ -443,6 +445,7 @@ def _daemons(monkeypatch, by_port):
                               models=list(models), suggested_model=models[0], probe_duration_ms=0.0)
 
     monkeypatch.setattr(init_cmd, "detect_provider", fake)
+    monkeypatch.setattr(library, "detect_provider", fake)
     return calls
 
 
@@ -488,9 +491,9 @@ def test_a_daemon_that_answers_as_some_other_runtime_adds_no_line(box, monkeypat
 
 
 def test_the_daemon_probes_only_run_for_a_llama_cpp_record(monkeypatch):
-    monkeypatch.setattr(init_cmd, "detect_provider", _boom("detect_provider"))
+    monkeypatch.setattr(library, "detect_provider", _boom("detect_provider"))
     recs = init_cmd.InitRecords(
         server=init_cmd.ManagedServerConfig(runtime="vllm", model="m", binary="/v"), served="m",
         lines=["serving m (vLLM) \u2190 m"])
 
-    init_cmd._show_records(recs)  # would raise if it asked a daemon
+    init_cmd.show_records(recs)  # would raise if it asked a daemon

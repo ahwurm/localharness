@@ -140,6 +140,21 @@ def test_the_audit_log_names_the_entries_written_as_the_cli(live):  # noqa: F811
     assert all(line["actor_detail"].startswith("localharness init: imported ") for line in lines)
 
 
+def test_the_import_is_one_overlay_write_with_one_audit_batch(live, monkeypatch):  # noqa: F811
+    from localharness.config import overlay
+
+    box(live, "-c", "65536", "-ngl", "99")
+    written: list[str] = []
+    real = overlay.atomic_write_overlay
+    monkeypatch.setattr(overlay, "atomic_write_overlay", lambda path, data: (written.append(Path(path).name), real(path, data))[1])
+
+    _exited(_init(live.cfg, "--no-input"), 0)
+
+    assert written == ["overrides.yaml"]
+    paths = [line["path"] for line in audit_lines(live)]
+    assert "server.model" in paths and len(paths) == len(set(paths))
+
+
 def test_the_ledger_holds_the_weights_path_after_the_overlay_write(live):  # noqa: F811
     box(live, "-c", "65536")
 
@@ -266,7 +281,7 @@ def test_an_attach_only_process_prints_its_one_line_and_keeps_the_config(live): 
 # ------------------------------------------------------------------ the peers
 
 
-def test_a_non_empty_peer_list_in_config_yaml_gets_the_server_only(live):  # noqa: F811
+def test_a_peer_list_in_config_yaml_is_copied_once_and_the_import_peers_follow_it(live):  # noqa: F811
     config = box(live, "-c", "65536")
     config.write_text(CONFIG.replace(
         "extra_endpoints: []", "extra_endpoints:\n  - name: mine\n    base_url: http://127.0.0.1:9000/v1\n"
@@ -276,15 +291,15 @@ def test_a_non_empty_peer_list_in_config_yaml_gets_the_server_only(live):  # noq
     _exited(_init(live.cfg, "--no-input"), 0)
 
     data = overrides(live)
-    assert set(data) == {"server"} and digest(config) == before
+    assert set(data) == {"server", "extra_endpoints"} and digest(config) == before
+    assert [p["name"] for p in data["extra_endpoints"]] == ["mine", "C", "B"]
     loader = ConfigLoader(config_dir=live.cfg)
-    assert [p.name for p in loader.load_harness().extra_endpoints] == ["mine"]
-    assert not any("replaces" in w for w in loader.harness_warnings)
+    assert [p.name for p in loader.load_harness().extra_endpoints] == ["mine", "C", "B"]
 
 
-def test_peers_gained_between_the_read_and_the_write_are_not_overwritten(live, monkeypatch):  # noqa: F811
+def test_peers_gained_between_the_read_and_the_write_are_kept_and_the_import_peers_follow(live, monkeypatch):  # noqa: F811
     box(live, "-c", "65536")
-    shown = init_cmd._show_records
+    shown = init_cmd.show_records
 
     def show_then_a_peer_appears(recs):  # the block is printed after the read and before the write
         shown(recs)
@@ -292,16 +307,16 @@ def test_peers_gained_between_the_read_and_the_write_are_not_overwritten(live, m
             "name": "late", "base_url": "http://127.0.0.1:9100/v1", "provider_type": "llamacpp"}]}),
             encoding="utf-8")
 
-    monkeypatch.setattr(init_cmd, "_show_records", show_then_a_peer_appears)
+    monkeypatch.setattr(init_cmd, "show_records", show_then_a_peer_appears)
 
     _exited(_init(live.cfg, "--no-input"), 0)
 
     data = overrides(live)
-    assert [peer["name"] for peer in data["extra_endpoints"]] == ["late"]
+    assert [peer["name"] for peer in data["extra_endpoints"]] == ["late", "C", "B"]
     assert data["server"]["port"] == 8080
 
 
-def test_an_overrides_peer_list_already_there_is_kept(live):  # noqa: F811
+def test_an_overrides_peer_list_already_there_is_kept_and_the_import_peers_follow(live):  # noqa: F811
     box(live, "-c", "65536")
     (live.cfg / "overrides.yaml").write_text(yaml.safe_dump({"extra_endpoints": [{
         "name": "mine", "base_url": "http://127.0.0.1:9100/v1", "provider_type": "llamacpp"}]}),
@@ -309,7 +324,7 @@ def test_an_overrides_peer_list_already_there_is_kept(live):  # noqa: F811
 
     _exited(_init(live.cfg, "--no-input"), 0)
 
-    assert [p["name"] for p in overrides(live)["extra_endpoints"]] == ["mine"]
+    assert [p["name"] for p in overrides(live)["extra_endpoints"]] == ["mine", "C", "B"]
 
 
 # ------------------------------------------------------------------ nothing listens: a stopped unit

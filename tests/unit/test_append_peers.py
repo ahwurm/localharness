@@ -13,10 +13,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from localharness.cli import library
+from localharness.cli import init_cmd, library
 from localharness.config import trust
 from localharness.config.redact import reveal
 from localharness.config.models import EndpointRef, ManagedServerConfig
+from tests.unit.gguf_support import write_gguf
 from tests.unit.procfs_support import fake_proc  # noqa: F401  (fixture)
 
 CONFIG = {"version": "1", "provider": {"provider_type": "llamacpp", "base_url": "http://127.0.0.1:8081/v1",
@@ -296,3 +297,49 @@ def test_two_writers_racing_both_land(g):
 
     assert all(results)
     assert sorted(p["name"] for p in overrides(g)["extra_endpoints"]) == ["alpha", "beta"]
+
+
+def test_the_record_helpers_live_in_library_and_library_never_imports_init_cmd():
+    for name, moved in (("InitRecords", "InitRecords"), ("preset_lines", "preset_lines"), ("show_records", "show_records"),
+                        ("_machine_autosense", "_machine_autosense"), ("_adopt_written", "_adopt_written"),
+                        ("_record_dicts_of", "_record_dicts_of"), ("_result_from_record", "_result_from_record")):
+        assert getattr(init_cmd, name) is getattr(library, moved)
+    tree = ast.parse(Path(library.__file__).read_text(encoding="utf-8"))
+    imported = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    imported |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    imported |= {f"localharness.cli.{a.name}" for n in ast.walk(tree)
+                 if isinstance(n, ast.ImportFrom) and n.module == "localharness.cli" for a in n.names}
+    assert "localharness.cli.init_cmd" not in imported
+
+
+def gguf(path: Path, **kv) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return write_gguf(path, {"general.architecture": "qwen35", "qwen35.block_count": 65, **kv})
+
+
+@pytest.mark.parametrize(("kv", "clause"), [
+    ({"qwen35.nextn_predict_layers": 1}, "(llama.cpp, mtp, +mmproj-Swift-F16.gguf)"),
+    ({}, "(llama.cpp, +mmproj-Swift-F16.gguf)"),
+    ({"qwen35.nextn_predict_layers": 66}, "(llama.cpp, +mmproj-Swift-F16.gguf)"),
+])
+def test_a_preset_clause_names_mtp_only_when_the_header_declares_it(tmp_path, kv, clause):
+    server = ManagedServerConfig(runtime="llamacpp", model=str(gguf(tmp_path / "m.gguf", **kv)),
+                                 mmproj="/x/mmproj-Swift-F16.gguf")
+
+    assert library.preset_clause(server) == clause
+
+
+def test_an_unreadable_model_has_no_mtp_clause_and_raises_nothing(tmp_path):
+    assert library.preset_clause(ManagedServerConfig(runtime="llamacpp", model=str(tmp_path / "gone.gguf"))) == "(llama.cpp)"
+
+
+def test_the_primary_and_every_peer_line_say_mtp(tmp_path):
+    path = str(gguf(tmp_path / "m.gguf", **{"qwen35.nextn_predict_layers": 1}))
+    server = ManagedServerConfig(runtime="llamacpp", model=path)
+    one = EndpointRef(name="alpha", base_url="http://127.0.0.1:8082/v1", provider_type="llamacpp", gpu=True,
+                      lifecycle=ManagedServerConfig(runtime="llamacpp", model=path, port=8082))
+
+    lines = library.preset_lines(server, "qwen-27b", [one], binary_from="on PATH")
+
+    assert lines[0].startswith("serving qwen-27b (llama.cpp, mtp) ← ")
+    assert lines[1].startswith("/model switches to alpha (llama.cpp, mtp) ← ")
