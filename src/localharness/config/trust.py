@@ -215,6 +215,15 @@ MACHINE_KINDS: frozenset[str] = frozenset(
 kind's current entries silently once — they predate the rule. That is how the first start that knows
 tool scripts adopts every script already in the tools folder."""
 
+AUTOSTART_FILE = "systemd/localharness-llm.service"
+AUTOSTART_ENTRY_NAME = "autostart.env"
+AUTOSTART_KEY = (AUTOSTART_FILE, LAUNCH_KIND, AUTOSTART_ENTRY_NAME)
+"""The pseudo-file, name and `(file, kind, name)` of the one entry that anchors the autostart unit's
+captured `# env` block in the machine record. It is a `launch`-kind entry on purpose: a kind of its
+own would be adopted silently once (a record predates the kind), and so would accept a unit planted
+before the first start that knows it. The pseudo-file is a pairing key only; no loader consumer
+matches it, so withholding the entry drops nothing the loader reads."""
+
 _DEPENDENCY_DIRS: frozenset[str] = frozenset(
     {"node_modules", ".venv", "venv", "__pycache__", ".git", "site-packages"})
 """Folders under <global>/tools/ that hold installed dependencies or caches, not scripts: the
@@ -611,6 +620,27 @@ def _launch_entries(file: str, prefix: str, mapping: Any) -> list[dict]:
     return out
 
 
+def autostart_entries(global_dir: Path) -> list[dict]:
+    """The autostart unit's captured environment as zero or one `launch` entry
+    ({file: AUTOSTART_FILE, kind: "launch", name: "autostart.env", shown: compact JSON of the
+    PATH / HF_HOME / LD_LIBRARY_PATH triple in that fixed order}): present only when the harness unit
+    file exists, its `ExecStart` names ``global_dir`` as `--config-dir` and its `# env` block parses;
+    otherwise none. The values become the exec environment of `serve` at boot, so a change to them is
+    a change to what the machine's files start.
+
+    `localharness.provider.units` is imported inside the function: the config layer never imports the
+    provider layer at import time."""
+    from localharness.provider import units
+
+    body = units.read_harness_unit()
+    if body is None or not units.unit_serves(global_dir, body):
+        return []
+    captured = units.captured_env(body)
+    if captured is None:
+        return []
+    return _launch_entries(AUTOSTART_FILE, "autostart.", {"env": captured})
+
+
 def machine_snapshot(global_dir: Path) -> list[dict]:
     """What your machine's own files would start, load or loosen: for every `<global>/agents/*.yaml`
     each `tools.mcp_servers` entry ({kind: "mcp_server", file: "agents/<f>", name, shown: command +
@@ -629,7 +659,9 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
     `extra_endpoints` peer's `lifecycle:` ({name: "extra_endpoints.<peer name>.lifecycle.<key>"} —
     by name, never by index; the peer's `api_key` and `extra_headers` are siblings of `lifecycle` and
     contribute no entry by construction). `bind_all` and `require_api_key` are the exception to
-    per-file emission: one entry each per record from the merged view (`_posture_entries`).
+    per-file emission: one entry each per record from the merged view (`_posture_entries`). The
+    autostart unit's captured `# env` block is one more `launch` entry (`autostart_entries`) for the
+    config dir the unit serves, not a kind of its own: a new kind is adopted silently once.
     Sorted by (file, kind, name, canonical JSON); unparsable files skipped; never an env or header
     value."""
     from localharness.config.loader import layer_files, org_deny_loosenings, permission_loosenings
@@ -689,6 +721,7 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
     if (root / "org.yaml").is_file():
         out += loosenings("org.yaml", _read_yaml(root / "org.yaml"))
     out += tool_script_entries(global_dir)
+    out += autostart_entries(global_dir)
     return sorted(out, key=_entry_key)
 
 
@@ -730,6 +763,17 @@ def record_machine(global_dir: Path, entries: list[dict],
     data[machine_key(global_dir)] = {"fingerprint": fingerprint(entries), "entries": entries,
                                      "kinds": sorted(kinds), "recorded": _now()}
     atomic_write_overlay(trust_store_path(), data)
+
+
+def recorded_autostart_entry(global_dir: Path) -> Optional[dict]:
+    """The recorded `autostart.env` entry (the one whose `(file, kind, name)` is AUTOSTART_KEY) of this
+    machine's record, or None when there is no record or it holds none. What `serve` compares the
+    unit's own captured environment against."""
+    rec = recorded_machine(global_dir)
+    if rec is None:
+        return None
+    return next((e for e in rec["entries"]
+                 if (e.get("file"), e.get("kind"), e.get("name")) == AUTOSTART_KEY), None)
 
 
 def adopt_entries(global_dir: Path, entries: list[dict]) -> None:
