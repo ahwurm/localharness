@@ -399,6 +399,16 @@ def _script_text(record, harness, cfg: Path, keyed: bool, decision, *, function:
         home_shown="" if plan.config_ini_home is None else shown_path(plan.config_ini_home))
 
 
+def _script_skip(record, view) -> str | None:
+    if model_ops.record_withheld(view, record):
+        return "not rendered — its record has changes you have not confirmed (run localharness start on a terminal)"
+    if record.spec is None:
+        return "not rendered — it launches nothing"
+    if not _script_kind(record):
+        return f"{record.spec.runtime} — not rendered"
+    return None
+
+
 def _script(name: str | None, config_dir: str | None, *, every: bool) -> None:
     """`localharness model --script [NAME]` and `--script --all`: print the launch as sh, decide no trust, prepare no home, write nothing."""
     cfg = resolve_config_dir(config_dir)
@@ -408,6 +418,21 @@ def _script(name: str | None, config_dir: str | None, *, every: bool) -> None:
     except Exception as exc:  # noqa: BLE001
         err_console.print(f"[bold red]Error:[/bold red] failed to load config: {escape(str(exc))}", soft_wrap=True)
         raise typer.Exit(2)
+    if every:
+        taken: list[str] = []
+        blocks = []
+        for record in model_ops.serving_records(harness):
+            why = _script_skip(record, view)
+            if why is None:
+                keyed, decision = _script_decision(record, harness)
+                why = decision.refusal
+            if why is None:
+                taken.append(tuning.script_function_name(record.name, taken))
+                blocks.append(_script_text(record, harness, cfg, keyed, decision, function=taken[-1]))
+            else:
+                blocks.append(visible_text(SCRIPT_SKIP_LINE.format(name=record.name, why=why)))
+        typer.echo("\n\n".join(blocks))
+        raise typer.Exit(0)
     serving = model_ops.resolve_serving(harness, view, name, config_dir=cfg)
     if isinstance(serving, model_ops.ServingRefusal):
         _say_script_refusal(serving.line, serving.exit_code)
