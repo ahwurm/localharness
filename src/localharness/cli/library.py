@@ -751,8 +751,7 @@ def record_line(name: str, runtime: str, port: int | None, binary: str | None, p
 
 
 def verify_download(path: str | os.PathLike[str], *, size: int, sha256: str) -> DiscoveredModel | str:
-    """The model a downloaded file is, its bytes counted and hashed and its header read through one descriptor;
-    else what is wrong with it."""
+    """The model a downloaded file is (bytes counted and hashed, header read through one descriptor), else what is wrong with it."""
     try:
         with os.fdopen(open_regular(path), "rb") as f:
             digest, count = hashlib.sha256(), 0
@@ -777,8 +776,7 @@ def verify_download(path: str | os.PathLike[str], *, size: int, sha256: str) -> 
 
 def record_path(config_path: Path, model: DiscoveredModel, *, first_run: bool, adopt: bool,
                 say: Callable[[str], None] | None = None) -> InitRecords | list[dict] | None:
-    """Record one verified file as it is: on a first run the `server:` record, else a peer appended to overrides.yaml.
-    Its record line is said before anything is written."""
+    """Record one verified file as it is, its record line said first: `server:` on a first run, else a peer in overrides.yaml."""
     say = say or _say
     binary = which_outside_cwd("llama-server")
     if first_run:
@@ -888,8 +886,7 @@ def _fetch(config_path: Path, row: RefArch, *, person: bool) -> InitRecords | No
 
 
 def offer(config_path: Path, *, person: bool) -> InitRecords | OfferVllm | NotNow | None:
-    """Nothing is set up and no model file was found: one question over this platform's reference rows, the sensed
-    row first. None when nobody could be asked or no row fits this platform."""
+    """One question over this platform's reference rows, the sensed one first; None when nobody could be asked or no row fits."""
     if not person:
         return None
     auto = _machine_autosense(config_path)
