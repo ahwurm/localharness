@@ -58,7 +58,7 @@ def fake(monkeypatch):
     monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: [])
     strat = FakeStrategy()
-    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: strat)
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec, **kw: strat)
     return strat
 
 

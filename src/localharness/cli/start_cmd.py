@@ -815,7 +815,7 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
                                 *, path_binary: str | None = None, autosense: Any = None,
                                 endpoint_out: list | None = None,
                                 notes: LaunchNotes | None = None,
-                                peer: str | None = None) -> str | None:
+                                peer: str | None = None, unit: Any = None) -> str | None:
     """Launch path 1 of the five: `start`'s down-server branch. Wait for a server that is already
     loading, or ask the launch decision BEFORE announcing anything and launch through the lifecycle
     strategy. Returns the decision's refusal line when the launch is refused (nothing stopped,
@@ -838,11 +838,16 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     (None for the primary): it names the peer in the lines, in the launch decision and in the undo
     field of a retried launch (``extra_endpoints.<peer>.lifecycle.speculative``). Every launch `start`
     makes, the primary's or a peer's, comes through here, so the one `activate` below stays the only
-    launch site of this module and sits inside the launch lock."""
+    launch site of this module and sits inside the launch lock.
+
+    ``unit`` is the harness's own autostart unit state (``start_serving.harness_unit``) or None: with it a
+    llama.cpp or vLLM-binary record is launched by restarting the unit (`UnitStrategy`), and a record the
+    unit cannot serve launches through its own strategy outside it, takes `unit-target` away right before
+    and says so (D-19, D-21)."""
     from localharness.provider import server as managed_server
     from localharness.provider import lifecycle
     from localharness.provider.lifecycle import LAUNCH_LOCK_WAIT_LINE, launch_lock, strategy_for
-    strategy = strategy_for(srv)
+    strategy = strategy_for(srv, unit=unit)
     label = managed_server.RUNTIME_LABELS.get(srv.runtime, srv.runtime)
     if peer:
         label = f"{label} ({peer})"
@@ -881,14 +886,19 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
         if _managed_server_running(strategy, srv, global_dir):
             loading = True  # someone else brought it up while we waited for the lock: attach, never launch
         else:
+            # A record the unit cannot serve launches beside it: `unit-target` goes first, so the next boot
+            # does not bring up the older choice (R-14-28), and the launch line says what that means.
+            outside = lifecycle.leave_unit(srv, unit, global_dir)
+
             def _announce(clause: str = "") -> None:
                 """The one launch line (D-23): the posture phrase first, then what was derived, then the
                 load warning. Plain text, never markup: the clause is built from closed plan values."""
                 inside = "; ".join(part for part in (posture, clause) if part)
                 inside = f"{inside}; " if inside else ""
+                tail = f" {lifecycle.RUNS_OUTSIDE_AUTOSTART}" if outside else ""
                 console.print(
-                    f"Managed {label} is not running — starting it ({inside}model load can take several minutes)...",
-                    markup=False)
+                    f"Managed {label} is not running — starting it ({inside}model load can take several minutes)..."
+                    + tail, markup=False)
 
             def _say_notes() -> None:
                 if notes is not None:
@@ -1889,6 +1899,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     provider, launch_key, _peer_headers = _session_endpoint(harness, record)
     _serving_spec = record.spec
 
+    # The autostart unit is sensed ONCE per start (D-19, D-22): one ask of the user manager, off the event
+    # loop. ``_unit_raw`` is what it said (the `starting` verdict's bound and the boot clause read it);
+    # ``_unit`` is that state once it passed the harness's-own-unit tests, the only value a strategy, a
+    # swap or a restore is handed (T-14-29), None when there is no unit or it is not ours.
+    def _sense_unit() -> "tuple[Any, Any]":
+        raw = start_serving.unit_runtime_state()
+        return raw, start_serving.harness_unit(raw, server_cfg_path)
+
+    _unit_raw, _unit = await asyncio.to_thread(_sense_unit)
+
     _ensure_packaged_tools(cfg_path)
 
     # Discover agents (migrate the legacy root-agent YAML first so discovery reads the
@@ -2127,6 +2147,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         The launch decision is asked BEFORE anything is stopped (a refused launch leaves the incumbent
         serving); the launch line names who is stopped and what starts, before the wait (D-21, R-13-36).
         A failed swap exits 1 after the reporter's redacted line; a success lands as a swap."""
+        from localharness.provider import lifecycle
         from localharness.provider import server as managed_server
         from localharness.provider.lifecycle import LAUNCH_LOCK_WAIT_LINE, strategy_for
         peer_name = record.peer.name if record.peer is not None else None
@@ -2143,13 +2164,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         undo_field = f"extra_endpoints.{peer_name}.lifecycle.speculative" if peer_name else "server.speculative"
         said: list[bool] = []
 
+        outside = lifecycle.outside_autostart(_serving_spec, _unit)  # the unit exists, this record is beside it
+
         def say_line(clause: str = "") -> None:
             inside = "; ".join(part for part in (posture, clause) if part)
-            console.print(
-                start_serving.swap_launch_line(
-                    incumbent=visible_text(incumbent.name) if incumbent is not None else None,
-                    target=visible_text(record.name), inside=f"{inside}; " if inside else ""),
-                markup=False, soft_wrap=True)
+            line = start_serving.swap_launch_line(
+                incumbent=visible_text(incumbent.name) if incumbent is not None else None,
+                target=visible_text(record.name), inside=f"{inside}; " if inside else "")
+            console.print(f"{line} {lifecycle.RUNS_OUTSIDE_AUTOSTART}" if outside else line,
+                          markup=False, soft_wrap=True)
             if not said:
                 said.append(True)
                 for note in launch_notes.lines:
@@ -2164,12 +2187,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         async def say_lock_wait() -> None:
             err_console.print(LAUNCH_LOCK_WAIT_LINE, markup=False, soft_wrap=True)
 
-        if not getattr(strategy_for(_serving_spec), "plans_launch", False):
+        if not getattr(strategy_for(_serving_spec, unit=_unit), "plans_launch", False):
             say_line()  # a strategy that plans nothing never calls `on_plan`: the line is said up front
         reporter = start_serving.ConsoleSwapReporter(err_console.print, harness, provider.api_key)
         outcome = await start_serving.run_swap(
             harness, incumbent, serving, config_dir=server_cfg_path, autosense=harness.autosense,
-            reporter=reporter, redact=reporter.redact, on_plan=on_plan, on_wait=say_lock_wait)
+            reporter=reporter, redact=reporter.redact, on_plan=on_plan, on_wait=say_lock_wait, unit=_unit)
         if outcome.error is not None:
             await _stop_start(1)  # the reporter already said why, redacted
         _launched.append(outcome.live)
@@ -2184,18 +2207,16 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             err_console.print(_foreign, markup=False, soft_wrap=True)
             decision = start_serving.Decision("attach_other", decision.incumbent, None, (), None)
     _verdict: Any = None
-    _unit_state: Any = None
     if decision.kind == "launch" and not probe_ok and _serving_spec is not None:
         # Nothing answers: before launching, prove what holds the box (D-18). The pidfile is a claim,
         # verified against /proc; a launch of another record is the swap's incumbent, never waited on.
         # Asked for every config, one record included: a hand-run server on the selected record's port
         # that answers nothing (still loading, a key, not an OpenAI server) is named here, whoever else
         # the config holds, instead of being launched into as an "exited during startup" (D-17).
-        _unit_state = start_serving.unit_runtime_state()
         _verdict = await asyncio.to_thread(
             lambda: start_serving.liveness_verdict(
                 harness, machine_trust, record, server_cfg_path,
-                main_pid=getattr(_unit_state, "main_pid", None)))
+                main_pid=getattr(_unit_raw, "main_pid", None), unit_state=_unit_raw))
 
     if decision.kind in ("attach", "attach_other"):
         # The one clause this attach carries, if any (D-13, D-15): said once, on stdout.
@@ -2227,7 +2248,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     elif _serving_spec is not None and _verdict is not None and _verdict.kind == "starting":
         # The autostart unit's own `serve` is bringing the selected record up: wait for it, bounded,
         # and never signal it (D-18).
-        _wait_seconds = start_serving.starting_seconds(_unit_state)
+        _wait_seconds = start_serving.starting_seconds(_unit_raw)
         console.print(_verdict.line, markup=False, soft_wrap=True)
 
         async def _selected_answers_now() -> bool:
@@ -2255,7 +2276,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             refusal = await _start_managed_server(
                 _serving_spec, server_cfg_path, provider.base_url, launch_key,
                 path_binary=path_llama_server, autosense=harness.autosense, endpoint_out=_launched,
-                notes=launch_notes, peer=record.peer.name if record.peer is not None else None)
+                notes=launch_notes, peer=record.peer.name if record.peer is not None else None,
+                unit=_unit)
             if refusal is None:
                 probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
                 if probe_ok:
@@ -2348,12 +2370,12 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     _served = _probe.served or _probe_window
     if _attached is not None and record.spec is not None and _boot_marker_present(server_cfg_path):
         # D-14: an attach with a boot marker on disk closes the boot's retry through `confirm_launch(marker=)`
-        # and says it once; with no marker (or no unit state, this release) nothing is confirmed. The
+        # and says it once; with no marker (or no unit state) nothing is confirmed. The
         # record's own GGUF header is what the recorded fit is clamped to.
         _boot_clause = await asyncio.to_thread(
             lambda: start_serving.boot_clause(
                 server_cfg_path, record, autosense=harness.autosense,
-                unit_state=start_serving.unit_runtime_state(), served_window=_probe.served,
+                unit_state=_unit_raw, served_window=_probe.served,
                 header=_record_fit_header(record.spec)))
         if _boot_clause:
             console.print(
@@ -2383,7 +2405,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             try:
                 from localharness.provider.lifecycle import strategy_for
                 _harness_launched = _managed_server_running(
-                    strategy_for(_serving_spec), _serving_spec, server_cfg_path)
+                    strategy_for(_serving_spec, unit=_unit), _serving_spec, server_cfg_path)
             except Exception:  # noqa: BLE001 — wording only: degrade to a foreign incumbent
                 _harness_launched = False
         # Off the event loop: the attach report reads the header, stats the weights and runs nvidia-smi.

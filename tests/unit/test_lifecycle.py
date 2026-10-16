@@ -68,7 +68,7 @@ async def test_free_accelerator_stops_different_heavy_incumbent(tmp_path, monkey
     OWN strategy) + settle, and RETURN it so a failed launch can restore it. Encodes the box rule."""
     from localharness.provider import lifecycle
     log: list = []
-    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: _RecordingStrategy(log))
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec, **kw: _RecordingStrategy(log))
     incumbent_spec = _docker_srv(gpu=True)
     target = _llamacpp_srv(gpu=True)
     returned = await lifecycle.free_accelerator(
@@ -83,7 +83,7 @@ async def test_free_accelerator_noop_when_incumbent_is_target(tmp_path, monkeypa
     free_accelerator does NOT stop; the caller's own stop→activate performs the reload."""
     from localharness.provider import lifecycle
     log: list = []
-    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: _RecordingStrategy(log))
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec, **kw: _RecordingStrategy(log))
     spec = _docker_srv(gpu=True)
     returned = await lifecycle.free_accelerator(
         (spec, "http://127.0.0.1:8000/v1"), spec, tmp_path, settle_seconds=0.0,
@@ -96,7 +96,7 @@ async def test_free_accelerator_noop_when_nothing_heavy_up(tmp_path, monkeypatch
     """No heavy incumbent (bound to a CPU-light peer, or an unmanaged primary) → nothing to free."""
     from localharness.provider import lifecycle
     log: list = []
-    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: _RecordingStrategy(log))
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec, **kw: _RecordingStrategy(log))
     returned = await lifecycle.free_accelerator(
         None, _llamacpp_srv(gpu=True), tmp_path, settle_seconds=0.0,
     )
