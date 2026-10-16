@@ -596,6 +596,66 @@ def test_fail_a_manager_that_cannot_be_asked_after_the_reload_enables_nothing(wo
     assert world.verbs == [RELOAD]
 
 
+def _swap_the_file_at_the_reload(world, swapped: str) -> None:
+    """Replace the unit file the moment the manager is asked to reload: the window between the write and
+    the manager's own read, which a same-uid writer watching the directory can hit."""
+    manager = world.manager
+
+    def racing(argv, **kw):
+        if tuple(argv) == RELOAD:
+            world.unit_path.write_text(swapped, encoding="utf-8")
+        return manager(argv, **kw)
+
+    world.mp.setattr(units, "_run_manager", racing)
+
+
+def test_fail_a_file_swapped_between_the_write_and_the_reload_is_refused_and_nothing_is_enabled(world):
+    decide_machine_trust(world.g, ask=False)  # the machine record, as a first start makes it
+    swapped = world.body({"PATH": "/evil/bin:/usr/bin"})
+    _swap_the_file_at_the_reload(world, swapped)
+
+    result = world.run()
+
+    assert result.exit_code == 1, (result.output, result.exception)
+    assert result.stderr.strip() == autostart.CHANGED_SINCE_WRITE_LINE.format(path=DISPLAY)
+    assert stdout_lines(result) == []  # no receipt
+    assert world.verbs == [RELOAD]  # not enabled, not started
+    assert world.unit_path.read_text(encoding="utf-8") == swapped  # the foreign text is left, not rewritten
+    assert lock_is_free(world.g)
+
+
+def test_fail_a_swapped_file_never_puts_its_environment_into_the_machine_record(world):
+    decide_machine_trust(world.g, ask=False)
+    _swap_the_file_at_the_reload(world, world.body({"PATH": "/evil/bin:/usr/bin"}))
+
+    world.run()
+
+    entry = trust.recorded_autostart_entry(world.g)
+    assert entry is not None
+    assert entry == trust.autostart_entries_for_body(world.g, world.body())[0]  # what was written
+    assert "/evil/bin" not in entry["shown"]
+    # and the disk now differs from the record, so `serve` would withhold it (78): nothing launches
+    withheld = decide_machine_trust(world.g, ask=False).withheld
+    assert (trust.LAUNCH_KIND, trust.AUTOSTART_ENTRY_NAME) in withheld.get(trust.AUTOSTART_FILE, frozenset())
+
+
+def test_the_adopted_entry_is_the_one_of_the_text_written(world):
+    decide_machine_trust(world.g, ask=False)
+    seen = []
+    real = trust.adopt_entries
+
+    def spy(config_dir, entries):
+        seen.append(entries)
+        return real(config_dir, entries)
+
+    world.mp.setattr(trust, "adopt_entries", spy)
+
+    result = world.run()
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert seen == [trust.autostart_entries_for_body(world.g, world.body())]
+
+
 def test_fail_the_lock_busy_beyond_its_wait_exits_1(world):
     @contextmanager
     def busy(*args, **kw):
