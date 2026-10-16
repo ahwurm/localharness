@@ -32,7 +32,7 @@ PLUGIN_FILES = frozenset({
 })
 _MIXED_DIR_CORE = {
     "cli": ("__init__", "acp_cmd", "agent_cmd", "app", "askrate_cmd", "bench_cmd", "coauthor", "components_cmd",
-            "config_cmd", "doctor_cmd", "errors", "init_cmd", "init_import", "mcp_cmd", "model_cmd", "model_ops",
+            "config_cmd", "doctor_cmd", "errors", "init_cmd", "init_import", "interview", "library", "mcp_cmd", "model_cmd", "model_ops",
             "picker", "plugin_mount", "plugins_cmd", "repl",
             "serve_cmd", "autostart",  # arrive in the autostart phase; named now so those plans leave this file alone
             "session_accumulator", "session_resume", "session_trust", "slash_commands", "start_cmd", "start_serving", "theme", "ui",

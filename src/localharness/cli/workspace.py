@@ -191,7 +191,23 @@ def resolve_workspace_layer(
 def _stdin_is_a_terminal() -> bool:
     """Is there a person to ask? `sys.stdin` is None in a detached process, and no stdin at all is
     no terminal either. One definition for both questions this module asks."""
-    return sys.stdin is not None and sys.stdin.isatty()
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _stdout_is_a_terminal() -> bool:
+    try:
+        return sys.stdout is not None and sys.stdout.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def local_operator(no_input: bool) -> bool:
+    """A person is here: a tty on stdin and stdout, no LOCALHARNESS_COMMIT, not --no-input."""
+    return (not no_input and "LOCALHARNESS_COMMIT" not in os.environ
+            and _stdin_is_a_terminal() and _stdout_is_a_terminal())
 
 
 # The ONE question `start` asks in a project it has never seen (owner bar, 2026-09-11: a live
