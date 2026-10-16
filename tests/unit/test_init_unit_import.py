@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import localharness.cli.init_cmd as init_cmd
+from localharness.cli import library
 from localharness.provider import speed_stats
 from localharness.provider.detector import DetectorResult
 from tests.unit.test_init_core_setup import (
@@ -84,7 +85,7 @@ def test_a_stopped_units_journal_becomes_the_primary_with_discoverys_other_model
     assert server.get("bind_all", False) is False and "context" not in server
     assert None not in server.values()
 
-    [peer] = cfg["extra_endpoints"]
+    [peer] = live.peers()
     assert peer["name"] == "B" and peer["base_url"] == "http://127.0.0.1:8081/v1"
     assert peer["lifecycle"]["model"] == str(live.model_b)
 
@@ -139,9 +140,10 @@ def test_the_units_model_is_the_primary_though_another_is_newer_and_the_ledger_n
     live.cfg.mkdir(parents=True, exist_ok=True)
     speed_stats.record_model_path(live.ledger(), "llamacpp", "B", str(live.model_b))
 
-    ranked = init_cmd._found_models(live.cfg, unit_model=os.path.realpath(live.model_a))
+    ranked = library.import_peer_models(live.cfg, exclude="/nothing", unit_model=os.path.realpath(live.model_a))
     assert [m.path.name for m in ranked] == ["A.gguf", "B.gguf"]
-    assert [m.path.name for m in init_cmd._found_models(live.cfg)] == ["B.gguf", "A.gguf"]
+    assert [m.path.name for m in library.import_peer_models(live.cfg, exclude="/nothing", unit_model=None)] == [
+        "B.gguf", "A.gguf"]
 
     _exited(_init(live.cfg, "--no-input"), 0)
 
@@ -151,13 +153,13 @@ def test_the_units_model_is_the_primary_though_another_is_newer_and_the_ledger_n
 def test_the_units_model_reaches_the_ranking_through_the_signature(live, monkeypatch):  # noqa: F811
     _stopped_unit(live)
     asked: list[object] = []
-    real = init_cmd._found_models
+    real = library.import_peer_models
 
-    def spy(config_path, *, unit_model=None):
+    def spy(config_path, *, exclude, unit_model):
         asked.append(unit_model)
-        return real(config_path, unit_model=unit_model)
+        return real(config_path, exclude=exclude, unit_model=unit_model)
 
-    monkeypatch.setattr(init_cmd, "_found_models", spy)
+    monkeypatch.setattr(library, "import_peer_models", spy)
 
     _exited(_init(live.cfg, "--no-input"), 0)
 
@@ -166,13 +168,13 @@ def test_the_units_model_reaches_the_ranking_through_the_signature(live, monkeyp
 
 def test_the_live_imports_peer_lookup_still_ranks_without_a_unit_model(live, monkeypatch):  # noqa: F811
     asked: list[object] = []
-    real = init_cmd._found_models
+    real = library.import_peer_models
 
-    def spy(config_path, *, unit_model=None):
+    def spy(config_path, *, exclude, unit_model):
         asked.append(unit_model)
-        return real(config_path, unit_model=unit_model)
+        return real(config_path, exclude=exclude, unit_model=unit_model)
 
-    monkeypatch.setattr(init_cmd, "_found_models", spy)
+    monkeypatch.setattr(library, "import_peer_models", spy)
     live.detect.return_value = DetectorResult(
         found=True, provider_type="llamacpp", base_url="http://127.0.0.1:8080/v1", models=["qwen-27b"],
         suggested_model="qwen-27b", probe_duration_ms=1.0)

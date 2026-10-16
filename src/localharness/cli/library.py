@@ -12,8 +12,9 @@ from urllib.parse import urlparse
 from pydantic import SecretStr
 from rich.console import Console
 
-from localharness.agent.gguf_header import read_header, unique_preset_name
-from localharness.cli import workspace
+from localharness.agent.gguf_header import DiscoveredModel, rank_models, read_header, unique_preset_name
+from localharness.cli import interview, workspace
+from localharness.cli.interview import Option
 from localharness.cli.workspace import shown_path, visible_text
 from localharness.config import trust
 from localharness.config.loader import ConfigLoader
@@ -21,7 +22,8 @@ from localharness.config.models import AutosenseConfig, EndpointRef, ManagedServ
 from localharness.config.overlay import load_overlay
 from localharness.config.paths import global_config_dir
 from localharness.config.redact import reveal
-from localharness.provider import model_library
+from localharness.core.which import which_outside_cwd
+from localharness.provider import autosense, model_library, speed_stats
 from localharness.provider.detector import DetectorResult, detect_provider
 from localharness.provider.server import RUNTIME_LABELS
 from localharness.provider.tuning import mtp_layers
@@ -31,6 +33,30 @@ console = Console()
 OVERLAY_BUSY_LINE = "overrides.yaml is busy — nothing written"
 PEERS_COPIED_COUNTS = " — {copied} copied, {kept} still confirmed"
 PEERS_DETAIL = "localharness: peers added to overrides.yaml"
+PRIMARY_PORT = 8081
+FIRST_RUN_QUESTION = "Set up these {n} models?"
+ALL_LABEL = "All, serving {best} first"
+ALL_HINT = "every file above becomes a preset; {best} serves on this start"
+ALL_HINT_EXCEPT_DECLINED = "every file above not declined earlier becomes a preset; {best} serves on this start"
+CHOOSE_LABEL = "Choose which, and which first"
+CHOOSE_HINT = "pick the files, then the one to serve"
+SKIP_LABEL = "Skip for now"
+SKIP_HINT = "nothing is set up; run localharness start again later"
+ONE_QUESTION = "Set up {name}?"
+SET_IT_UP = "Set it up"
+SET_IT_UP_HINT = "{name} becomes a preset"
+NOT_NOW = "Not now"
+NOT_NOW_HINT = "nothing is set up; localharness model --setup lists it later"
+SET_UP_WHICH = "Set up which?"
+SERVE_WHICH_FIRST = "Serve which first?"
+SKIP_LINE = "Nothing set up; run localharness start again later."
+DECLINED_ALL_LINE = "Nothing set up — {n} declined, remembered in {library}; run localharness start again to choose"
+NEXT_START_LINE = "Written unconfirmed — the next localharness start on a terminal asks about them"
+PEERS_NOT_WRITTEN_LINE = "The other {n} models were not written to overrides.yaml — localharness model --setup lists them"
+LATER_LINE = "Later: just run localharness start — it brings back your last choice."
+LATER_MODEL_CLAUSE = " /model {name} switches in a session."
+BULLET = "• {name} ({clause}) ← {path} · {size} · first seen {date}"
+DECLINED_TAG = " (declined earlier)"
 
 
 class _NothingToAppend(ValueError):
@@ -170,6 +196,8 @@ class InitRecords:
     base_url: str | None = None
     serving: bool = False
     label: str = ""
+    block_in_receipt: bool = False
+    confirmed: bool = True
 
     def __post_init__(self) -> None:
         if isinstance(self.api_key, str):
@@ -201,14 +229,18 @@ def model_mtp(path: str | os.PathLike[str]) -> bool:
         return False
 
 
+def _clause(runtime: str, *, mtp: bool, mmproj: str | os.PathLike[str] | None) -> str:
+    clause = RUNTIME_LABELS.get(runtime, runtime)
+    if mtp:
+        clause += ", mtp"
+    if mmproj:
+        clause += ", +" + visible_text(os.path.basename(mmproj))
+    return clause
+
+
 def preset_clause(server: ManagedServerConfig) -> str:
     """`(llama.cpp, mtp, +<projector basename>)`: the runtime, `mtp` when the model has it, the projector."""
-    clause = RUNTIME_LABELS.get(server.runtime, server.runtime)
-    if server.model and model_mtp(server.model):
-        clause += ", mtp"
-    if server.mmproj:
-        clause += ", +" + visible_text(os.path.basename(server.mmproj))
-    return f"({clause})"
+    return f"({_clause(server.runtime, mtp=bool(server.model and model_mtp(server.model)), mmproj=server.mmproj)})"
 
 
 def preset_lines(server: ManagedServerConfig, served: str, peers: Sequence[EndpointRef], *,
@@ -245,12 +277,14 @@ def _daemon_lines() -> list[str]:
     return lines
 
 
+def record_block(recs: InitRecords) -> list[str]:
+    """The lines that show a record: its own, then what a daemon on this machine holds."""
+    return [*recs.lines, *(_daemon_lines() if recs.server.runtime == "llamacpp" else [])]
+
+
 def show_records(recs: InitRecords) -> None:
     """Print the block a record path shows before it writes; a name from a file is text, never markup."""
-    lines = list(recs.lines)
-    if recs.server.runtime == "llamacpp":
-        lines += _daemon_lines()
-    for line in lines:
+    for line in record_block(recs):
         console.print(line, markup=False, soft_wrap=True)
 
 
@@ -297,3 +331,190 @@ def _result_from_record(recs: InitRecords) -> DetectorResult:
         suggested_model=recs.served,
         probe_duration_ms=0.0,
     )
+
+
+def recorded_paths(global_dir: Path) -> frozenset[str]:
+    """The realpaths of every model and projector the machine's two files name in a record."""
+    records: list = []
+    for raw in workspace.raw_settings(global_dir):
+        peers = raw.get("extra_endpoints")
+        records += [raw.get("server"), *(p.get("lifecycle") for p in peers if isinstance(p, dict))] \
+            if isinstance(peers, list) else [raw.get("server")]
+    return frozenset(os.path.realpath(os.path.expanduser(str(r[key])))
+                     for r in records if isinstance(r, dict) for key in ("model", "mmproj") if r.get(key))
+
+
+def prune_recorded(config_path: Path) -> bool:
+    """Drop from an existing library file every entry a record now names; True when it was rewritten."""
+    global_dir = global_config_dir(config_path)
+    path = model_library.library_path(global_dir)
+    lib = model_library.Library.load(path)
+    if lib.missing or lib.corrupt:
+        return False
+    kept = lib.unrecorded(recorded_paths(global_dir))
+    return len(kept.entries) != len(lib.entries) and kept.save(path)
+
+
+def format_size(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def no_binary_line(models: Sequence[DiscoveredModel], roots: Sequence[str]) -> str:
+    """The models were found and there is no llama-server to launch them with: the roots that hold one."""
+    holding: list[str] = []
+    for root in roots:
+        real = os.path.realpath(os.path.expanduser(root))
+        if any(m.real == real or m.real.startswith(real.rstrip(os.sep) + os.sep) for m in models):
+            holding.append(shown_path(os.path.expanduser(root)))
+    n = len(models)
+    return (f"found {n} GGUF{'s' if n != 1 else ''} under {', '.join(holding)}; "
+            "no llama-server — set server.binary")
+
+
+def _ranker(config_path: Path, auto: AutosenseConfig, unit_model: str | None = None):
+    """Best first: free memory is probed once, on the first call, and only a call with models reaches it."""
+    probed: list = []
+
+    def rank(models: Sequence[DiscoveredModel]) -> list[DiscoveredModel]:
+        if not probed:
+            probed.append(autosense.free_memory(auto))
+        fits: dict[str, int | None] = {}
+        for model in models:
+            try:
+                spec = ManagedServerConfig(runtime="llamacpp", model=str(model.path),
+                                           mmproj=str(model.mmproj) if model.mmproj else None)
+                fits[str(model.path)] = autosense.compute_fit(spec, auto, memory=probed[0]).fits
+            except Exception:  # noqa: BLE001 — one model that cannot be sized is ranked without a fit
+                fits[str(model.path)] = None
+        ledger = speed_stats.model_paths(speed_stats.default_speed_stats_path(config_path))
+        return rank_models(models, unit_model=unit_model, ledger_paths=ledger, fits=fits)
+
+    return rank
+
+
+def import_peer_models(config_path: Path, *, exclude: str, unit_model: str | None) -> list[DiscoveredModel]:
+    """The models an import offers as peers, best first: new or seen, never declined, none already recorded."""
+    global_dir = global_config_dir(config_path)
+    auto = _machine_autosense(config_path)
+    found = model_library.scan(auto.model_roots, recorded_paths(global_dir) | {exclude},
+                               model_library.library_path(global_dir), scope="all", rank=list, first_run=True)
+    models = [s.model for s in (*found.new, *found.seen) if s.model is not None]
+    return _ranker(config_path, auto, unit_model)(models) if models else []
+
+
+@dataclass(frozen=True)
+class Sync:
+    records: InitRecords | None = None
+    lines: tuple[str, ...] = ()
+    appended: int = 0
+    declined: tuple[str, ...] = ()
+    shown: int = 0
+
+
+@dataclass(frozen=True)
+class _Choice:
+    """What the person chose: the files in order (the first serves), the ones declined, or nothing at all."""
+    order: list[model_library.Shown]
+    declined: list[model_library.Shown]
+    skipped: bool = False
+
+
+def _bullets(listed: Sequence[model_library.Shown], names: dict[str, str]) -> None:
+    for s in listed:
+        clause = _clause("llamacpp", mtp=bool(s.model.mtp), mmproj=s.model.mmproj)
+        line = BULLET.format(name=visible_text(names[s.real]), clause=clause, path=shown_path(s.path),
+                             size=format_size(s.size), date=s.first_seen)
+        console.print(line + (DECLINED_TAG if s.declined else ""), markup=False, soft_wrap=True)
+
+
+def _first_of(files: Sequence[model_library.Shown], named: model_library.Shown | None) -> list[model_library.Shown]:
+    return [named, *(s for s in files if s is not named)] if named in files else list(files)
+
+
+def _interview(listed: Sequence[model_library.Shown], names: dict[str, str],
+               named: model_library.Shown | None, *, person: bool) -> _Choice | None:
+    """The first-run question and what each answer sets up; None when nobody could be asked."""
+    if not person:
+        return None
+    skip = _Choice([], [], skipped=True)
+    eligible = [s for s in listed if not s.declined]
+    if len(listed) == 1:
+        raise NotImplementedError("one model")
+    options = [Option("choose", CHOOSE_LABEL, CHOOSE_HINT), Option("skip", SKIP_LABEL, SKIP_HINT)]
+    if eligible:
+        best = visible_text(names[_first_of(eligible, named)[0].real])
+        hint = ALL_HINT_EXCEPT_DECLINED if len(eligible) < len(listed) else ALL_HINT
+        options.insert(0, Option("all", ALL_LABEL.format(best=best), hint.format(best=best)))
+    answer = interview.ask(FIRST_RUN_QUESTION.format(n=len(listed)), options, default=0, cancel="skip")
+    if not answer.reached:
+        return None
+    if answer.cancelled or answer.keys == ("skip",):
+        return skip
+    if answer.keys == ("all",):
+        return _Choice(_first_of(eligible, named), [])
+    raise NotImplementedError("choose which")
+
+
+def _named(listed: Sequence[model_library.Shown], names: dict[str, str],
+           preset: str | None) -> model_library.Shown | None:
+    return None
+
+
+def _records(config_path: Path, order: Sequence[model_library.Shown], names: dict[str, str], *,
+             confirmed: bool) -> InitRecords:
+    """The first file serves on `PRIMARY_PORT`, the rest are launchable peers above it."""
+    first, rest = order[0].model, [s.model for s in order[1:]]
+    served = names[order[0].real]
+    server = ManagedServerConfig(runtime="llamacpp", model=str(first.path),
+                                 mmproj=str(first.mmproj) if first.mmproj else None, served_name=served,
+                                 port=PRIMARY_PORT, binary=which_outside_cwd("llama-server"))
+    peers = model_library.peers_for(rest, start=PRIMARY_PORT + 1, taken_names={served}, taken_ports={PRIMARY_PORT})
+    lines = preset_lines(server, served, peers, binary_from="on PATH")
+    if server.binary is None:
+        lines.append(no_binary_line([s.model for s in order], _machine_autosense(config_path).model_roots))
+    return InitRecords(server=server, served=served, peers=peers, lines=lines, block_in_receipt=True, confirmed=confirmed)
+
+
+def sync(config_path: Path, *, scope: str, person: bool, preset: str | None = None,
+         first_run: bool = False) -> Sync:
+    """The first run: every unrecorded model under the roots, shown best first and set up as the person says."""
+    if not first_run:
+        raise ValueError("sync: only the first run is wired")
+    global_dir = global_config_dir(config_path)
+    auto = _machine_autosense(config_path)
+    lib_path = model_library.library_path(global_dir)
+    found = model_library.scan(auto.model_roots, frozenset(), lib_path, scope=scope, rank=list, first_run=True)
+    shown = [s for s in (*found.new, *found.seen, *found.declined) if s.model is not None]
+    if not shown:
+        return Sync()
+    by_path = {str(s.model.path): s for s in shown}
+    listed = [by_path[str(m.path)] for m in _ranker(config_path, auto)([s.model for s in shown])]
+    names: dict[str, str] = {}
+    for s in listed:
+        names[s.real] = unique_preset_name(s.model.name, names.values())
+    wanted = _named(listed, names, preset)
+    if person:
+        _bullets(listed, names)
+    choice = _interview(listed, names, wanted, person=person)
+    if choice is None:
+        if person:
+            _say(NEXT_START_LINE)
+        order = _first_of([s for s in listed if not s.declined], wanted)
+        if order:
+            return Sync(_records(config_path, order, names, confirmed=False), shown=len(listed))
+        choice = _Choice([], [s for s in listed if s.declined])
+    elif choice.skipped:
+        _say(SKIP_LINE)
+        return Sync(shown=len(listed))
+    else:
+        found.library.marked(declined=[s.real for s in choice.declined]).save(lib_path)
+    if choice.order:
+        records = _records(config_path, choice.order, names, confirmed=True)
+        return Sync(records, tuple(records.lines), 0, tuple(s.real for s in choice.declined), len(listed))
+    _say(DECLINED_ALL_LINE.format(n=len(choice.declined), library=shown_path(lib_path)))
+    return Sync(declined=tuple(s.real for s in choice.declined), shown=len(listed))

@@ -203,7 +203,7 @@ def test_no_input_writes_the_same_file_as_a_terminal_run(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("starting", [True, False], ids=["starting", "init"])
-def test_a_starting_setup_leaves_out_the_run_start_lines(starting, tmp_path, monkeypatch):
+def test_every_setup_names_the_command_for_later_and_only_init_asks_for_a_star(starting, tmp_path, monkeypatch):
     _detect(monkeypatch)
     _silent(monkeypatch)
     buf = io.StringIO()
@@ -216,7 +216,8 @@ def test_a_starting_setup_leaves_out_the_run_start_lines(starting, tmp_path, mon
     assert out == init_cmd.SetupResult(tmp_path / "config.yaml", True)
     printed = buf.getvalue()
     assert "LocalHarness configured at" in printed
-    assert ("Run 'localharness start' to begin." in printed) is (not starting), printed
+    assert "Run 'localharness start' to begin." not in printed
+    assert "Later: just run localharness start — it brings back your last choice." in printed
     assert ("★" in printed) is (not starting), printed
 
 

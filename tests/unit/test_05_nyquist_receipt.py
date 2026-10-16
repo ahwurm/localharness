@@ -25,5 +25,8 @@ def test_a_terminal_init_prints_the_receipt_row_after_configured(tmp_path, monke
     row = ("The agent can edit files, run commands and remember across sessions — "
            "org.permissions.mode: read-only or memory.enabled: false turns either off.")
     assert row in flat, flat
-    assert flat.index("LocalHarness configured at") < flat.index(row)
+    later = "Later: just run localharness start — it brings back your last choice."
+    assert flat.index("LocalHarness configured at") < flat.index(row) < flat.index(later)
+    assert "/model" not in flat[flat.index(later):].split("★")[0]
+    assert "Run 'localharness start' to begin." not in flat
     assert "Keep the usual settings" not in flat

@@ -108,6 +108,11 @@ class Live:
     def written(self) -> dict:
         return yaml.safe_load((self.cfg / "config.yaml").read_text(encoding="utf-8"))
 
+    def peers(self) -> list[dict]:
+        overrides = self.cfg / "overrides.yaml"
+        return yaml.safe_load(overrides.read_text(encoding="utf-8")).get("extra_endpoints", []) \
+            if overrides.exists() else []
+
     def ledger(self) -> Path:
         return speed_stats.default_speed_stats_path(self.cfg)
 
@@ -170,7 +175,7 @@ def test_a_running_llama_server_becomes_the_primary_with_discoverys_other_model_
     assert server["extra_args"] == ["-ngl", "99"]
     assert "context" not in server and None not in server.values()
 
-    [peer] = cfg["extra_endpoints"]
+    [peer] = live.peers()
     assert peer["name"] == "B" and peer["base_url"] == "http://127.0.0.1:8081/v1"
     assert peer["lifecycle"]["model"] == str(live.model_b) and peer["lifecycle"]["port"] == 8081
     assert "binary" not in peer["lifecycle"]
@@ -236,7 +241,8 @@ def test_without_a_dash_c_the_second_line_is_the_attach_form_and_no_window_is_re
 def test_an_interactive_init_prints_the_same_block(live):
     live.serve("-c", "65536", "-ngl", "99")
     unattended = block_of(_init(live.cfg, "--no-input"))
-    (live.cfg / "config.yaml").unlink()
+    for name in ("config.yaml", "overrides.yaml"):
+        (live.cfg / name).unlink()
     _terminal(live.monkeypatch)
 
     result = _init(live.cfg)

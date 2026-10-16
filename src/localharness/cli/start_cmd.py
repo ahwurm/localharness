@@ -3580,7 +3580,7 @@ def start_app(
             _refuse_unbuildable_channel(channel)  # a typo is refused before the setup, not after it
             console.print(FIRST_START_LEAD)
             if not core_setup(config_dir, endpoint=None, model=None, force=False,
-                              interactive=True, starting=True).server_ready:
+                              interactive=True, starting=True, preset=wanted).server_ready:
                 return  # skipped or nothing saved: the setup printed what to do next
             # The setup probed the server in event loops of its own, now closed. A client it left
             # open is finalized by scheduling its close on whatever loop is running when the GC
