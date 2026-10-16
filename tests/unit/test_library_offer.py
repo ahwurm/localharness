@@ -78,7 +78,7 @@ def test_enter_downloads_the_small_row_and_records_exactly_that_file(box, monkey
 
     [asked] = script.asked
     size = f"{box.row.bytes / 1e9:.1f} GB"
-    assert asked.question == f"Download Qwen3.8-9B-Q4_K_M.gguf ({size}, fits in your 10 GB)?"
+    assert asked.question == f"Download Qwen3.8-9B-Q4_K_M.gguf ({size} of weights, 9.6 GB of free memory)?"
     assert [o.label for o in asked.options] == ["Download it", "Show the other rows", "Not now"]
     assert asked.options[0].hint == library.SMALL_ROW_HINT and asked.default == 0 and asked.cancel == "not-now"
     assert box.calls == [{"repo": box.row.repo, "file": box.row.file, "revision": box.row.revision}]
@@ -161,7 +161,7 @@ def test_a_linux_nvidia_box_with_vllm_is_offered_the_spark_row_sized_by_the_gpu_
 
     library.offer(box.cfg, person=True)
 
-    assert _question(script) == "Download Qwen/Qwen3.6-27B-FP8 (30.9 GB, fits in your 94 GB)?"
+    assert _question(script) == "Download Qwen/Qwen3.6-27B-FP8 (30.9 GB of weights, 94.4 GB of free memory)?"
     assert script.asked[0].options[0].hint == "download Qwen/Qwen3.6-27B-FP8"
 
 
@@ -182,7 +182,7 @@ def test_darwin_arm64_with_llama_server_is_offered_the_gguf_row_and_no_install_l
 
     library.offer(box.cfg, person=True)
 
-    assert _question(script).startswith("Download Qwen3.8-9B-Q4_K_M.gguf") and "fits in your 14 GB" in _question(script)
+    assert _question(script).startswith("Download Qwen3.8-9B-Q4_K_M.gguf") and "13.9 GB of free memory" in _question(script)
     assert [o.key for o in script.asked[1].options] == [box.row.key, MAC_MINI.key]
     assert library.INSTALL_LINES["darwin"] not in capsys.readouterr().out
 
@@ -206,7 +206,7 @@ def test_a_row_the_memory_cannot_hold_is_not_said_to_fit(box, monkeypatch):
 
     library.offer(box.cfg, person=True)
 
-    assert "needs about" in _question(script) and "fits in" not in _question(script)
+    assert "needs about" in _question(script) and "free memory" not in _question(script)
 
 
 def test_win32_has_no_row_and_nothing_is_asked(box, monkeypatch):

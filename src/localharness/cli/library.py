@@ -91,7 +91,7 @@ NOTHING_TO_SET_UP_LINE = "Nothing to set up — every model found has a preset"
 LIBRARY_FAILED_LINE = "model library: {why} — start goes on"
 LIBRARY_NOT_SAVED_LINE = "model library: not saved, it is busy or unreadable — the same question comes back next start"
 NOT_WRITTEN_LINE = "Nothing was written to overrides.yaml — localharness model --setup lists the models"
-OFFER_QUESTION = "Download {what} ({size}, fits in your {gb} GB)?"
+OFFER_QUESTION = "Download {what} ({size} of weights, {free} of free memory)?"
 OFFER_QUESTION_UNKNOWN = "Download {what} ({size}, needs about {size})?"
 DOWNLOAD_IT = "Download it"
 SMALL_ROW_HINT = "a small model that runs anywhere; larger ones under Show the other rows"
@@ -930,7 +930,7 @@ def _consent(row: RefArch, global_dir: Path) -> str:
 def _download_question(row: RefArch, memory: float | None, global_dir: Path, *, rows: bool, person: bool) -> interview.Answer:
     size = _gb(row.bytes)
     what = visible_text(row.file or row.repo)
-    question = (OFFER_QUESTION.format(what=what, size=size, gb=f"{memory / 1e9:.0f}")
+    question = (OFFER_QUESTION.format(what=what, size=size, free=_gb(memory))
                 if memory is not None and row.bytes <= memory else OFFER_QUESTION_UNKNOWN.format(what=what, size=size))
     hint = SMALL_ROW_HINT if row.runtime == "llamacpp" else f"download {visible_text(row.repo)}" + _consent(row, global_dir)
     options = [Option("download", DOWNLOAD_IT, hint),
