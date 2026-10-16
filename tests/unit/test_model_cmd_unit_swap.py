@@ -47,7 +47,7 @@ class Cli:
         self.sessions: list = []
         self.operator = False
         monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
-        monkeypatch.setattr(model_cmd, "_is_local_operator", lambda: self.operator)
+        monkeypatch.setattr(model_cmd, "local_operator", lambda no_input: self.operator)
         monkeypatch.setattr(model_ops, "list_live_models", self._live)
         monkeypatch.setattr(session_presence, "live_sessions", lambda *a, **k: list(self.sessions))
         real_decide = model_cmd.decide_machine_trust

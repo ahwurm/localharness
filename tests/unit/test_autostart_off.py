@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import fcntl
 import os
-from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
-from localharness.cli import autostart, model_cmd
+from localharness.cli import autostart, model_cmd, workspace
 from localharness.cli.app import app
 from localharness.cli.workspace import decide_machine_trust
 from localharness.config import trust
@@ -322,7 +321,7 @@ def test_off_twice_the_second_says_it_is_already_off(world):
 
 def test_gate_off_without_a_local_operator_is_refused_and_nothing_runs(world):
     turned_on(world)
-    world.mp.setattr(model_cmd, "_is_local_operator", lambda: False)
+    world.mp.setattr(model_cmd, "local_operator", lambda no_input: False)
 
     result = world.run(mode="off")
 
@@ -334,8 +333,9 @@ def test_gate_off_without_a_local_operator_is_refused_and_nothing_runs(world):
 
 def test_gate_the_agent_command_marker_refuses_off_even_on_a_tty(world):
     turned_on(world)
-    world.mp.setattr(model_cmd, "_is_local_operator", REAL_OPERATOR_TEST)
-    world.mp.setattr(model_cmd, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True)))
+    world.mp.setattr(model_cmd, "local_operator", REAL_OPERATOR_TEST)
+    world.mp.setattr(workspace, "_stdin_is_a_terminal", lambda: True)
+    world.mp.setattr(workspace, "_stdout_is_a_terminal", lambda: True)
     world.mp.setenv("LOCALHARNESS_COMMIT", "1")
 
     result = world.run(mode="off")

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -70,8 +69,8 @@ def installed(world: World, **state) -> World:
 
 def anywhere(world: World) -> None:
     """The REAL local-operator test with no terminal and the agent-command marker set: a gate would refuse."""
-    world.mp.setattr(model_cmd, "_is_local_operator", REAL_OPERATOR_TEST)
-    world.mp.setattr(model_cmd, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: False)))
+    world.mp.setattr(model_cmd, "local_operator", REAL_OPERATOR_TEST)
+    world.mp.setattr(workspace, "_stdin_is_a_terminal", lambda: False)
     world.mp.setenv("LOCALHARNESS_COMMIT", "1")
 
 

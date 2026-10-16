@@ -207,7 +207,7 @@ def test_primary_served_name_passes_local_operator_both_ways(components_home, mo
         (components_home / "overrides.yaml").unlink(missing_ok=True)
         _unreachable(monkeypatch)
         calls = _record_persist_default(monkeypatch)
-        monkeypatch.setattr(model_cmd, "_is_local_operator", lambda v=value: v)
+        monkeypatch.setattr(model_cmd, "local_operator", lambda no_input, v=value: v)
         result = runner.invoke(app, ["model", PRIMARY_SERVED, "--config-dir", str(components_home)])
         assert result.exit_code == 0, result.output
         assert [c["local_operator"] for c in calls] == [value]

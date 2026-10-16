@@ -22,13 +22,12 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import yaml
 from typer.testing import CliRunner
 
-from localharness.cli import autostart, model_cmd
+from localharness.cli import autostart, model_cmd, workspace
 from localharness.cli.app import app
 from localharness.cli.workspace import decide_machine_trust
 from localharness.config import trust
@@ -41,7 +40,7 @@ from tests.unit.trust_support import answers, never_asked
 from tests.unit.unit_strategy_support import FakeServe
 from tests.unit.units_support import FakeManager, fake_manager  # noqa: F401 — the fixture
 
-REAL_OPERATOR_TEST = model_cmd._is_local_operator  # the real gate, kept before any case replaces it
+REAL_OPERATOR_TEST = model_cmd.local_operator  # the real gate, kept before any case replaces it
 SERVED = "qwen-27b-swift-1.5"
 INTERPRETER = "/opt/lh/bin/python"
 UNIT = units.HARNESS_UNIT
@@ -129,7 +128,7 @@ def on_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manager: FakeManag
         (lingering / units.current_user()).write_text("", encoding="utf-8")
     monkeypatch.setattr(units, "LINGER_DIR", str(lingering))
     monkeypatch.setattr(units, "systemctl_path", lambda: "/usr/bin/systemctl")
-    monkeypatch.setattr(model_cmd, "_is_local_operator", lambda: True)
+    monkeypatch.setattr(model_cmd, "local_operator", lambda no_input: True)
     never_asked(monkeypatch)
 
     world = World(tmp_path, g, home, lingering, manager, monkeypatch)
@@ -207,7 +206,7 @@ def test_only_the_user_manager_is_asked_and_the_login_managers_program_is_never_
 
 
 def test_gate_not_a_terminal_refuses_before_a_decision_a_write_or_a_verb(world):
-    world.mp.setattr(model_cmd, "_is_local_operator", lambda: False)
+    world.mp.setattr(model_cmd, "local_operator", lambda no_input: False)
 
     def decided(*a, **kw):
         raise AssertionError("trust was decided without a local operator")
@@ -223,8 +222,9 @@ def test_gate_not_a_terminal_refuses_before_a_decision_a_write_or_a_verb(world):
 
 
 def _real_gate_on_a_tty(world, tty: bool) -> None:
-    world.mp.setattr(model_cmd, "_is_local_operator", REAL_OPERATOR_TEST)
-    world.mp.setattr(model_cmd, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: tty)))
+    world.mp.setattr(model_cmd, "local_operator", REAL_OPERATOR_TEST)
+    world.mp.setattr(workspace, "_stdin_is_a_terminal", lambda: tty)
+    world.mp.setattr(workspace, "_stdout_is_a_terminal", lambda: tty)
 
 
 def test_gate_the_agent_command_marker_refuses_even_on_a_tty(world):
