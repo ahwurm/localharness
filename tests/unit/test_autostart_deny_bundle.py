@@ -45,6 +45,13 @@ NEW_PATTERNS = [
     "bash_exec(*localharness*model*--autostart*)",
 ]
 
+# defaults revision 5: the two verbs beside `enable PATH` that revision 4 missed
+REVISION_FIVE_PATTERNS = [
+    "bash_exec(*systemctl*[!A-Za-z0-9_.@-]reenable[!A-Za-z0-9_.@-]*/*)",
+    "bash_exec(*systemctl*[!A-Za-z0-9_.@-]preset[!A-Za-z0-9_.@-]*/*)",
+]
+ALL_PATTERNS = [*NEW_PATTERNS, *REVISION_FIVE_PATTERNS]
+
 
 def _denied(command: str) -> bool:
     return PermissionEvaluator().evaluate(
@@ -58,13 +65,13 @@ def _p(command: str, ident: str):
 
 # --------------------------------------------------------------------------- the shipped list
 
-def test_the_shipped_list_gains_exactly_the_thirteen_patterns():
+def test_the_shipped_list_gains_exactly_the_fifteen_patterns():
     shipped = PermissionConfig().deny_patterns
-    assert len(shipped) == 45
-    assert shipped[-13:] == NEW_PATTERNS
+    assert len(shipped) == 47
+    assert shipped[-15:] == ALL_PATTERNS
 
 
-@pytest.mark.parametrize("pattern", NEW_PATTERNS)
+@pytest.mark.parametrize("pattern", ALL_PATTERNS)
 def test_every_new_pattern_passes_the_format_check_and_the_evaluator_parse(pattern):
     assert PermissionConfig(deny_patterns=[pattern]).deny_patterns == [pattern]
     assert re.match(r"^([a-z_][a-z0-9_]*)(?:\((.+)\))?$", pattern)
@@ -72,13 +79,13 @@ def test_every_new_pattern_passes_the_format_check_and_the_evaluator_parse(patte
 
 
 def test_no_word_verb_pattern_is_delimited_by_a_literal_space():
-    for pattern in NEW_PATTERNS:
-        for verb in ("link", "edit", "set-property", "add-wants", "add-requires", "enable"):
+    for pattern in ALL_PATTERNS:
+        for verb in ("link", "edit", "set-property", "add-wants", "add-requires", "enable", "reenable", "preset"):
             assert f" {verb} " not in pattern
 
 
-def test_the_revision_is_four():
-    assert defaults.CURRENT_DEFAULTS_REVISION == 4
+def test_the_revision_is_five():
+    assert defaults.CURRENT_DEFAULTS_REVISION == 5
 
 
 # --------------------------------------------------------------------------- denied
@@ -104,6 +111,12 @@ DENIED = [
     _p(f"{U} enable /home/u/evil.service", "enable_path"),
     _p(f"{U} enable --now ./evil.service", "enable_now_relative_path"),
     _p(f"{SC} enable --user /home/u/evil.service", "enable_path_user_after"),
+    _p(f"{U} reenable /tmp/x", "reenable_path"),
+    _p(f"{U} reenable --now ./evil.service", "reenable_now_relative_path"),
+    _p(f"{SC} reenable --user /home/u/evil.service", "reenable_path_user_after"),
+    _p(f"{U} preset /tmp/x", "preset_path"),
+    _p(f"{SC} preset --user /home/u/evil.service", "preset_path_user_after"),
+    _p(f"cd /tmp && {U} reenable /tmp/x", "reenable_compound"),
     _p("busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 X Y", "busctl_user_first"),
     _p("busctl call --user org.freedesktop.systemd1 /org/freedesktop/systemd1 X Y", "busctl_user_after"),
     _p("gdbus call --session --dest org.freedesktop.systemd1 --object-path /x --method y", "gdbus_session"),
@@ -133,6 +146,12 @@ DENIED_WHITESPACE = [
     _p(f'{U} "edit" x.service', "double_quoted_edit"),
     _p(f"{U} 'set-property' x.service MemoryMax=1G", "single_quoted_set_property"),
     _p(f"{U} enable '/home/u/evil.service'", "quoted_path_enable"),
+    _p(f"{U}\treenable /home/u/evil.service", "tab_before_reenable"),
+    _p(f"{U} reenable\t/home/u/evil.service", "tab_after_reenable"),
+    _p(f"{U}\npreset /home/u/evil.service", "newline_before_preset"),
+    _p(f"{U} preset\t/home/u/evil.service", "tab_after_preset"),
+    _p(f"{U} reenable '/home/u/evil.service'", "quoted_path_reenable"),
+    _p(f"true;{U} reenable /x.service", "semicolon_before_reenable"),
     _p(f"{SC}\t--user\tset-environment\tLD_PRELOAD=/x", "tab_separated_set_environment"),
     _p(f"{SC}\n--user\nimport-environment\nPATH", "newline_separated_import_environment"),
     _p("localharness\tmodel --autostart on", "tab_after_localharness_autostart"),
@@ -163,6 +182,12 @@ ALLOWED = [
     _p(f"{U} status {UNIT}", "status"),
     _p(f"{U} show-environment", "show_environment"),
     _p(f"{U} enable llm.service", "enable_bare_name"),
+    _p(f"{U} reenable llm.service", "reenable_bare_name"),
+    _p(f"{U} preset llm.service", "preset_bare_name"),
+    _p(f"{U} status my.reenable.service", "unit_name_contains_reenable"),
+    _p(f"{U} status x-preset.service", "unit_name_ends_in_preset"),
+    _p("git log --oneline -- presets/", "git_log_mentions_preset_dir"),
+    _p("ls /usr/lib/systemd/user-preset/", "ls_a_preset_directory"),
     _p(f"{U} is-enabled llm.service", "is_enabled"),
     _p(f"{U} status credit.service", "unit_name_contains_edit"),
     _p(f"{U} status my.link.service", "unit_name_contains_link"),
@@ -211,7 +236,7 @@ def test_the_negated_set_delimiter_is_the_unit_name_alphabet():
         assert not fnmatch.fnmatchcase(f"systemctl --user {ch}edit{ch} x", pattern)
 
 
-# --------------------------------------------------------------------------- the revision-4 migration
+# --------------------------------------------------------------------------- the revision-4 and 5 migrations
 
 def _config(deny: list[str], *, revision: int) -> dict:
     return {
@@ -228,26 +253,59 @@ def _config(deny: list[str], *, revision: int) -> dict:
     }
 
 
-def test_a_config_stamped_three_gains_exactly_the_thirteen_patterns_and_is_stamped_four():
+def test_a_config_stamped_three_gains_exactly_the_fifteen_patterns_and_is_stamped_five():
     from localharness.config.migrate import plan
 
-    earlier = PermissionConfig().deny_patterns[:-13]
+    earlier = PermissionConfig().deny_patterns[:-15]
     assert len(earlier) == 32
     p = plan(_config(earlier, revision=3))
 
     assert p is not None
-    assert p.added == NEW_PATTERNS
-    assert (p.from_revision, p.to_revision) == (3, 4)
+    assert p.added == ALL_PATTERNS
+    assert (p.from_revision, p.to_revision) == (3, 5)
     perms = p.updated["org"]["permissions"]
-    assert perms["defaults_revision"] == 4
+    assert perms["defaults_revision"] == 5
     assert perms["deny_patterns"][:32] == earlier  # every earlier pattern kept, in place
-    assert perms["deny_patterns"][32:] == NEW_PATTERNS
+    assert perms["deny_patterns"][32:] == ALL_PATTERNS
+
+
+def test_a_config_stamped_four_gains_exactly_the_two_new_patterns_and_is_stamped_five():
+    from localharness.config.migrate import plan
+
+    earlier = PermissionConfig().deny_patterns[:-2]
+    assert len(earlier) == 45
+    p = plan(_config(earlier, revision=4))
+
+    assert p is not None
+    assert p.added == REVISION_FIVE_PATTERNS
+    assert (p.from_revision, p.to_revision) == (4, 5)
+    perms = p.updated["org"]["permissions"]
+    assert perms["defaults_revision"] == 5
+    assert perms["deny_patterns"][:45] == earlier  # every earlier pattern kept, in place
+    assert perms["deny_patterns"][45:] == REVISION_FIVE_PATTERNS
+
+
+def test_a_config_stamped_five_is_left_alone():
+    from localharness.config.migrate import plan
+
+    assert plan(_config(PermissionConfig().deny_patterns, revision=5)) is None
+
+
+def test_a_revision_four_config_that_deleted_a_revision_five_pattern_does_not_get_it_back_at_five():
+    from localharness.config.migrate import plan
+
+    earlier = PermissionConfig().deny_patterns[:-2]
+    p = plan(_config(earlier, revision=4))
+    assert p is not None
+    kept = [x for x in p.updated["org"]["permissions"]["deny_patterns"] if x != REVISION_FIVE_PATTERNS[0]]
+
+    assert plan(_config(kept, revision=5)) is None
 
 
 def test_a_config_stamped_three_keeps_the_users_own_entry_and_adds_nothing_twice():
     from localharness.config.migrate import plan
 
-    earlier = [*PermissionConfig().deny_patterns[:-13], "bash_exec(*my-own-thing*)"]
+    earlier = [*PermissionConfig().deny_patterns[:-15], "bash_exec(*my-own-thing*)"]
     p = plan(_config(earlier, revision=3))
 
     assert p is not None
@@ -256,12 +314,12 @@ def test_a_config_stamped_three_keeps_the_users_own_entry_and_adds_nothing_twice
     assert len(deny) == len(set(deny))
 
 
-def test_a_deleted_bundle_pattern_stays_deleted_at_revision_four():
+def test_a_deleted_bundle_pattern_stays_deleted_at_the_current_revision():
     from localharness.config.migrate import plan
 
     edit = "bash_exec(*systemctl*[!A-Za-z0-9_.@-]edit[!A-Za-z0-9_.@-]*)"
     deny = [p for p in PermissionConfig().deny_patterns if p != edit]
-    p = plan(_config(deny, revision=4))
+    p = plan(_config(deny, revision=5))
 
     assert p is None or p.added == []
     if p is not None:
