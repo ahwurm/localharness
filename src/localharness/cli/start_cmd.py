@@ -3575,8 +3575,9 @@ def start_app(
         # First start: no config. On a terminal, run init's core setup here and go on into the
         # session — no "run localharness init" bounce (owner ruling 2026-10-03). Without a person
         # to ask, _start_async's own welcome hint and exit 0 stand (the web/ACP callers use it too).
-        from localharness.cli.init_cmd import core_setup, is_interactive  # only a first start pays
-        if is_interactive(no_input):
+        from localharness.cli.init_cmd import core_setup  # only a first start pays
+        from localharness.cli.workspace import local_operator
+        if local_operator(no_input):
             _refuse_unbuildable_channel(channel)  # a typo is refused before the setup, not after it
             console.print(FIRST_START_LEAD)
             if not core_setup(config_dir, endpoint=None, model=None, force=False,

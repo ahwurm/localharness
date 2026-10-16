@@ -27,6 +27,7 @@ import pytest
 from typer.testing import CliRunner
 
 import localharness.cli.init_cmd as init_cmd
+from localharness.cli import workspace
 from localharness.cli.app import app
 from localharness.config.loader import ConfigLoader
 from localharness.provider.detector import DetectorResult
@@ -97,9 +98,9 @@ def _server(monkeypatch, *, found: bool = True) -> tuple[AsyncMock, MagicMock]:
 
 
 def _terminal(monkeypatch, on: bool = True) -> None:
-    fake_sys = MagicMock()
-    fake_sys.stdin.isatty.return_value = on
-    monkeypatch.setattr(init_cmd, "sys", fake_sys)
+    monkeypatch.setattr(workspace, "_stdin_is_a_terminal", lambda: on)
+    monkeypatch.setattr(workspace, "_stdout_is_a_terminal", lambda: on)
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
 
 
 def _questions(monkeypatch, *, confirms=None, prompts=None) -> MagicMock | None:
@@ -211,7 +212,7 @@ def test_a_configured_start_runs_no_setup(tmp_path, monkeypatch):
     detect = AsyncMock(side_effect=AssertionError("detection ran on a configured start"))
     monkeypatch.setattr(init_cmd, "detect_provider", detect)
     monkeypatch.setattr(init_cmd, "core_setup", _boom)
-    monkeypatch.setattr(init_cmd, "is_interactive", _boom)
+    monkeypatch.setattr(workspace, "local_operator", _boom)
     _terminal(monkeypatch)  # a terminal: with the config missing, the setup would run here
     _questions(monkeypatch)
 

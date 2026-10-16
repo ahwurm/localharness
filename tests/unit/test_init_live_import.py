@@ -448,8 +448,8 @@ def test_a_no_input_import_adopts_nothing_and_the_next_terminal_start_asks_about
 
 def test_the_shell_tools_init_adopts_nothing(live, monkeypatch):
     live.serve("-c", "65536")
-    monkeypatch.setenv("LOCALHARNESS_COMMIT", "1")
     _terminal(live.monkeypatch)
+    monkeypatch.setenv("LOCALHARNESS_COMMIT", "1")
 
     _exited(_init(live.cfg), 0)
 

@@ -32,7 +32,7 @@ from localharness.cli.library import (
     show_records,
 )
 from localharness.cli.errors import _HANDLED, report_filesystem_error
-from localharness.cli.workspace import shown_path, visible_text
+from localharness.cli.workspace import local_operator, shown_path, visible_text
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION
 from localharness.config.loader import ConfigLoader, ConfigValidationError
 from localharness.config.migrate import BACKUP_STAMP_FORMAT
@@ -432,12 +432,6 @@ def _scaffold_workspace(
         )
 
 
-def is_interactive(no_input: bool) -> bool:
-    """Is there a person to ask? Not with --no-input, not without a terminal on stdin. Reads this
-    module's `sys`, so a test that swaps init_cmd.sys for a fake terminal reaches every prompt."""
-    return not no_input and sys.stdin is not None and sys.stdin.isatty()
-
-
 @dataclass(frozen=True)
 class SetupResult:
     """What core_setup did: the config on disk afterwards (None: nothing was written) and whether
@@ -519,7 +513,7 @@ def init_app(
         _scaffold_workspace(endpoint=endpoint, model=model, config_dir=config_dir)
         return
     core_setup(config_dir, endpoint=endpoint, model=model, force=force,
-               interactive=is_interactive(no_input))
+               interactive=local_operator(no_input))
 
 
 def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | None, force: bool,
@@ -547,7 +541,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
         imported = None if changing else _imported_by_an_existing_install(config_path)
         if isinstance(imported, InitRecords):  # the change is the import — overrides.yaml, no question
             show_records(imported)
-            if _write_overlay_records(config_path, imported, adopt=_adopts(interactive)):
+            if _write_overlay_records(config_path, imported, adopt=interactive):
                 overlay_file = ConfigLoader(config_dir=config_path).user_overlay_path
                 console.print("[green]✓[/green] "
                               + escape(f"Updated {overlay_file} — your config.yaml is unchanged."),
@@ -585,7 +579,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
             if not picked.block_in_receipt:
                 show_records(picked)
             config_file, written = _write_records(config_path, picked, force=force,
-                                                  adopt=_adopts(interactive) and picked.confirmed)
+                                                  adopt=interactive and picked.confirmed)
             _receipt(config_file, starting, block=library.record_block(picked) if picked.block_in_receipt else (),
                      peer=written[0]["name"] if written else None)
             outcome = SetupResult(config_file, picked.serving or picked.launchable)
@@ -1256,13 +1250,6 @@ def _record_dicts(harness: HarnessConfig) -> tuple[dict | None, list[dict]]:
     return _record_dicts_of(harness.server, harness.extra_endpoints)
 
 
-def _adopts(interactive: bool) -> bool:
-    """Does this run adopt what it writes? Only a person at a terminal does (D-37): not `--no-input`,
-    not a run without a tty, not a command the shell tool started (it carries LOCALHARNESS_COMMIT),
-    so an agent running `init` cannot approve a launch for the next start."""
-    return interactive and "LOCALHARNESS_COMMIT" not in os.environ
-
-
 def _write_records(config_path: Path, recs: InitRecords, *, force: bool = False,
                    adopt: bool = False) -> tuple[Path, list[dict]]:
     """A fresh config.yaml from a record, its peers appended to overrides.yaml: the provider points at the
@@ -1624,8 +1611,6 @@ def _guided_setup(config_path: Path) -> InitRecords | None:
     # always the global layer, never a workspace one. `init` never discovers a workspace, so this
     # is the same value today — the point is that the site says which layer it means.
     server_config_path = global_config_dir(config_path)
-    if not sys.stdin.isatty():
-        return None
     if not Confirm.ask("\nSet up vLLM and a model now?", default=True):
         return None
 

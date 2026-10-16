@@ -20,6 +20,7 @@ from localharness.cli.app import app
 from localharness.config.loader import ConfigLoader
 from localharness.provider.client import CapabilityResult
 from localharness.provider.detector import DetectorResult
+from tests.unit.test_init_core_setup import _terminal
 
 runner = CliRunner()
 
@@ -78,9 +79,7 @@ def test_a_terminal_init_asks_no_settings_question_and_writes_both_defaults(
     """A person at a terminal is asked nothing about the two defaults (any Confirm raises) and gets
     the same file a scripted run gets."""
     import localharness.cli.init_cmd as init_cmd
-    fake_sys = MagicMock()
-    fake_sys.stdin.isatty.return_value = True
-    monkeypatch.setattr(init_cmd, "sys", fake_sys)
+    _terminal(monkeypatch)
     fake_confirm = MagicMock()
     fake_confirm.ask.side_effect = AssertionError("a settings question was asked")
     monkeypatch.setattr(init_cmd, "Confirm", fake_confirm)

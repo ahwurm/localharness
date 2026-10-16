@@ -21,6 +21,7 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 import localharness.cli.init_cmd as init_cmd
+from localharness.cli import workspace
 from localharness.cli.app import app
 from localharness.cli.model_ops import persist_active_endpoint, persist_default_model
 from localharness.config.loader import ConfigLoader
@@ -63,9 +64,9 @@ def _detect(monkeypatch, *models: str, found: bool = True) -> AsyncMock:
 
 
 def _terminal(monkeypatch, on: bool = True) -> None:
-    fake_sys = MagicMock()
-    fake_sys.stdin.isatty.return_value = on
-    monkeypatch.setattr(init_cmd, "sys", fake_sys)
+    monkeypatch.setattr(workspace, "_stdin_is_a_terminal", lambda: on)
+    monkeypatch.setattr(workspace, "_stdout_is_a_terminal", lambda: on)
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
 
 
 def _answers(monkeypatch, *confirms: bool) -> MagicMock:
@@ -110,18 +111,6 @@ def _overlay(g: Path) -> dict:
 
 
 # ------------------------------------------------------------------ the one gate
-
-
-def test_is_interactive_needs_a_terminal_and_no_no_input(monkeypatch):
-    _terminal(monkeypatch, True)
-    assert init_cmd.is_interactive(False) is True
-    assert init_cmd.is_interactive(True) is False
-    _terminal(monkeypatch, False)
-    assert init_cmd.is_interactive(False) is False
-    detached = MagicMock()
-    detached.stdin = None
-    monkeypatch.setattr(init_cmd, "sys", detached)
-    assert init_cmd.is_interactive(False) is False
 
 
 def test_no_input_asks_nothing_even_on_a_terminal(tmp_path, monkeypatch):
