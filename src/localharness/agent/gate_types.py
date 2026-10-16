@@ -951,6 +951,8 @@ PROTECTED_CONFIG_DIR_ENTRIES: tuple[str, ...] = (
     "plugins",
     "project_records.yaml",
     "project_records.yaml.lock",
+    "model-library.json",
+    "overrides.yaml.lock",
 )
 """The entries inside a harness config directory — the global one and any in-project
 ``.localharness/`` — that are protected in every mode.
@@ -964,7 +966,9 @@ load; ``grants.yaml`` holds every "always here" and every "never here" a human h
 imports and runs. A directory entry protects its subtree, so ``plugins/**`` is covered by the
 one word. ``project_records.yaml`` is the per-root instructions record and ``project_records.yaml.lock``
 its lock: a replaced store would clear every mark and set ``yes`` under the model's own hash, and a
-replaced lock is lost exclusion.
+replaced lock is lost exclusion. ``model-library.json`` is the deny-only record of which model files the
+person has been shown and declined, and ``overrides.yaml.lock`` is the overlay's lock: a replaced library
+hides a file the person never saw, and a replaced lock is lost exclusion.
 
 Everything else under a config directory is allowed: ``agents/`` and ``divisions/`` (agent
 definitions — creating one through the harness is the harness working), ``tools/`` (scripts the
