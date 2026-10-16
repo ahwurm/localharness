@@ -581,6 +581,36 @@ def _config_dirs(ctx: GateContext) -> list[Path]:
     return out
 
 
+_XDG_HOME_TWINS: tuple[tuple[str, str], ...] = (
+    ("~/.config/", "XDG_CONFIG_HOME"),
+    ("~/.local/share/", "XDG_DATA_HOME"),
+)
+"""A protected home entry under one of these prefixes also lives under the XDG variable that relocates the
+prefix: ``~/.config/systemd`` is ``$XDG_CONFIG_HOME/systemd`` once that variable is set, and the user
+manager, the desktop autostart and ``environment.d`` all follow it (spec 20 §12; the harness's own
+unit path does the same)."""
+
+
+def _home_protected_bases(raw: str) -> list[Path]:
+    """The resolved base paths one ``protected_paths_home`` entry guards, read at evaluation time: the
+    ``~`` form, plus the same entry below ``$XDG_CONFIG_HOME`` / ``$XDG_DATA_HOME`` when its prefix is
+    ``~/.config/`` / ``~/.local/share/`` and the variable is set to an ABSOLUTE path (an empty or relative
+    value is ignored, as the XDG specification says). The settings stay the one list: nothing here is a
+    second table of directories, so a layer that tightens the list is followed under the variable too."""
+    forms = [raw]
+    for prefix, variable in _XDG_HOME_TWINS:
+        root = os.environ.get(variable, "")
+        if raw.startswith(prefix) and root and os.path.isabs(root):
+            forms.append(os.path.join(root, raw[len(prefix):]))
+    bases: list[Path] = []
+    for form in forms:
+        try:
+            bases.append(Path(form).expanduser().resolve())
+        except (OSError, ValueError):
+            continue
+    return bases
+
+
 def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
     """Does this resolved target land on a protected path? (PRD §3.1 ``protected-path``.)
 
@@ -607,12 +637,9 @@ def _protected(path: Path, ctx: GateContext, settings: GateSettings) -> bool:
     if _protected_system(path, settings):
         return True
     for raw in settings.protected_paths_home:
-        try:
-            base = Path(raw).expanduser().resolve()
-        except (OSError, ValueError):
-            continue
-        if path == base or _within(base, path):
-            return True
+        for base in _home_protected_bases(raw):
+            if path == base or _within(base, path):
+                return True
     for config_dir in _config_dirs(ctx):
         if _within(config_dir, path):
             return bool(_config_dir_verdict(path.relative_to(config_dir).parts, settings))
