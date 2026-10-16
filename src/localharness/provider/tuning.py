@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping, Sequence
+import shlex
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
@@ -28,6 +29,7 @@ from localharness.provider.autosense import (
     has_spec_flag,
     spec_type_flag,
 )
+from localharness.provider.server import KEY_ENV
 
 # llama-server's own default; deriving it would change the 0.18 argv, so it derives nothing (D-08).
 _LLAMA_DEFAULT_CACHE_TYPE = "f16"
@@ -305,3 +307,90 @@ def derived_clause(
     dropping = (["mtp off"] if drafted_off else []) + ([f"-c {context}"] if context is not None else [])
     text = f"{', '.join(dropping)} {_RETRIED_DEATH}" if dropping else _RETRIED_DEATH
     return f"{text} · {undo(context is not None)}" if drafted_off else text
+
+
+SCRUBBED_SHOWN = MappingProxyType({
+    "llamacpp": "LLAMA_ARG_*/LLAMA_API_KEY/MTMD_BACKEND_DEVICE", "vllm": "VLLM_API_KEY"})
+
+_DERIVED_WORDS = (
+    ("cache_type", lambda t: f"kv {t.cache_type}"),
+    ("spec_type", lambda t: "draft-mtp"),
+    ("reasoning_parser", lambda t: f"reasoning {t.reasoning_parser}"),
+    ("tool_call_parser", lambda t: f"tools {t.tool_call_parser}"),
+)
+
+
+def _window_clause(plan: Any) -> str | None:
+    report = plan.report
+    if report is None:
+        return None
+    if report.mode == "fit":
+        return f"-c left to llama-server --fit (the harness fitted {plan.full_fit} today)"
+    if report.mode == "fit-by-server":
+        return "-c left to llama-server --fit"
+    if report.mode == "record":
+        return f"-c {report.asked} from the record"
+    return "-c from extra_args"
+
+
+def _script_argv(plan: Any) -> list[str]:
+    argv = list(plan.argv)
+    if plan.report is not None and plan.report.mode == "fit":
+        pair = ["-c", str(plan.serve_kwargs["context"])]
+        at = next((i for i in range(len(argv) - 1) if argv[i : i + 2] == pair), None)
+        if at is not None:
+            del argv[at : at + 2]
+    shown, hide = [], False
+    for tok in argv:
+        if hide:
+            tok, hide = "<key>", False
+        elif tok == "--api-key":
+            hide = True
+        elif tok.startswith("--api-key="):
+            tok = "--api-key=<key>"
+        shown.append(tok)
+    return shown
+
+
+def _exec_lines(tokens: Sequence[str], quote: Callable[[str], str]) -> list[str]:
+    groups: list[list[str]] = []
+    for tok in tokens[1:]:
+        if tok.startswith("-") or not groups:
+            groups.append([tok])
+        else:
+            groups[-1].append(tok)
+    lines = [f"exec {quote(tokens[0])} \\"]
+    lines += [f"  {' '.join(map(quote, g))}" + (" \\" if g is not groups[-1] else "") for g in groups]
+    return lines
+
+
+def render_script(
+    plan: Any, spec: Any, *, name: str, version: str, key_placeholder: str, home_shown: str,
+    visible: Callable[[str], str], function: str | None = None,
+) -> str:
+    """The launch `plan` as POSIX sh, every token and comment through `visible`, no key value printed; pure."""
+    derived = [f"{word(plan.tuned)} ({plan.tuned.reasons[field_]})"
+               for field_, word in _DERIVED_WORDS if field_ in plan.tuned.reasons]
+    if plan.shape == "retry":
+        derived.append(derived_clause(
+            NOTHING_DERIVED, shape="retry", cause=plan.cause, dropped=plan.dropped,
+            remembered_at=plan.remembered_at))
+    environment = f"environment: {SCRUBBED_SHOWN[spec.runtime]} dropped"
+    if plan.config_ini_home is not None:
+        environment += f", XDG_CONFIG_HOME → {home_shown}"
+    joined = " · ".join(derived) or "nothing"
+    comments = [
+        f"# {name} — the launch `localharness start` / `/model` runs ({version}); "
+        f"derived: {joined}",
+        "# " + "; ".join(filter(None, (_window_clause(plan), environment))),
+    ]
+    key_env = KEY_ENV.get(spec.runtime)
+    if key_env in plan.env_names:
+        comments.append(f"# {key_env}=<{key_placeholder}>")
+    quote = lambda tok: visible(shlex.quote(tok))  # noqa: E731
+    body = [visible(c) for c in comments]
+    body += [f"export {quote(k)}={quote(v)}" for k, v in sorted((getattr(spec, "env", None) or {}).items())]
+    body += _exec_lines(_script_argv(plan), quote)
+    if function is None:
+        return "\n".join(body)
+    return "\n".join([f"{function}() {{", "  (", *(f"    {line}" for line in body), "  )", "}"])

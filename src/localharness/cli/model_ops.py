@@ -669,6 +669,22 @@ def _withheld_refusal(trust: Any, record: ServingRecord, config_dir: Any) -> Ser
     return ServingRefusal(line, "withheld")
 
 
+def trust_as_recorded(config_dir: Any) -> "MachineTrust":
+    """The machine record read, never made: every launch entry withheld while none exists, else the entries it does not cover."""
+    from collections import defaultdict
+
+    from localharness.cli.workspace import MachineTrust, uncovered
+
+    cfg = global_config_dir(config_dir)
+    snapshot, recorded = trust.machine_snapshot(cfg), trust.recorded_machine(cfg)
+    held = (uncovered(recorded["entries"], snapshot) if recorded is not None
+            else [e for e in snapshot if e.get("kind") in (LAUNCH_KIND, LAUNCH_MODEL_KIND)])
+    by_file: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for entry in held:
+        by_file[entry["file"]].add((entry["kind"], entry["name"]))
+    return MachineTrust({file: frozenset(items) for file, items in by_file.items()})
+
+
 def _preset_records(harness: Any, trust: Any) -> tuple[ServingRecord, ...]:
     """The records a name can select: those with a launch spec, plus a record start withheld (the
     loader kept it without a spec, and it resolves by name so it can be refused as withheld, R-13-09)."""
