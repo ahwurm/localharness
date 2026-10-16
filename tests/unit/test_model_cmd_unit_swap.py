@@ -505,10 +505,38 @@ def test_an_already_serving_target_clears_a_stale_pending_preset_that_names_a_th
     result = cli.run("flash-next")
 
     assert result.exit_code == 0, result.output
-    assert "flash-next is already serving" in lines_of(result.output)
+    # the receipt says what the landing did to the older selection, in one line
+    assert lines_of(result.output) == [
+        "flash-next is already serving — the older selection qwen-27b was cleared"]
+    assert start_serving.ALREADY_SERVING_CLEARED_LINE.format(name="flash-next", older="qwen-27b") in result.output
     assert "pending_preset" not in cli.overlay                          # an explicit choice outlives no older one
     assert no_verbs(cli)
     assert cli.last_served == "flash-next"
+
+
+def test_an_already_serving_target_with_no_older_selection_says_only_that_it_is_serving(cli):
+    cli.answering.add(PEER_URLS["flash-next"])
+
+    result = cli.run("flash-next")
+
+    assert result.exit_code == 0, result.output
+    assert lines_of(result.output) == ["flash-next is already serving"]
+    assert "cleared" not in result.output
+
+
+def test_the_cleared_line_is_not_said_when_the_landing_could_not_be_written(cli):
+    cli.answering.add(PEER_URLS["flash-next"])
+    model_ops.write_pending_preset(cli.world.harness, "qwen-27b", config_dir=cli.world.g)
+
+    async def broken(*a, **kw):
+        raise OSError("disk full")
+
+    cli.monkeypatch.setattr(model_ops, "persist_landed", broken)
+
+    result = cli.run("flash-next")
+
+    assert result.exit_code == 2, result.output
+    assert "was cleared" not in result.output
 
 
 def test_a_failed_swap_exits_1_after_a_redacted_line_and_records_nothing(cli):

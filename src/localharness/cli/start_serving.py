@@ -52,6 +52,7 @@ SERVING_RESTARTED_LINE = "Serving {name} — autostart restarted"
 SERVING_LINE = "Serving {name}"
 REPL_TALKS_CLAUSE = "; a REPL session on this machine now talks to it"
 ALREADY_SERVING_TARGET_LINE = "{name} is already serving"
+ALREADY_SERVING_CLEARED_LINE = "{name} is already serving — the older selection {older} was cleared"
 
 _ATTACH_KINDS = ("attach", "attach_other")
 
