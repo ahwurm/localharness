@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from localharness.cli import start_cmd
+from localharness.cli import start_cmd, start_serving
 from localharness.cli.start_cmd import LaunchNotes, _start_managed_server
 from localharness.config.models import AutosenseConfig
 from localharness.provider import lifecycle, server, speed_stats
@@ -293,7 +293,7 @@ async def test_a_boot_plan_of_a_record_context_names_no_halved_window(tmp_path, 
     plan = lifecycle.plan_launch(spec, sensed, server.launch_decision(spec, False), autosense=KNOBS,
                                  api_key_held=False)
     assert plan.cause == "boot"
-    assert start_cmd._plan_clause(plan) == f"retried at boot: mtp off · {PINNED}"
+    assert start_serving.plan_clause(plan) == f"retried at boot: mtp off · {PINNED}"
 
 
 async def test_a_vllm_parser_retry_prints_its_line_before_the_second_start(tmp_path, world, box):

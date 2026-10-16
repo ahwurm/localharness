@@ -1,14 +1,17 @@
-"""`localharness model` — list served/downloaded models, or switch the persisted default.
+"""`localharness model` — list served/downloaded models, or switch what is served.
 
 CLI parity for the REPL /model, for scripts, pre-`start` config, and CI. Reuses cli/model_ops
-for the EXACT same atomic, audited overlay persistence and pin-trap warning. The live-session
-bits — hot-swap, TokenCounter rebind, managed-server restart — are REPL-only and deliberately
-absent: with no running session there is nothing to hot-swap, and the next `localharness start`
-launches (or relaunches the managed server on) the persisted model.
+for the EXACT same atomic, audited overlay persistence and pin-trap warning. With the harness's own
+autostart unit active, a recorded machine and a command that is not the agent's, `localharness model
+<name>` swaps NOW through the unit (`_swap_now`, the same `lifecycle.swap` `start` and the REPL run);
+otherwise it only records the choice (`pending_preset`) for the next start, or boot. The live-session
+bits — hot-swap, TokenCounter rebind — are REPL-only and deliberately absent: with no running session
+there is nothing to hot-swap.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -18,11 +21,12 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 
-from localharness.cli import autostart, model_ops
-from localharness.cli.workspace import MachineTrust, decide_machine_trust
+from localharness.cli import autostart, model_ops, start_serving
+from localharness.cli.workspace import MachineTrust, decide_machine_trust, visible_text
+from localharness.config import session_presence, trust
 from localharness.config.loader import ConfigLoader
 from localharness.config.paths import global_config_dir, resolve_config_dir
-from localharness.provider import lifecycle
+from localharness.provider import lifecycle, procfs
 from localharness.provider.units import read_target
 
 console = Console()
@@ -187,11 +191,16 @@ def _another_record_serves(harness, machine_trust, record) -> bool:
     return any(r.prefix != record.prefix for r in sense.answering)
 
 
-def _select_preset(harness, record, current, loader, audit_dir, ws, machine_trust=None) -> None:
+_BOOT_ENABLED = frozenset({"enabled", "enabled-runtime"})
+
+
+def _select_preset(harness, record, current, loader, audit_dir, ws, machine_trust=None, unit=None) -> None:
     """Record ``record`` as what the next start serves (D-10, R-13-18): ``select_pending`` writes the
     peer's ``active_endpoint`` (the primary clears one) and ``pending_preset``; the primary's served
     name also becomes the default when it differs, without writing ``server.model`` (an alias must
-    not become the model the next start loads, D-70, WR-54). The CLI never launches (D-10)."""
+    not become the model the next start loads, D-70, WR-54). This path never launches (D-10). ``unit`` is the
+    harness's own unit state or None: the receipt says "the next start or boot serves it" only when that
+    unit is enabled (it serves the last choice at every login), else "the next start serves it" (D-23)."""
     if (
         record.peer is None and record.served == current
         and harness.active_endpoint is None and not getattr(harness, "pending_preset", None)
@@ -227,11 +236,150 @@ def _select_preset(harness, record, current, loader, audit_dir, ws, machine_trus
                 soft_wrap=True,
             )
             raise typer.Exit(2)
-    console.print(
-        model_ops.SELECTED_NEXT_START_LINE.format(name=record.name), markup=False, soft_wrap=True)
+    enabled = unit is not None and getattr(unit, "unit_file_state", "") in _BOOT_ENABLED
+    receipt = model_ops.SELECTED_NEXT_START_OR_BOOT_LINE if enabled else model_ops.SELECTED_NEXT_START_LINE
+    console.print(receipt.format(name=record.name), markup=False, soft_wrap=True)
     if audit_warning:
         console.print("[yellow]Note:[/yellow] " + escape(str(audit_warning)), soft_wrap=True)
     _pin_notes(loader, ws)
+
+
+def _own_unit(cfg_path: Path):
+    """The harness's own autostart unit as the user manager reports it right now, or None: sensed ONCE per
+    command (D-19), identity-checked (``start_serving.harness_unit``). A manager that cannot be asked, a unit
+    that is not the harness's own and any failure of the look all say None: the command then selects."""
+    try:
+        return start_serving.harness_unit(start_serving.unit_runtime_state(), cfg_path)
+    except Exception:  # noqa: BLE001 — a failed look is "no unit": the deferred path stands
+        return None
+
+
+def _will_launch(unit, cfg_path: Path) -> bool:
+    """Whether this command swaps NOW (D-23, START-06): the harness's own unit is active, the machine has a
+    record (read BEFORE the trust decision, so its first-start adoption can never enable a swap) and this is
+    not an agent's command. Decided before the trust question, which it feeds as ``launching``; the target
+    being withheld is judged after it."""
+    return (
+        unit is not None and getattr(unit, "active_state", "") == "active"
+        and trust.recorded_machine(cfg_path) is not None
+        and "LOCALHARNESS_COMMIT" not in os.environ)
+
+
+def _incumbent(harness, config_dir: Path, unit, target) -> Optional[model_ops.ServingRecord]:
+    """The record whose server runs now, other than ``target`` (R-14-33): the one whose launch identity
+    verifies the pidfile's live process (``read_launch(expect=record_identity(spec), main_pid=...)``). A
+    pidfile is a claim, so a planted one names nothing. None: nothing the harness launched runs (the unit's
+    own restart replaces its process anyway)."""
+    main_pid = getattr(unit, "main_pid", None)
+    for record in model_ops.serving_records(harness):
+        if record.prefix == target.prefix or record.spec is None:
+            continue
+        identity = lifecycle.record_identity(record.spec)
+        if identity is None:
+            continue
+        launch = procfs.read_launch(config_dir, expect=identity, main_pid=main_pid)
+        if launch is not None and launch.verified:
+            return record
+    return None
+
+
+def _answers_now(harness, machine_trust: MachineTrust, record) -> bool:
+    """True when ``record`` answers at its own address (the sensor `start` uses, loopback only). Records
+    sharing an address are sensed together so the sensor can say whose it is. A failed look says False."""
+    records = model_ops.serving_records(harness)
+    sensed = (record,)
+    if model_ops.shares_base_url(record, records):
+        sensed = (record, *model_ops.launchable_loopback_others(harness, machine_trust, record))
+    try:
+        sense = asyncio.run(model_ops.sense_serving(harness, sensed))
+    except Exception:  # noqa: BLE001 — an unreadable look is "not serving": the swap's own checks stand
+        return False
+    return any(r.prefix == record.prefix for r in sense.answering)
+
+
+def _swap_now(
+    harness, machine_trust: MachineTrust, serving: model_ops.Serving, *, config_dir: Path, unit
+) -> None:
+    """Switch what autostart serves AT ONCE (D-23, START-06): the swap runs through ``lifecycle.swap`` via
+    ``start_serving.run_swap`` under the launch lock, with the harness's own unit state. It takes a
+    ``MachineTrust`` and a ``Serving`` with no default: the target is a record the ladder resolved under a
+    trust decision, and nothing else can reach a launch from here (structural, test_trust_structural_cli).
+
+    A target already answering is not restarted (an attach). Otherwise the launch line is said BEFORE the
+    wait, a failed swap exits 1 after the reporter's redacted line, and a success says what it did and
+    lands as a swap (``persist_landed`` is the one writer, which also removes a stale ``pending_preset``)."""
+    record = serving.record
+
+    def say(line: str) -> None:
+        console.print(line, markup=False, soft_wrap=True)
+
+    if _answers_now(harness, machine_trust, record):
+        say(start_serving.ALREADY_SERVING_TARGET_LINE.format(name=visible_text(record.name)))
+        with _landing_write(harness, record):
+            asyncio.run(model_ops.persist_landed(
+                harness, record, outcome="attach", rung=serving.rung, config_dir=config_dir))
+        return
+    incumbent = _incumbent(harness, config_dir, unit, record)
+    peer_name = record.peer.name if record.peer is not None else None
+    undo_field = f"extra_endpoints.{peer_name}.lifecycle.speculative" if peer_name else "server.speculative"
+    outside = lifecycle.outside_autostart(record.spec, unit)  # the unit exists, this record runs beside it
+
+    def say_line(clause: str = "") -> None:
+        line = start_serving.swap_launch_line(
+            incumbent=visible_text(incumbent.name) if incumbent is not None else None,
+            target=visible_text(record.name), inside=f"{clause}; " if clause else "")
+        say(f"{line} {lifecycle.RUNS_OUTSIDE_AUTOSTART}" if outside else line)
+
+    def on_plan(plan) -> None:
+        say_line(start_serving.plan_clause(plan, undo_field=undo_field))
+
+    async def say_lock_wait() -> None:
+        err_console.print(lifecycle.LAUNCH_LOCK_WAIT_LINE, markup=False, soft_wrap=True)
+
+    if not getattr(lifecycle.strategy_for(record.spec, unit=unit), "plans_launch", False):
+        say_line()  # a strategy that plans nothing never calls `on_plan`: the line is said up front
+    reporter = start_serving.ConsoleSwapReporter(err_console.print, harness, harness.provider.api_key)
+    try:
+        outcome = asyncio.run(start_serving.run_swap(
+            harness, incumbent, serving, config_dir=config_dir, autosense=harness.autosense,
+            reporter=reporter, redact=reporter.redact, on_plan=on_plan, on_wait=say_lock_wait, unit=unit))
+    except Exception as exc:  # noqa: BLE001 — a launch that could not even begin (a lock, a bad record)
+        err_console.print(
+            "[bold red]Error:[/bold red] " + escape(reporter.redact(f"failed to switch to {record.name!r}: {exc}")),
+            soft_wrap=True)
+        raise typer.Exit(1)
+    if outcome.error is not None:
+        raise typer.Exit(1)  # the reporter already said why, redacted
+    receipt = start_serving.SERVING_LINE if outside else start_serving.SERVING_RESTARTED_LINE
+    clause = start_serving.REPL_TALKS_CLAUSE if _repl_sessions(config_dir) else ""
+    say(receipt.format(name=visible_text(record.name)) + clause)
+    with _landing_write(harness, record):
+        asyncio.run(model_ops.persist_landed(
+            harness, record, outcome="swap", rung=serving.rung, config_dir=config_dir))
+
+
+def _repl_sessions(config_dir: Path) -> bool:
+    """Is a REPL session registered on this machine (its process alive)? The line then says it now talks
+    to the new server. A failed look says False."""
+    try:
+        return bool(session_presence.live_sessions(config_dir))
+    except Exception:  # noqa: BLE001 — presence is a courtesy
+        return False
+
+
+@contextlib.contextmanager
+def _landing_write(harness, record):
+    """Around the one ``persist_landed`` call: a failed write is said (redacted) and exits 2 (the server is
+    up, but the choice is not recorded)."""
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001
+        err_console.print(
+            "[bold red]Error:[/bold red] "
+            + escape(model_ops.redact_for_channel(
+                f"failed to record {record.name!r} as serving: {exc}", harness, harness.provider.api_key)),
+            soft_wrap=True)
+        raise typer.Exit(2)
 
 
 def _pin_notes(loader, ws) -> None:
@@ -298,12 +446,18 @@ def model(
     # D-09 / D-10: a switch decides machine trust exactly as `start` does, before anything loads, and
     # loads with what that decision withheld. A person at a terminal is asked; a pipe, a script or an
     # agent's command (LOCALHARNESS_COMMIT) is not, so a piped `y` adopts nothing and an EOF records
-    # no No. `will_launch` is False in this release (the CLI never launches, D-10). The list and
-    # `--download` decide nothing (R-13-16).
+    # no No. `will_launch` says whether this switch swaps now (the unit is active, a machine record
+    # exists, no agent marker; D-23). The list and `--download` decide nothing (R-13-16).
     machine_trust = MachineTrust()
+    unit = None
+    will_launch = False
     if name is not None and name.strip():
         cfg_path = resolve_config_dir(config_dir)
-        machine_trust = decide_machine_trust(cfg_path, ask=_is_local_operator(), launching=False)
+        # D-23: the unit is sensed once, before the decision, because `launching` is the decision's input.
+        # The question is gated on the terminal (`ask`), the action is not (`will_launch`).
+        unit = _own_unit(cfg_path)
+        will_launch = _will_launch(unit, cfg_path)
+        machine_trust = decide_machine_trust(cfg_path, ask=_is_local_operator(), launching=will_launch)
         if machine_trust.line:
             err_console.print(machine_trust.line, markup=False, soft_wrap=True)
     loader = ConfigLoader(
@@ -404,7 +558,12 @@ def model(
                     "[bold red]Error:[/bold red] " + escape(serving.line), soft_wrap=True)
             raise typer.Exit(serving.exit_code)
         if isinstance(serving, model_ops.Serving):
-            _select_preset(harness, serving.record, current, loader, _audit_dir, _ws, machine_trust)
+            if (will_launch and serving.record.spec is not None
+                    and not model_ops.record_withheld(machine_trust, serving.record)):
+                _swap_now(harness, machine_trust, serving, config_dir=loader._config_dir, unit=unit)
+                return
+            _select_preset(
+                harness, serving.record, current, loader, _audit_dir, _ws, machine_trust, unit=unit)
             return
 
     target: Optional[str] = None
