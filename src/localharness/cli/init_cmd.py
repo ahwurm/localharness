@@ -6,7 +6,6 @@ import copy
 import os
 import shlex
 import shutil
-import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -60,7 +59,7 @@ from localharness.provider.detector import (
     ProviderType,
     detect_provider,
 )
-from localharness.provider.refarch import REF_ARCHS
+from localharness.provider.refarch import RefArch
 
 console = Console()
 err_console = Console(stderr=True)
@@ -652,7 +651,7 @@ def _pick_server(
     changing: bool = False, force: bool = False, preset: str | None = None,
 ) -> tuple[DetectorResult, str] | SetupResult | InitRecords | Attached:
     """The model server and the model: the explicit --endpoint, else detection — and, finding
-    nothing on a terminal, the guided vLLM setup, then "skip for now" (whose SetupResult comes
+    nothing on a terminal, the download offer, then "skip for now" (whose SetupResult comes
     back as is). A change (`changing`) never sets a server up: finding nothing keeps the config
     and exits 1. Exits 1 on what it cannot honour."""
     if endpoint is not None:
@@ -727,19 +726,23 @@ def _pick_server(
             return synced.records
         if synced.shown:
             return SetupResult(None, False)
-        guided = _guided_setup(config_path) if interactive else None
-        if guided is None:
-            _say_not_detected()  # only an outcome that writes no record says nothing was found
-            if interactive:
-                return _skip_for_now(config_path, model, force=force)
-            console.print(
-                "\nStart your LLM server and run 'localharness init' again, or use:"
-            )
-            console.print(
-                "  localharness init --endpoint http://your-host:port/v1 --model your-model-name"
-            )
-            raise typer.Exit(1)
-        return guided
+        offered = library.offer(config_path, person=interactive)
+        if isinstance(offered, library.NotNow):
+            return SetupResult(None, False)
+        if isinstance(offered, library.OfferVllm):
+            return _guided_setup(config_path, offered.row)
+        if offered is not None:
+            return offered
+        _say_not_detected()  # only an outcome that writes no record says nothing was found
+        if interactive:
+            return _skip_for_now(config_path, model, force=force)
+        console.print(
+            "\nStart your LLM server and run 'localharness init' again, or use:"
+        )
+        console.print(
+            "  localharness init --endpoint http://your-host:port/v1 --model your-model-name"
+        )
+        raise typer.Exit(1)
 
     console.print(f"  [green]✓[/green] {result.provider_type} found at {result.base_url}")
     if not changing:  # the listener decides before the model list is judged (a 401 has none)
@@ -1608,37 +1611,11 @@ def _plugin_lines(config_path: Path) -> list[str]:
         for e in entries] + [PLUGINS_IN_SESSION]
 
 
-def _guided_setup(config_path: Path) -> InitRecords | None:
-    """No server detected: install vLLM and fetch a reference model — and write the record. The
-    first `start` launches it, after its own trust decision; init launches and waits for nothing.
-
-    Returns the record (the shown preset and flags lines inside) or None if declined or
-    non-interactive (caller keeps the manual-instructions exit)."""
-    # The managed vLLM install/pidfile/log/venv are machine-wide (C2 single-pidfile invariant):
-    # always the global layer, never a workspace one. `init` never discovers a workspace, so this
-    # is the same value today — the point is that the site says which layer it means.
+def _guided_setup(config_path: Path, ra: RefArch) -> InitRecords:
+    """The vLLM row the person chose, with its one consent given: find or install the runtime, fetch the
+    checkpoint, write the record. The first `start` launches it, after its own trust decision."""
     server_config_path = global_config_dir(config_path)
-    if not Confirm.ask("\nSet up vLLM and a model now?", default=True):
-        return None
-
-    # --- Hardware ---------------------------------------------------------- #
-    console.print("\nPick your hardware (reference architectures):")
-    rows = [ra for ra in REF_ARCHS if ra.runtime == "vllm"]
-    for i, ra in enumerate(rows, start=1):
-        console.print(f"  {i}. {ra.name}  [{ra.status}] — {ra.repo}")
-    console.print(f"  {len(rows) + 1}. Other / set up manually")
-    choice = IntPrompt.ask("Select", default=1)
-    if not 1 <= choice <= len(rows):
-        return None
-    ra = rows[choice - 1]
     console.print(f"  Reference doc: [cyan]{ra.page}[/cyan]")
-    if not sys.platform.startswith(ra.platforms):
-        console.print(
-            f"  [yellow]⚠[/yellow]  {ra.name} targets {' or '.join(ra.platforms)}; this machine is {sys.platform}. "
-            "Continuing, but the reference numbers won't apply."
-        )
-
-    # --- Runtime: existing binary > profile's install route ----------------- #
     binary = managed_server.find_vllm(server_config_path)
     launch, image = "binary", None
     if binary:
@@ -1655,14 +1632,6 @@ def _guided_setup(config_path: Path) -> InitRecords | None:
             f"  vLLM will run via Docker image [bold]{image}[/bold] (pulled on first launch; needs the NVIDIA container toolkit)."
         )
     else:
-        venv = managed_server.server_dir(server_config_path) / "venv"
-        # Confirm.ask renders through the same markup parser: an unescaped venv path crashed the
-        # PROMPT, so guided setup died before the user could answer it.
-        if not Confirm.ask(
-            f"  Install [bold]{ra.pip_package}[/bold] into " + escape(str(venv)) + "?", default=True
-        ):
-            console.print(f"  Install it yourself, then re-run init — see {ra.page}.")
-            raise typer.Exit(1)
         try:
             binary = managed_server.install_vllm_venv(server_config_path, str(ra.pip_package))
         except RuntimeError as exc:
@@ -1673,24 +1642,17 @@ def _guided_setup(config_path: Path) -> InitRecords | None:
             raise typer.Exit(1)
         console.print("  [green]✓[/green] " + escape(f"Installed: {binary}"), soft_wrap=True)
 
-    # --- Model -------------------------------------------------------------- #
-    console.print(f"\n  Reference model: [bold]{ra.repo}[/bold]")
+    model = ra.repo
     console.print(f"  [dim]{ra.model_note}[/dim]")
-    model = Prompt.ask("  Model (HF repo id, or local checkpoint path)", default=ra.repo)
-    if not Path(model).expanduser().exists():  # repo id → ensure it's in the HF cache
-        if managed_server.is_model_cached(model):
-            console.print("  [green]✓[/green] Already downloaded (Hugging Face cache).")
-        else:
-            if not Confirm.ask("  Download [bold]" + escape(model) + "[/bold] now?", default=True):
-                raise typer.Exit(1)
-            try:
-                managed_server.download_model(model)
-            except Exception as exc:
-                err_console.print(
-                    "[bold red]Error:[/bold red] " + escape(f"download failed: {exc}"), soft_wrap=True
-                )
-                raise typer.Exit(1)
-            console.print("  [green]✓[/green] Download complete.")
+    if managed_server.is_model_cached(model):
+        console.print("  [green]✓[/green] Already downloaded (Hugging Face cache).")
+    else:
+        try:
+            managed_server.download_model(model)
+        except Exception as exc:
+            err_console.print("[bold red]Error:[/bold red] " + escape(f"download failed: {exc}"), soft_wrap=True)
+            raise typer.Exit(1)
+        console.print("  [green]✓[/green] Download complete.")
 
     # --- The record ----------------------------------------------------------#
     srv = ManagedServerConfig(

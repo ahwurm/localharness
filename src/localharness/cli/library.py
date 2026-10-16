@@ -2,18 +2,33 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import platform
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
+import typer
 from pydantic import SecretStr
 from rich.console import Console
 
-from localharness.agent.gguf_header import DiscoveredModel, FileKind, rank_models, read_header, unique_preset_name
+from localharness.agent.gguf_header import (
+    DISCOVERY_KEYS,
+    DiscoveredModel,
+    FileKind,
+    GgufHeaderError,
+    model_of,
+    rank_models,
+    read_header,
+    read_header_from,
+    unique_preset_name,
+)
 from localharness.cli import interview, workspace
 from localharness.cli.interview import Option
 from localharness.cli.workspace import shown_path, visible_text
@@ -23,13 +38,17 @@ from localharness.config.models import AutosenseConfig, EndpointRef, ManagedServ
 from localharness.config.overlay import load_overlay
 from localharness.config.paths import global_config_dir
 from localharness.config.redact import reveal
+from localharness.core.private_files import NotRegularFile, open_regular
 from localharness.core.which import which_outside_cwd
 from localharness.provider import autosense, model_library, speed_stats
+from localharness.provider import server as managed_server
 from localharness.provider.detector import DetectorResult, detect_provider
+from localharness.provider.refarch import REF_ARCHS, RefArch, default_row, needs_met
 from localharness.provider.server import RUNTIME_LABELS
 from localharness.provider.tuning import mtp_layers
 
 console = Console()
+err_console = Console(stderr=True)
 
 OVERLAY_BUSY_LINE = "overrides.yaml is busy — nothing written"
 PEERS_COPIED_COUNTS = " — {copied} copied, {kept} still confirmed"
@@ -69,6 +88,30 @@ NOT_SET_UP_LINE = "Not set up: {names} — localharness model --setup lists them
 ADDED_KEPT_LINE = "Added {n}; kept config.yaml."
 NOTHING_TO_SET_UP_LINE = "Nothing to set up — every model found has a preset"
 LIBRARY_FAILED_LINE = "model library: {why} — start goes on"
+OFFER_QUESTION = "Download {what} ({size}, fits in your {gb} GB)?"
+OFFER_QUESTION_UNKNOWN = "Download {what} ({size}, needs about {size})?"
+DOWNLOAD_IT = "Download it"
+SMALL_ROW_HINT = "a small model that runs anywhere; larger ones under Show the other rows"
+SHOW_ROWS = "Show the other rows"
+SHOW_ROWS_HINT = "each row with its page, then pick one"
+DOWNLOAD_WHICH = "Download which?"
+NOT_NOW_OFFER_HINT = "nothing is fetched; the page and the command are printed"
+RUN_AGAIN_LINE = "Nothing set up; run localharness start again later."
+THEN_START = ", then run localharness start"
+ROW_LINE = "{name} — {where} · {size} · {page}"
+NOT_NOW_PAGE_LINE = "Reference: {page}"
+NOT_NOW_COMMAND_LINE = "Fetch it yourself: {command}"
+DOWNLOAD_FAILED_LINE = "download failed: {why}"
+RECORD_LINE = "{name} ({runtime}) ← {path} · port {port} · binary: {binary}"
+NO_BINARY_TEXT = "none — set server.binary"
+VERIFY_MISMATCH_LINE = "{path}: {what} — nothing recorded"
+VERIFIED_LINE = "Verified {file} at {commit} (sha256 {sha256})"
+START_FINDS_IT_LINE = "Not recorded ({why}) — the next localharness start finds it"
+INSTALL_LINES = {
+    "darwin": "brew install llama.cpp",
+    "linux": "a llama.cpp release build for your GPU from github.com/ggml-org/llama.cpp/releases, "
+             "llama-server on PATH — docs/runtimes/llamacpp.md",
+}
 
 
 class _NothingToAppend(ValueError):
@@ -684,3 +727,197 @@ def sync(config_path: Path, *, scope: Literal["new", "all"], person: bool, prese
     if first_run:
         return _first_run(config_path, scope=scope, person=person, preset=preset)
     return _later_run(config_path, scope=scope, person=person, preset=preset, choose=choose)
+
+
+@dataclass(frozen=True)
+class OfferVllm:
+    """A vLLM row chosen with its consent: the caller installs the runtime and fetches the checkpoint."""
+    row: RefArch
+
+
+@dataclass(frozen=True)
+class NotNow:
+    """The offer was declined, or a download did not verify; the way back was said."""
+
+
+def install_line(platform_name: str | None = None) -> str | None:
+    name = platform_name or sys.platform
+    return next((line for key, line in INSTALL_LINES.items() if name.startswith(key)), None)
+
+
+def record_line(name: str, runtime: str, port: int | None, binary: str | None, path: str | os.PathLike[str]) -> str:
+    return RECORD_LINE.format(name=visible_text(name), runtime=RUNTIME_LABELS.get(runtime, runtime), path=shown_path(path),
+                              port=port, binary=shown_path(binary) if binary else NO_BINARY_TEXT)
+
+
+def verify_download(path: str | os.PathLike[str], *, size: int, sha256: str) -> DiscoveredModel | str:
+    """The model a downloaded file is, its bytes counted and hashed and its header read through one descriptor;
+    else what is wrong with it."""
+    try:
+        with os.fdopen(open_regular(path), "rb") as f:
+            digest, count = hashlib.sha256(), 0
+            while count <= size and (chunk := f.read(min(1 << 20, size + 1 - count))):
+                count += len(chunk)
+                digest.update(chunk)
+            if count != size:
+                return f"size is {'more than ' if count > size else ''}{count} bytes, expected {size}"
+            if digest.hexdigest() != sha256:
+                return f"sha256 {digest.hexdigest()} differs from {sha256}"
+            f.seek(0)
+            header = read_header_from(f, DISCOVERY_KEYS | autosense.FIT_KEYS)
+            model = model_of(path, header, mtime=os.fstat(f.fileno()).st_mtime)
+    except NotRegularFile:
+        return "not a regular file"
+    except GgufHeaderError as exc:
+        return f"not a GGUF ({exc})"
+    except OSError as exc:
+        return f"cannot be read ({exc.strerror or type(exc).__name__})"
+    return model if model is not None else "not a model GGUF"
+
+
+def record_path(config_path: Path, model: DiscoveredModel, *, first_run: bool, adopt: bool,
+                say: Callable[[str], None] | None = None) -> InitRecords | list[dict] | None:
+    """Record one verified file as it is: on a first run the `server:` record, else a peer appended to overrides.yaml.
+    Its record line is said before anything is written."""
+    say = say or _say
+    binary = which_outside_cwd("llama-server")
+    if first_run:
+        server = ManagedServerConfig(runtime="llamacpp", model=str(model.path), served_name=model.name,
+                                     port=PRIMARY_PORT, binary=binary)
+        say(record_line(model.name, "llamacpp", PRIMARY_PORT, binary, model.path))
+        return InitRecords(server=server, served=model.name, block_in_receipt=True, confirmed=adopt)
+    names, ports = recorded_names_ports(global_config_dir(config_path))
+    [peer] = model_library.peers_for([model], start=PRIMARY_PORT + 1, taken_names=names, taken_ports=ports)
+    say(record_line(peer.name, "llamacpp", peer.lifecycle.port, binary, model.path))
+    return append_peers(config_path, [peer], adopt=adopt, say=say)
+
+
+def _ram(auto: AutosenseConfig) -> float | None:
+    """The box's RAM less the unified reserve; None when neither /proc/meminfo nor sysconf says."""
+    if sys.platform.startswith("linux") and (info := autosense._read_meminfo()) is not None:
+        return max(0.0, info["MemAvailable"] - auto.unified_reserve_ratio * info["MemTotal"])
+    try:
+        total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        return None
+    return total * (1 - auto.unified_reserve_ratio)
+
+
+def _on_path(runtime: str, *, global_dir: Path) -> bool:
+    found = which_outside_cwd("llama-server") if runtime == "llamacpp" else managed_server.vllm_binary(global_dir)
+    return found is not None
+
+
+def _sense(auto: AutosenseConfig) -> tuple[bool, float | None]:
+    """Whether nvidia-smi answers, and the memory a model may use."""
+    free = autosense.free_memory(auto)
+    if free is None:
+        return False, _ram(auto)
+    return True, free.free_bytes * (1 - auto.compute_margin_ratio if free.source == "nvidia-smi" else 1)
+
+
+def _gb(n: float) -> str:
+    return f"{n / 1e9:.1f} GB"
+
+
+def _where(row: RefArch) -> str:
+    return f"{row.repo}/{row.file}" if row.file else row.repo
+
+
+def _ask(question: str, options: Sequence[Option], *, default: int, cancel: str, person: bool) -> interview.Answer:
+    if not person:
+        return interview.Answer((cancel,), True, reached=False)
+    return interview.ask(question, options, default=default, cancel=cancel)
+
+
+def _consent(row: RefArch, global_dir: Path) -> str:
+    """What `Download it` also does on a vLLM row that has no runtime yet."""
+    if managed_server.vllm_binary(global_dir) is not None:
+        return ""
+    if row.launch == "docker":
+        return f" and pull {row.docker_image}"
+    return f" and install {row.pip_package} into {shown_path(managed_server.server_dir(global_dir) / 'venv')}"
+
+
+def _download_question(row: RefArch, memory: float | None, global_dir: Path, *, rows: bool, person: bool) -> interview.Answer:
+    size = _gb(row.bytes)
+    what = visible_text(row.file or row.repo)
+    question = (OFFER_QUESTION.format(what=what, size=size, gb=f"{memory / 1e9:.0f}")
+                if memory is not None and row.bytes <= memory else OFFER_QUESTION_UNKNOWN.format(what=what, size=size))
+    hint = SMALL_ROW_HINT if row.runtime == "llamacpp" else f"download {visible_text(row.repo)}" + _consent(row, global_dir)
+    options = [Option("download", DOWNLOAD_IT, hint),
+               *([Option("rows", SHOW_ROWS, SHOW_ROWS_HINT)] if rows else []),
+               Option("not-now", NOT_NOW, NOT_NOW_OFFER_HINT)]
+    return _ask(question, options, default=0, cancel="not-now", person=person)
+
+
+def _pick_row(rows: Sequence[RefArch], sensed: RefArch, *, person: bool) -> interview.Answer:
+    for row in rows:
+        _say(ROW_LINE.format(name=visible_text(row.name), where=visible_text(_where(row)), size=_gb(row.bytes), page=row.page))
+    options = [Option(r.key, visible_text(r.name), f"{visible_text(_where(r))} · {_gb(r.bytes)} · {r.page}") for r in rows]
+    return _ask(DOWNLOAD_WHICH, options, default=rows.index(sensed), cancel="not-now", person=person)
+
+
+def _not_now(row: RefArch) -> NotNow:
+    command = f"localharness model --download {row.repo}" + (f" --file {row.file}" if row.file else "")
+    for line in (NOT_NOW_PAGE_LINE.format(page=row.page), NOT_NOW_COMMAND_LINE.format(command=command), RUN_AGAIN_LINE):
+        _say(line)
+    return NotNow()
+
+
+def _tell_install(row: RefArch) -> None:
+    if row.runtime == "llamacpp" and which_outside_cwd("llama-server") is None and (line := install_line()):
+        _say(line)
+
+
+def _fetch(config_path: Path, row: RefArch, *, person: bool) -> InitRecords | NotNow:
+    try:
+        path = managed_server.download_file(row.repo, row.file, revision=row.revision)
+    except Exception as exc:  # noqa: BLE001 — whatever the hub client raises is one line
+        err_console.print(DOWNLOAD_FAILED_LINE.format(why=visible_text(exc)), markup=False, soft_wrap=True)
+        raise typer.Exit(1) from exc
+    checked = verify_download(path, size=row.bytes, sha256=row.sha256)
+    if isinstance(checked, str):
+        _say(VERIFY_MISMATCH_LINE.format(path=shown_path(path), what=checked))
+        _say(RUN_AGAIN_LINE)
+        return NotNow()
+    recs = record_path(config_path, checked, first_run=True, adopt=person)
+    if recs.server.binary is None and (line := install_line()):
+        recs.lines.append(line + THEN_START)
+    return recs
+
+
+def offer(config_path: Path, *, person: bool) -> InitRecords | OfferVllm | NotNow | None:
+    """Nothing is set up and no model file was found: one question over this platform's reference rows, the sensed
+    row first. None when nobody could be asked or no row fits this platform."""
+    if not person:
+        return None
+    auto = _machine_autosense(config_path)
+    global_dir = global_config_dir(config_path)
+    has_nvidia, memory = _sense(auto)
+    plat, machine = sys.platform, platform.machine()
+    rows = tuple(r for r in REF_ARCHS if any(plat.startswith(p) for p in r.platforms)
+                 and needs_met(r, platform=plat, machine=machine, has_nvidia=has_nvidia))
+    sensed = row = default_row(rows, platform=plat, machine=machine, has_nvidia=has_nvidia,
+                               on_path=partial(_on_path, global_dir=global_dir), memory=memory)
+    if row is None:
+        return None
+    _tell_install(row)
+    answer = _download_question(row, memory, global_dir, rows=True, person=person)
+    if not answer.reached:
+        return None
+    if answer.keys == ("rows",) and not answer.cancelled:
+        picked = _pick_row(rows, sensed, person=person)
+        if not picked.reached:
+            return None
+        if picked.cancelled:
+            return _not_now(row)
+        row = next(r for r in rows if r.key == picked.keys[0])
+        if row is not sensed:
+            _tell_install(row)
+        answer = _download_question(row, memory, global_dir, rows=False, person=person)
+        if not answer.reached:
+            return None
+    if answer.cancelled or answer.keys != ("download",):
+        return _not_now(row)
+    return _fetch(config_path, row, person=person) if row.runtime == "llamacpp" else OfferVllm(row)
