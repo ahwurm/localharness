@@ -198,8 +198,7 @@ class PeerFragment:
 
 def append_peers(config_path: Path, peers: Sequence[EndpointRef], *, adopt: bool,
                  say: Callable[[str], None] | None = None) -> list[dict] | None:
-    """Append ``peers`` to overrides.yaml's `extra_endpoints` under the overlay lock; `server:` is untouched.
-    Returns the dicts written, None when nothing was. ``adopt`` records them as approved."""
+    """Append `peers` to overrides.yaml's `extra_endpoints` under the overlay lock (adopted when `adopt`); the dicts written, None when none."""
     say = say or _say
     global_dir = global_config_dir(config_path)
     fragment = PeerFragment(global_dir, peers)
@@ -218,8 +217,7 @@ def append_peers(config_path: Path, peers: Sequence[EndpointRef], *, adopt: bool
 
 def finish_peers(global_dir: Path, server: dict | None, fragment: PeerFragment, *, adopt: bool,
                  say: Callable[[str], None] | None = None) -> None:
-    """After a write: adopt what it wrote beside ``server`` and the copied peers whose config.yaml twin was
-    covered (when ``adopt``), and say the copied line once."""
+    """After a write: adopt what it wrote and the copied peers whose config.yaml twin was covered (when `adopt`), and say the copied line once."""
     counts = ""
     if adopt:
         recorded = trust.recorded_machine(global_dir)
@@ -370,10 +368,7 @@ def _record_dicts_of(server: ManagedServerConfig | None,
 
 
 def _adopt_written(global_dir: Path, file: str, server: dict | None, peers: Sequence[dict]) -> None:
-    """Record, as already approved, the launch entries just written and shown: the primary's `server.` keys, each
-    peer's `lifecycle.` keys and the posture entries under those prefixes that still say what was written. With no
-    machine record the first is made, of the launch kinds only; with one these entries are added or replaced and
-    nothing else changes. No key is ever an entry."""
+    """Record the launch entries just written and shown as approved; with no machine record the first is made, of the launch kinds only."""
     written: dict[str, dict] = {}  # entry-name prefix -> the dict written under it
     if server is not None:
         written["server."] = server

@@ -147,8 +147,7 @@ def atomic_write_overlay(path: Path, data: dict) -> None:
 
 @contextmanager
 def overlay_lock(global_dir: Path | str) -> Iterator[None]:
-    """Hold an exclusive flock on the sidecar beside overrides.yaml, failing closed with `OverlayBusy`
-    once the budget is spent. A second acquisition on the same thread raises RuntimeError."""
+    """An exclusive flock on the sidecar beside overrides.yaml: `OverlayBusy` once the budget is spent, RuntimeError if held on this thread."""
     if getattr(_HELD, "depth", 0):
         raise RuntimeError("overlay_lock is held already on this thread")
     _HELD.depth = 1

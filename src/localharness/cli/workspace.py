@@ -1102,20 +1102,7 @@ def _run_sync(coro) -> None:
 def write_overlay_validated(global_dir: Path, mutate: Callable[[dict], None],
                              audit: Sequence[tuple[str, Any, Any]], *, actor_detail: str,
                              on_busy: Callable[[], None] | None = None) -> bool:
-    """The one writer of overrides.yaml for the machine-trust acts: ``mutate`` a deep copy of
-    the overlay, validate the config the next start would read (config.yaml raw merged with the new
-    overlay minus its `agent:` section, as `persist_default_model` does), write it atomically, then
-    publish one `ComponentMutated` (`layer="user"`, `actor="cli"`) per ``audit`` triple
-    `(dotted path, before, after)` to the configured `org.audit_log_path`.
-
-    The raw read, ``mutate``, the validation and the write happen under `overlay_lock`; the audit is
-    published after it is released. A busy lock writes nothing and calls ``on_busy`` once.
-
-    Returns False — nothing written, nothing emitted — when the lock is busy, the overlay will not
-    parse, the result will not validate (no `provider:` block in config.yaml is one such case) or the
-    file cannot be written. An emit that fails is logged at debug and never undoes the write. Callers
-    adopt only after True. Paths are entry names, never a whole list, so a peer's `api_key` stays out
-    of the audit log."""
+    """Mutate a copy of the overlay, validate the config the next start would read and write it under the overlay lock, then audit by entry name; False when nothing was written."""
     from localharness.config.loader import ConfigParseError
     from localharness.config.models import HarnessConfig
     from localharness.config.overlay import (

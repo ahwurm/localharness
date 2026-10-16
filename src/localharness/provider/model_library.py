@@ -323,8 +323,7 @@ def free_ports(start: int, count: int, *, taken: Collection[int]) -> list[int]:
 
 def peers_for(models: Sequence[DiscoveredModel], *, start: int, taken_names: Collection[str],
               taken_ports: Collection[int]) -> list[EndpointRef]:
-    """One launchable peer per model: a GPU llama.cpp record on the next free port from `start`, named as the
-    preset, carrying only the model, its projector, its served name and its port."""
+    """One launchable peer per model: a GPU llama.cpp record on the next free port from `start`, named as the preset."""
     ports = free_ports(start, len(models), taken=taken_ports)
     names = set(taken_names)
     peers: list[EndpointRef] = []

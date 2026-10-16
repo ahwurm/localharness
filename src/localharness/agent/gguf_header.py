@@ -144,7 +144,7 @@ def read_header_from(f, want: Iterable[str]) -> dict[str, Any]:
         raise GgufHeaderError("too many KV pairs")
     if not wanted:
         return {}
-    exact = {name for name in wanted if "." in name}  # D-47: a dotted name is an exact key
+    exact = {name for name in wanted if "." in name}  # a dotted name is an exact key
     suffixes = wanted - exact
     found: dict[str, Any] = {}
     seen: dict[str, Any] = {}  # candidate keys, buffered until general.architecture is known
@@ -199,7 +199,7 @@ class FileKind(str, Enum):
 @dataclass(frozen=True)
 class DiscoveredModel:
     """One preset-worthy GGUF: the path as written (a split model's is its first shard), its resolved
-    path, the D-05 name (not yet unique), the typed header values discovery used, the file's mtime,
+    path, the preset name (not yet unique), the typed header values discovery used, the file's mtime,
     the projector paired with it, if any, and its MTP layer count (None without valid MTP layers)."""
 
     path: Path
