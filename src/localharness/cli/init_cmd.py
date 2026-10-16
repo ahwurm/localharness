@@ -7,7 +7,7 @@ import os
 import shlex
 import shutil
 import sys
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -20,14 +20,7 @@ from rich.markup import escape
 from rich.prompt import Confirm, IntPrompt, Prompt
 
 from localharness.agent.context import response_reserve
-from localharness.agent.gguf_header import (
-    DiscoveredModel,
-    discover,
-    preset_name,
-    rank_models,
-    unique_preset_name,
-    walk_ggufs,
-)
+from localharness.agent.gguf_header import preset_name
 from localharness.cli import init_import, library, workspace
 from localharness.cli.library import (
     InitRecords,
@@ -51,14 +44,13 @@ from localharness.core.which import which_outside_cwd
 from localharness.config.models import (
     AutosenseConfig,
     ContextConfig,
-    EndpointRef,
     HarnessConfig,
     ManagedServerConfig,
     OrgConfig,
     PermissionConfig,
     ProviderConfig,
 )
-from localharness.provider import autosense, procfs, speed_stats, units
+from localharness.provider import autosense, model_library, procfs, speed_stats, units
 from localharness.provider import server as managed_server
 from localharness.provider.server import RUNTIME_LABELS
 from localharness.provider.client import CapabilityResult, LLMClient, LLMConfig
@@ -531,7 +523,7 @@ def init_app(
 
 
 def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | None, force: bool,
-               interactive: bool, starting: bool = False) -> SetupResult:
+               interactive: bool, starting: bool = False, preset: str | None = None) -> SetupResult:
     """Set up the core: find or name the model server, then write the config. Asks nothing about
     plugins (owner ruling 2026-10-03: a plugin is set up when it is turned on); every outcome that
     leaves a config on disk ends with the bundled plugins and the command beside each.
@@ -553,7 +545,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
     if config_file.exists() and not force:
         changing = endpoint is not None or model is not None
         imported = None if changing else _imported_by_an_existing_install(config_path)
-        if isinstance(imported, InitRecords):  # D-36: the change is the import — overrides.yaml, no question
+        if isinstance(imported, InitRecords):  # the change is the import — overrides.yaml, no question
             show_records(imported)
             if _write_overlay_records(config_path, imported, adopt=_adopts(interactive)):
                 overlay_file = ConfigLoader(config_dir=config_path).user_overlay_path
@@ -566,7 +558,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
                     + escape(f"the settings above do not validate, or {config_path / 'overrides.yaml'} "
                              f"could not be written. Nothing was written; {config_file} is kept."),
                     soft_wrap=True)
-                raise typer.Exit(1)  # a write that does not validate writes nothing and exits 1 (WR-06)
+                raise typer.Exit(1)  # a write that does not validate writes nothing and exits 1
             outcome = SetupResult(config_file, True)
         elif isinstance(imported, Attached):  # attach-only: its one line, the config kept
             console.print(imported.line, markup=False, soft_wrap=True)
@@ -581,7 +573,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
                           _probe_capabilities(result, selected_model))
             outcome = SetupResult(config_file, True)
     else:
-        picked = _pick_server(config_path, endpoint, model, interactive, force=force)
+        picked = _pick_server(config_path, endpoint, model, interactive, force=force, preset=preset)
         if isinstance(picked, SetupResult):  # skipped for now: saved unchecked, or nothing saved
             outcome = picked
         elif isinstance(picked, Attached):  # attached only: provider written, one line, no record
@@ -590,10 +582,12 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
             _receipt(config_file, starting)
             outcome = SetupResult(config_file, picked.server_ready)
         elif isinstance(picked, InitRecords):  # a record: shown, written, launched by the first start
-            show_records(picked)
-            config_file = _write_records(config_path, picked, force=force,
-                                        adopt=_adopts(interactive))
-            _receipt(config_file, starting)
+            if not picked.block_in_receipt:
+                show_records(picked)
+            config_file, written = _write_records(config_path, picked, force=force,
+                                                  adopt=_adopts(interactive) and picked.confirmed)
+            _receipt(config_file, starting, block=library.record_block(picked) if picked.block_in_receipt else (),
+                     peer=written[0]["name"] if written else None)
             outcome = SetupResult(config_file, picked.serving or picked.launchable)
         else:
             result, selected_model = picked
@@ -655,7 +649,7 @@ def _imported_by_an_existing_install(config_path: Path) -> InitRecords | Attache
 
 def _pick_server(
     config_path: Path, endpoint: str | None, model: str | None, interactive: bool, *,
-    changing: bool = False, force: bool = False,
+    changing: bool = False, force: bool = False, preset: str | None = None,
 ) -> tuple[DetectorResult, str] | SetupResult | InitRecords | Attached:
     """The model server and the model: the explicit --endpoint, else detection — and, finding
     nothing on a terminal, the guided vLLM setup, then "skip for now" (whose SetupResult comes
@@ -723,12 +717,19 @@ def _pick_server(
             console.print("\n" + escape(f"Nothing changed: {config_path / 'config.yaml'} is kept."),
                           soft_wrap=True)
             raise typer.Exit(1)
-        presets = _discover_presets(config_path)  # D-13: GGUFs found are written, not asked about
-        if presets is not None:
-            return presets
+        from_unit, skipped = _unit_import(config_path)
+        if from_unit is not None:
+            return from_unit
+        synced = library.sync(config_path, scope="all", person=interactive, preset=preset, first_run=True)
+        if synced.records is not None:
+            if synced.records.server.binary is None and skipped is not None:
+                synced.records.lines[-1] = _unit_skip_line(*skipped)
+            return synced.records
+        if synced.shown:
+            return SetupResult(None, False)
         guided = _guided_setup(config_path) if interactive else None
         if guided is None:
-            _say_not_detected()  # D-13: only an outcome that writes no record says nothing was found
+            _say_not_detected()  # only an outcome that writes no record says nothing was found
             if interactive:
                 return _skip_for_now(config_path, model, force=force)
             console.print(
@@ -741,7 +742,7 @@ def _pick_server(
         return guided
 
     console.print(f"  [green]✓[/green] {result.provider_type} found at {result.base_url}")
-    if not changing:  # D-26: the listener decides before the model list is judged (a 401 has none)
+    if not changing:  # the listener decides before the model list is judged (a 401 has none)
         imported = _import_listener(config_path, result)
         if imported is not None:
             return imported
@@ -765,86 +766,8 @@ def _say_not_detected() -> None:
         console.print(f"  http://localhost:{port}  ({name})  — connection refused")
 
 
-# ------------------------------------------------------------------ presets from the GGUFs found
-#
-# Nothing is serving and the machine holds GGUFs: init writes them as presets (a primary `server:`
-# and peers), shows them in one block and asks nothing and launches nothing (D-10, D-13, D-14, D-39).
-
-PRIMARY_PORT = 8081
-
-
-def _found_models(config_path: Path, *, unit_model: str | None = None) -> list[DiscoveredModel]:
-    """The GGUF models under the machine's `model_roots`, best first (D-07): the unit's model, one the
-    speed ledger recorded, one that fits the free memory, the newest. Free memory is probed once for
-    all of them (D-09, D-49) and not at all when there is no model."""
-    auto = _machine_autosense(config_path)
-    found = discover(walk_ggufs(auto.model_roots)).models
-    if not found:
-        return []
-    ledger = speed_stats.model_paths(speed_stats.default_speed_stats_path(config_path))
-    memory = autosense.free_memory(auto)
-    fits: dict[str, int | None] = {}
-    for model in found:
-        try:
-            spec = ManagedServerConfig(runtime="llamacpp", model=str(model.path),
-                                       mmproj=str(model.mmproj) if model.mmproj else None)
-            fits[str(model.path)] = autosense.compute_fit(spec, auto, memory=memory).fits
-        except Exception:  # noqa: BLE001 — one model that cannot be sized is ranked without a fit
-            fits[str(model.path)] = None
-    return rank_models(found, unit_model=unit_model, ledger_paths=ledger, fits=fits)
-
-
-def _free_ports(start: int, count: int, *, taken: Collection[int]) -> list[int]:
-    """The next `count` ports from `start` upward that no record uses (`taken`) and that nothing is
-    listening on (D-11)."""
-    ports: list[int] = []
-    port = start
-    while len(ports) < count and port <= 65535:
-        if port not in taken and not procfs.listeners(port):
-            ports.append(port)
-        port += 1
-    return ports
-
-
-def _peer_records(models: Sequence[DiscoveredModel], *, start: int, taken_names: Collection[str],
-                  taken_ports: Collection[int]) -> list[EndpointRef]:
-    """One launchable peer per model (D-10): a GPU llama.cpp record on the next free port from
-    `start`, named as the preset (`unique_preset_name` over every name already used), carrying
-    only the model, its projector, its served name and its port — no binary, args, env or key file."""
-    ports = _free_ports(start, len(models), taken=taken_ports)
-    names = set(taken_names)
-    peers: list[EndpointRef] = []
-    for model, port in zip(models, ports):
-        name = unique_preset_name(model.name, names)
-        names.add(name)
-        peers.append(EndpointRef(
-            name=name,
-            base_url=f"http://127.0.0.1:{port}/v1",
-            provider_type="llamacpp",
-            gpu=True,
-            lifecycle=ManagedServerConfig(
-                runtime="llamacpp", model=str(model.path),
-                mmproj=str(model.mmproj) if model.mmproj else None,
-                served_name=name, port=port, gpu=True),
-        ))
-    return peers
-
-
-def _no_binary_line(models: Sequence[DiscoveredModel], roots: Sequence[str]) -> str:
-    """D-24: the models were found and there is no llama-server to launch them with — the roots
-    that hold one are named, and the record is written declared (`server.binary` unset)."""
-    holding: list[str] = []
-    for root in roots:
-        real = os.path.realpath(os.path.expanduser(root))
-        if any(m.real == real or m.real.startswith(real.rstrip(os.sep) + os.sep) for m in models):
-            holding.append(shown_path(os.path.expanduser(root)))
-    n = len(models)
-    return (f"found {n} GGUF{'s' if n != 1 else ''} under {', '.join(holding)}; "
-            "no llama-server — set server.binary")
-
-
 def _unit_skip_line(unit: str, reason: str) -> str:
-    """D-24, first form: a unit that names a model could not be imported and no llama-server is on
+    """A unit that names a model could not be imported and no llama-server is on
     PATH either — the unit's own reason (a predicate from units.py) folded into the one line."""
     return f"{visible_text(unit)} {visible_text(reason)}; no llama-server found — set server.binary"
 
@@ -883,34 +806,6 @@ def _unit_import(config_path: Path, *, only_port: int | None = None
                                     base_url=None, unit_model=os.path.realpath(imp.spec.model))
         return recs, None
     return None, first_skip
-
-
-def _discover_presets(config_path: Path) -> InitRecords | None:
-    """Nothing is serving: the person's own stopped llama-server unit becomes the primary `server:`
-    when it can be read (D-21); else the GGUFs under the model roots become a primary (the best
-    ranked, port 8081, the llama-server found on PATH when there is one) and peers, written as
-    records by the first start's machinery — init asks nothing and launches nothing. None when no
-    GGUF model is found (the caller goes on to the guided setup)."""
-    from_unit, skipped = _unit_import(config_path)
-    if from_unit is not None:
-        return from_unit
-    models = _found_models(config_path)
-    if not models:
-        return None
-    first, rest = models[0], models[1:]
-    binary = which_outside_cwd("llama-server")
-    served = unique_preset_name(first.name, [])
-    server = ManagedServerConfig(
-        runtime="llamacpp", model=str(first.path),
-        mmproj=str(first.mmproj) if first.mmproj else None,
-        served_name=served, port=PRIMARY_PORT, binary=binary)
-    peers = _peer_records(rest, start=PRIMARY_PORT + 1, taken_names={served},
-                          taken_ports={PRIMARY_PORT})
-    lines = preset_lines(server, served, peers, binary_from="on PATH")
-    if binary is None:  # D-24: one line, naming the unit that could not be used when there is one
-        lines.append(_unit_skip_line(*skipped) if skipped is not None
-                     else _no_binary_line(models, _machine_autosense(config_path).model_roots))
-    return InitRecords(server=server, served=served, peers=peers, lines=lines)
 
 
 # ------------------------------------------------------------------ the server already running
@@ -1069,16 +964,16 @@ def _second_line(imp: init_import.Imported, holder: workspace.Holder, *, port: i
 def _records_from_import(config_path: Path, imp: init_import.Imported, holder: workspace.Holder, *,
                          port: int, running: bool, base_url: str | None,
                          unit_model: str | None = None) -> InitRecords:
-    """D-08, D-10, D-14, D-29: an Imported record is the primary; the other models discovery finds are
+    """An Imported record is the primary; the other models discovery finds are
     its peers (next free ports above it, no binary or args of their own). The block is the primary
     line, the import's extras, the second line, then the peers; the weights path and the window triple
-    are written to the ledger once the config is on disk. `unit_model` (D-64) is the stopped unit's
+    are written to the ledger once the config is on disk. `unit_model` is the stopped unit's
     model, which leads the ranking; None (a running process) ranks as discovery alone does."""
     spec = imp.spec
     real = os.path.realpath(os.path.expanduser(spec.model))
-    rest = [m for m in _found_models(config_path, unit_model=unit_model) if m.real != real]
-    peers = _peer_records(rest, start=spec.port + 1, taken_names={spec.served_name},
-                          taken_ports={spec.port})
+    rest = library.import_peer_models(config_path, exclude=real, unit_model=unit_model)
+    peers = model_library.peers_for(rest, start=spec.port + 1, taken_names={spec.served_name},
+                                    taken_ports={spec.port})
     if imp.binary_source == "process":
         binary_from = "from " + workspace.incumbent_subject(holder, port=port)
     else:
@@ -1369,16 +1264,17 @@ def _adopts(interactive: bool) -> bool:
 
 
 def _write_records(config_path: Path, recs: InitRecords, *, force: bool = False,
-                   adopt: bool = False) -> Path:
-    """A fresh config.yaml from a record: the provider points at the address the record will serve
-    on and names the served model; no capability probe and no context budget (a server that is not
-    up cannot be asked — the first `start` probes it and fits the window). Memory and host tools
-    are on. The record's deferred writes run only once the file is on disk."""
+                   adopt: bool = False) -> tuple[Path, list[dict]]:
+    """A fresh config.yaml from a record, its peers appended to overrides.yaml: the provider points at the
+    address the record will serve on and names the served model; no capability probe and no context budget
+    (a server that is not up cannot be asked — the first `start` probes it and fits the window). Memory and
+    host tools are on. The record's deferred writes run only once the file is on disk. Returns the file and
+    the peer dicts written."""
     result = _result_from_record(recs)
     # Dumped BEFORE the config is built: HarnessConfig lends the primary's binary to a peer that has
     # none, in place, at load. The file says what the record says (a peer carries no binary), and
-    # that same dump is what an adoption records (D-37, D-59).
-    server_dict, peer_dicts = _record_dicts_of(recs.server, recs.peers)
+    # that same dump is what an adoption records.
+    server_dict, _ = _record_dicts_of(recs.server, [])
     harness = HarnessConfig(
         version="1",
         provider=ProviderConfig(
@@ -1398,15 +1294,22 @@ def _write_records(config_path: Path, recs: InitRecords, *, force: bool = False,
             ),
         ),
         server=recs.server.model_copy(deep=True),
-        extra_endpoints=[peer.model_copy(deep=True) for peer in recs.peers],
+        extra_endpoints=[],
     )
-    written = _write_harness(config_path, harness, True, force=force,
-                             records=(server_dict, peer_dicts))
+    written = _write_harness(config_path, harness, True, force=force, records=(server_dict, []))
     for thunk in recs.deferred:  # only now that the config is on disk
         thunk()
-    if adopt:  # D-59: exactly the dicts that were written, not a fresh look at the disk
-        _adopt_written(global_config_dir(config_path), "config.yaml", server_dict, peer_dicts)
-    return written
+    peers = library.append_peers(config_path, recs.peers, adopt=False) if recs.peers else []
+    if peers is None:
+        console.print(library.PEERS_NOT_WRITTEN_LINE.format(n=len(recs.peers)), markup=False, soft_wrap=True)
+        peers = []
+    if adopt:  # exactly the dicts that were written, not a fresh look at the disk
+        global_dir = global_config_dir(config_path)
+        _adopt_written(global_dir, "config.yaml", server_dict, [])
+        if peers:
+            _adopt_written(global_dir, "overrides.yaml", None, peers)
+        library.prune_recorded(config_path)
+    return written, peers
 
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -1673,15 +1576,18 @@ def _write_change(config_path: Path, result: DetectorResult, selected_model: str
 RECEIPT_ROW = "The agent can edit files, run commands and remember across sessions — org.permissions.mode: read-only or memory.enabled: false turns either off."  # noqa: E501
 
 
-def _receipt(config_file: Path, starting: bool) -> None:
-    """The last lines of a fresh setup. A first `start` goes straight on into the session, so it
-    is not told to run `start`."""
+def _receipt(config_file: Path, starting: bool, *, block: Sequence[str] = (), peer: str | None = None) -> None:
+    """The last lines of a fresh setup: the preset block when the records were shown before the question, and
+    the command for later. A first `start` goes straight on into the session, so it gets no star."""
     # escape(): the receipt runs AFTER config.yaml is on disk, so an unescaped markup-named config
     # dir crashed here and exited 1 — init reporting failure for a setup that had just succeeded.
     console.print("\n[green]✓[/green] " + escape(f"LocalHarness configured at {config_file}."), soft_wrap=True)
-    console.print(RECEIPT_ROW, markup=False, soft_wrap=True)  # D-38: the defaults, and the undo
+    console.print(RECEIPT_ROW, markup=False, soft_wrap=True)  # the defaults, and the undo
+    for line in block:
+        console.print(line, markup=False, soft_wrap=True)
+    console.print(library.LATER_LINE + (library.LATER_MODEL_CLAUSE.format(name=visible_text(peer)) if peer else ""),
+                  markup=False, soft_wrap=True)
     if not starting:
-        console.print("  Run 'localharness start' to begin.")
         console.print(
             "\n[dim]★ If this saves you an API bill, a star helps others find it →[/dim] "
             "[cyan]https://github.com/ahwurm/localharness[/cyan]"

@@ -260,7 +260,7 @@ def test_force_starts_over_instead_of_importing_into_overrides(live, monkeypatch
 
     _exited(result, 0)
     assert live.written()["server"]["port"] == 8080  # the fresh path's own live import
-    assert not (live.cfg / "overrides.yaml").exists()
+    assert set(overrides(live)) == {"extra_endpoints"}  # only the peers it found; no saved server or provider
 
 
 # ------------------------------------------------------------------ attach-only

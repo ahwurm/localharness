@@ -355,13 +355,14 @@ def test_write_records_writes_peers_the_key_and_runs_the_deferred_after_the_file
     recs = _recs(peers=[peer], api_key="k-123",
                  deferred=[lambda: seen.append((tmp_path / "config.yaml").exists())])
 
-    written = init_cmd._write_records(tmp_path, recs)
+    written, peers = init_cmd._write_records(tmp_path, recs)
 
     assert written == tmp_path / "config.yaml" and seen == [True]
     cfg = _written(tmp_path)
-    assert cfg["provider"]["api_key"] == "k-123"
-    assert [p["name"] for p in cfg["extra_endpoints"]] == ["side"]
-    assert _no_none(cfg["extra_endpoints"])
+    assert cfg["provider"]["api_key"] == "k-123" and cfg["extra_endpoints"] == []
+    overlay = yaml.safe_load((tmp_path / "overrides.yaml").read_text(encoding="utf-8"))
+    assert [p["name"] for p in peers] == [p["name"] for p in overlay["extra_endpoints"]] == ["side"]
+    assert _no_none(overlay["extra_endpoints"])
 
 
 def test_a_record_with_a_server_already_up_is_ready_without_a_binary(tmp_path, monkeypatch):

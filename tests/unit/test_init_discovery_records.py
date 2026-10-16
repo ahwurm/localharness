@@ -20,9 +20,11 @@ import yaml
 import localharness.cli.init_cmd as init_cmd
 from localharness.cli import library
 from localharness.config.loader import ConfigLoader
-from localharness.provider import autosense, speed_stats
+from localharness.config import trust
+from localharness.provider import autosense, model_library, speed_stats
 from localharness.provider.detector import DetectorResult
 from tests.unit.gguf_support import write_gguf
+from tests.unit.interview_support import scripted
 from tests.unit.procfs_support import fake_proc  # noqa: F401  (fixture)
 from tests.unit.test_init_core_setup import (
     _Asked,
@@ -34,10 +36,11 @@ from tests.unit.test_init_core_setup import (
 )
 
 
-def _model(path: Path, *, embedding: int = 5120, mtime: float | None = None) -> Path:
+def _model(path: Path, *, embedding: int = 5120, mtime: float | None = None, mtp: bool = False) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_gguf(path, {"general.architecture": "llama", "general.type": "model",
-                      "llama.embedding_length": embedding, "llama.context_length": 32768})
+                      "llama.embedding_length": embedding, "llama.context_length": 32768,
+                      **({"llama.block_count": 65, "llama.nextn_predict_layers": 1} if mtp else {})})
     if mtime is not None:
         os.utime(path, (mtime, mtime))
     return path
@@ -76,10 +79,10 @@ def _boom(name: str):
 @pytest.fixture
 def box(tmp_path, monkeypatch, fake_home):
     """Two models and a projector under the faked HOME, llama-server on PATH, nothing answering,
-    no GPU, a terminal on which every question and every spawn is booby-trapped."""
+    no GPU, a terminal on which every spawn and every question but the first-run interview (which says `all`) is booby-trapped."""
     home = fake_home(tmp_path / "home", clear_overrides=False)
     root = home / "models" / "gguf"
-    swift = _model(root / "Swift-27B-Q8.gguf", mtime=1_000_000)
+    swift = _model(root / "Swift-27B-Q8.gguf", mtime=1_000_000, mtp=True)
     qwen = _model(root / "Qwen-27B.gguf", mtime=2_000_000)
     proj = _projector(root / "mmproj-Swift-27B-F16.gguf")
     bin_dir = _bin_dir(tmp_path, monkeypatch)
@@ -93,21 +96,35 @@ def box(tmp_path, monkeypatch, fake_home):
     monkeypatch.setattr(subprocess, "Popen", _boom("subprocess.Popen"))
     monkeypatch.setattr(init_cmd, "_guided_setup", _boom("_guided_setup"))
     cfg = tmp_path / "cfg"
+    asked = scripted(monkeypatch, *["all"] * 8)
     return SimpleNamespace(home=home, root=root, swift=swift, qwen=qwen, proj=proj,
-                           bin=bin_dir / "llama-server", cfg=cfg, detect=detect)
+                           bin=bin_dir / "llama-server", cfg=cfg, detect=detect, asked=asked)
 
 
 def _written(cfg: Path) -> dict:
     return yaml.safe_load((cfg / "config.yaml").read_text(encoding="utf-8"))
 
 
+def _peers(cfg: Path) -> list[dict]:
+    return yaml.safe_load((cfg / "overrides.yaml").read_text(encoding="utf-8")).get("extra_endpoints", [])
+
+
 # ------------------------------------------------------------------ the tracer
 
 
-def test_a_fresh_init_with_ggufs_writes_a_primary_and_a_peer_and_asks_nothing(box):
+def test_a_fresh_init_lists_two_models_and_enter_sets_both_up_with_the_best_serving(box):
     result = _init(box.cfg)
 
     _exited(result, 0)
+    [asked] = box.asked.asked
+    assert asked.question == "Set up these 2 models?" and asked.default == 0 and asked.cancel == "skip"
+    assert [o.label for o in asked.options] == ["All, serving Qwen-27B first", "Choose which, and which first",
+                                               "Skip for now"]
+    lines = result.output.splitlines()
+    swift = next(i for i, line in enumerate(lines) if line.startswith("• Swift-27B-Q8"))
+    assert "(llama.cpp, mtp, +mmproj-Swift-27B-F16.gguf)" in lines[swift] and "first seen" in lines[swift]
+    assert any(line.startswith("• Qwen-27B") for line in lines[:swift])
+
     cfg = _written(box.cfg)
     server = cfg["server"]
     assert server["runtime"] == "llamacpp"
@@ -116,8 +133,9 @@ def test_a_fresh_init_with_ggufs_writes_a_primary_and_a_peer_and_asks_nothing(bo
     assert server["served_name"] == "Qwen-27B" and server["port"] == 8081
     assert "mmproj" not in server and "context" not in server and "effort" not in server
     assert None not in server.values()
+    assert cfg["extra_endpoints"] == []
 
-    [peer] = cfg["extra_endpoints"]
+    [peer] = _peers(box.cfg)
     assert {k: v for k, v in peer.items() if k != "lifecycle"} == {
         "name": "Swift-27B-Q8", "base_url": "http://127.0.0.1:8082/v1", "provider_type": "llamacpp",
         "api_key": "none", "extra_headers": {}, "gpu": True}
@@ -134,24 +152,56 @@ def test_a_fresh_init_with_ggufs_writes_a_primary_and_a_peer_and_asks_nothing(bo
     assert cfg["provider"]["default_model"] == "Qwen-27B"
     assert cfg["provider"]["available_models"] == ["Qwen-27B"]
     assert cfg["org"]["default_model"] == "Qwen-27B"
-    # what was written is a config the next start loads
     loaded = ConfigLoader(config_dir=box.cfg).load_harness()
     assert loaded.server.served_name == "Qwen-27B" and loaded.extra_endpoints[0].name == "Swift-27B-Q8"
 
 
-def test_one_block_names_the_primary_with_its_binary_and_what_model_switches_to(box):
-    result = _init(box.cfg)
+def test_a_set_up_model_leaves_the_library_and_a_removed_peer_is_a_first_sighting(box):
+    _exited(_init(box.cfg), 0)
 
-    lines = result.output.splitlines()
-    primary = f"serving Qwen-27B (llama.cpp) ← ~/models/gguf/Qwen-27B.gguf · binary: {box.bin} (on PATH)"
-    peer = ("/model switches to Swift-27B-Q8 (llama.cpp, +mmproj-Swift-27B-F16.gguf) "
+    path = model_library.library_path(box.cfg)
+    assert path.exists()
+    held = set(model_library.Library.load(path).entries)
+    assert not held & {os.path.realpath(p) for p in (box.qwen, box.swift, box.proj)}
+    (box.cfg / "overrides.yaml").write_text(yaml.safe_dump({"extra_endpoints": []}), encoding="utf-8")
+
+    found = model_library.scan([box.root], library.recorded_paths(box.cfg), path, scope="new",
+                               rank=lambda ms: list(ms), first_run=False)
+
+    assert [s.path.name for s in found.new] == ["Swift-27B-Q8.gguf"]
+
+
+def test_the_receipt_prints_the_block_then_the_command_for_later(box):
+    out = _init(box.cfg).output
+
+    lines = out.splitlines()
+    primary = lines.index(
+        f"serving Qwen-27B (llama.cpp) ← ~/models/gguf/Qwen-27B.gguf · binary: {box.bin} (on PATH)")
+    peer = ("/model switches to Swift-27B-Q8 (llama.cpp, mtp, +mmproj-Swift-27B-F16.gguf) "
             "← ~/models/gguf/Swift-27B-Q8.gguf")
-    assert primary in lines, lines
-    assert lines.index(peer) == lines.index(primary) + 1, lines
-    out = _flat(result)
-    for absent in ("No local LLM detected", "Checked:", "Set up vLLM"):
-        assert absent not in out, out
-    assert "LocalHarness configured at" in out and init_cmd.RECEIPT_ROW in out
+    later = ("Later: just run localharness start — it brings back your last choice. "
+             "/model Swift-27B-Q8 switches in a session.")
+    configured = next(i for i, line in enumerate(lines) if line.startswith("✓ LocalHarness configured at"))
+    assert configured < primary and lines[primary + 1] == peer and lines[primary + 2] == later
+    assert "Run 'localharness start' to begin." not in out
+    assert lines.index(later) < next(i for i, line in enumerate(lines) if line.startswith("★"))
+
+
+def test_no_input_asks_nothing_writes_the_same_records_unadopted_and_no_library(box):
+    result = _init(box.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert box.asked.asked == []
+    assert _written(box.cfg)["server"]["served_name"] == "Qwen-27B"
+    assert [p["name"] for p in _peers(box.cfg)] == ["Swift-27B-Q8"]
+    assert trust.recorded_machine(box.cfg) is None
+    assert not model_library.library_path(box.cfg).exists()
+
+
+def test_init_cmd_keeps_no_discovery_of_its_own():
+    for gone in ("_discover_presets", "_found_models", "_peer_records", "_free_ports", "_no_binary_line",
+                 "PRIMARY_PORT"):
+        assert not hasattr(init_cmd, gone), gone
 
 
 def test_discovery_reports_a_server_ready_for_the_first_start(box):
@@ -198,7 +248,7 @@ def test_a_model_the_ledger_recorded_outranks_a_newer_one(box):
     cfg = _written(box.cfg)
     assert cfg["server"]["served_name"] == "Swift-27B-Q8"
     assert cfg["server"]["mmproj"] == str(box.proj)
-    assert [p["name"] for p in cfg["extra_endpoints"]] == ["Qwen-27B"]
+    assert [p["name"] for p in _peers(box.cfg)] == ["Qwen-27B"]
 
 
 def test_a_model_that_fits_outranks_a_newer_one_that_does_not(box, monkeypatch):
@@ -271,35 +321,12 @@ def test_peers_take_the_ports_above_the_primary_skipping_a_listener(box, fake_pr
 
     _exited(_init(box.cfg), 0)
 
-    cfg = _written(box.cfg)
+    cfg, peers = _written(box.cfg), _peers(box.cfg)
     assert cfg["server"]["port"] == 8081
-    assert [(p["name"], p["lifecycle"]["port"]) for p in cfg["extra_endpoints"]] == [
+    assert [(p["name"], p["lifecycle"]["port"]) for p in peers] == [
         ("Swift-27B-Q8", 8083), ("Third-7B", 8084)]
-    assert [p["base_url"] for p in cfg["extra_endpoints"]] == [
+    assert [p["base_url"] for p in peers] == [
         "http://127.0.0.1:8083/v1", "http://127.0.0.1:8084/v1"]
-
-
-def test_free_ports_skip_the_ports_a_record_uses_and_the_ones_listening(fake_proc):  # noqa: F811
-    fake_proc.listen(9002, inode=5, uid=os.getuid())
-
-    assert init_cmd._free_ports(9001, 3, taken={9001, 9004}) == [9003, 9005, 9006]
-    assert init_cmd._free_ports(9001, 0, taken=set()) == []
-    assert init_cmd._free_ports(65534, 5, taken=set()) == [65534, 65535]
-
-
-def test_peer_records_name_each_model_once_and_carry_only_what_launches_it(box):
-    found = init_cmd._found_models(box.cfg)
-    assert [m.name for m in found] == ["Qwen-27B", "Swift-27B-Q8"]
-
-    [peer] = init_cmd._peer_records(found[1:], start=9100, taken_names={"Swift-27B-Q8"},
-                                    taken_ports={9100})
-
-    assert peer.name == "Swift-27B-Q8-2" and peer.base_url == "http://127.0.0.1:9101/v1"
-    assert peer.provider_type == "llamacpp" and peer.gpu is True
-    life = peer.lifecycle
-    assert (life.runtime, life.model, life.mmproj, life.served_name, life.port, life.gpu) == (
-        "llamacpp", str(box.swift), str(box.proj), "Swift-27B-Q8-2", 9101, True)
-    assert not (life.binary or life.extra_args or life.env or life.config_ini or life.api_key_file)
 
 
 def test_two_files_with_one_preset_name_get_a_numbered_second(tmp_path, monkeypatch, fake_home):
@@ -313,10 +340,10 @@ def test_two_files_with_one_preset_name_get_a_numbered_second(tmp_path, monkeypa
     result = _init(tmp_path / "cfg", "--no-input")
 
     _exited(result, 0)
-    cfg = _written(tmp_path / "cfg")
+    cfg, peers = _written(tmp_path / "cfg"), _peers(tmp_path / "cfg")
     assert cfg["server"]["served_name"] == "m"
-    assert [p["name"] for p in cfg["extra_endpoints"]] == ["m-2"]
-    assert cfg["extra_endpoints"][0]["lifecycle"]["served_name"] == "m-2"
+    assert [p["name"] for p in peers] == ["m-2"]
+    assert peers[0]["lifecycle"]["served_name"] == "m-2"
 
 
 def test_a_filename_with_an_escape_is_shown_escaped_and_named_with_a_dash(tmp_path, monkeypatch,
@@ -334,9 +361,8 @@ def test_a_filename_with_an_escape_is_shown_escaped_and_named_with_a_dash(tmp_pa
     assert "\x1b" not in result.output and "\r" not in result.output
     assert "~/models/q\\x1b[2Jx.gguf" in result.output
     assert "~/models/plain\\x0aline.gguf" in result.output
-    cfg = _written(tmp_path / "cfg")
-    assert cfg["server"]["served_name"] == "q--2Jx"
-    assert [p["name"] for p in cfg["extra_endpoints"]] == ["plain-line"]
+    assert _written(tmp_path / "cfg")["server"]["served_name"] == "q--2Jx"
+    assert [p["name"] for p in _peers(tmp_path / "cfg")] == ["plain-line"]
 
 
 # ------------------------------------------------------------------ no llama-server (D-06, D-24, D-55)
@@ -350,7 +376,7 @@ def test_no_llama_server_on_path_declares_the_records_and_says_so_once(box, monk
 
     assert out == init_cmd.SetupResult(box.cfg / "config.yaml", False)
     cfg = _written(box.cfg)
-    assert "binary" not in cfg["server"] and "binary" not in cfg["extra_endpoints"][0]["lifecycle"]
+    assert "binary" not in cfg["server"] and "binary" not in _peers(box.cfg)[0]["lifecycle"]
     assert cfg["server"]["model"] == str(box.qwen)
 
 
@@ -386,11 +412,11 @@ def test_the_no_binary_line_names_every_root_holding_a_model_and_only_those():
         def __init__(self, real):
             self.real = real
 
-    line = init_cmd._no_binary_line([M("/data/a/x.gguf"), M("/data/b/y.gguf")],
+    line = library.no_binary_line([M("/data/a/x.gguf"), M("/data/b/y.gguf")],
                                     ["/data/a", "/data/b", "/data/empty"])
 
     assert line == "found 2 GGUFs under /data/a, /data/b; no llama-server \u2014 set server.binary"
-    assert init_cmd._no_binary_line([M("/data/a/x.gguf")], ["/data/a"]) == (
+    assert library.no_binary_line([M("/data/a/x.gguf")], ["/data/a"]) == (
         "found 1 GGUF under /data/a; no llama-server \u2014 set server.binary")
 
 
@@ -462,7 +488,7 @@ def test_an_ollama_that_answers_is_named_with_three_of_its_models(box, monkeypat
     assert (1.0, [11434]) in calls and (1.0, [1234]) in calls
     written = (box.cfg / "config.yaml").read_text(encoding="utf-8")
     assert not any(name in written for name in ("alpha", "beta", "gamma", "delta"))
-    assert "ollama" not in {p["provider_type"] for p in _written(box.cfg)["extra_endpoints"]}
+    assert "ollama" not in {p["provider_type"] for p in _peers(box.cfg)}
 
 
 def test_two_ollama_models_are_both_listed_and_lm_studio_has_its_own_line(box, monkeypatch):

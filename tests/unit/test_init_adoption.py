@@ -48,10 +48,14 @@ def _expected(cfg_dir: Path) -> list[dict]:
     the posture entries the machine's files give under those prefixes, in the record's order."""
     data = _written(cfg_dir)
     prefixes = {"server.": data["server"]}
-    for peer in data["extra_endpoints"]:
+    overrides = cfg_dir / "overrides.yaml"
+    peers = yaml.safe_load(overrides.read_text(encoding="utf-8")).get("extra_endpoints", []) \
+        if overrides.exists() else []
+    for peer in peers:
         prefixes[f"extra_endpoints.{peer['name']}.lifecycle."] = peer["lifecycle"]
     entries = [e for prefix, mapping in prefixes.items()
-               for e in trust._launch_entries("config.yaml", prefix, mapping)]
+               for e in trust._launch_entries("overrides.yaml" if prefix != "server." else "config.yaml",
+                                              prefix, mapping)]
     posture = {prefix + key for prefix in prefixes for key in ("bind_all", "require_api_key")}
     entries += [e for e in trust.machine_snapshot(cfg_dir)
                 if e["kind"] == trust.LAUNCH_KIND and e["name"] in posture]
