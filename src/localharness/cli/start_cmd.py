@@ -3468,6 +3468,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # through the same trust, and its accelerator lock starts on the server this start serves.
             machine_trust=machine_trust,
             serving_heavy=(record.spec, record.base_url) if record.spec is not None else None,
+            # The harness's own unit state sensed once above: the session's launches go through it too
+            # (D-19) and it never senses again.
+            unit_state=_unit,
         )
 
         repl_cell.append(repl)  # late binding: the supplier now answers repl.server_recovery()
