@@ -461,3 +461,14 @@ def test_free_accelerator_stops_only_what_the_caller_tracked_as_the_incumbent(wo
     assert freed is None
     assert world.stop_servers_called == [] and world.manager.verbs == []
     assert procfs.read_process(INCUMBENT_PID).__class__ is procfs.ProcRecord  # the CPU-only server still runs
+
+
+def test_a_swap_whose_incumbent_runs_in_the_unit_while_the_manager_cannot_be_asked_signals_nothing(world, monkeypatch):
+    unit_incumbent(world)
+    monkeypatch.setattr(units, "_run_manager", lambda *a, **kw: None)   # every question times out
+    outcome, rep = swap_now(world, heavy(world, world.primary), heavy(world, world.peer("flash-next"), "flash-next"))
+    assert outcome.stage == "free" and outcome.live is None and outcome.stopped is None
+    assert str(outcome.error) == lifecycle.UNIT_UNASKED_STOP_LINE.format(pid=INCUMBENT_PID, unit=UNIT)
+    assert rep.events == [] and world.events == []                   # nothing freed, nothing launched
+    assert rep.lines == [lifecycle.SWAP_FREE_FAILED.format(name="flash-next", exc=outcome.error)]
+    assert isinstance(procfs.read_process(INCUMBENT_PID), procfs.ProcRecord)   # still running, never signalled
