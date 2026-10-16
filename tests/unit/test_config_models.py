@@ -71,7 +71,8 @@ def test_permission_config_deny_patterns_default_count():
     # start; a config written before keeps it. Spec 20 §12 added 13 (revision 4): the user
     # manager's set/import/unset-environment, link, edit, set-property, add-wants, add-requires,
     # enable-with-a-path, the busctl / gdbus / dbus-send twins, and `localharness model --autostart`.
-    assert len(cfg.deny_patterns) == 45
+    # Revision 5 added 2: `reenable` and `preset` of a unit given by path.
+    assert len(cfg.deny_patterns) == 47
     assert "write(*/agents/*.yaml)" not in cfg.deny_patterns
 
 

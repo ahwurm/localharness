@@ -572,8 +572,11 @@ class PermissionConfig(BaseModel):
             # quote, `;`, `&`, `|`) — not by a literal space, which a tab or a quote would walk
             # past. A name that merely contains the letters (`credit.service`, `x-edit`) has a
             # name character next to them and is not matched. The environment verbs are not
-            # words of ordinary text and need no delimiter. `enable` is refused only with a `/`
-            # after it (an honest over-match: the list errs closed for what runs at login).
+            # words of ordinary text and need no delimiter. `enable`, `reenable` and `preset` are
+            # refused only with a `/` after them (an honest over-match: the list errs closed for
+            # what runs at login). `reenable PATH` and `preset PATH` install the same symlink under
+            # `default.target.wants` that `enable PATH` does; `reenable` has a name character before
+            # its `enable`, so the `enable` pattern alone never sees it.
             #
             # HONEST SCOPE: the gate covers the agent's tools only. A verb the shell assembles
             # at run time (quotes inside the word, a variable, an alias), python_exec and the
@@ -591,6 +594,9 @@ class PermissionConfig(BaseModel):
             "bash_exec(*gdbus*org.freedesktop.systemd1*)",
             "bash_exec(*dbus-send*org.freedesktop.systemd1*)",
             "bash_exec(*localharness*model*--autostart*)",
+            # defaults revision 5: the two verbs beside `enable PATH` that revision 4 missed
+            "bash_exec(*systemctl*[!A-Za-z0-9_.@-]reenable[!A-Za-z0-9_.@-]*/*)",
+            "bash_exec(*systemctl*[!A-Za-z0-9_.@-]preset[!A-Za-z0-9_.@-]*/*)",
         ],
         description=(
             "List of deny patterns. Each pattern is in the form: "
@@ -607,7 +613,7 @@ class PermissionConfig(BaseModel):
             "owner-only `localharness memory` CLI): an agent reads memory through its memory "
             "tools, never through a shell, and a stale store file must not re-enter as fact. "
             "They also refuse what changes what runs at the next login: the user manager's "
-            "environment, link, edit, set-property, add-wants/add-requires and enable-with-a-path "
+            "environment, link, edit, set-property, add-wants/add-requires and enable/reenable/preset-with-a-path "
             "verbs, their D-Bus twins, and `localharness model --autostart`. "
             "The deny list is evaluated after inheritance resolution — "
             "an agent's deny list is the UNION of its own list and all inherited lists. "

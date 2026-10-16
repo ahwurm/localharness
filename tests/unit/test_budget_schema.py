@@ -161,7 +161,7 @@ def test_the_init_nulls_stamp_and_its_revision():
     with pytest.raises(ValidationError):
         PermissionConfig(init_nulls_revision=-1)
     assert CURRENT_INIT_NULLS_REVISION == 2
-    assert CURRENT_DEFAULTS_REVISION == 4
+    assert CURRENT_DEFAULTS_REVISION == 5
 
 
 # --------------------------------------------------------------------------- workspace mark

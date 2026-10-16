@@ -52,9 +52,12 @@ COAUTHOR_EMAIL: str = "localharness.agent@gmail.com"
 #   4 -> the autostart bundle: the user manager's environment, link, edit, set-property,
 #        add-wants/add-requires and enable-with-a-path verbs, their D-Bus twins and
 #        localharness model --autostart (spec 20 §12, owner-confirmed 2026-10-13)
+#   5 -> the autostart bundle's two siblings of `enable PATH`: `reenable PATH` and `preset PATH`
+#        (a unit given by path installed under default.target.wants; `reenable` has a name
+#        character before its `enable`, so the revision-4 pattern never saw it)
 # A REMOVAL from the shipped list needs no bump: plan() only adds, and a config that already holds
 # the pattern keeps it (write(*/agents/*.yaml) left the defaults this way).
-CURRENT_DEFAULTS_REVISION: int = 4
+CURRENT_DEFAULTS_REVISION: int = 5
 
 # Revision of the one-shot step that clears the three values `init` used to dump (the two context
 # sizes and `max_actions`). It is its own stamp, recorded in `org.permissions.init_nulls_revision`:
