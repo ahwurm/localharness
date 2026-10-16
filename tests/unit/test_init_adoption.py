@@ -24,8 +24,10 @@ from tests.unit.test_init_core_setup import (
     _hermetic,  # noqa: F401  (autouse fixture; real sockets are refused by conftest)
     _init,
     _seed,
+    _silent,
     _terminal,
 )
+from tests.unit.interview_support import UNREACHED, scripted
 from tests.unit.test_init_discovery_records import (  # noqa: F401  (fixture)
     _written,
     box,
@@ -201,7 +203,8 @@ def test_a_kept_config_records_nothing(tmp_path, monkeypatch):
 def test_declining_to_save_anything_records_nothing(tmp_path, monkeypatch):
     _detect(monkeypatch, found=False)
     _terminal(monkeypatch)
-    _answers(monkeypatch, False)  # the guided setup is declined, and the skip asks for no address
+    _silent(monkeypatch)
+    scripted(monkeypatch, UNREACHED)  # no offer is answered, and the skip asks for no address
     monkeypatch.setattr(init_cmd, "Prompt", type("P", (), {"ask": staticmethod(lambda *a, **k: "")}))
 
     init_cmd.core_setup(str(tmp_path), endpoint=None, model=None, force=False, interactive=True)

@@ -206,30 +206,26 @@ def test_init_guided_setup_names_the_vllm_path_under_a_markup_named_dir(
     """Guided setup prints the vllm path it found, derived from the config dir — it died on a
     markup-named one after the model had already been downloaded. It launches nothing (D-39)."""
     import io
-    import sys
 
     from rich.console import Console
 
     import localharness.cli.init_cmd as init_cmd
     from localharness.provider import server as managed_server
+    from localharness.provider.refarch import DGX_SPARK
 
     buf = io.StringIO()
     monkeypatch.setattr(init_cmd, "console", Console(file=buf, width=400))
     cfg_dir = tmp_path / HOSTILE / "cfg"
     cfg_dir.mkdir(parents=True)
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(init_cmd.Confirm, "ask", staticmethod(lambda *a, **k: True))
-    monkeypatch.setattr(init_cmd.IntPrompt, "ask", staticmethod(lambda *a, **k: 1))
-    # An existing local path as the model: skips the HF-cache/download branch entirely.
-    monkeypatch.setattr(init_cmd.Prompt, "ask", staticmethod(lambda *a, **k: str(tmp_path)))
+    monkeypatch.setattr(managed_server, "is_model_cached", lambda _r: True)
     # find_vllm is stubbed only to skip the install.
     monkeypatch.setattr(managed_server, "find_vllm", lambda d: str(d / "server" / "venv" / "vllm"))
 
-    recs = init_cmd._guided_setup(cfg_dir)
+    recs = init_cmd._guided_setup(cfg_dir, DGX_SPARK)
 
     assert recs is not None and recs.launchable
     assert str(cfg_dir / "server" / "venv" / "vllm") in "\n".join(recs.lines), recs.lines
-    assert buf.getvalue()  # the install and model questions printed through the markup-safe console
+    assert buf.getvalue()  # the install and model lines printed through the markup-safe console
 
 
 def test_agent_list_names_an_unparseable_workspace_config(hostile_project, monkeypatch):

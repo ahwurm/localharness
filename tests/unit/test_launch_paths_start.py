@@ -8,13 +8,14 @@ the exposure phrase computed from the effective argv. No process is started and 
 from __future__ import annotations
 
 import asyncio
+import sys
 from types import SimpleNamespace
 
 import pytest
 import typer
 import yaml
 
-from localharness.cli import start_cmd
+from localharness.cli import library, start_cmd
 from localharness.cli.start_cmd import (
     HOST_CONVERTED,
     LaunchNotes,
@@ -99,7 +100,7 @@ async def test_a_declared_only_primary_prints_one_refusal_line_and_exits_1(tmp_p
     seen = _boot(tmp_path, monkeypatch, server_block=DECLARED_ONLY)
     assert await _drive(tmp_path) == 1
     lines = _err_text(seen.err)
-    assert [line for line in lines if "llama-server" in line] == [REFUSAL]
+    assert [line for line in lines if line.startswith("no llama-server")] == [REFUSAL]
     assert not [line for line in lines if "Error:" in line or "localharness doctor" in line]
     assert seen.started == []
 
@@ -107,7 +108,7 @@ async def test_a_declared_only_primary_prints_one_refusal_line_and_exits_1(tmp_p
 async def test_the_refusal_is_printed_verbatim_not_as_markup(tmp_path, monkeypatch):
     seen = _boot(tmp_path, monkeypatch, server_block=DECLARED_ONLY, path_binary="/opt/[bold]x/llama-server")
     assert await _drive(tmp_path) == 1
-    (args, kwargs), = [pair for pair in seen.err if "llama-server" in str(pair[0])]
+    (args, kwargs), = [pair for pair in seen.err if str(pair[0][0]).startswith("no llama-server")]
     assert args == (f"{REFUSAL} (PATH has /opt/[bold]x/llama-server)",)
     assert kwargs.get("markup") is False and kwargs.get("soft_wrap") is True
 
@@ -115,9 +116,26 @@ async def test_the_refusal_is_printed_verbatim_not_as_markup(tmp_path, monkeypat
 async def test_a_path_binary_is_named_in_the_refusal_text_only(tmp_path, monkeypatch):
     seen = _boot(tmp_path, monkeypatch, server_block=DECLARED_ONLY, path_binary="/opt/llama/llama-server")
     assert await _drive(tmp_path) == 1
-    assert [line for line in _err_text(seen.err) if "llama-server" in line] == [
+    assert [line for line in _err_text(seen.err) if line.startswith("no llama-server")] == [
         "no llama-server — set server.binary (PATH has /opt/llama/llama-server)"]
+    assert library.INSTALL_LINES["linux"] not in _err_text(seen.err)
     assert seen.started == []
+
+
+async def test_the_refusal_is_followed_by_the_install_line_when_no_llama_server_is_on_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    seen = _boot(tmp_path, monkeypatch, server_block=DECLARED_ONLY)
+    assert await _drive(tmp_path) == 1
+    lines = _err_text(seen.err)
+    assert lines[lines.index(REFUSAL) + 1] == library.INSTALL_LINES["linux"]
+    assert seen.err[lines.index(library.INSTALL_LINES["linux"])][1].get("markup") is False
+
+
+async def test_a_platform_without_an_install_line_prints_only_the_refusal(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    seen = _boot(tmp_path, monkeypatch, server_block=DECLARED_ONLY)
+    assert await _drive(tmp_path) == 1
+    assert _err_text(seen.err)[-1] == REFUSAL
 
 
 async def test_a_refusal_announces_nothing_and_never_activates(tmp_path, monkeypatch):

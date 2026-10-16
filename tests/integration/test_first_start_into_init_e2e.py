@@ -32,6 +32,7 @@ from localharness.cli.app import app
 from localharness.config.loader import ConfigLoader
 from localharness.provider.detector import DetectorResult
 from tests.integration.test_workspace_cli_surface_e2e import _offline_provider
+from tests.unit.interview_support import UNREACHED, scripted
 from tests.unit.test_init_cmd import _make_capability_result
 from tests.unit.test_start_cmd import _stub_start_boundaries
 
@@ -187,12 +188,13 @@ def test_a_first_start_without_a_terminal_keeps_the_welcome_hint_and_writes_noth
 
 @pytest.mark.parametrize("model", ["", "my-model"], ids=["nothing-saved", "saved-unchecked"])
 def test_a_first_start_that_finds_no_server_opens_no_session(tmp_path, monkeypatch, model):
-    """No server answered, the guided vLLM setup declined, skip for now: the setup's own next step
+    """No server answered, the download offer unanswered, skip for now: the setup's own next step
     is the last word. Saved unchecked leaves a config, but no server answered, so no session."""
     sessions = _machine(tmp_path, monkeypatch)
     _, client_cls = _server(monkeypatch, found=False)
     _terminal(monkeypatch)
-    _questions(monkeypatch, confirms=[False], prompts=["http://localhost:8081/v1", model])
+    _questions(monkeypatch, prompts=["http://localhost:8081/v1", model])
+    scripted(monkeypatch, UNREACHED)
 
     result = _start(tmp_path)
 
