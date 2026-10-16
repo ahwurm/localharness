@@ -8,9 +8,11 @@ import os
 
 import pytest
 from rich.console import Console
+from typer.testing import CliRunner
 
 import localharness.cli.init_cmd as init_cmd
-from localharness.cli import interview, library
+from localharness.cli import interview, library, start_cmd, workspace
+from localharness.cli.app import app
 from localharness.cli.interview import Answer
 from localharness.cli.workspace import shown_path
 from localharness.config import trust
@@ -352,3 +354,59 @@ def test_recorded_paths_are_the_models_and_projectors_both_files_name(tmp_path):
                                         (17 << 30, "17.0 GB"), (3 << 40, "3.0 TB")])
 def test_a_size_reads_in_the_largest_unit_it_fills(size, text):
     assert library.format_size(size) == text
+
+
+# ------------------------------------------------------------------ who counts as a person
+
+
+def test_a_tty_stdin_with_a_piped_stdout_is_not_a_person_so_init_asks_nothing_and_adopts_nothing(box, monkeypatch):
+    monkeypatch.setattr(workspace, "_stdout_is_a_terminal", lambda: False)
+    asked = scripted(monkeypatch)
+
+    result = _init(box.cfg)
+
+    _exited(result, 0)
+    assert asked.asked == []
+    assert _written(box.cfg)["server"]["model"] == str(box.qwen) and len(_peers(box.cfg)) == 1
+    assert trust.recorded_machine(box.cfg) is None
+    assert not model_library.library_path(box.cfg).exists()
+
+
+def test_a_tty_at_both_ends_asks_the_question(box):
+    _exited(_init(box.cfg), 0)
+
+    assert [a.question for a in box.asked.asked] == ["Set up these 2 models?"]
+
+
+def _first_start(box, monkeypatch, *flags: str) -> list:
+    ran: list = []
+
+    async def start_async(*args, **kw):
+        ran.append(kw.get("preset"))
+
+    monkeypatch.setattr(start_cmd, "_start_async", start_async)
+    result = CliRunner().invoke(app, ["start", "--config-dir", str(box.cfg), *flags])
+    _exited(result, 0)
+    return ran
+
+
+def test_a_first_start_on_a_terminal_asks_serving_the_preset_it_was_given(box, monkeypatch):
+    ran = _first_start(box, monkeypatch, "--preset", "Swift-27B-Q8")
+
+    [asked] = box.asked.asked
+    assert asked.options[0].label == "All, serving Swift-27B-Q8 first"
+    assert _written(box.cfg)["server"]["model"] == str(box.swift)
+    assert ran == ["Swift-27B-Q8"]
+
+
+def test_a_first_start_whose_stdout_is_piped_runs_no_setup(box, monkeypatch):
+    monkeypatch.setattr(workspace, "_stdout_is_a_terminal", lambda: False)
+
+    ran = _first_start(box, monkeypatch, "--preset", "Swift-27B-Q8")
+
+    assert box.asked.asked == [] and ran == ["Swift-27B-Q8"]
+    assert not (box.cfg / "config.yaml").exists() and not model_library.library_path(box.cfg).exists()
+
+
+def test_the_fold_left_no_predicate_of_its_own_in_init():
+    assert not hasattr(init_cmd, "is_interactive") and not hasattr(init_cmd, "_adopts")

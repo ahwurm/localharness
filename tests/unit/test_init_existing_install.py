@@ -437,7 +437,6 @@ def test_an_overlay_write_that_fails_keeps_the_config_and_says_nothing_was_writt
     config = box(live, "-c", "65536")
     monkeypatch.setattr(init_cmd.workspace, "write_overlay_validated", lambda *a, **k: False)
     _terminal(live.monkeypatch)
-    live.monkeypatch.setattr(init_cmd, "_adopts", lambda interactive: True)
 
     result = _init(live.cfg)
 

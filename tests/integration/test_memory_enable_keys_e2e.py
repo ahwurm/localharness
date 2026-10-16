@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from typer.testing import CliRunner
 
+from localharness.cli import workspace
 from localharness.cli.app import app
 from tests.unit.test_memory_config_surface import AGENT_MEMORY_PATHS
 from tests.unit.test_recall_scope_wiring import _record_memory_plugins
@@ -244,13 +245,14 @@ def test_a_fresh_init_starts_with_no_deprecation_line(tmp_path, monkeypatch, fak
     monkeypatch.setattr(init_cmd, "LLMClient", MagicMock(return_value=client))
     monkeypatch.setattr(init_cmd, "_detect_max_model_len", lambda *_: None)
     monkeypatch.setattr(init_cmd, "_identify_endpoint_provider", lambda *_: "unknown")
-    fake_sys = MagicMock()
-    fake_sys.stdin.isatty.return_value = True
-    monkeypatch.setattr(init_cmd, "sys", fake_sys)
     fake_confirm = MagicMock()
     fake_confirm.ask.side_effect = AssertionError("init asks no settings question (D-38)")
     monkeypatch.setattr(init_cmd, "Confirm", fake_confirm)
-    result = runner.invoke(app, ["init", "--config-dir", str(global_dir), "--force"])
+    with monkeypatch.context() as terminal:
+        terminal.setattr(workspace, "_stdin_is_a_terminal", lambda: True)
+        terminal.setattr(workspace, "_stdout_is_a_terminal", lambda: True)
+        terminal.delenv("LOCALHARNESS_COMMIT", raising=False)
+        result = runner.invoke(app, ["init", "--config-dir", str(global_dir), "--force"])
     assert result.exit_code == 0, result.output
     written = (global_dir / "config.yaml").read_text()
     assert written != stub_cfg and "memory_enabled" not in written, written

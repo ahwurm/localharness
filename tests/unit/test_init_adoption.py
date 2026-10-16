@@ -5,7 +5,7 @@ What `init` writes and prints in front of a person is read and accepted, so the 
 nothing about it. Adoption is built from the dicts that went into config.yaml, never from a fresh
 look at the disk, and only a run with a person behind it adopts: not `--no-input`, not a run
 without a terminal, not a command the shell tool started (it carries LOCALHARNESS_COMMIT). An init
-that wrote no record records nothing. The fake terminal is `init_cmd.sys` (P14).
+that wrote no record records nothing. The fake terminal is `_terminal`, which patches the two workspace checks.
 """
 from __future__ import annotations
 
@@ -172,15 +172,6 @@ def test_without_a_person_the_next_terminal_start_still_asks_once(box, monkeypat
     asked = answers(monkeypatch, True)
     decide_machine_trust(box.cfg, ask=True, launching=True)
     assert len(asked) == 1
-
-
-def test_adopts_is_interactive_and_no_marker(monkeypatch):
-    assert init_cmd._adopts(True) is True
-    assert init_cmd._adopts(False) is False
-    monkeypatch.setenv("LOCALHARNESS_COMMIT", "1")
-    assert init_cmd._adopts(True) is False
-    monkeypatch.setenv("LOCALHARNESS_COMMIT", "")
-    assert init_cmd._adopts(True) is False  # present at all: the shell tool started this
 
 
 # ------------------------------------------------------------------ an init that wrote no record
