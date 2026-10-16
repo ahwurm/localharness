@@ -227,6 +227,17 @@ def test_a_retry_shape_adds_its_clause_to_the_derived_words(tmp_path, box):
     assert "kv q8_0 (autosense.kv_cache_type) · " in first and "(retried: the full shape died)" in first
 
 
+@pytest.mark.parametrize("name, taken, expected", [
+    ("qwen", [], "serve_qwen"),
+    ("a-b", [], "serve_a_b"),
+    ("a_b", ["serve_a_b"], "serve_a_b_2"),
+    ("a b", ["serve_a_b", "serve_a_b_2"], "serve_a_b_3"),
+    ("é.1", [], "serve___1"),
+])
+def test_function_names_are_shell_safe_and_numbered_on_collision(name, taken, expected):
+    assert tuning.script_function_name(name, taken) == expected
+
+
 def test_the_scrub_names_shown_are_what_the_launch_scrubs():
     assert set(tuning.SCRUBBED_SHOWN) == {"llamacpp", "vllm"}
     for token in tuning.SCRUBBED_SHOWN["llamacpp"].split("/"):

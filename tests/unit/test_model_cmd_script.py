@@ -6,6 +6,7 @@ autosense seams). Nothing is started: the command senses, plans and prints, and 
 from __future__ import annotations
 
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ from localharness.config import trust
 from localharness.config.loader import ConfigLoader
 from localharness.provider import lifecycle, server, speed_stats
 from tests.unit.launch_support import record_opens
-from tests.unit.test_serve_cmd import attach_peer, llama_peer, ollama_peer, serve_world
+from tests.unit.test_serve_cmd import attach_peer, docker_peer, llama_peer, ollama_peer, serve_world
 
 WITHHELD = "change(s)"
 
@@ -107,6 +108,79 @@ def test_a_machine_with_no_record_withholds_every_launch_entry(world):
 
     assert result.exit_code == 2 and result.stdout == "" and "server.binary (config.yaml)" in result.stderr
     assert trust.recorded_machine(world.g) is None
+
+
+def test_all_emits_one_function_per_preset_primary_first_and_sh_accepts_it(world, tmp_path):
+    world.edit_config(lambda d: d["extra_endpoints"].append(llama_peer("flash-next", 8082)))
+    world.rerecord()
+
+    result = _run(world, "--script", "--all")
+
+    assert result.exit_code == 0, result.stderr
+    functions = [ln for ln in result.stdout.splitlines() if ln.endswith("() {")]
+    assert functions == ["serve_swift() {", "serve_flash_next() {"]
+    assert result.stdout.count("    exec ") == 2
+    path = tmp_path / "all.sh"
+    path.write_text(result.stdout + "\n")
+    assert subprocess.run(["sh", "-n", str(path)], capture_output=True).returncode == 0
+
+
+def test_all_is_in_the_same_order_every_run(world):
+    world.edit_config(lambda d: d["extra_endpoints"].extend([llama_peer("zz", 8082), llama_peer("aa", 8083)]))
+    world.rerecord()
+
+    first = _run(world, "--script", "--all").stdout
+
+    assert [ln for ln in first.splitlines() if ln.endswith("() {")] == [
+        "serve_swift() {", "serve_zz() {", "serve_aa() {"]
+    assert _run(world, "--script", "--all").stdout == first
+
+
+def test_two_names_that_make_one_function_are_numbered(world):
+    world.edit_config(lambda d: d["extra_endpoints"].extend([llama_peer("a-b", 8082), llama_peer("a_b", 8083)]))
+    world.rerecord()
+
+    result = _run(world, "--script", "--all")
+
+    assert [ln for ln in result.stdout.splitlines() if ln.endswith("() {")] == [
+        "serve_swift() {", "serve_a_b() {", "serve_a_b_2() {"]
+
+
+def test_all_says_why_a_record_is_not_rendered(world):
+    world.edit_config(lambda d: d["extra_endpoints"].extend(
+        [attach_peer("attached"), ollama_peer("oll"), llama_peer("moved", 8085)]))
+    world.rerecord()
+    world.edit_config(lambda d: d["extra_endpoints"][-1]["lifecycle"].update(model="/m/other.gguf"))
+
+    result = _run(world, "--script", "--all")
+
+    assert result.exit_code == 0, result.stderr
+    out = result.stdout.splitlines()
+    assert "# attached: not rendered — it launches nothing" in out
+    assert "# oll: ollama — not rendered" in out
+    assert ("# moved: not rendered — its record has changes you have not confirmed "
+            "(run localharness start on a terminal)") in out
+    assert [ln for ln in out if ln.endswith("() {")] == ["serve_swift() {"]
+
+
+def test_all_on_attach_only_records_prints_only_comments_and_exits_zero(world):
+    world.edit_config(lambda d: (d.pop("server"), d["extra_endpoints"].append(attach_peer("attached"))))
+    world.rerecord()
+
+    result = _run(world, "--script", "--all")
+
+    assert result.exit_code == 0, result.stderr
+    assert set(ln[:1] for ln in result.stdout.splitlines() if ln) == {"#"}
+    assert "# attached: not rendered — it launches nothing" in result.stdout
+
+
+def test_a_docker_peer_renders_as_a_function_with_its_run_line(world):
+    world.edit_config(lambda d: d["extra_endpoints"].append(docker_peer("dock", 8082)))
+    world.rerecord()
+
+    result = _run(world, "--script", "--all")
+
+    assert "serve_dock() {" in result.stdout and "    exec docker \\" in result.stdout
 
 
 def test_a_vllm_primary_renders_serve_with_the_vllm_key_variable_named(tmp_path, monkeypatch):
