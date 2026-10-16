@@ -27,7 +27,7 @@ import pytest
 from typer.testing import CliRunner
 
 import localharness.cli.init_cmd as init_cmd
-from localharness.cli import workspace
+from localharness.cli import library, workspace
 from localharness.cli.app import app
 from localharness.config.loader import ConfigLoader
 from localharness.provider.detector import DetectorResult
@@ -212,7 +212,8 @@ def test_a_configured_start_runs_no_setup(tmp_path, monkeypatch):
     detect = AsyncMock(side_effect=AssertionError("detection ran on a configured start"))
     monkeypatch.setattr(init_cmd, "detect_provider", detect)
     monkeypatch.setattr(init_cmd, "core_setup", _boom)
-    monkeypatch.setattr(workspace, "local_operator", _boom)
+    synced: list[dict] = []
+    monkeypatch.setattr(library, "sync", lambda *_a, **kw: synced.append(kw) or library.Sync())
     _terminal(monkeypatch)  # a terminal: with the config missing, the setup would run here
     _questions(monkeypatch)
 
@@ -223,6 +224,7 @@ def test_a_configured_start_runs_no_setup(tmp_path, monkeypatch):
     assert LEAD not in flat and "startup)" in flat, flat
     detect.assert_not_called()
     assert len(sessions) == 1
+    assert [(kw["scope"], "first_run" in kw) for kw in synced] == [("new", False)]
 
 
 @pytest.mark.parametrize(("channel", "refusal"), [
