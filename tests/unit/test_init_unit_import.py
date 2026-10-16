@@ -18,10 +18,12 @@ import localharness.cli.init_cmd as init_cmd
 from localharness.cli import library
 from localharness.provider import speed_stats
 from localharness.provider.detector import DetectorResult
+from tests.unit.interview_support import scripted
 from tests.unit.test_init_core_setup import (
     _exited,
     _hermetic,  # noqa: F401  (autouse fixture; real sockets are refused by conftest)
     _init,
+    _terminal,
 )
 from tests.unit.test_init_live_import import (  # noqa: F401  (fixtures and helpers)
     block_of,
@@ -93,6 +95,19 @@ def test_a_stopped_units_journal_becomes_the_primary_with_discoverys_other_model
     assert provider["default_model"] == "qwen-27b"
     assert provider["base_url"] == "http://127.0.0.1:8080/v1"
     assert provider["available_models"] == ["qwen-27b"]
+
+
+def test_a_stopped_unit_wins_silently_for_a_person_and_the_interview_is_never_asked(live):  # noqa: F811
+    _stopped_unit(live)
+    _terminal(live.monkeypatch)
+    asked = scripted(live.monkeypatch)
+
+    result = _init(live.cfg)
+
+    _exited(result, 0)
+    assert asked.asked == []
+    assert live.written()["server"]["model"] == str(live.model_a)
+    assert [p["lifecycle"]["model"] for p in live.peers()] == [str(live.model_b)]
 
 
 def test_the_block_reads_the_primary_its_flags_the_loopback_line_the_stopped_line_then_the_peer(live):  # noqa: F811
