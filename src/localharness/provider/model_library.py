@@ -293,7 +293,7 @@ def checkpoints(*, limit: int = DISCOVERY_MAX_FILES) -> tuple[Checkpoint, ...]:
     found: list[Checkpoint] = []
     for repo in repos[:limit]:
         rev = max(repo.revisions, key=lambda r: ("main" in r.refs, r.last_modified), default=None)
-        if rev is not None and _generates_text(Path(rev.snapshot_path)):
+        if rev is not None and _repo_ok(repo.repo_id) and _generates_text(Path(rev.snapshot_path)):
             found.append(Checkpoint(repo.repo_id, Path(rev.snapshot_path), os.path.realpath(rev.snapshot_path),
                                     repo.size_on_disk))
     return tuple(found)
