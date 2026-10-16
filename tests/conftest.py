@@ -96,6 +96,20 @@ def _no_model_download(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_hub_calls(monkeypatch):
+    """No test reaches the Hugging Face hub for a file or its metadata; a test that means to exercise
+    the call patches it itself."""
+    def refuse(name):
+        def call(*args, **kwargs):
+            raise RuntimeError(f"a test tried to call {name} on the Hugging Face hub")
+        return call
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", refuse("hf_hub_download"))
+    monkeypatch.setattr("huggingface_hub.HfApi.model_info", refuse("HfApi.model_info"))
+    monkeypatch.setattr("huggingface_hub.HfApi.get_paths_info", refuse("HfApi.get_paths_info"))
+
+
+@pytest.fixture(autouse=True)
 def _no_real_hf_cache_lookup(monkeypatch):
     """A vLLM launch looks a repo id's config.json up in the Hugging Face cache, and the suite's fake
     HOME does not cover an absolute HF_HOME inherited from the developer's shell. The lookup finds
