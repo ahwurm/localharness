@@ -11,6 +11,7 @@ import pytest
 import yaml
 from rich.console import Console
 
+import localharness.cli.init_cmd as init_cmd
 from localharness.cli import library
 from localharness.provider import model_library
 from tests.unit import test_init_discovery_records as world
@@ -189,3 +190,152 @@ def test_recorded_names_and_ports_are_the_merged_views(later):
     assert names == {"Qwen-27B", "Swift-27B-Q8"} and ports == {8081, 8082}
     overrides = later.cfg / "overrides.yaml"
     assert yaml.safe_load(overrides.read_text(encoding="utf-8"))["extra_endpoints"][0]["name"] in names
+
+
+# ------------------------------------------------------------------ init on an existing config
+
+
+@pytest.fixture
+def mixed(later, monkeypatch):
+    """B put off with Not now (seen), D declined, and a new C: what `init` finds on the second run."""
+    _add(later, "B", 3_000_000)
+    scripted(monkeypatch, "not-now")
+    _sync(later)
+    _add(later, "D", 2_000_000)
+    scripted(monkeypatch, "choose", set())
+    _sync(later)
+    assert _declined(later) == {"D.gguf"}
+    _add(later, "C", 5_000_000)
+    later.printed.truncate(0)
+    later.printed.seek(0)
+    return later
+
+
+def _flat_out(result) -> str:
+    return " ".join((result.output or "").split())
+
+
+def test_init_lists_every_unrecorded_model_asks_about_the_new_one_and_skips_keep_it(mixed, monkeypatch):
+    asked = scripted(monkeypatch, "set-up")
+
+    result = _init(mixed.cfg)
+
+    _exited(result, 0)
+    [question] = asked.asked
+    assert question.question == "New model C — set it up?"
+    assert [o.label for o in question.options] == ["Set it up", "Not now", "Choose which"]
+    shown = " ".join(mixed.printed.getvalue().split())
+    assert "• B (" in shown and "• D (" in shown and "• C (" in shown and shown.count("(declined earlier)") == 1
+    assert "Added 1; kept config.yaml." in _flat_out(result)
+    assert [p["name"] for p in _peers(mixed.cfg)] == ["Swift-27B-Q8", "C"]
+    assert _declined(mixed) == {"D.gguf"} and "B.gguf" in " ".join(_entries(mixed))
+
+
+def test_init_choose_which_lists_all_three_preselects_the_new_one_and_clears_a_selected_decline(mixed, monkeypatch):
+    asked = scripted(monkeypatch, "choose", {_key(mixed, "C"), _key(mixed, "D")})
+
+    result = _init(mixed.cfg)
+
+    _exited(result, 0)
+    pick = asked.asked[1]
+    assert [o.label for o in pick.options] == ["C", "B", "D (declined earlier)"]
+    assert pick.default == {_key(mixed, "C")}
+    assert [p["name"] for p in _peers(mixed.cfg)] == ["Swift-27B-Q8", "C", "D"]
+    assert _declined(mixed) == {"B.gguf"}
+    assert "Added 2; kept config.yaml." in _flat_out(result)
+    assert "Not set up: B — localharness model --setup lists them" in mixed.printed.getvalue()
+
+
+def test_init_with_nothing_new_asks_no_interview_question_and_keep_it_is_asked_as_today(mixed, monkeypatch):
+    (mixed.root / "C.gguf").unlink()
+    asked = scripted(monkeypatch)
+    from tests.unit.test_init_core_setup import _answers
+    confirm = _answers(monkeypatch, True)
+
+    result = _init(mixed.cfg)
+
+    _exited(result, 0)
+    assert asked.asked == [] and confirm.ask.call_count == 1 and "Kept" in _flat_out(result)
+    assert len(_peers(mixed.cfg)) == 1
+
+
+def test_init_over_a_missing_library_baselines_it_and_asks_nothing_new(later, monkeypatch):
+    model_library.library_path(later.cfg).unlink()
+    b = _add(later, "B")
+    asked = scripted(monkeypatch)
+    from tests.unit.test_init_core_setup import _answers
+    confirm = _answers(monkeypatch, True)
+
+    _exited(_init(later.cfg), 0)
+
+    assert asked.asked == [] and confirm.ask.call_count == 1
+    assert _entries(later)[os.path.realpath(b)]["declined"] is False
+
+
+def _spy(monkeypatch) -> list[dict]:
+    calls: list[dict] = []
+    real = library.sync
+
+    def spy(*args, **kw):
+        calls.append(kw)
+        return real(*args, **kw)
+
+    monkeypatch.setattr(library, "sync", spy)
+    return calls
+
+
+@pytest.mark.parametrize("answering", [False, True], ids=["no-server", "server-answering"])
+def test_the_existing_config_call_site_is_reached_with_a_server_answering_and_without(later, monkeypatch, answering):
+    from unittest.mock import AsyncMock
+
+    from localharness.provider.detector import DetectorResult
+    from tests.unit.test_init_core_setup import _answers
+    if answering:
+        found = DetectorResult(found=True, provider_type="llamacpp", base_url="http://127.0.0.1:8081/v1",
+                               models=["Qwen-27B"], suggested_model="Qwen-27B", probe_duration_ms=0.0)
+        monkeypatch.setattr(init_cmd, "detect_provider", AsyncMock(return_value=found))
+    _answers(monkeypatch, True)
+    scripted(monkeypatch)
+    calls = _spy(monkeypatch)
+
+    _exited(_init(later.cfg), 0)
+
+    assert [(c["scope"], c["person"], "first_run" in c) for c in calls] == [("all", True, False)]
+
+
+def test_an_explicit_change_asks_the_library_nothing(later, monkeypatch):
+    from tests.unit.test_init_core_setup import _detect, _silent
+    _detect(monkeypatch, "test-model:7b", "new-model")
+    _silent(monkeypatch)
+    _add(later, "C")
+    calls = _spy(monkeypatch)
+    scripted(monkeypatch)
+
+    _exited(_init(later.cfg, "--model", "new-model"), 0)
+
+    assert calls == []
+
+
+def test_an_unreadable_config_exits_1_before_the_library_is_asked(later, monkeypatch):
+    (later.cfg / "config.yaml").write_text("provider: [\n", encoding="utf-8")
+    calls = _spy(monkeypatch)
+    scripted(monkeypatch)
+
+    _exited(_init(later.cfg), 1)
+
+    assert calls == []
+
+
+def test_init_without_a_person_walks_nothing_appends_nothing_and_keeps_the_config(later, monkeypatch):
+    _add(later, "C")
+    scripted(monkeypatch)
+
+    def walk(*_a, **_k):
+        raise AssertionError("walk_ggufs called")
+
+    monkeypatch.setattr(model_library, "walk_ggufs", walk)
+
+    result = _init(later.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert "Kept" in _flat_out(result) and len(_peers(later.cfg)) == 1
