@@ -36,12 +36,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
+from typing import NamedTuple
 
 from localharness import resolved_version
 from localharness.core.private_files import (
     atomic_write_text, open_private_dir, open_regular, read_private_text,
 )
 from localharness.core.which import which_outside_cwd
+from localharness.provider import procfs
 from localharness.provider.procfs import HARNESS_UNIT, LaunchIdentity, ProcRecord, port_of
 from localharness.provider.server import server_dir, strip_url_credentials
 
@@ -53,6 +55,7 @@ __all__ = [
     "BOOT_MARKER_NAME", "Marker", "UnitRuntimeState", "remove_marker",
     "TARGET_NAME", "TARGET_NAME_PATTERN", "TARGET_CAP", "MARKER_CAP", "MARKER_CAUSES",
     "MARKER_SHAPES", "MARKER_DROPS", "write_target", "read_target", "remove_target", "read_marker",
+    "TARGET_BODY_PATTERN", "InFlight", "in_flight_request", "in_flight_target",
     "write_marker", "PRIMARY_TARGET", "TIMEOUT_START_SECONDS", "UNIT_VALUE_PATTERN", "UNIT_HEADER_PREFIX",
     "UNIT_VERSION_PATTERN", "CAPTURED_NAMES", "CapturedShell", "harness_unit_path", "harness_home",
     "unit_config_dir", "render_harness_unit", "captured_env", "capture_shell_env", "unit_serves",
@@ -90,6 +93,11 @@ CAPTURED_NAMES = ("PATH", "HF_HOME", "LD_LIBRARY_PATH")
 UNIT_HEADER_PREFIX = "# written by localharness "
 UNIT_VERSION_PATTERN = re.compile(r"[0-9A-Za-z.+-]{1,64}")
 TARGET_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+:-]{0,127}")
+TARGET_BODY_PATTERN = re.compile(
+    rf"({TARGET_NAME_PATTERN.pattern})(?: ([1-9][0-9]{{0,9}}) ([0-9]{{1,20}}))?")
+"""The body of `unit-target`: a record name (group 1), optionally followed by one space, the requesting
+process's pid (group 2, no leading zero) and its start time (group 3). The two tokens make the in-flight form
+(R-14-38); without them the body is the plain form."""
 TARGET_CAP = 256
 MARKER_CAP = 4096
 MARKER_CAUSES = frozenset({"death", "remembered", "none"})
@@ -640,8 +648,14 @@ def remove_marker(config_dir) -> bool:
 # ------------------------------------------------------------------------------ the unit target
 
 
-def write_target(config_dir, name: str) -> None:
+def write_target(config_dir, name: str, *, in_flight: bool = False) -> None:
     """Record `name` (a launch-record name) as the unit's target in `<server dir>/unit-target`.
+
+    Two forms share the file. The plain form is `<name>`. The in-flight form, `in_flight=True`, is
+    `<name> <pid> <start>` naming THIS process (`os.getpid()` and its start time, read through
+    `procfs.read_process`): `UnitStrategy.activate` writes it while the restart it requested is under way,
+    and the ladder ranks it above `pending_preset` only while that process lives (R-14-38). A process that
+    cannot read its own record raises OSError before anything is written, so the previous file stays.
 
     ValueError when `name` is not one record name (`TARGET_NAME_PATTERN`). The file is written
     through `atomic_write_text(dir_fd=)` inside the no-follow server directory, created if missing:
@@ -650,25 +664,73 @@ def write_target(config_dir, name: str) -> None:
     pins that."""
     if not isinstance(name, str) or not TARGET_NAME_PATTERN.fullmatch(name):
         raise ValueError(f"not a record name: {name!r}")
+    body = name
+    if in_flight:
+        own = procfs.read_process(os.getpid())
+        if not isinstance(own, ProcRecord):
+            raise OSError(f"cannot name this process for unit-target: {own.reason}")
+        body = f"{name} {own.pid} {own.start_time}"
     fd = _open_server_dir(config_dir, create=True)
     try:
-        atomic_write_text(TARGET_NAME, name + "\n", dir_fd=fd)
+        atomic_write_text(TARGET_NAME, body + "\n", dir_fd=fd)
     finally:
         os.close(fd)
 
 
-def read_target(config_dir) -> str | None:
-    """The record name in `<server dir>/unit-target`, or None: no file, no directory, a link, a FIFO,
-    more than `TARGET_CAP` bytes, bytes that are not UTF-8, or a body that is not one record name.
-    The ladder reads it (and still resolves it against fingerprinted records)."""
+def _read_target_match(config_dir) -> "re.Match[str] | None":
+    """The `TARGET_BODY_PATTERN` match of the `unit-target` body, or None: no file, no directory, a link, a
+    FIFO, more than `TARGET_CAP` bytes, bytes that are not UTF-8, or a body of neither form."""
     try:
         fd = _open_server_dir(config_dir, create=False)
     except OSError:
         return None
     try:
-        return read_private_text(TARGET_NAME, dir_fd=fd, cap=TARGET_CAP, pattern=TARGET_NAME_PATTERN)
+        text = read_private_text(TARGET_NAME, dir_fd=fd, cap=TARGET_CAP, pattern=TARGET_BODY_PATTERN)
     finally:
         os.close(fd)
+    return TARGET_BODY_PATTERN.fullmatch(text) if text is not None else None
+
+
+def read_target(config_dir) -> str | None:
+    """The record name in `<server dir>/unit-target` (either form), or None: no file, no directory, a link,
+    a FIFO, more than `TARGET_CAP` bytes, bytes that are not UTF-8, or a body that is neither one record name
+    nor a name with a pid and a start time. The ladder reads it (and still resolves it against fingerprinted
+    records)."""
+    found = _read_target_match(config_dir)
+    return found.group(1) if found is not None else None
+
+
+class InFlight(NamedTuple):
+    """A live in-flight request: the record `name`, and the requesting process's `pid` and `start` time."""
+    name: str
+    pid: int
+    start: int
+
+
+def in_flight_request(config_dir) -> InFlight | None:
+    """The in-flight request in `unit-target`, only while its requester still runs: the body is the in-flight
+    form AND `procfs.read_process(pid)` is a record whose `start_time` equals the recorded one. A gone
+    requester, a reused pid, a process of another uid (pid 1, a kernel thread, a system daemon), a plain body
+    and every unreadable file are None, so the file then reads as the plain rung.
+
+    The server directory is not a protected path, so the agent's own write tool can plant this form naming a
+    live process of the owner; it then outranks `pending_preset` until that process ends or the next swap
+    overwrites it (R-14-45, an open owner decision). This reader is how `--autostart status` and the doctor
+    row name the entry and its requester instead of leaving it silent."""
+    found = _read_target_match(config_dir)
+    if found is None or found.group(2) is None:
+        return None
+    pid, start = int(found.group(2)), int(found.group(3))
+    record = procfs.read_process(pid)
+    if not isinstance(record, ProcRecord) or record.start_time != start:
+        return None
+    return InFlight(found.group(1), pid, start)
+
+
+def in_flight_target(config_dir) -> str | None:
+    """The record name of the live in-flight request (`in_flight_request`), else None."""
+    request = in_flight_request(config_dir)
+    return request.name if request is not None else None
 
 
 def remove_target(config_dir) -> bool:

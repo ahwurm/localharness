@@ -1423,14 +1423,18 @@ class UnitStrategy:
         In order, with nothing written before the refusals: the record check (`spec` must be the record
         this strategy was chosen for, with the model and served name it had, else `UNIT_TYPED_LINE`; a peer
         name `unit-target` cannot hold is `UNIT_NAME_LINE`), the launch decision (`LaunchRefused`), the
-        local plan for the launch line (`on_plan`), then `units.write_target`, the own-unit re-check,
+        local plan for the launch line (`on_plan`), then `units.write_target(in_flight=True)`, the own-unit re-check,
         `reset-failed`, `restart` (each verb off the event loop), the loan of the launch lock until the
         unit's `serve` has recorded, and `server.wait_ready(unit_poll=)`. The wait tolerates exactly one
         automatic restart of the unit when the plan's boot retry would change the launch (the unit's own
         retry) and none otherwise; a second rise of `NRestarts` or `ActiveState=failed` raises a
         RuntimeError carrying the SCRUBBED journal tail of that invocation and a reference line, never a raw
-        line. A cancellation, or a refusal before the restart, puts `unit-target` back as it was (RULING W3,
-        R-14-22). This never starts a process and never stops one outside the unit."""
+        line. `unit-target` carries `<name> <pid> <start>` (this process) from the write on, so the ladder serves
+        the unit's restart the record asked for even beside an older `pending_preset` (R-14-38); ONE `finally`
+        in this body settles it on every exit (R-14-41, RULING W3): a cancellation, or a refusal or failing
+        verb before the restart, puts the prior value back (plain), and every other exit, success included,
+        leaves the plain name; an error out of the wait propagates as raised. This never starts a process and
+        never stops one outside the unit."""
         if spec is not self._spec or (spec.model, spec.served_name) != self._launch:
             raise server.LaunchRefused(UNIT_TYPED_LINE.format(path=spec.model))
         name = units.PRIMARY_TARGET if peer is None else peer
@@ -1455,22 +1459,28 @@ class UnitStrategy:
 
         prior = units.read_target(config_dir)
         try:
-            units.write_target(config_dir, name)
+            units.write_target(config_dir, name, in_flight=True)
         except OSError as exc:
+            # Nothing was written (or the previous file stands) and nothing was restarted.
             raise RuntimeError(
                 f"could not record the unit target: {getattr(exc, 'strerror', None) or type(exc).__name__}"
             ) from None
-        restarted = False
+        # From here on the file names this process as the requester (the in-flight form, R-14-38). The one
+        # `finally` below settles it on EVERY exit (R-14-41): the prior value, plain, while no restart was
+        # asked (or on a cancellation); the target's plain name otherwise.
+        restore_prior = True
         try:
             if await asyncio.to_thread(units.harness_unit_state, config_dir) is None:
                 raw = await asyncio.to_thread(units.unit_runtime_state)
                 why = units.harness_unit_failure(raw, config_dir) or "could not be confirmed as the harness's own"
                 raise server.LaunchRefused(UNIT_FOREIGN_LINE.format(unit=procfs.HARNESS_UNIT, why=why))
             for verb in ("reset-failed", "restart"):
+                if verb == "restart":
+                    restore_prior = False  # from the moment the verb is issued the unit may be serving `name`
                 done = await asyncio.to_thread(units.systemctl_user, verb, procfs.HARNESS_UNIT)
                 if done is None or done.code != 0:
+                    restore_prior = True  # the verb failed: nothing was restarted
                     raise RuntimeError(f"{verb} of {procfs.HARNESS_UNIT} failed: {_manager_words(done, api_key)}")
-            restarted = True
             after = await asyncio.to_thread(units.unit_runtime_state)
             base = after.n_restarts if after is not None else 0
             identity = record_identity(spec)
@@ -1550,24 +1560,23 @@ class UnitStrategy:
                 total_bytes=sensed.memory.total_bytes if sensed is not None and sensed.memory is not None else None)
             return live
         except asyncio.CancelledError:
-            try:
-                if prior is not None:
-                    units.write_target(config_dir, prior)
-                else:
-                    units.remove_target(config_dir)
-            except OSError:
-                log.debug("could not restore unit-target after a cancelled launch", exc_info=True)
+            restore_prior = True  # the person walked away: whatever the unit now runs, the prior stands
             raise
-        except Exception:
-            if not restarted:  # nothing was launched: the in-flight store must not claim otherwise
-                try:
+        finally:
+            try:
+                if restore_prior:
                     if prior is not None:
                         units.write_target(config_dir, prior)
                     else:
                         units.remove_target(config_dir)
+                else:
+                    units.write_target(config_dir, name)
+            except OSError:
+                log.debug("could not settle unit-target", exc_info=True)
+                try:  # an unlink needs no space: the in-flight form must not outlive this call
+                    units.remove_target(config_dir)
                 except OSError:
-                    log.debug("could not restore unit-target after a refused launch", exc_info=True)
-            raise
+                    log.debug("could not remove unit-target", exc_info=True)
 
     def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
         return self._inner.recovery_config_dir(config_dir)

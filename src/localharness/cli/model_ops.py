@@ -34,7 +34,9 @@ from localharness.config.redact import secret_values, validation_text
 from localharness.config.trust import LAUNCH_KIND, LAUNCH_MODEL_KIND
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
-from localharness.provider.units import TARGET_NAME, read_target, remove_target
+from localharness.provider.units import (
+    PRIMARY_TARGET, TARGET_NAME, in_flight_target, read_target, remove_target,
+)
 from localharness.registry import set_value_in_dict
 
 if TYPE_CHECKING:
@@ -718,6 +720,18 @@ def _stored(harness: Any, trust: Any, store: str, name: str, config_dir: Any) ->
     return got
 
 
+def _stored_target(harness: Any, trust: Any, name: str, config_dir: Any) -> Any:
+    """``_stored`` for a ``unit-target`` name (either rung): the reserved ``server:`` token (what
+    ``UnitStrategy`` writes for the primary) is the primary record, refused as withheld when the primary
+    is; any other name resolves as a preset name does."""
+    if name == PRIMARY_TARGET:
+        primary = _primary_record(harness)
+        if record_withheld(trust, primary):
+            return _withheld_refusal(trust, primary, config_dir)
+        return primary
+    return _stored(harness, trust, RUNG_UNIT, name, config_dir)
+
+
 def _active_record(harness: Any) -> ServingRecord | None:
     """The record ``active_endpoint`` names: by ``base_url``, then by a ``model`` exactly one record
     serves. None when it matches nothing (the rung is passed over; the store is left as it is)."""
@@ -740,15 +754,34 @@ def _active_record(harness: Any) -> ServingRecord | None:
 def resolve_serving(
     harness: Any, trust: MachineTrust, preset: str | None, *, config_dir: Any = None
 ) -> Serving | ServingRefusal:
-    """Walk the ladder: ``--preset`` > ``pending_preset`` > ``unit-target`` > ``active_endpoint`` >
-    ``server:``. Writes nothing; a stored selection that names nothing comes back on ``Serving.gone``
-    for the caller to pass to ``clear_gone`` (R-13-11)."""
+    """Walk the ladder: ``--preset`` > ``unit-target`` in flight (its requester alive) > ``pending_preset`` >
+    ``unit-target`` > ``active_endpoint`` > ``server:``. Writes nothing; a stored selection that names
+    nothing comes back on ``Serving.gone`` for the caller to pass to ``clear_gone`` (R-13-11).
+
+    The in-flight rung (R-14-38, spec 20 §8.1): while ``UnitStrategy.activate`` restarts the harness unit
+    it writes ``unit-target`` as ``<name> <pid> <start>``; that name outranks ``pending_preset`` only while
+    the requesting process still runs, so the restart a swap or a restore asked for serves what it asked
+    for. Once ``activate`` ends, or the requester is gone (no requester survives a boot), the same file is
+    the plain ``unit-target`` rung below ``pending_preset``, as the spec orders a boot. The ``server:``
+    token names the primary record on both ``unit-target`` rungs."""
     gone: list[GoneSelection] = []
     if preset is not None:
         got = resolve_preset(harness, trust, preset, config_dir=config_dir)
         if isinstance(got, ServingRefusal):
             return got
         return Serving(got, RUNG_PRESET, True)
+    target_dir = global_config_dir(config_dir)
+    skip_plain = False
+    in_flight = in_flight_target(target_dir)
+    if in_flight:
+        got = _stored_target(harness, trust, in_flight, config_dir)
+        if isinstance(got, GoneSelection):
+            gone.append(got)
+            skip_plain = True  # the same file: reported once, never twice
+        elif isinstance(got, ServingRefusal):
+            return got
+        else:
+            return Serving(got, RUNG_UNIT, False, tuple(gone))
     pending = getattr(harness, "pending_preset", None)
     if pending:
         got = _stored(harness, trust, RUNG_PENDING, pending, config_dir)
@@ -758,9 +791,9 @@ def resolve_serving(
             return got
         else:
             return Serving(got, RUNG_PENDING, True, tuple(gone))
-    target = read_target(global_config_dir(config_dir))
+    target = None if skip_plain else read_target(target_dir)
     if target:
-        got = _stored(harness, trust, RUNG_UNIT, target, config_dir)
+        got = _stored_target(harness, trust, target, config_dir)
         if isinstance(got, GoneSelection):
             gone.append(got)
         elif isinstance(got, ServingRefusal):
