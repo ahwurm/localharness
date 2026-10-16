@@ -7,6 +7,7 @@ import io
 import os
 
 import pytest
+import yaml
 from rich.console import Console
 from typer.testing import CliRunner
 
@@ -410,3 +411,51 @@ def test_a_first_start_whose_stdout_is_piped_runs_no_setup(box, monkeypatch):
 
 def test_the_fold_left_no_predicate_of_its_own_in_init():
     assert not hasattr(init_cmd, "is_interactive") and not hasattr(init_cmd, "_adopts")
+
+
+# ------------------------------------------------------------------ the first run's other edges
+
+
+def test_force_clears_extra_endpoints_with_the_other_saved_choices_and_lists_every_model_again(box):
+    _exited(_init(box.cfg), 0)
+    overrides = box.cfg / "overrides.yaml"
+    saved = yaml.safe_load(overrides.read_text(encoding="utf-8"))
+    saved["provider"] = {"default_model": "old"}
+    overrides.write_text(yaml.safe_dump(saved), encoding="utf-8")
+
+    result = _init(box.cfg, "--force")
+
+    _exited(result, 0)
+    assert "Cleared the saved model and server choices" in _flat(result)
+    cleared = _flat(result).split("Cleared the saved model and server choices", 1)[1].split(").", 1)[0]
+    assert "extra_endpoints" in cleared and "provider.default_model" in cleared
+    assert [a.question for a in box.asked.asked] == ["Set up these 2 models?"] * 2
+    assert [p["lifecycle"]["model"] for p in _peers(box.cfg)] == [str(box.swift)]
+    assert "provider" not in yaml.safe_load(overrides.read_text(encoding="utf-8"))
+
+
+def test_a_failed_peer_write_adopts_the_servers_entries_and_no_peers(box, monkeypatch):
+    monkeypatch.setattr(library, "append_peers", lambda *a, **k: None)
+
+    result = _init(box.cfg)
+
+    _exited(result, 0)
+    assert library.PEERS_NOT_WRITTEN_LINE.format(n=1) in _flat(result)
+    assert _written(box.cfg)["server"]["model"] == str(box.qwen) and _peers(box.cfg) == []
+    names = [e["name"] for e in trust.recorded_machine(box.cfg)["entries"]]
+    assert any(n.startswith("server.") for n in names) and not any(n.startswith("extra_endpoints.") for n in names)
+    entries = model_library.Library.load(model_library.library_path(box.cfg)).entries
+    assert os.path.realpath(box.swift) in entries and os.path.realpath(box.qwen) not in entries
+    assert not entries[os.path.realpath(box.swift)].declined
+
+
+def test_baseline_marks_every_file_seen_for_a_person_and_writes_nothing_without_one(box):
+    box.cfg.mkdir()
+    library.baseline(box.cfg, person=False)
+    assert not model_library.library_path(box.cfg).exists()
+
+    library.baseline(box.cfg, person=True)
+
+    entries = model_library.Library.load(model_library.library_path(box.cfg)).entries
+    assert {os.path.realpath(p) for p in (box.qwen, box.swift, box.proj)} == entries.keys()
+    assert box.asked.asked == []

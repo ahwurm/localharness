@@ -19,7 +19,8 @@ import pytest
 
 import localharness.cli.init_cmd as init_cmd
 from localharness.config import trust
-from localharness.provider import procfs
+from localharness.provider import model_library, procfs
+from tests.unit.interview_support import scripted
 from tests.unit.procfs_support import fake_proc  # noqa: F401  (fixture)
 from tests.unit.test_init_cmd import _make_capability_result
 from tests.unit.test_init_core_setup import (
@@ -294,3 +295,49 @@ def test_an_unkeyed_ollama_keeps_todays_attach_path(live, monkeypatch):
 
     _exited(result, 0)
     assert probed and not attach_lines(result)
+
+
+# ------------------------------------------------------------------ the library after a first run that attached
+
+
+def _library(live) -> dict:
+    return model_library.Library.load(model_library.library_path(live.cfg)).entries
+
+
+def _every_file_seen(live) -> None:
+    entries = _library(live)
+    assert entries.keys() == {os.path.realpath(live.model_a), os.path.realpath(live.model_b)}
+    assert not any(e.declined for e in entries.values())
+
+
+def test_an_attached_first_run_baselines_the_library_for_a_person_and_asks_nothing(live):
+    live.serve("--ssl-key-file", "/k")
+    _terminal(live.monkeypatch)
+    asked = scripted(live.monkeypatch)
+
+    result = _init(live.cfg)
+
+    _exited(result, 0)
+    assert asked.asked == [] and attach_lines(result)
+    _every_file_seen(live)
+
+
+def test_an_attached_first_run_without_a_person_writes_no_library_file(live):
+    live.serve("--ssl-key-file", "/k")
+
+    _exited(_init(live.cfg, "--no-input"), 0)
+
+    assert not model_library.library_path(live.cfg).exists()
+
+
+def test_a_plain_detected_server_baselines_the_library_for_a_person_and_the_receipt_says_later(live, monkeypatch):
+    live.fake_proc.listen(8080, INODE, 0)
+    monkeypatch.setattr(init_cmd, "_probe_capabilities", lambda result, model: _make_capability_result())
+    _terminal(live.monkeypatch)
+    asked = scripted(live.monkeypatch)
+
+    result = _init(live.cfg)
+
+    _exited(result, 0)
+    assert asked.asked == [] and "Later:" in result.output
+    _every_file_seen(live)
