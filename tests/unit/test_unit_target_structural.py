@@ -1,12 +1,14 @@
 """One writer of the `unit-target` store, and `private_files` stays below the packages above it.
 
-RULING W3: `units.write_target` is called only from `UnitStrategy.activate` in provider/lifecycle.py
-(it arrives with the autostart unit; today there is no caller and the pin holds vacuously). Nothing
+RULING W3: `units.write_target` is called only from `UnitStrategy.activate` in provider/lifecycle.py, and
+the cancellation rollback lives in `activate`'s OWN body: `activate` holds at least two `write_target` calls
+(the write and the rollback), so a rollback moved into a helper, a method or a closure nested in `activate`
+is reported (the checker takes the nearest enclosing function, and a closure is not `activate`). Nothing
 else spells the store's path (D-06), and `core/private_files.py` imports nothing from
 `localharness.config`, `.provider` or `.cli` (D-28: it sits below them).
 
 Mutation-checked: the synthetic sources at the bottom fail if a checker stops looking at the
-enclosing function / class or at the import list.
+enclosing function / class, at the number of calls in `activate`, or at the import list.
 """
 from __future__ import annotations
 
@@ -58,6 +60,18 @@ def stray_target_writers(source: str, module: Path) -> list[tuple[str, int]]:
     return out
 
 
+def activate_write_count(source: str, module: Path) -> int:
+    """How many `write_target` calls sit directly in `UnitStrategy.activate`'s own body of provider/lifecycle.py
+    (a call in a closure nested in it is another function and is not counted)."""
+    if module != LIFECYCLE:
+        return 0
+    tree = ast.parse(source)
+    parents = _parents(tree)
+    return sum(1 for node in ast.walk(tree)
+               if isinstance(node, ast.Call) and _name(node.func) == "write_target"
+               and _scope(node, parents) == ("activate", "UnitStrategy"))
+
+
 def target_name_literals(source: str) -> list[int]:
     """Line numbers of the string constant "unit-target" (a docstring that merely mentions it is not equal to it)."""
     return [n.lineno for n in ast.walk(ast.parse(source))
@@ -84,6 +98,12 @@ def test_write_target_is_called_only_from_unit_strategy_activate():
     for path in sorted(SRC.rglob("*.py")):
         found += stray_target_writers(path.read_text(), path.relative_to(SRC))
     assert found == []
+
+
+def test_activate_holds_the_write_and_the_rollback_in_its_own_body():
+    """Non-vacuous: `UnitStrategy.activate` really does write (RULING W3's one caller) and roll back."""
+    count = activate_write_count((SRC / LIFECYCLE).read_text(), LIFECYCLE)
+    assert count >= 2, f"UnitStrategy.activate holds {count} write_target call(s); the write and the rollback are two"
 
 
 def test_the_unit_target_path_is_spelled_only_in_units_py():
@@ -131,3 +151,37 @@ def test_a_planted_second_spelling_and_an_upward_import_are_reported():
     assert upward_imports("from localharness.config import overlay\n") != []
     assert upward_imports("import localharness.provider.units\n") != []
     assert upward_imports("from localharness.core import which\nimport os\n") == []
+
+
+def test_a_call_in_a_closure_nested_inside_activate_is_reported_and_not_counted():
+    src = textwrap.dedent('''
+        class UnitStrategy:
+            async def activate(self, d):
+                def rollback():
+                    units.write_target(d, "x")
+                rollback()
+    ''')
+    assert len(stray_target_writers(src, LIFECYCLE)) == 1
+    assert activate_write_count(src, LIFECYCLE) == 0
+
+
+def test_the_count_sees_only_activate_of_unit_strategy_in_lifecycle():
+    src = textwrap.dedent('''
+        class UnitStrategy:
+            async def activate(self, d):
+                units.write_target(d, "x")
+                try:
+                    pass
+                except BaseException:
+                    units.write_target(d, "y")
+                    raise
+            async def other(self, d):
+                units.write_target(d, "z")
+        class Other:
+            async def activate(self, d):
+                units.write_target(d, "w")
+    ''')
+    assert activate_write_count(src, LIFECYCLE) == 2
+    assert activate_write_count(src, Path("provider") / "other.py") == 0
+    one = "class UnitStrategy:\n    async def activate(self, d):\n        units.write_target(d, 'x')\n"
+    assert activate_write_count(one, LIFECYCLE) == 1  # fewer than two: the live assertion would fail on it
