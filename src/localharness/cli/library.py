@@ -7,6 +7,7 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import SecretStr
@@ -444,7 +445,14 @@ def _interview(listed: Sequence[model_library.Shown], names: dict[str, str],
     skip = _Choice([], [], skipped=True)
     eligible = [s for s in listed if not s.declined]
     if len(listed) == 1:
-        raise NotImplementedError("one model")
+        [only] = listed
+        name = visible_text(names[only.real])
+        answer = interview.ask(ONE_QUESTION.format(name=name), [
+            Option("set-up", SET_IT_UP, SET_IT_UP_HINT.format(name=name)),
+            Option("not-now", NOT_NOW, NOT_NOW_HINT)], default=1 if only.declined else 0, cancel="not-now")
+        if not answer.reached:
+            return None
+        return _Choice([only], []) if answer.keys == ("set-up",) and not answer.cancelled else skip
     options = [Option("choose", CHOOSE_LABEL, CHOOSE_HINT), Option("skip", SKIP_LABEL, SKIP_HINT)]
     if eligible:
         best = visible_text(names[_first_of(eligible, named)[0].real])
@@ -457,12 +465,33 @@ def _interview(listed: Sequence[model_library.Shown], names: dict[str, str],
         return skip
     if answer.keys == ("all",):
         return _Choice(_first_of(eligible, named), [])
-    raise NotImplementedError("choose which")
+    picked = interview.ask(SET_UP_WHICH, [Option(s.real, visible_text(names[s.real]), shown_path(s.path))
+                                          for s in listed],
+                           default={s.real for s in eligible}, cancel="cancel", multi=True)
+    if not picked.reached:
+        return None
+    if picked.cancelled:
+        return skip
+    chosen = [s for s in listed if s.real in picked.keys]
+    declined = [s for s in listed if s.real not in picked.keys]
+    if len(chosen) > 1 and named not in chosen:
+        first = interview.ask(SERVE_WHICH_FIRST, [Option(s.real, visible_text(names[s.real]), shown_path(s.path))
+                                                  for s in chosen], default=0, cancel="cancel")
+        if not first.reached:
+            return None
+        if first.cancelled:
+            return skip
+        chosen = _first_of(chosen, next(s for s in chosen if s.real == first.keys[0]))
+    return _Choice(_first_of(chosen, named), declined)
 
 
 def _named(listed: Sequence[model_library.Shown], names: dict[str, str],
            preset: str | None) -> model_library.Shown | None:
-    return None
+    """The listed file whose proposed preset name is `preset`: exactly, else ignoring case."""
+    if preset is None:
+        return None
+    return (next((s for s in listed if names[s.real] == preset), None)
+            or next((s for s in listed if names[s.real].casefold() == preset.casefold()), None))
 
 
 def _records(config_path: Path, order: Sequence[model_library.Shown], names: dict[str, str], *,
@@ -480,7 +509,7 @@ def _records(config_path: Path, order: Sequence[model_library.Shown], names: dic
     return InitRecords(server=server, served=served, peers=peers, lines=lines, block_in_receipt=True, confirmed=confirmed)
 
 
-def sync(config_path: Path, *, scope: str, person: bool, preset: str | None = None,
+def sync(config_path: Path, *, scope: Literal["new", "all"], person: bool, preset: str | None = None,
          first_run: bool = False) -> Sync:
     """The first run: every unrecorded model under the roots, shown best first and set up as the person says."""
     if not first_run:

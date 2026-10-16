@@ -106,7 +106,9 @@ def _written(cfg: Path) -> dict:
 
 
 def _peers(cfg: Path) -> list[dict]:
-    return yaml.safe_load((cfg / "overrides.yaml").read_text(encoding="utf-8")).get("extra_endpoints", [])
+    overrides = cfg / "overrides.yaml"
+    return yaml.safe_load(overrides.read_text(encoding="utf-8")).get("extra_endpoints", []) \
+        if overrides.exists() else []
 
 
 # ------------------------------------------------------------------ the tracer
