@@ -149,7 +149,10 @@ def _no_box_processes(request, monkeypatch, _empty_proc_root):
     anything, and `XDG_CONFIG_HOME` is unset so llama-server's `config.ini` path resolves under the
     faked HOME, never a developer's real one (a test that needs it sets it). A module that must reach
     the real `units._run` seam through its own fake `subprocess.run` (test_units) carries
-    `pytest.mark.real_units_seam` and opts out of that half only. Plan 05-10 (D-08): `start` reads
+    `pytest.mark.real_units_seam` and opts out of that half only; `units._run_manager`, the runner the
+    autostart unit is driven through (plan 14-05, D-27), answers None the same way, and a module that must
+    reach it through its own fake `subprocess.run` (and a `MANAGER_DIRS` pointed at a tmp directory)
+    carries `pytest.mark.real_manager_seam`. Plan 05-10 (D-08): `start` reads
     llama-server's `/props` at a llama.cpp attach, so `start_cmd._props_model_path` answers None for
     every test (no test dials a port for it; the socket guard below is the second line); the module is
     imported here, not looked up in `sys.modules`, so the stub never depends on import order
@@ -163,6 +166,8 @@ def _no_box_processes(request, monkeypatch, _empty_proc_root):
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     if request.node.get_closest_marker("real_units_seam") is None:
         monkeypatch.setattr(units, "_run", lambda argv, *, timeout, cap: None)
+    if request.node.get_closest_marker("real_manager_seam") is None:
+        monkeypatch.setattr(units, "_run_manager", lambda argv, *, timeout, cap, **kw: None)
     monkeypatch.setattr("localharness.cli.start_cmd._props_model_path", lambda base_url, launch_key: None,
                         raising=True)
 
@@ -1118,6 +1123,12 @@ def tool_scenario_corpus(tmp_path: Path) -> dict:
 
 
 def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_manager_seam: opt out of the stub of provider.units._run_manager (the autostart unit's "
+        "service-manager runner); the module tests the real runner through its own fake subprocess.run "
+        "and a MANAGER_DIRS pointed at a tmp directory",
+    )
     config.addinivalue_line(
         "markers",
         "live_vllm: opt-in real-model spine test hitting a live vLLM endpoint; "

@@ -1,10 +1,14 @@
-"""The systemd side of the init import: what a stopped user unit says about the llama-server it runs.
+"""The systemd side of the harness: what a stopped user unit says about the llama-server it runs (the
+init import), and the harness's own autostart unit (`localharness-llm.service`).
 
-Sensing only: the harness never starts, stops or edits a unit. Every `journalctl` and `systemctl`
-call goes through the one seam `_run` (the program found by `which_outside_cwd`, a list argv, no
-shell, stdin closed, a timeout, an output cap), and `_run` answers None for anything that is not a
-clean, bounded answer, which every caller reads as "not checked". A test replaces `_run`; nothing
-else here spawns a process.
+Two injectable subprocess seams, nothing else here spawns a process. Init's import senses through
+`_run` (the program found by `which_outside_cwd`, a list argv, no shell, stdin closed, a timeout, an
+output cap), and `_run` answers None for anything that is not a clean, bounded answer, which every
+caller reads as "not checked"; the import never starts, stops or edits a unit. The autostart unit is
+driven through `_run_manager`: the same shape, but the program is found in `MANAGER_DIRS` only (never
+PATH or the current directory), its environment supplies `XDG_RUNTIME_DIR`, and it keeps the exit code.
+The verbs the harness issues are the closed set `VERB_TIMEOUTS`. A test replaces `_run` and
+`_run_manager`; conftest stubs both for every test.
 
 Two sources yield the record a running process would (`procfs.ProcRecord`, with `pid=0` and
 `environ`/`cwd` possibly unknown): the last llama-server run in the unit's journal, queried by the
@@ -38,8 +42,8 @@ from localharness.core.private_files import (
     atomic_write_text, open_private_dir, open_regular, read_private_text,
 )
 from localharness.core.which import which_outside_cwd
-from localharness.provider.procfs import HARNESS_UNIT, ProcRecord
-from localharness.provider.server import server_dir
+from localharness.provider.procfs import HARNESS_UNIT, LaunchIdentity, ProcRecord, port_of
+from localharness.provider.server import server_dir, strip_url_credentials
 
 __all__ = [
     "JOURNAL_LINES", "JOURNAL_TIMEOUT_S", "JOURNAL_OUTPUT_CAP", "SYSTEMCTL_TIMEOUT_S",
@@ -53,7 +57,11 @@ __all__ = [
     "UNIT_VERSION_PATTERN", "CAPTURED_NAMES", "CapturedShell", "harness_unit_path", "harness_home",
     "unit_config_dir", "render_harness_unit", "captured_env", "capture_shell_env", "unit_serves",
     "read_harness_unit", "write_harness_unit", "remove_harness_unit", "harness_unit_failure",
-    "is_harness_unit",
+    "is_harness_unit", "MANAGER_DIRS", "RUNTIME_DIR_ROOT", "systemctl_path", "journalctl_path",
+    "manager_env", "ManagerResult", "unit_runtime_state", "own_unit", "harness_unit_state",
+    "VERB_TIMEOUTS", "systemctl_user", "JOURNAL_TAIL_LINES", "JOURNAL_REF_LINE", "journal_tail",
+    "LINGER_DIR", "current_user", "linger_on", "Launcher", "other_launchers", "STOPPED_WITHHELD_LINE",
+    "STOPPED_LIVE_PIDFILE_LINE", "STOPPED_START_LIMIT_LINE", "translate_exit",
 ]
 
 JOURNAL_LINES = 200
@@ -1061,3 +1069,140 @@ def write_marker(config_dir, marker: Marker) -> None:
         atomic_write_text(BOOT_MARKER_NAME, text, dir_fd=fd)
     finally:
         os.close(fd)
+
+
+# ------------------------------------------------------------------- the service-manager runner
+
+MANAGER_DIRS = ("/usr/bin", "/bin")
+"""The only directories the service manager's programs are looked for in. Never PATH, never the current
+directory: a planted `systemctl` earlier on PATH would receive every verb the harness issues (T-14-11)."""
+RUNTIME_DIR_ROOT = "/run/user"
+MANAGER_STDERR_CAP = 4096
+
+
+def _manager_program(name: str) -> str | None:
+    """`name` as an executable regular file in the first of `MANAGER_DIRS` that has one, else None.
+    A name holding a separator is not a program name and finds nothing."""
+    if not name or "/" in name:
+        return None
+    for directory in MANAGER_DIRS:
+        path = os.path.join(directory, name)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def systemctl_path() -> str | None:
+    """`/usr/bin/systemctl` or `/bin/systemctl` (executable), else None; no PATH lookup (D-10)."""
+    return _manager_program("systemctl")
+
+
+def journalctl_path() -> str | None:
+    """The journal's program, found the same way as `systemctl_path`."""
+    return _manager_program("journalctl")
+
+
+def manager_env() -> dict[str, str]:
+    """The process environment plus `XDG_RUNTIME_DIR=/run/user/<uid>` when that is unset or empty and the
+    directory exists, is a directory and is owned by this uid, so a cron-like empty environment still
+    reaches the user manager. A value already set is kept as it is."""
+    env = dict(os.environ)
+    if not env.get("XDG_RUNTIME_DIR"):
+        uid = os.getuid()
+        runtime = os.path.join(RUNTIME_DIR_ROOT, str(uid))
+        try:
+            st = os.stat(runtime)
+        except OSError:
+            return env
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == uid:
+            env["XDG_RUNTIME_DIR"] = runtime
+    return env
+
+
+@dataclass(frozen=True)
+class ManagerResult:
+    """What the service manager's program answered: the exit code and its decoded output."""
+
+    code: int
+    out: str
+    err: str
+
+
+def _run_manager(argv: list[str], *, timeout: float, cap: int) -> ManagerResult | None:
+    """The second subprocess seam, for the autostart unit: `argv[0]` found in `MANAGER_DIRS` only, a list
+    argv, no shell, stdin closed, `manager_env()` as the environment. The exit code with the decoded
+    stdout / stderr (a non-zero exit is an answer), or None when the program is missing, cannot start,
+    times out, or its stdout is longer than `cap` bytes. Stderr is kept to `MANAGER_STDERR_CAP` bytes."""
+    exe = _manager_program(argv[0]) if argv else None
+    if exe is None:
+        return None
+    try:
+        done = subprocess.run([exe, *argv[1:]], capture_output=True, stdin=subprocess.DEVNULL,
+                              timeout=timeout, check=False, env=manager_env())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    if len(done.stdout) > cap:
+        return None
+    return ManagerResult(done.returncode, done.stdout.decode("utf-8", errors="replace"),
+                         done.stderr[:MANAGER_STDERR_CAP].decode("utf-8", errors="replace"))
+
+
+# ---------------------------------------------------------------------------- the runtime state
+
+_STATE_PROPS = "FragmentPath,DropInPaths,ActiveState,UnitFileState,NRestarts,ExecMainStatus,MainPID,InvocationID,Result"
+
+
+def _fields(block: str) -> dict[str, str]:
+    """`Key=value` lines of one `show` block, split on the first `=`; the first of a repeated key wins."""
+    fields: dict[str, str] = {}
+    for line in block.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields.setdefault(key, value)
+    return fields
+
+
+def _whole_number(value: str | None) -> int | None:
+    return int(value) if value is not None and value.isascii() and value.isdigit() else None
+
+
+def unit_runtime_state() -> UnitRuntimeState | None:
+    """What the user manager says about `localharness-llm.service` right now (D-12), or None when it
+    could not be asked (the runner answered None or a non-zero exit) or answered a number the harness
+    cannot read (`NRestarts`, `ExecMainStatus` or `MainPID` missing or not a whole number). `MainPID=0`
+    (no process) and an empty `InvocationID` are None. `own` is False: `own_unit` sets it."""
+    shown = _run_manager(["systemctl", "--user", "show", "-p", _STATE_PROPS, "--", HARNESS_UNIT],
+                         timeout=SYSTEMCTL_TIMEOUT_S, cap=SYSTEMCTL_OUTPUT_CAP)
+    if shown is None or shown.code != 0:
+        return None
+    fields = _fields(shown.out)
+    n_restarts = _whole_number(fields.get("NRestarts"))
+    exec_status = _whole_number(fields.get("ExecMainStatus"))
+    main_pid = _whole_number(fields.get("MainPID"))
+    if n_restarts is None or exec_status is None or main_pid is None:
+        return None
+    return UnitRuntimeState(
+        invocation_id=fields.get("InvocationID") or None, n_restarts=n_restarts,
+        main_pid=main_pid or None, active_state=fields.get("ActiveState", ""),
+        unit_file_state=fields.get("UnitFileState", ""), fragment_path=fields.get("FragmentPath", ""),
+        drop_in_paths=fields.get("DropInPaths", ""), exec_main_status=exec_status,
+        result=fields.get("Result", ""))
+
+
+def own_unit(state, config_dir, *, interpreter: str | None = None,
+             home: str | None = None) -> UnitRuntimeState | None:
+    """`state` with `own=True` when it is the harness's own unit (`harness_unit_failure` finds nothing:
+    loaded from `harness_unit_path()`, no drop-ins, the file byte-equal to the render), else None
+    (D-13). Anything that is not a `UnitRuntimeState` is None."""
+    if not isinstance(state, UnitRuntimeState):
+        return None
+    if harness_unit_failure(state, config_dir, interpreter=interpreter, home=home) is not None:
+        return None
+    return replace(state, own=True)
+
+
+def harness_unit_state(config_dir, *, interpreter: str | None = None,
+                       home: str | None = None) -> UnitRuntimeState | None:
+    """`own_unit(unit_runtime_state(), config_dir)`: the one way a state that selects `UnitStrategy`
+    is made (D-13, D-19)."""
+    return own_unit(unit_runtime_state(), config_dir, interpreter=interpreter, home=home)
