@@ -398,6 +398,18 @@ def _ranker(config_path: Path, auto: AutosenseConfig, unit_model: str | None = N
     return rank
 
 
+def baseline(config_path: Path, *, person: bool) -> None:
+    """A first run that recorded no model: every file under the roots is seen, so a later run asks only about a new one."""
+    if not person:
+        return
+    global_dir = global_config_dir(config_path)
+    path = model_library.library_path(global_dir)
+    found = model_library.scan(_machine_autosense(config_path).model_roots, recorded_paths(global_dir), path,
+                               scope="new", rank=list)
+    if found.changed:
+        found.library.save(path)
+
+
 def import_peer_models(config_path: Path, *, exclude: str, unit_model: str | None) -> list[DiscoveredModel]:
     """The models an import offers as peers, best first: new or seen, never declined, none already recorded."""
     global_dir = global_config_dir(config_path)

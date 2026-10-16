@@ -573,6 +573,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
         elif isinstance(picked, Attached):  # attached only: provider written, one line, no record
             console.print(picked.line, markup=False, soft_wrap=True)
             config_file = _write_attached(config_path, picked.result, picked, force=force)
+            library.baseline(config_path, person=interactive)
             _receipt(config_file, starting)
             outcome = SetupResult(config_file, picked.server_ready)
         elif isinstance(picked, InitRecords):  # a record: shown, written, launched by the first start
@@ -588,6 +589,7 @@ def core_setup(config_dir: str | None, *, endpoint: str | None, model: str | Non
             cap = _probe_capabilities(result, selected_model)
             _write_config(config_path, result, selected_model, cap,
                           force=force)
+            library.baseline(config_path, person=interactive)
             _receipt(config_file, starting)
             outcome = SetupResult(config_file, True)
     if outcome.config_file is not None:  # fresh, kept, changed or saved unchecked
@@ -1155,12 +1157,13 @@ def _served_window(result: DetectorResult, *, cfg_dir: Path | None = None, model
 # R15: what `init --force` clears from the machine's overrides.yaml — the model and server choices
 # the core persists there: a re-run's change (_write_change), `/model` (model_ops.
 # persist_default_model: the default model, its list, a managed server's model) and a peer-endpoint
-# switch (model_ops.persist_active_endpoint: the whole active_endpoint record). Every other key and
+# switch (model_ops.persist_active_endpoint: the whole active_endpoint record), and the peer list a
+# first run appends. Every other key and
 # every plugin section is the user's, and stays.
 _SAVED_CHOICE_KEYS = (
     "provider.provider_type", "provider.base_url", "provider.default_model",
     "provider.available_models", "provider.supports_function_calling", "org.default_model",
-    "org.context.max_context_tokens", "server.model", "active_endpoint",
+    "org.context.max_context_tokens", "server.model", "active_endpoint", "extra_endpoints",
 )
 
 
