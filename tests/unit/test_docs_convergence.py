@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from localharness.agent.gate_types import PROTECTED_CONFIG_DIR_ENTRIES
 from localharness.agent.loop import AgentLoop
 from localharness.config.loader import (
     AGENT_GLOBAL_ONLY_FIELDS, ASK_GLOBAL_ONLY_FIELDS, HARNESS_GLOBAL_ONLY_FIELDS,
@@ -533,6 +534,49 @@ def test_launch_keys_doc_bites():
     assert check_launch_keys_doc(good.replace("`binary`", "binary") + "\n\nElsewhere: `binary`.\n") == [
         "launch key not named in SECURITY.md: binary"]
     assert check_launch_keys_doc("## Nothing\n") != []
+
+
+_NUMBER_WORDS = dict(zip(("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+                          "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen"), range(16)))
+
+
+def check_protected_entries_doc(text: str, entries: Iterable[str] | None = None) -> list[str]:
+    """SECURITY.md's `one <count>-entry list protects` sentence carries the count of
+    `PROTECTED_CONFIG_DIR_ENTRIES` and names each entry once; the order is free."""
+    entries = tuple(PROTECTED_CONFIG_DIR_ENTRIES if entries is None else entries)
+    m = re.search(r"one (\w+)-entry list protects (.*?)\. ", " ".join(text.split()))
+    if m is None:
+        return ["the protected config-directory list is not found"]
+    named = [t.removesuffix("/**") for t in re.findall(r"`([^`]+)`", m.group(2))]
+    out = []
+    if _NUMBER_WORDS.get(m.group(1)) != len(entries):
+        out.append(f"SECURITY.md says {m.group(1)} protected entries, the code has {len(entries)}")
+    out += [f"protected entry not named in SECURITY.md: {e}" for e in entries if e not in named]
+    out += [f"not a protected entry: {n}" for n in dict.fromkeys(named) if n not in entries]
+    out += [f"protected entry named twice: {n}" for n in dict.fromkeys(named) if named.count(n) > 1]
+    return out
+
+
+def test_protected_entries_doc():
+    assert check_protected_entries_doc(_read("SECURITY.md")) == []
+
+
+def test_protected_entries_doc_bites():
+    good = _read("SECURITY.md")
+    assert "ten-entry" in good
+    assert check_protected_entries_doc(good.replace("ten-entry", "nine-entry")) == [
+        f"SECURITY.md says nine protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES)}"]
+    assert len(check_protected_entries_doc(good.replace("ten-entry", "eleven-entry"))) == 1
+    assert check_protected_entries_doc(good.replace("`overrides.yaml.lock`", "the overlay lock")) == [
+        "protected entry not named in SECURITY.md: overrides.yaml.lock"]
+    assert check_protected_entries_doc(good.replace("`model-library.json`", "`grants.yaml` `model-library.json`")) == [
+        "protected entry named twice: grants.yaml"]
+    assert check_protected_entries_doc(good.replace("`grants.yaml`,", "`grants.yaml`, `grants.yml`,", 1)) == [
+        "not a protected entry: grants.yml"]
+    assert check_protected_entries_doc("## Nothing\n") == ["the protected config-directory list is not found"]
+    assert check_protected_entries_doc(good, [*PROTECTED_CONFIG_DIR_ENTRIES, "new.yaml"]) == [
+        f"SECURITY.md says ten protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES) + 1}",
+        "protected entry not named in SECURITY.md: new.yaml"]
 
 
 def check_key_file_doc(security_text: str, cap: int | None = None) -> list[str]:

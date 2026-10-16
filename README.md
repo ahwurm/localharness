@@ -19,12 +19,11 @@ LocalHarness is an open-source agent harness for local LLMs. It does not serve m
 
 ## Quick start
 
-You need Python 3.12 or later, [uv](https://docs.astral.sh/uv/), and a model server running.
+You need Python 3.12 or later and [uv](https://docs.astral.sh/uv/). A model server is not required: the first `localharness start` finds a model on your machine or offers one to fetch, and sets everything up.
 
 ```bash
 uv tool install 'localharness[embeddings,mobile]'  # memory's CPU model + the phone app
-localharness init                    # finds your model server, writes your config
-localharness start                   # an interactive session
+localharness start                   # finds a model (or offers one), sets up, opens a session
 
 localharness plugins list            # every plugin and whether it is on
 localharness plugins disable autoresearch
@@ -33,7 +32,7 @@ localharness plugins enable image --set comfyui_url=http://127.0.0.1:8188
 
 `plugins enable` and `plugins disable` write `overrides.yaml`, never your `config.yaml`. Add `--workspace` to change a bundled plugin for one project only. Add the `dispatch` extra for Discord.
 
-`init` ends with every plugin and the command that sets it up. Inside a running session, `/plugins enable <name>` does the same and turns the plugin on right away: the first time, or while the plugin is not set up yet, it asks what the plugin needs and checks it, then it restarts the session with your conversation kept. A first `localharness start` with no config runs `init`'s setup and goes on into the session.
+`init` ends with every plugin and the command that sets it up. Inside a running session, `/plugins enable <name>` does the same and turns the plugin on right away: the first time, or while the plugin is not set up yet, it asks what the plugin needs and checks it, then it restarts the session with your conversation kept. A first `localharness start` with no config runs `init`'s setup and goes on into the session; `localharness init` re-runs that setup on its own.
 
 ### Keys
 

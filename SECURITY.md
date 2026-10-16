@@ -422,10 +422,11 @@ read and argue with. Each step below says what it does in `auto`.
      `~/.gnupg`, `~/.config/gh`, `~/.kube`, `~/.docker`, `~/.git-credentials`, `~/.netrc`,
      `~/.npmrc`, `~/.pypirc`, `~/.config/gcloud`, `~/.azure`, your shell rc and profile files and
      the Windows credential folders. `~/.localharness` is no longer protected as a whole tree:
-     **one eight-entry list protects each harness config directory a session uses** — `config.yaml`,
+     **one ten-entry list protects each harness config directory a session uses** — `config.yaml`,
      `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`, `declined_workspace_offers.yaml`,
-     `plugins/**`, `project_records.yaml` and its lock file `project_records.yaml.lock`, the files
-     that change what the harness does next. Those directories are the
+     `plugins/**`, `project_records.yaml` and its lock file `project_records.yaml.lock`,
+     `model-library.json` (the models the library has shown and you declined) and the overlay's lock
+     file `overrides.yaml.lock`, the files that change what the harness does next. Those directories are the
      one the session was started with (`--config-dir`, else `LOCALHARNESS_DIR`, else
      `~/.localharness`), the default `~/.localharness` and any `.localharness/` in the project; a
      config directory the session does not use is not covered. Everything else under one (agents,
