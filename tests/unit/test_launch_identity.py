@@ -80,6 +80,19 @@ def test_every_strategy_class_states_a_launch_identity():
         assert isinstance(strategy(), lifecycle.LifecycleStrategy)
 
 
+def test_unit_strategy_is_a_lifecycle_strategy_stating_the_wrapped_identity():
+    from localharness.provider import units
+
+    spec = llama()
+    inner = lifecycle.SpawnedProcessStrategy()
+    state = units.UnitRuntimeState(None, 0, own=True)
+    wrapper = lifecycle.UnitStrategy(inner, state, spec)
+    assert isinstance(wrapper, lifecycle.LifecycleStrategy)
+    assert callable(getattr(lifecycle.UnitStrategy, "launch_identity", None))
+    assert wrapper.launch_identity(spec) == inner.launch_identity(spec) is not None
+    assert "stop" in vars(lifecycle.UnitStrategy)
+
+
 # ------------------------------------------------------------------------------- record_identity
 
 
