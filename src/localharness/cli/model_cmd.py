@@ -15,22 +15,29 @@ import contextlib
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
 
 import typer
 from rich.console import Console
 from rich.markup import escape
 
+from localharness import resolved_version
 from localharness.cli import autostart, model_ops, start_serving
-from localharness.cli.workspace import MachineTrust, decide_machine_trust, visible_text
+from localharness.cli.workspace import MachineTrust, decide_machine_trust, shown_path, visible_text
 from localharness.config import session_presence, trust
 from localharness.config.loader import ConfigLoader
 from localharness.config.paths import global_config_dir, resolve_config_dir
-from localharness.provider import lifecycle, procfs
+from localharness.provider import lifecycle, procfs, server, tuning
 from localharness.provider.units import read_target
 
 console = Console()
 err_console = Console(stderr=True)
+
+
+SCRIPT_ALONE_LINE = "--script takes a preset name or --all, nothing else"
+SCRIPT_NOTHING_LINE = "nothing to render — no record launches a server (llama.cpp or vLLM)"
+SCRIPT_KIND_LINE = "{name} is {kind} — --script renders llama.cpp and vLLM launches"
+SCRIPT_SKIP_LINE = "# {name}: {why}"
 
 
 def _is_local_operator() -> bool:
@@ -369,6 +376,58 @@ def _swap_now(
             harness, record, outcome="swap", rung=serving.rung, config_dir=config_dir))
 
 
+def _script_kind(record) -> bool:
+    return record.spec is not None and record.spec.runtime in ("llamacpp", "vllm")
+
+
+def _script_decision(record, harness) -> "tuple[bool, server.LaunchDecision]":
+    """Whether `start` would hold a key for the record (judged from the record, the key file never opened) and the launch decision."""
+    spec, peer = record.spec, record.peer
+    key = harness.provider.api_key if peer is None else peer.api_key
+    keyed = bool(server.required_key_kwargs(spec, key)) or (bool(spec.api_key_file) and spec.require_api_key is True)
+    return keyed, server.launch_decision(spec, keyed, peer=None if peer is None else peer.name)
+
+
+def _script_text(record, harness, cfg: Path, keyed: bool, decision, *, function: str | None = None) -> str:
+    spec, peer = record.spec, record.peer
+    plan = lifecycle.plan_launch(
+        spec, lifecycle.sense_launch(spec, cfg, harness.autosense, unit=None), decision,
+        autosense=harness.autosense, api_key_held=keyed)
+    return tuning.render_script(
+        plan, spec, name=record.name, version=resolved_version(), visible=visible_text, function=function,
+        key_placeholder="provider.api_key" if peer is None else f"extra_endpoints.{peer.name}.api_key",
+        home_shown="" if plan.config_ini_home is None else shown_path(plan.config_ini_home))
+
+
+def _script(name: str | None, config_dir: str | None, *, every: bool) -> None:
+    """`localharness model --script [NAME]` and `--script --all`: print the launch as sh, decide no trust, prepare no home, write nothing."""
+    cfg = resolve_config_dir(config_dir)
+    view = model_ops.trust_as_recorded(cfg)
+    try:
+        harness = ConfigLoader(config_dir=cfg, local_config_dir=None, machine_withheld=view.withheld).load_harness()
+    except Exception as exc:  # noqa: BLE001
+        err_console.print(f"[bold red]Error:[/bold red] failed to load config: {escape(str(exc))}", soft_wrap=True)
+        raise typer.Exit(2)
+    serving = model_ops.resolve_serving(harness, view, name, config_dir=cfg)
+    if isinstance(serving, model_ops.ServingRefusal):
+        _say_script_refusal(serving.line, serving.exit_code)
+    record = serving.record
+    if not _script_kind(record):
+        nothing = name is None and not any(map(_script_kind, model_ops.serving_records(harness)))
+        _say_script_refusal(SCRIPT_NOTHING_LINE if nothing else SCRIPT_KIND_LINE.format(
+            name=record.name, kind=lifecycle.unit_kind(record.spec)))
+    keyed, decision = _script_decision(record, harness)
+    if decision.refusal is not None:
+        _say_script_refusal(decision.refusal)
+    typer.echo(_script_text(record, harness, cfg, keyed, decision))
+    raise typer.Exit(0)
+
+
+def _say_script_refusal(line: str, code: int = 2) -> NoReturn:
+    err_console.print(visible_text(line), markup=False, soft_wrap=True)
+    raise typer.Exit(code)
+
+
 def _repl_sessions(config_dir: Path) -> bool:
     """Is a REPL session registered on this machine (its process alive)? The line then says it now talks
     to the new server. A failed look says False."""
@@ -436,8 +495,16 @@ def model(
         "--autostart",
         help="on | off | status — the autostart unit localharness-llm.service serves the last choice at login.",
     ),
+    script: bool = typer.Option(
+        False, "--script", help="Print the launch `start` runs as sh, for NAME or the preset the ladder resolves now."),
+    every: bool = typer.Option(
+        False, "--all", help="With --script: one shell function per preset."),
 ) -> None:
     """List available models, or switch the persisted default with `localharness model <name>`."""
+    if script or every:
+        if not script or autostart is not None or download is not None or file is not None or (every and name is not None):
+            _refuse_autostart(SCRIPT_ALONE_LINE)
+        _script(name, config_dir, every=every)
     if autostart is not None:
         _autostart(
             autostart, config_dir,
