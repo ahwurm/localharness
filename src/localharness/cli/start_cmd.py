@@ -844,6 +844,7 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     llama.cpp or vLLM-binary record is launched by restarting the unit (`UnitStrategy`), and a record the
     unit cannot serve launches through its own strategy outside it, takes `unit-target` away right before
     and says so (D-19, D-21)."""
+    from localharness.cli import start_serving
     from localharness.provider import server as managed_server
     from localharness.provider import lifecycle
     from localharness.provider.lifecycle import LAUNCH_LOCK_WAIT_LINE, launch_lock, strategy_for
@@ -916,7 +917,7 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
                 said: list[bool] = []
 
                 def on_plan(plan: Any) -> None:
-                    _announce(_plan_clause(plan, undo_field=undo_field))
+                    _announce(start_serving.plan_clause(plan, undo_field=undo_field))
                     if not said:
                         said.append(True)
                         _say_notes()
@@ -936,25 +937,6 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     if loading:
         await _wait_for_loading_server()
     return None
-
-
-def _plan_clause(plan: Any, *, undo_field: str = "server.speculative") -> str:
-    """The derived clause of the launch line for the plan a launch is about to run (D-23); empty for an
-    untuned launch (`None`). ``undo_field`` is the record field that keeps drafting off: the primary's
-    `server.speculative` by default, a peer's `extra_endpoints.<name>.lifecycle.speculative`."""
-    if plan is None:
-        return ""
-    from localharness.provider import tuning
-
-    report = getattr(plan, "report", None)
-    # Only a fit `-c` is ever halved: a record `context:` or an extra_args `-c` rides the retry as it was,
-    # so the clause names no `-c` and no window it kept (WR-05).
-    halved = (plan.shape == "retry" and report is not None and report.mode == "fit"
-              and plan.full_fit is not None)
-    return tuning.derived_clause(
-        plan.tuned, shape=plan.shape, cause=plan.cause, dropped=plan.dropped,
-        remembered_at=plan.remembered_at, context=report.asked if halved else None, halved=halved,
-        undo_field=undo_field, parser_fields=getattr(plan, "dropped_parser_fields", ()))
 
 
 _POSTURE_KEYS = ("bind_all", "require_api_key")
@@ -2182,7 +2164,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                     err_console.print(launch_decision.note, markup=False, soft_wrap=True)
 
         def on_plan(plan: Any) -> None:
-            say_line(_plan_clause(plan, undo_field=undo_field))
+            say_line(start_serving.plan_clause(plan, undo_field=undo_field))
 
         async def say_lock_wait() -> None:
             err_console.print(LAUNCH_LOCK_WAIT_LINE, markup=False, soft_wrap=True)

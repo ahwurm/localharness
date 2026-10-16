@@ -961,6 +961,7 @@ async def sense_serving(
 
 LANDING_OUTCOMES = frozenset({"launch", "swap", "attach"})
 SELECTED_NEXT_START_LINE = "Selected {name} — the next start serves it"
+SELECTED_NEXT_START_OR_BOOT_LINE = "Selected {name} — the next start or boot serves it"
 
 
 async def persist_landed(

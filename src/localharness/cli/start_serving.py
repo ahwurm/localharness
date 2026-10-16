@@ -48,6 +48,10 @@ BOOT_RETRY_CLAUSE = "retried at boot: {parts} · {undo}: off {keeps}"
 SWAP_LINE = "stopping {incumbent}…, starting {target} ({inside}model load can take several minutes)..."
 START_TARGET_LINE = "starting {target} ({inside}model load can take several minutes)..."
 STARTING_WAIT_SECONDS = 600
+SERVING_RESTARTED_LINE = "Serving {name} — autostart restarted"
+SERVING_LINE = "Serving {name}"
+REPL_TALKS_CLAUSE = "; a REPL session on this machine now talks to it"
+ALREADY_SERVING_TARGET_LINE = "{name} is already serving"
 
 _ATTACH_KINDS = ("attach", "attach_other")
 
@@ -353,6 +357,26 @@ class ConsoleSwapReporter:
 
     async def line(self, text: str) -> None:
         self._print_err(self.redact(text), markup=False, soft_wrap=True)
+
+
+def plan_clause(plan: Any, *, undo_field: str = "server.speculative") -> str:
+    """The derived clause of the launch line for the plan a launch is about to run (D-23); empty for an
+    untuned launch (`None`). ``undo_field`` is the record field that keeps drafting off: the primary's
+    `server.speculative` by default, a peer's `extra_endpoints.<name>.lifecycle.speculative`. The one
+    builder of the clause: `start`, the REPL and `localharness model <name>` all say it through here."""
+    if plan is None:
+        return ""
+    from localharness.provider import tuning
+
+    report = getattr(plan, "report", None)
+    # Only a fit `-c` is ever halved: a record `context:` or an extra_args `-c` rides the retry as it was,
+    # so the clause names no `-c` and no window it kept (WR-05).
+    halved = (plan.shape == "retry" and report is not None and report.mode == "fit"
+              and plan.full_fit is not None)
+    return tuning.derived_clause(
+        plan.tuned, shape=plan.shape, cause=plan.cause, dropped=plan.dropped,
+        remembered_at=plan.remembered_at, context=report.asked if halved else None, halved=halved,
+        undo_field=undo_field, parser_fields=getattr(plan, "dropped_parser_fields", ()))
 
 
 def swap_launch_line(*, incumbent: str | None, target: str, inside: str) -> str:
