@@ -1320,6 +1320,11 @@ UNIT_FOREIGN_LINE = "{unit} {why} — it is not the unit localharness wrote, so 
 """The refusal when the unit failed its identity re-check before a restart (D-13, T-14-22); `why` is
 `units.harness_unit_failure`'s phrase."""
 
+UNIT_FOREIGN_STOP_LINE = ("pidfile names pid {pid}, run by localharness-llm.service, which is no longer the unit "
+                          "localharness wrote ({why}) — not stopped")
+"""The refusal when the launch's owner is the unit but the unit failed its identity re-check before a stop
+(D-21, T-14-23); `why` is `units.harness_unit_failure`'s phrase. The process is named and never signalled."""
+
 UNIT_FAILED_LINE = "{label} did not come up under the autostart unit"
 UNIT_EXITED_LINE = "{label}: the autostart unit exited without starting a server"
 UNIT_TIMEOUT_LINE = "{label}: the autostart unit's server was not ready after {seconds}s"
@@ -1577,6 +1582,49 @@ class UnitStrategy:
                     units.remove_target(config_dir)
                 except OSError:
                     log.debug("could not remove unit-target", exc_info=True)
+
+    async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
+        """Stop the launch `config_dir`'s pidfile names, by the stopper its OWNER calls for (D-21, START-10).
+
+        The unit is asked first (a fresh state, off the event loop), then `procfs.read_launch(expect=,
+        main_pid=)` gives the owner: `unit` only for a process in `localharness-llm.service`'s cgroup that
+        is the fresh MainPID with the pidfile's start time (no MainPID makes every launch `spawned`). No
+        live launch: nothing. Owner `spawned`: the wrapped strategy's own verified stop, untouched. Owner
+        `unit`: while the unit is still the harness's own (the identity tests re-run now, D-13), `reset-failed`
+        then `stop` through the manager, and the pid must be gone afterwards, else RuntimeError naming it; a
+        unit that fails the re-check, or a unit process that is not this record's launch, is named in a
+        RuntimeError and nothing is signalled. `server.stop_server` is never called for a unit-owned launch
+        (the unit's stop removes it) and `unit-target` is not written (RULING W3)."""
+        raw = await asyncio.to_thread(units.unit_runtime_state)
+        failure = await asyncio.to_thread(units.harness_unit_failure, raw, config_dir)
+        launch = await asyncio.to_thread(
+            procfs.read_launch, config_dir, expect=self.launch_identity(spec),
+            main_pid=getattr(raw, "main_pid", None))
+        if launch is None:
+            return
+        if launch.owner != "unit":
+            await self._inner.stop(spec, config_dir)
+            return
+        if failure is not None:
+            raise RuntimeError(UNIT_FOREIGN_STOP_LINE.format(pid=launch.pid, why=failure))
+        if not (launch.verified or launch.starting):
+            found = await asyncio.to_thread(procfs.read_process, launch.pid)
+            exe = os.path.basename(found.exe) if isinstance(found, procfs.ProcRecord) and found.exe else "?"
+            raise RuntimeError(server.NOT_A_LAUNCH_LINE.format(
+                pid=launch.pid, exe=exe, pidfile=server.pid_path(config_dir)))
+        start = launch.start
+        if start is None:
+            before = await asyncio.to_thread(procfs.read_process, launch.pid)
+            start = before.start_time if isinstance(before, procfs.ProcRecord) else None
+        for verb in ("reset-failed", "stop"):
+            done = await asyncio.to_thread(units.systemctl_user, verb, procfs.HARNESS_UNIT)
+            if done is None or done.code != 0:
+                raise RuntimeError(f"{verb} of {procfs.HARNESS_UNIT} failed: {_manager_words(done, None)}")
+        after = await asyncio.to_thread(procfs.read_process, launch.pid)
+        if isinstance(after, procfs.ProcRecord) and (start is None or after.start_time == start):
+            raise RuntimeError(
+                f"pid {launch.pid} still alive after stop of {procfs.HARNESS_UNIT} — refusing to report "
+                "the accelerator free while the process still holds it")
 
     def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
         return self._inner.recovery_config_dir(config_dir)
