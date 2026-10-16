@@ -207,13 +207,28 @@ def _foreign(path: Path, why: str, err: Say) -> int:
     return 1
 
 
+def _off_verdict(state: Any, config_dir: Path) -> tuple[bool, str | None]:
+    """``(unloaded, why)`` for `off`: ``why`` is None when the unit may be undone. ``unloaded`` is True for the
+    file `on` wrote and the manager never loaded (`FragmentPath` empty, the file byte-equal to the render):
+    nothing runs and nothing is enabled, so `off` removes the file without `disable`. Every other unit that
+    fails the identity tests is foreign and named in ``why``."""
+    why = units.harness_unit_failure(state, config_dir)
+    if why is None:
+        return False, None
+    if units.unloaded_own_unit(state, config_dir):
+        return True, None
+    return False, why
+
+
 def turn_off(config_dir: Path, *, out: Say, err: Say, harness: Any = None) -> int:
     """Disable and remove the harness's own autostart unit for ``config_dir`` and prune its `autostart.env`
     entry (spec 20 §9.2 `off`, D-11, D-13). It acts only on a unit that passes all three identity tests —
     loaded from `harness_unit_path()`, no drop-ins, the file byte-equal to what localharness renders — read
     once up front and again under the launch lock, before anything is stopped; any other unit is left as it
-    is and named (exit 1). No file and nothing loaded is already off (exit 0). A failing `disable --now`
-    removes nothing and prunes nothing. ``harness`` only scrubs a failing verb's stderr of the config's
+    is and named (exit 1). The one exception is the file `on` wrote and the manager never loaded (a failing
+    reload): empty `FragmentPath`, no drop-ins, the file byte-equal to the render. Nothing runs, so it is
+    removed and pruned with no `disable`. No file and nothing loaded is already off (exit 0). A failing
+    `disable --now` removes nothing and prunes nothing. ``harness`` only scrubs a failing verb's stderr of the config's
     secrets; it is never asked about trust and `unit-target` is left as it is (R-14-26). Returns the exit
     code (see the module doc)."""
     if units.systemctl_path() is None:
@@ -224,7 +239,7 @@ def turn_off(config_dir: Path, *, out: Say, err: Say, harness: Any = None) -> in
     if not os.path.lexists(path) and not getattr(state, "fragment_path", ""):
         out(OFF_NOTHING.format(path=display_path(path)))
         return 0
-    why = units.harness_unit_failure(state, config_dir)
+    unloaded, why = _off_verdict(state, config_dir)
     if why is not None:
         return _foreign(path, why, err)
 
@@ -232,15 +247,16 @@ def turn_off(config_dir: Path, *, out: Say, err: Say, harness: Any = None) -> in
         with lifecycle.launch_lock_sync(config_dir, timeout_seconds=LOCK_WAIT_SECONDS):
             # The first read may be stale by the time the lock is ours (another `on` or `off`, an edit):
             # nothing is stopped on a unit the fresh state does not prove to be the harness's own.
-            why = units.harness_unit_failure(units.unit_runtime_state(), config_dir)
+            unloaded, why = _off_verdict(units.unit_runtime_state(), config_dir)
             if why is not None:
                 return _foreign(path, why, err)
 
-            units.systemctl_user("reset-failed", units.HARNESS_UNIT)  # best effort: a clean slate, never a gate
-            disabled = units.systemctl_user("disable", "--now", units.HARNESS_UNIT)
-            if disabled is None or disabled.code != 0:
-                err(_verb_error("off", "disable", disabled, harness))
-                return 1
+            if not unloaded:
+                units.systemctl_user("reset-failed", units.HARNESS_UNIT)  # best effort: a clean slate, never a gate
+                disabled = units.systemctl_user("disable", "--now", units.HARNESS_UNIT)
+                if disabled is None or disabled.code != 0:
+                    err(_verb_error("off", "disable", disabled, harness))
+                    return 1
             units.remove_harness_unit()
             reloaded = units.systemctl_user("daemon-reload")
             trust.forget_entries(config_dir, [trust.AUTOSTART_KEY])

@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from localharness.cli import autostart, model_cmd
 from localharness.cli.app import app
+from localharness.cli.workspace import decide_machine_trust
 from localharness.config import trust
 from localharness.provider import server, units
 from tests.unit.test_autostart_on_off import (  # noqa: F401 — `world` is the fixture
@@ -195,6 +196,63 @@ def test_foreign_a_file_that_is_a_link_is_not_followed_or_removed(world, tmp_pat
 
     assert result.exit_code == 1 and "left as it is" in result.stderr
     assert elsewhere.read_text(encoding="utf-8") == "[Unit]\n" and world.unit_path.is_symlink()
+    assert world.manager.calls == [STATE_SHOW]
+
+
+# ===================================================================== a file the manager never loaded
+
+
+def _on_that_failed_at_the_reload(world: World) -> None:
+    """`on` wrote the file and adopted its entry, then the reload failed: the manager has nothing loaded."""
+    world.manager.answer(RELOAD, code=1, err="no user bus")
+    first = world.run()
+    assert first.exit_code == 1 and world.unit_path.exists()
+    world.manager.answer(RELOAD, out="")
+    world.manager.answer_prefix("systemctl", "--user", "disable", out="")
+    world.manager.answer_prefix("systemctl", "--user", "reset-failed", out="")
+    world.manager_says(fragment="")
+    world.manager.calls.clear()
+
+
+def test_a_file_on_wrote_and_the_manager_never_loaded_is_removed_reloaded_and_pruned_without_a_disable(world):
+    decide_machine_trust(world.g, ask=False)
+    _on_that_failed_at_the_reload(world)
+    assert trust.recorded_autostart_entry(world.g) is not None
+
+    result = world.run(mode="off")
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert world.manager.calls == [STATE_SHOW, STATE_SHOW, RELOAD]  # no reset-failed, no disable --now
+    assert not world.unit_path.exists()
+    assert trust.recorded_autostart_entry(world.g) is None
+    assert stdout_lines(result) == [f"autostart off: removed {DISPLAY}; nothing starts at login"]
+    assert lock_is_free(world.g)
+
+
+def test_an_unloaded_file_that_is_not_byte_equal_to_the_render_stays_refused_as_foreign(world):
+    decide_machine_trust(world.g, ask=False)
+    _on_that_failed_at_the_reload(world)
+    path = world.unit_path
+    path.write_text(path.read_text(encoding="utf-8").replace("Restart=", "Restart =", 1), encoding="utf-8")
+    kept = path.read_text(encoding="utf-8")
+    entry = trust.recorded_autostart_entry(world.g)
+
+    result = world.run(mode="off")
+
+    assert result.exit_code == 1
+    assert "FragmentPath is empty" in result.stderr and result.stderr.strip().endswith("— left as it is")
+    assert world.manager.calls == [STATE_SHOW]
+    assert path.read_text(encoding="utf-8") == kept and trust.recorded_autostart_entry(world.g) == entry
+
+
+def test_an_unloaded_file_beside_a_drop_in_stays_refused_as_foreign(world):
+    decide_machine_trust(world.g, ask=False)
+    _on_that_failed_at_the_reload(world)
+    world.manager_says(fragment="", drop_ins="/x/y.d/z.conf")
+
+    result = world.run(mode="off")
+
+    assert result.exit_code == 1 and world.unit_path.exists()
     assert world.manager.calls == [STATE_SHOW]
 
 
