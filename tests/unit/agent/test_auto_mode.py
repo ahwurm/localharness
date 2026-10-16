@@ -208,6 +208,10 @@ def test_in_project_only_git_is_protected_wholesale(project):
     (".localharness/project_records.yaml", Verdict.ASK),
     (".localharness/project_records.yaml.lock", Verdict.ASK),
     (".localharness/project_records.yaml.bak", Verdict.ALLOW),
+    (".localharness/model-library.json", Verdict.ASK),
+    (".localharness/overrides.yaml.lock", Verdict.ASK),
+    (".localharness/model-library.json.bak", Verdict.ALLOW),
+    (".localharness/overrides.yaml.lock.bak", Verdict.ALLOW),
 ])
 def test_only_the_harness_files_that_decide_what_runs_are_protected(relative, expected, project):
     """The narrowing the replay forced (owner ruling 2026-09-11, "only hard blacklists… and even
@@ -242,13 +246,17 @@ def test_the_global_config_dir_answers_by_the_same_list(project, tmp_path, monke
     assert _verdict("write", {"path": str(config_dir / "project_records.yaml.lock")}, ctx, WRITE) is Verdict.ASK
     assert _verdict("write", {"path": str(config_dir / "project_records.yaml.bak")}, ctx, WRITE) is Verdict.ALLOW
     assert _verdict("write", {"path": str(config_dir / "coauthor_consent.yaml")}, ctx, WRITE) is Verdict.ALLOW
+    assert _verdict("write", {"path": str(config_dir / "model-library.json")}, ctx, WRITE) is Verdict.ASK
+    assert _verdict("write", {"path": str(config_dir / "overrides.yaml.lock")}, ctx, WRITE) is Verdict.ASK
+    assert _verdict("write", {"path": str(config_dir / "model-library.json.bak")}, ctx, WRITE) is Verdict.ALLOW
 
 
 @pytest.mark.parametrize("template", [
     "rm {p}", "unlink {p}", "mv {p} /tmp/moved", "mv -t /tmp {p}", "rm -- {p}", "rmdir {p}",
     "rm -f {p}", "rm -rf {p}", "shred -u {p}", "uv run rm {p}", "echo hi && rm {p}",
 ])
-@pytest.mark.parametrize("entry", ["project_records.yaml", "project_records.yaml.lock", "config.yaml"])
+@pytest.mark.parametrize("entry", ["project_records.yaml", "project_records.yaml.lock", "config.yaml",
+                                   "model-library.json", "overrides.yaml.lock"])
 def test_a_plain_delete_or_move_away_of_a_protected_config_entry_asks_in_auto(
         entry, template, project, tmp_path, monkeypatch):
     """CR-01 it2 (ruling taken on the owner's behalf by the GSD run): a write to the instructions
