@@ -1025,6 +1025,14 @@ def harness_unit_failure(state, config_dir, *, body: str | None = None, interpre
     drop_ins = getattr(state, "drop_in_paths", "")
     if drop_ins:
         return f"has drop-ins ({drop_ins})"
+    return unit_file_failure(body, config_dir, interpreter=interpreter, home=home)
+
+
+def unit_file_failure(body: str | None, config_dir, *, interpreter: str | None = None,
+                      home: str | None = None) -> str | None:
+    """The file half of `harness_unit_failure`: None when ``body`` (read from `read_harness_unit()` when
+    None) is byte-equal to `render_harness_unit` for this interpreter, config dir and the file's own `# env`
+    block, else the phrase naming what failed. It asks the service manager nothing."""
     if body is None:
         body = read_harness_unit()
     if body is None:
@@ -1043,6 +1051,17 @@ def harness_unit_failure(state, config_dir, *, body: str | None = None, interpre
     except ValueError:
         return differs
     return None if rendered == body else differs
+
+
+def unloaded_own_unit(state, config_dir, *, interpreter: str | None = None, home: str | None = None) -> bool:
+    """True when the manager answered that it loaded NOTHING for the harness unit (`FragmentPath` empty, no
+    drop-ins) and the file on disk is byte-equal to what localharness renders for this interpreter, config dir
+    and its own `# env` block: the file `--autostart on` wrote and the manager never read (a failing
+    reload, no user bus). Such a file runs nothing and is safe for `off` to remove; any other file the
+    manager did not load stays foreign."""
+    if state is None or getattr(state, "fragment_path", "") or getattr(state, "drop_in_paths", ""):
+        return False
+    return unit_file_failure(None, config_dir, interpreter=interpreter, home=home) is None
 
 
 def is_harness_unit(state, config_dir, *, body: str | None = None, interpreter: str | None = None,
