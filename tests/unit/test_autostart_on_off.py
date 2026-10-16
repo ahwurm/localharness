@@ -271,8 +271,8 @@ def test_the_trust_question_is_asked_once_with_ask_true_after_the_gate(world):
     assert [c["ask"] for c in calls] == [True]
 
 
-@pytest.mark.parametrize("mode", ["maybe", "off", "status", "ON", ""])
-def test_a_value_on_does_not_take_yet_exits_2_with_the_modes_line(world, mode):
+@pytest.mark.parametrize("mode", ["maybe", "status", "ON", ""])
+def test_a_value_on_does_not_take_exits_2_with_the_modes_line(world, mode):
     result = world.run(mode=mode)
 
     assert result.exit_code == 2
