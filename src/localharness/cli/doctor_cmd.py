@@ -438,6 +438,62 @@ def print_plugin_row(row, failures: list[str]) -> None:
         failures.append(f"plugin-{row.name}")
 
 
+def _tuning_plan(spec, config_dir: Path, autosense, *, keyed: bool, peer: str | None):
+    """The `LaunchPlan` the next launch of ``spec`` would run, sensed and planned and nothing prepared; None for a runtime that plans none or a refused launch."""
+    from localharness.provider import lifecycle, server
+
+    if spec.runtime not in ("llamacpp", "vllm"):
+        return None
+    decision = server.launch_decision(spec, keyed, peer=peer)
+    if decision.refusal is not None:
+        return None
+    sensed = lifecycle.sense_launch(spec, config_dir, autosense, unit=None)
+    return lifecycle.plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed)
+
+
+def _window_part(plan) -> str | None:
+    report = plan.report
+    if report is None:
+        return None
+    if report.mode == "fit":
+        return f"-c {report.asked} (fit)"
+    if report.mode == "fit-by-server":
+        return "-c left to llama-server --fit"
+    if report.mode == "record":
+        return f"-c {report.asked} (the record)"
+    return "-c from extra_args"
+
+
+def _tuning_rows(cfg_path: Path, harness: HarnessConfig) -> list[str]:
+    """One `Tuning:` row per llama.cpp or vLLM record: what its next launch derives, judged against the machine record as it stands. Decides no trust, prepares nothing, starts nothing, writes nothing."""
+    from localharness.cli import model_ops
+    from localharness.cli.model_cmd import _script_decision
+    from localharness.cli.workspace import visible_text
+    from localharness.provider import tuning
+
+    view = model_ops.trust_as_recorded(cfg_path)
+    rows = []
+    for record in model_ops.serving_records(harness):
+        spec = record.spec
+        if spec is None or spec.runtime not in ("llamacpp", "vllm"):
+            continue
+        head = f"Tuning: {visible_text(record.name)} — "
+        if model_ops.record_withheld(view, record):
+            rows.append(head + "not planned: its record has changes you have not confirmed")
+            continue
+        keyed, decision = _script_decision(record, harness)
+        if decision.refusal is not None:
+            rows.append(head + visible_text(decision.refusal))
+            continue
+        plan = _tuning_plan(spec, cfg_path, harness.autosense, keyed=keyed,
+                            peer=None if record.peer is None else record.peer.name)
+        derived = tuning.derived_clause(
+            plan.tuned, shape=plan.shape, cause=plan.cause, dropped=plan.dropped,
+            remembered_at=plan.remembered_at) or "nothing derived"
+        rows.append(head + " · ".join(part for part in (derived, _window_part(plan)) if part))
+    return rows
+
+
 def doctor(
     config_dir: Annotated[
         str | None,
@@ -886,6 +942,10 @@ def doctor(
             failures.append("llm-unreachable")
     else:
         console.print(f"  (skipped: no valid config)")
+
+    if harness is not None:
+        for row in _tuning_rows(cfg_path, harness):
+            console.print(f"{_INFO}  " + escape(row), soft_wrap=True)
 
     # 6. Config directory writable
     if os.access(cfg_path, os.W_OK):
