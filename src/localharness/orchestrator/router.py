@@ -24,10 +24,12 @@ class AgentCreationFlow:
 
     @staticmethod
     def no_config_message() -> str:
-        # #51: localharness.dev/resources is a 404 — point at the live site root, which exists.
+        """The first words a newcomer sees: `localharness start` first, no model server needed."""
         return (
             "Welcome to LocalHarness.\n\n"
-            "To configure, run: localharness init\n\n"
+            "To begin, run: localharness start\n"
+            "It finds a model on this machine or offers one to fetch, and sets everything up;\n"
+            "a model server is not required.\n\n"
             "For model and inference provider recommendations for your hardware,\n"
             "see: https://localharness.dev"
         )

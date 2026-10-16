@@ -37,7 +37,7 @@ from tests.unit.test_init_cmd import _make_capability_result
 from tests.unit.test_start_cmd import _stub_start_boundaries
 
 LEAD = "LocalHarness is not set up yet. Setting up the model server first:"
-HINT = "To configure, run: localharness init"
+HINT = "To begin, run: localharness start"
 DISCARD = "http://127.0.0.1:9/v1"  # the loopback discard port: nothing sent there is answered
 MODEL = "first-start-model"
 
