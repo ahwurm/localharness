@@ -18,10 +18,11 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 
-from localharness.cli import model_ops
+from localharness.cli import autostart, model_ops
 from localharness.cli.workspace import MachineTrust, decide_machine_trust
 from localharness.config.loader import ConfigLoader
 from localharness.config.paths import global_config_dir, resolve_config_dir
+from localharness.provider import lifecycle
 from localharness.provider.units import read_target
 
 console = Console()
@@ -43,6 +44,68 @@ def _is_local_operator() -> bool:
         return sys.stdin is not None and bool(sys.stdin.isatty())
     except (AttributeError, ValueError, OSError):
         return False
+
+
+def _refuse_autostart(line: str) -> None:
+    """One plain line on stderr, exit 2: the call is wrong and the line says how to fix it."""
+    err_console.print(line, markup=False, soft_wrap=True)
+    raise typer.Exit(2)
+
+
+def _autostart(mode: str, config_dir: Optional[str], *, with_other_arguments: bool) -> None:
+    """`localharness model --autostart <mode>` (spec 20 §9.1, D-01). Only `on` exists in this release of the
+    command; any other value is refused with the line that names all three modes. Turning autostart on
+    changes what runs at every login, so it needs a person at a terminal: the check comes BEFORE anything is
+    decided, asked, loaded or written, and `_autostart_on` below is the one place under `cli/` that puts the
+    machine-trust question (D-03)."""
+    if with_other_arguments:
+        _refuse_autostart(autostart.AUTOSTART_ALONE_LINE)
+    if mode != "on":
+        _refuse_autostart(autostart.AUTOSTART_MODE_LINE)
+    if not _is_local_operator():
+        _refuse_autostart(autostart.AUTOSTART_TERMINAL_LINE.format(mode=mode))
+    _autostart_on(resolve_config_dir(config_dir))
+
+
+def _autostart_on(cfg_path: Path) -> None:
+    """`--autostart on` after the gate: decide machine trust (the one question a switch may ask), resolve
+    what the unit would serve from the global config only (no workspace layer, no preset: the unit has
+    neither), refuse a target the unit cannot serve, and hand the rest to `autostart.turn_on`."""
+    machine_trust = decide_machine_trust(cfg_path, ask=True)
+    if machine_trust.line:
+        err_console.print(machine_trust.line, markup=False, soft_wrap=True)
+    loader = ConfigLoader(config_dir=cfg_path, local_config_dir=None, machine_withheld=machine_trust.withheld)
+    try:
+        harness = loader.load_harness()
+    except Exception as exc:
+        err_console.print(
+            "[bold red]Error:[/bold red] " + escape(f"failed to load config: {exc}"), soft_wrap=True)
+        raise typer.Exit(2)
+    serving = model_ops.resolve_serving(harness, machine_trust, None, config_dir=cfg_path)
+    if isinstance(serving, model_ops.ServingRefusal):
+        if serving.line != machine_trust.line:
+            err_console.print(serving.line, markup=False, soft_wrap=True)
+        raise typer.Exit(serving.exit_code)
+    record = serving.record
+    if model_ops.record_withheld(machine_trust, record):
+        # The person said No to something this record starts: the unit's `serve` would refuse it at every
+        # boot (exit 78), so there is nothing to turn on.
+        refusal = model_ops._withheld_refusal(machine_trust, record, cfg_path)
+        if refusal.line != machine_trust.line:
+            err_console.print(refusal.line, markup=False, soft_wrap=True)
+        raise typer.Exit(refusal.exit_code)
+    if not lifecycle.unit_servable(record.spec):
+        _refuse_autostart(autostart.AUTOSTART_SCOPE_LINE.format(
+            name=record.name, kind=lifecycle.unit_kind(record.spec)))
+
+    def out(line: str) -> None:
+        console.print(line, markup=False, soft_wrap=True)
+
+    def err(line: str) -> None:
+        err_console.print(line, markup=False, soft_wrap=True)
+
+    raise typer.Exit(autostart.turn_on(
+        harness, record, cfg_path, environ=os.environ, cwd=os.getcwd(), out=out, err=err))
 
 
 def _download(repo_id: str, filename: Optional[str]) -> None:
@@ -178,8 +241,18 @@ def model(
         "quant, e.g. `Qwen3-32B-Q4_K_M.gguf`) instead of the whole repo snapshot. Use this for "
         "llama.cpp models — GGUF repos commonly ship several quantizations as sibling files.",
     ),
+    autostart: Optional[str] = typer.Option(
+        None,
+        "--autostart",
+        help="on | off — the autostart unit localharness-llm.service serves the last choice at login.",
+    ),
 ) -> None:
     """List available models, or switch the persisted default with `localharness model <name>`."""
+    if autostart is not None:
+        _autostart(
+            autostart, config_dir,
+            with_other_arguments=name is not None or download is not None or file is not None)
+        return
     if download is not None:
         _download(download, file)
         return
