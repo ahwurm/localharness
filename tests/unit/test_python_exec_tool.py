@@ -85,26 +85,22 @@ async def test_wr05_a_child_python_exec_spawns_inherits_the_marker_and_the_proce
 @pytest.mark.asyncio
 async def test_wr05_a_child_makes_the_cli_say_not_a_local_operator(monkeypatch):
     """The CLI's own question, asked in a child python_exec spawned: the marker alone decides it
-    (a tty cannot be faked here, so the tty half is patched in the child's code)."""
+    (a tty cannot be faked here, so both terminal checks are patched in the child's code)."""
     monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    child = (
+        "import localharness.cli.workspace as w\n"
+        "w._stdin_is_a_terminal = lambda: True\n"
+        "w._stdout_is_a_terminal = lambda: True\n"
+        "print(w.local_operator(False))"
+    )
     code = (
         "import subprocess, sys\n"
-        "src = ('import sys\\n'\n"
-        "       'class T:\\n'\n"
-        "       '    def isatty(self): return True\\n'\n"
-        "       'sys.stdin = T()\\n'\n"
-        "       'from localharness.cli.model_cmd import _is_local_operator\\n'\n"
-        "       'print(_is_local_operator())')\n"
-        "print(subprocess.run([sys.executable, '-c', src], capture_output=True, text=True).stdout.strip())\n"
+        f"print(subprocess.run([sys.executable, '-c', {child!r}], capture_output=True, text=True).stdout.strip())\n"
     )
     assert (await PythonExecTool().run(code=code)).output.strip() == "False"
     import subprocess
     import sys
-    bare = subprocess.run(
-        [sys.executable, "-c",
-         "import sys\nclass T:\n    def isatty(self): return True\nsys.stdin = T()\n"
-         "from localharness.cli.model_cmd import _is_local_operator\nprint(_is_local_operator())"],
-        capture_output=True, text=True).stdout.strip()
+    bare = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True).stdout.strip()
     assert bare == "True"  # the same child without the marker is a local operator: the marker is what matters
 
 

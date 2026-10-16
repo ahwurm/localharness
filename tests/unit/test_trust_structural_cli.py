@@ -39,7 +39,7 @@ ASK_TRUE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({("cli/model_cmd.py",
 MODEL_CMD = "cli/model_cmd.py"
 ASKING_FUNCTION = "_autostart_on"
 GATE_FUNCTION = "_autostart"
-GATE_CALL = "_is_local_operator"
+GATE_CALL = "local_operator"
 
 # Where a `Heavy` may be built (cli/model_ops.py only) and where a `Serving` may be built: the ladder
 # and the one helper that hands back its last rung.
@@ -316,15 +316,15 @@ def test_bite_the_ask_before_its_gate_is_reported():
     ungated = textwrap.dedent("""
         def _autostart(mode, config_dir):
             _autostart_on(config_dir)
-            if not _is_local_operator():
+            if not local_operator(False):
                 raise SystemExit(2)
         def _autostart_on(cfg):
             return decide_machine_trust(cfg, ask=True)
     """)
-    assert gate_before_ask(ungated) == ["_autostart calls _autostart_on (line 3) before _is_local_operator (line 4)"]
+    assert gate_before_ask(ungated) == ["_autostart calls _autostart_on (line 3) before local_operator (line 4)"]
     gated = textwrap.dedent("""
         def _autostart(mode, config_dir):
-            if not _is_local_operator():
+            if not local_operator(False):
                 raise SystemExit(2)
             _autostart_on(config_dir)
         def _autostart_on(cfg):
@@ -336,7 +336,7 @@ def test_bite_the_ask_before_its_gate_is_reported():
 def test_bite_a_second_caller_of_the_ask_and_a_missing_gate_are_reported():
     sneaky = textwrap.dedent("""
         def _autostart(mode, config_dir):
-            if not _is_local_operator():
+            if not local_operator(False):
                 raise SystemExit(2)
             _autostart_on(config_dir)
         def elsewhere(config_dir):
@@ -346,7 +346,7 @@ def test_bite_a_second_caller_of_the_ask_and_a_missing_gate_are_reported():
     """)
     assert gate_before_ask(sneaky) == ["_autostart_on is called from ['_autostart', 'elsewhere'], not only _autostart"]
     ungated = "def _autostart(m, c):\n    _autostart_on(c)\n"
-    assert gate_before_ask(ungated) == ["_autostart never calls _is_local_operator"]
+    assert gate_before_ask(ungated) == ["_autostart never calls local_operator"]
     assert gate_before_ask("def other():\n    pass\n") == [
         "_autostart_on is called from nowhere, not only _autostart", "no _autostart function"]
 

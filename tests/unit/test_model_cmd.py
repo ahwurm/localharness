@@ -492,18 +492,30 @@ class _Stdin:
 )
 def test_only_a_tty_without_the_shell_tools_marker_is_a_local_operator(
         monkeypatch, tty, marker, expected):
-    from localharness.cli import model_cmd
+    from localharness.cli import workspace
 
     monkeypatch.setattr("sys.stdin", _Stdin(tty))
+    monkeypatch.setattr(workspace, "_stdout_is_a_terminal", lambda: True)
     monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
     if marker:
         monkeypatch.setenv("LOCALHARNESS_COMMIT", "1")
 
-    assert model_cmd._is_local_operator() is expected
+    assert workspace.local_operator(False) is expected
+
+
+def test_a_tty_stdin_with_a_piped_stdout_is_not_a_local_operator(monkeypatch):
+    from localharness.cli import workspace
+
+    monkeypatch.setattr("sys.stdin", _Stdin(True))
+    monkeypatch.setattr(workspace, "_stdout_is_a_terminal", lambda: False)
+    monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
+    assert workspace.local_operator(False) is False
 
 
 def test_a_stdin_that_cannot_say_is_not_a_local_operator(monkeypatch):
-    from localharness.cli import model_cmd
+    from localharness.cli import workspace
+
+    monkeypatch.setattr(workspace, "_stdout_is_a_terminal", lambda: True)
 
     class _Broken:
         def isatty(self):
@@ -511,9 +523,9 @@ def test_a_stdin_that_cannot_say_is_not_a_local_operator(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", _Broken())
     monkeypatch.delenv("LOCALHARNESS_COMMIT", raising=False)
-    assert model_cmd._is_local_operator() is False
+    assert workspace.local_operator(False) is False
     monkeypatch.setattr("sys.stdin", None)
-    assert model_cmd._is_local_operator() is False
+    assert workspace.local_operator(False) is False
 
 
 @pytest.mark.parametrize("operator", [True, False])
@@ -522,7 +534,7 @@ def test_model_switch_hands_the_operator_signal_to_persist(components_home, monk
 
     _seed_config(components_home)
     monkeypatch.setattr(model_ops, "list_live_models", _fake_live(["model-a", "model-b"]), raising=False)
-    monkeypatch.setattr(model_cmd, "_is_local_operator", lambda: operator)
+    monkeypatch.setattr(model_cmd, "local_operator", lambda no_input: operator)
     seen: list[dict] = []
     real = model_ops.persist_default_model
 
