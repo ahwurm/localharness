@@ -622,6 +622,10 @@ def _existing_config(config_path: Path, config_file: Path, interactive: bool, *,
         raise typer.Exit(1)
     if changing:
         return False
+    synced = library.sync(config_path, scope="all", person=interactive)
+    if synced.appended:
+        console.print("[green]✓[/green] " + escape(library.ADDED_KEPT_LINE.format(n=synced.appended)), soft_wrap=True)
+        return True
     if interactive and not Confirm.ask(
         escape(f"Config exists: {provider.default_model} at {provider.base_url}. Keep it?"),
         default=True,
