@@ -1612,8 +1612,7 @@ def _plugin_lines(config_path: Path) -> list[str]:
 
 
 def _guided_setup(config_path: Path, ra: RefArch) -> InitRecords:
-    """The vLLM row the person chose, with its one consent given: find or install the runtime, fetch the
-    checkpoint, write the record. The first `start` launches it, after its own trust decision."""
+    """The vLLM row the person chose, its consent given: find or install the runtime, fetch the checkpoint, build the record."""
     server_config_path = global_config_dir(config_path)
     console.print(f"  Reference doc: [cyan]{ra.page}[/cyan]")
     binary = managed_server.find_vllm(server_config_path)
