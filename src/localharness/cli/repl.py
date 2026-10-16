@@ -323,6 +323,7 @@ class OrchestratorREPL:
         launch_lines: Sequence[str] = (),
         machine_trust: Any = None,
         serving_heavy: tuple[Any, str] | None = None,
+        unit_state: Any = None,
     ) -> None:
         from localharness.cli.workspace import MachineTrust
         self._orchestrator = orchestrator
@@ -338,6 +339,11 @@ class OrchestratorREPL:
         self._channel = channel
         self._bus = bus
         self._config_dir = config_dir
+        # The harness's own autostart unit state `start` sensed ONCE for this invocation (D-19), or None:
+        # every strategy, swap, free, stop and restore the session builds takes it, so a launch goes
+        # through the unit exactly as `start`'s does. The session never senses the unit itself;
+        # `UnitStrategy` re-reads the live state before each restart and stop.
+        self._unit_state = unit_state
         # The workspace layer that applies to this session, or None. Resolved ONCE by the caller at
         # session start and carried for the session LIFETIME — never re-walked mid-session, even if
         # the user cd's elsewhere in a tool call (39-04's contract). Design D: the REPL never
@@ -444,7 +450,7 @@ class OrchestratorREPL:
             _held_spec = serving_heavy[0]
             try:
                 from localharness.provider.lifecycle import strategy_for
-                _held_alive = bool(strategy_for(_held_spec).liveness(
+                _held_alive = bool(strategy_for(_held_spec, unit=self._unit_state).liveness(
                     _held_spec, self._server_config_dir).alive)
             except Exception:  # noqa: BLE001 — a liveness that cannot be asked is "not launched"
                 _held_alive = False
@@ -454,7 +460,7 @@ class OrchestratorREPL:
                 and _prov is not None and config_dir is not None):
             try:
                 from localharness.provider.lifecycle import strategy_for
-                _alive = bool(strategy_for(_srv).liveness(_srv, self._server_config_dir).alive)
+                _alive = bool(strategy_for(_srv, unit=self._unit_state).liveness(_srv, self._server_config_dir).alive)
             except Exception:  # noqa: BLE001 — a liveness that cannot be asked is "not launched"
                 _alive = False
             if _alive:
@@ -1804,7 +1810,7 @@ class OrchestratorREPL:
             try:
                 from localharness.provider.lifecycle import strategy_for
                 claimed = bool(
-                    strategy_for(managed).liveness(managed, self._server_config_dir).alive)
+                    strategy_for(managed, unit=self._unit_state).liveness(managed, self._server_config_dir).alive)
             except Exception:  # noqa: BLE001 — a liveness that cannot be asked claims nothing
                 claimed = False
         if claimed and managed is not None and getattr(managed, "runtime", None) == "llamacpp":
@@ -2130,7 +2136,9 @@ class OrchestratorREPL:
             reporter = _ReplSwapReporter(
                 self, target=swap_target, incumbent=swap_incumbent,
                 launch_head=(f"Launching {ep.name}{f' ({posture})' if posture else ''} — "
-                             "the swap can take several minutes..."),
+                             "the swap can take several minutes..."
+                             + (f" {_lifecycle.RUNS_OUTSIDE_AUTOSTART}"
+                                if _lifecycle.outside_autostart(ep.lifecycle, self._unit_state) else "")),
                 tradeoff=tradeoff, note=decision.note, redact=redact)
             async with self._launch_lock():
                 try:
@@ -2139,7 +2147,7 @@ class OrchestratorREPL:
                     outcome = await _lifecycle.swap(
                         swap_incumbent, swap_target, config_dir=self._server_config_dir,
                         autosense=getattr(self._harness, "autosense", None), reporter=reporter,
-                        redact=redact, on_poll=_cold_progress,
+                        redact=redact, on_poll=_cold_progress, unit=self._unit_state,
                     )
                 finally:
                     if box_note is not None:
@@ -2204,6 +2212,19 @@ class OrchestratorREPL:
         if decision.refusal is not None:
             await self._channel.send_message(decision.refusal, metadata={"style": "system.error"})
             return
+        # Under the harness's own unit the restart goes through the unit, which serves the record the
+        # machine fingerprinted and nothing else (D-20): a typed .gguf, or a name other than the record's
+        # on a non-llama.cpp primary, is refused here, BEFORE the rebind-back and before anything is
+        # stopped. `UnitStrategy.activate` keeps its own refusal as the backstop.
+        from localharness.provider import lifecycle as _lifecycle
+        from localharness.provider.lifecycle import free_accelerator
+        strategy = _lifecycle.strategy_for(managed, unit=self._unit_state)
+        typed_swap = managed.runtime == "llamacpp" and typed_gguf and target != prim_served
+        if isinstance(strategy, _lifecycle.UnitStrategy) and (
+                typed_swap or (managed.runtime != "llamacpp" and target != prim_served)):
+            await self._channel.send_message(
+                _lifecycle.UNIT_TYPED_LINE.format(path=target), metadata={"style": "system.error"})
+            return
         # Tradeoff BEFORE the rebind-back below — cur_ptype must key where the current model
         # actually ran (possibly a peer), not the primary we are about to re-point at.
         tradeoff = self._swap_tradeoff_note(cur_ptype, current, prim_ptype, target)
@@ -2213,8 +2234,6 @@ class OrchestratorREPL:
             # headers field, so the primary's identity carries none.
             llm.rebind_endpoint(_prim.base_url, api_key=_prim.api_key, extra_headers={},
                                 provider_type=_prim.provider_type)
-        from localharness.provider.lifecycle import free_accelerator, strategy_for
-        strategy = strategy_for(managed)
         # a failure line carries a launch's tail: it is masked before any channel shows it (D-22)
         redact_failure = self._channel_redactor()
         label = RUNTIME_LABELS.get(managed.runtime, managed.runtime)
@@ -2240,7 +2259,8 @@ class OrchestratorREPL:
         # reloads the model.
         async with self._launch_lock():
             try:
-                freed = await free_accelerator(self._active_heavy, managed, self._server_config_dir)
+                freed = await free_accelerator(
+                    self._active_heavy, managed, self._server_config_dir, unit=self._unit_state)
             except (RuntimeError, TimeoutError) as exc:
                 if box_note is not None:
                     box_note(None)
@@ -2254,7 +2274,6 @@ class OrchestratorREPL:
             # The shared record's own weights and name, put back if the restart fails (WR-53).
             before = (managed.model, managed.served_name)
             spec = managed
-            typed_swap = managed.runtime == "llamacpp" and typed_gguf and target != prim_served
             try:
                 # The verified stop can block ~90s worst-case (#100); the strategy runs it OFF the event
                 # loop (asyncio.to_thread inside strategy.stop) so heartbeats/the channel stay live while
@@ -2501,7 +2520,7 @@ class OrchestratorREPL:
         would be clobbered-and-lost by the restore's own launch). The body is `lifecycle.safe_stop`,
         the one every surface's swap shares."""
         from localharness.provider import lifecycle as _lifecycle
-        await _lifecycle.safe_stop(spec, self._server_config_dir)
+        await _lifecycle.safe_stop(spec, self._server_config_dir, unit=self._unit_state)
 
     async def _announce_window(self, live: Any, provider_type: str, model_id: str) -> None:
         """The swap report names the window a launch got — what ``activate`` asked and the probe
@@ -2555,7 +2574,7 @@ class OrchestratorREPL:
             async with self._launch_lock():
                 label, note = await _lifecycle.restore_incumbent(
                     heavy, config_dir=self._server_config_dir,
-                    autosense=getattr(self._harness, "autosense", None))
+                    autosense=getattr(self._harness, "autosense", None), unit=self._unit_state)
                 if label is not None:
                     self._active_heavy = (spec, base_url)
             return label, note
@@ -2608,7 +2627,7 @@ class OrchestratorREPL:
             spec = launch_spec
             runtime = getattr(spec, "runtime", None)
             if cfg_dir is not None:
-                config_dir = strategy_for(spec).recovery_config_dir(cfg_dir)
+                config_dir = strategy_for(spec, unit=self._unit_state).recovery_config_dir(cfg_dir)
                 if not (getattr(spec, "require_api_key", False) is True and not launch_key):
                     relaunch = self._build_relaunch(
                         spec, client_base_url, cfg_dir, launch_key,
@@ -2621,7 +2640,7 @@ class OrchestratorREPL:
                     and provider.base_url == client_base_url):
                 runtime = getattr(managed, "runtime", None)
                 if cfg_dir is not None:
-                    config_dir = strategy_for(managed).recovery_config_dir(cfg_dir)
+                    config_dir = strategy_for(managed, unit=self._unit_state).recovery_config_dir(cfg_dir)
         pair = ServerRecovery(client_base_url, config_dir, relaunch, runtime)
         # the active spec and the launched one are held so their ids cannot be reused while the memo stands
         self._recovery_memo = (key, pair, (active[0] if active else None, launch_spec))
@@ -2682,7 +2701,7 @@ class OrchestratorREPL:
         async def relaunch():
             from localharness.provider import lifecycle as _lifecycle
             from localharness.provider import server as managed_server
-            strategy = _lifecycle.strategy_for(spec)
+            strategy = _lifecycle.strategy_for(spec, unit=self._unit_state)
 
             def _already_up() -> bool:
                 try:
