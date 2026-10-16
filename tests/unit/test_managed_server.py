@@ -1,6 +1,7 @@
 """Managed vLLM server: refarch profiles, config schema, lifecycle, /model plumbing."""
 from __future__ import annotations
 
+import re
 import os
 import signal
 import sys
@@ -39,10 +40,16 @@ def test_refarch_profiles_complete():
     keys = [ra.key for ra in REF_ARCHS]
     assert len(keys) == len(set(keys))
     for ra in REF_ARCHS:
-        assert ra.default_model
+        assert ra.repo
+        assert (REPO_ROOT / ra.page).exists(), f"{ra.key}: page {ra.page} missing"
+        if ra.file:
+            assert re.fullmatch("[0-9a-f]{40}", ra.revision)
+            assert re.fullmatch("[0-9a-f]{64}", ra.sha256)
+            assert ra.file.endswith(".gguf") and ra.bytes > 0
+            continue
+        assert ra.revision is None and ra.sha256 is None
         assert ra.context_tokens >= 8192
         assert "--max-model-len" in ra.serve_extra_args
-        assert (REPO_ROOT / ra.doc).exists(), f"{ra.key}: doc {ra.doc} missing"
         if ra.launch == "docker":
             assert ra.docker_image
         else:

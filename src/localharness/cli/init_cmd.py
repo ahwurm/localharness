@@ -1881,17 +1881,18 @@ def _guided_setup(config_path: Path) -> InitRecords | None:
 
     # --- Hardware ---------------------------------------------------------- #
     console.print("\nPick your hardware (reference architectures):")
-    for i, ra in enumerate(REF_ARCHS, start=1):
-        console.print(f"  {i}. {ra.name}  [{ra.status}] — {ra.default_model}")
-    console.print(f"  {len(REF_ARCHS) + 1}. Other / set up manually")
+    rows = [ra for ra in REF_ARCHS if ra.runtime == "vllm"]
+    for i, ra in enumerate(rows, start=1):
+        console.print(f"  {i}. {ra.name}  [{ra.status}] — {ra.repo}")
+    console.print(f"  {len(rows) + 1}. Other / set up manually")
     choice = IntPrompt.ask("Select", default=1)
-    if not 1 <= choice <= len(REF_ARCHS):
+    if not 1 <= choice <= len(rows):
         return None
-    ra = REF_ARCHS[choice - 1]
-    console.print(f"  Reference doc: [cyan]{ra.doc}[/cyan]")
-    if not sys.platform.startswith(ra.platform):
+    ra = rows[choice - 1]
+    console.print(f"  Reference doc: [cyan]{ra.page}[/cyan]")
+    if not sys.platform.startswith(ra.platforms):
         console.print(
-            f"  [yellow]⚠[/yellow]  {ra.name} targets {ra.platform}; this machine is {sys.platform}. "
+            f"  [yellow]⚠[/yellow]  {ra.name} targets {' or '.join(ra.platforms)}; this machine is {sys.platform}. "
             "Continuing, but the reference numbers won't apply."
         )
 
@@ -1904,7 +1905,7 @@ def _guided_setup(config_path: Path) -> InitRecords | None:
         if which_outside_cwd("docker") is None:
             err_console.print(
                 "[bold red]Error:[/bold red] No vllm binary and no docker. "
-                f"This hardware's supported route is the NVIDIA container — see {ra.doc}."
+                f"This hardware's supported route is the NVIDIA container — see {ra.page}."
             )
             raise typer.Exit(1)
         launch, image = "docker", ra.docker_image
@@ -1918,22 +1919,22 @@ def _guided_setup(config_path: Path) -> InitRecords | None:
         if not Confirm.ask(
             f"  Install [bold]{ra.pip_package}[/bold] into " + escape(str(venv)) + "?", default=True
         ):
-            console.print(f"  Install it yourself, then re-run init — see {ra.doc}.")
+            console.print(f"  Install it yourself, then re-run init — see {ra.page}.")
             raise typer.Exit(1)
         try:
             binary = managed_server.install_vllm_venv(server_config_path, str(ra.pip_package))
         except RuntimeError as exc:
             err_console.print(
-                "[bold red]Error:[/bold red] " + escape(f"{exc}\nSee {ra.doc} for the manual route."),
+                "[bold red]Error:[/bold red] " + escape(f"{exc}\nSee {ra.page} for the manual route."),
                 soft_wrap=True,
             )
             raise typer.Exit(1)
         console.print("  [green]✓[/green] " + escape(f"Installed: {binary}"), soft_wrap=True)
 
     # --- Model -------------------------------------------------------------- #
-    console.print(f"\n  Reference model: [bold]{ra.default_model}[/bold]")
+    console.print(f"\n  Reference model: [bold]{ra.repo}[/bold]")
     console.print(f"  [dim]{ra.model_note}[/dim]")
-    model = Prompt.ask("  Model (HF repo id, or local checkpoint path)", default=ra.default_model)
+    model = Prompt.ask("  Model (HF repo id, or local checkpoint path)", default=ra.repo)
     if not Path(model).expanduser().exists():  # repo id → ensure it's in the HF cache
         if managed_server.is_model_cached(model):
             console.print("  [green]✓[/green] Already downloaded (Hugging Face cache).")

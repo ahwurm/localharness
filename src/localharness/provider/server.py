@@ -518,12 +518,18 @@ def venv_vllm_bin(config_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def find_vllm(config_dir: Path) -> str | None:
+def vllm_binary(config_dir: Path) -> tuple[str, str] | None:
     """The harness-managed venv wins over a system vllm (its version is known)."""
     venv_bin = venv_vllm_bin(config_dir)
     if venv_bin.exists():
-        return str(venv_bin)
-    return which_outside_cwd("vllm")
+        return str(venv_bin), "harness venv"
+    found = which_outside_cwd("vllm")
+    return (found, "on PATH") if found else None
+
+
+def find_vllm(config_dir: Path) -> str | None:
+    found = vllm_binary(config_dir)
+    return found[0] if found else None
 
 
 def install_vllm_venv(config_dir: Path, package: str) -> str:
@@ -591,7 +597,7 @@ def download_model(repo_id: str) -> str:
     return snapshot_download(repo_id)
 
 
-def download_file(repo_id: str, filename: str) -> str:
+def download_file(repo_id: str, filename: str, *, revision: str | None = None) -> str:
     """Download ONE file from a HF repo into the HF cache (tqdm progress). Raises on failure.
 
     The llama.cpp/GGUF case: a GGUF repo commonly ships several quantizations as sibling files
@@ -600,7 +606,38 @@ def download_file(repo_id: str, filename: str) -> str:
     named file, returning its local cache path (ready to hand to a `server.model`/`-m` flag)."""
     from huggingface_hub import hf_hub_download
 
-    return hf_hub_download(repo_id=repo_id, filename=filename)
+    return hf_hub_download(repo_id=repo_id, filename=filename, revision=revision)
+
+
+@dataclass(frozen=True)
+class HubFile:
+    commit: str
+    size: int
+    sha256: str
+
+
+_HEX40 = re.compile(r"[0-9a-f]{40}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def hub_file(repo_id: str, filename: str, *, ref: str | None = None) -> HubFile | None:
+    """The hub's commit, LFS size and sha256 for one file; None on any failure or a non-LFS file."""
+    try:
+        from huggingface_hub import HfApi
+
+        api = HfApi()
+        commit = api.model_info(repo_id, revision=ref).sha
+        if not isinstance(commit, str) or not _HEX40.fullmatch(commit):
+            return None
+        lfs = api.get_paths_info(repo_id, [filename], revision=commit)[0].lfs
+        size, digest = lfs.size, lfs.sha256
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            return None
+        if not isinstance(digest, str) or not _HEX64.fullmatch(digest):
+            return None
+        return HubFile(commit, size, digest)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------

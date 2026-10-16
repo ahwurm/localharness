@@ -1,4 +1,4 @@
-"""Reference-architecture profiles for guided setup (`localharness init`).
+"""Reference-architecture rows for the download offer and guided setup (`localharness init`).
 
 Distilled from docs/reference-architectures/ — those docs are ground truth;
 keep this data in sync with them. Install routes verified June 2026:
@@ -16,27 +16,55 @@ class RefArch:
     key: str
     name: str
     status: str  # "tested" | "proposed" — mirrors the doc's status line
-    doc: str  # repo-relative path to the ground-truth doc
-    platform: str  # sys.platform this hardware runs ("linux" | "darwin")
+    page: str  # repo-relative path to the ground-truth doc
+    runtime: str  # "llamacpp" | "vllm"
+    platforms: tuple[str, ...]  # sys.platform prefixes this hardware runs
+    needs: str | None  # "nvidia" | "apple-silicon" | None
+    repo: str  # published, downloadable HF repo
+    file: str | None  # the one file a llama.cpp row fetches; None = whole repo
+    bytes: int  # the file's size, or the repo's total
+    revision: str | None  # 40-hex commit the file is fetched at; None for a whole-repo row
+    sha256: str | None  # the hub's LFS hash of `file` at `revision`
     launch: str  # preferred route when no vllm binary exists: "docker" | "binary"
-    docker_image: str | None
-    pip_package: str | None  # installed into the harness venv when launch="binary"
-    default_model: str  # published, downloadable HF checkpoint
-    model_note: str  # honesty note shown before download
-    serve_extra_args: tuple[str, ...]
-    context_tokens: int  # served window (--max-model-len)
+    docker_image: str | None = None
+    pip_package: str | None = None  # installed into the harness venv when launch="binary"
+    model_note: str = ""  # honesty note shown before download
+    serve_extra_args: tuple[str, ...] = ()
+    context_tokens: int | None = None  # served window (--max-model-len)
 
+
+RTX_4060 = RefArch(
+    key="rtx-4060",
+    name="8 GB consumer GPU — RTX 4060 class, 16 GB RAM",
+    status="proposed",
+    page="docs/reference-architectures/rtx-4060.md",
+    runtime="llamacpp",
+    platforms=("linux", "darwin"),
+    needs=None,
+    repo="empero-ai/Qwen3.8-9B-Distill-GGUF",
+    file="Qwen3.8-9B-Q4_K_M.gguf",
+    bytes=5780090176,
+    revision="760121cd70bb4c36b2b5ec58eb765e0df5987efe",
+    sha256="df13d66021cef676f82be74053220fd75af6bf2a6a7fb77f5222ab9e50744a7a",
+    launch="binary",
+    model_note="GGUF Q4_K_M (5.8 GB); fully offloaded on an 8 GB card",
+)
 
 DGX_SPARK = RefArch(
     key="dgx-spark",
     name="NVIDIA DGX Spark — GB10, 128 GB unified",
     status="tested",
-    doc="docs/reference-architectures/dgx-spark.md",
-    platform="linux",
+    page="docs/reference-architectures/dgx-spark.md",
+    runtime="vllm",
+    platforms=("linux",),
+    needs="nvidia",
+    repo="Qwen/Qwen3.6-27B-FP8",
+    file=None,
+    bytes=30890040900,
+    revision=None,
+    sha256=None,
     launch="docker",
     docker_image="vllm/vllm-openai:nightly",
-    pip_package=None,
-    default_model="Qwen/Qwen3.6-27B-FP8",
     model_note=(
         "Published FP8 checkpoint (~28 GB download). The doc's tested NVFP4 variant has no "
         "published checkpoint — quantize locally with TensorRT ModelOpt and enter its path instead."
@@ -54,15 +82,21 @@ MAC_MINI = RefArch(
     key="mac-mini",
     name="Apple Mac mini — M4, 16 GB unified",
     status="proposed",
-    doc="docs/reference-architectures/mac-mini.md",
-    platform="darwin",
+    page="docs/reference-architectures/mac-mini.md",
+    runtime="vllm",
+    platforms=("darwin",),
+    needs="apple-silicon",
+    repo="mlx-community/Qwen3.5-9B-MLX-4bit",
+    file=None,
+    bytes=5977074591,
+    revision=None,
+    sha256=None,
     launch="binary",
-    docker_image=None,
     pip_package="vllm-metal",
-    default_model="mlx-community/Qwen3.5-9B-MLX-4bit",
     model_note="MLX 4-bit (~5.7 GB download). vllm-metal needs native arm64 Python 3.12.",
     serve_extra_args=("--max-model-len", "65536"),
     context_tokens=65536,
 )
 
-REF_ARCHS: tuple[RefArch, ...] = (DGX_SPARK, MAC_MINI)
+REF_ARCHS: tuple[RefArch, ...] = (RTX_4060, DGX_SPARK, MAC_MINI)
+
