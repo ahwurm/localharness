@@ -38,6 +38,7 @@ import pytest
 import yaml
 
 from localharness.agent.context import WindowProbe
+from localharness.config import trust
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import autosense, lifecycle, procfs, server, units
@@ -425,6 +426,9 @@ def unit_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_proc: FakeP
     body = units.render_harness_unit(sys.executable, g, {"PATH": str(tmp_path / "bin")},
                                      home=units.harness_home(), version="0.19.0")
     units.write_harness_unit(body)
+    # The person confirmed this machine's files, the unit's environment among them: a swap through the unit
+    # checks that record before it stops anything (`lifecycle.unit_launch_refusal`).
+    trust.record_machine(g, trust.machine_snapshot(g))
     manager = ScriptedManager(str(units.harness_unit_path()))
     monkeypatch.setattr(units, "_run_manager", manager)
     fake_proc.process(os.getpid(), argv=("python", "-m", "pytest"), exe=INTERPRETER, start_time=111,

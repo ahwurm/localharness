@@ -1347,6 +1347,12 @@ UNIT_NAME_LINE = ("the autostart unit takes a record name of letters, digits and
                   "server:); {name!r} is not one")
 """The refusal for a peer name `unit-target` cannot hold (R-14-23)."""
 
+UNIT_ENV_LINE = ("the autostart unit would exit 78 at its start: {why}. localharness model --autostart on "
+                 "re-adopts it; localharness start in a terminal asks about it")
+"""The refusal when the machine record does not cover the unit's captured environment (a withheld, changed
+or missing `autostart.env` entry): `serve` would exit 78 on the restart, so nothing is stopped for it
+(`unit_launch_refusal`)."""
+
 UNIT_FOREIGN_LINE = "{unit} {why} — it is not the unit localharness wrote, so it was not restarted"
 """The refusal when the unit failed its identity re-check before a restart (D-13, T-14-22); `why` is
 `units.harness_unit_failure`'s phrase."""
@@ -1363,6 +1369,42 @@ UNIT_TIMEOUT_LINE = "{label}: the autostart unit's server was not ready after {s
 LEND_POLL_SECONDS = 0.25
 """How often the lent launch lock's holder looks at the unit. A poll interval, never a bound: the loan
 ends on an event or on the activate's own deadline (R-14-21)."""
+
+
+def unit_name_refusal(peer: str | None) -> str | None:
+    """`UNIT_NAME_LINE` for a peer name `unit-target` cannot hold (the primary's own reserved name, a name
+    outside `units.TARGET_NAME_PATTERN`: a space, a non-ASCII letter, over 128 characters), else None. A
+    primary (``peer`` None) always has a name."""
+    if peer is not None and (peer == units.PRIMARY_TARGET or not units.TARGET_NAME_PATTERN.fullmatch(peer)):
+        return UNIT_NAME_LINE.format(name=peer)
+    return None
+
+
+def unit_launch_refusal(
+    spec: ManagedServerConfig | None, peer: str | None, unit: Any, config_dir: Path,
+) -> str | None:
+    """Why a launch of ``spec`` (the peer named ``peer``, None for the primary) through the harness's own
+    unit is known to fail before anything is touched, else None. A swap stops the incumbent first, so every
+    refusal that is knowable beforehand is checked here, before that stop (the repo's rule: a refused
+    launch leaves the incumbent serving):
+
+    - a peer name `unit-target` cannot hold (`unit_name_refusal`);
+    - the machine record does not cover the unit's captured environment (`trust.autostart_env_failure`):
+      `serve` would exit 78, the restore of the incumbent would be refused the same way, and the box would
+      end with nothing serving.
+
+    Only a launch that goes through the harness's OWN unit (`unit` a `UnitRuntimeState` with ``own=True``
+    and a record the unit serves) is judged; anything else is None. Blocking: it reads the unit file and
+    the trust store, so async callers run it off the loop. Nothing is written."""
+    if not (isinstance(unit, units.UnitRuntimeState) and unit.own and unit_servable(spec)):
+        return None
+    named = unit_name_refusal(peer)
+    if named is not None:
+        return named
+    from localharness.config import trust as _trust
+
+    why = _trust.autostart_env_failure(config_dir)
+    return UNIT_ENV_LINE.format(why=why) if why is not None else None
 
 
 def _unit_failure_text(head: str, invocation: str | None, api_key: Any) -> str:
@@ -1474,8 +1516,9 @@ class UnitStrategy:
         if spec is not self._spec or (spec.model, spec.served_name) != self._launch:
             raise server.LaunchRefused(UNIT_TYPED_LINE.format(path=spec.model))
         name = units.PRIMARY_TARGET if peer is None else peer
-        if peer is not None and (peer == units.PRIMARY_TARGET or not units.TARGET_NAME_PATTERN.fullmatch(peer)):
-            raise server.LaunchRefused(UNIT_NAME_LINE.format(name=peer))
+        named = unit_name_refusal(peer)
+        if named is not None:
+            raise server.LaunchRefused(named)
         keyed = bool(api_key)
         decision = server.launch_decision(spec, keyed, peer=peer)
         if decision.refusal is not None:
@@ -1718,6 +1761,8 @@ SWAP_LAUNCH_FAILED = "Launch of {name} failed: {exc}{tail}"
 SWAP_RESTORED_TAIL = " Restored {label}."
 SWAP_NOT_RESTORED_TAIL = " Could not restore it: {why}"
 SWAP_NOTHING_SERVING_TAIL = " The box now has NO model serving — manual attention needed."
+SWAP_REFUSED = ("Did not start {name}: {why}. No change made — the current model should still be "
+                "serving.")
 
 
 @dataclass(frozen=True)
@@ -1762,7 +1807,8 @@ class SwapOutcome:
     """How a swap ended, for a failure that was handled: `live` the target's endpoint (None unless it
     came up), `stopped` the incumbent the swap freed, `restored` that incumbent when it came back,
     `error` the failure — a NEW exception whose text is the redacted one, with no cause and no
-    context — and `stage` where it happened ("free" or "launch"; None on success)."""
+    context — and `stage` where it happened ("refused" before anything was stopped, "free" or "launch";
+    None on success)."""
     live: LiveEndpoint | None
     stopped: Heavy | None
     restored: Heavy | None
@@ -1878,6 +1924,13 @@ async def swap(
     `unit-target` (RULING W3: only `UnitStrategy.activate` does); it only takes it away, through
     `leave_unit`, when the target is a record the unit cannot serve, right before that target's own
     launch (R-14-28)."""
+    # Before the incumbent is stopped: a launch through the unit that is known to fail (a peer name the
+    # unit target cannot hold, an `autostart.env` the record does not cover) is refused with the incumbent
+    # still serving, so the person never pays two model loads for a swap that could not succeed.
+    refusal = await asyncio.to_thread(unit_launch_refusal, target.spec, target.peer, unit, config_dir)
+    if refusal is not None:
+        await reporter.line(redact(SWAP_REFUSED.format(name=heavy_label(target), why=refusal)))
+        return SwapOutcome(None, None, None, _redacted_error(RuntimeError(refusal), redact), "refused")
     try:
         freed = await free_accelerator(
             (incumbent.spec, incumbent.base_url) if incumbent is not None else None,

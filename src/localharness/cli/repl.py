@@ -2225,6 +2225,15 @@ class OrchestratorREPL:
             await self._channel.send_message(
                 _lifecycle.UNIT_TYPED_LINE.format(path=target), metadata={"style": "system.error"})
             return
+        # And what `serve` would refuse at its start (an `autostart.env` the machine record does not cover),
+        # still before anything is stopped: the cold branch's `lifecycle.swap` asks the same question.
+        refusal = await asyncio.to_thread(
+            _lifecycle.unit_launch_refusal, managed, None, self._unit_state, self._server_config_dir)
+        if refusal is not None:
+            await self._channel.send_message(
+                self._channel_redactor()(_lifecycle.SWAP_REFUSED.format(name=target, why=refusal)),
+                metadata={"style": "system.error"})
+            return
         # Tradeoff BEFORE the rebind-back below — cur_ptype must key where the current model
         # actually ran (possibly a peer), not the primary we are about to re-point at.
         tradeoff = self._swap_tradeoff_note(cur_ptype, current, prim_ptype, target)

@@ -19,6 +19,7 @@ import yaml
 
 from localharness.cli import start_serving
 from localharness.cli.repl import OrchestratorREPL
+from localharness.config import trust
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import lifecycle, server, units
@@ -291,6 +292,29 @@ async def test_a_vllm_binary_restart_to_a_model_that_is_not_the_records_is_refus
     assert w.manager.verbs == [] and units.read_target(w.g) is None
     assert record.model == "org/rec"                              # the shared record keeps its weights
     assert repl._active_heavy == (record, PRIMARY_URL)
+
+
+@pytest.mark.asyncio
+async def test_a_restart_under_a_unit_whose_environment_the_record_does_not_cover_is_refused_before_any_stop(rw):
+    w = rw.world
+    rw.no_server_start()
+    rw.nothing_stops()
+    trust.forget_entries(w.g, [trust.AUTOSTART_KEY])              # `serve` would exit 78 on the restart
+    peer = w.peer("flash-next")
+    repl, channel, agent = rw.build(unit=w.state)
+    repl._live_models = _live([])                                 # the primary is down: a swap back restarts it
+    agent._llm.config.base_url = PEER_URLS["flash-next"]
+    agent._llm.config.model = "flash-next"
+    repl._active_heavy = (peer, PEER_URLS["flash-next"])
+
+    await repl._handle_slash(f"/model {PRIMARY}")
+
+    refusal = lifecycle.UNIT_ENV_LINE.format(why=trust.AUTOSTART_ENV_MISSING)
+    assert channel.styled[-1] == (lifecycle.SWAP_REFUSED.format(name=PRIMARY, why=refusal), "system.error")
+    assert "localharness model --autostart on" in channel.styled[-1][0]
+    assert w.manager.verbs == [] and units.read_target(w.g) is None
+    assert repl._active_heavy == (peer, PEER_URLS["flash-next"])  # the session still tracks the incumbent
+    assert agent._llm.config.base_url == PEER_URLS["flash-next"]  # not re-pointed
 
 
 def _live(models):
