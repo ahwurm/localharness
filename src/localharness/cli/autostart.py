@@ -1,15 +1,16 @@
-"""`localharness model --autostart on|off` — the body of the switch (spec 20 §9.1, §9.2, §12; D-01..D-13).
+"""`localharness model --autostart on|off|status` — the body of the switch (spec 20 §9.1, §9.2, §12; D-01..D-13).
 
 `cli/model_cmd.py` owns the command surface: the option, the local-operator gate and the one machine-trust
-question. Everything after the question lives here, so `status` (a later plan) and the doctor row share one
-module with `on`:
+question. Everything after the question lives here, so `status` and the doctor row share one module with `on`:
 
-- the lines (the gate's, the scope refusal's, the receipt's, the failures');
+- the lines (the gate's, the scope refusal's, the receipt's, the failures', the status's);
 - `turn_on`: capture the shell, render the unit, and under the launch lock write it, adopt its captured
   environment into the machine record, `daemon-reload`, re-check that the manager loaded the harness's own
   unit, and `enable` it (`--now` only when nothing of the harness's is serving; a running server is kept);
 - `turn_off`: the undo. Only the harness's own unit (all three identity tests, before and again under the
-  lock) is disabled, removed and pruned from the machine record; anything else is left as it is and named.
+  lock) is disabled, removed and pruned from the machine record; anything else is left as it is and named;
+- `status_lines` / `doctor_row`: what autostart is doing, read once and never written (D-11). Anyone may ask
+  — no terminal, no trust question, no verdict — because it decides nothing and removes nothing.
 
 Exit codes: 2 when the person can fix the call (a value the unit cannot carry); 1 when the system could not
 do it (no service manager, a failing verb, a file that could not be written, a unit the manager loaded from
@@ -25,8 +26,9 @@ from pathlib import Path
 from typing import Any
 
 from localharness.cli import model_ops
-from localharness.cli.workspace import shown_path, visible_text
+from localharness.cli.workspace import MachineTrust, shown_path, visible_text
 from localharness.config import trust
+from localharness.config.loader import ConfigLoader
 from localharness.provider import lifecycle, procfs, units
 
 AUTOSTART_TERMINAL_LINE = "autostart is set from a terminal: localharness model --autostart {mode}"
@@ -52,6 +54,22 @@ OFF_RECEIPT = "autostart off: removed {path}; nothing starts at login"
 OFF_NOTHING = "autostart is off — {path} does not exist"
 OFF_FOREIGN = "autostart off: {path} is not the unit localharness wrote ({why}) — left as it is"
 SECOND_LAUNCHER_LINE = "{unit} ({state}) also launches a server on port {port} — two launchers race at login"
+
+STATUS_ON_LINE = "Autostart: on — {path} ({file_state}, {active_state}, NRestarts {restarts}, MainPID {pid})"
+STATUS_FOREIGN_LINE = "Autostart: foreign — {path} {why}"
+STATUS_OFF_LINE = "Autostart: off — localharness model --autostart on serves the last choice at login"
+SERVES_LINE = "serves: {name}"
+SERVES_UNKNOWN_LINE = "serves: (the config could not be loaded: {why})"
+SERVES_REFUSED_LINE = "serves: ({why})"
+LINGER_ON_LINE = "linger: on"
+LINGER_OFF_LINE = "linger: off — at boot too after: loginctl enable-linger {user}"
+CAPTURED_PATH_LINE = "PATH captured: {path}"
+MARKER_LINE = "serving {name} at the {shape} shape since boot{parts}"
+IN_FLIGHT_LINE = "in flight: {name} (requested by pid {pid})"
+IN_FLIGHT_OUTRANKS_LINE = ("in flight: {name} (requested by pid {pid}) — "
+                           "outranks pending_preset {pending} while that process runs")
+STATUS_ENV_RECORD = "autostart.env ({path})"
+STATUS_UNKNOWN_RECORD = "the serving record"
 
 LOCK_WAIT_SECONDS = 60
 ERROR_TEXT_CAP = 400
@@ -225,3 +243,64 @@ def turn_off(config_dir: Path, *, out: Say, err: Say, harness: Any = None) -> in
 
     out(OFF_RECEIPT.format(path=display_path(path)))
     return 0
+
+
+# ------------------------------------------------------------------------------------------- status
+
+
+def _first_status_line(state: Any, path: Path, config_dir: Path, body: str | None) -> tuple[str, bool]:
+    """The `Autostart:` line and whether the unit is the harness's own: `on` with the manager's own words, or
+    `foreign` with the phrase of the FIRST identity test it failed (D-11, D-13)."""
+    why = units.harness_unit_failure(state, config_dir, body=body)
+    if why is not None:
+        return STATUS_FOREIGN_LINE.format(path=display_path(path), why=visible_text(why)), False
+    return STATUS_ON_LINE.format(
+        path=display_path(path), file_state=visible_text(state.unit_file_state or "-"),
+        active_state=visible_text(state.active_state or "-"), restarts=state.n_restarts,
+        pid=state.main_pid if state.main_pid is not None else "-"), True
+
+
+def _gather(config_dir: Any) -> tuple[list[str], str | None]:
+    """Every line `status` prints, and the in-flight line that outranks a `pending_preset` (or None). Reads
+    the manager, the unit file, the global config, linger and the stores once each and writes nothing: no
+    machine-trust decision, no adoption, no removal (R-14-30)."""
+    cfg = Path(config_dir)
+    path = units.harness_unit_path()
+    state = units.unit_runtime_state()
+    if not os.path.lexists(path) and not getattr(state, "fragment_path", ""):
+        return [STATUS_OFF_LINE], None
+    body = units.read_harness_unit()
+    first, _own = _first_status_line(state, path, cfg, body)
+    lines = [first]
+
+    # The target is named from the global config alone with an empty `MachineTrust()`: display only, the
+    # same answer `serve` reaches unless the machine record withholds it (which `stopped:` then says).
+    try:
+        harness = ConfigLoader(config_dir=cfg, local_config_dir=None).load_harness()
+    except Exception as exc:  # noqa: BLE001 — status must answer even when the config cannot be read
+        harness = None
+        lines.append(SERVES_UNKNOWN_LINE.format(why=visible_text(f"{type(exc).__name__}: {exc}")))
+    else:
+        serving = model_ops.resolve_serving(harness, MachineTrust(), None, config_dir=cfg)
+        if isinstance(serving, model_ops.ServingRefusal):
+            lines.append(SERVES_REFUSED_LINE.format(why=visible_text(serving.line)))
+        else:
+            lines.append(SERVES_LINE.format(name=visible_text(serving.record.name)))
+
+    lines.append(LINGER_ON_LINE if units.linger_on() else LINGER_OFF_LINE.format(
+        user=visible_text(units.current_user())))
+    captured = units.captured_env(body) if body is not None else None
+    if captured is not None and captured.get("PATH"):
+        lines.append(CAPTURED_PATH_LINE.format(path=visible_text(captured["PATH"])))
+    return lines, None
+
+
+def status_lines(config_dir: Any) -> list[str]:
+    """What `localharness model --autostart status` prints, one string per line (spec 20 §9.2, D-11): the
+    `Autostart:` line first, then the target, linger and the captured `PATH`. Read-only; anyone may ask."""
+    return _gather(config_dir)[0]
+
+
+def doctor_row(config_dir: Any) -> str:
+    """The one `Autostart:` row `doctor` shows: `status`'s first line (D-11)."""
+    return status_lines(config_dir)[0]
