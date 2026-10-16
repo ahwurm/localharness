@@ -23,7 +23,7 @@ from localharness.agent.gguf_header import (
 )
 from localharness.config.models import EndpointRef, ManagedServerConfig
 from localharness.config.overlay import OverlayBusy, overlay_lock
-from localharness.core.private_files import atomic_write_text, open_regular
+from localharness.core.private_files import NotRegularFile, atomic_write_text, open_regular
 from localharness.provider import procfs
 from localharness.provider.tuning import MODEL_CONFIG_CAP
 
@@ -83,11 +83,12 @@ def _entry(key: Any, value: Any) -> Entry | None:
 
 @dataclass(frozen=True)
 class Library:
-    """The file as loaded: `entries` by realpath; `missing` or `corrupt` give no entries at all."""
+    """The file as loaded: `entries` by realpath; `missing`, `corrupt` or `unreadable` give no entries at all."""
 
     entries: Mapping[str, Entry] = field(default_factory=dict)
     missing: bool = False
     corrupt: bool = False
+    unreadable: bool = False
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> Library:
@@ -96,8 +97,10 @@ class Library:
                 raw = fh.read(LIBRARY_CAP + 1)
         except FileNotFoundError:
             return cls(missing=True)
-        except OSError:
+        except NotRegularFile:
             return cls(corrupt=True)
+        except OSError:
+            return cls(unreadable=True)
         try:
             data = json.loads(raw) if len(raw) <= LIBRARY_CAP else None
         except (ValueError, RecursionError):
@@ -118,7 +121,9 @@ class Library:
                                       for k, e in self.entries.items() if k not in gone})
 
     def save(self, path: str | os.PathLike[str]) -> bool:
-        """Write the entries whose files still exist under the overlay lock; False when the lock is busy."""
+        """Write the entries whose files still exist under the overlay lock; False when the lock is busy or the file was unreadable."""
+        if self.unreadable:
+            return False
         path = Path(path)
         kept = {key: {"first_seen": e.first_seen, "size": e.size, "verdict": e.verdict.value,
                       "declined": e.declined, **({"repo": e.repo} if e.repo else {})}
@@ -199,6 +204,8 @@ def scan(roots: Iterable[str | os.PathLike[str]], recorded: Collection[str],
     if scope not in ("new", "all"):
         raise ValueError(f"scope is 'new' or 'all', not {scope!r}")
     lib = Library.load(library_path)
+    if lib.unreadable:
+        return Found((), (), (), lib)
     baselined = (lib.missing or lib.corrupt) and not first_run
     stamp = (today or datetime.now(timezone.utc).date()).isoformat()
     found: dict[str, tuple[Path, int]] = {}

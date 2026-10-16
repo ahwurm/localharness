@@ -307,6 +307,26 @@ def test_a_corrupt_library_baselines_like_a_missing_one(roots, kind):
     assert found.library.entries[real(a)].verdict is FileKind.MODEL
 
 
+def test_a_library_that_cannot_be_read_is_not_rebaselined_and_is_never_overwritten(roots, monkeypatch):
+    root, lib = roots
+    a = model(root / "A.gguf")
+    saved(root, lib, first_run=True)
+    run(root, lib).library.marked(declined=[real(a)]).save(lib)
+    before = lib.read_bytes()
+
+    def refuse(path):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(model_library, "open_regular", refuse)
+    loaded = Library.load(lib)
+    found = run(root, lib)
+
+    assert loaded.unreadable is True and loaded.corrupt is False and loaded.entries == {}
+    assert found.new == found.seen == found.declined == () and found.baselined is False and found.changed is False
+    assert found.library.marked(declined=[real(a)]).save(lib) is False
+    assert lib.read_bytes() == before
+
+
 def test_a_removed_entry_makes_a_known_file_new_again(roots):
     root, lib = roots
     a = model(root / "A.gguf")
