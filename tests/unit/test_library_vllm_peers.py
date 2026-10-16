@@ -155,17 +155,6 @@ def test_a_repo_a_record_names_is_never_listed_and_two_revisions_are_one_entry(v
     assert len([p for p in _peers(vbox.cfg) if p["name"].startswith("Two")]) == 1
 
 
-def test_a_repo_id_with_a_control_character_prints_escaped(vbox, monkeypatch, tmp_path):
-    vllm_on_path(vbox)
-    vbox.repos.append(cache_repo(tmp_path, "org/x\x1bq"))
-    scripted(monkeypatch, "not-now")
-
-    sync(vbox)
-
-    printed = vbox.printed.getvalue()
-    assert "← org/x\\x1bq" in printed and "\x1b" not in printed
-
-
 def test_a_first_run_with_only_a_checkpoint_serves_it_on_the_primary_port(box, monkeypatch, tmp_path):
     for gone in (box.swift, box.qwen, box.proj):
         gone.unlink()
@@ -276,6 +265,9 @@ SKIPPED = {
     "architectures not a list": lambda t: cache_repo(t, "org/Str", {"architectures": "XForCausalLM"}),
     "a dataset": lambda t: cache_repo(t, "org/Data", repo_type="dataset"),
     "no bytes": lambda t: cache_repo(t, "org/Empty", size=0),
+    "an option-like id": lambda t: cache_repo(t, "-q=awq"),
+    "a control character id": lambda t: cache_repo(t, "org/x\x1bq"),
+    "a traversal id": lambda t: cache_repo(t, "../../x"),
 }
 
 
