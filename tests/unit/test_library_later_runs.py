@@ -147,19 +147,19 @@ def test_a_cancel_inside_choose_which_is_not_now(later, monkeypatch):
     assert "Not set up: C, D" in later.printed.getvalue()
 
 
-def test_a_busy_overlay_keeps_the_files_new_so_they_are_asked_again(later, monkeypatch):
+def test_a_yes_that_writes_nothing_says_so_and_marks_the_file_seen_so_it_is_asked_once(later, monkeypatch):
     _add(later, "C")
     scripted(monkeypatch, "set-up")
-    real = library.append_peers
     monkeypatch.setattr(library, "append_peers", lambda *a, **k: None)
 
     synced = _sync(later)
 
-    assert synced.appended == 0 and "C.gguf" not in " ".join(_entries(later))
-    again = scripted(monkeypatch, "not-now")
-    monkeypatch.setattr(library, "append_peers", real)
+    assert synced.appended == 0 and len(_peers(later.cfg)) == 1
+    assert library.NOT_WRITTEN_LINE in later.printed.getvalue()
+    assert _entries(later)[_key(later, "C")]["declined"] is False
+    again = scripted(monkeypatch)
     _sync(later)
-    assert [a.question for a in again.asked] == ["New model C — set it up?"]
+    assert again.asked == []
 
 
 def test_a_library_that_cannot_be_saved_says_one_line(later, monkeypatch):

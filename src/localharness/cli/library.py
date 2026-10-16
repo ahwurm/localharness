@@ -90,6 +90,7 @@ ADDED_KEPT_LINE = "Added {n}; kept config.yaml."
 NOTHING_TO_SET_UP_LINE = "Nothing to set up — every model found has a preset"
 LIBRARY_FAILED_LINE = "model library: {why} — start goes on"
 LIBRARY_NOT_SAVED_LINE = "model library: not saved, it is busy or unreadable — the same question comes back next start"
+NOT_WRITTEN_LINE = "Nothing was written to overrides.yaml — localharness model --setup lists the models"
 OFFER_QUESTION = "Download {what} ({size}, fits in your {gb} GB)?"
 OFFER_QUESTION_UNKNOWN = "Download {what} ({size}, needs about {size})?"
 DOWNLOAD_IT = "Download it"
@@ -798,6 +799,8 @@ def _later_run(config_path: Path, *, scope: Literal["new", "all"], person: bool,
         peers = _peers(choice.order, names, start=PRIMARY_PORT + 1, taken_names=taken_names, taken_ports=taken_ports,
                        vllm=vllm)
         if (written := append_peers(config_path, peers, adopt=True)) is None:
+            _say(NOT_WRITTEN_LINE)
+            _save_library(found, lib_path)
             return Sync(shown=len(shown))
         for peer in written:
             _say(SET_UP_LINE.format(name=visible_text(peer["name"])))
