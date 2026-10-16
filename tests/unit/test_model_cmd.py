@@ -436,7 +436,7 @@ def test_model_download_with_file_fetches_one_sibling(monkeypatch):
     )
     monkeypatch.setattr(
         managed_server, "download_file",
-        lambda repo_id, filename: file_calls.append((repo_id, filename))
+        lambda repo_id, filename, revision=None: file_calls.append((repo_id, filename))
         or f"/fake/cache/{filename}",
         raising=False,
     )
