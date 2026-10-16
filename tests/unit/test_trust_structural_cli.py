@@ -5,8 +5,8 @@ so the guarantee holds for the one written tomorrow:
 
 - no `decide_machine_trust(` call passes `ask` bound to the constant `True` (an unasked-for question
   to a process with no local operator would be answered by whoever feeds its stdin). The allowlist
-  of `(module, function)` pairs that may do so is EMPTY in this release; the autostart gate is the
-  only future entry;
+  of `(module, function)` pairs that may do so holds one entry, `model_cmd._autostart_on`, which is
+  reached only through `_autostart`, after its local-operator gate (a tty and no LOCALHARNESS_COMMIT);
 - the swap cannot run without a `MachineTrust` in hand: `resolve_serving` takes `trust` with no
   default, `heavy_for` takes a `Serving`, a `Serving` is built only on the ladder in model_ops, a
   `Heavy` only by `heavy_for` / `incumbent_heavy`, and every function that calls `.swap(` gets its
@@ -29,8 +29,13 @@ CLI = SRC / "cli"
 MODEL_OPS = "cli/model_ops.py"
 
 # (module relative to src/localharness, enclosing function) pairs allowed to pass the constant True as
-# `ask` to decide_machine_trust. Empty in this release: the autostart gate is its only future entry.
-ASK_TRUE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset()
+# `ask` to decide_machine_trust. One entry: `--autostart on` asks the machine-trust question, and only after
+# `_autostart` has checked that a person is at the terminal (see `gate_before_ask`).
+ASK_TRUE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({("cli/model_cmd.py", "_autostart_on")})
+MODEL_CMD = "cli/model_cmd.py"
+ASKING_FUNCTION = "_autostart_on"
+GATE_FUNCTION = "_autostart"
+GATE_CALL = "_is_local_operator"
 
 # Where a `Heavy` may be built (cli/model_ops.py only) and where a `Serving` may be built: the ladder
 # and the one helper that hands back its last rung.
@@ -88,6 +93,32 @@ def ask_true_calls(source: str, module: str) -> list[tuple[str, int, str]]:
     return out
 
 
+def gate_before_ask(source: str, asking: str = ASKING_FUNCTION, gate_function: str = GATE_FUNCTION,
+                    gate_call: str = GATE_CALL) -> list[str]:
+    """What is wrong with how `asking` (the function that holds the allowlisted `ask=True`) is reached:
+    it must be called only from `gate_function`, and there only after a `gate_call(` that comes earlier in
+    the function's own text (a gate lexically later, or in a nested function, is no gate)."""
+    tree = ast.parse(source)
+    parents = _parents(tree)
+    problems = []
+    callers = {_enclosing_function(call, parents) for call in _calls_named(tree, asking)}
+    if callers != {gate_function}:
+        problems.append(f"{asking} is called from {sorted(callers) or 'nowhere'}, not only {gate_function}")
+    for node in ast.walk(tree):
+        if not (isinstance(node, _FUNCTIONS) and node.name == gate_function):
+            continue
+        own = [n for stmt in node.body for n in _walk_own(stmt) if isinstance(n, ast.Call)]
+        gates = [n.lineno for n in own if _name(n.func) == gate_call]
+        asks = [n.lineno for n in own if _name(n.func) == asking]
+        if not gates:
+            problems.append(f"{gate_function} never calls {gate_call}")
+        elif asks and min(asks) < min(gates):
+            problems.append(f"{gate_function} calls {asking} (line {min(asks)}) before {gate_call} (line {min(gates)})")
+    if not any(isinstance(n, _FUNCTIONS) and n.name == gate_function for n in ast.walk(tree)):
+        problems.append(f"no {gate_function} function")
+    return problems
+
+
 def stray_builders(source: str, module: str, constructor: str, allowed: frozenset[str]) -> list[tuple[str, int, str]]:
     """Calls of `constructor` outside cli/model_ops.py, or inside it but outside an `allowed` function."""
     tree = ast.parse(source)
@@ -135,7 +166,23 @@ def test_no_decide_machine_trust_call_is_bound_to_ask_true():
         calls += len(_calls_named(ast.parse(source), "decide_machine_trust"))
     assert found == []
     assert calls >= 2  # not vacuous: start and model_cmd both decide
-    assert ASK_TRUE_ALLOWLIST == frozenset()
+    assert ASK_TRUE_ALLOWLIST == frozenset({(MODEL_CMD, ASKING_FUNCTION)})
+
+
+def test_the_one_allowlisted_ask_exists_and_is_the_only_ask_literal_under_cli():
+    asking = []
+    for module, source in _cli_sources():
+        tree = ast.parse(source)
+        parents = _parents(tree)
+        for call in _calls_named(tree, "decide_machine_trust"):
+            if any(k.arg == "ask" and _is_true(k.value) for k in call.keywords):
+                asking.append((module, _enclosing_function(call, parents)))
+    assert asking == [(MODEL_CMD, ASKING_FUNCTION)]
+
+
+def test_autostart_on_is_reached_only_through_the_local_operator_gate():
+    source = (SRC / MODEL_CMD).read_text()
+    assert gate_before_ask(source) == []
 
 
 def test_resolve_serving_requires_a_machine_trust_with_no_default():
@@ -189,6 +236,52 @@ def test_bite_ask_true_is_reported_and_a_variable_is_not():
             return decide_machine_trust(d, ask=can_ask)
     """)
     assert ask_true_calls(planted, "cli/x.py") == [("cli/x.py", 3, "launches")]
+
+
+def test_bite_the_ask_before_its_gate_is_reported():
+    ungated = textwrap.dedent("""
+        def _autostart(mode, config_dir):
+            _autostart_on(config_dir)
+            if not _is_local_operator():
+                raise SystemExit(2)
+        def _autostart_on(cfg):
+            return decide_machine_trust(cfg, ask=True)
+    """)
+    assert gate_before_ask(ungated) == ["_autostart calls _autostart_on (line 3) before _is_local_operator (line 4)"]
+    gated = textwrap.dedent("""
+        def _autostart(mode, config_dir):
+            if not _is_local_operator():
+                raise SystemExit(2)
+            _autostart_on(config_dir)
+        def _autostart_on(cfg):
+            return decide_machine_trust(cfg, ask=True)
+    """)
+    assert gate_before_ask(gated) == []
+
+
+def test_bite_a_second_caller_of_the_ask_and_a_missing_gate_are_reported():
+    sneaky = textwrap.dedent("""
+        def _autostart(mode, config_dir):
+            if not _is_local_operator():
+                raise SystemExit(2)
+            _autostart_on(config_dir)
+        def elsewhere(config_dir):
+            _autostart_on(config_dir)
+        def _autostart_on(cfg):
+            return decide_machine_trust(cfg, ask=True)
+    """)
+    assert gate_before_ask(sneaky) == ["_autostart_on is called from ['_autostart', 'elsewhere'], not only _autostart"]
+    ungated = "def _autostart(m, c):\n    _autostart_on(c)\n"
+    assert gate_before_ask(ungated) == ["_autostart never calls _is_local_operator"]
+    assert gate_before_ask("def other():\n    pass\n") == [
+        "_autostart_on is called from nowhere, not only _autostart", "no _autostart function"]
+
+
+def test_bite_an_ask_in_a_function_that_is_not_the_allowlisted_one_is_reported():
+    planted = "def _autostart(d):\n    return decide_machine_trust(d, ask=True)\n"
+    assert ask_true_calls(planted, MODEL_CMD) == [(MODEL_CMD, 2, "_autostart")]
+    assert ask_true_calls(planted.replace("_autostart", "_autostart_on"), "cli/start_cmd.py") == [
+        ("cli/start_cmd.py", 2, "_autostart_on")]
 
 
 def test_bite_a_heavy_outside_the_builders_is_reported():
