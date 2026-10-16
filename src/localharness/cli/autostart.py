@@ -26,9 +26,10 @@ from pathlib import Path
 from typing import Any
 
 from localharness.cli import model_ops
-from localharness.cli.workspace import MachineTrust, shown_path, visible_text
+from localharness.cli.workspace import MachineTrust, shown_path, uncovered, visible_text
 from localharness.config import trust
 from localharness.config.loader import ConfigLoader
+from localharness.config.paths import global_config_dir
 from localharness.provider import lifecycle, procfs, units
 
 AUTOSTART_TERMINAL_LINE = "autostart is set from a terminal: localharness model --autostart {mode}"
@@ -260,10 +261,41 @@ def _first_status_line(state: Any, path: Path, config_dir: Path, body: str | Non
         pid=state.main_pid if state.main_pid is not None else "-"), True
 
 
+def _marker_line(marker: "units.Marker", records: Any) -> str:
+    """The boot marker as a line (R-14-31): the record's name (the raw key when no record has it), the shape
+    it served at, and what was dropped or halved to get there."""
+    names = {lifecycle.record_key(r.spec): r.name for r in records if r.spec is not None}
+    parts = []
+    if "draft-mtp" in marker.dropped:
+        parts.append("mtp off")
+    if "parsers" in marker.dropped:
+        parts.append("parsers off")
+    if (marker.planned_context is not None and marker.full_fit is not None
+            and marker.planned_context < marker.full_fit):
+        parts.append("-c halved")
+    return MARKER_LINE.format(
+        name=visible_text(names.get(marker.record, marker.record)), shape=visible_text(marker.shape),
+        parts=" — " + ", ".join(parts) if parts else "")
+
+
+def _withheld_record_name(cfg: Path, serving: Any) -> str:
+    """What a 78 withholds (D-11): `autostart.env (<unit path>)` when the machine record does not cover the
+    unit's captured environment as it is now (a read-only compare of the record against the snapshot), else
+    the name of the record the unit would serve."""
+    recorded = trust.recorded_machine(cfg)
+    gap = uncovered(recorded["entries"] if recorded is not None else [], trust.machine_snapshot(cfg))
+    if trust.AUTOSTART_KEY in {(e.get("file"), e.get("kind"), e.get("name")) for e in gap}:
+        return STATUS_ENV_RECORD.format(path=display_path(units.harness_unit_path()))
+    if isinstance(serving, model_ops.Serving):
+        return visible_text(serving.record.name)
+    return STATUS_UNKNOWN_RECORD
+
+
 def _gather(config_dir: Any) -> tuple[list[str], str | None]:
     """Every line `status` prints, and the in-flight line that outranks a `pending_preset` (or None). Reads
     the manager, the unit file, the global config, linger and the stores once each and writes nothing: no
-    machine-trust decision, no adoption, no removal (R-14-30)."""
+    machine-trust decision, no adoption, no removal, no clearing of a stale target (R-14-30, R-14-46). The
+    journal program is never run: the start-limit line only names the command for the person."""
     cfg = Path(config_dir)
     path = units.harness_unit_path()
     state = units.unit_runtime_state()
@@ -272,13 +304,15 @@ def _gather(config_dir: Any) -> tuple[list[str], str | None]:
     body = units.read_harness_unit()
     first, _own = _first_status_line(state, path, cfg, body)
     lines = [first]
+    outranks: str | None = None
 
     # The target is named from the global config alone with an empty `MachineTrust()`: display only, the
     # same answer `serve` reaches unless the machine record withholds it (which `stopped:` then says).
+    harness: Any = None
+    serving: Any = None
     try:
         harness = ConfigLoader(config_dir=cfg, local_config_dir=None).load_harness()
     except Exception as exc:  # noqa: BLE001 — status must answer even when the config cannot be read
-        harness = None
         lines.append(SERVES_UNKNOWN_LINE.format(why=visible_text(f"{type(exc).__name__}: {exc}")))
     else:
         serving = model_ops.resolve_serving(harness, MachineTrust(), None, config_dir=cfg)
@@ -287,20 +321,57 @@ def _gather(config_dir: Any) -> tuple[list[str], str | None]:
         else:
             lines.append(SERVES_LINE.format(name=visible_text(serving.record.name)))
 
+    # A live in-flight `unit-target` outranks the person's `pending_preset` (R-14-45); never silent here.
+    target_dir = global_config_dir(cfg)
+    request = units.in_flight_request(target_dir)
+    if request is not None:
+        pending = getattr(harness, "pending_preset", None)
+        if pending and isinstance(serving, model_ops.Serving) and serving.rung == model_ops.RUNG_UNIT:
+            outranks = IN_FLIGHT_OUTRANKS_LINE.format(
+                name=visible_text(serving.record.name), pid=request.pid, pending=visible_text(pending))
+            lines.append(outranks)
+        else:
+            lines.append(IN_FLIGHT_LINE.format(name=visible_text(request.name), pid=request.pid))
+
     lines.append(LINGER_ON_LINE if units.linger_on() else LINGER_OFF_LINE.format(
         user=visible_text(units.current_user())))
     captured = units.captured_env(body) if body is not None else None
     if captured is not None and captured.get("PATH"):
         lines.append(CAPTURED_PATH_LINE.format(path=visible_text(captured["PATH"])))
-    return lines, None
+
+    records = model_ops.serving_records(harness) if harness is not None else ()
+    ports = {r.spec.port for r in records
+             if r.spec is not None and isinstance(getattr(r.spec, "port", None), int)}
+    for other in units.other_launchers(ports):
+        lines.append(SECOND_LAUNCHER_LINE.format(unit=visible_text(other.unit), state=other.state, port=other.port))
+
+    # Only the run serving now wrote a marker worth showing as "since boot" (R-14-43); another run's is left.
+    live_run = getattr(state, "invocation_id", None)
+    marker = units.read_marker(target_dir) if live_run else None
+    if marker is not None and marker.invocation == live_run:
+        lines.append(_marker_line(marker, records))
+
+    not_served = None
+    if isinstance(serving, model_ops.Serving) and not lifecycle.unit_servable(serving.record.spec):
+        not_served = lifecycle.NOT_SERVED_BY_UNIT_LINE.format(
+            name=visible_text(serving.record.name), kind=lifecycle.unit_kind(serving.record.spec))
+    record_name = _withheld_record_name(cfg, serving) if getattr(state, "exec_main_status", None) == 78 else ""
+    stopped = units.translate_exit(state, record_name=record_name, not_served=not_served)
+    if stopped is not None:
+        lines.append(stopped)
+    return lines, outranks
 
 
 def status_lines(config_dir: Any) -> list[str]:
     """What `localharness model --autostart status` prints, one string per line (spec 20 §9.2, D-11): the
-    `Autostart:` line first, then the target, linger and the captured `PATH`. Read-only; anyone may ask."""
+    `Autostart:` line first, then the target, a live in-flight request, linger, the captured `PATH`, each
+    second launcher, the boot marker of the run serving now, and the unit's exit in words when it stopped.
+    Read-only; anyone may ask."""
     return _gather(config_dir)[0]
 
 
 def doctor_row(config_dir: Any) -> str:
-    """The one `Autostart:` row `doctor` shows: `status`'s first line (D-11)."""
-    return status_lines(config_dir)[0]
+    """The one `Autostart:` row `doctor` shows (D-11, R-14-46): `status`'s first line, then `; ` and the
+    in-flight line when a live in-flight target is outranking the person's `pending_preset`."""
+    lines, outranks = _gather(config_dir)
+    return lines[0] if outranks is None else f"{lines[0]}; {outranks}"
