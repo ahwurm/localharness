@@ -64,6 +64,7 @@ class PeerFragment:
         self.peers = list(peers)
         self.written: list[dict] = []
         self.audit: list[tuple[str, object, object]] = []
+        self.copied = 0
 
     def mutate(self, overlay: dict) -> None:
         from localharness.cli.init_cmd import _record_dicts_of
@@ -72,7 +73,8 @@ class PeerFragment:
         self.audit.clear()
         config_raw = workspace.raw_settings(self.global_dir)[0]
         server = {**(config_raw.get("server") or {}), **(overlay.get("server") or {})}
-        listed = overlay.get("extra_endpoints") if isinstance(overlay.get("extra_endpoints"), list) else []
+        self.copied = workspace.copy_peer_list(overlay, config_raw)
+        listed = overlay["extra_endpoints"]
         models, names, ports = _recorded(server, listed)
         for peer in self.peers:
             life = peer.lifecycle
@@ -99,7 +101,6 @@ class PeerFragment:
             names.add(name)
             ports |= {port} if port is not None else set()
             self.audit.extend(audit_entries(f"extra_endpoints.{name}.lifecycle.", record.get("lifecycle") or {}))
-        overlay["extra_endpoints"] = listed
 
 
 def append_peers(config_path: Path, peers: Sequence[EndpointRef], *, adopt: bool,
@@ -121,5 +122,22 @@ def append_peers(config_path: Path, peers: Sequence[EndpointRef], *, adopt: bool
                                              on_busy=lambda: say(OVERLAY_BUSY_LINE)):
         return None
     if adopt:
+        recorded = trust.recorded_machine(global_dir)
+        covered = {trust._canonical(e) for e in recorded["entries"]} if recorded else set()
         _adopt_written(global_dir, "overrides.yaml", None, fragment.written)
+    if fragment.copied:
+        say(workspace.PEER_LIST_COPIED + (_readopt_copied(global_dir, fragment.copied, covered) if adopt else ""))
     return fragment.written
+
+
+def _readopt_copied(global_dir: Path, copied: int, covered: set[str]) -> str:
+    """Adopt the copied peers' entries whose config.yaml twin was covered; the counts to say."""
+    raws = dict(zip(("config.yaml", "overrides.yaml"), workspace.raw_settings(global_dir)))
+    twins = workspace._copied_peer_entries(raws, covered, skip="")
+    if twins:
+        trust.adopt_entries(global_dir, twins)
+    adopted = {e["name"] for e in twins}
+    kept = sum({e["name"] for e in trust._launch_entries(
+        "overrides.yaml", f"extra_endpoints.{p['name']}.lifecycle.", p.get("lifecycle"))} <= adopted
+        for p in raws["overrides.yaml"]["extra_endpoints"][:copied] if isinstance(p, dict) and "name" in p)
+    return PEERS_COPIED_COUNTS.format(copied=copied, kept=kept)

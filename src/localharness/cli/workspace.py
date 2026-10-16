@@ -1177,6 +1177,16 @@ def _posture_names(name: str) -> Optional[tuple[Optional[str], str]]:
     return None
 
 
+def copy_peer_list(overlay: dict, config_raw: dict) -> int:
+    """Lists replace wholesale on merge, so an overlay without `extra_endpoints` starts from a copy of
+    config.yaml's. Returns how many entries were copied; 0 when the overlay already had its own list."""
+    if isinstance(overlay.get("extra_endpoints"), list):
+        return 0
+    peers = copy.deepcopy(config_raw.get("extra_endpoints"))
+    overlay["extra_endpoints"] = peers if isinstance(peers, list) else []
+    return len(overlay["extra_endpoints"])
+
+
 def _remember_posture_no(global_dir: Path, asked_about: list[dict],
                          confirmed: list[dict]) -> list[dict]:
     """A No on the machine question costs nothing and is remembered for the exposure entries among
@@ -1214,11 +1224,8 @@ def _remember_posture_no(global_dir: Path, asked_about: list[dict],
             before = value == "true"
 
             def mutate(overlay: dict, peer=peer, key=key, safe=safe) -> None:
-                peers = overlay.get("extra_endpoints")
-                if not isinstance(peers, list):  # lists replace wholesale: start from config.yaml's
-                    peers = copy.deepcopy(config_raw.get("extra_endpoints") or [])
-                    overlay["extra_endpoints"] = peers
-                for p in peers:
+                copy_peer_list(overlay, config_raw)
+                for p in overlay["extra_endpoints"]:
                     if (isinstance(p, dict) and str(p.get("name")) == peer
                             and isinstance(p.get("lifecycle"), dict)):
                         p["lifecycle"][key] = safe

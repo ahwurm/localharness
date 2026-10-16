@@ -208,7 +208,7 @@ def test_the_first_append_copies_a_0_18_list_and_readopts_only_covered_twins(g, 
     assert [p["name"] for p in overrides(g)["extra_endpoints"]] == ["p1", "p2", "p3"]
     assert config.read_bytes() == before
     held = covered(g)
-    assert "extra_endpoints.p1.lifecycle.model" in held and "extra_endpoints.p1.lifecycle.port" in held
+    assert "extra_endpoints.p1.lifecycle.model" in held and "extra_endpoints.p1.lifecycle.served_name" in held
     assert "extra_endpoints.p2.lifecycle.model" not in held
     assert "extra_endpoints.p3.lifecycle.model" in held
     out = capsys.readouterr().out
