@@ -410,7 +410,5 @@ def status_lines(config_dir: Any) -> list[str]:
 
 
 def doctor_row(config_dir: Any) -> str:
-    """The one `Autostart:` row `doctor` shows (D-11, R-14-46): `status`'s first line, then `; ` and the
-    in-flight line when a live in-flight target is outranking the person's `pending_preset`."""
-    lines, outranks = _gather(config_dir)
-    return lines[0] if outranks is None else f"{lines[0]}; {outranks}"
+    """The one `Autostart:` row `doctor` shows: every line `status` prints, `; `-joined in its order."""
+    return "; ".join(status_lines(config_dir))

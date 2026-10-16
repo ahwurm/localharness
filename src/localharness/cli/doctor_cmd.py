@@ -494,6 +494,37 @@ def _tuning_rows(cfg_path: Path, harness: HarnessConfig) -> list[str]:
     return rows
 
 
+SAMPLING_SET_ROW = "Sampling: temperature {temp} from {rung} (the model's own is {own} — unset {rung} to use it)"
+SAMPLING_SET_PLAIN_ROW = "Sampling: temperature {temp} from {rung}"
+SAMPLING_OWN_ROW = "Sampling: the model's own (temperature {own})"
+SAMPLING_UNSAID_ROW = "Sampling: the model's own — no temperature is sent"
+MODELS_ROW = "Models: {clauses} — localharness model --setup lists them"
+MODELS_NONE_ROW = "Models: none set up or found — localharness model --setup lists them"
+
+
+def _sampling_row(harness: HarnessConfig, loader: ConfigLoader, root_agent, server_default: float | None) -> str:
+    from localharness.cli.start_cmd import _fmt_temp
+    if root_agent is not None:
+        temperature, rung = root_agent.temperature, loader.temperature_rung(root_agent.name)
+    else:
+        temperature, rung = harness.org.default_temperature, "org.default_temperature"
+    if temperature is not None and rung:
+        if server_default is None or abs(temperature - server_default) <= 1e-3:
+            return SAMPLING_SET_PLAIN_ROW.format(temp=_fmt_temp(temperature), rung=rung)
+        return SAMPLING_SET_ROW.format(temp=_fmt_temp(temperature), rung=rung, own=_fmt_temp(server_default))
+    if server_default is not None:
+        return SAMPLING_OWN_ROW.format(own=_fmt_temp(server_default))
+    return SAMPLING_UNSAID_ROW
+
+
+def _models_row(cfg_path: Path) -> str:
+    from localharness.cli import library
+    held = library.counts(cfg_path)
+    clauses = [f"{n} {what}" for n, what in (
+        (held.set_up, "set up"), (held.found, "found, not set up"), (held.declined, "declined")) if n]
+    return MODELS_ROW.format(clauses=" · ".join(clauses)) if clauses else MODELS_NONE_ROW
+
+
 def doctor(
     config_dir: Annotated[
         str | None,
@@ -619,6 +650,7 @@ def doctor(
     _print_git_read(workspace, getattr(getattr(root_agent, "permissions", None), "workspace_root", None))
 
     # 4. LLM endpoint reachable
+    server_default: float | None = None
     if harness is not None:
         base_url = harness.provider.base_url
         # base_url always carries a /v1 suffix — build probes from the stripped root so we
@@ -693,6 +725,7 @@ def doctor(
             probe = probe_window(
                 harness.provider.base_url, budget_model, harness.provider.provider_type, **_key)
             served, trained = probe.served, probe.trained
+            server_default = probe.sampling
             fits, trained = _doctor_fit(harness, served, trained)
             console.print(
                 f"{_INFO}  Window: served {fmt_count(served)} \u00b7 trained {fmt_count(trained)} \u00b7 fits {fmt_count(fits)}")
@@ -945,6 +978,10 @@ def doctor(
 
     if harness is not None:
         for row in _tuning_rows(cfg_path, harness):
+            console.print(f"{_INFO}  " + escape(row), soft_wrap=True)
+        from localharness.cli import autostart
+        for row in (_sampling_row(harness, loader, root_agent, server_default),
+                    autostart.doctor_row(cfg_path), _models_row(cfg_path)):
             console.print(f"{_INFO}  " + escape(row), soft_wrap=True)
 
     # 6. Config directory writable

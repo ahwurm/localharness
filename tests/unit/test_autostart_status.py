@@ -162,10 +162,10 @@ def test_status_never_asks_for_a_terminal(world):
     assert "terminal" not in result.output
 
 
-def test_doctor_row_is_the_first_status_line(world):
+def test_doctor_row_is_every_status_line(world):
     installed(world)
 
-    assert autostart.doctor_row(world.g) == FIRST == autostart.status_lines(world.g)[0]
+    assert autostart.doctor_row(world.g) == "; ".join(autostart.status_lines(world.g)) == "; ".join(BASE)
 
 
 def test_doctor_row_is_the_off_line_with_no_unit(world):
@@ -177,7 +177,7 @@ def test_doctor_row_is_the_off_line_with_no_unit(world):
 def test_main_pid_shows_a_dash_when_no_process(world):
     installed(world, active="inactive", file_state="enabled", pid=0, invocation="")
 
-    assert autostart.doctor_row(world.g) == (
+    assert autostart.status_lines(world.g)[0] == (
         f"Autostart: on — {DISPLAY} (enabled, inactive, NRestarts 0, MainPID -)")
 
 
@@ -242,8 +242,9 @@ def test_foreign_a_manager_that_does_not_answer_says_so_in_the_foreign_line(worl
     world.manager.answer(lambda argv: argv[:3] == ("systemctl", "--user", "show") and "NRestarts" in argv[4],
                          out=None)
 
-    assert autostart.doctor_row(world.g) == (
+    assert autostart.status_lines(world.g)[0] == (
         f"Autostart: foreign — {DISPLAY} could not be asked: the service manager did not answer")
+    assert autostart.doctor_row(world.g) == "; ".join(autostart.status_lines(world.g))
 
 
 # ===================================================================== linger and a second launcher (D-10, D-11)
@@ -352,11 +353,12 @@ def test_marker_absent_means_no_such_line(world):
     assert not any(line.startswith("serving ") for line in autostart.status_lines(world.g))
 
 
-def test_marker_line_is_in_the_doctor_row_only_through_status(world):
+def test_the_live_marker_line_is_in_the_doctor_row(world):
     installed(world)
     put_marker(world)
 
-    assert autostart.doctor_row(world.g) == FIRST
+    assert autostart.doctor_row(world.g) == "; ".join(
+        [*BASE, f"serving {SERVED} at the retry shape since boot — mtp off, -c halved"])
 
 
 # ===================================================================== why it stopped, in words (D-02, D-11, D-18)
@@ -475,18 +477,18 @@ def test_in_flight_outranking_a_pending_preset_is_named_with_the_process_and_the
 
     outranks = OUTRANKS.format(pid=os.getpid())
     assert lines == [FIRST, "serves: flash-next", outranks, "linger: on", PATH_LINE]
-    assert autostart.doctor_row(peered.g) == f"{FIRST}; {outranks}"
+    assert autostart.doctor_row(peered.g) == "; ".join(lines)
     assert tree(peered.g) == before  # nothing cleared: `status` is not a second writer of unit-target
 
 
-def test_in_flight_without_a_pending_preset_is_the_short_line_and_the_doctor_row_stays_one_line(peered):
+def test_in_flight_without_a_pending_preset_is_the_short_line_and_the_doctor_row_holds_it(peered):
     units.write_target(peered.g, "flash-next", in_flight=True)
 
     lines = autostart.status_lines(peered.g)
 
     assert lines == [FIRST, "serves: flash-next", f"in flight: flash-next (requested by pid {os.getpid()})",
                      "linger: on", PATH_LINE]
-    assert autostart.doctor_row(peered.g) == FIRST
+    assert autostart.doctor_row(peered.g) == "; ".join(lines)
 
 
 def test_in_flight_through_the_command_prints_the_same_lines_off_a_terminal(peered):
@@ -509,7 +511,7 @@ def test_in_flight_no_line_for_a_gone_requester_or_a_plain_entry(peered, body):
     lines = autostart.status_lines(peered.g)
 
     assert lines == [FIRST, "serves: qwen-27b", "linger: on", PATH_LINE]
-    assert autostart.doctor_row(peered.g) == FIRST
+    assert autostart.doctor_row(peered.g) == "; ".join(lines)
 
 
 def test_in_flight_naming_no_record_is_the_short_line_with_its_raw_name(peered):
@@ -519,5 +521,5 @@ def test_in_flight_naming_no_record_is_the_short_line_with_its_raw_name(peered):
     lines = autostart.status_lines(peered.g)
 
     assert lines[1:3] == ["serves: qwen-27b", f"in flight: nonesuch (requested by pid {os.getpid()})"]
-    assert autostart.doctor_row(peered.g) == FIRST
+    assert autostart.doctor_row(peered.g) == "; ".join(lines)
 
