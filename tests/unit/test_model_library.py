@@ -29,8 +29,9 @@ def model(path: Path, *, mtp: int | None = 1, embedding: int = 4096, **extra) ->
 
 
 def run(root: Path, lib: Path, *, recorded=(), scope="new", first_run=False, today=TODAY,
-        rank=lambda ms: list(ms)):
-    return scan([root], set(recorded), lib, scope=scope, rank=rank, first_run=first_run, today=today)
+        rank=lambda ms: list(ms), checkpoints=()):
+    return scan([root], set(recorded), lib, scope=scope, rank=rank, first_run=first_run, today=today,
+                checkpoints=checkpoints)
 
 
 def real(path: Path) -> str:
@@ -337,6 +338,7 @@ def test_the_library_holds_exactly_the_file_cap_and_exactly_the_entry_cap(tmp_pa
     {"first_seen": "2026-13-45"}, {"first_seen": "20261016"}, {"first_seen": "2026-1-1"}, {"first_seen": 20261016},
     {"first_seen": "2026-01-01T00:00:00"}, {"size": -1}, {"size": 1.5}, {"size": True}, {"size": "10"},
     {"verdict": "weights"}, {"verdict": 3}, {"verdict": ["model"]}, {"declined": "yes"}, {"declined": 1},
+    {"repo": "org/a/b"}, {"repo": "../x"}, {"repo": "a" * 200}, {"repo": 3}, {"repo": ""},
 ])
 def test_an_invalid_entry_is_dropped_alone(tmp_path, bad):
     lib = tmp_path / "lib.json"
@@ -563,6 +565,56 @@ def writes_the_library(source: str) -> bool:
     return any(isinstance(n, ast.Call) and "atomic_write_text" in set(names(n.func))
                and any({"LIBRARY_FILE", "library_path"} & set(names(arg)) for arg in [*n.args, *(k.value for k in n.keywords)])
                for n in ast.walk(ast.parse(source)))
+
+
+def checkpoint(tmp_path: Path, repo_id: str, size: int = 10) -> model_library.Checkpoint:
+    snap = tmp_path / "snaps" / repo_id.replace("/", "--")
+    snap.mkdir(parents=True, exist_ok=True)
+    return model_library.Checkpoint(repo_id, snap, real(snap), size)
+
+
+def test_checkpoints_are_first_seen_after_the_ggufs_in_repo_id_order_keyed_by_the_snapshot(roots, tmp_path):
+    root, lib = roots
+    model(root / "A.gguf")
+    b, a = checkpoint(tmp_path, "org/B"), checkpoint(tmp_path, "org/A")
+
+    found = saved(root, lib, first_run=True, checkpoints=[b, a])
+
+    assert [s.checkpoint.repo_id if s.checkpoint else s.path.name for s in found.new] == ["A.gguf", "org/A", "org/B"]
+    assert found.new[1].model is None and found.new[1].real == a.real and found.new[1].size == 10
+    assert found.library.entries[a.real] == Entry("2026-10-16", 10, FileKind.MODEL, False, "org/A")
+    assert json.loads(lib.read_text(encoding="utf-8"))["entries"][a.real]["repo"] == "org/A"
+    assert Library.load(lib).entries[b.real].repo == "org/B"
+
+
+def test_a_checkpoint_a_record_names_by_repo_id_or_snapshot_is_never_listed(roots, tmp_path):
+    root, lib = roots
+    a, b = checkpoint(tmp_path, "org/A"), checkpoint(tmp_path, "org/B")
+
+    assert [s.checkpoint.repo_id for s in run(root, lib, first_run=True, recorded={"org/A"}, checkpoints=[a, b]).new] \
+        == ["org/B"]
+    assert [s.checkpoint.repo_id for s in run(root, lib, first_run=True, recorded={b.real}, checkpoints=[a, b]).new] \
+        == ["org/A"]
+
+
+def test_unrecorded_leaves_out_an_entry_whose_repo_a_record_names(roots, tmp_path):
+    root, lib = roots
+    a, b = checkpoint(tmp_path, "org/A"), checkpoint(tmp_path, "org/B")
+    library = saved(root, lib, first_run=True, checkpoints=[a, b]).library
+
+    assert set(library.unrecorded({"org/A"}).entries) == {b.real}
+    assert set(library.unrecorded({b.real}).entries) == {a.real}
+
+
+def test_a_seen_checkpoint_is_not_new_again_and_a_baselined_one_is_never_new(roots, tmp_path):
+    root, lib = roots
+    a = checkpoint(tmp_path, "org/A")
+
+    assert run(root, lib, checkpoints=[a]).new == ()
+    saved(root, lib, first_run=True, checkpoints=[a])
+
+    assert run(root, lib, checkpoints=[a]).new == ()
+    assert [s.checkpoint.repo_id for s in run(root, lib, scope="all", checkpoints=[a]).seen] == ["org/A"]
 
 
 def test_only_the_library_module_and_the_gate_name_the_library_file():
