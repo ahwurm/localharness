@@ -211,13 +211,58 @@ def test_a_spawned_launch_goes_to_the_wrapped_strategys_own_stop(world):
     assert verbs(world) == []
 
 
-def test_a_missing_main_pid_makes_every_launch_spawned(world):
-    record(world, main_pid=None)  # 4242 IS in the unit's cgroup, but the unit reports no MainPID
+def test_a_launch_in_the_units_cgroup_with_no_main_pid_is_stopped_through_the_unit_and_never_signalled(world):
+    # WR-09: the manager answers with MainPID 0 (failed, between restarts), the pidfile names a process that
+    # sits in the unit's cgroup. It reads `spawned`, but the cgroup line makes it the unit's.
+    record(world, main_pid=None)
+    dropping_stop(world)
     strat = world.strategy(world.primary)
     inner = Inner(strat.inner)
     strat._inner = inner
     stop(world, strategy=strat)
-    assert len(inner.stops) == 1
+    assert inner.stops == []                                      # the wrapped stopper was never asked
+    assert verbs(world) == [("reset-failed", UNIT), ("stop", UNIT)]
+    assert procfs.read_process(PID).__class__ is procfs.ProcRefusal   # the pid is gone, proven
+
+
+def test_a_unit_process_with_no_main_pid_that_survives_the_unit_stop_is_an_error_naming_the_pid(world):
+    record(world, main_pid=None)
+    dropping_stop(world, drop=False)
+    with pytest.raises(RuntimeError, match=f"pid {PID} still alive"):
+        stop(world)
+    assert verbs(world) == [("reset-failed", UNIT), ("stop", UNIT)]
+
+
+def test_a_unit_process_with_no_main_pid_under_a_foreign_unit_is_named_and_never_signalled(world):
+    record(world, main_pid=None)
+    world.manager.base["DropInPaths"] = "/x/override.conf"
+    why = units.harness_unit_failure(units.unit_runtime_state(), world.g)
+    with pytest.raises(RuntimeError) as caught:
+        stop(world)
+    assert str(caught.value) == UNIT_FOREIGN_STOP_LINE.format(pid=PID, why=why)
+    assert verbs(world) == []
+
+
+def test_a_unit_process_that_is_not_the_main_pid_the_manager_names_is_named_and_never_signalled(world):
+    # WR-09: the manager answers, MainPID is another pid (a wrapper's child, a restart in flight)
+    record(world, main_pid=9999)
+    strat = world.strategy(world.primary)
+    inner = Inner(strat.inner)
+    strat._inner = inner
+
+    with pytest.raises(RuntimeError) as raised:
+        stop(world, strategy=strat)
+
+    assert str(raised.value) == lifecycle.UNIT_UNASKED_STOP_LINE.format(pid=PID, unit=UNIT)
+    assert f"pid {PID}" in str(raised.value) and "stop the unit from a terminal" in str(raised.value)
+    assert inner.stops == [] and verbs(world) == []   # nothing signalled, the unit not stopped behind its back
+    assert isinstance(procfs.read_process(PID), procfs.ProcRecord)
+
+
+def test_a_unit_process_that_is_not_this_records_launch_is_refused_even_with_no_main_pid(world):
+    record(world, main_pid=None, argv=FakeServe.record_argv(world.peer("flash-next")))   # serves 8081, not 8080
+    with pytest.raises(RuntimeError, match=f"pid {PID} .* not a harness launch — not signalled"):
+        stop(world)
     assert verbs(world) == []
 
 
