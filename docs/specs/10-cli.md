@@ -194,11 +194,15 @@ that is entirely comments — nothing set. It probes nothing, prompts for nothin
 you are standing in the machine's own global config directory.
 
 **Behavior.** `init` sets up the core only: it finds or names the model server and writes the
-config. It asks nothing about plugins, nothing about settings and nothing about what it imports
-from the machine (step 3); it never launches a server itself, the first `start` launches a record
-whose server is down. Its few questions are on a terminal only: "Keep it?" for a config that is
-already there, the model to pick when several are served, and the guided setup when nothing is
-found. Without a terminal on stdin, or with `--no-input`, it asks nothing at all.
+config. It asks nothing about plugins or settings; it never launches a server itself, the first
+`start` launches a record whose server is down. Its questions are on a terminal only, and each is
+an interview question (arrows or digits to move, Enter to answer, Esc to decline): "Keep it?" for a
+config that is already there, the one first-run question about the models found on the machine
+(step 3), the model to pick when several are served, and the download offer when nothing is
+found. "A terminal" means a tty on stdin and on stdout, no `LOCALHARNESS_COMMIT` marker and no
+`--no-input`; a pipe on either end is nobody to ask, and the question component refuses a pipe, a
+dumb terminal or a window under 3 rows by 20 columns by itself. Without one, `init` asks nothing
+at all and writes its records unadopted.
 
 1. **A config that is already there is kept.** Without `--force`, a terminal asks
    "Config exists: <model> at <url>. Keep it?" and Enter keeps it ("✓ Kept <file>."); without a
@@ -221,10 +225,22 @@ found. Without a terminal on stdin, or with `--no-input`, it asks nothing at all
    Otherwise `detect_provider()` (`provider/detector.py`) probes the five ports above with a
    short timeout each.
 3. **What `init` finds on the machine (llama.cpp).** `init` turns what is already there into the
-   `server:` record (and `extra_endpoints` peers) that `start` and `/model` use. It asks nothing and
-   launches nothing, and it prints one block: the primary first (`serving <name> (llama.cpp) ←
-   <model path> · binary: …`), then one `/model switches to <name> …` line per other model, with the
-   flags, environment and `config.ini` it carried beneath the primary.
+   `server:` record (and peers in the global `overrides.yaml`) that `start` and `/model` use. It
+   launches nothing. The model library (`provider/model_library.py` and `cli/library.py`) walks
+   `autosense.model_roots` (bounded, regular `.gguf` files only, typed by their headers so a
+   projector is never a preset and a split model counts once) and prints every model it found as
+   a bullet, best first (`• <name> (llama.cpp · mtp) ← <path> · <size> · first seen <date>`; `(declined
+   earlier)` after one you declined). Then it asks one question on a terminal, `Set up these N models?`,
+   with `All, serving <best> first` (the default, so one Enter sets every model up), `Choose which, and
+   which first` and `Skip for now`; one model asks `Set up <name>?`.
+   `Choose which` asks `Set up which?` (all not-declined files pre-selected) and then `Serve which
+   first?`. Skip and Esc write nothing and decline nothing; choosing none declines every listed file,
+   says so, and remembers it in `model-library.json`. A preset line names `mtp` when the model's
+   header declares MTP layers. Peers are always appended to `overrides.yaml`, never to `config.yaml`
+   (the loader merges both), through the library's one peer writer under the overlay's lock
+   `overrides.yaml.lock`; a 0.18 `extra_endpoints` list in `config.yaml` is copied there once, and
+   `config.yaml` is left unchanged. The block ends with the flags, environment and `config.ini` it
+   carried beneath the primary.
    - *A llama-server of yours already listening* on the detected port is imported from
      `/proc/<pid>`: one directory handle, every read size-capped, another user's process never
      read. Its model, alias, port, cache types, projector, other `LLAMA_ARG_*` variables and
@@ -241,21 +257,36 @@ found. Without a terminal on stdin, or with `--no-input`, it asks nothing at all
      `provider:` only, no `server:` record, and says why in one line ("<who> <reason> — attached
      only, no server record written"). `init` exits 0.
    - *Nothing listening.* A stopped user unit of yours that names a model is read from its journal
-     (the newest run), else its unit file; its model leads and the other GGUF files are the peers.
-     A unit that cannot be used is named in the one "no llama-server found — set server.binary"
-     line. Otherwise `init` walks `autosense.model_roots` (bounded, regular `.gguf` files only,
-     typed by their headers so a projector is never a preset and a split model counts once), ranks
-     the models (the unit's, then one the speed ledger knows, then the one that fits, then the
-     newest) and writes the first as the primary.
+     (the newest run), else its unit file; its model leads and the other GGUF files are the peers,
+     with no question. A unit that cannot be used is named in the one "no llama-server found — set
+     server.binary" line. Otherwise the library's walk above applies: the models are ranked (the
+     unit's, then one the speed ledger knows, then the one that fits, then the newest) and the
+     first is the primary. A text-generation checkpoint in the Hugging Face cache is listed too,
+     and set up as a `runtime: vllm`, `launch: binary` peer, only when a `vllm` binary is found; its
+     line ends `binary: <path> (on PATH | harness venv)`.
    - *Ollama and LM Studio* that answer are listed ("<runtime> holds N models … left in <runtime>,
      no preset written"), not duplicated.
    - *A config that already exists with no `server:`* treats the same import as the change: the
      record goes to the global `overrides.yaml` ("✓ Updated <overrides> — your config.yaml is
      unchanged."), `config.yaml` stays byte-identical, nothing is asked, and an overlay that does
      not validate writes nothing and exits 1.
-   - *Adoption.* On a terminal `init` records exactly what it showed as the machine's launch
-     answer, so the first `start` does not ask again; with `--no-input`, without a terminal or
-     from the shell tool it records nothing.
+   - *Adoption.* On a terminal, once you answered, `init` records exactly what it showed as the
+     machine's launch answer, so the first `start` does not ask again; with `--no-input`, without a
+     terminal, from the shell tool or when the question could not be asked it records nothing and
+     the records are written unadopted.
+   - *Nothing found at all.* The download offer asks `Download <file> (<size>, fits in your <N> GB)?`
+     over this platform's reference models, the default sensed from the GPU, the runtimes on `PATH`
+     and the memory (`Download it`, `Show the other rows`, `Not now`). For the llama.cpp row it
+     fetches one named file at a pinned commit, verifies its size and `sha256` through one open
+     descriptor, and records exactly that file as the `server:` record; a file that does not match
+     is named and nothing is recorded. A vLLM row carries its one consent in its description (the
+     package or image it installs) and runs `init`'s guided setup without a further question. `Not
+     now` prints the model's page, the command that fetches it and "Nothing set up; run localharness
+     start again later.", writes nothing and exits 0.
+   - *Later runs.* `init` on an existing config lists every model not yet recorded, asks only about a
+     first sighting (a file the library has not shown before), appends what you accept to
+     `overrides.yaml` ("Added N; kept config.yaml.") and skips "Keep it?" after an append.
+     `localharness model --setup` is the way back to a `Not now` or a decline.
 4. **The model.** One model served is used. With several, `init` uses the one `--model` names,
    else Ollama's loaded model; otherwise a terminal shows a numbered list to pick from, and
    without a terminal `init` takes the first and prints the command that picks another.
@@ -266,7 +297,9 @@ found. Without a terminal on stdin, or with `--no-input`, it asks nothing at all
    `✓ LocalHarness configured at <file>.` and one row naming the two defaults every `init`
    applies, with a terminal or without — "The agent can edit files, run commands and remember
    across sessions — org.permissions.mode: read-only or memory.enabled: false turns either off."
-   — and `Run 'localharness start' to begin.` There is no settings question.
+   — and, after a first run, the command for later: "Later: just run localharness start — it brings
+   back your last choice." (followed by "/model <name> switches in a session." when a peer was
+   written). There is no settings question.
 7. **The plugin list.** Every outcome that leaves a config (written, kept, changed or saved for
    later) ends with "Plugins — the command beside each one turns it on or sets it up:", one line
    per bundled plugin with its state and the exact `localharness plugins enable <name>` for it,
@@ -313,8 +346,8 @@ Start your LLM server and run 'localharness init' again, or use:
 
 Without a terminal this exits 1 and writes nothing.
 
-**Skip for now, on a terminal.** There, `init` first offers the guided vLLM setup; declined, it
-prints "Skip for now: give the address and model you will use, and init saves them without
+**Skip for now, on a terminal.** When no model was found and the download offer has nothing for the
+platform, `init` prints "Skip for now: give the address and model you will use, and init saves them without
 checking." and asks for the model server's address and the model name (`--model` answers the
 second). With a model it writes the config unchecked ("✓ Saved <file> — not checked yet. Start
 your model server, then run `localharness start`.") and ends with the plugin list. With no model,
@@ -395,8 +428,31 @@ The excerpt shows three options; the real command has more (`--verbose`, `--mode
 (the same steps, one question on the quick path) and goes on into the session in the same
 command. A setup that ends without a model server that answered (skipped for now, or nothing
 saved) stops after its own next step and exits 0. Without a terminal, or with `--no-input` or
-`--list-models`, `start` prints the welcome hint ("To configure, run: localharness init"), writes
-nothing and exits 0. A configured `start` asks nothing new, and its banner is unchanged.
+`--list-models`, `start` prints the welcome message ("To begin, run: localharness start", saying a
+model server is not required), writes nothing and exits 0. The first `start` on a terminal is the
+first-run question of `init` (step 3 above), and `--preset` is passed through it.
+
+**`--preset` (`-p`) serves a named preset now.** `localharness start --preset <name>` serves the
+launch record `<name>` (a peer by name or served name, or the primary by its served name) ahead of
+what the last session ended on; another preset already serving is swapped for it as `/model <name>`
+does, and `--model` keeps its session-only meaning beside it. The name matches exactly, then
+case-folded, then as a unique prefix (an ambiguous prefix is refused naming both); an unknown name
+is `unknown preset '<name>' — presets: …` with exit 2, and a name whose record the machine record
+withholds is refused with the withheld line and clears nothing. Without it, `start` serves the first
+rung of one ladder: `pending_preset`, then an in-flight `unit-target`, then `active_endpoint`, then
+`server:`; whatever already answers is attached to rather than launched beside. `--scripts` is a
+hidden alias of `--preset`.
+
+**A model that arrives later is one question.** A terminal `start` of a configured machine looks once
+per process, before the session loads, for a `.gguf` first seen since the library last looked, and
+asks `New model <name> — set it up?` (`Set it up`, `Not now`; `<n> new models — set them up?` with
+`Choose which` for several). Enter appends it to `overrides.yaml` adopted, so the trust decision finds it
+covered; `Not now` keeps it quiet at later starts. It never runs without a person, off the terminal
+channel, with `--list-models`, after a first-start setup, on the `/plugins` restart pass, or when the
+config folder is not writable; a library failure is the one line `model library: <why> — start goes
+on`. A missing or corrupt `model-library.json` is rebuilt as a baseline by a person's `start`, and a
+model that arrives afterwards is then a first sighting. A configured `start` otherwise asks nothing new,
+and its banner is unchanged.
 
 **`--channel` (`-c`) picks the input channel.** Core's are `terminal` (the default) and `acp`; a
 bundled plugin of kind `channel` adds its own names, today `mobile` (the `mobile` plugin) and `discord`
@@ -515,6 +571,82 @@ class OrchestratorREPL:
 **Input handling during agent execution:**
 
 When an agent is running, `PromptSession.prompt_async()` is not called. Instead, the REPL displays streaming output. Ctrl-C during a turn does not touch the KILL file: the REPL installs its own SIGINT handler for the turn's duration that **cancels the turn task**, which propagates cancellation through the loop and closes the in-flight streaming HTTP call. On vLLM that disconnect aborts generation engine-side, so no ghost request is left running; other runtimes end the stream on their own terms. The session itself survives, and you are back at the prompt. A second Ctrl-C while the turn is already cancelling restores the default handler, so pressing it again hard-exits.
+
+---
+
+### `localharness model`
+
+Implemented in `localharness.cli.model_cmd.model`.
+
+```
+Usage: localharness model [OPTIONS] [NAME]
+
+Options:
+  --config-dir  TEXT  Config directory (default: $LOCALHARNESS_DIR, else ~/.localharness).
+  --download    TEXT  Download a Hugging Face repo id into the local cache, then exit.
+  --file        TEXT  With --download: fetch only this one filename from the repo.
+  --autostart   TEXT  on | off | status — the autostart unit that serves the last choice at login.
+  --script            Print the launch `start` runs as sh, for NAME or the preset the ladder resolves now.
+  --all               With --script: one shell function per preset.
+  --setup             Choose which of the models found on this machine to set up as presets.
+```
+
+With no argument it lists the available models. `localharness model <name>` switches to a preset
+by the same name rules as `start --preset`, and what it does depends on what can be done at once:
+
+- When the harness's own autostart unit is active, a machine record exists, `LOCALHARNESS_COMMIT`
+  is absent and the target is not withheld, it swaps **now** through the unit: it prints the launch
+  line before the wait ("stopping qwen…, starting flash-next (kv q8_0 · mtp (1 layer); model load can
+  take several minutes)..."), then "Serving <name> — autostart restarted", with "; a REPL session on this
+  machine now talks to it" when a session is live. A docker, Ollama or LM Studio target launches
+  outside the unit and says so.
+- Otherwise it records the choice and swaps nothing: `active_endpoint` as before, plus
+  `pending_preset: <name>` (the primary's swap-back too). The receipt is "Selected <name> — the next
+  start serves it", or "… the next start or boot serves it" only when the harness's unit is enabled.
+  `start` consumes `pending_preset` after the launch, swap or attach it resolved on; `serve` reads it and
+  never removes it.
+
+The trust question is put only to a person (a terminal on stdin and stdout, no `LOCALHARNESS_COMMIT`);
+without one only the entries the record does not yet cover are withheld, and a withheld target is
+refused with "run localharness start on a terminal", exit 2.
+
+`--script [NAME]` prints the launch `start` runs as POSIX `sh`: a two-line comment (the record, the
+version, the derived clauses with their reasons, `-c` left to llama-server's `--fit` with the value the
+harness fitted named, the environment names dropped and the `XDG_CONFIG_HOME` home), then `exec <binary> \`
+with every token shell-quoted and one option per continuation line. Keys are placeholders; a vLLM record
+prints `vllm serve …`. `--script --all` prints one shell function per preset (`serve_<name>`). It reads
+the machine record without deciding or recording trust, prepares nothing and writes nothing; a record
+the machine record does not cover is refused, or skipped with a comment under `--all`. The argv it
+shows is the argv `start`, `serve` and `doctor` use, with the fitted `-c` pair removed.
+
+`--autostart on` writes the harness's own user unit after a local-operator gate and the machine-trust
+question, captures the shell's `PATH` (and `HF_HOME` and `LD_LIBRARY_PATH` when set), runs
+`daemon-reload` and `enable` (`--now` only when nothing of the harness's is serving; a server already
+running is kept), and prints one receipt line naming the unit and the captured `PATH`. `off` runs a
+best-effort `disable` first for a unit file that was never loaded, then `disable --now`, removes the
+file when it is the harness's own and runs `daemon-reload`. `status` prints the unit's state, the target
+(and an in-flight request that outranks a `pending_preset`), linger, the captured `PATH`, a second
+launcher on a preset's port, the boot marker of the run serving now, and the unit's last exit in words;
+anyone may ask. The unit, its identity test and its exit codes are in SECURITY.md.
+
+`--setup` is the multi-select over every `.gguf` not yet recorded (new files pre-selected, declined
+files tagged and cleared when selected). It needs a terminal and a config and nothing else on the line
+(exit 2 otherwise).
+
+`--download <repo> --file <name>.gguf` resolves the commit, size and `sha256` from the hub, downloads
+at that commit and, with a config and a person, verifies the file, prints "Verified <file> at <commit>
+(sha256 <hash>)" and the record line, and appends a peer. Otherwise it prints "Not recorded (<why>) —
+the next localharness start finds it". A whole repository or a non-`.gguf` file keeps the plain
+download and its guidance text.
+
+### `localharness serve` (hidden)
+
+`localharness serve --config-dir <dir>` is the body of the autostart unit; a person never runs it. It
+decides what to serve exactly as `start` would, without asking anyone, and replaces itself with the
+server. Exit codes are the contract the unit's restart policy reads: 78 for a refusal by trust, the
+record, the captured environment or the unit identity test (not restarted), 75 when a live process holds
+the pidfile, 1 for a transient failure, and 0 when there is nothing to do (a target the unit does not
+serve, a server already up).
 
 ---
 
@@ -796,6 +928,24 @@ Rows added for the hardening, each an `i` (info) row unless noted, never a failu
   made it owner-only (this account's folder not tightened yet, another account's folder, a
   read-only filesystem); or, the folder being private, one `i` row counting the files inside that
   other accounts could read if it were opened up, naming `chmod -R go-rwx`.
+
+Four rows follow the endpoint checks, before "Config directory writable"; none reads a key file, runs a
+manager verb or writes a file:
+
+- `Tuning: <name> — <derived clause> · <window>`, one per llama.cpp or vLLM record, from the same sensing
+  and planning `start` runs with nothing prepared: `-c N (fit)`, `-c left to llama-server --fit`, `-c N
+  (the record)` or `-c from extra_args`, and `nothing derived` when nothing was. A record with changes you
+  have not confirmed says "not planned: its record has changes you have not confirmed"; a record whose
+  launch is refused prints that refusal (for example "no llama-server — set server.binary"). Attach-only,
+  Ollama and LM Studio records get no row.
+- `Sampling:` always, for a config that loads: `temperature <t> from <rung> (the model's own is <t> —
+  unset <rung> to use it)`, `temperature <t> from <rung>`, `the model's own (temperature <t>)`, or `the
+  model's own — no temperature is sent`.
+- `Autostart:` says what `localharness model --autostart status` says: every line `status` prints, joined
+  by `; `, the boot marker of the run serving now included, and so the captured `PATH` and any second
+  launcher.
+- `Models: <N> set up · <M> found, not set up · <K> declined — localharness model --setup lists them`
+  (zero clauses dropped), or `Models: none set up or found — …`.
 
 It does **not** check individual agents' memory databases, and there is no per-agent health table.
 
@@ -1345,6 +1495,7 @@ the exit code as *structured output* rather than as a pass/fail flag.
 | `agent create` / `agent list` | 0 done; 1 invalid input or write failure; 2 usage error (see `agent create` above) |
 | `config show` / `config migrate` | 0 done; 1 failure; 2 usage error |
 | `model`, `propose` | 0 done; 2 any error |
+| `serve` (hidden) | 78 refused by trust, the record, the captured environment or the unit identity test; 75 a live process holds the pidfile; 1 transient failure; 0 nothing to do or already serving |
 | `components` | 0 done; 2 any error |
 | `plugins` | 0 done; 2 any error |
 | `bench` | 0 success; 2 infrastructure failure (config missing, empty corpus, no runs) |

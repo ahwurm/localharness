@@ -1,5 +1,10 @@
 # LocalHarness bench harness configuration.
-# Locked thresholds from .planning/phases/11-bench-harness/11-CONTEXT.md
+# Locked thresholds.
+#
+# Sampling: the bench sends no temperature, so the server's own sampling defaults govern every entry,
+# exactly as in a session with no temperature set. To pin one, set it on the server a run measures:
+# llama-server's `--temp` in the record's `extra_args`, vLLM's `--generation-config` (or the model's
+# generation_config.json). A temperature a run reports is the server's, not the bench's.
 corpus_path: bench/scenarios
 results_path: bench/results
 
@@ -56,5 +61,5 @@ thresholds:
   parse_failures:   { type: absolute, value: 1 }
   stuck_recoveries: { type: absolute, value: 1 }
 
-# NOTE: Per-scenario threshold overrides live in scenario YAML files (Phase 12),
-# not here. 11-04 compare's resolve_thresholds() merges them at compare time.
+# NOTE: Per-scenario threshold overrides live in scenario YAML files,
+# not here. compare's resolve_thresholds() merges them at compare time.

@@ -1,6 +1,6 @@
 # Spec 13: Provider Support & Lifecycle
 
-**Component:** `src/localharness/provider/lifecycle.py`, `src/localharness/provider/server.py`, `config/models.py` (`EndpointRef`, `ManagedServerConfig`, `LocalModelEntry`, `ActiveSelection`), `cli/repl.py` (`/model`)
+**Component:** `src/localharness/provider/lifecycle.py`, `src/localharness/provider/server.py`, `src/localharness/provider/procfs.py`, `config/models.py` (`EndpointRef`, `ManagedServerConfig`, `LocalModelEntry`, `ActiveSelection`), `cli/repl.py` (`/model`)
 **Status:** v1
 **Dependencies:** [Spec 02: LLM Provider Layer](02-provider.md) (the request path + capability probe), [Spec 06: Configuration System](06-config.md) (the config models), [Spec 10: CLI](10-cli.md) (the REPL and `/model`)
 
@@ -90,9 +90,44 @@ The harness drives LM Studio's headless `lms` CLI: `lms daemon up` (start/attach
 
 The stop then **polls `pgrep -x llmster` until the process is actually gone** (≤ 50 attempts, ~5 s), because both the HTTP endpoint and `lms daemon status` flip to "down" ~0.4 s *before* the process holding the weights exits — so only process-gone is a sound accelerator-free signal on unified memory. If it never dies, `stop` raises rather than report a false free. Serving is local-only (`--bind 127.0.0.1`) on the caller's port; `--gpu off` when `spec.gpu` is False (so the lifecycle validates with no GPU window), `--gpu max` when heavy. A manual `--gpu` in `extra_args` is **rejected at config load** — it would (CLI last-wins) override the GPU-lock-derived flag and desync the bookkeeping into a two-heavy freeze.
 
-### `strategy_for(spec)`
+### `strategy_for(spec, unit=)`
 
-The single construction point. Dispatches on `spec.runtime`: `"llamacpp"` → `SpawnedProcessStrategy`, `"ollama"` → `DaemonStrategy`, `"lmstudio"` → `LmsStrategy`, anything else (`"vllm"`, the default) → `ManagedVllmStrategy`. The REPL `/model` swap and `start` autostart route through it, so the *strategy*, not the caller, owns how a backend is launched and stopped.
+The single construction point. Dispatches on `spec.runtime`: `"llamacpp"` → `SpawnedProcessStrategy`, `"ollama"` → `DaemonStrategy`, `"lmstudio"` → `LmsStrategy`, anything else (`"vllm"`, the default) → `ManagedVllmStrategy`. The REPL `/model` swap and `start` autostart route through it, so the *strategy*, not the caller, owns how a backend is launched and stopped. The `unit=` argument is the autostart unit's state: only a state that is the harness's own unit, with a record the unit can serve (llama.cpp or a vLLM binary), wraps the strategy above in a `UnitStrategy`; a raw state, a foreign unit and a docker, Ollama or LM Studio record get the plain strategy. Every call under `src/` passes `unit=`, and a structural test pins that.
+
+### One sensed, planned, confirmed launch
+
+A llama.cpp or vLLM-binary launch is a value before it is a process: **sense → plan → execute → confirm.**
+
+- **Sense.** `sense_launch(...)` reads what the machine and the model say, once, into a `Sensed`: the model file's header (a typed, bounded dict), where the weights will sit, the free memory, the weights' size, a vLLM checkpoint's `config.json`, the speed ledger's remembered retry, and, when given the unit's state, the boot marker and the verdict on whether the previous boot died. Anything that could not be known is empty, never guessed.
+- **Plan.** `plan_launch(sensed, ...)` is pure and returns a `LaunchPlan`: the exact `argv`, the keywords that built it, the *names* (never the values) of the environment variables the harness sets, the llama.cpp `config.ini` home, the window report, what the launch derived (`kv_cache_type`, `draft_mtp`, `draft_p_min`, the vLLM parsers), and how the plan came about: `shape` is `full` or `retry`, with `cause`, the derived names `dropped` and the fit `-c` a retry halves from. A record field set to a value pins that derived value.
+- **Execute.** `activate` runs the plan. `serve`, `doctor`'s `Tuning:` rows and `localharness model --script` render the same plan; one test holds `activate`, `serve` and `doctor` to the identical argv, and `--script` to the same argv with the fitted `-c` pair removed (the script leaves `-c` to `--fit`).
+- **Confirm.** `confirm_launch(...)` is the only writer of the speed ledger's `retry` record and the only remover of the boot marker. It runs after a launch answered, never senses (after a load the free memory is the loaded machine's and says nothing about the fit), and never raises.
+
+**One retry, chosen in one place.** A launch that died after a derived speculation type or a halved window might have fixed gets exactly one other shape: `LaunchPlan.retry()` drops the derived speculation type and halves the fitted `-c`, each only when the plan has it; a record that pins either keeps it. A retry that serves is remembered in the ledger (with a clause on the next attach), and a full shape that serves clears it. A death at boot is the same retry, chosen by `plan_launch` from the marker (`boot_retry()`).
+
+**`lifecycle.swap`.** `swap(incumbent, target, *, config_dir, autosense, unit, reporter)` is the heavy-to-heavy move the REPL's `/model` and `localharness model <name>` share, with the free, the restore-on-failure and the half-started-target stop described under the GPU-lock below. `Heavy(spec, base_url, peer, launch_kw)` is built by the caller, since the provider layer imports nothing from `cli`. A `SwapReporter` (`freed()`, `launched(live)`, `restored(spec)`, `line(text)`) is what a surface says while the swap runs; the lines it is given are already redacted. After a cancellation that came after the incumbent was freed, `swap` stops the half-started target, reports `freed()`, rolls `unit-target` back to the incumbent and does not restore.
+
+### `UnitStrategy`: launching through the harness's own unit
+
+While the harness's autostart unit exists and is provably its own, a llama.cpp or vLLM-binary record is launched *through* it, so the unit and the harness never hold two servers. `UnitStrategy.activate` does not start a process: it names the record in `<config-dir>/vllm/unit-target` (record names only; a typed `.gguf` path is refused under autostart), re-checks that the unit is still the harness's, runs `reset-failed` and `restart`, lends the launch lock to the unit's `serve` until it has written the pidfile, and waits with the unit as the judge of death: it tolerates one rise of `NRestarts` when the plan carries derived keywords (the unit's own retry) and stops at the second, or at `ActiveState=failed`, with the journal's last lines in the error. `liveness` and `launch_identity` are the wrapped strategy's, so a record is recognised in `/proc` exactly as before.
+
+**The stopper is the strategy's, chosen by the launch's owner.** `procfs.read_launch(config_dir, *, expect, main_pid)` reports `Launch.owner`: `unit` when the verified process sits in the unit's cgroup and is the unit's `MainPID` (the caller supplies it; `procfs` never calls `systemctl`), else `spawned`. `UnitStrategy.stop` re-runs the own-unit check, then stops a `unit` launch through the manager (a server in the unit's cgroup while the manager says `MainPID=0` is stopped the same way; a mismatched `MainPID`, or a manager that does not answer, is named and nothing is signalled) and hands a `spawned` launch to the wrapped strategy.
+
+**`launch_identity` and the pidfile.** The pidfile holds `<pid> <start time> <port>`. `strategy.launch_identity(spec)` is plain data, a `LaunchIdentity` of the binary's names, the record's port, the argv tokens the launch must carry (`serve` for vLLM) and the environment variable that carries the port; `procfs.identity_mismatch` is the one pure function that says why a process is not that launch (uid, executable, argv tokens, port, session leader, and for a unit launch the cgroup and `MainPID`). `expect` is required on every signalling path and supplied inside the strategies; a pid that fails is named and never signalled, and the pidfile is never unlinked on a mismatch.
+
+**The launch lock has two entry points.** The cross-process lock is one advisory `flock` on `server.lock_path(config_dir)`: `launch_lock` is taken asynchronously by the launching surfaces, `launch_lock_sync` synchronously by `serve`. They share the contended-errno set, so a REPL launching while the unit's `serve` starts waits rather than racing.
+
+### The ladder: which record `start`, `serve`, `model` and `--script` serve
+
+`model_ops.resolve_serving(harness, trust, preset)` is the one ladder, and it returns a `Serving` carrying the *record* (never a selection row's `base_url`), the rung and whether the choice is explicit:
+
+```
+--preset <name>  >  pending_preset  >  unit-target (in flight)  >  active_endpoint  >  server: (the primary)
+```
+
+`pending_preset` is the unconsumed intent `localharness model <name>` leaves when no swap could run at once; `unit-target` is the target a swap through the unit has requested and not yet landed; `active_endpoint` is the last success. A live in-flight `unit-target` outranks a stale `pending_preset` only while the process that requested it lives (its start time is recorded and compared), and `--autostart status` and `doctor` print that line. Names resolve against every record (exact, case-folded, unique prefix) before a served or downloaded model id is read; a record the machine record withholds is refused by `start` and `model` (exit 2) and by `serve` (78) and no stored selection is cleared; only a name that matches no record is removed. `model_ops.persist_landed` is the one writer of a landing's outcome (`active_endpoint`, the ledger's `last_served` and the removal of `pending_preset`) for `start`, the REPL wrapper and `model`; `serve` never calls it.
+
+**One harness-launched server per config directory** is the contract, from the single pidfile (see the GPU-lock below): a cold `/model` to a GPU peer beside a live CPU server of the harness's is refused with the live-launch line rather than started beside it.
 
 ---
 
