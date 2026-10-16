@@ -1362,6 +1362,12 @@ UNIT_FOREIGN_STOP_LINE = ("pidfile names pid {pid}, run by localharness-llm.serv
 """The refusal when the launch's owner is the unit but the unit failed its identity re-check before a stop
 (D-21, T-14-23); `why` is `units.harness_unit_failure`'s phrase. The process is named and never signalled."""
 
+UNIT_UNASKED_STOP_LINE = ("pid {pid} runs under {unit}, and the service manager could not be asked — not stopped "
+                          "(the unit would restart it); stop the unit from a terminal once the manager answers")
+"""The refusal when the pidfile's process sits in the harness unit's cgroup but the manager cannot be
+asked, so MainPID is unknown: the process is the unit's whatever the owner verdict says, and a signal sent
+behind the manager's back is counted as a failure by `Restart=on-failure` (WR-06). Named, never signalled."""
+
 UNIT_FAILED_LINE = "{label} did not come up under the autostart unit"
 UNIT_EXITED_LINE = "{label}: the autostart unit exited without starting a server"
 UNIT_TIMEOUT_LINE = "{label}: the autostart unit's server was not ready after {seconds}s"
@@ -1667,7 +1673,10 @@ class UnitStrategy:
         `unit`: while the unit is still the harness's own (the identity tests re-run now, D-13), `reset-failed`
         then `stop` through the manager, and the pid must be gone afterwards, else RuntimeError naming it; a
         unit that fails the re-check, or a unit process that is not this record's launch, is named in a
-        RuntimeError and nothing is signalled. `server.stop_server` is never called for a unit-owned launch
+        RuntimeError and nothing is signalled. When the manager cannot be asked at all, a launch whose cgroup is
+        the harness unit's is named in a RuntimeError (`UNIT_UNASKED_STOP_LINE`) and not signalled either: the
+        cgroup line needs no manager, and the unit would restart a server killed behind its back; a launch
+        outside the unit's cgroup still goes to the wrapped stopper. `server.stop_server` is never called for a unit-owned launch
         (the unit's stop removes it) and `unit-target` is not written (RULING W3)."""
         raw = await asyncio.to_thread(units.unit_runtime_state)
         failure = await asyncio.to_thread(units.harness_unit_failure, raw, config_dir)
@@ -1677,6 +1686,12 @@ class UnitStrategy:
         if launch is None:
             return
         if launch.owner != "unit":
+            if raw is None:
+                # Without the manager there is no MainPID, so every launch reads `spawned`; the cgroup line
+                # needs no manager. A process the unit runs is not ours to signal: the unit restarts it.
+                found = await asyncio.to_thread(procfs.read_process, launch.pid)
+                if getattr(found, "unit", None) == procfs.HARNESS_UNIT:
+                    raise RuntimeError(UNIT_UNASKED_STOP_LINE.format(pid=launch.pid, unit=procfs.HARNESS_UNIT))
             await self._inner.stop(spec, config_dir)
             return
         if failure is not None:

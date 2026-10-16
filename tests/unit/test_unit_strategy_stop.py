@@ -232,15 +232,46 @@ def test_a_cgroup_unit_spelled_otherwise_is_not_the_unit(world, unit_name):
     assert verbs(world) == []
 
 
-def test_a_manager_that_cannot_be_asked_leaves_the_launch_spawned(world, monkeypatch):
-    record(world)
+def test_a_manager_that_cannot_be_asked_does_not_signal_a_launch_in_the_units_cgroup(world, monkeypatch):
+    record(world)  # 4242 runs in localharness-llm.service's cgroup and is the unit's MainPID
     monkeypatch.setattr(units, "unit_runtime_state", lambda: None)
     strat = world.strategy(world.primary)
     inner = Inner(strat.inner)
     strat._inner = inner
+
+    with pytest.raises(RuntimeError) as raised:
+        stop(world, strategy=strat)
+
+    assert str(raised.value) == lifecycle.UNIT_UNASKED_STOP_LINE.format(pid=PID, unit=UNIT)
+    assert f"pid {PID}" in str(raised.value) and "stop the unit from a terminal" in str(raised.value)
+    assert inner.stops == [] and verbs(world) == []   # the world's patched signals and stop_server did not fire
+    assert isinstance(procfs.read_process(PID), procfs.ProcRecord)  # still running, untouched
+
+
+def test_a_runner_that_times_out_on_every_question_is_the_same_unasked_manager(world, monkeypatch):
+    # the real failure: the runner (timeout, busy user bus) answers None to the state read and to every verb
+    record(world, main_pid=9999)
+    monkeypatch.setattr(units, "_run_manager", lambda *a, **kw: None)
+    strat = world.strategy(world.primary)
+    inner = Inner(strat.inner)
+    strat._inner = inner
+
+    with pytest.raises(RuntimeError, match="could not be asked"):
+        stop(world, strategy=strat)
+
+    assert inner.stops == [] and verbs(world) == []
+
+
+def test_a_manager_that_cannot_be_asked_still_lets_a_launch_outside_the_unit_go_to_the_wrapped_stop(world, monkeypatch):
+    record(world, cgroup="/user.slice/app.slice/run-r1.scope", main_pid=9999)
+    monkeypatch.setattr(units, "unit_runtime_state", lambda: None)
+    strat = world.strategy(world.primary)
+    inner = Inner(strat.inner)
+    strat._inner = inner
+
     stop(world, strategy=strat)
-    assert len(inner.stops) == 1
-    assert verbs(world) == []
+
+    assert len(inner.stops) == 1 and verbs(world) == []
 
 
 def test_the_recheck_is_asked_first_even_when_the_launch_is_spawned(world):
