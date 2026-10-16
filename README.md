@@ -70,6 +70,8 @@ Every runtime is reached through one OpenAI-compatible client; `init` can also a
 | **Ollama** | spawns `ollama serve` | native | exact with the `exact-tokenizer` extra, else estimated | CPU round-trip |
 | **LM Studio** | drives headless `lms` | native | exact with the `exact-tokenizer` extra, else estimated | CPU round-trip |
 
+A session with no temperature set, and the bench, send none: the server's own sampling defaults govern. To pin one, set it on the server, for example llama-server's `--temp` in a record's `extra_args` or vLLM's `--generation-config`.
+
 Setup: [llama.cpp](docs/runtimes/llamacpp.md), [Ollama](docs/runtimes/ollama.md), [LM Studio](docs/runtimes/lmstudio.md), vLLM ([reference architectures](docs/reference-architectures/README.md)). Details: [spec 13](docs/specs/13-provider-support.md).
 
 ## Security
