@@ -10,7 +10,11 @@ so the guarantee holds for the one written tomorrow:
 - the swap cannot run without a `MachineTrust` in hand: `resolve_serving` takes `trust` with no
   default, `heavy_for` takes a `Serving`, a `Serving` is built only on the ladder in model_ops, a
   `Heavy` only by `heavy_for` / `incumbent_heavy`, and every function that calls `.swap(` gets its
-  target from `heavy_for(`.
+  target from `heavy_for(`;
+- the CLI's immediate swap (`localharness model <name>` with the autostart unit active) cannot run without a
+  `MachineTrust`: `model_cmd._swap_now` takes `machine_trust: MachineTrust` and a `Serving` with no default,
+  `run_swap(` is called under `cli/` only by `start_cmd._swap_start` and `model_cmd._swap_now`, and `_swap_now(`
+  is called only from `model_cmd.model`, after the `decide_machine_trust(` call of that same function.
 
 Each assertion has a "bites" test: the same checker run over a small source string that plants the
 forbidden call must report it, so a checker that stopped looking would fail here.
@@ -41,6 +45,13 @@ GATE_CALL = "_is_local_operator"
 # and the one helper that hands back its last rung.
 HEAVY_BUILDERS = frozenset({"heavy_for", "incumbent_heavy"})
 SERVING_BUILDERS = frozenset({"resolve_serving", "default_serving"})
+
+# (module, enclosing function) pairs that may call `run_swap(`: `start`'s swap and the CLI's immediate swap.
+RUN_SWAP_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
+    ("cli/start_cmd.py", "_swap_start"), ("cli/model_cmd.py", "_swap_now")})
+SWAP_NOW = "_swap_now"
+SWAP_NOW_CALLER = "model"
+DECISION = "decide_machine_trust"
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
@@ -147,6 +158,42 @@ def swaps_without_heavy_for(source: str) -> tuple[list[str], list[str]]:
     return good, bad
 
 
+def run_swap_callers(source: str, module: str) -> list[tuple[str, int, str]]:
+    """`run_swap(` calls whose `(module, function)` is not on the allowlist."""
+    tree = ast.parse(source)
+    parents = _parents(tree)
+    return [(module, call.lineno, _enclosing_function(call, parents))
+            for call in _calls_named(tree, "run_swap")
+            if (module, _enclosing_function(call, parents)) not in RUN_SWAP_ALLOWLIST]
+
+
+def swap_now_without_decision(source: str, swap_now: str = SWAP_NOW, caller: str = SWAP_NOW_CALLER,
+                              decision: str = DECISION) -> list[str]:
+    """What is wrong with how `swap_now` is reached: it must be called only from `caller`, and there only after
+    a `decision(` call that comes earlier in the caller's own text (a decision in a nested function, or one
+    lexically later, decides nothing for the swap)."""
+    tree = ast.parse(source)
+    parents = _parents(tree)
+    problems = []
+    callers = {_enclosing_function(call, parents) for call in _calls_named(tree, swap_now)}
+    if callers != {caller}:
+        problems.append(f"{swap_now} is called from {sorted(callers) or 'nowhere'}, not only {caller}")
+    for node in ast.walk(tree):
+        if not (isinstance(node, _FUNCTIONS) and node.name == caller):
+            continue
+        own = [n for stmt in node.body if not isinstance(stmt, (*_FUNCTIONS, ast.Lambda))
+               for n in _walk_own(stmt) if isinstance(n, ast.Call)]
+        decided = [n.lineno for n in own if _name(n.func) == decision]
+        swaps = [n.lineno for n in own if _name(n.func) == swap_now]
+        if not decided:
+            problems.append(f"{caller} never calls {decision}")
+        elif swaps and min(swaps) < min(decided):
+            problems.append(f"{caller} calls {swap_now} (line {min(swaps)}) before {decision} (line {min(decided)})")
+    if not any(isinstance(n, _FUNCTIONS) and n.name == caller for n in ast.walk(tree)):
+        problems.append(f"no {caller} function")
+    return problems
+
+
 def _walk_own(node: ast.AST):
     """`ast.walk` that does not descend into a nested function or lambda."""
     yield node
@@ -223,6 +270,33 @@ def test_every_function_that_swaps_takes_its_target_from_heavy_for():
     assert bad == []
     assert len(good) >= 2  # the REPL's /model handler and start_serving.run_swap
     assert "run_swap" in good
+
+
+def test_swap_now_takes_a_machine_trust_and_a_serving_with_no_default():
+    from localharness.cli import model_cmd
+
+    params = inspect.signature(model_cmd._swap_now).parameters
+    assert params["machine_trust"].default is inspect.Parameter.empty
+    assert "MachineTrust" in str(params["machine_trust"].annotation)
+    assert params["serving"].default is inspect.Parameter.empty
+    assert "Serving" in str(params["serving"].annotation)
+    assert list(params)[:3] == ["harness", "machine_trust", "serving"]
+
+
+def test_run_swap_is_called_under_cli_only_by_start_swap_and_the_cli_swap():
+    found, calls = [], set()
+    for module, source in _cli_sources():
+        found += run_swap_callers(source, module)
+        tree = ast.parse(source)
+        parents = _parents(tree)
+        calls |= {(module, _enclosing_function(c, parents)) for c in _calls_named(tree, "run_swap")}
+    assert found == []
+    assert calls == RUN_SWAP_ALLOWLIST                      # not vacuous: both callers exist
+
+
+def test_swap_now_is_reached_only_from_model_after_its_trust_decision():
+    source = (SRC / MODEL_CMD).read_text()
+    assert swap_now_without_decision(source) == []
 
 
 # ------------------------------------------------------------------------------ bites
@@ -309,3 +383,52 @@ def test_bite_a_swap_without_heavy_for_is_reported():
             return await lifecycle.swap(None, t)
     """)
     assert swaps_without_heavy_for(planted) == (["trusted"], ["untrusted"])
+
+
+def test_bite_a_run_swap_in_another_cli_function_is_reported():
+    planted = textwrap.dedent("""
+        async def sneaky(h, i, t):
+            return await start_serving.run_swap(h, i, t)
+        async def _swap_start(h, i, t):
+            return await start_serving.run_swap(h, i, t)
+    """)
+    assert run_swap_callers(planted, "cli/start_cmd.py") == [("cli/start_cmd.py", 3, "sneaky")]
+    assert run_swap_callers(planted, "cli/repl.py") == [("cli/repl.py", 3, "sneaky"), ("cli/repl.py", 5, "_swap_start")]
+    assert run_swap_callers("def _swap_now(h):\n    run_swap(h)\n", "cli/model_cmd.py") == []
+
+
+def test_bite_a_swap_now_before_or_without_the_decision_is_reported():
+    ungated = textwrap.dedent("""
+        def model(name):
+            _swap_now(h, trust, serving)
+            trust = decide_machine_trust(d, ask=False)
+    """)
+    assert swap_now_without_decision(ungated) == ["model calls _swap_now (line 3) before decide_machine_trust (line 4)"]
+    missing = "def model(name):\n    _swap_now(h, MachineTrust(), serving)\n"
+    assert swap_now_without_decision(missing) == ["model never calls decide_machine_trust"]
+    nested = textwrap.dedent("""
+        def model(name):
+            def later():
+                return decide_machine_trust(d, ask=False)
+            _swap_now(h, t, serving)
+    """)
+    assert swap_now_without_decision(nested) == ["model never calls decide_machine_trust"]
+    gated = textwrap.dedent("""
+        def model(name):
+            trust = decide_machine_trust(d, ask=False)
+            _swap_now(h, trust, serving)
+    """)
+    assert swap_now_without_decision(gated) == []
+
+
+def test_bite_a_second_caller_of_swap_now_is_reported():
+    sneaky = textwrap.dedent("""
+        def model(name):
+            trust = decide_machine_trust(d, ask=False)
+            _swap_now(h, trust, serving)
+        def elsewhere(h, serving):
+            _swap_now(h, MachineTrust(), serving)
+    """)
+    assert swap_now_without_decision(sneaky) == ["_swap_now is called from ['elsewhere', 'model'], not only model"]
+    assert swap_now_without_decision("def other():\n    pass\n") == [
+        "_swap_now is called from nowhere, not only model", "no model function"]
