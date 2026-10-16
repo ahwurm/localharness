@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
@@ -318,6 +319,16 @@ _DERIVED_WORDS = (
     ("reasoning_parser", lambda t: f"reasoning {t.reasoning_parser}"),
     ("tool_call_parser", lambda t: f"tools {t.tool_call_parser}"),
 )
+
+
+def script_function_name(name: str, taken: Collection[str]) -> str:
+    """`serve_<name>` with every character outside `[A-Za-z0-9_]` made `_`, numbered `_2`, `_3` ... when `taken` has it."""
+    base = "serve_" + re.sub(r"[^A-Za-z0-9_]", "_", name)
+    candidate, n = base, 1
+    while candidate in taken:
+        n += 1
+        candidate = f"{base}_{n}"
+    return candidate
 
 
 def _window_clause(plan: Any) -> str | None:
