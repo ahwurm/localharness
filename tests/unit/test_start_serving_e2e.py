@@ -618,7 +618,7 @@ async def test_a_retried_peer_launch_names_the_peers_own_undo_field(tmp_path, mo
             on_plan(plan)
             return lifecycle.LiveEndpoint(base_url=base_url, served_models=["m"], handle=1)
 
-    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: Strategy())
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec, **kw: Strategy())
     spec = peer("flash-next", served_name="flash-next")["lifecycle"]
     from localharness.config.models import ManagedServerConfig
     srv = ManagedServerConfig(**spec)

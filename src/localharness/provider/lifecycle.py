@@ -314,7 +314,8 @@ def record_identity(spec: ManagedServerConfig) -> LaunchIdentity | None:
     `-a <served_name>` when the record has one, else `-m <model>` as the launch spells it (`~`
     expanded); vLLM binary the model argument (`serve <model>`); vLLM docker the model it serves and the port it
     publishes; Ollama and LM Studio add nothing."""
-    identity = strategy_for(spec).launch_identity(spec)
+    # an identity does not depend on who runs the launch: the unit wraps the strategy and states its identity
+    identity = strategy_for(spec, unit=None).launch_identity(spec)
     if identity is None:
         return None
     tokens: tuple[str, ...] = ()
@@ -1304,6 +1305,36 @@ def unit_kind(spec: ManagedServerConfig | None) -> str:
     return "vLLM binary" if spec.launch == "binary" else "docker"
 
 
+RUNS_OUTSIDE_AUTOSTART = "(runs outside autostart — the next boot serves nothing)"
+"""The clause a launch line carries when the harness's own unit exists but the target is a record the
+unit cannot serve (a docker, Ollama or LM Studio record): it launches through its own strategy, outside
+the unit, and the next boot's `serve` exits 0 with nothing to serve (spec 20 §8.2, D-21)."""
+
+
+def outside_autostart(spec: ManagedServerConfig | None, unit: Any) -> bool:
+    """Does a launch of `spec` run outside the autostart unit that exists (D-21)? Only for the harness's
+    OWN unit (a `UnitRuntimeState` with `own=True`) and a record `unit_servable` says the unit cannot
+    serve. No unit, a raw or foreign state, and a record the unit serves are all False."""
+    return isinstance(unit, units.UnitRuntimeState) and unit.own and not unit_servable(spec)
+
+
+def leave_unit(spec: ManagedServerConfig | None, unit: Any, config_dir: Path) -> bool:
+    """Take `unit-target` away when a launch of `spec` runs outside the harness's own unit (R-14-28,
+    T-14-30): the ladder then falls to `active_endpoint`, and the next boot's `serve` exits 0 with its
+    not-served line instead of bringing up the older choice beside the server this launch starts. True
+    when the launch is outside the unit. The caller holds the launch lock and calls this right before
+    the launch. A file that cannot be removed is a RuntimeError, before anything is launched."""
+    if not outside_autostart(spec, unit):
+        return False
+    try:
+        units.remove_target(config_dir)
+    except OSError as exc:
+        raise RuntimeError(
+            f"could not leave the unit target: {getattr(exc, 'strerror', None) or type(exc).__name__}"
+        ) from None
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Launching through the harness's own autostart unit (spec 20 §9.4)
 # ---------------------------------------------------------------------------
@@ -1650,6 +1681,7 @@ async def free_accelerator(
     config_dir: Path,
     *,
     settle_seconds: float | None = None,
+    unit: "units.UnitRuntimeState | None" = None,
 ) -> tuple[ManagedServerConfig, str] | None:
     """GPU-lock: make the single accelerator free for `target`, honoring the box rule "at most one
     GPU-heavy server up at a time".
@@ -1660,13 +1692,17 @@ async def free_accelerator(
     stopped ``(spec, base_url)`` so a failed launch can restore it. Returns ``None`` (no action)
     when nothing heavy is up, or when the incumbent IS the target (a same-server model-reload
     restart, whose stop the caller performs itself). This function only ever FREES — it never starts
-    or probes anything."""
+    or probes anything.
+
+    ``unit`` is the autostart unit's own state (D-19): the incumbent is stopped by the stopper its OWNER
+    calls for (`UnitStrategy.stop`), so a server the unit runs is stopped through the unit and a server
+    the harness spawned is stopped by the spawned strategy's verified stop."""
     if incumbent is None:
         return None
     inc_spec, _inc_url = incumbent
     if inc_spec is target:
         return None
-    await strategy_for(inc_spec).stop(inc_spec, config_dir)
+    await strategy_for(inc_spec, unit=unit).stop(inc_spec, config_dir)
     # Read the settle from the module global at CALL time (not a def-time default) so it stays
     # tunable from live heavy-swap data and silenceable in tests.
     await asyncio.sleep(GPU_FREE_SETTLE_SECONDS if settle_seconds is None else settle_seconds)
@@ -1750,7 +1786,9 @@ def _redacted_error(exc: BaseException, redact: Callable[[str], str]) -> BaseExc
     return new
 
 
-async def safe_stop(spec: ManagedServerConfig, config_dir: Path) -> None:
+async def safe_stop(
+    spec: ManagedServerConfig, config_dir: Path, *, unit: "units.UnitRuntimeState | None" = None,
+) -> None:
     """Best-effort verified-stop of a server, swallowing errors. Used to tear a HALF-STARTED target
     down before restoring an incumbent: the pidfile is one-per-config_dir (shared across primary and
     peer), so a still-alive orphan would be clobbered-and-lost by the restore's own launch
@@ -1769,13 +1807,14 @@ async def safe_stop(spec: ManagedServerConfig, config_dir: Path) -> None:
     except Exception:  # noqa: BLE001 — a look that fails changes nothing: the strategy's own stop decides
         pass
     try:
-        await strategy_for(spec).stop(spec, config_dir)
+        await strategy_for(spec, unit=unit).stop(spec, config_dir)
     except Exception:  # noqa: BLE001 — cleanup is best-effort
         pass
 
 
 async def restore_incumbent(
     stopped: Heavy | None, *, config_dir: Path, autosense: "AutosenseConfig | None",
+    unit: "units.UnitRuntimeState | None" = None,
 ) -> tuple[str | None, str | None]:
     """Best-effort re-launch of a heavy incumbent stopped for a swap that then FAILED, so the box is
     never left with nothing serving. Returns `(label, note)` on success — `note` is the launch
@@ -1783,11 +1822,12 @@ async def restore_incumbent(
     relaunch or the launch itself fails, so the caller reports the cause instead of "nothing serving"
     (D-08). `(None, None)` is nothing to restore: the caller then reports the box needs manual
     attention. Takes no launch lock and flushes no line: the caller holds the lock around the whole
-    swap (D-21)."""
+    swap (D-21). Under the harness's own unit (``unit``) the incumbent comes back through the unit, so
+    ``unit-target`` is rewritten to it."""
     if stopped is None:
         return None, None
     try:
-        live = await strategy_for(stopped.spec).activate(
+        live = await strategy_for(stopped.spec, unit=unit).activate(
             stopped.spec, config_dir, stopped.base_url, peer=stopped.peer, autosense=autosense,
             **stopped.launch_kw)
         return stopped.spec.model, getattr(live, "note", None)
@@ -1828,12 +1868,20 @@ async def swap(
     required: `outcome.error` is rebuilt from `redact(str(exc))` and every line handed to
     `reporter.line` goes through it, so nothing `swap` returns or says carries the raw tail (D-22).
     A cancellation after the incumbent was freed stops the target (verified), awaits `freed()`, runs
-    no restore and re-raises (D-20). `swap` never writes or removes `unit-target`: `unit` is accepted
-    and not read in this release (RULING W3, D-32)."""
+    no restore and re-raises (D-20).
+
+    ``unit`` is the autostart unit's state when it is the harness's OWN unit (`harness_unit`; anything
+    else behaves as None). With it, every strategy `swap` builds is the unit's for a record the unit
+    serves: the incumbent is freed by its owner's stopper, the target is launched by restarting the
+    unit, a half-started target is stopped the same way, and the restore re-activates the incumbent
+    through the unit, which rewrites `unit-target` to it (D-19, D-21). `swap` itself never writes
+    `unit-target` (RULING W3: only `UnitStrategy.activate` does); it only takes it away, through
+    `leave_unit`, when the target is a record the unit cannot serve, right before that target's own
+    launch (R-14-28)."""
     try:
         freed = await free_accelerator(
             (incumbent.spec, incumbent.base_url) if incumbent is not None else None,
-            target.spec, config_dir)
+            target.spec, config_dir, unit=unit)
     except (RuntimeError, TimeoutError) as exc:
         # The incumbent would not stop → we launched NOTHING and it is still up (the verified-stop
         # only raises when the server survives).
@@ -1842,21 +1890,23 @@ async def swap(
     stopped = incumbent if freed is not None else None
     await reporter.freed()
     try:
-        live = await strategy_for(target.spec).activate(
+        leave_unit(target.spec, unit, config_dir)
+        live = await strategy_for(target.spec, unit=unit).activate(
             target.spec, config_dir, target.base_url, timeout_seconds=timeout_seconds,
             on_poll=on_poll, peer=target.peer, autosense=autosense, on_plan=on_plan,
             **target.launch_kw)
     except asyncio.CancelledError:
         # Nothing half-started stays behind, and nothing is restored: the person walked away.
-        await safe_stop(target.spec, config_dir)
+        await safe_stop(target.spec, config_dir, unit=unit)
         await reporter.freed()
         raise
     except (RuntimeError, TimeoutError) as exc:
         # The target half-started (a TimeoutError means its process is still ALIVE, per server.py
         # wait_ready). Tear it down FIRST — the shared pidfile means the restore's own launch would
         # otherwise clobber its handle and orphan it as a 2nd heavy — THEN restore the incumbent.
-        await safe_stop(target.spec, config_dir)
-        label, why = await restore_incumbent(stopped, config_dir=config_dir, autosense=autosense)
+        await safe_stop(target.spec, config_dir, unit=unit)
+        label, why = await restore_incumbent(
+            stopped, config_dir=config_dir, autosense=autosense, unit=unit)
         if label is not None and stopped is not None:
             await reporter.restored(stopped.spec)
         tail = (SWAP_RESTORED_TAIL.format(label=label) + (f" {why}" if why else "") if label

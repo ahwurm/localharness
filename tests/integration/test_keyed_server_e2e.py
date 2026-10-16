@@ -305,7 +305,7 @@ def _record_strategies(monkeypatch, *, fail: tuple[str, ...] = ()) -> list[tuple
             # the harness launched the primary it records (the restored incumbent needs the seed)
             return lifecycle.Liveness(alive=True, detail="pid 4321")
 
-    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: _Recorder())
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec, **kw: _Recorder())
     monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)
     monkeypatch.setattr(server, "list_cached_models", lambda: [])
     return log

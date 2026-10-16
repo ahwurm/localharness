@@ -10,8 +10,9 @@ bounded time for the autostart unit (`wait_starting`), closes a boot retry on at
 
 It never imports `start_cmd` (which imports it): callers pass the clause text and the printers in.
 Nothing here starts, stops or signals a process except through `lifecycle.swap`, and nothing here
-runs a service-manager command: the unit's state comes from `unit_runtime_state`, a seam that
-answers None in this release (D-14, D-32).
+runs a service-manager command itself: the unit's state comes from `unit_runtime_state`, the one seam
+through which `start` asks the user manager (once per start), and `harness_unit` turns it into the state
+that may select `UnitStrategy` (D-19, D-22).
 """
 from __future__ import annotations
 
@@ -52,10 +53,22 @@ _ATTACH_KINDS = ("attach", "attach_other")
 
 
 def unit_runtime_state() -> units.UnitRuntimeState | None:
-    """The autostart unit's live ``InvocationID`` and ``NRestarts``, or None. None in this release: no
-    code path of this phase asks a service manager anything (D-32); the autostart phase implements it.
-    Tests patch this name."""
-    return None
+    """What the user manager says about the autostart unit right now (``units.unit_runtime_state``): its
+    live ``InvocationID``, ``NRestarts``, ``MainPID``, states and ``TimeoutStartSec``, or None when it
+    could not be asked. The zero-argument seam `start` calls ONCE per invocation (D-19); the value is
+    passed down, never asked for again, and there is no memo here (it would leak between tests and go
+    stale in a long REPL). Tests patch this name."""
+    return units.unit_runtime_state()
+
+
+def harness_unit(state: Any, config_dir: Any) -> units.UnitRuntimeState | None:
+    """``state`` with ``own=True`` when it is the harness's own unit (``units.own_unit``: loaded from the
+    path the harness writes, no drop-ins, the file byte-equal to its render), else None. The only source
+    of the ``unit=`` value `start` hands a strategy, a swap or a restore (T-14-29): a raw state, a foreign
+    unit and anything that is not a ``UnitRuntimeState`` select nothing."""
+    if not isinstance(state, units.UnitRuntimeState):
+        return None
+    return units.own_unit(state, config_dir)
 
 
 # ----------------------------------------------------------------------------------------- the decision
@@ -162,13 +175,15 @@ def _launchable_others(harness: Any, trust: Any, selected: ServingRecord) -> tup
 
 
 def liveness_verdict(
-    harness: Any, trust: Any, selected: ServingRecord, config_dir: Any, *, main_pid: int | None = None
+    harness: Any, trust: Any, selected: ServingRecord, config_dir: Any, *, main_pid: int | None = None,
+    unit_state: Any = None,
 ) -> LivenessVerdict:
     """The test behind "nothing answers" (D-18, R-13-30). The pidfile is a claim: a launch counts
     only when its process is verified against a record's own identity, so a planted pidfile can never
     make `start` wait or stop anything.
 
-    A ``localharness serve`` process of the harness unit (its cgroup and ``main_pid``) is "starting".
+    A ``localharness serve`` process of the harness unit (its cgroup and ``main_pid``) is "starting"; the
+    line's bound is ``starting_seconds(unit_state)``, the state `start` sensed once (never asked again).
     Otherwise a verified live launch of ``selected`` is "this", of another launchable record
     "other". With no verified launch, a listener on the selected record's loopback port that
     ``workspace.port_holder`` can name is "foreign"; else "none"."""
@@ -177,7 +192,7 @@ def liveness_verdict(
         return LivenessVerdict(
             "starting", started.pid, selected,
             STARTING_LINE.format(name=workspace.visible_text(selected.name), pid=started.pid,
-                                 seconds=starting_seconds(unit_runtime_state())))
+                                 seconds=starting_seconds(unit_state)))
     for record, kind in [(selected, "this"), *((r, "other") for r in _launchable_others(harness, trust, selected))]:
         if record.spec is None:
             continue
@@ -220,7 +235,7 @@ def foreign_incumbent_line(
             launch = procfs.read_launch(config_dir, expect=identity)
             owned = launch is not None and launch.verified
         else:
-            owned = bool(lifecycle.strategy_for(spec).liveness(spec, config_dir).alive)
+            owned = bool(lifecycle.strategy_for(spec, unit=None).liveness(spec, config_dir).alive)
     except Exception:  # noqa: BLE001 — what cannot be read claims nothing: the swap's own checks stand
         return None
     if owned:
@@ -270,7 +285,7 @@ def boot_clause(
     runtime state, ``confirm_launch(marker=)`` runs with the verified process, and the clause comes
     back only for a ``cause: death`` marker when the ledger held no ``retry`` for this record before.
     The clause is built from the RECORDED retry, never from the marker's own claims. No marker, no
-    unit state (None in this release: the marker is left for the run it belongs to), no launch spec
+    unit state (the manager could not be asked: the marker is left for the run it belongs to), no launch spec
     or nothing dropped or halved: None."""
     marker = units.read_marker(config_dir)
     if marker is None or unit_state is None or record.spec is None:
@@ -360,12 +375,14 @@ async def run_swap(
     on_plan: Callable[[Any], None] | None = None,
     on_poll: Callable[[float], None] | None = None,
     on_wait: Callable[[], Any] | None = None,
+    unit: Any = None,
 ) -> lifecycle.SwapOutcome:
     """Stop ``incumbent`` (a record whose server runs, or None) and launch ``target`` (the trust-
     resolved ``Serving``), holding the launch lock around the whole swap (D-21). ``redact`` is handed
     to the swap so neither its lines nor its outcome's error carry a secret (D-22); the stop is the
     verified one every strategy does. A record with no launch record is ``ValueError`` from
-    ``heavy_for``, before anything is stopped."""
+    ``heavy_for``, before anything is stopped. ``unit`` is the harness's own unit state (``harness_unit``)
+    or None: the swap launches, stops and restores through the unit when it is given (D-19, D-21)."""
     target_heavy = model_ops.heavy_for(target, harness)
     incumbent_heavy = (
         model_ops.incumbent_heavy((incumbent.spec, incumbent.base_url), harness)
@@ -373,4 +390,4 @@ async def run_swap(
     async with lifecycle.launch_lock(config_dir, on_wait=on_wait):
         return await lifecycle.swap(
             incumbent_heavy, target_heavy, config_dir=config_dir, autosense=autosense,
-            reporter=reporter, redact=redact, on_poll=on_poll, on_plan=on_plan)
+            reporter=reporter, redact=redact, on_poll=on_poll, on_plan=on_plan, unit=unit)

@@ -402,7 +402,7 @@ class Launching:
                 owner.activations.append(kw)
                 return live
 
-        world.monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: Strategy())
+        world.monkeypatch.setattr(lifecycle, "strategy_for", lambda spec, **kw: Strategy())
         async def probe(llm, max_retries=3, delay=2.0):
             # down until this start's launch has happened, then up
             if len(owner.activations) < world.starts_begun:

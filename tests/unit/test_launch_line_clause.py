@@ -360,7 +360,7 @@ async def test_a_strategy_without_plans_launch_prints_before_activate_with_no_cl
             log.append(f"activate:{sorted(kw)}")
             return lifecycle.LiveEndpoint(base_url=base_url, served_models=[], handle=1)
 
-    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec: Plain())
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec, **kw: Plain())
     monkeypatch.setattr(start_cmd, "_managed_server_running", lambda *a, **k: False)
     notes = LaunchNotes(["a note"])
     await _start(tmp_path, _gguf_spec(tmp_path, SWIFT), notes=notes)
