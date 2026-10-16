@@ -9,6 +9,7 @@ keep this data in sync with them. Install routes verified June 2026:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -100,3 +101,23 @@ MAC_MINI = RefArch(
 
 REF_ARCHS: tuple[RefArch, ...] = (RTX_4060, DGX_SPARK, MAC_MINI)
 
+
+def needs_met(row: RefArch, *, platform: str, machine: str, has_nvidia: bool) -> bool:
+    if row.needs == "nvidia":
+        return has_nvidia
+    if row.needs == "apple-silicon":
+        return platform.startswith("darwin") and machine in ("arm64", "aarch64")
+    return True
+
+
+def default_row(
+    rows: tuple[RefArch, ...], *, platform: str, machine: str, has_nvidia: bool,
+    on_path: Callable[[str], bool], memory: float | None,
+) -> RefArch | None:
+    fits = [r for r in rows if any(platform.startswith(p) for p in r.platforms)
+            and needs_met(r, platform=platform, machine=machine, has_nvidia=has_nvidia)]
+    pool = [r for r in fits if on_path(r.runtime)] or [r for r in fits if r.runtime == "llamacpp"]
+    if not pool:
+        return None
+    within = [r for r in pool if memory is not None and r.bytes <= memory]
+    return max(within, key=lambda r: r.bytes) if within else min(pool, key=lambda r: r.bytes)
