@@ -7,6 +7,7 @@ from prompt_toolkit.output import DummyOutput
 
 from localharness.cli import interview, workspace
 from localharness.cli.interview import Answer, Option, ask, build_interview
+from tests.unit.interview_support import CANCEL, UNREACHED, Asked, scripted
 
 TWO_MODELS = [
     Option("all", "All, serving qwen first", "every file above becomes a preset"),
@@ -285,3 +286,14 @@ def test_the_options_window_has_the_height_the_output_allows_and_its_cursor_ride
         app.run(in_thread=True)
         assert app._lh_interview_state()["index"] == index
         assert rows.content.get_cursor_position().y == index
+
+
+def test_scripted_answers_each_kind_and_records_what_was_asked(monkeypatch):
+    script = scripted(monkeypatch, "all", CANCEL, UNREACHED, {"c", "a"})
+    assert interview.ask(QUESTION, TWO_MODELS, default=0, cancel="skip") == Answer(("all",), False, True)
+    assert script.asked == [Asked(QUESTION, tuple(TWO_MODELS), 0, "skip", False)]
+    assert interview.ask(QUESTION, TWO_MODELS, default=0, cancel="skip") == Answer(("skip",), True, True)
+    assert interview.ask(QUESTION, TWO_MODELS, default=0, cancel="skip") == Answer(("skip",), True, False)
+    assert interview.ask("Which?", ABC, default=frozenset(), cancel="a", multi=True) == Answer(("a", "c"), False, True)
+    with pytest.raises(AssertionError, match="asked"):
+        interview.ask(QUESTION, TWO_MODELS, default=0, cancel="skip")
