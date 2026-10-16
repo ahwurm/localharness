@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from localharness import resolved_version
-from localharness.cli import autostart, model_ops, start_serving
+from localharness.cli import autostart, library, model_ops, start_serving
 from localharness.cli.workspace import MachineTrust, decide_machine_trust, local_operator, shown_path, visible_text
 from localharness.config import session_presence, trust
 from localharness.config.loader import ConfigLoader
@@ -37,12 +37,25 @@ SCRIPT_ALONE_LINE = "--script takes a preset name or --all, nothing else"
 SCRIPT_NOTHING_LINE = "nothing to render — no record launches a server (llama.cpp or vLLM)"
 SCRIPT_KIND_LINE = "{name} is {kind} — --script renders llama.cpp and vLLM launches"
 SCRIPT_SKIP_LINE = "# {name}: {why}"
+SETUP_TERMINAL_LINE = "--setup asks which models to set up — run it from a terminal: localharness model --setup"
+SETUP_NO_CONFIG_LINE = "no config yet — localharness start sets one up"
+SETUP_ALONE_LINE = "--setup takes nothing else"
 
 
 def _refuse_autostart(line: str) -> None:
     """One plain line on stderr, exit 2: the call is wrong and the line says how to fix it."""
     err_console.print(line, markup=False, soft_wrap=True)
     raise typer.Exit(2)
+
+
+def _setup(config_dir: Optional[str], *, person: bool) -> None:
+    """`localharness model --setup`: the multi-select over every model the box holds that has no preset."""
+    cfg_path = resolve_config_dir(config_dir)
+    if not person:
+        _refuse_autostart(SETUP_TERMINAL_LINE)
+    if not (cfg_path / "config.yaml").exists():
+        _refuse_autostart(SETUP_NO_CONFIG_LINE)
+    library.sync(cfg_path, scope="all", person=person, choose=True)
 
 
 def _autostart(mode: str, config_dir: Optional[str], *, with_other_arguments: bool) -> None:
@@ -506,8 +519,15 @@ def model(
         False, "--script", help="Print the launch `start` runs as sh, for NAME or the preset the ladder resolves now."),
     every: bool = typer.Option(
         False, "--all", help="With --script: one shell function per preset."),
+    setup: bool = typer.Option(
+        False, "--setup", help="Choose which of the models found on this machine to set up as presets."),
 ) -> None:
     """List available models, or switch the persisted default with `localharness model <name>`."""
+    if setup:
+        if name is not None or script or every or download is not None or file is not None or autostart is not None:
+            _refuse_autostart(SETUP_ALONE_LINE)
+        _setup(config_dir, person=local_operator(False))
+        return
     if script or every:
         if not script or autostart is not None or download is not None or file is not None or (every and name is not None):
             _refuse_autostart(SCRIPT_ALONE_LINE)

@@ -13,7 +13,11 @@ from localharness.provider import model_library
 from tests.unit.interview_support import scripted
 from tests.unit.test_init_core_setup import _exited, _flat, _hermetic  # noqa: F401  (autouse fixture)
 from tests.unit.test_init_discovery_records import _peers
-from tests.unit.test_library_later_runs import _add, _declined, _entries, _key, _sync, box, later  # noqa: F401
+from tests.unit import test_library_later_runs as runs
+from tests.unit.test_library_later_runs import _add, _declined, _entries, _key, _sync
+
+box = runs.box
+later = runs.later
 
 
 def _setup(box, *flags: str):

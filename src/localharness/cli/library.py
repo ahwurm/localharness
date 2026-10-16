@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 from pydantic import SecretStr
 from rich.console import Console
 
-from localharness.agent.gguf_header import DiscoveredModel, rank_models, read_header, unique_preset_name
+from localharness.agent.gguf_header import DiscoveredModel, FileKind, rank_models, read_header, unique_preset_name
 from localharness.cli import interview, workspace
 from localharness.cli.interview import Option
 from localharness.cli.workspace import shown_path, visible_text
@@ -381,6 +381,25 @@ def recorded_names_ports(global_dir: Path) -> tuple[frozenset[str], frozenset[in
     return frozenset(names), frozenset(ports)
 
 
+@dataclass(frozen=True)
+class Counts:
+    set_up: int
+    found: int
+    declined: int
+
+
+def counts(config_path: Path) -> Counts:
+    """What the box holds, from the merged config and the library file alone: no walk, no header read."""
+    global_dir = global_config_dir(config_path)
+    recorded = recorded_paths(global_dir)
+    lib = model_library.Library.load(model_library.library_path(global_dir)).unrecorded(recorded)
+    here = [e for key, e in lib.entries.items() if e.verdict is FileKind.MODEL and os.path.lexists(key)]
+    server, peers = _merged(global_dir)
+    lives = [p.get("lifecycle") for p in peers if isinstance(p, dict)]
+    set_up = sum(isinstance(r, dict) and bool(r.get("model")) for r in (server, *lives))
+    return Counts(set_up, sum(not e.declined for e in here), sum(e.declined for e in here))
+
+
 def format_size(n: int) -> str:
     size = float(n)
     for unit in ("B", "KB", "MB", "GB"):
@@ -584,8 +603,11 @@ def _first_run(config_path: Path, *, scope: Literal["new", "all"], person: bool,
 
 
 def _later_interview(shown: Sequence[model_library.Shown], new: Sequence[model_library.Shown],
-                     names: dict[str, str], wanted: model_library.Shown | None, *, choose: bool) -> _Choice | None:
+                     names: dict[str, str], wanted: model_library.Shown | None, *, choose: bool,
+                     person: bool) -> _Choice | None:
     """The later-run question and what each answer sets up; Not now and a cancel are the same; None when nobody could be asked."""
+    if not person:
+        return None
     not_now = _Choice([], [], skipped=True)
     if not choose:
         if len(new) == 1:
@@ -638,7 +660,7 @@ def _later_run(config_path: Path, *, scope: Literal["new", "all"], person: bool,
     for s in shown:
         names[s.real] = unique_preset_name(s.model.name, {*taken_names, *names.values()})
     _bullets(shown, names)
-    choice = _later_interview(shown, new, names, _named(shown, names, preset), choose=choose)
+    choice = _later_interview(shown, new, names, _named(shown, names, preset), choose=choose, person=person)
     if choice is None:
         return Sync(shown=len(shown))
     written: list[dict] = []
