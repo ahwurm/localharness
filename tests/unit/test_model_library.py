@@ -327,6 +327,38 @@ def test_a_library_that_cannot_be_read_is_not_rebaselined_and_is_never_overwritt
     assert lib.read_bytes() == before
 
 
+def test_a_merged_save_keeps_a_decline_and_an_entry_another_process_wrote_in_between(roots):
+    root, lib = roots
+    a, b = model(root / "A.gguf"), model(root / "B.gguf")
+    saved(root, lib, first_run=True)
+    snapshot = run(root, lib)
+    other = Library.load(lib)
+    c = model(root / "C.gguf")
+    other_entries = {**other.entries, real(a): Entry("2026-10-16", other.entries[real(a)].size, FileKind.MODEL, True),
+                     real(c): Entry("2026-10-17", c.stat().st_size, FileKind.MODEL)}
+    assert Library(other_entries).save(lib)
+
+    assert snapshot.library.marked(declined=[real(b)], dropped=[]).save(lib, merge=True)
+
+    result = Library.load(lib).entries
+    assert result[real(a)].declined is True and result[real(b)].declined is True and real(c) in result
+
+
+def test_a_merged_save_removes_what_the_snapshot_dropped_or_pruned_and_refuses_an_unreadable_file(roots, monkeypatch):
+    root, lib = roots
+    a, b = model(root / "A.gguf"), model(root / "B.gguf")
+    saved(root, lib, first_run=True)
+    pruned = Library.load(lib).unrecorded({real(a)})
+
+    assert pruned.marked(dropped=[real(b)]).save(lib, merge=True)
+    assert Library.load(lib).entries == {}
+
+    saved(root, lib, first_run=True)
+    monkeypatch.setattr(model_library, "open_regular", lambda path: (_ for _ in ()).throw(PermissionError(13, "x")))
+    assert Library.load(lib).unreadable is True
+    assert Library({}).save(lib, merge=True) is False
+
+
 def test_a_removed_entry_makes_a_known_file_new_again(roots):
     root, lib = roots
     a = model(root / "A.gguf")
@@ -402,6 +434,15 @@ def test_save_writes_nothing_when_the_overlay_lock_is_busy(tmp_path, monkeypatch
     finally:
         os.close(fd)
     assert not (tmp_path / "model-library.json").exists()
+
+
+def test_save_returns_false_when_the_write_itself_fails(tmp_path, monkeypatch):
+    def fail(path, text):
+        raise OSError(28, "no space")
+
+    monkeypatch.setattr(model_library, "atomic_write_text", fail)
+
+    assert Library({}).save(tmp_path / "model-library.json") is False
 
 
 def test_a_saved_library_loads_back_equal(roots):

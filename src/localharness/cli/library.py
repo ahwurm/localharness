@@ -89,6 +89,7 @@ NOT_SET_UP_LINE = "Not set up: {names} — localharness model --setup lists them
 ADDED_KEPT_LINE = "Added {n}; kept config.yaml."
 NOTHING_TO_SET_UP_LINE = "Nothing to set up — every model found has a preset"
 LIBRARY_FAILED_LINE = "model library: {why} — start goes on"
+LIBRARY_NOT_SAVED_LINE = "model library: not saved, it is busy or unreadable — the same question comes back next start"
 OFFER_QUESTION = "Download {what} ({size}, fits in your {gb} GB)?"
 OFFER_QUESTION_UNKNOWN = "Download {what} ({size}, needs about {size})?"
 DOWNLOAD_IT = "Download it"
@@ -426,7 +427,7 @@ def prune_recorded(config_path: Path) -> bool:
     if lib.missing or lib.corrupt:
         return False
     kept = lib.unrecorded(recorded_paths(global_dir))
-    return len(kept.entries) != len(lib.entries) and kept.save(path)
+    return len(kept.entries) != len(lib.entries) and kept.save(path, merge=True)
 
 
 def _merged(global_dir: Path) -> tuple[dict, list]:
@@ -506,6 +507,13 @@ def _ranker(config_path: Path, auto: AutosenseConfig, unit_model: str | None = N
     return rank
 
 
+def _save_library(found: model_library.Found, path: Path, *, declined: Collection[str] = (),
+                  dropped: Collection[str] = ()) -> None:
+    """Save the scan's library with these marks, merged over the file as it is now; say one line when it was not."""
+    if not found.library.marked(declined=declined, dropped=dropped).save(path, merge=True):
+        _say(LIBRARY_NOT_SAVED_LINE)
+
+
 def baseline(config_path: Path, *, person: bool) -> None:
     """A first run that recorded no model: every file under the roots is seen, so a later run asks only about a new one."""
     if not person:
@@ -515,7 +523,7 @@ def baseline(config_path: Path, *, person: bool) -> None:
     found = model_library.scan(_machine_autosense(config_path).model_roots, recorded_paths(global_dir), path,
                                scope="new", rank=list, checkpoints=_vllm_world(global_dir)[0])
     if found.changed:
-        found.library.save(path)
+        _save_library(found, path)
 
 
 def import_peer_models(config_path: Path, *, exclude: str, unit_model: str | None) -> list[DiscoveredModel]:
@@ -715,7 +723,7 @@ def _first_run(config_path: Path, *, scope: Literal["new", "all"], person: bool,
         _say(SKIP_LINE)
         return Sync(shown=len(listed))
     else:
-        found.library.marked(declined=[s.real for s in choice.declined]).save(lib_path)
+        _save_library(found, lib_path, declined=[s.real for s in choice.declined])
     if choice.order:
         records = _records(config_path, choice.order, names, confirmed=True, vllm=vllm)
         return Sync(records, tuple(records.lines), 0, tuple(s.real for s in choice.declined), len(listed))
@@ -773,7 +781,7 @@ def _later_run(config_path: Path, *, scope: Literal["new", "all"], person: bool,
     new = _listable(found.new)
     if not (shown if choose else new):
         if found.changed:
-            found.library.save(lib_path)
+            _save_library(found, lib_path)
         if choose:
             _say(NOTHING_TO_SET_UP_LINE)
         return Sync(shown=len(shown))
@@ -796,7 +804,7 @@ def _later_run(config_path: Path, *, scope: Literal["new", "all"], person: bool,
     left = new if choice.skipped else choice.declined
     if left:
         _say(NOT_SET_UP_LINE.format(names=", ".join(visible_text(names[s.real]) for s in left)))
-    found.library.marked(declined=[s.real for s in choice.declined], dropped=[s.real for s in choice.order]).save(lib_path)
+    _save_library(found, lib_path, declined=[s.real for s in choice.declined], dropped=[s.real for s in choice.order])
     return Sync(None, (), len(written), tuple(s.real for s in choice.declined), len(shown))
 
 

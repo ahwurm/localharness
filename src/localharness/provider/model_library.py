@@ -22,7 +22,7 @@ from localharness.agent.gguf_header import (
     walk_ggufs,
 )
 from localharness.config.models import EndpointRef, ManagedServerConfig
-from localharness.config.overlay import OverlayBusy, overlay_lock
+from localharness.config.overlay import overlay_lock
 from localharness.core.private_files import NotRegularFile, atomic_write_text, open_regular
 from localharness.provider import procfs
 from localharness.provider.tuning import MODEL_CONFIG_CAP
@@ -89,6 +89,7 @@ class Library:
     missing: bool = False
     corrupt: bool = False
     unreadable: bool = False
+    gone: frozenset[str] = frozenset()
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> Library:
@@ -113,26 +114,35 @@ class Library:
 
     def unrecorded(self, recorded: Collection[str]) -> Library:
         """The entries no record names: the one test of recorded-ness the scan, the first run and the counts share."""
-        return replace(self, entries={k: e for k, e in self.entries.items() if not _recorded_by(recorded, k, e.repo)})
+        kept = {k: e for k, e in self.entries.items() if not _recorded_by(recorded, k, e.repo)}
+        return replace(self, entries=kept, gone=self.gone | (self.entries.keys() - kept.keys()))
 
     def marked(self, *, declined: Iterable[str] = (), dropped: Iterable[str] = ()) -> Library:
         gone, no = set(dropped), set(declined)
         return replace(self, entries={k: replace(e, declined=True) if k in no else e
-                                      for k, e in self.entries.items() if k not in gone})
+                                      for k, e in self.entries.items() if k not in gone}, gone=self.gone | gone)
 
-    def save(self, path: str | os.PathLike[str]) -> bool:
-        """Write the entries whose files still exist under the overlay lock; False when the lock is busy or the file was unreadable."""
+    def save(self, path: str | os.PathLike[str], *, merge: bool = False) -> bool:
+        """Write the entries whose files exist under the overlay lock; `merge` lays them over the file as reloaded there."""
         if self.unreadable:
             return False
         path = Path(path)
-        kept = {key: {"first_seen": e.first_seen, "size": e.size, "verdict": e.verdict.value,
-                      "declined": e.declined, **({"repo": e.repo} if e.repo else {})}
-                for key, e in sorted(self.entries.items()) if os.path.lexists(key)}
-        text = json.dumps({"version": LIBRARY_VERSION, "entries": kept}, indent=1, sort_keys=True)
         try:
             with overlay_lock(path.parent):
-                atomic_write_text(path, text)
-        except OverlayBusy:
+                entries = self.entries
+                if merge:
+                    disk = Library.load(path)
+                    if disk.unreadable:
+                        return False
+                    entries = {**{k: e for k, e in disk.entries.items() if k not in self.gone},
+                               **{k: replace(e, declined=e.declined or (k in disk.entries and disk.entries[k].declined))
+                                  for k, e in self.entries.items()}}
+                kept = {key: {"first_seen": e.first_seen, "size": e.size, "verdict": e.verdict.value,
+                              "declined": e.declined, **({"repo": e.repo} if e.repo else {})}
+                        for key, e in sorted(entries.items()) if os.path.lexists(key)}
+                atomic_write_text(path, json.dumps({"version": LIBRARY_VERSION, "entries": kept}, indent=1,
+                                                   sort_keys=True))
+        except OSError:
             return False
         return True
 
@@ -261,7 +271,8 @@ def scan(roots: Iterable[str | os.PathLike[str]], recorded: Collection[str],
         shown = Shown(cp.snapshot, cp.real, None, cp.size, entry.first_seen, entry.declined,
                       cp if scope == "all" or is_new else None)
         (new_cp if is_new else declined_cp if entry.declined else seen_cp).append(shown)
-    return Found((*ranked, *new_cp), (*seen, *seen_cp), (*declined, *declined_cp), Library(entries), baselined,
+    return Found((*ranked, *new_cp), (*seen, *seen_cp), (*declined, *declined_cp),
+                 Library(entries, gone=frozenset(lib.entries.keys() - entries.keys())), baselined,
                  lib.missing or lib.corrupt or entries != lib.entries)
 
 
