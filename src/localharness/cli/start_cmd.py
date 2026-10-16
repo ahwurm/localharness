@@ -811,6 +811,13 @@ def _server_recovery_supplier(repl_cell: list) -> Callable[[], ServerRecovery]:
     return _supplier
 
 
+def _say_install_line(refusal: str, path_binary: str | None) -> None:
+    """A refusal for want of llama-server, with none on PATH, is followed by how to get one."""
+    from localharness.cli import library
+    if refusal.startswith("no llama-server") and not path_binary and (line := library.install_line()):
+        err_console.print(line, markup=False, soft_wrap=True)
+
+
 async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launch_key: dict[str, str],
                                 *, path_binary: str | None = None, autosense: Any = None,
                                 endpoint_out: list | None = None,
@@ -2139,6 +2146,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             found = (f" (PATH has {path_llama_server})"
                      if path_llama_server and _serving_spec.runtime == "llamacpp" else "")
             err_console.print(launch_decision.refusal + found, markup=False, soft_wrap=True)
+            _say_install_line(launch_decision.refusal, path_llama_server)
             await _stop_start(1)
         exposed, posture = managed_server.effective_posture(_serving_spec, keyed=keyed, decision=launch_decision)
         if launch_notes.suffix and exposed:
@@ -2284,6 +2292,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if refusal is not None:
             # The one refusal line is the whole answer: no `Error:` line, no `doctor` pointer.
             err_console.print(refusal, markup=False, soft_wrap=True)
+            _say_install_line(refusal, path_llama_server)
             await _probe_client.aclose()
             raise typer.Exit(1)
     # The probe client has done its job — the session's real client is rebuilt below with the
