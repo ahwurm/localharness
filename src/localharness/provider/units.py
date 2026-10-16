@@ -1206,3 +1206,187 @@ def harness_unit_state(config_dir, *, interpreter: str | None = None,
     """`own_unit(unit_runtime_state(), config_dir)`: the one way a state that selects `UnitStrategy`
     is made (D-13, D-19)."""
     return own_unit(unit_runtime_state(), config_dir, interpreter=interpreter, home=home)
+
+
+# -------------------------------------------------------------------------------------- the verbs
+
+VERB_TIMEOUTS: Mapping[str, float] = MappingProxyType({
+    "daemon-reload": 30, "enable": 30, "disable": 120, "reset-failed": 10,
+    "restart": 120, "stop": 120, "start": 120,
+})
+"""The closed set of user-manager verbs the harness issues, each with its timeout in seconds
+(`restart`, `stop` and `disable` wait for a model server to exit). Nothing else is ever issued from here:
+no environment, link, edit, set-property or add-wants verb (R-14-13, T-14-12)."""
+
+
+def systemctl_user(verb: str, *args: str) -> ManagerResult | None:
+    """Issue one of the `VERB_TIMEOUTS` verbs to the user manager through `_run_manager`; ValueError,
+    before anything runs, for any other verb. The result has the exit code (a non-zero exit is an
+    answer); None when the manager could not be run at all."""
+    if verb not in VERB_TIMEOUTS:
+        raise ValueError(f"not a verb the harness issues: {verb!r}")
+    return _run_manager(["systemctl", "--user", verb, *args], timeout=VERB_TIMEOUTS[verb],
+                        cap=SYSTEMCTL_OUTPUT_CAP)
+
+
+# ------------------------------------------------------------------------------------ the journal
+
+JOURNAL_TAIL_LINES = 15
+JOURNAL_REF_LINE = "(see journalctl --user -u localharness-llm.service, invocation {invocation})"
+"""Where the raw lines of a journal tail an error quoted are: the journal keeps them, no exception does."""
+_NO_JOURNAL = "(no journal)"
+_INVOCATION_PATTERN = re.compile(r"[0-9A-Za-z-]{1,64}")
+
+
+def journal_tail(*, invocation: str | None = None, lines: int = JOURNAL_TAIL_LINES,
+                 secrets=()) -> str:
+    """The last `lines` lines of the harness unit's journal as an error may quote them, SCRUBBED: the
+    `secrets` given, `Bearer` tokens, llama-server's `api_keys:` line and URL credentials are masked
+    (T-14-13). Queried by the trusted `_SYSTEMD_USER_UNIT=` and `_UID=` fields (never `-u`, which matches
+    the forgeable `USER_UNIT`), plus `_SYSTEMD_INVOCATION_ID=` when `invocation` is given (ValueError for
+    one that is not an id). `"(no journal)"` when the journal could not be read."""
+    from localharness.config import redact  # function-local: the module imports light
+
+    argv = ["journalctl", "--user", "-o", "cat", "-n", str(lines), "--no-pager",
+            f"_SYSTEMD_USER_UNIT={HARNESS_UNIT}", f"_UID={os.getuid()}"]
+    if invocation is not None:
+        if not _INVOCATION_PATTERN.fullmatch(invocation):
+            raise ValueError(f"not an invocation id: {invocation!r}")
+        argv.append(f"_SYSTEMD_INVOCATION_ID={invocation}")
+    read = _run_manager(argv, timeout=JOURNAL_TIMEOUT_S, cap=JOURNAL_OUTPUT_CAP)
+    if read is None or read.code != 0 or not read.out.strip():
+        return _NO_JOURNAL
+    held = [secret for secret in secrets if isinstance(secret, str) and secret]
+    return strip_url_credentials(redact.scrub(read.out.rstrip("\n"), held,
+                                              patterns=redact.LOGGED_KEY_PATTERNS))
+
+
+# -------------------------------------------------------------------------------------- linger
+
+LINGER_DIR = "/var/lib/systemd/linger"
+"""The login manager keeps one empty file per user with linger on. The harness reads that directory and
+never runs the login manager's program (D-09)."""
+
+
+def current_user() -> str:
+    """This process's user name: the password database, else `USER` / `LOGNAME`, else the uid."""
+    try:
+        import pwd  # function-local: the module still imports where pwd is absent
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError):
+        return os.environ.get("USER") or os.environ.get("LOGNAME") or str(os.getuid())
+
+
+def linger_on(user: str | None = None) -> bool:
+    """True when `<LINGER_DIR>/<user>` exists (`user` defaults to `current_user()`): the user manager
+    then runs at boot, with no login. A name that is not one path component is False."""
+    name = current_user() if user is None else user
+    if not name or name in (".", "..") or "/" in name or "\x00" in name:
+        return False
+    return os.path.exists(os.path.join(LINGER_DIR, name))
+
+
+# ------------------------------------------------------------------------------ other launchers
+
+DEFAULT_LLAMA_PORT = 8080
+_LAUNCHER_IDENTITY = LaunchIdentity(frozenset({"llama-server"}), None, (), "LLAMA_ARG_PORT")
+_LAUNCHER_PROPS = "Id,FragmentPath,UnitFileState,ActiveState"
+
+
+@dataclass(frozen=True)
+class Launcher:
+    """Another user unit that starts a llama-server on a port the harness serves: its name, why it
+    counts (`enabled`, or `active` when it only runs now) and the port."""
+
+    unit: str
+    state: str
+    port: int
+
+
+def other_launchers(ports) -> list[Launcher]:
+    """Every user unit other than the harness's that is `enabled` or `active` and whose unit file runs a
+    llama-server on one of `ports` (`--port`, else `LLAMA_ARG_PORT`, else 8080), sorted by name (D-10).
+    Read through init's `read_unit`, which yields a record for a llama-server unit only: a vLLM or other
+    server unit on the port is not named (R-14-14). A unit with drop-ins is judged by its own file. Empty
+    when the manager could not be asked."""
+    wanted = {p for p in ports if isinstance(p, int) and not isinstance(p, bool)}
+    if not wanted:
+        return []
+    listed = _run_manager(["systemctl", "--user", "list-unit-files", "--type=service", "--plain",
+                           "--no-legend", "--no-pager"], timeout=SYSTEMCTL_TIMEOUT_S,
+                          cap=SYSTEMCTL_OUTPUT_CAP)
+    if listed is None or listed.code != 0:
+        return []
+    names: set[str] = set()
+    for row in listed.out.splitlines():
+        cols = row.split()
+        if not cols or "@" in cols[0] or cols[0] == HARNESS_UNIT:
+            continue
+        if len(cols) > 1 and cols[1] in _SKIPPED_FILE_STATES:
+            continue
+        names.add(cols[0])
+    kept = sorted(names)[:UNITS_SCANNED_CAP]
+    if not kept:
+        return []
+    shown = _run_manager(["systemctl", "--user", "show", "-p", _LAUNCHER_PROPS, "--", *kept],
+                         timeout=SYSTEMCTL_TIMEOUT_S, cap=SYSTEMCTL_OUTPUT_CAP)
+    if shown is None or shown.code != 0:
+        return []
+    by_name: dict[str, dict[str, str]] = {}
+    for block in shown.out.replace("\r\n", "\n").split("\n\n"):
+        fields = _fields(block)
+        if fields.get("Id") in kept:
+            by_name.setdefault(fields["Id"], fields)
+    found: list[Launcher] = []
+    for name in kept:
+        fields = by_name.get(name)
+        if fields is None:
+            continue
+        if fields.get("UnitFileState") in ("enabled", "enabled-runtime"):
+            state = "enabled"
+        elif fields.get("ActiveState") == "active":
+            state = "active"
+        else:
+            continue
+        fragment = fields.get("FragmentPath", "")
+        if not fragment:
+            continue
+        record = read_unit(fragment, unit=name)
+        if not isinstance(record, ProcRecord):
+            continue
+        port = port_of(record, _LAUNCHER_IDENTITY) or DEFAULT_LLAMA_PORT
+        if port in wanted:
+            found.append(Launcher(name, state, port))
+    return found
+
+
+# ------------------------------------------------------------------------------ the exit, in words
+
+STOPPED_WITHHELD_LINE = "stopped: the machine record withholds {record} — run localharness start in a terminal"
+STOPPED_LIVE_PIDFILE_LINE = ("stopped: a live process holds the launch pidfile — the unit will not start "
+                             "a second server beside it; localharness model <preset> switches it through the unit")
+STOPPED_START_LIMIT_LINE = "stopped after 3 failed loads — journalctl --user -u localharness-llm.service"
+
+_EXIT_WITHHELD = 78
+"""`serve`'s exit when the machine record withholds its target; `RestartPreventExitStatus=78` stops retries."""
+_EXIT_LIVE_PIDFILE = 75
+"""`serve`'s exit (EX_TEMPFAIL) when the pidfile names a live process it cannot verify as its own."""
+
+
+def translate_exit(state, *, record_name: str, not_served: str | None = None) -> str | None:
+    """The line `status` and `doctor` print for a unit that stopped, or None when nothing needs saying.
+    In order: `ExecMainStatus` 78 (the machine record withholds `record_name`), 75 (a live pidfile),
+    `Result=start-limit-hit` (3 failed loads), then an inactive unit whose target the unit cannot serve
+    (`not_served`, already worded by the caller). None for a state that is None."""
+    if state is None:
+        return None
+    status = getattr(state, "exec_main_status", None)
+    if status == _EXIT_WITHHELD:
+        return STOPPED_WITHHELD_LINE.format(record=record_name)
+    if status == _EXIT_LIVE_PIDFILE:
+        return STOPPED_LIVE_PIDFILE_LINE
+    if getattr(state, "result", "") == "start-limit-hit":
+        return STOPPED_START_LIMIT_LINE
+    if not_served is not None and getattr(state, "active_state", "") == "inactive":
+        return not_served
+    return None
