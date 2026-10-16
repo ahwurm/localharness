@@ -1353,6 +1353,11 @@ UNIT_ENV_LINE = ("the autostart unit would exit 78 at its start: {why}. localhar
 or missing `autostart.env` entry): `serve` would exit 78 on the restart, so nothing is stopped for it
 (`unit_launch_refusal`)."""
 
+UNIT_RESTORE_LINE = "{label} could not be put back through the autostart unit if this swap failed: {why}"
+"""The refusal when the INCUMBENT of a swap would be restored through the unit and the pre-flight meets the
+refusal for it that the restore would meet (`unit_launch_refusal`): a target outside the unit that failed to
+launch would leave nothing serving, so nothing is stopped for it. `why` is the refusal's own line."""
+
 UNIT_FOREIGN_LINE = "{unit} {why} — it is not the unit localharness wrote, so it was not restarted"
 """The refusal when the unit failed its identity re-check before a restart (D-13, T-14-22); `why` is
 `units.harness_unit_failure`'s phrase."""
@@ -1947,8 +1952,16 @@ async def swap(
     launch (R-14-28)."""
     # Before the incumbent is stopped: a launch through the unit that is known to fail (a peer name the
     # unit target cannot hold, an `autostart.env` the record does not cover) is refused with the incumbent
-    # still serving, so the person never pays two model loads for a swap that could not succeed.
+    # still serving, so the person never pays two model loads for a swap that could not succeed. The way
+    # back is judged the same way: a target outside the unit that fails to launch restores the incumbent
+    # through it.
     refusal = await asyncio.to_thread(unit_launch_refusal, target.spec, target.peer, unit, config_dir)
+    if refusal is None and incumbent is not None and incumbent.spec is not target.spec:
+        # The failed launch of a target outside the unit restores the incumbent through it, and `serve` meets
+        # the same exit 78 there: judge the way back before the way out (WR-10).
+        way_back = await asyncio.to_thread(unit_launch_refusal, incumbent.spec, incumbent.peer, unit, config_dir)
+        if way_back is not None:
+            refusal = UNIT_RESTORE_LINE.format(label=heavy_label(incumbent), why=way_back)
     if refusal is not None:
         await reporter.line(redact(SWAP_REFUSED.format(name=heavy_label(target), why=refusal)))
         return SwapOutcome(None, None, None, _redacted_error(RuntimeError(refusal), redact), "refused")

@@ -20,7 +20,7 @@ from tests.unit.procfs_support import fake_proc  # noqa: F401 — the fixture
 from tests.unit.test_lifecycle_swap_unit import (  # noqa: F401 — `world` is the fixture
     INCUMBENT_PID, _no_leaked_holds, flash_ready, heavy, swap_now, unit_incumbent, world,
 )
-from tests.unit.unit_strategy_support import INTERPRETER
+from tests.unit.unit_strategy_support import INTERPRETER, UNIT as UNIT_NAME
 
 FIX = "localharness model --autostart on"
 
@@ -132,6 +132,64 @@ def test_a_target_the_unit_cannot_serve_is_not_judged_by_the_units_environment(w
 
     assert lifecycle.unit_launch_refusal(spec, "dock", world.state, world.g) is None
     assert lifecycle.unit_launch_refusal(spec, "a b", world.state, world.g) is None
+
+
+# ---------------------------------------- WR-10: the way back (the restore of the incumbent) is judged too
+
+
+def _docker_target() -> Heavy:
+    spec = lifecycle.ManagedServerConfig(runtime="vllm", launch="docker", docker_image="vllm/vllm-openai:x",
+                                         model="/m/ckpt", port=8000)
+    return Heavy(spec, "http://127.0.0.1:8000/v1", "dock")
+
+
+def test_a_unit_incumbent_whose_restore_the_record_would_refuse_blocks_a_swap_to_a_docker_target(world):
+    unit_incumbent(world)
+    units.write_target(world.g, "flash-next")
+    _forget_the_entry(world)   # `serve` would exit 78 for the restore of the incumbent
+
+    outcome, rep = swap_now(world, heavy(world, world.primary), _docker_target())
+
+    assert_untouched(world, outcome, rep)
+    assert str(outcome.error) == lifecycle.UNIT_RESTORE_LINE.format(
+        label="qwen", why=lifecycle.UNIT_ENV_LINE.format(why=trust.AUTOSTART_ENV_MISSING))
+    assert FIX in str(outcome.error) and "could not be put back" in str(outcome.error)
+    assert world.target() == "flash-next"   # `unit-target` is as it was: the docker target did not take it away
+
+
+def test_an_incumbent_peer_name_unit_target_cannot_hold_blocks_a_swap_to_a_target_outside_the_unit(world):
+    unit_incumbent(world)
+    incumbent = Heavy(world.primary, world.url(), "Qwen 32B")
+
+    outcome, rep = swap_now(world, incumbent, _docker_target())
+
+    assert_untouched(world, outcome, rep)
+    assert str(outcome.error) == lifecycle.UNIT_RESTORE_LINE.format(
+        label="Qwen 32B", why=lifecycle.UNIT_NAME_LINE.format(name="Qwen 32B"))
+
+
+def test_the_target_is_judged_first_and_named_when_both_would_be_refused(world):
+    unit_incumbent(world)
+    _forget_the_entry(world)
+
+    outcome, rep = swap_now(world, heavy(world, world.primary), heavy(world, world.peer("flash-next"), "flash-next"))
+
+    assert_untouched(world, outcome, rep)
+    assert str(outcome.error) == lifecycle.UNIT_ENV_LINE.format(why=trust.AUTOSTART_ENV_MISSING)
+
+
+def test_a_covered_record_lets_a_swap_to_a_docker_target_through_with_the_unit_incumbent_stopped(world, monkeypatch):
+    unit_incumbent(world)
+
+    async def activate(self, spec, config_dir, base_url, **kw):
+        return lifecycle.LiveEndpoint(base_url=base_url, served_models=["m"], handle=1)
+
+    monkeypatch.setattr(lifecycle.ManagedVllmStrategy, "activate", activate)
+
+    outcome, _ = swap_now(world, heavy(world, world.primary), _docker_target())
+
+    assert outcome.error is None and outcome.live is not None
+    assert world.manager.verbs == [("reset-failed", UNIT_NAME), ("stop", UNIT_NAME)]
 
 
 @pytest.mark.parametrize("unit", [None, object(), units.UnitRuntimeState("a", 0)], ids=["none", "object", "raw"])
