@@ -1,6 +1,6 @@
 # Spec 20 — Tuned Presets: Out-of-the-Box Launch, `start --preset`, Autostart
 
-**Status:** Vetted, revision 9 (eight design-critic, eight security-critic and eight friction-critic passes; round 8: **SHIP from all three** on §§5–16, with eight minors folded in here — see §15 Iteration 8; §17 is an optional, out-of-scope extension at the owner's request, advisory only)
+**Status:** Revision 10, 2026-10-16 — §11 widened to the first-run job (§1 item 5, G7) and the interview (§11.5); four rounds of four critics: round four parsimony SHIP, design / security / friction REVISE with every item folded here (§15) and no fifth pass, by the owner's instruction to plan on this text (the plan checker verifies the folds); revision 9 was vetted (eight design-critic, eight security-critic and eight friction-critic passes; round 8: **SHIP from all three** on §§5–16, with eight minors folded in here — see §15 Iteration 8; §17 is an optional, out-of-scope extension at the owner's request, advisory only)
 **Version target:** 0.19.0
 **API version:** `PLUGIN_API_VERSION` unchanged ("1")
 **Numbering:** 18 is the task record (reserved by spec 17 §1), 19 the delegation surface; this is 20.
@@ -52,9 +52,26 @@ harness cannot reproduce any of the four things they do:
    box starts its server from a user unit; the harness has no equivalent, and a person who wants the
    server up before the harness, or for other clients, writes the unit by hand.
 
+5. **A fresh box is not one command.** `pip install localharness` then `localharness start` does run
+   `init`'s setup on a terminal (owner ruling 2026-10-03), and what it finds it writes without a question:
+   every GGUF under `~/models` and the HF cache becomes a preset, the ranked best becomes `server:`, and
+   the session starts on it. But a box with **no** model gets a vLLM-only menu of two reference
+   architectures (`_guided_setup`): nothing for llama.cpp, the runtime the harness is developed against
+   and the one the 8 GB consumer-GPU architecture uses, and no link to a file the box could run. A model
+   that arrives **after** the first run never becomes a preset: an existing install with a `server:`
+   block imports nothing (`_existing_install_import`), and discovery's peers are written only while
+   `extra_endpoints` is empty. The person is never asked which model should serve first, and the receipt
+   names `/model` but not `start --preset`, `model <name>` or `--autostart` — the commands this spec adds
+   are the ones nobody is told about.
+
 The jobs, in the owner's words: *"a user goes `localharness init`, it scans for model files, … makes
 [start/swap scripts with optimized configs], then `localharness start --scripts` allows you to start
-localharness with a specific start script … and `/model` begins to work correctly out of the box."*
+localharness with a specific start script … and `/model` begins to work correctly out of the box."* And the whole of it, 2026-10-16 (lightly edited):
+*"fresh computer, download localharness, run `localharness start`, and it runs you through it: if you don't
+have the model it gives you download links; if it autosenses a model is downloaded it asks whether to make a
+start/swap script for the models it found (any that has no script and was not designated a no), sets them
+up, asks which to launch, and tells you the start command for later — training people that they can be
+lazy, run `localharness start`, and have things work out."*
 
 ## 2. Ground truth (what exists)
 
@@ -68,7 +85,7 @@ it; nothing here redefines a preset, a launch path, a trust kind or a line.
 | A preset = `server:` or an `extra_endpoints[]` peer with a `lifecycle` (`ManagedServerConfig`), `None` = "the harness computes it", no `"auto"` literal | §3 G1, §5 | the three new record fields follow the same spelling; the three knobs join `autosense:`, which already rides every `activate` |
 | One launch decision on every launch path, `activate` the one enforcement point, `serve_command` pure, derived values as keywords that fill an unset record slot (`context=`, `cache_ram=`) | §5, §6.2 | derivation produces three more such keywords; one sensed-then-planned launch is what `activate` executes and what `serve`, `--script` and `doctor` read (§6) |
 | The fit, the window line on change, the halve-once retry, "no log text is parsed"; `wait_ready` | §6.1–6.2 | the fit gains the draft-context share; the retry widens to the derived flags, is chosen in one place (`plan_launch`) and confirmed in one place (`confirm_launch`); the unit's wait is the same `wait_ready` with a liveness callback |
-| `init` discovers GGUFs, writes presets, shows one line per preset, asks nothing, launches nothing; an interactive `init` adopts exactly what it showed | §8, §9 | discovery's header read supplies `nextn_predict_layers`; the preset line gains one clause; the vLLM peers (§11) show their binary |
+| `init` discovers GGUFs, writes presets, shows one line per preset, launches nothing; an interactive `init` adopts exactly what it showed | §8, §9 | discovery, the lines and the write move into the model library (§11); the preset line gains `mtp`; the vLLM peers show their binary; "asks nothing" becomes one prompt on a terminal (§11.1) |
 | Import from `/proc`, the journal and a unit file; `provider/units.py` (`UnitState`); `provider/procfs.py` (`read_process`, `_unit_from_cgroup`); the incumbent-sentence builder | §8, §10 | autostart (§9) reuses `user_units`/`read_unit`/`read_journal`, `unit_file_state` for the identity test, `read_process` to verify a pidfile's process, and the sentence builder |
 | Machine trust: `launch` / `launch_model` kinds, one key table, adoption per kind, withholding (`MachineTrust.withheld`, the loader's `machine_withheld=`), `decide_machine_trust(ask=can_ask, launching=)` (`start_cmd.py:1564–1565`; `can_ask` is tty + no `LOCALHARNESS_COMMIT`), the headless rule | §9 | the three new fields join `LAUNCH_MODEL_KEYS`; `serve` never adopts; a withheld record is withheld, never "gone"; **every surface that launches runs `decide_machine_trust` with `ask=<local operator>` and loads with `machine_withheld`** — `start` as today, `serve` with `ask=False`, the CLI with `ask=_is_local_operator()` (§8.1); a `decide_machine_trust(ask=True)` literal never appears under `cli/` (structural test) |
 | `active_endpoint`, `persist_active_endpoint` / `clear_active_endpoint`, the D-35 preset resolution | §5, §7.2, §9 | one ladder (`resolve_serving`) reads every selection store; one `persist_landed` writes the outcome after success on every surface |
@@ -76,7 +93,7 @@ it; nothing here redefines a preset, a launch path, a trust kind or a line.
 | The speed ledger as the per-model on-change store | §6.1, §7.4 | the sampling line, `last_served` and the remembered retry live there |
 | `open_regular`, `touch_private`, `overlay.atomic_write_text` (spec 17), the bounded GGUF header reader, `_visible`/`shown_path`, `strip_url_credentials`, `config/redact.py` (`scrub`, `secret_values`), `log_tail`, `child_environment` (a blocklist over a base, `server.py:736–770`) | §6.2, §8 | every small file the harness owns is written through `atomic_write_text` (moved into `core/private_files.py`, re-exported by `overlay`) and read through `open_regular`; every shown line is escaped and redacted at the channel boundary; `serve`'s environment is `child_environment` over an allowlisted base, so spec 16's blocklist contract stands |
 | `resolve_effort` from the live `base_url` | §7.2 | unchanged; §8.4 |
-| Zero `init` asks; lines on change only; `/reasoning` untouched; the one machine-trust question at a terminal `start` | §12 | carried as rulings |
+| Zero `init` asks; lines on change only; `/reasoning` untouched; the one machine-trust question at a terminal `start` | §12 | carried as rulings, except the zero-asks ruling, which spec 16 recorded as reversible by the owner and §11 revises to one prompt |
 
 Spec 16 items this spec **closes**: `start` never reading `active_endpoint` back (`model_ops.py:327`);
 the per-record pidfile follow-up ("IN-15"); the swap-back/peer resumption gap; a planted pidfile making
@@ -135,6 +152,10 @@ Line numbers against the tree at `ffdf2b4` (v0.18.0) and the owner's llama.cpp b
   the person once what happened at boot.
 - G5. **The launch is readable** (`localharness model --script`), generated from the record, never read back.
 - G6. Everything is additive; a 0.18 config loads; a hand-run server keeps working.
+- G7. **A fresh box is one command.** `localharness start` finds a model or offers one to fetch, confirms
+  the presets it will make and which serves first, and names the command for later; a model that arrives
+  later is found at the next terminal `start`. One question on the common path, answered by Enter; none
+  off a terminal. Two components own it: the model library and the interview (§11).
 
 ## 4. Non-goals
 
@@ -644,11 +665,238 @@ Every token `visible_text(shlex.quote(tok))`, comments through `visible_text`; n
 `NAME=value`; `--all` emits one shell function per preset; a vLLM record prints `vllm serve …`. Never read
 back; nothing written.
 
-## 11. `init`
+## 11. `init` and the first run
 
-Zero asks. Preset lines carry `mtp`. HF-cache text-generation checkpoints become `runtime: vllm`,
-`launch: binary` peers **only when a `vllm` binary is found**, each line showing `· binary: <shown_path>
-(on PATH | harness venv)`; otherwise nothing.
+The job (§1 item 5, G7): `pip install localharness`, then `localharness start`, and the box serves a model.
+A first `start` with no config runs `init`'s core setup on a terminal and goes on into the session
+(`start_cmd.py`, the first-start branch; owner ruling 2026-10-03). Spec 16 §8's rule stands — **every record
+`init` writes was shown, and an interactive `init` adopts exactly what it showed** — and one ruling of spec
+16 §12, recorded there as reversible by the owner, is revised: on a terminal the setup asks **one** question,
+through the interview (§11.5), whose default is the lazy answer. Without a person — no tty, `--no-input`,
+`LOCALHARNESS_COMMIT` — zero asks stays the rule: a first run writes its records unadopted as today (spec 16
+§8), an existing-config run appends nothing, and `start` senses no files at all (§11.3). The workspace-trust
+question (`settle_startup_trust`, spec 16) is outside this count.
+
+**One predicate for "a person is here":** `workspace.local_operator(no_input) -> bool` — a tty on stdin **and
+on stdout** (a question rendered into a pipe has no visible default), no `LOCALHARNESS_COMMIT`, not
+`--no-input`; `model_cmd._is_local_operator`, `init_cmd.is_interactive` and `init_cmd._adopts` fold into it.
+`init` and the first-start branch compute it once at the CLI boundary and hand it down as
+`core_setup(interactive=)` and `sync(person=)`; a structural test pins that every `sync(` call under `src/`
+passes a value that came from `local_operator(`. The interview (§11.5) calls the same predicate itself and
+fails closed without it — the component is the last line, the callers the first.
+
+### 11.0 One owner, two modules: the model library
+
+- **`provider/model_library.py`** is pure and imports nothing from `cli/` (no `provider/` module does today;
+  it imports `agent/gguf_header`, which itself imports only `core/`). `scan(roots, recorded, library_path,
+  *, scope, rank) -> Found`: `walk_ggufs` over the given roots (bounded by `DISCOVERY_MAX_*`,
+  symlinked directories never descended, a missing root skipped), deduplicated by realpath, set-differenced
+  against `recorded` (the realpath of every `model` and `mmproj` of `server:` and every peer of the merged
+  config, passed in by the caller) and against the library file; only a file in neither is header-typed
+  (`discover`, whose return type changes to one `FileKind` per path — `model`, `projector`, `shard`, `other`,
+  `unreadable` — the enum defined beside it in `agent/gguf_header.py`; not `Verdict`, which `gate_types`
+  already owns) and ranked by `rank`, a callable `cli/library` builds from `rank_models` with `unit_model`,
+  `ledger_paths` (`speed_stats.model_paths`) and `fits` (`compute_fit` over `_machine_autosense`, memory
+  probed once and only when some file is new) — spec 16 §8's order. `Found` carries the new models, the seen-unrecorded ones and the declined ones with their facts;
+  it prints nothing. `peers_for(models, *, start, taken_names, taken_ports)` and `free_ports` are
+  `_peer_records` and `_free_ports` moved here with public names. The library file (`Library.load` /
+  `Library.save`) lives here too.
+- **The library file**, `<global>/model-library.json`: private; read through `open_regular` under a cap (as
+  `speed_stats` reads the ledger), every field validated (an ISO date, an int size, the `FileKind` enum, at most
+  `DISCOVERY_MAX_FILES` entries) and every printed value through `visible_text`; written only by
+  `provider/model_library` through `atomic_write_text` under the overlay lock (§11.4); a
+  `PROTECTED_CONFIG_DIR_ENTRIES` member. Per realpath: `first_seen`, `size`, the verdict, `declined`. Its one
+  meaning: **new is first sighting** — a file absent from the file and from `recorded` is new whatever its
+  mtime (a `cp -p`, `mv` or `rsync` keeps an old one; mtime is also the agent's to set), and a file whose
+  verdict **becomes** `model` (re-typed after a size change, or `unreadable` the last time) is a first
+  sighting as a model, its `first_seen` reset. `other`, `projector` and `shard` are never re-read;
+  `unreadable` is re-tried; a resized file is re-typed. **Baseline:** on a run that is not a first run
+  (§11.1), when the library file is missing or corrupt, the first walk records every file `seen` and asks
+  nothing (an upgrade, an attach-only install, a deleted file); a removed single entry makes that file new
+  again, and so does a removed peer (the person removed its record; one question settles it). The first-run
+  `sync` writes the file (the shown files and the declines) before it hands back its records. The declined-
+  offer store of spec 16 is not used for files. The record of a shown file is always built from a fresh
+  header read at show time, never from the stored verdict.
+- **`cli/library.py`** is the side that talks and writes. `InitRecords`, `preset_lines`, `show_records`,
+  `_machine_autosense`, `_adopt_written`, `_record_dicts_of` and `_result_from_record` move here from
+  `init_cmd` (which imports them back; `library` never imports `init_cmd`). It owns `sync(config_path, *,
+  scope, person, preset=None) -> Sync(records, lines, appended, declined)`: it gathers roots and `recorded`,
+  calls `scan`, procs the interview (§11.1), writes, adopts, prints the receipt line. On a first run
+  `records` is what `core_setup` hands to `_write_records`, whose order changes: `_write_harness` writes
+  `config.yaml` with `extra_endpoints: []`, then `append_peers` writes the peers into `overrides.yaml`
+  (after `--force`'s reset of the saved choices, which now also clears `extra_endpoints` —
+  `_SAVED_CHOICE_KEYS` — so "both files or neither" holds and a first run's `recorded` is honestly empty),
+  then two adoptions: `server.` under `config.yaml`, the peers under `overrides.yaml` (trust entries are
+  keyed by file). If the peer write returns False, `config.yaml` stands with its `server:`, one line says the
+  peers were not written, and the files stay in the library as `seen`, so `localharness model --setup`
+  (§11.1) lists them. On every other run with a person `sync` appended its peers itself and adopted exactly
+  the lines it showed. **Peers always live in `overrides.yaml`.**
+  `append_peers(config_path, peers)` appends to that file's `extra_endpoints` list through
+  `write_overlay_validated` (the one validated overlay writer, now under the overlay lock, the
+  set-difference re-checked inside `mutate`), names unique over every record (`unique_preset_name`), ports
+  over every recorded port; `server:` is never touched here. A 0.18 `config.yaml` that still holds the
+  list is the one-time **copy** the posture flow already performs (`cli/workspace.py`: the list is copied
+  whole into `overrides.yaml` — one key, and an `overrides.yaml` list replaces — `config.yaml`'s own list
+  left in place and shadowed, `PEER_LIST_COPIED` printed): the first append reuses that copy, and
+  `_copied_peer_entries` re-adopts a copied peer **only where its `config.yaml` twin was already covered**
+  — a peer edited since its adoption is copied unadopted and the next start asks about it; with no machine
+  record nothing is adopted; the line carries both counts. There is no second copier. `append_peers` is
+  built as a `mutate` fragment over the overlay, so the import's `_write_overlay_records` composes its
+  `server:` write and the fragment in its one atomic write with one audit (its "only while empty" rule
+  goes; this is the one peer writer); `record_path(path)` is `scan` for one file plus `append_peers`;
+  `counts(config_path)` serves `doctor`. `_discover_presets` is deleted; `_records_from_import` takes
+  `peers_for`; `_record_dicts` stays a thin caller of the moved `_record_dicts_of`; `_guided_setup` is
+  reduced to the vLLM install step, which runs without its own `Confirm` when the interview's option carried
+  the consent (§11.2). Nothing else
+  walks a root, types a header for a record, asks about a file or writes a peer.
+- **Callers.** `init`: `sync(scope="all")` in `_pick_server` where `_discover_presets` ran (a **first run**
+  — no `config.yaml`, or `--force`, under which `recorded` is empty and the baseline is off — after
+  `_unit_import`, which wins silently as spec 16 §8 says: the unit import is authoritative, the one
+  intentional silent path), **and** inside `_existing_config` after the config has loaded (an unreadable
+  config exits 1 first, as today), not when `changing` (`--endpoint` / `--model` ask nothing); when `sync`
+  appended, `Keep it?` is not asked and the line reads `Added N; kept config.yaml.`. `start`:
+  `sync(scope="new")` once per process (§11.3). `model --download`: `record_path` (§11.2). `doctor`:
+  `counts`. A first run that **attached** to a running server (`Attached`, spec 16 §8) baselines and asks
+  nothing.
+
+### 11.1 Models found: one question
+
+The shown block is a bulleted list (the interview's options are the numbered things), the ranked best
+first, one line per unrecorded model: `• <name> (llama.cpp, mtp, +<projector>) ← <shown_path> · <size> ·
+first seen <date>`, a declined one tagged
+`(declined earlier)`, a vLLM checkpoint as a peer line **only when a `vllm` binary is found** (`· binary:
+<shown_path> (on PATH | harness venv)`), otherwise nothing; `scope="all"` lists every unrecorded model,
+`scope="new"` only the first sightings. There is no second block: after the choice the primary's line
+gains its binary clause and the list is the record that is written and adopted. Then **one interview
+question** (§11.5), its default the lazy answer:
+
+- **First run, N ≥ 2** — `Set up these N models?` with the options `All, serving <best> first` (default; its
+  description: `every file above becomes a preset; <best> serves on this start`), `Choose which, and which
+  first` (`pick the files, then the one to serve`), `Skip for now` (`nothing is set up; run localharness
+  start again later`). The second option opens two interview steps, a multi-select `Set up which?` (all
+  pre-selected) and, only when two or more stay selected, a single-select `Serve which first?` (the best
+  pre-selected). A file is **declined** only by being unselected there; Enter with none selected declines
+  them all (the everything-declined line); the default declines nothing. **N = 1** — `Set up <name>?` with
+  `Set it up` (default) and `Not now`. With `start --preset <name>` or `--scripts` naming a found file, that
+  file serves first and no order step runs. **Cancel** (Esc, Ctrl-C) at any step of a first run writes
+  nothing, declines nothing and prints the `Skip for now` line; it is never silent. `server:` is written only on a first run; every other run
+  appends peers. Everything declined on a first run → one line naming the library and `run localharness
+  start again`, exit 0, nothing written (`_skip_for_now` stays the path of `init --endpoint`).
+- **A later run** — on `start` (first sightings only): `New model <name> — set it up?` with `Set it up`
+  (default), `Not now`, and for N ≥ 2 `Choose which`; `Not now` and a cancel leave them `seen` (`start`
+  stops asking). On `init` (`scope="all"`) the question comes **only when there is a first sighting**, with
+  the same three options; its default sets up the first sightings alone — never a file the baseline or a
+  `Not now` kept quiet, and never a declined one. **The way back is `localharness model --setup`**: the
+  multi-select `Set up which?` over every unrecorded file on the box — first sightings pre-selected,
+  `seen` ones not, declined ones tagged and not — and selecting a declined file clears its decline. Every
+  answer prints one line saying what happened and the way back: after `Not now` or an unselected file,
+  `… — localharness model --setup lists them`; after a set-up peer, `/model <name> switches in a session;
+  localharness start --preset <name> starts on it`. `doctor`'s row (§11.4) names the same command.
+- **The receipt**, first run only: the list above as the preset block, then **one line**: `Later: just run
+  localharness start — it brings back your last choice.`, with ` /model <name> switches in a session.` only
+  when there is a peer; from `init` it replaces `Run 'localharness start' to begin.`. No other verb is
+  taught here. The README's Quick start and `no_config_message` teach `localharness start` as the first
+  command and say a model server is not required (§13).
+
+### 11.2 Nothing found: the download offer
+
+When no server answers and no model file is found, on a terminal, the old `Set up vLLM and a model now?`
+menu is replaced by one interview question:
+
+- **The table is `provider/refarch.py`**, one row per reference architecture of
+  `docs/reference-architectures/`: `runtime`, `platforms` (replaces `platform`), `needs` (`nvidia`,
+  `apple-silicon`, or none), `repo` (replaces `default_model`), the **one file** (`None` for a vLLM
+  checkpoint, fetched whole as today), `bytes`, `revision` (a 40-hex commit), `sha256` (both from the hub's
+  LFS metadata at that commit; a test pins every row's shapes), `page`, status, and the route fields the row
+  needs (`docker_image`, `pip_package`, optional). New: the 8 GB consumer-GPU row (llama.cpp, `Q4_K_M`, one
+  file, linux and darwin, no `needs`). The Spark's llama.cpp route is **not** offered — its doc needs a
+  second file, the MTP head, which `discover` does not pair — so the Spark keeps its vLLM row (`needs:
+  nvidia`); the Mac mini row keeps vLLM-metal (`needs: apple-silicon`). Kept in sync with the docs as the
+  module's docstring already requires.
+- **The default is sensed, by one ordered rule**: this platform's rows whose `needs` the box meets (an
+  answering `nvidia-smi`; darwin on arm64); among them, a row whose runtime is on `PATH` (`llama-server`,
+  `vllm`, `which_outside_cwd`); then, with no runtime present, the llama.cpp row (its install is one line,
+  §11.5's install line); then the largest whose `bytes` fit the sensed memory less the `autosense`
+  reserve — the GPU's free bytes from `free_memory`, else the box's RAM (`_read_meminfo` on Linux,
+  `os.sysconf` elsewhere; no new subprocess); memory unknown → the smallest, and the line says `needs about
+  <size>` instead of `fits in your <N> GB`. The question: `Download <file> (<size>, fits in your <N> GB)?` —
+  for the small row `a small model that runs anywhere; larger ones under Show the other rows` — with the
+  options `Download it` (default; on a vLLM row its description also carries the one consent that row
+  needs, `and install vllm into <venv>` or `and pull <image>`, so the old model prompt, download confirm and
+  venv `Confirm` are not asked again), `Show the other rows` (the rows with their pages, then the same
+  question), `Not now`. **No runtime** is not a dead end: the file is runtime-independent, so the question
+  still comes, with the platform's install line printed above it, again after the download ending in `then run
+  localharness start`, and on the next `start`'s `no llama-server — set server.binary` line (spec 16 §8).
+- `Download it` fetches the one file (a vLLM row: the whole repo through `download_model`, as today, with no
+  further prompt) through `download_file(repo, file, *, revision)` into the HF cache,
+  then verifies the returned file **through one descriptor** opened with `open_regular`: the bytes counted
+  and hashed against `bytes` and `sha256`, the header read from the same descriptor — a mismatch is named
+  and nothing is recorded (the HF cache is a model root the agent can write under, and `hf_hub_download`
+  returns a cached path for a pinned commit without a network round trip, so the hash is what makes the
+  offer's claim true). Then `record_path` builds the record from **that path alone**, prints its record
+  line (name, runtime, binary, port, path), writes and adopts exactly that line, with no second question.
+  `Not now` prints the page and `localharness model --download <repo> --file <file>` and §11.1's run-again
+  line, exit 0. The vLLM rows keep their install prompt and their whole-repo, unpinned `download_model`
+  (as today; §12 says what that leaves open). Nothing is launched by `init`; the first `start` launches
+  after its own trust decision (spec 16 §8).
+- **`model --download`** ends by calling `record_path` on its returned path when that is one `.gguf` file
+  (never a snapshot directory), a `config.yaml` exists, a person is present, **and the file verifies** —
+  resolved once: `HfApi.model_info(repo, revision=<ref>).sha` gives the 40-hex commit, which is passed to
+  both the download and `get_paths_info`, whose `lfs.sha256` is hashed against the returned file through one
+  descriptor as above (never the sha in the returned path, which sits in the agent-writable cache); the
+  commit and hash are printed with the record line. Otherwise —
+  no config yet, no person, no hub metadata, a mismatch — it writes nothing and says `start finds it`; the
+  file then surfaces as a first sighting at the next terminal `start`, shown as any other.
+
+### 11.3 A model that arrives later
+
+A terminal `start` calls `sync(scope="new")` **once per process**, in the sync body beside the first-start
+branch (not inside `_start_async`, which runs under `asyncio.run`; not on the `/plugins` restart pass; not
+after a first-start setup that just ran `sync`; not with `--list-models`), for the terminal channel only,
+with a person, **before** `decide_machine_trust` so an adopted append appears there as covered, and never
+when the config dir cannot be written. The walk is a bounded directory listing with no header read for a
+known path; silent when there is no first sighting; one question (§11.1) when there is, a cancel counting as `Not
+now`. Without a person `start` walks nothing and writes nothing. `localharness model --setup` is the same
+`sync` with the multi-select forced (§11.1), for a person only.
+
+### 11.4 `doctor`, and the overlay lock
+
+One `Models:` row from `counts`: `N set up · M found, not set up · K declined — localharness model --setup
+lists them`, the zero clauses dropped — the one place a person sees what the box holds that the harness is not
+serving. **The overlay lock** is new: `<global>/overrides.yaml.lock`, a sidecar `flock` acquired as
+`project_records.yaml.lock` is (`O_NOFOLLOW | O_NONBLOCK`, mode 0600, `LOCK_NB` polled for a bounded budget,
+then fail closed: `write_overlay_validated` returns False and `sync` prints `overrides.yaml is busy — nothing
+written`), held across the raw read, `mutate` and the write and released before the audit publish, taken
+around the library file's write as well, never nested (the two writes in `sync` are sequential, pinned), a
+`PROTECTED_CONFIG_DIR_ENTRIES` member beside `project_records.yaml.lock` (SECURITY.md's count and the gate
+test follow); until now the overlay write was an unlocked read-modify-write.
+
+### 11.5 The interview
+
+Every question of §11 — and only these, for now — is asked through **one component**, `cli/interview.py`,
+the harness's second prompt_toolkit app beside `cli/picker.py` (a different widget: `picker` is one
+horizontal line for `/effort`; this is vertical, with descriptions and `multi`; it shares `PICKER_STYLE` and
+the picker's `input` / `output` test seams; prompt_toolkit is already a dependency, no new one).
+`ask(question, options, *, default, cancel, multi=False) -> Answer`, with `Option(key, label, hint)` frozen
+and `Answer(keys, cancelled)`: the question on one line, each option on its own line with its label and
+hint, the default highlighted (`default` an index, or a set of keys when `multi`); the arrow keys move the
+highlight and a typed number jumps to that option (toggles it when `multi`; a two-digit buffer, the list
+scrolling past the terminal's height); Enter takes the highlight (when `multi`, the selected set, which may
+be empty); Space toggles when `multi`; Esc and Ctrl-C return `cancelled` with `cancel` as the key, and the
+caller treats a cancel as its no-change answer and prints its line, never silently. A dim hint line is part
+of the widget (`↑↓ move · Space select · Enter confirm` when `multi`). The app is inline, keeps the chosen
+line in scrollback (`erase_when_done=False`) and lets hints wrap on a narrow terminal. It calls
+`local_operator` itself and fails closed (`cancelled`, nothing read) without a tty on both ends or under the
+marker — a prompt_toolkit input reads a pipe if asked, so the gate is inside the component as well as in
+its callers; and when the terminal cannot draw it (`TERM=dumb`, too small), the caller takes the non-person
+path (records unadopted, the next-`start` line) rather than raising. The caller states only the question,
+the options with what each does, the default and the cancel; the keys and the look are the component's,
+written once and tested once, so no question in this spec carries a key grammar. The `rich` prompts elsewhere are untouched by this spec and named as debt for a later decision: the
+`Confirm`, `IntPrompt` and `Prompt` sites in `init_cmd` (`Keep it?`, `_skip_for_now`, `_select_model`, the
+vLLM install step's remaining asks) and `_confirm_on_a_tty` — so one `init` can still show two prompt
+grammars. The install line §11.2 prints is one constant per
+platform in `cli/library.py`: darwin `brew install llama.cpp`; linux `a llama.cpp release build for your
+GPU from github.com/ggml-org/llama.cpp/releases, llama-server on PATH — docs/runtimes/llamacpp.md`.
 
 ## 12. Security
 
@@ -695,6 +943,36 @@ Zero asks. Preset lines carry `mtp`. HF-cache text-generation checkpoints become
   at the channel boundary with the config's secrets, the key-file key and the two logged forms. HF-cache
   content integrity is a pre-existing residual.
 - **No code from files**; every reader is bounded; `tuning.py` runs nothing.
+- **The library file is deny-only** and machine-global, a protected config-dir entry: an entry an agent
+  plants hides a file it could have deleted; a removed entry makes that file new again; a removed or
+  corrupt file re-baselines (nothing asked at `start` until `init`, a functional loss the owner can see in
+  `doctor`'s row, not a security one); its fields are validated and capped on read. Nothing is adopted or
+  launched through it: the record of a shown file comes from a fresh header read at show time. Every
+  question, every library write and `start`'s walk run only for a person (`local_operator`: a tty on stdin
+  and stdout, no `LOCALHARNESS_COMMIT`, no `--no-input`; the interview enforces it again inside itself) — a gate against the agent's own tools, not a sandbox: a spawn
+  that clears the marker under a pty answers its own questions, the residual `_is_local_operator`'s
+  docstring already names; without a person a first run writes its records unadopted as today, no library file, and an
+  existing-config run appends nothing. **The record is shown and adopted, never the file's content**: a
+  file planted under a model root is shown with its path, size, first-seen date and header facts and asked
+  about on the next terminal run, never adopted unshown (spec 16's projector rule, extended to every
+  discovery); `model --download` records only for a person and only a file it verified against the hub at a commit
+  resolved from the hub, never from the cache path. The 0.18 list copy re-adopts only a peer whose
+  `config.yaml` twin was covered.
+  Residuals, named: a file whose bytes are swapped after its record was adopted is not re-shown (the
+  fingerprint covers the record; the record's path is the HF snapshot link the agent can retarget, which
+  also covers the gap between verify and launch); planted files sorting early in a root can crowd real ones
+  past `DISCOVERY_MAX_FILES`, and a flood of planted valid models is listed in full within that cap; and the
+  later-run question's default is `Set it up` — a file the person did not bring is accepted by Enter on a
+  highlighted default they can see, the owner's job statement deciding it (§15).
+- **The download offer fetches from a fixed table** (`refarch.py`): for the llama.cpp row one named file
+  at a pinned commit through `download_file(revision=)`, then its `bytes` and `sha256` verified on the
+  returned file through one `open_regular` descriptor before any record — the HF cache is a model root the
+  agent can write under and `hf_hub_download` returns a cached path for a pinned commit without a network
+  round trip, so without the hash a same-size planted file would pass as the table's; the record is built
+  from that path and a fresh header read alone. What the hash does not cover: the row's author, and a
+  compromised repository at that commit. The vLLM rows keep today's whole-repo, unpinned `download_model`,
+  and `is_model_cached` accepts a cached directory by name — a planted blob under an etag name is taken as
+  cached and the record's `model` is a repo id resolved at launch: that residual stays theirs.
 
 ## 13. Files touched
 
@@ -713,11 +991,17 @@ Zero asks. Preset lines carry `mtp`. HF-cache text-generation checkpoints become
 | `provider/speed_stats.py` | `_load` through `open_regular` with a cap; `record_sampling`/`last_sampling`, `record_retry`/`last_retry`/`clear_retry`, `record_last_served`/`last_served` |
 | `provider/client.py` | `LLMConfig.temperature: float \| None = None`; `_sampling_kwargs` |
 | `cli/model_ops.py` | `_launch_key`, `_peer_session_key` moved here; `resolve_serving(harness, trust, preset)`; `sense_serving`; `persist_landed(record)`; `redact_for_channel(text, harness, key_file_key)` |
-| `cli/start_cmd.py` | `--preset/-p` (+ hidden `--scripts`); `sense_serving`; attach / explicit swap / launch; `read_launch(expect=, main_pid=)`; `persist_landed`; `last_served`; the derived, resume, other-preset, boot-retry clauses; the sampling override line; the root temperature into both `LLMConfig` calls; the unit sensed once; redaction at the console; `confirm_launch(marker=)` on attach when a marker exists |
+| `cli/start_cmd.py` | `--preset/-p` (+ hidden `--scripts`); `sense_serving`; attach / explicit swap / launch; `read_launch(expect=, main_pid=)`; `persist_landed`; `last_served`; the derived, resume, other-preset, boot-retry clauses; the sampling override line; the root temperature into both `LLMConfig` calls; the unit sensed once; redaction at the console; `confirm_launch(marker=)` on attach when a marker exists; `library.sync(scope="new", person=)` once per process in the sync body (terminal channel, before `decide_machine_trust`, not on the `/plugins` restart pass, not after a first-start setup, not with `--list-models`); `local_operator(no_input)` computed once at the boundary for `core_setup(interactive=)` and `sync(person=)` |
 | `cli/repl.py` | `_active_heavy` from the serving record; the cold branch through `lifecycle.swap` with the REPL `SwapReporter`; `persist_landed`; wrappers; typed-`.gguf` refusal under the unit; `strategy_for(..., unit=)` |
-| `cli/model_cmd.py` | `decide_machine_trust(ask=_is_local_operator(), launching=will_launch)` + `machine_withheld` before any swap; the immediate `UnitStrategy` swap (console reporter: launch line before the wait, receipt after with the `live_sessions` clause; `persist_landed`), else `pending_preset` with the unit-gated receipt; `--script [--all]`; `--autostart on\|off\|status` (local-operator gate, then `ask=True`; scope refusal with its fix; captured `# env` lines recorded as the `autostart.env` launch entry, relative `PATH` entries dropped and named; `enable` without `--now` over a live launch; one-line receipt; `status` incl. captured `PATH`, second launcher, marker, translated exit) |
+| `cli/model_cmd.py` | `decide_machine_trust(ask=local_operator(no_input), launching=will_launch)` + `machine_withheld` before any swap; the immediate `UnitStrategy` swap (console reporter: launch line before the wait, receipt after with the `live_sessions` clause; `persist_landed`), else `pending_preset` with the unit-gated receipt; `--script [--all]`; `--autostart on\|off\|status` (local-operator gate, then `ask=True`; scope refusal with its fix; captured `# env` lines recorded as the `autostart.env` launch entry, relative `PATH` entries dropped and named; `enable` without `--now` over a live launch; one-line receipt; `status` incl. captured `PATH`, second launcher, marker, translated exit) |
 | `cli/serve_cmd.py` (new), `cli/app.py`, `src/localharness/__main__.py` (new) | hidden `serve` per §9.3 |
-| `cli/init_cmd.py`, `cli/doctor_cmd.py` | the `mtp` clause; vLLM peers with a shown binary; `Tuning:`, `Sampling:`, `Autostart:` rows |
+| `provider/model_library.py` (new) | pure, imports no `cli/`: `scan(roots, recorded, library_path, *, scope, rank) -> Found`, `peers_for`, `free_ports` (moved from `init_cmd` with public names), `Library.load` / `Library.save` (`<global>/model-library.json`: `first_seen`, `size`, verdict, `declined`; `open_regular` under a cap, validated and capped fields, `atomic_write_text` under the overlay lock, the baseline, the verdict transition) |
+| `cli/library.py` (new) | `InitRecords`, `preset_lines`, `show_records`, `_machine_autosense`, `_adopt_written`, `_record_dicts_of`, `_result_from_record` moved from `init_cmd`; `sync(config_path, *, scope, person, preset=None, choose=False) -> Sync`; `append_peers` as a `mutate` fragment (peers always in `overrides.yaml`; the 0.18 list reaches it through the posture flow's existing copy, `_copied_peer_entries` and `PEER_LIST_COPIED`), `record_path`, `counts`; the `rank` callable; the §11.1 questions and their after-lines; the `Later:` line; the download offer with the ordered default rule, the one-descriptor `bytes` + `sha256` verification and the record line; the per-platform install line; the `doctor` row |
+| `cli/interview.py` (new) | `Option`, `Answer`, `ask(question, options, *, default, cancel, multi=False)`: the one prompt_toolkit question app of §11.5 (inline, `PICKER_STYLE` and the picker's test seams, the hint line, scrolling, cancel); `local_operator` enforced inside; no typed fallback |
+| `cli/init_cmd.py`, `cli/doctor_cmd.py` | `init` calls `sync(scope="all")` in `_pick_server` (a first run: no `config.yaml` or `--force`; after `_unit_import`) and inside `_existing_config` after the load, not when `changing`, `Keep it?` skipped when `sync` appended; `_found_models`, `_peer_records`, `_free_ports`, `_discover_presets` deleted; `_records_from_import` takes `peers_for`; `_write_overlay_records` calls `append_peers` (its empty-only rule gone); `_write_records` writes `config.yaml` with `extra_endpoints: []`, then the peers into `overrides.yaml`, then two adoptions, the peer-write False path said; `_SAVED_CHOICE_KEYS` gains `extra_endpoints`; `_guided_setup` reduced to the vLLM install step; `is_interactive` and `_adopts` folded into `local_operator`; a first run that attached baselines; the receipt's `Later:` line replaces `Run 'localharness start' to begin.`; `doctor`'s `Models:` row beside `Tuning:`, `Sampling:`, `Autostart:` |
+| `cli/workspace.py`, `cli/model_cmd.py` | `local_operator(no_input)` (the one predicate; `_is_local_operator` folded in), `write_overlay_validated` under the new `overrides.yaml.lock`; `--download` ends in `record_path` for one `.gguf` verified at a hub-resolved commit under a config with a person, else says `start finds it`; `model --setup` = `sync(choose=True)` (§11.1) |
+| `provider/refarch.py`, `provider/server.py`, `agent/gguf_header.py`, `agent/gate_types.py`, `SECURITY.md` | `RefArch`: `runtime`, `platforms`, `needs`, `repo`, `file`, `bytes`, `revision`, `sha256`, `page`, route fields optional, the 8 GB llama.cpp row, a test on every row's shapes; `download_file(repo, file, *, revision)`; `discover`'s return type becomes one `FileKind` per path (`unreadable` included), `rank_models` unchanged and exported; `model-library.json` and `overrides.yaml.lock` in `PROTECTED_CONFIG_DIR_ENTRIES` (SECURITY.md's count, now ten, and the gate test beside `project_records.yaml.lock`); the library file in SECURITY.md's written-files list; `init_cmd`'s and spec 16 §8's "config.yaml is not touched" text amended for the one-time list move |
+| `README.md`, `orchestrator/router.py` | Quick start and `no_config_message` teach `localharness start` first; a model server is not required |
 | `agent/gate_types.py` | the four login-time directories in `PROTECTED_PATHS_HOME_DEFAULT` |
 | `bench/`, `SECURITY.md`, `docs/specs/10-cli.md`, `13-provider-support.md` | the bench temperature paragraph; the autostart unit (environment order, captured comment lines, allowlisted base, identity test, owner rule, exit codes, the marker, the deny bundle, the four directories, the residuals), the trust decision on every launching surface, the pidfile identity check, the redaction boundary, the three new `launch_model` keys; the CLI additions; the strategy-layer additions |
 
@@ -791,7 +1075,45 @@ Zero asks. Preset lines carry `mtp`. HF-cache text-generation checkpoints become
   cause, shape, `planned_context`, pidfile + marker under the sync lock (the same `lock_path`) before
   `execve`, the module entry importable; the new fields fingerprinted with `None` → no entry;
   `pending_preset` dropped from a workspace layer; the four protected directories and the deny bundle; the
-  harness's own writes never through a verdict; `doctor`'s rows; `init`'s clause and vLLM peers. **No test
+  harness's own writes never through a verdict; `doctor`'s rows; `init`'s clause and vLLM peers; **the model library and the interview** (§11): `scan` takes roots and
+  `recorded` in, prints nothing, reads a header only for a path in neither (new is first sighting: a
+  backdated or `cp -p` file is new, a known path with a future mtime is not, a verdict becoming `model` is
+  new), realpath dedupe, `other`/`projector`/`shard` never re-read, `unreadable` re-tried, a resized file
+  re-typed; the library file written only by the provider module (structural), the baseline off on a first
+  run and on when the file is missing or corrupt (an attach-only install included), a removed entry and a
+  removed peer new again, the first-run `sync` writing the file, an oversized, non-regular or malformed file
+  refused; the interview app: the default highlighted and taken by Enter, arrows and numbers, Space when
+  multi, Esc and Ctrl-C the no-change option, never reached without a person (structural: every `ask(`
+  caller is behind `person`); the first-run question with its default writing every shown file and the best
+  as `server:` (peers into `overrides.yaml`), `Choose which` declining only an unselected file and picking the
+  first, N = 1 and `--preset` folding the order step, `_unit_import` winning silently, `--force` a first run
+  with `recorded` empty, a first run that attached asking nothing; `scope="all"` listing every unrecorded
+  model with the declined ones tagged and excluded from the default, `scope="new"` only first sightings, `Not
+  now` marking seen so `start` stops and `init` lists, selecting a declined file clearing its decline, every
+  after-line; `append_peers` into `overrides.yaml` under the lock with names and ports unique over every
+  record and `server:` untouched, the 0.18 one-time list move with its re-adoption and line, two writers
+  racing under the lock losing nothing; `init`'s `_existing_config` call site reached with a server answering
+  and not, skipped when `changing`, an unreadable config exiting first, `Keep it?` skipped after an append;
+  nothing asked, walked or written without a person (a faked tty under `LOCALHARNESS_COMMIT`, no tty,
+  `--no-input`; a first run then writes unadopted records and the next terminal `start` asks once; an
+  existing-config run appends nothing); the structural `sync(person=local_operator(...))` pin; the `Later:`
+  line on the first run only, its `/model` clause only with a peer, replacing `init`'s run-start line; the
+  `doctor` row; the download default by the ordered rule from a faked platform, `needs`, `PATH` and memory
+  (a CPU-only box never offered the Spark row, a Mac with `llama-server` the GGUF row, unknown memory → the
+  smallest with `needs about`), no runtime → the question still asked with the install line printed before
+  and after, `Show the other rows`, `Not now` → the page, the command and the run-again line with exit 0,
+  `Download it` through a stubbed `download_file` with the revision passed and `bytes` and `sha256` checked
+  through one descriptor (a mismatch, a FIFO or a device named, nothing recorded) and the record from that
+  path alone while a planted sibling is not swept up, its record line printed before the write;
+  `model --download` recording only one `.gguf` under a config for a person that verifies against a stubbed
+  hub hash, otherwise saying `start finds it`; a planted file shown with path, size, first-seen date and
+  header facts and never adopted unshown; every single-file `refarch` row's `revision` 40-hex and `sha256` 64-hex (the vLLM rows carry none, §11.2); the interview driven with a pipe on stdin, a
+  non-tty stdout and under the marker reading nothing and returning `cancelled`; the first-run write order
+  with the peer-write False path; `--force` clearing `extra_endpoints`; the 0.18 copy re-adopting only a
+  covered twin; `model --setup` over seen and declined files; `init` asking only on a first sighting and its
+  default never taking a baseline or `Not now` file; the vLLM row's one consent; `Serve which first?` skipped
+  with one selected; a held lock failing closed with the line; `model --download` with a planted
+  `snapshots/<fakesha>` recording nothing; the §2 carry rows and SECURITY.md's protected-entry count; no test touches the network. **No test
   runs `systemctl`, `loginctl`, `journalctl`, `busctl` or a unit.**
 - Live, on the reference box (a runbook, as spec 16's live check was): (1) `init` after the 0.18 import — `mtp` on
   both 27B lines; (2) `start` on the Swift preset launches with `q8_0` KV, `draft-mtp`, a fitted `-c`;
@@ -808,10 +1130,106 @@ Zero asks. Preset lines carry `mtp`. HF-cache text-generation checkpoints become
   silently; `readelf -d` on `llama-server` confirms rpath and the unit's environment (`systemctl --user
   show-environment` is not used; `cat /proc/<MainPID>/environ` through the owner's shell) holds the captured
   `PATH` and no manager `LD_LIBRARY_PATH`; `--autostart off` removes the unit, `llm.service` untouched; (8)
-  `--script` pasted into a shell serves on a spare port; `--script --all > f; . ./f; serve_flash_next` serves.
+  `--script` pasted into a shell serves on a spare port; `--script --all > f; . ./f; serve_flash_next` serves;
+  (9) a fresh config dir on the box: `localharness start` → the interview with `All, serving qwen-27b-swift-1.5
+  first` highlighted, Enter, the receipt's `Later:` line; `model --download --file` a small GGUF → its commit,
+  hash and record line at once, the next `start` asks nothing; a GGUF copied in with `cp -p` → the next `start`
+  asks once, `Not now` and no later `start` asks, `localharness model --setup` lists it, unselecting it
+  declines it and the next `--setup` shows it tagged; `doctor`'s `Models:` row counts both; the interview
+  on a narrow terminal and under tmux and `script`.
 
 ## 15. Open questions and recorded decisions
 
+- **Revision 10, final text (2026-10-16) — the fourth round folded; no fifth pass, by the owner's instruction
+  to plan.** Parsimony SHIP (notes folded: `Option` / `Answer`, the picker's style and seams shared, the
+  `rich` sites named as debt, `_record_dicts` a thin caller). Design REVISE, folded: the first-run write
+  order with split adoption and the False path; `--force` clearing `extra_endpoints`; the 0.18 list reaching
+  the overlay through the posture flow's existing copy with `_copied_peer_entries` (no second copier); the
+  `ask` contract (`cancel`, a set default, cancel per step); `scan` taking a `rank` callable because
+  `rank_models` needs the ledger and the fits; `FileKind`, not a second `Verdict`; the lock's acquisition,
+  scope, failure and non-nesting; `append_peers` as a `mutate` fragment so the import stays one write; a
+  cancel on `start` counting as `Not now`. Security REVISE, folded: the interview enforcing the gate inside
+  itself with stdout a tty too; the copy re-adopting only a covered twin; `model --download` resolving the
+  commit from the hub, never the cache path; the lock fail-closed; "never adopted unshown" and no library
+  file without a person. Friction REVISE, folded: the vLLM row's one consent inside `Download it`; `init`
+  asking only on a first sighting with a default that never takes a baseline, `Not now` or declined file,
+  and `localharness model --setup` as the one way back (named by every after-line and `doctor`); bullets
+  instead of list numbers; the hint line and number-toggles in `multi`; `Serve which first?` skipped with one
+  selected; `Set it up` / `Not now` / `Skip for now` everywhere with descriptions; cancel never silent; the
+  app inline with scrollback kept and a draw failure taking the non-person path; the install block ending
+  in `then run localharness start`; the small row's text. The plan checker verifies these folds against the
+  source before execution.
+- **Revision 10, fourth draft (2026-10-16) — the interview, and the third round folded.** The owner's call,
+  2026-10-16: every question of §11 is asked through one interview component (§11.5, `cli/interview.py`,
+  prompt_toolkit, beside `cli/picker.py`) — a question, options with a highlighted default, arrows or a
+  number, Enter — so no question in this spec carries a key grammar and the drafts' `[Y/n · d · numbers]`
+  forms are gone; the later-run default is `Set it up`, the lazy answer, with security's `[y/N]` note
+  retired into a §12 residual (the default is visible before Enter). Third-round folds: parsimony (SHIP,
+  notes) — `_adopt_written` and the record helpers re-homed to `cli/library`, one predicate
+  `local_operator`, one peer-write rule (peers always in `overrides.yaml`), `scan(unit_model=)`, public
+  names `peers_for` / `free_ports`, `_machine_autosense` in `cli/library`, the unit import named as the one
+  intentional silent path, the stale `_is_local_operator` mentions fixed; design — `provider/model_library`
+  takes roots and `recorded` in and imports no `cli/`, the `config.yaml` append writer that did not exist
+  replaced by "peers always in `overrides.yaml`" with the 0.18 one-time move, the overlay lock defined
+  (`overrides.yaml.lock`, a protected entry), `--force` a first run, `sync` inside `_existing_config` after
+  the load and not when `changing` with `Keep it?` skipped after an append, `person` threaded from one
+  boundary computation, the verdict-becomes-`model` first sighting, the first-run `sync` writing the file,
+  the removed-peer rule, `platforms` and `repo` replacing `platform` and `default_model`, one shown block;
+  security — `model --download` verifying against the hub's LFS hash before it records (a cache hit on a
+  pinned commit is otherwise a planted path), the one-descriptor hash-and-header read, the vLLM residual
+  stated exactly, a non-person existing-config run appending nothing, the library file's fields validated
+  and capped, the flood named; friction — `needs` on the rows so a CPU-only box is never offered the
+  Spark checkpoint and a Mac with `llama-server` gets the GGUF row, the install line written per platform
+  and printed before the question, the way back from `Not now` and from a decline as after-lines and as
+  `init`'s `Choose which`, the declined files excluded from `init`'s default, `start --preset <name>` named
+  after a shell download, `Show the other rows` instead of a key. Fourth round pending.
+- **Revision 10, third draft (2026-10-16) — the second round of the four critics folded.** All four REVISE
+  on the second draft; folded: parsimony — the component split into `provider/model_library.py` (pure:
+  `scan`, `append_peers`, `record_path`, `counts`, the file) and `cli/library.py` (the prompt, `sync`, the
+  offer, the row), `RefArch` and `download_file(revision=)` named as schema and signature changes, the
+  `init_cmd.py` deletions listed so no second path survives, the `Verdict` enum in one place, the operator
+  test read inside `sync` rather than passed; design — `Sync`'s contract and the `preset` argument, "new"
+  as first sighting (not mtime), the baseline on `config.yaml` present rather than records present, the
+  append into the file that wins the merge (no copied peers, so no re-asked trust), `init`'s second call
+  site in the existing-config branch, `server:` only when no `config.yaml` existed, `--no-input` in the
+  gate, `unreadable` re-tried, the §2 carry rows, the library write under the overlay lock, `sync` skipped
+  after a first-start setup and with `--list-models`; security — `sha256` on the row and verified on the
+  returned path (a pinned commit alone lets a planted cache file pass), `model --download` recording only
+  for a local operator and one `.gguf`, the record line printed before the offer's write, the vLLM rows'
+  unpinned whole-repo fetch said plainly, the gate called a gate and not a sandbox, the fresh header read
+  at show time, the roots from the machine config; friction — `init` reachable as the way back (the
+  existing-config call site; declined files listed tagged so the undo is a typed number, not a file edit),
+  a first run that attached asking nothing, `d = not now` named and its after-line specified, the N = 1
+  wording, the `Later:` line on the first run only with the `/model` clause only with a peer, the `l` key
+  dropped, the install line printed again after the download and on the next `start`'s refusal, No at the
+  offer and everything-declined exiting with one line rather than `_skip_for_now`'s two prompts, the
+  numbered lines, memory sensed from RAM where there is no GPU. **Still open for the owner:** the
+  later-run default — `[Y/n]` as drafted (the lazy path; friction) or `[y/N]` (security: a file the person
+  did not bring should take a typed `y`; the first-run prompt keeps Enter either way). Third round pending.
+- **Revision 10, second draft (2026-10-16) — the first-run job; four critics' first round folded.**
+The
+  owner's job statement (§1 item 5) widened §11; spec 16 §12's zero-asks ruling, recorded there as
+  reversible by the owner, is revised. First-round verdicts, all REVISE, folded as follows. Parsimony
+  (the fourth critic, added this day: plugin or core; which component; readable and extensible in one
+  place): core, and shape (b) — one new module, `cli/model_library.py`, owns the inventory, the file, the
+  prompt, the write and the offer, with `init`, `start`, `doctor` and `model --download` as callers,
+  instead of the first draft's five-file spread. Design: the append inside `mutate` (an `overrides.yaml`
+  list replaces, so the old empty-only gate was the only thing making it safe), names and ports seeded
+  from every record, `server:` untouched after the first run; the Spark's two-file llama.cpp route not
+  offered; `free_memory` None defined; the call site in `start`'s sync body before `decide_machine_trust`;
+  everything-declined → skip-for-now; `--preset`, N = 1 and the unit import fold the prompt; the record
+  after a download from the returned path alone; realpath dedupe; `other`-typed and growing files
+  remembered. Security: local-operator gate on every prompt, write and walk; what is shown (path, size,
+  mtime, header facts, `new since`); the pinned revision and size check; the §12 claims narrowed with the
+  residuals named; the one library file replaces the shared declined-offer store for files. Friction:
+  one prompt whose Enter never declines (a decline is a typed number), `n` on a later arrival meaning
+  "not now" rather than a permanent No; the receipt cut to today's block plus one `Later:` line teaching
+  `localharness start`; the download menu skipped when one row is sensed and the offer kept when no
+  runtime is installed; the upgrade baseline so an old install is never asked about dozens of files;
+  README and `no_config_message` teaching `start` first. **Open for the owner:** the friction and security
+  critics split on the later-arrival default — `[Enter = yes]` as drafted (the owner's lazy path) or
+  `[y/N]` (security's: a planted file should take a typed `y`); §12 names it as a residual under the
+  owner's job statement. Second round of all four critics pending on this draft.
 - **Iteration 8 (applied 2026-10-13) — SHIP from all three critics on §§5–16.** Eight minors folded:
   design — the `autostart.env` entry is emitted only for the config dir the unit's `ExecStart` names,
   `harness_unit_path()` honours `XDG_CONFIG_HOME`, the unit's real path rides `machine_diff`'s annotations,

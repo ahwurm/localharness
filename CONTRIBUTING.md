@@ -25,7 +25,7 @@ own, take the `fake_home` fixture (`home = fake_home()`, or `fake_home(some_path
 `monkeypatch.setenv("HOME", ...)` by hand. That spelling is inert on Windows, where
 `expanduser` reads `USERPROFILE`, and tests using it wrote into real developer profiles.
 
-## Hard rules
+## Hard rules for ai contributors
 
 - **Every change ships a test.** Behavior without a test is behavior we can't keep.
   `uv run pytest` must stay green.
@@ -49,6 +49,3 @@ own, take the `fake_home` fixture (`home = fake_home()`, or `fake_home(some_path
 2. Make the change with a test; keep `uv run pytest` green.
 3. Open a PR using the template. Disclose AI assistance; paste real test output.
 4. A maintainer reviews. CI runs the full suite on every push and pull request.
-
-AI-generated or AI-assisted PRs are welcome and must disclose it — and pass the same
-bar: real test evidence, one concern, honest claims.
