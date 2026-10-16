@@ -180,7 +180,7 @@ def test_the_question_is_asked_on_a_terminal_at_both_ends_only(components_home, 
 
 
 def test_model_cmd_has_no_private_operator_check():
-    assert not hasattr(model_cmd, "_is_local_operator")
+    assert [n for n in vars(model_cmd) if n.startswith("_is_")] == []
 
 
 def test_list_and_download_decide_nothing(components_home, monkeypatch):
