@@ -314,12 +314,19 @@ def _swap_now(
         console.print(line, markup=False, soft_wrap=True)
 
     if _answers_now(harness, machine_trust, record):
-        say(start_serving.ALREADY_SERVING_TARGET_LINE.format(name=visible_text(record.name)))
+        # An earlier selection still stored (an agent's, naming a third record) is read before the landing
+        # removes it, so the receipt can say that it is gone: the attach records no selection of its own.
+        older = getattr(harness, "pending_preset", None)
+        if not older:
+            say(start_serving.ALREADY_SERVING_TARGET_LINE.format(name=visible_text(record.name)))
         # The name typed here is the shell's own intent, so the attach lands on the ``pending_preset`` rung:
-        # an earlier selection (an agent's, naming a third record) must not outlive an explicit choice.
+        # an earlier selection must not outlive an explicit choice.
         with _landing_write(harness, record):
             asyncio.run(model_ops.persist_landed(
                 harness, record, outcome="attach", rung=model_ops.RUNG_PENDING, config_dir=config_dir))
+        if older:
+            say(start_serving.ALREADY_SERVING_CLEARED_LINE.format(
+                name=visible_text(record.name), older=visible_text(str(older))))
         return
     incumbent = _incumbent(harness, config_dir, unit, record)
     peer_name = record.peer.name if record.peer is not None else None
