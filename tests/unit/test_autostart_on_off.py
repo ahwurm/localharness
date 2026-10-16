@@ -1,7 +1,7 @@
 """`localharness model --autostart on` — gate, scope, capture, write, adopt, reload, re-check, enable (spec 20
 §9.1, §9.2, §12; D-01..D-10, AUTO-01, AUTO-03..AUTO-06).
 
-(`off` has its own module, test_autostart_off.py; `status` is tested with its own plan.)
+(`off` has its own module, test_autostart_off.py; `status` has test_autostart_status.py.)
 
 `on_world` builds the one world every case shares: a global dir (conftest's hermetic `LOCALHARNESS_HOME`
 renamed per case) with a llama.cpp `server:` record, a fake home, the unit file's directory under a redirected
@@ -271,7 +271,7 @@ def test_the_trust_question_is_asked_once_with_ask_true_after_the_gate(world):
     assert [c["ask"] for c in calls] == [True]
 
 
-@pytest.mark.parametrize("mode", ["maybe", "status", "ON", ""])
+@pytest.mark.parametrize("mode", ["maybe", "STATUS", "ON", ""])
 def test_a_value_on_does_not_take_exits_2_with_the_modes_line(world, mode):
     result = world.run(mode=mode)
 

@@ -53,20 +53,31 @@ def _refuse_autostart(line: str) -> None:
 
 
 def _autostart(mode: str, config_dir: Optional[str], *, with_other_arguments: bool) -> None:
-    """`localharness model --autostart <mode>` (spec 20 §9.1, D-01). `on` and `off` exist in this release of
-    the command; any other value is refused with the line that names all three modes. Changing what runs at
-    every login needs a person at a terminal: the check comes BEFORE anything is decided, asked, loaded or
+    """`localharness model --autostart <mode>` (spec 20 §9.1, D-01). `on`, `off` and `status` exist in this
+    release of the command; any other value is refused with the line that names all three. Changing what runs
+    at every login needs a person at a terminal: the check comes BEFORE anything is decided, asked, loaded or
     written, and `_autostart_on` below is the one place under `cli/` that puts the machine-trust question
-    (D-03); `off` removes and never asks."""
+    (D-03); `off` removes and never asks. `status` only reads, so it runs anywhere — a script, a pipe, an
+    agent's command — ahead of the terminal check (D-01, D-11)."""
     if with_other_arguments:
         _refuse_autostart(autostart.AUTOSTART_ALONE_LINE)
-    if mode not in ("on", "off"):
+    if mode not in ("on", "off", "status"):
         _refuse_autostart(autostart.AUTOSTART_MODE_LINE)
+    if mode == "status":
+        _autostart_status(resolve_config_dir(config_dir))
     if not _is_local_operator():
         _refuse_autostart(autostart.AUTOSTART_TERMINAL_LINE.format(mode=mode))
     if mode == "off":
         _autostart_off(resolve_config_dir(config_dir))
     _autostart_on(resolve_config_dir(config_dir))
+
+
+def _autostart_status(cfg_path: Path) -> None:
+    """`--autostart status`: print what autostart is doing and exit 0. It asks no trust question, decides and
+    writes nothing, and needs no terminal."""
+    for line in autostart.status_lines(cfg_path):
+        console.print(line, markup=False, soft_wrap=True)
+    raise typer.Exit(0)
 
 
 def _autostart_off(cfg_path: Path) -> None:
@@ -264,7 +275,7 @@ def model(
     autostart: Optional[str] = typer.Option(
         None,
         "--autostart",
-        help="on | off — the autostart unit localharness-llm.service serves the last choice at login.",
+        help="on | off | status — the autostart unit localharness-llm.service serves the last choice at login.",
     ),
 ) -> None:
     """List available models, or switch the persisted default with `localharness model <name>`."""
