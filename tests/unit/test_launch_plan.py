@@ -2,8 +2,8 @@
 """TUNE-06 / TUNE-03 / TUNE-04 (spec 20 §6.0, §6.4, D-14, D-15): `activate` is sense -> plan -> prepare ->
 execute, and the argv it starts is exactly `plan.argv`.
 
-The identical-argv test starts here, with `activate`; `serve`, `doctor` and `--script` join it in later
-phases. Nothing here starts a process or reads the host: `subprocess.Popen` is the `PopenRecorder`, free
+The identical-argv test starts here, with `activate`; `serve` has joined it (below), `doctor` and `--script`
+join it in later phases. Nothing here starts a process or reads the host: `subprocess.Popen` is the `PopenRecorder`, free
 memory, `/proc/meminfo`, the weights and the probe are faked through their module seams (`Box`), and
 `wait_ready` is the scripted fake.
 """
@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from localharness.agent import gguf_header
+from localharness.cli import serve_cmd
 from localharness.config.models import AutosenseConfig, ManagedServerConfig
 from localharness.provider import autosense, lifecycle, server, speed_stats, tuning, units
 from localharness.provider.autosense import FIT_KEYS, FreeMemory, fit, fit_header
@@ -109,6 +110,37 @@ async def test_activate_launches_exactly_the_planned_argv(tmp_path, popen, box, 
         assert "--enable-auto-tool-choice" in argv
         assert plan.report is None and live.window is None
         assert box.events.count("free_memory") == 0
+
+
+@pytest.mark.parametrize("kind", ["swift-gguf", "vllm-binary"])
+async def test_serve_plans_exactly_the_argv_activate_launches(tmp_path, popen, box, kind):
+    """TUNE-06 for `serve` (spec 20 §9.3): the unit's body plans through the same sense -> plan the
+    strategy's `activate` runs, so for one record on one sensed machine the two argvs are equal."""
+    spec = _gguf_spec(tmp_path, SWIFT) if kind == "swift-gguf" else _vllm_spec(tmp_path)
+    strategy = lifecycle.ManagedVllmStrategy() if spec.runtime == "vllm" else lifecycle.SpawnedProcessStrategy()
+    await strategy.activate(spec, tmp_path, BASE, autosense=KNOBS)
+    launched = list(_argv(popen))
+
+    decision = server.launch_decision(spec, False)
+    argv, plan, sensed = serve_cmd._planned_argv(spec, tmp_path, KNOBS, decision, keyed=False, unit=None)
+
+    assert argv == launched and tuple(argv) == plan.argv
+    assert sensed is not None and sensed.runtime == spec.runtime
+    if kind == "swift-gguf":
+        assert _has_pair(argv, "--spec-type", "draft-mtp") and plan.shape == "full"
+    else:
+        assert _has_pair(argv, "--tool-call-parser", "qwen3_coder")
+
+
+async def test_serve_without_autosense_knobs_builds_the_0_18_command(tmp_path):
+    spec = _gguf_spec(tmp_path, SWIFT)
+    decision = server.launch_decision(spec, False)
+
+    argv, plan, sensed = serve_cmd._planned_argv(spec, tmp_path, None, decision, keyed=False, unit=None)
+
+    assert plan is None and sensed is None
+    assert argv == server.serve_command(spec, keyed=False, loopback=decision.loopback,
+                                        key_file_ok=decision.key_file_ok, context=None, cache_ram=None)
 
 
 async def test_an_untuned_launch_has_no_plan_and_todays_keywords(tmp_path, monkeypatch, box):
