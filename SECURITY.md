@@ -1448,7 +1448,9 @@ test and is named instead of stopped.
 error quotes, on the terminal, in a swap's progress lines and in the REPL, is scrubbed at that
 channel with the secrets the config holds, the key read from any `api_key_file` the session
 holds, `Bearer` tokens, llama-server's `api_keys:` line and credentials inside URLs. The
-`--script` output prints a placeholder for every key and runs nothing. What this does NOT cover:
+`--script` output prints a placeholder for the harness-held key and for any `--api-key` in a record's
+`extra_args`, and runs nothing; a record's own `env:` values print as written, so keep credentials out of
+them. What this does NOT cover:
 a secret that a server logs in a form none of these patterns match.
 
 The three keys of `launch_model` that select a launch's behaviour, `speculative`,
@@ -1572,12 +1574,17 @@ sets up every model it found on one Enter with the best first, and says what to 
 that arrives afterwards is found at the next terminal `start`. Two files make that possible:
 `model-library.json` in the config directory, which remembers what the library has shown you and
 what you declined, and the overlay's lock file `overrides.yaml.lock`. Both are protected entries
-(see the ten-entry list above), so a plain delete or move asks like the config files do.
+(see the ten-entry list above), so a plain delete or move asks like the config files do. The lock covers the
+library file and the peer writes `init`, `start` and `model --setup` make through the validated overlay
+writer; the other `overrides.yaml` writers (`localharness model`'s own persistence, `components`, `plugins`,
+`init --reset` and the import) keep their atomic replace outside it, so two of those racing can lose an
+update but can adopt or launch nothing.
 
 **The library file is deny-only.** An entry in it hides a file from the question; it adopts and
 launches nothing. An entry the agent plants hides a file it could have deleted; a removed entry
-makes that file new again; a missing or corrupt file is rebuilt as a baseline (nothing is asked at
-`start` until `init`, a loss of convenience that `doctor`'s `Models:` row shows, not of security).
+makes that file new again; a missing or corrupt file is rebuilt as a baseline: everything present is
+treated as seen and nothing is asked about it (a loss of convenience that `doctor`'s `Models:` row shows,
+not of security), and a model that arrives afterwards is asked about at the next terminal `start` as usual.
 It is read under a size cap, at most 256 entries are accepted, and each field is validated.
 
 **Only a person is asked, walks or writes.** Every question, every write to the library and
