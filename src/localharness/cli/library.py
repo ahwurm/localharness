@@ -5,7 +5,7 @@ import asyncio
 import json
 import os
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
@@ -58,6 +58,17 @@ LATER_LINE = "Later: just run localharness start — it brings back your last ch
 LATER_MODEL_CLAUSE = " /model {name} switches in a session."
 BULLET = "• {name} ({clause}) ← {path} · {size} · first seen {date}"
 DECLINED_TAG = " (declined earlier)"
+NEW_ONE_QUESTION = "New model {name} — set it up?"
+NEW_MANY_QUESTION = "{n} new models — set them up?"
+SET_THEM_UP = "Set them up"
+SET_THEM_UP_HINT = "every new model becomes a preset"
+CHOOSE_WHICH = "Choose which"
+CHOOSE_WHICH_HINT = "pick the files to set up"
+SET_UP_LINE = "/model {name} switches in a session; localharness start --preset {name} starts on it"
+NOT_SET_UP_LINE = "Not set up: {names} — localharness model --setup lists them"
+ADDED_KEPT_LINE = "Added {n}; kept config.yaml."
+NOTHING_TO_SET_UP_LINE = "Nothing to set up — every model found has a preset"
+LIBRARY_FAILED_LINE = "model library: {why} — start goes on"
 
 
 class _NothingToAppend(ValueError):
@@ -356,6 +367,20 @@ def prune_recorded(config_path: Path) -> bool:
     return len(kept.entries) != len(lib.entries) and kept.save(path)
 
 
+def _merged(global_dir: Path) -> tuple[dict, list]:
+    """The merged view's `server:` record and peer list: the overlay's keys win, its list replaces."""
+    config_raw, overlay = workspace.raw_settings(global_dir)
+    peers = overlay["extra_endpoints"] if isinstance(overlay.get("extra_endpoints"), list) \
+        else config_raw.get("extra_endpoints")
+    return {**(config_raw.get("server") or {}), **(overlay.get("server") or {})}, peers if isinstance(peers, list) else []
+
+
+def recorded_names_ports(global_dir: Path) -> tuple[frozenset[str], frozenset[int]]:
+    """The preset names and ports the merged config already uses."""
+    _, names, ports = _recorded(*_merged(global_dir))
+    return frozenset(names), frozenset(ports)
+
+
 def format_size(n: int) -> str:
     size = float(n)
     for unit in ("B", "KB", "MB", "GB"):
@@ -521,11 +546,8 @@ def _records(config_path: Path, order: Sequence[model_library.Shown], names: dic
     return InitRecords(server=server, served=served, peers=peers, lines=lines, block_in_receipt=True, confirmed=confirmed)
 
 
-def sync(config_path: Path, *, scope: Literal["new", "all"], person: bool, preset: str | None = None,
-         first_run: bool = False) -> Sync:
-    """The first run: every unrecorded model under the roots, shown best first and set up as the person says."""
-    if not first_run:
-        raise ValueError("sync: only the first run is wired")
+def _first_run(config_path: Path, *, scope: Literal["new", "all"], person: bool, preset: str | None) -> Sync:
+    """Every unrecorded model under the roots, shown best first and set up as the person says."""
     global_dir = global_config_dir(config_path)
     auto = _machine_autosense(config_path)
     lib_path = model_library.library_path(global_dir)
@@ -559,3 +581,84 @@ def sync(config_path: Path, *, scope: Literal["new", "all"], person: bool, prese
         return Sync(records, tuple(records.lines), 0, tuple(s.real for s in choice.declined), len(listed))
     _say(DECLINED_ALL_LINE.format(n=len(choice.declined), library=shown_path(lib_path)))
     return Sync(declined=tuple(s.real for s in choice.declined), shown=len(listed))
+
+
+def _later_interview(shown: Sequence[model_library.Shown], new: Sequence[model_library.Shown],
+                     names: dict[str, str], wanted: model_library.Shown | None, *, choose: bool) -> _Choice | None:
+    """The later-run question and what each answer sets up; Not now and a cancel are the same; None when nobody could be asked."""
+    not_now = _Choice([], [], skipped=True)
+    if not choose:
+        if len(new) == 1:
+            name = visible_text(names[new[0].real])
+            question, yes = NEW_ONE_QUESTION.format(name=name), Option("set-up", SET_IT_UP, SET_IT_UP_HINT.format(name=name))
+        else:
+            question, yes = NEW_MANY_QUESTION.format(n=len(new)), Option("set-up", SET_THEM_UP, SET_THEM_UP_HINT)
+        options = [yes, Option("not-now", NOT_NOW, NOT_NOW_HINT)]
+        if len(shown) > 1:
+            options.append(Option("choose", CHOOSE_WHICH, CHOOSE_WHICH_HINT))
+        answer = interview.ask(question, options, default=0, cancel="not-now")
+        if not answer.reached:
+            return None
+        if answer.cancelled or answer.keys == ("not-now",):
+            return not_now
+        if answer.keys == ("set-up",):
+            return _Choice(list(new), [])
+    picked = interview.ask(
+        SET_UP_WHICH,
+        [Option(s.real, visible_text(names[s.real]) + (DECLINED_TAG if s.declined else ""), shown_path(s.path))
+         for s in shown],
+        default={s.real for s in new} | ({wanted.real} if wanted else set()), cancel="cancel", multi=True)
+    if not picked.reached:
+        return None
+    if picked.cancelled:
+        return not_now
+    return _Choice([s for s in shown if s.real in picked.keys], [s for s in shown if s.real not in picked.keys])
+
+
+def _later_run(config_path: Path, *, scope: Literal["new", "all"], person: bool, preset: str | None,
+               choose: bool) -> Sync:
+    """A model that arrives after the first run: asked about once, set up as a peer, never asked twice."""
+    if not person:
+        return Sync()
+    global_dir = global_config_dir(config_path)
+    auto = _machine_autosense(config_path)
+    lib_path = model_library.library_path(global_dir)
+    found = model_library.scan(auto.model_roots, recorded_paths(global_dir), lib_path, scope=scope,
+                               rank=_ranker(config_path, auto))
+    shown = [s for s in (*found.new, *found.seen, *found.declined) if s.model is not None]
+    new = [s for s in found.new if s.model is not None]
+    if not (shown if choose else new):
+        if found.changed:
+            found.library.save(lib_path)
+        if choose:
+            _say(NOTHING_TO_SET_UP_LINE)
+        return Sync(shown=len(shown))
+    taken_names, taken_ports = recorded_names_ports(global_dir)
+    names: dict[str, str] = {}
+    for s in shown:
+        names[s.real] = unique_preset_name(s.model.name, {*taken_names, *names.values()})
+    _bullets(shown, names)
+    choice = _later_interview(shown, new, names, _named(shown, names, preset), choose=choose)
+    if choice is None:
+        return Sync(shown=len(shown))
+    written: list[dict] = []
+    if choice.order:
+        peers = model_library.peers_for([replace(s.model, name=names[s.real]) for s in choice.order],
+                                        start=PRIMARY_PORT + 1, taken_names=taken_names, taken_ports=taken_ports)
+        if (written := append_peers(config_path, peers, adopt=True)) is None:
+            return Sync(shown=len(shown))
+        for peer in written:
+            _say(SET_UP_LINE.format(name=visible_text(peer["name"])))
+    left = new if choice.skipped else choice.declined
+    if left:
+        _say(NOT_SET_UP_LINE.format(names=", ".join(visible_text(names[s.real]) for s in left)))
+    found.library.marked(declined=[s.real for s in choice.declined], dropped=[s.real for s in choice.order]).save(lib_path)
+    return Sync(None, (), len(written), tuple(s.real for s in choice.declined), len(shown))
+
+
+def sync(config_path: Path, *, scope: Literal["new", "all"], person: bool, preset: str | None = None,
+         first_run: bool = False, choose: bool = False) -> Sync:
+    """Every unrecorded model the roots hold, asked about and set up as the person says; nothing without a person."""
+    if first_run:
+        return _first_run(config_path, scope=scope, person=person, preset=preset)
+    return _later_run(config_path, scope=scope, person=person, preset=preset, choose=choose)

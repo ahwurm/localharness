@@ -3513,6 +3513,20 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     return restart_request
 
 
+def _models_that_arrived(config_dir: str | None, preset: str | None, no_input: bool) -> None:
+    """Before the session loads: ask about a GGUF copied in since the last run, so the machine-trust decision sees it covered."""
+    from localharness.cli import library
+    from localharness.cli.workspace import local_operator
+    from localharness.config.paths import resolve_config_dir
+    cfg = resolve_config_dir(config_dir)
+    if not os.access(cfg, os.W_OK):
+        return
+    try:
+        library.sync(cfg, scope="new", person=local_operator(no_input), preset=preset)
+    except (OSError, ValueError) as exc:
+        console.print(library.LIBRARY_FAILED_LINE.format(why=exc), markup=False, soft_wrap=True)
+
+
 _CHANNEL_HELP = ("Input channel: " + ", ".join(sorted(channel_names())) + " (default terminal). An "
                  "unknown name is refused, not silently treated as terminal. mobile and acp are served "
                  "by their own commands: `localharness mobile`, `localharness acp`.")
@@ -3571,7 +3585,8 @@ def start_app(
         raise typer.Exit(2)
     wanted = preset if preset is not None else scripts
     from localharness.config.paths import resolve_config_dir
-    if not list_models and not (resolve_config_dir(config_dir) / "config.yaml").exists():
+    first_start = not list_models and not (resolve_config_dir(config_dir) / "config.yaml").exists()
+    if first_start:
         # First start: no config. On a terminal, run init's core setup here and go on into the
         # session — no "run localharness init" bounce (owner ruling 2026-10-03). Without a person
         # to ask, _start_async's own welcome hint and exit 0 stand (the web/ACP callers use it too).
@@ -3588,6 +3603,8 @@ def start_app(
             # reaches it — inside the session's, that raises "Event loop is closed". Collect now.
             import gc
             gc.collect()
+    elif not list_models and channel == "terminal":
+        _models_that_arrived(config_dir, wanted, no_input)
     resume: Resume | None = None
     try:
         while True:
