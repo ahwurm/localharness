@@ -31,7 +31,7 @@ import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import yaml
 
@@ -793,6 +793,22 @@ def adopt_entries(global_dir: Path, entries: list[dict]) -> None:
     keep = [e for e in rec["entries"] if (e.get("file"), e.get("kind"), e.get("name")) not in written]
     record_machine(global_dir, sorted([*keep, *entries], key=_entry_key),
                    kinds=frozenset(rec["kinds"]))
+
+
+def forget_entries(global_dir: Path, keys: Iterable[tuple[str, str, str]]) -> None:
+    """Remove exactly the recorded entries whose `(file, kind, name)` is in ``keys`` and re-record
+    the rest: `kinds` kept, the list re-sorted as `machine_snapshot` sorts, re-fingerprinted, written
+    by `record_machine`'s 0600 atomic write. The mirror of `adopt_entries` — the record changes by
+    exactly what the act removed — used by `off` to prune the entry it made obsolete. A no-op when
+    this machine has no record. It never calls `machine_snapshot`."""
+    rec = recorded_machine(global_dir)
+    if rec is None:
+        return
+    gone = set(keys)
+    keep = [e for e in rec["entries"] if (e.get("file"), e.get("kind"), e.get("name")) not in gone]
+    if len(keep) == len(rec["entries"]):
+        return
+    record_machine(global_dir, sorted(keep, key=_entry_key), kinds=frozenset(rec["kinds"]))
 
 
 def decline_key(kind: str, *parts: str) -> str:

@@ -893,7 +893,8 @@ def decide_machine_trust(global_dir: Path, *, ask: bool, launching: bool = False
     if not ask:
         return withheld(MACHINE_UNASKED)
     notes = _merged_annotations(
-        {**_bind_all_annotations(asked_about), **_key_file_annotations(global_dir, asked_about)},
+        {**_bind_all_annotations(asked_about), **_key_file_annotations(global_dir, asked_about),
+         **_autostart_annotations(asked_about)},
         annotations)
     if _confirm_or_no(MACHINE_CHANGED_QUESTION.format(
             global_dir=global_dir, diff=machine_diff(confirmed, visible, annotations=notes))):
@@ -901,6 +902,18 @@ def decide_machine_trust(global_dir: Path, *, ask: bool, launching: bool = False
         return still_quiet
     _DECLINED.add(declined)
     return withheld(MACHINE_DECLINED, remember=True)
+
+
+def _where(entry: dict) -> str:
+    """Where an entry lives, as the withheld line names it: its file, except the autostart entry,
+    whose pseudo-file is a pairing key only and which lives in the unit file itself."""
+    from localharness.config import trust
+
+    if (entry.get("file"), entry.get("kind"), entry.get("name")) == trust.AUTOSTART_KEY:
+        from localharness.provider import units
+
+        return str(units.harness_unit_path())
+    return str(entry["file"])
 
 
 def _by_file(entries: list[dict]) -> dict[str, frozenset[tuple[str, str]]]:
@@ -913,7 +926,7 @@ def _by_file(entries: list[dict]) -> dict[str, frozenset[tuple[str, str]]]:
 def _withhold(changed: list[dict], global_dir: Path, why: str,
               quiet: list[dict] = ()) -> MachineTrust:
     """Withhold ``changed`` (named in the one line) and ``quiet`` (named nowhere)."""
-    names = ", ".join(f"{visible_text(e['name'])} ({visible_text(e['file'])})" for e in changed)
+    names = ", ".join(f"{visible_text(e['name'])} ({visible_text(_where(e))})" for e in changed)
     line = MACHINE_WITHHELD_LINE.format(
         n=len(changed), global_dir=global_dir, names=names, why=why) if changed else ""
     return MachineTrust(_by_file([*changed, *quiet]), line, quiet=_triples(list(quiet)))
@@ -1004,6 +1017,18 @@ def _key_file_annotations(global_dir: Path, entries: list[dict]) -> dict[tuple[s
     return {(e["file"], e["kind"], e["name"]):
             KEY_FILE_NOTE.format(destination=_key_file_destination(global_dir, str(e["name"])))
             for e in entries if str(e.get("name", "")).endswith(".api_key_file")}
+
+
+def _autostart_annotations(entries: list[dict]) -> dict[tuple[str, str, str], str]:
+    """The autostart entry's line says which file it is: the pseudo-file in its `(file, kind, name)`
+    is a pairing key, the real path is the unit file's. Display only; never part of an entry."""
+    from localharness.config import trust
+
+    if not any((e.get("file"), e.get("kind"), e.get("name")) == trust.AUTOSTART_KEY for e in entries):
+        return {}
+    from localharness.provider import units
+
+    return {trust.AUTOSTART_KEY: f"(the unit file {units.harness_unit_path()})"}
 
 
 def _merged_annotations(mine: dict, theirs: Optional[Mapping]) -> dict:
