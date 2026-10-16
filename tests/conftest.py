@@ -119,6 +119,14 @@ def _no_real_hf_cache_lookup(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_hf_cache_listing(monkeypatch):
+    """The model library lists cached checkpoints when a vllm binary is found, and `scan_cache_dir`
+    reads the developer's real cache whatever HOME the suite fakes. It lists nothing unless a test that
+    means to exercise the checkpoints patches the seam itself."""
+    monkeypatch.setattr("localharness.provider.model_library._cache_repos", lambda: ())
+
+
+@pytest.fixture(autouse=True)
 def _pin_terminal_color_env(monkeypatch):
     """#131: color-rendering tests build consoles with force_terminal=True but never pin
     color_system, so Rich still consults the AMBIENT environment for whether color is allowed.
