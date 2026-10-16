@@ -321,10 +321,11 @@ class UnitWorld:
     # ------------------------------------------------------------------ the HTTP wait
 
     def http(self, *, answer_after: int = 2, served: str = PRIMARY, hook: Callable[[int], None] | None = None,
-             needs_pidfile: bool = True) -> None:
+             needs_pidfile: bool = True, gate: Callable[[], bool] | None = None) -> None:
         """`/models` answers 503 for the first `answer_after - 1` polls and a well-formed 200 after; `hook(n)`
         runs on poll n (before the answer) and may raise. A server only answers once the unit's `serve` has
-        recorded its pidfile (`needs_pidfile`), as the real one can only be running after that."""
+        recorded its pidfile (`needs_pidfile`), as the real one can only be running after that; `gate()`, when
+        given, must also be true."""
         seen = {"n": 0}
 
         def answer(request: httpx.Request) -> httpx.Response:
@@ -332,7 +333,8 @@ class UnitWorld:
             self.requests.append(str(request.url))
             if hook is not None:
                 hook(seen["n"])
-            if seen["n"] < answer_after or (needs_pidfile and not server.pid_path(self.g).exists()):
+            if (seen["n"] < answer_after or (needs_pidfile and not server.pid_path(self.g).exists())
+                    or (gate is not None and not gate())):
                 return httpx.Response(503)
             return httpx.Response(200, json={"data": [{"id": served}]})
 
