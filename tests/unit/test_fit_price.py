@@ -289,6 +289,14 @@ def test_a_bf16_snapshot_no_4_bit_build_would_fit_says_pick_a_smaller_quant():
         "smaller quant.")
 
 
+def test_a_4_bit_build_whose_weights_leave_no_room_for_the_floor_is_not_promised():
+    config, budget = _config("davidau-gemma-4-31b-it"), int(0.9 * GEMMA_CARD)
+    tight = int((budget - GIB // 8) / (autosense._Q4_K_M_SHARE * (1 + AUTO.compute_margin_ratio)))
+    placed = _vllm(config, weights=tight, total=GEMMA_CARD, name="gemma", floor=15_360)
+    assert placed.refusal.endswith("— pick a smaller quant.")
+    assert "4-bit build" in _vllm(config, weights=GEMMA_BF16, total=GEMMA_CARD, name="gemma", floor=15_360).refusal
+
+
 def test_a_quantized_checkpoint_beyond_the_budget_names_no_dtype_and_no_4_bit_build():
     placed = _vllm(_config("nvidia-qwen3.8-27b-nvfp4"), weights=40 * GIB, name="NVFP4-27B")
     assert placed.refusal == (
