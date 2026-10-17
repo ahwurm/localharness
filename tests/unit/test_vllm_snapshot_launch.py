@@ -156,7 +156,8 @@ async def test_a_refused_snapshot_starts_nothing(cache, tmp_path, monkeypatch):
         await lifecycle.ManagedVllmStrategy().activate(_spec(), tmp_path, BASE, autosense=AUTO)
 
 
-async def test_a_swap_to_a_refused_snapshot_leaves_the_incumbent_serving(cache, tmp_path, monkeypatch):
+@pytest.mark.parametrize("floor", [15_360, None])
+async def test_a_swap_to_a_refused_snapshot_leaves_the_incumbent_serving(cache, tmp_path, monkeypatch, floor):
     _plant_link(cache.add(REPO))
     calls = []
     monkeypatch.setattr(server, "stop_server", lambda *a, **kw: calls.append("stop") or True)
@@ -175,7 +176,7 @@ async def test_a_swap_to_a_refused_snapshot_leaves_the_incumbent_serving(cache, 
 
     outcome = await lifecycle.swap(
         incumbent, lifecycle.Heavy(_spec(), BASE), config_dir=tmp_path, autosense=AUTO, reporter=Reporter(),
-        redact=lambda t: t, floor=15_360)
+        redact=lambda t: t, floor=floor)
     assert outcome.stage == "refused" and calls == []
     assert lines[0].endswith(f"{REFUSAL_TAIL} incumbent keeps serving.")
 
