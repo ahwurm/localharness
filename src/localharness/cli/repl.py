@@ -2149,6 +2149,7 @@ class OrchestratorREPL:
                         swap_incumbent, swap_target, config_dir=self._server_config_dir,
                         autosense=getattr(self._harness, "autosense", None), reporter=reporter,
                         redact=redact, on_poll=_cold_progress, unit=self._unit_state,
+                        floor=self._live_floor(),
                     )
                 finally:
                     if box_note is not None:
@@ -2669,6 +2670,10 @@ class OrchestratorREPL:
         from localharness.provider.lifecycle import launch_lock, launch_lock_wait_line
         # the line is chosen when it is said: a holder in this very process is not "another LocalHarness"
         return launch_lock(cfg, on_wait=lambda: self._send_info(launch_lock_wait_line(cfg)))
+
+    def _live_floor(self) -> int | None:
+        floor = getattr(self._agent, "floor", None)
+        return floor() if callable(floor) else None
 
     def _channel_redactor(self, *keys: Any):
         """The one-argument masking function a failure line goes through before any channel shows it
