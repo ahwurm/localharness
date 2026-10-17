@@ -128,13 +128,14 @@ def test_an_unkeyed_vllm_binary_record_gets_a_copy_of_the_base_not_the_environme
     out, inherited, runtime, ini_home = seen[0]
     assert runtime == "vllm" and ini_home is None
     assert out is env or out == env
+    assert env.pop("MAX_JOBS") == str(max(1, (os.cpu_count() or 2) // 2))
     assert env == {"HOME": str(w.home), "PATH": str(w.bindir), "USER": "alice", "CUDA_VISIBLE_DEVICES": "0",
                    "LANG": "C.UTF-8"}
     assert type(env) is dict and env is not os.environ and inherited is os.environ
 
 
 def test_exec_environment_returns_a_plain_dict_even_when_child_environment_adds_nothing(monkeypatch):
-    spec = ManagedServerConfig(runtime="vllm", launch="binary", binary="/x/vllm", model="m", port=8000)
+    spec = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/m.gguf", port=8080)
     inherited = {"USER": "alice", "PATH": "/manager/bin", "SOME_OTHER": "1"}
 
     env = serve_cmd._exec_environment({"PATH": "/captured"}, "/home/u", inherited, spec, None, None)

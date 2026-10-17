@@ -77,7 +77,7 @@ def test_the_keyword_comes_before_the_key_and_after_the_record_env():
 def test_without_the_keyword_nothing_changes():
     assert server.child_environment("llamacpp", {"PATH": "/bin"}) == (None, [])
     assert server.child_environment("llamacpp", {"XDG_CONFIG_HOME": "/home/u/.config"}) == (None, [])
-    assert server.child_environment("vllm", {"PATH": "/bin"}, xdg_config_home=None) == (None, [])
+    assert server.child_environment("vllm", {"PATH": "/bin", "MAX_JOBS": "3"}, xdg_config_home=None) == (None, [])
 
 
 # ------------------------------------------------------------------------------- activate, primary and peer

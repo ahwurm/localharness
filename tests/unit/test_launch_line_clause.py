@@ -225,7 +225,8 @@ async def test_the_flash_next_preset_reads_kv_only(tmp_path, world):
 async def test_a_vllm_binary_preset_reads_the_derived_parsers(tmp_path, world):
     await _start(tmp_path, _vllm_spec(tmp_path))
     assert world.out == ["Managed vLLM is not running — starting it "
-                         "(reasoning qwen3 · tools qwen3_coder; model load can take several minutes)..."]
+                         f"(reasoning qwen3 · tools qwen3_coder; {start_serving.FIRST_BUILD_CLAUSE}; "
+                         "model load can take several minutes)..."]
 
 
 async def test_the_posture_phrase_stays_first(tmp_path, world):
@@ -313,8 +314,8 @@ async def test_a_vllm_parser_retry_prints_its_line_before_the_second_start(tmp_p
     assert len(world.cmds) == 2 and "--reasoning-parser" not in world.cmds[1]
     assert world.out[1] == (
         "Managed vLLM is not running — starting it (parsers off (retried: the full shape died) · "
-        "server.reasoning_parser: off / server.tool_call_parser: off keeps them pinned off; "
-        "model load can take several minutes)...")
+        f"server.reasoning_parser: off / server.tool_call_parser: off keeps them pinned off; "
+        f"{start_serving.FIRST_BUILD_CLAUSE}; model load can take several minutes)...")
 
 
 # ------------------------------------------------------------------- the remembered line

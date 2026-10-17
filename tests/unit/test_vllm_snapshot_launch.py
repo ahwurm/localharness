@@ -93,7 +93,7 @@ def test_a_docker_launch_keeps_the_repo_id(cache, tmp_path):
 def test_the_launch_environment_is_offline_over_the_persons_shell():
     env, _dropped = server.child_environment("vllm", {"HF_HUB_OFFLINE": "0"}, hf_offline=True)
     assert env["HF_HUB_OFFLINE"] == "1"
-    assert server.child_environment("vllm", {"HF_HUB_OFFLINE": "0"}) == (None, [])
+    assert server.child_environment("vllm", {"HF_HUB_OFFLINE": "0", "MAX_JOBS": "3"}) == (None, [])
 
 
 def test_the_record_env_cannot_turn_the_launch_online():

@@ -264,6 +264,7 @@ def test_a_required_key_travels_in_the_environment_not_in_argv_or_the_log(tmp_pa
 
 def test_without_a_key_the_launch_inherits_the_environment(tmp_path, popen, monkeypatch):  # noqa: F811
     monkeypatch.delenv("VLLM_API_KEY", raising=False)
+    monkeypatch.setenv("MAX_JOBS", "3")
     server.start_server(tmp_path, ["true"])
     assert popen[0]["env"] is None
 
