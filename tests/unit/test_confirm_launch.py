@@ -55,8 +55,8 @@ def _live(served=40_000) -> lifecycle.LiveEndpoint:
                                   window=report)
 
 
-def _process(*argv: str) -> ProcRecord:
-    return ProcRecord(pid=4242, uid=1000, argv=("/x/llama-server", "-m", "m.gguf", *argv), exe=None,
+def _process(*argv: str, ctx: tuple = ("-c", "40000")) -> ProcRecord:
+    return ProcRecord(pid=4242, uid=1000, argv=("/x/llama-server", "-m", "m.gguf", *ctx, *argv), exe=None,
                       cwd=None, start_time=1, unit="llama.service", environ=None, mapped_ggufs=())
 
 
@@ -95,9 +95,8 @@ FLIPS = {
     "no live invocation": dict(unit=_unit(None)),
     "no unit": dict(unit=None),
     "no restart behind it": dict(unit=_unit(restarts=0)),
-    "window not the planned one": dict(live=_live(served=20_000)),
-    "window unknown": dict(live=_live(served=None)),
-    "no live endpoint": dict(live=None),
+    "-c not the planned one": dict(process=_process(ctx=("-c", "20000"))),
+    "no -c on the live argv": dict(process=_process(ctx=())),
     "no verified process": dict(process=None),
     "no spec": dict(spec=None),
     "no knobs": dict(autosense=None),
@@ -125,6 +124,21 @@ MARKER_FLIPS = {
 def test_a_marker_that_is_not_this_death_writes_nothing(tmp_path, flip):
     spec = _spec(tmp_path)
     _confirm(tmp_path, spec, _marker(spec, **MARKER_FLIPS[flip]))
+    assert _recorded(tmp_path, spec) is None
+
+
+def test_a_served_window_rounded_up_from_the_planned_c_writes_the_record(tmp_path):
+    spec = _spec(tmp_path)
+    _confirm(tmp_path, spec, _marker(spec, planned_context=37_001), live=_live(served=37_120),
+             process=_process(ctx=("-c", "37001")))
+    assert _recorded(tmp_path, spec) is not None
+
+
+@pytest.mark.parametrize("ctx", [(), ("-c", "80000"), ("-c", "37001", "--ctx-size=80000")])
+def test_a_live_argv_without_the_planned_c_writes_nothing(tmp_path, ctx):
+    spec = _spec(tmp_path)
+    _confirm(tmp_path, spec, _marker(spec, planned_context=37_001), live=_live(served=37_120),
+             process=_process(ctx=ctx))
     assert _recorded(tmp_path, spec) is None
 
 
@@ -231,7 +245,7 @@ def test_a_missing_or_non_positive_full_fit_writes_nothing(tmp_path, bad):
 
 
 @pytest.mark.parametrize("over", [
-    dict(planned_context=1),            # the window did not match
+    dict(planned_context=1),            # the planned -c did not match
     dict(cause="remembered"),
     dict(cause="none"),
     dict(record="llamacpp:another"),

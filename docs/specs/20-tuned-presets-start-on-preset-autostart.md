@@ -235,8 +235,9 @@ launch): a successful retry writes `retry` from that plan's values; a full-shape
 remembered record. **From a marker** (`start`'s attach and `UnitStrategy`'s wait, §9.3–9.4), **only when a
 marker exists**: the marker must be bound to the run that is serving — `marker.invocation` equal to the
 unit's live `InvocationID` (`show -p InvocationID`; `serve` writes the marker and `exec`s inside the same
-invocation, so equality means "the process serving now is the one this marker describes"), the window
-`/props` reports equal to the marker's planned `-c`, **and the unit's `NRestarts ≥ 1`** (a marker alone,
+invocation, so equality means "the process serving now is the one this marker describes"), the verified
+live process's argv `-c` equal to the marker's planned `-c` (not the `/props` window: llama.cpp rounds `-c`
+up, 37001 → 37120), **and the unit's `NRestarts ≥ 1`** (a marker alone,
 with no automatic restart behind it, never writes the ledger); `dropped` is `["draft-mtp"]` **only when the
 record's own `derive` would have emitted `spec_type` for this header and knobs** and the verified live
 process's argv carries no `--spec-type` — a record with `speculative: off` or a header without MTP layers
@@ -454,7 +455,7 @@ then named, never signalled. A foreign process → the incumbent sentence. `--mo
 `<pid> <start> <port>`; `_parse_pidfile` accepts one, two or three tokens. **The `/proc` side lives in
 `provider/procfs.py`** (`start_time_from_stat` moves in; `ProcRecord` gains `sid`; `server` imports `procfs`
 one way). `LaunchIdentity(exe_names, port, argv_contains, port_env)` is plain data from
-`strategy.launch_identity(spec)`: llama.cpp `({binary basename}, port, (), "LLAMA_ARG_PORT")`; vLLM binary
+`strategy.launch_identity(spec)`: llama.cpp `({binary basename, its target's, "llama-server"}, port, (), "LLAMA_ARG_PORT")`; vLLM binary
 `({"vllm", "python…"}, port, ("serve",), None)`; docker `({"docker"}, None, ("--name", container), None)`;
 Ollama `({"ollama"}, port, (), "OLLAMA_HOST")`; LM Studio `None`. One pure `procfs.identity_mismatch(record,
 expect) -> str | None`: uid, `exe` basename in `exe_names`, every `argv_contains` token, the **record's**
@@ -469,7 +470,8 @@ expect=self.launch_identity(spec))`; a structural test pins that `stop_server(` 
 `expect`. A pid that fails is `pidfile names pid 4242 (<exe>), which is not a harness launch — not
 signalled; stop it, or remove <pidfile>`. **Residual (`SECURITY.md`):** a `setsid` server of the person's
 own on the record's port with the record's binary, named by a planted pidfile, passes every test and would
-be stopped by an explicit swap; a wrapper-script binary fails the `exe` test and is named.
+be stopped by an explicit swap; a wrapper-script binary whose process execs `llama-server` passes the `exe`
+test, one that execs a differently named server fails it and is named.
 
 **The harness's own small files** — the pidfile, `unit-target`, the boot marker, the unit — are written
 through **`atomic_write_text`** (moved from `config/overlay.py:137` into `core/private_files.py`, re-exported
@@ -619,7 +621,7 @@ good load does not come back degraded. `invocation` binds the marker to the run 
 
 **The marker closes the loop through `confirm_launch`** (§6.0): the next `start` that attaches to the
 unit's server, or `UnitStrategy`'s wait, confirms a marker whose `invocation` is the live one — `cause:
-death` with the served window equal to `planned_context` → the ledger `retry` record (clamped marker fit,
+death` with the live argv's `-c` equal to `planned_context` → the ledger `retry` record (clamped marker fit,
 `dropped` from the live argv) and the one-time clause; `cause: remembered` → removed silently (the §6.4
 on-change clause covers it); any other outcome → removed, nothing written. A person who never runs `start`
 sees the marker in `status`/`doctor`.
@@ -1014,7 +1016,7 @@ GPU from github.com/ggml-org/llama.cpp/releases, llama-server on PATH — docs/r
   from `remembered` with `-c` from the fresh fit; from `prior_death` only with a marker for this record and
   binary, `cause: death` or `shape: full`, younger than `TimeoutStartSec`, `NRestarts ≥ 1`); **`confirm_launch`
   the only ledger writer** (structural over `record_retry(` callers), never sensing, from a plan with the
-  pre-launch values, from a marker only when `invocation` matches the live one and the served window equals
+  pre-launch values, from a marker only when `invocation` matches the live one and the live argv's `-c` equals
   `planned_context`, `dropped` from the live argv (a marker claiming `dropped: []` beside an argv without
   `--spec-type` records `draft-mtp`), fit values clamped, any matching marker removed, a non-matching one
   left; `start` calling it only when a marker exists; the ledger read under a cap; the pidfile and

@@ -546,7 +546,7 @@ class Boot:
         from localharness.provider.autosense import FIT_KEYS, fit_header
 
         self.header = fit_header(read_header(self.record.spec.model, FIT_KEYS))
-        fake_proc.process(4242, argv=(LLAMA, "-a", "flash-next", "--port", "8081"), exe=LLAMA,
+        fake_proc.process(4242, argv=(LLAMA, "-a", "flash-next", "-c", "40000", "--port", "8081"), exe=LLAMA,
                           start_time=777)
         _pidfile(home, "4242 777 8081")
 
@@ -657,7 +657,7 @@ def test_boot_clause_is_not_fooled_by_a_marker_that_claims_dropped_work(boot):
     proc_dir = os.path.join(procfs.PROC_ROOT, "4242")
     with open(os.path.join(proc_dir, "cmdline"), "wb") as fh:
         fh.write(b"\0".join(a.encode() for a in (
-            LLAMA, "-a", "flash-next", "--port", "8081", "--spec-type", "draft-mtp")) + b"\0")
+            LLAMA, "-a", "flash-next", "-c", "40000", "--port", "8081", "--spec-type", "draft-mtp")) + b"\0")
     got = boot.clause()
     assert got is not None and "mtp off" not in got
     assert got.startswith("retried at boot: -c halved")
@@ -673,7 +673,7 @@ def test_boot_clause_for_the_primary_names_server_speculative(home, tmp_path, fa
     harness = load(home)
     primary = record(harness, PRIMARY)
     key = lifecycle.record_key(primary.spec)
-    fake_proc.process(4242, argv=(LLAMA, "-a", PRIMARY, "--port", "8080"), exe=LLAMA, start_time=777)
+    fake_proc.process(4242, argv=(LLAMA, "-a", PRIMARY, "-c", "40000", "--port", "8080"), exe=LLAMA, start_time=777)
     _pidfile(home, "4242 777 8080")
     from localharness.agent.gguf_header import read_header
     from localharness.provider.autosense import FIT_KEYS, fit_header
