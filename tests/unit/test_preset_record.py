@@ -8,14 +8,16 @@ from __future__ import annotations
 import pytest
 
 from localharness.config.models import (
-    LLAMACPP_ONLY_FIELDS,
     EffortLevel,
     EndpointRef,
     HarnessConfig,
     ManagedServerConfig,
     ProviderConfig,
 )
+from localharness.provider.runtimes import RUNTIMES
 from tests.unit.test_floor_machine_level import _layers
+
+LLAMACPP_ONLY_FIELDS = RUNTIMES["llamacpp"].record_fields
 
 GGUF = "~/models/gguf/Swift-1.5-Qwen3.8-27B-NVFP4-Q8mix.gguf"
 LLAMA_SERVER = "/home/awurm/src/llama.cpp/build/bin/llama-server"
