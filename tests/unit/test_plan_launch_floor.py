@@ -1,12 +1,18 @@
 """The launch plan prices its window (or refuses) before anything starts: Flash-Next, the modes, the floor and the retry."""
 from __future__ import annotations
 
+import os
+import shutil
+from pathlib import Path
+
 import pytest
 
+from localharness.agent import context as agent_context
 from localharness.config.models import AutosenseConfig, ManagedServerConfig
 from localharness.provider import autosense, lifecycle, server
 from localharness.provider.autosense import FreeMemory
 from tests.unit.gguf_support import load_fixture, write_recorded, write_sparse
+from tests.unit.launch_support import popen  # noqa: F401
 
 GIB = 2**30
 AUTO = AutosenseConfig()
@@ -180,3 +186,102 @@ def test_every_activate_takes_a_floor(strategy):
     import inspect
 
     assert inspect.signature(strategy.activate).parameters["floor"].default is None
+
+
+CHECKPOINT = Path(__file__).resolve().parents[1] / "fixtures" / "vllm_checkpoints" / "nvidia-qwen3.8-27b-nvfp4"
+SAFETENSORS = 21_921_697_280
+GPU_TOTAL = int(31.8 * GIB)
+
+
+def _vllm(tmp_path, *, weights=SAFETENSORS, **over):
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir(exist_ok=True)
+    shutil.copy(CHECKPOINT / "config.json", ckpt / "config.json")
+    for i in range(2):
+        write_sparse(ckpt / f"model-0000{i + 1}-of-00002.safetensors", weights // 2)
+    return ManagedServerConfig(**{"runtime": "vllm", "launch": "binary", "binary": "/x/vllm", "model": str(ckpt), **over})
+
+
+def _gpu(monkeypatch, total=GPU_TOTAL):
+    monkeypatch.setattr(autosense, "free_memory", lambda ratios: FreeMemory(total, total, "nvidia-smi"))
+
+
+def test_a_vllm_checkpoint_plans_max_model_len_from_its_config_and_its_safetensors(tmp_path, monkeypatch):
+    _gpu(monkeypatch)
+    plan = _plan(_vllm(tmp_path), tmp_path)
+    argv = list(plan.argv)
+    assert _pair(argv, "--max-model-len") == "100864" and "--trust-remote-code" not in argv
+    assert plan.report.mode == "fit" and plan.report.runtime == "vllm" and plan.report.placement.where == "vllm"
+
+
+def test_the_flag_a_record_or_extra_args_set_wins_and_is_never_doubled(tmp_path, monkeypatch):
+    _gpu(monkeypatch)
+    extra = _plan(_vllm(tmp_path, extra_args=["--max-model-len", "8192"]), tmp_path)
+    assert extra.report.mode == "extra_args" and list(extra.argv).count("--max-model-len") == 1
+    assert _pair(list(extra.argv), "--max-model-len") == "8192"
+    record = _plan(_vllm(tmp_path, context=32_768), tmp_path)
+    assert record.report.mode == "record" and _pair(list(record.argv), "--max-model-len") == "32768"
+    with pytest.raises(server.LaunchRefused, match=r"is set to a 4,096-token window \(context:\)"):
+        _plan(_vllm(tmp_path, context=4096), tmp_path, FLOOR)
+
+
+def test_weights_beyond_the_gpu_budget_are_refused_before_a_start(tmp_path, monkeypatch):
+    _gpu(monkeypatch)
+    with pytest.raises(server.LaunchRefused, match=r"ckpt cannot run here: 30.0 GiB of weights, and vLLM keeps them all"):
+        _plan(_vllm(tmp_path, weights=30 * GIB), tmp_path)
+
+
+def test_a_vllm_window_under_the_floor_is_the_floor_sentence(tmp_path, monkeypatch):
+    _gpu(monkeypatch)
+    with pytest.raises(server.LaunchRefused, match="ckpt fits only a 100,864-token window here and the harness needs at least 150,000"):
+        _plan(_vllm(tmp_path), tmp_path, 150_000)
+
+
+def test_the_vllm_retry_halves_under_the_same_floor_rule_and_drops_the_parsers(tmp_path, monkeypatch):
+    _gpu(monkeypatch)
+    retry = _plan(_vllm(tmp_path), tmp_path).retry()
+    assert _pair(list(retry.argv), "--max-model-len") == "50432" and "--reasoning-parser" not in retry.argv
+    held = _plan(_vllm(tmp_path), tmp_path, 60_000).retry()
+    assert _pair(list(held.argv), "--max-model-len") == "100864" and "--reasoning-parser" not in held.argv
+
+
+def test_a_checkpoint_without_safetensors_or_a_gpu_reading_is_not_computed(tmp_path, monkeypatch):
+    _gpu(monkeypatch)
+    spec = _vllm(tmp_path)
+    for f in Path(spec.model).glob("*.safetensors"):
+        f.unlink()
+    assert _plan(spec, tmp_path).report.mode == "not-computed"
+    monkeypatch.setattr(autosense, "free_memory", lambda ratios: None)
+    assert "--max-model-len" not in _plan(_vllm(tmp_path), tmp_path).argv
+
+
+def test_checkpoint_bytes_sums_the_regular_safetensors_and_follows_a_link_for_its_size_only(tmp_path):
+    assert autosense.checkpoint_bytes(tmp_path) is None
+    (tmp_path / "blobs").mkdir()
+    write_sparse(tmp_path / "blobs" / "abc", 1_000)
+    os.symlink(tmp_path / "blobs" / "abc", tmp_path / "model.safetensors")
+    write_sparse(tmp_path / "other.safetensors", 24)
+    write_sparse(tmp_path / "model.bin", 99)
+    (tmp_path / "dir.safetensors").mkdir()
+    assert autosense.checkpoint_bytes(tmp_path) == 1_024
+    assert autosense.checkpoint_bytes(tmp_path / "missing") is None
+
+
+async def test_a_vllm_launch_reports_the_window_the_server_serves(tmp_path, monkeypatch, popen):
+    _gpu(monkeypatch)
+
+    async def wait_ready(base_url, **kw):
+        return ["ckpt"]
+
+    probed = []
+
+    def probe_window(base_url, model, provider_type=None, *, api_key=None):
+        probed.append((model, provider_type))
+        return agent_context.WindowProbe(100_864, 100_864)
+
+    monkeypatch.setattr(server, "wait_ready", wait_ready)
+    monkeypatch.setattr(agent_context, "probe_window", probe_window)
+    live = await lifecycle.ManagedVllmStrategy().activate(_vllm(tmp_path), tmp_path, BASE, autosense=AUTO)
+    assert probed == [("ckpt", "vllm")]
+    assert (live.window.served, live.window.fits, live.window.asked, live.window.verified) == (100_864, 100_864, 100_864, True)
+    assert _pair(popen[0]["cmd"], "--max-model-len") == "100864"
