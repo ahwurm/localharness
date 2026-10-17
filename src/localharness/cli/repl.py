@@ -31,6 +31,7 @@ from localharness.core.events import (
     PermissionStaged,
     UserMessage,
 )
+from localharness.provider.runtimes import RUNTIMES, row_of
 
 log = logging.getLogger(__name__)
 
@@ -1813,7 +1814,7 @@ class OrchestratorREPL:
                     strategy_for(managed, unit=self._unit_state).liveness(managed, self._server_config_dir).alive)
             except Exception:  # noqa: BLE001 — a liveness that cannot be asked claims nothing
                 claimed = False
-        if claimed and managed is not None and getattr(managed, "runtime", None) == "llamacpp":
+        if claimed and getattr(row_of(getattr(managed, "runtime", None)), "gguf", False):
             claimed = self._pidfile_process_holds(port)
         if claimed:
             return None
@@ -2182,8 +2183,9 @@ class OrchestratorREPL:
         # regular .gguf the person typed. Anything else (a local_models name, an HF-cache repo id) is
         # answered in one line as the first statement of the fallthrough (D-58) — before the launch
         # decision, the rebind-back or any stop — so nothing is launched, stopped or rebound.
+        gguf = RUNTIMES[managed.runtime].gguf
         typed_gguf = Path(target).expanduser().is_file() and target.lower().endswith(".gguf")
-        if managed.runtime == "llamacpp" and target != prim_served and not typed_gguf:
+        if gguf and target != prim_served and not typed_gguf:
             await self._send_info(NOT_A_GGUF_LINE.format(target=target))
             return
         # A process the harness did not launch holding the primary's port ends the restart in the same
@@ -2219,9 +2221,9 @@ class OrchestratorREPL:
         from localharness.provider import lifecycle as _lifecycle
         from localharness.provider.lifecycle import free_accelerator
         strategy = _lifecycle.strategy_for(managed, unit=self._unit_state)
-        typed_swap = managed.runtime == "llamacpp" and typed_gguf and target != prim_served
+        typed_swap = gguf and typed_gguf and target != prim_served
         if isinstance(strategy, _lifecycle.UnitStrategy) and (
-                typed_swap or (managed.runtime != "llamacpp" and target != prim_served)):
+                typed_swap or (not gguf and target != prim_served)):
             await self._channel.send_message(
                 _lifecycle.UNIT_TYPED_LINE.format(path=target), metadata={"style": "system.error"})
             return
@@ -2293,7 +2295,7 @@ class OrchestratorREPL:
                 # (a llama.cpp alias never reaches -m; a vLLM --served-model-name alias never becomes
                 # the vLLM model, D-70). Only a name other than the primary's (non-llama.cpp), or a typed
                 # regular .gguf (llama.cpp, named in memory only, never persisted), changes the model.
-                if managed.runtime != "llamacpp" and target != prim_served:
+                if not gguf and target != prim_served:
                     managed.model = target
                 elif typed_swap:
                     # A copy for the launch: the shared record (the primary's served name, the listing,
@@ -2344,7 +2346,7 @@ class OrchestratorREPL:
         note = await self._refresh_token_counter(served)
         # Swapping back to a non-llama.cpp primary by a served-model-name alias relaunched the record
         # as written; persisting the alias would write it over server.model (D-70), so nothing is.
-        alias_swap_back = (managed.runtime != "llamacpp" and target == prim_served
+        alias_swap_back = (not gguf and target == prim_served
                            and managed.model != target)
         saved = (False if alias_swap_back or typed_swap
                  else await self._persist_landed(llm.config.base_url, served))
