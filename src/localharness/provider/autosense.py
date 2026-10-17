@@ -375,7 +375,7 @@ def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name
     """Experts on the GPU first, in RAM when that misses the floor; the whole file on the GPU without a split."""
     gpu = split.gpu + mmproj if split else weights
     experts = split.experts if split else 0
-    margin = int(autosense.compute_margin_ratio * gpu)
+    margin = int(autosense.compute_margin_ratio * gpu) + int(autosense.compute_reserve * 2**30)
     kv = kv_bytes_per_token(header, cache_type_k, cache_type_v, split)
     kv = kv * share if kv is not None else None
     trained = _pos_int(header.get("context_length"))

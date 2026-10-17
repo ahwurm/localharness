@@ -11,6 +11,7 @@ from localharness.provider import autosense
 from localharness.provider.autosense import FIT_KEYS, fit_header, read_split
 from localharness.provider.gguf_header import read_header
 from tests.unit.gguf_support import load_fixture, write_recorded
+from tests.unit.test_floor_machine_level import _layers, _warnings
 
 FLASH, SWIFT, NVIDIA = "flash-next-iq3-xxs", "swift-27b-nvfp4-q8mix", "nvidia-27b-nvfp4"
 GIB = 2**30
@@ -30,11 +31,11 @@ def _mem(available_gib):
     return {"MemTotal": MEM_TOTAL, "MemAvailable": int(available_gib * GIB)}
 
 
-def _place_27b(tmp_path, free, *, name=SWIFT, mmproj=SWIFT_MMPROJ, header_over=None, **kw):
+def _place_27b(tmp_path, free, *, name=SWIFT, mmproj=SWIFT_MMPROJ, header_over=None, auto=AUTO, **kw):
     split, header = _model(tmp_path, name)
     return autosense.place_llamacpp(
         split, {**header, **(header_over or {})}, name="Swift-27B", weights=0, mmproj=mmproj, free_bytes=free,
-        meminfo=_mem(52.9), cache_type_k="q8_0", cache_type_v="q8_0", share=1 + 1 / 16, autosense=AUTO, **kw)
+        meminfo=_mem(52.9), cache_type_k="q8_0", cache_type_v="q8_0", share=1 + 1 / 16, autosense=auto, **kw)
 
 
 def _place_flash(tmp_path, available_gib, free=int(30.2 * GIB), **kw):
@@ -44,14 +45,26 @@ def _place_flash(tmp_path, available_gib, free=int(30.2 * GIB), **kw):
         meminfo=_mem(available_gib), cache_type_k="q8_0", cache_type_v="q8_0", share=1.0, autosense=AUTO, **kw)
 
 
-def test_the_swift_27b_prices_296960_before_the_cap_and_fits_the_trained_window_on_the_gpu(tmp_path):
+def test_the_swift_27b_prices_209920_with_the_reserve_held_back_and_the_trained_window_without_it(tmp_path):
     free = int(30.2 * GIB)
-    uncapped = _place_27b(tmp_path, free, header_over={"context_length": 10**9})
-    assert uncapped.fits == 296_960
     placed = _place_27b(tmp_path, free)
-    assert (placed.fits, placed.where, placed.experts_ram, placed.refusal) == (262_144, "gpu", 0, None)
+    assert (placed.fits, placed.where, placed.experts_ram, placed.refusal) == (209_920, "gpu", 0, None)
+    flat = AutosenseConfig(compute_reserve=0.0)
+    assert _place_27b(tmp_path, free, header_over={"context_length": 10**9}, auto=flat).fits == 296_960
+    assert _place_27b(tmp_path, free, auto=flat).fits == 262_144
     assert placed.mmproj == SWIFT_MMPROJ and placed.gpu_bytes == 18_562_465_856 + SWIFT_MMPROJ
     assert placed.kv_per_token == 34_816 * (1 + 1 / 16)
+
+
+def test_the_compute_reserve_is_three_gib_bounded_and_machine_level(tmp_path):
+    assert AutosenseConfig().compute_reserve == 3.0
+    for bad in (-1, 65):
+        with pytest.raises(ValueError):
+            AutosenseConfig(compute_reserve=bad)
+    assert AutosenseConfig(compute_reserve=0).compute_reserve == 0
+    loader, ws = _layers(tmp_path, ws_cfg={"autosense": {"compute_reserve": 0.0}})
+    assert loader.load_harness().autosense.compute_reserve == 3.0
+    assert _warnings(loader) == [f"ignoring autosense in {ws / 'config.yaml'}: only the global config may set it"]
 
 
 def test_flash_next_puts_its_experts_in_ram_and_gives_the_prompt_cache_what_is_left(tmp_path):
@@ -83,7 +96,7 @@ def test_an_unreadable_meminfo_gives_no_cache_ram_on_the_gpu(tmp_path):
 
 
 def _free_for(window, *, gpu=18_562_465_856 + SWIFT_MMPROJ, kv=36_992):
-    return gpu + int(AUTO.compute_margin_ratio * gpu) + window * kv
+    return gpu + int(AUTO.compute_margin_ratio * gpu) + int(AUTO.compute_reserve * GIB) + window * kv
 
 
 def test_the_ram_refusal_is_one_sentence_at_the_episodes_figures(tmp_path):
@@ -127,7 +140,7 @@ def test_a_hand_set_ngl_with_experts_beyond_the_gpu_is_refused_and_a_fitting_mod
         "Flash-Next sets -ngl in server.extra_args, which turns llama-server's --fit off, and its experts do not "
         "fit the GPU — drop the -ngl, or add --n-cpu-moe to extra_args.")
     ok = _place_27b(tmp_path, int(30.2 * GIB), ngl_hand=True)
-    assert (ok.fits, ok.refusal) == (262_144, None)
+    assert (ok.fits, ok.refusal) == (209_920, None)
 
 
 def test_a_window_under_the_floor_is_the_floor_refusal(tmp_path):
@@ -146,7 +159,8 @@ def test_a_window_exactly_at_the_floor_is_placed_and_one_step_below_is_refused(t
 
 def test_a_gpu_window_under_the_floor_moves_the_experts_to_ram(tmp_path):
     split, _ = _model(tmp_path, FLASH)
-    free = split.gpu + FLASH_MMPROJ + int(AUTO.compute_margin_ratio * (split.gpu + FLASH_MMPROJ)) + 20_000 * 16_320
+    gpu = split.gpu + FLASH_MMPROJ
+    free = gpu + int(AUTO.compute_margin_ratio * gpu) + int(AUTO.compute_reserve * GIB) + 20_000 * 16_320
     placed = _place_flash(tmp_path, 52.9, free=free, floor=15_360)
     assert (placed.where, placed.fits) == ("experts in RAM", 19_968) and placed.refusal is None
     on_gpu = _place_flash(tmp_path, 52.9, free=free + split.experts, floor=15_360)

@@ -19,6 +19,7 @@ GIB = 2**30
 AUTO = AutosenseConfig()
 MEM_TOTAL = 64_139_128 * 1024
 FLASH_MMPROJ = 907_543_520
+SWIFT_MMPROJ = 927_606_912
 BASE = "http://127.0.0.1:8080/v1"
 
 
@@ -33,6 +34,13 @@ def _flash(tmp_path, **over):
     mmproj = write_sparse(tmp_path / "mmproj.gguf", FLASH_MMPROJ)
     return ManagedServerConfig(**{"runtime": "llamacpp", "binary": "/x/llama-server", "model": str(model),
                                   "mmproj": str(mmproj), "served_name": "Flash-Next", "port": 8080, **over})
+
+
+def _swift(tmp_path, **over):
+    model = write_recorded(tmp_path, load_fixture("swift-27b-nvfp4-q8mix"))[0]
+    mmproj = write_sparse(tmp_path / "mmproj.gguf", SWIFT_MMPROJ)
+    return ManagedServerConfig(**{"runtime": "llamacpp", "binary": "/x/llama-server", "model": str(model),
+                                  "mmproj": str(mmproj), "served_name": "Swift-27B", "port": 8080, **over})
 
 
 def _plan(spec, config_dir, floor=None):
@@ -51,6 +59,12 @@ def test_flash_next_plans_its_window_with_the_experts_in_ram(tmp_path, monkeypat
     argv = list(plan.argv)
     assert _pair(argv, "-c") == "262144" and _pair(argv, "--cache-ram") == "3849" and "--fit-ctx" not in argv
     assert plan.report.mode == "fit" and plan.report.placement.where == "experts in RAM"
+
+
+def test_a_dense_27b_at_the_boxs_free_figure_plans_the_window_that_stays_resident(tmp_path, monkeypatch):
+    _world(monkeypatch)
+    plan = _plan(_swift(tmp_path), tmp_path)
+    assert _pair(list(plan.argv), "-c") == "209920" and plan.report.placement.where == "gpu"
 
 
 def test_no_mmap_in_extra_args_shrinks_the_priced_prompt_cache(tmp_path, monkeypatch):
@@ -90,7 +104,7 @@ KV = 16_320
 
 def _free_for(window):
     gpu = FLASH_GPU + FLASH_MMPROJ
-    return gpu + int(AUTO.compute_margin_ratio * gpu) + window * KV
+    return gpu + int(AUTO.compute_margin_ratio * gpu) + int(AUTO.compute_reserve * GIB) + window * KV
 
 
 def test_a_priced_window_exactly_at_the_floor_launches_and_one_step_below_is_the_floor_sentence(tmp_path, monkeypatch):

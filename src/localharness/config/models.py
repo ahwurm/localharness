@@ -2584,6 +2584,10 @@ class AutosenseConfig(BaseModel):
     compute_margin_ratio: float = Field(default=0.10, gt=0.0, le=1.0, description=(
         "Share of the weights' bytes held back for compute buffers when the harness sizes a "
         "window."))
+    compute_reserve: float = Field(default=3.0, ge=0.0, le=64.0, description=(
+        "GiB of GPU memory held back beside compute_margin_ratio for what a llama.cpp launch's bytes "
+        "do not price: compute buffers and the CUDA context (about 2.7 GiB measured on a dense 27B at "
+        "131,072 tokens)."))
     template_margin_ratio: float = Field(default=1 / 64, gt=0.0, le=1.0, description=(
         "Share of the window held back for chat-template overhead (default 1/64 of the window). "
         "Applies to the main agent's loop; subagents and the bench keep 1/64."))
