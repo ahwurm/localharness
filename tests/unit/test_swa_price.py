@@ -6,9 +6,9 @@ import pytest
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import autosense, lifecycle, server
 from localharness.provider.autosense import (FIT_KEYS, FreeMemory, WindowReport, fit_header, read_split,
-                                             swa_bytes_per_cell, swa_pattern)
+                                             swa_bytes_per_cell, swa_cells_cap, swa_pattern)
 from localharness.provider.gguf_header import kv_layer_ids, read_header, read_tensor_table
-from tests.unit.gguf_support import load_fixture, write_recorded
+from tests.unit.gguf_support import load_fixture, write_gguf, write_recorded
 from tests.unit.test_fit_price import AUTO, GIB, NVIDIA, SWIFT, FLASH, _mem, _model
 
 GEMMA = "gemma4-31b-q4-k-m"
@@ -123,3 +123,62 @@ def test_a_model_without_sliding_window_keys_prices_as_before(tmp_path, name):
     assert (split.swa, split.heads_full, split.heads_swa) == (0, 0, 0)
     assert swa_bytes_per_cell(header, "q8_0", "q8_0", split) == 0
     assert swa_pattern(header) is None
+
+
+def _toy(tmp_path, pattern, layers=12):
+    kv = {"general.architecture": "toy", "toy.block_count": layers, "toy.context_length": 32768,
+          "toy.embedding_length": 64, "toy.attention.head_count": 4, "toy.attention.head_count_kv": 2,
+          "toy.attention.key_length": 16, "toy.attention.sliding_window": 1024,
+          "toy.attention.sliding_window_pattern": pattern}
+    tensors = [("token_embd.weight", [8], 0, 0)] + [(f"blk.{i}.attn_k.weight", [8], 0, 32 * (i + 1)) for i in range(layers)]
+    path = write_gguf(tmp_path / "toy.gguf", kv, tensors=tensors, data_bytes=32 * (layers + 1))
+    header = fit_header(read_header(path, FIT_KEYS))
+    return header, read_split(path, header)
+
+
+def _largest(room, kv, swa, cap):
+    fits = lambda w: w * kv + min(w, cap) * swa <= room  # noqa: E731
+    return max(w for w in range(0, 20_000, 256) if fits(w))
+
+
+@pytest.mark.parametrize("room", [4_500_000, 3_000_000, 2_000_000, 9_000_000, 20_000_000])
+def test_the_window_is_the_largest_multiple_of_256_the_full_and_the_capped_sliding_cells_fit(room):
+    kv, swa, cap = 1_000, 500, 4_608
+    assert autosense._window(room, kv, 10**9, swa, cap) == _largest(room, kv, swa, cap)
+
+
+def test_a_window_below_the_cells_pays_for_every_sliding_cell_it_holds():
+    kv, swa, cap = 1_000, 500, 4_608
+    w = autosense._window(4_500_000, kv, 10**9, swa, cap)
+    assert w < cap and w * (kv + swa) <= 4_500_000 < (w + 256) * (kv + swa)
+
+
+def test_swa_full_prices_every_layer_at_the_window(tmp_path):
+    assert swa_cells_cap(1024, ["--swa-full"]) is None
+    assert autosense._window(9_000_000, 1_000, 10**9, 500, None) == 9_000_000 // 1_500 // 256 * 256
+    placed = _place(tmp_path, ["--swa-full"])
+    assert placed.fits == 17_920 and placed.swa_bytes == 17_920 * 435_200
+
+
+def test_an_int_pattern_leaves_every_nth_layer_full(tmp_path):
+    header = {"block_count": 12, "sliding_window": 1024, "sliding_window_pattern": 6}
+    assert [i for i, sliding in enumerate(swa_pattern(header)) if not sliding] == [5, 11]
+    _, split = _toy(tmp_path, 6)
+    assert (split.kv_main, split.swa, split.heads_full, split.heads_swa) == (12, 10, 0, 0)
+
+
+@pytest.mark.parametrize("extra,cells", [
+    ([], 4_608), (["-np", "2"], 3_072), (["-np", "2", "--kv-unified"], 2_560), (["--parallel=2", "-kvu"], 2_560),
+    (["-np", "1"], 1_536), (["-np", "2", "-ub", "1024"], 4_096), (["-ub", "256"], 4_352), (["-np", "-1"], 4_608),
+    (["-np", "abc"], 4_608),
+])
+def test_the_sliding_cache_holds_what_llama_cpp_allocates_for_the_slots(extra, cells):
+    assert swa_cells_cap(1024, extra) == cells
+
+
+@pytest.mark.parametrize("pattern", [[1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0], [True, False] * 5, "ssssss", [], True, 0])
+def test_a_pattern_it_cannot_read_leaves_every_layer_full_priced_as_before(tmp_path, pattern):
+    header, split = _toy(tmp_path, pattern)
+    assert swa_pattern({**header, "sliding_window_pattern": pattern}) is None
+    assert split.swa == 0 and swa_bytes_per_cell(header, "q8_0", "q8_0", split) == 0
+    assert autosense.kv_bytes_per_token(header, "f16", "f16", split) == 12 * 2 * 16 * 4
