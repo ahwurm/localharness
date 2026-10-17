@@ -32,7 +32,7 @@ import math
 import os
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1922,6 +1922,22 @@ async def _roll_back(
     return label, why
 
 
+def own_launch(config_dir: Path, specs: "Iterable[ManagedServerConfig | None]") -> procfs.Launch | None:
+    """The harness's verified live launch of one of `specs` under `config_dir`, if any."""
+    launches = (procfs.read_launch(config_dir, expect=record_identity(spec)) for spec in specs if spec is not None)
+    return next((launch for launch in launches if launch is not None and launch.verified), None)
+
+
+def memory_after_launch(
+    autosense: "AutosenseConfig", launch: procfs.Launch | None, *, stopping: bool = False,
+) -> "_auto.FreeMemory | None":
+    """Free memory once `launch` is stopped; with none, the probe itself, or the card less 1 GiB when `stopping` an incumbent anyway."""
+    free = _auto.free_memory(autosense)
+    if launch is None and not stopping:
+        return free
+    return _auto.memory_after_stop(free, None if launch is None else _auto.held_by(launch.pid))
+
+
 def swap_refusal(
     target: Heavy, incumbent: Heavy | None, *, config_dir: Path, autosense: "AutosenseConfig | None",
     floor: int | None, unit: Any = None,
@@ -1936,9 +1952,7 @@ def swap_refusal(
         return None
     seen = {}
     if incumbent is not None:
-        launch = procfs.read_launch(config_dir, expect=record_identity(incumbent.spec))
-        held = _auto.held_by(launch.pid) if launch is not None and launch.verified else None
-        seen["memory"] = _auto.memory_after_stop(_auto.free_memory(autosense), held)
+        seen["memory"] = memory_after_launch(autosense, own_launch(config_dir, [incumbent.spec]), stopping=True)
     try:
         plan_launch(spec, sense_launch(spec, config_dir, autosense, **seen), decision,
                     autosense=autosense, api_key_held=keyed, floor=floor)

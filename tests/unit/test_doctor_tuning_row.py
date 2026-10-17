@@ -62,11 +62,11 @@ def _flash(world, name: str = "flash-next", port: int = 8082) -> dict:
     return peer
 
 
-def _fitted(world, index: int | None = None) -> int:
+def _fitted(world, index: int | None = None, **sensing) -> int:
     harness = ConfigLoader(config_dir=world.g, local_config_dir=None).load_harness()
     spec = harness.server if index is None else harness.extra_endpoints[index].lifecycle
     plan = lifecycle.plan_launch(
-        spec, lifecycle.sense_launch(spec, world.g, harness.autosense), server.launch_decision(spec, False),
+        spec, lifecycle.sense_launch(spec, world.g, harness.autosense, **sensing), server.launch_decision(spec, False),
         autosense=harness.autosense, api_key_held=False)
     return plan.full_fit
 
@@ -275,3 +275,20 @@ def test_a_vllm_checkpoint_shows_its_weights_and_the_vllm_budget(tmp_path, monke
 
     assert _rows(_doctor(world))[0].endswith("--max-model-len 100864 (fit) · weights 20.4 GiB · vLLM budget 28.6 GiB")
 
+
+
+def test_a_verified_launch_of_the_harnesss_own_lends_the_row_the_memory_it_holds(world, monkeypatch):
+    from localharness.provider import autosense, procfs
+
+    monkeypatch.setattr(autosense, "free_memory", lambda ratios: autosense.FreeMemory(5 * GIB, 48 * GIB, "nvidia-smi"))
+    monkeypatch.setattr(autosense, "held_by", lambda pid: 30 * GIB if pid == 4321 else None)
+    monkeypatch.setattr(procfs, "read_launch", lambda cfg, **kw: None)
+    assert _rows(_doctor(world)) == [
+        "Tuning: swift — swift cannot run here: it needs 18.0 GiB of GPU memory and 5.0 GiB is free — stop what "
+        "holds the GPU, or pick a smaller quant."]
+
+    monkeypatch.setattr(procfs, "read_launch",
+                        lambda cfg, *, expect=None, **kw: procfs.Launch(4321, None, 8080, "spawned", expect is not None))
+
+    fitted = _fitted(world, memory=autosense.FreeMemory(35 * GIB, 48 * GIB, "nvidia-smi"))
+    assert _rows(_doctor(world)) == [f"Tuning: swift — kv q8_0 · mtp (1 layer) · -c {fitted} (fit){UNREAD}"]
