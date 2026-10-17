@@ -2194,7 +2194,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         reporter = start_serving.ConsoleSwapReporter(err_console.print, harness, provider.api_key)
         outcome = await start_serving.run_swap(
             harness, incumbent, serving, config_dir=server_cfg_path, autosense=harness.autosense,
-            reporter=reporter, redact=reporter.redact, on_plan=on_plan, on_wait=say_lock_wait, unit=_unit)
+            reporter=reporter, redact=reporter.redact, on_plan=on_plan, on_wait=say_lock_wait, unit=_unit,
+            floor=_floor)
         if outcome.error is not None:
             await _stop_start(1)  # the reporter already said why, redacted
         _launched.append(outcome.live)

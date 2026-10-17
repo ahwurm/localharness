@@ -445,6 +445,7 @@ async def run_swap(
     on_poll: Callable[[float], None] | None = None,
     on_wait: Callable[[], Any] | None = None,
     unit: Any = None,
+    floor: int | None = None,
 ) -> lifecycle.SwapOutcome:
     """Stop ``incumbent`` (a record whose server runs, or None) and launch ``target`` (the trust-
     resolved ``Serving``), holding the launch lock around the whole swap (D-21). ``redact`` is handed
@@ -459,4 +460,4 @@ async def run_swap(
     async with lifecycle.launch_lock(config_dir, on_wait=on_wait):
         return await lifecycle.swap(
             incumbent_heavy, target_heavy, config_dir=config_dir, autosense=autosense,
-            reporter=reporter, redact=redact, on_poll=on_poll, on_plan=on_plan, unit=unit)
+            reporter=reporter, redact=redact, on_poll=on_poll, on_plan=on_plan, unit=unit, floor=floor)
