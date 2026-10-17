@@ -503,6 +503,22 @@ def _figures(plan) -> str | None:
     return " · ".join(parts) or None
 
 
+LIVE_MTP_ON = "serving now: mtp on"
+LIVE_MTP_OFF = "serving now: mtp off"
+
+
+def _live_mtp(cfg_path: Path, spec) -> str | None:
+    """Whether the record's verified live process drafts, from its own argv; None when none is live or readable."""
+    from localharness.provider import autosense, lifecycle, procfs
+
+    if not RUNTIMES[spec.runtime].gguf or (launch := lifecycle.own_launch(cfg_path, [spec])) is None:
+        return None
+    rec = procfs.read_process(launch.pid)
+    if not isinstance(rec, procfs.ProcRecord):
+        return None
+    return LIVE_MTP_ON if autosense.spec_type_flag(list(rec.argv), {}) == "draft-mtp" else LIVE_MTP_OFF
+
+
 def _tuning_rows(cfg_path: Path, harness: HarnessConfig) -> list[str]:
     """One `Tuning:` row per llama.cpp or vLLM record: what its next launch derives, judged against the machine record as it stands. Decides no trust, prepares nothing, starts nothing, writes nothing."""
     from localharness.cli import model_ops
@@ -535,7 +551,8 @@ def _tuning_rows(cfg_path: Path, harness: HarnessConfig) -> list[str]:
         derived = tuning.derived_clause(
             plan.tuned, shape=plan.shape, cause=plan.cause, dropped=plan.dropped,
             remembered_at=plan.remembered_at) or "nothing derived"
-        rows.append(head + " · ".join(part for part in (derived, _window_part(plan), _figures(plan)) if part))
+        parts = (derived, _window_part(plan), _figures(plan), _live_mtp(cfg_path, spec))
+        rows.append(head + " · ".join(part for part in parts if part))
     return rows
 
 
