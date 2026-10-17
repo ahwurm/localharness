@@ -45,9 +45,9 @@ def _probe(key: str) -> Callable[..., Any]:
     return probe
 
 
-def _size_llamacpp(spec: Any, sensed: Any, tuned: Any, autosense: Any) -> Any:
-    from localharness.provider import lifecycle
-    return lifecycle._size_llamacpp(spec, sensed, tuned, autosense)
+def _price_llamacpp(spec: Any, sensed: Any, tuned: Any, autosense: Any) -> Any:
+    from localharness.provider import autosense as _auto
+    return _auto.price_llamacpp(spec, sensed, tuned, autosense)
 
 
 def _parsers() -> Mapping:
@@ -61,7 +61,7 @@ RUNTIMES: Mapping[str, Runtime] = MappingProxyType({
     "llamacpp": Runtime(
         name="llama.cpp", strategy=_strategy("SpawnedProcessStrategy"),
         unit_servable=lambda spec: True, label=lambda spec: "llama.cpp",
-        key_env="LLAMA_API_KEY", probe=_probe("llamacpp"), price=_size_llamacpp, facts=None,
+        key_env="LLAMA_API_KEY", probe=_probe("llamacpp"), price=_price_llamacpp, facts=None,
         record_fields=("mmproj", "served_name", "cache_type_k", "cache_type_v", "cache_ram",
                        "api_key_file", "env", "config_ini", "speculative"),
         gguf=True, checkpoint=False, path_binary="llama-server", exposed_by_default=False,

@@ -320,7 +320,8 @@ def record_identity(spec: ManagedServerConfig) -> LaunchIdentity | None:
     if identity is None:
         return None
     tokens: tuple[str, ...] = ()
-    if spec.runtime == "vllm" and spec.launch == "docker":
+    row = RUNTIMES[spec.runtime]
+    if row.checkpoint and spec.launch == "docker":
         # Every docker record runs under the one container name, so the record is told apart by what
         # the `docker run` line says of it: the model it mounts and serves, and the port it publishes
         # (127.0.0.1:<port>:8000 when bound to loopback, <port>:8000 otherwise).
@@ -329,12 +330,12 @@ def record_identity(spec: ManagedServerConfig) -> LaunchIdentity | None:
         return dataclasses.replace(
             identity, argv_contains=identity.argv_contains + tokens,
             argv_one_of=((f"127.0.0.1:{spec.port}:8000", f"{spec.port}:8000"),))
-    if spec.runtime == "llamacpp":
+    if row.gguf:
         if spec.served_name is not None:
             tokens = ("-a", spec.served_name)
         else:
             tokens = ("-m", os.path.expanduser(str(spec.model)))
-    elif spec.runtime == "vllm" and spec.launch != "docker":
+    elif row.checkpoint:
         entry = spec.entry_for(spec.model)
         tokens = (str(Path(entry.path).expanduser()) if entry is not None else str(spec.model),)
     if not tokens:
@@ -386,12 +387,13 @@ def sense_launch(
     another binary or past the window is ignored here and replaced by the next one `serve` writes, never
     removed by sensing) and sets `marker` and `prior_death` from `boot_prior_death`, with the unit's own
     `TimeoutStartSec` as the window. `now` is the clock for that age test (UTC now when None)."""
-    if spec.runtime == "llamacpp":
+    row = RUNTIMES[spec.runtime]
+    if row.gguf:
         fi = _auto.compute_fit(spec, autosense, meminfo=True)  # its `fits` is priced without the derived types: unused
         remembered = speed_stats.last_retry(speed_stats.default_speed_stats_path(config_dir), record_key(spec))
         sensed = Sensed(spec.runtime, config_dir, fi.header, fi.offload, fi.memory, fi.weights, fi.meminfo,
                         remembered=remembered)
-    elif spec.runtime == "vllm":
+    elif row.checkpoint:
         sensed = Sensed(spec.runtime, config_dir, model_config=tuning.read_model_config(spec))
     else:
         return Sensed(spec.runtime, config_dir)
@@ -527,45 +529,6 @@ class LaunchPlan:
 
 
 
-def _size_llamacpp(
-    spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, autosense: "AutosenseConfig",
-) -> "tuple[_auto.WindowReport, int | None, int | None, int | None]":
-    """What a llama.cpp launch asks for, from what was sensed: `(report, context, cache_ram, full_fit)`.
-
-    `context` and `cache_ram` are the fit keywords for `serve_command`: the fit's `-c` only when
-    the record sets no `context` and `extra_args` carry no `-c` / `--ctx-size`, and the formula's
-    `--cache-ram` only when neither the record nor `extra_args` set one. The fit is priced at the
-    KV types the argv carries and, when the argv drafts with MTP, at the draft context's share. An
-    unknown or non-positive fit gives no `-c` (llama-server's own `--fit` sizes the window, mode
-    "fit-by-server"); a header that cannot be read, a missing key or an unknown memory is "not
-    computed", never a guess. Pure."""
-    extra = list(spec.extra_args or [])
-    header, mem, weights, mi = sensed.header, sensed.memory, sensed.weights, sensed.meminfo
-    k, v, share = tuning.launch_pricing(spec, header, tuned)
-    fits = _auto.fit(
-        header, mem.free_bytes if mem else None, autosense, cache_type_k=k, cache_type_v=v,
-        weights=weights, offload=sensed.offload, runtime="llamacpp", draft_share=share)
-    has_c = _auto.has_ctx_arg(extra)
-    cache_set = spec.cache_ram is not None or _auto.has_cache_ram_arg(extra)
-    cache_kw = None if cache_set else _auto.cache_ram_mib(
-        mi["MemAvailable"] if mi else None, mi["MemTotal"] if mi else None,
-        weights, sensed.offload, extra, autosense)
-    if spec.context is not None:
-        mode, asked, ctx_kw = "record", spec.context, None
-    elif has_c:
-        mode, asked, ctx_kw = "extra_args", None, None
-    elif fits:
-        mode, asked, ctx_kw = "fit", fits, fits
-    else:
-        mode, asked, ctx_kw = "fit-by-server", None, None
-    report = _auto.WindowReport(
-        served=None, trained=header.get("context_length"), fits=fits,
-        free_bytes=mem.free_bytes if mem else None, total_bytes=mem.total_bytes if mem else None,
-        weights_bytes=weights, asked=asked, mode=mode, attached=False, retried=False,
-        verified=False, runtime="llamacpp")
-    return report, ctx_kw, cache_kw, (fits if mode == "fit" else None)
-
-
 def plan_launch(
     spec: ManagedServerConfig, sensed: Sensed, decision: "server.LaunchDecision", *,
     autosense: "AutosenseConfig", api_key_held: bool,
@@ -584,16 +547,19 @@ def plan_launch(
     full_fit = None
     home = None
     names = sorted(getattr(spec, "env", None) or {})
-    if spec.runtime == "llamacpp":
-        report, kw["context"], kw["cache_ram"], full_fit = _size_llamacpp(spec, sensed, tuned, autosense)
+    row = RUNTIMES[spec.runtime]
+    if row.price is not None:
+        priced = row.price(spec, sensed, tuned, autosense)
+        report, kw["context"], kw["cache_ram"], full_fit = priced.report, priced.context, priced.cache_ram, priced.full_fit
+    if "config_ini" in row.record_fields:
         home = server.config_ini_home(sensed.config_dir, spec.port)
         names.append("XDG_CONFIG_HOME")
     for name in ("cache_type", "spec_type", "draft_p_min", "reasoning_parser", "tool_call_parser"):
         value = getattr(tuned, name)
         if value is not None:
             kw[name] = value
-    if api_key_held and spec.runtime in server.KEY_ENV:
-        names.append(server.KEY_ENV[spec.runtime])
+    if api_key_held and row.key_env is not None:
+        names.append(row.key_env)
     full = LaunchPlan(
         argv=tuple(server.serve_command(spec, **kw)), serve_kwargs=kw,
         env_names=tuple(dict.fromkeys(names)), config_ini_home=home, report=report, tuned=tuned,
@@ -797,7 +763,7 @@ class SpawnedProcessStrategy:
         # OFF the event loop: sensing reads the header, stats the weights and shells out to
         # nvidia-smi (up to 5 s on a wedged driver), none of which may freeze the REPL's loop.
         plan: LaunchPlan | None = None
-        if autosense is not None and spec.runtime == "llamacpp":
+        if autosense is not None and RUNTIMES[spec.runtime].gguf:
             sensed = await asyncio.to_thread(sense_launch, spec, config_dir, autosense)
             plan = plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed)
             argv = list(plan.argv)
@@ -1596,7 +1562,7 @@ class UnitStrategy:
             if tolerated and final is not None and final.n_restarts - base >= 1 and plan is not None:
                 plan = plan.boot_retry() or plan  # the unit's own retry is what answered
             report = plan.report if plan is not None else None
-            if report is not None and spec.runtime == "llamacpp":
+            if report is not None:
                 from localharness.agent.context import probe_window
 
                 model_id = served[0] if served else spec.served_name
