@@ -160,3 +160,105 @@ async def test_a_restart_that_serves_below_the_floor_is_a_failed_launch(tmp_path
                             "harness needs") for m in channel.messages)
     assert not any(m.startswith("Switched to") for m in channel.messages)
     assert boundaries.stops and primary.model == "/x/primary.gguf"
+
+
+# --- localharness model and start ------------------------------------------------------------ #
+
+from localharness.cli import model_cmd, start_serving  # noqa: E402
+from localharness.config.loader import ConfigLoader  # noqa: E402
+from tests.unit.test_model_cmd_unit_swap import cli  # noqa: E402, F401 — the fixture
+from tests.unit.test_start_serving import _run  # noqa: E402
+from tests.unit.test_start_serving import home, swap_rig  # noqa: E402, F401 — the fixtures
+from tests.unit.test_start_serving_e2e import world  # noqa: E402, F401 — the fixture
+from tests.unit.procfs_support import fake_proc  # noqa: E402, F401 — the fixture
+from tests.unit.test_sense_serving import PRIMARY, PRIMARY_URL  # noqa: E402
+from tests.unit.test_lifecycle_swap_unit import flash_ready, unit_incumbent  # noqa: E402
+
+
+def _spy_run_swap(monkeypatch) -> list[dict]:
+    seen: list[dict] = []
+    real = start_serving.run_swap
+
+    async def spy(*a, **kw):
+        seen.append(kw)
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(start_serving, "run_swap", spy)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_run_swap_hands_the_floor_to_lifecycle_swap(swap_rig, monkeypatch):
+    seen: list = []
+
+    async def fake_swap(incumbent, target, **kw):
+        seen.append(kw["floor"])
+        return lifecycle.SwapOutcome(None, None, None, None, None)
+
+    monkeypatch.setattr(lifecycle, "swap", fake_swap)
+
+    await _run(swap_rig, None, "flash-next", floor=FLOOR)
+    await _run(swap_rig, None, "flash-next")
+
+    assert seen == [FLOOR, None]
+
+
+@pytest.mark.asyncio
+async def test_starts_swap_of_another_launch_passes_the_pre_launch_floor(world, monkeypatch):
+    async def floor(agent_config, *, config_dir):
+        return FLOOR
+
+    monkeypatch.setattr(start_serving, "launch_floor", floor)
+    seen = _spy_run_swap(monkeypatch)
+    world.config(last_served=PRIMARY)
+    world.answering = {PRIMARY_URL}
+
+    await world.start_exit(preset="flash-next")
+
+    assert [kw["floor"] for kw in seen] == [FLOOR]
+
+
+def test_the_cli_swap_prices_the_root_agent_the_way_start_does(cli, monkeypatch):
+    unit_incumbent(cli.world)
+    flash = flash_ready(cli.world)
+    seen = _spy_run_swap_sync(monkeypatch)
+
+    async def floor(agent_config, *, config_dir):
+        return FLOOR
+
+    monkeypatch.setattr(start_serving, "launch_floor", floor)
+    monkeypatch.setattr(ConfigLoader, "load_agent", lambda self, name: name)
+
+    assert cli.run("flash-next").exit_code == 0
+    flash.join()
+
+    assert seen == [FLOOR]
+
+
+def test_the_cli_swap_without_a_loadable_root_uses_the_cached_floor(cli, monkeypatch):
+    unit_incumbent(cli.world)
+    flash = flash_ready(cli.world)
+    seen = _spy_run_swap_sync(monkeypatch)
+    lifecycle.record_floor(cli.world.g, 12_000, {})
+
+    def missing(self, name):
+        raise RuntimeError("no such agent")
+
+    monkeypatch.setattr(ConfigLoader, "load_agent", missing)
+
+    assert cli.run("flash-next").exit_code == 0
+    flash.join()
+
+    assert seen == [12_000]
+
+
+def _spy_run_swap_sync(monkeypatch) -> list:
+    floors: list = []
+    real = start_serving.run_swap
+
+    async def spy(*a, **kw):
+        floors.append(kw["floor"])
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(start_serving, "run_swap", spy)
+    return floors
