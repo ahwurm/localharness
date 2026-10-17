@@ -56,7 +56,9 @@ from tests.unit.test_workspace_state_landing import (
 
 
 def _record_tool_registration(monkeypatch) -> list[dict]:
-    """Record every `register_builtin_tools` call, and still run the real one.
+    """Record every session `register_builtin_tools` call, and still run the real one.
+
+    The session's call carries a boundary; the pre-launch floor's scratch registry does not.
 
     A wrapper rather than a double: the drive keeps building its real tool registry, so a mistake
     that made registration fail would surface as a broken drive instead of a quietly empty list.
@@ -69,7 +71,8 @@ def _record_tool_registration(monkeypatch) -> list[dict]:
     calls: list[dict] = []
 
     async def _rec(registry, *args, **kwargs):
-        calls.append(dict(kwargs))
+        if "boundary" in kwargs:
+            calls.append(dict(kwargs))
         return await real(registry, *args, **kwargs)
 
     monkeypatch.setattr("localharness.tools.builtin.register_builtin_tools", _rec)
