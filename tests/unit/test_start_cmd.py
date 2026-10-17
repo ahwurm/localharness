@@ -1182,6 +1182,14 @@ def _stub_nonvllm_start(tmp_path, monkeypatch, *, served, probe_window):
     )
 
 
+def _floor_of(monkeypatch, tokens=256):
+    """The harness floor a tiny-window test runs under, before the launch and after the registry."""
+    async def launch_floor(agent_config, *, config_dir):
+        return tokens
+    monkeypatch.setattr("localharness.cli.start_serving.launch_floor", launch_floor)
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop.floor", lambda self: tokens)
+
+
 async def test_start_does_not_abort_on_a_fabricated_probe_window(tmp_path, monkeypatch):
     """detect_capabilities SEEDS CapabilityResult.context_window from LLMConfig and only overwrites
     it from a vLLM-shape /v1/models answer — for llama.cpp/Ollama/LM Studio/unknown it returns the
@@ -1327,6 +1335,7 @@ async def test_start_sends_no_output_cap_when_none_is_configured(tmp_path, monke
     from localharness.provider.client import LLMClient
 
     _stub_nonvllm_start(tmp_path, monkeypatch, served=served, probe_window=None)
+    _floor_of(monkeypatch)
     seen: list = []
     real_init = LLMClient.__init__
 
@@ -1366,6 +1375,7 @@ async def test_start_fits_a_configured_output_cap_to_the_window_reserve(
     from localharness.provider.client import LLMClient
 
     _stub_nonvllm_start(tmp_path, monkeypatch, served=served, probe_window=None)
+    _floor_of(monkeypatch)
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(cfg_path.read_text() + "org:\n  default_max_tokens: 4096\n")
     seen: list = []
@@ -1454,9 +1464,7 @@ async def test_start_accepts_the_smallest_runnable_window(tmp_path, monkeypatch)
 
     _stub_nonvllm_start(tmp_path, monkeypatch, served=1_025, probe_window=None)
 
-    async def _small_floor(agent_config, *, config_dir):
-        return 256
-    monkeypatch.setattr("localharness.cli.start_serving.launch_floor", _small_floor)
+    _floor_of(monkeypatch)
     seen: list = []
     real_init = LLMClient.__init__
 

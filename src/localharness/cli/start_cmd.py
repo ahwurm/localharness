@@ -3142,6 +3142,13 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             effort=(_effort_level, _effort_rung),
             effort_ratios=_effort_ratios,
         )
+        from localharness.agent.subagent import builtin_role_floors
+        from localharness.provider.lifecycle import record_floor
+        _full_floor = agent_loop.floor()
+        record_floor(
+            server_cfg_path, _full_floor,
+            builtin_role_floors(tool_registry, token_counter, llm, harness.org.children_budget))
+        await _exit_under_floor(_full_floor)
         if resume is not None:  # the next turn carries the earlier conversation, byte for byte
             agent_loop.resume(list(resume.conversation), resume.prior_context)
         if acp_channel is not None:
