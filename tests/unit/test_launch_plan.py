@@ -52,9 +52,13 @@ def box(monkeypatch):
     return world
 
 
+def _fit(*args, **kw) -> int:
+    return fit(*args, **kw) // 256 * 256
+
+
 def _expected_fit(spec: ManagedServerConfig, box: Box, *, share: float) -> int | None:
     header = fit_header(gguf_header.read_header(spec.model, FIT_KEYS))
-    return fit(header, box.mem.free_bytes, KNOBS, cache_type_k="q8_0", cache_type_v="q8_0",
+    return _fit(header, box.mem.free_bytes, KNOBS, cache_type_k="q8_0", cache_type_v="q8_0",
                weights=box.weights, offload="gpu", draft_share=share)
 
 
@@ -189,9 +193,9 @@ def test_the_0_18_parity_covers_the_keywords_and_an_env_cache_type_is_priced_as_
                                  autosense=PRE_TUNING, api_key_held=False)
     assert set(plan.serve_kwargs) == {"keyed", "loopback", "key_file_ok", "context", "cache_ram"}
     header = fit_header(gguf_header.read_header(spec.model, FIT_KEYS))
-    q8 = fit(header, box.mem.free_bytes, PRE_TUNING, cache_type_k="q8_0", cache_type_v="q8_0",
+    q8 = _fit(header, box.mem.free_bytes, PRE_TUNING, cache_type_k="q8_0", cache_type_v="q8_0",
              weights=box.weights, offload="gpu")
-    f16 = fit(header, box.mem.free_bytes, PRE_TUNING, cache_type_k="f16", cache_type_v="f16",
+    f16 = _fit(header, box.mem.free_bytes, PRE_TUNING, cache_type_k="f16", cache_type_v="f16",
               weights=box.weights, offload="gpu")
     assert plan.full_fit == q8 != f16
 
@@ -217,7 +221,7 @@ async def test_a_hand_set_cache_type_is_priced_not_the_derived_one(tmp_path, pop
     plan = plans[0]
     assert plan.tuned.cache_type is None and "--cache-type-k" not in plan.argv
     header = fit_header(gguf_header.read_header(spec.model, FIT_KEYS))
-    assert plan.full_fit == fit(header, box.mem.free_bytes, KNOBS, cache_type_k="f16", cache_type_v="f16",
+    assert plan.full_fit == _fit(header, box.mem.free_bytes, KNOBS, cache_type_k="f16", cache_type_v="f16",
                                 weights=box.weights, offload="gpu", draft_share=SHARE)
 
 
@@ -432,7 +436,7 @@ async def test_a_config_ini_cache_type_is_priced_and_not_overridden(tmp_path, po
     plan = plans[0]
     assert plan.tuned.cache_type is None and "--cache-type-k" not in plan.argv
     header = fit_header(gguf_header.read_header(spec.model, FIT_KEYS))
-    assert plan.full_fit == fit(header, box.mem.free_bytes, KNOBS, cache_type_k="f16", cache_type_v="f16",
+    assert plan.full_fit == _fit(header, box.mem.free_bytes, KNOBS, cache_type_k="f16", cache_type_v="f16",
                                 weights=box.weights, offload="gpu", draft_share=SHARE)
 
 

@@ -140,17 +140,18 @@ def test_price_llamacpp_prices_the_fit_and_the_cache_ram_through_the_row():
     spec, knobs = _record("llamacpp", binary="/x/llama-server"), AutosenseConfig()
     tuned = Tuned(cache_type="q8_0")
     got = RUNTIMES["llamacpp"].price(spec, _sensed(), tuned, knobs)
-    fits = autosense.fit(HEADER, 40 * GIB, knobs, cache_type_k="q8_0", cache_type_v="q8_0", weights=18 * GIB)
+    fits = autosense.fit(HEADER, 40 * GIB, knobs, cache_type_k="q8_0", cache_type_v="q8_0", weights=18 * GIB) // 256 * 256
     ram = autosense.cache_ram_mib(90 * GIB, 128 * GIB, 18 * GIB, "gpu", [], knobs)
     assert isinstance(got, autosense.Price) and got.refusal is None
     assert (got.context, got.cache_ram, got.full_fit) == (fits, ram, fits) and fits
     assert (got.report.mode, got.report.asked, got.report.fits, got.report.trained) == ("fit", fits, fits, 262144)
 
 
-def test_price_llamacpp_with_a_fit_that_is_not_positive_leaves_the_window_to_the_server():
+def test_price_llamacpp_with_weights_beyond_the_free_memory_is_a_refusal():
     got = autosense.price_llamacpp(
         _record("llamacpp", binary="/x/llama-server"), _sensed(free=18 * GIB), Tuned(), AutosenseConfig())
-    assert (got.context, got.full_fit, got.report.mode, got.report.fits) == (None, None, "fit-by-server", None)
+    assert (got.context, got.full_fit, got.report.fits) == (None, None, None)
+    assert got.refusal.endswith("it needs 18.0 GiB of GPU memory and 18.0 GiB is free — stop what holds the GPU, or pick a smaller quant.")
 
 
 @pytest.mark.parametrize("over,mode", [({"context": 4096}, "record"), ({"extra_args": ["-c", "8192"]}, "extra_args")])
@@ -160,7 +161,7 @@ def test_price_llamacpp_sets_no_context_when_the_record_or_extra_args_did(over, 
     assert got.context is None and got.full_fit is None and got.report.mode == mode
 
 
-@pytest.mark.parametrize("name", ["vllm", "ollama", "lmstudio"])
+@pytest.mark.parametrize("name", ["ollama", "lmstudio"])
 def test_a_row_without_a_price_plans_no_window(name):
     assert RUNTIMES[name].price is None
 
