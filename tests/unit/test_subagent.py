@@ -374,7 +374,7 @@ async def test_runner_threads_token_counter_and_window_into_child(monkeypatch):
     runner = subagent.make_explore_agent_runner(
         llm=object(), bus=object(), base_registry=object(),
         permission_evaluator=object(), get_parent_session_id=lambda: "sid",
-        token_counter=sentinel_counter, max_context_tokens=126_976,
+        token_counter=sentinel_counter, window=lambda: 126_976,
     )
     await runner("explore", "find X")
     ctx = captured["ctx"]

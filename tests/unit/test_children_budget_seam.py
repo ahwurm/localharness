@@ -219,7 +219,7 @@ async def test_a_partial_combine_level_carries_the_block_too(monkeypatch, bus):
     monkeypatch.setattr("localharness.agent.loop.AgentLoop", _Loop)
     store = ContentStore()
     handle = store.put("section text. " * 4000)
-    runner = await _runner(bus, children_budget=_BLOCK, parent_store=store, max_context_tokens=2000)
+    runner = await _runner(bus, children_budget=_BLOCK, parent_store=store, window=lambda: 2000)
     await runner("cruncher", "what does it say?", [handle])
     leaves = [c for c in calls if c["config"].name == "chunk-summarizer"]
     combines = [c for c in calls if c["config"].name == "cruncher"]
@@ -362,7 +362,7 @@ async def test_a_partial_combine_level_carries_the_knob_too(monkeypatch, bus):
     monkeypatch.setattr("localharness.agent.loop.AgentLoop", _Loop)
     store = ContentStore()
     handle = store.put("section text. " * 4000)
-    runner = await _runner(bus, unattended_max_actions=100, parent_store=store, max_context_tokens=2000)
+    runner = await _runner(bus, unattended_max_actions=100, parent_store=store, window=lambda: 2000)
     await runner("cruncher", "what does it say?", [handle])
     assert len([c for c in calls if c["config"].name == "cruncher"]) >= 2
     assert set(_knobs(calls)) == {100}

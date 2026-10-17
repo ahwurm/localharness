@@ -3056,10 +3056,8 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             # agents/<name>.yaml overlays the code-defined base (e.g. a bigger web-researcher
             # budget) — absent file = built-in defaults, malformed = explicit error, never silent.
             load_builtin_override=_override_builtin,
-            # Children inherit the parent's exact /tokenize counter + resolved window so the
-            # sub-agent fleet accounts for context correctly instead of bare 131,072 + tiktoken.
             token_counter=token_counter,
-            max_context_tokens=agent_config.context.max_context_tokens,
+            window=lambda: ctx_mgr.max_context_tokens,
             # Real, config-capped recursion depth: the orchestrator is depth 0; a non-leaf child
             # (e.g. web-researcher) may nest a grandchild (search-verifier) up to this cap.
             depth=0,
