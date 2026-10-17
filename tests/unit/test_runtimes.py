@@ -14,7 +14,7 @@ from localharness.provider.runtimes import RUNTIMES, row_of
 
 
 COLUMNS = {
-    "strategy", "unit_servable", "label", "key_env", "probe", "price", "facts", "record_fields", "name",
+    "strategy", "unit_servable", "label", "key_env", "probe", "price", "argv", "facts", "record_fields", "name",
     "gguf", "checkpoint", "path_binary", "exposed_by_default", "scrub", "window_note", "derived_args"}
 
 
@@ -187,3 +187,79 @@ def test_record_identity_adds_the_records_own_tokens(spec, tokens):
 
 def test_lm_studio_has_no_record_identity():
     assert lifecycle.record_identity(_record("lmstudio")) is None
+
+
+BASE_ENV = {"LLAMA_ARG_CTX_SIZE": "1", "LLAMA_API_KEY": "k", "MTMD_BACKEND_DEVICE": "d", "VLLM_API_KEY": "v",
+            "VLLM_LOGGING_LEVEL": "x", "HF_TOKEN": "t", "PATH": "/bin"}
+
+
+@pytest.mark.parametrize("runtime,dropped", [
+    ("llamacpp", ["LLAMA_API_KEY", "LLAMA_ARG_CTX_SIZE", "MTMD_BACKEND_DEVICE"]),
+    ("vllm", ["VLLM_API_KEY"]), ("ollama", []), ("lmstudio", []), ("unknown", [])])
+def test_child_environment_drops_the_rows_own_namespace_only(runtime, dropped):
+    env, got = server.child_environment(runtime, BASE_ENV)
+    assert got == dropped
+    assert (env is None) is not bool(dropped)
+
+
+@pytest.mark.parametrize("runtime,var", [("llamacpp", "LLAMA_API_KEY"), ("vllm", "VLLM_API_KEY")])
+def test_child_environment_sets_the_rows_key_variable_last(runtime, var):
+    env, _ = server.child_environment(runtime, BASE_ENV, record_env={var: "other"}, api_key="held")
+    assert env[var] == "held"
+
+
+@pytest.mark.parametrize("runtime", ["ollama", "lmstudio", "unknown"])
+def test_a_runtime_without_a_key_variable_refuses_a_key(runtime):
+    with pytest.raises(ValueError):
+        server.child_environment(runtime, BASE_ENV, api_key="held")
+
+
+@pytest.mark.parametrize("runtime", ["ollama", "lmstudio"])
+def test_launch_decision_binds_loopback_for_a_runtime_with_no_key(runtime):
+    assert server.launch_decision(_record(runtime, bind_all=True), False) == server.LaunchDecision(None, True, False, None)
+
+
+def test_launch_decision_refuses_a_llamacpp_record_without_a_binary():
+    spec = _record("llamacpp", binary="/x/llama-server")
+    object.__setattr__(spec, "binary", None)
+    assert server.launch_decision(spec, False).refusal == "no llama-server — set server.binary"
+    assert server.launch_decision(spec, False, peer="p").refusal == (
+        "no llama-server — set extra_endpoints[p].lifecycle.binary")
+
+
+@pytest.mark.parametrize("spec,verdict", [
+    (_record("llamacpp", binary="/x/llama-server"), False),
+    (_record("llamacpp", binary="/x/llama-server", bind_all=True), True),
+    (_record("vllm", launch="binary", binary="/x/vllm"), False),
+    (_record("vllm", launch="binary", binary="/x/vllm", bind_all=True), True),
+    (_record("vllm", launch="docker", docker_image="img"), False),
+    (_record("vllm", launch="docker", docker_image="img", bind_all=True), True),
+    (_record("ollama"), False), (_record("lmstudio", bind_all=True), False)])
+def test_effective_posture_exposure_per_runtime(spec, verdict):
+    decision = server.launch_decision(spec, False)
+    assert server.effective_posture(spec, keyed=False, decision=decision)[0] is verdict
+
+
+def test_the_argv_column_is_what_serve_command_builds_per_runtime():
+    llama = _record("llamacpp", binary="/x/llama-server", model="/x/m.gguf")
+    assert server.serve_command(llama, context=4096)[:3] == ["/x/llama-server", "-m", "/x/m.gguf"]
+    assert server.serve_command(llama, context=4096)[-2:] == ["--host", "127.0.0.1"]
+    assert server.serve_command(_record("ollama"))[:3] == ["env", "OLLAMA_HOST=127.0.0.1:8000", "OLLAMA_KEEP_ALIVE=-1"]
+    binary = _record("vllm", launch="binary", binary="/x/vllm", model="org/m")
+    assert server.serve_command(binary, reasoning_parser="r", tool_call_parser="t") == [
+        "/x/vllm", "serve", "org/m", "--port", "8000", "--reasoning-parser", "r", "--tool-call-parser", "t",
+        "--enable-auto-tool-choice", "--host", "127.0.0.1"]
+    lms = _record("lmstudio", binary="/x/lms", model="org/m")
+    assert server.serve_command(lms)[:3] == ["/x/lms", "serve", "org/m"]
+
+
+def test_tuning_reads_the_rows_for_checkpoint_and_parsers():
+    vllm = _record("vllm", launch="binary", binary="/x/vllm", model="/nonexistent/ckpt")
+    assert tuning.read_model_config(_record("llamacpp", binary="/x/llama-server")) is None
+    assert tuning.read_model_config(_record("ollama")) is None
+    assert tuning.read_model_config(vllm) is None
+    parsers = tuning.MODEL_TYPE_PARSERS["qwen3"]
+    got = tuning.derive(vllm, {}, AutosenseConfig(), model_config={"model_type": "qwen3"})
+    assert (got.reasoning_parser, got.tool_call_parser) == parsers
+    assert tuning.derive(_record("ollama"), {}, AutosenseConfig(), model_config={"model_type": "qwen3"}) == Tuned()
+    assert tuning.derive(_record("lmstudio"), {}, AutosenseConfig()) == Tuned()
