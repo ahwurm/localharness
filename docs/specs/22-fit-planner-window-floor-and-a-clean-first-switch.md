@@ -240,8 +240,11 @@ llama.cpp's cache for them is `pad256(n_swa × slots + n_ubatch)` cells: 4 unifi
 when `-np` is unset (`src/llama-kv-cache-iswa.cpp:73`, `tools/server/server.cpp:168–172`), `slots × pad256(n_swa +
 n_ubatch)` for an explicit `-np`, `pad256(n_swa × slots + n_ubatch)` with `-kvu`, and the full window under
 `--swa-full`; the planner reads `-np`, `-kvu`, `-ub` and `--swa-full` from the record's `extra_args` only.
-vLLM's is `min(window, sliding_window + 2 × max_num_batched_tokens)` tokens per sliding layer
-(`vllm/v1/kv_cache_interface.py`), with the full layers on `num_global_key_value_heads` and `global_head_dim`.
+vLLM holds `min(window, sliding_window − 1 + max_concurrent_batches × max_num_batched_tokens)` tokens per sliding
+layer (`vllm/v1/kv_cache_interface.py`, `SlidingWindowSpec.max_admission_blocks_per_request`; `vllm/config/vllm.py`,
+`max_in_flight_tokens`), with `max_num_batched_tokens` 2,048 by default and 2 concurrent batches under async
+scheduling; the planner prices `sliding_window + 2 × max_num_batched_tokens`, one token above, with the full layers on
+`num_global_key_value_heads` and `global_head_dim`.
 A header whose pattern or head array cannot be read prices every layer full, which errs high.
 
 The table is cross-checked against the header before it prices anything, and a check that fails makes the model
@@ -830,6 +833,20 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
      delegated turn after each.
   12. The response field names for reasoning and tool calls from one `--debug` body, written into §11.6.
 
+  Rows for the next live run (0.19.2), each checking what §7.1, §7.2, §7.5, §10 and §16 now state:
+
+  13. The gemma Q4_K_M GGUF set up and launched with `llm.service` stopped: the launch line's window equals the
+      plan's (152,832 at 30.2 GiB free with no `-np`, §16), `nvidia-smi` shows the process resident, and a turn runs.
+  14. `/model nvidia/Qwen3.8-27B-NVFP4` through `Set it up and switch?` with a `vllm` binary on `PATH`: the
+      first-build clause before the launch, the load average and free RAM read during flashinfer's build with
+      `MAX_JOBS` at half the cores, the server ready and a turn running. The owner runs this row; no agent launches
+      vLLM unattended.
+  15. `/model` with `llm.service` serving: §10.2's lines, the foreign-unit sentence once, and `init` and `start`
+      silent on the second run.
+  16. The gemma bf16 `not offered` line, and `/model` on its name printing §10.4's sentence and stopping nothing.
+  17. Any launch whose window line carries the spill clause, checked against `nvidia-smi` and decode speed; and a
+      launch under the autostart unit, which never carries the clause (§7.5), read by hand against `nvidia-smi`.
+
 ## 16. Open questions and recorded decisions
 
 - **Decided — the resume clause.** `(your last /model choice)` prints when `start` **launches** a record on the
@@ -894,7 +911,8 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
   ran on every core (load average 15) and froze the desktop. The launch line of `start`, of `localharness model` and
   of the REPL (its cold launch and its restart) ends with `first launch of this checkpoint compiles kernels —
   several minutes, the machine will be busy` while no launch of that record has answered on this box. The evidence
-  is the harness's own ledger, never the engine's cache directories: the stamp every launch writes once it answers
+  is the harness's own ledger, never the engine's cache directories (flashinfer caches its compiled kernels under
+  `~/.cache/flashinfer`, moved by `FLASHINFER_WORKSPACE_BASE`, so only the first launch pays): the stamp every launch writes once it answers
   (`served_here_at`), or a window report `start` recorded on an attach. The build runs `ninja` with the job count
   from `MAX_JOBS` (vLLM's environment-variable reference; flashinfer's `jit/cpp_ext.py`, `_get_num_workers`), so a
   vLLM checkpoint launch carries `MAX_JOBS` at half the cores (at least 1) unless the person's shell or the record
