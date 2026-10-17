@@ -11,6 +11,7 @@ reach because their per-agent yaml pins a concrete model.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1048,6 +1049,12 @@ def _primary_port(harness: Any) -> int | None:
         return None
 
 
+def _model_file(spec: Any) -> str:
+    """The realpath of a GGUF record's file, a checkpoint record's model string as it is."""
+    model = str(spec.model)
+    return os.path.realpath(os.path.expanduser(model)) if RUNTIMES[spec.runtime].gguf else model
+
+
 def _unit_serves(config_dir: Any, specs: Any, main_pid: int | None) -> bool:
     """True when the harness unit's main process is the verified launch of one of ``specs``."""
     from localharness.provider import lifecycle, procfs
@@ -1162,16 +1169,27 @@ def plan_entries(
         if owner is not None:
             serving.add(owner.prefix)
     cold, refused = [], []
+    last = speed_stats.last_served(speed_stats.default_speed_stats_path(config_dir))
+    by_file: dict[str, list[ServingRecord]] = {}
     for record in records:
         if record.spec is None or record.prefix in serving:
             continue
+        if record_withheld(trust, record):
+            refused.append(PlanEntry(
+                record.name, "cold", record.spec.runtime, record=record, endpoint=record.peer,
+                refusal=f"{record.name} cannot run here: its record has changes you have not confirmed"))
+        else:
+            by_file.setdefault(_model_file(record.spec), []).append(record)
+    for path, twins in by_file.items():
+        record = next((r for r in twins if r.name == last), twins[0])
         try:
             window, where, refusal = _priced(harness, record, config_dir=config_dir, memory=memory, floor=floor, unit=unit)
         except Exception as exc:  # noqa: BLE001 — one record's failure is its own line, never the list's
             window, where, refusal = None, None, f"{record.name} cannot run here: could not plan it ({type(exc).__name__})"
         entry = PlanEntry(
             record.name, "cold", record.spec.runtime, window, where, refusal, record, record.peer,
-            rate=rate(record.provider_type, record.served))
+            rate=rate(record.provider_type, record.served), path=path,
+            others=tuple(r.name for r in twins if r is not record))
         (refused if refusal is not None else cold).append(entry)
     if cold and foreign is not None:
         cold = [replace(e, refusal=workspace.incumbent_sentence(
