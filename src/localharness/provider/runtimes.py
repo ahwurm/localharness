@@ -5,6 +5,7 @@ import this module, so each callable column resolves its implementation inside t
 """
 from __future__ import annotations
 
+import importlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -32,10 +33,9 @@ class Runtime:
     derived_args: Mapping[str, str]
 
 
-def _strategy(cls_name: str) -> Callable[[Any], Any]:
+def _strategy(cls_name: str, module: str = "lifecycle") -> Callable[[Any], Any]:
     def build(spec: Any) -> Any:
-        from localharness.provider import lifecycle
-        return getattr(lifecycle, cls_name)()
+        return getattr(importlib.import_module(f"localharness.provider.{module}"), cls_name)()
     return build
 
 
@@ -53,16 +53,19 @@ def _price(name: str) -> Callable[..., Any]:
     return price
 
 
-def _argv(name: str) -> Callable[..., list[str]]:
+def _argv(name: str, module: str = "server") -> Callable[..., list[str]]:
     def build(srv: Any, **kw: Any) -> list[str]:
-        from localharness.provider import server
-        return getattr(server, name)(srv, **kw)
+        return getattr(importlib.import_module(f"localharness.provider.{module}"), name)(srv, **kw)
     return build
 
 
 def _parsers() -> Mapping:
     from localharness.provider import tuning
     return tuning.MODEL_TYPE_PARSERS
+
+
+def _no_parsers() -> Mapping:
+    return MappingProxyType({})
 
 
 _LMSTUDIO_GPU = "it is derived from `gpu` (--gpu max when gpu=True, --gpu off when False)"
@@ -98,6 +101,16 @@ RUNTIMES: Mapping[str, Runtime] = MappingProxyType({
         key_env=None, probe=_probe("_probe_lmstudio"), price=None, argv=_argv("_vllm_argv"), facts=None, record_fields=(),
         gguf=False, checkpoint=False, path_binary=None, exposed_by_default=False,
         scrub=(), window_note="", derived_args=MappingProxyType({"--gpu": _LMSTUDIO_GPU})),
+    "strata": Runtime(
+        name="Strata", strategy=_strategy("StrataStrategy", "strata"),
+        unit_servable=lambda spec: True, label=lambda spec: "Strata",
+        key_env="STRATA_API_KEY", probe=_probe("_probe_strata"), price=None,
+        argv=_argv("argv", "strata"), facts=_no_parsers,
+        record_fields=("mmproj", "served_name", "engine_dir", "engine_config"),
+        gguf=True, checkpoint=False, path_binary=None, exposed_by_default=False,
+        scrub=("STRATA_API_KEY", "STRATA_SKIP_SHA256", "STRATA_PREBUILT_URL", "STRATA_SOURCE", "STRATA_EXECV",
+               "HF_ENDPOINT"),
+        window_note=None, derived_args=MappingProxyType({})),
 })
 
 

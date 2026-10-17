@@ -26,7 +26,7 @@ _LOCAL_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-ProviderType = Literal["ollama", "vllm", "llamacpp", "lmstudio", "unknown"]
+ProviderType = Literal["ollama", "vllm", "llamacpp", "lmstudio", "strata", "unknown"]
 
 # ---------------------------------------------------------------------------
 # Data structures

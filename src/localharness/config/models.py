@@ -1874,7 +1874,7 @@ class EndpointRef(BaseModel):
 
     name: str = Field(description="Human label for the endpoint, e.g. 'ollama-local'.")
     base_url: str = Field(description="OpenAI-compatible base URL, with /v1 suffix.")
-    provider_type: Literal["ollama", "vllm", "llamacpp", "lmstudio", "unknown"] = Field(
+    provider_type: Literal["ollama", "vllm", "llamacpp", "lmstudio", "strata", "unknown"] = Field(
         default="unknown",
         description="Runtime family — drives the token-counter's tokenize contract (vLLM/llama.cpp "
         "exact, ollama/lmstudio labeled-approximate).",
@@ -1972,7 +1972,7 @@ class ActiveSelection(BaseModel):
 
     name: str = Field(default="", description="Label of the active peer endpoint.")
     base_url: str = Field(description="Active endpoint base URL.")
-    provider_type: Literal["ollama", "vllm", "llamacpp", "lmstudio", "unknown"] = Field(
+    provider_type: Literal["ollama", "vllm", "llamacpp", "lmstudio", "strata", "unknown"] = Field(
         default="unknown", description="Active endpoint runtime family."
     )
     model: str = Field(description="Active model id served by that endpoint.")
@@ -1991,7 +1991,7 @@ class ProviderConfig(BaseModel):
     """Detected LLM provider configuration. Written by localharness init."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    provider_type: Literal["ollama", "vllm", "llamacpp", "lmstudio", "unknown"] = Field(
+    provider_type: Literal["ollama", "vllm", "llamacpp", "lmstudio", "strata", "unknown"] = Field(
         description="Detected provider type.",
     )
     base_url: str = Field(description="OpenAI-compatible base URL with /v1 suffix.")
@@ -2130,7 +2130,7 @@ class ManagedServerConfig(BaseModel):
     user-managed servers."""
     model_config = ConfigDict(frozen=False, extra="forbid")
 
-    runtime: Literal["vllm", "llamacpp", "ollama", "lmstudio"] = Field(
+    runtime: Literal["vllm", "llamacpp", "ollama", "lmstudio", "strata"] = Field(
         default="vllm",
         description=(
             "Which server the harness launches. 'vllm' (default) = the existing docker/binary "
@@ -2139,7 +2139,8 @@ class ManagedServerConfig(BaseModel):
             "loads a model into it (0.11 Phase D; `model` is the ollama tag, `binary` defaults to "
             "PATH `ollama`, `port` is the daemon port). 'lmstudio' = the harness drives LM Studio's "
             "headless `lms` CLI (0.11 Phase D5: daemon up → load → server start; `model` is the LM "
-            "Studio model key, `binary` the `lms` path, `port` the OpenAI server port). `runtime` "
+            "Studio model key, `binary` the `lms` path, `port` the OpenAI server port). 'strata' = "
+            "the harness runs an installed Strata (`engine_dir`) on a GGUF it already holds. `runtime` "
             "drives the command builder + the lifecycle strategy. ADDITIVE: existing vLLM configs "
             "never set this and keep the default."
         ),
@@ -2202,6 +2203,11 @@ class ManagedServerConfig(BaseModel):
     served_name: Optional[str] = Field(default=None, description=(
         "llama.cpp only: the alias the server answers to (`-a`); `/model` and `localharness "
         "model` match it while `model` stays the GGUF path."))
+    engine_dir: Optional[str] = Field(default=None, description=(
+        "Strata only: the Strata install the harness runs; `~` is expanded at launch, and its "
+        "`.venv/bin/python` is the interpreter."))
+    engine_config: Optional[str] = Field(default=None, description=(
+        "Strata only: the config file Strata's setup wrote, relative to engine_dir."))
     context: Optional[int] = Field(default=None, ge=1, description=(
         "The window to serve; on llama.cpp it becomes `-c`. Unset means the harness computes it."))
     cache_type_k: Optional[str] = Field(default=None, description=(
@@ -2239,7 +2245,8 @@ class ManagedServerConfig(BaseModel):
     def _effort_yaml_bool(cls, v: Any) -> Any:
         return coerce_yaml_effort(v)
 
-    @field_validator("served_name", "mmproj", "cache_type_k", "cache_type_v", "api_key_file")
+    @field_validator(
+        "served_name", "mmproj", "cache_type_k", "cache_type_v", "api_key_file", "engine_dir", "engine_config")
     @classmethod
     def _argv_text_clean(cls, v: Optional[str], info: Any) -> Optional[str]:
         """These strings reach argv: a blank, NUL-bearing or multi-line one would crash `Popen` at
@@ -2360,14 +2367,15 @@ class ManagedServerConfig(BaseModel):
     @model_validator(mode="after")
     def _launch_target_present(self) -> "ManagedServerConfig":
         from localharness.provider.runtimes import RUNTIMES
+        row = RUNTIMES[self.runtime]
         for key, other in RUNTIMES.items():
-            names = [n for n in other.record_fields if key != self.runtime and getattr(self, n) is not None]
+            names = [n for n in other.record_fields
+                     if key != self.runtime and n not in row.record_fields and getattr(self, n) is not None]
             if names:
                 verb = "is" if len(names) == 1 else "are"
                 raise ValueError(f"runtime={self.runtime}: {', '.join(names)} {verb} {other.name}-only (runtime: {key})")
         if self.api_key_file is not None and self.require_api_key is not True:
             raise ValueError("api_key_file requires require_api_key: true")
-        row = RUNTIMES[self.runtime]
         for flag, why in row.derived_args.items():
             if any(a == flag or a.startswith(f"{flag}=") for a in self.extra_args):
                 raise ValueError(f"runtime={self.runtime}: `{flag}` must not appear in extra_args — {why}.")
