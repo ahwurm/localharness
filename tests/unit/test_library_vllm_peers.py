@@ -32,6 +32,7 @@ def cache_repo(tmp_path, repo_id, config=QWEN, *, size=GB16, refs=("main",), rep
     """A cache repo as `scan_cache_dir` lists it, over a real snapshot directory under tmp_path."""
     directory = tmp_path / "hfcache" / ("models--" + repo_id.replace("/", "--")) / "snapshots" / snap
     directory.mkdir(parents=True, exist_ok=True)
+    (directory / "model.safetensors").write_bytes(b"x")
     if raw is not None:
         (directory / "config.json").write_bytes(raw)
     elif config is not None:
