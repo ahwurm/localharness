@@ -280,8 +280,7 @@ class ManagedVllmStrategy:
                 report, served=probe.served, trained=report.trained or probe.trained, verified=probe.served is not None)
         live = LiveEndpoint(base_url=base_url, served_models=served, handle=handle, note=decision.note,
                             window=report, dropped_env=tuple(dropped), tuned=plan.tuned if plan else None)
-        if plan is not None:
-            confirm_launch(config_dir, record_key(spec), plan=plan, live=live)
+        confirm_launch(config_dir, record_key(spec), plan=plan, live=live, spec=spec)
         return live
 
     def recovery_config_dir(self, config_dir: Path | None) -> Path | None:
@@ -362,6 +361,12 @@ def record_key(spec: ManagedServerConfig) -> str:
     return speed_stats.speed_key(spec.runtime, spec.served_name or str(spec.model))
 
 
+def first_build(spec: ManagedServerConfig, config_dir: Path | None) -> bool:
+    """A checkpoint record no launch has answered for on this box (no config directory, no ledger: not one)."""
+    return (config_dir is not None and RUNTIMES[spec.runtime].checkpoint
+            and not speed_stats.served_here(speed_stats.default_speed_stats_path(config_dir), record_key(spec)))
+
+
 FLOOR_FILE = "server-floor.json"
 _FLOOR_READ_CAP = 64 * 1024
 _FLOOR_MIN = 1_024
@@ -422,6 +427,7 @@ class Sensed:
     mmproj: int = 0
     snapshot: str | None = None
     snapshot_refusal: str | None = None
+    first_build: bool = False
 
 
 def sense_launch(
@@ -457,7 +463,7 @@ def sense_launch(
             free = _auto.free_memory(autosense) if memory is _auto._UNSET else memory
             weights = _auto.checkpoint_bytes(os.path.dirname(path))
         sensed = Sensed(spec.runtime, config_dir, model_config=config, memory=free, weights=weights,
-                        snapshot=snapshot, snapshot_refusal=refusal)
+                        snapshot=snapshot, snapshot_refusal=refusal, first_build=first_build(spec, config_dir))
     else:
         return Sensed(spec.runtime, config_dir)
     if unit is None:
@@ -736,6 +742,12 @@ def confirm_launch(
     clamped to `total_bytes`. A marker whose invocation matches is removed
     whatever the outcome; one that does not is left for the run it belongs to."""
     ledger = speed_stats.default_speed_stats_path(config_dir)
+    stamped = spec if spec is not None else plan.inputs[0] if plan is not None and plan.inputs else None
+    if live is not None and stamped is not None and RUNTIMES[stamped.runtime].checkpoint:
+        try:
+            speed_stats.record_served_here(ledger, record_key)
+        except OSError:
+            pass
     if plan is not None:
         if plan.inputs is None:
             return
