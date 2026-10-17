@@ -411,6 +411,26 @@ def _swap_now(
             harness, record, outcome="swap", rung=serving.rung, config_dir=config_dir))
 
 
+def _set_up_entry(entry, loader) -> Optional[str]:
+    """Ask a person whether to set `entry` up; the written peer's name on yes, None on Not now. No person, or nothing written, exits 2."""
+    elsewhere = library.SETUP_ELSEWHERE_LINE.format(name=visible_text(entry.name))
+    if not local_operator(False):
+        _refuse_autostart(elsewhere)
+    cfg = loader._config_dir
+    console.print(library.setup_bullet(cfg, entry.setup), markup=False, soft_wrap=True)
+    answer = library.ask_set_up(entry.name, person=True)
+    if not answer.reached:
+        _refuse_autostart(elsewhere)
+    if answer.cancelled or answer.keys != ("set-up",):
+        return None
+    done = library.set_up(cfg, entry.setup.real)
+    for line in done.lines:
+        (console if done.name else err_console).print(line, markup=False, soft_wrap=True)
+    if done.name is None:
+        raise typer.Exit(2)
+    return done.name
+
+
 def _script_kind(record) -> bool:
     return record.spec is not None and getattr(RUNTIMES[record.spec.runtime].strategy(record.spec), "plans_launch", False)
 
@@ -615,9 +635,12 @@ def model(
         machine_trust = decide_machine_trust(cfg_path, ask=local_operator(False), launching=will_launch)
         if machine_trust.line:
             err_console.print(machine_trust.line, markup=False, soft_wrap=True)
-    loader = ConfigLoader(
-        config_dir=config_dir, local_config_dir=resolve_workspace_layer(config_dir),
-        machine_withheld=machine_trust.withheld)
+    def _new_loader() -> ConfigLoader:
+        return ConfigLoader(
+            config_dir=config_dir, local_config_dir=resolve_workspace_layer(config_dir),
+            machine_withheld=machine_trust.withheld)
+
+    loader = _new_loader()
     # v0.13: two values, two jobs. `loader._config_dir` is machine-wide truth (the overlay target,
     # one GPU daemon); `_ws` is the workspace layer, or None. The audit record follows the WORK
     # (MEMS-04) and falls back to the session's config dir — NOT to None, which would re-resolve
@@ -701,6 +724,7 @@ def model(
     # A number is the list's entry (its record name when it has one); every name then goes through the
     # ladder's preset resolution first. A `Serving` is a preset selection; a withheld or ambiguous name is
     # refused with exit 2; an unknown name falls through to the served / checkpoint resolution below.
+    setup_entry = None
     if name.isascii() and name.isdigit():
         listed = _entries()[0]
         picked = listed.pick(name)
@@ -713,7 +737,38 @@ def model(
         if isinstance(picked, str):
             err_console.print("[bold red]Error:[/bold red] " + escape(picked), soft_wrap=True)
             raise typer.Exit(2)
+        if picked.kind == "setup":
+            setup_entry = picked
         name = picked.record.name if picked.record is not None else picked.name
+
+    def _switch(serving) -> None:
+        if (will_launch and serving.record.spec is not None
+                and not model_ops.record_withheld(machine_trust, serving.record)):
+            _swap_now(harness, machine_trust, serving, config_dir=loader._config_dir, unit=unit)
+            return
+        _select_preset(
+            harness, serving.record, current, loader, _audit_dir, _ws, machine_trust, unit=unit)
+
+    def _set_up_then_switch(entry) -> None:
+        nonlocal harness, loader
+        written = _set_up_entry(entry, loader)
+        if written is None:
+            return
+        loader = _new_loader()
+        try:
+            harness = loader.load_harness()
+        except Exception as exc:
+            err_console.print(f"[bold red]Error:[/bold red] failed to load config: {exc}")
+            raise typer.Exit(2)
+        serving = model_ops.resolve_serving(harness, machine_trust, written, config_dir=loader._config_dir)
+        if not isinstance(serving, model_ops.Serving):
+            err_console.print("[bold red]Error:[/bold red] " + escape(serving.line), soft_wrap=True)
+            raise typer.Exit(serving.exit_code)
+        _switch(serving)
+
+    if setup_entry is not None:
+        _set_up_then_switch(setup_entry)
+        return
     serving = model_ops.resolve_serving(
         harness, machine_trust, name, config_dir=loader._config_dir)
     if isinstance(serving, model_ops.ServingRefusal) and serving.kind != "unknown":
@@ -724,12 +779,7 @@ def model(
                 "[bold red]Error:[/bold red] " + escape(serving.line), soft_wrap=True)
         raise typer.Exit(serving.exit_code)
     if isinstance(serving, model_ops.Serving):
-        if (will_launch and serving.record.spec is not None
-                and not model_ops.record_withheld(machine_trust, serving.record)):
-            _swap_now(harness, machine_trust, serving, config_dir=loader._config_dir, unit=unit)
-            return
-        _select_preset(
-            harness, serving.record, current, loader, _audit_dir, _ws, machine_trust, unit=unit)
+        _switch(serving)
         return
 
     target: Optional[str] = None
@@ -739,6 +789,13 @@ def model(
         target = name
 
     if target is None:
+        found = _entries()[0].pick(name)
+        if isinstance(found, str):
+            err_console.print("[bold red]Error:[/bold red] " + escape(found), soft_wrap=True)
+            raise typer.Exit(2)
+        if found is not None and found.kind == "setup":
+            _set_up_then_switch(found)
+            return
         if reachable:
             # Reached the runtime and the target isn't served/downloaded → fail loud, name options.
             avail = ", ".join(choices) if choices else "(none served or downloaded)"

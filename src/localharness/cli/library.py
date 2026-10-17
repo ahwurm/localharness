@@ -87,6 +87,11 @@ CHOOSE_WHICH = "Choose which"
 CHOOSE_WHICH_HINT = "pick the files to set up"
 SET_UP_LINE = "/model {name} switches in a session; localharness start --preset {name} starts on it"
 NOT_SET_UP_LINE = "Not set up: {names} — localharness model --setup lists them"
+SETUP_SWITCH_QUESTION = "Set it up and switch?"
+SET_UP_AND_SWITCH = "Set it up and switch"
+SET_UP_AND_SWITCH_HINT = "{name} becomes a preset, then serves"
+SETUP_ELSEWHERE_LINE = "{name} is not set up — localharness model --setup sets it up"
+SETUP_GONE_LINE = "{path} is gone — nothing set up"
 ADDED_KEPT_LINE = "Added {n}; kept config.yaml."
 NOTHING_TO_SET_UP_LINE = "Nothing to set up — every model found has a preset"
 LIBRARY_FAILED_LINE = "model library: {why} — start goes on"
@@ -575,15 +580,22 @@ class Listing:
     vllm: tuple[str, str] | None
 
 
+def _scan(config_path: Path):
+    """The whole scan the listing and a set-up both read: the found files, the snapshots, the recorded paths."""
+    global_dir = global_config_dir(config_path)
+    recorded = recorded_paths(global_dir)
+    snaps = model_library.snapshots()
+    found = model_library.scan(
+        _machine_autosense(config_path).model_roots, recorded, model_library.library_path(global_dir), scope="all",
+        rank=list, checkpoints=tuple(c for c in snaps if c.kind == "vllm" and c.refusal is None),
+        extra=tuple(p for c in snaps if c.kind == "gguf" for p in c.ggufs))
+    return found, snaps, recorded
+
+
 def listing(config_path: Path) -> Listing:
     """Read only: the library file is neither saved nor merged."""
     global_dir = global_config_dir(config_path)
-    auto, recorded = _machine_autosense(config_path), recorded_paths(global_dir)
-    snaps = model_library.snapshots()
-    found = model_library.scan(
-        auto.model_roots, recorded, model_library.library_path(global_dir), scope="all", rank=list,
-        checkpoints=tuple(c for c in snaps if c.kind == "vllm" and c.refusal is None),
-        extra=tuple(p for c in snaps if c.kind == "gguf" for p in c.ggufs))
+    found, snaps, recorded = _scan(config_path)
     return Listing(
         tuple(_listable((*found.new, *found.seen, *found.declined))),
         tuple(c for c in snaps if c.kind == "vllm" and c.refusal is not None
@@ -603,8 +615,9 @@ def _ranked(config_path: Path, auto: AutosenseConfig, shown: Sequence[model_libr
     return ranked + sorted((s for s in shown if s.checkpoint), key=lambda s: s.checkpoint.repo_id)
 
 
-def _bullets(listed: Sequence[model_library.Shown], names: dict[str, str],
-             vllm: tuple[str, str] | None = None) -> None:
+def _bullet_lines(listed: Sequence[model_library.Shown], names: dict[str, str],
+                  vllm: tuple[str, str] | None = None) -> list[str]:
+    lines = []
     for s in listed:
         if s.checkpoint:
             line = BULLET.format(name=visible_text(names[s.real]), clause=_clause("vllm", mtp=False, mmproj=None),
@@ -614,7 +627,14 @@ def _bullets(listed: Sequence[model_library.Shown], names: dict[str, str],
             clause = _clause("llamacpp", mtp=bool(s.model.mtp), mmproj=s.model.mmproj)
             line = BULLET.format(name=visible_text(names[s.real]), clause=clause, path=shown_path(s.path),
                                  size=format_size(s.size), date=s.first_seen)
-        console.print(line + (DECLINED_TAG if s.declined else ""), markup=False, soft_wrap=True)
+        lines.append(line + (DECLINED_TAG if s.declined else ""))
+    return lines
+
+
+def _bullets(listed: Sequence[model_library.Shown], names: dict[str, str],
+             vllm: tuple[str, str] | None = None) -> None:
+    for line in _bullet_lines(listed, names, vllm):
+        console.print(line, markup=False, soft_wrap=True)
 
 
 def _peers(chosen: Sequence[model_library.Shown], names: dict[str, str], *, start: int, taken_names: Collection[str],
@@ -632,6 +652,45 @@ def _peers(chosen: Sequence[model_library.Shown], names: dict[str, str], *, star
         ports.add(free[0])
         used.add(name)
     return peers
+
+
+def setup_bullet(config_path: Path, s: model_library.Shown) -> str:
+    """The record line the person is shown before the question."""
+    global_dir = global_config_dir(config_path)
+    name = unique_preset_name(_label(s), recorded_names_ports(global_dir)[0])
+    return _bullet_lines([s], {s.real: name}, managed_server.vllm_binary(global_dir))[0]
+
+
+def ask_set_up(name: str, *, person: bool) -> interview.Answer:
+    """`set-up` or `not-now`; not reached when no person can answer."""
+    return _ask(SETUP_SWITCH_QUESTION, [
+        Option("set-up", SET_UP_AND_SWITCH, SET_UP_AND_SWITCH_HINT.format(name=visible_text(name))),
+        Option("not-now", NOT_NOW, NOT_NOW_HINT)], default=0, cancel="not-now", person=person)
+
+
+@dataclass(frozen=True)
+class SetUp:
+    """The peer's name (None when nothing was written) and the lines to say."""
+    name: str | None
+    lines: tuple[str, ...]
+
+
+def set_up(config_path: Path, real: str) -> SetUp:
+    """Set up the one file or snapshot at `real`, found again by a fresh scan: its peer written and adopted, the library told."""
+    global_dir = global_config_dir(config_path)
+    found, _, _ = _scan(config_path)
+    s = next((s for s in _listable((*found.new, *found.seen, *found.declined)) if s.real == real), None)
+    if s is None:
+        return SetUp(None, (SETUP_GONE_LINE.format(path=shown_path(real)),))
+    taken_names, taken_ports = recorded_names_ports(global_dir)
+    names = {real: unique_preset_name(_label(s), taken_names)}
+    peers = _peers([s], names, start=PRIMARY_PORT + 1, taken_names=taken_names, taken_ports=taken_ports,
+                   vllm=managed_server.vllm_binary(global_dir))
+    lines: list[str] = []
+    if not peers or (written := append_peers(config_path, peers, adopt=True, say=lines.append)) is None:
+        return SetUp(None, (*lines, NOT_WRITTEN_LINE))
+    _save_library(found, model_library.library_path(global_dir), dropped=[real])
+    return SetUp(written[0]["name"], (*lines, SET_UP_LINE.format(name=visible_text(written[0]["name"]))))
 
 
 def _first_of(files: Sequence[model_library.Shown], named: model_library.Shown | None) -> list[model_library.Shown]:
