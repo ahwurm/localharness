@@ -1258,29 +1258,13 @@ serve (spec 20 §9.1, D-02); `kind` comes from `unit_kind`."""
 
 
 def unit_servable(spec: ManagedServerConfig | None) -> bool:
-    """Can the autostart unit serve this record (spec 20 §9.1, D-02)? Only llama.cpp and a vLLM
-    `launch: binary` record: the unit runs `serve`, which execs a binary. A docker, Ollama or LM Studio
-    record, and no record at all (attach-only), are not."""
-    if spec is None:
-        return False
-    if spec.runtime == "llamacpp":
-        return True
-    return spec.runtime == "vllm" and spec.launch == "binary"
+    """Can the autostart unit serve this record: llama.cpp and a vLLM `launch: binary` record only."""
+    return spec is not None and RUNTIMES[spec.runtime].unit_servable(spec)
 
 
 def unit_kind(spec: ManagedServerConfig | None) -> str:
-    """What a record is, for `NOT_SERVED_BY_UNIT_LINE` and the scope refusal (R-14-10): `docker` for a vLLM
-    docker record, `Ollama`, `LM Studio`, `attach-only` for no record, and `llama.cpp` / `vLLM binary`
-    for the two the unit serves."""
-    if spec is None:
-        return "attach-only"
-    if spec.runtime == "llamacpp":
-        return "llama.cpp"
-    if spec.runtime == "ollama":
-        return "Ollama"
-    if spec.runtime == "lmstudio":
-        return "LM Studio"
-    return "vLLM binary" if spec.launch == "binary" else "docker"
+    """What a record is, for `NOT_SERVED_BY_UNIT_LINE` and the scope refusal; `attach-only` for no record."""
+    return "attach-only" if spec is None else RUNTIMES[spec.runtime].label(spec)
 
 
 RUNS_OUTSIDE_AUTOSTART = "(runs outside autostart — the next boot serves nothing)"

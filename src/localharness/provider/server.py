@@ -40,6 +40,7 @@ from localharness.core import private_files
 from localharness.core.private_files import NotRegularFile, open_regular
 from localharness.core.which import which_outside_cwd
 from localharness.provider import procfs
+from localharness.provider.runtimes import RUNTIMES
 
 logger = structlog.get_logger(__name__)
 """The module logger. Named `logger`, not `log`: `start_server` holds its serve.log handle as `log`."""
@@ -334,13 +335,11 @@ def read_key_file(path: str | os.PathLike[str]) -> str:
     return line.decode("ascii")
 
 
-KEY_ENV: Mapping[str, str] = MappingProxyType({"vllm": "VLLM_API_KEY", "llamacpp": "LLAMA_API_KEY"})
-"""The one key-variable table: the environment variable each launched runtime reads its key from.
-`start_server`'s child environment and the docker `-e` both read it, so the mapping lives in one
-place. (llama-server reads `LLAMA_API_KEY`; `LLAMA_ARG_API_KEY` is read by nothing.)"""
+KEY_ENV: Mapping[str, str] = MappingProxyType(
+    {name: row.key_env for name, row in RUNTIMES.items() if row.key_env})
+"""The environment variable each launched runtime reads its key from (llama-server reads `LLAMA_API_KEY`; `LLAMA_ARG_API_KEY` is read by nothing)."""
 
-RUNTIME_LABELS: Mapping[str, str] = MappingProxyType(
-    {"vllm": "vLLM", "llamacpp": "llama.cpp", "ollama": "Ollama", "lmstudio": "LM Studio"})
+RUNTIME_LABELS: Mapping[str, str] = MappingProxyType({name: row.name for name, row in RUNTIMES.items()})
 """The runtime names `start`'s and `/model`'s launch lines print."""
 
 EVERY_INTERFACE_NO_KEY = "every interface, no key"
