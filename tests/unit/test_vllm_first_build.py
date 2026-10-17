@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -214,3 +216,41 @@ async def test_the_repl_restart_line_carries_the_clause_on_a_first_launch(tmp_pa
     await repl._handle_slash("/model model-a")
     (line,) = [m for m in channel.messages if m.startswith("Restarting managed vLLM with model-a")]
     assert f" ({start_serving.FIRST_BUILD_CLAUSE})" in line
+
+
+@pytest.mark.parametrize(("cpus", "jobs"), [(24, "12"), (3, "1"), (1, "1"), (None, "1")])
+def test_a_vllm_build_runs_at_half_the_cores(monkeypatch, cpus, jobs):
+    monkeypatch.setattr(os, "cpu_count", lambda: cpus)
+    env, dropped = server.child_environment("vllm", {})
+    assert env == {"MAX_JOBS": jobs} and dropped == []
+
+
+def test_a_max_jobs_the_person_exported_is_kept(monkeypatch):
+    monkeypatch.setattr(os, "cpu_count", lambda: 24)
+    assert server.child_environment("vllm", {"MAX_JOBS": "4"}) == (None, [])
+    env, _ = server.child_environment("vllm", {"MAX_JOBS": "4", "VLLM_API_KEY": "x"})
+    assert env["MAX_JOBS"] == "4"
+
+
+def test_a_max_jobs_the_record_sets_is_kept(monkeypatch):
+    monkeypatch.setattr(os, "cpu_count", lambda: 24)
+    env, _ = server.child_environment("vllm", {}, record_env={"MAX_JOBS": "6"})
+    assert env["MAX_JOBS"] == "6"
+
+
+def test_a_llama_cpp_launch_gets_no_max_jobs():
+    assert server.child_environment("llamacpp", {"PATH": "/b"}) == (None, [])
+
+
+def test_security_md_names_both_values_the_harness_sets_in_the_launch_environment():
+    text = (Path(__file__).resolve().parents[2] / "SECURITY.md").read_text(encoding="utf-8")
+    paragraph = next(p for p in text.split("\n\n") if p.startswith("The launched server's environment"))
+    assert "`HF_HUB_OFFLINE=1`" in paragraph and "`MAX_JOBS`" in paragraph
+
+
+def test_the_units_exec_environment_builds_at_half_the_cores_too(monkeypatch):
+    from localharness.cli import serve_cmd
+
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
+    env = serve_cmd._exec_environment({"PATH": "/captured"}, "/home/u", {}, _vllm(), None, None)
+    assert env["MAX_JOBS"] == "4"

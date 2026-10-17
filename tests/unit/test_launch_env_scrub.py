@@ -70,9 +70,9 @@ async def test_a_keyed_llama_cpp_activation_holds_its_key_in_the_child_environme
 
 def test_a_vllm_child_drops_the_shell_key_and_keeps_the_rest_of_its_settings():
     env, dropped = server.child_environment(
-        "vllm", {"VLLM_API_KEY": "shell", "VLLM_SERVER_DEV_MODE": "1", "PATH": "/b"})
+        "vllm", {"VLLM_API_KEY": "shell", "VLLM_SERVER_DEV_MODE": "1", "PATH": "/b", "MAX_JOBS": "3"})
     assert dropped == ["VLLM_API_KEY"]
-    assert env == {"VLLM_SERVER_DEV_MODE": "1", "PATH": "/b"}
+    assert env == {"VLLM_SERVER_DEV_MODE": "1", "PATH": "/b", "MAX_JOBS": "3"}
 
 
 @pytest.mark.parametrize("runtime", ["ollama", "lmstudio"])
@@ -115,8 +115,8 @@ def test_a_blocklist_keeps_the_whole_gpu_and_loader_environment():
     base = {**SURVIVORS, "PATH": "/b", "LLAMA_ARG_THREADS": "2"}
     env, _ = server.child_environment("llamacpp", base)
     assert env == {**SURVIVORS, "PATH": "/b"}
-    env, _ = server.child_environment("vllm", {**base, "VLLM_API_KEY": "s"})
-    assert env == base
+    env, _ = server.child_environment("vllm", {**base, "VLLM_API_KEY": "s", "MAX_JOBS": "3"})
+    assert env == {**base, "MAX_JOBS": "3"}
 
 
 # ------------------------------------------------------------------------------- start_server
