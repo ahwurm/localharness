@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from localharness.provider.lifecycle import FLOOR_FILE, cached_floor, raised_floor, record_floor
+
+SRC = Path(__file__).resolve().parents[2] / "src" / "localharness"
 
 
 def test_the_floor_round_trips_with_the_roles_and_a_utc_time(tmp_path):
@@ -74,3 +77,8 @@ def test_a_planted_small_cache_never_lowers_the_live_floor(tmp_path):
 
     assert raised_floor(6_000, cached_floor(tmp_path)) == 6_000
 
+
+
+def test_only_the_lifecycle_module_and_the_gate_name_the_floor_file():
+    named = {p.relative_to(SRC).as_posix() for p in SRC.rglob("*.py") if FLOOR_FILE in p.read_text(encoding="utf-8")}
+    assert named == {"provider/lifecycle.py", "agent/gate_types.py"}
