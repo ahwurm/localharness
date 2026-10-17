@@ -2112,10 +2112,18 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     _all_records = model_ops.serving_records(harness)
     _shared = model_ops.shares_base_url(record, _all_records)
     _sensed_records = model_ops.launchable_loopback_others(harness, machine_trust, record)
-    if _shared:
-        _sensed_records = (*_sensed_records, record)  # a shared address needs the sensor to name its owner
-    (probe_ok, probed_mode, served_window, probe_error), _sense = await asyncio.gather(
-        _probe_llm(_probe_client), model_ops.sense_serving(harness, _sensed_records))
+    if _shared or record.spec is not None:
+        _sensed_records = (*_sensed_records, record)  # the sensor names a shared address's owner and gates the probe
+    if record.spec is None:
+        (probe_ok, probed_mode, served_window, probe_error), _sense = await asyncio.gather(
+            _probe_llm(_probe_client), model_ops.sense_serving(harness, _sensed_records))
+    else:
+        _sense = await model_ops.sense_serving(harness, _sensed_records)
+        _mine = model_ops._norm_url(record.base_url)
+        if any(model_ops._norm_url(url) == _mine and ids for url, ids in _sense.ids.items()):
+            probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
+        else:
+            probe_ok, probed_mode, served_window, probe_error = False, None, None, None
     decision = start_serving.decide(
         serving,
         selected_answers=start_serving.selected_answers(probe_ok, record, _sense, shared=_shared),
