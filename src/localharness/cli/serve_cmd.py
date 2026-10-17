@@ -50,6 +50,7 @@ from localharness.cli.workspace import decide_machine_trust, visible_text
 from localharness.config import trust
 from localharness.config.loader import ConfigLoader
 from localharness.provider import lifecycle, procfs, server, units
+from localharness.provider.runtimes import RUNTIMES
 
 err_console = Console(stderr=True)
 
@@ -264,7 +265,7 @@ def serve(
                 _stop(EXIT_LIVE_PIDFILE, str(refused))
             if stale:
                 _say(stale.strip())
-            if spec.runtime == "llamacpp":
+            if "config_ini" in RUNTIMES[spec.runtime].record_fields:
                 try:
                     ini_home = str(server.prepare_config_ini_home(
                         cfg, spec.port, getattr(spec, "config_ini", None)))

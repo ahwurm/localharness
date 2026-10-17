@@ -565,8 +565,10 @@ def _posture_entries(raws: dict) -> list[dict]:
         return value if isinstance(value, dict) else {}
 
     def entry(file: str, prefix: str, key: str, view: dict, keyed: Any) -> list[dict]:
+        from localharness.provider.runtimes import row_of
         runtime = view.get("runtime", "vllm")
-        if runtime not in ("vllm", "llamacpp") or view.get(key) is None:
+        row = row_of(runtime)
+        if row is None or row.key_env is None or view.get(key) is None:
             return []
         value = coerce_bool(view[key])  # the model's reading: `1`, "yes", "on" are `true` (CR-02)
         spelled = json.dumps(value if value is not None else view[key])

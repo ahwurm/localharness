@@ -507,13 +507,16 @@ def _needs_bind_all(data: dict) -> tuple[str, ...]:
     user's and is never touched. A section written by hand after the upgrade without the key looks
     exactly like a 0.16 one and is migrated the same way — accepted (orchestrator ruling R19): the
     receipt and doctor's row say how to keep the server on this machine."""
-    def launches_vllm(spec: object) -> bool:
-        return isinstance(spec, dict) and spec.get("runtime", "vllm") == "vllm" and "bind_all" not in spec
+    from localharness.provider.runtimes import row_of
+
+    def binds_every_interface(spec: object) -> bool:
+        row = row_of(spec.get("runtime", "vllm")) if isinstance(spec, dict) else None
+        return row is not None and row.exposed_by_default and "bind_all" not in spec
 
     endpoints = data.get("extra_endpoints") if isinstance(data.get("extra_endpoints"), list) else []
-    return (*(("server",) if launches_vllm(data.get("server")) else ()),
+    return (*(("server",) if binds_every_interface(data.get("server")) else ()),
             *(f"extra_endpoints[{i}].lifecycle" for i, ep in enumerate(endpoints)
-              if isinstance(ep, dict) and launches_vllm(ep.get("lifecycle"))))
+              if isinstance(ep, dict) and binds_every_interface(ep.get("lifecycle"))))
 
 
 def plan(data: dict, sidecars: tuple[SidecarPlan, ...] = (), *,
