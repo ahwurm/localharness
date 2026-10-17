@@ -26,20 +26,25 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from localharness.core.private_files import NotRegularFile, open_regular
 
 __all__ = ["GgufHeaderError", "NotRegularFile", "read_header", "read_header_from", "FileKind", "model_of", "MAGIC", "MAX_KV", "MAX_STRING",
            "MAX_ARRAY_ELEMENTS", "HEADER_BYTE_BUDGET", "DISCOVERY_MAX_DEPTH", "DISCOVERY_MAX_FILES",
            "DISCOVERY_MAX_ENTRIES", "DISCOVERY_KEYS", "DiscoveredModel", "Discovery", "walk_ggufs",
-           "discover", "preset_name", "unique_preset_name", "rank_models", "served_model"]
+           "discover", "preset_name", "unique_preset_name", "rank_models", "served_model", "TensorEntry",
+           "TensorTable", "read_tensor_table", "shard_paths", "MAX_TENSORS", "MAX_TENSOR_NAME", "MAX_DIMS"]
 
 MAGIC = b"GGUF"
 MAX_KV = 4096
 MAX_STRING = 1 << 20
 MAX_ARRAY_ELEMENTS = 1_048_576
 HEADER_BYTE_BUDGET = 16 << 20
+MAX_TENSORS = 65_536
+MAX_TENSOR_NAME = 256
+MAX_DIMS = 4
+DEFAULT_ALIGNMENT = 32
 _SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
 _FORMATS = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q",
             12: "<d"}
@@ -129,19 +134,24 @@ def read_header(path: str | os.PathLike[str], want: Iterable[str]) -> dict[str, 
         return read_header_from(f, want)
 
 
-def read_header_from(f, want: Iterable[str]) -> dict[str, Any]:
-    """`read_header` over an already-open binary file positioned at its start."""
-    wanted = set(want)
-    c = _Cursor(f)
+def _preamble(c: _Cursor) -> tuple[int, int]:
+    """Check magic and version; return (n_tensors, n_kv) with the KV count bounded."""
     if c.read(len(MAGIC)) != MAGIC:
         raise GgufHeaderError("bad magic")
     version = c.unpack("<I")
     if version not in (2, 3):
         raise GgufHeaderError(f"unsupported GGUF version {version}")
-    c.unpack("<Q")  # n_tensors: the tensor infos are never read
-    n_kv = c.unpack("<Q")
+    n_tensors, n_kv = c.unpack("<Q"), c.unpack("<Q")
     if n_kv > MAX_KV:
         raise GgufHeaderError("too many KV pairs")
+    return n_tensors, n_kv
+
+
+def read_header_from(f, want: Iterable[str]) -> dict[str, Any]:
+    """`read_header` over an already-open binary file positioned at its start."""
+    wanted = set(want)
+    c = _Cursor(f)
+    _, n_kv = _preamble(c)
     if not wanted:
         return {}
     exact = {name for name in wanted if "." in name}  # a dotted name is an exact key
@@ -169,6 +179,61 @@ def read_header_from(f, want: Iterable[str]) -> dict[str, Any]:
         if found.keys() == wanted:
             return found
     return found
+
+
+class TensorEntry(NamedTuple):
+    name: str
+    bytes: int
+
+
+@dataclass(frozen=True)
+class TensorTable:
+    entries: tuple[TensorEntry, ...]
+    data_bytes: int
+
+
+_SHARD_NAME = re.compile(r"^(?P<prefix>.*)-\d{5}-of-(?P<n>\d{5})\.gguf$")
+
+
+def shard_paths(path: str | os.PathLike[str]) -> list[Path]:
+    """The model's files in shard order: `<prefix>-00001-of-0000N.gguf` .. `-0000N-of-0000N.gguf` when its
+    name has that shape, else the path alone. A missing shard is the caller's OSError."""
+    p = Path(path)
+    shard = _SHARD_NAME.match(p.name)
+    if shard is None or int(shard["n"]) < 1:
+        return [p]
+    return [p.with_name(f"{shard['prefix']}-{i:05d}-of-{shard['n']}.gguf") for i in range(1, int(shard["n"]) + 1)]
+
+
+def read_tensor_table(path: str | os.PathLike[str]) -> TensorTable:
+    """The tensors of the model and its split shards with the bytes each holds; GgufHeaderError when a
+    shard is not a table this reader will price (`NotRegularFile` and other OSErrors as the open raises them)."""
+    tables = [_shard_table(p) for p in shard_paths(path)]
+    return TensorTable(tuple(e for entries, _ in tables for e in entries), sum(d for _, d in tables))
+
+
+def _shard_table(path: Path) -> tuple[list[TensorEntry], int]:
+    with os.fdopen(open_regular(path), "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        c = _Cursor(f)
+        n_tensors, n_kv = _preamble(c)
+        alignment = DEFAULT_ALIGNMENT
+        for _ in range(n_kv):
+            key = c.string() or ""
+            value = _value(c, c.unpack("<I"), key == "general.alignment")
+            if key == "general.alignment":
+                alignment = value
+        infos = []
+        for _ in range(n_tensors):
+            name = c.string() or ""
+            dims = c.unpack("<I")
+            c.read(8 * dims)
+            c.unpack("<I")
+            infos.append((name, c.unpack("<Q")))
+        data_start = -(-f.tell() // alignment) * alignment
+    data_bytes = size - data_start
+    ends = [off for _, off in infos[1:]] + [data_bytes]
+    return [TensorEntry(name, end - off) for (name, off), end in zip(infos, ends)], data_bytes
 
 
 # ---- discovery (D-01..D-05, D-07, D-47, D-48): what `init` finds under the model roots --------------

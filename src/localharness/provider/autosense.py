@@ -26,6 +26,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from localharness.core.which import which_outside_cwd
+from localharness.provider.gguf_header import shard_paths
 from localharness.provider.runtimes import row_of
 from localharness.provider.speed_stats import WindowRecord
 
@@ -186,9 +187,6 @@ def offload_kind(extra_args: Sequence[str], n_layer: int | None) -> str:
     return kind
 
 
-_SHARD = re.compile(r"^(?P<prefix>.*)-(?P<i>\d{5})-of-(?P<n>\d{5})\.gguf$")
-
-
 def _size(path: Path) -> int:
     st = os.stat(path)
     if not stat.S_ISREG(st.st_mode):
@@ -202,12 +200,7 @@ def weights_bytes(model: str, mmproj: str | None = None) -> int | None:
     of them is missing."""
     try:
         path = Path(os.path.expanduser(model))
-        total = _size(path)
-        shard = _SHARD.match(path.name)
-        if shard:
-            siblings = re.compile(
-                rf"^{re.escape(shard['prefix'])}-\d{{5}}-of-{shard['n']}\.gguf$")
-            total = sum(_size(p) for p in path.parent.iterdir() if siblings.match(p.name))
+        total = sum(_size(p) for p in shard_paths(path))
         if mmproj:
             total += _size(Path(os.path.expanduser(mmproj)))
     except (OSError, ValueError):
