@@ -427,7 +427,7 @@ def _script_text(record, harness, cfg: Path, keyed: bool, decision, *, function:
     spec, peer = record.spec, record.peer
     plan = lifecycle.plan_launch(
         spec, lifecycle.sense_launch(spec, cfg, harness.autosense, unit=None), decision,
-        autosense=harness.autosense, api_key_held=keyed)
+        autosense=harness.autosense, api_key_held=keyed, floor=lifecycle.cached_floor(cfg))
     return tuning.render_script(
         plan, spec, name=record.name, version=resolved_version(), visible=visible_text, function=function,
         key_placeholder="provider.api_key" if peer is None else f"extra_endpoints.{peer.name}.api_key",

@@ -404,6 +404,17 @@ def test_serve_stops_with_78_and_the_sentence_when_the_plan_refuses(world, monke
     assert world.said() == "The model does not fit."
 
 
+def test_serve_plans_under_the_cached_floor_and_refuses_a_record_window_below_it(world):
+    world.edit_config(lambda d: d["server"].update(context=4096))
+    world.rerecord()
+    lifecycle.record_floor(world.g, 20_000, {})
+
+    result = world.run()
+
+    world.untouched_by(result, 78)
+    assert "is set to a 4,096-token window (context:) and the harness needs at least 20,000" in world.said()
+
+
 def test_serve_refuses_a_changed_environment_the_record_does_not_cover_with_78(tmp_path, monkeypatch):
     w = serve_world(tmp_path, monkeypatch)
     w.write_unit({"PATH": str(w.bindir), "HF_HOME": "/h/hf"})  # a new value, never adopted

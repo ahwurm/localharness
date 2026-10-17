@@ -196,6 +196,17 @@ def test_a_named_record_that_refuses_is_its_sentence_and_exit_two(world, monkeyp
     assert "The model does not fit." in result.stderr
 
 
+def test_a_record_window_below_the_cached_floor_is_the_floor_sentence_and_exit_two(world):
+    world.edit_config(lambda d: d["server"].update(context=4096))
+    world.rerecord()
+    lifecycle.record_floor(world.g, 20_000, {})
+
+    result = _run(world, "--script", "swift")
+
+    assert result.exit_code == 2 and result.stdout == ""
+    assert "is set to a 4,096-token window (context:) and the harness needs at least 20,000" in result.stderr
+
+
 def test_all_on_attach_only_records_prints_only_comments_and_exits_zero(world):
     world.edit_config(lambda d: (d.pop("server"), d["extra_endpoints"].append(attach_peer("attached"))))
     world.rerecord()

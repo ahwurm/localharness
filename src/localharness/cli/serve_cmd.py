@@ -106,7 +106,8 @@ def _planned_argv(spec: Any, config_dir: Path, autosense: Any, decision: Any, *,
     lets `sense_launch` read the boot marker. Nothing is written."""
     if autosense is not None:
         sensed = lifecycle.sense_launch(spec, config_dir, autosense, unit=unit)
-        plan = lifecycle.plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed)
+        plan = lifecycle.plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed,
+                                     floor=lifecycle.cached_floor(config_dir))
         return list(plan.argv), plan, sensed
     argv = server.serve_command(
         spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
