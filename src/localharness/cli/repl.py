@@ -2237,6 +2237,28 @@ class OrchestratorREPL:
                 self._channel_redactor()(_lifecycle.SWAP_REFUSED.format(name=target, why=refusal)),
                 metadata={"style": "system.error"})
             return
+        # The plan for what the restart will launch, asked at the live floor before the rebind-back and
+        # before anything is stopped: a target it refuses leaves the primary serving.
+        planned = managed
+        if typed_swap:
+            from localharness.provider import gguf_header
+            planned = managed.model_copy(update={
+                "model": str(Path(target).expanduser()), "served_name": gguf_header.preset_name(target)})
+        elif not gguf and target != prim_served:
+            planned = managed.model_copy(update={"model": target})
+        incumbent_heavy = (
+            model_ops.incumbent_heavy(self._active_heavy, self._harness) if self._active_heavy is not None
+            else _lifecycle.Heavy(managed, _prim.base_url if _prim is not None else llm.config.base_url))
+        target_heavy = _lifecycle.Heavy(planned, llm.config.base_url, None, launch_kw)
+        floor = self._live_floor()
+        unplanned = await asyncio.to_thread(
+            _lifecycle.swap_refusal, target_heavy, incumbent_heavy, config_dir=self._server_config_dir,
+            autosense=getattr(self._harness, "autosense", None), floor=floor,
+            unit=self._unit_state)
+        if unplanned is not None:
+            await self._channel.send_message(
+                self._channel_redactor()(unplanned), metadata={"style": "system.error"})
+            return
         # Tradeoff BEFORE the rebind-back below — cur_ptype must key where the current model
         # actually ran (possibly a peer), not the primary we are about to re-point at.
         tradeoff = self._swap_tradeoff_note(cur_ptype, current, prim_ptype, target)
@@ -2302,15 +2324,18 @@ class OrchestratorREPL:
                     # A copy for the launch: the shared record (the primary's served name, the listing,
                     # the swap-back target) keeps its own weights, so a typed file is never "the primary"
                     # (WR-53, IN-57).
-                    from localharness.provider import gguf_header
-                    spec = managed.model_copy(update={
-                        "model": str(Path(target).expanduser()),
-                        "served_name": gguf_header.preset_name(target)})
+                    spec = planned
                 # the provider's key, only when the managed server is set to require one (default off)
                 ep = await strategy.activate(
                     spec, self._server_config_dir, llm.config.base_url, on_poll=_swap_progress,
-                    autosense=getattr(self._harness, "autosense", None), **launch_kw,
+                    autosense=getattr(self._harness, "autosense", None), floor=floor, **launch_kw,
                 )
+                served_window = ep.window.served if ep.window is not None else None
+                if floor is not None and served_window is not None and served_window < floor:
+                    from localharness.provider.autosense import window_phrase
+                    raise RuntimeError(_lifecycle.SWAP_BELOW_FLOOR.format(
+                        name=_lifecycle.heavy_label(target_heavy),
+                        window=window_phrase(served_window), floor=f"{floor:,}"))
                 models = ep.served_models
             except (RuntimeError, TimeoutError) as exc:
                 # The primary half-started (still alive on a TimeoutError) — tear it down before restoring

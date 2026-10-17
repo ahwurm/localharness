@@ -144,8 +144,9 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     # give a launched server's pair its strategy's config dir (read once, passed down as a local).
     # + 1 from the warm restart's pre-flight (`unit_launch_refusal`), which reads the unit file and the
     # trust store to refuse a restart `serve` would exit 78 on, before anything is stopped.
+    # + 1 from the managed restart's swap_refusal, which plans the target against the memory the restart will have.
     # None of them starts or stops a server.
-    assert text.count("self._server_config_dir") == 13, _where(text, "self._server_config_dir")
+    assert text.count("self._server_config_dir") == 14, _where(text, "self._server_config_dir")
     # assignment + the property's own two reads on one line + 6 deliberately-untouched uses,
     # + 1 from phase 41's `_audit_base_dir` property, which reads `self._config_dir` as its
     # FALLBACK when the session has no workspace layer, + 1 from Phase 2's `_announce_window`,
