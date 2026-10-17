@@ -13,11 +13,17 @@ import pytest
 import yaml
 
 from localharness.cli import model_ops, start_cmd
+from localharness.cli.start_cmd import _start_managed_server
+from localharness.config.models import AutosenseConfig
 from localharness.cli.start_cmd import _probe_llm as real_probe
+from localharness.provider.autosense import FreeMemory
 from localharness.provider.client import CapabilityResult, LLMClient
 from tests.unit.launch_support import stub_liveness
 from tests.unit.procfs_support import fake_proc  # noqa: F401
 from tests.unit.test_sense_serving import PEER_URL, PRIMARY, PRIMARY_URL, home  # noqa: F401
+from tests.unit.test_launch_fit_retry import BASE, Box
+from tests.unit.test_launch_line_clause import GIB, _World
+from tests.unit.test_launch_plan import SWIFT, _gguf_spec
 from tests.unit.test_start_serving_e2e import FLASH_LOW, World, _flash_launch
 
 
@@ -106,3 +112,56 @@ async def test_a_loading_server_that_answers_no_model_list_is_not_probed_before_
     await world.start()
 
     assert _order(world) == ["wait", "detect"]
+
+
+RESUME = "your last /model choice"
+
+
+@pytest.fixture
+def launch(monkeypatch):
+    box = Box(monkeypatch)
+    box.mem = FreeMemory(40 * GIB, 48 * GIB, "nvidia-smi")
+    box.weights = 18 * GIB
+    return _World(monkeypatch, box)
+
+
+async def test_a_launch_of_the_last_choice_says_so_beside_the_derived_clause(tmp_path, launch):
+    spec = _gguf_spec(tmp_path, SWIFT)
+    assert await _start_managed_server(
+        spec, tmp_path, BASE, {}, autosense=AutosenseConfig(), resume=True) is None
+    assert launch.out == [f"Managed llama.cpp is not running — starting it ({RESUME}; kv q8_0 · mtp (1 layer); "
+                          "model load can take several minutes)..."]
+
+
+async def test_a_launch_that_is_not_the_last_choice_carries_no_resume_clause(tmp_path, launch):
+    spec = _gguf_spec(tmp_path, SWIFT)
+    assert await _start_managed_server(spec, tmp_path, BASE, {}, autosense=AutosenseConfig()) is None
+    assert RESUME not in launch.out[0]
+
+
+async def test_an_attach_on_the_active_endpoint_rung_prints_no_clause(world):
+    world.config(active=FLASH_LOW, last_served=PRIMARY)
+    world.answering = {PEER_URL}
+
+    lines = await world.start()
+
+    assert not [x for x in lines if x.startswith("Serving ") or RESUME in x]
+    assert world.starts == []
+
+
+async def test_a_cold_start_on_the_active_endpoint_rung_names_the_last_choice_in_its_launch_line(world):
+    world.config(active=FLASH_LOW, last_served=PRIMARY)
+
+    lines = await world.start()
+
+    (launch_line,) = [x for x in lines if "is not running" in x]
+    assert launch_line.startswith(f"Managed llama.cpp (flash-next) is not running — starting it ({RESUME}")
+
+
+async def test_a_cold_start_on_the_server_rung_carries_no_clause(world):
+    world.config()
+
+    lines = await world.start()
+
+    (launch_line,) = [x for x in lines if "is not running" in x]
+    assert RESUME not in launch_line
