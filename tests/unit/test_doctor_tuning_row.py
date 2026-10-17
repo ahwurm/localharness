@@ -228,7 +228,7 @@ def test_flash_next_row_carries_the_per_tensor_and_ram_figures(world, monkeypatc
     _flash_machine(world, monkeypatch)
 
     assert _rows(_doctor(world))[1] == (
-        "Tuning: flash-next — kv q8_0 · -c 262144 (fit) · dense 3.7 GiB · experts 40.0 GiB in RAM · "
+        "Tuning: flash-next — kv q8_0 · -c 219136 (fit) · dense 3.7 GiB · experts 40.0 GiB in RAM · "
         "token tables 27.1 GiB read through mmap · prompt cache 3,849 MiB · RAM reserve 9.2 GiB")
 
 

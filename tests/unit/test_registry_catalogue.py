@@ -282,8 +282,8 @@ def test_self_check_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 245, (
-        "catalogue should be 245 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 246, (
+        "catalogue should be 246 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -299,7 +299,7 @@ def test_self_check_leaves_enumerate(components_home):
         "plus the thirteen server.* preset fields (mmproj, served_name, context, cache_type_k, "
         "cache_type_v, cache_ram, api_key_file, env, config_ini, effort, speculative, "
         "reasoning_parser, tool_call_parser) "
-        "plus autosense.* x10, effort_budget.* x2 and org.default_effort (the machine-level "
+        "plus autosense.* x11, effort_budget.* x2 and org.default_effort (the machine-level "
         "sizing and effort sections) plus pending_preset x1 (the machine-level selection the "
         "next start serves) plus active_endpoint.effort x1 (the "
         "reasoning-effort enum on the persisted endpoint selection; agent.effort is withheld, the "
@@ -400,8 +400,8 @@ def test_role_sections_leaves_enumerate(components_home):
     assert "agent.repetition_guard.max_unique_ratio" in entries
     # Memory rung 1: the dormancy-archival rollout gate is registry-addressable.
     assert "agent.memory.archival.enabled" in entries
-    assert len(entries) == 245, (
-        "catalogue should be 245 entries (184 + the 2026-10 context.max_image_tokens field, "
+    assert len(entries) == 246, (
+        "catalogue should be 246 entries (184 + the 2026-10 context.max_image_tokens field, "
         "one entry per root): the 223-entry v0.14 ledger minus the resonance "
         "rebuild's removals (agent.memory.write_gate_enabled x1, "
         "agent.memory.predictive_gate.* x13, and 32 of the 36 agent.memory.consolidation.* "
@@ -417,7 +417,7 @@ def test_role_sections_leaves_enumerate(components_home):
         "plus the thirteen server.* preset fields (mmproj, served_name, context, cache_type_k, "
         "cache_type_v, cache_ram, api_key_file, env, config_ini, effort, speculative, "
         "reasoning_parser, tool_call_parser) "
-        "plus autosense.* x10, effort_budget.* x2 and org.default_effort (the machine-level "
+        "plus autosense.* x11, effort_budget.* x2 and org.default_effort (the machine-level "
         "sizing and effort sections) plus pending_preset x1 (the machine-level selection the "
         "next start serves) plus active_endpoint.effort x1 (the "
         "reasoning-effort enum on the persisted endpoint selection; agent.effort is withheld, the "
