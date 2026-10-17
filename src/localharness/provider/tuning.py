@@ -18,6 +18,7 @@ import re
 import shlex
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any
 
@@ -273,7 +274,7 @@ def derived_clause(
 ) -> str:
     """What a launch derived, as the clause of `start`'s launch line (spec 20 §6.5, D-23). The one place
     these words are composed. Pure string building from closed values: the cache type, `draft-mtp`, a
-    table parser, ints and the first ten printable ASCII characters of the ledger's ISO `at`.
+    table parser, ints and the local calendar date of the ledger's ISO `at`.
 
     A full shape reads `kv q8_0 · mtp (1 layer)` (vLLM: `reasoning qwen3 · tools qwen3_coder`) and never
     carries the fitted `-c`: the window line prints that. A retry shape says what it dropped and, when
@@ -300,10 +301,10 @@ def derived_clause(
         text = f"retried at boot: {', '.join(dropping)}" if dropping else "retried at boot"
         return f"{text} · {undo(halved)}" if drafted_off else text
     if cause == "remembered":
-        # The ledger sits where agent-run code can write: only printable ASCII of its `at` reaches the
-        # terminal, so no escape sequence rides the line (WR-04, T-12-35).
-        shown = "".join(c for c in remembered_at or "" if " " <= c <= "~")[:10].strip()
-        date = f" {shown}" if shown else ""
+        try:  # the ledger is agent-writable: only a parsed date's ASCII digits reach the terminal
+            date = f" {datetime.fromisoformat(remembered_at).astimezone().date().isoformat()}"
+        except (ValueError, TypeError, OverflowError):
+            date = ""
         what = "mtp off" if drafted_off else "window halved"
         kv = [f"kv {tuned.cache_type}"] if tuned.cache_type is not None else []
         return " · ".join([*kv, f"{what} (remembered{date})"])
