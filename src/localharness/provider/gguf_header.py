@@ -591,16 +591,19 @@ def _pair_directory(models: list[dict[str, Any]], projectors: list[dict[str, Any
 
 
 def rank_models(models: Iterable[DiscoveredModel], *, unit_model: str | None,
-                ledger_paths: Iterable[str], fits: Mapping[str, int | None]) -> list[DiscoveredModel]:
-    """D-07, pure: the unit's model, then a model whose path the ledger recorded, then one that fits
-    (above zero), then the newest, then the path string."""
+                ledger_paths: Iterable[str], fits: Mapping[str, int | None],
+                gpu_bytes: Mapping[str, int | None] | None = None) -> list[DiscoveredModel]:
+    """Pure: the unit's model, a ledger-recorded path, a fit above zero, the larger window, fewer GPU-resident bytes (unknown last), the newest, the path."""
     recorded = set(ledger_paths)
+    gpu = gpu_bytes or {}
 
     def key(m: DiscoveredModel) -> tuple:
         names = (m.real, str(m.path))
+        window, size = fits.get(str(m.path)) or 0, gpu.get(str(m.path))
         return (unit_model is None or unit_model not in names,
                 not any(n in recorded for n in names),
-                (fits.get(str(m.path)) or 0) <= 0,
+                window <= 0, -window,
+                size is None, size or 0,
                 -m.mtime, str(m.path))
 
     return sorted(models, key=key)
