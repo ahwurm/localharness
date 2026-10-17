@@ -9,7 +9,7 @@ from localharness.provider.autosense import (FIT_KEYS, FreeMemory, WindowReport,
                                              swa_bytes_per_cell, swa_cells_cap, swa_pattern)
 from localharness.provider.gguf_header import kv_layer_ids, read_header, read_tensor_table
 from tests.unit.gguf_support import load_fixture, write_gguf, write_recorded
-from tests.unit.test_fit_price import AUTO, GIB, NVIDIA, SWIFT, FLASH, _mem, _model
+from tests.unit.test_fit_price import AUTO, FLASH, GIB, NVFP4, NVIDIA, SWIFT, _config, _mem, _model, _vllm
 
 GEMMA = "gemma4-31b-q4-k-m"
 FREE = int(30.2 * GIB)
@@ -136,9 +136,8 @@ def _toy(tmp_path, pattern, layers=12):
     return header, read_split(path, header)
 
 
-def _largest(room, kv, swa, cap):
-    fits = lambda w: w * kv + min(w, cap) * swa <= room  # noqa: E731
-    return max(w for w in range(0, 20_000, 256) if fits(w))
+def _largest(room, kv, swa, cap, limit=20_000):
+    return max(w for w in range(0, limit + 1, 256) if w * kv + min(w, cap) * swa <= room)
 
 
 @pytest.mark.parametrize("room", [4_500_000, 3_000_000, 2_000_000, 9_000_000, 20_000_000])
@@ -182,3 +181,48 @@ def test_a_pattern_it_cannot_read_leaves_every_layer_full_priced_as_before(tmp_p
     assert swa_pattern({**header, "sliding_window_pattern": pattern}) is None
     assert split.swa == 0 and swa_bytes_per_cell(header, "q8_0", "q8_0", split) == 0
     assert autosense.kv_bytes_per_token(header, "f16", "f16", split) == 12 * 2 * 16 * 4
+
+
+GEMMA_VLLM = "davidau-gemma-4-31b-it"
+
+
+def _vllm_room(weights, total):
+    return int(0.9 * total) - weights - int(AUTO.compute_margin_ratio * weights)
+
+
+def test_a_vllm_gemma_prices_global_heads_on_the_full_layers_and_a_bounded_cache_on_the_sliding_ones():
+    weights, total = 10 * GIB, 48 * GIB
+    placed = _vllm(_config(GEMMA_VLLM), weights=weights, total=total)
+    kv, cell, cap = 10 * 2 * 4 * 512 * 2, 50 * 2 * 16 * 256 * 2, 1024 + 2 * 2048
+    assert placed.kv_per_token == kv
+    assert placed.fits == _largest(_vllm_room(weights, total), kv, cell, cap, 262_144) and placed.fits < 262_144
+    assert placed.swa_bytes == cell * cap
+
+
+def test_max_num_batched_tokens_in_extra_args_widens_the_sliding_cache():
+    weights, total = 10 * GIB, 48 * GIB
+    placed = _vllm(_config(GEMMA_VLLM), weights=weights, total=total, extra_args=["--max-num-batched-tokens", "8192"])
+    kv, cell, cap = 81_920, 819_200, 1024 + 2 * 8192
+    assert placed.fits == _largest(_vllm_room(weights, total), kv, cell, cap, 262_144)
+    assert placed.swa_bytes == cell * cap
+    unset = _vllm(_config(GEMMA_VLLM), weights=weights, total=total, extra_args=["--max-num-batched-tokens", "0"])
+    assert unset.swa_bytes == cell * (1024 + 2 * 2048)
+
+
+def test_a_sliding_layer_without_a_window_is_priced_at_the_full_window():
+    config = {k: v for k, v in _config(GEMMA_VLLM)["text_config"].items() if k != "sliding_window"}
+    placed = _vllm(config, weights=10 * GIB, total=48 * GIB)
+    assert placed.kv_per_token == 10 * 2 * 4 * 512 * 2 + 50 * 2 * 16 * 256 * 2 and placed.swa_bytes == 0
+
+
+@pytest.mark.parametrize("name,weights", NVFP4.items())
+def test_a_checkpoint_without_sliding_layers_still_prices_100864(name, weights):
+    placed = _vllm(_config(name), weights=weights)
+    assert (placed.fits, placed.kv_per_token, placed.swa_bytes) == (100_864, 65_536, 0)
+
+
+def test_the_vllm_window_line_counts_the_sliding_cells():
+    placed = _vllm(_config(GEMMA_VLLM), weights=10 * GIB, total=48 * GIB)
+    report = WindowReport(None, 262_144, placed.fits, None, None, None, placed.fits, "fit", runtime="vllm", placement=placed)
+    share = autosense.gib(placed.gpu_bytes + placed.kv_per_token * placed.fits + placed.swa_bytes)
+    assert autosense._placement_line(report).startswith(f"window: {placed.fits:,} · vLLM · all on the GPU ({share} of vLLM's")
