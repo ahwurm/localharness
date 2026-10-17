@@ -923,9 +923,8 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
   `Set it up and switch?` turns into one (§10.1). The managed-restart branches that switched a vLLM primary onto a
   registry name are reachable by no entry; deleting them is a follow-up.
 - **Decided — a swap without a floor still plans before it stops anything.** `swap_refusal` plans the target with no
-  floor when none is cached, so the refusals that do not depend on a window (a snapshot the launch-time walk refuses,
-  a model that leaves no room, §10.1) come with the incumbent still serving; only the floor refusal waits for a
-  floor.
+  floor when none is cached, so the refusals that do not depend on a window (a snapshot the launch-time walk refuses
+  among them) come with the incumbent still serving; only the floor refusal waits for a floor.
 - **Open — Strata's unknowns (§11.6)**, each with a live row.
 
 ## 17. Out of scope
