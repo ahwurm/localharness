@@ -1781,6 +1781,7 @@ SWAP_LAUNCH_FAILED = "Launch of {name} failed: {exc}{tail}"
 SWAP_RESTORED_TAIL = " Restored {label}."
 SWAP_NOT_RESTORED_TAIL = " Could not restore it: {why}"
 SWAP_NOTHING_SERVING_TAIL = " The box now has NO model serving — manual attention needed."
+SWAP_BELOW_FLOOR = "{name} served {window}, below the {floor} the harness needs"
 SWAP_REFUSED = ("Did not start {name}: {why}. No change made — the current model should still be "
                 "serving.")
 
@@ -1910,6 +1911,18 @@ async def restore_incumbent(
         return None, f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+async def _roll_back(
+    target: Heavy, stopped: Heavy | None, reporter: SwapReporter, config_dir: Path,
+    autosense: "AutosenseConfig | None", unit: Any,
+) -> tuple[str | None, str | None]:
+    """Stop the target, then put the incumbent back; `restore_incumbent`'s `(label, why)`."""
+    await safe_stop(target.spec, config_dir, unit=unit)
+    label, why = await restore_incumbent(stopped, config_dir=config_dir, autosense=autosense, unit=unit)
+    if label is not None and stopped is not None:
+        await reporter.restored(stopped.spec)
+    return label, why
+
+
 def swap_refusal(
     target: Heavy, incumbent: Heavy | None, *, config_dir: Path, autosense: "AutosenseConfig | None",
     floor: int | None, unit: Any = None,
@@ -1961,6 +1974,9 @@ async def swap(
     `reporter.line` goes through it, so nothing `swap` returns or says carries the raw tail (D-22).
     A cancellation after the incumbent was freed stops the target (verified), awaits `freed()`, runs
     no restore and re-raises (D-20).
+
+    With `floor`, a target the plan refuses is reported with the incumbent still serving before anything
+    stops (`stage` "refused"), and a launch that serves a window below it is a failed launch.
 
     ``unit`` is the autostart unit's state when it is the harness's OWN unit (`harness_unit`; anything
     else behaves as None). With it, every strategy `swap` builds is the unit's for a record the unit
@@ -2016,11 +2032,7 @@ async def swap(
         # The target half-started (a TimeoutError means its process is still ALIVE, per server.py
         # wait_ready). Tear it down FIRST — the shared pidfile means the restore's own launch would
         # otherwise clobber its handle and orphan it as a 2nd heavy — THEN restore the incumbent.
-        await safe_stop(target.spec, config_dir, unit=unit)
-        label, why = await restore_incumbent(
-            stopped, config_dir=config_dir, autosense=autosense, unit=unit)
-        if label is not None and stopped is not None:
-            await reporter.restored(stopped.spec)
+        label, why = await _roll_back(target, stopped, reporter, config_dir, autosense, unit)
         tail = (SWAP_RESTORED_TAIL.format(label=label) + (f" {why}" if why else "") if label
                 else SWAP_NOT_RESTORED_TAIL.format(why=why) if why
                 else SWAP_NOTHING_SERVING_TAIL if stopped is not None
@@ -2028,6 +2040,15 @@ async def swap(
         await reporter.line(redact(SWAP_LAUNCH_FAILED.format(name=heavy_label(target), exc=exc, tail=tail)))
         return SwapOutcome(None, stopped, stopped if label is not None else None,
                            _redacted_error(exc, redact), "launch")
+    served = live.window.served if live.window is not None else None
+    if floor is not None and served is not None and served < floor:
+        head = SWAP_BELOW_FLOOR.format(name=heavy_label(target), window=_auto.window_phrase(served), floor=f"{floor:,}")
+        label, why = await _roll_back(target, stopped, reporter, config_dir, autosense, unit)
+        tail = (f" — {heavy_label(stopped)} serves again." if label is not None and stopped is not None
+                else f". Could not restore it: {why}" if why else " — it was stopped.")
+        await reporter.line(redact(head + tail))
+        return SwapOutcome(None, stopped, stopped if label is not None else None,
+                           _redacted_error(RuntimeError(head), redact), "launch")
     await reporter.launched(live)
     return SwapOutcome(live, stopped, None, None, None)
 
