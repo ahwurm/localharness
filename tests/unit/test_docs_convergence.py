@@ -508,7 +508,7 @@ def check_launch_keys_doc(security_text: str, launch_keys: Iterable[str] | None 
 
 
 def test_launch_keys_doc_live():
-    """SECURITY.md names all eleven launch keys, the seven model keys, the kind and the gap."""
+    """SECURITY.md names all thirteen launch keys, the seven model keys, the kind and the gap."""
     assert check_launch_keys_doc(_read("SECURITY.md")) == []
 
 
@@ -563,10 +563,10 @@ def test_protected_entries_doc():
 
 def test_protected_entries_doc_bites():
     good = _read("SECURITY.md")
-    assert "eleven-entry" in good
-    assert check_protected_entries_doc(good.replace("eleven-entry", "ten-entry")) == [
-        f"SECURITY.md says ten protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES)}"]
-    assert len(check_protected_entries_doc(good.replace("eleven-entry", "twelve-entry"))) == 1
+    assert "twelve-entry" in good
+    assert check_protected_entries_doc(good.replace("twelve-entry", "eleven-entry")) == [
+        f"SECURITY.md says eleven protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES)}"]
+    assert len(check_protected_entries_doc(good.replace("twelve-entry", "thirteen-entry"))) == 1
     assert check_protected_entries_doc(good.replace("`overrides.yaml.lock`", "the overlay lock")) == [
         "protected entry not named in SECURITY.md: overrides.yaml.lock"]
     assert check_protected_entries_doc(good.replace("`model-library.json`", "`grants.yaml` `model-library.json`")) == [
@@ -575,7 +575,7 @@ def test_protected_entries_doc_bites():
         "not a protected entry: grants.yml"]
     assert check_protected_entries_doc("## Nothing\n") == ["the protected config-directory list is not found"]
     assert check_protected_entries_doc(good, [*PROTECTED_CONFIG_DIR_ENTRIES, "new.yaml"]) == [
-        f"SECURITY.md says eleven protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES) + 1}",
+        f"SECURITY.md says twelve protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES) + 1}",
         "protected entry not named in SECURITY.md: new.yaml"]
 
 
