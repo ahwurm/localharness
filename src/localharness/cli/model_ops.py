@@ -1135,7 +1135,7 @@ def _setup_entries(harness: Any, listed: Any, taken: set[str], *, config_dir: An
         except Exception as exc:  # noqa: BLE001 — one file's failure is its own line, never the list's
             window, where, refusal = None, None, f"{name} cannot run here: could not plan it ({type(exc).__name__})"
         if refusal is not None:
-            shown_as = Path(name).name if spec.runtime == "vllm" else name
+            shown_as = Path(name).name if RUNTIMES[spec.runtime].checkpoint else name
             refusal = f"{name}{refusal.removeprefix(shown_as)}" if refusal.startswith(shown_as) \
                 else f"{name} cannot run here: {refusal}"
         entries.append(PlanEntry(name, "setup", spec.runtime, window, where, refusal, setup=s))
