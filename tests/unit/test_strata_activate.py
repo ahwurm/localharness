@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -188,3 +189,76 @@ def test_the_venv_python_serving_strata_matches_the_identity_and_the_engine_chil
     assert identity == strata.StrataStrategy().launch_identity(spec)
     assert procfs.identity_mismatch(_running(fake_proc, spec, exe=strata.interpreter(spec)), identity) is None
     assert procfs.identity_mismatch(_running(fake_proc, spec, exe=f"{world.engine}/engine/strata"), identity)
+
+
+def _plan(world, *, keyed=False):
+    sensed = lifecycle.sense_launch(world.spec, world.config_dir, SENSED)
+    decision = server.launch_decision(world.spec, keyed)
+    return sensed, lifecycle.plan_launch(world.spec, sensed, decision, autosense=SENSED, api_key_held=keyed)
+
+
+def _script(world, *, keyed=False, function=None, plan=None, spec=None):
+    sensed, planned = _plan(world, keyed=keyed)
+    spec = spec or world.spec
+    copy = strata.copy_text(strata.copy_of(
+        sensed.engine, spec, context=strata.launch_context(planned, spec), port=spec.port, config_dir=world.config_dir))
+    return strata.render_script(
+        plan or planned, spec, copy, strata.copy_path(world.config_dir, spec.port), name="swift", version="0.19.1",
+        key_placeholder="key", visible=lambda text: text, function=function), copy
+
+
+def _heredoc(script: str) -> str:
+    lines = script.split("\n")
+    start = next(i for i, line in enumerate(lines) if line.endswith("<<'STRATA_COPY'")) + 1
+    return "\n".join(lines[start:lines.index(strata.COPY_DELIMITER, start)]) + "\n"
+
+
+def test_the_script_writes_the_copy_then_execs_the_venv_python_from_the_engine_dir(world, sensing):
+    script, copy = _script(world, keyed=True)
+    lines = script.split("\n")
+    copy_file = strata.copy_path(world.config_dir, 8083)
+    assert lines[0].startswith("# swift — ") and lines[0].endswith("(0.19.1)")
+    assert lines[1] == ("# window: 65536 (--max-context); environment: "
+                        "STRATA_API_KEY/STRATA_SKIP_SHA256/STRATA_PREBUILT_URL/STRATA_SOURCE/STRATA_EXECV/HF_ENDPOINT dropped")
+    assert lines[2] == "# STRATA_API_KEY=<key>"
+    assert lines[3:5] == [f"mkdir -p {copy_file.parent}", f"cat > {copy_file} <<'STRATA_COPY'"]
+    assert lines[-1] == (f"cd {world.engine} && exec .venv/bin/python serve/server.py --engine strata "
+                         f"--config {copy_file} --port 8083 --host 127.0.0.1")
+    assert _heredoc(script) == copy
+
+
+async def test_the_script_and_activate_start_the_same_process_from_the_same_bytes(world, sensing, popen):  # noqa: F811
+    await world.activate(autosense=SENSED, api_key="k-secret-123")
+    script, _ = _script(world, keyed=True)
+    assert _heredoc(script) == strata.copy_path(world.config_dir, 8083).read_text("utf-8")
+    assert shlex.split(script.split("\n")[-1]) == [
+        "cd", str(world.engine), "&&", "exec", ".venv/bin/python", "serve/server.py", *popen[0]["cmd"][2:]]
+    assert "k-secret-123" not in script and popen[0]["env"]["STRATA_API_KEY"] == "k-secret-123"
+    assert "k-secret-123" not in " ".join(popen[0]["cmd"])
+
+
+def test_an_unkeyed_script_prints_no_key_line(world, sensing):
+    assert "STRATA_API_KEY=" not in _script(world)[0]
+
+
+def test_the_delimiter_is_quoted_and_no_copy_line_equals_it(world, sensing):
+    world.spec = world.spec.model_copy(update={"served_name": f"{strata.COPY_DELIMITER}$(id)`x`"})
+    script, copy = _script(world)
+    assert "<<'STRATA_COPY'" in script and "$(id)`x`" in _heredoc(script)
+    assert strata.COPY_DELIMITER not in copy.split("\n")
+
+
+def test_a_path_with_a_space_is_one_quoted_token(world, sensing):
+    spec = world.spec.model_copy(update={"engine_dir": "/opt/my engine"})
+    plan = SimpleNamespace(argv=strata.argv(spec, config_copy="/c/a b.json"), serve_kwargs={"context": None}, env_names=())
+    script, _ = _script(world, plan=plan, spec=spec)
+    assert script.split("\n")[-1].startswith("cd '/opt/my engine' && exec .venv/bin/python serve/server.py")
+    assert "--config '/c/a b.json'" in script
+
+
+def test_a_function_wraps_the_body_and_leaves_the_here_document_at_column_zero(world, sensing):
+    script, copy = _script(world, function="serve_swift")
+    lines = script.split("\n")
+    assert lines[:2] == ["serve_swift() {", "  ("] and lines[-2:] == ["  )", "}"]
+    assert _heredoc(script) == copy and strata.COPY_DELIMITER in lines
+    assert lines[-3].startswith(f"    cd {world.engine} && exec")
