@@ -1,7 +1,9 @@
 """A child runs in the parent's live window, read once at spawn."""
 from __future__ import annotations
 
+import ast
 import types
+from pathlib import Path
 
 import pytest
 
@@ -166,3 +168,48 @@ async def test_builtin_role_floors_cover_the_three_roles():
     floors = subagent.builtin_role_floors(reg, _Counter(), object(), None)
     assert set(floors) == {"explore", "web-researcher", "search-verifier"}
     assert set(floors.values()) == {8_448}
+
+
+SRC = Path(__file__).resolve().parents[2] / "src" / "localharness"
+
+
+def _runner_calls(source):
+    return [n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call)
+            and getattr(n.func, "id", getattr(n.func, "attr", None)) == "make_explore_agent_runner"]
+
+
+def int_window_calls(source: str, name: str) -> list[str]:
+    """Runner calls whose window is not a lambda or the Name `window`, or that pass `max_context_tokens`."""
+    bad = []
+    for call in _runner_calls(source):
+        kws = {k.arg: k.value for k in call.keywords}
+        w = kws.get("window")
+        if "max_context_tokens" in kws or (w is not None and not (
+                isinstance(w, ast.Lambda) or (isinstance(w, ast.Name) and w.id == "window"))):
+            bad.append(f"{name}:{call.lineno}")
+    return bad
+
+
+def test_no_runner_call_under_src_passes_an_int_window():
+    sources = {p.relative_to(SRC).as_posix(): p.read_text(encoding="utf-8") for p in SRC.rglob("*.py")}
+    assert [b for n, s in sources.items() for b in int_window_calls(s, n)] == []
+    sites = {n for n, s in sources.items() if _runner_calls(s)}
+    assert {"cli/start_cmd.py", "bench/runner.py", "agent/subagent.py"} <= sites
+
+
+@pytest.mark.parametrize("call", [
+    "make_explore_agent_runner(window=4096)",
+    "make_explore_agent_runner(window=cfg.context.max_context_tokens)",
+    "sub.make_explore_agent_runner(max_context_tokens=4096)",
+])
+def test_an_int_window_call_is_reported(call):
+    assert int_window_calls(call, "m.py") == ["m.py:1"]
+
+
+@pytest.mark.parametrize("call", [
+    "make_explore_agent_runner(window=lambda: 1)",
+    "make_explore_agent_runner(window=window)",
+    "make_explore_agent_runner()",
+])
+def test_a_live_window_call_is_not_reported(call):
+    assert int_window_calls(call, "m.py") == []
