@@ -31,7 +31,7 @@ from localharness.provider.speed_stats import (
 )
 from tests.unit.gguf_support import write_gguf
 from tests.unit.launch_support import stub_liveness
-from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
+from tests.unit.test_start_cmd import _capture_start_console, _floor_of, _stub_start_boundaries
 
 GIB = 2**30
 URL = "http://127.0.0.1:9/v1"  # the discard port: a live :8080 would rename the model
@@ -77,6 +77,7 @@ class World:
             self.budgets.append(repl._agent._ctx.max_context_tokens)
 
         _stub_start_boundaries(tmp_path, monkeypatch, repl_run=capture_budget)
+        _floor_of(monkeypatch)
         self.out = _capture_start_console(monkeypatch)
         self.gguf = write_gguf(tmp_path / "model.gguf", HEADER_A)
 
