@@ -160,7 +160,7 @@ async def test_naming_an_entry_a_foreign_holder_blocks_sends_its_sentence_and_mo
 
     await repl._handle_slash(f"/model {name}")
 
-    assert channel.messages == [foreign.LISTED_STOP]
+    assert channel.messages == [foreign.UNIT_STOP]
     assert moved == [] and agent._llm.rebinds == []
 
 

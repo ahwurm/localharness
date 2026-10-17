@@ -1002,11 +1002,12 @@ class EntryGroup:
 
 @dataclass(frozen=True)
 class Entries:
-    """The list: groups in display order, the entries said with their reason, notes, and who else holds the primary's port."""
+    """The list: groups in display order, the entries said with their reason, notes, and the foreign-unit sentence with its (unit, served) key when the unit holds the primary's port (the sentence only when it changed since it was last printed)."""
     groups: tuple[EntryGroup, ...]
     not_offered: tuple[PlanEntry, ...] = ()
     notes: tuple[str, ...] = ()
     foreign: str | None = None
+    foreign_key: tuple[str, str] | None = None
 
     def numbered(self) -> tuple[PlanEntry, ...]:
         return tuple(e for g in self.groups if g.numbered for e in g.entries)
@@ -1212,7 +1213,8 @@ def plan_entries(
         if owner is not None:
             serving.add(owner.prefix)
     cold, refused = [], []
-    last = speed_stats.last_served(speed_stats.default_speed_stats_path(config_dir))
+    ledger = speed_stats.default_speed_stats_path(config_dir)
+    last = speed_stats.last_served(ledger)
     by_file: dict[str, list[ServingRecord]] = {}
     for record in records:
         if record.spec is None or record.prefix in serving:
@@ -1244,13 +1246,19 @@ def plan_entries(
                 s for s in library.shown if s.real not in named and (s.checkpoint is None or s.checkpoint.repo_id not in named))),
             taken, config_dir=config_dir, memory=memory, floor=floor, unit=unit):
         (refused if e.refusal is not None else cold).append(e)
+    unit_sentence = key = None
+    if foreign is not None and foreign.unit:
+        ids = live.get(_norm_url(provider.base_url))
+        key = (foreign.unit, ids[0] if ids else held)
+        unit_sentence = workspace.foreign_unit_sentence(foreign, served=key[1], port=port)
     if cold and foreign is not None:
-        cold = [replace(e, refusal=workspace.incumbent_sentence(
+        cold = [replace(e, refusal=unit_sentence or workspace.incumbent_sentence(
             foreign, port=port, form="imperative", served=held, target=e.name)) for e in cold]
         groups.append(EntryGroup(f"available once {who} is stopped", tuple(cold), False))
     elif cold:
         groups.append(EntryGroup("this box can launch", tuple(cold), True))
-    return Entries(tuple(groups), tuple(refused), tuple(notes), who)
+    changed = key is not None and speed_stats.foreign_unit_changed(ledger, *key)
+    return Entries(tuple(groups), tuple(refused), tuple(notes), unit_sentence if changed else None, key)
 
 
 def not_offered_reason(sentence: str, name: str) -> str:
@@ -1287,8 +1295,19 @@ def entry_lines(entries: Entries) -> list[str]:
 
 
 def listing(harness: Any, **kw: Any) -> tuple[Entries, list[str]]:
+    """The list's lines, then the foreign-unit sentence when it changed, which this records as printed."""
+    from localharness.provider import speed_stats
+
     entries = plan_entries(harness, **kw)
-    return entries, entry_lines(entries)
+    lines = entry_lines(entries)
+    if entries.foreign_key is not None:
+        if entries.foreign is not None:
+            lines.append(entries.foreign)
+        try:
+            speed_stats.record_foreign_unit(speed_stats.default_speed_stats_path(kw["config_dir"]), *entries.foreign_key)
+        except OSError:
+            pass
+    return entries, lines
 
 
 # --------------------------------------------------------------------------- landing / selection writers

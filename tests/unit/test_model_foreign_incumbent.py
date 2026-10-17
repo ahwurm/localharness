@@ -33,7 +33,10 @@ PEER_URL = "http://127.0.0.1:8090/v1"
 UNIT = "llama-server.service"
 SENTENCE_STOP = ("qwen-27b is served by llama-server.service (pid 1234), not by the harness; "
                  "systemctl --user stop llama-server.service, then /model flash-next")
-LISTED_STOP = SENTENCE_STOP.replace("/model flash-next", "/model flash")
+UNIT_STOP = ("llama-server.service serves qwen-27b and is yours, so the harness lists models but never stops it; "
+             "systemctl --user stop llama-server.service hands the GPU to the harness "
+             "(localharness model --autostart on brings your choice up at login).")
+UNIT_DISABLE = UNIT_STOP.replace("--user stop", "--user disable --now")
 
 
 def _cgroup(unit: str = UNIT) -> str:
@@ -136,7 +139,7 @@ async def test_a_foreign_unit_on_the_primarys_port_is_one_sentence_and_nothing_i
 
     await repl._handle_slash("/model flash-next")
 
-    assert channel.messages == [LISTED_STOP]
+    assert channel.messages == [UNIT_STOP]
     assert spies.hits == []
     assert repl._active_heavy is held
     assert agent._llm.rebinds == []
@@ -152,14 +155,12 @@ async def test_an_enabled_unit_is_disabled_now(tmp_path, fake_proc, fake_systemd
 
     await repl._handle_slash("/model flash-next")
 
-    assert channel.messages == [
-        "qwen-27b is served by llama-server.service (pid 1234), not by the harness; "
-        "systemctl --user disable --now llama-server.service, then /model flash"]
+    assert channel.messages == [UNIT_DISABLE]
     assert spies.hits == []
 
 
 @pytest.mark.asyncio
-async def test_a_unit_systemd_could_not_be_asked_about_says_so(
+async def test_a_unit_systemd_could_not_be_asked_about_is_stopped_not_disabled(
         tmp_path, fake_proc, fake_systemd, spies, monkeypatch):
     stub_liveness(monkeypatch, False)
     _foreign(fake_proc, cgroup=_cgroup())  # fake_systemd answers nothing: "not checked"
@@ -167,10 +168,7 @@ async def test_a_unit_systemd_could_not_be_asked_about_says_so(
 
     await repl._handle_slash("/model flash-next")
 
-    assert len(channel.messages) == 1
-    assert channel.messages[0].startswith(
-        "qwen-27b is served by llama-server.service (unit file not checked) (pid 1234), "
-        "not by the harness;")
+    assert channel.messages == [UNIT_STOP]
     assert spies.hits == []
 
 
@@ -215,7 +213,7 @@ async def test_with_no_server_record_the_providers_port_is_the_primarys_port(
 
     await repl._handle_slash("/model flash-next")
 
-    assert channel.messages == [LISTED_STOP]
+    assert channel.messages == [UNIT_STOP]
     assert spies.hits == []
 
 
@@ -271,9 +269,7 @@ async def test_swapping_back_to_the_primarys_name_is_one_sentence_while_a_foreig
 
     await repl._handle_slash("/model qwen-27b")
 
-    assert channel.messages == [
-        "qwen-27b is served by llama-server.service (pid 1234), not by the harness; "
-        "systemctl --user stop llama-server.service, then /model qwen-27b"]
+    assert channel.messages == [UNIT_STOP]
     assert spies.hits == [] and agent._llm.rebinds == []
     assert agent._llm.config.base_url == PEER_URL
 
@@ -408,7 +404,7 @@ async def test_a_foreign_listener_is_named_without_asking_the_strategy_liveness(
     await repl._handle_slash("/model flash-next")
 
     assert asked == []
-    assert len(channel.messages) == 1 and "served by" in channel.messages[0]
+    assert len(channel.messages) == 1 and "is yours" in channel.messages[0]
 
 
 # --- the Holder fillers -------------------------------------------------------------------------- #

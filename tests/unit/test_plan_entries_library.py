@@ -300,6 +300,6 @@ def test_a_foreign_process_that_is_no_unit_keeps_the_imperative_sentence_and_rec
     assert entries.foreign is None and entries.foreign_key is None
     assert not [line for line in lines if "systemctl" in line]
     assert entries.groups[1].entries[0].refusal == workspace.incumbent_sentence(
-        holder, port=8080, form="imperative", served=UNIT_SERVES, target="flash-next")
+        holder, port=8080, form="imperative", served=PRIMARY, target="flash-next")
     ledger = speed_stats.default_speed_stats_path(world.g)
     assert speed_stats.foreign_unit_changed(ledger, "llm.service", UNIT_SERVES)
