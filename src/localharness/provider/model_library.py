@@ -10,8 +10,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from localharness.agent import gguf_header
-from localharness.agent.gguf_header import (
+from localharness.provider import gguf_header
+from localharness.provider.gguf_header import (
     DISCOVERY_MAX_FILES,
     DiscoveredModel,
     Discovery,

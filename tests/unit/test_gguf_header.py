@@ -11,8 +11,8 @@ import threading
 
 import pytest
 
-from localharness.agent import gguf_header
-from localharness.agent.gguf_header import GgufHeaderError, read_header
+from localharness.provider import gguf_header
+from localharness.provider.gguf_header import GgufHeaderError, read_header
 from localharness.core.private_files import NotRegularFile
 from tests.unit.gguf_support import Raw, gguf_bytes, long_string_array, write_gguf
 from tests.unit.launch_support import record_opens

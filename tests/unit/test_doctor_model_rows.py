@@ -20,7 +20,7 @@ from localharness.agent.context import WindowProbe
 from localharness.cli import autostart, doctor_cmd, library
 from localharness.cli.app import app
 from localharness.provider import model_library, units
-from localharness.agent.gguf_header import FileKind
+from localharness.provider.gguf_header import FileKind
 from localharness.provider.server import server_dir
 from tests.unit.procfs_support import fake_proc  # noqa: F401 — the fixture
 from tests.unit.test_autostart_on_off import SERVED, on_world, world  # noqa: F401 — `world` is the fixture

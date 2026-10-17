@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from localharness.agent import gguf_header
+from localharness.provider import gguf_header
 from localharness.cli import doctor_cmd, serve_cmd
 from localharness.config.models import AutosenseConfig, ManagedServerConfig
 from localharness.provider import autosense, lifecycle, server, speed_stats, tuning, units

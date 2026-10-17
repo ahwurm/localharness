@@ -157,7 +157,7 @@ async def test_start_probes_the_window_exactly_once(world):
 async def test_the_attach_fit_is_priced_at_the_kv_type_the_launch_derives(world):
     """WR-06: with the default knobs a harness launch runs q8_0, so the attach fit and the `-c` its undo
     names are priced at q8_0, not f16."""
-    from localharness.agent.gguf_header import read_header
+    from localharness.provider.gguf_header import read_header
     from localharness.config.models import AutosenseConfig
 
     world.config(kv_cache_type="q8_0")

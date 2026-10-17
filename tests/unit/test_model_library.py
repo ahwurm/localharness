@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from localharness.agent import gguf_header
-from localharness.agent.gguf_header import FileKind, rank_models
+from localharness.provider import gguf_header
+from localharness.provider.gguf_header import FileKind, rank_models
 from localharness.provider import model_library
 from localharness.provider.model_library import Entry, Library, library_path, scan
 from tests.unit.gguf_support import Raw, write_gguf

@@ -404,7 +404,7 @@ HEADER_MTP = {**HEADER_A, "qwen3.nextn_predict_layers": 1}
 
 
 def test_the_row_prices_the_derived_kv_type_and_the_draft_share(tmp_path, mock_httpx):
-    from localharness.agent.gguf_header import read_header
+    from localharness.provider.gguf_header import read_header
     from localharness.config.models import AutosenseConfig
     from localharness.provider import autosense as _auto
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from localharness.agent.gguf_header import read_header
+from localharness.provider.gguf_header import read_header
 from localharness.config.models import AutosenseConfig, ManagedServerConfig
 from localharness.provider import tuning
 from localharness.provider.autosense import FIT_KEYS, fit_header
