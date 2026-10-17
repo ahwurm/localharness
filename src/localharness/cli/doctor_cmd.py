@@ -440,7 +440,7 @@ def print_plugin_row(row, failures: list[str]) -> None:
 
 
 def _tuning_plan(spec, config_dir: Path, autosense, *, keyed: bool, peer: str | None):
-    """The `LaunchPlan` the next launch of ``spec`` would run, sensed and planned and nothing prepared; None for a runtime that plans none or a refused launch."""
+    """The `LaunchPlan` the next launch of ``spec`` would run, sensed and planned and nothing prepared; None for a runtime that plans none or a refused decision, the planner's refusal sentence when it refuses."""
     from localharness.provider import lifecycle, server
 
     if not getattr(RUNTIMES[spec.runtime].strategy(spec), "plans_launch", False):
@@ -449,7 +449,11 @@ def _tuning_plan(spec, config_dir: Path, autosense, *, keyed: bool, peer: str | 
     if decision.refusal is not None:
         return None
     sensed = lifecycle.sense_launch(spec, config_dir, autosense, unit=None)
-    return lifecycle.plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed)
+    try:
+        return lifecycle.plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed,
+                                     floor=lifecycle.cached_floor(config_dir))
+    except server.LaunchRefused as refused:
+        return str(refused)
 
 
 def _window_part(plan) -> str | None:
@@ -457,12 +461,45 @@ def _window_part(plan) -> str | None:
     if report is None:
         return None
     if report.mode == "fit":
-        return f"-c {report.asked} (fit)"
-    if report.mode in ("fit-by-server", "not-computed"):
+        return f"--max-model-len {report.asked} (fit)" if report.runtime == "vllm" else f"-c {report.asked} (fit)"
+    if report.mode == "not-computed":
+        return "-c not computed"
+    if report.mode == "fit-by-server":
         return "-c left to llama-server --fit"
     if report.mode == "record":
         return f"-c {report.asked} (the record)"
     return "-c from extra_args"
+
+
+def _figures(plan) -> str | None:
+    """The per-tensor and RAM figures behind the plan's window: the ones the sensed machine knows, in reading order."""
+    from localharness.provider.autosense import gib
+
+    sensed, ratios, placed = plan.inputs[1], plan.inputs[3], plan.report.placement if plan.report else None
+    parts = []
+    if sensed.runtime == "vllm":
+        if sensed.weights:
+            parts.append(f"weights {gib(sensed.weights)} GiB")
+        if placed is not None and placed.budget_bytes:
+            parts.append(f"vLLM budget {gib(placed.budget_bytes)} GiB")
+        return " · ".join(parts) or None
+    split = sensed.split
+    if split is None:
+        if sensed.weights:
+            parts.append(f"weights {gib(sensed.weights)} GiB (tensor table not read)")
+    else:
+        parts.append(f"dense {gib(split.gpu)} GiB")
+        if split.experts:
+            where = {"experts in RAM": " in RAM", "gpu": " on the GPU"}.get(placed.where if placed else None, "")
+            parts.append(f"experts {gib(split.experts)} GiB{where}")
+        if split.input:
+            parts.append(f"token tables {gib(split.input)} GiB read through mmap")
+    cache = plan.serve_kwargs.get("cache_ram")
+    if cache:
+        parts.append(f"prompt cache {cache:,} MiB")
+    if sensed.meminfo is not None:
+        parts.append(f"RAM reserve {gib(ratios.unified_reserve_ratio * sensed.meminfo['MemTotal'])} GiB")
+    return " · ".join(parts) or None
 
 
 def _tuning_rows(cfg_path: Path, harness: HarnessConfig) -> list[str]:
@@ -488,10 +525,13 @@ def _tuning_rows(cfg_path: Path, harness: HarnessConfig) -> list[str]:
             continue
         plan = _tuning_plan(spec, cfg_path, harness.autosense, keyed=keyed,
                             peer=None if record.peer is None else record.peer.name)
+        if isinstance(plan, str):
+            rows.append(head + visible_text(plan))
+            continue
         derived = tuning.derived_clause(
             plan.tuned, shape=plan.shape, cause=plan.cause, dropped=plan.dropped,
             remembered_at=plan.remembered_at) or "nothing derived"
-        rows.append(head + " · ".join(part for part in (derived, _window_part(plan)) if part))
+        rows.append(head + " · ".join(part for part in (derived, _window_part(plan), _figures(plan)) if part))
     return rows
 
 
