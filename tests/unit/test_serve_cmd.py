@@ -392,6 +392,18 @@ def test_serve_with_a_withheld_pending_preset_clears_nothing(tmp_path, monkeypat
     assert "pending_preset" in (w.g / "overrides.yaml").read_text(encoding="utf-8")
 
 
+def test_serve_stops_with_78_and_the_sentence_when_the_plan_refuses(world, monkeypatch):
+    def refuse(*a, **kw):
+        raise server.LaunchRefused("The model does not fit.")
+
+    monkeypatch.setattr(lifecycle, "plan_launch", refuse)
+
+    result = world.run()
+
+    world.untouched_by(result, 78)
+    assert world.said() == "The model does not fit."
+
+
 def test_serve_refuses_a_changed_environment_the_record_does_not_cover_with_78(tmp_path, monkeypatch):
     w = serve_world(tmp_path, monkeypatch)
     w.write_unit({"PATH": str(w.bindir), "HF_HOME": "/h/hf"})  # a new value, never adopted

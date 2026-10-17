@@ -461,10 +461,14 @@ def _script(name: str | None, config_dir: str | None, *, every: bool) -> None:
                 keyed, decision = _script_decision(record, harness)
                 why = decision.refusal
             if why is None:
-                taken.append(tuning.script_function_name(record.name, taken))
-                blocks.append(_script_text(record, harness, cfg, keyed, decision, function=taken[-1]))
-            else:
-                blocks.append(visible_text(SCRIPT_SKIP_LINE.format(name=record.name, why=why)))
+                function = tuning.script_function_name(record.name, taken)
+                try:
+                    blocks.append(_script_text(record, harness, cfg, keyed, decision, function=function))
+                    taken.append(function)
+                    continue
+                except server.LaunchRefused as refused:
+                    why = str(refused)
+            blocks.append(visible_text(SCRIPT_SKIP_LINE.format(name=record.name, why=why)))
         typer.echo("\n\n".join(blocks))
         raise typer.Exit(0)
     serving = model_ops.resolve_serving(harness, view, name, config_dir=cfg)
@@ -478,7 +482,11 @@ def _script(name: str | None, config_dir: str | None, *, every: bool) -> None:
     keyed, decision = _script_decision(record, harness)
     if decision.refusal is not None:
         _say_script_refusal(decision.refusal)
-    typer.echo(_script_text(record, harness, cfg, keyed, decision))
+    try:
+        text = _script_text(record, harness, cfg, keyed, decision)
+    except server.LaunchRefused as refused:
+        _say_script_refusal(str(refused))
+    typer.echo(text)
     raise typer.Exit(0)
 
 
