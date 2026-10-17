@@ -20,7 +20,7 @@ import re
 import stat
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -62,18 +62,44 @@ class FreeMemory:
     source: str  # "nvidia-smi" or "meminfo"
 
 
-def _run_nvidia_smi() -> str | None:
-    """nvidia-smi's CSV (MiB, one line per GPU), or None when it is absent, fails or hangs."""
+def _smi(query: str) -> str | None:
+    """nvidia-smi's CSV for `query` (MiB), or None when it is absent, fails or hangs."""
     exe = which_outside_cwd("nvidia-smi")
     if exe is None:
         return None
     try:
         done = subprocess.run(
-            [exe, "--query-gpu=memory.free,memory.total", "--format=csv,noheader,nounits"],
+            [exe, query, "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=_SMI_TIMEOUT, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return done.stdout if done.returncode == 0 else None
+
+
+def _run_nvidia_smi() -> str | None:
+    return _smi("--query-gpu=memory.free,memory.total")
+
+
+def held_by(pid: int) -> int | None:
+    """Bytes of GPU memory nvidia-smi lists for `pid`, summed over its rows; None when it lists none."""
+    out = _smi("--query-compute-apps=pid,used_memory")
+    mib: list[int] = []
+    for line in (out or "").splitlines()[:256]:
+        try:
+            row_pid, used = (int(field) for field in line.split(","))
+        except ValueError:
+            continue
+        if row_pid == pid:
+            mib.append(used)
+    return sum(mib) * _MIB if mib else None
+
+
+def memory_after_stop(mem: "FreeMemory | None", held: int | None) -> "FreeMemory | None":
+    """`mem` once the incumbent holding `held` bytes is gone; with `held` unknown, the card less 1 GiB."""
+    if mem is None:
+        return None
+    free = mem.free_bytes + held if held is not None else mem.total_bytes - 2**30
+    return replace(mem, free_bytes=max(0, min(free, mem.total_bytes)))
 
 
 def _read_meminfo() -> dict[str, int] | None:
