@@ -26,6 +26,7 @@ import contextvars
 import dataclasses
 import errno
 import functools
+import json
 import logging
 import math
 import os
@@ -45,6 +46,7 @@ except ImportError:  # non-POSIX: the launch lock degrades to an in-process asyn
 
 from localharness.config import redact as _redact
 from localharness.config.models import ManagedServerConfig
+from localharness.core.private_files import atomic_write_text, open_regular
 from localharness.provider import autosense as _auto
 from localharness.provider import procfs, server, speed_stats, tuning, units
 from localharness.provider.procfs import LaunchIdentity
@@ -347,6 +349,42 @@ def record_key(spec: ManagedServerConfig) -> str:
     """The ledger entry a record's retry lives on: `speed_key(runtime, served id)` (R-09a), the same
     key its speed samples use. A boot marker's `record` must equal it."""
     return speed_stats.speed_key(spec.runtime, spec.served_name or str(spec.model))
+
+
+FLOOR_FILE = "server-floor.json"
+_FLOOR_READ_CAP = 64 * 1024
+_FLOOR_MIN = 1_024
+
+
+def record_floor(config_dir: Path, root: int, roles: Mapping[str, int], *, now: datetime | None = None) -> None:
+    """Cache the full window floor for the next start's first launch; a start never fails on it."""
+    at = (now or datetime.now(timezone.utc)).isoformat()
+    try:
+        atomic_write_text(Path(config_dir) / FLOOR_FILE, json.dumps({"root": root, "roles": dict(roles), "at": at}))
+    except OSError:
+        log.debug("could not write %s", FLOOR_FILE, exc_info=True)
+
+
+def cached_floor(config_dir: Path, trained: int | None = None) -> int | None:
+    """The cached root floor clamped to [1,024, trained]; None when absent or not a plain positive int."""
+    try:
+        with os.fdopen(open_regular(Path(config_dir) / FLOOR_FILE), "rb") as fh:
+            raw = fh.read(_FLOOR_READ_CAP + 1)
+        if len(raw) > _FLOOR_READ_CAP:
+            return None
+        root = json.loads(raw).get("root")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not _plain_int(root) or root <= 0:
+        return None
+    root = max(_FLOOR_MIN, root)
+    return min(trained, root) if _plain_int(trained) and trained > 0 else root
+
+
+def raised_floor(live: int | None, cached: int | None) -> int | None:
+    """The larger known figure: the cache only raises the live floor."""
+    known = [v for v in (live, cached) if v is not None]
+    return max(known) if known else None
 
 
 @dataclass(frozen=True)
