@@ -414,7 +414,9 @@ _UNSET: Any = object()  # compute_fit's `memory=` default: probe free memory as 
 @dataclass(frozen=True)
 class FitInputs:
     """What `compute_fit` gathered for one llama.cpp record: the typed header, the GPU residency, the
-    memory probes and the fit they give. Every field is None (or `{}`) when it could not be known."""
+    memory probes, the fit they give, the tensor `split` (None when unreadable or failing its
+    cross-checks, then the whole file is priced) and the projector's bytes. Every field is None (or `{}`) when
+    it could not be known."""
 
     header: dict[str, Any]
     offload: str
@@ -422,6 +424,8 @@ class FitInputs:
     weights: int | None
     meminfo: dict[str, int] | None
     fits: int | None
+    split: TensorSplit | None = None
+    mmproj: int = 0
 
 
 def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None, size: bool = True,
@@ -458,19 +462,21 @@ def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None,
         return FitInputs(header, offload, None, None, None, None)
     mem = free_memory(ratios) if memory is _UNSET else memory
     weights = weights_bytes(server.model, server.mmproj)
+    mmproj = (weights_bytes(server.mmproj) or 0) if server.mmproj else 0
+    split = read_split(server.model, header) if header else None
     mi = _read_meminfo() if meminfo else None
     if as_launched:
         from localharness.provider import tuning  # function-local: tuning imports this module
 
-        k, v, draft_share = tuning.launch_pricing(server, header, tuning.derive(server, header, ratios))
+        k, v, draft_share = tuning.launch_pricing(server, header, tuning.derive(server, header, ratios), split)
     else:
         extra_k, extra_v = extra_cache_types(extra)
         k, v = server.cache_type_k or extra_k or cache_type, server.cache_type_v or extra_v or cache_type
     fits = fit(
         header, mem.free_bytes if mem else None, ratios, attached_served,
         cache_type_k=k, cache_type_v=v,
-        weights=weights, offload=offload, runtime=server.runtime, draft_share=draft_share)
-    return FitInputs(header, offload, mem, weights, mi, fits)
+        weights=weights, offload=offload, runtime=server.runtime, draft_share=draft_share, split=split)
+    return FitInputs(header, offload, mem, weights, mi, fits, split, mmproj)
 
 
 @dataclass(frozen=True)
@@ -506,10 +512,10 @@ def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, auto
 
     extra = list(spec.extra_args or [])
     header, mem, weights, mi = sensed.header, sensed.memory, sensed.weights, sensed.meminfo
-    k, v, share = tuning.launch_pricing(spec, header, tuned)
+    k, v, share = tuning.launch_pricing(spec, header, tuned, sensed.split)
     fits = fit(
         header, mem.free_bytes if mem else None, autosense, cache_type_k=k, cache_type_v=v,
-        weights=weights, offload=sensed.offload, runtime="llamacpp", draft_share=share)
+        weights=weights, offload=sensed.offload, runtime="llamacpp", draft_share=share, split=sensed.split)
     has_c = has_ctx_arg(extra)
     cache_set = spec.cache_ram is not None or has_cache_ram_arg(extra)
     cache_kw = None if cache_set else cache_ram_mib(

@@ -408,6 +408,8 @@ class Sensed:
     remembered: "speed_stats.RetryRecord | None" = None
     marker: "units.Marker | None" = None
     prior_death: bool = False
+    split: "_auto.TensorSplit | None" = None
+    mmproj: int = 0
 
 
 def sense_launch(
@@ -430,7 +432,7 @@ def sense_launch(
         fi = _auto.compute_fit(spec, autosense, meminfo=True)  # its `fits` is priced without the derived types: unused
         remembered = speed_stats.last_retry(speed_stats.default_speed_stats_path(config_dir), record_key(spec))
         sensed = Sensed(spec.runtime, config_dir, fi.header, fi.offload, fi.memory, fi.weights, fi.meminfo,
-                        remembered=remembered)
+                        remembered=remembered, split=fi.split, mmproj=fi.mmproj)
     elif row.checkpoint:
         sensed = Sensed(spec.runtime, config_dir, model_config=tuning.read_model_config(spec))
     else:
