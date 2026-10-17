@@ -790,6 +790,31 @@ _UNDO = {
 }
 
 
+def _placement_line(r: WindowReport) -> str | None:
+    """The launch line for a priced fit: the window, where the weights live and the GPU's share of it."""
+    p = r.placement
+    window = r.served if r.verified and r.served else r.asked
+    if r.attached or r.mode != "fit" or p is None or p.where is None or not window or p.kv_per_token is None:
+        return None
+    share = gib(p.gpu_bytes + p.kv_per_token * window)
+    if p.where == "vllm":
+        return f"window: {window:,} · vLLM · all on the GPU ({share} of vLLM's {gib(p.budget_bytes)} GiB)"
+    if p.where == "experts in RAM":
+        resident = "dense, projector and KV" if p.mmproj else "dense and KV"
+        where = f"experts in RAM ({gib(p.experts_ram)} GiB) · {resident} on the GPU"
+    else:
+        where = "all on the GPU"
+    return f"window: {window:,} · {where} ({share} of {gib(p.free_bytes)} GiB free)"
+
+
+def _fit_line(r: WindowReport) -> str:
+    line = f"window: served {fmt_count(r.served)} · trained {fmt_count(r.trained)} · fits {fmt_count(r.fits)}"
+    if r.free_bytes is not None and r.total_bytes is not None and r.weights_bytes is not None:
+        beside = " beside the served model" if r.attached else ""
+        line += f" (free {gib(r.free_bytes)} GiB of {gib(r.total_bytes)}{beside}; weights {gib(r.weights_bytes)} GiB)"
+    return line
+
+
 def window_lines(report: WindowReport, ratios: Any, undo: str | None = None) -> list[str]:
     """The window line(s) for one report; empty when there is nothing worth saying.
 
@@ -808,10 +833,7 @@ def window_lines(report: WindowReport, ratios: Any, undo: str | None = None) -> 
     if r.attached and (r.fits is None or r.served is None
                        or abs(r.fits - r.served) <= ratios.notify_ratio * r.served):
         return []
-    line = f"window: served {fmt_count(r.served)} · trained {fmt_count(r.trained)} · fits {fmt_count(r.fits)}"
-    if r.free_bytes is not None and r.total_bytes is not None and r.weights_bytes is not None:
-        beside = " beside the served model" if r.attached else ""
-        line += f" (free {gib(r.free_bytes)} GiB of {gib(r.total_bytes)}{beside}; weights {gib(r.weights_bytes)} GiB)"
+    line = _placement_line(r) or _fit_line(r)
     if r.asked and r.served and r.served < r.asked:
         line += f" (asked {r.asked:,})"
     if not r.verified:
