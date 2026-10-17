@@ -10,6 +10,7 @@ from localharness.cli.workspace import Holder
 from localharness.provider import speed_stats
 from tests.unit.test_init_core_setup import _exited, _init
 from tests.unit.test_init_live_import import UNIT, block_of, live, show  # noqa: F401  (fixture)
+from tests.unit.test_init_unit_import import STOPPED_LINE, _stopped_unit, _systemd
 from tests.unit.procfs_support import fake_proc  # noqa: F401  (fixture)
 from tests.unit.units_support import fake_systemd  # noqa: F401  (fixture)
 
@@ -106,3 +107,58 @@ def test_with_a_window_the_sentence_rides_on_the_line_before_the_window_clause(l
     block = block_of(result)
     at = block.index(running_sentence(UNIT, "disabled"))
     assert block[at + 1].startswith(f"{UNIT} serves -c 65536; the harness launches")
+
+
+# ------------------------------------------------------------------ the stopped unit init imported
+
+
+def imported_sentence(enabled: bool) -> str:
+    clause = f" — {DISABLE} keeps it from starting at login beside the harness" if enabled else ""
+    return (f"llm.service is yours and was imported as the server: record; from now on the harness "
+            f"launches qwen-27b itself and never touches the unit{clause}.")
+
+
+DISABLE = "systemctl --user " + "disable llm.service"
+
+
+def stopped(live, enabled: str) -> None:  # noqa: F811
+    _stopped_unit(live)
+    _systemd(live, ("llm.service", enabled, str(live.home / ".config/systemd/user/llm.service"), ""))
+
+
+def test_an_enabled_unit_the_import_took_says_how_to_keep_it_from_starting_beside_the_harness(live):  # noqa: F811
+    stopped(live, "enabled")
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    block = block_of(result)
+    assert block.count(imported_sentence(True)) == 1
+    assert block.index(imported_sentence(True)) < block.index(STOPPED_LINE)
+
+
+def test_a_unit_that_is_not_enabled_gets_no_systemctl_clause(live):  # noqa: F811
+    stopped(live, "disabled")
+
+    result = _init(live.cfg, "--no-input")
+
+    _exited(result, 0)
+    assert imported_sentence(False) in block_of(result)
+    assert "keeps it from starting at login" not in result.output
+
+
+def test_a_later_init_on_the_written_config_does_not_say_it_again(live):  # noqa: F811
+    stopped(live, "enabled")
+    _exited(_init(live.cfg, "--no-input"), 0)
+
+    again = _init(live.cfg, "--no-input")
+
+    assert "was imported as the server" not in again.output
+
+
+def test_a_control_character_in_the_imported_unit_is_escaped_and_quoted():
+    sentence = workspace.imported_unit_sentence(unit_holder("llm\x1b[2J my.service"), served=SERVED)
+
+    assert sentence.startswith("llm\\x1b[2J my.service is yours and was imported")
+    assert "disable 'llm\\x1b[2J my.service' keeps it" in sentence
+    assert "\x1b" not in sentence
