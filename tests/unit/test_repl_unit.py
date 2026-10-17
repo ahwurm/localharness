@@ -23,7 +23,7 @@ from localharness.config import trust
 from localharness.config.loader import ConfigLoader
 from localharness.config.models import ManagedServerConfig
 from localharness.provider import lifecycle, server, units
-from tests.unit.launch_support import stub_liveness
+from tests.unit.launch_support import offer_primary_as, stub_liveness
 from tests.unit.procfs_support import fake_proc  # noqa: F401 — the fixture
 from tests.unit.test_repl_model_cmd import FakeChannel, _xrepl
 from tests.unit.unit_strategy_support import PEER_URLS, PRIMARY, PRIMARY_URL, UNIT, unit_world
@@ -281,7 +281,7 @@ async def test_a_vllm_binary_restart_to_a_model_that_is_not_the_records_is_refus
     record = ManagedServerConfig(runtime="vllm", launch="binary", binary="/x/vllm", model="org/rec",
                                  port=8080, gpu=True)
     harness = w.harness.model_copy(update={"server": record})
-    monkeypatch.setattr(server, "list_cached_models", lambda: ["other-model"])
+    offer_primary_as(monkeypatch, "other-model")
     repl, channel, _agent = rw.build(unit=w.state, harness=harness)
     repl._live_models = _live([])
     repl._active_heavy = (record, PRIMARY_URL)
@@ -319,7 +319,7 @@ async def test_a_restart_under_a_unit_whose_environment_the_record_does_not_cove
 
 def _live(models):
     async def live(base_url):
-        return list(models), True
+        return list(models), bool(models)
 
     return live
 

@@ -94,11 +94,15 @@ def _launchable_peer(name="llamacpp-local", served="qwen-gguf", api_key="none", 
     )
 
 
-def _session(tmp_path, peer, server=None, **repl_kw):
+PRIMARY_DOWN = {PRIMARY_URL: "unreachable", PEER_URL: "unreachable"}
+ON_PEER = {PRIMARY_URL: "unreachable", PEER_URL: ["qwen-gguf"]}
+
+
+def _session(tmp_path, peer, server=None, *, live=None, **repl_kw):
     harness = _harness(server=server if server is not None else _heavy_primary(),
                        extra_endpoints=[peer])
     repl, channel, agent, _ = _xrepl(
-        tmp_path, harness, {PRIMARY_URL: ["model-a"], PEER_URL: "unreachable"}, **repl_kw)
+        tmp_path, harness, live or {PRIMARY_URL: ["model-a"], PEER_URL: "unreachable"}, **repl_kw)
 
     async def _refresh(model, *, base_url=None, provider_type=None):
         return ""
@@ -415,7 +419,7 @@ def _on_the_cold_peer(repl, agent, peer) -> None:
 async def test_a_swap_back_to_a_declared_only_primary_refuses_before_its_rebind(
         tmp_path, boundaries, monkeypatch):
     peer = _launchable_peer()
-    _, repl, channel, agent = _session(tmp_path, peer, server=_llama_primary(binary=None))
+    _, repl, channel, agent = _session(tmp_path, peer, server=_llama_primary(binary=None), live=ON_PEER)
     _on_the_cold_peer(repl, agent, peer)
     held = repl._active_heavy
 
@@ -430,7 +434,8 @@ async def test_a_swap_back_to_a_declared_only_primary_refuses_before_its_rebind(
 
 @pytest.mark.asyncio
 async def test_a_llama_cpp_restart_names_the_runtime(tmp_path, boundaries, monkeypatch):
-    _, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=_llama_primary())
+    _, repl, channel, _ = _session(
+        tmp_path, _launchable_peer(), server=_llama_primary(), live=PRIMARY_DOWN)
 
     await repl._handle_slash(f"/model {PRIMARY_SERVED}")
 
@@ -441,13 +446,12 @@ async def test_a_llama_cpp_restart_names_the_runtime(tmp_path, boundaries, monke
 
 @pytest.mark.asyncio
 async def test_a_vllm_restart_announcement_is_unchanged(tmp_path, boundaries, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
-    _, repl, channel, _ = _session(tmp_path, _launchable_peer())
+    _, repl, channel, _ = _session(tmp_path, _launchable_peer(), live=PRIMARY_DOWN)
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash("/model model-a")
 
     assert any(m.startswith(
-        "Restarting managed vLLM with cached-b — model load can take several minutes...")
+        "Restarting managed vLLM with model-a — model load can take several minutes...")
         for m in channel.messages)
     assert not any("every interface" in m for m in channel.messages)
 
@@ -541,9 +545,8 @@ async def test_a_failed_cold_launch_reports_why_the_incumbent_was_not_restored(
 @pytest.mark.asyncio
 async def test_a_failed_swap_back_reports_why_the_peer_was_not_restored(
         tmp_path, boundaries, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     peer = _declared_only_peer(name="flash-next")  # a vLLM primary lends it no binary
-    _, repl, channel, agent = _session(tmp_path, peer)
+    _, repl, channel, agent = _session(tmp_path, peer, live=ON_PEER)
     _on_the_cold_peer(repl, agent, peer)
 
     async def never_ready(base_url, config_dir=None, **kw):
@@ -551,7 +554,7 @@ async def test_a_failed_swap_back_reports_why_the_peer_was_not_restored(
 
     monkeypatch.setattr(managed_server, "wait_ready", never_ready)
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash("/model model-a")
 
     last = channel.messages[-1]
     assert last.startswith("Model swap failed:")
@@ -632,7 +635,7 @@ async def test_launch_path_2_cold_branch_host_is_last(tmp_path, boundaries):
 async def test_launch_path_3_swap_back_host_is_last(tmp_path, boundaries, monkeypatch):
     peer = _launchable_peer()
     primary = _llama_primary(extra_args=["--host", "0.0.0.0"])
-    _, repl, _, agent = _session(tmp_path, peer, server=primary)
+    _, repl, _, agent = _session(tmp_path, peer, server=primary, live=ON_PEER)
     _on_the_cold_peer(repl, agent, peer)
 
     await repl._handle_slash(f"/model {PRIMARY_SERVED}")
@@ -783,7 +786,7 @@ async def test_a_repl_built_without_the_keyword_prints_nothing_extra(tmp_path, b
 async def test_a_swap_back_that_is_the_sessions_first_launch_prints_the_line_once_before_its_announcement(
         tmp_path, boundaries, monkeypatch):
     _, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=_llama_primary(),
-                                   launch_lines=(LINE,))
+                                   launch_lines=(LINE,), live=PRIMARY_DOWN)
     sent = _when_sent(channel, boundaries)
 
     await repl._handle_slash(f"/model {PRIMARY_SERVED}")
@@ -812,7 +815,8 @@ async def test_a_restore_that_is_the_sessions_first_launch_prints_the_line(tmp_p
 async def test_the_sessions_second_launch_prints_none_of_the_lines(tmp_path, boundaries, monkeypatch):
     peer = _launchable_peer()
     primary = _llama_primary()
-    _, repl, channel, agent = _session(tmp_path, peer, server=primary, launch_lines=(LINE,))
+    _, repl, channel, agent = _session(
+        tmp_path, peer, server=primary, launch_lines=(LINE,), live=PRIMARY_DOWN)
 
     await repl._handle_slash("/model qwen-gguf")  # the cold launch: the first
     await repl._handle_slash(f"/model {PRIMARY_SERVED}")  # the swap-back: the second
@@ -825,15 +829,15 @@ async def test_the_sessions_second_launch_prints_none_of_the_lines(tmp_path, bou
 @pytest.mark.asyncio
 async def test_a_refused_cold_launch_prints_none_of_the_lines_and_keeps_them_for_the_next_launch(
         tmp_path, boundaries, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
-    _, repl, channel, _ = _session(tmp_path, _declared_only_peer(), launch_lines=(LINE,))
+    _, repl, channel, _ = _session(
+        tmp_path, _declared_only_peer(), launch_lines=(LINE,), live=PRIMARY_DOWN)
 
     await repl._handle_slash("/model qwen-gguf")
 
     assert channel.messages[-1] == NO_LLAMA_PEER and LINE not in channel.messages
     assert repl._pending_launch_lines == [LINE]
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash("/model model-a")
 
     assert channel.messages.count(LINE) == 1 and repl._pending_launch_lines == []
 
@@ -842,7 +846,8 @@ async def test_a_refused_cold_launch_prints_none_of_the_lines_and_keeps_them_for
 async def test_a_refused_swap_back_and_a_refused_restore_keep_the_lines(tmp_path, boundaries, monkeypatch):
     peer = _launchable_peer()
     declared = _llama_primary(binary=None)
-    _, repl, channel, agent = _session(tmp_path, peer, server=declared, launch_lines=(LINE,))
+    _, repl, channel, agent = _session(
+        tmp_path, peer, server=declared, launch_lines=(LINE,), live=ON_PEER)
     _on_the_cold_peer(repl, agent, peer)
 
     await repl._handle_slash(f"/model {PRIMARY_SERVED}")
@@ -870,7 +875,8 @@ async def test_wr06_a_peer_whose_base_url_is_not_this_machine_never_has_its_key_
     key.write_text(SENTINEL + "\n", encoding="utf-8")
     peer = _launchable_peer(bind_all=True, require_api_key=True, api_key_file=str(key))
     peer.base_url = "http://192.168.1.50:8080/v1"
-    _, repl, channel, agent = _session(tmp_path, peer)
+    _, repl, channel, agent = _session(
+        tmp_path, peer, live={PRIMARY_URL: ["model-a"], peer.base_url: "unreachable"})
     started = _capture_start_kw(monkeypatch)
 
     with record_opens() as opened:

@@ -14,7 +14,7 @@ from localharness.config.models import ManagedServerConfig
 from localharness.config.overlay import load_overlay
 from localharness.provider import lifecycle
 from localharness.provider import server as managed_server
-from tests.unit.launch_support import harness_launched, stub_liveness  # noqa: F401
+from tests.unit.launch_support import harness_launched, offer_primary_as, stub_liveness  # noqa: F401
 from tests.unit.test_launch_paths_repl import (  # noqa: F401
     PEER_URL,
     PRIMARY_URL,
@@ -26,6 +26,7 @@ from tests.unit.test_launch_paths_repl import (  # noqa: F401
 from tests.unit.test_repl_model_cmd import _harness, _xrepl
 
 NOT_A_GGUF = "{} is not a GGUF file — /model <path.gguf> or a preset name"
+UNKNOWN = "Unknown model '{}'. /model lists what's available."
 
 
 @pytest.fixture(autouse=True)
@@ -230,7 +231,7 @@ async def test_a_vllm_primary_swaps_back_by_its_alias_and_keeps_its_weights(
 
 @pytest.mark.asyncio
 async def test_a_vllm_primary_still_restarts_on_a_cached_model(tmp_path, boundaries, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    offer_primary_as(monkeypatch, "cached-b")
     primary = _vllm_alias_primary()
     _, repl, _, _, _ = _on_a_peer(tmp_path, primary)
     _ready_as(monkeypatch, "cached-b")
@@ -362,18 +363,12 @@ async def test_a_failed_typed_restart_leaves_the_primary_record_as_it_was(tmp_pa
 
 @pytest.fixture
 def untouched(monkeypatch, boundaries):
-    """Spies on every path that would stop, launch or decide; the test asserts none ran."""
+    """Spies on the path that would free the accelerator; the test asserts it never ran."""
     calls: list[str] = []
-    real_decision = managed_server.launch_decision
-
-    def decision(*a, **kw):
-        calls.append("launch_decision")
-        return real_decision(*a, **kw)
 
     async def free(*a, **kw):
         calls.append("free_accelerator")
 
-    monkeypatch.setattr(managed_server, "launch_decision", decision)
     monkeypatch.setattr(lifecycle, "free_accelerator", free)
     return calls
 
@@ -388,7 +383,7 @@ async def test_an_hf_cache_name_on_a_llama_cpp_primary_is_one_line_and_nothing_m
 
     await repl._handle_slash("/model cached-b")
 
-    assert channel.messages[-1] == NOT_A_GGUF.format("cached-b")
+    assert channel.messages[-1] == UNKNOWN.format("cached-b")
     assert untouched == []
     assert boundaries.stops == [] and boundaries.cmds == [] and boundaries.waits == []
     assert agent._llm.rebinds == [] and agent._llm.config.base_url == PEER_URL
@@ -406,7 +401,7 @@ async def test_a_local_models_name_on_a_llama_cpp_primary_gets_the_same_line(
 
     await repl._handle_slash("/model reg-model")
 
-    assert channel.messages[-1] == NOT_A_GGUF.format("reg-model")
+    assert channel.messages[-1] == UNKNOWN.format("reg-model")
     assert untouched == [] and boundaries.stops == [] and agent._llm.rebinds == []
 
 
@@ -430,7 +425,7 @@ async def test_a_typed_path_that_is_not_a_gguf_file_gets_the_same_line(
 
 
 @pytest.mark.asyncio
-async def test_on_a_declared_only_llama_cpp_primary_the_gguf_line_comes_first(
+async def test_on_a_declared_only_llama_cpp_primary_an_unlisted_name_is_unknown_first(
         tmp_path, boundaries, untouched, monkeypatch):
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     primary = _llama(binary=None, served_name="qwen-27b")
@@ -438,7 +433,7 @@ async def test_on_a_declared_only_llama_cpp_primary_the_gguf_line_comes_first(
 
     await repl._handle_slash("/model cached-b")
 
-    assert channel.messages[-1] == NOT_A_GGUF.format("cached-b")
+    assert channel.messages[-1] == UNKNOWN.format("cached-b")
     assert NO_LLAMA_PRIMARY not in channel.messages and untouched == []
 
     await repl._handle_slash("/model qwen-27b")  # its own name: the declared-only refusal, as before

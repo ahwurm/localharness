@@ -18,7 +18,7 @@ from localharness.config.overlay import (
     atomic_write_overlay,
     load_overlay,
 )
-from tests.unit.launch_support import harness_launched, stub_liveness  # noqa: F401
+from tests.unit.launch_support import harness_launched, offer_primary_as, stub_liveness  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -160,7 +160,7 @@ def _harness(server=None, audit_log_path=None, extra_endpoints=None):
 
 
 @pytest.mark.asyncio
-async def test_model_list_shows_serving_and_downloaded(tmp_path, monkeypatch):
+async def test_model_list_shows_serving_and_never_the_download_cache(tmp_path, monkeypatch):
     from localharness.provider import server as managed_server
 
     monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["model-a", "cached-b"])
@@ -171,7 +171,7 @@ async def test_model_list_shows_serving_and_downloaded(tmp_path, monkeypatch):
     assert handled is True
     out = channel.messages[-1]
     assert "model-a" in out and "(serving)" in out and "[active]" in out
-    assert "cached-b" in out and "downloaded" in out
+    assert "cached-b" not in out and "downloaded" not in out
 
 
 @pytest.mark.asyncio
@@ -242,7 +242,7 @@ async def test_model_managed_restart_path(tmp_path, monkeypatch):
     from localharness.provider import server as managed_server
 
     calls: list[str] = []
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    offer_primary_as(monkeypatch, "cached-b")
     monkeypatch.setattr(managed_server, "stop_server", lambda cfg, launch="binary", **kw: calls.append("stop") or True)
     monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: calls.append("start") or 1234)
 
@@ -266,10 +266,10 @@ async def test_model_managed_restart_path(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_model_managed_restart_on_llamacpp_answers_a_non_gguf_name_in_one_line(
+async def test_model_managed_restart_on_llamacpp_answers_an_unlisted_name_in_one_line(
         tmp_path, monkeypatch):
-    """The vLLM test above restarts on `cached-b`; on a llama.cpp primary a cached name would reach
-    `-m`, so it is answered in one line before anything is stopped or launched (D-58, WR-04)."""
+    """A cached name the list does not offer is answered in one line before anything is stopped or
+    launched."""
     from localharness.provider import server as managed_server
 
     calls: list[str] = []
@@ -284,7 +284,7 @@ async def test_model_managed_restart_on_llamacpp_answers_a_non_gguf_name_in_one_
 
     await repl._handle_slash("/model cached-b")
 
-    assert channel.messages[-1] == "cached-b is not a GGUF file — /model <path.gguf> or a preset name"
+    assert channel.messages[-1] == "Unknown model 'cached-b'. /model lists what's available."
     assert calls == []
     assert agent._llm.config.model == "model-a"
     assert harness.server.model == "/x/primary.gguf" and harness.server.served_name == "qwen-27b"
@@ -388,7 +388,7 @@ async def test_model_managed_restart_rebinds_token_counter(tmp_path, monkeypatch
     from localharness.provider import server as managed_server
 
     monkeypatch.setattr(TokenCounter, "_remote_count", lambda self, text: 3)
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    offer_primary_as(monkeypatch, "cached-b")
     monkeypatch.setattr(managed_server, "stop_server", lambda cfg, launch="binary", **kw: True)
     monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: 1234)
 
@@ -1041,29 +1041,30 @@ async def test_model_swap_back_to_primary_stops_cold_peer_first(tmp_path, monkey
     from localharness.provider import lifecycle
 
     monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     stops: list[str] = []
     monkeypatch.setattr(managed_server, "stop_server",
                         lambda cfg, launch="binary", **kw: stops.append(launch) or True)
     monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: 1234)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
-        return ["cached-b"]
+        return ["model-a"]
 
     monkeypatch.setattr(managed_server, "wait_ready", fake_wait_ready)
 
     cold = _cold_peer()
     harness = _harness(server=_heavy_primary(), extra_endpoints=[cold])
-    repl, channel, agent, _ = _xrepl(tmp_path, harness, {"http://localhost:8081/v1": ["model-a"]})
+    repl, channel, agent, _ = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": "unreachable", "http://127.0.0.1:8080/v1": ["qwen-gguf"]})
     # simulate we're currently ON the cold-launched peer: it's the GPU occupant + the bound endpoint
     repl._active_heavy = (cold.lifecycle, cold.base_url)
     agent._llm.config.base_url = cold.base_url
     agent._llm.config.model = "qwen-gguf"
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash("/model model-a")
 
     assert stops == ["binary", "docker"]  # PEER stopped (GPU-lock) THEN primary (restart), in order
-    assert agent._llm.config.model == "cached-b"
+    assert agent._llm.config.model == "model-a"
     assert repl._active_heavy == (harness.server, "http://localhost:8081/v1")
 
 
@@ -1075,7 +1076,6 @@ async def test_model_swap_back_free_fail_reports_no_change(tmp_path, monkeypatch
     from localharness.provider import lifecycle
 
     monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
     started: list = []
 
     def _boom_stop(cfg, launch="binary", **kw):
@@ -1087,18 +1087,20 @@ async def test_model_swap_back_free_fail_reports_no_change(tmp_path, monkeypatch
     monkeypatch.setattr(managed_server, "start_server", lambda cfg, cmd, **kw: started.append(cmd) or 1)
 
     async def fake_wait_ready(base_url, config_dir=None, **kw):
-        return ["cached-b"]
+        return ["model-a"]
 
     monkeypatch.setattr(managed_server, "wait_ready", fake_wait_ready)
 
     cold = _cold_peer()
     harness = _harness(server=_heavy_primary(), extra_endpoints=[cold])
-    repl, channel, agent, _ = _xrepl(tmp_path, harness, {"http://localhost:8081/v1": ["model-a"]})
+    repl, channel, agent, _ = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": "unreachable", "http://127.0.0.1:8080/v1": ["qwen-gguf"]})
     repl._active_heavy = (cold.lifecycle, cold.base_url)   # currently on the cold peer
     agent._llm.config.base_url = cold.base_url
     agent._llm.config.model = "qwen-gguf"
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash("/model model-a")
 
     assert started == []                               # the primary was NEVER (re)started
     assert agent._llm.config.model == "qwen-gguf"      # session model unchanged
@@ -1364,8 +1366,8 @@ async def test_model_tree_continuous_numbering_resolves_peer_model(tmp_path):
 
 @pytest.mark.asyncio
 async def test_model_tree_feeds_peer_models_into_picker_cache(tmp_path):
-    """After a bare /model the picker cache (Tab menu) also holds the peer's models, each tagged
-    with the peer framework + host — so the menu can switch across endpoints, not just list them."""
+    """After a bare /model the picker cache (Tab menu) also holds the peer's models, so the menu can
+    switch across endpoints, not just list them."""
     peer = _peer()
     harness = _harness(extra_endpoints=[peer])
     repl, channel, agent, _ = _xrepl(
@@ -1376,7 +1378,7 @@ async def test_model_tree_feeds_peer_models_into_picker_cache(tmp_path):
 
     await repl._handle_slash("/model")
     assert ("model-a", "serving now") in repl._model_cache
-    assert ("gpt-oss:20b", "Ollama · localhost:11434") in repl._model_cache
+    assert ("gpt-oss:20b", "serving") in repl._model_cache
 
 
 @pytest.mark.asyncio
@@ -1398,15 +1400,12 @@ async def test_model_tree_marks_cold_peer_plainly(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_model_flat_listing_unchanged_without_peers(tmp_path):
-    """Backward compat: with no extra_endpoints the listing stays the flat single-endpoint style
-    (no ▸ endpoint headers) — existing single-endpoint output/behavior is unchanged."""
+async def test_model_listing_without_peers_is_the_one_endpoint_group(tmp_path):
     repl, channel, _ = _repl(tmp_path, _harness(), live=["model-a", "model-b"])
 
     await repl._handle_slash("/model")
     out = channel.messages[-1]
-    assert "▸" not in out  # no grouped-tree headers
-    assert out.startswith("Models:")
+    assert out.startswith("Models:\n▸ vLLM · localhost:8081")
     assert "1. model-a" in out and "2. model-b" in out
 
 
