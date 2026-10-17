@@ -4,11 +4,13 @@ from __future__ import annotations
 import pytest
 
 from localharness.config.models import AutosenseConfig, ManagedServerConfig
-from localharness.provider.autosense import FIT_KEYS, TensorSplit, fit, fit_header, kv_bytes_per_token, read_split
-from localharness.provider.gguf_header import (TensorEntry, classify, indexer_layers, kv_layers,
+from localharness.provider import autosense, gguf_header, lifecycle
+from localharness.provider.autosense import (FIT_KEYS, FreeMemory, TensorSplit, compute_fit, fit, fit_header,
+                                             kv_bytes_per_token, read_split, weights_bytes)
+from localharness.provider.gguf_header import (TensorEntry, classify, cross_checked, indexer_layers, kv_layers,
                                                read_header, read_tensor_table)
 from localharness.provider.tuning import Tuned, draft_share, launch_pricing
-from tests.unit.gguf_support import load_fixture, write_recorded
+from tests.unit.gguf_support import load_fixture, write_gguf, write_recorded, write_sparse
 
 FLASH, SWIFT, NVIDIA = "flash-next-iq3-xxs", "swift-27b-nvfp4-q8mix", "nvidia-27b-nvfp4"
 SPLITS = {
@@ -112,3 +114,75 @@ def test_the_fit_uses_the_split_price(splits):
     kw = dict(cache_type_k="q8_0", cache_type_v="q8_0", weights=weights)
     assert fit(header, free, ratios, split=split, **kw) == min(262_144, int(usable // 34_816))
     assert fit(header, free, ratios, **kw) < fit(header, free, ratios, split=split, **kw)
+
+
+HEADER = {"block_count": 8, "full_attention_interval": 4}
+
+
+@pytest.mark.parametrize("sums,main,header,data,ok", [
+    ({"input": 50}, 2, HEADER, 100, True),
+    ({"input": 51}, 2, HEADER, 100, False),
+    ({}, 0, HEADER, 100, False),
+    ({}, 9, {"block_count": 8}, 100, False),
+    ({}, 8, {"block_count": 8}, 100, True),
+    ({}, 1, HEADER, 100, False),
+    ({}, 1, {"block_count": 9, "nextn_predict_layers": 1, "full_attention_interval": 8}, 100, True),
+    ({}, 1, {}, 100, False),
+    ({"experts": 10}, 2, HEADER, 100, False),
+    ({"experts": 10}, 2, {**HEADER, "expert_count": 4}, 100, True),
+])
+def test_cross_checked(sums, main, header, data, ok):
+    assert cross_checked(sums, main, header, data) is ok
+
+
+def _hostile(tmp_path):
+    kv = {"general.architecture": "qwen35", "qwen35.block_count": 8, "qwen35.context_length": 32768,
+          "qwen35.embedding_length": 64, "qwen35.attention.head_count": 4, "qwen35.attention.head_count_kv": 2}
+    tensors = [("token_embd.weight", [8], 0, 0), ("blk.0.ffn_gate_exps.weight", [8], 0, 32),
+               ("blk.1.ffn_down_exps.weight", [8], 0, 64)]
+    return write_gguf(tmp_path / "hostile.gguf", kv, tensors=tensors, data_bytes=128)
+
+
+def _server(model, **over):
+    return ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model=str(model), port=8080, **over)
+
+
+MEMORY = FreeMemory(2**30, 2**31, "nvidia-smi")
+
+
+def test_a_hostile_table_fails_the_checks_and_is_priced_as_the_whole_file(tmp_path):
+    model = _hostile(tmp_path)
+    ratios = AutosenseConfig()
+    fi = compute_fit(_server(model), ratios, memory=MEMORY)
+    assert fi.split is None
+    whole = fit(fi.header, MEMORY.free_bytes, ratios, weights=weights_bytes(str(model)))
+    assert fi.fits == whole is not None
+
+
+def test_compute_fit_carries_the_split_and_the_projector(tmp_path):
+    fixture = load_fixture(SWIFT)
+    model = write_recorded(tmp_path, fixture)[0]
+    mmproj = write_sparse(tmp_path / "mmproj.gguf", fixture["mmproj_bytes"])
+    fi = compute_fit(_server(model, mmproj=str(mmproj)), AutosenseConfig(), memory=MEMORY)
+    assert fi.split == TensorSplit(*SPLITS[SWIFT]) and fi.mmproj == fixture["mmproj_bytes"]
+    assert compute_fit(_server(model), AutosenseConfig(), memory=MEMORY).mmproj == 0
+
+
+def test_sense_launch_reads_the_table_once_per_shard(tmp_path, monkeypatch):
+    fixture = load_fixture(FLASH)
+    model = write_recorded(tmp_path, fixture)[0]
+    mmproj = write_sparse(tmp_path / "mmproj.gguf", fixture["mmproj_bytes"])
+    reads = []
+    real = gguf_header._shard_table
+    monkeypatch.setattr(gguf_header, "_shard_table", lambda p: reads.append(p) or real(p))
+    monkeypatch.setattr(autosense, "free_memory", lambda ratios: MEMORY)
+    monkeypatch.setattr(autosense, "_read_meminfo", lambda: {"MemTotal": 2**35, "MemAvailable": 2**34})
+    sensed = lifecycle.sense_launch(_server(model, mmproj=str(mmproj)), tmp_path, AutosenseConfig())
+    assert len(reads) == 2
+    assert sensed.split == TensorSplit(*SPLITS[FLASH]) and sensed.mmproj == fixture["mmproj_bytes"]
+
+
+def test_an_unreadable_table_leaves_the_split_unset(tmp_path, monkeypatch):
+    monkeypatch.setattr(autosense, "free_memory", lambda ratios: MEMORY)
+    sensed = lifecycle.sense_launch(_server(_hostile(tmp_path)), tmp_path, AutosenseConfig())
+    assert sensed.split is None and sensed.mmproj == 0
