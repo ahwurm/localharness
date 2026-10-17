@@ -41,6 +41,19 @@ def test_the_recorded_tables_split_to_the_measured_bytes(tmp_path, name):
     assert split == TensorSplit(*SPLITS[name])
 
 
+def test_a_table_without_an_output_projection_prices_a_gpu_copy_of_token_embd(tmp_path):
+    fixture = load_fixture(SWIFT)
+    for tensor in fixture["shards"][0]["tensors"]:
+        if tensor[0] == "output.weight":
+            tensor[0] = "output_proj.weight"
+    path = write_recorded(tmp_path, fixture)[0]
+    entries = read_tensor_table(path).entries
+    embd = next(e.bytes for e in entries if e.name == "token_embd.weight")
+    split = read_split(path, fit_header(read_header(path, FIT_KEYS)))
+    assert split.gpu == sum(e.bytes for e in entries if classify(e.name) == "gpu") + embd
+    assert split.input == SPLITS[SWIFT][2]
+
+
 @pytest.mark.parametrize("name", SPLITS)
 def test_the_layer_counts_come_from_the_attention_tensors(tmp_path, name):
     path, header = _recorded(tmp_path, name)

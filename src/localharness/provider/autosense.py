@@ -196,6 +196,9 @@ def read_split(model: str, header: Mapping[str, Any]) -> TensorSplit | None:
     sums = {"gpu": 0, "experts": 0, "input": 0}
     for e in table.entries:
         sums[gh.classify(e.name)] += e.bytes
+    if not any(e.name == "output.weight" for e in table.entries):
+        # llama.cpp builds the output projection as a copy of token_embd on the output device (create_tensor ... TENSOR_DUPLICATED)
+        sums["gpu"] += sum(e.bytes for e in table.entries if e.name == "token_embd.weight")
     main, draft = gh.kv_layers(table.entries, header)
     if not gh.cross_checked(sums, main, header, table.data_bytes):
         return None
