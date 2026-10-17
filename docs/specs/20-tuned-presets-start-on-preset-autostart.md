@@ -652,7 +652,7 @@ harness-owned.
 
 ```sh
 # qwen-27b-swift-1.5 — the launch `localharness start` / `/model` runs (0.19.0); derived: kv q8_0 (autosense.kv_cache_type) · draft-mtp (nextn_predict_layers=1)
-# -c left to llama-server --fit (the harness fitted 114688 today); environment: LLAMA_ARG_*/LLAMA_API_KEY/MTMD_BACKEND_DEVICE dropped, XDG_CONFIG_HOME → ~/.localharness/config-ini/8080
+# -c 114688 (fit); environment: LLAMA_ARG_*/LLAMA_API_KEY/MTMD_BACKEND_DEVICE dropped, XDG_CONFIG_HOME → ~/.localharness/config-ini/8080
 exec /home/awurm/src/llama.cpp/build/bin/llama-server \
   -m /home/awurm/models/gguf/Swift-1.5-Qwen3.8-27B-NVFP4-Q8mix.gguf \
   --mmproj /home/awurm/models/gguf/mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf \
@@ -1308,7 +1308,7 @@ The
   pinned `ExecStart`; `serve` never adopting; unit identity test; procfs verification; vLLM peer binary
   shown; `--script` escaping; header ints validated; plain `start` attaches to what answers; retry
   remembered; unit wait bounded; sampling line reduced; GPU-holder folded; second-launcher line gated;
-  `--script` leaves `-c` to `--fit`; unique-prefix names; `--scripts` alias.
+  `--script` carries the plan's `-c` (spec 22; 0.19.0 left it to `--fit`); unique-prefix names; `--scripts` alias.
 - **Zero asks (carried from spec 16).** `init` asks nothing; autostart is an explicit command; the one
   machine-trust question is the same one on every surface that puts it (`start`, `--autostart on`, the
   CLI's immediate swap).

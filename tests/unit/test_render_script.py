@@ -63,12 +63,7 @@ def _exec_tokens(script: str) -> list[str]:
     return shlex.split("\n".join(body).replace("\\\n", " "))[1:]
 
 
-def _without_pair(argv, flag: str, value: str) -> list[str]:
-    at = next(i for i in range(len(argv) - 1) if argv[i] == flag and argv[i + 1] == value)
-    return [*argv[:at], *argv[at + 2:]]
-
-
-def test_a_fitted_launch_is_two_comments_then_an_exec_with_the_fit_left_to_llama_server(tmp_path, box):
+def test_a_fitted_launch_is_two_comments_then_an_exec_carrying_the_fit(tmp_path, box):
     spec = _spec(tmp_path, served_name="qwen")
     plan = _plan(tmp_path, spec)
 
@@ -78,21 +73,21 @@ def test_a_fitted_launch_is_two_comments_then_an_exec_with_the_fit_left_to_llama
         "# qwen — the launch `localharness start` / `/model` runs (0.19.0); "
         "derived: kv q8_0 (autosense.kv_cache_type) · draft-mtp (nextn_predict_layers=1)")
     assert lines[1] == (
-        f"# -c left to llama-server --fit (the harness fitted {plan.full_fit} today); environment: "
+        f"# -c {plan.serve_kwargs['context']} (fit); environment: "
         "LLAMA_ARG_*/LLAMA_API_KEY/MTMD_BACKEND_DEVICE dropped, XDG_CONFIG_HOME → ~/.localharness/xdg/8080")
     assert lines[2] == "exec /x/llama-server \\"
     assert lines[3].startswith("  -m ") and not lines[-1].endswith("\\")
     assert all(ln.endswith(" \\") for ln in lines[2:-1])
 
 
-def test_the_exec_tokens_are_the_plan_argv_in_order_without_the_fitted_window_pair(tmp_path, box):
+def test_the_exec_tokens_are_the_plan_argv_in_order_with_the_fitted_window_pair(tmp_path, box):
     spec = _spec(tmp_path)
     plan = _plan(tmp_path, spec)
 
     tokens = _exec_tokens(_render(plan, spec))
 
-    assert tokens == _without_pair(plan.argv, "-c", str(plan.full_fit))
-    assert plan.report.mode == "fit" and "-c" in plan.argv
+    assert tokens == list(plan.argv)
+    assert plan.report.mode == "fit" and tokens[tokens.index("-c") + 1] == str(plan.serve_kwargs["context"])
 
 
 def test_a_record_context_keeps_its_window_and_says_so(tmp_path, box):

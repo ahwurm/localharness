@@ -611,8 +611,8 @@ without one only the entries the record does not yet cover are withheld, and a w
 refused with "run localharness start on a terminal", exit 2.
 
 `--script [NAME]` prints the launch `start` runs as POSIX `sh`: a two-line comment (the record, the
-version, the derived clauses with their reasons, `-c` left to llama-server's `--fit` with the value the
-harness fitted named, the environment names dropped and the `XDG_CONFIG_HOME` home), then `exec <binary> \`
+version, the derived clauses with their reasons, the `-c` the plan priced (`-c 131072 (fit)`), the
+environment names dropped and the `XDG_CONFIG_HOME` home), then `exec <binary> \`
 with every token shell-quoted and one option per continuation line. Keys are placeholders; a vLLM record
 prints `vllm serve …`. `--script --all` prints one shell function per preset (`serve_<name>`). It reads
 the machine record without deciding or recording trust, prepares nothing and writes nothing; a record
