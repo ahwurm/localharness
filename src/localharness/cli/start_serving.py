@@ -28,7 +28,6 @@ from urllib.parse import urlsplit
 from localharness.agent.context import TokenCounter, fixed_tokens, floor_schemas, harness_floor
 from localharness.cli import model_ops, workspace
 from localharness.cli.model_ops import (
-    RUNG_ACTIVE,
     Serving,
     ServingRecord,
     ServingSense,
@@ -114,16 +113,10 @@ def selected_answers(
 def decide(
     serving: Serving, *, selected_answers: bool, sense: ServingSense, last_served: str | None
 ) -> Decision:
-    """Pick the action (D-13, D-15, D-16). The two clauses sit on separate branches, so one event
-    prints at most one: the resume clause only on an attach to the selected record that the
-    ``active_endpoint`` rung named and the ledger's ``last_served`` is not; the attach-to-another
-    clause only when ``last_served`` is not the record that answers."""
+    """Pick the action: attach, swap, launch, or attach to the record that answers."""
     record = serving.record
     if selected_answers:
-        lines: tuple[str, ...] = ()
-        if serving.rung == RUNG_ACTIVE and last_served != record.name:
-            lines = (ATTACH_LINE.format(name=record.name, clause=RESUME_CLAUSE),)
-        return Decision("attach", record, None, lines, serving.rung)
+        return Decision("attach", record, None, (), serving.rung)
     answering = next((r for r in sense.answering if r.prefix != record.prefix), None)
     if answering is not None:
         if serving.explicit:

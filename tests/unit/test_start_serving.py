@@ -27,9 +27,7 @@ from localharness.cli.model_ops import (
     shares_base_url,
 )
 from localharness.cli.start_serving import (
-    ATTACH_LINE,
     OTHER_SERVING_LINE,
-    RESUME_CLAUSE,
     Decision,
     decide,
     selected_answers,
@@ -87,8 +85,7 @@ async def test_a_resumed_peer_answers_and_the_attach_lands_as_a_remembered_attac
     last = speed_stats.last_served(ledger(home))
     decision = decide(serving, selected_answers=True, sense=sense, last_served=last)
     assert (decision.kind, decision.record.name, decision.rung) == ("attach", "flash-next", RUNG_ACTIVE)
-    assert decision.lines == ("Serving flash-next (your last /model choice)",)
-    assert decision.lines == (ATTACH_LINE.format(name="flash-next", clause=RESUME_CLAUSE),)
+    assert decision.lines == ()
 
     overrides = (home / "overrides.yaml").read_bytes()
     spied: list[dict] = []
@@ -147,10 +144,10 @@ def test_decide_prints_no_resume_clause_when_the_active_endpoint_is_the_last_ser
     assert (got.kind, got.lines, got.rung) == ("attach", (), RUNG_ACTIVE)
 
 
-def test_decide_prints_the_resume_clause_when_nothing_was_ever_served(home):
+def test_decide_prints_no_clause_on_an_attach_when_nothing_was_ever_served(home):
     seed(home, active=FLASH_ACTIVE)
     got = decide(serve(home), selected_answers=True, sense=NOTHING, last_served=None)
-    assert got.lines == ("Serving flash-next (your last /model choice)",)
+    assert got.lines == ()
 
 
 def test_decide_prints_no_clause_on_the_server_rung(home):

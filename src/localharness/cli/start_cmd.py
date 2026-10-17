@@ -830,7 +830,7 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
                                 endpoint_out: list | None = None,
                                 notes: LaunchNotes | None = None,
                                 peer: str | None = None, unit: Any = None,
-                                floor: int | None = None) -> str | None:
+                                floor: int | None = None, resume: bool = False) -> str | None:
     """Launch path 1 of the five: `start`'s down-server branch. Wait for a server that is already
     loading, or ask the launch decision BEFORE announcing anything and launch through the lifecycle
     strategy. Returns the decision's refusal line when the launch is refused (nothing stopped,
@@ -909,7 +909,7 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
             def _announce(clause: str = "") -> None:
                 """The one launch line (D-23): the posture phrase first, then what was derived, then the
                 load warning. Plain text, never markup: the clause is built from closed plan values."""
-                inside = "; ".join(part for part in (posture, clause) if part)
+                inside = "; ".join(part for part in (start_serving.RESUME_CLAUSE if resume else "", posture, clause) if part)
                 inside = f"{inside}; " if inside else ""
                 tail = f" {lifecycle.RUNS_OUTSIDE_AUTOSTART}" if outside else ""
                 console.print(
@@ -2290,7 +2290,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 _serving_spec, server_cfg_path, provider.base_url, launch_key,
                 path_binary=path_llama_server, autosense=harness.autosense, endpoint_out=_launched,
                 notes=launch_notes, peer=record.peer.name if record.peer is not None else None,
-                unit=_unit, floor=_floor)
+                unit=_unit, floor=_floor, resume=serving.rung == model_ops.RUNG_ACTIVE)
             if refusal is None:
                 probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
                 if probe_ok:
