@@ -97,7 +97,7 @@ def schema_tokens(counter: Any, tool_schemas: list | None) -> int:
 def floor_schemas(registry: Any, agent_id: str, division_id: str, tool_config: Any) -> list:
     """A role's tool schemas for the floor, without the registry's tool-count warning, which belongs to a turn."""
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
+        warnings.filterwarnings("ignore", message=r"Agent .* has \d+ tools", category=UserWarning)
         return list(registry.get_tools_for_agent(agent_id, division_id, tool_config).values())
 
 

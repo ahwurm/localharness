@@ -116,7 +116,7 @@ def test_counting_the_fixed_part_does_not_raise_the_tool_count_warning():
 
     class _Noisy(_Registry):
         def get_tools_for_agent(self, agent_id, division_id, tool_config):
-            warnings.warn("too many tools", UserWarning)
+            warnings.warn("Agent 'a' has 9 tools (threshold: 8).", UserWarning)
             return super().get_tools_for_agent(agent_id, division_id, tool_config)
 
     loop, _ = _loop(100, _Noisy({"t": _Schema()}))
