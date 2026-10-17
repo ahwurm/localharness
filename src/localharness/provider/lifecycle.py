@@ -515,8 +515,8 @@ class LaunchPlan:
 
     def retry(self) -> "LaunchPlan | None":
         """The one relaunch after a death (D-16, D-35, D-37): the derived spec type dropped and the fit
-        `-c` halved (`max(1, full_fit // 2)`), each only when the plan has it; for vLLM, both derived
-        parsers dropped (and with them `--enable-auto-tool-choice`, unless the record's own tool-call
+        `-c` halved (`max(floor or 1, full_fit // 2)`, not at all when that is below the floor), each only when the
+        plan has it; for vLLM, both derived parsers dropped (and with them `--enable-auto-tool-choice`, unless the record's own tool-call
         parser keeps it), `dropped` then naming "parsers". None for a plan already in the retry shape
         and for one with none of these (a KV-only launch, a vLLM launch that derived no parser). A
         record or `extra_args` value is never touched. Pure: the same plan gives an equal retry."""
@@ -541,12 +541,13 @@ class LaunchPlan:
         the plan is not a full one."""
         if self.shape != "full" or self.inputs is None:
             return None
-        spec, sensed, decision, autosense, held, _floor = self.inputs
+        spec, sensed, decision, autosense, held, floor = self.inputs
         kw = dict(self.serve_kwargs)
         report, tuned, dropped = self.report, self.tuned, ()
         drops_spec = drop_spec and tuned.spec_type is not None
         drops_parsers = drop_parsers and (tuned.reasoning_parser is not None or tuned.tool_call_parser is not None)
-        halves = report is not None and report.mode == "fit" and self.full_fit is not None
+        halves = (report is not None and report.mode == "fit" and self.full_fit is not None
+                  and (floor is None or self.full_fit // 2 >= floor))
         if not drops_spec and not halves and not drops_parsers:
             return None
         if drops_parsers:
@@ -562,7 +563,7 @@ class LaunchPlan:
             tuned = dataclasses.replace(tuned, spec_type=None, draft_p_min=None, mtp_layers=None, reasons=reasons)
             dropped = (*dropped, "draft-mtp")
         if halves:
-            halved = max(1, self.full_fit // 2)
+            halved = max(floor or 1, self.full_fit // 2)
             kw["context"] = halved
             report = dataclasses.replace(report, asked=halved, retried=cause == "death")  # IN-01: only a death retried
         return dataclasses.replace(
@@ -595,6 +596,8 @@ def plan_launch(
         if priced.refusal is not None:
             raise server.LaunchRefused(priced.refusal)
         report, kw["context"], kw["cache_ram"], full_fit = priced.report, priced.context, priced.cache_ram, priced.full_fit
+        if priced.fit_ctx is not None:
+            kw["fit_ctx"] = priced.fit_ctx
     if "config_ini" in row.record_fields:
         home = server.config_ini_home(sensed.config_dir, spec.port)
         names.append("XDG_CONFIG_HOME")

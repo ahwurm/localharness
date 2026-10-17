@@ -323,6 +323,8 @@ RAM_UNKNOWN_REFUSAL = ("{name} cannot run here: its experts need {need} GiB of R
                        "(/proc/meminfo) — pick a quant whose experts fit the GPU.")
 NGL_REFUSAL = ("{name} sets -ngl in server.extra_args, which turns llama-server's --fit off, and its experts do not "
                "fit the GPU — drop the -ngl, or add --n-cpu-moe to extra_args.")
+CONTEXT_FLOOR_REFUSAL = ("{name} is set to {window} (context:) and the harness needs at least {floor:,} — raise it, "
+                         "or unset it so the harness sizes the window.")
 FLOOR_REFUSAL = ("{name} fits only {window} here and the harness needs at least {floor:,} — free GPU memory, "
                  "or pick a smaller model.")
 
@@ -651,6 +653,7 @@ class Price:
     cache_ram: int | None
     full_fit: int | None
     refusal: str | None = None
+    fit_ctx: int | None = None
 
 
 def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, autosense: Any,
@@ -671,9 +674,11 @@ def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, auto
             meminfo=mi, cache_type_k=k, cache_type_v=v, share=share, autosense=autosense,
             floor=None if chosen else floor, ngl_hand=_flag_value(extra, _NGL) is not None)
     fits = placed.fits if placed else None
-    refusal = None
+    refusal = fit_ctx = None
     if spec.context is not None:
         mode, asked, ctx_kw = "record", spec.context, None
+        if floor and spec.context < floor:
+            refusal = CONTEXT_FLOOR_REFUSAL.format(name=_label(spec), window=window_phrase(spec.context), floor=floor)
     elif has_c:
         mode, asked, ctx_kw = "extra_args", None, None
     elif by_hand or mem is None:
@@ -683,7 +688,7 @@ def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, auto
     elif fits:
         mode, asked, ctx_kw = "fit", fits, fits
     else:
-        mode, asked, ctx_kw = "fit-by-server", None, None
+        mode, asked, ctx_kw, fit_ctx = "fit-by-server", None, None, floor
     cache_set = spec.cache_ram is not None or has_cache_ram_arg(extra)
     if cache_set:
         cache_kw = None
@@ -697,7 +702,7 @@ def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, auto
         free_bytes=mem.free_bytes if mem else None, total_bytes=mem.total_bytes if mem else None,
         weights_bytes=weights, asked=asked, mode=mode, attached=False, retried=False,
         verified=False, runtime="llamacpp", placement=placed, floor=floor)
-    return Price(report, ctx_kw, cache_kw, fits if mode == "fit" else None, refusal)
+    return Price(report, ctx_kw, cache_kw, fits if mode == "fit" else None, refusal, fit_ctx)
 
 
 def gib(n: float) -> str:
