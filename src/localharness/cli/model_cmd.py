@@ -27,6 +27,7 @@ from localharness.config import session_presence, trust
 from localharness.config.loader import ConfigLoader
 from localharness.config.paths import global_config_dir, resolve_config_dir
 from localharness.provider import lifecycle, procfs, server, tuning
+from localharness.provider.runtimes import RUNTIMES
 from localharness.provider.units import read_target
 
 console = Console()
@@ -398,7 +399,7 @@ def _swap_now(
 
 
 def _script_kind(record) -> bool:
-    return record.spec is not None and record.spec.runtime in ("llamacpp", "vllm")
+    return record.spec is not None and getattr(RUNTIMES[record.spec.runtime].strategy(record.spec), "plans_launch", False)
 
 
 def _script_decision(record, harness) -> "tuple[bool, server.LaunchDecision]":
