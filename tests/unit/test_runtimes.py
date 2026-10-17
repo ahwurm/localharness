@@ -22,18 +22,18 @@ def _record(runtime, **over):
     return ManagedServerConfig(**{"runtime": runtime, "model": "m", "port": 8000, **over})
 
 
-def test_the_table_has_the_four_runtimes_in_order_and_is_read_only():
-    assert list(RUNTIMES) == ["llamacpp", "vllm", "ollama", "lmstudio"]
+def test_the_table_has_the_five_runtimes_in_order_and_is_read_only():
+    assert list(RUNTIMES) == ["llamacpp", "vllm", "ollama", "lmstudio", "strata"]
     with pytest.raises(TypeError):
-        RUNTIMES["strata"] = RUNTIMES["vllm"]
+        RUNTIMES["other"] = RUNTIMES["vllm"]
 
 
-@pytest.mark.parametrize("name", ["llamacpp", "vllm", "ollama", "lmstudio"])
+@pytest.mark.parametrize("name", ["llamacpp", "vllm", "ollama", "lmstudio", "strata"])
 def test_row_of_a_known_name_is_its_row(name):
     assert row_of(name) is RUNTIMES[name]
 
 
-@pytest.mark.parametrize("name", [None, "", 7, "strata", "vLLM"])
+@pytest.mark.parametrize("name", [None, "", 7, "vLLM"])
 def test_row_of_anything_else_is_none(name):
     assert row_of(name) is None
 
@@ -69,6 +69,7 @@ def test_only_the_own_unit_and_a_servable_record_wrap_in_the_unit_strategy(spec,
     (_record("vllm", launch="docker", docker_image="img"), False, "docker"),
     (_record("ollama"), False, "Ollama"),
     (_record("lmstudio"), False, "LM Studio"),
+    (_record("strata", engine_dir="/e", engine_config="c.json", served_name="s"), True, "Strata"),
     (None, False, "attach-only"),
 ])
 def test_what_the_unit_serves_and_what_a_record_is_called(spec, servable, kind):
@@ -77,9 +78,9 @@ def test_what_the_unit_serves_and_what_a_record_is_called(spec, servable, kind):
 
 
 def test_the_server_key_and_label_tables_are_views_over_the_rows():
-    assert dict(server.KEY_ENV) == {"vllm": "VLLM_API_KEY", "llamacpp": "LLAMA_API_KEY"}
+    assert dict(server.KEY_ENV) == {"vllm": "VLLM_API_KEY", "llamacpp": "LLAMA_API_KEY", "strata": "STRATA_API_KEY"}
     assert dict(server.RUNTIME_LABELS) == {
-        "vllm": "vLLM", "llamacpp": "llama.cpp", "ollama": "Ollama", "lmstudio": "LM Studio"}
+        "vllm": "vLLM", "llamacpp": "llama.cpp", "ollama": "Ollama", "lmstudio": "LM Studio", "strata": "Strata"}
     with pytest.raises(TypeError):
         server.KEY_ENV["ollama"] = "X"
     with pytest.raises(TypeError):
@@ -113,17 +114,19 @@ def test_record_fields_are_the_runtime_only_fields():
         "config_ini", "speculative")
     assert RUNTIMES["vllm"].record_fields == ("reasoning_parser", "tool_call_parser")
     assert RUNTIMES["ollama"].record_fields == RUNTIMES["lmstudio"].record_fields == ()
+    assert RUNTIMES["strata"].record_fields == ("mmproj", "served_name", "engine_dir", "engine_config")
 
 
 def test_the_site_answers_each_row_carries():
-    llama, vllm, ollama, lms = RUNTIMES.values()
-    assert [r.key_env for r in RUNTIMES.values()] == ["LLAMA_API_KEY", "VLLM_API_KEY", None, None]
-    assert [r.gguf for r in RUNTIMES.values()] == [True, False, False, False]
-    assert [r.checkpoint for r in RUNTIMES.values()] == [False, True, False, False]
-    assert [r.path_binary for r in RUNTIMES.values()] == ["llama-server", None, None, None]
-    assert [r.exposed_by_default for r in RUNTIMES.values()] == [False, True, False, False]
-    assert [r.window_note for r in RUNTIMES.values()] == [None, None, " · Ollama decides the window", ""]
+    llama, vllm, ollama, lms, strata = RUNTIMES.values()
+    assert [r.key_env for r in RUNTIMES.values()] == ["LLAMA_API_KEY", "VLLM_API_KEY", None, None, "STRATA_API_KEY"]
+    assert [r.gguf for r in RUNTIMES.values()] == [True, False, False, False, True]
+    assert [r.checkpoint for r in RUNTIMES.values()] == [False, True, False, False, False]
+    assert [r.path_binary for r in RUNTIMES.values()] == ["llama-server", None, None, None, None]
+    assert [r.exposed_by_default for r in RUNTIMES.values()] == [False, True, False, False, False]
+    assert [r.window_note for r in RUNTIMES.values()] == [None, None, " · Ollama decides the window", "", None]
     assert vllm.facts() is tuning.MODEL_TYPE_PARSERS and llama.facts is None
+    assert dict(strata.facts()) == {} and strata.price is None and not strata.derived_args
     assert list(lms.derived_args) == ["--gpu"] and not ollama.derived_args
 
 
