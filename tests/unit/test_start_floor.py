@@ -172,3 +172,68 @@ async def test_the_cached_floor_raises_the_live_one_and_never_lowers_it(tmp_path
 
     lifecycle.record_floor(tmp_path, 1_024, {})
     assert await _live_floor(tmp_path) == live
+
+
+def _capture_agent(monkeypatch):
+    agents: list = []
+
+    async def run(self):
+        agents.append(self._agent)
+    monkeypatch.setattr("localharness.cli.repl.OrchestratorREPL.run", run)
+    return agents
+
+
+def _spy_record_floor(monkeypatch):
+    calls: list[tuple] = []
+    real = lifecycle.record_floor
+
+    def record(*a, **k):
+        calls.append(a)
+        return real(*a, **k)
+    monkeypatch.setattr(lifecycle, "record_floor", record)
+    return calls
+
+
+async def test_the_full_floor_is_written_once_after_the_registry(tmp_path, monkeypatch):
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=65_536, probe_window=None)
+    _stub_floor(monkeypatch, 256)
+    agents = _capture_agent(monkeypatch)
+    calls = _spy_record_floor(monkeypatch)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    ((config_dir, root, roles),) = calls
+    assert root == agents[0].floor() and root > 0
+    assert set(roles) == {"explore", "web-researcher", "search-verifier"} and all(roles.values())
+    assert lifecycle.cached_floor(config_dir) == max(1_024, root)
+
+
+async def test_a_window_between_the_pre_launch_and_the_full_floor_exits_1_before_any_turn(tmp_path, monkeypatch):
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=16_384, probe_window=None)
+    _stub_floor(monkeypatch, 256)
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop.floor", lambda self: 20_000)
+    ran = _spy_repl(monkeypatch)
+    errs = _capture_err_console(monkeypatch)
+
+    with pytest.raises(typer.Exit) as exit_:
+        await _start_async(None, False, False, str(tmp_path))
+
+    assert exit_.value.exit_code == 1
+    assert errs == [UNIT_LINE.replace("4,096", "16,384").replace("15,360", "20,000")]
+    assert ran == []
+    assert lifecycle.cached_floor(tmp_path) == 20_000
+
+
+async def test_a_window_at_the_full_floor_starts_even_when_the_cache_cannot_be_written(tmp_path, monkeypatch):
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=20_000, probe_window=None)
+    _stub_floor(monkeypatch, 256)
+    monkeypatch.setattr("localharness.agent.loop.AgentLoop.floor", lambda self: 20_000)
+
+    def refuse(path, text):
+        raise OSError("read-only")
+    monkeypatch.setattr(lifecycle, "atomic_write_text", refuse)
+    ran = _spy_repl(monkeypatch)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert ran == [1]
