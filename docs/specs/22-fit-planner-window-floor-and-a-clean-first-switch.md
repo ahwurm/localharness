@@ -351,8 +351,8 @@ From the episodes, the root's fixed part plus a short first message was about 6,
   window (§8.3).
 
 The cache, `<config_dir>/server-floor.json`, holds `{root, roles: {name: floor}, at}`, is written by
-`lifecycle.record_floor` through `atomic_write_text`, joins `PROTECTED_CONFIG_DIR_ENTRIES`, and is clamped on read
-to `[1,024, trained]`; it only ever raises the live figure (`max(live, cached)`), so a planted or stale value can
+`lifecycle.record_floor` through `atomic_write_text`, joins `PROTECTED_CONFIG_DIR_ENTRIES`, and is read as at least
+1,024; it only ever raises the live figure (`max(live, cached)`), so a planted or stale value can
 refuse a launch the person sees, never let a smaller window through.
 
 ### 8.3 Where it applies
@@ -709,7 +709,7 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
   offered; a `tokenizer.json` symlink leaving `blobs/` unlists the snapshot; the argv holding the snapshot path and
   the table's parsers only, `HF_HUB_OFFLINE=1` in its environment.
 - The floor: the ascending scan across the 12,288 jump; 6,700 → 15,360 and 4,370 → 8,448; the cache only raising the
-  live figure and clamped; the swap refusing before `free_accelerator` (a fake incumbent never stopped), the backstop
+  live figure and read as at least 1,024; the swap refusing before `free_accelerator` (a fake incumbent never stopped), the backstop
   through `swap`'s failure branch (target stopped, incumbent restored, `_refresh_token_counter` never called);
   `start` and attach exiting 1 under the floor before any turn.
 - Children: a runner built at 4,096, the root refit to 66,560, the next spawn at 66,560 (nested and cruncher too);
