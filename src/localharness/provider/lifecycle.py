@@ -934,6 +934,8 @@ class SpawnedProcessStrategy:
             report = dataclasses.replace(
                 report, served=probe.served, trained=probe.trained or report.trained,
                 verified=probe.served is not None)
+            if report.placement is not None and _auto._flag_value(plan.argv, _auto._NGL) is None:
+                report = dataclasses.replace(report, held=await asyncio.to_thread(_auto.held_by, pid))
         live = LiveEndpoint(base_url=base_url, served_models=served, handle=pid, note=decision.note,
                             window=report, dropped_env=tuple(dropped), tuned=plan.tuned if plan else None)
         if plan is not None:
