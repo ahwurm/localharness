@@ -30,6 +30,7 @@ from localharness.provider.autosense import (
     has_spec_flag,
     spec_type_flag,
 )
+from localharness.provider.runtimes import RUNTIMES, row_of
 from localharness.provider.server import KEY_ENV, strip_url_credentials
 
 # llama-server's own default; deriving it would change the 0.18 argv, so it derives nothing (D-08).
@@ -149,7 +150,7 @@ def read_model_config(spec: Any) -> Mapping[str, Any] | None:
     and the value kept only when it is an object. A missing, unreadable, oversized, malformed or
     deeply nested file, or any other runtime, gives None; this never raises."""
     try:
-        if getattr(spec, "runtime", None) != "vllm":
+        if not getattr(row_of(getattr(spec, "runtime", None)), "checkpoint", False):
             return None
         path = _checkpoint_config_path(spec)
         if path is None:
@@ -167,11 +168,11 @@ def read_model_config(spec: Any) -> Mapping[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _derive_vllm(spec: Any, model_config: Mapping[str, Any] | None) -> Tuned:
+def _derive_vllm(spec: Any, model_config: Mapping[str, Any] | None, parsers: Mapping) -> Tuned:
     if not isinstance(model_config, dict):
         return NOTHING_DERIVED
     model_type = model_config.get("model_type")
-    row = MODEL_TYPE_PARSERS.get(model_type) if isinstance(model_type, str) else None
+    row = parsers.get(model_type) if isinstance(model_type, str) else None
     if row is None:
         return NOTHING_DERIVED
     entry = spec.entry_for(spec.model)
@@ -203,9 +204,10 @@ def derive(spec: Any, header: Mapping[str, Any], autosense: Any, *,
     MTP layers. A vLLM record derives its reasoning / tool-call parsers from `model_config`'s
     `model_type` (the table above) unless the record's field or a parser flag in `extra_args` says
     otherwise. Any other runtime derives nothing."""
-    if getattr(spec, "runtime", None) == "vllm":
-        return _derive_vllm(spec, model_config)
-    if getattr(spec, "runtime", None) != "llamacpp":
+    row = row_of(getattr(spec, "runtime", None))
+    if row is not None and row.facts is not None:
+        return _derive_vllm(spec, model_config, row.facts())
+    if row is None or not row.gguf:
         return NOTHING_DERIVED
     # `extra_args`, `env:` and the record's `config_ini` in one argv / env view: a cache type, a
     # flash-attention off or a speculative option set in any of them is the person's choice (CR-01).
@@ -310,8 +312,7 @@ def derived_clause(
     return f"{text} · {undo(context is not None)}" if drafted_off else text
 
 
-SCRUBBED_SHOWN = MappingProxyType({
-    "llamacpp": "LLAMA_ARG_*/LLAMA_API_KEY/MTMD_BACKEND_DEVICE", "vllm": "VLLM_API_KEY"})
+SCRUBBED_SHOWN = MappingProxyType({name: "/".join(row.scrub) for name, row in RUNTIMES.items() if row.scrub})
 
 _DERIVED_WORDS = (
     ("cache_type", lambda t: f"kv {t.cache_type}"),

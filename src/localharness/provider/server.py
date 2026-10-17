@@ -40,7 +40,7 @@ from localharness.core import private_files
 from localharness.core.private_files import NotRegularFile, open_regular
 from localharness.core.which import which_outside_cwd
 from localharness.provider import procfs
-from localharness.provider.runtimes import RUNTIMES
+from localharness.provider.runtimes import RUNTIMES, Runtime, row_of
 
 logger = structlog.get_logger(__name__)
 """The module logger. Named `logger`, not `log`: `start_server` holds its serve.log handle as `log`."""
@@ -241,12 +241,12 @@ def launch_decision(spec: Any, keyed: bool, *, peer: str | None = None) -> Launc
       the launch keyed, the file stays off argv and the launch binds loopback.
 
     Pure with respect to the spec (it is read, never copied or changed)."""
-    runtime = getattr(spec, "runtime", "vllm")
-    if runtime in ("ollama", "lmstudio"):
+    row = _row(getattr(spec, "runtime", "vllm"))
+    if row.key_env is None:
         return LaunchDecision(None, True, False, None)
-    if runtime == "llamacpp" and not getattr(spec, "binary", None):
-        refusal = ("no llama-server — set server.binary" if peer is None
-                   else f"no llama-server — set extra_endpoints[{peer}].lifecycle.binary")
+    if row.path_binary is not None and not getattr(spec, "binary", None):
+        refusal = (f"no {row.path_binary} — set server.binary" if peer is None
+                   else f"no {row.path_binary} — set extra_endpoints[{peer}].lifecycle.binary")
         return LaunchDecision(refusal, True, False, None)
     loopback = getattr(spec, "bind_all", False) is not True
     key_file = getattr(spec, "api_key_file", None)
@@ -340,6 +340,10 @@ KEY_ENV: Mapping[str, str] = MappingProxyType(
 """The environment variable each launched runtime reads its key from (llama-server reads `LLAMA_API_KEY`; `LLAMA_ARG_API_KEY` is read by nothing)."""
 
 RUNTIME_LABELS: Mapping[str, str] = MappingProxyType({name: row.name for name, row in RUNTIMES.items()})
+
+
+def _row(runtime: str | None) -> Runtime:
+    return row_of(runtime) or RUNTIMES["vllm"]
 """The runtime names `start`'s and `/model`'s launch lines print."""
 
 EVERY_INTERFACE_NO_KEY = "every interface, no key"
@@ -644,94 +648,51 @@ def hub_file(repo_id: str, filename: str, *, ref: str | None = None) -> HubFile 
 # ---------------------------------------------------------------------------
 
 
-def serve_command(
-    srv: ManagedServerConfig,
-    *,
-    keyed: bool = False,
-    loopback: bool = False,
-    key_file_ok: bool = False,
-    context: int | None = None,
-    cache_ram: int | None = None,
-    cache_type: str | None = None,
-    spec_type: str | None = None,
-    draft_p_min: float | None = None,
-    reasoning_parser: str | None = None,
-    tool_call_parser: str | None = None,
+def _llamacpp_argv(
+    srv: ManagedServerConfig, *, loop: bool, key_file_ok: bool, context: int | None, cache_ram: int | None,
+    cache_type: str | None, spec_type: str | None, draft_p_min: float | None, **_: Any,
 ) -> list[str]:
-    """Build the launch command for srv.model. Pure: list argv, no shell, no I/O.
+    ctx = srv.context if srv.context is not None else context
+    ram = srv.cache_ram if srv.cache_ram is not None else cache_ram
+    key_file = os.path.expanduser(srv.api_key_file) if srv.api_key_file else None
+    k = srv.cache_type_k if srv.cache_type_k is not None else cache_type
+    v = srv.cache_type_v if srv.cache_type_v is not None else cache_type
+    if srv.speculative == "draft-mtp":
+        spec = ["--spec-type", "draft-mtp"]
+    elif srv.speculative is None and spec_type is not None:
+        spec = ["--spec-type", spec_type,
+                *(["--spec-draft-p-min", str(float(draft_p_min))] if draft_p_min is not None else [])]
+    else:
+        spec = []
+    return [
+        str(srv.binary), "-m", os.path.expanduser(srv.model),
+        *(["-a", srv.served_name] if srv.served_name is not None else []),
+        *(["--mmproj", os.path.expanduser(srv.mmproj)] if srv.mmproj is not None else []),
+        *(["--cache-type-k", k] if k is not None else []),
+        *(["--cache-type-v", v] if v is not None else []),
+        *spec,
+        *(["-c", str(ctx)] if ctx is not None else []),
+        *(["--cache-ram", str(ram)] if ram is not None else []),
+        *(["--api-key-file", key_file] if key_file_ok and key_file else []),
+        "--port", str(srv.port),
+        *([] if loop else ["--host", "0.0.0.0"]),
+        *srv.extra_args,
+        *(["--host", "127.0.0.1"] if loop else []),
+    ]
 
-    A server listens on this machine only unless `srv.bind_all` (and `loopback`, the launch
-    decision's narrowing, is not set): the loopback `--host 127.0.0.1` comes LAST, after
-    `extra_args`, because the server keeps the last `--host` it sees — so `bind_all` is the only
-    exposure switch and an `extra_args` `--host 0.0.0.0` can never outlive the narrowing. Docker
-    changes only the PUBLISHED address (`-p 127.0.0.1:<port>:8000`): inside the container vLLM
-    must keep listening on the container's own interfaces, because the container's loopback is
-    not what `-p` forwards to. `key_file_ok` and the two fit keywords `context` / `cache_ram` are
-    what `activate` passes (the decision's judgment, then the fit); this function judges nothing.
-    `keyed` (docker only) passes `-e VLLM_API_KEY` — the variable's NAME, its value coming from the
-    launch environment (`start_server(api_key=)`); a binary reads that environment directly.
 
-    When srv.model names a `local_models` registry entry, the entry's checkpoint dir is
-    served (docker: bind-mounted read-only at /models/serving) under --served-model-name
-    <entry.name>, with the entry's per-model extra_args appended after the shared ones —
-    so a swap changes checkpoint, served id, AND model-specific flags in one place.
-    Otherwise srv.model passes through untouched (HF repo id resolved via the cache).
+def _ollama_argv(srv: ManagedServerConfig, **_: Any) -> list[str]:
+    # the daemon takes no model arg (it loads lazily; DaemonStrategy warm-loads after); `env` sets vars through start_server's plain Popen
+    env = ["env", f"OLLAMA_HOST=127.0.0.1:{srv.port}", "OLLAMA_KEEP_ALIVE=-1"]
+    if not srv.gpu:
+        env.append("CUDA_VISIBLE_DEVICES=")
+    return [*env, str(srv.binary) if srv.binary else "ollama", "serve"]
 
-    runtime='llamacpp' (0.11 Phase B) is a separate, simpler shape the harness spawns directly:
-    `llama-server -m <gguf> [-a <alias>] [--mmproj <p>] [--cache-type-k/-v <t>]
-    [--spec-type <t> [--spec-draft-p-min <p>]] [-c <n>] [--cache-ram <n>] [--api-key-file <p>]
-    --port <p> [--host 0.0.0.0] <extra_args> [--host 127.0.0.1]` — every item from the record, in that order, each only when set; the
-    record's own `context` / `cache_ram` / `cache_type_*` / `speculative` win over the keywords
-    (`context`, `cache_ram`, `cache_type`, `spec_type`, `draft_p_min`), which fill an unset one
-    (`speculative: draft-mtp` emits `--spec-type draft-mtp` alone, `off` emits nothing); `~` in
-    the model, mmproj and key-file paths is expanded as a string (no stat); the key file rides argv
-    only when `key_file_ok`. A GGUF file IS the model, so there is no docker mount /
-    --served-model-name registry indirection.
 
-    vLLM (binary and docker) emits `--reasoning-parser X --tool-call-parser Y
-    --enable-auto-tool-choice` just before the shared `extra_args`: each side is the record's own
-    `reasoning_parser` / `tool_call_parser` when it is a name, nothing when it is `off`, else the
-    keyword (`reasoning_parser`, `tool_call_parser`); `--enable-auto-tool-choice` rides with a
-    tool-call parser unless `extra_args` already carry it, and never with a reasoning parser alone."""
-    loop = loopback or not srv.bind_all
-    if srv.runtime == "llamacpp":
-        ctx = srv.context if srv.context is not None else context
-        ram = srv.cache_ram if srv.cache_ram is not None else cache_ram
-        key_file = os.path.expanduser(srv.api_key_file) if srv.api_key_file else None
-        k = srv.cache_type_k if srv.cache_type_k is not None else cache_type
-        v = srv.cache_type_v if srv.cache_type_v is not None else cache_type
-        if srv.speculative == "draft-mtp":
-            spec = ["--spec-type", "draft-mtp"]
-        elif srv.speculative is None and spec_type is not None:
-            spec = ["--spec-type", spec_type,
-                    *(["--spec-draft-p-min", str(float(draft_p_min))] if draft_p_min is not None else [])]
-        else:
-            spec = []
-        return [
-            str(srv.binary), "-m", os.path.expanduser(srv.model),
-            *(["-a", srv.served_name] if srv.served_name is not None else []),
-            *(["--mmproj", os.path.expanduser(srv.mmproj)] if srv.mmproj is not None else []),
-            *(["--cache-type-k", k] if k is not None else []),
-            *(["--cache-type-v", v] if v is not None else []),
-            *spec,
-            *(["-c", str(ctx)] if ctx is not None else []),
-            *(["--cache-ram", str(ram)] if ram is not None else []),
-            *(["--api-key-file", key_file] if key_file_ok and key_file else []),
-            "--port", str(srv.port),
-            *([] if loop else ["--host", "0.0.0.0"]),
-            *srv.extra_args,
-            *(["--host", "127.0.0.1"] if loop else []),
-        ]
-    if srv.runtime == "ollama":
-        # Ollama (0.11 Phase D): the harness spawns the DAEMON — `ollama serve` takes NO model arg
-        # (models load lazily per request; DaemonStrategy warm-loads srv.model after). Env carries
-        # the bind host/port + keep-loaded-while-the-daemon-is-up; CPU-only when gpu=False (lets the
-        # daemon lifecycle be validated with NO GPU window). The `env` prefix sets vars through
-        # start_server's plain Popen without adding a param. `binary` defaults to PATH `ollama`.
-        env = ["env", f"OLLAMA_HOST=127.0.0.1:{srv.port}", "OLLAMA_KEEP_ALIVE=-1"]
-        if not srv.gpu:
-            env.append("CUDA_VISIBLE_DEVICES=")
-        return [*env, str(srv.binary) if srv.binary else "ollama", "serve"]
+def _vllm_argv(
+    srv: ManagedServerConfig, *, loop: bool, keyed: bool, reasoning_parser: str | None,
+    tool_call_parser: str | None, **_: Any,
+) -> list[str]:
     entry = srv.entry_for(srv.model)
     extra = [*srv.extra_args, *(entry.extra_args if entry is not None else [])]
     rp = srv.reasoning_parser if srv.reasoning_parser is not None else reasoning_parser
@@ -745,6 +706,7 @@ def serve_command(
           if tp is not None and "--enable-auto-tool-choice" not in extra else []),
     ]
     if srv.launch == "docker":
+        # only the PUBLISHED address narrows to loopback: inside the container vLLM keeps listening on its own interfaces, which is what `-p` forwards to
         hf_cache = str(Path("~/.cache/huggingface").expanduser())
         model_arg = srv.model
         mounts = ["-v", f"{hf_cache}:/root/.cache/huggingface"]
@@ -771,17 +733,38 @@ def serve_command(
             *(["--host", "127.0.0.1"] if loop else [])]
 
 
+def serve_command(
+    srv: ManagedServerConfig,
+    *,
+    keyed: bool = False,
+    loopback: bool = False,
+    key_file_ok: bool = False,
+    context: int | None = None,
+    cache_ram: int | None = None,
+    cache_type: str | None = None,
+    spec_type: str | None = None,
+    draft_p_min: float | None = None,
+    reasoning_parser: str | None = None,
+    tool_call_parser: str | None = None,
+) -> list[str]:
+    """The launch argv: the runtime row's builder; loopback `--host` comes last, after `extra_args`."""
+    return RUNTIMES[srv.runtime].argv(
+        srv, loop=loopback or not srv.bind_all, keyed=keyed, key_file_ok=key_file_ok, context=context,
+        cache_ram=cache_ram, cache_type=cache_type, spec_type=spec_type, draft_p_min=draft_p_min,
+        reasoning_parser=reasoning_parser, tool_call_parser=tool_call_parser)
+
+
 def effective_posture(spec: Any, *, keyed: bool, decision: LaunchDecision) -> tuple[bool, str | None]:
     """(exposed, line): does the launch bind beyond this machine, and the exposure phrase when it
     does so with no key. Read from the argv `serve_command` would build for `decision` plus the key
     actually held — never from the `bind_all` / `require_api_key` flags, so `require_api_key: true`
     with no key held still reads `every interface, no key`. Ollama, LM Studio and a refused launch
     expose nothing and build no command. Pure; the key file is never opened."""
-    runtime = getattr(spec, "runtime", "vllm")
-    if runtime in ("ollama", "lmstudio") or decision.refusal is not None:
+    row = _row(getattr(spec, "runtime", "vllm"))
+    if row.key_env is None or decision.refusal is not None:
         return False, None
     cmd = serve_command(spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok)
-    if runtime != "llamacpp" and getattr(spec, "launch", "binary") == "docker":
+    if row.checkpoint and getattr(spec, "launch", "binary") == "docker":
         exposed = not cmd[cmd.index("-p") + 1].startswith("127.0.0.1:")
     else:
         host: str | None = None
@@ -791,7 +774,7 @@ def effective_posture(spec: Any, *, keyed: bool, decision: LaunchDecision) -> tu
             elif token.startswith("--host="):
                 host = token[len("--host="):]
         # llama-server's own default is loopback, vLLM's is every interface
-        exposed = runtime != "llamacpp" if host is None else classify_hosts(host) != "loopback"
+        exposed = row.exposed_by_default if host is None else classify_hosts(host) != "loopback"
     argv_keyed = keyed or any(
         token in ("--api-key", "--api-key-file") or token.startswith(("--api-key=", "--api-key-file="))
         for token in cmd)
@@ -803,11 +786,9 @@ def _scrubbed(runtime: str, name: str) -> bool:
 
     A blocklist: it names only what that runtime reads as a setting or a key. HF_TOKEN,
     CUDA_VISIBLE_DEVICES, LD_LIBRARY_PATH, PATH and HF_HOME are never in it."""
-    if runtime == "llamacpp":
-        return name.startswith("LLAMA_ARG_") or name in {"LLAMA_API_KEY", "MTMD_BACKEND_DEVICE"}
-    if runtime == "vllm":
-        return name == "VLLM_API_KEY"
-    return False
+    row = row_of(runtime)
+    return row is not None and any(
+        name.startswith(entry[:-1]) if entry.endswith("*") else name == entry for entry in row.scrub)
 
 
 def child_environment(
@@ -839,9 +820,10 @@ def child_environment(
     if xdg_config_home is not None:
         env["XDG_CONFIG_HOME"] = xdg_config_home
     if api_key:
-        if runtime not in KEY_ENV:
+        row = row_of(runtime)
+        if row is None or row.key_env is None:
             raise ValueError(f"runtime {runtime!r} launches with no key variable")
-        env[KEY_ENV[runtime]] = api_key
+        env[row.key_env] = api_key
     return env, dropped
 
 
@@ -880,7 +862,7 @@ def start_server(
         dropped_out.extend(dropped)
     if dropped:
         logger.info("launch environment scrubbed", runtime=runtime, dropped=dropped)
-    if runtime == "vllm":
+    if getattr(row_of(runtime), "checkpoint", False):
         inherited = sorted(n for n in os.environ if n.startswith("VLLM_") and n != "VLLM_API_KEY")
         if inherited:
             logger.info("launch environment inherits VLLM_ settings", runtime=runtime, names=inherited)
@@ -1370,7 +1352,7 @@ async def wait_ready(
     `serve` process (not yet the server) for a moment before the exec: the unit, not the pidfile, decides
     death, and the identity proof moves into the poll. Unset, nothing changes.
     """
-    label = RUNTIME_LABELS.get(runtime, "vLLM") if runtime else "vLLM"
+    label = _row(runtime).name
     start = time.monotonic()
     deadline = start + timeout_seconds
     headers = auth_headers(api_key)
