@@ -491,15 +491,18 @@ def _ranker(config_path: Path, auto: AutosenseConfig, unit_model: str | None = N
         if not probed:
             probed.append(autosense.free_memory(auto))
         fits: dict[str, int | None] = {}
+        gpu: dict[str, int | None] = {}
         for model in models:
             try:
                 spec = ManagedServerConfig(runtime="llamacpp", model=str(model.path),
                                            mmproj=str(model.mmproj) if model.mmproj else None)
-                fits[str(model.path)] = autosense.compute_fit(spec, auto, memory=probed[0]).fits
+                fi = autosense.compute_fit(spec, auto, memory=probed[0])
+                fits[str(model.path)] = fi.fits
+                gpu[str(model.path)] = fi.split.gpu + fi.mmproj if fi.split else fi.weights
             except Exception:  # noqa: BLE001 — one model that cannot be sized is ranked without a fit
-                fits[str(model.path)] = None
+                fits[str(model.path)] = gpu[str(model.path)] = None
         ledger = speed_stats.model_paths(speed_stats.default_speed_stats_path(config_path))
-        return rank_models(models, unit_model=unit_model, ledger_paths=ledger, fits=fits)
+        return rank_models(models, unit_model=unit_model, ledger_paths=ledger, fits=fits, gpu_bytes=gpu)
 
     return rank
 
