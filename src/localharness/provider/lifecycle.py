@@ -424,6 +424,7 @@ class Sensed:
 def sense_launch(
     spec: ManagedServerConfig, config_dir: Path, autosense: "AutosenseConfig", *,
     unit: "units.UnitRuntimeState | None" = None, now: datetime | None = None,
+    memory: "_auto.FreeMemory | None" = _auto._UNSET,
 ) -> Sensed:
     """Every read a launch needs, once: the GGUF header, free memory, the weights, `/proc/meminfo` and
     the ledger's remembered retry for llama.cpp; a checkpoint's `config.json` for vLLM; nothing for any
@@ -435,20 +436,22 @@ def sense_launch(
     vLLM launch also reads the boot marker (`units.read_marker`, read only: a marker for another record,
     another binary or past the window is ignored here and replaced by the next one `serve` writes, never
     removed by sensing) and sets `marker` and `prior_death` from `boot_prior_death`, with the unit's own
-    `TimeoutStartSec` as the window. `now` is the clock for that age test (UTC now when None)."""
+    `TimeoutStartSec` as the window. `now` is the clock for that age test (UTC now when None). `memory`
+    (a `FreeMemory` or None) replaces the probe of free memory."""
     row = RUNTIMES[spec.runtime]
     if row.gguf:
-        fi = _auto.compute_fit(spec, autosense, meminfo=True)  # its `fits` is priced without the derived types: unused
+        fi = _auto.compute_fit(spec, autosense, meminfo=True, memory=memory)  # its `fits` is priced without the derived types: unused
         remembered = speed_stats.last_retry(speed_stats.default_speed_stats_path(config_dir), record_key(spec))
         sensed = Sensed(spec.runtime, config_dir, fi.header, fi.offload, fi.memory, fi.weights, fi.meminfo,
                         remembered=remembered, split=fi.split, mmproj=fi.mmproj)
     elif row.checkpoint:
         config = tuning.read_model_config(spec)
-        memory = weights = None
+        free = weights = None
         path = tuning._checkpoint_config_path(spec) if config is not None else None
         if path is not None:
-            memory, weights = _auto.free_memory(autosense), _auto.checkpoint_bytes(os.path.dirname(path))
-        sensed = Sensed(spec.runtime, config_dir, model_config=config, memory=memory, weights=weights)
+            free = _auto.free_memory(autosense) if memory is _auto._UNSET else memory
+            weights = _auto.checkpoint_bytes(os.path.dirname(path))
+        sensed = Sensed(spec.runtime, config_dir, model_config=config, memory=free, weights=weights)
     else:
         return Sensed(spec.runtime, config_dir)
     if unit is None:
@@ -1907,6 +1910,27 @@ async def restore_incumbent(
         return None, f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+def swap_refusal(
+    target: Heavy, incumbent: Heavy | None, *, config_dir: Path, autosense: "AutosenseConfig | None",
+    floor: int | None, unit: Any = None,
+) -> str | None:
+    """The refusal the target's plan would raise against the memory the swap will have, with the
+    incumbent named as still serving; None when it plans, or when the launch itself has the say."""
+    spec = target.spec
+    if autosense is None or floor is None or not getattr(strategy_for(spec, unit=unit), "plans_launch", False):
+        return None
+    keyed = bool(target.launch_kw.get("api_key"))
+    decision = server.launch_decision(spec, keyed, peer=target.peer)
+    if decision.refusal is not None:
+        return None
+    try:
+        plan_launch(spec, sense_launch(spec, config_dir, autosense), decision,
+                    autosense=autosense, api_key_held=keyed, floor=floor)
+    except server.LaunchRefused as exc:
+        return f"{exc} {heavy_label(incumbent)} keeps serving." if incumbent is not None else str(exc)
+    return None
+
+
 async def swap(
     incumbent: Heavy | None,
     target: Heavy,
@@ -1919,6 +1943,7 @@ async def swap(
     on_poll: Callable[[float], None] | None = None,
     on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
     timeout_seconds: float = 1800.0,
+    floor: int | None = None,
 ) -> SwapOutcome:
     """Free the accelerator of `incumbent`, launch `target`, tell `reporter`; a failed launch stops the
     half-started target and restores the incumbent (the REPL's cold branch, moved here so every
@@ -1956,6 +1981,11 @@ async def swap(
     if refusal is not None:
         await reporter.line(redact(SWAP_REFUSED.format(name=heavy_label(target), why=refusal)))
         return SwapOutcome(None, None, None, _redacted_error(RuntimeError(refusal), redact), "refused")
+    unplanned = await asyncio.to_thread(
+        swap_refusal, target, incumbent, config_dir=config_dir, autosense=autosense, floor=floor, unit=unit)
+    if unplanned is not None:
+        await reporter.line(redact(unplanned))
+        return SwapOutcome(None, None, None, _redacted_error(RuntimeError(unplanned), redact), "refused")
     try:
         freed = await free_accelerator(
             (incumbent.spec, incumbent.base_url) if incumbent is not None else None,
@@ -1971,7 +2001,7 @@ async def swap(
         leave_unit(target.spec, unit, config_dir)
         live = await strategy_for(target.spec, unit=unit).activate(
             target.spec, config_dir, target.base_url, timeout_seconds=timeout_seconds,
-            on_poll=on_poll, peer=target.peer, autosense=autosense, on_plan=on_plan,
+            on_poll=on_poll, peer=target.peer, autosense=autosense, on_plan=on_plan, floor=floor,
             **target.launch_kw)
     except asyncio.CancelledError:
         # Nothing half-started stays behind, and nothing is restored: the person walked away.
