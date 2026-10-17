@@ -89,6 +89,7 @@ async def test_listing_names_the_serving_model_and_opens_the_picker(tmp_path, mo
     out = "\n".join(chan.msgs)
     assert "1. qwen3.6-35b-a3b  (serving)  ● [active]" in out
     assert "downloaded" not in out and "restarts the managed server" not in out
+    assert r._model_cache == [("qwen3.6-35b-a3b", "serving now")]   # the menu offers what the list numbers
     assert chan.menu_opened == 1                       # bare /model auto-opens the picker menu
 
 

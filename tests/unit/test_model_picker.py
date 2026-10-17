@@ -17,7 +17,9 @@ from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 from localharness.channels.terminal import SlashCommandCompleter, _build_persistent_input_app
+from localharness.cli.model_ops import Entries, EntryGroup, PlanEntry
 from localharness.cli.repl import OrchestratorREPL
+from localharness.config.models import HarnessConfig, ManagedServerConfig, OrgConfig, ProviderConfig
 
 NAMES = ["qwen3.6-35b-a3b", "qwen2.5-7b-instruct", "llama-3.3-70b"]
 
@@ -117,9 +119,16 @@ async def test_command_menu_enter_stays_accept_only():
 
 
 # ------------------------------------------------------------------ REPL cache plumbing
-def _repl(channel, llm):
+def _harness(server=None) -> HarnessConfig:
+    return HarnessConfig(
+        provider=ProviderConfig(provider_type="vllm", base_url="http://localhost:1/v1",
+                                default_model="a-model", available_models=["a-model"]),
+        org=OrgConfig(default_model="a-model"), server=server)
+
+
+def _repl(channel, llm, harness=None):
     return OrchestratorREPL(
-        orchestrator=None, agent_loop=NS(_llm=llm), channel=channel, bus=None,
+        orchestrator=None, agent_loop=NS(_llm=llm), channel=channel, bus=None, harness_config=harness,
     )
 
 
@@ -129,7 +138,7 @@ async def test_prefetch_fills_cache_and_channel_hook_serves_it():
 
     chan = Chan()
     llm = NS(config=NS(base_url="http://localhost:1/v1", model="m"))
-    r = _repl(chan, llm)
+    r = _repl(chan, llm, _harness())
 
     async def fake_live(base_url):
         return (["a-model", "b-model"], True)
@@ -142,7 +151,7 @@ async def test_prefetch_fills_cache_and_channel_hook_serves_it():
 
 async def test_prefetch_swallows_unreachable_server():
     llm = NS(config=NS(base_url="http://localhost:1/v1", model="m"))
-    r = _repl(NS(), llm)
+    r = _repl(NS(), llm, _harness())
 
     async def boom(base_url):
         raise OSError("connection refused")
@@ -152,32 +161,77 @@ async def test_prefetch_swallows_unreachable_server():
     assert r._model_cache == []
 
 
-async def test_prefetch_includes_managed_registry_names():
-    """Full-swap feature: the picker menu offers the managed server's local checkpoints by
-    name alongside whatever is live — live first, registry appended, deduped."""
+async def test_prefetch_swallows_a_planner_failure(monkeypatch):
+    from localharness.cli import model_ops
+
     llm = NS(config=NS(base_url="http://localhost:1/v1", model="m"))
-    managed = NS(local_models=[
-        NS(name="live-one", quant=None, tps=None),
-        NS(name="qwen3.6-27b", quant="nvfp4 (compressed-tensors)", tps=9.5),
-    ])
-    r = OrchestratorREPL(
-        orchestrator=None, agent_loop=NS(_llm=llm), channel=NS(), bus=None,
-        harness_config=NS(server=managed),
-    )
+    r = _repl(NS(), llm, _harness())
 
     async def fake_live(base_url):
-        return (["live-one"], True)
+        return (["a-model"], True)
+
+    def broken(*a, **kw):
+        raise RuntimeError("planner failed")
 
     r._live_models = fake_live
+    monkeypatch.setattr(model_ops, "plan_entries", broken)
+    await r._prefetch_model_cache()  # must not raise
+    assert r._model_cache == []
+
+
+async def test_prefetch_without_a_harness_leaves_the_cache_empty():
+    llm = NS(config=NS(base_url="http://localhost:1/v1", model="m"))
+    r = _repl(NS(), llm)
     await r._prefetch_model_cache()
-    # A row with a known rate becomes formatted-text meta: the t/s segment carries its
-    # color band (9.5 < 20 → tps-red); rateless rows stay plain strings.
-    assert r._model_cache == [
-        ("live-one", "serving"),
-        ("qwen3.6-27b", [("", "nvfp4 (compressed-tensors) · "),
-                         ("class:tps-red", "~9.5 t/s"),
-                         ("", " · swap")]),
+    assert r._model_cache == []
+
+
+async def test_prefetch_offers_a_cold_launch_record_with_its_detail(monkeypatch):
+    """The menu holds what the list numbers: a primary that is down is a launch entry with its runtime."""
+    from tests.unit.launch_support import stub_liveness
+
+    stub_liveness(monkeypatch, False)
+    llm = NS(config=NS(base_url="http://localhost:1/v1", model="m"))
+    server = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/primary.gguf",
+                                 port=1, gpu=True, served_name="qwen")
+    r = _repl(NS(), llm, _harness(server))
+
+    async def down(base_url):
+        return ([], False)
+
+    r._live_models = down
+    await r._prefetch_model_cache()
+    assert [name for name, _ in r._model_cache] == ["qwen"]
+    assert r._model_cache[0][1].startswith("llama.cpp")
+
+
+def _menu_entries() -> Entries:
+    live = [PlanEntry("active-one", "live", "vllm", active=True),
+            PlanEntry("other-one", "live", "vllm", rate="34.6 t/s measured"),
+            PlanEntry("slow-one", "live", "vllm", rate="9.5 t/s measured")]
+    cold = [PlanEntry("flash", "cold", "llamacpp", window=262_144),
+            PlanEntry("moe", "cold", "llamacpp", window=32_768, where="experts in RAM")]
+    return Entries((EntryGroup("vLLM · localhost:1", tuple(live), True),
+                    EntryGroup("this box can launch", tuple(cold), True)))
+
+
+def test_menu_items_hold_the_numbered_entries_in_listing_order():
+    assert OrchestratorREPL._menu_items(_menu_entries()) == [
+        ("active-one", "serving now"),
+        ("other-one", [("", "serving · "), ("class:tps-green", "34.6 t/s")]),
+        ("slow-one", [("", "serving · "), ("class:tps-red", "9.5 t/s")]),
+        ("flash", "llama.cpp · 262,144"),
+        ("moe", "llama.cpp · experts in RAM · 32,768"),
     ]
+
+
+def test_menu_items_leave_out_what_the_list_does_not_number():
+    unnumbered = Entries((EntryGroup("available once x is stopped", (PlanEntry("flash", "cold", "llamacpp"),), False),))
+    assert OrchestratorREPL._menu_items(unnumbered) == []
+
+
+def test_the_repl_has_one_menu_builder():
+    assert hasattr(OrchestratorREPL, "_menu_items") and not hasattr(OrchestratorREPL, "_compose_model_menu")
 
 
 def test_completer_renders_meta_from_tuples():
@@ -194,27 +248,6 @@ def test_completer_renders_meta_from_tuples():
 
 
 # ------------------------------------------------------------------ peer models in the menu (tree)
-def test_menu_includes_peer_models_tagged_with_endpoint():
-    """0.10.0 tree: peer-endpoint models join the completion cache after live + registry, each
-    tagged `<framework> · <host:port>` so a user tells a vLLM model from an Ollama one. Registry
-    (managed) and live entries are unchanged."""
-    from localharness.config.models import EndpointRef
-
-    ep = EndpointRef(name="ollama-local", base_url="http://localhost:11434/v1",
-                     provider_type="ollama")
-    menu = OrchestratorREPL._compose_model_menu(
-        ["qwen-live"], None, "qwen-live", {"gpt-oss:20b": ep},
-    )
-    assert menu[0] == ("qwen-live", "serving now")               # live entry unchanged
-    assert menu[-1] == ("gpt-oss:20b", "Ollama · localhost:11434")  # peer tagged with endpoint
-
-
-def test_menu_without_peers_is_unchanged():
-    """No peer_target (the default) leaves the menu exactly live + registry — single-endpoint
-    users see no new entries."""
-    assert OrchestratorREPL._compose_model_menu(["m"], None, "m") == [("m", "serving now")]
-
-
 def test_peer_model_completes_as_model_pick_with_endpoint_meta():
     """A peer model in the cache is a normal /model completion: model-pick style (one-Enter
     cross-endpoint switch) with its endpoint tag as the right-column meta."""
@@ -227,20 +260,6 @@ def test_peer_model_completes_as_model_pick_with_endpoint_meta():
     assert comps[0].text == "gpt-oss:20b"
     assert comps[0].display_meta_text == "Ollama · localhost:11434"
     assert "model-pick" in (comps[0].style or "")
-
-
-def test_compose_menu_prefers_ledger_median_over_registry_tps():
-    """The auto-measured verified median outranks the hand-authored registry value and
-    renders unprefixed (~ marks the registry fallback). Keys are provider_type-scoped."""
-    models = [NS(name="a", quant=None, tps=9.5), NS(name="b", quant=None, tps=9.5)]
-    managed = NS(local_models=models,
-                 entry_for=lambda n: next((e for e in models if e.name == n), None))
-    menu = OrchestratorREPL._compose_model_menu(
-        ["a", "b"], managed, "a",
-        medians={"vllm:a": 34.56}, live_ptype="vllm", registry_ptype="vllm",
-    )
-    assert menu[0] == ("a", [("", "serving now · "), ("class:tps-green", "34.6 t/s")])
-    assert menu[1] == ("b", [("", "serving · "), ("class:tps-red", "~9.5 t/s")])
 
 
 def test_measured_note_prefers_ledger_and_falls_back_to_registry():
