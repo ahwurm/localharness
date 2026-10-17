@@ -1,7 +1,7 @@
 # Spec 22 — The Fit Planner, the Harness Window Floor, and a Clean First Switch
 
 **Status:** Draft, revision 2, 2026-10-17 — revision 1's four critics (design, security, ux-friction, parsimony) all REVISE; every major and every parsimony finding folded here, by the owner's instruction to revise once
-**Version target:** 0.19.1
+**Version target:** 0.19.1; amended for 0.19.2 in §5, §7, §10, §15, §16 and §17 (the compute reserve, sliding-window pricing, the spill clause, the first-use kernel build)
 **API version:** `PLUGIN_API_VERSION` unchanged ("1")
 **Kind:** a delta spec. It changes specs 16, 20, 08, 10, 13 and 19 in the places §12 lists, and nothing else in them.
 
@@ -176,11 +176,13 @@ A read-only clone of `github.com/Niko1221/Strata` at `296b59d` (2026-10-14), nev
 ```yaml
 autosense:                        # existing machine-only section
   compute_margin_ratio: 0.10      # now of the GPU-resident bytes, not of the file
+  compute_reserve: 3.0            # GiB beside the ratio, for compute buffers and the CUDA context
   cache_ram_ratio: 0.40           # now of MemAvailable less the experts priced into RAM
   strata_dir: null                # new: the Strata install; unset = sensed (§11.5)
 ```
 
-`strata_dir` is the one new key, and the `strata` runtime brings two record fields (§11.1).
+`strata_dir` is the one new key of the Strata work, and the `strata` runtime brings two record fields (§11.1).
+`compute_reserve` is a machine-level key like the rest of `autosense` (bounded 0 to 64), so a workspace layer cannot set it.
 The floor (§8) is derived, never configured, because a configured floor would be a second owner beside
 `response_reserve`.
 The lifecycle keeps one small state file, `<config_dir>/server-floor.json` (§8.2), a cache of the last full floor.
@@ -230,7 +232,17 @@ everything else is GPU.
 `kv_layers(entries, header) -> (main, draft)` counts the blocks that hold `attn_k`, or hold `attn_qkv` and no
 `ssm_` tensor, split at `block_count − nextn_predict_layers`.
 An indexer (`blk.N.indexer.k_proj`) adds `indexer.key_length × 2` K-only elements per token on its layer.
-Sliding-window layers are priced at the full window, which errs high.
+A sliding-window layer is priced at the cache the server allocates for it, not at the full window.
+The header supplies `sliding_window`, a `sliding_window_pattern` (one boolean per block, or an integer period), a
+per-layer `head_count_kv` array and the sliding layers' own `key_length_swa` / `value_length_swa`.
+The full layers are priced per token; the sliding ones per cell, at `min(window, cells)` cells.
+llama.cpp's cache for them is `pad256(n_swa × slots + n_ubatch)` cells: 4 unified slots and an `n_ubatch` of 512
+when `-np` is unset (`src/llama-kv-cache-iswa.cpp:73`, `tools/server/server.cpp:168–172`), `slots × pad256(n_swa +
+n_ubatch)` for an explicit `-np`, `pad256(n_swa × slots + n_ubatch)` with `-kvu`, and the full window under
+`--swa-full`; the planner reads `-np`, `-kvu`, `-ub` and `--swa-full` from the record's `extra_args` only.
+vLLM's is `min(window, sliding_window + 2 × max_num_batched_tokens)` tokens per sliding layer
+(`vllm/v1/kv_cache_interface.py`), with the full layers on `num_global_key_value_heads` and `global_head_dim`.
+A header whose pattern or head array cannot be read prices every layer full, which errs high.
 
 The table is cross-checked against the header before it prices anything, and a check that fails makes the model
 "not split" (priced as today, the whole file on the GPU, which errs high):
@@ -239,17 +251,17 @@ The table is cross-checked against the header before it prices anything, and a c
 - experts are counted only when the header sets `expert_count`;
 - input tables are at most 50% of the file (Flash-Next's are 38%, the 27B's 7–12%).
 
-`Sensed` (spec 20 §6.0) gains `split: TensorSplit(gpu, experts, input, kv_main, kv_draft, indexer) | None`, read
-once by `sense_launch`.
+`Sensed` (spec 20 §6.0) gains `split: TensorSplit(gpu, experts, input, kv_main, kv_draft, indexer, swa, heads_full,
+heads_swa) | None`, read once by `sense_launch`.
 
 ### 7.2 The price
 
 ```
 gpu_bytes   = split.gpu + mmproj
-margin      = compute_margin_ratio × gpu_bytes
+margin      = compute_margin_ratio × gpu_bytes + compute_reserve
 kv_per_tok  = kv_main × 2 × kv_heads × head_dim × bytes(K, V) + indexer bytes, × draft_share when drafting
 draft_share = 1 + kv_draft / kv_main
-fits        = min(trained, (free_vram − gpu_bytes − margin − experts_on_gpu) // kv_per_tok), rounded down to 256
+fits        = min(trained, (free_vram − gpu_bytes − margin − experts_on_gpu − swa_cells × kv_per_cell) // kv_per_tok), rounded down to 256
 ram_room    = MemAvailable − unified_reserve_ratio × MemTotal
 cache_ram   = min(cache_ram_ratio × (MemAvailable − experts_in_ram), ram_room − experts_in_ram), clamped at 0
 ```
@@ -277,10 +289,14 @@ With `-c` set, llama-server cannot correct an optimistic `fits`: a margin too sm
 the load. Measured on 2026-10-17 (live row 4): the 27B relaunched at the trained 262,144 died at load, `cudaMalloc
 failed: out of memory` on the 884.6 MiB projector buffer after the weights and KV, and the floored halve-once retry
 landed it at 131,072, where llama-server holds 25,960 MiB against a priced 22.7 GiB: about 2.7 GiB of overhead
-beyond the priced bytes against the 10% margin's 1.82 GiB. The retry is the guard today; a margin keyed to the
-model's shape is the open item (§16).
+beyond the priced bytes against the 10% margin's 1.82 GiB. The flat `compute_reserve` (3 GiB) beside the ratio
+covers that measured overhead, so the planned window is one that stays resident (§16); the halve-once retry
+remains the guard for a launch that still dies at load.
+The whole-file price `fit` (the attached-server path and `doctor`) holds the same reserve, so a surface that
+prices a file without a tensor table reads the window a launch of it plans.
 
-On this box: the 27B at 30.2 GiB free fits 262,144 (297k before the cap; today's formula said 66,437).
+On this box: the 27B at 30.2 GiB free fits 209,920 (without the reserve it was 296,960 before the cap, so the
+trained 262,144, the window that died at load; the formula before the split said 66,437).
 Flash-Next at 30.2 GiB free and 52.9 GiB available fits 262,144 with experts in RAM: `ram_room` is 52.9 − 9.2 =
 43.7 GiB, the experts take 39.97, and `cache_ram` gets the 3.7 GiB left.
 
@@ -293,6 +309,20 @@ Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS cannot run here: its experts need 40.0 
 Qwen3.8-27B-Nvidia-NVFP4 cannot run here: it needs 17.6 GiB of GPU memory plus a 15,360-token window and 12.0 GiB is free — stop what holds the GPU, or pick a smaller quant.
 ```
 
+A llama.cpp refusal for memory or for the floor ends with the cheapest change that would reach the floor, the first
+of these that applies and reaches it:
+
+1. a q8_0 KV cache, when either cache type prices above q8_0 (`a q8_0 KV cache fits it (cache_type_k and
+   cache_type_v: q8_0)`); q8_0 costs 0.0046 perplexity over f16 (llama.cpp PR #7412);
+2. MTP drafting off, when the draft share is above 1 (`it fits with MTP drafting off (speculative: off)`);
+3. a q4_0 KV cache, unless both types are already q4_0 or smaller (`a q4_0 KV cache fits it (cache_type_k and
+   cache_type_v: q4_0)`).
+
+When none reaches the floor the tail stays as above: `stop what holds the GPU, or pick a smaller quant` for a
+memory refusal, `free GPU memory, or pick a smaller model` for a floor refusal. The order is cheapest in quality
+first, the choice the community guides for local servers make (smaller quant, q8_0 KV, a window that fits, drafting
+off), and it is a default a person overrides by setting the record's keys.
+
 ### 7.4 vLLM
 
 A vLLM record is priced from its checkpoint (spec 16 §6.2's "not computed" is replaced), in `provider/autosense.py`.
@@ -300,10 +330,19 @@ The weights are the snapshot's `*.safetensors` bytes; the KV layers are `config.
 read `full_attention` (else `num_hidden_layers`), with `num_key_value_heads` and `head_dim` from `text_config` when
 present; the KV type is bf16 unless `--kv-cache-dtype` is in `extra_args`; the budget is vLLM's own
 `gpu_memory_utilization` (0.90 unless set) of the GPU total.
-Weights above that budget make the checkpoint "not offered" (§10.2); otherwise the plan emits `--max-model-len
-fits` through the same `context` keyword, vLLM's memory profile at load is the verifier, and a load that dies
-takes the halve-once retry.
-The two NVFP4 checkpoints price at 0.90 × 31.8 − 20.42 − 2.04 = 6.16 GiB of KV at 65,536 B a token: 100,864 tokens.
+A `sliding_attention` entry of `layer_types` is priced as §7.1 says: the bounded cache on `sliding_window`, the
+full layers on the global heads and head dimension.
+Weights plus the margin at or above that budget make the checkpoint "not offered" (§10.2); otherwise the plan emits
+`--max-model-len fits` through the same `context` keyword, vLLM's memory profile at load is the verifier, and a load
+that dies takes the halve-once retry. The vLLM margin is the ratio alone: vLLM sizes its own buffers and verifies at
+load, so `compute_reserve` is not held back here.
+The sentence is `<name> cannot run here: <weights> GiB of <dtype>weights, and vLLM keeps them all on the <total> GiB
+GPU — <remedy>.`: the dtype word (`bf16 `, `fp16 `) only for an unquantized config, and the remedy `a 4-bit build of
+it (a GGUF Q4_K_M for llama.cpp, or NVFP4 for vLLM) would fit` only when a 4-bit build plus the margin fits the
+budget, else `pick a smaller quant`; the build is priced at 0.31 of the bf16 weights, a little above the 0.299 the
+box measured (the 31B's Q4_K_M, 18,687,062,560 B, against its 62,546,338,264 B of bf16).
+The two NVFP4 checkpoints price at 0.90 × 31.8 − 20.42 − 2.04 = 6.16 GiB of KV at 65,536 B a token: 100,864 tokens
+on a card read as 31.8 GiB; the box's 32,607 MiB reading gives 101,376.
 
 ### 7.5 The window line
 
@@ -311,9 +350,29 @@ The launch line says the window and where the weights live:
 
 ```
 window: 262,144 · experts in RAM (40.0 GiB) · dense, projector and KV on the GPU (8.5 of 30.2 GiB free)
-window: 262,144 · all on the GPU (27.2 of 30.2 GiB free)
+window: 209,920 · all on the GPU (25.4 of 30.2 GiB free)
 window: 100,864 · vLLM · all on the GPU (26.6 of vLLM's 28.6 GiB)
 ```
+
+The share of the GPU in a line counts the sliding layers' cells the plan chose (§7.1).
+
+After a llama.cpp launch whose fit is on, the harness reads the launched process's GPU residency once
+(`nvidia-smi --query-compute-apps=pid,used_memory`, the launched pid) and ends the line with a spill clause when
+llama-server placed dense layers on the CPU, which nothing in its log at the default level reports:
+
+```
+window: 262,144 · all on the GPU (26.6 of 30.0 GiB free) — 1.9 GiB of layers on the CPU, decode will be slow
+```
+
+The clause is `priced share + 2.7 GiB − held`, said only when that is at least 1 GiB, and only for the class it
+was calibrated on: a dense launch with everything priced on the GPU (no experts in RAM), llama-server's fit on (no
+`-ngl`, `--n-gpu-layers` or `--gpu-layers`), and priced GPU bytes of at least 10 GiB. The 2.7 GiB is the fixed
+overhead the fully resident Swift 27B held beyond its priced share (25,960 MiB held against 24,338,688,192 B
+priced), independent of `compute_reserve`, so no setting moves the figure; the 1 GiB tolerance is llama-server's own
+`--fit-target` margin. The figure on the box's NVIDIA 27B launch at 262,144 (28,098 MiB held against
+28,610,641,984 B priced) is 1.9 GiB. Below the class no clause is printed, and a launch under the autostart unit is
+never read (its process is the unit's, and its activation does not hold the pid), so the unit path is checked by
+hand against `nvidia-smi` (§15, row 17).
 
 The per-tensor figures, the token tables read through `mmap`, the prompt cache and the RAM reserve are
 `doctor`'s `Tuning:` row, not the launch line.
@@ -415,15 +474,31 @@ Models:
   1. qwen-27b-swift-1.5  (serving)  ● [active]  [129.5 t/s measured]
 ▸ available once llm.service is stopped
      Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS  llama.cpp · experts in RAM · 262,144
-     Qwen3.8-27B-Nvidia-NVFP4  llama.cpp · 262,144
+     Qwen3.8-27B-Nvidia-NVFP4  llama.cpp · 199,424
      nvidia/Qwen3.8-27B-NVFP4  vLLM · 100,864 (not set up)
      ukisai/Swift-1.5-Qwen3.8-27b-NVFP4  vLLM · 100,864 (not set up)
   not offered: DavidAU/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking — 58.3 GiB of bf16 weights, and vLLM keeps them all on the 31.8 GiB GPU
 ```
 
+The windows are the plan's at 30.2 GiB free with the compute reserve held back (§7.2). The box's GGUF quant of the
+gemma (the Q4_K_M the `not offered` line points at) is one more `(not set up)` llama.cpp entry, priced with its
+sliding-window cache at 152,832 (§7.1, §16).
+
 With it stopped, the second group is `▸ this box can launch`, its entries are numbered 2–5 and switch, and the
 `not offered` line stays.
 
+- An entry that is not yet a record is `(not set up)`: an unrecorded GGUF (also one inside an HF snapshot), or a
+  checkpoint snapshot. A snapshot a record already names is that record's entry, and the library file is not
+  written by listing.
+- A refusal is one `not offered: <name> — <reason>` line after the numbered entries, in name order; the reason is the
+  planner's sentence up to its first ` — `. The reasons: the over-budget vLLM sentence of §7.4; `needs
+  trust_remote_code` for a snapshot whose `config.json` or `tokenizer_config.json` carries an `auto_map` (the
+  harness never passes `--trust-remote-code`); `no vllm binary on PATH or in the harness's venv` for every vLLM
+  checkpoint on a box with none. The embedding snapshot appears nowhere.
+- Owner rule: nothing runs on the CPU. A dense model is never placed partly in RAM and never kept when llama-server
+  spills a layer: it is a smaller window or a refusal that names a smaller quant, a q8_0 or q4_0 KV cache, or MTP
+  off (§7.3). The one sanctioned RAM placement is an MoE's experts, which llama.cpp reads per token at RAM
+  bandwidth.
 - The group suffix says who owns the server: `· the harness`, `· autostart`, `· <unit> (yours)`.
 - Only what can be switched to now is numbered; nothing numbered is refused when picked.
 - "(downloaded — switching restarts the managed server)" and "(cold on … — /model launches it on the GPU)" are gone.
@@ -462,7 +537,7 @@ The gemma snapshot resolves to a vLLM plan whose weights exceed the budget, so i
 `/model DavidAU/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking` prints, and stops nothing:
 
 ```
-DavidAU/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking cannot run here: vLLM keeps its 58.3 GiB of bf16 weights on the GPU and this one has 31.8 GiB — a GGUF quant (llama.cpp keeps part of it in RAM) or an NVFP4 build of it would fit.
+DavidAU/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking cannot run here: 58.3 GiB of bf16 weights, and vLLM keeps them all on the 31.8 GiB GPU — a 4-bit build of it (a GGUF Q4_K_M for llama.cpp, or NVFP4 for vLLM) would fit.
 ```
 
 The session stays on the model that served, and the next turn runs on it.
@@ -707,7 +782,7 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
   29,073,290,240 bytes and 12 attention layers for Flash-Next, and 16 + 1 for both 27B files; KV per token 16,320 B
   (q8_0) and 30,720 B (f16) for Flash-Next, 34,816 + 2,176 B for the 27B. A hostile fixture (every tensor named
   `token_embd` or `_exps`, no `attn_k`) fails the cross-checks and prices as the whole file.
-- `fit` at the episodes' figures: the 27B at 30.2 GiB free fits 262,144; Flash-Next at 30.2 free and 52.9 available
+- `fit` at the episodes' figures: the 27B at 30.2 GiB free fits 209,920 (262,144 with `compute_reserve` 0); Flash-Next at 30.2 free and 52.9 available
   fits 262,144 with experts in RAM and `cache_ram` 3.7 GiB; Flash-Next at 31.4 available is the RAM refusal; the 27B
   at 12.0 free is the VRAM refusal; an unreadable `/proc/meminfo` refuses.
 - The plan carries `-c` whenever priced; `--fit-ctx <floor>` only in `fit-by-server`; the retry floored; a hand
@@ -790,25 +865,55 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
   measurements.
 - **Decided — Strata is opt-in.** A second preset, set up by the person, preferred only by the person's own landing
   until rows 8–11 pass; the owner ruled it core, though it is a plugin candidate.
-- **Open — the compute margin of a split launch.** The Flash-Next profile used 10.6 GiB of GPU at `-c 32768` against
-  4.6 GiB of dense weights, projector and q8_0 KV, so about 5–6 GiB went to compute buffers, recurrent state and the
-  CUDA context, against a 10% margin of 0.45 GiB. On this box the window caps at the trained 262,144 with room to
-  spare, so the margin does not move the plan; on a smaller card it would, and `-c` set keeps llama-server from
-  correcting it. Live row 1 (2026-10-17): Flash-Next at `-c 262144` with experts in RAM holds a figure this run did not capture (the session ended during the vLLM row) on the
-  GPU against the window line's priced 8.5 GiB; the server's log at its default level does not print the buffer
-  sizes. A margin keyed to the model's shape waits on the 27B's figure above.
-- **Measured — a dense launch at the trained window fails, and the retry lands it.** Live row 4 (2026-10-17): the
-  27B at 262,144 died at load (`cudaMalloc failed: out of memory`, the 884.6 MiB projector buffer), the retry landed
-  131,072 (`window: 131,072 · all on the GPU (22.7 of 30.2 GiB free) (after one retry at -c 131,072)`), the ledger
-  remembers it, and decode there read 109.6 t/s median against 116.0 t/s at 66,437 before the swap: no spilled
-  layer. The overhead beyond the priced bytes is about 2.7 GiB on this model (§7.2); the 10% margin is 1.82 GiB.
-  A margin keyed to the model's shape, or a flat allowance beside the ratio, is 0.19.2's.
+- **Decided — the compute margin is a flat reserve beside the ratio.** The overhead beyond the priced bytes (compute
+  buffers, the CUDA context, the draft context's KV) is about 2.7 GiB on the dense 27B: live row 4 held 25,960 MiB
+  at 131,072 against a priced 22.7 GiB, and the 10% margin is 1.82 GiB. `autosense.compute_reserve` (3 GiB) is held
+  back beside the ratio in the llama.cpp price and in the whole-file price `fit` (§7.2), so the 27B plans 209,920 at
+  30.2 GiB free instead of the 262,144 that died at load, and the plan is a window that stays resident. The NVIDIA
+  27B record (no `-ngl`, so llama-server's fit is on) launched at 262,144 and llama-server's fit moved layers to the
+  CPU: 28,098 MiB held against 28,610,641,984 B priced, decode 11–16 t/s where about 110 is normal; the spill
+  clause (§7.5) reports that case. Flash-Next's profile (10.6 GiB of GPU at `-c 32768` against 4.6 GiB priced)
+  shows a larger overhead for a split launch, but it caps at the trained 262,144 with room to spare, so the
+  reserve does not move its plan; its live figure at `-c 262144` was not captured (the session ended during the
+  vLLM row). A margin keyed to the window (the attention compute buffer grows with `-c`) or learned from the ledger
+  waits until two launches have been read.
+- **Decided — a sliding-window layer is priced at the cache the server allocates (§7.1).** The box's gemma4 31B
+  Q4_K_M (18,687,062,560 B, `general.file_type` 15) has 60 layers, 50 of them sliding (`sliding_window` 1,024, five
+  sliding to one full), `head_count_kv` 16 on the sliding layers and 4 on the full ones, `key_length` and
+  `value_length` 512 on the full layers and `key_length_swa` and `value_length_swa` 256 on the sliding ones. At
+  q8_0 (34/32 bytes an element) a full layer set costs 10 × 4 × (512 + 512) × 34/32 = 43,520 B a token and the
+  sliding set 50 × 16 × (256 + 256) × 34/32 = 435,200 B a cell, over 4,608 cells with no `-np`
+  (`pad256(1,024 × 4 + 512)`), 1,536 with `-np 1`, and the full window with `--swa-full`. The window at 30.2 GiB
+  free is 152,832 (183,552 with `-np 1`; 17,920 with `--swa-full`); the price that charged every layer for every
+  token (1,044,480 B a token) gave 11,264 and refused the file under the 13,824 floor. For vLLM the same config
+  prices 81,920 B a token on the full layers and 819,200 B a cell on the sliding ones, over `min(window, 1,024 + 2
+  × 2,048 = 5,120)` cells; both NVFP4 checkpoints are unchanged at 100,864. The planner reads `-np`, `-kvu`, `-ub`
+  and `--swa-full` from `extra_args` only: a flag set through `config_ini` or the environment is not seen.
+- **Decided — the first use of a vLLM checkpoint builds kernels, and the launch says so.** The owner's first
+  `nvidia/Qwen3.8-27B-NVFP4` launch priced correctly and never came up: flashinfer's first-use build of `gemm_sm120`
+  ran on every core (load average 15) and froze the desktop. The launch line of `start`, of `localharness model` and
+  of the REPL (its cold launch and its restart) ends with `first launch of this checkpoint compiles kernels —
+  several minutes, the machine will be busy` while no launch of that record has answered on this box. The evidence
+  is the harness's own ledger, never the engine's cache directories: the stamp every launch writes once it answers
+  (`served_here_at`), or a window report `start` recorded on an attach. The build runs `ninja` with the job count
+  from `MAX_JOBS` (vLLM's environment-variable reference; flashinfer's `jit/cpp_ext.py`, `_get_num_workers`), so a
+  vLLM checkpoint launch carries `MAX_JOBS` at half the cores (at least 1) unless the person's shell or the record
+  already sets it, through the allowlisted launch environment (SECURITY.md names it). Half the cores and the RAM per
+  compiler job are not yet measured on the box: live row 14.
+- **Decided — `/model` lists launch records, not registry or cache names.** `local_models` registry names and bare HF
+  cache names are no longer pickable; a model enters the list as a record, or as a `(not set up)` entry that
+  `Set it up and switch?` turns into one (§10.1). The managed-restart branches that switched a vLLM primary onto a
+  registry name are reachable by no entry; deleting them is a follow-up.
+- **Open — a swap without a floor meets a snapshot's refusal late.** `swap_refusal` returns early when no floor is
+  passed, so a floor-less swap to a snapshot the launch-time walk refuses (a link planted after the listing, an
+  `auto_map` added since) meets the refusal in activation, after the incumbent was stopped, and restores the incumbent
+  as for any failed launch. The REPL and `/model` pass the cached floor when one is known, which makes the refusal
+  come before anything stops.
 - **Open — Strata's unknowns (§11.6)**, each with a live row.
 
 ## 17. Out of scope
 
 - An SSD tier of the harness's own, vLLM CPU offload, and any harness-chosen `-ngl`, `--n-cpu-moe` or `-ot`.
-- Sliding-window KV pricing (priced at the full window, which errs high).
 - Launching beside a foreign unit when it fits (spec 16 §12, still open).
 - Strata's other families (Coder, the original Flash-Next), its multi-GPU flags, `--replicas`, `--lazy` and idle
   unload, its MCP and image endpoints, and its browser app.
