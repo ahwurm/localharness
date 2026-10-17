@@ -2019,7 +2019,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if agent_config.model != "inherit"
         else provider.default_model
     )
-    _floor = await start_serving.launch_floor(agent_config, config_dir=server_cfg_path)
+    _live_floor = await start_serving.launch_floor(agent_config)
+    from localharness.provider.lifecycle import cached_floor, raised_floor
+    _floor = raised_floor(_live_floor, cached_floor(server_cfg_path))
     if model_override:
         # --model (session-only, never persisted): restricted to a model ALREADY being served.
         # A harness-managed single-model server (llama.cpp/vLLM) serves exactly one checkpoint at
@@ -2498,7 +2500,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             markup=False, soft_wrap=True)
         raise typer.Exit(1)
 
-    await _exit_under_floor(_floor)
+    await _exit_under_floor(_live_floor)
     if _bound != _cfg_window:
         from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
         # #127: the untouched FACTORY default must never hard-block startup — on the reference
