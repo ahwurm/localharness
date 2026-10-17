@@ -49,6 +49,24 @@ def test_vllm_only_refusal_message_is_exact(runtime, base):
         runtime=runtime, tool_call_parser="glm45", **base)
 
 
+@pytest.mark.parametrize("runtime,base", [
+    ("llamacpp", {"model": "/x/m.gguf"}),
+    ("vllm", {"binary": "/opt/vllm", "model": "org/repo"}),
+    ("ollama", {"model": "tag"}),
+])
+def test_strata_only_refusal_message_is_exact(runtime, base):
+    assert f"runtime={runtime}: engine_dir is Strata-only (runtime: strata)" in _refusal(
+        runtime=runtime, engine_dir="/e", **base)
+    assert f"runtime={runtime}: engine_dir, engine_config are Strata-only (runtime: strata)" in _refusal(
+        runtime=runtime, engine_dir="/e", engine_config="c.json", **base)
+
+
+def test_a_strata_record_keeps_the_fields_it_shares_with_llamacpp():
+    record = ManagedServerConfig(runtime="strata", model="/x/m.gguf", engine_dir="/e", engine_config="c.json",
+                                 served_name="s", mmproj="/x/p.gguf")
+    assert (record.mmproj, record.served_name) == ("/x/p.gguf", "s")
+
+
 def test_llamacpp_only_fields_are_reported_before_vllm_only_ones():
     msg = _refusal(runtime="vllm", binary="/opt/vllm", model="org/repo", mmproj="/x", reasoning_parser="glm45")
     assert "llama.cpp-only" in msg and "vLLM-only" not in msg
