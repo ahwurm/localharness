@@ -1358,8 +1358,10 @@ entry whose `lifecycle` launches a server follows the same rules with its own `l
 The launched server's environment is your shell's with the runtime's own settings dropped, so a
 variable you exported for some other run cannot reconfigure it: every `LLAMA_ARG_*`, `LLAMA_API_KEY`
 and `MTMD_BACKEND_DEVICE` for llama.cpp, and `VLLM_API_KEY` for vLLM. What it gets is that environment,
-the record's own `env:` entries and, when a key is required, the one key variable. The dropped names
-are logged, never their values. Stopping or replacing a launched server acts only on the process the
+the record's own `env:` entries, for a vLLM launch of a cached checkpoint `HF_HUB_OFFLINE=1` (so a
+cache entry never reaches the network) and `MAX_JOBS` at half the CPU count unless your environment
+sets it (so a first launch's kernel build leaves the machine usable), and, when a key is required,
+the one key variable. The dropped names are logged, never their values. Stopping or replacing a launched server acts only on the process the
 harness started: the pidfile records its start time and port, and the process must still be the
 launch the harness expects, so a process id since reused by another program is never signalled (see
 [Who may start, switch or stop a launched server](#who-may-start-switch-or-stop-a-launched-server)).
