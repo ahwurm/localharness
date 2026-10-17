@@ -1095,6 +1095,10 @@ def _priced(harness: Any, record: ServingRecord, *, config_dir: Any, memory: Any
     return (report.asked if report is not None else None), (placement.where if placement is not None else None), None
 
 
+NO_VLLM_BINARY = "{name} cannot run here: no vllm binary on PATH or in the harness's venv — install vllm or put it on PATH."
+NO_REMOTE_CODE = "{name} cannot run here: {why} — the harness never passes --trust-remote-code."
+
+
 def _setup_entries(harness: Any, listed: Any, taken: set[str], *, config_dir: Any, memory: Any, floor: int | None,
                    unit: Any) -> list[PlanEntry]:
     """One entry per file or snapshot no record names, priced as a record would be."""
@@ -1104,12 +1108,14 @@ def _setup_entries(harness: Any, listed: Any, taken: set[str], *, config_dir: An
     server = getattr(harness, "server", None)
     llama = server.binary if server is not None and RUNTIMES[server.runtime].gguf else None
     port = library.PRIMARY_PORT + 1
-    entries = []
+    entries = [PlanEntry(c.repo_id, "setup", "vllm", refusal=NO_REMOTE_CODE.format(name=c.repo_id, why=c.refusal))
+               for c in listed.refused]
     for s in listed.shown:
         if s.checkpoint is not None:
-            if listed.vllm is None:
-                continue
             name = s.checkpoint.repo_id
+            if listed.vllm is None:
+                entries.append(PlanEntry(name, "setup", "vllm", refusal=NO_VLLM_BINARY.format(name=name), setup=s))
+                continue
             spec = ManagedServerConfig(runtime="vllm", launch="binary", binary=listed.vllm[0], model=name, port=port, gpu=True)
         else:
             name = library.unique_preset_name(library._label(s), taken)
@@ -1274,7 +1280,7 @@ def entry_lines(entries: Entries) -> list[str]:
             else:
                 lead = "     "
             lines.append(f"{lead}{vt(e.name)}  {detail}" + (f"  [{e.rate}]" if e.rate else ""))
-    for e in entries.not_offered:
+    for e in sorted(entries.not_offered, key=lambda e: e.name):
         lines.append(f"  not offered: {vt(e.name)} — {vt(not_offered_reason(e.refusal or '', e.name))}")
     lines.extend(f"  · {vt(note)}" for note in entries.notes)
     return lines
