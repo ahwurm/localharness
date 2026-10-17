@@ -26,7 +26,7 @@ from localharness.cli.workspace import MachineTrust, decide_machine_trust, local
 from localharness.config import session_presence, trust
 from localharness.config.loader import ConfigLoader
 from localharness.config.paths import global_config_dir, resolve_config_dir
-from localharness.provider import lifecycle, procfs, server, tuning
+from localharness.provider import lifecycle, procfs, server, speed_stats, tuning
 from localharness.provider.runtimes import RUNTIMES
 from localharness.provider.units import read_target
 
@@ -391,6 +391,8 @@ def _swap_now(
     if not getattr(lifecycle.strategy_for(record.spec, unit=unit), "plans_launch", False):
         say_line()  # a strategy that plans nothing never calls `on_plan`: the line is said up front
     reporter = start_serving.ConsoleSwapReporter(err_console.print, harness, harness.provider.api_key)
+    ledger = speed_stats.default_speed_stats_path(config_dir)
+    retry_before = speed_stats.last_retry(ledger, lifecycle.record_key(record.spec))
     try:
         outcome = asyncio.run(start_serving.run_swap(
             harness, incumbent, serving, config_dir=config_dir, autosense=harness.autosense,
@@ -404,8 +406,10 @@ def _swap_now(
     if outcome.error is not None:
         raise typer.Exit(1)  # the reporter already said why, redacted
     receipt = start_serving.SERVING_LINE if outside else start_serving.SERVING_RESTARTED_LINE
+    retried = "" if outside else start_serving.retry_receipt_clause(
+        retry_before, speed_stats.last_retry(ledger, lifecycle.record_key(record.spec)))
     clause = start_serving.REPL_TALKS_CLAUSE if _repl_sessions(config_dir) else ""
-    say(receipt.format(name=visible_text(record.name)) + clause)
+    say(receipt.format(name=visible_text(record.name)) + retried + clause)
     with _landing_write(harness, record):
         asyncio.run(model_ops.persist_landed(
             harness, record, outcome="swap", rung=serving.rung, config_dir=config_dir))

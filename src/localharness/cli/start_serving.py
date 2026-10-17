@@ -52,6 +52,8 @@ STARTING_WAIT_SECONDS = 600
 SERVING_RESTARTED_LINE = "Serving {name} — autostart restarted"
 SERVING_LINE = "Serving {name}"
 REPL_TALKS_CLAUSE = "; a REPL session on this machine now talks to it"
+RETRIED_SMALLER_WINDOW = "retried with a smaller window"
+RETRIED_NO_MTP = "speculative decoding off"
 START_FLOOR_LINE = "{where} serves {window} and the harness needs at least {floor:,} — {fix}"
 START_FLOOR_UNIT_FIX = "raise its -c, or stop the unit and let the harness launch it."
 START_FLOOR_SERVER_FIX = "raise the window at the server."
@@ -427,6 +429,14 @@ class ConsoleSwapReporter:
 
 
 FIRST_BUILD_CLAUSE = "first launch of this checkpoint compiles kernels — several minutes, the machine will be busy"
+
+
+def retry_receipt_clause(before: speed_stats.RetryRecord | None, after: speed_stats.RetryRecord | None) -> str:
+    """` (retried …)` when the retry record changed between the two reads, else empty."""
+    if after is None or (before is not None and after.at == before.at):
+        return ""
+    parts = [RETRIED_SMALLER_WINDOW, *([RETRIED_NO_MTP] if "draft-mtp" in after.dropped else [])]
+    return f" ({', '.join(parts)})"
 
 
 def plan_clause(plan: Any, *, undo_field: str = "server.speculative") -> str:
