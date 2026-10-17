@@ -126,8 +126,7 @@ def _script_argv(plan, spec) -> list[str]:
 @pytest.mark.parametrize("kind", ["swift-gguf", "vllm-binary"])
 async def test_every_renderer_of_the_plan_gives_the_argv_activate_launches(tmp_path, popen, box, kind):
     """Spec 20 §14: `activate`, `serve` (the unit's body), `doctor`'s row and `--script` plan through the same
-    sense -> plan, so for one record on one sensed machine the argvs are equal; the script leaves the fit's
-    own `-c` pair to `--fit`."""
+    sense -> plan, so for one record on one sensed machine the argvs are equal, the script's included."""
     spec = _gguf_spec(tmp_path, SWIFT) if kind == "swift-gguf" else _vllm_spec(tmp_path)
     strategy = lifecycle.ManagedVllmStrategy() if spec.runtime == "vllm" else lifecycle.SpawnedProcessStrategy()
     await strategy.activate(spec, tmp_path, BASE, autosense=KNOBS)
@@ -140,13 +139,10 @@ async def test_every_renderer_of_the_plan_gives_the_argv_activate_launches(tmp_p
     assert served == launched and tuple(served) == plan.argv
     assert list(doctor_plan.argv) == launched
     assert sensed is not None and sensed.runtime == spec.runtime
-    scripted = _script_argv(doctor_plan, spec)
+    assert _script_argv(doctor_plan, spec) == launched
     if kind == "swift-gguf":
-        at = launched.index("-c")
-        assert scripted == launched[:at] + launched[at + 2:]
         assert _has_pair(served, "--spec-type", "draft-mtp") and plan.shape == "full"
     else:
-        assert scripted == launched
         assert _has_pair(served, "--tool-call-parser", "qwen3_coder")
 
 

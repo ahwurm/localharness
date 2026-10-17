@@ -337,7 +337,7 @@ def _window_clause(plan: Any) -> str | None:
     if report is None:
         return None
     if report.mode == "fit":
-        return f"-c left to llama-server --fit (the harness fitted {plan.full_fit} today)"
+        return f"-c {plan.serve_kwargs['context']} (fit)"
     if report.mode in ("fit-by-server", "not-computed"):
         return "-c left to llama-server --fit"
     if report.mode == "record":
@@ -349,14 +349,8 @@ _SECRET_FLAGS = frozenset({"--api-key", "--hf-token", "-hft"})
 
 
 def _script_argv(plan: Any) -> list[str]:
-    argv = list(plan.argv)
-    if plan.report is not None and plan.report.mode == "fit":
-        pair = ["-c", str(plan.serve_kwargs["context"])]
-        at = next((i for i in range(len(argv) - 1) if argv[i : i + 2] == pair), None)
-        if at is not None:
-            del argv[at : at + 2]
     shown, hide = [], False
-    for tok in argv:
+    for tok in plan.argv:
         if hide:
             tok, hide = "<key>", False
         elif tok in _SECRET_FLAGS:

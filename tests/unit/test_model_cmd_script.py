@@ -51,7 +51,7 @@ def world(tmp_path, monkeypatch):
     return serve_world(tmp_path, monkeypatch)
 
 
-def test_script_prints_the_swift_launch_with_the_fitted_window_left_to_fit(world):
+def test_script_prints_the_swift_launch_with_the_fitted_window(world):
     result = _run(world, "--script", "swift")
 
     assert result.exit_code == 0, result.stderr
@@ -59,13 +59,12 @@ def test_script_prints_the_swift_launch_with_the_fitted_window_left_to_fit(world
     plan = _plan_of(world)
     assert lines[0].startswith("# swift — the launch `localharness start` / `/model` runs (")
     assert "derived: kv q8_0 (autosense.kv_cache_type) · draft-mtp (nextn_predict_layers=1)" in lines[0]
-    assert f"-c left to llama-server --fit (the harness fitted {plan.full_fit} today)" in lines[1]
+    assert f"-c {plan.serve_kwargs['context']} (fit)" in lines[1]
     assert "LLAMA_ARG_*/LLAMA_API_KEY/MTMD_BACKEND_DEVICE dropped" in lines[1] and "XDG_CONFIG_HOME →" in lines[1]
     assert lines[2] == f"exec {world.binary} \\"
     argv = list(plan.argv)
-    at = argv.index("-c")
-    assert argv[at + 1] == str(plan.full_fit)
-    assert _exec_tokens(result.stdout) == argv[:at] + argv[at + 2:]
+    assert argv[argv.index("-c") + 1] == str(plan.serve_kwargs["context"])
+    assert _exec_tokens(result.stdout) == argv
 
 
 def test_script_decides_nothing_and_writes_nothing(world, monkeypatch):
@@ -364,5 +363,5 @@ def test_a_verified_launch_of_the_harnesss_own_lends_the_script_the_memory_it_ho
     assert result.exit_code == 0, result.stderr
     assert "cannot run here" not in result.stdout and len(probes) == 1
     assert len([ln for ln in result.stdout.splitlines() if ln.endswith("() {")]) == 2
-    fitted = _plan_of(world, memory=autosense.FreeMemory(35 * GIB, 48 * GIB, "nvidia-smi")).full_fit
-    assert f"-c left to llama-server --fit (the harness fitted {fitted} today)" in result.stdout
+    fitted = _plan_of(world, memory=autosense.FreeMemory(35 * GIB, 48 * GIB, "nvidia-smi")).serve_kwargs["context"]
+    assert f"-c {fitted} (fit)" in result.stdout
