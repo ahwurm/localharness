@@ -1300,6 +1300,26 @@ def _probe_openai(root: str, model: str, hk: dict[str, Any]) -> WindowProbe:
     return WindowProbe(None, None)
 
 
+def _probe_strata(root: str, model: str, hk: dict[str, Any]) -> WindowProbe:
+    import httpx
+
+    served = trained = None
+    try:
+        items = [e for e in (httpx.get(f"{root}/models", timeout=3.0, **hk).json().get("data") or [])
+                 if isinstance(e, dict)]
+        entry = next((e for e in items if e.get("id") == model), items[0] if len(items) == 1 else None)
+        meta = (entry or {}).get("meta") or {}
+        served, trained = _int(meta.get("n_ctx")), _int(meta.get("n_ctx_train"))
+    except Exception:
+        served = trained = None
+    if served is None:
+        try:
+            served = _int(httpx.get(f"{root.removesuffix('/v1')}/health", timeout=3.0).json().get("max_context"))
+        except Exception:
+            pass
+    return WindowProbe(served, trained)
+
+
 def probe_window(
     base_url: str | None, model: str | None, provider_type: str | None = None, *,
     api_key: str | None = None,

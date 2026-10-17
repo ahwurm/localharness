@@ -8,7 +8,7 @@ from collections.abc import Mapping
 import pytest
 
 from localharness.config.models import AutosenseConfig, ManagedServerConfig
-from localharness.provider import autosense, detector, lifecycle, server, tuning, units
+from localharness.provider import autosense, detector, lifecycle, server, strata, tuning, units
 from localharness.provider.tuning import Tuned
 from localharness.provider.runtimes import RUNTIMES, row_of
 
@@ -44,6 +44,7 @@ def test_row_of_anything_else_is_none(name):
     (_record("vllm", launch="docker", docker_image="img"), lifecycle.ManagedVllmStrategy),
     (_record("ollama"), lifecycle.DaemonStrategy),
     (_record("lmstudio"), lifecycle.LmsStrategy),
+    (_record("strata", engine_dir="/e", engine_config="c.json", served_name="s"), strata.StrataStrategy),
 ])
 def test_strategy_for_returns_the_class_of_the_row(spec, cls):
     assert type(lifecycle.strategy_for(spec, unit=None)) is cls

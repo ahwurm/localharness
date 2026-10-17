@@ -428,6 +428,8 @@ class Sensed:
     snapshot: str | None = None
     snapshot_refusal: str | None = None
     first_build: bool = False
+    engine: Any = None
+    engine_refusal: str | None = None
 
 
 def sense_launch(
@@ -451,8 +453,14 @@ def sense_launch(
     if row.gguf:
         fi = _auto.compute_fit(spec, autosense, meminfo=True, memory=memory)  # its `fits` is priced without the derived types: unused
         remembered = speed_stats.last_retry(speed_stats.default_speed_stats_path(config_dir), record_key(spec))
+        engine = engine_refusal = None
+        if "engine_config" in row.record_fields:
+            from localharness.provider import strata
+
+            engine, engine_refusal = strata.sense(spec)
         sensed = Sensed(spec.runtime, config_dir, fi.header, fi.offload, fi.memory, fi.weights, fi.meminfo,
-                        remembered=remembered, split=fi.split, mmproj=fi.mmproj)
+                        remembered=remembered, split=fi.split, mmproj=fi.mmproj, engine=engine,
+                        engine_refusal=engine_refusal)
     elif row.checkpoint:
         snapshot, refusal = _verified_snapshot(spec)
         located = spec.model_copy(update={"model": snapshot}) if snapshot is not None else spec
@@ -637,6 +645,8 @@ def plan_launch(
     MTP drafting: those are now priced at the types the launch runs with, as intended (IN-03)."""
     if sensed.snapshot_refusal is not None:
         raise server.LaunchRefused(sensed.snapshot_refusal)
+    if sensed.engine_refusal is not None:
+        raise server.LaunchRefused(sensed.engine_refusal)
     tuned = tuning.derive(spec, sensed.header, autosense, model_config=sensed.model_config)
     kw: dict[str, Any] = {
         "keyed": api_key_held, "loopback": decision.loopback, "key_file_ok": decision.key_file_ok,
@@ -656,6 +666,10 @@ def plan_launch(
     if "config_ini" in row.record_fields:
         home = server.config_ini_home(sensed.config_dir, spec.port)
         names.append("XDG_CONFIG_HOME")
+    if "engine_config" in row.record_fields:
+        from localharness.provider import strata
+
+        kw["config_copy"] = str(strata.copy_path(sensed.config_dir, spec.port))
     for name in ("cache_type", "spec_type", "draft_p_min", "reasoning_parser", "tool_call_parser"):
         value = getattr(tuned, name)
         if value is not None:
