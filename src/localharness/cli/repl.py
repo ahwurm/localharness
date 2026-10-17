@@ -1869,6 +1869,37 @@ class OrchestratorREPL:
                                           current=(llm.config.base_url, llm.config.model))
         return entries, live, malformed
 
+    async def _set_up_and_switch(self, entry: Any) -> None:
+        """Ask the person at this machine once; on yes write and adopt the entry's peer, then switch to it as to any cold peer."""
+        from localharness.agent.gate_types import PermissionRequest
+        from localharness.cli import library
+        from localharness.cli.workspace import visible_text
+        from localharness.config.loader import ConfigLoader
+
+        if not (getattr(self._channel, "local_operator", False) and getattr(self._channel, "can_ask", False)):
+            await self._send_info(library.SETUP_ELSEWHERE_LINE.format(name=visible_text(entry.name)))
+            return
+        cfg = self._server_config_dir
+        bullet = await asyncio.to_thread(library.setup_bullet, cfg, entry.setup)
+        await self._send_info(bullet)
+        answer = await self._channel.ask_permission(PermissionRequest(
+            tool_name="model", tool_params={"model": entry.name}, klass="model-setup", key=None, grantable=False,
+            reason=library.SETUP_SWITCH_QUESTION, display=f"{bullet}\n{library.SETUP_SWITCH_QUESTION}"))
+        if not answer.allowed:
+            return
+        done = await asyncio.to_thread(library.set_up, cfg, entry.setup.real)
+        for line in done.lines:
+            await self._send_info(line)
+        if done.name is None:
+            return
+        loader = ConfigLoader(config_dir=cfg, local_config_dir=self._workspace,
+                              machine_withheld=self._machine_trust.withheld)
+        written = await asyncio.to_thread(loader.load_harness)
+        peer = next((ep for ep in written.extra_endpoints if ep.name == done.name), None)
+        if peer is not None:
+            self._harness.extra_endpoints.append(peer)
+            await self._handle_model_cmd(done.name)
+
     async def _handle_model_cmd(self, arg: str) -> None:
         """List the models `model_ops.plan_entries` offers, or switch to one by number or name."""
         if arg.strip().lower() == "list":
@@ -1928,6 +1959,9 @@ class OrchestratorREPL:
             target = arg
         elif entry.active:
             await self._send_info(f"{entry.name} is already active.")
+            return
+        elif entry.kind == "setup" and entry.setup is not None:
+            await self._set_up_and_switch(entry)
             return
         elif entry.kind not in ("live", "cold"):
             from localharness.cli.workspace import visible_text
