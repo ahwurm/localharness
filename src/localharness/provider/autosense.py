@@ -348,8 +348,13 @@ def _cache_ram(meminfo: Mapping[str, int] | None, host: int, ratios: Any) -> int
     return max(0, int(cap // _MIB))
 
 
+VRAM_REMEDY = "stop what holds the GPU, or pick a smaller quant"
+FLOOR_REMEDY = "free GPU memory, or pick a smaller model"
+REMEDY_Q8 = "a q8_0 KV cache fits it (cache_type_k and cache_type_v: q8_0)"
+REMEDY_MTP_OFF = "it fits with MTP drafting off (speculative: off)"
+REMEDY_Q4 = "a q4_0 KV cache fits it (cache_type_k and cache_type_v: q4_0)"
 VRAM_REFUSAL = ("{name} cannot run here: it needs {need} GiB of GPU memory{window} and {free} GiB is free — "
-                "stop what holds the GPU, or pick a smaller quant.")
+                "{remedy}.")
 RAM_REFUSAL = ("{name} cannot run here: its experts need {need} GiB of RAM and only {free} GiB is free beside the "
                "system's reserve — close something that holds RAM, or pick a smaller quant.")
 RAM_UNKNOWN_REFUSAL = ("{name} cannot run here: its experts need {need} GiB of RAM and the free RAM cannot be read "
@@ -358,14 +363,34 @@ NGL_REFUSAL = ("{name} sets -ngl in server.extra_args, which turns llama-server'
                "fit the GPU — drop the -ngl, or add --n-cpu-moe to extra_args.")
 CONTEXT_FLOOR_REFUSAL = ("{name} is set to {window} ({where}) and the harness needs at least {floor:,} — raise it, "
                          "or unset it so the harness sizes the window.")
-FLOOR_REFUSAL = ("{name} fits only {window} here and the harness needs at least {floor:,} — free GPU memory, "
-                 "or pick a smaller model.")
+FLOOR_REFUSAL = "{name} fits only {window} here and the harness needs at least {floor:,} — {remedy}."
 
 
 def window_phrase(n: int) -> str:
     """"a 4,096-token window", "an 8,448-token window": the article follows how the number is read."""
     lead = f"{n:,}".split(",")[0]
     return f"{'an' if lead in ('8', '11', '18') or lead.startswith('8') else 'a'} {n:,}-token window"
+
+
+def _remedy(room: float, header: Mapping[str, Any], split: TensorSplit | None, k: str | None, v: str | None,
+            share: float, trained: int, floor: int, default: str) -> str:
+    """The cheapest change that reaches `floor`: a q8_0 cache (ΔPPL 0.0046 over f16, llama.cpp PR 7412), drafting off, a q4_0 cache."""
+    need = max(floor, 1)
+
+    def reaches(cache: str, factor: float) -> bool:
+        kv = kv_bytes_per_token(header, cache, cache, split)
+        return kv is not None and _window(room, kv * factor, trained) >= need
+
+    above_q8 = any(KV_BYTES.get((t or "f16").lower(), 0) > KV_BYTES["q8_0"] for t in (k, v))
+    at_q4 = all(KV_BYTES.get((t or "f16").lower(), 0) <= KV_BYTES["q4_0"] for t in (k, v))
+    if above_q8 and reaches("q8_0", share):
+        return REMEDY_Q8
+    kv = kv_bytes_per_token(header, k, v, split)
+    if share > 1 and kv is not None and _window(room, kv, trained) >= need:
+        return REMEDY_MTP_OFF
+    if not at_q4 and reaches("q4_0", share):
+        return REMEDY_Q4
+    return default
 
 
 def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name: str, weights: int, mmproj: int,
@@ -385,32 +410,41 @@ def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name
         return Placement(fits or None, None if refusal else where, gpu, mmproj, experts_ram, kv, free_bytes,
                          free_bytes, _cache_ram(meminfo, weights if no_mmap else experts_ram, autosense), refusal)
 
-    def decided(window: int, where: str, experts_ram: int = 0) -> Placement:
+    def remedy(room: float, default: str) -> str:
+        return _remedy(room, header, split, cache_type_k, cache_type_v, share, trained, floor or 0, default)
+
+    def decided(window: int, where: str, room: float, experts_ram: int = 0) -> Placement:
         if window <= 0:
             plus = f" plus {window_phrase(floor)}" if floor else ""
             return made(0, where, refusal=VRAM_REFUSAL.format(
-                name=label, need=gib(gpu), window=plus, free=gib(free_bytes)))
+                name=label, need=gib(gpu), window=plus, free=gib(free_bytes), remedy=remedy(room, VRAM_REMEDY)))
         if floor and window < floor:
             return made(window, where, refusal=FLOOR_REFUSAL.format(
-                name=label, window=window_phrase(window), floor=floor))
+                name=label, window=window_phrase(window), floor=floor, remedy=remedy(room, FLOOR_REMEDY)))
         return made(window, where, experts_ram)
 
     if ngl_hand and experts > 0 and gpu + experts > free_bytes:
         return made(0, None, refusal=NGL_REFUSAL.format(name=label))
     if kv is None or trained is None:
         return made(0, None)
-    on_gpu = _window(free_bytes - gpu - margin - experts, kv, trained)
+    room = free_bytes - gpu - margin
+    on_gpu = _window(room - experts, kv, trained)
     if on_gpu >= max(floor or 0, 1) or not (split and experts > 0 and _pos_int(header.get("expert_count"))) or ngl_hand:
-        return decided(on_gpu, "gpu")
+        return decided(on_gpu, "gpu", room - experts)
     if meminfo is None:
         return made(0, None, refusal=RAM_UNKNOWN_REFUSAL.format(name=label, need=gib(experts)))
     ram_room = meminfo["MemAvailable"] - autosense.unified_reserve_ratio * meminfo["MemTotal"]
     if experts > ram_room:
         return made(0, None, refusal=RAM_REFUSAL.format(name=label, need=gib(experts), free=gib(max(0, ram_room))))
-    return decided(_window(free_bytes - gpu - margin, kv, trained), "experts in RAM", experts)
+    return decided(_window(room, kv, trained), "experts in RAM", room, experts)
 
 
-VLLM_REFUSAL = "{name} cannot run here: {weights} GiB of weights, and vLLM keeps them all on the {total} GiB GPU."
+VLLM_REFUSAL = ("{name} cannot run here: {weights} GiB of {dtype}weights, and vLLM keeps them all on the {total} "
+                "GiB GPU — {remedy}.")
+VLLM_REMEDY_4BIT = "a 4-bit build of it (a GGUF Q4_K_M for llama.cpp, or NVFP4 for vLLM) would fit"
+VLLM_REMEDY = "pick a smaller quant"
+_Q4_K_M_SHARE = 0.31
+_DTYPE_WORD = {"bfloat16": "bf16 ", "float16": "fp16 "}
 _VLLM_GMU = 0.90
 
 
@@ -438,7 +472,15 @@ def place_vllm(model_config: Mapping[str, Any], *, name: str, weights: int, tota
                          budget, None, refusal)
 
     if weights + margin >= budget:
-        return made(0, None, VLLM_REFUSAL.format(name=label, weights=gib(weights), total=gib(total_bytes)))
+        text = model_config.get("text_config")
+        quantized = "quantization_config" in model_config or (isinstance(text, Mapping) and "quantization_config" in text)
+        raw = _config_value(model_config, "dtype") or _config_value(model_config, "torch_dtype")
+        dtype = "" if quantized else _DTYPE_WORD.get(raw, "") if isinstance(raw, str) else ""
+        four_bit = int(_Q4_K_M_SHARE * weights)
+        fits_4bit = four_bit + int(autosense.compute_margin_ratio * four_bit) < budget
+        remedy = VLLM_REMEDY_4BIT if dtype and fits_4bit else VLLM_REMEDY
+        return made(0, None, VLLM_REFUSAL.format(
+            name=label, weights=gib(weights), dtype=dtype, total=gib(total_bytes), remedy=remedy))
     types = _config_value(model_config, "layer_types")
     layers = sum(t == "full_attention" for t in types) if isinstance(types, list) else 0
     layers = layers or _pos_int(_config_value(model_config, "num_hidden_layers"))
@@ -455,7 +497,8 @@ def place_vllm(model_config: Mapping[str, Any], *, name: str, weights: int, tota
     window = max(0, (budget - weights - margin) // kv) // 256 * 256
     window = min(trained, window) if trained else window
     if floor and window < floor:
-        return made(window, kv, FLOOR_REFUSAL.format(name=label, window=window_phrase(window), floor=floor))
+        return made(window, kv, FLOOR_REFUSAL.format(
+            name=label, window=window_phrase(window), floor=floor, remedy=FLOOR_REMEDY))
     return made(window, kv)
 
 

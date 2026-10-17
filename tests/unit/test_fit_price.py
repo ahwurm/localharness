@@ -163,7 +163,7 @@ KV_F16, KV_Q8 = 65_536, 34_816
     ("q8_0", 1.0, KV_Q8, 5_000, 4_864, "free GPU memory, or pick a smaller model"),
 ], ids=["q8-kv", "mtp-off", "q4-kv", "nothing-helps-at-q4", "nothing-helps-at-q8"])
 def test_a_floor_refusal_names_the_first_remedy_that_reaches_the_floor(tmp_path, cache, share, kv, window, got, remedy):
-    placed = _place_27b(tmp_path, _free_for(window, kv=int(kv * share)), cache=cache, share=share, floor=FLOOR_13_8)
+    placed = _place_27b(tmp_path, _free_for(window, kv=kv), cache=cache, share=share, floor=FLOOR_13_8)
     assert placed.fits == got and placed.refusal == (
         f"Swift-27B fits only {autosense.window_phrase(got)} here and the harness needs at least 13,824 — {remedy}.")
 
