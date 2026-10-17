@@ -109,6 +109,21 @@ def test_an_unrecorded_gguf_is_a_llama_cpp_entry_priced_like_a_record(world):
     assert model_ops.entry_lines(listed(world))[4] == f"  2. {entry.name}  llama.cpp · {entry.window:,} (not set up)"
 
 
+def test_one_projector_name_the_config_refuses_is_its_own_line_not_the_lists(world):
+    models = world.home / "models"
+    models.mkdir(exist_ok=True)
+    write_gguf(models / "Flash-Next.gguf", {**FLASH_NEXT, "qwen4exp.embedding_length": 2048})
+    unrecorded_gguf(world, "Other-Model.gguf")
+    write_gguf(models / "mmproj-Flash-Next\n.gguf", {
+        "general.architecture": "clip", "general.type": "mmproj", "clip.vision.projection_dim": 2048})
+
+    entries = listed(world)
+
+    (bad,) = [e for e in entries.numbered() + entries.not_offered if e.refusal and "could not plan it" in e.refusal]
+    assert "\n" in str(bad.setup.model.mmproj)
+    assert [e.name for e in entries.numbered() if e.kind == "setup" and e.refusal is None]
+
+
 def test_a_snapshot_gguf_a_record_names_is_that_records_entry(tmp_path, monkeypatch):
     repo = cache_repo(tmp_path, "org/flash-GGUF")
     gguf = write_gguf(repo.revisions[0].snapshot_path / "flash.gguf", FLASH_NEXT)
