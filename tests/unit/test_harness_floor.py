@@ -21,7 +21,7 @@ from localharness.agent.permissions import PermissionEvaluator
 CASES = [
     (6_700, None, 15_360),
     (4_370, None, 8_448),
-    (6_300, None, 12_032),
+    (6_300, None, 14_848),
     (6_400, None, 14_848),
     (6_700, 8_192, 19_456),
     (0, None, 256),
@@ -44,8 +44,16 @@ def test_the_floor_fits_and_one_step_below_does_not(fixed, mrt, expected):
     assert not _fits(fixed, expected - 256, mrt)
 
 
-def test_the_scan_crosses_the_reserve_jump_without_a_closed_form():
-    assert harness_floor(6_300) == 12_032 < 12_288 <= harness_floor(6_400) == 14_848
+def test_the_floor_steps_over_the_reserve_jump_instead_of_stopping_below_it():
+    assert 12_288 <= harness_floor(6_300) == harness_floor(6_400) == 14_848
+
+
+@pytest.mark.parametrize("mrt", [None, 8_192])
+@pytest.mark.parametrize("fixed", range(4_000, 7_001, 100))
+def test_every_window_from_the_floor_up_fits(fixed, mrt):
+    floor = harness_floor(fixed, mrt)
+    assert all(_fits(fixed, w, mrt) for w in range(floor, floor + 40_000, 256))
+    assert floor == 256 or not _fits(fixed, floor - 256, mrt)
 
 
 def test_a_configured_reply_cap_raises_the_floor_and_never_lowers_the_reserve():

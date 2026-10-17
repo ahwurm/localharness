@@ -75,12 +75,15 @@ def response_reserve(max_context_tokens: int, max_response_tokens: int | None = 
 
 
 def harness_floor(fixed_tokens: int, max_response_tokens: int | None = None) -> int:
-    """Smallest window, in 256-token steps, whose usable part holds the fixed prompt at the compaction target."""
-    window = 256
-    while fixed_tokens > COMPACTION_TARGET_USAGE_FRACTION * (
-        window - response_reserve(window, max_response_tokens)
-    ):
+    """Smallest window, in 256-token steps, from which every larger window holds the fixed prompt at the compaction target."""
+    def holds(w: int) -> bool:
+        return fixed_tokens <= COMPACTION_TARGET_USAGE_FRACTION * (w - response_reserve(w, max_response_tokens))
+
+    window = 12_288  # usable space only grows from the reserve's jump here, so a window that holds here holds above
+    while not holds(window):
         window += 256
+    while window > 256 and holds(window - 256):
+        window -= 256
     return window
 
 
