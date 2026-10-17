@@ -3,11 +3,12 @@
 The context-window fit (block count, KV heads, head size) and the trained-window probe (context
 length) need a handful of metadata values from a model file that may be a hostile or merely odd
 thing: a FIFO, a device symlink, a header declaring four billion elements. `read_header(path, want)`
-reads only the KV section — never the tensor infos, never tensor data — and stops the moment every
+reads only the KV section and stops the moment every
 wanted name is resolved. Every count and length is checked BEFORE it is acted on (`MAX_KV`,
 `MAX_STRING`, `MAX_ARRAY_ELEMENTS`) and the bytes read or skipped are charged against
 `HEADER_BYTE_BUDGET`, so a crafted header can only produce a `GgufHeaderError`, never a hang or a
-large allocation. The file is opened with `open_regular`, which refuses anything but a regular file.
+large allocation. `read_tensor_table` also reads the tensor infos (never tensor data) under `MAX_TENSORS`,
+`MAX_TENSOR_NAME` and `MAX_DIMS`. The file is opened with `open_regular`, which refuses anything but a regular file.
 
 Pure standard library (struct, os): no llama-cpp-python, no new dependency.
 Layout (little-endian): b"GGUF", u32 version (2 or 3), u64 n_tensors, u64 n_kv, then n_kv pairs of
@@ -81,9 +82,9 @@ class _Cursor:
     def unpack(self, fmt: str) -> Any:
         return struct.unpack(fmt, self.read(struct.calcsize(fmt)))[0]
 
-    def string(self, keep: bool = True) -> str | None:
+    def string(self, keep: bool = True, limit: int = MAX_STRING) -> str | None:
         n = self.unpack("<Q")
-        if n > MAX_STRING:
+        if n > limit:
             raise GgufHeaderError("string too long")
         if not keep:
             self.skip(n)
@@ -217,23 +218,35 @@ def _shard_table(path: Path) -> tuple[list[TensorEntry], int]:
         size = os.fstat(f.fileno()).st_size
         c = _Cursor(f)
         n_tensors, n_kv = _preamble(c)
+        if n_tensors > MAX_TENSORS:
+            raise GgufHeaderError("too many tensors")
         alignment = DEFAULT_ALIGNMENT
         for _ in range(n_kv):
             key = c.string() or ""
             value = _value(c, c.unpack("<I"), key == "general.alignment")
             if key == "general.alignment":
+                if not isinstance(value, int) or value < 1:
+                    raise GgufHeaderError("bad alignment")
                 alignment = value
-        infos = []
+        infos: list[tuple[str, int]] = []
         for _ in range(n_tensors):
-            name = c.string() or ""
+            name = c.string(limit=MAX_TENSOR_NAME) or ""
             dims = c.unpack("<I")
+            if dims > MAX_DIMS:
+                raise GgufHeaderError("too many tensor dimensions")
             c.read(8 * dims)
             c.unpack("<I")
-            infos.append((name, c.unpack("<Q")))
-        data_start = -(-f.tell() // alignment) * alignment
-    data_bytes = size - data_start
-    ends = [off for _, off in infos[1:]] + [data_bytes]
-    return [TensorEntry(name, end - off) for (name, off), end in zip(infos, ends)], data_bytes
+            offset = c.unpack("<Q")
+            if offset % alignment:
+                raise GgufHeaderError("tensor offset not aligned")
+            if infos and offset <= infos[-1][1]:
+                raise GgufHeaderError("tensor offsets not increasing")
+            infos.append((name, offset))
+        data_bytes = size - -(-f.tell() // alignment) * alignment
+    if data_bytes < 0 or any(offset >= data_bytes for _, offset in infos):
+        raise GgufHeaderError("tensor offset past the end of the data")
+    ends = [offset for _, offset in infos[1:]] + [data_bytes]
+    return [TensorEntry(name, end - offset) for (name, offset), end in zip(infos, ends)], data_bytes
 
 
 # ---- discovery (D-01..D-05, D-07, D-47, D-48): what `init` finds under the model roots --------------
