@@ -376,7 +376,6 @@ def settle_startup_trust(
         if existing is None:
             # The create-offer's own memory, kept: a "no" is not re-asked as an offer either.
             trust.record_offer_decline(target)
-        _notice(DECLINED_NOTICE.format(root=root))
         return None
     trust.record_executables(root, snap)  # the yes approved exactly the list it showed
     if candidate is not None:
@@ -395,12 +394,6 @@ def settle_startup_trust(
         # the user asked for — a workspace that could not be created is not a reason not to work.
         return None
     return target
-
-
-DECLINED_NOTICE = (
-    "Workspace {root} is not trusted — this session asks before boundary-crossing and "
-    "destructive calls."
-)
 
 
 def _ask_create(prompt: str = OFFER_PROMPT) -> Optional[bool]:
