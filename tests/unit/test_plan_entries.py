@@ -11,10 +11,10 @@ from typer.testing import CliRunner
 from localharness.cli import model_ops, workspace
 from localharness.cli.app import app
 from localharness.config.loader import ConfigLoader
-from localharness.provider import autosense, lifecycle, procfs, server
+from localharness.provider import autosense, lifecycle, procfs, server, speed_stats
 from localharness.provider.autosense import FreeMemory
 from tests.unit.gguf_support import write_gguf
-from tests.unit.test_serve_cmd import GIB, PRIMARY, PRIMARY_URL, attach_peer, llama_peer, serve_world
+from tests.unit.test_serve_cmd import GIB, PRIMARY, PRIMARY_URL, attach_peer, docker_peer, llama_peer, serve_world
 from tests.unit.test_tuning_derive import FLASH_NEXT
 
 runner = CliRunner()
@@ -261,3 +261,97 @@ def test_a_name_with_an_escape_byte_prints_it_as_four_characters(tmp_path, monke
 
     assert "\x1b" not in out
     assert "bad\\x1b[2Jname" in out and "skipped a\\x1b[31mb" in out
+
+
+# ====================================================================== one entry per file, refusals, every record by name
+
+
+def twin_files(tmp_path: Path) -> list[dict]:
+    first = flash(tmp_path, "x", 8082)
+    second = flash(tmp_path, "x-strata", 8083)
+    link = tmp_path / "x-strata.gguf"
+    link.unlink()
+    link.symlink_to(first["lifecycle"]["model"])
+    second["lifecycle"]["model"] = str(link)
+    return [first, second]
+
+
+def test_two_records_on_one_file_are_one_entry_shown_as_the_first_in_config_order(tmp_path, monkeypatch):
+    world = serve_world(tmp_path, monkeypatch, peers=twin_files(tmp_path))
+
+    entries = entries_of(world, {PRIMARY_URL: (PRIMARY,)})
+
+    cold = entries.groups[1].entries
+    assert [(e.name, e.others) for e in cold] == [("x", ("x-strata",))]
+    assert entries.pick("x") is cold[0] and entries.pick("x-strata") is cold[0]
+
+
+def test_the_record_last_served_is_the_one_shown(tmp_path, monkeypatch):
+    world = serve_world(tmp_path, monkeypatch, peers=twin_files(tmp_path))
+    speed_stats.record_last_served(speed_stats.default_speed_stats_path(world.g), "x-strata")
+
+    cold = entries_of(world, {PRIMARY_URL: (PRIMARY,)}).groups[1].entries
+
+    assert [(e.name, e.others) for e in cold] == [("x-strata", ("x",))]
+
+
+def test_a_withheld_record_is_a_not_offered_line(world):
+    world.edit_config(lambda d: d["extra_endpoints"][0]["lifecycle"].update(binary="/other/llama-server"))
+
+    entries = entries_of(world, SERVING)
+
+    assert entries.numbered()[1:] == ()
+    assert model_ops.entry_lines(entries)[-1] == "  not offered: flash-next — its record has changes you have not confirmed"
+
+
+def test_a_plan_the_floor_refuses_is_a_not_offered_line(world, monkeypatch):
+    refusal = autosense.FLOOR_REFUSAL.format(name="flash-next", window=autosense.window_phrase(9216), floor=FLOOR)
+
+    def refuse(*args, **kw):
+        raise server.LaunchRefused(refusal)
+
+    monkeypatch.setattr(lifecycle, "plan_launch", refuse)
+
+    entries = entries_of(world, SERVING)
+
+    assert model_ops.entry_lines(entries)[-1] == (
+        "  not offered: flash-next — fits only a 9,216-token window here and the harness needs at least 13,824")
+    assert entries.pick("flash-next") == refusal
+
+
+def test_one_record_that_cannot_be_planned_does_not_fail_the_list(world, monkeypatch):
+    def broken(*args, **kw):
+        raise OSError("boom")
+
+    monkeypatch.setattr(lifecycle, "sense_launch", broken)
+
+    lines = model_ops.entry_lines(entries_of(world, SERVING))
+
+    assert lines[-1] == "  not offered: flash-next — could not plan it (OSError)"
+
+
+@pytest.mark.parametrize("serving", [True, False])
+@pytest.mark.parametrize("record", [PRIMARY, "flash-next", "dock"])
+def test_every_record_is_reachable_by_name(tmp_path, monkeypatch, record, serving):
+    world = serve_world(tmp_path, monkeypatch, peers=[flash(tmp_path), docker_peer("dock", 8090), attach_peer("attached")])
+    live = {PRIMARY_URL: (PRIMARY,) if serving else None, PEER_URL: None, "http://127.0.0.1:8090/v1": None}
+
+    entries = entries_of(world, live)
+
+    assert entries.pick(record) is not None
+    assert {r.name for r in model_ops.serving_records(harness_of(world)) if r.spec is not None} == {PRIMARY, "flash-next", "dock"}
+
+
+def test_building_the_list_writes_nothing_and_takes_no_lock(world, monkeypatch):
+    def forbidden(*args, **kw):
+        raise AssertionError("the list started, stopped or locked something")
+
+    for target in ("start_server", "stop_server"):
+        monkeypatch.setattr(server, target, forbidden)
+    for target in ("launch_lock", "launch_lock_sync"):
+        monkeypatch.setattr(lifecycle, target, forbidden)
+    before = {str(p): (p.stat().st_mtime_ns, p.stat().st_size) for p in sorted(world.g.rglob("*")) if p.is_file()}
+
+    entries_of(world, SERVING)
+
+    assert {str(p): (p.stat().st_mtime_ns, p.stat().st_size) for p in sorted(world.g.rglob("*")) if p.is_file()} == before
