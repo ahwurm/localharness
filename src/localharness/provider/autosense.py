@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 FIT_KEYS = frozenset({
     "block_count", "head_count_kv", "key_length", "embedding_length", "head_count", "context_length",
     "nextn_predict_layers", "expert_count", "full_attention_interval", "indexer.key_length",
+    "sliding_window", "sliding_window_pattern", "key_length_swa", "value_length_swa", "value_length",
 })
 
 # Bytes per element of a KV cache type, from ggml's block sizes (bytes per block / elements per block).
@@ -140,10 +141,13 @@ def _pos_int(value: object) -> int | None:
 
 def fit_header(raw: Mapping[str, Any]) -> dict[str, Any]:
     """The header values a caller may rely on: only well-typed positive ints survive, and
-    `head_count_kv` may stay a list of them. A GGUF declares its own types, so a value that is a
+    `head_count_kv` may stay a list of them and `sliding_window_pattern` a list of bools or a positive int. A GGUF declares its own types, so a value that is a
     string, a bool or a list where an int belongs is dropped here, once, right after `read_header`;
     `offload_kind`, `WindowReport` and `window_lines` then only ever see an int or nothing."""
-    out = {k: v for k, v in raw.items() if k != "head_count_kv" and _pos_int(v) is not None}
+    out = {k: v for k, v in raw.items() if k not in ("head_count_kv", "sliding_window_pattern") and _pos_int(v) is not None}
+    pattern = raw.get("sliding_window_pattern")
+    if _pos_int(pattern) is not None or (isinstance(pattern, list) and pattern and all(type(x) is bool for x in pattern)):
+        out["sliding_window_pattern"] = pattern
     kv = raw.get("head_count_kv")
     if isinstance(kv, list):
         ints = [x for x in kv if _pos_int(x) is not None]
@@ -172,9 +176,20 @@ def kv_heads(header: Mapping[str, Any]) -> int | None:
     return _pos_int(value)
 
 
+def swa_pattern(header: Mapping[str, Any]) -> list[bool] | None:
+    """Per layer, whether it slides: the header's bool list, or an int period n (all but every nth, as llama.cpp's `set_swa_pattern`); None otherwise."""
+    n, pattern = _pos_int(header.get("block_count")), header.get("sliding_window_pattern")
+    if n is None or _pos_int(header.get("sliding_window")) is None:
+        return None
+    if isinstance(pattern, list):
+        return list(pattern) if len(pattern) == n and all(type(x) is bool for x in pattern) else None
+    period = _pos_int(pattern)
+    return [i % period < period - 1 for i in range(n)] if period is not None else None
+
+
 @dataclass(frozen=True)
 class TensorSplit:
-    """The model's bytes by where they live (gpu, experts, input) and the layers that hold KV."""
+    """The model's bytes by where they live, the layers that hold KV, the sliding ones among them and their KV heads."""
 
     gpu: int
     experts: int
@@ -182,6 +197,9 @@ class TensorSplit:
     kv_main: int
     kv_draft: int
     indexer: int
+    swa: int = 0
+    heads_full: int = 0
+    heads_swa: int = 0
 
 
 def read_split(model: str, header: Mapping[str, Any]) -> TensorSplit | None:
@@ -201,20 +219,63 @@ def read_split(model: str, header: Mapping[str, Any]) -> TensorSplit | None:
     main, draft = gh.kv_layers(table.entries, header)
     if not gh.cross_checked(sums, main, header, table.data_bytes):
         return None
-    return TensorSplit(sums["gpu"], sums["experts"], sums["input"], main, draft, gh.indexer_layers(table.entries))
+    pattern, heads = swa_pattern(header), header.get("head_count_kv")
+    ids = gh.kv_layer_ids(table.entries, header)
+    sliding = [i for i in ids if pattern and pattern[i]]
+    per_layer = bool(sliding) and isinstance(heads, list) and len(heads) == header["block_count"]
+    heads_swa = sum(heads[i] for i in sliding) if per_layer else 0
+    heads_full = sum(heads[i] for i in ids if not pattern[i]) if per_layer else 0
+    return TensorSplit(sums["gpu"], sums["experts"], sums["input"], main, draft, gh.indexer_layers(table.entries),
+                       len(sliding), heads_full, heads_swa)
 
 
 def kv_bytes_per_token(header: Mapping[str, Any], cache_type_k: str | None, cache_type_v: str | None,
                        split: TensorSplit | None = None) -> float | None:
-    """KV cache bytes per token over the split's attention layers (else every block); None for an unknown type or a missing header value."""
+    """KV cache bytes per token over the split's full-attention layers (else every block); None for an unknown type or a missing header value."""
     k = KV_BYTES.get((cache_type_k or "f16").lower())
     v = KV_BYTES.get((cache_type_v or "f16").lower())
-    n_layer = split.kv_main if split else _pos_int(header.get("block_count"))
+    n_layer = split.kv_main - split.swa if split else _pos_int(header.get("block_count"))
     heads, dim = kv_heads(header), head_dim(header)
     if k is None or v is None or not n_layer or heads is None or dim is None:
         return None
     indexer = split.indexer * (_pos_int(header.get("indexer.key_length")) or 0) * 2 * k if split else 0
-    return n_layer * heads * dim * (k + v) + indexer
+    total = split.heads_full if split and split.heads_full else n_layer * heads
+    return total * (dim * k + (_pos_int(header.get("value_length")) or dim) * v) + indexer
+
+
+def swa_bytes_per_cell(header: Mapping[str, Any], cache_type_k: str | None, cache_type_v: str | None,
+                       split: TensorSplit | None) -> float:
+    """KV cache bytes of one cell of the sliding layers; 0 without any or for an unknown type or a missing header value."""
+    k = KV_BYTES.get((cache_type_k or "f16").lower())
+    v = KV_BYTES.get((cache_type_v or "f16").lower())
+    heads, dim = kv_heads(header), head_dim(header)
+    if split is None or not split.swa or k is None or v is None or heads is None or dim is None:
+        return 0.0
+    key = _pos_int(header.get("key_length_swa")) or dim
+    value = _pos_int(header.get("value_length_swa")) or _pos_int(header.get("value_length")) or dim
+    return (split.heads_swa or split.swa * heads) * (key * k + value * v)
+
+
+_UBATCH = 512
+
+
+def swa_cells_cap(n_swa: int, extra_args: Sequence[str]) -> int | None:
+    """llama.cpp's sliding-window cache cells (unified 4 slots unless `-np`); None under `--swa-full`."""
+    if _has_flag(extra_args, ("--swa-full",)):
+        return None
+
+    def number(flags: Sequence[str], default: int) -> int:
+        raw = _flag_value(extra_args, flags)
+        return int(raw) if raw is not None and raw.isdecimal() and int(raw) > 0 else default
+
+    ubatch, parallel = number(("-ub", "--ubatch-size"), _UBATCH), number(("-np", "--parallel"), 0)
+
+    def pad(n: int) -> int:
+        return -(-n // 256) * 256
+
+    if not parallel:
+        return pad(n_swa * 4 + ubatch)
+    return pad(n_swa * parallel + ubatch) if _has_flag(extra_args, ("-kvu", "--kv-unified")) else parallel * pad(n_swa + ubatch)
 
 
 # Flags that place tensors by hand: how many layers sit on the GPU cannot be read from them.
@@ -288,7 +349,7 @@ def fit(header: Mapping[str, Any], free_bytes: int | None, ratios: Any,
     `draft_share` multiplies the KV bytes per token (1.0, the default, with drafting off)."""
     kv = kv_bytes_per_token(header, cache_type_k, cache_type_v, split)
     if kv is not None:
-        kv *= draft_share
+        kv = (kv + swa_bytes_per_cell(header, cache_type_k, cache_type_v, split)) * draft_share
     trained = _pos_int(header.get("context_length"))
     row = row_of(runtime)
     if row is None or not row.gguf or offload != "gpu" or free_bytes is None or kv is None or trained is None:
@@ -333,10 +394,23 @@ class Placement:
     budget_bytes: int
     cache_ram: int | None
     refusal: str | None
+    swa_bytes: int = 0
 
 
-def _window(room: float, kv: float, trained: int) -> int:
-    return min(trained, max(0, int(room // kv)) // 256 * 256)
+def _window(room: float, kv: float, trained: int, swa: float = 0.0, cap: int | None = None) -> int:
+    """The largest multiple of 256 with `w × kv + min(w, cap) × swa` within `room`: the sliding layers' cells stop growing at `cap`."""
+    if swa and cap is not None and (room - cap * swa) // kv >= cap:
+        w = (room - cap * swa) // kv
+    else:
+        w = room // (kv + swa)
+    return min(trained, max(0, int(w)) // 256 * 256)
+
+
+def _swa_price(header: Mapping[str, Any], k: str | None, v: str | None, split: TensorSplit | None,
+               extra_args: Sequence[str]) -> tuple[float, int | None]:
+    """(bytes per sliding cell, the cells the cache holds); the cap is None for a cache the size of the window."""
+    swa = swa_bytes_per_cell(header, k, v, split)
+    return swa, swa_cells_cap(_pos_int(header.get("sliding_window")) or 0, extra_args) if swa else None
 
 
 def _cache_ram(meminfo: Mapping[str, int] | None, host: int, ratios: Any) -> int | None:
@@ -373,20 +447,22 @@ def window_phrase(n: int) -> str:
 
 
 def _remedy(room: float, header: Mapping[str, Any], split: TensorSplit | None, k: str | None, v: str | None,
-            share: float, trained: int, floor: int, default: str) -> str:
+            share: float, trained: int, floor: int, default: str, extra_args: Sequence[str] = ()) -> str:
     """The cheapest change that reaches `floor`: a q8_0 cache (ΔPPL 0.0046 over f16, llama.cpp PR 7412), drafting off, a q4_0 cache."""
     need = max(floor, 1)
 
     def reaches(cache: str, factor: float) -> bool:
         kv = kv_bytes_per_token(header, cache, cache, split)
-        return kv is not None and _window(room, kv * factor, trained) >= need
+        swa, cap = _swa_price(header, cache, cache, split, extra_args)
+        return kv is not None and _window(room, kv * factor, trained, swa * factor, cap) >= need
 
     above_q8 = any(KV_BYTES.get((t or "f16").lower(), 0) > KV_BYTES["q8_0"] for t in (k, v))
     at_q4 = all(KV_BYTES.get((t or "f16").lower(), 0) <= KV_BYTES["q4_0"] for t in (k, v))
     if above_q8 and reaches("q8_0", share):
         return REMEDY_Q8
     kv = kv_bytes_per_token(header, k, v, split)
-    if share > 1 and kv is not None and _window(room, kv, trained) >= need:
+    swa, cap = _swa_price(header, k, v, split, extra_args)
+    if share > 1 and kv is not None and _window(room, kv, trained, swa, cap) >= need:
         return REMEDY_MTP_OFF
     if not at_q4 and reaches("q4_0", share):
         return REMEDY_Q4
@@ -396,22 +472,26 @@ def _remedy(room: float, header: Mapping[str, Any], split: TensorSplit | None, k
 def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name: str, weights: int, mmproj: int,
                    free_bytes: int, meminfo: Mapping[str, int] | None, cache_type_k: str | None,
                    cache_type_v: str | None, share: float, autosense: Any, floor: int | None = None,
-                   ngl_hand: bool = False, no_mmap: bool = False) -> Placement:
+                   ngl_hand: bool = False, no_mmap: bool = False, extra_args: Sequence[str] = ()) -> Placement:
     """Experts on the GPU first, in RAM when that misses the floor; the whole file on the GPU without a split."""
     gpu = split.gpu + mmproj if split else weights
     experts = split.experts if split else 0
     margin = int(autosense.compute_margin_ratio * gpu) + int(autosense.compute_reserve * 2**30)
     kv = kv_bytes_per_token(header, cache_type_k, cache_type_v, split)
     kv = kv * share if kv is not None else None
+    swa, cap = _swa_price(header, cache_type_k, cache_type_v, split, extra_args)
+    swa *= share
     trained = _pos_int(header.get("context_length"))
     label = "".join(c for c in name if c.isprintable())
 
     def made(fits: int, where: str | None, experts_ram: int = 0, refusal: str | None = None) -> Placement:
+        cells = fits if cap is None else min(fits, cap)
         return Placement(fits or None, None if refusal else where, gpu, mmproj, experts_ram, kv, free_bytes,
-                         free_bytes, _cache_ram(meminfo, weights if no_mmap else experts_ram, autosense), refusal)
+                         free_bytes, _cache_ram(meminfo, weights if no_mmap else experts_ram, autosense), refusal,
+                         int(swa * cells))
 
     def remedy(room: float, default: str) -> str:
-        return _remedy(room, header, split, cache_type_k, cache_type_v, share, trained, floor or 0, default)
+        return _remedy(room, header, split, cache_type_k, cache_type_v, share, trained, floor or 0, default, extra_args)
 
     def decided(window: int, where: str, room: float, experts_ram: int = 0) -> Placement:
         if window <= 0:
@@ -428,7 +508,7 @@ def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name
     if kv is None or trained is None:
         return made(0, None)
     room = free_bytes - gpu - margin
-    on_gpu = _window(room - experts, kv, trained)
+    on_gpu = _window(room - experts, kv, trained, swa, cap)
     if on_gpu >= max(floor or 0, 1) or not (split and experts > 0 and _pos_int(header.get("expert_count"))) or ngl_hand:
         return decided(on_gpu, "gpu", room - experts)
     if meminfo is None:
@@ -436,7 +516,7 @@ def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name
     ram_room = meminfo["MemAvailable"] - autosense.unified_reserve_ratio * meminfo["MemTotal"]
     if experts > ram_room:
         return made(0, None, refusal=RAM_REFUSAL.format(name=label, need=gib(experts), free=gib(max(0, ram_room))))
-    return decided(_window(room, kv, trained), "experts in RAM", room, experts)
+    return decided(_window(room, kv, trained, swa, cap), "experts in RAM", room, experts)
 
 
 VLLM_REFUSAL = ("{name} cannot run here: {weights} GiB of {dtype}weights, and vLLM keeps them all on the {total} "
@@ -700,7 +780,7 @@ def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None,
         ram = mi or (_read_meminfo() if split.experts else None)
         fits = place_llamacpp(
             split, header, name="", weights=weights, mmproj=mmproj, free_bytes=mem.free_bytes, meminfo=ram,
-            cache_type_k=k, cache_type_v=v, share=draft_share, autosense=ratios).fits
+            cache_type_k=k, cache_type_v=v, share=draft_share, autosense=ratios, extra_args=extra).fits
     else:
         fits = fit(
             header, mem.free_bytes if mem else None, ratios, attached_served,
@@ -756,7 +836,7 @@ def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, auto
             split, header, name=_label(spec), weights=weights or 0, mmproj=sensed.mmproj, free_bytes=mem.free_bytes,
             meminfo=mi, cache_type_k=k, cache_type_v=v, share=share, autosense=autosense,
             floor=None if chosen else floor, ngl_hand=_flag_value(extra, _NGL) is not None,
-            no_mmap="--no-mmap" in extra)
+            no_mmap="--no-mmap" in extra, extra_args=extra)
     fits = placed.fits if placed else None
     refusal = fit_ctx = None
     if spec.context is not None:
@@ -851,7 +931,7 @@ def _placement_line(r: WindowReport) -> str | None:
     window = r.served if r.verified and r.served else r.asked
     if r.attached or r.mode != "fit" or p is None or p.where is None or not window or p.kv_per_token is None:
         return None
-    share = gib(p.gpu_bytes + p.kv_per_token * window)
+    share = gib(p.gpu_bytes + p.kv_per_token * window + p.swa_bytes)
     if p.where == "vllm":
         return f"window: {window:,} · vLLM · all on the GPU ({share} of vLLM's {gib(p.budget_bytes)} GiB)"
     if p.where == "experts in RAM":

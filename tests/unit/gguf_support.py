@@ -119,9 +119,17 @@ def load_fixture(name: str) -> dict:
     return json.loads((FIXTURES / f"{name}.json").read_text())
 
 
+def _packed(type_id: int, value: object) -> bytes:
+    if type_id == 8:
+        return _string(value)
+    if type_id == 9:
+        elem, items = value
+        return struct.pack("<IQ", elem, len(items)) + b"".join(_packed(elem, x) for x in items)
+    return struct.pack(_PACK[type_id], value)
+
+
 def _recorded_kv(kv: list) -> dict[str, object]:
-    return {key: Raw(type_id, _string(value) if type_id == 8 else struct.pack(_PACK[type_id], value))
-            for key, type_id, value in kv}
+    return {key: Raw(type_id, _packed(type_id, value)) for key, type_id, value in kv}
 
 
 def write_recorded(directory: Path, fixture: dict) -> list[Path]:

@@ -16,6 +16,7 @@ MEASURED = {
     "flash-next-iq3-xxs": (1224, 75_955_048_960),
     "swift-27b-nvfp4-q8mix": (1252, 19_913_326_656),
     "nvidia-27b-nvfp4": (1252, 21_456_207_936),
+    "gemma4-31b-q4-k-m": (833, 18_671_230_848),
 }
 
 
@@ -38,7 +39,7 @@ def test_the_builder_reproduces_each_recorded_shard(tmp_path, name):
 
 def test_the_recorded_data_starts_are_the_measured_ones():
     starts = [s["data_start"] for n in MEASURED for s in load_fixture(n)["shards"]]
-    assert starts == [10_966_240, 57_920, 11_016_416, 11_016_640]
+    assert starts == [10_966_240, 57_920, 11_016_416, 11_016_640, 15_831_712]
 
 
 def test_weights_bytes_and_the_table_share_the_shard_set(tmp_path):
