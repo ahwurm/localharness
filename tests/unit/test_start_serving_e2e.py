@@ -122,7 +122,7 @@ class World:
     def _list_live_models(self, base_url, timeout=3.0, **kw):
         self.sensor.calls.append({"url": base_url, "timeout": timeout, "kw": kw})
         if base_url in self.answering:
-            return (self.served_ids.get(base_url, []), True)
+            return (self.served_ids.get(base_url) or [PRIMARY if base_url == PRIMARY_URL else "flash-next"], True)
         return ([], False)
 
     def _boundaries(self) -> None:
@@ -482,7 +482,7 @@ async def test_another_preset_answering_is_attached_with_one_clause_and_no_selec
     assert world.overlay["active_endpoint"] == FLASH_ACTIVE  # D-15: no selection written
     assert world.last_served == PRIMARY
     assert world.session_endpoint() == (PRIMARY_URL, PRIMARY)
-    assert set(world.probe_urls) == {PEER_URL, PRIMARY_URL}  # probed where it was asked, then where it answers
+    assert set(world.probe_urls) == {PRIMARY_URL}  # the address that answers nothing is not probed
 
 
 async def test_a_hand_run_primary_in_the_incumbents_place_is_attached_to_never_stopped_or_launched_beside(
