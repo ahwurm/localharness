@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import warnings
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -91,6 +92,13 @@ def schema_tokens(counter: Any, tool_schemas: list | None) -> int:
     return counter.estimate_messages(
         [{"role": "system", "content": json.dumps([t.model_dump() for t in tool_schemas])}]
     ) if tool_schemas else 0
+
+
+def floor_schemas(registry: Any, agent_id: str, division_id: str, tool_config: Any) -> list:
+    """A role's tool schemas for the floor, without the registry's tool-count warning, which belongs to a turn."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return list(registry.get_tools_for_agent(agent_id, division_id, tool_config).values())
 
 
 def fixed_tokens(counter: Any, system_prompt: str, tool_schemas: list | None) -> int:
