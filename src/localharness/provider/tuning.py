@@ -105,11 +105,13 @@ def mtp_layers(header: Mapping[str, Any]) -> int | None:
     return nextn
 
 
-def draft_share(header: Mapping[str, Any]) -> float:
+def draft_share(header: Mapping[str, Any], split: Any = None) -> float:
     """The multiple of the main context's KV a drafting launch holds: the MTP draft context keeps
-    its own KV for nextn_predict_layers layers, so `1 + nextn / block_count`; 1.0 when the header
-    declares no valid MTP layers."""
+    its own KV for nextn_predict_layers layers, so `1 + nextn / block_count`, or with a tensor split
+    `1 + kv_draft / kv_main`; 1.0 when the header declares no valid MTP layers."""
     n = mtp_layers(header)
+    if n is not None and split is not None and split.kv_main > 0:
+        return 1 + split.kv_draft / split.kv_main
     return 1.0 if n is None else 1 + n / header["block_count"]
 
 
@@ -231,7 +233,7 @@ def derive(spec: Any, header: Mapping[str, Any], autosense: Any, *,
     return Tuned(reasons=reasons, **fields) if fields else NOTHING_DERIVED
 
 
-def launch_pricing(spec: Any, header: Mapping[str, Any], tuned: Tuned) -> tuple[str | None, str | None, float]:
+def launch_pricing(spec: Any, header: Mapping[str, Any], tuned: Tuned, split: Any = None) -> tuple[str | None, str | None, float]:
     """What a llama.cpp launch of `spec` is priced at: `(cache_type_k, cache_type_v, draft_share)`. The KV
     types are the record's, else `extra_args` `-ctk` / `-ctv`, else a `config_ini` cache-type key (as a
     flag name), else env `LLAMA_ARG_CACHE_TYPE_K` / `_V` (the record's `env:`, then a `config_ini` key
@@ -245,7 +247,7 @@ def launch_pricing(spec: Any, header: Mapping[str, Any], tuned: Tuned) -> tuple[
     v = spec.cache_type_v or extra_v or env.get("LLAMA_ARG_CACHE_TYPE_V") or tuned.cache_type
     drafting = (tuned.spec_type == "draft-mtp" or getattr(spec, "speculative", None) == "draft-mtp"
                 or spec_type_flag(args, env) == "draft-mtp")
-    return k, v, draft_share(header) if drafting else 1.0
+    return k, v, draft_share(header, split) if drafting else 1.0
 
 
 _RETRIED_DEATH = "(retried: the full shape died)"

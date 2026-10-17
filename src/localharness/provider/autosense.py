@@ -176,16 +176,19 @@ def read_split(model: str, header: Mapping[str, Any]) -> TensorSplit | None:
     return TensorSplit(sums["gpu"], sums["experts"], sums["input"], main, draft, gh.indexer_layers(table.entries))
 
 
-def kv_bytes_per_token(header: Mapping[str, Any], cache_type_k: str | None,
-                       cache_type_v: str | None) -> float | None:
-    """KV cache bytes per token: layers x KV heads x head dim x (bytes of K + bytes of V). An unset
-    type is f16; an unknown type, or any header value that is missing, gives None."""
+def kv_bytes_per_token(header: Mapping[str, Any], cache_type_k: str | None, cache_type_v: str | None,
+                       split: TensorSplit | None = None) -> float | None:
+    """KV cache bytes per token: attention layers x KV heads x head dim x (bytes of K + bytes of V), plus
+    the indexer's K-only keys. The layers are the split's, else every block. An unset type is f16; an
+    unknown type, or any header value that is missing, gives None."""
     k = KV_BYTES.get((cache_type_k or "f16").lower())
     v = KV_BYTES.get((cache_type_v or "f16").lower())
-    n_layer, heads, dim = _pos_int(header.get("block_count")), kv_heads(header), head_dim(header)
-    if k is None or v is None or n_layer is None or heads is None or dim is None:
+    n_layer = split.kv_main if split else _pos_int(header.get("block_count"))
+    heads, dim = kv_heads(header), head_dim(header)
+    if k is None or v is None or not n_layer or heads is None or dim is None:
         return None
-    return n_layer * heads * dim * (k + v)
+    indexer = split.indexer * (_pos_int(header.get("indexer.key_length")) or 0) * 2 * k if split else 0
+    return n_layer * heads * dim * (k + v) + indexer
 
 
 # Flags that place tensors by hand: how many layers sit on the GPU cannot be read from them.
@@ -241,7 +244,7 @@ def weights_bytes(model: str, mmproj: str | None = None) -> int | None:
 def fit(header: Mapping[str, Any], free_bytes: int | None, ratios: Any,
         attached_served: int | None = None, *, cache_type_k: str | None = None,
         cache_type_v: str | None = None, weights: int | None = None, offload: str = "gpu",
-        runtime: str = "llamacpp", draft_share: float = 1.0) -> int | None:
+        runtime: str = "llamacpp", draft_share: float = 1.0, split: TensorSplit | None = None) -> int | None:
     """The largest window the free memory holds, capped at the trained window; None when it cannot
     be known or is not above zero. Beside a running server (`attached_served`) the window already
     served is counted as served plus what the free memory adds; otherwise the weights and a
@@ -250,7 +253,7 @@ def fit(header: Mapping[str, Any], free_bytes: int | None, ratios: Any,
     `draft_share` multiplies the KV bytes per token: the MTP draft context holds its own KV for
     nextn_predict_layers layers, so a drafting launch costs `1 + nextn / block_count` of the main
     context's KV (1.0, the default, with drafting off)."""
-    kv = kv_bytes_per_token(header, cache_type_k, cache_type_v)
+    kv = kv_bytes_per_token(header, cache_type_k, cache_type_v, split)
     if kv is not None:
         kv *= draft_share
     trained = _pos_int(header.get("context_length"))
