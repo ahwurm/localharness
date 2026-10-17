@@ -8,6 +8,8 @@ weights and the probe are faked (`Box`), the consoles are recorders, the ledger 
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from localharness.cli import start_cmd, start_serving
@@ -78,6 +80,15 @@ def test_a_boot_retry_that_halved_no_window_says_so():
     assert clause == f"retried at boot: mtp off · {PINNED}"
 
 
+@pytest.fixture(autouse=True)
+def _utc(monkeypatch):
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
 def test_a_remembered_shape_with_mtp_dropped_says_when_it_was_learned():
     clause = derived_clause(Tuned(cache_type="q8_0"), shape="retry", cause="remembered",
                             dropped=("draft-mtp",), remembered_at="2026-10-01T09:00:00+00:00")
@@ -90,10 +101,10 @@ def test_a_remembered_shape_without_mtp_dropped_says_the_window_was_halved():
     assert clause == "kv q8_0 · window halved (remembered 2026-10-01)"
 
 
-def test_the_remembered_date_is_sliced_to_ten_characters():
+def test_a_date_that_does_not_parse_prints_no_date():
     clause = derived_clause(NOTHING_DERIVED, shape="retry", cause="remembered", dropped=("draft-mtp",),
                             remembered_at="2026-10-01[bold]ZZZZZZ")
-    assert clause == "mtp off (remembered 2026-10-01)"
+    assert clause == "mtp off (remembered)"
 
 
 @pytest.mark.parametrize("planted", ["\x1b[2J\x1b[H\x1b]0;x", "2026-10-01\x1b[2J", "\x07\x9b2026-10-01T",
