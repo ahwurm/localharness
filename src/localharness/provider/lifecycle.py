@@ -326,7 +326,7 @@ def record_identity(spec: ManagedServerConfig) -> LaunchIdentity | None:
     `argv_contains`, so two records on one binary and port can be told apart (R-13-07): llama.cpp
     `-a <served_name>` when the record has one, else `-m <model>` as the launch spells it (`~`
     expanded); vLLM binary the model argument (`serve <model>`); vLLM docker the model it serves and the port it
-    publishes; Ollama and LM Studio add nothing."""
+    publishes; Strata, Ollama and LM Studio add nothing."""
     # an identity does not depend on who runs the launch: the unit wraps the strategy and states its identity
     identity = strategy_for(spec, unit=None).launch_identity(spec)
     if identity is None:
@@ -342,7 +342,7 @@ def record_identity(spec: ManagedServerConfig) -> LaunchIdentity | None:
         return dataclasses.replace(
             identity, argv_contains=identity.argv_contains + tokens,
             argv_one_of=((f"127.0.0.1:{spec.port}:8000", f"{spec.port}:8000"),))
-    if row.gguf:
+    if row.gguf and "engine_config" not in row.record_fields:
         if spec.served_name is not None:
             tokens = ("-a", spec.served_name)
         else:
