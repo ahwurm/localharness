@@ -322,14 +322,15 @@ The per-tensor figures, the token tables read through `mmap`, the prompt cache a
 
 ```
 harness_floor(fixed_tokens, max_response_tokens) =
-    the smallest W in 256, 512, 768, … (scanned upward) with
+    the smallest W in 256, 512, 768, … such that W and every larger window satisfy
     fixed_tokens ≤ COMPACTION_TARGET_USAGE_FRACTION × (W − response_reserve(W, max_response_tokens))
 fixed_tokens(role) = estimate(system prompt) + estimate(tool schemas)
 ```
 
 `agent/context.py` gains `harness_floor`, pure, beside `response_reserve`.
-The scan is ascending because `response_reserve` is not monotone (it jumps from `W // 8` to 4,096 at 12,288,
-`context.py:56–74`), so no closed form holds.
+`response_reserve` is not monotone (it jumps from `W // 8` to 4,096 at 12,288, `context.py:56–74`), so a window
+above the smallest one that fits can fail the test; the floor is the least window above which none does, found by
+scanning up from 12,288 and stepping back down, so no closed form holds.
 The fixed part is what compaction can never remove, and compaction lands usage at 0.60 of the effective limit
 (`context.py:215`), so a fixed part above that fraction leaves no turn compaction can rescue.
 `estimate` is `TokenCounter.estimate_messages`, the estimate `build_messages` already uses for the schemas
