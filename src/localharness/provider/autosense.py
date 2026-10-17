@@ -425,6 +425,12 @@ def place_vllm(model_config: Mapping[str, Any], *, name: str, weights: int, tota
     return made(window, kv)
 
 
+def _label(spec: Any) -> str:
+    """The record's name as a sentence shows it: `served_name`, else the model's file name, printable characters only."""
+    name = getattr(spec, "served_name", None) or Path(os.path.expanduser(str(spec.model))).name
+    return "".join(c for c in name if c.isprintable())
+
+
 def has_ctx_arg(extra_args: Sequence[str]) -> bool:
     """Whether `extra_args` already carry a context size (`-c`, `--ctx-size`, `--ctx-size=N`)."""
     return any(t in ("-c", "--ctx-size") or t.startswith("--ctx-size=") for t in extra_args)
@@ -634,6 +640,8 @@ class WindowReport:
     retried: bool = False
     verified: bool = True  # the probe answered
     runtime: str = "llamacpp"
+    placement: Placement | None = None
+    floor: int | None = None
 
 
 @dataclass(frozen=True)
@@ -645,35 +653,51 @@ class Price:
     refusal: str | None = None
 
 
-def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, autosense: Any) -> Price:
-    """The fit's `-c` and the formula's `--cache-ram`, each only where neither the record nor `extra_args` set one."""
+def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, autosense: Any,
+                   floor: int | None = None) -> Price:
+    """The plan's `-c` and `--cache-ram`, each only where neither the record nor `extra_args` set one; a placement that fits nowhere is the refusal."""
     from localharness.provider import tuning
 
     extra = list(spec.extra_args or [])
-    header, mem, weights, mi = sensed.header, sensed.memory, sensed.weights, sensed.meminfo
-    k, v, share = tuning.launch_pricing(spec, header, tuned, sensed.split)
-    fits = fit(
-        header, mem.free_bytes if mem else None, autosense, cache_type_k=k, cache_type_v=v,
-        weights=weights, offload=sensed.offload, runtime="llamacpp", draft_share=share, split=sensed.split)
+    header, mem, weights, mi, split = sensed.header, sensed.memory, sensed.weights, sensed.meminfo, sensed.split
+    k, v, share = tuning.launch_pricing(spec, header, tuned, split)
     has_c = has_ctx_arg(extra)
-    cache_set = spec.cache_ram is not None or has_cache_ram_arg(extra)
-    cache_kw = None if cache_set else cache_ram_mib(
-        mi["MemAvailable"] if mi else None, mi["MemTotal"] if mi else None,
-        weights, sensed.offload, extra, autosense)
+    chosen = spec.context is not None or has_c
+    by_hand = offload_kind(extra, header.get("block_count") or 1) != "gpu"
+    placed = None
+    if not by_hand and mem is not None and (split is not None or weights is not None):
+        placed = place_llamacpp(
+            split, header, name=_label(spec), weights=weights or 0, mmproj=sensed.mmproj, free_bytes=mem.free_bytes,
+            meminfo=mi, cache_type_k=k, cache_type_v=v, share=share, autosense=autosense,
+            floor=None if chosen else floor, ngl_hand=_flag_value(extra, _NGL) is not None)
+    fits = placed.fits if placed else None
+    refusal = None
     if spec.context is not None:
         mode, asked, ctx_kw = "record", spec.context, None
     elif has_c:
         mode, asked, ctx_kw = "extra_args", None, None
+    elif by_hand or mem is None:
+        mode, asked, ctx_kw = "not-computed", None, None
+    elif placed is not None and placed.refusal is not None:
+        mode, asked, ctx_kw, refusal = "fit", None, None, placed.refusal
     elif fits:
         mode, asked, ctx_kw = "fit", fits, fits
     else:
         mode, asked, ctx_kw = "fit-by-server", None, None
+    cache_set = spec.cache_ram is not None or has_cache_ram_arg(extra)
+    if cache_set:
+        cache_kw = None
+    elif placed is not None and placed.refusal is None:
+        cache_kw = placed.cache_ram
+    else:
+        cache_kw = cache_ram_mib(
+            mi["MemAvailable"] if mi else None, mi["MemTotal"] if mi else None, weights, sensed.offload, extra, autosense)
     report = WindowReport(
         served=None, trained=header.get("context_length"), fits=fits,
         free_bytes=mem.free_bytes if mem else None, total_bytes=mem.total_bytes if mem else None,
         weights_bytes=weights, asked=asked, mode=mode, attached=False, retried=False,
-        verified=False, runtime="llamacpp")
-    return Price(report, ctx_kw, cache_kw, fits if mode == "fit" else None)
+        verified=False, runtime="llamacpp", placement=placed, floor=floor)
+    return Price(report, ctx_kw, cache_kw, fits if mode == "fit" else None, refusal)
 
 
 def gib(n: float) -> str:
