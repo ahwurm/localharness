@@ -1,6 +1,7 @@
 """localharness doctor command — prerequisite checks."""
 from __future__ import annotations
 
+import functools
 import os
 import stat
 import subprocess
@@ -439,7 +440,7 @@ def print_plugin_row(row, failures: list[str]) -> None:
         failures.append(f"plugin-{row.name}")
 
 
-def _tuning_plan(spec, config_dir: Path, autosense, *, keyed: bool, peer: str | None):
+def _tuning_plan(spec, config_dir: Path, autosense, *, keyed: bool, peer: str | None, **sensing):
     """The `LaunchPlan` the next launch of ``spec`` would run, sensed and planned and nothing prepared; None for a runtime that plans none or a refused decision, the planner's refusal sentence when it refuses."""
     from localharness.provider import lifecycle, server
 
@@ -448,7 +449,7 @@ def _tuning_plan(spec, config_dir: Path, autosense, *, keyed: bool, peer: str | 
     decision = server.launch_decision(spec, keyed, peer=peer)
     if decision.refusal is not None:
         return None
-    sensed = lifecycle.sense_launch(spec, config_dir, autosense, unit=None)
+    sensed = lifecycle.sense_launch(spec, config_dir, autosense, unit=None, **sensing)
     try:
         return lifecycle.plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed,
                                      floor=lifecycle.cached_floor(config_dir))
@@ -507,11 +508,14 @@ def _tuning_rows(cfg_path: Path, harness: HarnessConfig) -> list[str]:
     from localharness.cli import model_ops
     from localharness.cli.model_cmd import _script_decision
     from localharness.cli.workspace import visible_text
-    from localharness.provider import tuning
+    from localharness.provider import lifecycle, tuning
 
     view = model_ops.trust_as_recorded(cfg_path)
+    records = model_ops.serving_records(harness)
+    budget = functools.cache(lambda: lifecycle.memory_after_launch(
+        harness.autosense, lifecycle.own_launch(cfg_path, (r.spec for r in records))))
     rows = []
-    for record in model_ops.serving_records(harness):
+    for record in records:
         spec = record.spec
         if spec is None or not getattr(RUNTIMES[spec.runtime].strategy(spec), "plans_launch", False):
             continue
@@ -524,7 +528,7 @@ def _tuning_rows(cfg_path: Path, harness: HarnessConfig) -> list[str]:
             rows.append(head + visible_text(decision.refusal))
             continue
         plan = _tuning_plan(spec, cfg_path, harness.autosense, keyed=keyed,
-                            peer=None if record.peer is None else record.peer.name)
+                            peer=None if record.peer is None else record.peer.name, memory=budget())
         if isinstance(plan, str):
             rows.append(head + visible_text(plan))
             continue

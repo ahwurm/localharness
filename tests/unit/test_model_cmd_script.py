@@ -22,6 +22,7 @@ from tests.unit.launch_support import record_opens
 from tests.unit.test_serve_cmd import attach_peer, docker_peer, llama_peer, ollama_peer, serve_world
 
 WITHHELD = "change(s)"
+GIB = 2**30
 
 
 def _run(world, *args: str):
@@ -37,10 +38,10 @@ def _files(root: Path) -> dict[str, bytes]:
     return {str(p): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-def _plan_of(world):
+def _plan_of(world, **sensing):
     harness = ConfigLoader(config_dir=world.g, local_config_dir=None).load_harness()
     spec = harness.server
-    sensed = lifecycle.sense_launch(spec, world.g, harness.autosense)
+    sensed = lifecycle.sense_launch(spec, world.g, harness.autosense, **sensing)
     decision = server.launch_decision(spec, False)
     return lifecycle.plan_launch(spec, sensed, decision, autosense=harness.autosense, api_key_held=False)
 
@@ -339,3 +340,29 @@ def test_a_config_that_will_not_load_is_one_line_and_exit_two(world):
     result = _run(world, "--script")
 
     assert result.exit_code == 2 and "failed to load config" in result.stderr
+
+
+def test_a_verified_launch_of_the_harnesss_own_lends_the_script_the_memory_it_holds(world, monkeypatch):
+    from localharness.provider import autosense, procfs
+
+    probes: list = []
+    monkeypatch.setattr(autosense, "free_memory",
+                        lambda ratios: probes.append(ratios) or autosense.FreeMemory(5 * GIB, 48 * GIB, "nvidia-smi"))
+    monkeypatch.setattr(autosense, "held_by", lambda pid: 30 * GIB if pid == 4321 else None)
+    monkeypatch.setattr(procfs, "read_launch", lambda cfg, **kw: None)
+    world.edit_config(lambda d: d["extra_endpoints"].append(llama_peer("flash-next", 8082)))
+    world.rerecord()
+    refused = _run(world, "--script", "--all")
+    assert refused.exit_code == 0 and "# swift: swift cannot run here" in refused.stdout
+    assert "serve_swift() {" not in refused.stdout
+
+    monkeypatch.setattr(procfs, "read_launch",
+                        lambda cfg, *, expect=None, **kw: procfs.Launch(4321, None, 8080, "spawned", expect is not None))
+    probes.clear()
+    result = _run(world, "--script", "--all")
+
+    assert result.exit_code == 0, result.stderr
+    assert "cannot run here" not in result.stdout and len(probes) == 1
+    assert len([ln for ln in result.stdout.splitlines() if ln.endswith("() {")]) == 2
+    fitted = _plan_of(world, memory=autosense.FreeMemory(35 * GIB, 48 * GIB, "nvidia-smi")).full_fit
+    assert f"-c left to llama-server --fit (the harness fitted {fitted} today)" in result.stdout

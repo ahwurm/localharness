@@ -423,10 +423,10 @@ def _script_decision(record, harness) -> "tuple[bool, server.LaunchDecision]":
     return keyed, server.launch_decision(spec, keyed, peer=None if peer is None else peer.name)
 
 
-def _script_text(record, harness, cfg: Path, keyed: bool, decision, *, function: str | None = None) -> str:
+def _script_text(record, harness, cfg: Path, keyed: bool, decision, *, memory, function: str | None = None) -> str:
     spec, peer = record.spec, record.peer
     plan = lifecycle.plan_launch(
-        spec, lifecycle.sense_launch(spec, cfg, harness.autosense, unit=None), decision,
+        spec, lifecycle.sense_launch(spec, cfg, harness.autosense, unit=None, memory=memory), decision,
         autosense=harness.autosense, api_key_held=keyed, floor=lifecycle.cached_floor(cfg))
     return tuning.render_script(
         plan, spec, name=record.name, version=resolved_version(), visible=visible_text, function=function,
@@ -453,10 +453,12 @@ def _script(name: str | None, config_dir: str | None, *, every: bool) -> None:
     except Exception as exc:  # noqa: BLE001
         err_console.print(f"[bold red]Error:[/bold red] failed to load config: {escape(str(exc))}", soft_wrap=True)
         raise typer.Exit(2)
+    records = model_ops.serving_records(harness)
+    memory = lifecycle.memory_after_launch(harness.autosense, lifecycle.own_launch(cfg, (r.spec for r in records)))
     if every:
         taken: list[str] = []
         blocks = []
-        for record in model_ops.serving_records(harness):
+        for record in records:
             why = _script_skip(record, view)
             if why is None:
                 keyed, decision = _script_decision(record, harness)
@@ -464,7 +466,7 @@ def _script(name: str | None, config_dir: str | None, *, every: bool) -> None:
             if why is None:
                 function = tuning.script_function_name(record.name, taken)
                 try:
-                    blocks.append(_script_text(record, harness, cfg, keyed, decision, function=function))
+                    blocks.append(_script_text(record, harness, cfg, keyed, decision, memory=memory, function=function))
                     taken.append(function)
                     continue
                 except server.LaunchRefused as refused:
@@ -484,7 +486,7 @@ def _script(name: str | None, config_dir: str | None, *, every: bool) -> None:
     if decision.refusal is not None:
         _say_script_refusal(decision.refusal)
     try:
-        text = _script_text(record, harness, cfg, keyed, decision)
+        text = _script_text(record, harness, cfg, keyed, decision, memory=memory)
     except server.LaunchRefused as refused:
         _say_script_refusal(str(refused))
     typer.echo(text)
