@@ -426,6 +426,9 @@ class ConsoleSwapReporter:
         self._print_err(self.redact(text), markup=False, soft_wrap=True)
 
 
+FIRST_BUILD_CLAUSE = "first launch of this checkpoint compiles kernels — several minutes, the machine will be busy"
+
+
 def plan_clause(plan: Any, *, undo_field: str = "server.speculative") -> str:
     """The derived clause of the launch line for the plan a launch is about to run (D-23); empty for an
     untuned launch (`None`). ``undo_field`` is the record field that keeps drafting off: the primary's
@@ -440,10 +443,13 @@ def plan_clause(plan: Any, *, undo_field: str = "server.speculative") -> str:
     # so the clause names no `-c` and no window it kept (WR-05).
     halved = (plan.shape == "retry" and report is not None and report.mode == "fit"
               and plan.full_fit is not None)
-    return tuning.derived_clause(
+    clause = tuning.derived_clause(
         plan.tuned, shape=plan.shape, cause=plan.cause, dropped=plan.dropped,
         remembered_at=plan.remembered_at, context=report.asked if halved else None, halved=halved,
         undo_field=undo_field, parser_fields=getattr(plan, "dropped_parser_fields", ()))
+    inputs = getattr(plan, "inputs", None)
+    building = inputs is not None and getattr(inputs[1], "first_build", False)
+    return "; ".join(part for part in (clause, FIRST_BUILD_CLAUSE if building else "") if part)
 
 
 def swap_launch_line(*, incumbent: str | None, target: str, inside: str) -> str:

@@ -275,6 +275,17 @@ def last_window_report(path: Path, provider_type: str, model: str) -> WindowReco
     return WindowRecord(nums[0], nums[1], nums[2], at) if isinstance(at, str) else None
 
 
+def record_served_here(path: Path, key: str) -> None:
+    """Stamp the entry `key` (a `speed_key`) with the time a launch of it answered on this box."""
+    _update_entry(path, key, served_here_at=datetime.now(timezone.utc).isoformat())
+
+
+def served_here(path: Path, key: str) -> bool:
+    """Did a launch of the entry `key` answer here: a `served_here_at` stamp or a recorded window report."""
+    entry = _load(path).get(key)
+    return isinstance(entry, dict) and (isinstance(entry.get("served_here_at"), str) or isinstance(entry.get("window_report"), dict))
+
+
 REJECTED_EFFORT_KEYS_FIELD = "rejected_effort_keys"
 
 
