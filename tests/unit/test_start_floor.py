@@ -1,3 +1,4 @@
+# ruff: noqa: F401, F811
 """Start holds the served window to the harness floor before any turn."""
 from __future__ import annotations
 
@@ -8,7 +9,11 @@ from localharness.agent.context import TokenCounter
 from localharness.cli import start_serving
 from localharness.cli.start_cmd import _start_async
 from localharness.config.models import AgentConfig
+from localharness.provider import lifecycle
+from tests.unit.procfs_support import fake_proc
+from tests.unit.test_sense_serving import home
 from tests.unit.test_start_cmd import _capture_err_console, _stub_nonvllm_start
+from tests.unit.test_start_serving_e2e import World, world
 
 UNIT_LINE = ("test-model on llm.service serves a 4,096-token window and the harness needs at least 15,360 — "
              "raise its -c, or stop the unit and let the harness launch it.")
@@ -107,3 +112,58 @@ def test_the_offline_counter_estimates_bytes_and_never_builds_the_vocabulary(mon
     assert TokenCounter(offline=True).count("abcdef") == 2
     assert built == []
     assert TokenCounter().count("abcdef") == 6 and built == ["cl100k_base"]
+
+
+def _spy_activate(monkeypatch):
+    seen: list[dict] = []
+    real = lifecycle.strategy_for
+
+    def strategy_for(spec, **kw):
+        strategy = real(spec, **kw)
+        activate = strategy.activate
+
+        async def spy(*a, **k):
+            seen.append(k)
+            return await activate(*a, **k)
+        strategy.activate = spy
+        return strategy
+    monkeypatch.setattr(lifecycle, "strategy_for", strategy_for)
+    return seen
+
+
+async def test_the_managed_launch_hands_the_pre_launch_floor_to_activate(world, monkeypatch):
+    _stub_floor(monkeypatch, 12_288)
+    seen = _spy_activate(monkeypatch)
+    world.config()
+
+    await world.start()
+
+    assert [k["floor"] for k in seen] == [12_288]
+    assert world.kinds() == ["start", "wait"]
+
+
+async def test_a_priced_window_under_the_floor_is_refused_before_anything_starts(world, monkeypatch):
+    _stub_floor(monkeypatch, 4_000_000)
+    world.config()
+
+    assert await world.start_exit() == 1
+
+    assert not [e for e in world.events if e.startswith("start:")]
+    assert not world.starts
+    assert "the harness needs at least 4,000,000" in "\n".join(world.err_lines)
+    assert "Error:" not in "\n".join(world.err_lines)
+
+
+async def _live_floor(tmp_path, cfg=None):
+    return await start_serving.launch_floor(cfg or AgentConfig(name="orchestrator", role="r", model="inherit"),
+                                            config_dir=tmp_path)
+
+
+async def test_the_cached_floor_raises_the_live_one_and_never_lowers_it(tmp_path):
+    live = await _live_floor(tmp_path)
+
+    lifecycle.record_floor(tmp_path, live + 5_000, {})
+    assert await _live_floor(tmp_path) == live + 5_000
+
+    lifecycle.record_floor(tmp_path, 1_024, {})
+    assert await _live_floor(tmp_path) == live
