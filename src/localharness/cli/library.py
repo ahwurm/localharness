@@ -45,6 +45,7 @@ from localharness.provider import autosense, model_library, speed_stats
 from localharness.provider import server as managed_server
 from localharness.provider.detector import DetectorResult, detect_provider
 from localharness.provider.refarch import REF_ARCHS, RefArch, default_row, needs_met
+from localharness.provider.runtimes import RUNTIMES, row_of
 from localharness.provider.server import RUNTIME_LABELS
 from localharness.provider.tuning import mtp_layers
 
@@ -185,7 +186,7 @@ class PeerFragment:
                 update["base_url"] = peer.base_url.replace(f":{_port_of(peer.base_url)}", f":{port}", 1)
             if life is not None:
                 update["lifecycle"] = life.model_copy(update={
-                    "port": port, "served_name": name if life.runtime == "llamacpp" and life.served_name in (None, peer.name)
+                    "port": port, "served_name": name if RUNTIMES[life.runtime].gguf and life.served_name in (None, peer.name)
                     else life.served_name})
             record = _record_dicts_of(None, [peer.model_copy(update=update)])[1][0]
             listed.append(record)
@@ -297,12 +298,12 @@ def _clause(runtime: str, *, mtp: bool, mmproj: str | os.PathLike[str] | None) -
 
 def preset_clause(server: ManagedServerConfig) -> str:
     """`(llama.cpp, mtp, +<projector basename>)`: the runtime, `mtp` when the model has it, the projector."""
-    mtp = bool(server.runtime == "llamacpp" and server.model and model_mtp(server.model))
+    mtp = bool(RUNTIMES[server.runtime].gguf and server.model and model_mtp(server.model))
     return f"({_clause(server.runtime, mtp=mtp, mmproj=server.mmproj)})"
 
 
 def _model_text(server: ManagedServerConfig) -> str:
-    return visible_text(server.model) if server.runtime == "vllm" else shown_path(server.model)
+    return visible_text(server.model) if RUNTIMES[server.runtime].checkpoint else shown_path(server.model)
 
 
 def vllm_peer(checkpoint: model_library.Checkpoint, *, name: str, port: int, binary: str) -> EndpointRef:
@@ -324,7 +325,7 @@ def preset_lines(server: ManagedServerConfig, served: str, peers: Sequence[Endpo
         life = peer.lifecycle
         if life is not None:
             line = f"/model switches to {visible_text(peer.name)} {preset_clause(life)} ← {_model_text(life)}"
-            if life.runtime == "vllm" and life.binary:
+            if RUNTIMES[life.runtime].checkpoint and life.binary:
                 line += f" · binary: {shown_path(life.binary)} ({vllm_from})"
             lines.append(line)
     return lines
@@ -351,7 +352,7 @@ def _daemon_lines() -> list[str]:
 
 def record_block(recs: InitRecords) -> list[str]:
     """The lines that show a record: its own, then what a daemon on this machine holds."""
-    return [*recs.lines, *(_daemon_lines() if recs.server.runtime == "llamacpp" else [])]
+    return [*recs.lines, *(_daemon_lines() if RUNTIMES[recs.server.runtime].gguf else [])]
 
 
 def show_records(recs: InitRecords) -> None:
@@ -412,7 +413,7 @@ def recorded_paths(global_dir: Path) -> frozenset[str]:
     live = [r for r in records if isinstance(r, dict)]
     return frozenset({os.path.realpath(os.path.expanduser(str(r[key]))) for r in live
                       for key in ("model", "mmproj") if r.get(key)}
-                     | {str(r["model"]) for r in live if r.get("runtime", "vllm") == "vllm" and r.get("model")})
+                     | {str(r["model"]) for r in live if getattr(row_of(r.get("runtime", "vllm")), "checkpoint", False) and r.get("model")})
 
 
 def prune_recorded(config_path: Path) -> bool:
@@ -887,7 +888,8 @@ def _ram(auto: AutosenseConfig) -> float | None:
 
 
 def _on_path(runtime: str, *, global_dir: Path) -> bool:
-    found = which_outside_cwd("llama-server") if runtime == "llamacpp" else managed_server.vllm_binary(global_dir)
+    binary = RUNTIMES[runtime].path_binary
+    found = which_outside_cwd(binary) if binary else managed_server.vllm_binary(global_dir)
     return found is not None
 
 
@@ -927,7 +929,7 @@ def _download_question(row: RefArch, memory: float | None, global_dir: Path, *, 
     what = visible_text(row.file or row.repo)
     question = (OFFER_QUESTION.format(what=what, size=size, free=_gb(memory))
                 if memory is not None and row.bytes <= memory else OFFER_QUESTION_UNKNOWN.format(what=what, size=size))
-    hint = SMALL_ROW_HINT if row.runtime == "llamacpp" else f"download {visible_text(row.repo)}" + _consent(row, global_dir)
+    hint = SMALL_ROW_HINT if RUNTIMES[row.runtime].gguf else f"download {visible_text(row.repo)}" + _consent(row, global_dir)
     options = [Option("download", DOWNLOAD_IT, hint),
                *([Option("rows", SHOW_ROWS, SHOW_ROWS_HINT)] if rows else []),
                Option("not-now", NOT_NOW, NOT_NOW_OFFER_HINT)]
@@ -949,7 +951,7 @@ def _not_now(row: RefArch) -> NotNow:
 
 
 def _tell_install(row: RefArch) -> None:
-    if row.runtime == "llamacpp" and which_outside_cwd("llama-server") is None and (line := install_line()):
+    if (binary := RUNTIMES[row.runtime].path_binary) and which_outside_cwd(binary) is None and (line := install_line()):
         _say(line)
 
 
@@ -1002,4 +1004,4 @@ def offer(config_path: Path, *, person: bool) -> InitRecords | OfferVllm | NotNo
             return None
     if answer.cancelled or answer.keys != ("download",):
         return _not_now(row)
-    return _fetch(config_path, row, person=person) if row.runtime == "llamacpp" else OfferVllm(row)
+    return _fetch(config_path, row, person=person) if RUNTIMES[row.runtime].gguf else OfferVllm(row)

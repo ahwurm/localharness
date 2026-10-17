@@ -3,7 +3,7 @@
 Pure: `import_record` takes a `procfs.ProcRecord` and returns data, a validated `ManagedServerConfig`
 mapping with its window input and the lines `init` shows before it adopts anything, or the one reason the
 process can only be attached to. It reads the tables in `provider/server.py` (`excluded_option`,
-`classify_hosts`, `llama_annotation`, `RUNTIME_LABELS`); there is no second list here. It performs no I/O of
+`classify_hosts`, `llama_annotation`) and the runtime rows; there is no second list here. It performs no I/O of
 its own beyond the injected readers: the binary resolver and, for a download identity, the GGUF header
 reader behind `gguf_header.served_model`. A key file a process names is recorded, never opened (D-18).
 """
@@ -23,9 +23,9 @@ from localharness.cli.workspace import shown_path, visible_text
 from localharness.config.models import ManagedServerConfig
 from localharness.core.private_files import open_regular
 from localharness.provider.procfs import ProcRecord
+from localharness.provider.runtimes import row_of
 from localharness.provider.server import (
     LLAMA_EXCLUDED_OPTIONS,
-    RUNTIME_LABELS,
     classify_hosts,
     effective_posture,
     excluded_option,
@@ -568,10 +568,10 @@ def _import_record(
     Order (D-19), all before validation: TLS; download identity or no local `-m`; keys; hosts; the
     field table; the `--verbose` family. The key a process holds goes into `Imported.api_key` and
     nowhere else; a key file is recorded as a path and never opened."""
-    runtime = runtime_of(rec)
-    if runtime in ("ollama", "lmstudio"):
-        return AttachOnly(f"runs {RUNTIME_LABELS[runtime]}, which cannot carry a key")
-    if runtime != "llamacpp":
+    row = row_of(runtime_of(rec))
+    if row is not None and row.key_env is None:
+        return AttachOnly(f"runs {row.name}, which cannot carry a key")
+    if row is None or not row.gguf:
         return AttachOnly(f"runs {visible_text(_basename(rec.argv[0] if rec.argv else rec.exe))}, "
                           "which the import does not translate")
     walk = _walk(rec.argv[1:])

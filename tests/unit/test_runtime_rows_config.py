@@ -144,3 +144,23 @@ def test_bind_all_migration_selects_peer_lifecycles_the_same_way():
     from localharness.config.migrate import _needs_bind_all
     data = {"extra_endpoints": [{"lifecycle": {"runtime": "llamacpp"}}, {"lifecycle": {}}, {"lifecycle": {"runtime": "ollama"}}]}
     assert _needs_bind_all(data) == ("extra_endpoints[1].lifecycle",)
+
+
+def test_library_names_mtp_only_for_a_gguf_model_and_shows_checkpoints_as_visible_text():
+    from localharness.cli import library
+    vllm = ManagedServerConfig(binary="/opt/vllm", model="org/repo")
+    assert library.preset_clause(vllm) == "(vLLM)"
+    assert library._model_text(vllm) == "org/repo"
+    ollama = ManagedServerConfig(runtime="ollama", model="tag")
+    assert library.preset_clause(ollama) == "(Ollama)"
+    assert library._model_text(ollama) == library.shown_path("tag")
+
+
+def test_library_binary_lookup_uses_the_rows_path_binary(monkeypatch):
+    from localharness.cli import library
+    seen = []
+    monkeypatch.setattr(library, "which_outside_cwd", lambda b: seen.append(b) or "/x")
+    monkeypatch.setattr(library.managed_server, "vllm_binary", lambda d: seen.append("vllm") or None)
+    assert library._on_path("llamacpp", global_dir=None) is True
+    assert library._on_path("vllm", global_dir=None) is False
+    assert seen == ["llama-server", "vllm"]
