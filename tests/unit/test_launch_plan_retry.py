@@ -196,7 +196,8 @@ async def test_retry_is_deterministic_and_final(tmp_path, box, monkeypatch):
 async def test_the_retry_halves_from_the_full_fit_and_never_below_one(tmp_path, box, monkeypatch):
     from localharness.provider import autosense
 
-    monkeypatch.setattr(autosense, "fit", lambda *a, **k: 1)
+    monkeypatch.setattr(autosense, "place_llamacpp", lambda *a, **k: autosense.Placement(
+        1, "gpu", 0, 0, 0, None, 0, 0, None, None))
     calls = _launches(box, monkeypatch)
     box.ready_script = [RuntimeError(DEATH_1), ["qwen"]]
     plans: list = []
