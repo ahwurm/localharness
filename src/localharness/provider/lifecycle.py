@@ -149,6 +149,7 @@ class LifecycleStrategy(Protocol):
         peer: str | None = None,
         autosense: "AutosenseConfig | None" = None,
         on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
+        floor: int | None = None,
     ) -> LiveEndpoint: ...
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None: ...
@@ -206,6 +207,7 @@ class ManagedVllmStrategy:
         peer: str | None = None,
         autosense: "AutosenseConfig | None" = None,
         on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
+        floor: int | None = None,
     ) -> LiveEndpoint:
         keyed = bool(api_key)
         decision = server.launch_decision(spec, keyed, peer=peer)
@@ -215,7 +217,7 @@ class ManagedVllmStrategy:
         if autosense is not None:
             # OFF the event loop: sensing opens the checkpoint's config.json.
             sensed = await asyncio.to_thread(sense_launch, spec, config_dir, autosense)
-            plan = plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed)
+            plan = plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed, floor=floor)
             cmd = list(plan.argv)
         else:
             cmd = server.serve_command(
@@ -526,7 +528,7 @@ class LaunchPlan:
         dropped, re-derived from the plan's own inputs (pure); empty when no parser was dropped."""
         if "parsers" not in self.dropped or self.inputs is None:
             return ()
-        spec, sensed, _decision, autosense, _held = self.inputs
+        spec, sensed, _decision, autosense, _held, _floor = self.inputs
         full = tuning.derive(spec, sensed.header, autosense, model_config=sensed.model_config)
         return tuple(f for f in ("reasoning_parser", "tool_call_parser") if getattr(full, f) is not None)
 
@@ -539,7 +541,7 @@ class LaunchPlan:
         the plan is not a full one."""
         if self.shape != "full" or self.inputs is None:
             return None
-        spec, sensed, decision, autosense, held = self.inputs
+        spec, sensed, decision, autosense, held, _floor = self.inputs
         kw = dict(self.serve_kwargs)
         report, tuned, dropped = self.report, self.tuned, ()
         drops_spec = drop_spec and tuned.spec_type is not None
@@ -571,7 +573,7 @@ class LaunchPlan:
 
 def plan_launch(
     spec: ManagedServerConfig, sensed: Sensed, decision: "server.LaunchDecision", *,
-    autosense: "AutosenseConfig", api_key_held: bool,
+    autosense: "AutosenseConfig", api_key_held: bool, floor: int | None = None,
 ) -> LaunchPlan:
     """The launch of `spec` as a value (D-15): derive, fit, build the `serve_command` keywords and the
     argv. Pure — every read happened in `sense_launch`, nothing is written, and `api_key_held` is a
@@ -589,7 +591,9 @@ def plan_launch(
     names = sorted(getattr(spec, "env", None) or {})
     row = RUNTIMES[spec.runtime]
     if row.price is not None:
-        priced = row.price(spec, sensed, tuned, autosense)
+        priced = row.price(spec, sensed, tuned, autosense, floor)
+        if priced.refusal is not None:
+            raise server.LaunchRefused(priced.refusal)
         report, kw["context"], kw["cache_ram"], full_fit = priced.report, priced.context, priced.cache_ram, priced.full_fit
     if "config_ini" in row.record_fields:
         home = server.config_ini_home(sensed.config_dir, spec.port)
@@ -603,7 +607,7 @@ def plan_launch(
     full = LaunchPlan(
         argv=tuple(server.serve_command(spec, **kw)), serve_kwargs=kw,
         env_names=tuple(dict.fromkeys(names)), config_ini_home=home, report=report, tuned=tuned,
-        full_fit=full_fit, inputs=(spec, sensed, decision, autosense, api_key_held))
+        full_fit=full_fit, inputs=(spec, sensed, decision, autosense, api_key_held, floor))
     # The retry shape is chosen here and nowhere else (D-17): first a remembered record that still
     # applies, then the boot marker's verdict. Either gives the full plan back when it has nothing
     # to drop or halve.
@@ -684,7 +688,7 @@ def confirm_launch(
     if plan is not None:
         if plan.inputs is None:
             return
-        plan_spec, sensed, _, plan_autosense, _ = plan.inputs
+        plan_spec, sensed, _, plan_autosense, *_ = plan.inputs
         try:
             if plan.shape == "retry" and plan.cause == "death":
                 if plan.full_fit is not None:
@@ -773,6 +777,7 @@ class SpawnedProcessStrategy:
         peer: str | None = None,
         autosense: "AutosenseConfig | None" = None,
         on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
+        floor: int | None = None,
     ) -> LiveEndpoint:
         """Bring the spawned server up and return its endpoint.
 
@@ -805,7 +810,7 @@ class SpawnedProcessStrategy:
         plan: LaunchPlan | None = None
         if autosense is not None and RUNTIMES[spec.runtime].gguf:
             sensed = await asyncio.to_thread(sense_launch, spec, config_dir, autosense)
-            plan = plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed)
+            plan = plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed, floor=floor)
             argv = list(plan.argv)
         else:
             argv = server.serve_command(
@@ -941,6 +946,7 @@ class DaemonStrategy:
         peer: str | None = None,
         autosense: "AutosenseConfig | None" = None,
         on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
+        floor: int | None = None,
     ) -> LiveEndpoint:
         # CONTRACT: like every LifecycleStrategy.activate, this raises ONLY RuntimeError/TimeoutError
         # on failure — the /model swap callers catch exactly those to tear down + restore. _load
@@ -1095,6 +1101,7 @@ class LmsStrategy:
         peer: str | None = None,
         autosense: "AutosenseConfig | None" = None,
         on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
+        floor: int | None = None,
     ) -> LiveEndpoint:
         v1 = self._v1(base_url)
         if await self._server_already_up(v1):
@@ -1476,6 +1483,7 @@ class UnitStrategy:
         peer: str | None = None,
         autosense: "AutosenseConfig | None" = None,
         on_plan: "Callable[[LaunchPlan | None], None] | None" = None,
+        floor: int | None = None,
     ) -> LiveEndpoint:
         """Restart the unit for `spec` and wait until its `serve` has the server answering.
 
@@ -1511,7 +1519,7 @@ class UnitStrategy:
             # Sensed as the restarted unit will: a manual restart resets `NRestarts`, so the unit's own
             # `serve` plans the full shape (or the remembered one) and the harness predicts the same.
             sensed = await asyncio.to_thread(sense_launch, spec, config_dir, autosense)
-            plan = plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed)
+            plan = plan_launch(spec, sensed, decision, autosense=autosense, api_key_held=keyed, floor=floor)
         _say_plan(on_plan, plan)
         tolerated = 1 if (plan is not None and plan.shape == "full" and plan.boot_retry() is not None) else 0
         label = server.RUNTIME_LABELS.get(spec.runtime, "vLLM")

@@ -46,9 +46,11 @@ def _probe(name: str) -> Callable[..., Any]:
     return probe
 
 
-def _price_llamacpp(spec: Any, sensed: Any, tuned: Any, autosense: Any) -> Any:
-    from localharness.provider import autosense as _auto
-    return _auto.price_llamacpp(spec, sensed, tuned, autosense)
+def _price(name: str) -> Callable[..., Any]:
+    def price(spec: Any, sensed: Any, tuned: Any, autosense: Any, floor: int | None = None) -> Any:
+        from localharness.provider import autosense as _auto
+        return getattr(_auto, name)(spec, sensed, tuned, autosense, floor)
+    return price
 
 
 def _argv(name: str) -> Callable[..., list[str]]:
@@ -69,7 +71,7 @@ RUNTIMES: Mapping[str, Runtime] = MappingProxyType({
     "llamacpp": Runtime(
         name="llama.cpp", strategy=_strategy("SpawnedProcessStrategy"),
         unit_servable=lambda spec: True, label=lambda spec: "llama.cpp",
-        key_env="LLAMA_API_KEY", probe=_probe("_probe_llamacpp"), price=_price_llamacpp,
+        key_env="LLAMA_API_KEY", probe=_probe("_probe_llamacpp"), price=_price("price_llamacpp"),
         argv=_argv("_llamacpp_argv"), facts=None,
         record_fields=("mmproj", "served_name", "cache_type_k", "cache_type_v", "cache_ram",
                        "api_key_file", "env", "config_ini", "speculative"),
