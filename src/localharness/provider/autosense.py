@@ -729,11 +729,12 @@ def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, auto
     elif by_hand or mem is None:
         mode, asked, ctx_kw = "not-computed", None, None
     elif placed is not None and placed.refusal is not None:
-        mode, asked, ctx_kw, refusal = "fit", None, None, placed.refusal
+        mode, asked, ctx_kw = "fit", None, None
     elif fits:
         mode, asked, ctx_kw = "fit", fits, fits
     else:
         mode, asked, ctx_kw, fit_ctx = "fit-by-server", None, None, floor
+    refusal = refusal or (placed.refusal if placed else None)
     cache_set = spec.cache_ram is not None or has_cache_ram_arg(extra)
     if cache_set:
         cache_kw = None
@@ -770,11 +771,12 @@ def price_vllm(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, autosens
     elif chosen:
         mode, asked, ctx_kw = "extra_args", None, None
     elif placed is not None and placed.refusal is not None:
-        mode, asked, ctx_kw, refusal = "fit", None, None, placed.refusal
+        mode, asked, ctx_kw = "fit", None, None
     elif fits:
         mode, asked, ctx_kw = "fit", fits, fits
     else:
         return Price(None, None, None, None)
+    refusal = refusal or (placed.refusal if placed else None)
     trained = _pos_int(_config_value(config, "max_position_embeddings")) if config is not None else None
     report = WindowReport(
         served=None, trained=trained, fits=fits, free_bytes=mem.free_bytes if mem else None,

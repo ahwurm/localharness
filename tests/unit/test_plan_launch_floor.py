@@ -60,10 +60,11 @@ def test_no_mmap_in_extra_args_shrinks_the_priced_prompt_cache(tmp_path, monkeyp
     assert plain == "3849" and int(unmapped) < int(plain)
 
 
-def test_flash_next_without_the_ram_for_its_experts_is_one_refusal_sentence(tmp_path, monkeypatch):
+@pytest.mark.parametrize("over", [{}, {"context": 32_768}, {"extra_args": ["-c", "32768"]}])
+def test_flash_next_without_the_ram_for_its_experts_is_one_refusal_sentence(tmp_path, monkeypatch, over):
     _world(monkeypatch, available=31.4)
     with pytest.raises(server.LaunchRefused) as refused:
-        _plan(_flash(tmp_path), tmp_path)
+        _plan(_flash(tmp_path, **over), tmp_path)
     assert str(refused.value) == (
         "Flash-Next cannot run here: its experts need 40.0 GiB of RAM and only 22.2 GiB is free beside the "
         "system's reserve — close something that holds RAM, or pick a smaller quant.")
@@ -246,10 +247,11 @@ def test_the_flag_a_record_or_extra_args_set_wins_and_is_never_doubled(tmp_path,
         _plan(_vllm(tmp_path, context=4096), tmp_path, FLOOR)
 
 
-def test_weights_beyond_the_gpu_budget_are_refused_before_a_start(tmp_path, monkeypatch):
+@pytest.mark.parametrize("over", [{}, {"context": 32_768}])
+def test_weights_beyond_the_gpu_budget_are_refused_before_a_start(tmp_path, monkeypatch, over):
     _gpu(monkeypatch)
     with pytest.raises(server.LaunchRefused, match=r"ckpt cannot run here: 30.0 GiB of weights, and vLLM keeps them all"):
-        _plan(_vllm(tmp_path, weights=30 * GIB), tmp_path)
+        _plan(_vllm(tmp_path, weights=30 * GIB, **over), tmp_path)
 
 
 def test_a_vllm_window_under_the_floor_is_the_floor_sentence(tmp_path, monkeypatch):
