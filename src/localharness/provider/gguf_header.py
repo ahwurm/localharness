@@ -200,8 +200,7 @@ _SHARD_NAME = re.compile(r"^(?P<prefix>.*)-\d{5}-of-(?P<n>\d{5})\.gguf$")
 
 
 def shard_paths(path: str | os.PathLike[str]) -> list[Path]:
-    """The model's files in shard order: `<prefix>-00001-of-0000N.gguf` .. `-0000N-of-0000N.gguf` when its
-    name has that shape, else the path alone. A missing shard is the caller's OSError."""
+    """The model's files in shard order (`<prefix>-00001-of-0000N.gguf` ..), else the path alone."""
     p = Path(path)
     shard = _SHARD_NAME.match(p.name)
     if shard is None or int(shard["n"]) < 1:
@@ -210,8 +209,7 @@ def shard_paths(path: str | os.PathLike[str]) -> list[Path]:
 
 
 def read_tensor_table(path: str | os.PathLike[str]) -> TensorTable:
-    """The tensors of the model and its split shards with the bytes each holds; GgufHeaderError when a
-    shard is not a table this reader will price (`NotRegularFile` and other OSErrors as the open raises them)."""
+    """The tensors of the model and its shards with the bytes each holds; GgufHeaderError when a shard is not priceable."""
     tables = [_shard_table(p) for p in shard_paths(path)]
     return TensorTable(tuple(e for entries, _ in tables for e in entries), sum(d for _, d in tables))
 
@@ -273,8 +271,7 @@ def _blocks(entries: Iterable[TensorEntry]) -> dict[int, list[str]]:
 
 
 def kv_layers(entries: Iterable[TensorEntry], header: Mapping[str, Any]) -> tuple[int, int]:
-    """(main, draft): the blocks that hold K (`attn_k`, or `attn_qkv` with no `ssm_` tensor), split at
-    `block_count - nextn_predict_layers`."""
+    """(main, draft): the blocks holding K, split at `block_count - nextn_predict_layers`."""
     trunk = header.get("block_count", 0) - header.get("nextn_predict_layers", 0)
     holders = [n for n, names in _blocks(entries).items()
                if any(t.startswith("attn_k.") for t in names)
@@ -288,8 +285,7 @@ def indexer_layers(entries: Iterable[TensorEntry]) -> int:
 
 
 def cross_checked(sums: Mapping[str, int], main: int, header: Mapping[str, Any], data_bytes: int) -> bool:
-    """Whether the table agrees with the header: attention layers within the block count (and equal to the
-    trunk over `full_attention_interval` when set), experts only with `expert_count`, input at most half the data."""
+    """Whether the table agrees with the header on attention layers, experts and the input tables' share."""
     blocks = header.get("block_count")
     if blocks is None or not 1 <= main <= blocks:
         return False
