@@ -326,6 +326,17 @@ def _answers_now(harness, machine_trust: MachineTrust, record) -> bool:
     return any(r.prefix == record.prefix for r in sense.answering)
 
 
+def _swap_floor(machine_trust: MachineTrust, config_dir: Path) -> int | None:
+    """The floor `start` would price for its default root agent, else the last start's cached one."""
+    try:
+        agent = ConfigLoader(
+            config_dir=config_dir, local_config_dir=None, machine_withheld=machine_trust.withheld
+        ).load_agent("orchestrator")
+        return asyncio.run(start_serving.launch_floor(agent, config_dir=config_dir))
+    except Exception:  # noqa: BLE001 — no loadable root: the cache alone
+        return lifecycle.cached_floor(config_dir)
+
+
 def _swap_now(
     harness, machine_trust: MachineTrust, serving: model_ops.Serving, *, config_dir: Path, unit
 ) -> None:
@@ -382,7 +393,8 @@ def _swap_now(
     try:
         outcome = asyncio.run(start_serving.run_swap(
             harness, incumbent, serving, config_dir=config_dir, autosense=harness.autosense,
-            reporter=reporter, redact=reporter.redact, on_plan=on_plan, on_wait=say_lock_wait, unit=unit))
+            reporter=reporter, redact=reporter.redact, on_plan=on_plan, on_wait=say_lock_wait, unit=unit,
+            floor=_swap_floor(machine_trust, config_dir)))
     except Exception as exc:  # noqa: BLE001 — a launch that could not even begin (a lock, a bad record)
         err_console.print(
             "[bold red]Error:[/bold red] " + escape(reporter.redact(f"failed to switch to {record.name!r}: {exc}")),
