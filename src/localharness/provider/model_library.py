@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
@@ -12,6 +13,8 @@ from typing import Any, Literal
 
 from localharness.provider import gguf_header
 from localharness.provider.gguf_header import (
+    DISCOVERY_MAX_DEPTH,
+    DISCOVERY_MAX_ENTRIES,
     DISCOVERY_MAX_FILES,
     DiscoveredModel,
     Discovery,
@@ -37,6 +40,7 @@ _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?")
 _TEXT_GENERATION = ("ForCausalLM", "ForConditionalGeneration")
 _EMBEDDING_FILES = ("modules.json", "config_sentence_transformers.json")
+_UNLOADED = "its snapshot holds an entry the harness does not load"
 
 
 def _repo_ok(repo: object) -> bool:
@@ -290,20 +294,51 @@ def _cache_repos() -> tuple[Any, ...]:
         return ()
 
 
-def _generates_text(snapshot: Path) -> bool:
+def _json_object(path: Path) -> dict[str, Any] | None:
     try:
-        with os.fdopen(open_regular(snapshot / "config.json"), "rb") as fh:
+        with os.fdopen(open_regular(path), "rb") as fh:
             raw = fh.read(MODEL_CONFIG_CAP + 1)
-        config = json.loads(raw) if len(raw) <= MODEL_CONFIG_CAP else None
+        data = json.loads(raw) if len(raw) <= MODEL_CONFIG_CAP else None
     except (OSError, ValueError, RecursionError):
-        return False
-    architectures = config.get("architectures") if isinstance(config, dict) else None
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _generates_text(snapshot: Path) -> bool:
+    architectures = (_json_object(snapshot / "config.json") or {}).get("architectures")
     return isinstance(architectures, list) and any(
         isinstance(a, str) and a.endswith(_TEXT_GENERATION) for a in architectures)
 
 
-def _names(snapshot: Path) -> list[str]:
-    return sorted(p.relative_to(snapshot).as_posix() for p in snapshot.rglob("*"))
+def _walk_ok(snapshot: Path) -> tuple[bool, list[str]]:
+    """Every entry by lstat: a file, a directory, or a link to a regular file inside this repo's blobs."""
+    blobs = os.path.realpath(snapshot.parent.parent / "blobs")
+    names: list[str] = []
+
+    def walk(directory: Path, depth: int) -> bool:
+        try:
+            entries = sorted(os.scandir(directory), key=lambda e: e.name)
+        except OSError:
+            return False
+        for entry in entries:
+            names.append(Path(entry.path).relative_to(snapshot).as_posix())
+            if len(names) > DISCOVERY_MAX_ENTRIES:
+                return False
+            if entry.is_symlink():
+                try:
+                    inside = os.path.commonpath([os.path.realpath(entry.path), blobs]) == blobs
+                    ok = inside and stat.S_ISREG(os.stat(entry.path).st_mode)
+                except (OSError, ValueError):
+                    ok = False
+            elif entry.is_dir(follow_symlinks=False):
+                ok = depth < DISCOVERY_MAX_DEPTH and walk(Path(entry.path), depth + 1)
+            else:
+                ok = entry.is_file(follow_symlinks=False)
+            if not ok:
+                return False
+        return True
+
+    return walk(snapshot, 1), names
 
 
 def _snapshot_kind(snapshot: Path, names: Collection[str]) -> tuple[str | None, tuple[Path, ...]]:
@@ -318,15 +353,21 @@ def _snapshot_kind(snapshot: Path, names: Collection[str]) -> tuple[str | None, 
     return None, ()
 
 
-def _checkpoint(repo: Any) -> Checkpoint | None:
+def _checkpoint(repo: Any, *, refuse_unloadable: bool = False) -> Checkpoint | None:
     rev = max(repo.revisions, key=lambda r: ("main" in r.refs, r.last_modified), default=None)
     if rev is None or not _repo_ok(repo.repo_id):
         return None
     snapshot = Path(rev.snapshot_path)
-    kind, ggufs = _snapshot_kind(snapshot, _names(snapshot))
+    found = Checkpoint(repo.repo_id, snapshot, os.path.realpath(snapshot), repo.size_on_disk)
+    walked, names = _walk_ok(snapshot)
+    if not walked:
+        return replace(found, refusal=_UNLOADED) if refuse_unloadable else None
+    kind, ggufs = _snapshot_kind(snapshot, names)
     if kind is None:
         return None
-    return Checkpoint(repo.repo_id, snapshot, os.path.realpath(snapshot), repo.size_on_disk, kind, None, ggufs)
+    remote = kind == "vllm" and any("auto_map" in (_json_object(snapshot / n) or {})
+                                    for n in ("config.json", "tokenizer_config.json"))
+    return replace(found, kind=kind, ggufs=ggufs, refusal="needs trust_remote_code" if remote else None)
 
 
 def _model_repos() -> list[Any]:
@@ -341,7 +382,7 @@ def snapshots(*, limit: int = DISCOVERY_MAX_FILES) -> tuple[Checkpoint, ...]:
 
 def snapshot_of(repo_id: str) -> Checkpoint | None:
     """The one repo's snapshot, resolved at the call."""
-    return next((c for r in _model_repos() if r.repo_id == repo_id and (c := _checkpoint(r))), None)
+    return next((c for r in _model_repos() if r.repo_id == repo_id and (c := _checkpoint(r, refuse_unloadable=True))), None)
 
 
 def checkpoints(*, limit: int = DISCOVERY_MAX_FILES) -> tuple[Checkpoint, ...]:
