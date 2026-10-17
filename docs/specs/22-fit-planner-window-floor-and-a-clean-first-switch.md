@@ -273,9 +273,12 @@ The plan emits `-c fits` whenever it priced one, so llama-server never reduces t
 `fit-by-server` survives only for a model whose table and header cannot be read, and that launch carries
 `--fit-ctx <floor>` so llama-server's reduction stops at the floor, not at 4,096.
 The halve-once retry (spec 16 §6.2) halves to `max(floor, fits // 2)` and is skipped when `fits // 2 < floor`.
-With `-c` set, llama-server cannot correct an optimistic `fits`: a margin too small for the compute buffers spills
-a dense layer to the CPU (slower, not failed). The margin is the open risk of this plan (§16), and the retry and
-the live rows are its only guards today.
+With `-c` set, llama-server cannot correct an optimistic `fits`: a margin too small for the compute buffers fails
+the load. Measured on 2026-10-17 (live row 4): the 27B relaunched at the trained 262,144 died at load, `cudaMalloc
+failed: out of memory` on the 884.6 MiB projector buffer after the weights and KV, and the floored halve-once retry
+landed it at 131,072, where llama-server holds 25,960 MiB against a priced 22.7 GiB: about 2.7 GiB of overhead
+beyond the priced bytes against the 10% margin's 1.82 GiB. The retry is the guard today; a margin keyed to the
+model's shape is the open item (§16).
 
 On this box: the 27B at 30.2 GiB free fits 262,144 (297k before the cap; today's formula said 66,437).
 Flash-Next at 30.2 GiB free and 52.9 GiB available fits 262,144 with experts in RAM: `ram_room` is 52.9 − 9.2 =
@@ -337,8 +340,12 @@ The fixed part is what compaction can never remove, and compaction lands usage a
 (`context.py:2190–2193`), so the floor needs no server.
 It is built on `response_reserve`, so it never lowers the reserve and never subtracts it twice.
 The root's floor gates launches, swaps and attaches; each role's own floor gates its spawn.
-From the episodes, the root's fixed part plus a short first message was about 6,700 tokens (187% of 3,584) and the
-`web-researcher`'s about 4,370 (122% of 3,584): floors of 15,360 and 8,448; the live run records the real figures (§15).
+Measured on the box on 2026-10-17 with the served tokenizer (`/tokenize`): the root's fixed part before the registry
+exists (base prompt and the built-in schemas) is 2,137 tokens, floor 4,096; the live root (18 tools, guardrails) floors
+at 13,824, a fixed part between 5,683 and 5,837 (the cache holds the floor, not the count); `explore` 1,129 → 2,304,
+`web-researcher` 1,310 → 2,560, `search-verifier` 1,180 → 2,304. The episodes' estimates (6,700 and 4,370, floors of
+15,360 and 8,448) counted the memory block and the first message as well; those sit beside the fixed part, so a window
+just above the floor compacts early but never overflows. A 4,096-token launch is refused by the live floor.
 
 ### 8.2 Where it is computed
 
@@ -360,8 +367,9 @@ refuse a launch the person sees, never let a smaller window through.
 | Site | Behaviour | What the person sees |
 |---|---|---|
 | Plan (`plan_launch`, every surface) | a priced `fits`, a record `context` or a Strata config window below the root floor is a refusal; a `fit-by-server` launch carries `--fit-ctx <floor>` | `<name> fits only a 9,216-token window here and the harness needs at least 15,360 — free GPU memory, or pick a smaller model.` |
-| Swap, before it commits (`provider/lifecycle.py:1915 swap`) | the target is sensed and planned **before** `free_accelerator`, against the memory the swap will have: free now plus what the verified incumbent's pid holds (`nvidia-smi --query-compute-apps=pid,used_memory`), else the card's total less 1 GiB; a refusal stops nothing | the plan's refusal sentence, then `qwen-27b-swift-1.5 keeps serving.` |
+| Swap, before it commits (`provider/lifecycle.py swap`) | the target is sensed and planned **before** `free_accelerator`, against the memory the swap will have: free now plus what the verified incumbent's pid holds (`nvidia-smi --query-compute-apps=pid,used_memory`), else the card's total less 1 GiB; a refusal stops nothing | the plan's refusal sentence, then `qwen-27b-swift-1.5 keeps serving.` |
 | Swap, after the launch (the backstop, same function) | `swap` takes `floor=` and treats a served window below it as a failed launch: its existing failure branch stops the target through its verified stop and restores the incumbent (`_restore_incumbent`); `_refresh_token_counter` (`repl.py:2859`) still never aborts a swap, and runs only after `swap` succeeded | `Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS served a 4,096-token window, below the 15,360 the harness needs — qwen-27b-swift-1.5 serves again.` |
+| `doctor`'s `Tuning:` row and `model --script` | priced against free now plus what the harness's own verified launch holds, whichever record it serves, read once per command; against free memory alone when no verified launch of the harness's own is live (a foreign server is never stopped by these surfaces) | the row or the script carries the `-c` the launch would get, or the refusal the swap would give |
 | `start` and attach (`start_cmd.py:2484–2512`) | the full floor is compared with the served window before the first turn; below it, `start` exits 1 (the ≤ 1,024 branch becomes this one) | `qwen-27b-swift-1.5 on llm.service serves a 4,096-token window and the harness needs at least 15,360 — raise its -c, or stop the unit and let the harness launch it.` |
 | Spawn (§9) | a child whose own floor exceeds the live window is not run; the `agent` tool returns an error result | `web-researcher needs an 8,448-token window and the server serves 4,096; not delegated.` |
 
@@ -786,10 +794,15 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
   4.6 GiB of dense weights, projector and q8_0 KV, so about 5–6 GiB went to compute buffers, recurrent state and the
   CUDA context, against a 10% margin of 0.45 GiB. On this box the window caps at the trained 262,144 with room to
   spare, so the margin does not move the plan; on a smaller card it would, and `-c` set keeps llama-server from
-  correcting it. Live row 1 records the buffer sizes; a margin keyed to the model's shape waits for that number.
-- **Open — a dense launch at the trained window.** The corrected 27B fit leaves 1.2 GiB above the 10% margin at
-  262,144; a spilled layer is slower, not failed, and nothing reports it (no log text is parsed). Live row 4 reads the
-  decode speed against the 116 t/s band.
+  correcting it. Live row 1 (2026-10-17): Flash-Next at `-c 262144` with experts in RAM holds a figure this run did not capture (the session ended during the vLLM row) on the
+  GPU against the window line's priced 8.5 GiB; the server's log at its default level does not print the buffer
+  sizes. A margin keyed to the model's shape waits on the 27B's figure above.
+- **Measured — a dense launch at the trained window fails, and the retry lands it.** Live row 4 (2026-10-17): the
+  27B at 262,144 died at load (`cudaMalloc failed: out of memory`, the 884.6 MiB projector buffer), the retry landed
+  131,072 (`window: 131,072 · all on the GPU (22.7 of 30.2 GiB free) (after one retry at -c 131,072)`), the ledger
+  remembers it, and decode there read 109.6 t/s median against 116.0 t/s at 66,437 before the swap: no spilled
+  layer. The overhead beyond the priced bytes is about 2.7 GiB on this model (§7.2); the 10% margin is 1.82 GiB.
+  A margin keyed to the model's shape, or a flat allowance beside the ratio, is 0.19.2's.
 - **Open — Strata's unknowns (§11.6)**, each with a live row.
 
 ## 17. Out of scope

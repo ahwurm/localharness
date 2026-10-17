@@ -4,6 +4,103 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.19.1] — 2026-10-17
+
+A launch is priced from the model's own tensor table, a model that fits nowhere is refused in one
+sentence before anything stops, one number says how small a window the harness can run in and
+nothing runs below it, and a child runs in the parent's live window. 0.19.0's first morning on the
+reference box (an RTX 5090, a 125B MoE and two dense 27Bs) found four defects behind "auto sense
+for model configs needs way better optimization": the fit priced only all-weights-on-GPU, so the
+MoE launched with no `-c` and llama-server's `--fit` shrank it to 4,096; nothing refused a window
+the harness cannot run in; a child kept the window its runner was built with; and `/model` listed
+names, not launches. This release fixes the first three (spec 22 §6-9); `/model` as launch plans,
+the foreign-unit sentence and Strata follow in 0.19.2 (spec 22 §10-11, §16). Spec 22.
+
+### Added
+- **The fit planner (spec 22 §7).** A llama.cpp launch is priced from the GGUF tensor table: the
+  dense weights, the projector and the KV of the attention layers on the GPU, a compute margin
+  (`autosense.compute_margin_ratio`, 10%), and the experts of an MoE in RAM when the GPU does not
+  hold them and RAM does (`autosense.unified_reserve_ratio`, 15% of RAM, kept for the system). The
+  plan carries `-c` whenever it priced a window and `--cache-ram` from what RAM has left;
+  `--fit-ctx <floor>` only where it cannot price. On the box Flash-Next (125B MoE, IQ3_XXS) plans
+  `-c 262144` with 40.0 GiB of experts in RAM where 0.19.0 came up at 4,096. A vLLM checkpoint is
+  priced from its `config.json` and safetensors sizes (`--max-model-len 100864` for the NVFP4 27B).
+  KV is priced per attention layer (a hybrid model's linear-attention layers hold none, drafting's
+  share included), so the dense 27B's fit is no longer a quarter of what free memory holds. The
+  table is cross-checked (expert count, attention layers, bytes in file); one that fails prices as
+  the whole file, as before.
+- **One refusal sentence, before anything stops.** A model that fits nowhere is refused at plan
+  time: `<name> cannot run here: its experts need 40.0 GiB of RAM and only 22.2 GiB is free beside
+  the system's reserve — close something that holds RAM, or pick a smaller quant.`; the GPU, an
+  unreadable `/proc/meminfo`, a hand `-ngl` that turns `--fit` off, and vLLM weights beyond the
+  GPU each have theirs. A record that pins its window (`context:`, `-c`, `--max-model-len`) keeps
+  it and still gets the refusals that do not depend on it. A swap plans the target against the
+  memory it will have (free plus what the incumbent holds) before it stops anything; a refused
+  swap ends `<incumbent> keeps serving.` `doctor`'s `Tuning:` row and `model --script` price the
+  same way.
+- **The harness window floor (spec 22 §8).** `harness_floor` is the smallest window from which
+  the root's fixed part (system prompt plus tool schemas) fits at the compaction target at every
+  larger window; on the box the live root floors at 13,824 and the `web-researcher` at 2,560. A
+  priced window or a record `context:` below it is a refusal; `start` and an attach exit 1 before
+  any turn (`… serves a 4,096-token window and the harness needs at least 13,824 — raise its -c,
+  or stop the unit and let the harness launch it.`); a swap whose server came up below it is
+  rolled back and the incumbent restored; `serve`, `model --script` and `doctor` plan under it.
+  The floor is cached in `<config_dir>/server-floor.json` (a protected entry, read as at least
+  1,024, only ever raising the live figure) for `start`'s launch before the registry exists.
+- **A child runs in the parent's live window (spec 22 §9).** The subagent runner reads the root's
+  window at every spawn, so after `/model` the next `agent` call sees the new window, not the one
+  the runner was built with; a child whose own floor exceeds the window is not run:
+  `web-researcher needs an 8,448-token window and the server serves 4,096; not delegated.`
+- **The launch line names where the weights live:** `window: 262,144 · experts in RAM (40.0 GiB)
+  · dense, projector and KV on the GPU (8.5 of 30.2 GiB free)`, `window: 131,072 · all on the GPU
+  (22.7 of 30.2 GiB free)`, `window: 100,864 · vLLM · all on the GPU (…)`; `(after one retry at
+  -c 131,072)` when the halve-once retry landed it. `doctor`'s `Tuning:` row carries the per-tensor
+  figures (dense, experts, token tables read through `mmap`, prompt cache, RAM reserve) or the
+  refusal.
+- **One runtime table (spec 22 §6).** `provider/runtimes.py` holds every runtime's answers
+  (strategy, unit servability, label, key environment, probe, price, facts, record fields); no
+  `runtime ==` comparison remains outside it, and a structural test keeps it so.
+
+### Changed
+- The GGUF reader moved from `agent/gguf_header.py` to `provider/gguf_header.py` and reads the
+  tensor table under caps (65,536 tensors, names of 256 bytes, offsets strictly increasing, aligned
+  and inside the file; a sharded file's shards from its `-of-N` name).
+- The halve-once retry halves to `max(floor, fits // 2)` and is skipped when that is below the
+  floor; the ledger remembers the shape as before.
+- **`model --script` carries the plan's `-c`.** 0.19.0 left it to llama-server's `--fit`, which
+  aborts under a hand `-ngl` (the launch then runs at the trained window and dies) and otherwise
+  shrinks the window to what the server guesses; the script now runs exactly what `start` runs.
+
+### Security
+- The computed launch numbers (`-c`, `--cache-ram`, `--max-model-len`, `--fit-ctx`) are derived
+  from the header and tensor table, `config.json` and the machine's memory, bounded by the trained
+  window and the floor; the knobs (`kv_cache_type`, `draft_mtp`, `draft_p_min`) still pick among
+  closed values. A hostile tensor table fails the cross-checks and prices as the whole file. RAM
+  pricing fails closed: an unreadable `/proc/meminfo` refuses experts in RAM. `server-floor.json`
+  joins the protected config-directory entries. SECURITY.md names each.
+
+### Known limitations
+- **Live verification on the reference box ran on 2026-10-17** (spec 22 §15 rows 1, 4 and 7, and
+  the vLLM peer of row 2 on a hand-written record): Flash-Next launched through the planner at
+  262,144 with its experts in RAM, a turn and a delegated turn ran on it with no floor incident, the
+  round trip back to the 27B and a delegated turn ran, and decode at the relaunched window read
+  109.6 t/s against 116.0 before the swap. The 27B's first relaunch at the trained 262,144 died at
+  load (`cudaMalloc failed: out of memory` on the 884.6 MiB projector buffer) and the retry landed
+  it at 131,072, remembered for the next launch: the 10% compute margin is about 0.9 GiB short for
+  a dense model at its trained window, measured at about 2.7 GiB of overhead beyond the priced
+  bytes. A margin keyed to the model's shape is 0.19.2's (spec 22 §16). The vLLM peer priced the
+  NVFP4 27B (`--max-model-len 101376`, `reasoning qwen3 · tools qwen3_coder`) but its server never
+  came up: flashinfer's first-use kernel build for the card compiled on every core and froze the
+  desktop, so that row, the gemma, foreign-unit and Strata rows wait for the phases that add them.
+- `/model` still lists names (an entry that cannot launch is refused when picked, not before),
+  and spec 20's live-run questions (the resume clause, the first-run ranking) are open until
+  0.19.2.
+- The floor counts the system prompt and tool schemas; the memory block and workspace
+  instructions sit beside it, so a window just above the floor compacts early.
+- The vLLM reference rows still download the whole repository, unpinned, and a cached directory
+  is accepted by name. A record's `env:` values print as written in `--script`. One
+  harness-launched server per config dir.
+
 ## [0.19.0] — 2026-10-16
 
 A model `init` discovers now launches tuned, and a fresh box is one command. The KV cache type,
