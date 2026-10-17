@@ -425,11 +425,11 @@ read and argue with. Each step below says what it does in `auto`.
      `~/.local/share/systemd/user`, `~/.config/environment.d` and `~/.config/autostart`, followed
      to `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME` when those are absolute paths) and
      the Windows credential folders. `~/.localharness` is no longer protected as a whole tree:
-     **one eleven-entry list protects each harness config directory a session uses** — `config.yaml`,
+     **one twelve-entry list protects each harness config directory a session uses** — `config.yaml`,
      `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`, `declined_workspace_offers.yaml`,
      `plugins/**`, `project_records.yaml` and its lock file `project_records.yaml.lock`,
      `model-library.json` (the models the library has shown and you declined) and the overlay's lock
-     file `overrides.yaml.lock`, and `server-floor.json` (the window floor cached for start's first launch; it can only raise the floor), the files that change what the harness does next. Those directories are the
+     file `overrides.yaml.lock`, `server-floor.json` (the window floor cached for start's first launch; it can only raise the floor) and `strata/**` (the config copies and logs the harness writes for a Strata launch), the files that change what the harness does next. Those directories are the
      one the session was started with (`--config-dir`, else `LOCALHARNESS_DIR`, else
      `~/.localharness`), the default `~/.localharness` and any `.localharness/` in the project; a
      config directory the session does not use is not covered. Everything else under one (agents,
@@ -582,10 +582,13 @@ and `unattended` run it as they run any command — and it is listed for you at 
 already there the first time you start this version is adopted without a question).
 
 **What the record holds of a launch.** For the `server:` section and for every `extra_endpoints`
-entry's `lifecycle:`, the record a start checks holds eleven launch keys: `binary`, `docker_image`,
+entry's `lifecycle:`, the record a start checks holds thirteen launch keys: `binary`, `docker_image`,
 `extra_args`, `runtime`, `launch`, `bind_all`, `require_api_key`, `api_key_file`, `env`,
-`local_models` and `config_ini`, each by name and per file, so a change to any of them asks at the
-next start on a terminal. The model keys are an entry kind of their own, `launch_model`: `model`,
+`local_models`, `config_ini`, `engine_dir` and `engine_config`, each by name and per file, so a change to any of them asks at the
+next start on a terminal. For a Strata record the record also holds the SHA-256 of its config file
+(`lifecycle.engine_config`) and of `serve/server.py` and `engine/strata` (`lifecycle.strata_code`), each
+re-hashed only when the file's size, modification time or inode moved, so a changed engine asks at the
+next start on a terminal and a touch does not. The model keys are an entry kind of their own, `launch_model`: `model`,
 `mmproj`, `served_name`, `context`, `cache_type_k`, `cache_type_v`, `cache_ram`, `speculative`,
 `reasoning_parser` and `tool_call_parser`, because a changed model is not a changed command. The
 harness also derives flags at launch from the model file and the machine's `autosense` settings:
@@ -657,8 +660,8 @@ files below a dependency or cache folder in the tools folder (`node_modules`, a 
 environment, `.git`) are not tracked — that is where `npm install` and a virtual environment put
 thousands of files; the scripts and files a confirmed command reads are not hashed; of
 `config.yaml` and `overrides.yaml`, the record a start checks holds the looser `org:` permissions,
-eleven `server:` launch keys (`binary`, `docker_image`, `extra_args`, `runtime`, `launch`,
-`bind_all`, `require_api_key`, `api_key_file`, `env`, `local_models`, `config_ini`) with the ten
+thirteen `server:` launch keys (`binary`, `docker_image`, `extra_args`, `runtime`, `launch`,
+`bind_all`, `require_api_key`, `api_key_file`, `env`, `local_models`, `config_ini`, `engine_dir`, `engine_config`) with the ten
 `launch_model` keys (`model`, `mmproj`, `served_name`, `context`, `cache_type_k`, `cache_type_v`,
 `cache_ram`, `speculative`, `reasoning_parser`, `tool_call_parser`) and the same keys of each peer's `lifecycle:`, and `overrides.yaml`'s `agent:`
 section, nothing else, so code the agent runs can change any other setting in those files, such as
@@ -1583,7 +1586,7 @@ sets up every model it found on one Enter with the best first, and says what to 
 that arrives afterwards is found at the next terminal `start`. Two files make that possible:
 `model-library.json` in the config directory, which remembers what the library has shown you and
 what you declined, and the overlay's lock file `overrides.yaml.lock`. Both are protected entries
-(see the eleven-entry list above), so a plain delete or move asks like the config files do. The lock covers the
+(see the twelve-entry list above), so a plain delete or move asks like the config files do. The lock covers the
 library file and the peer writes `init`, `start` and `model --setup` make through the validated overlay
 writer; the other `overrides.yaml` writers (`localharness model`'s own persistence, `components`, `plugins`,
 `init --reset` and the import) keep their atomic replace outside it, so two of those racing can lose an

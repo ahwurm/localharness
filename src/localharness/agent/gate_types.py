@@ -954,6 +954,7 @@ PROTECTED_CONFIG_DIR_ENTRIES: tuple[str, ...] = (
     "model-library.json",
     "overrides.yaml.lock",
     "server-floor.json",
+    "strata",
 )
 """The entries inside a harness config directory — the global one and any in-project
 ``.localharness/`` — that are protected in every mode.
@@ -971,6 +972,8 @@ replaced lock is lost exclusion. ``model-library.json`` is the deny-only record 
 person has been shown and declined, and ``overrides.yaml.lock`` is the overlay's lock: a replaced library
 hides a file the person never saw, and a replaced lock is lost exclusion. ``server-floor.json`` is the window floor cached for
 ``start``'s first launch: it can only raise the floor, and a planted value is read clamped.
+``strata/`` holds the copies of Strata's config the harness writes before a launch and their logs, so
+a planted copy cannot change what the engine is started with.
 
 Everything else under a config directory is allowed: ``agents/`` and ``divisions/`` (agent
 definitions — creating one through the harness is the harness working), ``tools/`` (scripts the
