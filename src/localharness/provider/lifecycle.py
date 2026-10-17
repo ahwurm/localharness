@@ -485,11 +485,15 @@ def _verified_snapshot(spec: ManagedServerConfig) -> tuple[str | None, str | Non
     model = os.path.expanduser(spec.model)
     if os.path.isabs(model):
         return None, None
-    found = model_library.snapshot_of(spec.model)
-    if found is None:
-        return None, None
-    if found.refusal is not None or found.kind != "vllm":
-        why = found.refusal or "its snapshot is not a vLLM checkpoint"
+    try:
+        found = model_library.snapshot_of(spec.model)
+    except Exception:  # noqa: BLE001 — a cache that cannot be listed verifies nothing
+        why = "its Hugging Face cache cannot be read"
+    else:
+        if found is None:
+            return None, None
+        why = found.refusal or (None if found.kind == "vllm" else "its snapshot is not a vLLM checkpoint")
+    if why is not None:
         return None, f"{_auto._label(spec)} cannot run here: {why} — the harness launches only a verified checkpoint."
     return str(found.snapshot), None
 

@@ -41,6 +41,7 @@ _REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?")
 _TEXT_GENERATION = ("ForCausalLM", "ForConditionalGeneration")
 _EMBEDDING_FILES = ("modules.json", "config_sentence_transformers.json")
 _UNLOADED = "its snapshot holds an entry the harness does not load"
+_NO_WEIGHTS = "its snapshot holds no safetensors weights of a text-generation model"
 
 
 def _repo_ok(repo: object) -> bool:
@@ -286,11 +287,12 @@ def scan(roots: Iterable[str | os.PathLike[str]], recorded: Collection[str],
 
 
 def _cache_repos() -> tuple[Any, ...]:
-    try:
-        from huggingface_hub import scan_cache_dir
+    from huggingface_hub import scan_cache_dir
+    from huggingface_hub.errors import CacheNotFound
 
+    try:
         return tuple(scan_cache_dir().repos)
-    except Exception:  # noqa: BLE001 — a cache that cannot be listed holds nothing
+    except CacheNotFound:
         return ()
 
 
@@ -364,7 +366,7 @@ def _checkpoint(repo: Any, *, refuse_unloadable: bool = False) -> Checkpoint | N
         return replace(found, refusal=_UNLOADED) if refuse_unloadable else None
     kind, ggufs = _snapshot_kind(snapshot, names)
     if kind is None:
-        return None
+        return replace(found, kind="", refusal=_NO_WEIGHTS) if refuse_unloadable else None
     remote = kind == "vllm" and any("auto_map" in (_json_object(snapshot / n) or {})
                                     for n in ("config.json", "tokenizer_config.json"))
     return replace(found, kind=kind, ggufs=ggufs, refusal="needs trust_remote_code" if remote else None)
@@ -377,11 +379,15 @@ def _model_repos() -> list[Any]:
 
 def snapshots(*, limit: int = DISCOVERY_MAX_FILES) -> tuple[Checkpoint, ...]:
     """The cached repos in repo-id order that hold a model, one snapshot each: the `main` revision, else the latest."""
-    return tuple(c for r in _model_repos()[:limit] if (c := _checkpoint(r)))
+    try:
+        repos = _model_repos()[:limit]
+    except Exception:  # noqa: BLE001 — a cache that cannot be listed holds nothing
+        return ()
+    return tuple(c for r in repos if (c := _checkpoint(r)))
 
 
 def snapshot_of(repo_id: str) -> Checkpoint | None:
-    """The one repo's snapshot, resolved at the call."""
+    """The one repo's snapshot, resolved at the call; raises when the cache cannot be listed."""
     return next((c for r in _model_repos() if r.repo_id == repo_id and (c := _checkpoint(r, refuse_unloadable=True))), None)
 
 
