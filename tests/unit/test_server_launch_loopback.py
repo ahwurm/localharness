@@ -232,7 +232,7 @@ def test_a_0_17_vllm_binary_record_keeps_every_token_and_only_the_host_moves():
 
 
 def test_one_table_names_each_runtimes_key_variable():
-    assert dict(server.KEY_ENV) == {"vllm": "VLLM_API_KEY", "llamacpp": "LLAMA_API_KEY"}
+    assert dict(server.KEY_ENV) == {"vllm": "VLLM_API_KEY", "llamacpp": "LLAMA_API_KEY", "strata": "STRATA_API_KEY"}
     with pytest.raises(TypeError):
         server.KEY_ENV["x"] = "y"  # type: ignore[index]
 
@@ -244,7 +244,7 @@ def test_the_docker_launch_names_the_variable_from_that_table():
 
 def test_every_runtime_has_a_label():
     assert dict(server.RUNTIME_LABELS) == {
-        "vllm": "vLLM", "llamacpp": "llama.cpp", "ollama": "Ollama", "lmstudio": "LM Studio"}
+        "vllm": "vLLM", "llamacpp": "llama.cpp", "ollama": "Ollama", "lmstudio": "LM Studio", "strata": "Strata"}
     with pytest.raises(TypeError):
         server.RUNTIME_LABELS["x"] = "y"  # type: ignore[index]
 

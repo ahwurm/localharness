@@ -6,6 +6,7 @@ import logging
 import os
 import re
 from dataclasses import fields as dataclass_fields
+from pathlib import PurePath
 from typing import Any, Literal, Optional
 
 from pydantic import (
@@ -2364,6 +2365,19 @@ class ManagedServerConfig(BaseModel):
     def set_key_file_refused(self, refused: bool) -> None:
         self._key_file_refused = bool(refused)
 
+    def _engine_record_admitted(self, name: str) -> None:
+        if self.bind_all is True or self.extra_args:
+            raise ValueError(
+                f"runtime={self.runtime}: bind_all and extra_args do not apply — {name}'s engine arguments "
+                "live in its engine_config and it serves on 127.0.0.1 only")
+        missing = [f for f in ("engine_dir", "engine_config", "served_name") if getattr(self, f) is None]
+        if missing:
+            listed = missing[0] if len(missing) == 1 else f"{', '.join(missing[:-1])} and {missing[-1]}"
+            raise ValueError(f"runtime={self.runtime} requires {listed}")
+        config = PurePath(self.engine_config)
+        if config.is_absolute() or ".." in config.parts:
+            raise ValueError("engine_config must be a path inside engine_dir")
+
     @model_validator(mode="after")
     def _launch_target_present(self) -> "ManagedServerConfig":
         from localharness.provider.runtimes import RUNTIMES
@@ -2379,6 +2393,8 @@ class ManagedServerConfig(BaseModel):
         for flag, why in row.derived_args.items():
             if any(a == flag or a.startswith(f"{flag}=") for a in self.extra_args):
                 raise ValueError(f"runtime={self.runtime}: `{flag}` must not appear in extra_args — {why}.")
+        if "engine_config" in row.record_fields:
+            self._engine_record_admitted(row.name)
         if not row.checkpoint:
             return self
         if self.launch == "binary" and not self.binary:
