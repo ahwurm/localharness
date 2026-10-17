@@ -126,9 +126,10 @@ def _harness(server=None) -> HarnessConfig:
         org=OrgConfig(default_model="a-model"), server=server)
 
 
-def _repl(channel, llm, harness=None):
+def _repl(channel, llm, harness=None, config_dir=None):
     return OrchestratorREPL(
         orchestrator=None, agent_loop=NS(_llm=llm), channel=channel, bus=None, harness_config=harness,
+        config_dir=config_dir,
     )
 
 
@@ -186,7 +187,7 @@ async def test_prefetch_without_a_harness_leaves_the_cache_empty():
     assert r._model_cache == []
 
 
-async def test_prefetch_offers_a_cold_launch_record_with_its_detail(monkeypatch):
+async def test_prefetch_offers_a_cold_launch_record_with_its_detail(tmp_path, monkeypatch):
     """The menu holds what the list numbers: a primary that is down is a launch entry with its runtime."""
     from tests.unit.launch_support import stub_liveness
 
@@ -194,7 +195,7 @@ async def test_prefetch_offers_a_cold_launch_record_with_its_detail(monkeypatch)
     llm = NS(config=NS(base_url="http://localhost:1/v1", model="m"))
     server = ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/x/primary.gguf",
                                  port=1, gpu=True, served_name="qwen")
-    r = _repl(NS(), llm, _harness(server))
+    r = _repl(NS(), llm, _harness(server), tmp_path)
 
     async def down(base_url):
         return ([], False)
