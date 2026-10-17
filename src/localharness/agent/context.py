@@ -1172,110 +1172,111 @@ def _gguf_trained(model: str, ptype: str) -> int | None:
         return None
 
 
-def probe_window(
-    base_url: str | None, model: str | None, provider_type: str | None = None, *,
-    api_key: str | None = None,
-) -> WindowProbe:
-    """`model`'s served and trained context window, from whatever the runtime exposes (AUTO-01).
-
-    Disclose, never fabricate: every number the runtime did not report is None, and this never
-    raises (blocking httpx with 3 s timeouts, so callers run it OFF the event loop, #32).
-    llama.cpp: GET /v1/models, the id-matched (or only) entry's meta.n_ctx (served) and
-    meta.n_ctx_train (trained), then ONE GET /props: its n_ctx is the fallback for served and its
-    default temperature (`default_generation_settings.params.temperature`, else `.temperature`) is
-    `sampling`; every other runtime leaves `sampling` None. vLLM / OpenAI-compat:
-    the id-matched entry's max_model_len|context_length is both. Any other provider type (unknown,
-    None) takes that route and falls back to the same entry's llama.cpp-shaped `meta`, so a
-    llama-server behind the wrong provider_type keeps its window. Ollama: GET /api/ps context_length
-    of the LOADED model (the served window, NOT /api/show's ceiling). LM Studio: GET /api/v0/models
-    loaded_context_length (the LOADED window, NOT max_context_length). For both, trained is the
-    model GGUF's `context_length` when a local file resolves. `api_key` rides every llama.cpp and
-    vLLM GET (a launched server set to require its key)."""
-    if not (base_url and model):
-        return WindowProbe(None, None)
+def _probe_llamacpp(root: str, model: str, hk: dict[str, Any]) -> WindowProbe:
     import httpx
 
-    from localharness.provider.server import auth_headers
-    root = base_url.rstrip("/")
-    ptype = (provider_type or "").lower()
-    headers = auth_headers(api_key)
-    hk: dict[str, Any] = {"headers": headers} if headers else {}
-    if ptype == "llamacpp":
+    served = trained = None
+    try:
+        items = [e for e in (httpx.get(f"{root}/models", timeout=3.0, **hk).json().get("data") or [])
+                 if isinstance(e, dict)]
+        entry = next((e for e in items if e.get("id") == model), items[0] if len(items) == 1 else None)
+        meta = (entry or {}).get("meta") or {}
+        served, trained = _int(meta.get("n_ctx")), _int(meta.get("n_ctx_train"))
+    except Exception:
         served = trained = None
-        try:
-            items = [e for e in (httpx.get(f"{root}/models", timeout=3.0, **hk).json().get("data") or [])
-                     if isinstance(e, dict)]
-            entry = next((e for e in items if e.get("id") == model), items[0] if len(items) == 1 else None)
-            meta = (entry or {}).get("meta") or {}
-            served, trained = _int(meta.get("n_ctx")), _int(meta.get("n_ctx_train"))
-        except Exception:
-            served = trained = None
-        # ONE /props GET per probe: the fallback for `served` and the server's default temperature
-        # both come from this body (D-31).
-        sampling = None
-        try:
-            props = httpx.get(f"{root.removesuffix('/v1')}/props", timeout=3.0, **hk).json()
-            dgs = props.get("default_generation_settings")
-            dgs = dgs if isinstance(dgs, dict) else {}
-            if served is None:
-                served = _int(dgs.get("n_ctx") or props.get("n_ctx"))
-            params = dgs.get("params")
-            sampling = _float(params.get("temperature")) if isinstance(params, dict) else None
-            if sampling is None:
-                sampling = _float(dgs.get("temperature"))
-        except Exception:
-            pass
-        return WindowProbe(served, trained, sampling)
-    if ptype == "ollama":
-        # Ollama's SERVED window is num_ctx (default 4096), NOT the model's trained max. /api/ps
-        # reports the LOADED model's context_length = the actual served window (what truncates /
-        # 400s mid-session). /api/show model_info "*.context_length" is the model CEILING — using
-        # it OVER-reports and causes silent prompt truncation (the same unsafe direction we avoid
-        # for LM Studio below). Read the served window only; not-loaded (Ollama lazy-loads on
-        # first request) or older builds → None (disclose, never fabricate).
+    # ONE /props GET per probe: the fallback for `served` and the server's default temperature come from this body.
+    sampling = None
+    try:
+        props = httpx.get(f"{root.removesuffix('/v1')}/props", timeout=3.0, **hk).json()
+        dgs = props.get("default_generation_settings")
+        dgs = dgs if isinstance(dgs, dict) else {}
+        if served is None:
+            served = _int(dgs.get("n_ctx") or props.get("n_ctx"))
+        params = dgs.get("params")
+        sampling = _float(params.get("temperature")) if isinstance(params, dict) else None
+        if sampling is None:
+            sampling = _float(dgs.get("temperature"))
+    except Exception:
+        pass
+    return WindowProbe(served, trained, sampling)
+
+
+def _probe_ollama(root: str, model: str, hk: dict[str, Any]) -> WindowProbe:
+    import httpx
+
+    # Ollama's SERVED window is num_ctx (default 4096), NOT the model's trained max. /api/ps
+    # reports the LOADED model's context_length = the actual served window (what truncates /
+    # 400s mid-session). /api/show model_info "*.context_length" is the model CEILING — using
+    # it OVER-reports and causes silent prompt truncation (the same unsafe direction we avoid
+    # for LM Studio below). Read the served window only; not-loaded (Ollama lazy-loads on
+    # first request) or older builds → None (disclose, never fabricate).
+    served = None
+    try:
+        native = root.removesuffix("/v1")
+        data = httpx.get(f"{native}/api/ps", timeout=3.0).json()
+        for m in (data.get("models") or []):
+            if model in (m.get("model"), m.get("name")):
+                served = _int(m.get("context_length"))
+                break
+    except Exception:
         served = None
-        try:
-            native = root.removesuffix("/v1")
-            data = httpx.get(f"{native}/api/ps", timeout=3.0).json()
-            for m in (data.get("models") or []):
-                if model in (m.get("model"), m.get("name")):
-                    served = _int(m.get("context_length"))
-                    break
-        except Exception:
-            served = None
-        return WindowProbe(served, _gguf_trained(model, ptype))
-    if ptype == "lmstudio":
-        # LM Studio's native REST list reports loaded_context_length — the window the model was
-        # actually LOADED with (≤ its max_context_length), i.e. what 400s mid-session. Read the
-        # loaded window ONLY (never max_context_length: over-reporting would let the guard PASS a
-        # too-big config). Not-loaded / older builds omit it → None.
+    return WindowProbe(served, _gguf_trained(model, "ollama"))
+
+
+def _probe_lmstudio(root: str, model: str, hk: dict[str, Any]) -> WindowProbe:
+    import httpx
+
+    # LM Studio's native REST list reports loaded_context_length — the window the model was
+    # actually LOADED with (≤ its max_context_length), i.e. what 400s mid-session. Read the
+    # loaded window ONLY (never max_context_length: over-reporting would let the guard PASS a
+    # too-big config). Not-loaded / older builds omit it → None.
+    served = None
+    try:
+        native = root.removesuffix("/v1")
+        data = httpx.get(f"{native}/api/v0/models", timeout=3.0).json()
+        for m in (data.get("data") or []):
+            if m.get("id") == model:
+                served = _int(m.get("loaded_context_length"))
+                break
+    except Exception:
         served = None
-        try:
-            native = root.removesuffix("/v1")
-            data = httpx.get(f"{native}/api/v0/models", timeout=3.0).json()
-            for m in (data.get("data") or []):
-                if m.get("id") == model:
-                    served = _int(m.get("loaded_context_length"))
-                    break
-        except Exception:
-            served = None
-        return WindowProbe(served, _gguf_trained(model, ptype))
+    return WindowProbe(served, _gguf_trained(model, "lmstudio"))
+
+
+def _probe_openai(root: str, model: str, hk: dict[str, Any]) -> WindowProbe:
+    import httpx
+
     try:
         data = httpx.get(f"{root}/models", timeout=3.0, **hk).json()
         items = [e for e in (data.get("data") or []) if isinstance(e, dict)]
         # The id-matched entry, else the only one: a single-model server (vLLM, a llama-server behind
         # the wrong provider_type) whose id is an alias or a path still reports its window, as the
-        # llama.cpp branch and doctor's old derivation both did (D-02, WR-07).
+        # llama.cpp probe does.
         m = next((e for e in items if e.get("id") == model), items[0] if len(items) == 1 else None)
         if m is not None:
             val = m.get("max_model_len") or m.get("context_length")
             if val:
                 return WindowProbe(_int(val), _int(val))
-            meta = m.get("meta") or {}  # D-39: a llama-server behind a non-llamacpp provider_type
+            meta = m.get("meta") or {}  # a llama-server behind a non-llamacpp provider_type
             return WindowProbe(_int(meta.get("n_ctx")), _int(meta.get("n_ctx_train")))
     except Exception:
         return WindowProbe(None, None)
     return WindowProbe(None, None)
+
+
+def probe_window(
+    base_url: str | None, model: str | None, provider_type: str | None = None, *,
+    api_key: str | None = None,
+) -> WindowProbe:
+    """`model`'s served and trained window as its runtime's row probes it; None where it did not say. Never raises; blocking, so run it off the event loop."""
+    if not (base_url and model):
+        return WindowProbe(None, None)
+    from localharness.provider.runtimes import row_of
+    from localharness.provider.server import auth_headers
+    headers = auth_headers(api_key)
+    row = row_of((provider_type or "").lower())
+    return (row.probe if row else _probe_openai)(
+        base_url.rstrip("/"), model, {"headers": headers} if headers else {})
 
 
 def probe_served_window(

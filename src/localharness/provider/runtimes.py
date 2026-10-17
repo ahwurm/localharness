@@ -39,10 +39,10 @@ def _strategy(cls_name: str) -> Callable[[Any], Any]:
     return build
 
 
-def _probe(key: str) -> Callable[..., Any]:
-    def probe(base_url: str | None, model: str | None, *, api_key: str | None = None) -> Any:
-        from localharness.agent.context import probe_window
-        return probe_window(base_url, model, key, api_key=api_key)
+def _probe(name: str) -> Callable[..., Any]:
+    def probe(root: str, model: str, hk: dict[str, Any]) -> Any:
+        from localharness.agent import context
+        return getattr(context, name)(root, model, hk)
     return probe
 
 
@@ -69,7 +69,7 @@ RUNTIMES: Mapping[str, Runtime] = MappingProxyType({
     "llamacpp": Runtime(
         name="llama.cpp", strategy=_strategy("SpawnedProcessStrategy"),
         unit_servable=lambda spec: True, label=lambda spec: "llama.cpp",
-        key_env="LLAMA_API_KEY", probe=_probe("llamacpp"), price=_price_llamacpp,
+        key_env="LLAMA_API_KEY", probe=_probe("_probe_llamacpp"), price=_price_llamacpp,
         argv=_argv("_llamacpp_argv"), facts=None,
         record_fields=("mmproj", "served_name", "cache_type_k", "cache_type_v", "cache_ram",
                        "api_key_file", "env", "config_ini", "speculative"),
@@ -80,20 +80,20 @@ RUNTIMES: Mapping[str, Runtime] = MappingProxyType({
         name="vLLM", strategy=_strategy("ManagedVllmStrategy"),
         unit_servable=lambda spec: spec.launch == "binary",
         label=lambda spec: "vLLM binary" if spec.launch == "binary" else "docker",
-        key_env="VLLM_API_KEY", probe=_probe("vllm"), price=None, argv=_argv("_vllm_argv"), facts=_parsers,
+        key_env="VLLM_API_KEY", probe=_probe("_probe_openai"), price=None, argv=_argv("_vllm_argv"), facts=_parsers,
         record_fields=("reasoning_parser", "tool_call_parser"),
         gguf=False, checkpoint=True, path_binary=None, exposed_by_default=True,
         scrub=("VLLM_API_KEY",), window_note=None, derived_args=MappingProxyType({})),
     "ollama": Runtime(
         name="Ollama", strategy=_strategy("DaemonStrategy"),
         unit_servable=lambda spec: False, label=lambda spec: "Ollama",
-        key_env=None, probe=_probe("ollama"), price=None, argv=_argv("_ollama_argv"), facts=None, record_fields=(),
+        key_env=None, probe=_probe("_probe_ollama"), price=None, argv=_argv("_ollama_argv"), facts=None, record_fields=(),
         gguf=False, checkpoint=False, path_binary=None, exposed_by_default=False,
         scrub=(), window_note=" · Ollama decides the window", derived_args=MappingProxyType({})),
     "lmstudio": Runtime(
         name="LM Studio", strategy=_strategy("LmsStrategy"),
         unit_servable=lambda spec: False, label=lambda spec: "LM Studio",
-        key_env=None, probe=_probe("lmstudio"), price=None, argv=_argv("_vllm_argv"), facts=None, record_fields=(),
+        key_env=None, probe=_probe("_probe_lmstudio"), price=None, argv=_argv("_vllm_argv"), facts=None, record_fields=(),
         gguf=False, checkpoint=False, path_binary=None, exposed_by_default=False,
         scrub=(), window_note="", derived_args=MappingProxyType({"--gpu": _LMSTUDIO_GPU})),
 })

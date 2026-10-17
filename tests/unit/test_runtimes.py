@@ -263,3 +263,28 @@ def test_tuning_reads_the_rows_for_checkpoint_and_parsers():
     assert (got.reasoning_parser, got.tool_call_parser) == parsers
     assert tuning.derive(_record("ollama"), {}, AutosenseConfig(), model_config={"model_type": "qwen3"}) == Tuned()
     assert tuning.derive(_record("lmstudio"), {}, AutosenseConfig()) == Tuned()
+
+
+@pytest.mark.parametrize("name,url,body,served", [
+    ("llamacpp", "http://h/v1/models", {"data": [{"id": "m", "meta": {"n_ctx": 4096, "n_ctx_train": 8192}}]}, 4096),
+    ("vllm", "http://h/v1/models", {"data": [{"id": "m", "max_model_len": 2048}]}, 2048),
+    ("ollama", "http://h/api/ps", {"models": [{"name": "m", "context_length": 1024}]}, 1024),
+    ("lmstudio", "http://h/api/v0/models", {"data": [{"id": "m", "loaded_context_length": 512}]}, 512)])
+def test_a_rows_probe_takes_root_model_and_headers(monkeypatch, name, url, body, served):
+    import httpx
+
+    class Reply:
+        def json(self):
+            return body if url in seen else {}
+
+    seen: list[str] = []
+    monkeypatch.setattr(httpx, "get", lambda u, **kw: (seen.append(u), Reply())[1])
+    assert RUNTIMES[name].probe("http://h/v1", "m", {}).served == served
+
+
+@pytest.mark.parametrize("runtime,tail", [("ollama", " · Ollama decides the window"), ("lmstudio", "")])
+def test_window_lines_takes_the_rows_note(runtime, tail):
+    report = autosense.WindowReport(
+        served=4096, trained=8192, fits=None, free_bytes=None, total_bytes=None, weights_bytes=None,
+        asked=None, mode="not-computed", runtime=runtime)
+    assert autosense.window_lines(report, AutosenseConfig()) == [f"window: served 4,096 · trained 8,192{tail}"]
