@@ -101,3 +101,46 @@ def test_no_other_primary_lends_a_binary(primary):
 def test_a_peer_of_another_runtime_borrows_nothing():
     primary = ManagedServerConfig(runtime="llamacpp", binary=LLAMA_SERVER, model="/x/m.gguf")
     assert _borrowed(primary, runtime="ollama") is None
+
+
+def _posture(runtime_key: dict) -> list[str]:
+    from localharness.config.trust import _posture_entries
+    raws = {"config.yaml": {"server": {"bind_all": True, "require_api_key": True, **runtime_key}}}
+    return [e["shown"] for e in _posture_entries(raws)]
+
+
+@pytest.mark.parametrize("runtime_key,runtimes", [
+    ({"runtime": "vllm"}, {"vllm"}),
+    ({"runtime": "llamacpp"}, {"llamacpp"}),
+    ({}, {"vllm"}),
+    ({"runtime": "ollama"}, set()),
+    ({"runtime": "lmstudio"}, set()),
+    ({"runtime": "bogus"}, set()),
+    ({"runtime": ["vllm"]}, set()),
+])
+def test_trust_posture_entries_exist_for_exactly_the_keyed_runtimes(runtime_key, runtimes):
+    assert {s.split(":")[0] for s in _posture(runtime_key)} == runtimes
+
+
+def test_trust_posture_entries_carry_both_keys():
+    assert _posture({"runtime": "llamacpp"}) == ["llamacpp:true:open", "llamacpp:true:open"]
+
+
+@pytest.mark.parametrize("server,selected", [
+    ({"runtime": "vllm"}, True),
+    ({}, True),
+    ({"runtime": "vllm", "bind_all": False}, False),
+    ({"runtime": "llamacpp"}, False),
+    ({"runtime": "ollama"}, False),
+    ({"runtime": "lmstudio"}, False),
+    ({"runtime": "bogus"}, False),
+])
+def test_bind_all_migration_selects_vllm_sections_without_the_key(server, selected):
+    from localharness.config.migrate import _needs_bind_all
+    assert (_needs_bind_all({"server": server}) == ("server",)) is selected
+
+
+def test_bind_all_migration_selects_peer_lifecycles_the_same_way():
+    from localharness.config.migrate import _needs_bind_all
+    data = {"extra_endpoints": [{"lifecycle": {"runtime": "llamacpp"}}, {"lifecycle": {}}, {"lifecycle": {"runtime": "ollama"}}]}
+    assert _needs_bind_all(data) == ("extra_endpoints[1].lifecycle",)

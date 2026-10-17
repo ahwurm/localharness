@@ -34,6 +34,7 @@ from localharness.config.redact import secret_values, validation_text
 from localharness.config.trust import LAUNCH_KIND, LAUNCH_MODEL_KIND
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
+from localharness.provider.runtimes import RUNTIMES
 from localharness.provider.units import (
     PRIMARY_TARGET, TARGET_NAME, in_flight_target, read_target, remove_target,
 )
@@ -196,7 +197,7 @@ async def persist_default_model(
     # alias is `served_name`, so the alias must never reach `-m`: it is written to neither the
     # overlay (here) nor the in-memory record (below).
     wrote_server_model = (write_server_model and harness.server is not None
-                          and harness.server.runtime != "llamacpp")
+                          and not RUNTIMES[harness.server.runtime].gguf)
     if wrote_server_model:
         set_value_in_dict(new_overlay, "server.model", model)
 
