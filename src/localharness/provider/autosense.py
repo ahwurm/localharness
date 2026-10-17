@@ -818,6 +818,7 @@ class WindowReport:
     runtime: str = "llamacpp"
     placement: Placement | None = None
     floor: int | None = None
+    held: int | None = None
 
 
 @dataclass(frozen=True)
@@ -953,6 +954,23 @@ def _placement_line(r: WindowReport) -> str | None:
     return f"window: {window:,} · {where} ({share} of {gib(p.free_bytes)} GiB free)"
 
 
+# Swift 27B at 131,072 tokens on the RTX 5090 held 2.68 GiB beyond its priced share (25,960 MiB held, 24,338,688,192 B priced).
+SPILL_OVERHEAD = int(2.7 * 2**30)
+SPILL_MIN_GPU_BYTES = 10 * 2**30
+SPILL_CLAUSE = " — {gib} GiB of layers on the CPU, decode will be slow"
+
+
+def spilled_bytes(r: WindowReport) -> int | None:
+    """Bytes of a dense llama.cpp launch's priced share the process does not hold on the GPU, when at least 1 GiB."""
+    p = r.placement
+    window = r.served if r.verified and r.served else r.asked
+    if (r.held is None or r.attached or r.mode != "fit" or p is None or p.where != "gpu"
+            or p.gpu_bytes < SPILL_MIN_GPU_BYTES or p.kv_per_token is None or not window):
+        return None
+    short = int(p.gpu_bytes + p.kv_per_token * window + p.swa_bytes) + SPILL_OVERHEAD - r.held
+    return short if short >= 2**30 else None
+
+
 def _fit_line(r: WindowReport) -> str:
     line = f"window: served {fmt_count(r.served)} · trained {fmt_count(r.trained)} · fits {fmt_count(r.fits)}"
     if r.free_bytes is not None and r.total_bytes is not None and r.weights_bytes is not None:
@@ -987,6 +1005,8 @@ def window_lines(report: WindowReport, ratios: Any, undo: str | None = None) -> 
         line += " (not verified)"
     if r.retried and r.asked:
         line += f" (after one retry at -c {r.asked:,})"
+    if (spill := spilled_bytes(r)) is not None:
+        line += SPILL_CLAUSE.format(gib=gib(spill))
     if r.attached and undo in _UNDO:
         return [line, _UNDO[undo].format(fits=r.fits)]
     return [line]
