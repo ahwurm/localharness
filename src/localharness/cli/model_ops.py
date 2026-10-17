@@ -1294,20 +1294,23 @@ def entry_lines(entries: Entries) -> list[str]:
     return lines
 
 
-def listing(harness: Any, **kw: Any) -> tuple[Entries, list[str]]:
-    """The list's lines, then the foreign-unit sentence when it changed, which this records as printed."""
+def foreign_lines(entries: Entries, config_dir: Any) -> list[str]:
+    """The foreign-unit sentence when it changed, which this records as printed."""
     from localharness.provider import speed_stats
 
+    if entries.foreign_key is None:
+        return []
+    try:
+        speed_stats.record_foreign_unit(speed_stats.default_speed_stats_path(config_dir), *entries.foreign_key)
+    except OSError:
+        pass
+    return [] if entries.foreign is None else [entries.foreign]
+
+
+def listing(harness: Any, **kw: Any) -> tuple[Entries, list[str]]:
+    """The list's lines, then the foreign-unit sentence when it changed."""
     entries = plan_entries(harness, **kw)
-    lines = entry_lines(entries)
-    if entries.foreign_key is not None:
-        if entries.foreign is not None:
-            lines.append(entries.foreign)
-        try:
-            speed_stats.record_foreign_unit(speed_stats.default_speed_stats_path(kw["config_dir"]), *entries.foreign_key)
-        except OSError:
-            pass
-    return entries, lines
+    return entries, [*entry_lines(entries), *foreign_lines(entries, kw["config_dir"])]
 
 
 # --------------------------------------------------------------------------- landing / selection writers

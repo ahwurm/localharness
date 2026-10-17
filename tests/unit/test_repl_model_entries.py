@@ -6,12 +6,13 @@ import threading
 
 import pytest
 
-from localharness.cli import model_ops
+from localharness.cli import model_ops, workspace
 from localharness.cli.repl import OrchestratorREPL
 from localharness.config.models import EndpointRef
-from localharness.provider import lifecycle
+from localharness.provider import lifecycle, speed_stats
 from tests.unit import test_model_foreign_incumbent as foreign
 from tests.unit.launch_support import stub_liveness
+from tests.unit.test_plan_entries import LLM_SERVICE
 from tests.unit.procfs_support import fake_proc  # noqa: F401 — the fixture
 from tests.unit.test_launch_paths_repl import (  # noqa: F401 — the autouse fixtures
     PEER_URL,
@@ -53,6 +54,23 @@ async def test_bare_model_sends_the_one_list_and_the_switch_hint(tmp_path):
                         "▸ this box can launch"]
     assert sent[4].startswith("  2. flash  llama.cpp")
     assert [e.name for e in entries.numbered()] == ["qwen", "flash"]
+
+
+@pytest.mark.asyncio
+async def test_the_list_says_the_foreign_unit_sentence_once_and_records_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(workspace, "port_holder", lambda port: LLM_SERVICE)
+    _, repl, channel, _ = _session(tmp_path)
+    sentence = workspace.foreign_unit_sentence(LLM_SERVICE, served="qwen", port=8081)
+    ledger = speed_stats.default_speed_stats_path(repl._server_config_dir)
+
+    await repl._handle_slash("/model")
+
+    assert channel.messages[-1].split("\n")[-2:] == [sentence, SWITCH_HINT]
+    assert not speed_stats.foreign_unit_changed(ledger, "llm.service", "qwen")
+
+    await repl._handle_slash("/model")
+
+    assert sentence not in channel.messages[-1]
 
 
 @pytest.mark.asyncio
