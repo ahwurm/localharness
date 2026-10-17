@@ -1,18 +1,20 @@
 """`model_ops.plan_entries`: the one list `/model` and `localharness model` render, built over `serve_world` records."""
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
-from localharness.cli import model_ops
+from localharness.cli import model_ops, workspace
 from localharness.cli.app import app
 from localharness.config.loader import ConfigLoader
-from localharness.provider import autosense, lifecycle, server
+from localharness.provider import autosense, lifecycle, procfs, server
 from localharness.provider.autosense import FreeMemory
 from tests.unit.gguf_support import write_gguf
-from tests.unit.test_serve_cmd import GIB, PRIMARY, PRIMARY_URL, llama_peer, serve_world
+from tests.unit.test_serve_cmd import GIB, PRIMARY, PRIMARY_URL, attach_peer, llama_peer, serve_world
 from tests.unit.test_tuning_derive import FLASH_NEXT
 
 runner = CliRunner()
@@ -112,3 +114,150 @@ def test_localharness_model_with_a_number_resolves_through_the_list(world, monke
     runner.invoke(app, ["model", "2", "--config-dir", str(world.g)])
 
     assert seen == ["flash-next"]
+
+
+# ====================================================================== owners, the foreign holder, peers once, order
+
+PEER_ONLY = {PRIMARY_URL: None, PEER_URL: None}
+LAUNCH = procfs.Launch(pid=4321, start=None, port=8080, owner="spawned", verified=True)
+UNIT_LAUNCH = dataclasses.replace(LAUNCH, owner="unit")
+LLM_SERVICE = workspace.Holder(
+    "llm.service", 77, "llama-server", 1000, SimpleNamespace(unit_file_state="enabled", load_state="loaded"))
+
+
+def headers(entries) -> list[str]:
+    return [g.header for g in entries.groups]
+
+
+def test_the_group_names_the_harness_as_owner_of_its_own_launch(world, monkeypatch):
+    monkeypatch.setattr(lifecycle, "own_launch", lambda config_dir, specs: LAUNCH)
+
+    assert headers(entries_of(world, SERVING))[0] == "llama.cpp · 127.0.0.1:8080 · the harness"
+
+
+def test_the_group_names_autostart_for_the_units_main_process(world, monkeypatch):
+    monkeypatch.setattr(lifecycle, "own_launch", lambda config_dir, specs: LAUNCH)
+    monkeypatch.setattr(procfs, "read_launch", lambda config_dir, *, expect=None, main_pid=None: (
+        UNIT_LAUNCH if main_pid == 4321 else LAUNCH))
+
+    entries = entries_of(world, SERVING, unit=SimpleNamespace(main_pid=4321))
+
+    assert headers(entries)[0] == "llama.cpp · 127.0.0.1:8080 · autostart"
+
+
+def test_the_group_names_a_foreign_unit_as_yours(world, monkeypatch):
+    monkeypatch.setattr(workspace, "port_holder", lambda port: LLM_SERVICE)
+
+    entries = entries_of(world, SERVING)
+
+    assert headers(entries) == ["llama.cpp · 127.0.0.1:8080 · llm.service (yours)", "available once llm.service is stopped"]
+    assert entries.foreign == "llm.service"
+
+
+def test_a_foreign_holder_leaves_the_launch_group_unnumbered_and_unpickable(world, monkeypatch):
+    monkeypatch.setattr(workspace, "port_holder", lambda port: LLM_SERVICE)
+
+    entries = entries_of(world, SERVING)
+
+    sentence = workspace.incumbent_sentence(
+        LLM_SERVICE, port=8080, form="imperative", served=PRIMARY, target="flash-next")
+    assert [e.name for e in entries.numbered()] == [PRIMARY]
+    assert model_ops.entry_lines(entries)[3:] == [
+        "▸ available once llm.service is stopped",
+        f"     flash-next  llama.cpp · {entries.groups[1].entries[0].window:,}"]
+    assert entries.pick("flash-next") == sentence
+    assert entries.pick("2") is None
+
+
+def test_a_foreign_holder_prices_against_the_card_less_a_gibibyte(world, monkeypatch):
+    monkeypatch.setattr(workspace, "port_holder", lambda port: LLM_SERVICE)
+    asks = []
+    real = lifecycle.memory_after_launch
+    monkeypatch.setattr(lifecycle, "memory_after_launch", lambda auto, launch, *, stopping=False: (
+        asks.append((launch, stopping)) or real(auto, launch, stopping=stopping)))
+
+    entries_of(world, SERVING)
+
+    assert asks == [(None, True)]
+
+
+def test_a_down_lifecycle_peer_is_one_cold_entry_and_no_note(world):
+    entries = entries_of(world, PEER_ONLY)
+
+    assert [e.name for e in entries.numbered()] == [PRIMARY, "flash-next"]
+    assert entries.notes == ()
+
+
+def test_a_down_attach_only_peer_is_one_note_and_no_entry(tmp_path, monkeypatch):
+    world = serve_world(tmp_path, monkeypatch, peers=[attach_peer("attached", 1234)])
+
+    entries = entries_of(world, {PRIMARY_URL: (PRIMARY,), "http://127.0.0.1:1234/v1": None})
+
+    assert entries.notes == ("skipped attached (http://127.0.0.1:1234/v1): unreachable",)
+    assert [e.name for e in entries.numbered()] == [PRIMARY]
+
+
+def test_a_model_an_earlier_endpoint_serves_is_listed_once(tmp_path, monkeypatch):
+    peers = [attach_peer("first", 1234), attach_peer("second", 1235)]
+    world = serve_world(tmp_path, monkeypatch, peers=peers)
+    urls = {"http://127.0.0.1:1234/v1": ("shared", PRIMARY), "http://127.0.0.1:1235/v1": ("shared", "own")}
+
+    entries = entries_of(world, {PRIMARY_URL: (PRIMARY,), **urls})
+
+    assert [e.name for e in entries.numbered()] == [PRIMARY, "shared", "own"]
+    assert entries.notes == (
+        "second (http://127.0.0.1:1235/v1) also serves 'shared' — hidden by first (first configured wins)",)
+
+
+def test_entries_keep_config_order_with_notes_last(tmp_path, monkeypatch):
+    peers = [flash(tmp_path, "cold-one", 8082), attach_peer("up", 1234), attach_peer("gone", 1235)]
+    world = serve_world(tmp_path, monkeypatch, peers=peers)
+    live = {PRIMARY_URL: (PRIMARY,), PEER_URL: None, "http://127.0.0.1:1234/v1": ("peer-model",),
+            "http://127.0.0.1:1235/v1": None}
+
+    entries = entries_of(world, live)
+
+    assert headers(entries) == ["llama.cpp · 127.0.0.1:8080", "LM Studio · 127.0.0.1:1234", "this box can launch"]
+    assert [e.name for e in entries.numbered()] == [PRIMARY, "peer-model", "cold-one"]
+    assert model_ops.entry_lines(entries)[-1] == "  · skipped gone (http://127.0.0.1:1235/v1): unreachable"
+
+
+def test_the_serving_endpoint_comes_first_even_when_it_is_a_peer(tmp_path, monkeypatch):
+    world = serve_world(tmp_path, monkeypatch, peers=[attach_peer("up", 1234)])
+    live = {PRIMARY_URL: (PRIMARY,), "http://127.0.0.1:1234/v1": ("peer-model",)}
+
+    entries = entries_of(world, live, current=("http://127.0.0.1:1234/v1", "peer-model"))
+
+    assert [e.name for e in entries.numbered()] == ["peer-model", PRIMARY]
+    assert [e.active for e in entries.numbered()] == [True, False]
+
+
+def test_no_record_and_no_answer_gives_no_numbered_entry(tmp_path, monkeypatch):
+    world = serve_world(tmp_path, monkeypatch)
+    world.edit_config(lambda d: d.pop("server"))
+    world.rerecord()
+
+    entries = entries_of(world, {PRIMARY_URL: None})
+
+    assert entries.numbered() == () and entries.groups == ()
+
+
+def test_without_peers_the_list_is_the_serving_group_and_the_launch_group_only(world):
+    world.edit_config(lambda d: d.update(extra_endpoints=[]))
+    world.rerecord()
+
+    serving = entries_of(world, {PRIMARY_URL: (PRIMARY,)})
+    down = entries_of(world, {PRIMARY_URL: None})
+
+    assert headers(serving) == ["llama.cpp · 127.0.0.1:8080"] and serving.notes == ()
+    assert headers(down) == ["this box can launch"] and down.notes == ()
+
+
+def test_a_name_with_an_escape_byte_prints_it_as_four_characters(tmp_path, monkeypatch):
+    world = serve_world(tmp_path, monkeypatch, peers=[flash(tmp_path, "bad\x1b[2Jname", 8082), attach_peer("a\x1b[31mb", 1234)])
+    live = {PRIMARY_URL: (PRIMARY,), PEER_URL: None, "http://127.0.0.1:1234/v1": None}
+
+    out = "\n".join(model_ops.entry_lines(entries_of(world, live)))
+
+    assert "\x1b" not in out
+    assert "bad\\x1b[2Jname" in out and "skipped a\\x1b[31mb" in out
