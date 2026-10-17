@@ -535,6 +535,44 @@ def builtin_base_config(name: str, children_budget: ChildrenBudgetConfig | None 
     return builder(name, budget=_children_budget(children_budget).for_name(name))
 
 
+def role_floor(cfg: AgentConfig, schemas: list, *, counter: Any, llm: Any,
+               max_response_tokens: int | None) -> int:
+    """The smallest window a role's fixed part (system prompt without guardrails, plus tool schemas) fits."""
+    from localharness.agent.context import fixed_tokens, harness_floor
+    from localharness.agent.loop import base_system_prompt
+    mode = getattr(getattr(llm, "config", None), "tool_call_mode", "native")
+    prompt = base_system_prompt(cfg, tool_call_mode=mode, guardrails="")
+    return harness_floor(fixed_tokens(counter, prompt, schemas), max_response_tokens)
+
+
+def _schemas(cfg: AgentConfig, registry: Any) -> list:
+    return list(registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools).values())
+
+
+def builtin_role_floors(base_registry: Any, counter: Any, llm: Any,
+                        children_budget: ChildrenBudgetConfig | None) -> dict[str, int]:
+    from localharness.tools.registry import ToolRegistry
+    floors = {}
+    for name in ("explore", "web-researcher", "search-verifier"):
+        cfg = builtin_base_config(name, children_budget)
+        registry = ToolRegistry.from_allowed(_BUILTIN_TOOLSETS[name], base_registry=base_registry)
+        floors[name] = role_floor(cfg, _schemas(cfg, registry), counter=counter, llm=llm,
+                                  max_response_tokens=None)
+    return floors
+
+
+def _refuse_below_floor(cfg: AgentConfig, registry: Any, ctx: Any, llm: Any) -> None:
+    window = getattr(ctx, "max_context_tokens", None)
+    if window is None:
+        return
+    needed = role_floor(cfg, _schemas(cfg, registry), counter=ctx._token_counter, llm=llm,
+                        max_response_tokens=ctx.max_response_tokens)
+    if window < needed:
+        from localharness.provider.autosense import window_phrase
+        raise ValueError(
+            f"{cfg.name} needs {window_phrase(needed)} and the server serves {window:,}; not delegated.")
+
+
 class _ParentIdBus:
     """Thin pass-through wrapper over an EventBus that stamps `parent_id` on published events.
 
@@ -867,6 +905,7 @@ async def dispatch_config_subagent(
         budget_fallback=budget_fallback,
         budget_labels=budget_labels,
     )
+    _refuse_below_floor(agent_config, child_registry, context_manager, llm)
 
     # Make the limits and the toolset explicit in the brief — small models attend weakly to absent
     # tools (observed live: a bash-less child globbed for `pip` instead of saying "I have no
@@ -978,6 +1017,7 @@ async def dispatch_explore_subagent(
         budget_fallback=budget_fallback,
         budget_labels=budget_labels,
     )
+    _refuse_below_floor(child_config, child_registry, context_manager, llm)
     if on_child_loop is not None:
         on_child_loop(child_loop)
 
@@ -1079,6 +1119,7 @@ async def dispatch_web_subagent(
             budget_fallback=budget_fallback,
             budget_labels=budget_labels,
         )
+        _refuse_below_floor(child_config, child_registry, context_manager, llm)
         if on_child_loop is not None:
             on_child_loop(child_loop)  # every retry attempt rebinds the slot to the loop now running
         brief = task if attempt == 0 else ZERO_CALL_RETRY_PREFIX + task
@@ -1279,6 +1320,7 @@ async def dispatch_search_verifier_subagent(
         budget_fallback=budget_fallback,
         budget_labels=budget_labels,
     )
+    _refuse_below_floor(child_config, child_registry, context_manager, llm)
     if on_child_loop is not None:
         on_child_loop(child_loop)
 
@@ -1620,6 +1662,8 @@ async def dispatch_cruncher_subagent(
 
     ctx = context_manager or ContextManager()
     cruncher_store = ctx._content_store
+    _refuse_below_floor(build_cruncher_config().model_copy(update={"tools": ToolConfig(add=[])}),
+                        ToolRegistry.from_allowed([], base_registry=base_registry), ctx, llm)
     handles = list(grant_handles or [])
     child_bus = _ParentIdBus(bus, parent_session_id) if parent_session_id is not None else bus
     max_ctx = getattr(ctx, "max_context_tokens", None)
