@@ -286,6 +286,62 @@ def cache_ram_mib(mem_available: int | None, mem_total: int | None, weights: int
     return mib if mib > 0 else None
 
 
+@dataclass(frozen=True)
+class Placement:
+    """Where a model's weights live and the window that leaves; `refusal` is the one sentence when nothing holds it."""
+
+    fits: int | None
+    where: str | None  # "gpu", "experts in RAM", "vllm" or None when nothing was priced
+    gpu_bytes: int
+    mmproj: int
+    experts_ram: int
+    kv_per_token: float | None
+    free_bytes: int
+    budget_bytes: int
+    cache_ram: int | None
+    refusal: str | None
+
+
+def _window(room: float, kv: float, trained: int) -> int:
+    return min(trained, max(0, int(room // kv)) // 256 * 256)
+
+
+def _cache_ram(meminfo: Mapping[str, int] | None, experts_ram: int, ratios: Any) -> int | None:
+    if meminfo is None:
+        return None
+    avail, total = meminfo["MemAvailable"], meminfo["MemTotal"]
+    room = avail - ratios.unified_reserve_ratio * total
+    cap = min(ratios.cache_ram_ratio * (avail - experts_ram), room - experts_ram, ratios.cache_ram_ceiling_ratio * total)
+    return max(0, int(cap // _MIB))
+
+
+def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name: str, weights: int, mmproj: int,
+                   free_bytes: int, meminfo: Mapping[str, int] | None, cache_type_k: str | None,
+                   cache_type_v: str | None, share: float, autosense: Any, floor: int | None = None,
+                   ngl_hand: bool = False) -> Placement:
+    """Experts on the GPU first, in RAM when that misses the floor; the whole file on the GPU without a split."""
+    gpu = split.gpu + mmproj if split else weights
+    experts = split.experts if split else 0
+    margin = int(autosense.compute_margin_ratio * gpu)
+    kv = kv_bytes_per_token(header, cache_type_k, cache_type_v, split)
+    kv = kv * share if kv is not None else None
+    trained = _pos_int(header.get("context_length"))
+
+    def made(fits: int, where: str, experts_ram: int = 0) -> Placement:
+        return Placement(fits or None, where, gpu, mmproj, experts_ram, kv, free_bytes, free_bytes,
+                         _cache_ram(meminfo, experts_ram, autosense), None)
+
+    if kv is None or trained is None:
+        return Placement(None, None, gpu, mmproj, 0, kv, free_bytes, free_bytes, _cache_ram(meminfo, 0, autosense), None)
+    on_gpu = _window(free_bytes - gpu - margin - experts, kv, trained)
+    if on_gpu >= (floor or 1) or not (split and experts > 0 and _pos_int(header.get("expert_count"))):
+        return made(on_gpu, "gpu")
+    ram_room = meminfo["MemAvailable"] - autosense.unified_reserve_ratio * meminfo["MemTotal"] if meminfo else None
+    if ram_room is None or experts > ram_room:
+        return made(on_gpu, "gpu")
+    return made(_window(free_bytes - gpu - margin, kv, trained), "experts in RAM", experts)
+
+
 def has_ctx_arg(extra_args: Sequence[str]) -> bool:
     """Whether `extra_args` already carry a context size (`-c`, `--ctx-size`, `--ctx-size=N`)."""
     return any(t in ("-c", "--ctx-size") or t.startswith("--ctx-size=") for t in extra_args)
