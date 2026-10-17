@@ -823,10 +823,15 @@ def child_environment(
     `hf_offline` (a launch of a verified snapshot) sets `HF_HUB_OFFLINE=1` at the same point, so
     neither the person's shell nor the record can send a cache entry to the network.
 
-    With nothing dropped, no record env, no key and no `xdg_config_home` it returns `(None, [])`:
-    Popen inherits the environment unchanged, byte for byte as 0.17 did."""
+    A checkpoint runtime gets `MAX_JOBS` at half the CPUs unless `base` or the record sets it: the
+    first-use kernel build runs `ninja -j MAX_JOBS` (vLLM's environment-variable reference).
+
+    With nothing dropped, no record env, no key, no `xdg_config_home` and nothing to default it
+    returns `(None, [])`: Popen inherits the environment unchanged, byte for byte as 0.17 did."""
     dropped = sorted(name for name in base if _scrubbed(runtime, name))
-    if not dropped and not record_env and not api_key and xdg_config_home is None and not hf_offline:
+    row = row_of(runtime)
+    build_jobs = row is not None and row.checkpoint and "MAX_JOBS" not in base and "MAX_JOBS" not in (record_env or {})
+    if not dropped and not record_env and not api_key and xdg_config_home is None and not hf_offline and not build_jobs:
         return None, []
     env = {name: value for name, value in base.items() if name not in dropped}
     env.update(record_env or {})
@@ -834,8 +839,9 @@ def child_environment(
         env["XDG_CONFIG_HOME"] = xdg_config_home
     if hf_offline:
         env["HF_HUB_OFFLINE"] = "1"
+    if build_jobs:
+        env["MAX_JOBS"] = str(max(1, (os.cpu_count() or 2) // 2))
     if api_key:
-        row = row_of(runtime)
         if row is None or row.key_env is None:
             raise ValueError(f"runtime {runtime!r} launches with no key variable")
         env[row.key_env] = api_key
