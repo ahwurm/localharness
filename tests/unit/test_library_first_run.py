@@ -173,7 +173,7 @@ def test_choose_which_pre_selects_every_file_and_asks_which_serves_first(trio, m
     first, which, serve = script.asked
     assert first.question == "Set up these 3 models?"
     assert which.question == "Set up which?" and which.multi and which.default == set(k.values())
-    assert [o.key for o in which.options] == [k["A"], k["B"], k["C"]] and which.cancel == "cancel"
+    assert [o.key for o in which.options] == [k["A"], k["C"], k["B"]] and which.cancel == "cancel"
     assert serve.question == "Serve which first?" and not serve.multi and serve.default == 0
     assert [o.key for o in serve.options] == [k["A"], k["C"]]
     assert _served(trio) == ("Third-7B", ["Qwen-27B"])

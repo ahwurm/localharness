@@ -259,7 +259,7 @@ def test_a_model_that_fits_outranks_a_newer_one_that_does_not(box, monkeypatch):
 
     def fake_fit(spec, ratios, *, memory, **kw):
         seen.append(memory)
-        return SimpleNamespace(fits=8192 if spec.model == str(box.swift) else None)
+        return SimpleNamespace(fits=8192 if spec.model == str(box.swift) else None, split=None, weights=None, mmproj=0)
 
     monkeypatch.setattr(autosense, "free_memory", lambda _ratios: memory)
     monkeypatch.setattr(autosense, "compute_fit", fake_fit)
@@ -305,7 +305,7 @@ def test_a_size_that_cannot_be_computed_leaves_that_model_ranked_without_a_fit(b
     def fake_fit(spec, ratios, *, memory, **kw):
         if spec.model == str(box.qwen):
             raise OSError("unreadable")
-        return SimpleNamespace(fits=4096)
+        return SimpleNamespace(fits=4096, split=None, weights=None, mmproj=0)
 
     monkeypatch.setattr(autosense, "compute_fit", fake_fit)
 
@@ -326,7 +326,7 @@ def test_peers_take_the_ports_above_the_primary_skipping_a_listener(box, fake_pr
     cfg, peers = _written(box.cfg), _peers(box.cfg)
     assert cfg["server"]["port"] == 8081
     assert [(p["name"], p["lifecycle"]["port"]) for p in peers] == [
-        ("Swift-27B-Q8", 8083), ("Third-7B", 8084)]
+        ("Third-7B", 8083), ("Swift-27B-Q8", 8084)]
     assert [p["base_url"] for p in peers] == [
         "http://127.0.0.1:8083/v1", "http://127.0.0.1:8084/v1"]
 
