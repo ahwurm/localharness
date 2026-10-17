@@ -114,8 +114,8 @@ def test_a_priced_window_exactly_at_the_floor_launches_and_one_step_below_is_the
     with pytest.raises(server.LaunchRefused) as refused:
         _plan(_flash(tmp_path), tmp_path, FLOOR)
     assert str(refused.value) == (
-        "Flash-Next fits only a 15,104-token window here and the harness needs at least 15,360 — free GPU memory, "
-        "or pick a smaller model.")
+        "Flash-Next fits only a 15,104-token window here and the harness needs at least 15,360 — a q4_0 KV cache "
+        "fits it (cache_type_k and cache_type_v: q4_0).")
 
 
 def test_a_record_context_below_the_floor_is_the_record_context_sentence(tmp_path, monkeypatch):

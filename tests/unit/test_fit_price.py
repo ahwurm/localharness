@@ -31,11 +31,12 @@ def _mem(available_gib):
     return {"MemTotal": MEM_TOTAL, "MemAvailable": int(available_gib * GIB)}
 
 
-def _place_27b(tmp_path, free, *, name=SWIFT, mmproj=SWIFT_MMPROJ, header_over=None, auto=AUTO, **kw):
+def _place_27b(tmp_path, free, *, name=SWIFT, mmproj=SWIFT_MMPROJ, header_over=None, auto=AUTO, cache="q8_0",
+               share=1 + 1 / 16, **kw):
     split, header = _model(tmp_path, name)
     return autosense.place_llamacpp(
         split, {**header, **(header_over or {})}, name="Swift-27B", weights=0, mmproj=mmproj, free_bytes=free,
-        meminfo=_mem(52.9), cache_type_k="q8_0", cache_type_v="q8_0", share=1 + 1 / 16, autosense=auto, **kw)
+        meminfo=_mem(52.9), cache_type_k=cache, cache_type_v=cache, share=share, autosense=auto, **kw)
 
 
 def _place_flash(tmp_path, available_gib, free=int(30.2 * GIB), **kw):
@@ -146,8 +147,32 @@ def test_a_hand_set_ngl_with_experts_beyond_the_gpu_is_refused_and_a_fitting_mod
 def test_a_window_under_the_floor_is_the_floor_refusal(tmp_path):
     placed = _place_27b(tmp_path, _free_for(9_216) + 1, floor=15_360)
     assert placed.fits == 9_216 and placed.refusal == (
-        "Swift-27B fits only a 9,216-token window here and the harness needs at least 15,360 — free GPU memory, "
-        "or pick a smaller model.")
+        "Swift-27B fits only a 9,216-token window here and the harness needs at least 15,360 — a q4_0 KV cache "
+        "fits it (cache_type_k and cache_type_v: q4_0).")
+
+
+FLOOR_13_8 = 13_824
+KV_F16, KV_Q8 = 65_536, 34_816
+
+
+@pytest.mark.parametrize("cache,share,kv,window,got,remedy", [
+    ("f16", 1.0, KV_F16, 10_240, 10_240, "a q8_0 KV cache fits it (cache_type_k and cache_type_v: q8_0)"),
+    ("q8_0", 1 + 1 / 16, KV_Q8, FLOOR_13_8, 12_800, "it fits with MTP drafting off (speculative: off)"),
+    ("q8_0", 1.0, KV_Q8, 10_240, 10_240, "a q4_0 KV cache fits it (cache_type_k and cache_type_v: q4_0)"),
+    ("q4_0", 1.0, 18_432, 5_000, 4_864, "free GPU memory, or pick a smaller model"),
+    ("q8_0", 1.0, KV_Q8, 5_000, 4_864, "free GPU memory, or pick a smaller model"),
+], ids=["q8-kv", "mtp-off", "q4-kv", "nothing-helps-at-q4", "nothing-helps-at-q8"])
+def test_a_floor_refusal_names_the_first_remedy_that_reaches_the_floor(tmp_path, cache, share, kv, window, got, remedy):
+    placed = _place_27b(tmp_path, _free_for(window, kv=int(kv * share)), cache=cache, share=share, floor=FLOOR_13_8)
+    assert placed.fits == got and placed.refusal == (
+        f"Swift-27B fits only {autosense.window_phrase(got)} here and the harness needs at least 13,824 — {remedy}.")
+
+
+def test_a_refusal_without_room_for_any_window_names_the_remedy_that_gives_one(tmp_path):
+    placed = _place_27b(tmp_path, _free_for(0) + 12_000_000, cache="f16", share=1.0)
+    assert placed.fits is None and placed.refusal == (
+        "Swift-27B cannot run here: it needs 18.2 GiB of GPU memory and 23.0 GiB is free — a q8_0 KV cache fits "
+        "it (cache_type_k and cache_type_v: q8_0).")
 
 
 def test_a_window_exactly_at_the_floor_is_placed_and_one_step_below_is_refused(tmp_path):
@@ -247,10 +272,34 @@ def test_two_checkpoints_of_the_same_shape_price_equal():
     assert a == b == _vllm(_config("nvidia-qwen3.8-27b-nvfp4"))
 
 
-def test_weights_beyond_the_budget_are_the_vllm_refusal():
-    placed = _vllm(_config("nvidia-qwen3.8-27b-nvfp4"), weights=62_546_338_264, name="gemma")
+GEMMA_BF16, GEMMA_CARD = 62_546_338_264, 32_607 * 2**20
+
+
+def test_a_bf16_snapshot_beyond_the_budget_is_the_vllm_refusal_naming_a_4_bit_build():
+    placed = _vllm(_config("davidau-gemma-4-31b-it"), weights=GEMMA_BF16, total=GEMMA_CARD, name="gemma")
     assert placed.fits is None and placed.where is None and placed.refusal == (
-        "gemma cannot run here: 58.3 GiB of weights, and vLLM keeps them all on the 31.8 GiB GPU.")
+        "gemma cannot run here: 58.3 GiB of bf16 weights, and vLLM keeps them all on the 31.8 GiB GPU — a 4-bit "
+        "build of it (a GGUF Q4_K_M for llama.cpp, or NVFP4 for vLLM) would fit.")
+
+
+def test_a_bf16_snapshot_no_4_bit_build_would_fit_says_pick_a_smaller_quant():
+    placed = _vllm(_config("davidau-gemma-4-31b-it"), weights=140 * GIB, total=GEMMA_CARD, name="gemma")
+    assert placed.refusal == (
+        "gemma cannot run here: 140.0 GiB of bf16 weights, and vLLM keeps them all on the 31.8 GiB GPU — pick a "
+        "smaller quant.")
+
+
+def test_a_quantized_checkpoint_beyond_the_budget_names_no_dtype_and_no_4_bit_build():
+    placed = _vllm(_config("nvidia-qwen3.8-27b-nvfp4"), weights=40 * GIB, name="NVFP4-27B")
+    assert placed.refusal == (
+        "NVFP4-27B cannot run here: 40.0 GiB of weights, and vLLM keeps them all on the 31.8 GiB GPU — pick a "
+        "smaller quant.")
+
+
+def test_an_fp16_config_names_fp16_and_a_dtype_less_one_names_none():
+    base = {"num_hidden_layers": 8, "num_key_value_heads": 1, "head_dim": 16}
+    assert "58.3 GiB of fp16 weights" in _vllm({**base, "torch_dtype": "float16"}, weights=GEMMA_BF16, total=GEMMA_CARD).refusal
+    assert "58.3 GiB of weights" in _vllm(base, weights=GEMMA_BF16, total=GEMMA_CARD).refusal
 
 
 def test_weights_plus_the_margin_at_the_budget_is_refused_and_one_byte_under_prices():
