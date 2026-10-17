@@ -185,8 +185,7 @@ class TensorSplit:
 
 
 def read_split(model: str, header: Mapping[str, Any]) -> TensorSplit | None:
-    """The model's tensor table split by `classify` and `kv_layers`, or None when it is unreadable or
-    fails `cross_checked` (the caller then prices the whole file). Never raises."""
+    """The model's tensor table split by `classify` and `kv_layers`, or None when unreadable or failing `cross_checked`."""
     from localharness.provider import gguf_header as gh
 
     try:
@@ -207,9 +206,7 @@ def read_split(model: str, header: Mapping[str, Any]) -> TensorSplit | None:
 
 def kv_bytes_per_token(header: Mapping[str, Any], cache_type_k: str | None, cache_type_v: str | None,
                        split: TensorSplit | None = None) -> float | None:
-    """KV cache bytes per token: attention layers x KV heads x head dim x (bytes of K + bytes of V), plus
-    the indexer's K-only keys. The layers are the split's, else every block. An unset type is f16; an
-    unknown type, or any header value that is missing, gives None."""
+    """KV cache bytes per token over the split's attention layers (else every block); None for an unknown type or a missing header value."""
     k = KV_BYTES.get((cache_type_k or "f16").lower())
     v = KV_BYTES.get((cache_type_v or "f16").lower())
     n_layer = split.kv_main if split else _pos_int(header.get("block_count"))
@@ -375,8 +372,7 @@ def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name
                    free_bytes: int, meminfo: Mapping[str, int] | None, cache_type_k: str | None,
                    cache_type_v: str | None, share: float, autosense: Any, floor: int | None = None,
                    ngl_hand: bool = False, no_mmap: bool = False) -> Placement:
-    """Experts on the GPU first, in RAM when that misses the floor; the whole file on the GPU without a split.
-    A refusal is a field of the result, never an exception."""
+    """Experts on the GPU first, in RAM when that misses the floor; the whole file on the GPU without a split."""
     gpu = split.gpu + mmproj if split else weights
     experts = split.experts if split else 0
     margin = int(autosense.compute_margin_ratio * gpu)

@@ -106,9 +106,7 @@ def mtp_layers(header: Mapping[str, Any]) -> int | None:
 
 
 def draft_share(header: Mapping[str, Any], split: Any = None) -> float:
-    """The multiple of the main context's KV a drafting launch holds: the MTP draft context keeps
-    its own KV for nextn_predict_layers layers, so `1 + nextn / block_count`, or with a tensor split
-    `1 + kv_draft / kv_main`; 1.0 when the header declares no valid MTP layers."""
+    """The multiple of the main context's KV a drafting launch holds; 1.0 when the header declares no valid MTP layers."""
     n = mtp_layers(header)
     if n is not None and split is not None and split.kv_main > 0:
         return 1 + split.kv_draft / split.kv_main
