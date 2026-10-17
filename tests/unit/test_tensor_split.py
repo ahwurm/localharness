@@ -6,7 +6,7 @@ import pytest
 from localharness.config.models import AutosenseConfig, ManagedServerConfig
 from localharness.provider import autosense, gguf_header, lifecycle
 from localharness.provider.autosense import (FIT_KEYS, FreeMemory, TensorSplit, compute_fit, fit, fit_header,
-                                             kv_bytes_per_token, read_split, weights_bytes)
+                                             kv_bytes_per_token, place_llamacpp, read_split, weights_bytes)
 from localharness.provider.gguf_header import (TensorEntry, classify, cross_checked, indexer_layers, kv_layers,
                                                read_header, read_tensor_table)
 from localharness.provider.tuning import Tuned, draft_share, launch_pricing
@@ -123,7 +123,7 @@ def test_launch_pricing_hands_the_split_to_a_drafting_launch(splits):
 def test_the_fit_uses_the_split_price(splits):
     header, split = splits[SWIFT]
     ratios, free, weights = AutosenseConfig(), 32 * 2**30, 20 * 2**30
-    usable = free - weights - int(ratios.compute_margin_ratio * weights)
+    usable = free - weights - int(ratios.compute_margin_ratio * weights) - int(ratios.compute_reserve * 2**30)
     kw = dict(cache_type_k="q8_0", cache_type_v="q8_0", weights=weights)
     assert fit(header, free, ratios, split=split, **kw) == min(262_144, int(usable // 34_816))
     assert fit(header, free, ratios, **kw) < fit(header, free, ratios, split=split, **kw)
@@ -163,13 +163,41 @@ def _server(model, **over):
 MEMORY = FreeMemory(2**30, 2**31, "nvidia-smi")
 
 
-def test_a_hostile_table_fails_the_checks_and_is_priced_as_the_whole_file(tmp_path):
+def _whole_file(tmp_path, reserve=3.0):
     model = _hostile(tmp_path)
-    ratios = AutosenseConfig()
-    fi = compute_fit(_server(model), ratios, memory=MEMORY)
+    ratios = AutosenseConfig(compute_reserve=reserve)
+    w = weights_bytes(str(model))
+    free = FreeMemory(3 * 2**30 + w + int(ratios.compute_margin_ratio * w) + 10_000_000, 2**40, "nvidia-smi")
+    return model, ratios, w, free
+
+
+def test_a_hostile_table_fails_the_checks_and_is_priced_as_the_whole_file(tmp_path):
+    model, ratios, w, free = _whole_file(tmp_path)
+    fi = compute_fit(_server(model), ratios, memory=free, cache_type="q8_0")
+    kv = kv_bytes_per_token(fi.header, "q8_0", "q8_0")
     assert fi.split is None
-    whole = fit(fi.header, MEMORY.free_bytes, ratios, weights=weights_bytes(str(model)))
-    assert fi.fits == whole is not None
+    assert fi.fits == min(32_768, int((free.free_bytes - w - int(0.10 * w) - 3 * 2**30) // kv)) == 10_000_000 // 544
+
+
+def test_the_whole_file_window_is_the_launch_window_rounded_to_256(tmp_path):
+    model, ratios, w, free = _whole_file(tmp_path)
+    fi = compute_fit(_server(model), ratios, memory=free, cache_type="q8_0")
+    planned = place_llamacpp(None, fi.header, name="", weights=w, mmproj=0, free_bytes=free.free_bytes, meminfo=None,
+                             cache_type_k="q8_0", cache_type_v="q8_0", share=1.0, autosense=ratios)
+    assert planned.fits == fi.fits // 256 * 256 and 0 < fi.fits < 32_768
+
+
+def test_a_zero_reserve_gives_the_whole_file_price_back(tmp_path):
+    model, ratios, w, free = _whole_file(tmp_path, reserve=0.0)
+    fi = compute_fit(_server(model), ratios, memory=free, cache_type="q8_0")
+    assert fi.fits == min(32_768, (free.free_bytes - w - int(0.10 * w)) // 544)
+
+
+@pytest.mark.parametrize("reserve", [0.0, 3.0])
+def test_the_reserve_leaves_an_attached_window_alone(tmp_path, reserve):
+    model, ratios, w, free = _whole_file(tmp_path, reserve)
+    header = compute_fit(_server(model), ratios, memory=free).header
+    assert fit(header, 10_000, ratios, 100, weights=w) == 100 + 10_000 // 1024
 
 
 def test_compute_fit_carries_the_split_and_the_projector(tmp_path):
