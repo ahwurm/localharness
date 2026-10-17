@@ -43,6 +43,9 @@ UNIT = "llama-server.service"
 INODE = 5551
 PID = 1234
 URL = "http://127.0.0.1:8080/v1"
+FOREIGN = (f"{UNIT} serves qwen-27b and is yours, so the harness lists models but never stops it; "
+           f"systemctl --user stop {UNIT} hands the GPU to the harness "
+           "(localharness model --autostart on brings your choice up at login).")
 
 
 def gguf(path: Path) -> Path:
@@ -197,11 +200,12 @@ def test_the_block_is_the_primary_its_extras_the_second_line_then_the_peer(live)
     assert block_of(result) == [
         f"serving qwen-27b (llama.cpp) ← ~/models/gguf/A.gguf · binary: {live.bin} (from {UNIT})",
         "flags: -ngl 99",
+        FOREIGN,
         f"{UNIT} serves -c 65536; the harness launches -c 114688 once it stops "
         "· server.context: 65536 keeps it",
         "/model switches to B (llama.cpp) ← ~/models/gguf/B.gguf",
     ]
-    assert f"{UNIT} holds :8080; the harness attaches" not in " ".join(lines_of(result))
+    assert "holds :8080; the harness attaches" not in " ".join(lines_of(result))
 
 
 def test_the_import_asks_nothing_probes_nothing_and_launches_nothing(live):
@@ -230,7 +234,7 @@ def test_without_a_dash_c_the_second_line_is_the_attach_form_and_no_window_is_re
     _exited(result, 0)
     assert block_of(result) == [
         f"serving qwen-27b (llama.cpp) ← ~/models/gguf/A.gguf · binary: {live.bin} (from {UNIT})",
-        f"{UNIT} holds :8080; the harness attaches",
+        FOREIGN,
         "/model switches to B (llama.cpp) ← ~/models/gguf/B.gguf",
     ]
     assert "context" not in live.written()["server"]
@@ -243,6 +247,7 @@ def test_an_interactive_init_prints_the_same_block(live):
     unattended = block_of(_init(live.cfg, "--no-input"))
     for name in ("config.yaml", "overrides.yaml"):
         (live.cfg / name).unlink()
+    live.ledger().unlink()
     _terminal(live.monkeypatch)
 
     result = _init(live.cfg)

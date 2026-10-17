@@ -945,10 +945,11 @@ def _second_line(imp: init_import.Imported, holder: workspace.Holder, *, port: i
     """D-29, D-32: the one line about one fact, from the one builder that also says the attach
     sentence. With a `-c` it is the window line (what the incumbent runs with, what the harness
     launches, and the setting that keeps the incumbent's number); without one, the attach form while
-    the server runs and nothing once it is stopped. Returns (line, fit, trained): the triple's last
-    two members, for the ledger. `context` is never set from the import."""
+    a unitless server runs and nothing otherwise (a unit's own sentence is the caller's). Returns
+    (line, fit, trained): the triple's last two members, for the ledger. `context` is never set from
+    the import."""
     if imp.ctx is None:
-        if not running:
+        if not running or holder.unit:
             return None, None, None
         return workspace.incumbent_sentence(holder, port=port, form="attach"), None, None
     fit: int | None = None
@@ -985,10 +986,13 @@ def _records_from_import(config_path: Path, imp: init_import.Imported, holder: w
         binary_from = "on PATH"
     line, fit, trained = _second_line(imp, holder, port=port, running=running,
                                       autosense=_machine_autosense(config_path))
-    extras = (*imp.shown, line) if line else imp.shown
-    lines = preset_lines(spec, spec.served_name, peers, binary_from=binary_from, extras=extras)
     ledger = speed_stats.default_speed_stats_path(config_path)
     served = spec.served_name
+    foreign = (workspace.foreign_unit_sentence(holder, served=served, port=port)
+               if running and holder.unit and speed_stats.foreign_unit_changed(ledger, holder.unit, served)
+               else None)
+    extras = tuple(x for x in (*imp.shown, foreign, line) if x)
+    lines = preset_lines(spec, served, peers, binary_from=binary_from, extras=extras)
     deferred: list[Callable[[], None]] = []
     if imp.ctx is not None:  # the triple that was printed, so the first start does not print it again
         def _window() -> None:
@@ -1006,6 +1010,14 @@ def _records_from_import(config_path: Path, imp: init_import.Imported, holder: w
             pass  # a read-only config dir must not break init
 
     deferred.append(_weights)
+    if foreign:
+        def _foreign() -> None:
+            try:
+                speed_stats.record_foreign_unit(ledger, holder.unit, served)
+            except OSError:
+                pass  # a read-only config dir must not break init
+
+        deferred.append(_foreign)
     return InitRecords(
         server=spec, served=served, peers=peers, lines=lines,
         api_key=imp.api_key,

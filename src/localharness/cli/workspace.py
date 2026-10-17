@@ -701,6 +701,19 @@ def incumbent_sentence(holder: Holder, *, port: int, form: str, served: Optional
     return f"{visible_text(served)} is served by {subject}, not by the harness; stop it, then {now}"
 
 
+def foreign_unit_sentence(holder: Holder, *, served: str, port: int) -> str:
+    """What a unit the harness did not write means: models are listed, the unit is never stopped, and the
+    command that hands the GPU over is the person's to run."""
+    shown = visible_text(served)
+    if not holder.unit:
+        return (f"{incumbent_subject(holder, port=port)} serves {shown} and is yours, so the harness lists "
+                "models but never stops it; stopping it hands the GPU to the harness.")
+    verb = "disable --now" if getattr(holder.state, "unit_file_state", None) == "enabled" else "stop"
+    return (f"{visible_text(holder.unit)} serves {shown} and is yours, so the harness lists models but never "
+            f"stops it; systemctl --user {verb} {shlex.quote(visible_text(holder.unit))} hands the GPU to "
+            "the harness (localharness model --autostart on brings your choice up at login).")
+
+
 def uncovered(old: list[dict], new: list[dict]) -> list[dict]:
     """The entries of `new` not covered by `old`, counted as a multiset of whole entries: a second
     verbatim copy of an entry is uncovered too."""
