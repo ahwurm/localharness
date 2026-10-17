@@ -116,16 +116,18 @@ def _planned_argv(spec: Any, config_dir: Path, autosense: Any, decision: Any, *,
 
 
 def _exec_environment(captured: Mapping[str, str], home: str, inherited: Mapping[str, str], spec: Any,
-                      api_key: str | None, ini_home: str | None) -> dict[str, str]:
+                      api_key: str | None, ini_home: str | None, hf_offline: bool = False) -> dict[str, str]:
     """The environment the server is exec'd with (D-15): the pinned ``home``, then the values ``captured``
     from the verified unit file (`PATH`, `HF_HOME`, `LD_LIBRARY_PATH`), then exactly the `EXEC_INHERITED`
     names present in ``inherited``; `child_environment` adds the record's `env:`, the llama.cpp config home
-    and the key and scrubs the runtime's own namespace. Returns `child_environment`'s dict, or a copy of the
+    and the key, ``hf_offline`` sets `HF_HUB_OFFLINE=1` for a snapshot launch, and the runtime's own namespace
+    is scrubbed. Returns `child_environment`'s dict, or a copy of the
     base when it had nothing to add — never ``inherited`` itself, so nothing the manager set outside the
     eleven names reaches the server."""
     base = {"HOME": home, **captured, **{name: inherited[name] for name in EXEC_INHERITED if name in inherited}}
     env, _dropped = server.child_environment(
-        spec.runtime, base, record_env=getattr(spec, "env", None), api_key=api_key, xdg_config_home=ini_home)
+        spec.runtime, base, record_env=getattr(spec, "env", None), api_key=api_key, xdg_config_home=ini_home,
+        hf_offline=hf_offline)
     return env if env is not None else dict(base)
 
 
@@ -286,7 +288,8 @@ def serve(
     except TimeoutError as timed_out:
         _stop(EXIT_TRANSIENT, str(timed_out))
 
-    env = _exec_environment(captured, units.harness_home(), os.environ, spec, api_key, ini_home)
+    env = _exec_environment(captured, units.harness_home(), os.environ, spec, api_key, ini_home,
+                            hf_offline=plan is not None and plan.offline)
     _say(LAUNCHING_LINE.format(name=visible_text(record.name), shape=plan.shape if plan is not None else "full"))
     for stream in (sys.stdout, sys.stderr):
         try:

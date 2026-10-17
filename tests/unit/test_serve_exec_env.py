@@ -116,8 +116,8 @@ def test_an_unkeyed_vllm_binary_record_gets_a_copy_of_the_base_not_the_environme
     seen: list = []
     real = serve_cmd._exec_environment
 
-    def spy(captured, home, inherited, spec, api_key, ini_home):
-        out = real(captured, home, inherited, spec, api_key, ini_home)
+    def spy(captured, home, inherited, spec, api_key, ini_home, hf_offline=False):
+        out = real(captured, home, inherited, spec, api_key, ini_home, hf_offline=hf_offline)
         seen.append((out, inherited, spec.runtime, ini_home))
         return out
 
