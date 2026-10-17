@@ -376,6 +376,55 @@ def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name
     return decided(_window(free_bytes - gpu - margin, kv, trained), "experts in RAM", experts)
 
 
+VLLM_REFUSAL = "{name} cannot run here: {weights} GiB of weights, and vLLM keeps them all on the {total} GiB GPU."
+_VLLM_GMU = 0.90
+
+
+def _config_value(config: Mapping[str, Any], key: str) -> Any:
+    """`key` from `text_config` when it holds one, else from the top level."""
+    text = config.get("text_config")
+    return text[key] if isinstance(text, Mapping) and key in text else config.get(key)
+
+
+def place_vllm(model_config: Mapping[str, Any], *, name: str, weights: int, total_bytes: int,
+               extra_args: Sequence[str], autosense: Any, floor: int | None = None) -> Placement:
+    """A vLLM checkpoint's window from its parsed config.json, the stat-only weight sum and the GPU total."""
+    raw = _flag_value(extra_args, ("--gpu-memory-utilization",))
+    try:
+        gmu = float(raw) if raw is not None else _VLLM_GMU
+    except ValueError:
+        gmu = _VLLM_GMU
+    gmu = gmu if 0 < gmu <= 1 else _VLLM_GMU
+    budget = int(gmu * total_bytes)
+    margin = int(autosense.compute_margin_ratio * weights)
+    label = "".join(c for c in name if c.isprintable())
+
+    def made(fits: int, kv: int | None, refusal: str | None = None) -> Placement:
+        return Placement(fits or None, None if refusal or not kv else "vllm", weights, 0, 0, kv, total_bytes,
+                         budget, None, refusal)
+
+    if weights + margin >= budget:
+        return made(0, None, VLLM_REFUSAL.format(name=label, weights=gib(weights), total=gib(total_bytes)))
+    types = _config_value(model_config, "layer_types")
+    layers = sum(t == "full_attention" for t in types) if isinstance(types, list) else 0
+    layers = layers or _pos_int(_config_value(model_config, "num_hidden_layers"))
+    heads = _pos_int(_config_value(model_config, "num_key_value_heads"))
+    dim = _pos_int(_config_value(model_config, "head_dim"))
+    if dim is None:
+        hidden, attn = (_pos_int(_config_value(model_config, k)) for k in ("hidden_size", "num_attention_heads"))
+        dim = hidden // attn if hidden and attn else None
+    if not (layers and heads and dim):
+        return made(0, None)
+    dtype = (_flag_value(extra_args, ("--kv-cache-dtype",)) or "").lower()
+    kv = layers * 2 * heads * dim * (1 if dtype.startswith("fp8") else 2)
+    trained = _pos_int(_config_value(model_config, "max_position_embeddings"))
+    window = max(0, (budget - weights - margin) // kv) // 256 * 256
+    window = min(trained, window) if trained else window
+    if floor and window < floor:
+        return made(window, kv, FLOOR_REFUSAL.format(name=label, window=window_phrase(window), floor=floor))
+    return made(window, kv)
+
+
 def has_ctx_arg(extra_args: Sequence[str]) -> bool:
     """Whether `extra_args` already carry a context size (`-c`, `--ctx-size`, `--ctx-size=N`)."""
     return any(t in ("-c", "--ctx-size") or t.startswith("--ctx-size=") for t in extra_args)
