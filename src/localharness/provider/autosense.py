@@ -343,8 +343,8 @@ def fit(header: Mapping[str, Any], free_bytes: int | None, ratios: Any,
         runtime: str = "llamacpp", draft_share: float = 1.0, split: TensorSplit | None = None) -> int | None:
     """The largest window the free memory holds, capped at the trained window; None when it cannot
     be known or is not above zero. Beside a running server (`attached_served`) the window already
-    served is counted as served plus what the free memory adds; otherwise the weights and a
-    `compute_margin_ratio` of them come off the free bytes first.
+    served is counted as served plus what the free memory adds; otherwise the weights, a
+    `compute_margin_ratio` of them and the `compute_reserve` come off the free bytes first.
 
     `draft_share` multiplies the KV bytes per token (1.0, the default, with drafting off)."""
     kv = kv_bytes_per_token(header, cache_type_k, cache_type_v, split)
@@ -359,7 +359,7 @@ def fit(header: Mapping[str, Any], free_bytes: int | None, ratios: Any,
     else:
         if weights is None:
             return None
-        usable = free_bytes - weights - int(ratios.compute_margin_ratio * weights)
+        usable = free_bytes - weights - int(ratios.compute_margin_ratio * weights) - int(ratios.compute_reserve * 2**30)
         if usable <= 0:
             return None
         window = int(usable // kv)
