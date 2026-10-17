@@ -71,6 +71,9 @@ def _fitted(world, index: int | None = None) -> int:
     return plan.full_fit
 
 
+UNREAD = " · weights 18.0 GiB (tensor table not read) · prompt cache 24,576 MiB · RAM reserve 9.6 GiB"
+
+
 def _files(root: Path) -> dict[str, bytes]:
     return {str(p): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
@@ -82,8 +85,8 @@ def test_the_swift_primary_and_a_peer_get_a_row_each_and_an_attach_only_peer_get
     result = _doctor(world)
 
     assert _rows(result) == [
-        f"Tuning: swift — kv q8_0 · mtp (1 layer) · -c {_fitted(world)} (fit)",
-        f"Tuning: flash-next — kv q8_0 · -c {_fitted(world, 0)} (fit)"]
+        f"Tuning: swift — kv q8_0 · mtp (1 layer) · -c {_fitted(world)} (fit){UNREAD}",
+        f"Tuning: flash-next — kv q8_0 · -c {_fitted(world, 0)} (fit){UNREAD}"]
     out = result.output
     assert out.index("LLM endpoint reachable") < out.index("Tuning: swift") < out.index("Tuning: flash-next")
     assert out.index("Tuning: flash-next") < out.index("Config directory writable")
@@ -117,7 +120,7 @@ def test_a_record_with_nothing_derived_says_so_and_keeps_its_window(world):
     world.edit_config(lambda d: d.update(autosense={"kv_cache_type": "f16", "draft_mtp": False}))
     world.rerecord()
 
-    assert _rows(_doctor(world)) == [f"Tuning: swift — nothing derived · -c {_fitted(world)} (fit)"]
+    assert _rows(_doctor(world)) == [f"Tuning: swift — nothing derived · -c {_fitted(world)} (fit){UNREAD}"]
 
 
 def test_a_record_without_a_binary_names_the_field_to_set(world):
@@ -156,7 +159,7 @@ def test_the_window_part_says_where_the_window_comes_from(world, change, window)
     world.edit_config(lambda d: d["server"].update(change))
     world.rerecord()
 
-    assert _rows(_doctor(world)) == [f"Tuning: swift — kv q8_0 · mtp (1 layer) · {window}"]
+    assert _rows(_doctor(world)) == [f"Tuning: swift — kv q8_0 · mtp (1 layer) · {window}{UNREAD}"]
 
 
 def test_an_unknown_free_memory_says_the_window_was_not_computed(world, monkeypatch):
@@ -214,7 +217,7 @@ def _flash_machine(world, monkeypatch, *, available=52.9):
     model = write_recorded(world.tmp, load_fixture("flash-next-iq3-xxs"))[0]
     mmproj = write_sparse(world.tmp / "mmproj.gguf", 907_543_520)
     peer = llama_peer("flash-next", 8082)
-    peer["lifecycle"].update(model=str(model), mmproj=str(mmproj))
+    peer["lifecycle"].update(model=str(model), mmproj=str(mmproj), served_name="Flash-Next")
     world.edit_config(lambda d: (d["extra_endpoints"].append(peer), d.update(autosense={"draft_mtp": False})))
     world.rerecord()
     monkeypatch.setattr(autosense, "free_memory", lambda ratios: autosense.FreeMemory(int(30.2 * GIB), int(31.8 * GIB), "nvidia-smi"))
@@ -233,7 +236,7 @@ def test_flash_next_without_the_ram_for_its_experts_shows_the_refusal_sentence(w
     _flash_machine(world, monkeypatch, available=31.4)
 
     assert _rows(_doctor(world))[1] == (
-        "Tuning: flash-next — flash-next cannot run here: its experts need 40.0 GiB of RAM and only 22.2 GiB is "
+        "Tuning: flash-next — Flash-Next cannot run here: its experts need 40.0 GiB of RAM and only 22.2 GiB is "
         "free beside the system's reserve — close something that holds RAM, or pick a smaller quant.")
 
 
@@ -247,13 +250,12 @@ def test_a_dense_27b_with_a_readable_table_has_no_experts_clause(world, monkeypa
     row = _rows(_doctor(world))[0]
 
     assert re.search(r"\(fit\) · dense \d+\.\d GiB · token tables \d+\.\d GiB read through mmap · "
-                     r"prompt cache [\d,]+ MiB · RAM reserve 9\.0 GiB$", row)
+                     r"prompt cache 24,576 MiB · RAM reserve 9\.6 GiB$", row)
     assert "experts" not in row
 
 
 def test_a_model_whose_table_cannot_be_read_shows_its_file_size(world):
-    assert _rows(_doctor(world))[0].endswith(
-        "(fit) · weights 18.0 GiB (tensor table not read) · prompt cache 3,072 MiB · RAM reserve 9.0 GiB")
+    assert _rows(_doctor(world))[0].endswith(f"(fit){UNREAD}")
 
 
 def test_a_vllm_checkpoint_shows_its_weights_and_the_vllm_budget(tmp_path, monkeypatch, mock_httpx):
