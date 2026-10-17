@@ -1129,7 +1129,7 @@ def _setup_entries(harness: Any, listed: Any, taken: set[str], *, config_dir: An
             runtime = "llamacpp"
         try:
             spec = ManagedServerConfig(runtime="vllm", launch="binary", binary=listed.vllm[0], model=name, port=port, gpu=True) \
-                if runtime == "vllm" else ManagedServerConfig(
+                if RUNTIMES[runtime].checkpoint else ManagedServerConfig(
                     runtime="llamacpp", model=str(s.path), mmproj=str(s.model.mmproj) if s.model.mmproj else None,
                     served_name=name, port=port, gpu=True, binary=llama)
             record = ServingRecord(name, name, f"http://127.0.0.1:{port}/v1", runtime, None, spec, f"setup.{name}")
