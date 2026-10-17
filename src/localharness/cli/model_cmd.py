@@ -332,9 +332,10 @@ def _swap_floor(machine_trust: MachineTrust, config_dir: Path) -> int | None:
         agent = ConfigLoader(
             config_dir=config_dir, local_config_dir=None, machine_withheld=machine_trust.withheld
         ).load_agent("orchestrator")
-        return asyncio.run(start_serving.launch_floor(agent, config_dir=config_dir))
+        live = asyncio.run(start_serving.launch_floor(agent))
     except Exception:  # noqa: BLE001 — no loadable root: the cache alone
-        return lifecycle.cached_floor(config_dir)
+        live = None
+    return lifecycle.raised_floor(live, lifecycle.cached_floor(config_dir))
 
 
 def _swap_now(

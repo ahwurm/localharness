@@ -21,7 +21,7 @@ UNIT_LINE = ("test-model on llm.service serves a 4,096-token window and the harn
 
 
 def _stub_floor(monkeypatch, floor, unit="llm.service"):
-    async def fake_floor(agent_config, *, config_dir):
+    async def fake_floor(agent_config):
         return floor
     monkeypatch.setattr(start_serving, "launch_floor", fake_floor)
     monkeypatch.setattr(start_serving, "served_unit", lambda base_url: unit)
@@ -159,19 +159,14 @@ async def test_a_priced_window_under_the_floor_is_refused_before_anything_starts
     assert world.err_lines == [line]
 
 
-async def _live_floor(tmp_path, cfg=None):
-    return await start_serving.launch_floor(cfg or AgentConfig(name="orchestrator", role="r", model="inherit"),
-                                            config_dir=tmp_path)
-
-
-async def test_the_cached_floor_raises_the_live_one_and_never_lowers_it(tmp_path):
-    live = await _live_floor(tmp_path)
+async def test_the_launch_floor_is_the_live_figure_and_ignores_the_cache(tmp_path):
+    cfg = AgentConfig(name="orchestrator", role="r", model="inherit")
+    live = await start_serving.launch_floor(cfg)
 
     lifecycle.record_floor(tmp_path, live + 5_000, {})
-    assert await _live_floor(tmp_path) == live + 5_000
 
-    lifecycle.record_floor(tmp_path, 1_024, {})
-    assert await _live_floor(tmp_path) == live
+    assert await start_serving.launch_floor(cfg) == live
+    assert lifecycle.raised_floor(live, lifecycle.cached_floor(tmp_path)) == live + 5_000
 
 
 def _capture_agent(monkeypatch):
@@ -206,6 +201,18 @@ async def test_the_full_floor_is_written_once_after_the_registry(tmp_path, monke
     assert root == agents[0].floor() and root > 0
     assert set(roles) == {"explore", "web-researcher", "search-verifier"} and all(roles.values())
     assert lifecycle.cached_floor(config_dir) == max(1_024, root)
+
+
+async def test_a_stale_cached_floor_does_not_refuse_an_attach_and_is_rewritten(tmp_path, monkeypatch):
+    _stub_nonvllm_start(tmp_path, monkeypatch, served=65_536, probe_window=None)
+    _stub_floor(monkeypatch, 256)
+    lifecycle.record_floor(tmp_path, 100_000, {})
+    ran = _spy_repl(monkeypatch)
+
+    await _start_async(None, False, False, str(tmp_path))
+
+    assert ran == [1]
+    assert lifecycle.cached_floor(tmp_path) < 65_536
 
 
 async def test_a_window_between_the_pre_launch_and_the_full_floor_exits_1_before_any_turn(tmp_path, monkeypatch):

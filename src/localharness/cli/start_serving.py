@@ -256,9 +256,8 @@ def foreign_incumbent_line(
         holder, port=port, form="imperative", served=incumbent.served, target=target.name)
 
 
-async def launch_floor(agent_config: Any, *, config_dir: Path) -> int | None:
-    """The root's window floor before the registry exists: base prompt plus the built-in tool schemas,
-    counted offline, raised to the cached full floor."""
+async def launch_floor(agent_config: Any) -> int | None:
+    """The root's window floor before the registry exists: base prompt plus the built-in tool schemas, counted offline."""
     from localharness.agent.loop import base_system_prompt
     from localharness.tools.builtin import register_builtin_tools
     from localharness.tools.capabilities import apply_root_capability_floor
@@ -274,8 +273,7 @@ async def launch_floor(agent_config: Any, *, config_dir: Path) -> int | None:
     except Exception:  # noqa: BLE001 — the loop's own count degrades the same way: no schemas
         schemas = []
     prompt = base_system_prompt(agent_config, tool_call_mode="native", guardrails="")
-    live = harness_floor(fixed_tokens(TokenCounter(offline=True), prompt, schemas), agent_config.max_tokens)
-    return lifecycle.raised_floor(live, lifecycle.cached_floor(config_dir))
+    return harness_floor(fixed_tokens(TokenCounter(offline=True), prompt, schemas), agent_config.max_tokens)
 
 
 def served_unit(base_url: str) -> str | None:
