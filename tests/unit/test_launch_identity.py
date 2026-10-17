@@ -41,7 +41,7 @@ def test_a_symlinked_llamacpp_binary_matches_under_both_names(tmp_path):
     link.parent.mkdir()
     link.symlink_to(real)
     got = identity(llama(binary=str(link)))
-    assert got is not None and got.exe_names == frozenset({"ls-link", "llama-server-cuda"})
+    assert got is not None and got.exe_names == frozenset({"ls-link", "llama-server-cuda", "llama-server"})
 
 
 def test_llamacpp_without_a_binary_expects_llama_server():
@@ -170,6 +170,21 @@ def test_a_launch_for_one_alias_is_not_a_launch_for_another(fake_proc):  # noqa:
     assert qwen_id is not None and flash_id is not None
     assert procfs.identity_mismatch(record, qwen_id) is None
     assert procfs.identity_mismatch(record, flash_id) == "has no flash-next on its command line"
+
+
+def test_a_wrapper_binary_whose_process_execs_llama_server_verifies(fake_proc):  # noqa: F811
+    spec = llama(binary="/x/die-once-llama-server", served_name="qwen")
+    expect = lifecycle.record_identity(spec)
+    assert expect is not None and expect.exe_names == frozenset({"die-once-llama-server", "llama-server"})
+    assert procfs.identity_mismatch(_launched(fake_proc, spec), expect) is None
+
+
+def test_a_wrapper_binary_that_execs_another_server_does_not_verify(fake_proc):  # noqa: F811
+    spec = llama(binary="/x/die-once-llama-server", served_name="qwen")
+    fake_proc.process(4242, argv=("/x/other-server", "-a", "qwen", "--port", "8080"), exe="/x/other-server")
+    record = procfs.read_process(4242)
+    assert isinstance(record, procfs.ProcRecord)
+    assert "runs other-server" in procfs.identity_mismatch(record, lifecycle.record_identity(spec))
 
 
 @pytest.mark.parametrize("method", ["activate", "stop", "liveness", "launch_identity"])

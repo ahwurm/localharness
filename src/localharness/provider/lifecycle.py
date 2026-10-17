@@ -665,9 +665,9 @@ def confirm_launch(
 
     From a `marker` (`start`'s attach and the unit's wait, later phases): the ledger is written only
     when the marker is bound to the run that is serving, `marker.invocation` equal to the unit's live
-    `InvocationID`, the served window equal to the marker's `planned_context`, the unit's `NRestarts`
-    at least 1, `cause` `death`, and the marker's record and binary this record's, with the verified
-    live `process` given. `dropped` is `draft-mtp` only when the record's own `derive` (over the
+    `InvocationID`, the live argv's `-c` equal to the marker's `planned_context` (llama.cpp rounds the
+    served window up), the unit's `NRestarts` at least 1, `cause` `death`, and the marker's record and
+    binary this record's, with the verified live `process` given. `dropped` is `draft-mtp` only when the record's own `derive` (over the
     caller's `header` and `autosense`, never sensed here) would emit a spec type and the live argv has
     none; the marker's own `dropped` is never read. `full_fit` is clamped to `context_length` (default
     the header's), and with no positive context length known nothing is recorded; `free_bytes` is
@@ -696,7 +696,6 @@ def confirm_launch(
     bound = (unit is not None and marker.invocation is not None
              and marker.invocation == unit.invocation_id)
     try:
-        served = live.window.served if live is not None and live.window is not None else None
         known = context_length if context_length is not None else (header or {}).get("context_length")
         # A planted full_fit is only ever recorded clamped (D-18): with no positive context length to
         # clamp it to, nothing is recorded (WR-02).
@@ -707,7 +706,8 @@ def confirm_launch(
         if (bound and unit.n_restarts >= 1 and marker.cause == "death" and process is not None
                 and spec is not None and autosense is not None
                 and marker.record == record_key and marker.binary == str(spec.binary)
-                and _plain_int(served) and served == marker.planned_context
+                and _plain_int(marker.planned_context)
+                and _auto._flag_value(process.argv, ("-c", "--ctx-size")) == str(marker.planned_context)
                 and _plain_int(full_fit) and full_fit > 0):
             derived = tuning.derive(spec, header or {}, autosense)
             hand_set = any(t == "--spec-type" or t.startswith("--spec-type=") for t in process.argv)
@@ -894,14 +894,10 @@ class SpawnedProcessStrategy:
         return Liveness(alive=pid is not None, detail=f"pid {pid}" if pid is not None else "no live pidfile")
 
     def launch_identity(self, spec: ManagedServerConfig) -> LaunchIdentity | None:
-        """What a `llama-server` launch of `spec` looks like in `/proc` (D-25): the binary's own
-        basename and its resolved target's (a symlinked binary runs under the target's name), the
-        record's port from `--port` or `LLAMA_ARG_PORT`, no extra argv token."""
+        """The `/proc` shape of a `llama-server` launch of `spec`: exe names `llama-server` (a wrapper execs it), the binary's basename and its realpath's; the port from `--port` or `LLAMA_ARG_PORT`; no extra token."""
         binary = getattr(spec, "binary", None)
-        if binary is None:
-            names = {procfs.LLAMA_EXE}
-        else:
-            names = {os.path.basename(str(binary)), os.path.basename(os.path.realpath(str(binary)))}
+        names = {procfs.LLAMA_EXE} | ({os.path.basename(str(binary)), os.path.basename(os.path.realpath(str(binary)))}
+                                      if binary is not None else set())
         return LaunchIdentity(frozenset(names), spec.port, (), "LLAMA_ARG_PORT")
 
 

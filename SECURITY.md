@@ -1441,8 +1441,9 @@ session leader of its own, and for a launch through the autostart unit the unit'
 remove <pidfile>`. Every stop passes the identity it expects; a stop without one signals nothing.
 **What this does NOT cover:** a server of yours started with `setsid` on the record's port with
 the record's own binary, named by a pidfile the agent planted, passes every one of those tests and
-would be stopped by an explicit swap. A binary that is a wrapper script fails the executable-name
-test and is named instead of stopped.
+would be stopped by an explicit swap. A llama.cpp binary that is a wrapper script passes the
+executable-name test once it execs `llama-server`; one that execs a differently named server fails it
+and is named instead of stopped.
 
 **Logs and tails are redacted where they leave the harness.** The tail of a server's log that an
 error quotes, on the terminal, in a swap's progress lines and in the REPL, is scrubbed at that
