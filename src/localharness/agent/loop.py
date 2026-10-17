@@ -38,7 +38,7 @@ from localharness.core.types import (
     provider_messages,
 )
 from localharness.core.content import redact_images, text_part
-from localharness.agent.context import APPROX_CHARS_PER_TOKEN, response_reserve
+from localharness.agent.context import APPROX_CHARS_PER_TOKEN, fixed_tokens, harness_floor, response_reserve
 from localharness.agent.context import ActiveReferenceError, ActiveReferenceOverflow
 from localharness.agent.task_context import TaskContext
 from localharness.agent.task_record import TaskState
@@ -1422,6 +1422,19 @@ class AgentLoop:
                 log.warning("GUARDRAILS.md at %s could not be read (%r) — no guardrails while it "
                             "stays unreadable", path, exc)
             return ""
+
+    def fixed_tokens(self) -> int:
+        """The role's fixed part: its turn-invariant system prompt plus its tool schemas."""
+        try:
+            schemas = list(self._tools.get_tools_for_agent(
+                self._config.name, self._config.division or "", self._config.tools).values())
+        except Exception:
+            schemas = []
+        prompt = _assemble_role(self._config)
+        return fixed_tokens(self._ctx._token_counter, prompt, schemas)
+
+    def floor(self) -> int:
+        return harness_floor(self.fixed_tokens(), self._ctx.max_response_tokens)
 
     def _resolve_compact_md_path(self) -> Path | None:
         """This loop's compact.md, or None when it has none.
