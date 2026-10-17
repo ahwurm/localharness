@@ -537,7 +537,7 @@ def builtin_base_config(name: str, children_budget: ChildrenBudgetConfig | None 
 
 def role_floor(cfg: AgentConfig, schemas: list, *, counter: Any, llm: Any,
                max_response_tokens: int | None) -> int:
-    """The smallest window a role's fixed part (system prompt without guardrails, plus tool schemas) fits."""
+    """The smallest window from which a role's fixed part (system prompt without guardrails, plus tool schemas) fits at every larger window."""
     from localharness.agent.context import fixed_tokens, harness_floor
     from localharness.agent.loop import base_system_prompt
     mode = getattr(getattr(llm, "config", None), "tool_call_mode", "native")
