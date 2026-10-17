@@ -20,6 +20,7 @@ from localharness.config.loader import ConfigLoader
 from localharness.config.migrate import BACKUP_PREFIX, BACKUP_STAMP_FORMAT
 from localharness.config.models import HarnessConfig
 from localharness.config.paths import resolve_config_dir
+from localharness.provider.runtimes import RUNTIMES
 
 console = Console()
 
@@ -104,7 +105,7 @@ def _doctor_fit(
     falls back to the header's `context_length` when the probe did not report it. Reads one header
     and the memory probe; writes nothing (doctor never records the ledger, D-09, D-26)."""
     server = harness.server
-    if server is None or server.runtime != "llamacpp" or not server.model:
+    if server is None or not RUNTIMES[server.runtime].gguf or not server.model:
         return None, trained
     from localharness.provider import autosense as _auto
 
@@ -245,7 +246,7 @@ def _print_exposure(harness: HarnessConfig) -> None:
                  for i, ep in enumerate(harness.extra_endpoints)]
     for label, setting, spec, whose, key_path, key, peer in launched:
         # Ollama and LM Studio argv hard-code loopback; only these two honour bind_all/require_api_key.
-        if spec is None or spec.runtime not in ("vllm", "llamacpp"):
+        if spec is None or RUNTIMES[spec.runtime].key_env is None:
             continue
         keyed = getattr(spec, "require_api_key", False) is True and (
             sends_key(key) or _is_regular_file(getattr(spec, "api_key_file", None)))
@@ -442,7 +443,7 @@ def _tuning_plan(spec, config_dir: Path, autosense, *, keyed: bool, peer: str | 
     """The `LaunchPlan` the next launch of ``spec`` would run, sensed and planned and nothing prepared; None for a runtime that plans none or a refused launch."""
     from localharness.provider import lifecycle, server
 
-    if spec.runtime not in ("llamacpp", "vllm"):
+    if not getattr(RUNTIMES[spec.runtime].strategy(spec), "plans_launch", False):
         return None
     decision = server.launch_decision(spec, keyed, peer=peer)
     if decision.refusal is not None:
@@ -475,7 +476,7 @@ def _tuning_rows(cfg_path: Path, harness: HarnessConfig) -> list[str]:
     rows = []
     for record in model_ops.serving_records(harness):
         spec = record.spec
-        if spec is None or spec.runtime not in ("llamacpp", "vllm"):
+        if spec is None or not getattr(RUNTIMES[spec.runtime].strategy(spec), "plans_launch", False):
             continue
         head = f"Tuning: {visible_text(record.name)} — "
         if model_ops.record_withheld(view, record):
@@ -953,7 +954,7 @@ def doctor(
                 # gives us. Advisory only (never fails) — a Vulkan build still works.
                 if (
                     harness.server is not None
-                    and harness.server.runtime == "llamacpp"
+                    and RUNTIMES[harness.server.runtime].path_binary
                     and harness.server.binary
                 ):
                     backends = _llama_server_linked_backends(harness.server.binary)

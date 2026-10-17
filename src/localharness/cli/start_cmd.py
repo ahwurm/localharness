@@ -12,6 +12,7 @@ import socket
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
@@ -38,6 +39,7 @@ from localharness.core.private_files import touch_private
 from localharness.core.which import which_outside_cwd
 from localharness.plugins.channels import (OWN_COMMAND, accepted_channels, channel_names,
                                            plugin_channel_names)
+from localharness.provider.runtimes import RUNTIMES, row_of
 
 if TYPE_CHECKING:
     from localharness.provider.lifecycle import ServerRecovery
@@ -45,6 +47,11 @@ if TYPE_CHECKING:
 console = Console()
 err_console = Console(stderr=True)
 log = logging.getLogger(__name__)
+
+def _gguf(runtime: object) -> bool:
+    row = row_of(runtime)
+    return row is not None and row.gguf
+
 
 UNKNOWN_CHANNEL_ERROR = "unknown channel {given!r}; choose one of: {known}"
 
@@ -313,7 +320,7 @@ def _boot_marker_present(global_dir: Path) -> bool:
 def _record_fit_header(spec: Any) -> Any:
     """The fit-relevant fields of ``spec``'s GGUF header, or None when it has no readable one: the
     context length a boot retry's recorded fit is clamped to."""
-    if getattr(spec, "runtime", None) != "llamacpp" or not getattr(spec, "model", None):
+    if not _gguf(getattr(spec, "runtime", None)) or not getattr(spec, "model", None):
         return None
     try:
         from localharness.agent.gguf_header import read_header
@@ -346,7 +353,7 @@ def _managed_server_running(strategy: Any, srv: Any, global_dir: Path) -> bool:
     port) is what tells them apart."""
     if not strategy.liveness(srv, global_dir).alive:
         return False
-    if getattr(strategy, "launch_identity", None) is None or srv.runtime == "lmstudio":
+    if getattr(strategy, "launch_identity", None) is None:
         return True
     from localharness.provider import lifecycle, procfs
     identity = lifecycle.record_identity(srv)
@@ -489,7 +496,7 @@ def _write_path_binary(global_dir: Path, rec: dict | None, path_binary: str | No
         return None
     cfg, over = raw_settings(global_dir)
     merged = _merged_server(cfg, over)
-    if merged.get("runtime") != "llamacpp" or merged.get("binary"):
+    if not getattr(row_of(merged.get("runtime")), "path_binary", None) or merged.get("binary"):
         return None
     if trust.offer_was_declined(trust.decline_key("<binary>", path_binary)):
         return None
@@ -557,7 +564,7 @@ def _write_config_ini(global_dir: Path, rec: dict | None) -> tuple[str | None, s
         return None, None
     cfg, over = raw_settings(global_dir)
     merged = _merged_server(cfg, over)
-    if merged.get("runtime") != "llamacpp":
+    if "config_ini" not in getattr(row_of(merged.get("runtime")), "record_fields", ()):
         return None, None
     read = init_import.read_config_ini(init_import.user_config_ini())
     if read.line:
@@ -679,8 +686,8 @@ def _convert_extra_args_host(global_dir: Path, rec: dict | None, *, can_ask: boo
 
     cfg, over = raw_settings(global_dir)
     merged = _merged_server(cfg, over)
-    runtime = merged.get("runtime", "vllm")
-    if not (runtime == "llamacpp" or (runtime == "vllm" and merged.get("launch", "binary") == "binary")):
+    row = row_of(merged.get("runtime", "vllm"))
+    if row is None or not row.unit_servable(SimpleNamespace(launch=merged.get("launch", "binary"))):
         return {}, None, None
     winner_file, winner = ("overrides.yaml", over) if "extra_args" in _server_section(over) \
         else ("config.yaml", cfg)
@@ -758,7 +765,7 @@ def _sensed_launching(global_dir: Path, rec: dict | None) -> bool:
         return True
     cfg, over = raw_settings(global_dir)
     merged = _merged_server(cfg, over)
-    if merged.get("runtime") != "llamacpp" or trust.coerce_bool(merged.get("bind_all")) is not True:
+    if not _gguf(merged.get("runtime")) or trust.coerce_bool(merged.get("bind_all")) is not True:
         return True
     posture = next((e for e in trust._posture_entries({"config.yaml": cfg, "overrides.yaml": over})
                     if e["name"] == "server.bind_all"), None)
@@ -877,7 +884,7 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
     keyed = bool(launch_key)
     decision = managed_server.launch_decision(srv, keyed, peer=peer)
     if decision.refusal is not None:
-        found = f" (PATH has {path_binary})" if path_binary and srv.runtime == "llamacpp" else ""
+        found = f" (PATH has {path_binary})" if path_binary and RUNTIMES[srv.runtime].path_binary else ""
         return decision.refusal + found
     exposed, posture = managed_server.effective_posture(srv, keyed=keyed, decision=decision)
     if notes is not None and notes.suffix and exposed:
@@ -1020,7 +1027,7 @@ def _posture_lines(machine_trust: MachineTrust,
             if (file, kind, name) in quiet:
                 declined = peer is not None and trust.offer_was_declined(
                     trust.decline_key("<peer>", name, shown))
-                if key == "bind_all" and runtime == "llamacpp" and value == "true" and not declined:
+                if key == "bind_all" and _gguf(runtime) and value == "true" and not declined:
                     lines.append(_BIND_ALL_DEFERRED.format(subject=subject))
             elif key == "bind_all" and value == "true":
                 lines.append(_BIND_ALL_ASKS.format(subject=subject))
@@ -1163,7 +1170,7 @@ def _attach_window_report(harness: Any, provider_type: str, served: int | None, 
     fits = free = total = weights = None
     undo: str | None = None
     mode = "not-computed"
-    if srv is not None and srv.runtime == "llamacpp" and srv.model:
+    if srv is not None and _gguf(srv.runtime) and srv.model:
         fi = _auto.compute_fit(srv, harness.autosense, attached_served=served, as_launched=True)
         fits, weights = fi.fits, fi.weights
         if fi.memory is not None:
@@ -2144,7 +2151,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         launch_decision = managed_server.launch_decision(_serving_spec, keyed, peer=peer_name)
         if launch_decision.refusal is not None:
             found = (f" (PATH has {path_llama_server})"
-                     if path_llama_server and _serving_spec.runtime == "llamacpp" else "")
+                     if path_llama_server and RUNTIMES[_serving_spec.runtime].path_binary else "")
             err_console.print(launch_decision.refusal + found, markup=False, soft_wrap=True)
             _say_install_line(launch_decision.refusal, path_llama_server)
             await _stop_start(1)
@@ -2392,7 +2399,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # Was the serving process launched by the harness (a live pidfile)? Only the undo sentence of
         # an attach report asks (D-38), and only a llama.cpp record has one; a failure reads "no".
         _harness_launched = False
-        if _serving_spec is not None and _serving_spec.runtime == "llamacpp":
+        if _serving_spec is not None and _gguf(_serving_spec.runtime):
             try:
                 from localharness.provider.lifecycle import strategy_for
                 _harness_launched = _managed_server_running(
@@ -2452,7 +2459,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             if _names:
                 _pending_warnings.append(
                     f"launch environment dropped {', '.join(_names)}"
-                    + (" — set server.env: for what llama-server should see" if _runtime == "llamacpp" else ""))
+                    + (" — set server.env: for what llama-server should see" if _gguf(_runtime) else ""))
             try:
                 record_dropped_env(_ledger, _runtime, _names)
             except OSError:
