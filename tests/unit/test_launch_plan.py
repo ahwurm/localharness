@@ -52,8 +52,8 @@ def box(monkeypatch):
     return world
 
 
-def _fit(*args, **kw) -> int:
-    return fit(*args, **kw) // 256 * 256
+def _fit(header, free_bytes, ratios, **kw) -> int:
+    return fit(header, free_bytes - int(ratios.compute_reserve * GIB), ratios, **kw) // 256 * 256
 
 
 def _expected_fit(spec: ManagedServerConfig, box: Box, *, share: float) -> int | None:

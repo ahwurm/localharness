@@ -31,7 +31,8 @@ BASE = "http://127.0.0.1:8080/v1"
 
 HEADER_A = {"general.architecture": "qwen3", "qwen3.block_count": 64, "qwen3.attention.head_count_kv": 8,
             "qwen3.attention.key_length": 128, "qwen3.context_length": 262144}
-WEIGHTS_A = 19864223744  # 18.5 GiB: with 24 GiB free the fit is 14848
+WEIGHTS_A = 19864223744  # 18.5 GiB: with FREE free the fit is 14848
+FREE = 24 * GIB + int(RATIOS.compute_reserve * GIB)
 MEMINFO = {"MemTotal": 64 * GIB, "MemAvailable": 60 * GIB}
 CACHE_RAM = cache_ram_mib(MEMINFO["MemAvailable"], MEMINFO["MemTotal"], WEIGHTS_A, "gpu", [], RATIOS)
 
@@ -56,7 +57,7 @@ class Box:
         self.probe_result = WindowProbe(14950, 262144)
         self.stops: list[tuple] = []
         self.stop_kw: list[dict] = []
-        mem = FreeMemory(24 * GIB, 32 * GIB, "nvidia-smi")
+        mem = FreeMemory(FREE, 32 * GIB, "nvidia-smi")
         self.mem: FreeMemory | None = mem
         self.meminfo: dict | None = dict(MEMINFO)
         self.weights: int | None = WEIGHTS_A
@@ -122,7 +123,7 @@ async def test_a_record_without_a_context_launches_with_the_fit_and_the_cache_si
     w = live.window
     assert (w.served, w.trained, w.fits, w.asked, w.mode, w.verified, w.retried) == (
         14950, 262144, 14848, 14848, "fit", True, False)
-    assert w.weights_bytes == WEIGHTS_A and w.free_bytes == 24 * GIB and w.total_bytes == 32 * GIB
+    assert w.weights_bytes == WEIGHTS_A and w.free_bytes == FREE and w.total_bytes == 32 * GIB
     assert live.served_models == ["qwen"] and live.handle == 4242
 
 

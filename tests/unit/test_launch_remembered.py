@@ -24,6 +24,7 @@ from tests.unit.test_launch_plan import FLASH_NEXT, SWIFT, _gguf_spec
 
 GIB = 2**30
 KNOBS = AutosenseConfig()
+RESERVE = int(KNOBS.compute_reserve * GIB)
 DEATH = "llama.cpp exited during startup. Log tail:\nfirst death"
 NOW = datetime(2026, 10, 13, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -31,7 +32,7 @@ NOW = datetime(2026, 10, 13, 12, 0, 0, tzinfo=timezone.utc)
 @pytest.fixture
 def box(monkeypatch):
     world = Box(monkeypatch)
-    world.mem = FreeMemory(24 * GIB, 48 * GIB, "nvidia-smi")
+    world.mem = FreeMemory(24 * GIB + RESERVE, 48 * GIB, "nvidia-smi")
     world.weights = 18 * GIB
     return world
 
@@ -87,7 +88,7 @@ async def test_a_death_retry_is_remembered_planned_again_and_cleared_by_a_larger
     assert full_fit_1 and plans[1].cause == "death"
     rec = speed_stats.last_retry(_ledger(tmp_path), key)
     assert rec is not None
-    assert (rec.full_fit, rec.free_bytes, rec.dropped) == (full_fit_1, 24 * GIB, ("draft-mtp",))
+    assert (rec.full_fit, rec.free_bytes, rec.dropped) == (full_fit_1, 24 * GIB + RESERVE, ("draft-mtp",))
     assert (rec.binary, rec.kv_cache_type, rec.draft_p_min) == (str(spec.binary), "q8_0", 0.6)
     assert datetime.fromisoformat(rec.at).tzinfo is not None
 
@@ -105,7 +106,7 @@ async def test_a_death_retry_is_remembered_planned_again_and_cleared_by_a_larger
     assert speed_stats.last_retry(_ledger(tmp_path), key) == rec  # a remembered success leaves it
 
     # run 2b: less memory -> its own smaller fit halved, never run 1's number
-    box.mem = FreeMemory(22 * GIB, 48 * GIB, "nvidia-smi")
+    box.mem = FreeMemory(22 * GIB + RESERVE, 48 * GIB, "nvidia-smi")
     box.ready_script = [["qwen"]]
     plans = []
     await _activate(tmp_path, spec, plans)
@@ -114,7 +115,7 @@ async def test_a_death_retry_is_remembered_planned_again_and_cleared_by_a_larger
     assert int(_value(_argv(calls, 3), "-c")) == smaller // 2
 
     # run 3: more memory, a fresh fit above the recorded one -> the full shape, which clears the record
-    box.mem = FreeMemory(44 * GIB, 48 * GIB, "nvidia-smi")
+    box.mem = FreeMemory(44 * GIB + RESERVE, 48 * GIB, "nvidia-smi")
     box.ready_script = [["qwen"]]
     plans = []
     await _activate(tmp_path, spec, plans)
