@@ -6,7 +6,8 @@ import dataclasses
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+import shlex
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,8 +17,9 @@ import httpx
 from localharness.config.models import ManagedServerConfig
 from localharness.core import private_files
 from localharness.provider import autosense as _auto
-from localharness.provider import lifecycle, server
+from localharness.provider import lifecycle, server, tuning
 from localharness.provider.procfs import LaunchIdentity
+from localharness.provider.runtimes import RUNTIMES
 from localharness.provider.tuning import MODEL_CONFIG_CAP
 
 READY_SECONDS = 900 + 60
@@ -79,11 +81,11 @@ def _shown(text: str) -> str:
     return "".join(c for c in text if c.isprintable())[:60]
 
 
-def _native(args: list[str]) -> str | None:
+def _value(args: list[str], flag: str) -> str | None:
     for i, token in enumerate(args):
-        if token == "--native":
+        if token == flag:
             return args[i + 1] if i + 1 < len(args) else None
-        if token.startswith("--native="):
+        if token.startswith(f"{flag}="):
             return token.partition("=")[2]
     return None
 
@@ -114,7 +116,7 @@ def sense(spec: ManagedServerConfig) -> tuple[EngineConfig | None, str | None]:
     stray = [f for f in flags if f not in ALLOWED_FLAGS]
     if stray:
         return refuse(f"passes {', '.join(_shown(f) for f in stray)}")
-    native = _native(args)
+    native = _value(args, "--native")
     served = os.path.realpath(_root(spec) / native) if native else None
     if served != os.path.realpath(os.path.expanduser(str(spec.model))):
         return None, NATIVE_MISMATCH.format(name=name)
@@ -151,6 +153,29 @@ def write_copy(config_dir: Path, port: int, copy: Mapping[str, Any]) -> Path:
     server._own_directory(path.parent)
     private_files.atomic_write_text(path, copy_text(copy))
     return path
+
+
+def render_script(
+    plan: Any, spec: ManagedServerConfig, copy_text: str, copy_file: Path, *, name: str, version: str,
+    key_placeholder: str, visible: Callable[[str], str], function: str | None = None,
+) -> str:
+    """The launch as POSIX sh: write the copy through a quoted here-document, then exec the venv python; no key value."""
+    window = _value(json.loads(copy_text).get("args", []), "--max-context")
+    clauses = ([f"window: {window} (--max-context)"] if window else []) + [
+        f"environment: {tuning.SCRUBBED_SHOWN[spec.runtime]} dropped"]
+    head = [f"# {name} — the launch `localharness start` / `/model` runs ({version})", "# " + "; ".join(clauses)]
+    key_env = RUNTIMES[spec.runtime].key_env
+    if key_env in plan.env_names:
+        head.append(f"# {key_env}=<{key_placeholder}>")
+    quote = lambda tok: visible(shlex.quote(tok))  # noqa: E731
+    head = [visible(line) for line in head]
+    head += [f"mkdir -p {quote(str(copy_file.parent))}", f"cat > {quote(str(copy_file))} <<'{COPY_DELIMITER}'"]
+    run = " ".join(map(quote, [".venv/bin/python", "serve/server.py", *plan.argv[2:]]))
+    tail = f"cd {quote(str(_root(spec)))} && exec {run}"
+    document = [*copy_text.removesuffix("\n").split("\n"), COPY_DELIMITER]
+    if function is None:
+        return "\n".join([*head, *document, tail])
+    return "\n".join([f"{function}() {{", "  (", *(f"    {line}" for line in head), *document, f"    {tail}", "  )", "}"])
 
 
 async def health_ready(client: httpx.AsyncClient, base_url: str, headers: dict[str, str]) -> list[str] | None:
