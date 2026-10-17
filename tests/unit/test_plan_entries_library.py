@@ -143,3 +143,90 @@ def test_the_second_nvfp4_snapshot_is_listed_beside_the_first(world, tmp_path, m
     assert model_ops.entry_lines(listed(world))[3:] == [
         "▸ this box can launch", f"  2. {NVIDIA}  vLLM · 100,864 (not set up)",
         f"  3. {UKISAI}  vLLM · 100,864 (not set up)"]
+
+
+GEMMA = "DavidAU/gemma-4-31B-it-The-DECKARD-HERETIC-UNCENSORED-Thinking"
+GEMMA_SHARDS = (31_273_169_132, 31_273_169_132)
+GEMMA_REASON = "58.3 GiB of bf16 weights, and vLLM keeps them all on the 31.8 GiB GPU"
+GEMMA_SENTENCE = (f"{GEMMA} cannot run here: {GEMMA_REASON} — a 4-bit build of it "
+                  "(a GGUF Q4_K_M for llama.cpp, or NVFP4 for vLLM) would fit.")
+
+
+def gemma(tmp_path):
+    return snapshot(tmp_path, GEMMA, "davidau-gemma-4-31b-it", sizes=GEMMA_SHARDS)
+
+
+def not_offered(entries):
+    return [line for line in model_ops.entry_lines(entries) if line.startswith("  not offered:")]
+
+
+def test_the_gemma_bf16_snapshot_is_one_unnumbered_line_with_its_reason(world, tmp_path, monkeypatch):
+    cached(monkeypatch, gemma(tmp_path))
+    with_vllm(tmp_path, monkeypatch)
+
+    entries = listed(world)
+
+    assert not_offered(entries) == [f"  not offered: {GEMMA} — {GEMMA_REASON}"]
+    assert [e.name for e in entries.numbered()] == [PRIMARY]
+    assert entries.pick(GEMMA) == GEMMA_SENTENCE
+
+
+def test_a_snapshot_with_an_auto_map_needs_trust_remote_code(world, tmp_path, monkeypatch):
+    repo = cache_repo(tmp_path, "org/remote")
+    (repo.revisions[0].snapshot_path / "tokenizer_config.json").write_text('{"auto_map": {}}', encoding="utf-8")
+    cached(monkeypatch, repo)
+    with_vllm(tmp_path, monkeypatch)
+
+    entries = listed(world)
+
+    assert not_offered(entries) == ["  not offered: org/remote — needs trust_remote_code"]
+    assert entries.pick("org/remote") == (
+        "org/remote cannot run here: needs trust_remote_code — the harness never passes --trust-remote-code.")
+
+
+def test_with_no_vllm_binary_each_vllm_snapshot_says_so(world, tmp_path, monkeypatch):
+    cached(monkeypatch, snapshot(tmp_path, NVIDIA, "nvidia-qwen3.8-27b-nvfp4"), gemma(tmp_path))
+    monkeypatch.setattr(server, "vllm_binary", lambda config_dir: None)
+
+    entries = listed(world)
+
+    assert not_offered(entries) == [
+        f"  not offered: {GEMMA} — no vllm binary on PATH or in the harness's venv",
+        f"  not offered: {NVIDIA} — no vllm binary on PATH or in the harness's venv"]
+    assert entries.pick(NVIDIA) == (
+        f"{NVIDIA} cannot run here: no vllm binary on PATH or in the harness's venv — install vllm or put it on PATH.")
+    assert [e.name for e in entries.numbered()] == [PRIMARY]
+
+
+def test_an_embedding_snapshot_is_nowhere_in_the_list(world, tmp_path, monkeypatch):
+    repo = cache_repo(tmp_path, "Qwen/Qwen3-Embedding-0.6B", {"architectures": ["Qwen3ForCausalLM"]})
+    directory = repo.revisions[0].snapshot_path
+    (directory / "modules.json").write_text("[]", encoding="utf-8")
+    (directory / "1_Pooling").mkdir()
+    (directory / "1_Pooling" / "config.json").write_text("{}", encoding="utf-8")
+    cached(monkeypatch, repo)
+    with_vllm(tmp_path, monkeypatch)
+
+    lines = model_ops.entry_lines(listed(world))
+
+    assert "Embedding" not in "\n".join(lines) and lines[-1] == f"  1. {PRIMARY}  (serving)  ● [active]"
+
+
+def test_a_box_holding_nothing_unrecorded_has_no_setup_entry_and_no_library_line(world, tmp_path, monkeypatch):
+    with_vllm(tmp_path, monkeypatch)
+
+    lines = model_ops.entry_lines(listed(world))
+
+    assert lines == ["Models:", "▸ llama.cpp · 127.0.0.1:8080", f"  1. {PRIMARY}  (serving)  ● [active]"]
+
+
+def test_not_offered_lines_follow_every_numbered_entry_in_name_order(world, tmp_path, monkeypatch):
+    unrecorded_gguf(world)
+    cached(monkeypatch, snapshot(tmp_path, "zeta/model", "nvidia-qwen3.8-27b-nvfp4"),
+           snapshot(tmp_path, "alpha/model", "nvidia-qwen3.8-27b-nvfp4"))
+    monkeypatch.setattr(server, "vllm_binary", lambda config_dir: None)
+
+    lines = model_ops.entry_lines(listed(world))
+
+    assert [line.split(" — ")[0] for line in lines[-2:]] == ["  not offered: alpha/model", "  not offered: zeta/model"]
+    assert lines[-3].startswith("  2. ")
