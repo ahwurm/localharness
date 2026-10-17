@@ -257,6 +257,19 @@ def _no_real_sockets(request, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_real_gpu_query(request, monkeypatch):
+    """No test runs the developer's nvidia-smi: autosense finds none, so `_smi` answers None and free memory is
+    unknown. A test that fakes the GPU patches `which_outside_cwd`, `_smi` or `_run_nvidia_smi` after this, and a
+    `live_*` or `real_sockets` test keeps the real lookup."""
+    if request.node.get_closest_marker("real_sockets") or any(
+            mark.name.startswith("live") for mark in request.node.iter_markers()):
+        yield
+        return
+    monkeypatch.setattr("localharness.provider.autosense.which_outside_cwd", lambda name: None)
+    yield
+
+
 @pytest.fixture
 def minimal_agent_config() -> AgentConfig:
     return AgentConfig(name="test-agent", role="Test agent for unit tests.")

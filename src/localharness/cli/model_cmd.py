@@ -648,35 +648,35 @@ def model(
             f"response wasn't understood — is base_url pointing at an OpenAI-compatible API? ({exc})"
         )
         raise typer.Exit(2)
-    downloaded: list[str] = []
-    if harness.server is not None:
-        from localharness.provider import server as managed_server
-        downloaded = [m for m in managed_server.list_cached_models() if m not in live]
-    choices = live + downloaded
+    choices = live
     current = provider.default_model
+
+    def _entries() -> tuple[model_ops.Entries, list[str]]:
+        cfg = loader._config_dir
+        recorded = model_ops.trust_as_recorded(cfg)
+        others = tuple(r for r in model_ops.serving_records(harness)
+                       if model_ops._norm_url(r.base_url) != model_ops._norm_url(provider.base_url))
+        sensed = asyncio.run(model_ops.sense_serving(harness, others)).ids if others else {}
+        probed = {model_ops._norm_url(url): ids for url, ids in sensed.items()}
+        probed[model_ops._norm_url(provider.base_url)] = tuple(live) if reachable else None
+        return model_ops.listing(
+            harness, live=probed, config_dir=cfg, trust=recorded, floor=_swap_floor(recorded, cfg),
+            unit=_own_unit(cfg))
 
     # --- List --- #
     if name is None:
-        if not reachable and not choices:
-            err_console.print(
-                f"[bold red]Error:[/bold red] could not reach the model server at "
-                f"{provider.base_url}, and no downloaded models were found. "
-                f"Is it running? Try `localharness doctor`."
-            )
-            raise typer.Exit(2)
-        if not choices:
-            console.print(
-                f"No models served at {provider.base_url} or in the local download cache."
-            )
+        entries, lines = _entries()
+        if not entries.numbered():
+            if not reachable:
+                err_console.print(
+                    f"[bold red]Error:[/bold red] could not reach the model server at "
+                    f"{provider.base_url}. Is it running? Try `localharness doctor`."
+                )
+                raise typer.Exit(2)
+            console.print(f"No models served at {provider.base_url}.")
             return
-        console.print("Models:")
-        for i, m in enumerate(live, start=1):
-            mark = "  [active]" if m == current else ""
-            console.print(f"  {i}. {m}  (serving){mark}", markup=False)
-        for i, m in enumerate(downloaded, start=len(live) + 1):
-            console.print(
-                f"  {i}. {m}  (downloaded — `localharness start` will launch it)", markup=False
-            )
+        for line in lines:
+            console.print(line, markup=False, soft_wrap=True)
         console.print("Switch with `localharness model <name|number>`.")
         # #50: a reachable server whose served/downloaded set omits the configured default
         # otherwise shows NO [active] marker and no other signal — the moment of highest risk
@@ -698,33 +698,42 @@ def model(
         err_console.print("[bold red]Error:[/bold red] model name cannot be empty.")
         raise typer.Exit(2)
 
-    # D-03 / R-13-17: a number keeps its list meaning; any other name goes through the ladder's
-    # preset resolution first. A `Serving` is a preset selection; a withheld or ambiguous name is
-    # refused with exit 2; an unknown name falls through to today's served / downloaded / checkpoint
-    # resolution and its messages, unchanged.
-    if not (name.isdigit() and 1 <= int(name) <= len(choices)):
-        serving = model_ops.resolve_serving(
-            harness, machine_trust, name, config_dir=loader._config_dir)
-        if isinstance(serving, model_ops.ServingRefusal) and serving.kind != "unknown":
-            # The withheld line was already printed once as `machine_trust.line`; say a refusal
-            # that is not that line (an ambiguous name, or a withheld record start composed no line for).
-            if serving.line != machine_trust.line:
-                err_console.print(
-                    "[bold red]Error:[/bold red] " + escape(serving.line), soft_wrap=True)
-            raise typer.Exit(serving.exit_code)
-        if isinstance(serving, model_ops.Serving):
-            if (will_launch and serving.record.spec is not None
-                    and not model_ops.record_withheld(machine_trust, serving.record)):
-                _swap_now(harness, machine_trust, serving, config_dir=loader._config_dir, unit=unit)
-                return
-            _select_preset(
-                harness, serving.record, current, loader, _audit_dir, _ws, machine_trust, unit=unit)
+    # A number is the list's entry (its record name when it has one); every name then goes through the
+    # ladder's preset resolution first. A `Serving` is a preset selection; a withheld or ambiguous name is
+    # refused with exit 2; an unknown name falls through to the served / checkpoint resolution below.
+    if name.isascii() and name.isdigit():
+        listed = _entries()[0]
+        picked = listed.pick(name)
+        if picked is None:
+            err_console.print(
+                "[bold red]Error:[/bold red] " + escape(f"{name} is out of range")
+                + f" — {len(listed.numbered())} model(s) listed. Run `localharness model` to see them.",
+                soft_wrap=True)
+            raise typer.Exit(2)
+        if isinstance(picked, str):
+            err_console.print("[bold red]Error:[/bold red] " + escape(picked), soft_wrap=True)
+            raise typer.Exit(2)
+        name = picked.record.name if picked.record is not None else picked.name
+    serving = model_ops.resolve_serving(
+        harness, machine_trust, name, config_dir=loader._config_dir)
+    if isinstance(serving, model_ops.ServingRefusal) and serving.kind != "unknown":
+        # The withheld line was already printed once as `machine_trust.line`; say a refusal
+        # that is not that line (an ambiguous name, or a withheld record start composed no line for).
+        if serving.line != machine_trust.line:
+            err_console.print(
+                "[bold red]Error:[/bold red] " + escape(serving.line), soft_wrap=True)
+        raise typer.Exit(serving.exit_code)
+    if isinstance(serving, model_ops.Serving):
+        if (will_launch and serving.record.spec is not None
+                and not model_ops.record_withheld(machine_trust, serving.record)):
+            _swap_now(harness, machine_trust, serving, config_dir=loader._config_dir, unit=unit)
             return
+        _select_preset(
+            harness, serving.record, current, loader, _audit_dir, _ws, machine_trust, unit=unit)
+        return
 
     target: Optional[str] = None
-    if name.isdigit() and 1 <= int(name) <= len(choices):
-        target = choices[int(name) - 1]
-    elif name in choices:
+    if name in choices:
         target = name
     elif harness.server is not None and Path(name).expanduser().exists():
         target = name
@@ -733,14 +742,6 @@ def model(
         if reachable:
             # Reached the runtime and the target isn't served/downloaded → fail loud, name options.
             avail = ", ".join(choices) if choices else "(none served or downloaded)"
-            if name.isdigit():
-                # A number that didn't resolve is out of range — say how many are listed.
-                err_console.print(
-                    "[bold red]Error:[/bold red] " + escape(f"{name} is out of range")
-                    + f" — {len(choices)} model(s) listed. Run `localharness model` to see them.",
-                    soft_wrap=True,
-                )
-                raise typer.Exit(2)
             # Fat-finger hint: a case-insensitive exact match is almost certainly the intent.
             ci = next((m for m in choices if m.lower() == name.lower()), None)
             if ci is not None:
