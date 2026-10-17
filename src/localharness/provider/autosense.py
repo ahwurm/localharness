@@ -288,9 +288,7 @@ def fit(header: Mapping[str, Any], free_bytes: int | None, ratios: Any,
     served is counted as served plus what the free memory adds; otherwise the weights and a
     `compute_margin_ratio` of them come off the free bytes first.
 
-    `draft_share` multiplies the KV bytes per token: the MTP draft context holds its own KV for
-    nextn_predict_layers layers, so a drafting launch costs `1 + nextn / block_count` of the main
-    context's KV (1.0, the default, with drafting off)."""
+    `draft_share` multiplies the KV bytes per token (1.0, the default, with drafting off)."""
     kv = kv_bytes_per_token(header, cache_type_k, cache_type_v, split)
     if kv is not None:
         kv *= draft_share
@@ -657,10 +655,18 @@ def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None,
     else:
         extra_k, extra_v = extra_cache_types(extra)
         k, v = server.cache_type_k or extra_k or cache_type, server.cache_type_v or extra_v or cache_type
-    fits = fit(
-        header, mem.free_bytes if mem else None, ratios, attached_served,
-        cache_type_k=k, cache_type_v=v,
-        weights=weights, offload=offload, runtime=server.runtime, draft_share=draft_share, split=split)
+    row = row_of(server.runtime)
+    if split is not None and attached_served is None and offload == "gpu" and mem is not None and weights is not None \
+            and row is not None and row.gguf:
+        ram = mi or (_read_meminfo() if split.experts else None)
+        fits = place_llamacpp(
+            split, header, name="", weights=weights, mmproj=mmproj, free_bytes=mem.free_bytes, meminfo=ram,
+            cache_type_k=k, cache_type_v=v, share=draft_share, autosense=ratios).fits
+    else:
+        fits = fit(
+            header, mem.free_bytes if mem else None, ratios, attached_served,
+            cache_type_k=k, cache_type_v=v,
+            weights=weights, offload=offload, runtime=server.runtime, draft_share=draft_share, split=split)
     return FitInputs(header, offload, mem, weights, mi, fits, split, mmproj)
 
 

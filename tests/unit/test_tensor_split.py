@@ -181,6 +181,16 @@ def test_compute_fit_carries_the_split_and_the_projector(tmp_path):
     assert compute_fit(_server(model), AutosenseConfig(), memory=MEMORY).mmproj == 0
 
 
+def test_compute_fit_prices_a_moe_the_way_the_launch_plan_does(tmp_path, monkeypatch):
+    fixture = load_fixture(FLASH)
+    model = write_recorded(tmp_path, fixture)[0]
+    mmproj = write_sparse(tmp_path / "mmproj.gguf", fixture["mmproj_bytes"])
+    monkeypatch.setattr(autosense, "_read_meminfo", lambda: {"MemTotal": 64_139_128 * 1024, "MemAvailable": int(52.9 * 2**30)})
+    free = FreeMemory(int(30.2 * 2**30), int(31.8 * 2**30), "nvidia-smi")
+    fi = compute_fit(_server(model, mmproj=str(mmproj)), AutosenseConfig(), memory=free, cache_type="q8_0")
+    assert fi.fits == 262_144
+
+
 def test_sense_launch_reads_the_table_once_per_shard(tmp_path, monkeypatch):
     fixture = load_fixture(FLASH)
     model = write_recorded(tmp_path, fixture)[0]
