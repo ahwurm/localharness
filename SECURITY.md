@@ -588,9 +588,12 @@ entry's `lifecycle:`, the record a start checks holds eleven launch keys: `binar
 next start on a terminal. The model keys are an entry kind of their own, `launch_model`: `model`,
 `mmproj`, `served_name`, `context`, `cache_type_k`, `cache_type_v`, `cache_ram`, `speculative`,
 `reasoning_parser` and `tool_call_parser`, because a changed model is not a changed command. The
-harness also derives flags at launch from the model file and the machine's `autosense` settings
-(`kv_cache_type`, `draft_mtp`, `draft_p_min`); those settings and the derived flags are not part of
-the record, because each picks among closed values, and a record field set to a value pins it. A model you switch yourself with `/model` on a terminal
+harness also derives flags at launch from the model file and the machine's `autosense` settings:
+`kv_cache_type`, `draft_mtp` and `draft_p_min` pick among closed values; `-c`, `--cache-ram`,
+`--max-model-len` and `--fit-ctx` are numbers computed from the model file's header and tensor table,
+the checkpoint's `config.json` and the machine's memory, bounded by the trained window and the harness
+floor. Those settings and the derived flags are not part of the record, and a record field set to a
+value pins it. A model you switch yourself with `/model` on a terminal
 (or in Zed), or with `localharness model` typed at a terminal, is re-recorded as you set it and
 asks nothing; one switched from a remote channel, or by a command the agent ran in the shell
 tool or from `python_exec`, is not, and asks at the next start. (Both tools mark the commands they
@@ -1457,9 +1460,12 @@ a secret that a server logs in a form none of these patterns match.
 The three keys of `launch_model` that select a launch's behaviour, `speculative`,
 `reasoning_parser` and `tool_call_parser`, are part of the record the trust decision covers like
 the other model keys, so a changed parser or speculation setting asks at the next terminal
-`start`. The flags the harness derives itself (`kv_cache_type`, `draft_mtp`, `draft_p_min`) are
-not part of the record: each picks among closed values from the model file's header and the
-machine's memory, and a record field set to a value pins it.
+`start`. The flags the harness derives itself are not part of the record: `kv_cache_type`,
+`draft_mtp` and `draft_p_min` pick among closed values, while `-c`, `--cache-ram`, `--max-model-len`
+and `--fit-ctx` are numbers computed from the model file's header and tensor table, the checkpoint's
+`config.json` and the machine's memory, bounded by the trained window and the harness floor, and a
+record field set to a value pins each. A hostile tensor table can mis-price within those bounds: one
+optimistic `-c` for the person's own file, an OOM or a spilled layer at load, never an escalation.
 
 ### Autostart: the harness's own user unit
 
