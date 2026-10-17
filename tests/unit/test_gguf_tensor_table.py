@@ -69,12 +69,12 @@ def test_a_count_at_the_cap_passes_the_count_check(tmp_path):
 
 def test_a_name_is_bounded_by_its_bytes(tmp_path):
     assert _read(tmp_path, tensors=[_t("a" * MAX_TENSOR_NAME, 0)], data_bytes=32).entries[0].bytes == 32
-    with pytest.raises(GgufHeaderError, match="name"):
+    with pytest.raises(GgufHeaderError, match="too long"):
         _read(tmp_path, tensors=[_t("a" * (MAX_TENSOR_NAME + 1), 0)], data_bytes=32)
 
 
 def test_a_name_of_many_characters_in_few_bytes_is_bounded_by_bytes(tmp_path):
-    with pytest.raises(GgufHeaderError, match="name"):
+    with pytest.raises(GgufHeaderError, match="too long"):
         _read(tmp_path, tensors=[_t("é" * 129, 0)], data_bytes=32)
 
 
