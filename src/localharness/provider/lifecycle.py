@@ -1914,8 +1914,7 @@ def swap_refusal(
     target: Heavy, incumbent: Heavy | None, *, config_dir: Path, autosense: "AutosenseConfig | None",
     floor: int | None, unit: Any = None,
 ) -> str | None:
-    """The refusal the target's plan would raise against the memory the swap will have, with the
-    incumbent named as still serving; None when it plans, or when the launch itself has the say."""
+    """The target's plan refusal against the memory the swap will have, naming the incumbent that keeps serving."""
     spec = target.spec
     if autosense is None or floor is None or not getattr(strategy_for(spec, unit=unit), "plans_launch", False):
         return None
@@ -1923,8 +1922,13 @@ def swap_refusal(
     decision = server.launch_decision(spec, keyed, peer=target.peer)
     if decision.refusal is not None:
         return None
+    seen = {}
+    if incumbent is not None:
+        launch = procfs.read_launch(config_dir, expect=record_identity(incumbent.spec))
+        held = _auto.held_by(launch.pid) if launch is not None and launch.verified else None
+        seen["memory"] = _auto.memory_after_stop(_auto.free_memory(autosense), held)
     try:
-        plan_launch(spec, sense_launch(spec, config_dir, autosense), decision,
+        plan_launch(spec, sense_launch(spec, config_dir, autosense, **seen), decision,
                     autosense=autosense, api_key_held=keyed, floor=floor)
     except server.LaunchRefused as exc:
         return f"{exc} {heavy_label(incumbent)} keeps serving." if incumbent is not None else str(exc)
