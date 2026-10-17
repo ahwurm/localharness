@@ -1122,23 +1122,25 @@ def _setup_entries(harness: Any, listed: Any, taken: set[str], *, config_dir: An
             if listed.vllm is None:
                 entries.append(PlanEntry(name, "setup", "vllm", refusal=NO_VLLM_BINARY.format(name=name), setup=s))
                 continue
-            spec = ManagedServerConfig(runtime="vllm", launch="binary", binary=listed.vllm[0], model=name, port=port, gpu=True)
+            runtime = "vllm"
         else:
             name = library.unique_preset_name(library._label(s), taken)
             taken.add(name)
-            spec = ManagedServerConfig(
-                runtime="llamacpp", model=str(s.path), mmproj=str(s.model.mmproj) if s.model.mmproj else None,
-                served_name=name, port=port, gpu=True, binary=llama)
-        record = ServingRecord(name, name, f"http://127.0.0.1:{port}/v1", spec.runtime, None, spec, f"setup.{name}")
+            runtime = "llamacpp"
         try:
+            spec = ManagedServerConfig(runtime="vllm", launch="binary", binary=listed.vllm[0], model=name, port=port, gpu=True) \
+                if runtime == "vllm" else ManagedServerConfig(
+                    runtime="llamacpp", model=str(s.path), mmproj=str(s.model.mmproj) if s.model.mmproj else None,
+                    served_name=name, port=port, gpu=True, binary=llama)
+            record = ServingRecord(name, name, f"http://127.0.0.1:{port}/v1", runtime, None, spec, f"setup.{name}")
             window, where, refusal = _priced(harness, record, config_dir=config_dir, memory=memory, floor=floor, unit=unit)
         except Exception as exc:  # noqa: BLE001 — one file's failure is its own line, never the list's
             window, where, refusal = None, None, f"{name} cannot run here: could not plan it ({type(exc).__name__})"
         if refusal is not None:
-            shown_as = Path(name).name if RUNTIMES[spec.runtime].checkpoint else name
+            shown_as = Path(name).name if RUNTIMES[runtime].checkpoint else name
             refusal = f"{name}{refusal.removeprefix(shown_as)}" if refusal.startswith(shown_as) \
                 else f"{name} cannot run here: {refusal}"
-        entries.append(PlanEntry(name, "setup", spec.runtime, window, where, refusal, setup=s))
+        entries.append(PlanEntry(name, "setup", runtime, window, where, refusal, setup=s))
     return entries
 
 
