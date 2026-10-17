@@ -246,8 +246,9 @@ def test_function_names_are_shell_safe_and_numbered_on_collision(name, taken, ex
 
 
 def test_the_scrub_names_shown_are_what_the_launch_scrubs():
-    assert set(tuning.SCRUBBED_SHOWN) == {"llamacpp", "vllm"}
-    for token in tuning.SCRUBBED_SHOWN["llamacpp"].split("/"):
-        assert server._scrubbed("llamacpp", token.replace("*", "X"))
+    assert set(tuning.SCRUBBED_SHOWN) == {"llamacpp", "vllm", "strata"}
+    for runtime in ("llamacpp", "strata"):
+        for token in tuning.SCRUBBED_SHOWN[runtime].split("/"):
+            assert server._scrubbed(runtime, token.replace("*", "X"))
     assert server._scrubbed("llamacpp", "LLAMA_ARG_X") and not server._scrubbed("llamacpp", "VLLM_API_KEY")
-    assert server._scrubbed("vllm", tuning.SCRUBBED_SHOWN["vllm"])
+    assert server._scrubbed("vllm", tuning.SCRUBBED_SHOWN["vllm"]) and not server._scrubbed("vllm", "STRATA_API_KEY")
