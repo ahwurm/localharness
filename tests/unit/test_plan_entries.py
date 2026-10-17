@@ -305,7 +305,8 @@ def test_a_withheld_record_is_a_not_offered_line(world):
 
 
 def test_a_plan_the_floor_refuses_is_a_not_offered_line(world, monkeypatch):
-    refusal = autosense.FLOOR_REFUSAL.format(name="flash-next", window=autosense.window_phrase(9216), floor=FLOOR)
+    refusal = autosense.FLOOR_REFUSAL.format(name="flash-next", window=autosense.window_phrase(9216), floor=FLOOR,
+                                        remedy=autosense.FLOOR_REMEDY)
 
     def refuse(*args, **kw):
         raise server.LaunchRefused(refusal)
