@@ -650,7 +650,8 @@ def hub_file(repo_id: str, filename: str, *, ref: str | None = None) -> HubFile 
 
 def _llamacpp_argv(
     srv: ManagedServerConfig, *, loop: bool, key_file_ok: bool, context: int | None, cache_ram: int | None,
-    cache_type: str | None, spec_type: str | None, draft_p_min: float | None, **_: Any,
+    cache_type: str | None, spec_type: str | None, draft_p_min: float | None, fit_ctx: int | None = None,
+    **_: Any,
 ) -> list[str]:
     ctx = srv.context if srv.context is not None else context
     ram = srv.cache_ram if srv.cache_ram is not None else cache_ram
@@ -672,6 +673,7 @@ def _llamacpp_argv(
         *(["--cache-type-v", v] if v is not None else []),
         *spec,
         *(["-c", str(ctx)] if ctx is not None else []),
+        *(["--fit-ctx", str(fit_ctx)] if fit_ctx is not None else []),
         *(["--cache-ram", str(ram)] if ram is not None else []),
         *(["--api-key-file", key_file] if key_file_ok and key_file else []),
         "--port", str(srv.port),
@@ -746,12 +748,13 @@ def serve_command(
     draft_p_min: float | None = None,
     reasoning_parser: str | None = None,
     tool_call_parser: str | None = None,
+    fit_ctx: int | None = None,
 ) -> list[str]:
     """The launch argv: the runtime row's builder; loopback `--host` comes last, after `extra_args`."""
     return RUNTIMES[srv.runtime].argv(
         srv, loop=loopback or not srv.bind_all, keyed=keyed, key_file_ok=key_file_ok, context=context,
         cache_ram=cache_ram, cache_type=cache_type, spec_type=spec_type, draft_p_min=draft_p_min,
-        reasoning_parser=reasoning_parser, tool_call_parser=tool_call_parser)
+        reasoning_parser=reasoning_parser, tool_call_parser=tool_call_parser, fit_ctx=fit_ctx)
 
 
 def effective_posture(spec: Any, *, keyed: bool, decision: LaunchDecision) -> tuple[bool, str | None]:
