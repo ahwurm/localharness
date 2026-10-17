@@ -693,7 +693,7 @@ def _ollama_argv(srv: ManagedServerConfig, **_: Any) -> list[str]:
 
 def _vllm_argv(
     srv: ManagedServerConfig, *, loop: bool, keyed: bool, reasoning_parser: str | None,
-    tool_call_parser: str | None, context: int | None = None, **_: Any,
+    tool_call_parser: str | None, context: int | None = None, snapshot: str | None = None, **_: Any,
 ) -> list[str]:
     entry = srv.entry_for(srv.model)
     extra = [*srv.extra_args, *(entry.extra_args if entry is not None else [])]
@@ -732,8 +732,9 @@ def _vllm_argv(
             *window,
             *extra,
         ]
-    model_arg = str(Path(entry.path).expanduser()) if entry is not None else srv.model
-    served = ["--served-model-name", entry.name] if entry is not None else []
+    model_arg = str(Path(entry.path).expanduser()) if entry is not None else snapshot or srv.model
+    served = (["--served-model-name", entry.name] if entry is not None
+              else ["--served-model-name", srv.served_name or srv.model] if snapshot is not None else [])
     return [str(srv.binary), "serve", model_arg, "--port", str(srv.port), *served, *parsers, *window, *extra,
             *(["--host", "127.0.0.1"] if loop else [])]
 
@@ -752,12 +753,14 @@ def serve_command(
     reasoning_parser: str | None = None,
     tool_call_parser: str | None = None,
     fit_ctx: int | None = None,
+    snapshot: str | None = None,
 ) -> list[str]:
     """The launch argv: the runtime row's builder; loopback `--host` comes last, after `extra_args`."""
     return RUNTIMES[srv.runtime].argv(
         srv, loop=loopback or not srv.bind_all, keyed=keyed, key_file_ok=key_file_ok, context=context,
         cache_ram=cache_ram, cache_type=cache_type, spec_type=spec_type, draft_p_min=draft_p_min,
-        reasoning_parser=reasoning_parser, tool_call_parser=tool_call_parser, fit_ctx=fit_ctx)
+        reasoning_parser=reasoning_parser, tool_call_parser=tool_call_parser, fit_ctx=fit_ctx,
+        snapshot=snapshot)
 
 
 def effective_posture(spec: Any, *, keyed: bool, decision: LaunchDecision) -> tuple[bool, str | None]:
@@ -804,6 +807,7 @@ def child_environment(
     record_env: Mapping[str, str] | None = None,
     api_key: str | None = None,
     xdg_config_home: str | None = None,
+    hf_offline: bool = False,
 ) -> tuple[dict[str, str] | None, list[str]]:
     """The environment a launched server inherits, and the sorted names dropped from `base`.
 
@@ -816,15 +820,20 @@ def child_environment(
     scrub and the record env, before the key, so nothing inherited or recorded can point the server
     at another `config.ini`. It is not in the scrub list: it is added, never dropped.
 
+    `hf_offline` (a launch of a verified snapshot) sets `HF_HUB_OFFLINE=1` at the same point, so
+    neither the person's shell nor the record can send a cache entry to the network.
+
     With nothing dropped, no record env, no key and no `xdg_config_home` it returns `(None, [])`:
     Popen inherits the environment unchanged, byte for byte as 0.17 did."""
     dropped = sorted(name for name in base if _scrubbed(runtime, name))
-    if not dropped and not record_env and not api_key and xdg_config_home is None:
+    if not dropped and not record_env and not api_key and xdg_config_home is None and not hf_offline:
         return None, []
     env = {name: value for name, value in base.items() if name not in dropped}
     env.update(record_env or {})
     if xdg_config_home is not None:
         env["XDG_CONFIG_HOME"] = xdg_config_home
+    if hf_offline:
+        env["HF_HUB_OFFLINE"] = "1"
     if api_key:
         row = row_of(runtime)
         if row is None or row.key_env is None:
@@ -843,6 +852,7 @@ def start_server(
     dropped_out: list[str] | None = None,
     xdg_config_home: str | None = None,
     port: int | None = None,
+    hf_offline: bool = False,
 ) -> int:
     """Launch detached (new session), append stdout+stderr to serve.log, write pidfile. Refuses
     (RuntimeError, nothing started) while the pidfile names a live process: a second launch would
@@ -863,7 +873,8 @@ def start_server(
     # The live-pidfile rule is `refuse_live_launch`, shared with `serve` (which writes its own pidfile).
     stale_note = refuse_live_launch(config_dir, cmd)
     env, dropped = child_environment(
-        runtime, os.environ, record_env=record_env, api_key=api_key, xdg_config_home=xdg_config_home)
+        runtime, os.environ, record_env=record_env, api_key=api_key, xdg_config_home=xdg_config_home,
+        hf_offline=hf_offline)
     if dropped_out is not None:
         dropped_out.extend(dropped)
     if dropped:
