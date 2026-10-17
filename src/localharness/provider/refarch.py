@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from localharness.provider.runtimes import row_of
+
 
 @dataclass(frozen=True)
 class RefArch:
@@ -116,7 +118,7 @@ def default_row(
 ) -> RefArch | None:
     fits = [r for r in rows if any(platform.startswith(p) for p in r.platforms)
             and needs_met(r, platform=platform, machine=machine, has_nvidia=has_nvidia)]
-    pool = [r for r in fits if on_path(r.runtime)] or [r for r in fits if r.runtime == "llamacpp"]
+    pool = [r for r in fits if on_path(r.runtime)] or [r for r in fits if getattr(row_of(r.runtime), "path_binary", None) is not None]
     if not pool:
         return None
     within = [r for r in pool if memory is not None and r.bytes <= memory]
