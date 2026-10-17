@@ -94,5 +94,5 @@ async def test_a_refused_target_stops_nothing_and_the_incumbent_keeps_serving(tm
 
 def test_swap_plans_the_target_before_it_frees_the_accelerator():
     body = ast.parse(inspect.getsource(lifecycle.swap)).body[0]
-    names = [n.func.id for n in ast.walk(body) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
-    assert names.index("swap_refusal") < names.index("free_accelerator")
+    line = {n.id: n.lineno for n in ast.walk(body) if isinstance(n, ast.Name)}
+    assert line["swap_refusal"] < line["free_accelerator"]
