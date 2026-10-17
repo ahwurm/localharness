@@ -18,15 +18,13 @@ def test_the_floor_round_trips_with_the_roles_and_a_utc_time(tmp_path):
     assert json.loads((tmp_path / FLOOR_FILE).read_text()) == {
         "root": 9_000, "roles": {"root": 9_000, "worker": 6_000}, "at": "2026-01-02T03:04:00+00:00"}
     assert cached_floor(tmp_path) == 9_000
-    assert cached_floor(tmp_path, trained=32_768) == 9_000
 
 
-@pytest.mark.parametrize("root, trained, expected", [
-    (1_000, None, 1_024), (1_000, 32_768, 1_024), (50_000, 32_768, 32_768), (50_000, None, 50_000), (1_024, 2_048, 1_024)])
-def test_a_cached_root_is_clamped_to_the_floor_minimum_and_the_trained_window(tmp_path, root, trained, expected):
+@pytest.mark.parametrize("root, expected", [(1_000, 1_024), (1_024, 1_024), (50_000, 50_000)])
+def test_a_cached_root_is_raised_to_the_floor_minimum(tmp_path, root, expected):
     (tmp_path / FLOOR_FILE).write_text(json.dumps({"root": root}))
 
-    assert cached_floor(tmp_path, trained) == expected
+    assert cached_floor(tmp_path) == expected
 
 
 @pytest.mark.parametrize("root", [4096.0, True, "4096", [4096], None, 0, -5])

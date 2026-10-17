@@ -374,8 +374,8 @@ def record_floor(config_dir: Path, root: int, roles: Mapping[str, int], *, now: 
         log.debug("could not write %s", FLOOR_FILE, exc_info=True)
 
 
-def cached_floor(config_dir: Path, trained: int | None = None) -> int | None:
-    """The cached root floor clamped to [1,024, trained]; None when absent or not a plain positive int."""
+def cached_floor(config_dir: Path) -> int | None:
+    """The cached root floor, at least 1,024; None when absent or not a plain positive int."""
     try:
         with os.fdopen(open_regular(Path(config_dir) / FLOOR_FILE), "rb") as fh:
             raw = fh.read(_FLOOR_READ_CAP + 1)
@@ -386,8 +386,7 @@ def cached_floor(config_dir: Path, trained: int | None = None) -> int | None:
         return None
     if not _plain_int(root) or root <= 0:
         return None
-    root = max(_FLOOR_MIN, root)
-    return min(trained, root) if _plain_int(trained) and trained > 0 else root
+    return max(_FLOOR_MIN, root)
 
 
 def raised_floor(live: int | None, cached: int | None) -> int | None:
