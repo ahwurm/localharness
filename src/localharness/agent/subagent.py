@@ -546,7 +546,8 @@ def role_floor(cfg: AgentConfig, schemas: list, *, counter: Any, llm: Any,
 
 
 def _schemas(cfg: AgentConfig, registry: Any) -> list:
-    return list(registry.get_tools_for_agent(cfg.name, cfg.division or "", cfg.tools).values())
+    from localharness.agent.context import floor_schemas
+    return floor_schemas(registry, cfg.name, cfg.division or "", cfg.tools)
 
 
 def builtin_role_floors(base_registry: Any, counter: Any, llm: Any,

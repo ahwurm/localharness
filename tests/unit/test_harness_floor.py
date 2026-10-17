@@ -111,6 +111,21 @@ def test_a_loop_floor_is_harness_floor_of_its_own_fixed_part():
     assert loop.floor() == 15_360
 
 
+def test_counting_the_fixed_part_does_not_raise_the_tool_count_warning():
+    import warnings
+
+    class _Noisy(_Registry):
+        def get_tools_for_agent(self, agent_id, division_id, tool_config):
+            warnings.warn("too many tools", UserWarning)
+            return super().get_tools_for_agent(agent_id, division_id, tool_config)
+
+    loop, _ = _loop(100, _Noisy({"t": _Schema()}))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loop.fixed_tokens()
+    assert caught == []
+
+
 def test_a_loop_counts_its_tool_schemas_into_the_fixed_part():
     loop, _ = _loop(3_350, _Registry({"t": _Schema()}))
     assert loop.fixed_tokens() == 6_700

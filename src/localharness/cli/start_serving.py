@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from localharness.agent.context import TokenCounter, fixed_tokens, harness_floor
+from localharness.agent.context import TokenCounter, fixed_tokens, floor_schemas, harness_floor
 from localharness.cli import model_ops, workspace
 from localharness.cli.model_ops import (
     RUNG_ACTIVE,
@@ -268,8 +268,7 @@ async def launch_floor(agent_config: Any) -> int | None:
     tools = agent_config.tools.model_copy(deep=True)
     apply_root_capability_floor(tools, registry.global_schemas())
     try:
-        schemas = list(registry.get_tools_for_agent(
-            agent_config.name, agent_config.division or "", tools).values())
+        schemas = floor_schemas(registry, agent_config.name, agent_config.division or "", tools)
     except Exception:  # noqa: BLE001 — the loop's own count degrades the same way: no schemas
         schemas = []
     prompt = base_system_prompt(agent_config, tool_call_mode="native", guardrails="")
