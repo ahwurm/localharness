@@ -340,7 +340,7 @@ def _window_clause(plan: Any) -> str | None:
         return None
     if report.mode == "fit":
         return f"-c left to llama-server --fit (the harness fitted {plan.full_fit} today)"
-    if report.mode == "fit-by-server":
+    if report.mode in ("fit-by-server", "not-computed"):
         return "-c left to llama-server --fit"
     if report.mode == "record":
         return f"-c {report.asked} from the record"

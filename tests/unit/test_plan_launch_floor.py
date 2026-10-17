@@ -251,7 +251,7 @@ def test_a_checkpoint_without_safetensors_or_a_gpu_reading_is_not_computed(tmp_p
     spec = _vllm(tmp_path)
     for f in Path(spec.model).glob("*.safetensors"):
         f.unlink()
-    assert _plan(spec, tmp_path).report.mode == "not-computed"
+    assert _plan(spec, tmp_path).report is None
     monkeypatch.setattr(autosense, "free_memory", lambda ratios: None)
     assert "--max-model-len" not in _plan(_vllm(tmp_path), tmp_path).argv
 

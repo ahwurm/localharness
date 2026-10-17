@@ -228,9 +228,9 @@ async def test_a_missing_model_file_is_not_computed_not_a_failure(tmp_path, pope
     assert "-c" not in _argv(popen) and live.window.mode == "fit-by-server"
 
 
-async def test_a_vllm_record_without_a_readable_checkpoint_sizes_nothing(tmp_path, monkeypatch, box):
+async def test_a_vllm_record_never_computes_a_fit(tmp_path, monkeypatch, box):
     def boom(*a, **k):
-        raise AssertionError("a vLLM launch without a checkpoint must not size a window")
+        raise AssertionError("a vLLM launch must not size a window")
 
     monkeypatch.setattr(gguf_header, "read_header", boom)
     monkeypatch.setattr(autosense, "free_memory", boom)
@@ -239,7 +239,7 @@ async def test_a_vllm_record_without_a_readable_checkpoint_sizes_nothing(tmp_pat
     live = await lifecycle.ManagedVllmStrategy().activate(
         spec, tmp_path, "http://127.0.0.1:8081/v1", autosense=RATIOS)
     assert calls["serve_command"]["context"] is None and calls["serve_command"]["cache_ram"] is None
-    assert (live.window.mode, live.window.fits) == ("not-computed", None)
+    assert live.window is None
 
 
 # ------------------------------------------------------------------------------- --cache-ram

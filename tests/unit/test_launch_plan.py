@@ -112,7 +112,7 @@ async def test_activate_launches_exactly_the_planned_argv(tmp_path, popen, box, 
         assert _has_pair(argv, "--reasoning-parser", "qwen3")
         assert _has_pair(argv, "--tool-call-parser", "qwen3_coder")
         assert "--enable-auto-tool-choice" in argv
-        assert plan.report.mode == "not-computed" and live.window.mode == "not-computed"
+        assert plan.report is None and live.window is None
         assert box.events.count("free_memory") == 1
 
 
