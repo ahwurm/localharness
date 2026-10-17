@@ -102,7 +102,7 @@ def host(monkeypatch):
 
 def test_compute_fit_gathers_the_inputs_and_the_fit(tmp_path, host):
     fi = compute_fit(_record(tmp_path), RATIOS)
-    assert fi.fits == 14950 and fi.weights == WEIGHTS_A and fi.offload == "gpu"
+    assert fi.fits == 2662 and fi.weights == WEIGHTS_A and fi.offload == "gpu"
     assert fi.memory == FreeMemory(24 * GIB, 32 * GIB, "nvidia-smi")
     assert fi.header["context_length"] == 262144 and fi.meminfo is None
     assert host == ["free_memory"]  # /proc/meminfo only when asked for
@@ -135,13 +135,12 @@ def test_compute_fit_types_the_header_and_never_raises_on_a_bad_file(tmp_path, h
 def test_compute_fit_reads_the_cache_types_from_extra_args(tmp_path, host, extra):
     """IN-04: `-ctk q8_0 -ctv q8_0` halves the KV cost (262144 -> 139264 bytes/token), so the fit is larger."""
     fi = compute_fit(_record(tmp_path, extra_args=extra), RATIOS)
-    # usable 3919157658 // (64 * 8 * 128 * 2 * 34/32 = 139264) = 28141
-    assert fi.fits == 28141 and fi.fits > 14950
+    assert fi.fits == 5011 and fi.fits > 2662
 
 
 def test_the_records_cache_types_win_over_extra_args(tmp_path, host):
     rec = _record(tmp_path, extra_args=["-ctk", "q8_0", "-ctv", "q8_0"], cache_type_k="f16", cache_type_v="f16")
-    assert compute_fit(rec, RATIOS).fits == 14950
+    assert compute_fit(rec, RATIOS).fits == 2662
 
 
 def test_an_unknown_cache_type_in_extra_args_is_not_computed(tmp_path, host):
@@ -165,13 +164,13 @@ def test_the_argv_detectors_agree_with_the_forms_llama_server_takes():
 
 def test_header_a_is_the_formula_with_f16_cache():
     assert kv_bytes_per_token(HEADER_A, "f16", "f16") == 262144
-    # usable = 24 GiB - 18.5 GiB - int(0.10 * weights) = 3919157658; // 262144 = 14950
-    assert fit(HEADER_A, 24 * GIB, RATIOS, cache_type_k="f16", cache_type_v="f16", weights=WEIGHTS_A) == 14950
+    # usable = 24 GiB - weights - int(0.10 * weights) - 3 GiB = 697932186; // 262144 = 2662
+    assert fit(HEADER_A, 24 * GIB, RATIOS, cache_type_k="f16", cache_type_v="f16", weights=WEIGHTS_A) == 2662
 
 
 def test_header_b_derives_head_dim_and_is_capped_at_trained():
     assert kv_bytes_per_token(HEADER_B, "q8_0", "q8_0") == 69632
-    # usable 27487790695 // 69632 = 394758, above trained 131072
+    # usable 24266565223 // 69632 = 348497, above trained 131072
     assert fit(HEADER_B, 30 * GIB, RATIOS, cache_type_k="q8_0", cache_type_v="q8_0", weights=4 * GIB) == 131072
 
 
@@ -215,7 +214,7 @@ def test_the_key_shapes_agree_with_read_header(tmp_path):
                       "qwen3.attention.head_count_kv": 8, "qwen3.attention.key_length": 128,
                       "qwen3.context_length": 262144})
     header = read_header(path, FIT_KEYS)
-    assert fit(header, 24 * GIB, RATIOS, weights=WEIGHTS_A) == 14950
+    assert fit(header, 24 * GIB, RATIOS, weights=WEIGHTS_A) == 2662
 
 
 def test_a_fit_is_never_zero_or_negative():
@@ -637,7 +636,7 @@ def test_compute_fit_uses_the_memory_it_is_given_and_never_probes(tmp_path, host
 
 def test_compute_fit_given_free_bytes_changes_the_fit(tmp_path, host):
     big = compute_fit(_record(tmp_path), RATIOS, memory=FreeMemory(24 * GIB, 32 * GIB, "nvidia-smi"))
-    small = compute_fit(_record(tmp_path), RATIOS, memory=FreeMemory(22 * GIB, 32 * GIB, "nvidia-smi"))
+    small = compute_fit(_record(tmp_path), RATIOS, memory=FreeMemory(24 * GIB - 128 * 2**20, 32 * GIB, "nvidia-smi"))
     assert big.fits == compute_fit(_record(tmp_path), RATIOS).fits  # the same bytes as the probe gave
     assert small.fits is not None and small.fits < big.fits
     assert host == ["free_memory"]  # only the un-given call probed

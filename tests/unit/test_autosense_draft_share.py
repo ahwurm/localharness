@@ -26,7 +26,7 @@ def _window(share: float | None = None) -> int | None:
 
 
 def test_the_draft_share_multiplies_the_kv_bytes_per_token():
-    usable = FREE - WEIGHTS - int(RATIOS.compute_margin_ratio * WEIGHTS)
+    usable = FREE - WEIGHTS - int(RATIOS.compute_margin_ratio * WEIGHTS) - int(RATIOS.compute_reserve * GIB)
     assert _window(SHARE) == int(usable // (KV_Q8 * SHARE))
     assert _window(1.0) == int(usable // KV_Q8)
     assert _window(SHARE) < _window(1.0)
