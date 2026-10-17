@@ -29,10 +29,11 @@ def _peer(**lifecycle) -> dict:
 # ------------------------------------------------------------------ the tables
 
 
-def test_the_launch_key_table_is_the_eleven_keys_in_order():
+def test_the_launch_key_table_is_the_thirteen_keys_in_order():
     assert trust.LAUNCH_KEYS == (
         "binary", "docker_image", "extra_args", "runtime", "launch", "bind_all", "require_api_key",
-        "api_key_file", "env", "local_models", "config_ini")
+        "api_key_file", "env", "local_models", "config_ini", "engine_dir", "engine_config")
+    assert len(trust.LAUNCH_KEYS) == 13 and trust.LAUNCH_KEYS[-2:] == ("engine_dir", "engine_config")
 
 
 def test_the_launch_model_table_and_kind():
