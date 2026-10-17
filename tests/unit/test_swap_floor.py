@@ -176,3 +176,97 @@ def test_no_incumbent_plans_against_the_probe(monkeypatch, tmp_path):
     monkeypatch.setattr(lifecycle, "sense_launch", lambda *a, **kw: seen.append(kw) or real(*a, **kw))
     assert lifecycle.swap_refusal(_flash(tmp_path), None, config_dir=tmp_path, autosense=AUTO, floor=FLOOR) is None
     assert "memory" not in seen[0]
+
+
+HEAD = ("Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS served a 4,096-token window, below the 15,360 the harness "
+        "needs")
+
+
+def _live(served):
+    window = None if served is None else autosense.WindowReport(
+        served, 262_144, None, None, None, None, None, "fit-by-server")
+    return lifecycle.LiveEndpoint("http://127.0.0.1:8081/v1", ["m"], 1, window=window)
+
+
+class FakeStrategy:
+    def __init__(self, spec, log, served, restore_raises) -> None:
+        self.spec, self.log, self.served, self.restore_raises = spec, log, served, restore_raises
+
+    def launch_identity(self, spec):
+        return None
+
+    async def stop(self, spec, config_dir):
+        self.log.append(f"stop:{spec.served_name}")
+
+    async def activate(self, spec, config_dir, base_url, *, floor=None, **kw):
+        self.log.append(f"activate:{spec.served_name}:{floor}")
+        if spec.served_name == INCUMBENT and self.restore_raises:
+            raise RuntimeError("the port is taken")
+        return _live(self.served if spec.served_name != INCUMBENT else None)
+
+
+@pytest.fixture
+def served(monkeypatch):
+    """swap with strategies that record: `rig.served` is the window the target's launch reports."""
+    class Rig:
+        log: list[str] = []
+        served: int | None = 4096
+        restore_raises = False
+
+    rig = Rig()
+    rig.log = []
+    monkeypatch.setattr(lifecycle, "GPU_FREE_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(lifecycle, "strategy_for",
+                        lambda spec, *, unit: FakeStrategy(spec, rig.log, rig.served, rig.restore_raises))
+    return rig
+
+
+def _target(tmp_path) -> Heavy:
+    return Heavy(ManagedServerConfig(runtime="llamacpp", binary="/x/llama-server", model="/m/flash.gguf",
+                                     served_name="Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS", port=8081),
+                 "http://127.0.0.1:8081/v1")
+
+
+async def test_a_launch_that_serves_below_the_floor_is_rolled_back_and_the_rollback_named(tmp_path, served):
+    reporter = Reporter()
+    outcome = await _swap(tmp_path, _incumbent(), _target(tmp_path), reporter)
+    assert reporter.lines == [f"{HEAD} — {INCUMBENT} serves again."]
+    assert reporter.calls == ["freed", "restored", "line"] and "launched" not in reporter.calls
+    assert served.log == [f"stop:{INCUMBENT}", f"activate:{_target(tmp_path).spec.served_name}:{FLOOR}",
+                          f"stop:{_target(tmp_path).spec.served_name}", f"activate:{INCUMBENT}:None"]
+    assert outcome.stage == "launch" and outcome.live is None and outcome.error is not None
+    assert outcome.restored == _incumbent() and outcome.stopped == _incumbent()
+
+
+async def test_a_restore_that_fails_says_why(tmp_path, served):
+    served.restore_raises = True
+    reporter = Reporter()
+    outcome = await _swap(tmp_path, _incumbent(), _target(tmp_path), reporter)
+    assert reporter.lines == [f"{HEAD}. Could not restore it: the port is taken"]
+    assert "restored" not in reporter.calls and outcome.restored is None and outcome.stage == "launch"
+
+
+async def test_with_no_incumbent_the_target_is_stopped_and_the_line_says_so(tmp_path, served):
+    reporter = Reporter()
+    outcome = await _swap(tmp_path, None, _target(tmp_path), reporter)
+    assert reporter.lines == [f"{HEAD} — it was stopped."]
+    assert served.log[-1] == f"stop:{_target(tmp_path).spec.served_name}" and outcome.stage == "launch"
+
+
+@pytest.mark.parametrize("window, floor", [(FLOOR, FLOOR), (None, FLOOR), (4096, None)])
+async def test_a_window_at_the_floor_unknown_or_unchecked_is_a_success(tmp_path, served, window, floor):
+    served.served = window
+    reporter = Reporter()
+    outcome = await swap(_incumbent(), _target(tmp_path), config_dir=tmp_path, autosense=AUTO, reporter=reporter,
+                         redact=lambda t: t, floor=floor)
+    assert outcome.stage is None and outcome.live is not None and reporter.calls == ["freed", "launched"]
+
+
+async def test_a_served_report_with_no_window_is_a_success(tmp_path, served, monkeypatch):
+    class NoWindow(FakeStrategy):
+        async def activate(self, spec, config_dir, base_url, **kw):
+            return _live(None)
+
+    monkeypatch.setattr(lifecycle, "strategy_for", lambda spec, *, unit: NoWindow(spec, served.log, None, False))
+    reporter = Reporter()
+    assert (await _swap(tmp_path, _incumbent(), _target(tmp_path), reporter)).stage is None
