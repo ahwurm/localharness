@@ -15,7 +15,8 @@ Layout (little-endian): b"GGUF", u32 version (2 or 3), u64 n_tensors, u64 n_kv, 
 string key (u64 length + bytes), u32 value type, value. A dotless wanted name is a suffix resolved
 against `general.architecture`: `general.<name>`, `<arch>.<name>` or `<arch>.attention.<name>`. A
 wanted name that contains a `.` is an exact key (`split.no`, `clip.vision.projection_dim`), matched in
-any position whatever the architecture, and returned under its full name.
+any position whatever the architecture, and returned under its full name; once the architecture is known
+it also matches `<arch>.attention.<name>` (`indexer.key_length`).
 """
 from __future__ import annotations
 
@@ -35,7 +36,8 @@ __all__ = ["GgufHeaderError", "NotRegularFile", "read_header", "read_header_from
            "MAX_ARRAY_ELEMENTS", "HEADER_BYTE_BUDGET", "DISCOVERY_MAX_DEPTH", "DISCOVERY_MAX_FILES",
            "DISCOVERY_MAX_ENTRIES", "DISCOVERY_KEYS", "DiscoveredModel", "Discovery", "walk_ggufs",
            "discover", "preset_name", "unique_preset_name", "rank_models", "served_model", "TensorEntry",
-           "TensorTable", "read_tensor_table", "shard_paths", "MAX_TENSORS", "MAX_TENSOR_NAME", "MAX_DIMS"]
+           "TensorTable", "read_tensor_table", "shard_paths", "MAX_TENSORS", "MAX_TENSOR_NAME", "MAX_DIMS",
+           "classify", "kv_layers", "indexer_layers", "cross_checked"]
 
 MAGIC = b"GGUF"
 MAX_KV = 4096
@@ -163,7 +165,8 @@ def read_header_from(f, want: Iterable[str]) -> dict[str, Any]:
     for _ in range(n_kv):
         key = c.string() or ""
         is_exact = key in exact
-        keep = key == _ARCH_KEY or is_exact or _wanted_key(key, suffixes, arch)
+        keep = (key == _ARCH_KEY or is_exact or _wanted_key(key, suffixes, arch)
+                or any(key.endswith(f".attention.{name}") for name in exact))
         value = _value(c, c.unpack("<I"), keep)
         if key == _ARCH_KEY and isinstance(value, str):
             arch = value
@@ -172,8 +175,8 @@ def read_header_from(f, want: Iterable[str]) -> dict[str, Any]:
         elif keep:
             seen[key] = value
         if arch is not None:
-            for name in suffixes - found.keys():
-                for candidate in _forms(arch, name):
+            for name in wanted - found.keys():
+                for candidate in _forms(arch, name) if name in suffixes else (f"{arch}.attention.{name}",):
                     if candidate in seen:
                         found[name] = seen[candidate]
                         break
@@ -247,6 +250,53 @@ def _shard_table(path: Path) -> tuple[list[TensorEntry], int]:
         raise GgufHeaderError("tensor offset past the end of the data")
     ends = [offset for _, offset in infos[1:]] + [data_bytes]
     return [TensorEntry(name, end - offset) for (name, offset), end in zip(infos, ends)], data_bytes
+
+
+_INPUT_TENSORS = frozenset({"token_embd", "per_layer_token_embd", "pos_embd", "token_types"})
+_BLOCK_TENSOR = re.compile(r"^blk\.(\d+)\.(.*)$")
+
+
+def classify(name: str) -> str:
+    """Where llama.cpp keeps a tensor: "input" (read row by row through mmap), "experts" (`_exps`) or "gpu"."""
+    if name.split(".", 1)[0] in _INPUT_TENSORS:
+        return "input"
+    return "experts" if "_exps" in name else "gpu"
+
+
+def _blocks(entries: Iterable[TensorEntry]) -> dict[int, list[str]]:
+    blocks: dict[int, list[str]] = {}
+    for e in entries:
+        m = _BLOCK_TENSOR.match(e.name)
+        if m:
+            blocks.setdefault(int(m[1]), []).append(m[2])
+    return blocks
+
+
+def kv_layers(entries: Iterable[TensorEntry], header: Mapping[str, Any]) -> tuple[int, int]:
+    """(main, draft): the blocks that hold K (`attn_k`, or `attn_qkv` with no `ssm_` tensor), split at
+    `block_count - nextn_predict_layers`."""
+    trunk = header.get("block_count", 0) - header.get("nextn_predict_layers", 0)
+    holders = [n for n, names in _blocks(entries).items()
+               if any(t.startswith("attn_k.") for t in names)
+               or (any(t.startswith("attn_qkv.") for t in names) and not any(t.startswith("ssm_") for t in names))]
+    return sum(n < trunk for n in holders), sum(n >= trunk for n in holders)
+
+
+def indexer_layers(entries: Iterable[TensorEntry]) -> int:
+    """The blocks holding a `blk.N.indexer.k_proj` tensor."""
+    return sum(any(t.startswith("indexer.k_proj.") for t in names) for names in _blocks(entries).values())
+
+
+def cross_checked(sums: Mapping[str, int], main: int, header: Mapping[str, Any], data_bytes: int) -> bool:
+    """Whether the table agrees with the header: attention layers within the block count (and equal to the
+    trunk over `full_attention_interval` when set), experts only with `expert_count`, input at most half the data."""
+    blocks = header.get("block_count")
+    if blocks is None or not 1 <= main <= blocks:
+        return False
+    interval = header.get("full_attention_interval")
+    if interval is not None and main != (blocks - header.get("nextn_predict_layers", 0)) // interval:
+        return False
+    return (sums.get("experts", 0) == 0 or "expert_count" in header) and 2 * sums.get("input", 0) <= data_bytes
 
 
 # ---- discovery (D-01..D-05, D-07, D-47, D-48): what `init` finds under the model roots --------------
