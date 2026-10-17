@@ -60,6 +60,7 @@ from localharness.provider.detector import (
     detect_provider,
 )
 from localharness.provider.refarch import RefArch
+from localharness.provider.runtimes import RUNTIMES
 
 console = Console()
 err_console = Console(stderr=True)
@@ -867,10 +868,11 @@ def _import_listener(config_path: Path, result: DetectorResult) -> InitRecords |
         return None
     holder = workspace.holder_of(rec)
     who = workspace.incumbent_subject(holder, port=port)
-    if runtime != "llamacpp":  # a keyed Ollama or LM Studio has no place for a key; unkeyed attaches as before
+    row = RUNTIMES[runtime]
+    if row.key_env is None:  # a keyed Ollama or LM Studio has no place for a key; unkeyed attaches as before
         if not answered_401:
             return None
-        return Attached(f"{who} runs {RUNTIME_LABELS[runtime]}, which cannot carry a key"
+        return Attached(f"{who} runs {row.name}, which cannot carry a key"
                         f"{init_import.ATTACH_ONLY_SUFFIX}", _attach_model(rec, result), result=result)
     imp = init_import.import_record(
         rec, source="live", binary_resolver=which_outside_cwd, port=port,
