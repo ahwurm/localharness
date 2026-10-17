@@ -48,6 +48,7 @@ from localharness.config.models import ManagedServerConfig
 from localharness.provider import autosense as _auto
 from localharness.provider import procfs, server, speed_stats, tuning, units
 from localharness.provider.procfs import LaunchIdentity
+from localharness.provider.runtimes import RUNTIMES
 from localharness.provider.tuning import Tuned
 
 log = logging.getLogger(__name__)
@@ -1244,27 +1245,8 @@ class LmsStrategy:
 def strategy_for(
     spec: ManagedServerConfig, *, unit: "units.UnitRuntimeState | None" = None,
 ) -> LifecycleStrategy:
-    """Map a managed-server spec to its launch strategy by `runtime` (the launch-STRATEGY axis,
-    orthogonal to provider_type): 'llamacpp' → SpawnedProcessStrategy (the harness spawns
-    llama-server itself), 'ollama' → DaemonStrategy (the harness spawns + owns the `ollama serve`
-    daemon), 'lmstudio' → LmsStrategy (the harness drives LM Studio's headless `lms` CLI), anything
-    else ('vllm', the default) → ManagedVllmStrategy (docker/binary vLLM). The single construction
-    point the callers — the REPL /model swap and `start` autostart — route through, so the strategy,
-    not the caller, owns HOW a backend is launched/stopped.
-
-    `unit` is the autostart unit's state (spec 20 §9.4, D-19). Only a state that is the harness's OWN
-    unit (`own=True`, made by `units.own_unit` / `harness_unit_state` after the identity tests passed) and
-    a record the unit can serve (`unit_servable`: llama.cpp or a vLLM binary) wrap the strategy above in a
-    `UnitStrategy`; a raw state, a foreign unit and a docker / Ollama / LM Studio record get the strategy
-    above unchanged."""
-    if spec.runtime == "llamacpp":
-        base: LifecycleStrategy = SpawnedProcessStrategy()
-    elif spec.runtime == "ollama":
-        base = DaemonStrategy()
-    elif spec.runtime == "lmstudio":
-        base = LmsStrategy()
-    else:
-        base = ManagedVllmStrategy()
+    """The runtime row's launch strategy, wrapped in a `UnitStrategy` only for the harness's own unit and a unit-servable record."""
+    base = RUNTIMES[spec.runtime].strategy(spec)
     if isinstance(unit, units.UnitRuntimeState) and unit.own and unit_servable(spec):
         return UnitStrategy(base, unit, spec)
     return base
