@@ -121,6 +121,13 @@ server keeps working. Spec 20.
   server is not required.
 - **Provider errors that quote the server log quote it scrubbed** (bearer tokens, llama-server's
   key line, URL credentials) and point at the log file.
+- **A llama.cpp wrapper-script binary verifies under the autostart unit.** The launch identity
+  always includes `llama-server`, so a record whose `binary` is a script that execs it no longer
+  fails the switch with "the live launch is not this record's"; a script that execs a differently
+  named server still does.
+- **The unit's tolerated restart is remembered.** The boot marker is confirmed against the live
+  argv's `-c`, not the served window llama.cpp rounds up (37001 → 37120), so the retry shape reaches
+  the ledger after a restart under the unit instead of the marker being dropped unrecorded.
 
 ### Security
 - **Every launching surface runs the same trust decision**: `start`, `serve` (never asks, exits 78
@@ -164,9 +171,11 @@ server keeps working. Spec 20.
   that commit.
 
 ### Known limitations
-- **Live verification on the reference box has not been run.** The tuned launch, the swap, the boot
-  retry and the unit are covered by tests and fakes, not yet shown on the reference box; the
-  owner's runbook covers it.
+- **Live verification on the reference box ran on 2026-10-16** (52 of the runbook's 58 rows: the
+  tuned launch, the swap, the model's own sampling, the resume, the script, vLLM 0.31.0, the unit
+  end to end and a fresh config dir); the reboot, linger and interview-look rows are the owner's.
+  Two findings from it are fixed below; the first-run ranking (newest fitting file first, so not
+  always the reference preset) and the resume clause after `/model` are spec questions for 0.19.1.
 - The vLLM reference rows still download the whole repository, unpinned, and a cached directory is
   accepted by name. Only the llama.cpp row is hash-checked.
 - A record's `env:` values print as written in `--script`; keep keys in `api_key_file`.
