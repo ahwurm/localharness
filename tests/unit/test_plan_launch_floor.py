@@ -66,3 +66,117 @@ async def test_a_refused_activate_starts_and_writes_nothing(tmp_path, monkeypatc
     with pytest.raises(server.LaunchRefused, match="Flash-Next cannot run here"):
         await lifecycle.SpawnedProcessStrategy().activate(_flash(tmp_path), config, BASE, autosense=AUTO)
     assert touched == [] and list(config.iterdir()) == []
+
+
+FLASH_GPU = 3_968_785_920
+FLOOR = 15_360
+KV = 16_320
+
+
+def _free_for(window):
+    gpu = FLASH_GPU + FLASH_MMPROJ
+    return gpu + int(AUTO.compute_margin_ratio * gpu) + window * KV
+
+
+def test_a_priced_window_exactly_at_the_floor_launches_and_one_step_below_is_the_floor_sentence(tmp_path, monkeypatch):
+    _world(monkeypatch, free=_free_for(FLOOR))
+    assert _pair(list(_plan(_flash(tmp_path), tmp_path, FLOOR).argv), "-c") == "15360"
+    _world(monkeypatch, free=_free_for(FLOOR) - 1)
+    with pytest.raises(server.LaunchRefused) as refused:
+        _plan(_flash(tmp_path), tmp_path, FLOOR)
+    assert str(refused.value) == (
+        "Flash-Next fits only a 15,104-token window here and the harness needs at least 15,360 — free GPU memory, "
+        "or pick a smaller model.")
+
+
+def test_a_record_context_below_the_floor_is_the_record_context_sentence(tmp_path, monkeypatch):
+    _world(monkeypatch)
+    with pytest.raises(server.LaunchRefused) as refused:
+        _plan(_flash(tmp_path, context=4096), tmp_path, FLOOR)
+    assert str(refused.value) == (
+        "Flash-Next is set to a 4,096-token window (context:) and the harness needs at least 15,360 — raise it, "
+        "or unset it so the harness sizes the window.")
+    assert _pair(list(_plan(_flash(tmp_path, context=4096), tmp_path).argv), "-c") == "4096"
+
+
+def test_a_name_with_a_control_character_reaches_a_sentence_without_it(tmp_path, monkeypatch):
+    _world(monkeypatch)
+    with pytest.raises(server.LaunchRefused) as refused:
+        _plan(_flash(tmp_path, context=4096, served_name="Flash\x1b-Next"), tmp_path, FLOOR)
+    assert str(refused.value).startswith("Flash-Next is set to")
+
+
+def test_a_model_that_cannot_be_read_launches_by_the_server_with_the_floor_as_its_fit_ctx(tmp_path, monkeypatch):
+    _world(monkeypatch)
+    spec = _flash(tmp_path)
+    open(spec.model, "wb").write(b"not a gguf")
+    argv = list(_plan(spec, tmp_path, FLOOR).argv)
+    assert _pair(argv, "--fit-ctx") == "15360" and "-c" not in argv
+    assert _plan(spec, tmp_path).report.mode == "fit-by-server"
+    assert "--fit-ctx" not in _plan(spec, tmp_path).argv
+
+
+@pytest.mark.parametrize("extra", [["-ot", "exps=CPU"], ["--n-cpu-moe", "48"], ["-ngl", "10"]])
+def test_a_record_placing_tensors_by_hand_is_not_computed(tmp_path, monkeypatch, extra):
+    _world(monkeypatch)
+    plan = _plan(_flash(tmp_path, extra_args=extra), tmp_path, FLOOR)
+    assert plan.report.mode == "not-computed" and "-c" not in plan.argv and "--fit-ctx" not in plan.argv
+
+
+def test_an_unknown_free_gpu_memory_is_not_computed(tmp_path, monkeypatch):
+    _world(monkeypatch, memory=False)
+    plan = _plan(_flash(tmp_path), tmp_path, FLOOR)
+    assert plan.report.mode == "not-computed" and "-c" not in plan.argv and "--fit-ctx" not in plan.argv
+
+
+def test_a_hand_ngl_beyond_the_gpu_is_the_ngl_sentence(tmp_path, monkeypatch):
+    _world(monkeypatch)
+    with pytest.raises(server.LaunchRefused) as refused:
+        _plan(_flash(tmp_path, extra_args=["-ngl", "99"]), tmp_path)
+    assert str(refused.value) == (
+        "Flash-Next sets -ngl in server.extra_args, which turns llama-server's --fit off, and its experts do not "
+        "fit the GPU — drop the -ngl, or add --n-cpu-moe to extra_args.")
+
+
+def test_the_halve_once_retry_halves_to_the_floor_and_not_below_it(tmp_path, monkeypatch):
+    _world(monkeypatch, free=_free_for(30_720))
+    retry = _plan(_flash(tmp_path), tmp_path, FLOOR).retry()
+    assert retry is not None and _pair(list(retry.argv), "-c") == "15360"
+    _world(monkeypatch, free=_free_for(30_464))
+    assert _plan(_flash(tmp_path), tmp_path, FLOOR).retry() is None
+    _world(monkeypatch, free=_free_for(30_720))
+    assert _pair(list(_plan(_flash(tmp_path), tmp_path).retry().argv), "-c") == "15360"
+
+
+def test_no_floor_is_no_plan_time_refusal_and_no_fit_ctx(tmp_path, monkeypatch):
+    _world(monkeypatch, free=_free_for(2_048))
+    plan = _plan(_flash(tmp_path), tmp_path)
+    assert _pair(list(plan.argv), "-c") == "2048" and "--fit-ctx" not in plan.argv
+
+
+def test_the_harness_places_nothing_by_hand(tmp_path, monkeypatch):
+    _world(monkeypatch)
+    argv = list(_plan(_flash(tmp_path), tmp_path, FLOOR).argv)
+    assert not {"-ngl", "--n-cpu-moe", "-ot", "-t"} & set(argv)
+
+
+def test_planning_twice_gives_equal_plans_or_the_same_refusal(tmp_path, monkeypatch):
+    _world(monkeypatch)
+    spec = _flash(tmp_path)
+    assert _plan(spec, tmp_path, FLOOR) == _plan(spec, tmp_path, FLOOR)
+    _world(monkeypatch, available=31.4)
+    sentences = []
+    for _ in range(2):
+        with pytest.raises(server.LaunchRefused) as refused:
+            _plan(spec, tmp_path, FLOOR)
+        sentences.append(str(refused.value))
+    assert sentences[0] == sentences[1]
+
+
+@pytest.mark.parametrize("strategy", [
+    lifecycle.ManagedVllmStrategy, lifecycle.SpawnedProcessStrategy, lifecycle.DaemonStrategy,
+    lifecycle.LmsStrategy, lifecycle.UnitStrategy])
+def test_every_activate_takes_a_floor(strategy):
+    import inspect
+
+    assert inspect.signature(strategy.activate).parameters["floor"].default is None
