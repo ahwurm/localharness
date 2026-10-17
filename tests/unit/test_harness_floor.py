@@ -118,3 +118,84 @@ def test_a_registry_that_raises_counts_the_prompt_alone():
 def test_a_loop_floor_reads_the_context_managers_reply_cap():
     loop, _ = _loop(6_700, max_response_tokens=8_192)
     assert loop.floor() == 19_456
+
+
+_RULES = (
+    "\n\nAnswer ordinary questions directly. For substantive work, follow the latest "
+    "human request and corrections, retain needed references, and stop at the requested "
+    "checkpoint. An answer-only request excludes unsolicited execution. Harness control "
+    "messages are not human feedback. Report actual tool and gate outcomes: failed, "
+    "missing, or stale evidence remains unresolved; a human waiver is not a passed gate. "
+    "Self-checks and CONFIRMED do not prove completion. Avoid repeated unchanged attempts; "
+    "report a blocker or unknown result honestly. For substantive multi-step work, keep "
+    "the working record with the task tool when it is available: the objective, the "
+    "human's decisions, artifacts, references, and checks."
+)
+
+
+def _head_prompt(role: str, *, native: bool, guardrails: str) -> str:
+    from datetime import datetime
+    from pathlib import Path
+    now = datetime.now().astimezone()
+    out = role + f"\n\nToday's date: {now.strftime('%A, %Y-%m-%d')} ({now.tzname()})"
+    out += (
+        f"\n\nWorking directory: {Path.cwd()}"
+        "\nUnless the user names another location, create any files or folders you make "
+        "under this working directory."
+    )
+    out += (
+        "\n\nWhen you start a distinct phase of a multi-step task, first state what you are "
+        'about to do in one short line (e.g. "Pulling the data…") before making the tool calls.'
+    )
+    out += _RULES
+    if not native:
+        out += (
+            "\n\nWhen you have finished using tools, respond directly to the user. "
+            "Be concise — give the answer, not your reasoning process."
+        )
+    if guardrails:
+        out += "\n\n## Guardrails\n" + guardrails
+    return out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [True, False])
+@pytest.mark.parametrize("guardrails", ["", "NEVER rm -rf"])
+async def test_the_turns_leading_system_message_is_the_head_prompt(tmp_path, native, guardrails):
+    from localharness.agent.loop import base_system_prompt
+    from tests.conftest import FakeLLMResponse, MockLLMClient
+
+    llm = MockLLMClient([FakeLLMResponse(content="Done.")])
+    llm.config.tool_call_mode = "native" if native else "text"
+    sent: list[str] = []
+    original = llm.stream_complete
+
+    async def recording(messages=None, **kw):
+        sent.append(messages[0]["content"])
+        return await original(messages=messages, **kw)
+
+    llm.stream_complete = recording
+    path = None
+    if guardrails:
+        path = tmp_path / "GUARDRAILS.md"
+        path.write_text(guardrails, encoding="utf-8")
+    cfg = AgentConfig(name="a", role="Test agent.", permissions=PermissionConfig(mode="unattended"))
+    loop = AgentLoop(config=cfg, llm=llm, bus=EventBus(), context_manager=ContextManager(),
+                     tool_registry=None, permission_evaluator=PermissionEvaluator(),
+                     guardrails_path=path)
+    await loop.run_turn("hi")
+
+    expected = _head_prompt("Test agent.", native=native, guardrails=guardrails)
+    assert sent[0] == expected
+    assert base_system_prompt(cfg, tool_call_mode="native" if native else "text",
+                              guardrails=guardrails) == expected
+
+
+def test_the_loops_fixed_part_counts_the_shared_prompt_and_its_guardrails(tmp_path):
+    path = tmp_path / "GUARDRAILS.md"
+    path.write_text("RULES-G", encoding="utf-8")
+    loop, counter = _loop(10)
+    loop._guardrails_path = path
+    loop.fixed_tokens()
+    assert "## Guardrails\nRULES-G" in counter.seen[-1][0]["content"]
+    assert counter.seen[-1][0]["content"].startswith("Test agent.\n\nToday's date: ")
