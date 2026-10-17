@@ -1,3 +1,4 @@
+# ruff: noqa: F811  (the `popen` fixture is imported by name, then taken as a parameter)
 """The launch plan prices its window (or refuses) before anything starts: Flash-Next, the modes, the floor and the retry."""
 from __future__ import annotations
 
