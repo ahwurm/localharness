@@ -2246,10 +2246,9 @@ class OrchestratorREPL:
                 "model": str(Path(target).expanduser()), "served_name": gguf_header.preset_name(target)})
         elif not gguf and target != prim_served:
             planned = managed.model_copy(update={"model": target})
-        incumbent_heavy = (
-            model_ops.incumbent_heavy(self._active_heavy, self._harness) if self._active_heavy is not None
-            else _lifecycle.Heavy(managed, _prim.base_url if _prim is not None else llm.config.base_url))
-        target_heavy = _lifecycle.Heavy(planned, llm.config.base_url, None, launch_kw)
+        primary_url = _prim.base_url if _prim is not None else llm.config.base_url
+        incumbent_heavy = model_ops.incumbent_heavy(self._active_heavy or (managed, primary_url), self._harness)
+        target_heavy = model_ops.incumbent_heavy((planned, primary_url), self._harness)
         floor = self._live_floor()
         unplanned = await asyncio.to_thread(
             _lifecycle.swap_refusal, target_heavy, incumbent_heavy, config_dir=self._server_config_dir,
