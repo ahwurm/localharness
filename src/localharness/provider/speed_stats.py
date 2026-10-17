@@ -67,6 +67,7 @@ DROPPED_ENV_KEY = "_dropped_env"
 # Reserved top-level key: the name of the record `start` last served, for spec 20 §8.2's resume
 # clause. Not a model entry, so the speed readers skip it.
 LAST_SERVED_KEY = "_last_served"
+FOREIGN_UNIT_KEY = "_foreign_unit"
 # The largest ledger file `_load` will read. A real ledger is a handful of model entries (a few
 # KiB); 1 MiB is far above that and far below anything that costs memory or time to parse.
 LEDGER_CAP = 1 << 20
@@ -311,7 +312,7 @@ def model_paths(path: Path) -> set[str]:
     reserved `_dropped_env` map and any entry without a string `model_path` are skipped."""
     found: set[str] = set()
     for key, entry in _load(path).items():
-        reserved = key in (DROPPED_ENV_KEY, LAST_SERVED_KEY)
+        reserved = key in (DROPPED_ENV_KEY, LAST_SERVED_KEY, FOREIGN_UNIT_KEY)
         value = entry.get("model_path") if not reserved and isinstance(entry, dict) else None
         if isinstance(value, str):
             found.add(value)
@@ -351,11 +352,11 @@ def median_tps(path: Path, provider_type: str, model: str) -> float | None:
 def all_median_tps(path: Path) -> dict[str, float]:
     """{speed_key: median tok/s} for every model with at least one sample.
 
-    Reserved keys (leading underscore, e.g. DROPPED_ENV_KEY, LAST_SERVED_KEY) are not model entries
+    Reserved keys (leading underscore, e.g. DROPPED_ENV_KEY, LAST_SERVED_KEY, FOREIGN_UNIT_KEY) are not model entries
     and are skipped by name."""
     out: dict[str, float] = {}
     for key, entry in _load(path).items():
-        if key in (DROPPED_ENV_KEY, LAST_SERVED_KEY):
+        if key in (DROPPED_ENV_KEY, LAST_SERVED_KEY, FOREIGN_UNIT_KEY):
             continue
         samples = entry.get("samples", []) if isinstance(entry, dict) else []
         samples = [s for s in samples if isinstance(s, (int, float))]
@@ -499,3 +500,18 @@ def last_served(path: Path) -> str | None:
     rec = _load(path).get(LAST_SERVED_KEY)
     name = rec.get("name") if isinstance(rec, dict) else None
     return name if isinstance(name, str) and name else None
+
+
+def record_foreign_unit(path: Path, unit: str, served: str) -> None:
+    """Record the foreign unit and what it serves, so its sentence prints again only when either changes."""
+    data = _load_for_write(path)
+    if data is None:
+        return
+    data[FOREIGN_UNIT_KEY] = {"unit": unit, "served": served, "recorded_at": datetime.now(timezone.utc).isoformat()}
+    _write(path, data)
+
+
+def foreign_unit_changed(path: Path, unit: str, served: str) -> bool:
+    """True unless the ledger holds exactly this (unit, served) pair."""
+    rec = _load(path).get(FOREIGN_UNIT_KEY)
+    return not (isinstance(rec, dict) and rec.get("unit") == unit and rec.get("served") == served)
