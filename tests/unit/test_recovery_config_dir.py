@@ -25,6 +25,7 @@ from localharness.provider.lifecycle import (
 _ACTIVATE_PARAMETERS = [
     "self", "spec", "config_dir", "base_url", "timeout_seconds", "on_poll", "api_key", "peer", "autosense",
     "on_plan",  # 0.19: the launch line's callback (spec 20 §6.4), appended last and defaulted
+    "floor",  # the window floor the plan must clear, appended last and defaulted
 ]
 
 

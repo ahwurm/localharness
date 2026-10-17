@@ -195,9 +195,12 @@ def test_a_zero_cache_ram_is_passed_not_dropped():
     assert server.serve_command(_llama(cache_ram=0)).count("--cache-ram") == 1
 
 
-def test_the_fit_keywords_do_nothing_to_a_vllm_record():
+def test_a_vllm_record_takes_the_window_as_max_model_len_unless_extra_args_hold_one():
+    argv = server.serve_command(_docker(), context=32768, cache_ram=512)
+    assert argv.count("--max-model-len") == 1 and argv[argv.index("--max-model-len") + 1] == "32768"
+    assert [t for t in argv if t not in ("--max-model-len", "32768")] == server.serve_command(_docker())
     assert server.serve_command(_binary(), context=32768, cache_ram=512) == server.serve_command(_binary())
-    assert server.serve_command(_docker(), context=32768, cache_ram=512) == server.serve_command(_docker())
+    assert "--max-model-len" in server.serve_command(_docker(context=8192)) and "8192" in server.serve_command(_docker(context=8192))
 
 
 def test_serve_command_does_no_io_and_is_deterministic(monkeypatch):

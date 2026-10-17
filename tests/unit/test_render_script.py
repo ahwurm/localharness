@@ -124,7 +124,7 @@ def test_an_unknown_free_memory_leaves_c_to_llama_server_with_no_fitted_value(tm
 
     script = _render(plan, spec)
 
-    assert plan.report.mode == "fit-by-server"
+    assert plan.report.mode == "not-computed"
     assert script.splitlines()[1].startswith("# -c left to llama-server --fit; environment:")
     assert _exec_tokens(script) == list(plan.argv)
 
