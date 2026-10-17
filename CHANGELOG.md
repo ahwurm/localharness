@@ -4,6 +4,175 @@ All notable changes to LocalHarness are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: interfaces may change).
 
+## [0.19.0] — 2026-10-16
+
+A model `init` discovers now launches tuned, and a fresh box is one command. The KV cache type,
+MTP drafting and the vLLM parsers are derived when the server launches, the model's own sampling
+is no longer overwritten on every request, and `localharness start` serves whatever is serving,
+honours `--preset`, and brings back your last choice when nothing is. Autostart is
+`localharness model --autostart on`, the launch is readable as a script
+(`localharness model --script`), and `localharness start` on a box with no config finds a model
+or offers one to fetch, sets up every model it found on one Enter, and finds a model that arrives
+later. The job, in one sentence: fresh computer, download localharness, run `localharness start`, and it
+runs you through it. A 0.18 config loads unchanged and a hand-run
+server keeps working. Spec 20.
+
+### Added
+- **KV cache type and MTP drafting are derived at launch (spec 20 §6).** A llama.cpp preset with
+  no cache type set gets `autosense.kv_cache_type` (default `q8_0`) for K and V, and a GGUF with
+  `nextn_predict_layers` of 1 or more gets `--spec-type draft-mtp --spec-draft-p-min
+  <autosense.draft_p_min>` (default 0.6) unless `autosense.draft_mtp` is false. A record field
+  (`speculative: off | draft-mtp`, `cache_type_k`/`cache_type_v`) or a flag in `extra_args`,
+  `env:` or `config_ini`, in any spelling, wins over the derivation; the fit prices both, drafting
+  context included. `kv_cache_type: f16` with `draft_mtp: false` restores 0.18's launch.
+- **vLLM parsers.** A vLLM preset with no parser set gets `--reasoning-parser`, `--tool-call-parser`
+  and `--enable-auto-tool-choice` from the checkpoint's `config.json` `model_type` (one table:
+  `qwen3`, `gemma4`, `glm4_moe`, `deepseek_v3`, `gpt_oss`, `llama`, `mistral`, `kimi_k2` and their
+  variants). No match derives nothing. `reasoning_parser` and `tool_call_parser` on the record
+  pin a value, and `off` pins one side off.
+- **The launch line names what was derived**, in its existing parenthesis:
+  `Managed llama.cpp is not running — starting it (kv q8_0 · mtp (1 layer); model load can take
+  several minutes)...`, and `reasoning qwen3 · tools qwen3_coder` on vLLM.
+- **One remembered retry.** A launch that dies before it is ready with a derived keyword is
+  relaunched once without MTP and with the window halved
+  (`mtp off, -c 57344 (retried: the full shape died) · server.speculative: off keeps the full
+  window`). The ledger remembers the shape, so the next launch starts there and says
+  `mtp off (remembered <date>)` until the fit grows or the binary or a knob changes. A KV-only
+  launch is not retried and a value you set is never dropped.
+- **The model's own sampling applies.** `LLMConfig.temperature` is no longer a constant 0.6:
+  no temperature is sent unless the root agent's file, the division or `org.default_temperature`
+  sets one, and the bench sends none. `start` prints one line when a set temperature differs from
+  the server's own (`sampling: temperature 0.6 from org.default_temperature (the model's own is
+  1.0 — unset org.default_temperature to use it)`).
+- **`start` serves what serves (spec 20 §8).** One ladder on every surface: `--preset` >
+  `pending_preset` (written by `localharness model <name>`) > an in-flight autostart target >
+  `active_endpoint` (the last `/model` choice) > `server:`. If the selected preset answers,
+  `start` attaches; if another answers and nothing explicit was chosen, it attaches to that one
+  and says so (`serving flash-next; your last choice was … — /model … swaps`); an explicit
+  `--preset` swaps exactly as `/model` does; if nothing answers it launches the selection.
+  `--preset <name>` takes a name or served name, exact first, then case-folded, then a unique
+  prefix. `--scripts` is a hidden alias.
+- **The pidfile records its port and the process is proven before it is signalled.** It holds
+  `<pid> <start> <port>`, so a peer's launch is no longer taken for the primary's (after
+  `/model flash-next` and a quit, the next `start` used to wait up to 30 minutes on the wrong port).
+  A stop checks the uid, executable, argument tokens, the record's port and session leader first,
+  and otherwise names the pid and leaves it alone.
+- **`localharness model <name>` from the CLI** runs the same trust decision as `start`. When the
+  harness's own unit is active it swaps at once and prints
+  `Serving flash-next — autostart restarted`; otherwise it records the choice and prints
+  `Selected flash-next — the next start serves it` (`… the next start or boot …` when the unit is
+  enabled).
+- **`localharness model --autostart on | off | status` (spec 20 §9).** `on` writes one systemd
+  user unit, `~/.config/systemd/user/localharness-llm.service`, whose body is the hidden
+  `localharness serve`: it plans the same launch `start` would, keeps a server the harness already
+  runs, and retries once after a death at boot. `on` and `off` need a person at a terminal;
+  `status` runs anywhere and prints the unit, its target, linger, the captured `PATH` and why it
+  last stopped. While the unit exists, `/model` and `start` restart it instead of spawning beside
+  it. llama.cpp and a vLLM binary only; a docker preset is refused with the line that says so.
+  The first `start` that attaches after a boot retry says so once.
+- **`localharness model --script [NAME]`, and `--all` (spec 20 §10).** Prints the launch a preset
+  gets as POSIX `sh` with comments saying what was derived, generated from the record and never
+  read back. A key prints as a placeholder, never its value.
+- **`init` and `start` name each preset's `mtp`, and list vLLM peers with their binary.** A cached
+  Hugging Face checkpoint is offered as a vLLM peer only when a `vllm` binary is found, and its
+  line says where (`on PATH` or `harness venv`).
+- **A fresh box is one command (spec 20 §11).** `localharness start` with no config on a terminal
+  lists every model it found, best first, and asks one question: `Set up these N models?`, whose
+  Enter sets up all of them and serves the best first. `Choose which, and which first` and
+  `Skip for now` are the other two. The receipt ends with `Later: just run localharness start —
+  it brings back your last choice.` One shared question widget (arrows, a typed number, Space on
+  a multi-select, Esc to cancel) asks every one of these and refuses to read a pipe.
+- **A box with no model gets a download offer.** One question over the reference rows for your
+  platform, its default sensed from the GPU, the runtimes on `PATH` and free memory
+  (`Download <file> (<size> of weights, <N> GB of free memory)?`). Enter fetches one pinned GGUF, checks its
+  size, SHA-256 and header, and records exactly that file. New: an 8 GB consumer-GPU row
+  (llama.cpp, `Q4_K_M`). With no runtime installed the question still comes, with the install line
+  above it.
+- **`localharness model --download <repo> --file <file>`** now records the file as a preset when
+  it is one `.gguf` that the hub vouches for at a commit it resolved itself, and a person is
+  present; otherwise it writes nothing and says `start finds it`.
+- **A model that arrives later is found.** A terminal `start` asks once, before the session loads,
+  about a GGUF copied in since the last run (`New model <name> — set it up?`; `Not now` stops it
+  asking). `localharness model --setup` lists every file not set up, declined ones included, and
+  clears a decline when you select it. Without a person nothing is walked or written.
+- **`doctor` rows.** `Tuning: <name> — <derived clause> · <window>` per launchable record,
+  `Sampling:` (the root's temperature rung against the server's own), `Autostart:` (what
+  `--autostart status` says) and `Models: N set up · M found, not set up · K declined —
+  localharness model --setup lists them`.
+
+### Changed
+- **`org.default_temperature` is null by default and was never sent.** The loader resolved a
+  temperature that no request carried, so a critic's `temperature: 0.2` had no effect. The root's
+  rung (agent file > division > `org.default_temperature`) is now applied; a child's file
+  `temperature` stays unused. `init_nulls` revision 2 nulls exactly `org.default_temperature: 0.6`
+  in `config.yaml` and `overrides.yaml`, with a backup and a receipt clause naming how to restore
+  it. Set it to 0.6 to keep the old value.
+- **A llama.cpp preset launches with q8_0 KV and, when the model has MTP layers, drafting.**
+  Its fitted `-c` can differ from 0.18's, because the fit now prices those types. Both undo with
+  `autosense.kv_cache_type: f16` and `draft_mtp: false`.
+- **Peers `init` and the library write live in `overrides.yaml`**, appended under a new lock
+  (`overrides.yaml.lock`), so a write by one process no longer races another's read-modify-write.
+  `init --force` now clears the peer list too. `init`'s `Keep it?` is not asked after peers were
+  appended (`Added N; kept config.yaml.`).
+- **The first run asks one question where it asked none**, on a terminal only. Off a terminal, with
+  `--no-input` or under `LOCALHARNESS_COMMIT`, it asks nothing, as before. "A person is here" is
+  one test everywhere: a terminal on stdin and on stdout.
+- **The README and the no-config message teach `localharness start` first** and say a model
+  server is not required.
+- **Provider errors that quote the server log quote it scrubbed** (bearer tokens, llama-server's
+  key line, URL credentials) and point at the log file.
+
+### Security
+- **Every launching surface runs the same trust decision**: `start`, `serve` (never asks, exits 78
+  when the machine record or a target is withheld), `localharness model` (asks only on a terminal)
+  and `--autostart on`. The CLI's immediate swap runs without a question only when a machine
+  record exists, `LOCALHARNESS_COMMIT` is absent and the target is not withheld: a choice among
+  records you have already confirmed, as at boot.
+- **The unit is pinned.** `ExecStart` runs the harness's interpreter with `-I` and `--config-dir`;
+  `UnsetEnvironment=` clears the loader variables (`LD_PRELOAD`, `PYTHONPATH` and the others);
+  `serve` execs the server over an allowlisted environment of eleven named variables and `PATH`,
+  `HF_HOME` and `LD_LIBRARY_PATH` from the unit's own `# env` lines. Those captured lines are a
+  fingerprinted machine-record entry (`autostart.env`), so an edited line is withheld. A unit is
+  restarted or stopped only when it is provably the harness's own; a foreign unit's process is
+  named, never stopped.
+- **Four login-time directories are protected paths** (`~/.config/systemd`,
+  `~/.local/share/systemd/user`, `~/.config/environment.d`, `~/.config/autostart`), and the
+  agent's deny list gains `systemctl --user set-environment | import-environment |
+  unset-environment | link | edit | set-property | add-wants | add-requires`, `enable` with a path,
+  `busctl`/`gdbus`/`dbus-send` aimed at systemd, and `localharness model --autostart`.
+- **A pidfile is a claim, not proof.** No signal is sent without the strategy's identity check,
+  and a structural test pins that `stop_server(` is never called without it. The harness's small
+  files are written through one atomic writer under a no-follow directory descriptor.
+- **Secrets stay out of every channel.** `--script` prints placeholders; a failed launch's log tail
+  is redacted at the console and the REPL with the config's secrets, the key file's key and the two
+  forms llama-server logs.
+- **The interview and every library write are for a person only**, checked again inside the
+  question widget. `model-library.json` and `overrides.yaml.lock` are protected config entries;
+  the library is deny-only, bounded and validated on read, and nothing is adopted through it. A
+  file is shown with its path, size, first-seen date and header facts, and the record comes from a
+  fresh header read, never the stored one.
+- **The download is hub-verified.** The llama.cpp row fetches one file at a pinned commit and
+  checks bytes and SHA-256 on the returned file through one descriptor before any record; the HF
+  cache is a place the agent can write. `--download` verifies against a commit the hub resolved.
+- **Named residuals** (SECURITY.md): a `setsid` server of your own on a record's port with the
+  record's binary, named by a planted pidfile, passes the check and would be stopped by an explicit
+  swap; the D-Bus route to the user manager is not closed; the harness's install tree and the
+  captured `PATH` run at boot as they do from your shell; a file swapped after its record was
+  adopted is not re-shown; a flood of planted models can crowd real ones past the discovery cap;
+  the later-run question's default is `Set it up`, so a file you did not bring is accepted by Enter
+  on a default you can see; the hash does not cover the row's author or a compromised repository at
+  that commit.
+
+### Known limitations
+- **Live verification on the reference box has not been run.** The tuned launch, the swap, the boot
+  retry and the unit are covered by tests and fakes, not yet shown on the reference box; the
+  owner's runbook covers it.
+- The vLLM reference rows still download the whole repository, unpinned, and a cached directory is
+  accepted by name. Only the llama.cpp row is hash-checked.
+- A record's `env:` values print as written in `--script`; keep keys in `api_key_file`.
+- One harness-launched server per config dir: the pidfile and the unit name one launch, so two
+  presets cannot be served at once.
+
 ## [0.18.1] — 2026-10-15
 
 A line break in the input box on every terminal, and a nudge chord of your own. Both were proposed
