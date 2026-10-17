@@ -61,6 +61,19 @@ def test_flash_next_puts_its_experts_in_ram_and_gives_the_prompt_cache_what_is_l
     assert placed.cache_ram == 3_849 and 3.7 <= placed.cache_ram / 1024 < 3.8
 
 
+def test_no_mmap_counts_the_whole_file_as_host_resident_in_the_prompt_cache(tmp_path):
+    split, header = _model(tmp_path, SWIFT)
+    weights = 20 * GIB
+
+    def cache_ram(**kw):
+        return autosense.place_llamacpp(
+            split, header, name="Swift-27B", weights=weights, mmproj=SWIFT_MMPROJ, free_bytes=int(30.2 * GIB),
+            meminfo=_mem(52.9), cache_type_k="q8_0", cache_type_v="q8_0", share=1.0, autosense=AUTO, **kw).cache_ram
+
+    mapped, unmapped = cache_ram(), cache_ram(no_mmap=True)
+    assert mapped - unmapped == int(AUTO.cache_ram_ratio * weights) // 2**20
+
+
 def test_an_unreadable_meminfo_gives_no_cache_ram_on_the_gpu(tmp_path):
     split, header = _model(tmp_path, SWIFT)
     placed = autosense.place_llamacpp(

@@ -53,6 +53,13 @@ def test_flash_next_plans_its_window_with_the_experts_in_ram(tmp_path, monkeypat
     assert plan.report.mode == "fit" and plan.report.placement.where == "experts in RAM"
 
 
+def test_no_mmap_in_extra_args_shrinks_the_priced_prompt_cache(tmp_path, monkeypatch):
+    _world(monkeypatch)
+    plain = _pair(list(_plan(_flash(tmp_path), tmp_path).argv), "--cache-ram")
+    unmapped = _pair(list(_plan(_flash(tmp_path, extra_args=["--no-mmap"]), tmp_path).argv), "--cache-ram")
+    assert plain == "3849" and int(unmapped) < int(plain)
+
+
 def test_flash_next_without_the_ram_for_its_experts_is_one_refusal_sentence(tmp_path, monkeypatch):
     _world(monkeypatch, available=31.4)
     with pytest.raises(server.LaunchRefused) as refused:

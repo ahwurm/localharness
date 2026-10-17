@@ -344,12 +344,12 @@ def _window(room: float, kv: float, trained: int) -> int:
     return min(trained, max(0, int(room // kv)) // 256 * 256)
 
 
-def _cache_ram(meminfo: Mapping[str, int] | None, experts_ram: int, ratios: Any) -> int | None:
+def _cache_ram(meminfo: Mapping[str, int] | None, host: int, ratios: Any) -> int | None:
     if meminfo is None:
         return None
     avail, total = meminfo["MemAvailable"], meminfo["MemTotal"]
     room = avail - ratios.unified_reserve_ratio * total
-    cap = min(ratios.cache_ram_ratio * (avail - experts_ram), room - experts_ram, ratios.cache_ram_ceiling_ratio * total)
+    cap = min(ratios.cache_ram_ratio * (avail - host), room - host, ratios.cache_ram_ceiling_ratio * total)
     return max(0, int(cap // _MIB))
 
 
@@ -376,7 +376,7 @@ def window_phrase(n: int) -> str:
 def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name: str, weights: int, mmproj: int,
                    free_bytes: int, meminfo: Mapping[str, int] | None, cache_type_k: str | None,
                    cache_type_v: str | None, share: float, autosense: Any, floor: int | None = None,
-                   ngl_hand: bool = False) -> Placement:
+                   ngl_hand: bool = False, no_mmap: bool = False) -> Placement:
     """Experts on the GPU first, in RAM when that misses the floor; the whole file on the GPU without a split.
     A refusal is a field of the result, never an exception."""
     gpu = split.gpu + mmproj if split else weights
@@ -389,7 +389,7 @@ def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name
 
     def made(fits: int, where: str | None, experts_ram: int = 0, refusal: str | None = None) -> Placement:
         return Placement(fits or None, None if refusal else where, gpu, mmproj, experts_ram, kv, free_bytes,
-                         free_bytes, _cache_ram(meminfo, experts_ram, autosense), refusal)
+                         free_bytes, _cache_ram(meminfo, weights if no_mmap else experts_ram, autosense), refusal)
 
     def decided(window: int, where: str, experts_ram: int = 0) -> Placement:
         if window <= 0:
@@ -710,7 +710,8 @@ def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, auto
         placed = place_llamacpp(
             split, header, name=_label(spec), weights=weights or 0, mmproj=sensed.mmproj, free_bytes=mem.free_bytes,
             meminfo=mi, cache_type_k=k, cache_type_v=v, share=share, autosense=autosense,
-            floor=None if chosen else floor, ngl_hand=_flag_value(extra, _NGL) is not None)
+            floor=None if chosen else floor, ngl_hand=_flag_value(extra, _NGL) is not None,
+            no_mmap="--no-mmap" in extra)
     fits = placed.fits if placed else None
     refusal = fit_ctx = None
     if spec.context is not None:
