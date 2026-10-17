@@ -188,7 +188,7 @@ ORG_PERMISSION_KIND = "org_permission"
 LAUNCH_KIND = "launch"
 LAUNCH_KEYS: tuple[str, ...] = (
     "binary", "docker_image", "extra_args", "runtime", "launch", "bind_all", "require_api_key",
-    "api_key_file", "env", "local_models", "config_ini")
+    "api_key_file", "env", "local_models", "config_ini", "engine_dir", "engine_config")
 """The one key table: the `server:` keys (and every peer `lifecycle:` key) that decide what the
 harness executes, how it is exposed or what it is given when it launches a model server.
 `machine_snapshot`, `init`'s adoption and `SECURITY.md` all read this tuple, so no list is kept by
@@ -622,6 +622,47 @@ def _launch_entries(file: str, prefix: str, mapping: Any) -> list[dict]:
     return out
 
 
+STRATA_CODE_FILES: tuple[str, ...] = ("serve/server.py", "engine/strata")
+
+
+def _strata_entry(file: str, name: str, rel: str, path: Path, recorded: list[dict]) -> dict:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        st = None
+    if st is None or not stat.S_ISREG(st.st_mode):
+        return {"file": file, "kind": LAUNCH_KIND, "name": name, "shown": f"unreadable ({rel})"}
+    triple = [st.st_size, st.st_mtime_ns, st.st_ino]
+    old = next((e for e in sorted(recorded, key=lambda e: e.get("file") != file)
+                if e.get("kind") == LAUNCH_KIND and e.get("name") == name and "stat" in e
+                and str(e.get("shown", "")).endswith(f"({rel})")), None)
+    if old is not None and old["stat"] == triple:
+        return {**old, "file": file}
+    digest = _sha256_file(path)
+    if digest is None:
+        return {"file": file, "kind": LAUNCH_KIND, "name": name, "shown": f"unreadable ({rel})"}
+    if old is not None and old.get("sha256") == digest:
+        return {**old, "file": file}
+    return {"file": file, "kind": LAUNCH_KIND, "name": name, "shown": f"sha256:{digest[:12]} ({rel})",
+            "sha256": digest, "stat": triple}
+
+
+def strata_entries(global_dir: Path, file: str, prefix: str, mapping: Any) -> list[dict]:
+    """A Strata record's `launch` entries: its config bytes (`engine_config`) and `STRATA_CODE_FILES`
+    (`strata_code`), each hashed, never run. A file whose `(size, mtime_ns, inode)` equals the recorded
+    one is not re-hashed, and one re-hashed to the recorded digest keeps its recorded entry, so a touch
+    asks nothing; a file that is not a regular file reads `unreadable`."""
+    if not isinstance(mapping, dict):
+        return []
+    root, config = mapping.get("engine_dir"), mapping.get("engine_config")
+    if not (isinstance(root, str) and root and isinstance(config, str) and config):
+        return []
+    recorded = (recorded_machine(global_dir) or {}).get("entries", [])
+    wanted = [(prefix + "engine_config", config), *((prefix + "strata_code", rel) for rel in STRATA_CODE_FILES)]
+    base = Path(root).expanduser()
+    return [_strata_entry(file, name, rel, base / rel, recorded) for name, rel in wanted]
+
+
 def autostart_entries(global_dir: Path) -> list[dict]:
     """The autostart unit's captured environment as zero or one `launch` entry
     ({file: AUTOSTART_FILE, kind: "launch", name: "autostart.env", shown: compact JSON of the
@@ -746,15 +787,17 @@ def machine_snapshot(global_dir: Path) -> list[dict]:
         out += [{"file": file, "kind": ORG_PERMISSION_KIND, "name": f"org.{key}", "shown": shown}
                 for key, shown in permission_loosenings(
                     org.get("permissions") if isinstance(org, dict) else None)]
-        out += _launch_entries(file, "server.", raw.get("server") if isinstance(raw, dict) else None)
+        section = raw.get("server") if isinstance(raw, dict) else None
+        out += _launch_entries(file, "server.", section) + strata_entries(global_dir, file, "server.", section)
         # A peer endpoint's `lifecycle:` is the same launch decision as the primary's, named by the
         # peer's `name` (never its list position). Its `api_key` and `extra_headers` are siblings
         # of `lifecycle`, so no secret can reach an entry: they are never read here.
         for peer in (raw.get("extra_endpoints") if isinstance(raw, dict) else None) or []:
             if (isinstance(peer, dict) and peer.get("name") is not None
                     and isinstance(peer.get("lifecycle"), dict)):
-                out += _launch_entries(
-                    file, f"extra_endpoints.{peer['name']}.lifecycle.", peer["lifecycle"])
+                prefix = f"extra_endpoints.{peer['name']}.lifecycle."
+                out += (_launch_entries(file, prefix, peer["lifecycle"])
+                        + strata_entries(global_dir, file, prefix, peer["lifecycle"]))
     out += _posture_entries(raws)
     for path in layer_files(root, "divisions"):
         out += loosenings(f"divisions/{path.name}", _read_yaml(path))
