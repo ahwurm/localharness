@@ -170,6 +170,10 @@ class LifecycleStrategy(Protocol):
         ...
 
 
+def _offline(plan: "LaunchPlan | None") -> bool:
+    return plan is not None and plan.serve_kwargs.get("snapshot") is not None
+
+
 class ManagedVllmStrategy:
     """Lifecycle for the harness-managed vLLM server (init guided setup / reboot autostart /
     REPL `/model` swap). A thin, ZERO-BEHAVIOR-CHANGE wrapper over `provider/server.py`, which
@@ -229,7 +233,7 @@ class ManagedVllmStrategy:
             names: list[str] = []
             started = server.start_server(
                 config_dir, argv, runtime=spec.runtime, record_env=getattr(spec, "env", None),
-                dropped_out=names, port=spec.port, **server.key_kwargs(api_key))
+                dropped_out=names, port=spec.port, hf_offline=_offline(plan), **server.key_kwargs(api_key))
             return started, names
 
         async def ready() -> list[str]:
@@ -418,6 +422,8 @@ class Sensed:
     prior_death: bool = False
     split: "_auto.TensorSplit | None" = None
     mmproj: int = 0
+    snapshot: str | None = None
+    snapshot_refusal: str | None = None
 
 
 def sense_launch(
@@ -444,13 +450,16 @@ def sense_launch(
         sensed = Sensed(spec.runtime, config_dir, fi.header, fi.offload, fi.memory, fi.weights, fi.meminfo,
                         remembered=remembered, split=fi.split, mmproj=fi.mmproj)
     elif row.checkpoint:
-        config = tuning.read_model_config(spec)
+        snapshot, refusal = _verified_snapshot(spec)
+        located = spec.model_copy(update={"model": snapshot}) if snapshot is not None else spec
+        config = tuning.read_model_config(located)
         free = weights = None
-        path = tuning._checkpoint_config_path(spec) if config is not None else None
+        path = tuning._checkpoint_config_path(located) if config is not None else None
         if path is not None:
             free = _auto.free_memory(autosense) if memory is _auto._UNSET else memory
             weights = _auto.checkpoint_bytes(os.path.dirname(path))
-        sensed = Sensed(spec.runtime, config_dir, model_config=config, memory=free, weights=weights)
+        sensed = Sensed(spec.runtime, config_dir, model_config=config, memory=free, weights=weights,
+                        snapshot=snapshot, snapshot_refusal=refusal)
     else:
         return Sensed(spec.runtime, config_dir)
     if unit is None:
@@ -461,6 +470,24 @@ def sense_launch(
         now=now or datetime.now(timezone.utc),
         max_age_seconds=getattr(unit, "timeout_start_seconds", units.TIMEOUT_START_SECONDS))
     return dataclasses.replace(sensed, marker=marker, prior_death=prior)
+
+
+def _verified_snapshot(spec: ManagedServerConfig) -> tuple[str | None, str | None]:
+    """``(snapshot, refusal)`` for a vLLM binary launch of a cached repo id, re-walked now; (None, None) when it is not one."""
+    from localharness.provider import model_library
+
+    if spec.launch != "binary" or spec.entry_for(spec.model) is not None:
+        return None, None
+    model = os.path.expanduser(spec.model)
+    if os.path.isabs(model):
+        return None, None
+    found = model_library.snapshot_of(spec.model)
+    if found is None:
+        return None, None
+    if found.refusal is not None or found.kind != "vllm":
+        why = found.refusal or "its snapshot is not a vLLM checkpoint"
+        return None, f"{_auto._label(spec)} cannot run here: {why} — the harness launches only a verified checkpoint."
+    return str(found.snapshot), None
 
 
 def boot_prior_death(
@@ -596,6 +623,8 @@ def plan_launch(
     not None, so a launch that derived nothing calls it with exactly the 0.18 keywords (R-08c). The
     fit `-c` matches 0.18 only for a record with no `env:` / `config_ini` cache type and no hand-set
     MTP drafting: those are now priced at the types the launch runs with, as intended (IN-03)."""
+    if sensed.snapshot_refusal is not None:
+        raise server.LaunchRefused(sensed.snapshot_refusal)
     tuned = tuning.derive(spec, sensed.header, autosense, model_config=sensed.model_config)
     kw: dict[str, Any] = {
         "keyed": api_key_held, "loopback": decision.loopback, "key_file_ok": decision.key_file_ok,
@@ -619,6 +648,9 @@ def plan_launch(
         value = getattr(tuned, name)
         if value is not None:
             kw[name] = value
+    if sensed.snapshot is not None:
+        kw["snapshot"] = sensed.snapshot
+        names.append("HF_HUB_OFFLINE")
     if api_key_held and row.key_env is not None:
         names.append(row.key_env)
     full = LaunchPlan(
