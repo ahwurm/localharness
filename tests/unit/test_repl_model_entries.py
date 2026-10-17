@@ -7,7 +7,12 @@ import threading
 import pytest
 
 from localharness.cli import model_ops
+from localharness.cli.repl import OrchestratorREPL
+from localharness.config.models import EndpointRef
 from localharness.provider import lifecycle
+from tests.unit import test_model_foreign_incumbent as foreign
+from tests.unit.launch_support import stub_liveness
+from tests.unit.procfs_support import fake_proc  # noqa: F401 — the fixture
 from tests.unit.test_launch_paths_repl import (  # noqa: F401 — the autouse fixtures
     PEER_URL,
     PRIMARY_URL,
@@ -17,6 +22,7 @@ from tests.unit.test_launch_paths_repl import (  # noqa: F401 — the autouse fi
     _no_machine_probes,
 )
 from tests.unit.test_repl_model_cmd import _harness, _xrepl
+from tests.unit.units_support import fake_systemd  # noqa: F401 — the fixture
 
 SWITCH_HINT = "Switch with /model <name|number>, or scroll the menu and press Enter."
 
@@ -122,3 +128,72 @@ async def test_an_unreachable_server_with_nothing_to_launch_says_so(tmp_path):
     await repl._handle_slash("/model")
 
     assert channel.messages[-1] == f"Could not reach the model server at {PRIMARY_URL}. Is it running?"
+
+
+def test_the_repl_builds_no_list_of_its_own():
+    for name in ("_grouped_model_lines", "_discover_peer_models", "_cold_lifecycle_targets", "_cold_served_name"):
+        assert not hasattr(OrchestratorREPL, name)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["flash", "flash-next"])
+async def test_naming_an_entry_a_foreign_holder_blocks_sends_its_sentence_and_moves_nothing(
+        tmp_path, monkeypatch, fake_proc, fake_systemd, name):
+    stub_liveness(monkeypatch, False)
+    fake_systemd.answer_prefix("systemctl", "--user", "show", stdout=foreign._show())
+    foreign._foreign(fake_proc, cgroup=foreign._cgroup())
+    repl, channel, agent = foreign._build(tmp_path, foreign._harness(foreign._llama_primary()))
+    moved = []
+
+    async def swap(*a, **k):
+        moved.append("swap")
+
+    async def free(*a, **k):
+        moved.append("free_accelerator")
+
+    async def stop(*a, **k):
+        moved.append("stop")
+
+    monkeypatch.setattr(lifecycle, "swap", swap)
+    monkeypatch.setattr(lifecycle, "free_accelerator", free)
+    monkeypatch.setattr(lifecycle.SpawnedProcessStrategy, "stop", stop)
+
+    await repl._handle_slash(f"/model {name}")
+
+    assert channel.messages == [foreign.LISTED_STOP]
+    assert moved == [] and agent._llm.rebinds == []
+
+
+@pytest.mark.asyncio
+async def test_a_down_lifecycle_peer_is_one_entry_and_no_note(tmp_path):
+    _, repl, channel, _ = _session(tmp_path)
+
+    await repl._handle_slash("/model")
+
+    out = channel.messages[-1]
+    assert out.count("flash") == 1 and "skipped" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_down_attach_only_peer_is_one_note(tmp_path):
+    attach = EndpointRef(name="attached", base_url="http://127.0.0.1:1234/v1", provider_type="lmstudio")
+    _, repl, channel, _ = _session(
+        tmp_path, peers=[attach], live={PRIMARY_URL: ["qwen"], attach.base_url: "unreachable"})
+
+    await repl._handle_slash("/model")
+
+    notes = [line for line in channel.messages[-1].split("\n") if "skipped" in line]
+    assert notes == ["  · skipped attached (http://127.0.0.1:1234/v1): unreachable"]
+
+
+@pytest.mark.asyncio
+async def test_cached_repos_never_reach_the_listing(tmp_path, monkeypatch):
+    from localharness.provider import server as managed_server
+
+    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["org/cached-repo"])
+    _, repl, channel, _ = _session(tmp_path)
+
+    await repl._handle_slash("/model")
+
+    out = channel.messages[-1]
+    assert "(downloaded" not in out and "(cold on" not in out and "cached-repo" not in out
