@@ -542,7 +542,7 @@ async def test_the_helper_hands_autosense_to_activate_and_collects_the_endpoint(
         "S", (), {"liveness": lambda self, s, d: lifecycle.Liveness(False), "activate": fake.activate})())
     cfg, out = AutosenseConfig(), []
     assert await _start_managed_server(_llama(), tmp_path, URL, {}, autosense=cfg, endpoint_out=out) is None
-    assert fake.calls == [{"autosense": cfg}]
+    assert fake.calls == [{"autosense": cfg, "floor": None}]
     assert out == [live]
 
 
@@ -554,7 +554,7 @@ async def test_the_new_keywords_default_to_none(tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "strategy_for", lambda spec, **kw: type(
         "S", (), {"liveness": lambda self, s, d: lifecycle.Liveness(False), "activate": fake.activate})())
     assert await _start_managed_server(_llama(), tmp_path, URL, {}) is None
-    assert fake.calls == [{"autosense": None}]
+    assert fake.calls == [{"autosense": None, "floor": None}]
 
 
 async def test_a_server_already_loading_collects_no_endpoint_and_never_activates(tmp_path, monkeypatch):

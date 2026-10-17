@@ -829,7 +829,8 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
                                 *, path_binary: str | None = None, autosense: Any = None,
                                 endpoint_out: list | None = None,
                                 notes: LaunchNotes | None = None,
-                                peer: str | None = None, unit: Any = None) -> str | None:
+                                peer: str | None = None, unit: Any = None,
+                                floor: int | None = None) -> str | None:
     """Launch path 1 of the five: `start`'s down-server branch. Wait for a server that is already
     loading, or ask the launch decision BEFORE announcing anything and launch through the lifecycle
     strategy. Returns the decision's refusal line when the launch is refused (nothing stopped,
@@ -944,8 +945,11 @@ async def _start_managed_server(srv: Any, global_dir: Path, base_url: str, launc
             # activate = serve_command → start_server → wait_ready (launch + readiness) via the lifecycle
             # strategy. The off-loop verified-stop wrapper lives in the strategy, not this launch path.
             # a peer's name rides only for a peer: the primary's launch is called exactly as it always was
-            live = await strategy.activate(srv, global_dir, base_url, autosense=autosense,
-                                           **({"peer": peer} if peer else {}), **launch_kw, **launch_key)
+            try:
+                live = await strategy.activate(srv, global_dir, base_url, autosense=autosense, floor=floor,
+                                               **({"peer": peer} if peer else {}), **launch_kw, **launch_key)
+            except managed_server.LaunchRefused as exc:
+                return str(exc)
             if endpoint_out is not None:
                 endpoint_out.append(live)
     if loading:
@@ -2275,7 +2279,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 _serving_spec, server_cfg_path, provider.base_url, launch_key,
                 path_binary=path_llama_server, autosense=harness.autosense, endpoint_out=_launched,
                 notes=launch_notes, peer=record.peer.name if record.peer is not None else None,
-                unit=_unit)
+                unit=_unit, floor=_floor)
             if refusal is None:
                 probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
                 if probe_ok:

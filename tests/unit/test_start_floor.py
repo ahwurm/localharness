@@ -10,6 +10,7 @@ from localharness.cli import start_serving
 from localharness.cli.start_cmd import _start_async
 from localharness.config.models import AgentConfig
 from localharness.provider import lifecycle
+from localharness.provider import server as managed_server
 from tests.unit.procfs_support import fake_proc
 from tests.unit.test_sense_serving import home
 from tests.unit.test_start_cmd import _capture_err_console, _stub_nonvllm_start
@@ -114,7 +115,7 @@ def test_the_offline_counter_estimates_bytes_and_never_builds_the_vocabulary(mon
     assert TokenCounter().count("abcdef") == 6 and built == ["cl100k_base"]
 
 
-def _spy_activate(monkeypatch):
+def _spy_activate(monkeypatch, refusal=None):
     seen: list[dict] = []
     real = lifecycle.strategy_for
 
@@ -124,6 +125,8 @@ def _spy_activate(monkeypatch):
 
         async def spy(*a, **k):
             seen.append(k)
+            if refusal is not None:
+                raise managed_server.LaunchRefused(refusal)
             return await activate(*a, **k)
         strategy.activate = spy
         return strategy
@@ -143,15 +146,17 @@ async def test_the_managed_launch_hands_the_pre_launch_floor_to_activate(world, 
 
 
 async def test_a_priced_window_under_the_floor_is_refused_before_anything_starts(world, monkeypatch):
-    _stub_floor(monkeypatch, 4_000_000)
+    line = ("qwen-27b-swift-1.5 fits only a 9,216-token window here and the harness needs at least 15,360 — "
+            "free GPU memory, or pick a smaller model.")
+    _stub_floor(monkeypatch, 15_360)
+    seen = _spy_activate(monkeypatch, refusal=line)
     world.config()
 
     assert await world.start_exit() == 1
 
-    assert not [e for e in world.events if e.startswith("start:")]
+    assert [k["floor"] for k in seen] == [15_360]
     assert not world.starts
-    assert "the harness needs at least 4,000,000" in "\n".join(world.err_lines)
-    assert "Error:" not in "\n".join(world.err_lines)
+    assert world.err_lines == [line]
 
 
 async def _live_floor(tmp_path, cfg=None):
