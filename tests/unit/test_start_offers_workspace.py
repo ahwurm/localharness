@@ -28,7 +28,6 @@ import typer
 
 from localharness.cli import workspace as ws_mod
 from localharness.cli.workspace import (
-    DECLINED_NOTICE,
     OFFER_PROMPT,
     TRUST_ONLY_PROMPT,
     settle_startup_trust,
@@ -302,7 +301,31 @@ def test_a_no_records_the_root_as_untrusted_and_the_offer_as_declined(project, m
 
     assert _decided(project) is False
     assert offer_was_declined(project / ".localharness") is True
-    assert DECLINED_NOTICE.format(root=project) in _said(capsys.readouterr().err)
+    said = _said(capsys.readouterr().err)
+    assert "this session asks before boundary-crossing and destructive calls" not in said
+    assert "is not trusted" not in said
+
+
+def test_a_first_starts_no_gives_one_guarded_mode_notice(project, monkeypatch, capsys, tmp_path):
+    import asyncio
+
+    from localharness.agent.gate import PermissionGate
+    from localharness.cli.session_trust import DECLINED_NOTICE, UNTRUSTED_MODE, establish_session_trust
+    from localharness.config.grants import GrantStore
+
+    _tty(monkeypatch)
+    _answer(monkeypatch, False)
+    settle_startup_trust(None)
+    gate = PermissionGate(boundary=project, workspace=project, grants=GrantStore(tmp_path / "grants.yaml"),
+                          mode="auto", asker=None, channel_name="test")
+    notices: list[str] = []
+
+    asyncio.run(establish_session_trust(gate, notices.append))
+
+    notice = DECLINED_NOTICE.format(mode=UNTRUSTED_MODE)
+    said = _said(capsys.readouterr().err) + " " + " ".join(notices)
+    assert said.count("this workspace is not trusted, so the session runs in") == 1
+    assert notice in said
 
 
 @pytest.mark.parametrize("answer", [True, False])
