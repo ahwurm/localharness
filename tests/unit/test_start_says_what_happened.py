@@ -17,7 +17,7 @@ from localharness.cli import model_ops, start_cmd, workspace
 from localharness.cli.start_cmd import _start_managed_server
 from localharness.config.models import AutosenseConfig
 from localharness.cli.start_cmd import _probe_llm as real_probe
-from localharness.provider import units
+from localharness.provider import speed_stats, units
 from localharness.provider.autosense import FreeMemory
 from localharness.provider.client import CapabilityResult, LLMClient
 from tests.unit.launch_support import stub_liveness
@@ -203,6 +203,21 @@ async def test_an_attach_beside_a_foreign_unit_says_so_once(world, foreign_unit)
 
     await world.start()
     assert world.err_lines.count(sentence) == 1
+
+
+async def test_start_keeps_attaching_when_the_ledger_cannot_be_written(world, foreign_unit, monkeypatch):
+    world.config()
+    world.answering = {PRIMARY_URL}
+
+    def unwritable(*a, **k):
+        raise OSError("read-only config dir")
+
+    monkeypatch.setattr(speed_stats, "record_foreign_unit", unwritable)
+
+    lines = await world.start()
+
+    assert _sentence(foreign_unit, PRIMARY, 8080) in world.err_lines
+    assert any("1 agent" in x for x in lines)
 
 
 async def test_attaching_to_another_record_under_a_foreign_unit_promises_no_swap(world, foreign_unit):
