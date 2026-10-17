@@ -192,19 +192,8 @@ _FRAMEWORK_LABELS = {
 
 
 def _framework_label(provider_type: str | None) -> str:
-    """Human framework name for an endpoint's provider_type (tree header + menu meta)."""
+    """Human framework name for an endpoint's provider_type (menu meta)."""
     return _FRAMEWORK_LABELS.get(provider_type or "", provider_type or "server")
-
-
-def _endpoint_host(base_url: str) -> str:
-    """host:port of a base_url for compact headers/meta (strip scheme + /v1 path). Best-effort:
-    a display helper must never raise into the /model listing, so a parse slip falls back raw."""
-    from urllib.parse import urlparse
-
-    try:
-        return urlparse(base_url).netloc or base_url
-    except Exception:  # noqa: BLE001 — display-only; never break the listing
-        return base_url
 
 
 def _generation_system_prompt() -> str:
@@ -2774,62 +2763,6 @@ class OrchestratorREPL:
                                        **_launch_key(getattr(self, "_harness", None), base_url))
 
     @staticmethod
-    def _compose_model_menu(live: list, managed, current: str, peer_target: dict | None = None,
-                            medians: dict | None = None, live_ptype: str | None = None,
-                            registry_ptype: str | None = None) -> list:
-        """Picker-menu entries: (name, info-meta) tuples, live models first then registry, then
-        peer-endpoint models — HF-cache repos stay OUT of the menu (many are not vLLM-servable; the
-        printed listing keeps them). Info shows only what is KNOWN: quant, and measured t/s — the
-        auto-recorded speed ledger's verified median first (keyed by the row's provider_type via
-        medians/live_ptype/registry_ptype), the hand-authored registry value (`~`) as fallback,
-        never estimates. A row with a rate returns prompt_toolkit formatted-text meta (list of
-        (style, text) fragments) so the value renders color-banded (tps-green/yellow/red classes
-        in INPUT_STYLE); rateless rows stay plain strings. Peer models (0.10.0 tree) carry
-        `<framework> · <host:port>` so a vLLM model reads apart from an Ollama one; each is a
-        normal /model completion the completer styles model-pick (one-Enter switch)."""
-        from localharness.provider.speed_stats import speed_key, tps_band
-
-        medians = medians or {}
-
-        def rate_for(name, ptype, entry) -> tuple[float, str] | None:
-            v = medians.get(speed_key(ptype, name)) if ptype else None
-            if v is not None:
-                return v, f"{v:.1f} t/s"
-            tps = getattr(entry, "tps", None) if entry is not None else None
-            if tps:
-                return tps, f"~{tps:g} t/s"
-            return None
-
-        def meta(before: list, rate, after: list = []):
-            if rate is None:
-                return " · ".join(before + after)
-            v, txt = rate
-            frags = []
-            if before:
-                frags.append(("", " · ".join(before) + " · "))
-            frags.append((f"class:tps-{tps_band(v)}", txt))
-            if after:
-                frags.append(("", " · " + " · ".join(after)))
-            return frags
-
-        entry_for = (lambda n: managed.entry_for(n)) if managed is not None and hasattr(managed, "entry_for") \
-            else (lambda n: next((e for e in getattr(managed, "local_models", []) or [] if e.name == n), None))
-        out = []
-        for name in live:
-            status = "serving now" if name == current else "serving"
-            entry = entry_for(name)
-            quant = [entry.quant] if entry is not None and getattr(entry, "quant", None) else []
-            out.append((name, meta([status] + quant, rate_for(name, live_ptype, entry))))
-        for e in (getattr(managed, "local_models", []) or []) if managed is not None else []:
-            if e.name not in live:
-                quant = [e.quant] if getattr(e, "quant", None) else []
-                out.append((e.name, meta(quant, rate_for(e.name, registry_ptype, e), ["swap"])))
-        for m, ep in (peer_target or {}).items():
-            head = [f"{_framework_label(ep.provider_type)} · {_endpoint_host(ep.base_url)}"]
-            out.append((m, meta(head, rate_for(m, ep.provider_type, None))))
-        return out
-
-    @staticmethod
     def _menu_items(entries: Any) -> list:
         """`(name, meta)` for every numbered entry in listing order; a measured rate is a color-banded fragment."""
         from localharness.provider.speed_stats import tps_band
@@ -2893,26 +2826,16 @@ class OrchestratorREPL:
         return ""
 
     async def _prefetch_model_cache(self) -> None:
-        """Warm the /model picker menu without ever blocking the UI — best-effort and silent:
-        an unreachable or malformed server leaves the cache empty (no menu), and /model itself
-        still reports those states properly when actually run."""
+        """Warm the /model picker menu without ever blocking the UI: best-effort and silent, so a server
+        that cannot be listed leaves the cache empty and /model itself reports why when run."""
         llm = getattr(self._agent, "_llm", None)
-        if llm is None:
+        if llm is None or self._harness is None:
             return
         try:
-            live, reachable = await self._live_models(llm.config.base_url)
-        except Exception:
-            return
-        if reachable:
-            managed = getattr(self._harness, "server", None) if self._harness is not None else None
-            self._model_cache[:] = self._compose_model_menu(
-                live, managed, llm.config.model,
-                medians=self._measured_medians(),
-                live_ptype=(self._provider_type_for_base_url(llm.config.base_url)
-                            if self._harness is not None else None),
-                registry_ptype=getattr(getattr(self._harness, "provider", None),
-                                       "provider_type", None),
-            )
+            entries, _, _ = await self._plan_model_entries(llm)
+            self._model_cache[:] = self._menu_items(entries)
+        except Exception:  # noqa: BLE001 — a prefetch that fails leaves no menu
+            log.debug("model menu prefetch failed", exc_info=True)
 
     async def _persist_default_model(self, model: str) -> bool:
         """Persist the swap to the atomic, audited USER OVERLAY (issue #22 pattern) so the next
