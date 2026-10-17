@@ -34,7 +34,7 @@ from localharness.config.redact import secret_values, validation_text
 from localharness.config.trust import LAUNCH_KIND, LAUNCH_MODEL_KIND
 from localharness.core.bus import EventBus
 from localharness.core.events import ComponentMutated
-from localharness.provider.runtimes import RUNTIMES
+from localharness.provider.runtimes import RUNTIMES, row_of
 from localharness.provider.units import (
     PRIMARY_TARGET, TARGET_NAME, in_flight_target, read_target, remove_target,
 )
@@ -969,6 +969,215 @@ async def sense_serving(
     return ServingSense(
         tuple(sorted(answering.values(), key=lambda r: order[r.prefix])),
         MappingProxyType(ids_by_url))
+
+
+_UNSET: Any = object()
+
+
+@dataclass(frozen=True)
+class PlanEntry:
+    """One entry; ``kind`` is "live" (served now), "cold" (a launch record not answering) or "setup"."""
+    name: str
+    kind: str
+    runtime: str | None
+    window: int | None = None
+    where: str | None = None
+    refusal: str | None = None
+    record: ServingRecord | None = None
+    endpoint: Any = None
+    active: bool = False
+    rate: str | None = None
+    path: str | None = None
+    setup: Any = None
+    others: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EntryGroup:
+    header: str
+    entries: tuple[PlanEntry, ...]
+    numbered: bool
+
+
+@dataclass(frozen=True)
+class Entries:
+    """The list: groups in display order, the entries said with their reason, notes, and who else holds the primary's port."""
+    groups: tuple[EntryGroup, ...]
+    not_offered: tuple[PlanEntry, ...] = ()
+    notes: tuple[str, ...] = ()
+    foreign: str | None = None
+
+    def numbered(self) -> tuple[PlanEntry, ...]:
+        return tuple(e for g in self.groups if g.numbered for e in g.entries)
+
+    def pick(self, arg: str) -> "PlanEntry | str | None":
+        """A decimal is that numbered entry; a name is the entry it names, or, when that entry is not numbered, the sentence saying why it cannot be picked."""
+        if arg.isascii() and arg.isdigit():
+            shown = self.numbered()
+            return shown[int(arg) - 1] if 1 <= int(arg) <= len(shown) else None
+        every = [(e, g.numbered) for g in self.groups for e in g.entries] + [(e, False) for e in self.not_offered]
+        for entry, numbered in every:
+            names = {entry.name, *entry.others}
+            if entry.record is not None:
+                names |= {entry.record.name, entry.record.served}
+            if arg in names:
+                return entry if numbered else (entry.refusal or f"{entry.name} cannot be switched to now")
+        return None
+
+
+def _runtime_label(provider_type: Any) -> str:
+    row = row_of(provider_type)
+    return row.name if row is not None else str(provider_type or "server")
+
+
+def _host(base_url: str) -> str:
+    try:
+        return urlsplit(base_url).netloc or base_url
+    except ValueError:
+        return base_url
+
+
+def _medians(config_dir: Any) -> dict[str, float]:
+    from localharness.provider import speed_stats
+    try:
+        return speed_stats.all_median_tps(speed_stats.default_speed_stats_path(config_dir))
+    except Exception:  # noqa: BLE001 — a ledger that cannot be read shows no rates
+        return {}
+
+
+def _priced(harness: Any, record: ServingRecord, *, config_dir: Any, memory: Any, floor: int | None,
+            unit: Any) -> tuple[int | None, str | None, str | None]:
+    """``(window, where, refusal)`` of the next launch of ``record``'s spec against ``memory``."""
+    from localharness.provider import lifecycle, server
+    spec, auto = record.spec, getattr(harness, "autosense", None)
+    key = _launch_key(harness, record.base_url, spec)
+    decision = server.launch_decision(spec, bool(key), peer=record.peer.name if record.peer else None)
+    if decision.refusal is not None:
+        return None, None, decision.refusal
+    if auto is None or not getattr(lifecycle.strategy_for(spec, unit=unit), "plans_launch", False):
+        return None, None, None
+    try:
+        plan = lifecycle.plan_launch(
+            spec, lifecycle.sense_launch(spec, config_dir, auto, memory=memory), decision,
+            autosense=auto, api_key_held=bool(key), floor=floor)
+    except server.LaunchRefused as exc:
+        return None, None, str(exc)
+    report = plan.report
+    placement = report.placement if report is not None else None
+    return (report.asked if report is not None else None), (placement.where if placement is not None else None), None
+
+
+def plan_entries(
+    harness: Any, *, live: Mapping[str, "tuple[str, ...] | None"], config_dir: Any, trust: Any,
+    floor: int | None, library: Any = None, memory: Any = _UNSET, unit: Any = None,
+    current: "tuple[str, str] | None" = None,
+) -> Entries:
+    """What this box can switch to now; ``live`` maps each probed ``_norm_url`` to its served ids (``()`` not a model list, None no answer). Reads memory once, takes no lock, writes nothing."""
+    from localharness.provider import lifecycle, speed_stats
+
+    provider, records = harness.provider, serving_records(harness)
+    cur_url, cur_model = current or (provider.base_url, provider.default_model)
+    cur_url = _norm_url(cur_url)
+    auto = getattr(harness, "autosense", None)
+    if memory is _UNSET:
+        own = lifecycle.own_launch(config_dir, [r.spec for r in records])
+        memory = lifecycle.memory_after_launch(auto, own, stopping=own is not None) if auto is not None else None
+    medians = _medians(config_dir)
+
+    def rate(ptype: Any, name: str) -> str | None:
+        v = medians.get(speed_stats.speed_key(ptype, name))
+        return f"{v:.1f} t/s measured" if v is not None else None
+
+    endpoints = {_norm_url(provider.base_url): (provider.provider_type, None)}
+    for ep in getattr(harness, "extra_endpoints", None) or []:
+        endpoints.setdefault(_norm_url(ep.base_url), (ep.provider_type, ep))
+
+    groups: list[EntryGroup] = []
+    notes: list[str] = []
+    shown: dict[str, tuple[str, str]] = {}
+    for url in sorted(endpoints, key=lambda u: u != cur_url):
+        ptype, ep = endpoints[url]
+        ids = live.get(url)
+        if ids is None:
+            continue
+        label = ep.name if ep is not None else "primary"
+        on_url = [r for r in records if _norm_url(r.base_url) == url]
+        found = []
+        for served in ids:
+            if served in shown:
+                first, first_url = shown[served]
+                if cur_url not in (url, first_url):
+                    notes.append(f"{label} ({url}) also serves {served!r} — hidden by {first} (first configured wins)")
+                continue
+            shown[served] = (label, url)
+            found.append(PlanEntry(
+                served, "live", ptype, record=next((r for r in on_url if served in (r.served, r.name)), None),
+                endpoint=ep, active=url == cur_url and served == cur_model, rate=rate(ptype, served)))
+        if found:
+            groups.append(EntryGroup(f"{_runtime_label(ptype)} · {_host(url)}", tuple(found), True))
+        elif not ids and url != cur_url:
+            notes.append(f"skipped {label} ({url}): not an OpenAI-compatible model list")
+    for ep in getattr(harness, "extra_endpoints", None) or []:
+        if ep.lifecycle is None and live.get(_norm_url(ep.base_url)) is None:
+            notes.append(f"skipped {ep.name} ({ep.base_url}): unreachable")
+
+    serving = set()
+    for url, ids in live.items():
+        owner = _attribute([r for r in records if _norm_url(r.base_url) == url], ids) if ids is not None else None
+        if owner is not None:
+            serving.add(owner.prefix)
+    cold, refused = [], []
+    for record in records:
+        if record.spec is None or record.prefix in serving:
+            continue
+        try:
+            window, where, refusal = _priced(harness, record, config_dir=config_dir, memory=memory, floor=floor, unit=unit)
+        except Exception as exc:  # noqa: BLE001 — one record's failure is its own line, never the list's
+            window, where, refusal = None, None, f"{record.name} cannot run here: could not plan it ({type(exc).__name__})"
+        entry = PlanEntry(
+            record.name, "cold", record.spec.runtime, window, where, refusal, record, record.peer,
+            rate=rate(record.provider_type, record.served))
+        (refused if refusal is not None else cold).append(entry)
+    if cold:
+        groups.append(EntryGroup("this box can launch", tuple(cold), True))
+    return Entries(tuple(groups), tuple(refused), tuple(notes))
+
+
+def not_offered_reason(sentence: str, name: str) -> str:
+    """The reason in a refusal sentence: without the leading name and ``cannot run here:``, up to the first `` — ``, no final period."""
+    text = sentence.removeprefix(f"{name} ").removeprefix("cannot run here: ")
+    return text.split(" — ")[0].rstrip(".")
+
+
+def entry_lines(entries: Entries) -> list[str]:
+    """The list as the lines both surfaces print; every name and URL passes ``visible_text``."""
+    from localharness.cli.workspace import visible_text as vt
+
+    lines, n = ["Models:"], 0
+    for group in entries.groups:
+        lines.append(f"▸ {vt(group.header)}")
+        for e in group.entries:
+            if e.kind == "live":
+                detail = "(serving)" + ("  ● [active]" if e.active else "")
+            else:
+                detail = _runtime_label(e.runtime)
+                detail += " · experts in RAM" if e.where == "experts in RAM" else ""
+                detail += f" · {e.window:,}" if e.window is not None else ""
+            if group.numbered:
+                n += 1
+                lead = f"  {n}. "
+            else:
+                lead = "     "
+            lines.append(f"{lead}{vt(e.name)}  {detail}" + (f"  [{e.rate}]" if e.rate else ""))
+    for e in entries.not_offered:
+        lines.append(f"  not offered: {vt(e.name)} — {vt(not_offered_reason(e.refusal or '', e.name))}")
+    lines.extend(f"  · {vt(note)}" for note in entries.notes)
+    return lines
+
+
+def listing(harness: Any, **kw: Any) -> tuple[Entries, list[str]]:
+    entries = plan_entries(harness, **kw)
+    return entries, entry_lines(entries)
 
 
 # --------------------------------------------------------------------------- landing / selection writers
