@@ -1168,6 +1168,42 @@ def _assemble_role(cfg) -> str:
     return "\n\n".join([base, *extra])
 
 
+def base_system_prompt(cfg, *, tool_call_mode: str, guardrails: str) -> str:
+    """The turn-invariant system prompt: role, facts, rules and guardrails; no instructions or memory."""
+    system_prompt = _assemble_role(cfg)
+    # Date only (no clock time) so the vLLM prefix cache churns daily, not per-turn.
+    _now = datetime.now().astimezone()
+    system_prompt += f"\n\nToday's date: {_now.strftime('%A, %Y-%m-%d')} ({_now.tzname()})"
+    system_prompt += (
+        f"\n\nWorking directory: {Path.cwd()}"
+        "\nUnless the user names another location, create any files or folders you make "
+        "under this working directory."
+    )
+    system_prompt += (
+        "\n\nWhen you start a distinct phase of a multi-step task, first state what you are "
+        'about to do in one short line (e.g. "Pulling the data…") before making the tool calls.'
+    )
+    system_prompt += (
+        "\n\nAnswer ordinary questions directly. For substantive work, follow the latest "
+        "human request and corrections, retain needed references, and stop at the requested "
+        "checkpoint. An answer-only request excludes unsolicited execution. Harness control "
+        "messages are not human feedback. Report actual tool and gate outcomes: failed, "
+        "missing, or stale evidence remains unresolved; a human waiver is not a passed gate. "
+        "Self-checks and CONFIRMED do not prove completion. Avoid repeated unchanged attempts; "
+        "report a blocker or unknown result honestly. For substantive multi-step work, keep "
+        "the working record with the task tool when it is available: the objective, the "
+        "human's decisions, artifacts, references, and checks."
+    )
+    if tool_call_mode != "native":
+        system_prompt += (
+            "\n\nWhen you have finished using tools, respond directly to the user. "
+            "Be concise — give the answer, not your reasoning process."
+        )
+    if guardrails:
+        system_prompt += "\n\n## Guardrails\n" + guardrails
+    return system_prompt
+
+
 class AgentLoop:
     """ReAct while-loop agent executor. One instance per agent."""
 
@@ -1430,7 +1466,11 @@ class AgentLoop:
                 self._config.name, self._config.division or "", self._config.tools).values())
         except Exception:
             schemas = []
-        prompt = _assemble_role(self._config)
+        prompt = base_system_prompt(
+            self._config,
+            tool_call_mode=getattr(getattr(self._llm, "config", None), "tool_call_mode", "native"),
+            guardrails=self._read_guardrails(),
+        )
         return fixed_tokens(self._ctx._token_counter, prompt, schemas)
 
     def floor(self) -> int:
@@ -1940,47 +1980,9 @@ class AgentLoop:
         tool_call_mode = getattr(
             getattr(self._llm, "config", None), "tool_call_mode", "native"
         )
-        system_prompt = _assemble_role(self._config)
-        # Date only (no clock time) so the vLLM prefix cache churns daily, not per-turn.
-        _now = datetime.now().astimezone()
-        system_prompt += f"\n\nToday's date: {_now.strftime('%A, %Y-%m-%d')} ({_now.tzname()})"
-        # Working directory + placement rule (#75). Without it the model invents paths under
-        # $HOME instead of the project dir it was launched from ("make a folder for yourself"
-        # -> wrong dir). Same deterministic-fact pattern as the date; cwd is stable across the
-        # process, so it doesn't churn the prefix cache per-turn.
-        system_prompt += (
-            f"\n\nWorking directory: {Path.cwd()}"
-            "\nUnless the user names another location, create any files or folders you make "
-            "under this working directory."
+        system_prompt = base_system_prompt(
+            self._config, tool_call_mode=tool_call_mode, guardrails=self._read_guardrails()
         )
-        # Narration nudge (belt-and-suspenders — the terminal render is the mechanism): a
-        # one-line stage announcement keeps a long multi-step task legible as it runs.
-        system_prompt += (
-            "\n\nWhen you start a distinct phase of a multi-step task, first state what you are "
-            'about to do in one short line (e.g. "Pulling the data…") before making the tool calls.'
-        )
-        system_prompt += (
-            "\n\nAnswer ordinary questions directly. For substantive work, follow the latest "
-            "human request and corrections, retain needed references, and stop at the requested "
-            "checkpoint. An answer-only request excludes unsolicited execution. Harness control "
-            "messages are not human feedback. Report actual tool and gate outcomes: failed, "
-            "missing, or stale evidence remains unresolved; a human waiver is not a passed gate. "
-            "Self-checks and CONFIRMED do not prove completion. Avoid repeated unchanged attempts; "
-            "report a blocker or unknown result honestly. For substantive multi-step work, keep "
-            "the working record with the task tool when it is available: the objective, the "
-            "human's decisions, artifacts, references, and checks."
-        )
-        if tool_call_mode != "native":
-            system_prompt += (
-                "\n\nWhen you have finished using tools, respond directly to the user. "
-                "Be concise — give the answer, not your reasoning process."
-            )
-        # SAFE-04: OUTSIDE the memory slot, so memory off — or a memory failure — can never turn
-        # the safety rules off with it. Same place and separator the old memory block's join used,
-        # so with memory on the prompt is byte-identical to before.
-        guardrails = self._read_guardrails()
-        if guardrails:
-            system_prompt += "\n\n## Guardrails\n" + guardrails
         # D-37: the project's own file, fenced, directly after Guardrails and ahead of the memory slot.
         # The role is built once per turn, so this is the one call at assembly (the turn-end check is
         # run_turn's finally). Not through role_sections: the header and the tag are core's.
