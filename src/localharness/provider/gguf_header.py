@@ -37,7 +37,7 @@ __all__ = ["GgufHeaderError", "NotRegularFile", "read_header", "read_header_from
            "DISCOVERY_MAX_ENTRIES", "DISCOVERY_KEYS", "DiscoveredModel", "Discovery", "walk_ggufs",
            "discover", "preset_name", "unique_preset_name", "rank_models", "served_model", "TensorEntry",
            "TensorTable", "read_tensor_table", "shard_paths", "MAX_TENSORS", "MAX_TENSOR_NAME", "MAX_DIMS",
-           "classify", "kv_layers", "indexer_layers", "cross_checked"]
+           "classify", "kv_layer_ids", "kv_layers", "indexer_layers", "cross_checked"]
 
 MAGIC = b"GGUF"
 MAX_KV = 4096
@@ -270,13 +270,23 @@ def _blocks(entries: Iterable[TensorEntry]) -> dict[int, list[str]]:
     return blocks
 
 
+def _holders(entries: Iterable[TensorEntry]) -> list[int]:
+    return sorted(n for n, names in _blocks(entries).items()
+                  if any(t.startswith("attn_k.") for t in names)
+                  or (any(t.startswith("attn_qkv.") for t in names) and not any(t.startswith("ssm_") for t in names)))
+
+
+def kv_layer_ids(entries: Iterable[TensorEntry], header: Mapping[str, Any]) -> tuple[int, ...]:
+    """The trunk blocks holding K, ascending; the trunk ends at `block_count - nextn_predict_layers`."""
+    trunk = header.get("block_count", 0) - header.get("nextn_predict_layers", 0)
+    return tuple(n for n in _holders(entries) if n < trunk)
+
+
 def kv_layers(entries: Iterable[TensorEntry], header: Mapping[str, Any]) -> tuple[int, int]:
     """(main, draft): the blocks holding K, split at `block_count - nextn_predict_layers`."""
-    trunk = header.get("block_count", 0) - header.get("nextn_predict_layers", 0)
-    holders = [n for n, names in _blocks(entries).items()
-               if any(t.startswith("attn_k.") for t in names)
-               or (any(t.startswith("attn_qkv.") for t in names) and not any(t.startswith("ssm_") for t in names))]
-    return sum(n < trunk for n in holders), sum(n >= trunk for n in holders)
+    entries = tuple(entries)
+    main = len(kv_layer_ids(entries, header))
+    return main, len(_holders(entries)) - main
 
 
 def indexer_layers(entries: Iterable[TensorEntry]) -> int:
