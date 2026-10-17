@@ -754,13 +754,14 @@ def serve_command(
     tool_call_parser: str | None = None,
     fit_ctx: int | None = None,
     snapshot: str | None = None,
+    config_copy: str | None = None,
 ) -> list[str]:
     """The launch argv: the runtime row's builder; loopback `--host` comes last, after `extra_args`."""
     return RUNTIMES[srv.runtime].argv(
         srv, loop=loopback or not srv.bind_all, keyed=keyed, key_file_ok=key_file_ok, context=context,
         cache_ram=cache_ram, cache_type=cache_type, spec_type=spec_type, draft_p_min=draft_p_min,
         reasoning_parser=reasoning_parser, tool_call_parser=tool_call_parser, fit_ctx=fit_ctx,
-        snapshot=snapshot)
+        snapshot=snapshot, config_copy=config_copy)
 
 
 def effective_posture(spec: Any, *, keyed: bool, decision: LaunchDecision) -> tuple[bool, str | None]:
@@ -859,6 +860,7 @@ def start_server(
     xdg_config_home: str | None = None,
     port: int | None = None,
     hf_offline: bool = False,
+    cwd: str | None = None,
 ) -> int:
     """Launch detached (new session), append stdout+stderr to serve.log, write pidfile. Refuses
     (RuntimeError, nothing started) while the pidfile names a live process: a second launch would
@@ -916,6 +918,7 @@ def start_server(
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
                 env=env,
+                cwd=cwd,
             )
         except OSError as exc:
             # A binary that is set but missing or not executable passes `launch_decision` (it never
@@ -1347,6 +1350,7 @@ async def wait_ready(
     liveness: bool = False,
     expect: procfs.LaunchIdentity | None = None,
     unit_poll: "Callable[[], Awaitable[str | None]] | None" = None,
+    ready: "Callable[[httpx.AsyncClient, str, dict[str, str]], Awaitable[list[str] | None]] | None" = None,
 ) -> list[str]:
     """Poll {base_url}/models until the server answers; return served model ids.
 
@@ -1374,6 +1378,9 @@ async def wait_ready(
     skipped, because under the unit the pidfile is absent between the unit's own restarts and names its
     `serve` process (not yet the server) for a moment before the exec: the unit, not the pidfile, decides
     death, and the identity proof moves into the poll. Unset, nothing changes.
+
+    `ready` replaces the `/models` GET: awaited each poll, a list of ids ends the wait, None keeps
+    polling, and a connection error reads as still loading.
     """
     label = _row(runtime).name
     start = time.monotonic()
@@ -1396,11 +1403,17 @@ async def wait_ready(
                 if live is not None and not live.verified:
                     raise RuntimeError(NOT_THIS_LAUNCH_LINE.format(label=label, pid=live.pid))
             try:
-                resp = await client.get(f"{base_url.rstrip('/')}/models", timeout=3.0,
-                                        **({"headers": headers} if headers else {}))
-                if resp.status_code == 200 and not liveness:
+                if ready is not None:
+                    found = await ready(client, base_url, headers)
+                    if found is not None:
+                        return found
+                    resp = None
+                else:
+                    resp = await client.get(f"{base_url.rstrip('/')}/models", timeout=3.0,
+                                            **({"headers": headers} if headers else {}))
+                if resp is not None and resp.status_code == 200 and not liveness:
                     return [m["id"] for m in resp.json().get("data", [])]
-                if liveness and resp.status_code < 500:
+                if resp is not None and liveness and resp.status_code < 500:
                     try:
                         return [m["id"] for m in resp.json().get("data", [])]
                     except (ValueError, KeyError, TypeError, AttributeError):
