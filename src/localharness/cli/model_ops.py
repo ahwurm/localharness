@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -1037,6 +1037,27 @@ def _host(base_url: str) -> str:
         return base_url
 
 
+def _primary_port(harness: Any) -> int | None:
+    server = getattr(harness, "server", None)
+    if server is not None:
+        return server.port
+    url = harness.provider.base_url
+    try:
+        return urlsplit(url).port if is_loopback(url) else None
+    except ValueError:
+        return None
+
+
+def _unit_serves(config_dir: Any, specs: Any, main_pid: int | None) -> bool:
+    """True when the harness unit's main process is the verified launch of one of ``specs``."""
+    from localharness.provider import lifecycle, procfs
+    if main_pid is None:
+        return False
+    launches = (procfs.read_launch(config_dir, expect=lifecycle.record_identity(s), main_pid=main_pid)
+                for s in specs if s is not None)
+    return any(x is not None and x.verified and x.owner == "unit" for x in launches)
+
+
 def _medians(config_dir: Any) -> dict[str, float]:
     from localharness.provider import speed_stats
     try:
@@ -1073,15 +1094,28 @@ def plan_entries(
     current: "tuple[str, str] | None" = None,
 ) -> Entries:
     """What this box can switch to now; ``live`` maps each probed ``_norm_url`` to its served ids (``()`` not a model list, None no answer). Reads memory once, takes no lock, writes nothing."""
+    from localharness.cli import workspace
     from localharness.provider import lifecycle, speed_stats
 
     provider, records = harness.provider, serving_records(harness)
     cur_url, cur_model = current or (provider.base_url, provider.default_model)
     cur_url = _norm_url(cur_url)
     auto = getattr(harness, "autosense", None)
+    specs = [r.spec for r in records]
+    port = _primary_port(harness)
+    holder = workspace.port_holder(port) if port is not None else None
+    own = lifecycle.own_launch(config_dir, specs)
+    foreign = holder if own is None else None
+    who = None
+    if foreign is not None:
+        who = workspace.visible_text(foreign.unit) if foreign.unit else workspace.incumbent_subject(foreign, port=port)
+    owner = None
+    if own is not None:
+        owner = "autostart" if _unit_serves(config_dir, specs, getattr(unit, "main_pid", None)) else "the harness"
+    elif who is not None:
+        owner = f"{who} (yours)"
     if memory is _UNSET:
-        own = lifecycle.own_launch(config_dir, [r.spec for r in records])
-        memory = lifecycle.memory_after_launch(auto, own, stopping=own is not None) if auto is not None else None
+        memory = lifecycle.memory_after_launch(auto, own, stopping=foreign is not None) if auto is not None else None
     medians = _medians(config_dir)
 
     def rate(ptype: Any, name: str) -> str | None:
@@ -1114,7 +1148,8 @@ def plan_entries(
                 served, "live", ptype, record=next((r for r in on_url if served in (r.served, r.name)), None),
                 endpoint=ep, active=url == cur_url and served == cur_model, rate=rate(ptype, served)))
         if found:
-            groups.append(EntryGroup(f"{_runtime_label(ptype)} · {_host(url)}", tuple(found), True))
+            suffix = f" · {owner}" if owner and url == _norm_url(provider.base_url) else ""
+            groups.append(EntryGroup(f"{_runtime_label(ptype)} · {_host(url)}{suffix}", tuple(found), True))
         elif not ids and url != cur_url:
             notes.append(f"skipped {label} ({url}): not an OpenAI-compatible model list")
     for ep in getattr(harness, "extra_endpoints", None) or []:
@@ -1138,9 +1173,13 @@ def plan_entries(
             record.name, "cold", record.spec.runtime, window, where, refusal, record, record.peer,
             rate=rate(record.provider_type, record.served))
         (refused if refusal is not None else cold).append(entry)
-    if cold:
+    if cold and foreign is not None:
+        cold = [replace(e, refusal=workspace.incumbent_sentence(
+            foreign, port=port, form="imperative", served=cur_model, target=e.name)) for e in cold]
+        groups.append(EntryGroup(f"available once {who} is stopped", tuple(cold), False))
+    elif cold:
         groups.append(EntryGroup("this box can launch", tuple(cold), True))
-    return Entries(tuple(groups), tuple(refused), tuple(notes))
+    return Entries(tuple(groups), tuple(refused), tuple(notes), who)
 
 
 def not_offered_reason(sentence: str, name: str) -> str:
