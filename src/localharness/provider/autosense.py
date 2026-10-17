@@ -829,7 +829,8 @@ def window_lines(report: WindowReport, ratios: Any, undo: str | None = None) -> 
     if row is not None and row.window_note is not None:
         return [f"window: served {fmt_count(r.served)} · trained {fmt_count(r.trained)}{row.window_note}"]
     if r.mode == "fit-by-server":
-        return [FIT_BY_SERVER_LINE + (f" · served {r.served:,}" if r.served and r.verified else "")]
+        floor = f" (at least {r.floor:,})" if r.floor else ""
+        return [FIT_BY_SERVER_LINE + floor + (f" · served {r.served:,}" if r.served and r.verified else "")]
     if r.attached and (r.fits is None or r.served is None
                        or abs(r.fits - r.served) <= ratios.notify_ratio * r.served):
         return []
