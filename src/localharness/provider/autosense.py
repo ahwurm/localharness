@@ -526,6 +526,7 @@ VLLM_REMEDY = "pick a smaller quant"
 _Q4_K_M_SHARE = 0.31
 _DTYPE_WORD = {"bfloat16": "bf16 ", "float16": "fp16 "}
 _VLLM_GMU = 0.90
+_VLLM_BATCHED = 2048
 
 
 def _config_value(config: Mapping[str, Any], key: str) -> Any:
@@ -547,9 +548,9 @@ def place_vllm(model_config: Mapping[str, Any], *, name: str, weights: int, tota
     margin = int(autosense.compute_margin_ratio * weights)
     label = "".join(c for c in name if c.isprintable())
 
-    def made(fits: int, kv: int | None, refusal: str | None = None) -> Placement:
+    def made(fits: int, kv: int | None, refusal: str | None = None, swa_bytes: int = 0) -> Placement:
         return Placement(fits or None, None if refusal or not kv else "vllm", weights, 0, 0, kv, total_bytes,
-                         budget, None, refusal)
+                         budget, None, refusal, swa_bytes)
 
     if weights + margin >= budget:
         text = model_config.get("text_config")
@@ -563,6 +564,7 @@ def place_vllm(model_config: Mapping[str, Any], *, name: str, weights: int, tota
             name=label, weights=gib(weights), dtype=dtype, total=gib(total_bytes), remedy=remedy))
     types = _config_value(model_config, "layer_types")
     layers = sum(t == "full_attention" for t in types) if isinstance(types, list) else 0
+    sliding = sum(t == "sliding_attention" for t in types) if isinstance(types, list) else 0
     layers = layers or _pos_int(_config_value(model_config, "num_hidden_layers"))
     heads = _pos_int(_config_value(model_config, "num_key_value_heads"))
     dim = _pos_int(_config_value(model_config, "head_dim"))
@@ -572,14 +574,23 @@ def place_vllm(model_config: Mapping[str, Any], *, name: str, weights: int, tota
     if not (layers and heads and dim):
         return made(0, None)
     dtype = (_flag_value(extra_args, ("--kv-cache-dtype",)) or "").lower()
-    kv = layers * 2 * heads * dim * (1 if dtype.startswith("fp8") else 2)
+    elem = 1 if dtype.startswith("fp8") else 2
+    kv = layers * 2 * (_pos_int(_config_value(model_config, "num_global_key_value_heads")) or heads) \
+        * (_pos_int(_config_value(model_config, "global_head_dim")) or dim) * elem
+    swa, cap = sliding * 2 * heads * dim * elem, None
+    window_tokens = _pos_int(_config_value(model_config, "sliding_window"))
+    if window_tokens is None:
+        kv, swa = kv + swa, 0
+    else:
+        raw = _flag_value(extra_args, ("--max-num-batched-tokens",))
+        cap = window_tokens + 2 * (int(raw) if raw is not None and raw.isdecimal() and int(raw) > 0 else _VLLM_BATCHED)
     trained = _pos_int(_config_value(model_config, "max_position_embeddings"))
-    window = max(0, (budget - weights - margin) // kv) // 256 * 256
-    window = min(trained, window) if trained else window
+    window = _window(budget - weights - margin, kv, trained or 1 << 40, swa, cap)
+    swa_bytes = swa * (window if cap is None else min(window, cap))
     if floor and window < floor:
         return made(window, kv, FLOOR_REFUSAL.format(
-            name=label, window=window_phrase(window), floor=floor, remedy=FLOOR_REMEDY))
-    return made(window, kv)
+            name=label, window=window_phrase(window), floor=floor, remedy=FLOOR_REMEDY), swa_bytes)
+    return made(window, kv, swa_bytes=swa_bytes)
 
 
 def _label(spec: Any) -> str:
