@@ -922,11 +922,10 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
   cache names are no longer pickable; a model enters the list as a record, or as a `(not set up)` entry that
   `Set it up and switch?` turns into one (§10.1). The managed-restart branches that switched a vLLM primary onto a
   registry name are reachable by no entry; deleting them is a follow-up.
-- **Open — a swap without a floor meets a snapshot's refusal late.** `swap_refusal` returns early when no floor is
-  passed, so a floor-less swap to a snapshot the launch-time walk refuses (a link planted after the listing, an
-  `auto_map` added since) meets the refusal in activation, after the incumbent was stopped, and restores the incumbent
-  as for any failed launch. The REPL and `/model` pass the cached floor when one is known, which makes the refusal
-  come before anything stops.
+- **Decided — a swap without a floor still plans before it stops anything.** `swap_refusal` plans the target with no
+  floor when none is cached, so the refusals that do not depend on a window (a snapshot the launch-time walk refuses,
+  a model that leaves no room, §10.1) come with the incumbent still serving; only the floor refusal waits for a
+  floor.
 - **Open — Strata's unknowns (§11.6)**, each with a live row.
 
 ## 17. Out of scope

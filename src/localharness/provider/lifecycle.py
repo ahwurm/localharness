@@ -1992,7 +1992,7 @@ def swap_refusal(
 ) -> str | None:
     """The target's plan refusal against the memory the swap will have, naming the incumbent that keeps serving."""
     spec = target.spec
-    if autosense is None or floor is None or not getattr(strategy_for(spec, unit=unit), "plans_launch", False):
+    if autosense is None or not getattr(strategy_for(spec, unit=unit), "plans_launch", False):
         return None
     keyed = bool(target.launch_kw.get("api_key"))
     decision = server.launch_decision(spec, keyed, peer=target.peer)
@@ -2036,8 +2036,8 @@ async def swap(
     A cancellation after the incumbent was freed stops the target (verified), awaits `freed()`, runs
     no restore and re-raises (D-20).
 
-    With `floor`, a target the plan refuses is reported with the incumbent still serving before anything
-    stops (`stage` "refused"), and a launch that serves a window below it is a failed launch.
+    A target the plan refuses is reported with the incumbent still serving before anything
+    stops (`stage` "refused"); with `floor`, a launch that serves a window below it is a failed launch.
 
     ``unit`` is the autostart unit's state when it is the harness's OWN unit (`harness_unit`; anything
     else behaves as None). With it, every strategy `swap` builds is the unit's for a record the unit
