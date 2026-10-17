@@ -1617,17 +1617,6 @@ class DivisionConfig(BaseModel):
         return v
 
 
-LLAMACPP_ONLY_FIELDS: tuple[str, ...] = (
-    "mmproj", "served_name", "cache_type_k", "cache_type_v", "cache_ram", "api_key_file", "env",
-    "config_ini", "speculative",
-)
-"""The `ManagedServerConfig` fields refused on every runtime but llamacpp (vllm, ollama and
-lmstudio alike); `context` and `effort` are accepted everywhere."""
-
-VLLM_ONLY_FIELDS: tuple[str, ...] = ("reasoning_parser", "tool_call_parser")
-"""The `ManagedServerConfig` fields refused on every runtime but vllm (llamacpp, ollama and
-lmstudio alike): the parsers the harness hands a vLLM launch."""
-
 KV_CACHE_TYPES: tuple[str, ...] = (
     "f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1")
 """llama.cpp's cache type list. It must equal `provider/autosense.KV_BYTES` (a literal tuple here
@@ -2370,41 +2359,19 @@ class ManagedServerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _launch_target_present(self) -> "ManagedServerConfig":
-        if self.runtime != "llamacpp":
-            set_names = [n for n in LLAMACPP_ONLY_FIELDS if getattr(self, n) is not None]
-            if set_names:
-                verb = "is" if len(set_names) == 1 else "are"
-                raise ValueError(
-                    f"runtime={self.runtime}: {', '.join(set_names)} {verb} llama.cpp-only "
-                    "(runtime: llamacpp)")
-        if self.runtime != "vllm":
-            vllm_names = [n for n in VLLM_ONLY_FIELDS if getattr(self, n) is not None]
-            if vllm_names:
-                verb = "is" if len(vllm_names) == 1 else "are"
-                raise ValueError(
-                    f"runtime={self.runtime}: {', '.join(vllm_names)} {verb} vLLM-only "
-                    "(runtime: vllm)")
+        from localharness.provider.runtimes import RUNTIMES
+        for key, other in RUNTIMES.items():
+            names = [n for n in other.record_fields if key != self.runtime and getattr(self, n) is not None]
+            if names:
+                verb = "is" if len(names) == 1 else "are"
+                raise ValueError(f"runtime={self.runtime}: {', '.join(names)} {verb} {other.name}-only (runtime: {key})")
         if self.api_key_file is not None and self.require_api_key is not True:
             raise ValueError("api_key_file requires require_api_key: true")
-        if self.runtime in ("ollama", "lmstudio"):
-            # ollama / lmstudio: the harness drives a PATH CLI (`ollama serve` / `lms`), not a
-            # checkpoint or image — `binary` defaults to that command and `model` is a pulled tag /
-            # LM Studio model key, so there is no launch-target file to validate here.
-            if self.runtime == "lmstudio" and any(
-                a == "--gpu" or a.startswith("--gpu=") for a in self.extra_args
-            ):
-                # LmsStrategy derives `lms load --gpu {max|off}` from `gpu` (the GPU-lock signal); a
-                # manual --gpu in extra_args would (CLI last-wins) silently override it and desync the
-                # GPU-lock bookkeeping → a two-heavy freeze on a later swap. Reject it at load.
-                raise ValueError(
-                    "runtime=lmstudio: `--gpu` must not appear in extra_args — it is derived from "
-                    "`gpu` (--gpu max when gpu=True, --gpu off when False)."
-                )
-            return self
-        if self.runtime == "llamacpp":
-            # A llama.cpp record with no binary is declared, not launchable: whether it can launch
-            # is the one launch decision's call, so the schema accepts it (and must return before
-            # the `launch == "binary"` check below, which `launch`'s default would trip).
+        row = RUNTIMES[self.runtime]
+        for flag, why in row.derived_args.items():
+            if any(a == flag or a.startswith(f"{flag}=") for a in self.extra_args):
+                raise ValueError(f"runtime={self.runtime}: `{flag}` must not appear in extra_args — {why}.")
+        if not row.checkpoint:
             return self
         if self.launch == "binary" and not self.binary:
             raise ValueError("launch=binary requires `binary` (path to the vllm executable)")
@@ -2736,11 +2703,12 @@ class HarnessConfig(BaseModel):
         at launch. The primary must be llama.cpp with a binary; a vLLM or declared-only primary
         lends nothing. The assignment is in place so the peer's lifecycle object keeps its identity
         (`_active_heavy` compares by it) and the YAML file is untouched."""
+        from localharness.provider.runtimes import RUNTIMES
         primary = self.server
-        if primary is None or primary.runtime != "llamacpp" or not primary.binary:
+        if primary is None or not primary.binary or not RUNTIMES[primary.runtime].path_binary:
             return self
         for ep in self.extra_endpoints:
             life = ep.lifecycle
-            if life is not None and life.runtime == "llamacpp" and not life.binary:
+            if life is not None and life.runtime == primary.runtime and not life.binary:
                 life.binary = primary.binary
         return self

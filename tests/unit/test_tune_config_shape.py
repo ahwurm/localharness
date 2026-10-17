@@ -91,8 +91,9 @@ def test_a_plain_parser_name_is_accepted(good):
 
 
 def test_the_gate_tuples():
-    assert "speculative" in M.LLAMACPP_ONLY_FIELDS
-    assert M.VLLM_ONLY_FIELDS == ("reasoning_parser", "tool_call_parser")
+    from localharness.provider.runtimes import RUNTIMES
+    assert "speculative" in RUNTIMES["llamacpp"].record_fields
+    assert RUNTIMES["vllm"].record_fields == ("reasoning_parser", "tool_call_parser")
 
 
 # ------------------------------------------------------------------ the fingerprint
