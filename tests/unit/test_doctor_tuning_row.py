@@ -159,13 +159,12 @@ def test_the_window_part_says_where_the_window_comes_from(world, change, window)
     assert _rows(_doctor(world)) == [f"Tuning: swift — kv q8_0 · mtp (1 layer) · {window}"]
 
 
-def test_an_unknown_free_memory_leaves_the_window_to_llama_server(world, monkeypatch):
+def test_an_unknown_free_memory_says_the_window_was_not_computed(world, monkeypatch):
     from localharness.provider import autosense
 
     monkeypatch.setattr(autosense, "free_memory", lambda ratios: None)
 
-    assert _rows(_doctor(world)) == [
-        "Tuning: swift — kv q8_0 · mtp (1 layer) · -c left to llama-server --fit"]
+    assert _rows(_doctor(world))[0].startswith("Tuning: swift — kv q8_0 · mtp (1 layer) · -c not computed")
 
 
 def test_ollama_and_lmstudio_records_get_no_row_and_a_docker_record_does(world):
@@ -203,3 +202,74 @@ def test_the_rows_print_when_the_endpoint_is_unreachable(world, mock_httpx):
     result = _doctor(world)
 
     assert "LLM endpoint unreachable" in result.output and len(_rows(result)) == 1
+
+
+GIB = 2**30
+
+
+def _flash_machine(world, monkeypatch, *, available=52.9):
+    from localharness.provider import autosense
+    from tests.unit.gguf_support import load_fixture, write_recorded, write_sparse
+
+    model = write_recorded(world.tmp, load_fixture("flash-next-iq3-xxs"))[0]
+    mmproj = write_sparse(world.tmp / "mmproj.gguf", 907_543_520)
+    peer = llama_peer("flash-next", 8082)
+    peer["lifecycle"].update(model=str(model), mmproj=str(mmproj))
+    world.edit_config(lambda d: (d["extra_endpoints"].append(peer), d.update(autosense={"draft_mtp": False})))
+    world.rerecord()
+    monkeypatch.setattr(autosense, "free_memory", lambda ratios: autosense.FreeMemory(int(30.2 * GIB), int(31.8 * GIB), "nvidia-smi"))
+    monkeypatch.setattr(autosense, "_read_meminfo", lambda: {"MemTotal": 64_139_128 * 1024, "MemAvailable": int(available * GIB)})
+
+
+def test_flash_next_row_carries_the_per_tensor_and_ram_figures(world, monkeypatch):
+    _flash_machine(world, monkeypatch)
+
+    assert _rows(_doctor(world))[1] == (
+        "Tuning: flash-next — kv q8_0 · -c 262144 (fit) · dense 3.7 GiB · experts 40.0 GiB in RAM · "
+        "token tables 27.1 GiB read through mmap · prompt cache 3,849 MiB · RAM reserve 9.2 GiB")
+
+
+def test_flash_next_without_the_ram_for_its_experts_shows_the_refusal_sentence(world, monkeypatch):
+    _flash_machine(world, monkeypatch, available=31.4)
+
+    assert _rows(_doctor(world))[1] == (
+        "Tuning: flash-next — flash-next cannot run here: its experts need 40.0 GiB of RAM and only 22.2 GiB is "
+        "free beside the system's reserve — close something that holds RAM, or pick a smaller quant.")
+
+
+def test_a_dense_27b_with_a_readable_table_has_no_experts_clause(world, monkeypatch):
+    from tests.unit.gguf_support import load_fixture, write_recorded
+
+    model = write_recorded(world.tmp, load_fixture("swift-27b-nvfp4-q8mix"))[0]
+    world.edit_config(lambda d: d["server"].update(model=str(model)))
+    world.rerecord()
+
+    row = _rows(_doctor(world))[0]
+
+    assert re.search(r"\(fit\) · dense \d+\.\d GiB · token tables \d+\.\d GiB read through mmap · "
+                     r"prompt cache [\d,]+ MiB · RAM reserve 9\.0 GiB$", row)
+    assert "experts" not in row
+
+
+def test_a_model_whose_table_cannot_be_read_shows_its_file_size(world):
+    assert _rows(_doctor(world))[0].endswith(
+        "(fit) · weights 18.0 GiB (tensor table not read) · prompt cache 3,072 MiB · RAM reserve 9.0 GiB")
+
+
+def test_a_vllm_checkpoint_shows_its_weights_and_the_vllm_budget(tmp_path, monkeypatch, mock_httpx):
+    import shutil
+
+    from localharness.provider import autosense
+    from tests.unit.gguf_support import write_sparse
+
+    world = serve_world(tmp_path, monkeypatch, runtime="vllm")
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "vllm_checkpoints" / "nvidia-qwen3.8-27b-nvfp4"
+    shutil.copy(fixture / "config.json", world.model / "config.json")
+    for i in range(2):
+        write_sparse(world.model / f"model-0000{i + 1}-of-00002.safetensors", 21_921_697_280 // 2)
+    total = int(31.8 * GIB)
+    monkeypatch.setattr(autosense, "free_memory", lambda ratios: autosense.FreeMemory(total, total, "nvidia-smi"))
+    world.rerecord()
+
+    assert _rows(_doctor(world))[0].endswith("--max-model-len 100864 (fit) · weights 20.4 GiB · vLLM budget 28.6 GiB")
+
