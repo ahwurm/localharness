@@ -140,7 +140,7 @@ def test_price_llamacpp_prices_the_fit_and_the_cache_ram_through_the_row():
     spec, knobs = _record("llamacpp", binary="/x/llama-server"), AutosenseConfig()
     tuned = Tuned(cache_type="q8_0")
     got = RUNTIMES["llamacpp"].price(spec, _sensed(), tuned, knobs)
-    fits = autosense.fit(HEADER, 40 * GIB - int(knobs.compute_reserve * GIB), knobs, cache_type_k="q8_0", cache_type_v="q8_0", weights=18 * GIB) // 256 * 256
+    fits = autosense.fit(HEADER, 40 * GIB, knobs, cache_type_k="q8_0", cache_type_v="q8_0", weights=18 * GIB) // 256 * 256
     ram = autosense.cache_ram_mib(90 * GIB, 128 * GIB, 18 * GIB, "gpu", [], knobs)
     assert isinstance(got, autosense.Price) and got.refusal is None
     assert (got.context, got.cache_ram, got.full_fit) == (fits, ram, fits) and fits
