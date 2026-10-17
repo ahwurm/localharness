@@ -597,7 +597,7 @@ async def _build_agent_loop(bus: EventBus, llm_client: Any, scenario: ScenarioSp
             # (FIX 2: already clamped to the org ceiling above) so the cruncher's chunk sizing
             # (_cruncher_chunk_chars) tracks the REAL served window, not an aspirational one.
             token_counter=token_counter,
-            max_context_tokens=effective_max_context_tokens,
+            window=lambda: effective_max_context_tokens,
             depth=0,
             available_agents=_bench_agents,
             parent_store=bench_store,

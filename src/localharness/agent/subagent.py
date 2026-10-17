@@ -1780,7 +1780,7 @@ def make_explore_agent_runner(
         Callable[[str, AgentConfig], AgentConfig | Awaitable[AgentConfig]] | None
     ) = None,
     token_counter: Any = None,
-    max_context_tokens: int | None = None,
+    window: Callable[[], int | None] | None = None,
     depth: int = 0,
     max_subagent_depth: int = MAX_DEPTH,
     available_agents: list[str] | None = None,
@@ -1878,8 +1878,8 @@ def make_explore_agent_runner(
 
     def _make_child_ctx(grant_handles: list[str] | None = None) -> Any:
         """Fresh ContextManager per child, carrying the parent's model-aware token_counter
-        (exact /tokenize counts, not tiktoken) and resolved window — so children account
-        for context the same way the parent does instead of falling to bare defaults.
+        (exact /tokenize counts, not tiktoken) and the window `window()` returns now — so children
+        account for context the same way the parent does instead of falling to bare defaults.
 
         When grant_handles are passed AND a parent_store exists, the child's ContentStore is built
         with (parent=parent_store, granted=frozenset(handles)) — the grant keystone: the child reads
@@ -1889,8 +1889,9 @@ def make_explore_agent_runner(
         kwargs: dict[str, Any] = {}
         if token_counter is not None:
             kwargs["token_counter"] = token_counter
-        if max_context_tokens is not None:
-            kwargs["max_context_tokens"] = max_context_tokens
+        served = window() if window is not None else None
+        if served is not None:
+            kwargs["max_context_tokens"] = served
         if grant_handles and parent_store is not None:
             kwargs["content_store"] = ContentStore(
                 parent=parent_store, granted=frozenset(grant_handles)
@@ -1918,7 +1919,7 @@ def make_explore_agent_runner(
             load_agent=load_agent,
             load_builtin_override=load_builtin_override,
             token_counter=token_counter,
-            max_context_tokens=max_context_tokens,
+            window=window,
             depth=child_depth,
             max_subagent_depth=max_subagent_depth,
             available_agents=available_agents,
