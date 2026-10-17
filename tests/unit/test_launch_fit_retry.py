@@ -31,7 +31,7 @@ BASE = "http://127.0.0.1:8080/v1"
 
 HEADER_A = {"general.architecture": "qwen3", "qwen3.block_count": 64, "qwen3.attention.head_count_kv": 8,
             "qwen3.attention.key_length": 128, "qwen3.context_length": 262144}
-WEIGHTS_A = 19864223744  # 18.5 GiB: with 24 GiB free the fit is 14950
+WEIGHTS_A = 19864223744  # 18.5 GiB: with 24 GiB free the fit is 14848
 MEMINFO = {"MemTotal": 64 * GIB, "MemAvailable": 60 * GIB}
 CACHE_RAM = cache_ram_mib(MEMINFO["MemAvailable"], MEMINFO["MemTotal"], WEIGHTS_A, "gpu", [], RATIOS)
 
@@ -116,12 +116,12 @@ async def _activate(tmp_path, spec, **kw):
 async def test_a_record_without_a_context_launches_with_the_fit_and_the_cache_size(tmp_path, popen, box):
     live = await _activate(tmp_path, _spec(tmp_path))
     argv = _argv(popen)
-    assert _has_pair(argv, "-c", "14950")
+    assert _has_pair(argv, "-c", "14848")
     assert _has_pair(argv, "--cache-ram", str(CACHE_RAM))
     assert argv[-2:] == ["--host", "127.0.0.1"]
     w = live.window
     assert (w.served, w.trained, w.fits, w.asked, w.mode, w.verified, w.retried) == (
-        14950, 262144, 14950, 14950, "fit", True, False)
+        14950, 262144, 14848, 14848, "fit", True, False)
     assert w.weights_bytes == WEIGHTS_A and w.free_bytes == 24 * GIB and w.total_bytes == 32 * GIB
     assert live.served_models == ["qwen"] and live.handle == 4242
 
@@ -148,7 +148,7 @@ async def test_the_sizing_runs_off_the_event_loop(tmp_path, popen, box, monkeypa
     monkeypatch.setattr(autosense, "free_memory", free_memory)
     live = await _activate(tmp_path, _spec(tmp_path))
     assert seen and all(t != loop_thread for t in seen)
-    assert live.window.fits == 14950  # the faked memory was the one used
+    assert live.window.fits == 14848  # the faked memory was the one used
 
 
 async def test_the_key_reaches_the_probe_and_nothing_else_does(tmp_path, popen, box):
@@ -165,14 +165,14 @@ async def test_a_record_context_wins_and_the_fit_stays_off_argv(tmp_path, popen,
     argv = _argv(popen)
     assert [t for t in argv if t == "-c"] == ["-c"] and _has_pair(argv, "-c", "4096")
     assert live.window.mode == "record" and live.window.asked == 4096
-    assert live.window.fits == 14950  # still computed, for the report
+    assert live.window.fits == 14848  # still computed, for the report
 
 
 @pytest.mark.parametrize("extra", [["-c", "8192"], ["--ctx-size=8192"], ["--ctx-size", "8192"]])
 async def test_a_c_in_extra_args_wins_with_no_fit_keyword(tmp_path, popen, box, extra):
     live = await _activate(tmp_path, _spec(tmp_path, extra_args=extra))
     argv = _argv(popen)
-    assert "14950" not in argv
+    assert "14848" not in argv
     assert argv.count("-c") == extra.count("-c")  # the extra_args -c only, never a second one
     assert live.window.mode == "extra_args" and live.window.asked is None
 
@@ -184,13 +184,18 @@ async def test_an_extra_args_c_never_triggers_a_retry(tmp_path, popen, box):
     assert len(popen) == 1 and box.stops == []
 
 
-@pytest.mark.parametrize("memory", [None, FreeMemory(1 * GIB, 32 * GIB, "nvidia-smi")])
-async def test_an_uncomputable_or_non_positive_fit_launches_with_no_c(tmp_path, popen, box, memory):
-    box.mem = memory  # 1 GiB free cannot hold 18.5 GiB of weights: the fit is None, never <= 0
+async def test_an_unknown_free_memory_launches_with_no_c(tmp_path, popen, box):
+    box.mem = None
     live = await _activate(tmp_path, _spec(tmp_path))
-    assert "-c" not in _argv(popen)
-    assert live.window.mode == "fit-by-server" and live.window.asked is None
-    assert live.window.fits is None
+    assert "-c" not in _argv(popen) and "--fit-ctx" not in _argv(popen)
+    assert live.window.mode == "not-computed" and live.window.asked is None and live.window.fits is None
+
+
+async def test_weights_beyond_the_free_memory_are_refused_before_anything_starts(tmp_path, popen, box):
+    box.mem = FreeMemory(1 * GIB, 32 * GIB, "nvidia-smi")
+    with pytest.raises(server.LaunchRefused, match="needs 18.5 GiB of GPU memory and 1.0 GiB is free"):
+        await _activate(tmp_path, _spec(tmp_path))
+    assert popen == [] and box.events == ["free_memory"]
 
 
 async def test_an_unreadable_header_is_not_computed_not_a_failure(tmp_path, popen, box):
@@ -244,7 +249,7 @@ async def test_a_record_cache_ram_of_zero_is_sent_as_zero(tmp_path, popen, box):
     await _activate(tmp_path, _spec(tmp_path, cache_ram=0))
     argv = _argv(popen)
     assert _has_pair(argv, "--cache-ram", "0") and argv.count("--cache-ram") == 1
-    assert _has_pair(argv, "-c", "14950")  # the fit path is independent of it
+    assert _has_pair(argv, "-c", "14848")  # the fit path is independent of it
 
 
 async def test_a_record_cache_ram_wins_over_the_formula(tmp_path, popen, box):
@@ -286,7 +291,7 @@ async def test_a_probe_that_answers_nothing_is_unverified_not_a_failure(tmp_path
 async def test_a_served_window_smaller_than_asked_is_a_mismatch_not_a_failure(tmp_path, popen, box):
     box.probe_result = WindowProbe(8192, 262144)
     live = await _activate(tmp_path, _spec(tmp_path))
-    assert live.window.served == 8192 < live.window.asked == 14950
+    assert live.window.served == 8192 < live.window.asked == 14848
     assert live.window.verified is True
 
 
@@ -394,9 +399,9 @@ async def test_a_dead_process_on_a_fit_c_is_stopped_then_relaunched_at_half(tmp_
     box.ready_script = [RuntimeError(DEAD), ["qwen"]]
     live = await _activate(tmp_path, _spec(tmp_path))
     assert len(calls) == 2
-    assert _has_pair(_argv(calls, 0), "-c", "14950") and _has_pair(_argv(calls, 1), "-c", "7475")
+    assert _has_pair(_argv(calls, 0), "-c", "14848") and _has_pair(_argv(calls, 1), "-c", "7424")
     assert box.stops == [(tmp_path, "binary")]
-    assert live.window.retried is True and live.window.asked == 7475
+    assert live.window.retried is True and live.window.asked == 7424
     assert live.window.mode == "fit"
 
 
@@ -413,7 +418,7 @@ async def test_the_cache_ram_and_the_rest_of_the_argv_survive_the_halving(tmp_pa
     box.ready_script = [RuntimeError(DEAD), ["qwen"]]
     await _activate(tmp_path, _spec(tmp_path))
     first, second = _argv(calls, 0), _argv(calls, 1)
-    strip = lambda argv: [t for t in argv if t not in ("14950", "7475")]  # noqa: E731
+    strip = lambda argv: [t for t in argv if t not in ("14848", "7424")]  # noqa: E731
     assert strip(first) == strip(second) and _has_pair(second, "--cache-ram", str(CACHE_RAM))
 
 
@@ -490,7 +495,8 @@ async def test_a_launch_the_server_sized_itself_is_not_retried(tmp_path, box, mo
 
 async def test_a_fit_of_one_halves_to_one_not_zero(tmp_path, box, monkeypatch):
     calls = _launches(box, monkeypatch)
-    monkeypatch.setattr(autosense, "fit", lambda *a, **k: 1)
+    monkeypatch.setattr(autosense, "place_llamacpp", lambda *a, **k: autosense.Placement(
+        1, "gpu", 0, 0, 0, None, 0, 0, None, None))
     box.ready_script = [RuntimeError(DEAD), ["qwen"]]
     live = await _activate(tmp_path, _spec(tmp_path))
     assert _has_pair(_argv(calls, 1), "-c", "1") and live.window.asked == 1 and live.window.retried
@@ -566,7 +572,7 @@ async def test_the_death_not_the_log_text_triggers_the_retry(tmp_path, box, monk
     with pytest.raises(RuntimeError) as dead:
         await _activate(tmp_path, _spec(tmp_path))
     assert len(launched) == 2
-    assert _has_pair(launched[0]["cmd"], "-c", "14950") and _has_pair(launched[1]["cmd"], "-c", "7475")
+    assert _has_pair(launched[0]["cmd"], "-c", "14848") and _has_pair(launched[1]["cmd"], "-c", "7424")
     assert len(box.stops) == 2
     assert str(dead.value).startswith("llama.cpp exited during startup. Log tail:")
     # the abandon quotes the log's last lines: the failure when there was one, otherwise the launch line
@@ -582,5 +588,5 @@ async def test_load_failure_in_the_log_is_the_dead_process(tmp_path, box, monkey
     text = str(dead.value)
     assert text.startswith("llama.cpp exited during startup. Log tail:")
     assert "failed to initialize the context" in text and "cudaMalloc failed" in text
-    assert len(launched) == 2 and _has_pair(launched[1]["cmd"], "-c", "7475")
+    assert len(launched) == 2 and _has_pair(launched[1]["cmd"], "-c", "7424")
     assert [call[1] for call in box.stops] == ["binary", "binary"]
