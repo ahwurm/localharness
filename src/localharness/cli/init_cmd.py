@@ -991,7 +991,8 @@ def _records_from_import(config_path: Path, imp: init_import.Imported, holder: w
     foreign = (workspace.foreign_unit_sentence(holder, served=served, port=port)
                if running and holder.unit and speed_stats.foreign_unit_changed(ledger, holder.unit, served)
                else None)
-    extras = tuple(x for x in (*imp.shown, foreign, line) if x)
+    imported = None if running or not holder.unit else workspace.imported_unit_sentence(holder, served=served)
+    extras = tuple(x for x in (*imp.shown, imported, foreign, line) if x)
     lines = preset_lines(spec, served, peers, binary_from=binary_from, extras=extras)
     deferred: list[Callable[[], None]] = []
     if imp.ctx is not None:  # the triple that was printed, so the first start does not print it again

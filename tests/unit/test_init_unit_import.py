@@ -36,6 +36,8 @@ from tests.unit.units_support import fake_systemd  # noqa: F401  (fixture)
 UNIT = "llm.service"
 LOOPBACK_LINE = (f"{UNIT} binds 0.0.0.0 with no key file — imported on 127.0.0.1 · "
                  "server.bind_all: true beside server.api_key_file restores it (asks once)")
+IMPORTED_LINE = (f"{UNIT} is yours and was imported as the server: record; from now on the harness "
+                 "launches qwen-27b itself and never touches the unit.")
 STOPPED_LINE = f"{UNIT} sets -c 65536; the first start launches -c 114688 · server.context: 65536 keeps it"
 
 
@@ -120,6 +122,7 @@ def test_the_block_reads_the_primary_its_flags_the_loopback_line_the_stopped_lin
         f"serving qwen-27b (llama.cpp) ← ~/models/gguf/A.gguf · binary: {live.bin} (from {UNIT})",
         "flags: -ngl 99",
         LOOPBACK_LINE,
+        IMPORTED_LINE,
         STOPPED_LINE,
         "/model switches to B (llama.cpp) ← ~/models/gguf/B.gguf",
     ]
