@@ -1,6 +1,9 @@
 """The fit planner's price: where a model's weights live and the window that leaves, at the box's measured figures."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from localharness.config.models import AutosenseConfig
@@ -11,6 +14,7 @@ from tests.unit.gguf_support import load_fixture, write_recorded
 
 FLASH, SWIFT, NVIDIA = "flash-next-iq3-xxs", "swift-27b-nvfp4-q8mix", "nvidia-27b-nvfp4"
 GIB = 2**30
+CHECKPOINTS = Path(__file__).resolve().parents[1] / "fixtures" / "vllm_checkpoints"
 AUTO = AutosenseConfig()
 MEM_TOTAL = 64_139_128 * 1024
 SWIFT_MMPROJ, FLASH_MMPROJ = 927_606_912, 907_543_520
@@ -188,3 +192,106 @@ def test_a_control_character_in_a_name_never_reaches_a_sentence(tmp_path):
 
 def test_the_same_inputs_priced_twice_give_equal_placements(tmp_path):
     assert _place_flash(tmp_path, 52.9) == _place_flash(tmp_path, 52.9)
+
+
+NVFP4 = {"nvidia-qwen3.8-27b-nvfp4": 21_921_697_280, "ukisai-swift-1.5-27b-nvfp4": 21_921_695_568}
+GPU_31_8 = int(31.8 * GIB)
+
+
+def _config(name):
+    return json.loads((CHECKPOINTS / name / "config.json").read_text())
+
+
+def _vllm(config, *, weights=21_921_697_280, total=GPU_31_8, extra_args=(), floor=None, name="NVFP4-27B"):
+    return autosense.place_vllm(
+        config, name=name, weights=weights, total_bytes=total, extra_args=list(extra_args), autosense=AUTO, floor=floor)
+
+
+@pytest.mark.parametrize("name,weights", NVFP4.items())
+def test_both_nvfp4_checkpoints_price_at_100864(name, weights):
+    placed = _vllm(_config(name), weights=weights)
+    assert (placed.fits, placed.where, placed.refusal) == (100_864, "vllm", None)
+    assert autosense.gib(placed.budget_bytes) == "28.6" and placed.kv_per_token == 65_536
+    assert placed.gpu_bytes == weights and placed.mmproj == 0 and placed.experts_ram == 0
+
+
+def test_two_checkpoints_of_the_same_shape_price_equal():
+    a, b = (_vllm(_config(n)) for n in NVFP4)
+    assert a == b == _vllm(_config("nvidia-qwen3.8-27b-nvfp4"))
+
+
+def test_weights_beyond_the_budget_are_the_vllm_refusal():
+    placed = _vllm(_config("nvidia-qwen3.8-27b-nvfp4"), weights=62_546_338_264, name="gemma")
+    assert placed.fits is None and placed.where is None and placed.refusal == (
+        "gemma cannot run here: 58.3 GiB of weights, and vLLM keeps them all on the 31.8 GiB GPU.")
+
+
+def test_weights_plus_the_margin_at_the_budget_is_refused_and_one_byte_under_prices():
+    config, total = _config("nvidia-qwen3.8-27b-nvfp4"), 10 * 10**9
+    weights = 8_181_818_182
+    assert weights + int(AUTO.compute_margin_ratio * weights) == int(0.9 * total)
+    assert _vllm(config, weights=weights, total=total).refusal is not None
+    under = _vllm(config, weights=weights - 1, total=total)
+    assert under.refusal is None and under.fits is None
+
+
+def test_a_config_with_no_layer_types_counts_num_hidden_layers():
+    config = {"num_hidden_layers": 64, "num_key_value_heads": 4, "head_dim": 256, "max_position_embeddings": 262_144}
+    assert _vllm(config).kv_per_token == 64 * 2 * 4 * 256 * 2
+
+
+def test_text_config_values_win_over_top_level_ones():
+    config = {"num_hidden_layers": 8, "num_key_value_heads": 1, "head_dim": 16, "max_position_embeddings": 1_000,
+              "text_config": {"num_hidden_layers": 64, "num_key_value_heads": 4, "head_dim": 256}}
+    placed = _vllm(config)
+    assert placed.kv_per_token == 64 * 2 * 4 * 256 * 2 and placed.fits == 1_000
+
+
+def test_the_head_dim_falls_back_to_hidden_size_over_heads_and_the_window_is_capped_at_the_trained_one():
+    config = {"num_hidden_layers": 16, "num_key_value_heads": 4, "hidden_size": 2_048, "num_attention_heads": 8,
+              "max_position_embeddings": 65_536}
+    placed = _vllm(config)
+    assert placed.kv_per_token == 16 * 2 * 4 * 256 * 2 and placed.fits == 65_536
+
+
+@pytest.mark.parametrize("dtype", ["fp8", "fp8_e4m3", "FP8_E5M2"])
+def test_an_fp8_kv_cache_halves_the_kv_bytes(dtype):
+    config = _config("nvidia-qwen3.8-27b-nvfp4")
+    assert _vllm(config, extra_args=["--kv-cache-dtype", dtype]).kv_per_token == 32_768
+    assert _vllm(config, extra_args=[f"--kv-cache-dtype={dtype}"]).kv_per_token == 32_768
+    assert _vllm(config, extra_args=["--kv-cache-dtype", "auto"]).kv_per_token == 65_536
+
+
+def test_the_gpu_memory_utilization_in_extra_args_replaces_the_default():
+    config = _config("nvidia-qwen3.8-27b-nvfp4")
+    assert _vllm(config, extra_args=["--gpu-memory-utilization=0.8"]).budget_bytes == int(0.8 * GPU_31_8)
+    assert _vllm(config, extra_args=["--gpu-memory-utilization", "0.95"]).budget_bytes == int(0.95 * GPU_31_8)
+    for bad in ("1.5", "0", "-0.1", "abc", "nan"):
+        assert _vllm(config, extra_args=["--gpu-memory-utilization", bad]).budget_bytes == int(0.9 * GPU_31_8)
+
+
+@pytest.mark.parametrize("hostile", [True, "4", 4.0, 0, -4, None, [4]])
+def test_a_value_that_is_not_a_positive_int_prices_nothing(hostile):
+    for key in ("num_key_value_heads", "head_dim"):
+        config = {"num_hidden_layers": 64, "num_key_value_heads": 4, "head_dim": 256, key: hostile}
+        placed = _vllm(config)
+        assert (placed.fits, placed.where, placed.refusal) == (None, None, None)
+
+
+def test_no_heads_or_head_dim_anywhere_prices_nothing_without_a_refusal():
+    placed = _vllm({"num_hidden_layers": 64})
+    assert (placed.fits, placed.refusal, placed.kv_per_token) == (None, None, None)
+
+
+def test_a_vllm_window_under_the_floor_is_the_floor_refusal():
+    placed = _vllm(_config("nvidia-qwen3.8-27b-nvfp4"), floor=200_000)
+    assert placed.fits == 100_864 and placed.refusal == (
+        "NVFP4-27B fits only a 100,864-token window here and the harness needs at least 200,000 — free GPU "
+        "memory, or pick a smaller model.")
+    assert _vllm(_config("nvidia-qwen3.8-27b-nvfp4"), floor=100_864).refusal is None
+
+
+def test_a_control_character_in_a_vllm_name_never_reaches_the_refusal():
+    placed = _vllm(_config("nvidia-qwen3.8-27b-nvfp4"), weights=GPU_31_8, name="x\x1b[0m\ny")
+    assert placed.refusal.startswith("x[0my cannot run here: ")
+
