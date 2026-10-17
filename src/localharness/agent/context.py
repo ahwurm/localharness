@@ -1163,7 +1163,7 @@ def _gguf_trained(model: str, ptype: str) -> int | None:
     """The trained window from the model's own GGUF header (Ollama / LM Studio: their APIs report
     the served window, not the ceiling), or None when no local file resolves or it cannot be read."""
     try:
-        from localharness.agent.gguf_header import read_header
+        from localharness.provider.gguf_header import read_header
         from localharness.agent.gguf_tokenizer import resolve_gguf_path
 
         path = resolve_gguf_path(model, ptype)

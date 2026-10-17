@@ -2301,7 +2301,7 @@ class OrchestratorREPL:
                     # A copy for the launch: the shared record (the primary's served name, the listing,
                     # the swap-back target) keeps its own weights, so a typed file is never "the primary"
                     # (WR-53, IN-57).
-                    from localharness.agent import gguf_header
+                    from localharness.provider import gguf_header
                     spec = managed.model_copy(update={
                         "model": str(Path(target).expanduser()),
                         "served_name": gguf_header.preset_name(target)})

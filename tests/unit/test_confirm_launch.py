@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from localharness.agent.gguf_header import read_header
+from localharness.provider.gguf_header import read_header
 from localharness.config.models import AutosenseConfig, ManagedServerConfig
 from localharness.provider import lifecycle, server, speed_stats, tuning, units
 from localharness.provider.autosense import FIT_KEYS, FreeMemory, WindowReport, fit_header

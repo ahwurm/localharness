@@ -1,7 +1,7 @@
 """serve_command places each derived flag at the record field's own slot (spec 20 §6.0, D-08)."""
 from __future__ import annotations
 
-from localharness.agent.gguf_header import read_header
+from localharness.provider.gguf_header import read_header
 from localharness.config.models import AutosenseConfig, ManagedServerConfig
 from localharness.provider import server
 from localharness.provider.autosense import FIT_KEYS, fit_header

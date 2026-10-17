@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from localharness.provider.lifecycle import Sensed
     from localharness.provider.tuning import Tuned
 
-# What callers hand to `agent.gguf_header.read_header` so the header holds exactly the fit's inputs.
+# What callers hand to `provider.gguf_header.read_header` so the header holds exactly the fit's inputs.
 FIT_KEYS = frozenset({
     "block_count", "head_count_kv", "key_length", "embedding_length", "head_count", "context_length",
     "nextn_predict_layers", "expert_count",
@@ -419,7 +419,7 @@ def compute_fit(server: Any, ratios: Any, *, attached_served: int | None = None,
     `--cache-ram`. `memory=` replaces the probe (D-49): `init` runs `free_memory` once and passes that
     one result for every model it ranks; a `FreeMemory` or None is used as given and `free_memory` is
     never called. Starts nothing and writes nothing."""
-    from localharness.agent.gguf_header import read_header
+    from localharness.provider.gguf_header import read_header
 
     extra = list(server.extra_args or [])
     try:

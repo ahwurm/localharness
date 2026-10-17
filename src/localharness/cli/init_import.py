@@ -18,7 +18,7 @@ from typing import Callable
 
 from pydantic import SecretStr, ValidationError
 
-from localharness.agent.gguf_header import preset_name, served_model
+from localharness.provider.gguf_header import preset_name, served_model
 from localharness.cli.workspace import shown_path, visible_text
 from localharness.config.models import ManagedServerConfig
 from localharness.core.private_files import open_regular

@@ -542,7 +542,7 @@ class Boot:
         self.harness = load(home)
         self.record = record(self.harness, "flash-next")
         self.key = lifecycle.record_key(self.record.spec)
-        from localharness.agent.gguf_header import read_header
+        from localharness.provider.gguf_header import read_header
         from localharness.provider.autosense import FIT_KEYS, fit_header
 
         self.header = fit_header(read_header(self.record.spec.model, FIT_KEYS))
@@ -675,7 +675,7 @@ def test_boot_clause_for_the_primary_names_server_speculative(home, tmp_path, fa
     key = lifecycle.record_key(primary.spec)
     fake_proc.process(4242, argv=(LLAMA, "-a", PRIMARY, "-c", "40000", "--port", "8080"), exe=LLAMA, start_time=777)
     _pidfile(home, "4242 777 8080")
-    from localharness.agent.gguf_header import read_header
+    from localharness.provider.gguf_header import read_header
     from localharness.provider.autosense import FIT_KEYS, fit_header
 
     directory = server.server_dir(home)

@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from localharness.agent import gguf_header
-from localharness.agent.gguf_header import (
+from localharness.provider import gguf_header
+from localharness.provider.gguf_header import (
     DISCOVERY_MAX_DEPTH,
     DISCOVERY_MAX_ENTRIES,
     DISCOVERY_MAX_FILES,

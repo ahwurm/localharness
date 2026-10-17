@@ -9,7 +9,7 @@ from tests.unit.test_interview_structural import _ask_names, _is_ask_call
 SRC = Path(__file__).resolve().parents[2] / "src" / "localharness"
 LIBRARY = SRC / "cli" / "library.py"
 MODEL_LIBRARY = SRC / "provider" / "model_library.py"
-GGUF_HEADER = SRC / "agent" / "gguf_header.py"
+GGUF_HEADER = SRC / "provider" / "gguf_header.py"
 PERSON_PARAMS = {"interactive", "person"}
 INTERACTIVE_ARG = {"core_setup": ("interactive", None), "_pick_server": ("interactive", 3),
                    "_existing_config": ("interactive", 2)}
@@ -149,7 +149,7 @@ def _walkers(source: str, name: str = "<source>") -> list[str]:
     tree = ast.parse(source)
     headers = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "localharness.agent.gguf_header":
+        if isinstance(node, ast.ImportFrom) and node.module == "localharness.provider.gguf_header":
             headers |= {a.asname or a.name for a in node.names if a.name in ("discover", "walk_ggufs")}
     found = []
     for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
@@ -170,9 +170,9 @@ def test_only_the_model_library_walks_a_root_or_types_a_header():
 
 
 def test_a_walker_outside_the_model_library_is_named():
-    source = "from localharness.agent.gguf_header import discover, walk_ggufs\n\ndef f(r):\n    walk_ggufs(r)\n    discover(r)\n"
+    source = "from localharness.provider.gguf_header import discover, walk_ggufs\n\ndef f(r):\n    walk_ggufs(r)\n    discover(r)\n"
     assert _walkers(source) == ["<source>:4", "<source>:5"]
-    assert _walkers("from localharness.agent import gguf_header\n\ndef f(r):\n    gguf_header.discover(r)\n") == ["<source>:4"]
+    assert _walkers("from localharness.provider import gguf_header\n\ndef f(r):\n    gguf_header.discover(r)\n") == ["<source>:4"]
 
 
 def test_the_plugins_discover_is_not_a_gguf_walker():

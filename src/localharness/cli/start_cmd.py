@@ -323,7 +323,7 @@ def _record_fit_header(spec: Any) -> Any:
     if not _gguf(getattr(spec, "runtime", None)) or not getattr(spec, "model", None):
         return None
     try:
-        from localharness.agent.gguf_header import read_header
+        from localharness.provider.gguf_header import read_header
         from localharness.provider.autosense import FIT_KEYS, fit_header
         return fit_header(read_header(spec.model, FIT_KEYS))
     except Exception:  # noqa: BLE001 — a header that cannot be read clamps nothing: no clause is said

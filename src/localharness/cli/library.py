@@ -18,7 +18,7 @@ import typer
 from pydantic import SecretStr
 from rich.console import Console
 
-from localharness.agent.gguf_header import (
+from localharness.provider.gguf_header import (
     DISCOVERY_KEYS,
     DiscoveredModel,
     FileKind,

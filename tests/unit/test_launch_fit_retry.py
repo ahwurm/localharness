@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from localharness.agent import context as agent_context
-from localharness.agent import gguf_header
+from localharness.provider import gguf_header
 from localharness.agent.context import WindowProbe
 from localharness.config.models import AutosenseConfig, ManagedServerConfig
 from localharness.provider import autosense, lifecycle, server

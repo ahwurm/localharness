@@ -19,7 +19,7 @@ from rich.markup import escape
 from rich.prompt import Confirm, IntPrompt, Prompt
 
 from localharness.agent.context import response_reserve
-from localharness.agent.gguf_header import preset_name
+from localharness.provider.gguf_header import preset_name
 from localharness.cli import init_import, library, workspace
 from localharness.cli.library import (
     InitRecords,
