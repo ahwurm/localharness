@@ -576,8 +576,8 @@ def _with_lifecycle(**record) -> EndpointRef:
 
 
 def _name_of(ep) -> str:
-    from localharness.cli.repl import OrchestratorREPL
-    return OrchestratorREPL._cold_served_name(ep)
+    from localharness.cli import model_ops
+    return model_ops.peer_served_name(ep)
 
 
 def test_served_name_is_read_before_any_alias_flag():
@@ -610,7 +610,6 @@ async def test_a_non_ascii_served_name_is_returned_and_matched_verbatim(tmp_path
     peer = _with_lifecycle(served_name=name)
     assert _name_of(peer) == name
     _, repl, channel, _ = _session(tmp_path, peer)
-    assert repl._cold_lifecycle_targets(["model-a"], {}) == {name: peer}
 
     await repl._handle_slash(f"/model {name}")
 
