@@ -425,11 +425,11 @@ read and argue with. Each step below says what it does in `auto`.
      `~/.local/share/systemd/user`, `~/.config/environment.d` and `~/.config/autostart`, followed
      to `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME` when those are absolute paths) and
      the Windows credential folders. `~/.localharness` is no longer protected as a whole tree:
-     **one ten-entry list protects each harness config directory a session uses** — `config.yaml`,
+     **one eleven-entry list protects each harness config directory a session uses** — `config.yaml`,
      `overrides.yaml`, `trusted_workspaces.yaml`, `grants.yaml`, `declined_workspace_offers.yaml`,
      `plugins/**`, `project_records.yaml` and its lock file `project_records.yaml.lock`,
      `model-library.json` (the models the library has shown and you declined) and the overlay's lock
-     file `overrides.yaml.lock`, the files that change what the harness does next. Those directories are the
+     file `overrides.yaml.lock`, and `server-floor.json` (the window floor cached for start's first launch; it can only raise the floor), the files that change what the harness does next. Those directories are the
      one the session was started with (`--config-dir`, else `LOCALHARNESS_DIR`, else
      `~/.localharness`), the default `~/.localharness` and any `.localharness/` in the project; a
      config directory the session does not use is not covered. Everything else under one (agents,
@@ -1575,7 +1575,7 @@ sets up every model it found on one Enter with the best first, and says what to 
 that arrives afterwards is found at the next terminal `start`. Two files make that possible:
 `model-library.json` in the config directory, which remembers what the library has shown you and
 what you declined, and the overlay's lock file `overrides.yaml.lock`. Both are protected entries
-(see the ten-entry list above), so a plain delete or move asks like the config files do. The lock covers the
+(see the eleven-entry list above), so a plain delete or move asks like the config files do. The lock covers the
 library file and the peer writes `init`, `start` and `model --setup` make through the validated overlay
 writer; the other `overrides.yaml` writers (`localharness model`'s own persistence, `components`, `plugins`,
 `init --reset` and the import) keep their atomic replace outside it, so two of those racing can lose an

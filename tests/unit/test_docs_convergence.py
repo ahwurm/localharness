@@ -563,10 +563,10 @@ def test_protected_entries_doc():
 
 def test_protected_entries_doc_bites():
     good = _read("SECURITY.md")
-    assert "ten-entry" in good
-    assert check_protected_entries_doc(good.replace("ten-entry", "nine-entry")) == [
-        f"SECURITY.md says nine protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES)}"]
-    assert len(check_protected_entries_doc(good.replace("ten-entry", "eleven-entry"))) == 1
+    assert "eleven-entry" in good
+    assert check_protected_entries_doc(good.replace("eleven-entry", "ten-entry")) == [
+        f"SECURITY.md says ten protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES)}"]
+    assert len(check_protected_entries_doc(good.replace("eleven-entry", "twelve-entry"))) == 1
     assert check_protected_entries_doc(good.replace("`overrides.yaml.lock`", "the overlay lock")) == [
         "protected entry not named in SECURITY.md: overrides.yaml.lock"]
     assert check_protected_entries_doc(good.replace("`model-library.json`", "`grants.yaml` `model-library.json`")) == [
@@ -575,7 +575,7 @@ def test_protected_entries_doc_bites():
         "not a protected entry: grants.yml"]
     assert check_protected_entries_doc("## Nothing\n") == ["the protected config-directory list is not found"]
     assert check_protected_entries_doc(good, [*PROTECTED_CONFIG_DIR_ENTRIES, "new.yaml"]) == [
-        f"SECURITY.md says ten protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES) + 1}",
+        f"SECURITY.md says eleven protected entries, the code has {len(PROTECTED_CONFIG_DIR_ENTRIES) + 1}",
         "protected entry not named in SECURITY.md: new.yaml"]
 
 
