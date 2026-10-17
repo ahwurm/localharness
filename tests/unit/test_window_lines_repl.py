@@ -15,7 +15,9 @@ from localharness.provider.autosense import WindowReport
 from localharness.provider.lifecycle import LiveEndpoint
 from localharness.provider.speed_stats import default_speed_stats_path, last_window_report
 from tests.unit.test_launch_paths_repl import (
+    ON_PEER,
     PEER_URL,
+    PRIMARY_DOWN,
     PRIMARY_URL,
     _launchable_peer,
     _llama_primary,
@@ -41,6 +43,9 @@ class FakeStrategy:
         self.live = live
         self.fail = fail
         self.activations: list[dict] = []
+
+    def launch_identity(self, spec):
+        return None
 
     async def stop(self, spec, config_dir, **kw) -> None:
         return None
@@ -228,7 +233,7 @@ async def test_a_fit_by_server_restart_sends_its_line_and_records_it(tmp_path, f
         base_url=PRIMARY_URL, served_models=[served], handle=1,
         window=_report(served=65536, trained=None, fits=None, free_bytes=None, total_bytes=None,
                        weights_bytes=None, asked=None, mode="fit-by-server"))
-    harness, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=primary)
+    harness, repl, channel, _ = _session(tmp_path, _launchable_peer(), server=primary, live=PRIMARY_DOWN)
 
     await repl._handle_slash(f"/model {served}")
 
@@ -243,15 +248,14 @@ async def test_a_fit_by_server_restart_sends_its_line_and_records_it(tmp_path, f
 
 @pytest.mark.asyncio
 async def test_a_restart_with_no_window_sends_no_line(tmp_path, fake, monkeypatch):
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
-    fake.live = LiveEndpoint(base_url=PRIMARY_URL, served_models=["cached-b"], handle=1)
-    harness, repl, channel, _ = _session(tmp_path, _launchable_peer())
+    fake.live = LiveEndpoint(base_url=PRIMARY_URL, served_models=["model-a"], handle=1)
+    harness, repl, channel, _ = _session(tmp_path, _launchable_peer(), live=PRIMARY_DOWN)
 
-    await repl._handle_slash("/model cached-b")
+    await repl._handle_slash("/model model-a")
 
     assert _window_lines(channel) == []
     # no window was recorded; the landing's own `last_served` entry (persist_landed) may be in the file
-    assert _ledger(tmp_path, harness.provider.provider_type, "cached-b") is None
+    assert _ledger(tmp_path, harness.provider.provider_type, "model-a") is None
 
 
 # --- _restore_incumbent ------------------------------------------------------------------------- #
@@ -277,7 +281,7 @@ async def test_a_swap_back_failure_restores_with_autosense_and_stays_silent_on_t
         tmp_path, fake, monkeypatch):
     primary = _llama_primary()
     peer = _launchable_peer()
-    harness, repl, channel, agent = _session(tmp_path, peer, server=primary)
+    harness, repl, channel, agent = _session(tmp_path, peer, server=primary, live=ON_PEER)
     _on_the_cold_peer(repl, agent, peer)
     calls: list[dict] = []
     ok = _live(_report())

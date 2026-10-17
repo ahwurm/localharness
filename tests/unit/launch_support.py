@@ -118,3 +118,21 @@ def record_opens() -> Iterator[list[str]]:
         yield opened
     finally:
         _ACTIVE = None
+
+
+def offer_primary_as(monkeypatch, name: str) -> None:
+    """The list also offers the primary's record under ``name``: a model the managed restart relaunches it on."""
+    import dataclasses
+
+    from localharness.cli import model_ops
+
+    real = model_ops.plan_entries
+
+    def plan(harness, **kw):
+        entries = real(harness, **kw)
+        record = dataclasses.replace(model_ops.serving_records(harness)[0], name=name, served=name)
+        entry = model_ops.PlanEntry(name, "cold", record.spec.runtime, record=record)
+        group = model_ops.EntryGroup("this box can launch", (entry,), True)
+        return dataclasses.replace(entries, groups=(*entries.groups, group))
+
+    monkeypatch.setattr(model_ops, "plan_entries", plan)

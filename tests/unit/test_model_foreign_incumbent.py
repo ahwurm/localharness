@@ -33,6 +33,7 @@ PEER_URL = "http://127.0.0.1:8090/v1"
 UNIT = "llama-server.service"
 SENTENCE_STOP = ("qwen-27b is served by llama-server.service (pid 1234), not by the harness; "
                  "systemctl --user stop llama-server.service, then /model flash-next")
+LISTED_STOP = SENTENCE_STOP.replace("/model flash-next", "/model flash")
 
 
 def _cgroup(unit: str = UNIT) -> str:
@@ -135,7 +136,7 @@ async def test_a_foreign_unit_on_the_primarys_port_is_one_sentence_and_nothing_i
 
     await repl._handle_slash("/model flash-next")
 
-    assert channel.messages == [SENTENCE_STOP]
+    assert channel.messages == [LISTED_STOP]
     assert spies.hits == []
     assert repl._active_heavy is held
     assert agent._llm.rebinds == []
@@ -153,7 +154,7 @@ async def test_an_enabled_unit_is_disabled_now(tmp_path, fake_proc, fake_systemd
 
     assert channel.messages == [
         "qwen-27b is served by llama-server.service (pid 1234), not by the harness; "
-        "systemctl --user disable --now llama-server.service, then /model flash-next"]
+        "systemctl --user disable --now llama-server.service, then /model flash"]
     assert spies.hits == []
 
 
@@ -184,7 +185,7 @@ async def test_a_holder_in_no_unit_is_named_by_pid_and_command(
 
     assert channel.messages == [
         "qwen-27b is served by pid 1234 (llama-server), not by the harness; "
-        "stop it, then /model flash-next"]
+        "stop it, then /model flash"]
     assert spies.hits == []
 
 
@@ -199,7 +200,7 @@ async def test_a_listener_of_another_uid_is_named_by_uid(
 
     assert channel.messages == [
         "qwen-27b is served by uid 0's process on :8080, not by the harness; "
-        "stop it, then /model flash-next"]
+        "stop it, then /model flash"]
     assert spies.hits == []
 
 
@@ -214,7 +215,7 @@ async def test_with_no_server_record_the_providers_port_is_the_primarys_port(
 
     await repl._handle_slash("/model flash-next")
 
-    assert channel.messages == [SENTENCE_STOP]
+    assert channel.messages == [LISTED_STOP]
     assert spies.hits == []
 
 
@@ -396,7 +397,7 @@ async def test_a_free_port_asks_no_strategy_liveness(tmp_path, fake_proc, monkey
 
 
 @pytest.mark.asyncio
-async def test_a_foreign_listener_asks_the_liveness_exactly_once(
+async def test_a_foreign_listener_is_named_without_asking_the_strategy_liveness(
         tmp_path, fake_proc, fake_systemd, monkeypatch, spies):
     stub_liveness(monkeypatch, False)
     _foreign(fake_proc, cgroup=_cgroup())
@@ -406,7 +407,7 @@ async def test_a_foreign_listener_asks_the_liveness_exactly_once(
 
     await repl._handle_slash("/model flash-next")
 
-    assert asked == ["asked"]
+    assert asked == []
     assert len(channel.messages) == 1 and "served by" in channel.messages[0]
 
 

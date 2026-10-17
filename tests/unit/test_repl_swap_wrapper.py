@@ -23,6 +23,7 @@ from localharness.provider import server as managed_server
 from localharness.provider.speed_stats import default_speed_stats_path, last_served
 from tests.unit.test_launch_paths_repl import (
     PEER_URL,
+    PRIMARY_DOWN,
     PRIMARY_SERVED,
     PRIMARY_URL,
     _launchable_peer,
@@ -100,7 +101,7 @@ def rig(monkeypatch):
     return r
 
 
-def _build(tmp_path, *, provider_key=None, primary=None, **repl_kw):
+def _build(tmp_path, *, provider_key=None, primary=None, live=None, **repl_kw):
     """A REPL on a llama.cpp primary that the harness launched, with the cold peer `flash-next`.
     Persistence is the real one (no stub): the overlay and the ledger land under `tmp_path`."""
     peer = _launchable_peer(name="flash-next", served="flash-next")
@@ -109,7 +110,7 @@ def _build(tmp_path, *, provider_key=None, primary=None, **repl_kw):
     if provider_key is not None:
         harness.provider.api_key = SecretStr(provider_key)
     repl, _, agent, _ = _xrepl(
-        tmp_path, harness, {PRIMARY_URL: ["model-a"], PEER_URL: "unreachable"}, **repl_kw)
+        tmp_path, harness, live or {PRIMARY_URL: ["model-a"], PEER_URL: "unreachable"}, **repl_kw)
     channel = StyledChannel()
     repl._channel = channel
 
@@ -213,7 +214,7 @@ async def test_a_swap_target_the_machine_withholds_is_refused_before_anything_is
     await asyncio.wait_for(repl._handle_slash("/model flash-next"), 5)
 
     assert seen.calls == [] and rig.events == []
-    assert channel.styled[-1] == (trust.line, "system.error")
+    assert channel.messages[-1] == "flash-next cannot run here: its record has changes you have not confirmed"
     assert repl._active_heavy == (primary, PRIMARY_URL)
 
 
@@ -275,12 +276,11 @@ async def test_a_planted_key_in_a_timeout_is_masked_too(tmp_path, rig):
 @pytest.mark.asyncio
 async def test_the_managed_restart_failure_is_redacted_the_same_way(tmp_path, rig, monkeypatch):
     harness, repl, channel, agent, peer, primary = _build(
-        tmp_path, provider_key=PROVIDER_KEY, primary=_heavy_primary())
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+        tmp_path, provider_key=PROVIDER_KEY, primary=_heavy_primary(), live=PRIMARY_DOWN)
     rig.wait_raises[PRIMARY_URL] = RuntimeError(PLANTED_TAIL)
     repl._active_heavy = (primary, PRIMARY_URL)
 
-    await asyncio.wait_for(repl._handle_slash("/model cached-b"), 5)
+    await asyncio.wait_for(repl._handle_slash("/model model-a"), 5)
 
     text, style = channel.styled[-1]
     assert style == "system.error" and text.startswith("Model swap failed:")
@@ -290,12 +290,11 @@ async def test_the_managed_restart_failure_is_redacted_the_same_way(tmp_path, ri
 @pytest.mark.asyncio
 async def test_a_failed_cold_restart_stops_the_launched_model_before_the_record_is_reset(
         tmp_path, rig, monkeypatch, fake_proc):
-    """The REPL's cold `/model <other model>` restart mutates the shared record to the new model, then
-    the launch dies (or times out, the process still alive). The half-started target is stopped as it
-    was launched: the verified stop reads the record's own model, so it runs BEFORE the reset to the old
-    one. The pidfile is gone before any incumbent is restored, and the record ends on its old model."""
-    harness, repl, channel, agent, peer, primary = _build(tmp_path, primary=_heavy_primary())
-    monkeypatch.setattr(managed_server, "list_cached_models", lambda: ["cached-b"])
+    """The REPL's cold `/model <other model>` restart launches the primary's record, then the launch
+    dies (or times out, the process still alive). The half-started target is stopped as it was
+    launched, before any incumbent is restored, and the record ends on its own model."""
+    harness, repl, channel, agent, peer, primary = _build(
+        tmp_path, primary=_heavy_primary(), live=PRIMARY_DOWN)
     pidfile = managed_server.server_dir(repl._server_config_dir) / "server.pid"
     launched: list[str] = []
 
@@ -324,9 +323,9 @@ async def test_a_failed_cold_restart_stops_the_launched_model_before_the_record_
     rig.wait_raises[PRIMARY_URL] = TimeoutError("not ready")
     repl._active_heavy = (primary, PRIMARY_URL)
 
-    await asyncio.wait_for(repl._handle_slash("/model cached-b"), 5)
+    await asyncio.wait_for(repl._handle_slash("/model model-a"), 5)
 
-    assert launched == ["cached-b"]
+    assert launched == ["model-a"]
     # the strategy's own stop before the launch, then the half-started target's after the failure
     assert rig.events[0] == "stop" and rig.events[-1] == "stop" and rig.events.count("stop") == 2
     assert not pidfile.exists() and gone_at_restore == [True]

@@ -1121,6 +1121,8 @@ def plan_entries(
         owner = "autostart" if _unit_serves(config_dir, specs, getattr(unit, "main_pid", None)) else "the harness"
     elif who is not None:
         owner = f"{who} (yours)"
+    held = cur_model if cur_url == _norm_url(provider.base_url) else (
+        primary_served_name(getattr(harness, "server", None), provider) or provider.default_model)
     if memory is _UNSET:
         memory = lifecycle.memory_after_launch(auto, own, stopping=foreign is not None) if auto is not None else None
     medians = _medians(config_dir)
@@ -1193,7 +1195,7 @@ def plan_entries(
         (refused if refusal is not None else cold).append(entry)
     if cold and foreign is not None:
         cold = [replace(e, refusal=workspace.incumbent_sentence(
-            foreign, port=port, form="imperative", served=cur_model, target=e.name)) for e in cold]
+            foreign, port=port, form="imperative", served=held, target=e.name)) for e in cold]
         groups.append(EntryGroup(f"available once {who} is stopped", tuple(cold), False))
     elif cold:
         groups.append(EntryGroup("this box can launch", tuple(cold), True))

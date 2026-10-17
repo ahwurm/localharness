@@ -21,6 +21,7 @@ from localharness.provider import client as provider_client
 from localharness.provider import lifecycle
 from localharness.provider import server as managed_server
 from tests.unit.test_launch_paths_repl import (
+    ON_PEER,
     PEER_URL,
     PRIMARY_SERVED,
     PRIMARY_URL,
@@ -372,7 +373,7 @@ async def test_the_managed_restart_that_is_the_swap_back_takes_the_lock_once(
         tmp_path, boundaries, monkeypatch):
     peer = _launchable_peer()
     primary = _llama_primary()
-    _, repl, channel, agent = _session(tmp_path, peer, server=primary)
+    _, repl, channel, agent = _session(tmp_path, peer, server=primary, live=ON_PEER)
     _on_the_cold_peer(repl, agent, peer)
     watch = LockWatch(monkeypatch, repl)
 
@@ -389,7 +390,7 @@ async def test_a_failed_swap_back_restores_the_peer_inside_the_held_lock(
         tmp_path, boundaries, monkeypatch):
     peer = _launchable_peer()
     primary = _llama_primary()
-    _, repl, channel, agent = _session(tmp_path, peer, server=primary)
+    _, repl, channel, agent = _session(tmp_path, peer, server=primary, live=ON_PEER)
     _on_the_cold_peer(repl, agent, peer)
     _wait_ready_fails_at(monkeypatch, PRIMARY_URL)
     watch = LockWatch(monkeypatch, repl)

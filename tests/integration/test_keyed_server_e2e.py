@@ -28,7 +28,7 @@ from localharness.cli.app import app
 from localharness.config.defaults import CURRENT_DEFAULTS_REVISION, CURRENT_INIT_NULLS_REVISION
 from localharness.config.models import EndpointRef, HarnessConfig, ManagedServerConfig, ProviderConfig
 from localharness.provider import server
-from tests.unit.launch_support import harness_launched, stub_liveness  # noqa: F401
+from tests.unit.launch_support import harness_launched, offer_primary_as, stub_liveness  # noqa: F401
 from tests.unit.test_repl_model_cmd import _heavy_primary, _xrepl
 from tests.unit.test_start_cmd import _capture_start_console, _stub_start_boundaries
 
@@ -301,6 +301,9 @@ def _record_strategies(monkeypatch, *, fail: tuple[str, ...] = ()) -> list[tuple
         async def stop(self, spec, config_dir):
             log.append(("stop", spec.model))
 
+        def launch_identity(self, spec):
+            return None
+
         def liveness(self, spec, config_dir):
             # the harness launched the primary it records (the restored incumbent needs the seed)
             return lifecycle.Liveness(alive=True, detail="pid 4321")
@@ -342,6 +345,7 @@ def _activations(log) -> list[tuple]:
 async def test_the_model_swap_sends_the_providers_key_only_to_a_server_that_requires_it(tmp_path, monkeypatch,
                                                                                          require):
     log = _record_strategies(monkeypatch)
+    offer_primary_as(monkeypatch, "model-b")
     managed = ManagedServerConfig(launch="docker", docker_image="vllm:latest", model="model-a",
                                   require_api_key=require, local_models=[{"name": "model-b", "path": "/x/B"}])
     repl, channel, _agent, _ = _xrepl(tmp_path, _harness(managed), {PRIMARY: ["model-a"]})

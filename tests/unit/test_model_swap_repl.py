@@ -13,7 +13,8 @@ from types import SimpleNamespace as NS
 import pytest
 
 from localharness.cli.repl import OrchestratorREPL
-from localharness.config.models import ManagedServerConfig
+from localharness.config.models import HarnessConfig, ManagedServerConfig, OrgConfig, ProviderConfig
+from tests.unit.launch_support import offer_primary_as, stub_liveness
 
 
 class _Chan:
@@ -46,7 +47,12 @@ def _managed() -> ManagedServerConfig:
     )
 
 
-def _mk(tmp_path, managed):
+def _mk(tmp_path, managed, monkeypatch):
+    stub_liveness(monkeypatch, False)
+    harness = HarnessConfig(
+        provider=ProviderConfig(provider_type="vllm", base_url="http://x/v1",
+                                default_model="qwen3.6-35b-a3b", available_models=["qwen3.6-35b-a3b"]),
+        org=OrgConfig(default_model="qwen3.6-35b-a3b"), server=managed)
     llm = NS(config=NS(base_url="http://x/v1", model="qwen3.6-35b-a3b"))
 
     async def caps():
@@ -56,7 +62,7 @@ def _mk(tmp_path, managed):
     chan = _Chan()
     r = OrchestratorREPL(
         orchestrator=None, agent_loop=NS(_llm=llm), channel=chan, bus=None,
-        config_dir=tmp_path, harness_config=NS(server=managed),
+        config_dir=tmp_path, harness_config=harness,
     )
 
     async def fake_live(base_url):
@@ -77,34 +83,20 @@ def _mk(tmp_path, managed):
     return r, chan, llm, persisted
 
 
-async def test_listing_names_registry_models_and_feeds_picker_cache(tmp_path, monkeypatch):
-    from localharness.provider import server as ms
-
-    monkeypatch.setattr(ms, "list_cached_models", lambda: [])  # isolate from the host HF cache
-    r, chan, _llm, _p = _mk(tmp_path, _managed())
+async def test_listing_names_the_serving_model_and_opens_the_picker(tmp_path, monkeypatch):
+    r, chan, _llm, _p = _mk(tmp_path, _managed(), monkeypatch)
     await r._handle_model_cmd("")
     out = "\n".join(chan.msgs)
-    assert "qwen3.6-27b" in out
-    assert "restarts the managed server" in out
-    assert "nvfp4 (compressed-tensors)" in out         # per-model info in the listing
-    assert "~9.5 t/s" in out                           # measured throughput shown
-    # picker menu = live + registry ONLY (HF-cache noise stays out of the scroll path),
-    # each with its info meta; the t/s segment is formatted text carrying its color band
-    # (30 is yellow — the owner spec colors >30 green, 20–30 yellow; 9.5 is red).
-    assert r._model_cache == [
-        ("qwen3.6-35b-a3b", [("", "serving now · nvfp4 (modelopt) · "),
-                             ("class:tps-yellow", "~30 t/s")]),
-        ("qwen3.6-27b", [("", "nvfp4 (compressed-tensors) · "),
-                         ("class:tps-red", "~9.5 t/s"),
-                         ("", " · swap")]),
-    ]
+    assert "1. qwen3.6-35b-a3b  (serving)  ● [active]" in out
+    assert "downloaded" not in out and "restarts the managed server" not in out
     assert chan.menu_opened == 1                       # bare /model auto-opens the picker menu
 
 
 async def test_swap_to_registry_model_full_choreography(tmp_path, monkeypatch):
     from localharness.provider import server as ms
 
-    r, chan, llm, persisted = _mk(tmp_path, _managed())
+    r, chan, llm, persisted = _mk(tmp_path, _managed(), monkeypatch)
+    offer_primary_as(monkeypatch, "qwen3.6-27b")
     calls: dict = {}
 
     def fake_stop(cfg, launch="binary", **kw):
@@ -142,7 +134,8 @@ async def test_swap_to_registry_model_full_choreography(tmp_path, monkeypatch):
 async def test_swap_failure_reports_and_keeps_current_model(tmp_path, monkeypatch):
     from localharness.provider import server as ms
 
-    r, chan, llm, persisted = _mk(tmp_path, _managed())
+    r, chan, llm, persisted = _mk(tmp_path, _managed(), monkeypatch)
+    offer_primary_as(monkeypatch, "qwen3.6-27b")
 
     monkeypatch.setattr(ms, "stop_server", lambda cfg, launch="binary", **kw: None)
     monkeypatch.setattr(ms, "start_server", lambda cfg, cmd, **kw: 1)

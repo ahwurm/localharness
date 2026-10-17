@@ -1853,24 +1853,35 @@ class OrchestratorREPL:
         except Exception:  # noqa: BLE001 — what cannot be read claims nothing new
             return True
 
-    async def _primary_serves(self, llm: Any, name: str) -> bool:
-        """True when the session is on another endpoint and the primary's own endpoint answers with
-        ``name`` right now: the name is then a plain rebind, never a restart (WR-51). A primary that is
-        the current endpoint, unreachable, or answers anything unusable reads as not serving."""
+    async def _plan_model_entries(self, llm: Any) -> tuple[Any, dict, set]:
+        """`(entries, live, malformed)`: every distinct endpoint probed at once, then the list built off the loop."""
+        from localharness.cli import model_ops
+
         provider = getattr(self._harness, "provider", None)
-        base_url = getattr(provider, "base_url", None)
-        if not base_url or str(llm.config.base_url).rstrip("/") == str(base_url).rstrip("/"):
-            return False
-        try:
-            primary_live, reachable = await self._live_models(base_url)
-        except Exception:  # noqa: BLE001 — a primary that cannot be asked is down for this purpose
-            return False
-        return bool(reachable) and name in primary_live
+        peers = getattr(self._harness, "extra_endpoints", None) or []
+        urls = {model_ops._norm_url(u): u for u in
+                (llm.config.base_url, getattr(provider, "base_url", None), *(ep.base_url for ep in peers)) if u}
+        malformed: set[str] = set()
+
+        async def probe(key: str, url: str) -> "tuple[str, ...] | None":
+            try:
+                ids, reachable = await self._live_models(url)
+            except model_ops.MalformedModelListError:
+                malformed.add(key)
+                return ()
+            except Exception:  # noqa: BLE001 — a probe that fails answers nothing, never raises into /model
+                return None
+            return tuple(ids) if reachable else None
+
+        live = dict(zip(urls, await asyncio.gather(*(probe(k, u) for k, u in urls.items()))))
+        entries = await asyncio.to_thread(model_ops.plan_entries, self._harness, live=live,
+                                          config_dir=self._server_config_dir, trust=self._machine_trust,
+                                          floor=self._live_floor(), unit=self._unit_state,
+                                          current=(llm.config.base_url, llm.config.model))
+        return entries, live, malformed
 
     async def _handle_model_cmd(self, arg: str) -> None:
-        """List models or switch. A model already served by the endpoint hot-swaps
-        (Ollama serves many); a different downloaded model on a harness-managed
-        vLLM triggers a server restart (vLLM serves one at a time)."""
+        """List the models `model_ops.plan_entries` offers, or switch to one by number or name."""
         if arg.strip().lower() == "list":
             # /help says "/model — List available models"; typing "/model list" is the natural
             # reading and must list, not error with "Unknown model 'list'" (new-user papercut).
@@ -1882,133 +1893,30 @@ class OrchestratorREPL:
 
         current = llm.config.model
         from localharness.cli import model_ops
-        try:
-            live, reachable = await self._live_models(llm.config.base_url)
-        except model_ops.MalformedModelListError:
-            # #38: reached but the reply isn't a model list — its OWN message, not "no models".
+        entries, live, malformed = await self._plan_model_entries(llm)
+        cur_key = model_ops._norm_url(llm.config.base_url)
+        if cur_key in malformed:
             await self._send_info(
                 f"The server at {llm.config.base_url} responded, but the response wasn't "
                 "understood — is base_url pointing at an OpenAI-compatible API?"
             )
             return
         managed = self._harness.server
-        # Verified speed context for every surface below (listing, picker, swap notes):
-        # ledger medians keyed provider_type:model, plus the ptypes that key each row group.
+        provider = getattr(self._harness, "provider", None)
         medians = self._measured_medians()
         cur_ptype = self._provider_type_for_base_url(llm.config.base_url)
-        prim_ptype = getattr(getattr(self._harness, "provider", None), "provider_type", None)
-        downloaded: list[str] = []
-        if managed is not None:
-            from localharness.provider import server as managed_server
-            registry = [e.name for e in managed.local_models if e.name not in live]
-            hf_cached = [m for m in managed_server.list_cached_models()
-                         if m not in live and m not in registry]
-            downloaded = registry + hf_cached
-        # The primary's own served name is the managed-restart target whenever the current endpoint
-        # does not serve it live (swapping back to it after a cold peer stopped it, D-34). It is
-        # matched against the list below; it is never free text written into `model`.
-        prim_served = (
-            model_ops.primary_served_name(managed, getattr(self._harness, "provider", None))
-            if managed is not None else None
-        )
-        # ... but only while the primary is not up. A session on a peer whose primary is still serving
-        # its name rebinds to it through the peer tree like any other served model; relaunching a
-        # healthy, loaded server would cost minutes and its KV cache (WR-51).
-        swap_back = bool(
-            prim_served and prim_served not in live and prim_served not in downloaded
-            and not await self._primary_serves(llm, prim_served))
-        if swap_back:
-            downloaded.insert(0, prim_served)
-        # Cross-endpoint discovery (0.10.0 model tree): probe the primary + each configured peer
-        # endpoint, so a target NAME can resolve to a model served on a DIFFERENT server. Backward
-        # compatible — with no `extra_endpoints`, peer_target is empty and every path below behaves
-        # exactly as before (single-endpoint users see zero change).
-        # #5: only probe peers when NEEDED — a bare listing, or an arg that does NOT already resolve
-        # on the current endpoint / managed cache. A routine `/model <local-name|local-number>` pays
-        # zero peer-probe latency.
-        local_choices = live + downloaded
-        need_peers = (not arg) or not (
-            (arg.isdigit() and 1 <= int(arg) <= len(local_choices)) or arg in local_choices
-        )
-        if need_peers:
-            peer_target, disc_notes = await self._discover_peer_models(
-                llm.config.base_url, live, downloaded
-            )
-            # Phase C2: cold peers the harness can LAUNCH itself (lifecycle block, not yet serving).
-            # Config-only (no probe), so they surface even while down — the heavy-swap targets. Pass
-            # local_choices (live + downloaded) so a cold alias never shadows a local checkpoint name.
-            cold_target = self._cold_lifecycle_targets(local_choices, peer_target)
-        else:
-            peer_target, disc_notes, cold_target = {}, [], {}
-        choices = local_choices + list(peer_target) + list(cold_target)
-        if reachable:
-            # picker menu = live + registry + peer-endpoint models (each tagged with its
-            # framework · host so a vLLM model reads apart from an Ollama one); HF-cache noise
-            # stays out of the menu. Peers only join when they were probed (a routine local arg
-            # doesn't probe → peer_target is {} → menu is live+registry, unchanged).
-            self._model_cache[:] = self._compose_model_menu(
-                live, managed, current, peer_target,
-                medians=medians, live_ptype=cur_ptype, registry_ptype=prim_ptype,
-            )
-            # The down primary's served name is pickable too: the swap-back target (D-34).
-            if swap_back and not any(
-                (e[0] if isinstance(e, tuple) else e) == prim_served for e in self._model_cache
-            ):
-                self._model_cache.append((prim_served, "swap"))
-            # Phase C2: cold launchable peers are pickable too (the menu never fetches; these are
-            # config-derived served-names).
-            self._model_cache.extend(n for n in cold_target if n not in self._model_cache)
+        prim_ptype = getattr(provider, "provider_type", None)
+        prim_served = model_ops.primary_served_name(managed, provider) if managed is not None else None
+        self._model_cache[:] = self._menu_items(entries)
 
         if not arg:
-            if not choices:
-                # #38: distinguish an unreachable runtime from a reached-but-empty one.
-                if not reachable:
-                    await self._send_info(
-                        f"Could not reach the model server at {llm.config.base_url}. Is it running?"
-                    )
-                else:
-                    await self._send_info(
-                        "No models visible at the endpoint or in the local download cache."
-                    )
+            lines = model_ops.entry_lines(entries)
+            if lines == ["Models:"]:
+                await self._send_info(
+                    f"Could not reach the model server at {llm.config.base_url}. Is it running?"
+                    if live.get(cur_key) is None else "No models visible at the endpoint."
+                )
                 return
-            def _info_suffix(name: str) -> str:
-                entry = managed.entry_for(name) if managed is not None else None
-                rate = self._measured_note(
-                    medians, cur_ptype if name in live else prim_ptype, name, entry
-                )
-                quant = entry.quant if entry is not None and entry.quant else None
-                parts = [p for p in (quant, rate) if p]
-                return f"  [{' · '.join(parts)}]" if parts else ""
-
-            # 0.10.0 model tree: with peer endpoints configured, render a grouped-by-endpoint tree
-            # (primary provider first, then each reachable peer, its models indented under a
-            # `▸ <framework> · <host:port>` header). Numbering stays CONTINUOUS across groups and
-            # matches `choices`, so /model <number> resolves the model shown. With no peers the
-            # flat single-endpoint listing is byte-unchanged (backward compat).
-            if getattr(self._harness, "extra_endpoints", None):
-                lines = self._grouped_model_lines(
-                    live, downloaded, peer_target, disc_notes, current, _info_suffix
-                )
-            else:
-                lines = ["Models:"]
-                for i, m in enumerate(live, start=1):
-                    mark = "  [active]" if m == current else ""
-                    lines.append(f"  {i}. {m}  (serving){mark}{_info_suffix(m)}")
-                for i, m in enumerate(downloaded, start=len(live) + 1):
-                    lines.append(
-                        f"  {i}. {m}  (downloaded — switching restarts the managed server)"
-                        f"{_info_suffix(m)}"
-                    )
-                for n in disc_notes:
-                    lines.append(f"  · {n}")
-            # Phase C2: cold launchable peers, numbered continuously after live+downloaded+peers.
-            for i, name in enumerate(cold_target, start=len(local_choices) + len(peer_target) + 1):
-                cep = cold_target[name]
-                rate = self._measured_note(medians, cep.provider_type, name)
-                lines.append(
-                    f"  {i}. {name}  (cold on {cep.name} — /model launches it on the GPU)"
-                    + (f"  [{rate}]" if rate else "")
-                )
             lines.append("Switch with /model <name|number>, or scroll the menu and press Enter.")
             await self._send_info("\n".join(lines), colorize=True)
             open_menu = getattr(self._channel, "box_open_model_menu", None)
@@ -2016,43 +1924,55 @@ class OrchestratorREPL:
                 open_menu()  # one-Enter picker: menu pops with the first model highlighted
             return
 
-        # Resolve target: number, exact name, or (managed only) a local checkpoint path.
-        if arg.isdigit() and 1 <= int(arg) <= len(choices):
-            target = choices[int(arg) - 1]
-        elif arg in choices:
+        entry = entries.pick(arg)
+        if isinstance(entry, str):
+            await self._send_info(entry)
+            return
+        if entry is None:
+            typed = Path(arg).expanduser()
+            if managed is None or not typed.exists():
+                await self._send_info(f"Unknown model '{arg}'. /model lists what's available.")
+                return
+            if not (RUNTIMES[managed.runtime].gguf and typed.is_file() and arg.lower().endswith(".gguf")):
+                await self._send_info(NOT_A_GGUF_LINE.format(target=arg))
+                return
             target = arg
-        elif managed is not None and Path(arg).expanduser().exists():
-            target = arg
+        elif entry.active:
+            await self._send_info(f"{entry.name} is already active.")
+            return
+        elif entry.kind not in ("live", "cold"):
+            from localharness.cli.workspace import visible_text
+            await self._send_info(next(
+                (line for line in model_ops.entry_lines(entries) if visible_text(entry.name) in line),
+                entry.name))
+            return
         else:
-            await self._send_info(
-                f"Unknown model '{arg}'. /model lists what's available."
-            )
-            return
+            target = entry.name if entry.kind == "live" else entry.record.served
 
-        if target == current:
-            await self._send_info(f"{target} is already active.")
-            return
-
-        if target in live:
-            # Same (current) endpoint → hot-swap, mechanics unchanged.
-            llm.config.model = target
-            cap = await llm.detect_capabilities()
-            note = await self._refresh_token_counter(target)
-            saved = await self._persist_landed(llm.config.base_url, target)
-            rate = self._measured_note(medians, cur_ptype, target)
-            await self._send_info(
-                f"Switched to {target} (tool calling: {cap.tool_call_mode}).{note}"
-                + (f" {rate}." if rate else "")
-                + (SAVED_DEFAULT_NOTE if saved else ""), colorize=True,
-            )
-            return
-
-        if target in peer_target:
+        if entry is not None and entry.kind == "live":
+            ep = entry.endpoint
+            if model_ops._norm_url(ep.base_url if ep is not None else provider.base_url) == cur_key:
+                # Same (current) endpoint → hot-swap, mechanics unchanged.
+                llm.config.model = target
+                cap = await llm.detect_capabilities()
+                note = await self._refresh_token_counter(target)
+                saved = await self._persist_landed(llm.config.base_url, target)
+                rate = self._measured_note(medians, cur_ptype, target)
+                await self._send_info(
+                    f"Switched to {target} (tool calling: {cap.tool_call_mode}).{note}"
+                    + (f" {rate}." if rate else "")
+                    + (SAVED_DEFAULT_NOTE if saved else ""), colorize=True,
+                )
+                return
+            if ep is None:
+                from localharness.config.models import EndpointRef
+                ep = EndpointRef(
+                    name="primary", base_url=provider.base_url, provider_type=provider.provider_type,
+                    api_key=provider.api_key)
             # Cross-endpoint → re-point the client at the peer, then reuse the SAME re-probe /
             # refit / counter-rebind machinery as a hot-swap. The token counter is rebound with the
             # PEER's provider_type, so an Ollama target is labeled approximate, not the old vLLM's
             # exact /tokenize contract.
-            ep = peer_target[target]
             # #3: pass ep.extra_headers directly — NOT `ep.extra_headers or None`. `None` means
             # "leave unchanged" in rebind_endpoint, so an endpoint with the default {} headers would
             # otherwise silently INHERIT the previous endpoint's headers. An endpoint's identity is
@@ -2076,7 +1996,7 @@ class OrchestratorREPL:
             )
             return
 
-        if target in cold_target:
+        if entry is not None and entry.kind == "cold" and entry.record.peer is not None:
             # A process the harness did not launch holds the primary's port: say so in one sentence
             # and touch nothing — before any key read, launch decision, stop or announcement (D-33).
             # Off the loop: it reads /proc and may ask systemd or an LM Studio endpoint.
@@ -2097,7 +2017,7 @@ class OrchestratorREPL:
                 launch_decision,
                 required_key_kwargs,
             )
-            ep = cold_target[target]
+            ep = entry.record.peer
             # The peer's key file is read here, at its cold launch and from a lifecycle the loader
             # kept (D-23). On success the key is held in memory on the endpoint, so the launch, the
             # rebind and every later probe of this peer carry it; a refused file leaves the peer as
@@ -2180,15 +2100,8 @@ class OrchestratorREPL:
             )
             return
 
-        # A llama.cpp primary restarts on a weights FILE: its own record (its served name), or a
-        # regular .gguf the person typed. Anything else (a local_models name, an HF-cache repo id) is
-        # answered in one line as the first statement of the fallthrough (D-58) — before the launch
-        # decision, the rebind-back or any stop — so nothing is launched, stopped or rebound.
         gguf = RUNTIMES[managed.runtime].gguf
         typed_gguf = Path(target).expanduser().is_file() and target.lower().endswith(".gguf")
-        if gguf and target != prim_served and not typed_gguf:
-            await self._send_info(NOT_A_GGUF_LINE.format(target=target))
-            return
         # A process the harness did not launch holding the primary's port ends the restart in the same
         # one sentence, before anything is launched or stopped: a launch beside it would be answered by
         # the foreign server and reported as ready (WR-52). Off the loop, like the cold-peer guard.
@@ -3075,6 +2988,25 @@ class OrchestratorREPL:
         for m, ep in (peer_target or {}).items():
             head = [f"{_framework_label(ep.provider_type)} · {_endpoint_host(ep.base_url)}"]
             out.append((m, meta(head, rate_for(m, ep.provider_type, None))))
+        return out
+
+    @staticmethod
+    def _menu_items(entries: Any) -> list:
+        """`(name, meta)` for every numbered entry in listing order; a measured rate is a color-banded fragment."""
+        from localharness.provider.speed_stats import tps_band
+
+        out = []
+        for e in entries.numbered():
+            if e.kind == "live":
+                head = "serving now" if e.active else "serving"
+            else:
+                head = _framework_label(e.runtime) + (" · experts in RAM" if e.where == "experts in RAM" else "")
+                head += f" · {e.window:,}" if e.window is not None else ""
+            if e.rate is None:
+                out.append((e.name, head))
+            else:
+                band = tps_band(float(e.rate.split()[0]))
+                out.append((e.name, [("", head + " · "), (f"class:tps-{band}", e.rate.removesuffix(" measured"))]))
         return out
 
     def _measured_medians(self) -> dict[str, float]:
