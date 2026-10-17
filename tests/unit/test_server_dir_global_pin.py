@@ -147,8 +147,9 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     # + 1 from the managed restart's swap_refusal, which plans the target against the memory the restart will have,
     # + 1 from `_plan_model_entries`, which prices the /model list against the global dir (read-only).
     # + 1 from `_set_up_and_switch`, which writes and adopts one peer in the global dir after a person's yes.
+    # + 1 from `_first_build_note`, which reads the speed ledger under the global dir for the launch line (read-only).
     # None of them starts or stops a server.
-    assert text.count("self._server_config_dir") == 16, _where(text, "self._server_config_dir")
+    assert text.count("self._server_config_dir") == 17, _where(text, "self._server_config_dir")
     # assignment + the property's own two reads on one line + 6 deliberately-untouched uses,
     # + 1 from phase 41's `_audit_base_dir` property, which reads `self._config_dir` as its
     # FALLBACK when the session has no workspace layer, + 1 from Phase 2's `_announce_window`,

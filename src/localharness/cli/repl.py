@@ -2082,7 +2082,8 @@ class OrchestratorREPL:
                 launch_head=(f"Launching {ep.name}{f' ({posture})' if posture else ''} — "
                              "the swap can take several minutes..."
                              + (f" {_lifecycle.RUNS_OUTSIDE_AUTOSTART}"
-                                if _lifecycle.outside_autostart(ep.lifecycle, self._unit_state) else "")),
+                                if _lifecycle.outside_autostart(ep.lifecycle, self._unit_state) else "")
+                             + await self._first_build_note(ep.lifecycle)),
                 tradeoff=tradeoff, note=decision.note, redact=redact)
             async with self._launch_lock():
                 try:
@@ -2210,7 +2211,8 @@ class OrchestratorREPL:
         await self._flush_launch_lines()
         await self._send_info(
             f"Restarting managed {label} with {target}{f' ({posture})' if posture else ''}"
-            f" — model load can take several minutes...{tradeoff}", colorize=True,
+            f" — model load can take several minutes...{await self._first_build_note(planned)}{tradeoff}",
+            colorize=True,
         )
         if decision.note:
             await self._send_info(decision.note)
@@ -2469,6 +2471,13 @@ class OrchestratorREPL:
         from localharness.provider.lifecycle import launch_lock, launch_lock_wait_line
         # the line is chosen when it is said: a holder in this very process is not "another LocalHarness"
         return launch_lock(cfg, on_wait=lambda: self._send_info(launch_lock_wait_line(cfg)))
+
+    async def _first_build_note(self, spec: Any) -> str:
+        from localharness.cli.start_serving import FIRST_BUILD_CLAUSE
+        from localharness.provider import lifecycle as _lifecycle
+
+        building = await asyncio.to_thread(_lifecycle.first_build, spec, self._server_config_dir)
+        return f" ({FIRST_BUILD_CLAUSE})" if building else ""
 
     def _live_floor(self) -> int | None:
         floor = getattr(self._agent, "floor", None)
