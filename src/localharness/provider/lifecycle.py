@@ -170,10 +170,6 @@ class LifecycleStrategy(Protocol):
         ...
 
 
-def _offline(plan: "LaunchPlan | None") -> bool:
-    return plan is not None and plan.serve_kwargs.get("snapshot") is not None
-
-
 class ManagedVllmStrategy:
     """Lifecycle for the harness-managed vLLM server (init guided setup / reboot autostart /
     REPL `/model` swap). A thin, ZERO-BEHAVIOR-CHANGE wrapper over `provider/server.py`, which
@@ -229,11 +225,13 @@ class ManagedVllmStrategy:
                 context=None, cache_ram=None)
         _say_plan(on_plan, plan)
 
+        offline = {"hf_offline": True} if plan is not None and plan.offline else {}
+
         def launch(argv: list[str]) -> tuple[int, list[str]]:
             names: list[str] = []
             started = server.start_server(
                 config_dir, argv, runtime=spec.runtime, record_env=getattr(spec, "env", None),
-                dropped_out=names, port=spec.port, hf_offline=_offline(plan), **server.key_kwargs(api_key))
+                dropped_out=names, port=spec.port, **offline, **server.key_kwargs(api_key))
             return started, names
 
         async def ready() -> list[str]:
@@ -545,6 +543,10 @@ class LaunchPlan:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "serve_kwargs", MappingProxyType(dict(self.serve_kwargs)))
+
+    @property
+    def offline(self) -> bool:
+        return self.serve_kwargs.get("snapshot") is not None
 
     def boot_retry(self) -> "LaunchPlan | None":
         """The retry shape of a boot that died (spec 20 §9.3, D-17): the derived spec type dropped and the

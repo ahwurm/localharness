@@ -123,7 +123,7 @@ async def test_activate_of_an_uncached_repo_is_not_offline(cache, tmp_path, monk
     monkeypatch.setattr(server, "wait_ready", wait_ready)
     monkeypatch.setattr(server, "start_server", lambda cfg, cmd, **kw: started.append((cmd, kw)) or 4321)
     await lifecycle.ManagedVllmStrategy().activate(_spec(), tmp_path, BASE, autosense=AUTO)
-    assert started[0][1]["hf_offline"] is False
+    assert not started[0][1].get("hf_offline")
 
 
 def _plant_link(snapshot):
