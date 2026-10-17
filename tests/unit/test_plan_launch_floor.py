@@ -113,6 +113,19 @@ def test_a_record_context_below_the_floor_is_the_record_context_sentence(tmp_pat
     assert _pair(list(_plan(_flash(tmp_path, context=4096), tmp_path).argv), "-c") == "4096"
 
 
+@pytest.mark.parametrize("extra", [["-c", "4096"], ["--ctx-size=4096"]])
+def test_a_context_in_extra_args_below_the_floor_is_refused_like_the_record_field(tmp_path, monkeypatch, extra):
+    _world(monkeypatch)
+    with pytest.raises(server.LaunchRefused, match=r"is set to a 4,096-token window \(-c in extra_args\)"):
+        _plan(_flash(tmp_path, extra_args=extra), tmp_path, FLOOR)
+
+
+@pytest.mark.parametrize("extra", [["-c", "0"], ["-c", "20000"]])
+def test_a_context_in_extra_args_at_or_above_the_floor_or_zero_is_left_alone(tmp_path, monkeypatch, extra):
+    _world(monkeypatch)
+    assert _plan(_flash(tmp_path, extra_args=extra), tmp_path, FLOOR).report.mode == "extra_args"
+
+
 def test_a_name_with_a_control_character_reaches_a_sentence_without_it(tmp_path, monkeypatch):
     _world(monkeypatch)
     with pytest.raises(server.LaunchRefused) as refused:
