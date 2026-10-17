@@ -721,6 +721,8 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
   in either lists the snapshot as `not offered: needs trust_remote_code`, and the harness never passes
   `--trust-remote-code`. A vLLM launch passes the verified snapshot directory, not the repo id, and carries
   `HF_HUB_OFFLINE=1`, so a cache entry never reaches the network.
+  A repo id the cache does not hold launches by its id, as before; a cache that cannot be listed, or a cached repo
+  that is no loadable checkpoint, is a refusal, never an unverified launch by repo id.
 - **Nothing unrecorded is launched.** An entry that is not a record is set up through spec 20 §11's shown record and
   its adoption, for a person only; the plan of a shown entry is recomputed from a fresh read at launch.
 - **vLLM arguments come from the table.** `model_type` selects a `facts` row or nothing; no snapshot value reaches

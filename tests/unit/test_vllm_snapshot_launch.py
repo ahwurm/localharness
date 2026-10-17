@@ -139,6 +139,25 @@ def test_a_link_planted_after_the_listing_refuses_the_launch(cache, tmp_path):
         f"Qwen3.8-27B-NVFP4 cannot run here: its snapshot holds an entry the harness does not load {REFUSAL_TAIL}")
 
 
+def test_a_cache_that_cannot_be_listed_refuses_the_launch(cache, tmp_path, monkeypatch):
+    def unreadable():
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(model_library, "_cache_repos", unreadable)
+    with pytest.raises(server.LaunchRefused) as refused:
+        _plan(_spec(), tmp_path)
+    assert str(refused.value) == f"Qwen3.8-27B-NVFP4 cannot run here: its Hugging Face cache cannot be read {REFUSAL_TAIL}"
+
+
+def test_a_cached_repo_with_no_safetensors_refuses_the_launch(cache, tmp_path):
+    (cache.add(REPO) / "model.safetensors").unlink()
+    with pytest.raises(server.LaunchRefused) as refused:
+        _plan(_spec(), tmp_path)
+    assert str(refused.value) == (
+        "Qwen3.8-27B-NVFP4 cannot run here: its snapshot holds no safetensors weights of a text-generation model "
+        + REFUSAL_TAIL)
+
+
 def test_an_auto_map_written_after_the_listing_refuses_the_launch(cache, tmp_path):
     snapshot = cache.add(REPO)
     assert [c.repo_id for c in model_library.snapshots()] == [REPO]

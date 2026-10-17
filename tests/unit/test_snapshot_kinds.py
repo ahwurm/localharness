@@ -169,3 +169,19 @@ def test_snapshot_of_refuses_a_cached_repo_whose_walk_fails_and_knows_no_uncache
 
     assert model_library.snapshot_of("org/Planted").refusal == UNLOADED
     assert model_library.snapshot_of("org/Nowhere") is None
+
+
+def test_a_machine_with_no_hf_cache_directory_holds_no_repo(tmp_path, monkeypatch):
+    import importlib.util
+    import sys
+
+    import huggingface_hub
+
+    spec = importlib.util.spec_from_file_location("fresh_model_library", model_library.__file__)
+    fresh = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, fresh)
+    spec.loader.exec_module(fresh)
+    real = huggingface_hub.scan_cache_dir
+    monkeypatch.setattr(huggingface_hub, "scan_cache_dir", lambda: real(tmp_path / "absent"))
+
+    assert fresh._cache_repos() == () and fresh.snapshot_of("org/Nowhere") is None
