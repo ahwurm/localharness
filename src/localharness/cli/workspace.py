@@ -714,6 +714,17 @@ def foreign_unit_sentence(holder: Holder, *, served: str, port: int) -> str:
             "the harness (localharness model --autostart on brings your choice up at login).")
 
 
+def imported_unit_sentence(holder: Holder, *, served: str) -> str:
+    """What `init` did with a stopped unit of the person's: imported as the server record, the unit left alone."""
+    unit = visible_text(holder.unit)
+    keep = ""
+    if getattr(holder.state, "unit_file_state", None) == "enabled":
+        keep = (f" — systemctl --user disable {shlex.quote(unit)} keeps it from starting at login "
+                "beside the harness")
+    return (f"{unit} is yours and was imported as the server: record; from now on the harness launches "
+            f"{visible_text(served)} itself and never touches the unit{keep}.")
+
+
 def uncovered(old: list[dict], new: list[dict]) -> list[dict]:
     """The entries of `new` not covered by `old`, counted as a multiset of whole entries: a second
     verbatim copy of an entry is uncovered too."""
