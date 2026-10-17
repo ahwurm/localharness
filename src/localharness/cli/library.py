@@ -567,6 +567,30 @@ def _label(s: model_library.Shown) -> str:
     return s.model.name if s.model else preset_name(s.checkpoint.repo_id.rsplit("/", 1)[-1])
 
 
+@dataclass(frozen=True)
+class Listing:
+    """What the box holds that no record names: the files and snapshots to show, the snapshots refused, the vLLM binary."""
+    shown: tuple[model_library.Shown, ...]
+    refused: tuple[model_library.Checkpoint, ...]
+    vllm: tuple[str, str] | None
+
+
+def listing(config_path: Path) -> Listing:
+    """Read only: the library file is neither saved nor merged."""
+    global_dir = global_config_dir(config_path)
+    auto, recorded = _machine_autosense(config_path), recorded_paths(global_dir)
+    snaps = model_library.snapshots()
+    found = model_library.scan(
+        auto.model_roots, recorded, model_library.library_path(global_dir), scope="all", rank=list,
+        checkpoints=tuple(c for c in snaps if c.kind == "vllm" and c.refusal is None),
+        extra=tuple(p for c in snaps if c.kind == "gguf" for p in c.ggufs))
+    return Listing(
+        tuple(_listable((*found.new, *found.seen, *found.declined))),
+        tuple(c for c in snaps if c.kind == "vllm" and c.refusal is not None
+              and c.real not in recorded and c.repo_id not in recorded),
+        managed_server.vllm_binary(global_dir))
+
+
 def _origin(s: model_library.Shown) -> str:
     return visible_text(s.checkpoint.repo_id) if s.checkpoint else shown_path(s.path)
 
