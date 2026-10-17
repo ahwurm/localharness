@@ -702,9 +702,10 @@ def foreign_unit_sentence(holder: Holder, *, served: str, port: int) -> str:
         return (f"{incumbent_subject(holder, port=port)} serves {shown} and is yours, so the harness lists "
                 "models but never stops it; stopping it hands the GPU to the harness.")
     verb = "disable --now" if getattr(holder.state, "unit_file_state", None) == "enabled" else "stop"
+    command = f"systemctl --user {verb} {shlex.quote(visible_text(holder.unit))}"
     return (f"{visible_text(holder.unit)} serves {shown} and is yours, so the harness lists models but never "
-            f"stops it; systemctl --user {verb} {shlex.quote(visible_text(holder.unit))} hands the GPU to "
-            "the harness (localharness model --autostart on brings your choice up at login).")
+            f"stops it; {command} "
+            "hands the GPU to the harness (localharness model --autostart on brings your choice up at login).")
 
 
 def imported_unit_sentence(holder: Holder, *, served: str) -> str:
@@ -712,8 +713,7 @@ def imported_unit_sentence(holder: Holder, *, served: str) -> str:
     unit = visible_text(holder.unit)
     keep = ""
     if getattr(holder.state, "unit_file_state", None) == "enabled":
-        keep = (f" — systemctl --user disable {shlex.quote(unit)} keeps it from starting at login "
-                "beside the harness")
+        keep = f" — systemctl --user disable {shlex.quote(unit)} keeps it from starting at login beside the harness"
     return (f"{unit} is yours and was imported as the server: record; from now on the harness launches "
             f"{visible_text(served)} itself and never touches the unit{keep}.")
 
