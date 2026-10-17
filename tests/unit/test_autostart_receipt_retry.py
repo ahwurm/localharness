@@ -68,6 +68,38 @@ def test_a_swap_that_records_no_retry_is_the_plain_receipt(swift):
     assert PLAIN in run(swift)
 
 
+def test_a_retry_left_from_before_the_command_is_not_reported(swift):
+    retry(swift.world, swift.world.peer("flash-next"))
+    swap_recording(swift, None)
+    out = run(swift)
+    assert PLAIN in out
+
+
+def test_the_clause_follows_the_swap_that_recorded_it_not_the_next_one(swift):
+    swap_recording(swift, ["draft-mtp"], None)
+    first = run(swift)
+    swift.answering.clear()
+    second = run(swift)
+    assert f"{PLAIN} (retried with a smaller window, speculative decoding off)" in first
+    assert PLAIN in second
+
+
+def test_a_record_name_with_an_escape_byte_is_shown_escaped(cli):
+    rename_flash(cli, "flash\x1b[2Jx")
+    swap_recording(cli, None)
+    out = run(cli, "flash\x1b[2Jx")
+    assert "Serving flash\\x1b[2Jx — autostart restarted" in out
+    assert not any("\x1b" in ln for ln in out)
+
+
+def test_outside_the_unit_the_receipt_carries_no_clause(cli):
+    add_docker_peer(cli)
+    swap_recording(cli, ["draft-mtp"])
+    out = run(cli, "vllm-box")
+    assert "Serving vllm-box" in out
+    assert not any("retried" in ln for ln in out)
+
+
 def test_the_clause_builder_needs_a_record_that_changed():
     rec = speed_stats.RetryRecord(262144, None, ("draft-mtp",), "vllm", "q8_0", 0.6, "t1")
     assert start_serving.retry_receipt_clause(None, None) == ""
