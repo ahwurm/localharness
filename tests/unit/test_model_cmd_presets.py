@@ -350,15 +350,13 @@ def test_a_plain_model_switch_on_a_vllm_primary_still_writes_server_model(compon
     assert _overlay(components_home)["server"]["model"] == "org/n"
 
 
-def test_the_repls_cold_peer_label_is_the_same_rule():
-    """IN-55: one copy of the rule, so `--alias=NAME` matches in `/model` as in `localharness model`."""
+def test_a_peers_served_name_reads_every_alias_spelling():
+    """One copy of the rule, so `--alias=NAME` matches in `/model` as in `localharness model`."""
     from types import SimpleNamespace as NS
-
-    from localharness.cli.repl import OrchestratorREPL
 
     for args, expected in ((["--alias=al4"], "al4"), (["-a", "al"], "al"),
                            (["--served-model-name", "al3"], "al3"), ([], "p")):
         ep = NS(name="p", lifecycle=NS(served_name=None, extra_args=args))
-        assert OrchestratorREPL._cold_served_name(ep) == expected
+        assert model_ops.peer_served_name(ep) == expected
     assert model_ops.primary_served_name(NS(served_name=None, extra_args=["--alias=al4"]),
                                          NS(default_model="d")) == "al4"

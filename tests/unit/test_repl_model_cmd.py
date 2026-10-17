@@ -917,16 +917,31 @@ def _heavy_primary(model="model-a"):
     return ManagedServerConfig(launch="docker", docker_image="vllm:latest", model=model)
 
 
-def test_cold_lifecycle_targets_surfaces_cold_launchable_peer(tmp_path):
-    """A down peer WITH a lifecycle block is offered (by its configured served-name); an attach-only
-    peer (lifecycle=None) is not; a lifecycle peer already probed live is left to the live path."""
+@pytest.mark.asyncio
+async def test_a_down_launchable_peer_is_offered_once_and_an_attach_only_one_is_not(tmp_path):
+    """A down peer WITH a lifecycle block is a cold entry, picked by its record name or its served
+    name; an attach-only peer (lifecycle=None) is only a note; a lifecycle peer that IS up is live,
+    never also cold."""
     cold = _cold_peer(served="qwen-gguf")
     attach = _peer(name="ollama", base_url="http://localhost:11434/v1")  # lifecycle=None
     harness = _harness(server=_heavy_primary(), extra_endpoints=[cold, attach])
-    repl, _, _, _ = _xrepl(tmp_path, harness, {})
-    assert repl._cold_lifecycle_targets(["model-a"], {}) == {"qwen-gguf": cold}
-    # a lifecycle peer that IS up (present as a peer_target value) is NOT re-offered as cold
-    assert repl._cold_lifecycle_targets(["model-a"], {"qwen-gguf": cold}) == {}
+    repl, channel, _, _ = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"], cold.base_url: "unreachable", attach.base_url: "unreachable"})
+    llm = repl._agent._llm
+
+    entries, _live, _bad = await repl._plan_model_entries(llm)
+
+    assert [(e.name, e.kind) for e in entries.numbered()] == [("model-a", "live"), ("llamacpp-local", "cold")]
+    assert entries.pick("qwen-gguf") is entries.pick("llamacpp-local")
+    assert entries.notes == ("skipped ollama (http://localhost:11434/v1): unreachable",)
+
+    up_repl, _, _, _ = _xrepl(
+        tmp_path, harness,
+        {"http://localhost:8081/v1": ["model-a"], cold.base_url: ["qwen-gguf"], attach.base_url: "unreachable"})
+    up, _, _ = await up_repl._plan_model_entries(llm)
+
+    assert [(e.name, e.kind) for e in up.numbered()] == [("model-a", "live"), ("qwen-gguf", "live")]
 
 
 @pytest.mark.asyncio
@@ -1107,15 +1122,20 @@ async def test_model_swap_back_free_fail_reports_no_change(tmp_path, monkeypatch
     assert "Could not free the GPU" in channel.messages[-1]
 
 
-def test_cold_alias_colliding_with_downloaded_is_not_offered(tmp_path):
-    """Finding 6: a cold peer alias equal to a downloaded checkpoint name is dropped from cold_target
-    (passed local_choices = live + downloaded), so it can't shadow the local name or duplicate a menu
-    number into the wrong (cross-framework launch) branch."""
+@pytest.mark.asyncio
+async def test_a_cold_alias_colliding_with_a_live_name_never_shadows_it(tmp_path):
+    """A cold peer's served alias equal to a name the current endpoint serves resolves to the live
+    model: `/model <name>` hot-swaps and never launches an unrelated cross-framework server."""
     cold = _cold_peer(served="collide")
     harness = _harness(server=_heavy_primary(), extra_endpoints=[cold])
-    repl, _, _, _ = _xrepl(tmp_path, harness, {})
-    assert repl._cold_lifecycle_targets(["model-a", "collide"], {}) == {}   # collides → dropped
-    assert repl._cold_lifecycle_targets(["model-a"], {}) == {"collide": cold}  # no collision → offered
+    repl, channel, agent, _ = _xrepl(
+        tmp_path, harness, {"http://localhost:8081/v1": ["model-a", "collide"], cold.base_url: "unreachable"})
+
+    entries, _live, _bad = await repl._plan_model_entries(agent._llm)
+    picked = entries.pick("collide")
+
+    assert picked.kind == "live" and picked.name == "collide"
+    assert [e.name for e in entries.numbered()] == ["model-a", "collide", "llamacpp-local"]
 
 
 @pytest.mark.asyncio
