@@ -74,6 +74,28 @@ def response_reserve(max_context_tokens: int, max_response_tokens: int | None = 
     return min(max(256, max_context_tokens // 8), max(0, max_context_tokens - 1_024))
 
 
+def harness_floor(fixed_tokens: int, max_response_tokens: int | None = None) -> int:
+    """Smallest window, in 256-token steps, whose usable part holds the fixed prompt at the compaction target."""
+    window = 256
+    while fixed_tokens > COMPACTION_TARGET_USAGE_FRACTION * (
+        window - response_reserve(window, max_response_tokens)
+    ):
+        window += 256
+    return window
+
+
+def schema_tokens(counter: Any, tool_schemas: list | None) -> int:
+    return counter.estimate_messages(
+        [{"role": "system", "content": json.dumps([t.model_dump() for t in tool_schemas])}]
+    ) if tool_schemas else 0
+
+
+def fixed_tokens(counter: Any, system_prompt: str, tool_schemas: list | None) -> int:
+    return counter.estimate_messages(
+        [{"role": "system", "content": system_prompt}]
+    ) + schema_tokens(counter, tool_schemas)
+
+
 def clamp_response_tokens(
     max_context_tokens: int, configured_max_tokens: int | None
 ) -> int | None:
@@ -2177,7 +2199,6 @@ class ContextManager:
         Budget reflects post-compaction state so callers (heartbeat emitter) see the
         actual size of the next outgoing request. Budget is always returned (never None).
         """
-        import json as _json
         # Wire safety: no message may reach the payload with content=None — vLLM's
         # request validation 400s on it ('Input should be a valid string'). Covers
         # reasoning-parser tool turns plus persisted/legacy history, for ANY role;
@@ -2189,9 +2210,7 @@ class ContextManager:
         self.last_commit = None
         repaired = self.repair_tool_pairing(copied)
         restore_pins = self._restore_pins(repaired)
-        tool_tokens = self._token_counter.estimate_messages(
-            [{"role": "system", "content": _json.dumps([t.model_dump() for t in tool_schemas])}]
-        ) if tool_schemas else 0
+        tool_tokens = schema_tokens(self._token_counter, tool_schemas)
 
         # Stale-web eviction: cheap, deterministic, runs BEFORE LLM compaction so bulky
         # page bodies never trigger the expensive path. Threshold-gated (Manus caveat:
