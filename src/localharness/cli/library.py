@@ -382,7 +382,7 @@ def _adopt_written(global_dir: Path, file: str, server: dict | None, peers: Sequ
         if isinstance(peer.get("lifecycle"), dict):
             written[f"extra_endpoints.{peer['name']}.lifecycle."] = peer["lifecycle"]
     entries = [e for prefix, mapping in written.items()
-               for e in trust._launch_entries(file, prefix, mapping)]
+               for e in trust._launch_entries(file, prefix, mapping) + trust.strata_entries(global_dir, file, prefix, mapping)]
     posture = {prefix + key: json.dumps(mapping.get(key))
                for prefix, mapping in written.items() for key in trust._POSTURE_KEYS}
     # `shown` is `<runtime>:<true|false>:<keyed|open>`: the middle part is the value in effect.
