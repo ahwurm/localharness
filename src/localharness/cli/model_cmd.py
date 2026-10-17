@@ -741,17 +741,23 @@ def model(
             setup_entry = picked
         name = picked.record.name if picked.record is not None else picked.name
 
-    def _switch(serving) -> None:
-        if (will_launch and serving.record.spec is not None
-                and not model_ops.record_withheld(machine_trust, serving.record)):
-            _swap_now(harness, machine_trust, serving, config_dir=loader._config_dir, unit=unit)
-            return
-        _select_preset(
-            harness, serving.record, current, loader, _audit_dir, _ws, machine_trust, unit=unit)
-
-    def _set_up_then_switch(entry) -> None:
-        nonlocal harness, loader
-        written = _set_up_entry(entry, loader)
+    serving = model_ops.resolve_serving(
+        harness, machine_trust, name, config_dir=loader._config_dir)
+    target: Optional[str] = None
+    if name in choices:
+        target = name
+    elif harness.server is not None and Path(name).expanduser().exists():
+        target = name
+    if (setup_entry is None and target is None and isinstance(serving, model_ops.ServingRefusal)
+            and serving.kind == "unknown"):
+        found = _entries()[0].pick(name)
+        if isinstance(found, str):
+            err_console.print("[bold red]Error:[/bold red] " + escape(found), soft_wrap=True)
+            raise typer.Exit(2)
+        if found is not None and found.kind == "setup":
+            setup_entry = found
+    if setup_entry is not None:
+        written = _set_up_entry(setup_entry, loader)
         if written is None:
             return
         loader = _new_loader()
@@ -761,16 +767,6 @@ def model(
             err_console.print(f"[bold red]Error:[/bold red] failed to load config: {exc}")
             raise typer.Exit(2)
         serving = model_ops.resolve_serving(harness, machine_trust, written, config_dir=loader._config_dir)
-        if not isinstance(serving, model_ops.Serving):
-            err_console.print("[bold red]Error:[/bold red] " + escape(serving.line), soft_wrap=True)
-            raise typer.Exit(serving.exit_code)
-        _switch(serving)
-
-    if setup_entry is not None:
-        _set_up_then_switch(setup_entry)
-        return
-    serving = model_ops.resolve_serving(
-        harness, machine_trust, name, config_dir=loader._config_dir)
     if isinstance(serving, model_ops.ServingRefusal) and serving.kind != "unknown":
         # The withheld line was already printed once as `machine_trust.line`; say a refusal
         # that is not that line (an ambiguous name, or a withheld record start composed no line for).
@@ -779,23 +775,15 @@ def model(
                 "[bold red]Error:[/bold red] " + escape(serving.line), soft_wrap=True)
         raise typer.Exit(serving.exit_code)
     if isinstance(serving, model_ops.Serving):
-        _switch(serving)
+        if (will_launch and serving.record.spec is not None
+                and not model_ops.record_withheld(machine_trust, serving.record)):
+            _swap_now(harness, machine_trust, serving, config_dir=loader._config_dir, unit=unit)
+            return
+        _select_preset(
+            harness, serving.record, current, loader, _audit_dir, _ws, machine_trust, unit=unit)
         return
 
-    target: Optional[str] = None
-    if name in choices:
-        target = name
-    elif harness.server is not None and Path(name).expanduser().exists():
-        target = name
-
     if target is None:
-        found = _entries()[0].pick(name)
-        if isinstance(found, str):
-            err_console.print("[bold red]Error:[/bold red] " + escape(found), soft_wrap=True)
-            raise typer.Exit(2)
-        if found is not None and found.kind == "setup":
-            _set_up_then_switch(found)
-            return
         if reachable:
             # Reached the runtime and the target isn't served/downloaded → fail loud, name options.
             avail = ", ".join(choices) if choices else "(none served or downloaded)"
