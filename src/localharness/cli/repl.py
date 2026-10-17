@@ -1937,6 +1937,7 @@ class OrchestratorREPL:
                     if live.get(cur_key) is None else "No models visible at the endpoint."
                 )
                 return
+            lines.extend(await asyncio.to_thread(model_ops.foreign_lines, entries, self._server_config_dir))
             lines.append("Switch with /model <name|number>, or scroll the menu and press Enter.")
             await self._send_info("\n".join(lines), colorize=True)
             open_menu = getattr(self._channel, "box_open_model_menu", None)
