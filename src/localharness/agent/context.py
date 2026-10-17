@@ -731,11 +731,14 @@ class TokenCounter:
         base_url: str | None = None,
         model: str | None = None,
         provider_type: str | None = None,
+        *,
+        offline: bool = False,
     ) -> None:
         # The cl100k vocabulary is built on the first count that needs it (`_cl100k`), never here:
         # an exact runtime never needs it, and building it can fetch it from the network (R8).
+        # `offline` counts with the byte estimate and never builds it.
         self._encoder = None
-        self._encoder_state = "unbuilt"  # "unbuilt" | "ready" | "failed" (never retried)
+        self._encoder_state = "failed" if offline else "unbuilt"  # "unbuilt" | "ready" | "failed" (never retried)
 
         # Model-identity state (owned by rebind so a /model swap can re-derive it):
         # /tokenize lives at the SERVER ROOT, not under /v1.

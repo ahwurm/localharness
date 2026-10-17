@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from localharness.agent.context import TokenCounter, fixed_tokens, harness_floor
 from localharness.cli import model_ops, workspace
 from localharness.cli.model_ops import (
     RUNG_ACTIVE,
@@ -51,6 +52,9 @@ STARTING_WAIT_SECONDS = 600
 SERVING_RESTARTED_LINE = "Serving {name} — autostart restarted"
 SERVING_LINE = "Serving {name}"
 REPL_TALKS_CLAUSE = "; a REPL session on this machine now talks to it"
+START_FLOOR_LINE = "{where} serves {window} and the harness needs at least {floor:,} — {fix}"
+START_FLOOR_UNIT_FIX = "raise its -c, or stop the unit and let the harness launch it."
+START_FLOOR_SERVER_FIX = "raise the window at the server."
 ALREADY_SERVING_TARGET_LINE = "{name} is already serving"
 ALREADY_SERVING_CLEARED_LINE = "{name} is already serving — the older selection {older} was cleared"
 
@@ -250,6 +254,46 @@ def foreign_incumbent_line(
         return None
     return workspace.incumbent_sentence(
         holder, port=port, form="imperative", served=incumbent.served, target=target.name)
+
+
+async def launch_floor(agent_config: Any, *, config_dir: Path) -> int | None:
+    """The root's window floor before the registry exists: base prompt plus the built-in tool schemas,
+    counted offline, raised to the cached full floor."""
+    from localharness.agent.loop import base_system_prompt
+    from localharness.tools.builtin import register_builtin_tools
+    from localharness.tools.capabilities import apply_root_capability_floor
+    from localharness.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    await register_builtin_tools(registry, workspace_root=agent_config.permissions.workspace_root)
+    tools = agent_config.tools.model_copy(deep=True)
+    apply_root_capability_floor(tools, registry.global_schemas())
+    try:
+        schemas = list(registry.get_tools_for_agent(
+            agent_config.name, agent_config.division or "", tools).values())
+    except Exception:  # noqa: BLE001 — the loop's own count degrades the same way: no schemas
+        schemas = []
+    prompt = base_system_prompt(agent_config, tool_call_mode="native", guardrails="")
+    live = harness_floor(fixed_tokens(TokenCounter(offline=True), prompt, schemas), agent_config.max_tokens)
+    return lifecycle.raised_floor(live, lifecycle.cached_floor(config_dir))
+
+
+def served_unit(base_url: str) -> str | None:
+    """The unit that holds a loopback server's port, else None."""
+    port = _port_of(base_url)
+    if port is None or not model_ops.is_loopback(base_url):
+        return None
+    holder = workspace.port_holder(port)
+    return holder.unit if holder is not None else None
+
+
+def floor_line(name: str, base_url: str, unit: str | None, served: int, floor: int) -> str:
+    """The sentence for a served window under the harness floor."""
+    from localharness.provider.autosense import window_phrase
+    label = workspace.visible_text(name)
+    where, fix = (f"{label} on {workspace.visible_text(unit)}", START_FLOOR_UNIT_FIX) if unit else (
+        f"{label} at {workspace.visible_text(base_url)}", START_FLOOR_SERVER_FIX)
+    return START_FLOOR_LINE.format(where=where, window=window_phrase(served), floor=floor, fix=fix)
 
 
 async def wait_starting(probe: Callable[[], Any], *, seconds: float, poll_seconds: float = 3.0) -> bool:
