@@ -694,7 +694,7 @@ A sensed install adds `· Strata available` to the Flash-Next entry; picking `/m
 | 16 §8 `/model` | four branches over names; a foreign incumbent is one imperative sentence | §10 | episode 1 |
 | 20 §6.0, §6.4 | `Sensed` holds the header; the retry halves `-c` | `Sensed.split`; the retry halves to the floor; Strata halves `--max-context` | the planner needs the table; a window under the floor is the failure the retry exists to avoid |
 | 20 §8.2 swap | the floor is not checked | §8.3: before the commit, then the backstop | episode 2 |
-| 20 §8.2 resume clause, §9.3 receipt, §11.1 ranking, §14 (2) | as written | §16's decisions | the live run |
+| 20 §8.2 resume clause, §9.4 receipt, §11.1 ranking, §14 (2), (4) | as written | §16's decisions | the live run |
 | 20 §13 | `rank_models` unchanged | its row names the two tie-breaks (amended in spec 20) | §16 |
 | 08 "Reserve for model output" | `response_reserve` is the one reserve | unchanged; `harness_floor` sits beside it, built on it | the floor never lowers the reserve |
 | 08 `ContextManager` | `max_context_tokens` is a construction argument | unchanged for the root; a child's comes from the root's live value at spawn | episode 3 |

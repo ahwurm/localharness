@@ -410,9 +410,10 @@ beyond the gated `on`.
 
 - **The selected record answers** → attach on that record. **`last_served`** (ledger top-level: the record
   name; written by `persist_landed` and by every successful attach in `start` and the REPL, never by
-  `serve`) gates two clauses on separate branches, so one event triggers at most one: the resume clause
-  `(your last /model choice)` prints iff the rung is `active_endpoint` and `last_served ≠ record`; the
-  attach-to-another clause below prints iff `last_served ≠ the answering record`. When a boot marker
+  `serve`) gates the attach-to-another clause below, which prints iff `last_served ≠ the answering record`. The
+  resume clause `(your last /model choice)` is not an attach clause: it prints, in the launch line's parenthesis,
+  when `start` **launches** a record on the `active_endpoint` rung, and never on an attach to the server the person
+  left (spec 22 §16). When a boot marker
   exists, `confirm_launch` runs from it (§6.0) and the attach line carries **once** `(retried at boot: mtp
   off, -c halved · server.speculative: off keeps the full window)` — only for a `cause: death` marker when
   the ledger held no `retry` record before.
@@ -637,7 +638,10 @@ init to add it as a peer`); own-unit re-check; `reset-failed`; `restart`; then *
 with a `liveness` callback reading `unit_runtime_state` each poll (`ActiveState, NRestarts, ExecMainStatus,
 MainPID, InvocationID`) — **tolerating one rise of `NRestarts` when the plan carries derived keywords** (the
 unit's own retry) and stopping at the second, or at `ActiveState=failed`, with the journal's last lines
-**raw in the `RuntimeError`**. On success it calls `confirm_launch` from the marker. Tails are redacted **at
+**raw in the `RuntimeError`**. On success it calls `confirm_launch` from the marker. The `model` receipt after a
+tolerated retry reads `Serving <name> — autostart restarted (retried with a smaller window, speculative decoding
+off)`, the last part only when the retry dropped drafting, and only for a retry `confirm_launch` recorded during
+this swap (spec 22 §16); outside the unit the receipt stays `Serving <name>`. Tails are redacted **at
 the channel boundary** — the REPL's `SwapReporter.line`, the CLI's, `start`'s console — with
 `strip_url_credentials` and `redact.scrub(text, secrets, *, patterns=)`: the secret set is
 `secret_values(HarnessConfig, merged)` **plus the key read from any `api_key_file` the session holds**, and
@@ -764,7 +768,8 @@ fails closed without it — the component is the last line, the callers the firs
 ### 11.1 Models found: one question
 
 The shown block is a bulleted list (the interview's options are the numbered things), the ranked best
-first, one line per unrecorded model: `• <name> (llama.cpp, mtp, +<projector>) ← <shown_path> · <size> ·
+first (by the unit's model, the ledger, a fit above zero, then the larger window, then fewer GPU-resident bytes,
+then the newest; spec 22 §16), one line per unrecorded model: `• <name> (llama.cpp, mtp, +<projector>) ← <shown_path> · <size> ·
 first seen <date>`, a declined one tagged
 `(declined earlier)`, a vLLM checkpoint as a peer line **only when a `vllm` binary is found** (`· binary:
 <shown_path> (on PATH | harness venv)`), otherwise nothing; `scope="all"` lists every unrecorded model,
@@ -1002,7 +1007,7 @@ GPU from github.com/ggml-org/llama.cpp/releases, llama-server on PATH — docs/r
 | `cli/interview.py` (new) | `Option`, `Answer`, `ask(question, options, *, default, cancel, multi=False)`: the one prompt_toolkit question app of §11.5 (inline, `PICKER_STYLE` and the picker's test seams, the hint line, scrolling, cancel); `local_operator` enforced inside; no typed fallback |
 | `cli/init_cmd.py`, `cli/doctor_cmd.py` | `init` calls `sync(scope="all")` in `_pick_server` (a first run: no `config.yaml` or `--force`; after `_unit_import`) and inside `_existing_config` after the load, not when `changing`, `Keep it?` skipped when `sync` appended; `_found_models`, `_peer_records`, `_free_ports`, `_discover_presets` deleted; `_records_from_import` takes `peers_for`; `_write_overlay_records` calls `append_peers` (its empty-only rule gone); `_write_records` writes `config.yaml` with `extra_endpoints: []`, then the peers into `overrides.yaml`, then two adoptions, the peer-write False path said; `_SAVED_CHOICE_KEYS` gains `extra_endpoints`; `_guided_setup` reduced to the vLLM install step; `is_interactive` and `_adopts` folded into `local_operator`; a first run that attached baselines; the receipt's `Later:` line replaces `Run 'localharness start' to begin.`; `doctor`'s `Models:` row beside `Tuning:`, `Sampling:`, `Autostart:` |
 | `cli/workspace.py`, `cli/model_cmd.py` | `local_operator(no_input)` (the one predicate; `_is_local_operator` folded in), `write_overlay_validated` under the new `overrides.yaml.lock`; `--download` ends in `record_path` for one `.gguf` verified at a hub-resolved commit under a config with a person, else says `start finds it`; `model --setup` = `sync(choose=True)` (§11.1) |
-| `provider/refarch.py`, `provider/server.py`, `agent/gguf_header.py`, `agent/gate_types.py`, `SECURITY.md` | `RefArch`: `runtime`, `platforms`, `needs`, `repo`, `file`, `bytes`, `revision`, `sha256`, `page`, route fields optional, the 8 GB llama.cpp row, a test on every row's shapes; `download_file(repo, file, *, revision)`; `discover`'s return type becomes one `FileKind` per path (`unreadable` included), `rank_models` exported, with the window and GPU-bytes tie-breaks of spec 22 §15; `model-library.json` and `overrides.yaml.lock` in `PROTECTED_CONFIG_DIR_ENTRIES` (SECURITY.md's count, now ten, and the gate test beside `project_records.yaml.lock`); the library file in SECURITY.md's written-files list; `init_cmd`'s and spec 16 §8's "config.yaml is not touched" text amended for the one-time list move |
+| `provider/refarch.py`, `provider/server.py`, `agent/gguf_header.py`, `agent/gate_types.py`, `SECURITY.md` | `RefArch`: `runtime`, `platforms`, `needs`, `repo`, `file`, `bytes`, `revision`, `sha256`, `page`, route fields optional, the 8 GB llama.cpp row, a test on every row's shapes; `download_file(repo, file, *, revision)`; `discover`'s return type becomes one `FileKind` per path (`unreadable` included), `rank_models` exported, ranking the unit's model, then the ledger, then a fit above zero, then the larger window, then fewer GPU-resident bytes, then the newest (spec 22 §16); `model-library.json` and `overrides.yaml.lock` in `PROTECTED_CONFIG_DIR_ENTRIES` (SECURITY.md's count, now ten, and the gate test beside `project_records.yaml.lock`); the library file in SECURITY.md's written-files list; `init_cmd`'s and spec 16 §8's "config.yaml is not touched" text amended for the one-time list move |
 | `README.md`, `orchestrator/router.py` | Quick start and `no_config_message` teach `localharness start` first; a model server is not required |
 | `agent/gate_types.py` | the four login-time directories in `PROTECTED_PATHS_HOME_DEFAULT` |
 | `bench/`, `SECURITY.md`, `docs/specs/10-cli.md`, `13-provider-support.md` | the bench temperature paragraph; the autostart unit (environment order, captured comment lines, allowlisted base, identity test, owner rule, exit codes, the marker, the deny bundle, the four directories, the residuals), the trust decision on every launching surface, the pidfile identity check, the redaction boundary, the three new `launch_model` keys; the CLI additions; the strategy-layer additions |
@@ -1119,10 +1124,13 @@ GPU from github.com/ggml-org/llama.cpp/releases, llama-server on PATH — docs/r
   runs `systemctl`, `loginctl`, `journalctl`, `busctl` or a unit.**
 - Live, on the reference box (a runbook, as spec 16's live check was): (1) `init` after the 0.18 import — `mtp` on
   both 27B lines; (2) `start` on the Swift preset launches with `q8_0` KV, `draft-mtp`, a fitted `-c`;
-  `/props` shows `speculative.types: draft-mtp` and the asked window; decode in the profile's band; (3) a
+  the verified process's command line (`/proc/<pid>/cmdline`) holds `--spec-type draft-mtp` and `/props` shows
+  the asked window (`/props` reports `speculative.types: none` with MTP on, so it is not the evidence; spec 22
+  §16); decode in the profile's band; (3) a
   `--debug` body carries no `temperature`; `/props` `temperature 1.0`; (4) `/model flash-next`, `quit`,
-  `start` attaches within seconds with the resume clause once, `start --preset qwen-27b-swift-1.5` swaps
-  back; (5) `llm.service` hand-started on :8080 with `active_endpoint` = flash-next: `start` attaches to
+  `start` attaches within seconds and prints no resume clause, `start --preset qwen-27b-swift-1.5` swaps
+  back; (4b) reboot without autostart, then `start` launches the last choice with `(your last /model choice)` in
+  its launch line; (5) `llm.service` hand-started on :8080 with `active_endpoint` = flash-next: `start` attaches to
   qwen with the clause, launches nothing; (6) `localharness model flash-next` from the shell (no unit) →
   `Selected … — the next start serves it`, then `start` swaps; (7) `--autostart on` while the spawned qwen
   serves: `enable` only, the server untouched, the receipt names the captured `PATH`; `/model flash-next`
