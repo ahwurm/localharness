@@ -723,7 +723,7 @@ def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, auto
     elif has_c:
         mode, asked, ctx_kw = "extra_args", None, None
         sized = _flag_value(extra, ("-c", "--ctx-size"))
-        if floor and sized and sized.isdigit() and 0 < int(sized) < floor:
+        if floor and sized and sized.isdecimal() and 0 < int(sized) < floor:
             refusal = CONTEXT_FLOOR_REFUSAL.format(
                 name=_label(spec), window=window_phrase(int(sized)), where="-c in extra_args", floor=floor)
     elif by_hand or mem is None:

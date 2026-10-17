@@ -120,7 +120,7 @@ def test_a_context_in_extra_args_below_the_floor_is_refused_like_the_record_fiel
         _plan(_flash(tmp_path, extra_args=extra), tmp_path, FLOOR)
 
 
-@pytest.mark.parametrize("extra", [["-c", "0"], ["-c", "20000"]])
+@pytest.mark.parametrize("extra", [["-c", "0"], ["-c", "20000"], ["-c", "\u00b2"]])
 def test_a_context_in_extra_args_at_or_above_the_floor_or_zero_is_left_alone(tmp_path, monkeypatch, extra):
     _world(monkeypatch)
     assert _plan(_flash(tmp_path, extra_args=extra), tmp_path, FLOOR).report.mode == "extra_args"
