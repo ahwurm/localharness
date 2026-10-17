@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from localharness.cli import model_ops
+from localharness.cli import model_ops, workspace
 from localharness.config.models import ManagedServerConfig
-from localharness.provider import lifecycle, model_library, server, tuning
+from localharness.provider import lifecycle, model_library, server, speed_stats, tuning
 from localharness.provider.autosense import FreeMemory
 from tests.unit.test_library_vllm_peers import cache_repo
 from tests.unit.gguf_support import write_gguf
-from tests.unit.test_plan_entries import FLOOR, entries_of, harness_of
+from tests.unit.test_plan_entries import FLOOR, LLM_SERVICE, entries_of, flash, harness_of
 from tests.unit.test_serve_cmd import PRIMARY, PRIMARY_URL, llama_peer, serve_world
 from tests.unit.test_tuning_derive import FLASH_NEXT
 
@@ -230,3 +230,76 @@ def test_not_offered_lines_follow_every_numbered_entry_in_name_order(world, tmp_
 
     assert [line.split(" — ")[0] for line in lines[-2:]] == ["  not offered: alpha/model", "  not offered: zeta/model"]
     assert lines[-3].startswith("  2. ")
+
+
+UNIT_SERVES = "qwen-27b-swift-1.5"
+
+
+@pytest.fixture
+def unit_world(world, monkeypatch):
+    monkeypatch.setattr(workspace, "port_holder", lambda port: LLM_SERVICE)
+    return world
+
+
+def listing_of(world, served=UNIT_SERVES):
+    return model_ops.listing(
+        harness_of(world), live={PRIMARY_URL: (served,)}, config_dir=world.g,
+        trust=model_ops.trust_as_recorded(world.g), floor=FLOOR, memory=MEMORY)
+
+
+def sentence_for(served=UNIT_SERVES):
+    return workspace.foreign_unit_sentence(LLM_SERVICE, served=served, port=8080)
+
+
+def test_the_entries_a_unit_forbids_answer_with_the_foreign_unit_sentence(unit_world, tmp_path, monkeypatch):
+    cached(monkeypatch, snapshot(tmp_path, NVIDIA, "nvidia-qwen3.8-27b-nvfp4"))
+    with_vllm(tmp_path, monkeypatch)
+
+    entries, lines = listing_of(unit_world)
+
+    forbidden = entries.groups[1]
+    assert forbidden.header == "available once llm.service is stopped" and not forbidden.numbered
+    assert {e.name for e in forbidden.entries} == {NVIDIA}
+    assert entries.pick(NVIDIA) == sentence_for()
+    assert lines[-1] == sentence_for()
+
+
+def test_the_sentence_is_recorded_and_not_said_twice(unit_world):
+    ledger = speed_stats.default_speed_stats_path(unit_world.g)
+
+    listing_of(unit_world)
+
+    assert not speed_stats.foreign_unit_changed(ledger, "llm.service", UNIT_SERVES)
+    _, again = listing_of(unit_world)
+    assert sentence_for() not in again
+    assert again[1] == "▸ llama.cpp · 127.0.0.1:8080 · llm.service (yours)"
+
+
+def test_the_sentence_comes_back_once_when_the_unit_serves_another_model(unit_world):
+    listing_of(unit_world)
+
+    _, changed = listing_of(unit_world, served="flash")
+    _, after = listing_of(unit_world, served="flash")
+
+    assert changed[-1] == sentence_for("flash") and sentence_for("flash") not in after
+
+
+def test_building_the_list_alone_records_nothing(unit_world):
+    entries_of(unit_world, {PRIMARY_URL: (UNIT_SERVES,)}, memory=MEMORY)
+
+    assert speed_stats.foreign_unit_changed(speed_stats.default_speed_stats_path(unit_world.g), "llm.service", UNIT_SERVES)
+
+
+def test_a_foreign_process_that_is_no_unit_keeps_the_imperative_sentence_and_records_nothing(tmp_path, monkeypatch):
+    world = serve_world(tmp_path, monkeypatch, peers=[flash(tmp_path)])
+    holder = workspace.Holder(None, 77, "llama-server", 1000, None)
+    monkeypatch.setattr(workspace, "port_holder", lambda port: holder)
+
+    entries, lines = listing_of(world)
+
+    assert entries.foreign is None and entries.foreign_key is None
+    assert not [line for line in lines if "systemctl" in line]
+    assert entries.groups[1].entries[0].refusal == workspace.incumbent_sentence(
+        holder, port=8080, form="imperative", served=UNIT_SERVES, target="flash-next")
+    ledger = speed_stats.default_speed_stats_path(world.g)
+    assert speed_stats.foreign_unit_changed(ledger, "llm.service", UNIT_SERVES)

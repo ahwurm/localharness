@@ -151,7 +151,8 @@ def test_the_group_names_a_foreign_unit_as_yours(world, monkeypatch):
     entries = entries_of(world, SERVING)
 
     assert headers(entries) == ["llama.cpp · 127.0.0.1:8080 · llm.service (yours)", "available once llm.service is stopped"]
-    assert entries.foreign == "llm.service"
+    assert entries.foreign == workspace.foreign_unit_sentence(LLM_SERVICE, served=PRIMARY, port=8080)
+    assert entries.foreign_key == ("llm.service", PRIMARY)
 
 
 def test_a_foreign_holder_leaves_the_launch_group_unnumbered_and_unpickable(world, monkeypatch):
@@ -159,8 +160,7 @@ def test_a_foreign_holder_leaves_the_launch_group_unnumbered_and_unpickable(worl
 
     entries = entries_of(world, SERVING)
 
-    sentence = workspace.incumbent_sentence(
-        LLM_SERVICE, port=8080, form="imperative", served=PRIMARY, target="flash-next")
+    sentence = workspace.foreign_unit_sentence(LLM_SERVICE, served=PRIMARY, port=8080)
     assert [e.name for e in entries.numbered()] == [PRIMARY]
     assert model_ops.entry_lines(entries)[3:] == [
         "▸ available once llm.service is stopped",
