@@ -23,10 +23,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from localharness.core.which import which_outside_cwd
+from localharness.provider.runtimes import row_of
 from localharness.provider.speed_stats import WindowRecord
+
+if TYPE_CHECKING:
+    from localharness.config.models import ManagedServerConfig
+    from localharness.provider.lifecycle import Sensed
+    from localharness.provider.tuning import Tuned
 
 # What callers hand to `agent.gguf_header.read_header` so the header holds exactly the fit's inputs.
 FIT_KEYS = frozenset({
@@ -225,7 +231,8 @@ def fit(header: Mapping[str, Any], free_bytes: int | None, ratios: Any,
     if kv is not None:
         kv *= draft_share
     trained = _pos_int(header.get("context_length"))
-    if runtime != "llamacpp" or offload != "gpu" or free_bytes is None or kv is None or trained is None:
+    row = row_of(runtime)
+    if row is None or not row.gguf or offload != "gpu" or free_bytes is None or kv is None or trained is None:
         return None
     if attached_served is not None:
         window = attached_served + int(free_bytes // kv)
@@ -458,6 +465,46 @@ class WindowReport:
     runtime: str = "llamacpp"
 
 
+@dataclass(frozen=True)
+class Price:
+    report: WindowReport
+    context: int | None
+    cache_ram: int | None
+    full_fit: int | None
+    refusal: str | None = None
+
+
+def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, autosense: Any) -> Price:
+    """The fit's `-c` and the formula's `--cache-ram`, each only where neither the record nor `extra_args` set one."""
+    from localharness.provider import tuning
+
+    extra = list(spec.extra_args or [])
+    header, mem, weights, mi = sensed.header, sensed.memory, sensed.weights, sensed.meminfo
+    k, v, share = tuning.launch_pricing(spec, header, tuned)
+    fits = fit(
+        header, mem.free_bytes if mem else None, autosense, cache_type_k=k, cache_type_v=v,
+        weights=weights, offload=sensed.offload, runtime="llamacpp", draft_share=share)
+    has_c = has_ctx_arg(extra)
+    cache_set = spec.cache_ram is not None or has_cache_ram_arg(extra)
+    cache_kw = None if cache_set else cache_ram_mib(
+        mi["MemAvailable"] if mi else None, mi["MemTotal"] if mi else None,
+        weights, sensed.offload, extra, autosense)
+    if spec.context is not None:
+        mode, asked, ctx_kw = "record", spec.context, None
+    elif has_c:
+        mode, asked, ctx_kw = "extra_args", None, None
+    elif fits:
+        mode, asked, ctx_kw = "fit", fits, fits
+    else:
+        mode, asked, ctx_kw = "fit-by-server", None, None
+    report = WindowReport(
+        served=None, trained=header.get("context_length"), fits=fits,
+        free_bytes=mem.free_bytes if mem else None, total_bytes=mem.total_bytes if mem else None,
+        weights_bytes=weights, asked=asked, mode=mode, attached=False, retried=False,
+        verified=False, runtime="llamacpp")
+    return Price(report, ctx_kw, cache_kw, fits if mode == "fit" else None)
+
+
 def gib(n: float) -> str:
     return f"{n / 2**30:.1f}"
 
@@ -485,9 +532,9 @@ def window_lines(report: WindowReport, ratios: Any, undo: str | None = None) -> 
     alone. An attach report with a fit or served window unknown, or whose fit is within
     `notify_ratio` of what is served, says nothing."""
     r = report
-    if r.runtime in ("ollama", "lmstudio"):
-        extra = " · Ollama decides the window" if r.runtime == "ollama" else ""
-        return [f"window: served {fmt_count(r.served)} · trained {fmt_count(r.trained)}{extra}"]
+    row = row_of(r.runtime)
+    if row is not None and row.window_note is not None:
+        return [f"window: served {fmt_count(r.served)} · trained {fmt_count(r.trained)}{row.window_note}"]
     if r.mode == "fit-by-server":
         return [FIT_BY_SERVER_LINE + (f" · served {r.served:,}" if r.served and r.verified else "")]
     if r.attached and (r.fits is None or r.served is None

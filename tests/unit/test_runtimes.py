@@ -7,8 +7,9 @@ from collections.abc import Mapping
 
 import pytest
 
-from localharness.config.models import ManagedServerConfig
-from localharness.provider import detector, lifecycle, server, tuning, units
+from localharness.config.models import AutosenseConfig, ManagedServerConfig
+from localharness.provider import autosense, detector, lifecycle, server, tuning, units
+from localharness.provider.tuning import Tuned
 from localharness.provider.runtimes import RUNTIMES, row_of
 
 
@@ -18,7 +19,7 @@ COLUMNS = {
 
 
 def _record(runtime, **over):
-    return ManagedServerConfig(runtime=runtime, model="m", port=8000, **over)
+    return ManagedServerConfig(**{"runtime": runtime, "model": "m", "port": 8000, **over})
 
 
 def test_the_table_has_the_four_runtimes_in_order_and_is_read_only():
@@ -124,3 +125,65 @@ def test_the_site_answers_each_row_carries():
     assert [r.window_note for r in RUNTIMES.values()] == [None, None, " · Ollama decides the window", ""]
     assert vllm.facts() is tuning.MODEL_TYPE_PARSERS and llama.facts is None
     assert list(lms.derived_args) == ["--gpu"] and not ollama.derived_args
+
+
+GIB = 2**30
+HEADER = {"block_count": 64, "head_count_kv": 8, "key_length": 128, "context_length": 262144}
+
+
+def _sensed(header=HEADER, free=40 * GIB, weights=18 * GIB):
+    mem = autosense.FreeMemory(free, 48 * GIB, "nvidia-smi")
+    return lifecycle.Sensed("llamacpp", None, header, "gpu", mem, weights, {"MemAvailable": 90 * GIB, "MemTotal": 128 * GIB})
+
+
+def test_price_llamacpp_prices_the_fit_and_the_cache_ram_through_the_row():
+    spec, knobs = _record("llamacpp", binary="/x/llama-server"), AutosenseConfig()
+    tuned = Tuned(cache_type="q8_0")
+    got = RUNTIMES["llamacpp"].price(spec, _sensed(), tuned, knobs)
+    fits = autosense.fit(HEADER, 40 * GIB, knobs, cache_type_k="q8_0", cache_type_v="q8_0", weights=18 * GIB)
+    ram = autosense.cache_ram_mib(90 * GIB, 128 * GIB, 18 * GIB, "gpu", [], knobs)
+    assert isinstance(got, autosense.Price) and got.refusal is None
+    assert (got.context, got.cache_ram, got.full_fit) == (fits, ram, fits) and fits
+    assert (got.report.mode, got.report.asked, got.report.fits, got.report.trained) == ("fit", fits, fits, 262144)
+
+
+def test_price_llamacpp_with_a_fit_that_is_not_positive_leaves_the_window_to_the_server():
+    got = autosense.price_llamacpp(
+        _record("llamacpp", binary="/x/llama-server"), _sensed(free=18 * GIB), Tuned(), AutosenseConfig())
+    assert (got.context, got.full_fit, got.report.mode, got.report.fits) == (None, None, "fit-by-server", None)
+
+
+@pytest.mark.parametrize("over,mode", [({"context": 4096}, "record"), ({"extra_args": ["-c", "8192"]}, "extra_args")])
+def test_price_llamacpp_sets_no_context_when_the_record_or_extra_args_did(over, mode):
+    got = autosense.price_llamacpp(
+        _record("llamacpp", binary="/x/llama-server", **over), _sensed(), Tuned(), AutosenseConfig())
+    assert got.context is None and got.full_fit is None and got.report.mode == mode
+
+
+@pytest.mark.parametrize("name", ["vllm", "ollama", "lmstudio"])
+def test_a_row_without_a_price_plans_no_window(name):
+    assert RUNTIMES[name].price is None
+
+
+@pytest.mark.parametrize("name", ["vllm", "ollama", "lmstudio"])
+def test_only_a_gguf_row_has_a_fit(name):
+    assert autosense.fit(HEADER, 40 * GIB, AutosenseConfig(), weights=18 * GIB, runtime=name) is None
+    assert autosense.fit(HEADER, 40 * GIB, AutosenseConfig(), weights=18 * GIB, runtime="llamacpp")
+
+
+@pytest.mark.parametrize("spec,tokens", [
+    (_record("llamacpp", binary="/x/llama-server", model="/x/m.gguf", served_name="qwen"), ("-a", "qwen")),
+    (_record("llamacpp", binary="/x/llama-server", model="/x/m.gguf"), ("-m", "/x/m.gguf")),
+    (_record("vllm", launch="binary", binary="/x/vllm", model="org/m"), ("org/m",)),
+    (_record("vllm", launch="docker", docker_image="img", model="org/m"), ("org/m",)),
+    (_record("ollama", model="qwen"), ()),
+])
+def test_record_identity_adds_the_records_own_tokens(spec, tokens):
+    base = lifecycle.strategy_for(spec, unit=None).launch_identity(spec)
+    got = lifecycle.record_identity(spec)
+    assert got.argv_contains == base.argv_contains + tokens
+    assert (got.argv_one_of != ()) is (spec.runtime == "vllm" and spec.launch == "docker")
+
+
+def test_lm_studio_has_no_record_identity():
+    assert lifecycle.record_identity(_record("lmstudio")) is None
