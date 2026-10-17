@@ -249,7 +249,10 @@ def serve(
         _stop(EXIT_REFUSED, decision.refusal)
     if decision.note:
         _say(decision.note)
-    argv, plan, _sensed = _planned_argv(spec, cfg, harness.autosense, decision, keyed=keyed, unit=state)
+    try:
+        argv, plan, _sensed = _planned_argv(spec, cfg, harness.autosense, decision, keyed=keyed, unit=state)
+    except server.LaunchRefused as refused:
+        _stop(EXIT_REFUSED, visible_text(str(refused)))
     binary, why_not = _resolve_binary(argv[0], captured.get("PATH", ""))
     if binary is None:
         _stop(EXIT_TRANSIENT, why_not)

@@ -163,6 +163,39 @@ def test_all_says_why_a_record_is_not_rendered(world):
     assert [ln for ln in out if ln.endswith("() {")] == ["serve_swift() {"]
 
 
+def _refusing_port(monkeypatch, port: int) -> None:
+    real = lifecycle.plan_launch
+
+    def plan(spec, *a, **kw):
+        if spec.port == port:
+            raise server.LaunchRefused("The model does not fit.")
+        return real(spec, *a, **kw)
+
+    monkeypatch.setattr(lifecycle, "plan_launch", plan)
+
+
+def test_all_reports_the_refusing_record_and_renders_the_rest(world, monkeypatch):
+    world.edit_config(lambda d: d["extra_endpoints"].append(llama_peer("flash-next", 8082)))
+    world.rerecord()
+    _refusing_port(monkeypatch, 8082)
+
+    result = _run(world, "--script", "--all")
+
+    assert result.exit_code == 0, result.stderr
+    out = result.stdout.splitlines()
+    assert "# flash-next: The model does not fit." in out
+    assert [ln for ln in out if ln.endswith("() {")] == ["serve_swift() {"]
+
+
+def test_a_named_record_that_refuses_is_its_sentence_and_exit_two(world, monkeypatch):
+    _refusing_port(monkeypatch, 8080)
+
+    result = _run(world, "--script", "swift")
+
+    assert result.exit_code == 2 and result.stdout == ""
+    assert "The model does not fit." in result.stderr
+
+
 def test_all_on_attach_only_records_prints_only_comments_and_exits_zero(world):
     world.edit_config(lambda d: (d.pop("server"), d["extra_endpoints"].append(attach_peer("attached"))))
     world.rerecord()
