@@ -1095,6 +1095,41 @@ def _priced(harness: Any, record: ServingRecord, *, config_dir: Any, memory: Any
     return (report.asked if report is not None else None), (placement.where if placement is not None else None), None
 
 
+def _setup_entries(harness: Any, listed: Any, taken: set[str], *, config_dir: Any, memory: Any, floor: int | None,
+                   unit: Any) -> list[PlanEntry]:
+    """One entry per file or snapshot no record names, priced as a record would be."""
+    from localharness.cli import library
+    from localharness.config.models import ManagedServerConfig
+
+    server = getattr(harness, "server", None)
+    llama = server.binary if server is not None and RUNTIMES[server.runtime].gguf else None
+    port = library.PRIMARY_PORT + 1
+    entries = []
+    for s in listed.shown:
+        if s.checkpoint is not None:
+            if listed.vllm is None:
+                continue
+            name = s.checkpoint.repo_id
+            spec = ManagedServerConfig(runtime="vllm", launch="binary", binary=listed.vllm[0], model=name, port=port, gpu=True)
+        else:
+            name = library.unique_preset_name(library._label(s), taken)
+            taken.add(name)
+            spec = ManagedServerConfig(
+                runtime="llamacpp", model=str(s.path), mmproj=str(s.model.mmproj) if s.model.mmproj else None,
+                served_name=name, port=port, gpu=True, binary=llama)
+        record = ServingRecord(name, name, f"http://127.0.0.1:{port}/v1", spec.runtime, None, spec, f"setup.{name}")
+        try:
+            window, where, refusal = _priced(harness, record, config_dir=config_dir, memory=memory, floor=floor, unit=unit)
+        except Exception as exc:  # noqa: BLE001 — one file's failure is its own line, never the list's
+            window, where, refusal = None, None, f"{name} cannot run here: could not plan it ({type(exc).__name__})"
+        if refusal is not None:
+            shown_as = Path(name).name if spec.runtime == "vllm" else name
+            refusal = f"{name}{refusal.removeprefix(shown_as)}" if refusal.startswith(shown_as) \
+                else f"{name} cannot run here: {refusal}"
+        entries.append(PlanEntry(name, "setup", spec.runtime, window, where, refusal, setup=s))
+    return entries
+
+
 def plan_entries(
     harness: Any, *, live: Mapping[str, "tuple[str, ...] | None"], config_dir: Any, trust: Any,
     floor: int | None, library: Any = None, memory: Any = _UNSET, unit: Any = None,
@@ -1193,6 +1228,16 @@ def plan_entries(
             rate=rate(record.provider_type, record.served), path=path,
             others=tuple(r.name for r in twins if r is not record))
         (refused if refusal is not None else cold).append(entry)
+    if library is None:
+        from localharness.cli import library as library_mod
+        library = library_mod.listing(global_config_dir(config_dir))
+    named = {_model_file(r.spec) for r in records if r.spec is not None}
+    taken = {*(r.name for r in records), *(r.served for r in records), *shown}
+    for e in _setup_entries(
+            harness, replace(library, shown=tuple(
+                s for s in library.shown if s.real not in named and (s.checkpoint is None or s.checkpoint.repo_id not in named))),
+            taken, config_dir=config_dir, memory=memory, floor=floor, unit=unit):
+        (refused if e.refusal is not None else cold).append(e)
     if cold and foreign is not None:
         cold = [replace(e, refusal=workspace.incumbent_sentence(
             foreign, port=port, form="imperative", served=held, target=e.name)) for e in cold]
@@ -1222,6 +1267,7 @@ def entry_lines(entries: Entries) -> list[str]:
                 detail = _runtime_label(e.runtime)
                 detail += " · experts in RAM" if e.where == "experts in RAM" else ""
                 detail += f" · {e.window:,}" if e.window is not None else ""
+                detail += " (not set up)" if e.kind == "setup" else ""
             if group.numbered:
                 n += 1
                 lead = f"  {n}. "
