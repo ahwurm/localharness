@@ -78,12 +78,15 @@ def test_a_strata_record_with_extra_args_is_refused():
     assert "bind_all and extra_args do not apply" in _refusal(extra_args=["--x"])
 
 
-@pytest.mark.parametrize("missing", [("engine_dir",), ("engine_config",), ("served_name",), ("engine_dir", "served_name")])
-def test_a_strata_record_without_its_required_fields_is_refused_naming_them(missing):
+@pytest.mark.parametrize("missing,said", [
+    (("engine_dir",), "engine_dir"), (("engine_config",), "engine_config"), (("served_name",), "served_name"),
+    (("engine_dir", "served_name"), "engine_dir and served_name"),
+    (("engine_dir", "engine_config", "served_name"), "engine_dir, engine_config and served_name")])
+def test_a_strata_record_without_its_required_fields_is_refused_naming_only_them(missing, said):
     fields = {k: v for k, v in _bare().items() if k not in missing}
     with pytest.raises(ValidationError) as caught:
         ManagedServerConfig(**fields)
-    assert f"runtime=strata requires {', '.join(missing)}" in str(caught.value)
+    assert f"runtime=strata requires {said}" in str(caught.value)
 
 
 @pytest.mark.parametrize("config", ["/etc/strata.json", "../strata.json", "a/../../strata.json"])
