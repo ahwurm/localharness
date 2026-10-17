@@ -361,7 +361,7 @@ RAM_UNKNOWN_REFUSAL = ("{name} cannot run here: its experts need {need} GiB of R
                        "(/proc/meminfo) — pick a quant whose experts fit the GPU.")
 NGL_REFUSAL = ("{name} sets -ngl in server.extra_args, which turns llama-server's --fit off, and its experts do not "
                "fit the GPU — drop the -ngl, or add --n-cpu-moe to extra_args.")
-CONTEXT_FLOOR_REFUSAL = ("{name} is set to {window} (context:) and the harness needs at least {floor:,} — raise it, "
+CONTEXT_FLOOR_REFUSAL = ("{name} is set to {window} ({where}) and the harness needs at least {floor:,} — raise it, "
                          "or unset it so the harness sizes the window.")
 FLOOR_REFUSAL = ("{name} fits only {window} here and the harness needs at least {floor:,} — free GPU memory, "
                  "or pick a smaller model.")
@@ -717,9 +717,13 @@ def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, auto
     if spec.context is not None:
         mode, asked, ctx_kw = "record", spec.context, None
         if floor and spec.context < floor:
-            refusal = CONTEXT_FLOOR_REFUSAL.format(name=_label(spec), window=window_phrase(spec.context), floor=floor)
+            refusal = CONTEXT_FLOOR_REFUSAL.format(name=_label(spec), window=window_phrase(spec.context), where="context:", floor=floor)
     elif has_c:
         mode, asked, ctx_kw = "extra_args", None, None
+        sized = _flag_value(extra, ("-c", "--ctx-size"))
+        if floor and sized and sized.isdigit() and 0 < int(sized) < floor:
+            refusal = CONTEXT_FLOOR_REFUSAL.format(
+                name=_label(spec), window=window_phrase(int(sized)), where="-c in extra_args", floor=floor)
     elif by_hand or mem is None:
         mode, asked, ctx_kw = "not-computed", None, None
     elif placed is not None and placed.refusal is not None:
@@ -760,7 +764,7 @@ def price_vllm(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, autosens
     if spec.context is not None:
         mode, asked, ctx_kw = "record", spec.context, None
         if floor and spec.context < floor:
-            refusal = CONTEXT_FLOOR_REFUSAL.format(name=_label(spec), window=window_phrase(spec.context), floor=floor)
+            refusal = CONTEXT_FLOOR_REFUSAL.format(name=_label(spec), window=window_phrase(spec.context), where="context:", floor=floor)
     elif chosen:
         mode, asked, ctx_kw = "extra_args", None, None
     elif placed is not None and placed.refusal is not None:
