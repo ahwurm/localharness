@@ -55,6 +55,7 @@ class StartWorld:
             self.repls.append(repl)
 
         _stub_start_boundaries(scratch, monkeypatch, repl_run=keep)
+        monkeypatch.setattr(model_ops, "sense_serving", model_ops.sense_serving.real)
         self.out = _capture_start_console(monkeypatch)
         monkeypatch.setattr(start_cmd.err_console, "print",
                             lambda *a, **k: self.err.append(" ".join(str(x) for x in a)))

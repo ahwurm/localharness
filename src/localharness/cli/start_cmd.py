@@ -2124,11 +2124,15 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
             probe_ok, probed_mode, served_window, probe_error = await _probe_llm(_probe_client)
         else:
             probe_ok, probed_mode, served_window, probe_error = False, None, None, None
+    _selected_answers = start_serving.selected_answers(probe_ok, record, _sense, shared=_shared)
+    _other = None if _selected_answers else next((r for r in _sense.answering if r.prefix != record.prefix), None)
     decision = start_serving.decide(
         serving,
-        selected_answers=start_serving.selected_answers(probe_ok, record, _sense, shared=_shared),
+        selected_answers=_selected_answers,
         sense=_sense,
-        last_served=_speed_stats.last_served(_speed_stats.default_speed_stats_path(server_cfg_path)))
+        last_served=_speed_stats.last_served(_speed_stats.default_speed_stats_path(server_cfg_path)),
+        foreign=_other is not None
+        and await asyncio.to_thread(start_serving.foreign_holder, _other, server_cfg_path) is not None)
     # What a launch THIS start makes hands back (its LiveEndpoint: the window it got, the environment
     # names it dropped); empty when the server was already up or only loading — that start attaches.
     _launched: list = []
@@ -2235,6 +2239,9 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         # The one clause this attach carries, if any (D-13, D-15): said once, on stdout.
         for line in decision.lines:
             console.print(line, markup=False, soft_wrap=True)
+        _foreign_said = await asyncio.to_thread(start_serving.foreign_unit_line, decision.record, server_cfg_path)
+        if _foreign_said:
+            err_console.print(_foreign_said, markup=False, soft_wrap=True)
         if decision.kind == "attach_other":
             # Another record answers and nothing explicit asked otherwise: serve that one, never launch
             # beside it (D-15). The session moves onto it and the probe runs once more, there.

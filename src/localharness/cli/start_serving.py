@@ -40,6 +40,7 @@ from localharness.provider.autosense import WindowReport
 RESUME_CLAUSE = "your last /model choice"
 ATTACH_LINE = "Serving {name} ({clause})"
 OTHER_SERVING_LINE = "serving {serving}; your last choice was {selected} — /model {selected} swaps"
+OTHER_SERVING_FOREIGN_LINE = "serving {serving}; your last choice was {selected}"
 NOT_LAUNCHABLE_LINE = (
     "{name} ({base_url}) is not answering and the harness does not launch it — starting on the primary")
 STARTING_LINE = "autostart is starting {name} (pid {pid}) — waiting up to {seconds}s"
@@ -111,7 +112,8 @@ def selected_answers(
 
 
 def decide(
-    serving: Serving, *, selected_answers: bool, sense: ServingSense, last_served: str | None
+    serving: Serving, *, selected_answers: bool, sense: ServingSense, last_served: str | None,
+    foreign: bool = False,
 ) -> Decision:
     """Pick the action: attach, swap, launch, or attach to the record that answers."""
     record = serving.record
@@ -123,7 +125,8 @@ def decide(
             return Decision("swap", record, answering, (), serving.rung)
         lines = ()
         if last_served != answering.name:
-            lines = (OTHER_SERVING_LINE.format(serving=answering.name, selected=record.name),)
+            line = OTHER_SERVING_FOREIGN_LINE if foreign else OTHER_SERVING_LINE
+            lines = (line.format(serving=answering.name, selected=record.name),)
         return Decision("attach_other", answering, None, lines, None)
     return Decision("launch", record, None, (), serving.rung)
 
@@ -275,6 +278,35 @@ def served_unit(base_url: str) -> str | None:
         return None
     holder = workspace.port_holder(port)
     return holder.unit if holder is not None else None
+
+
+def foreign_holder(record: ServingRecord, config_dir: Any) -> workspace.Holder | None:
+    """The unit holding a loopback record's port when the record's own launch is not what serves, else None."""
+    port = _port_of(record.base_url)
+    if port is None or not model_ops.is_loopback(record.base_url):
+        return None
+    holder = workspace.port_holder(port)
+    if holder is None or not holder.unit:
+        return None
+    identity = lifecycle.record_identity(record.spec) if record.spec is not None else None
+    if identity is not None:
+        launch = procfs.read_launch(config_dir, expect=identity)
+        if launch is not None and launch.verified:
+            return None
+    return holder
+
+
+def foreign_unit_line(record: ServingRecord, config_dir: Any) -> str | None:
+    """The foreign-unit sentence when a unit the harness did not write serves ``record`` and the ledger
+    has not heard this (unit, served) yet; recorded as said. Reads only: no unit is touched."""
+    holder = foreign_holder(record, config_dir)
+    if holder is None:
+        return None
+    ledger = speed_stats.default_speed_stats_path(config_dir)
+    if not speed_stats.foreign_unit_changed(ledger, holder.unit, record.served):
+        return None
+    speed_stats.record_foreign_unit(ledger, holder.unit, record.served)
+    return workspace.foreign_unit_sentence(holder, served=record.served, port=_port_of(record.base_url))
 
 
 def floor_line(name: str, base_url: str, unit: str | None, served: int, floor: int) -> str:
