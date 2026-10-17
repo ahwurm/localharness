@@ -7,12 +7,17 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+from localharness.agent.gate_types import Decision
 from localharness.cli import interview, model_cmd, model_ops, workspace
 from localharness.cli.app import app
 from localharness.config import trust
+from localharness.config.loader import ConfigLoader
+from localharness.provider import lifecycle
 from tests.unit.interview_support import UNREACHED, scripted
 from tests.unit.test_plan_entries_library import NVIDIA, cached, snapshot, with_vllm
-from tests.unit.test_serve_cmd import PRIMARY, serve_world
+from tests.unit.test_launch_paths_repl import _liveness_not_launched, _no_machine_probes  # noqa: F401 — autouse
+from tests.unit.test_repl_model_cmd import _xrepl
+from tests.unit.test_serve_cmd import PRIMARY, PRIMARY_URL, serve_world
 
 runner = CliRunner()
 
@@ -144,4 +149,101 @@ def test_a_snapshot_gone_since_the_listing_is_not_set_up(before, monkeypatch):
 
     assert result.exit_code == 2, result.output
     assert "is gone — nothing set up" in said(result)
+    assert (written(before), machine(before)) == before.before
+
+
+PEER_URL = "http://127.0.0.1:8082/v1"
+
+
+@pytest.fixture
+def session(box):
+    harness = ConfigLoader(config_dir=box.g, local_config_dir=None).load_harness()
+    repl, channel, agent, _ = _xrepl(box.g, harness, {PRIMARY_URL: [PRIMARY], PEER_URL: "unreachable"})
+    agent._llm.config.base_url, agent._llm.config.model = PRIMARY_URL, PRIMARY
+    agent._llm.config.provider_type = "llamacpp"
+    channel.requests = []
+    return harness, repl, channel
+
+
+def answering(channel, *kinds, local_operator=True, can_ask=True):
+    channel.local_operator, channel.can_ask = local_operator, can_ask
+    kinds = list(kinds)
+
+    async def ask(request):
+        channel.requests.append(request)
+        return Decision(kinds.pop(0))
+
+    channel.ask_permission = ask
+
+
+@pytest.fixture
+def swaps(monkeypatch):
+    targets = []
+
+    async def fake_swap(incumbent, target, **kw):
+        targets.append(target)
+        return lifecycle.SwapOutcome(None, None, None, RuntimeError("stop here"), "launch")
+
+    monkeypatch.setattr(lifecycle, "swap", fake_swap)
+    return targets
+
+
+@pytest.mark.asyncio
+async def test_the_repl_asks_through_the_channel_and_launches_what_it_set_up(box, session, swaps):
+    harness, repl, channel = session
+    answering(channel, "allow_once")
+
+    await repl._handle_slash(f"/model {NVIDIA}")
+
+    [request] = channel.requests
+    assert (request.grantable, request.reason) == (False, "Set it up and switch?")
+    assert request.tool_params == {"model": NVIDIA}
+    [peer] = peers(box)
+    assert any(m.startswith(f"• {peer['name']} (vLLM) ← {NVIDIA}") for m in channel.messages)
+    assert any(f"/model {peer['name']} switches in a session;" in m for m in channel.messages)
+    assert peer["name"] in [ep.name for ep in harness.extra_endpoints]
+    [target] = swaps
+    assert (target.spec.runtime, target.spec.model, target.spec.port) == ("vllm", NVIDIA, peer["lifecycle"]["port"])
+    prefix = f"extra_endpoints.{peer['name']}.lifecycle."
+    assert any(e["name"].startswith(prefix) for e in machine(box)["entries"])
+
+
+@pytest.mark.asyncio
+async def test_a_rejection_in_the_repl_writes_and_launches_nothing(before, session, swaps):
+    _, repl, channel = session
+    answering(channel, "reject_once")
+
+    await repl._handle_slash(f"/model {NVIDIA}")
+
+    assert len(channel.requests) == 1 and swaps == []
+    assert (written(before), machine(before)) == before.before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operator,can_ask", [(False, True), (True, False), (False, False)])
+async def test_a_channel_with_no_local_operator_is_told_where_to_set_it_up(before, session, swaps, operator, can_ask):
+    _, repl, channel = session
+    answering(channel, local_operator=operator, can_ask=can_ask)
+
+    await repl._handle_slash(f"/model {NVIDIA}")
+
+    assert channel.messages[-1] == OFF_TERMINAL
+    assert channel.requests == [] and swaps == []
+    assert (written(before), machine(before)) == before.before
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_gone_since_the_listing_is_not_launched_by_the_repl(before, session, swaps):
+    _, repl, channel = session
+
+    async def vanish(request):
+        shutil.rmtree(before.snapshot)
+        return Decision("allow_once")
+
+    answering(channel)
+    channel.ask_permission = vanish
+
+    await repl._handle_slash(f"/model {NVIDIA}")
+
+    assert "is gone — nothing set up" in channel.messages[-1] and swaps == []
     assert (written(before), machine(before)) == before.before
