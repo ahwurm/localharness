@@ -307,7 +307,10 @@ def foreign_unit_line(record: ServingRecord, config_dir: Any) -> str | None:
     ledger = speed_stats.default_speed_stats_path(config_dir)
     if not speed_stats.foreign_unit_changed(ledger, holder.unit, record.served):
         return None
-    speed_stats.record_foreign_unit(ledger, holder.unit, record.served)
+    try:
+        speed_stats.record_foreign_unit(ledger, holder.unit, record.served)
+    except OSError:
+        pass
     return workspace.foreign_unit_sentence(holder, served=record.served, port=_port_of(record.base_url))
 
 
