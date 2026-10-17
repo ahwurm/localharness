@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 # What callers hand to `provider.gguf_header.read_header` so the header holds exactly the fit's inputs.
 FIT_KEYS = frozenset({
     "block_count", "head_count_kv", "key_length", "embedding_length", "head_count", "context_length",
-    "nextn_predict_layers", "expert_count",
+    "nextn_predict_layers", "expert_count", "full_attention_interval", "indexer.key_length",
 })
 
 # Bytes per element of a KV cache type, from ggml's block sizes (bytes per block / elements per block).
@@ -144,6 +144,36 @@ def kv_heads(header: Mapping[str, Any]) -> int | None:
         ints = [v for v in value if _pos_int(v) is not None]
         return max(ints) if ints else None
     return _pos_int(value)
+
+
+@dataclass(frozen=True)
+class TensorSplit:
+    """The model's bytes by where they live (gpu, experts, input) and the layers that hold KV."""
+
+    gpu: int
+    experts: int
+    input: int
+    kv_main: int
+    kv_draft: int
+    indexer: int
+
+
+def read_split(model: str, header: Mapping[str, Any]) -> TensorSplit | None:
+    """The model's tensor table split by `classify` and `kv_layers`, or None when it is unreadable or
+    fails `cross_checked` (the caller then prices the whole file). Never raises."""
+    from localharness.provider import gguf_header as gh
+
+    try:
+        table = gh.read_tensor_table(os.path.expanduser(model))
+    except (OSError, ValueError):
+        return None
+    sums = {"gpu": 0, "experts": 0, "input": 0}
+    for e in table.entries:
+        sums[gh.classify(e.name)] += e.bytes
+    main, draft = gh.kv_layers(table.entries, header)
+    if not gh.cross_checked(sums, main, header, table.data_bytes):
+        return None
+    return TensorSplit(sums["gpu"], sums["experts"], sums["input"], main, draft, gh.indexer_layers(table.entries))
 
 
 def kv_bytes_per_token(header: Mapping[str, Any], cache_type_k: str | None,
