@@ -28,7 +28,7 @@ from localharness.provider import procfs
 from localharness.provider.tuning import MODEL_CONFIG_CAP
 
 __all__ = ["LIBRARY_FILE", "LIBRARY_VERSION", "LIBRARY_CAP", "Entry", "Library", "Shown", "Found", "Checkpoint",
-           "library_path", "scan", "peers_for", "free_ports", "checkpoints"]
+           "library_path", "scan", "peers_for", "free_ports", "checkpoints", "snapshots", "snapshot_of"]
 
 LIBRARY_FILE = "model-library.json"
 LIBRARY_VERSION = 1
@@ -36,6 +36,7 @@ LIBRARY_CAP = 1 << 20
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?")
 _TEXT_GENERATION = ("ForCausalLM", "ForConditionalGeneration")
+_EMBEDDING_FILES = ("modules.json", "config_sentence_transformers.json")
 
 
 def _repo_ok(repo: object) -> bool:
@@ -48,12 +49,15 @@ def _recorded_by(recorded: Collection[str], real: str, repo: str | None) -> bool
 
 @dataclass(frozen=True)
 class Checkpoint:
-    """A cached Hugging Face text-generation repo: its chosen snapshot directory (and that directory's realpath)."""
+    """A cached Hugging Face repo: its chosen snapshot directory (and that directory's realpath) and what it holds."""
 
     repo_id: str
     snapshot: Path
     real: str
     size: int
+    kind: str = "vllm"
+    refusal: str | None = None
+    ggufs: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -209,7 +213,8 @@ def _typed(known: Mapping[str, Entry], found: Mapping[str, tuple[Path, int]],
 def scan(roots: Iterable[str | os.PathLike[str]], recorded: Collection[str],
          library_path: str | os.PathLike[str], *, scope: Literal["new", "all"],
          rank: Callable[[list[DiscoveredModel]], Sequence[DiscoveredModel]],
-         first_run: bool = False, today: date | None = None, checkpoints: Sequence[Checkpoint] = ()) -> Found:
+         first_run: bool = False, today: date | None = None, checkpoints: Sequence[Checkpoint] = (),
+         extra: Sequence[Path] = ()) -> Found:
     """What the roots hold that `recorded` does not name: new is a first sighting in the library, never an mtime."""
     if scope not in ("new", "all"):
         raise ValueError(f"scope is 'new' or 'all', not {scope!r}")
@@ -219,7 +224,7 @@ def scan(roots: Iterable[str | os.PathLike[str]], recorded: Collection[str],
     baselined = (lib.missing or lib.corrupt) and not first_run
     stamp = (today or datetime.now(timezone.utc).date()).isoformat()
     found: dict[str, tuple[Path, int]] = {}
-    for path in walk_ggufs(roots):
+    for path in (*walk_ggufs(roots), *extra):
         real = os.path.realpath(path)
         if real in recorded or real in found:
             continue
@@ -297,17 +302,51 @@ def _generates_text(snapshot: Path) -> bool:
         isinstance(a, str) and a.endswith(_TEXT_GENERATION) for a in architectures)
 
 
+def _names(snapshot: Path) -> list[str]:
+    return sorted(p.relative_to(snapshot).as_posix() for p in snapshot.rglob("*"))
+
+
+def _snapshot_kind(snapshot: Path, names: Collection[str]) -> tuple[str | None, tuple[Path, ...]]:
+    """gguf when it holds a `.gguf`; vllm when it holds safetensors and a text-generation config; else None."""
+    ggufs = tuple(snapshot / n for n in names if n.lower().endswith(".gguf"))
+    if ggufs:
+        return "gguf", ggufs
+    if any(n in _EMBEDDING_FILES or any(part.endswith("_Pooling") for part in n.split("/")) for n in names):
+        return None, ()
+    if _generates_text(snapshot) and any(n.endswith(".safetensors") for n in names):
+        return "vllm", ()
+    return None, ()
+
+
+def _checkpoint(repo: Any) -> Checkpoint | None:
+    rev = max(repo.revisions, key=lambda r: ("main" in r.refs, r.last_modified), default=None)
+    if rev is None or not _repo_ok(repo.repo_id):
+        return None
+    snapshot = Path(rev.snapshot_path)
+    kind, ggufs = _snapshot_kind(snapshot, _names(snapshot))
+    if kind is None:
+        return None
+    return Checkpoint(repo.repo_id, snapshot, os.path.realpath(snapshot), repo.size_on_disk, kind, None, ggufs)
+
+
+def _model_repos() -> list[Any]:
+    return sorted((r for r in _cache_repos() if r.repo_type == "model" and r.size_on_disk > 0),
+                  key=lambda r: r.repo_id)
+
+
+def snapshots(*, limit: int = DISCOVERY_MAX_FILES) -> tuple[Checkpoint, ...]:
+    """The cached repos in repo-id order that hold a model, one snapshot each: the `main` revision, else the latest."""
+    return tuple(c for r in _model_repos()[:limit] if (c := _checkpoint(r)))
+
+
+def snapshot_of(repo_id: str) -> Checkpoint | None:
+    """The one repo's snapshot, resolved at the call."""
+    return next((c for r in _model_repos() if r.repo_id == repo_id and (c := _checkpoint(r))), None)
+
+
 def checkpoints(*, limit: int = DISCOVERY_MAX_FILES) -> tuple[Checkpoint, ...]:
-    """The cached text-generation repos in repo-id order, one snapshot each: the `main` revision, else the latest."""
-    repos = sorted((r for r in _cache_repos() if r.repo_type == "model" and r.size_on_disk > 0),
-                   key=lambda r: r.repo_id)
-    found: list[Checkpoint] = []
-    for repo in repos[:limit]:
-        rev = max(repo.revisions, key=lambda r: ("main" in r.refs, r.last_modified), default=None)
-        if rev is not None and _repo_ok(repo.repo_id) and _generates_text(Path(rev.snapshot_path)):
-            found.append(Checkpoint(repo.repo_id, Path(rev.snapshot_path), os.path.realpath(rev.snapshot_path),
-                                    repo.size_on_disk))
-    return tuple(found)
+    """The snapshots a vLLM launch can offer: kind vllm and no refusal."""
+    return tuple(c for c in snapshots(limit=limit) if c.kind == "vllm" and c.refusal is None)
 
 
 def free_ports(start: int, count: int, *, taken: Collection[int]) -> list[int]:
