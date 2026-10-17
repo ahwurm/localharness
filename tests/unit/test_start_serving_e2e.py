@@ -46,7 +46,6 @@ from tests.unit.test_start_cmd import _capture_start_console, _stub_start_bounda
 GIB = 2**30
 LLAMA = "/x/llama-server"
 FLASH_LOW = {**FLASH_ACTIVE, "effort": "low"}
-RESUME_LINE = "Serving flash-next (your last /model choice)"
 
 
 class World:
@@ -227,13 +226,13 @@ def world(home, monkeypatch, fake_proc):
 # ------------------------------------------------------------------------------- the tracer
 
 
-async def test_plain_start_resumes_the_peer_the_last_model_choice_named(world):
+async def test_plain_start_attaches_the_peer_the_last_model_choice_named(world):
     world.config(active=FLASH_LOW, last_served=PRIMARY)
     world.answering = {PEER_URL}
 
     lines = await world.start()
 
-    assert [x for x in lines if x.startswith("Serving ")] == [RESUME_LINE]
+    assert not [x for x in lines if x.startswith("Serving ")]
     assert world.starts == [] and not [e for e in world.events if e.startswith("start")]
     # both LLMConfig builds (the probe client and the session's) are the peer's, on the peer's served name
     assert world.session_urls() == {(PEER_URL, "flash-next")}
@@ -246,7 +245,7 @@ async def test_plain_start_resumes_the_peer_the_last_model_choice_named(world):
 async def test_a_second_start_the_same_way_prints_no_resume_clause(world):
     world.config(active=FLASH_LOW, last_served=PRIMARY)
     world.answering = {PEER_URL}
-    assert RESUME_LINE in await world.start()
+    await world.start()
     again = await world.start()
     assert not [x for x in again if x.startswith("Serving ")]
     assert world.last_served == "flash-next"
