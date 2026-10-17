@@ -657,7 +657,7 @@ class WindowReport:
 
 @dataclass(frozen=True)
 class Price:
-    report: WindowReport
+    report: WindowReport | None
     context: int | None
     cache_ram: int | None
     full_fit: int | None
@@ -738,7 +738,7 @@ def price_vllm(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, autosens
     elif fits:
         mode, asked, ctx_kw = "fit", fits, fits
     else:
-        mode, asked, ctx_kw = "not-computed", None, None
+        return Price(None, None, None, None)
     trained = _pos_int(_config_value(config, "max_position_embeddings")) if config is not None else None
     report = WindowReport(
         served=None, trained=trained, fits=fits, free_bytes=mem.free_bytes if mem else None,

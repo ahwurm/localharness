@@ -458,7 +458,7 @@ def _window_part(plan) -> str | None:
         return None
     if report.mode == "fit":
         return f"-c {report.asked} (fit)"
-    if report.mode == "fit-by-server":
+    if report.mode in ("fit-by-server", "not-computed"):
         return "-c left to llama-server --fit"
     if report.mode == "record":
         return f"-c {report.asked} (the record)"
