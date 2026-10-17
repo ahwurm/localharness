@@ -315,31 +315,65 @@ def _cache_ram(meminfo: Mapping[str, int] | None, experts_ram: int, ratios: Any)
     return max(0, int(cap // _MIB))
 
 
+VRAM_REFUSAL = ("{name} cannot run here: it needs {need} GiB of GPU memory{window} and {free} GiB is free — "
+                "stop what holds the GPU, or pick a smaller quant.")
+RAM_REFUSAL = ("{name} cannot run here: its experts need {need} GiB of RAM and only {free} GiB is free beside the "
+               "system's reserve — close something that holds RAM, or pick a smaller quant.")
+RAM_UNKNOWN_REFUSAL = ("{name} cannot run here: its experts need {need} GiB of RAM and the free RAM cannot be read "
+                       "(/proc/meminfo) — pick a quant whose experts fit the GPU.")
+NGL_REFUSAL = ("{name} sets -ngl in server.extra_args, which turns llama-server's --fit off, and its experts do not "
+               "fit the GPU — drop the -ngl, or add --n-cpu-moe to extra_args.")
+FLOOR_REFUSAL = ("{name} fits only {window} here and the harness needs at least {floor:,} — free GPU memory, "
+                 "or pick a smaller model.")
+
+
+def window_phrase(n: int) -> str:
+    """"a 4,096-token window", "an 8,448-token window": the article follows how the number is read."""
+    lead = f"{n:,}".split(",")[0]
+    return f"{'an' if lead in ('8', '11', '18') or lead.startswith('8') else 'a'} {n:,}-token window"
+
+
 def place_llamacpp(split: TensorSplit | None, header: Mapping[str, Any], *, name: str, weights: int, mmproj: int,
                    free_bytes: int, meminfo: Mapping[str, int] | None, cache_type_k: str | None,
                    cache_type_v: str | None, share: float, autosense: Any, floor: int | None = None,
                    ngl_hand: bool = False) -> Placement:
-    """Experts on the GPU first, in RAM when that misses the floor; the whole file on the GPU without a split."""
+    """Experts on the GPU first, in RAM when that misses the floor; the whole file on the GPU without a split.
+    A refusal is a field of the result, never an exception."""
     gpu = split.gpu + mmproj if split else weights
     experts = split.experts if split else 0
     margin = int(autosense.compute_margin_ratio * gpu)
     kv = kv_bytes_per_token(header, cache_type_k, cache_type_v, split)
     kv = kv * share if kv is not None else None
     trained = _pos_int(header.get("context_length"))
+    label = "".join(c for c in name if c.isprintable())
 
-    def made(fits: int, where: str, experts_ram: int = 0) -> Placement:
-        return Placement(fits or None, where, gpu, mmproj, experts_ram, kv, free_bytes, free_bytes,
-                         _cache_ram(meminfo, experts_ram, autosense), None)
+    def made(fits: int, where: str | None, experts_ram: int = 0, refusal: str | None = None) -> Placement:
+        return Placement(fits or None, None if refusal else where, gpu, mmproj, experts_ram, kv, free_bytes,
+                         free_bytes, _cache_ram(meminfo, experts_ram, autosense), refusal)
 
+    def decided(window: int, where: str, experts_ram: int = 0) -> Placement:
+        if window <= 0:
+            plus = f" plus {window_phrase(floor)}" if floor else ""
+            return made(0, where, refusal=VRAM_REFUSAL.format(
+                name=label, need=gib(gpu), window=plus, free=gib(free_bytes)))
+        if floor and window < floor:
+            return made(window, where, refusal=FLOOR_REFUSAL.format(
+                name=label, window=window_phrase(window), floor=floor))
+        return made(window, where, experts_ram)
+
+    if ngl_hand and experts > 0 and gpu + experts > free_bytes:
+        return made(0, None, refusal=NGL_REFUSAL.format(name=label))
     if kv is None or trained is None:
-        return Placement(None, None, gpu, mmproj, 0, kv, free_bytes, free_bytes, _cache_ram(meminfo, 0, autosense), None)
+        return made(0, None)
     on_gpu = _window(free_bytes - gpu - margin - experts, kv, trained)
-    if on_gpu >= (floor or 1) or not (split and experts > 0 and _pos_int(header.get("expert_count"))):
-        return made(on_gpu, "gpu")
-    ram_room = meminfo["MemAvailable"] - autosense.unified_reserve_ratio * meminfo["MemTotal"] if meminfo else None
-    if ram_room is None or experts > ram_room:
-        return made(on_gpu, "gpu")
-    return made(_window(free_bytes - gpu - margin, kv, trained), "experts in RAM", experts)
+    if on_gpu >= max(floor or 0, 1) or not (split and experts > 0 and _pos_int(header.get("expert_count"))) or ngl_hand:
+        return decided(on_gpu, "gpu")
+    if meminfo is None:
+        return made(0, None, refusal=RAM_UNKNOWN_REFUSAL.format(name=label, need=gib(experts)))
+    ram_room = meminfo["MemAvailable"] - autosense.unified_reserve_ratio * meminfo["MemTotal"]
+    if experts > ram_room:
+        return made(0, None, refusal=RAM_REFUSAL.format(name=label, need=gib(experts), free=gib(max(0, ram_room))))
+    return decided(_window(free_bytes - gpu - margin, kv, trained), "experts in RAM", experts)
 
 
 def has_ctx_arg(extra_args: Sequence[str]) -> bool:
