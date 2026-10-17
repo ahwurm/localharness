@@ -1102,16 +1102,21 @@ NO_REMOTE_CODE = "{name} cannot run here: {why} — the harness never passes --t
 
 def _setup_entries(harness: Any, listed: Any, taken: set[str], *, config_dir: Any, memory: Any, floor: int | None,
                    unit: Any) -> list[PlanEntry]:
-    """One entry per file or snapshot no record names, priced as a record would be."""
+    """One entry per file or snapshot the loaded records do not name, priced as a record would be."""
     from localharness.cli import library
     from localharness.config.models import ManagedServerConfig
 
+    if listed is None:
+        listed = library.listing(global_config_dir(config_dir))
+    named = {_model_file(r.spec) for r in serving_records(harness) if r.spec is not None}
     server = getattr(harness, "server", None)
     llama = server.binary if server is not None and RUNTIMES[server.runtime].gguf else None
     port = library.PRIMARY_PORT + 1
     entries = [PlanEntry(c.repo_id, "setup", "vllm", refusal=NO_REMOTE_CODE.format(name=c.repo_id, why=c.refusal))
                for c in listed.refused]
     for s in listed.shown:
+        if s.real in named or (s.checkpoint is not None and s.checkpoint.repo_id in named):
+            continue
         if s.checkpoint is not None:
             name = s.checkpoint.repo_id
             if listed.vllm is None:
@@ -1236,15 +1241,8 @@ def plan_entries(
             rate=rate(record.provider_type, record.served), path=path,
             others=tuple(r.name for r in twins if r is not record))
         (refused if refusal is not None else cold).append(entry)
-    if library is None:
-        from localharness.cli import library as library_mod
-        library = library_mod.listing(global_config_dir(config_dir))
-    named = {_model_file(r.spec) for r in records if r.spec is not None}
     taken = {*(r.name for r in records), *(r.served for r in records), *shown}
-    for e in _setup_entries(
-            harness, replace(library, shown=tuple(
-                s for s in library.shown if s.real not in named and (s.checkpoint is None or s.checkpoint.repo_id not in named))),
-            taken, config_dir=config_dir, memory=memory, floor=floor, unit=unit):
+    for e in _setup_entries(harness, library, taken, config_dir=config_dir, memory=memory, floor=floor, unit=unit):
         (refused if e.refusal is not None else cold).append(e)
     unit_sentence = key = None
     if foreign is not None and foreign.unit:
