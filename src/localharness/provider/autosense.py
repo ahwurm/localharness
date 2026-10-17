@@ -227,6 +227,15 @@ def _size(path: Path) -> int:
     return st.st_size
 
 
+def checkpoint_bytes(directory: str | os.PathLike[str]) -> int | None:
+    """Bytes of one directory's `*.safetensors` files (a link is followed for its size only, as in a Hugging Face snapshot); stat only. None when there are none or the directory cannot be read."""
+    try:
+        sizes = [_size(p) for p in sorted(Path(directory).glob("*.safetensors")) if not p.is_dir()]
+    except OSError:
+        return None
+    return sum(sizes) if sizes else None
+
+
 def weights_bytes(model: str, mmproj: str | None = None) -> int | None:
     """Bytes of the GGUF, of its split shards (siblings named `<prefix>-0000N-of-0000M.gguf` when
     the model's own name has that shape) and of `mmproj`. Stat only, never an open. None when any
@@ -703,6 +712,39 @@ def price_llamacpp(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, auto
         weights_bytes=weights, asked=asked, mode=mode, attached=False, retried=False,
         verified=False, runtime="llamacpp", placement=placed, floor=floor)
     return Price(report, ctx_kw, cache_kw, fits if mode == "fit" else None, refusal, fit_ctx)
+
+
+def price_vllm(spec: ManagedServerConfig, sensed: Sensed, tuned: Tuned, autosense: Any,
+               floor: int | None = None) -> Price:
+    """`--max-model-len` from the checkpoint's config.json and safetensors bytes; a checkpoint beyond the GPU is the refusal."""
+    entry = spec.entry_for(spec.model)
+    extra = [*(spec.extra_args or []), *(entry.extra_args if entry is not None else [])]
+    mem, config, weights = sensed.memory, sensed.model_config, sensed.weights
+    chosen = spec.context is not None or _flag_value(extra, ("--max-model-len",)) is not None
+    placed = None
+    if mem is not None and config is not None and weights is not None:
+        placed = place_vllm(config, name=_label(spec), weights=weights, total_bytes=mem.total_bytes,
+                            extra_args=extra, autosense=autosense, floor=None if chosen else floor)
+    fits = placed.fits if placed else None
+    refusal = None
+    if spec.context is not None:
+        mode, asked, ctx_kw = "record", spec.context, None
+        if floor and spec.context < floor:
+            refusal = CONTEXT_FLOOR_REFUSAL.format(name=_label(spec), window=window_phrase(spec.context), floor=floor)
+    elif chosen:
+        mode, asked, ctx_kw = "extra_args", None, None
+    elif placed is not None and placed.refusal is not None:
+        mode, asked, ctx_kw, refusal = "fit", None, None, placed.refusal
+    elif fits:
+        mode, asked, ctx_kw = "fit", fits, fits
+    else:
+        mode, asked, ctx_kw = "not-computed", None, None
+    trained = _pos_int(_config_value(config, "max_position_embeddings")) if config is not None else None
+    report = WindowReport(
+        served=None, trained=trained, fits=fits, free_bytes=mem.free_bytes if mem else None,
+        total_bytes=mem.total_bytes if mem else None, weights_bytes=weights, asked=asked, mode=mode,
+        verified=False, runtime="vllm", placement=placed, floor=floor)
+    return Price(report, ctx_kw, None, fits if mode == "fit" else None, refusal)
 
 
 def gib(n: float) -> str:

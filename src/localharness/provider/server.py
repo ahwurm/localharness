@@ -693,10 +693,12 @@ def _ollama_argv(srv: ManagedServerConfig, **_: Any) -> list[str]:
 
 def _vllm_argv(
     srv: ManagedServerConfig, *, loop: bool, keyed: bool, reasoning_parser: str | None,
-    tool_call_parser: str | None, **_: Any,
+    tool_call_parser: str | None, context: int | None = None, **_: Any,
 ) -> list[str]:
     entry = srv.entry_for(srv.model)
     extra = [*srv.extra_args, *(entry.extra_args if entry is not None else [])]
+    ctx = srv.context if srv.context is not None else context
+    window = ["--max-model-len", str(ctx)] if ctx is not None and not any(t.partition("=")[0] == "--max-model-len" for t in extra) else []
     rp = srv.reasoning_parser if srv.reasoning_parser is not None else reasoning_parser
     tp = srv.tool_call_parser if srv.tool_call_parser is not None else tool_call_parser
     rp = None if rp == "off" else rp
@@ -727,11 +729,12 @@ def _vllm_argv(
             "--model", model_arg,
             *served,
             *parsers,
+            *window,
             *extra,
         ]
     model_arg = str(Path(entry.path).expanduser()) if entry is not None else srv.model
     served = ["--served-model-name", entry.name] if entry is not None else []
-    return [str(srv.binary), "serve", model_arg, "--port", str(srv.port), *served, *parsers, *extra,
+    return [str(srv.binary), "serve", model_arg, "--port", str(srv.port), *served, *parsers, *window, *extra,
             *(["--host", "127.0.0.1"] if loop else [])]
 
 

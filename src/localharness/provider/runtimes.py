@@ -82,7 +82,7 @@ RUNTIMES: Mapping[str, Runtime] = MappingProxyType({
         name="vLLM", strategy=_strategy("ManagedVllmStrategy"),
         unit_servable=lambda spec: spec.launch == "binary",
         label=lambda spec: "vLLM binary" if spec.launch == "binary" else "docker",
-        key_env="VLLM_API_KEY", probe=_probe("_probe_openai"), price=None, argv=_argv("_vllm_argv"), facts=_parsers,
+        key_env="VLLM_API_KEY", probe=_probe("_probe_openai"), price=_price("price_vllm"), argv=_argv("_vllm_argv"), facts=_parsers,
         record_fields=("reasoning_parser", "tool_call_parser"),
         gguf=False, checkpoint=True, path_binary=None, exposed_by_default=True,
         scrub=("VLLM_API_KEY",), window_note=None, derived_args=MappingProxyType({})),

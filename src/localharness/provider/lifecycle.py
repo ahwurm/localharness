@@ -268,9 +268,16 @@ class ManagedVllmStrategy:
                 raise RuntimeError(f"{again}\n{parser_pin_hint(retry, record_prefix=where)}") from None
             plan = retry
         handle = server.DOCKER_CONTAINER_NAME if spec.launch == "docker" else pid
-        # No fit for vLLM (D-10): the plan derives the parsers only and `window` stays None.
+        report = plan.report if plan is not None else None
+        if report is not None:
+            from localharness.agent.context import probe_window
+
+            probe = await asyncio.to_thread(
+                probe_window, base_url, served[0] if served else None, spec.runtime, api_key=api_key)
+            report = dataclasses.replace(
+                report, served=probe.served, trained=report.trained or probe.trained, verified=probe.served is not None)
         live = LiveEndpoint(base_url=base_url, served_models=served, handle=handle, note=decision.note,
-                            dropped_env=tuple(dropped), tuned=plan.tuned if plan else None)
+                            window=report, dropped_env=tuple(dropped), tuned=plan.tuned if plan else None)
         if plan is not None:
             confirm_launch(config_dir, record_key(spec), plan=plan, live=live)
         return live
@@ -436,7 +443,12 @@ def sense_launch(
         sensed = Sensed(spec.runtime, config_dir, fi.header, fi.offload, fi.memory, fi.weights, fi.meminfo,
                         remembered=remembered, split=fi.split, mmproj=fi.mmproj)
     elif row.checkpoint:
-        sensed = Sensed(spec.runtime, config_dir, model_config=tuning.read_model_config(spec))
+        config = tuning.read_model_config(spec)
+        memory = weights = None
+        path = tuning._checkpoint_config_path(spec) if config is not None else None
+        if path is not None:
+            memory, weights = _auto.free_memory(autosense), _auto.checkpoint_bytes(os.path.dirname(path))
+        sensed = Sensed(spec.runtime, config_dir, model_config=config, memory=memory, weights=weights)
     else:
         return Sensed(spec.runtime, config_dir)
     if unit is None:
