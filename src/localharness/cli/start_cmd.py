@@ -2015,6 +2015,7 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if agent_config.model != "inherit"
         else provider.default_model
     )
+    _floor = await start_serving.launch_floor(agent_config, config_dir=server_cfg_path)
     if model_override:
         # --model (session-only, never persisted): restricted to a model ALREADY being served.
         # A harness-managed single-model server (llama.cpp/vLLM) serves exactly one checkpoint at
@@ -2482,13 +2483,17 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
     from localharness.config.effort import resolve_effort
     _effort_level, _effort_rung = resolve_effort(None, agent_config.effort, harness, provider.base_url)
     _effort_ratios = (harness.effort_budget.low_ratio, harness.effort_budget.high_ratio)
-    # #145: a served window that cannot hold a reply reserve cannot run AT ALL — history is
-    # allowed to fill the whole thing, so prompt + max_tokens overruns it on the first real turn
-    # whatever the config says, and clamp_response_tokens has no reserve to fit the reply into.
-    # Keyed to the SERVED window, not the resolved budget: a deliberately tiny budget on a roomy
-    # server is safe (the request still fits the server) and must not be swept up in this.
-    # (`_served and …` also narrows away the None/unknown case: no window read, no refusal.)
-    _unrunnable = bool(_served and response_reserve(_served) <= 0)
+    async def _exit_under_floor(floor: int | None) -> None:
+        # a window with no reply reserve (1,024 or less) is under every floor, whatever the figure
+        if not _served or (_served >= (floor or 0) and response_reserve(_served) > 0):
+            return
+        unit = await asyncio.to_thread(start_serving.served_unit, provider.base_url)
+        err_console.print(
+            start_serving.floor_line(resolved_model, provider.base_url, unit, _served, floor or 0),
+            markup=False, soft_wrap=True)
+        raise typer.Exit(1)
+
+    await _exit_under_floor(_floor)
     if _bound != _cfg_window:
         from localharness.config.defaults import DEFAULT_MAX_CONTEXT_TOKENS
         # #127: the untouched FACTORY default must never hard-block startup — on the reference
@@ -2498,7 +2503,6 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
         if (
             _cfg_window == DEFAULT_MAX_CONTEXT_TOKENS
             and _bound >= MIN_CONFIGURABLE_CONTEXT_TOKENS
-            and not _unrunnable  # never auto-fit onto a window that cannot run
         ):
             if changed:  # D-23: said once per (runtime, model), again when the window moved
                 console.print(
@@ -2508,34 +2512,20 @@ async def _start_async(agent_name: str | None, verbose: bool, debug: bool, confi
                 )
             agent_config.context.max_context_tokens = _bound
             _cfg_window = _bound
-    # `or _unrunnable`: an explicit budget EQUAL to a too-small served window agrees with the
-    # bound, so the disagreement gate alone would wave it through to a guaranteed 400.
-    if _bound != _cfg_window or _unrunnable:
-        # The bound printed is the SAME expression the check enforces — the old message derived its
-        # own unfloored number and could tell the user to set an unsatisfiable "≤ 0".
-        if _unrunnable or _bound < MIN_CONFIGURABLE_CONTEXT_TOKENS:
-            err_console.print(
-                f"[bold red]Error:[/bold red] the context window served for '{resolved_model}' "
-                f"({_served}) is too small to run the harness: at or below 1,024 tokens nothing is "
-                "left to hold the model's reply once history fits, so every request would overrun "
-                f"the window (the configurable minimum is {MIN_CONFIGURABLE_CONTEXT_TOKENS}; the "
-                "practical one is 1,025). Raise the window at the SERVER (llama.cpp `-c`, Ollama "
-                "`OLLAMA_CONTEXT_LENGTH`, LM Studio's context length) and start again."
-            )
-        else:
-            # #137: name the setting that actually GOVERNS this number. When the budget came from
-            # a pin, "set context.max_context_tokens ≤ N" is a loop that changes nothing — the pin
-            # outranks the scalar on the next start too.
-            _key = (
-                f"context.model_context_overrides['{resolved_model}']" if _pinned
-                else "context.max_context_tokens"
-            )
-            err_console.print(
-                f"[bold red]Error:[/bold red] {_key}={_cfg_window} exceeds the "
-                f"window served for '{resolved_model}' ({_bound}). It would 400 mid-session. "
-                f"Set {_key} ≤ {_bound} (under org: in config.yaml, or in the agent's yaml — it "
-                f"is not a top-level key), or raise the served window at the server."
-            )
+    if _bound != _cfg_window:
+        # #137: name the setting that actually GOVERNS this number. When the budget came from
+        # a pin, "set context.max_context_tokens ≤ N" is a loop that changes nothing — the pin
+        # outranks the scalar on the next start too.
+        _key = (
+            f"context.model_context_overrides['{resolved_model}']" if _pinned
+            else "context.max_context_tokens"
+        )
+        err_console.print(
+            f"[bold red]Error:[/bold red] {_key}={_cfg_window} exceeds the "
+            f"window served for '{resolved_model}' ({_bound}). It would 400 mid-session. "
+            f"Set {_key} ≤ {_bound} (under org: in config.yaml, or in the agent's yaml — it "
+            f"is not a top-level key), or raise the served window at the server."
+        )
         raise typer.Exit(1)
 
     # The session's per-reply cap — the agent's RESOLVED max_tokens (agent yaml -> division ->

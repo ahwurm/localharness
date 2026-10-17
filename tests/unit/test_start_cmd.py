@@ -1272,7 +1272,8 @@ async def test_start_window_guard_small_window_names_the_server_fix(tmp_path, mo
 
     #145: the threshold moved with the semantic — the bound is the served window itself, so a
     4,096-token Ollama is now merely TIGHT (it runs on 3,584 usable), not impossible. Only a
-    window below the configurable minimum is unrunnable, and that is what this asserts."""
+    window below the configurable minimum is unrunnable, and that is what this asserts. The
+    refusal is the harness-floor sentence; its remedy is the server's window."""
     import typer
     from localharness.cli.start_cmd import _start_async
 
@@ -1284,8 +1285,8 @@ async def test_start_window_guard_small_window_names_the_server_fix(tmp_path, mo
 
     msg = "\n".join(errs)
     assert "≤ 0" not in msg and "≤ -" not in msg, f"unsatisfiable remedy: {msg}"
-    assert "too small" in msg
-    assert "OLLAMA_CONTEXT_LENGTH" in msg, "name the server-side knob that actually fixes it"
+    assert "serves a 512-token window and the harness needs at least" in msg
+    assert "raise the window at the server" in msg, "name the server-side fix"
 
 
 async def test_start_threads_config_dir_into_llm_config(tmp_path, monkeypatch):
@@ -1413,8 +1414,8 @@ async def test_start_refuses_a_window_with_no_room_for_a_reply(tmp_path, monkeyp
         await _start_async(None, False, False, str(tmp_path))
 
     msg = "\n".join(errs)
-    assert "too small" in msg, msg
-    assert "OLLAMA_CONTEXT_LENGTH" in msg, "name the server-side knob that actually fixes it"
+    assert f"serves a {served:,}-token window and the harness needs at least" in msg, msg
+    assert "raise the window at the server" in msg, "name the server-side fix"
     assert "below 1,000" not in msg, f"1,024 is not below the 1,000 minimum — say why it fails: {msg}"
     assert not [c for c in seen if c.provider_type], "no session client may be built for it"
 
@@ -1437,7 +1438,7 @@ async def test_start_refuses_a_tiny_window_even_when_the_config_agrees_with_it(
     with pytest.raises(typer.Exit):
         await _start_async(None, False, False, str(tmp_path))
 
-    assert "too small" in "\n".join(errs), errs
+    assert "the harness needs at least" in "\n".join(errs), errs
 
 
 async def test_start_accepts_the_smallest_runnable_window(tmp_path, monkeypatch):
@@ -1450,6 +1451,10 @@ async def test_start_accepts_the_smallest_runnable_window(tmp_path, monkeypatch)
     from localharness.provider.client import LLMClient
 
     _stub_nonvllm_start(tmp_path, monkeypatch, served=1_025, probe_window=None)
+
+    async def _small_floor(agent_config, *, config_dir):
+        return 256
+    monkeypatch.setattr("localharness.cli.start_serving.launch_floor", _small_floor)
     seen: list = []
     real_init = LLMClient.__init__
 
@@ -2498,6 +2503,7 @@ def test_hard_fail_in_resource_window_process_exits_not_hangs(tmp_path):
         import asyncio, sys
         import typer
         import localharness.cli.start_cmd as sc
+        import localharness.cli.start_serving
         import localharness.agent.context as ctx
         import localharness.memory.sqlite as sq
 
@@ -2640,7 +2646,7 @@ def test_managed_server_running_lmstudio_is_endpoint_based_not_pidfile(monkeypat
 @pytest.mark.parametrize(
     "served, fragment",
     [
-        (512, "too small"),          # bound < MIN_CONFIGURABLE_CONTEXT_TOKENS branch (#145: the
+        (512, "the harness needs at least"),          # bound < MIN_CONFIGURABLE_CONTEXT_TOKENS branch (#145: the
                                      # bound is now the served window, so only a sub-1_000 server
                                      # is unrunnable — 4_500 is tight but legal)
         (8_192, "max_context_tokens"),  # config-exceeds-served branch
