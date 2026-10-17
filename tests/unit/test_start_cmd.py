@@ -1048,6 +1048,19 @@ def _stub_start_boundaries(tmp_path, monkeypatch, *, capture_session_id=None, re
         return (True, "native", 262_144, None)
     monkeypatch.setattr("localharness.cli.start_cmd._probe_llm", fake_probe)
 
+    from localharness.cli import model_ops
+
+    real_sense = model_ops.sense_serving
+
+    async def fake_sense(harness, records, **kw):
+        # the sensor agrees with the fake probe: the primary's own address serves
+        records = tuple(records)
+        got = await real_sense(harness, [r for r in records if r.prefix != "server"], **kw)
+        ids = {**got.ids, **{r.base_url: ("m",) for r in records if r.prefix == "server"}}
+        return model_ops.ServingSense(got.answering, ids)
+    fake_sense.real = real_sense
+    monkeypatch.setattr("localharness.cli.model_ops.sense_serving", fake_sense)
+
     class _StubTokenCounter:
         # the real TokenCounter FAILS LOUD without a /tokenize server
         approximate = False
