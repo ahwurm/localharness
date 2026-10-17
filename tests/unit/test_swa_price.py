@@ -190,21 +190,24 @@ def _vllm_room(weights, total):
     return int(0.9 * total) - weights - int(AUTO.compute_margin_ratio * weights)
 
 
-def test_a_vllm_gemma_prices_global_heads_on_the_full_layers_and_a_bounded_cache_on_the_sliding_ones():
-    weights, total = 10 * GIB, 48 * GIB
+@pytest.mark.parametrize("card,trained_window", [(48, True), (24, False)])
+def test_a_vllm_gemma_prices_global_heads_on_the_full_layers_and_a_bounded_cache_on_the_sliding_ones(card, trained_window):
+    weights, total = 10 * GIB, card * GIB
     placed = _vllm(_config(GEMMA_VLLM), weights=weights, total=total)
     kv, cell, cap = 10 * 2 * 4 * 512 * 2, 50 * 2 * 16 * 256 * 2, 1024 + 2 * 2048
     assert placed.kv_per_token == kv
-    assert placed.fits == _largest(_vllm_room(weights, total), kv, cell, cap, 262_144) and placed.fits < 262_144
+    assert placed.fits == _largest(_vllm_room(weights, total), kv, cell, cap, 262_144)
+    assert (placed.fits == 262_144) is trained_window
     assert placed.swa_bytes == cell * cap
 
 
 def test_max_num_batched_tokens_in_extra_args_widens_the_sliding_cache():
-    weights, total = 10 * GIB, 48 * GIB
+    weights, total = 10 * GIB, 24 * GIB
     placed = _vllm(_config(GEMMA_VLLM), weights=weights, total=total, extra_args=["--max-num-batched-tokens", "8192"])
     kv, cell, cap = 81_920, 819_200, 1024 + 2 * 8192
     assert placed.fits == _largest(_vllm_room(weights, total), kv, cell, cap, 262_144)
-    assert placed.swa_bytes == cell * cap
+    assert placed.swa_bytes == cell * min(placed.fits, cap)
+    assert placed.fits < _vllm(_config(GEMMA_VLLM), weights=weights, total=total).fits
     unset = _vllm(_config(GEMMA_VLLM), weights=weights, total=total, extra_args=["--max-num-batched-tokens", "0"])
     assert unset.swa_bytes == cell * (1024 + 2 * 2048)
 
