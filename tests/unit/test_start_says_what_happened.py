@@ -8,14 +8,16 @@ manager is asked.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from localharness.cli import model_ops, start_cmd
+from localharness.cli import model_ops, start_cmd, workspace
 from localharness.cli.start_cmd import _start_managed_server
 from localharness.config.models import AutosenseConfig
 from localharness.cli.start_cmd import _probe_llm as real_probe
+from localharness.provider import units
 from localharness.provider.autosense import FreeMemory
 from localharness.provider.client import CapabilityResult, LLMClient
 from tests.unit.launch_support import stub_liveness
@@ -25,6 +27,7 @@ from tests.unit.test_launch_fit_retry import BASE, Box
 from tests.unit.test_launch_line_clause import GIB, _World
 from tests.unit.test_launch_plan import SWIFT, _gguf_spec
 from tests.unit.test_start_serving_e2e import FLASH_LOW, World, _flash_launch
+from tests.unit.test_sense_serving import FLASH_ACTIVE
 
 
 @pytest.fixture
@@ -165,3 +168,61 @@ async def test_a_cold_start_on_the_server_rung_carries_no_clause(world):
 
     (launch_line,) = [x for x in lines if "is not running" in x]
     assert RESUME not in launch_line
+
+
+UNIT = "llm.service"
+
+
+@pytest.fixture
+def foreign_unit(monkeypatch):
+    """`llm.service` holds every loopback port; the service manager refuses any command."""
+    holder = workspace.Holder(UNIT, 4242, "llama-server", 1000,
+                              SimpleNamespace(unit_file_state="enabled", load_state="loaded"))
+    monkeypatch.setattr(workspace, "port_holder", lambda port: holder)
+
+    def refuse(*a, **k):
+        raise AssertionError("start asked the service manager")
+
+    monkeypatch.setattr(units, "_run", refuse)
+    return holder
+
+
+def _sentence(holder, served: str, port: int) -> str:
+    return workspace.foreign_unit_sentence(holder, served=served, port=port)
+
+
+async def test_an_attach_beside_a_foreign_unit_says_so_once(world, foreign_unit):
+    world.config()
+    world.answering = {PRIMARY_URL}
+    sentence = _sentence(foreign_unit, PRIMARY, 8080)
+
+    await world.start()
+    assert world.err_lines.count(sentence) == 1
+    assert all(k.get("markup") is False and k.get("soft_wrap") is True
+               for a, k in world.err if a and a[0] == sentence)
+
+    await world.start()
+    assert world.err_lines.count(sentence) == 1
+
+
+async def test_attaching_to_another_record_under_a_foreign_unit_promises_no_swap(world, foreign_unit):
+    world.config(active=FLASH_ACTIVE)
+    world.answering = {PRIMARY_URL}
+
+    lines = await world.start()
+
+    assert [x for x in lines if x.startswith("serving ")] == [f"serving {PRIMARY}; your last choice was flash-next"]
+    assert _sentence(foreign_unit, PRIMARY, 8080) in world.err_lines
+
+
+async def test_a_harness_launch_serving_says_nothing_about_a_unit_and_keeps_its_swap_promise(
+        world, fake_proc, foreign_unit):
+    world.config(last_served=PRIMARY)
+    _flash_launch(fake_proc, world.home)
+    world.answering = {PEER_URL}
+
+    lines = await world.start()
+
+    assert [x for x in lines if x.startswith("serving ")] == [
+        f"serving flash-next; your last choice was {PRIMARY} — /model {PRIMARY} swaps"]
+    assert not [x for x in world.err_lines if "is yours" in x]
