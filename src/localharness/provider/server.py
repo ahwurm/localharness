@@ -734,7 +734,7 @@ def _vllm_argv(
         ]
     model_arg = str(Path(entry.path).expanduser()) if entry is not None else snapshot or srv.model
     served = (["--served-model-name", entry.name] if entry is not None
-              else ["--served-model-name", srv.served_name or srv.model] if snapshot is not None else [])
+              else ["--served-model-name", srv.model] if snapshot is not None else [])
     return [str(srv.binary), "serve", model_arg, "--port", str(srv.port), *served, *parsers, *window, *extra,
             *(["--host", "127.0.0.1"] if loop else [])]
 
