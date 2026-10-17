@@ -461,7 +461,7 @@ def _window_part(plan) -> str | None:
     if report is None:
         return None
     if report.mode == "fit":
-        return f"--max-model-len {report.asked} (fit)" if report.runtime == "vllm" else f"-c {report.asked} (fit)"
+        return f"--max-model-len {report.asked} (fit)" if RUNTIMES[report.runtime].checkpoint else f"-c {report.asked} (fit)"
     if report.mode == "not-computed":
         return "-c not computed"
     if report.mode == "fit-by-server":
@@ -477,7 +477,7 @@ def _figures(plan) -> str | None:
 
     sensed, ratios, placed = plan.inputs[1], plan.inputs[3], plan.report.placement if plan.report else None
     parts = []
-    if sensed.runtime == "vllm":
+    if RUNTIMES[sensed.runtime].checkpoint:
         if sensed.weights:
             parts.append(f"weights {gib(sensed.weights)} GiB")
         if placed is not None and placed.budget_bytes:
