@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import stat
 
 import pytest
 
@@ -194,3 +195,70 @@ def test_two_copies_of_the_same_config_are_byte_identical_and_keep_the_args_orde
     assert first == second
     args = json.loads(first)["args"]
     assert args[:1] == ["--native"] and args[2:4] == ["--max-context", "65536"]
+
+
+COPY = {"model_name": SERVED, "args": ["--native", "m"], "port": 8083}
+
+
+def test_a_symlink_planted_at_the_strata_directory_is_replaced_by_a_private_directory(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    (tmp_path / "strata").symlink_to(target)
+    strata.write_copy(tmp_path, 8083, COPY)
+    directory = tmp_path / "strata"
+    assert not directory.is_symlink() and stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert list(target.iterdir()) == []
+
+
+def test_a_symlink_planted_at_the_copy_is_replaced_and_its_target_untouched(tmp_path):
+    directory = tmp_path / "strata"
+    directory.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("keep", "utf-8")
+    (directory / "8083.json").symlink_to(victim)
+    path = strata.write_copy(tmp_path, 8083, COPY)
+    assert not path.is_symlink() and json.loads(path.read_text("utf-8")) == COPY
+    assert victim.read_text("utf-8") == "keep"
+
+
+def test_a_symlink_planted_at_the_log_is_replaced_by_a_private_regular_file(tmp_path):
+    directory = tmp_path / "strata"
+    directory.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("keep", "utf-8")
+    (directory / "8083.log").symlink_to(victim)
+    strata.write_copy(tmp_path, 8083, COPY)
+    log = strata.log_path(tmp_path, 8083)
+    assert log.is_file() and not log.is_symlink() and stat.S_IMODE(log.stat().st_mode) == 0o600
+    assert victim.read_text("utf-8") == "keep"
+
+
+def test_a_directory_planted_at_the_log_is_replaced_and_an_existing_log_keeps_its_bytes(tmp_path):
+    log = strata.log_path(tmp_path, 8083)
+    log.mkdir(parents=True)
+    (log / "x").write_text("x", "utf-8")
+    strata.write_copy(tmp_path, 8083, COPY)
+    assert log.is_file()
+    log.write_text("earlier output", "utf-8")
+    log.chmod(0o644)
+    strata.write_copy(tmp_path, 8083, COPY)
+    assert log.read_text("utf-8") == "earlier output" and stat.S_IMODE(log.stat().st_mode) == 0o600
+
+
+def test_the_copy_is_private_byte_identical_across_writes_and_leaves_no_temporary(tmp_path):
+    directory = tmp_path / "strata"
+    directory.mkdir()
+    (directory / ".8083.json.dead.tmp").write_text("{", "utf-8")
+    path = strata.write_copy(tmp_path, 8083, COPY)
+    first = path.read_bytes()
+    strata.write_copy(tmp_path, 8083, COPY)
+    assert path.read_bytes() == first and stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert sorted(p.name for p in directory.iterdir()) == ["8083.json", "8083.log"]
+
+
+async def test_a_launch_never_rewrites_the_persons_config(make_world, popen):  # noqa: F811
+    world = make_world()
+    source = world.engine / CONFIG_NAME
+    before = source.read_bytes()
+    await world.activate(autosense=None)
+    assert popen and source.read_bytes() == before
