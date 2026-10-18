@@ -6,6 +6,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ import httpx
 from localharness.config.models import ManagedServerConfig
 from localharness.core import private_files
 from localharness.provider import autosense as _auto
+from localharness.provider import gguf_header
 from localharness.provider import lifecycle, server, tuning
 from localharness.provider.procfs import LaunchIdentity
 from localharness.provider.runtimes import RUNTIMES
@@ -33,6 +35,11 @@ NATIVE_MISMATCH = ("{name}'s Strata config serves another file than its model: p
                    "re-run Strata's setup with --gguf-dir, or fix the record.")
 CONFIG_REFUSAL = "{name}'s Strata config {what} — the harness launches Strata only with the keys, flags and paths it checks."
 COPY_DELIMITER = "STRATA_COPY"
+DATA_DIR_NAME = "Strata-data"
+EFFORT_VALUES = ("none", "low", "medium", "high")
+SAMPLING_KEYS = (
+    "sequence", "top_k", "top_p", "min_p", "xtc_probability", "xtc_threshold", "temp", "penalty_last_n",
+    "penalty_repeat", "mirostat", "mirostat_tau", "mirostat_eta")
 
 
 def _root(spec: ManagedServerConfig) -> Path:
@@ -65,6 +72,7 @@ class EngineConfig:
     raw: bytes
     data: Mapping[str, Any]
     sha256: str
+    sampling: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
 
 def is_flag(token: str) -> bool:
@@ -90,6 +98,63 @@ def _value(args: list[str], flag: str) -> str | None:
     return None
 
 
+def roots(spec: ManagedServerConfig) -> tuple[str, ...]:
+    """The realpaths a path argument may sit under: the install, Strata's data beside it, the model's folder."""
+    engine = os.path.realpath(_root(spec))
+    return (engine, os.path.join(os.path.dirname(engine), DATA_DIR_NAME),
+            os.path.dirname(os.path.realpath(os.path.expanduser(str(spec.model)))))
+
+
+def inside(path: str, allowed: tuple[str, ...]) -> bool:
+    return any(os.path.commonpath([path, root]) == root for root in allowed)
+
+
+def _number(token: str) -> bool:
+    try:
+        float(token)
+    except ValueError:
+        return False
+    return True
+
+
+def _paths(args: list[str], spec: ManagedServerConfig) -> list[str]:
+    values = [t.partition("=")[2] if is_flag(t) else t for t in args]
+    like = [v for v in values if (("/" in v or v[:1] in ("~", ".")) and not _number(v))]
+    allowed = roots(spec)
+    return [v for v in like if not inside(os.path.realpath(_root(spec) / os.path.expanduser(v)), allowed)]
+
+
+def _max_contexts(args: list[str]) -> list[str | None]:
+    return [t.partition("=")[2] if "=" in t else (args[i + 1] if i + 1 < len(args) else None)
+            for i, t in enumerate(args) if t.partition("=")[0] == "--max-context"]
+
+
+def _count(value: Any, least: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= least
+
+
+def _bad_keys(data: Mapping[str, Any], args: list[str]) -> list[str]:
+    checks = {
+        "gpu": lambda v: _count(v, 0), "parallel": lambda v: _count(v, 1),
+        "model_name": lambda v: isinstance(v, str) and "\n" not in v and "\r" not in v,
+        "reasoning_effort": lambda v: v in EFFORT_VALUES and isinstance(v, str),
+        "sampling": lambda v: isinstance(v, dict) and all(
+            isinstance(x, (int, float, str)) and not isinstance(x, bool) for x in v.values())}
+    bad = [k for k in sorted(checks) if k in data and not checks[k](data[k])]
+    if any(v is None or not re.fullmatch(r"[0-9]+", v) for v in _max_contexts(args)):
+        bad.append("--max-context")
+    return bad
+
+
+def _header_sampling(spec: ManagedServerConfig) -> dict[str, Any]:
+    try:
+        found = gguf_header.read_header(
+            os.path.expanduser(str(spec.model)), {f"general.sampling.{k}" for k in SAMPLING_KEYS})
+    except (OSError, gguf_header.GgufHeaderError):
+        return {}
+    return {k.rpartition(".")[2]: float(f"{v:.7g}") if isinstance(v, float) else v for k, v in found.items()}
+
+
 def sense(spec: ManagedServerConfig) -> tuple[EngineConfig | None, str | None]:
     """The engine config read once and checked: `(config, None)`, or `(None, the refusal sentence)`."""
     name = _auto._label(spec)
@@ -102,8 +167,10 @@ def sense(spec: ManagedServerConfig) -> tuple[EngineConfig | None, str | None]:
             raw = fh.read(MODEL_CONFIG_CAP + 1)
     except OSError as exc:
         return refuse(f"cannot be read ({exc.strerror or type(exc).__name__})")
+    if len(raw) > MODEL_CONFIG_CAP:
+        return refuse(f"cannot be read (over {MODEL_CONFIG_CAP} bytes)")
     try:
-        data = json.loads(raw) if len(raw) <= MODEL_CONFIG_CAP else None
+        data = json.loads(raw)
     except (ValueError, RecursionError):
         data = None
     args = data.get("args", []) if isinstance(data, dict) else None
@@ -121,9 +188,15 @@ def sense(spec: ManagedServerConfig) -> tuple[EngineConfig | None, str | None]:
     stray = [f for f in flags if f not in ALLOWED_FLAGS]
     if stray:
         offences.append(f"passes {', '.join(_shown(f) for f in stray)}")
+    outside = _paths(args, spec)
+    if outside:
+        offences.append(f"names {', '.join(_shown(p) for p in outside)} outside the Strata install, its data and the model folder")
+    bad = _bad_keys(data, args)
+    if bad:
+        offences.append(f"has a bad value for {', '.join(bad)}")
     if offences:
         return refuse("; ".join(offences))
-    return EngineConfig(raw, data, hashlib.sha256(raw).hexdigest()), None
+    return EngineConfig(raw, data, hashlib.sha256(raw).hexdigest(), _header_sampling(spec)), None
 
 
 def launch_context(plan: "lifecycle.LaunchPlan | None", spec: ManagedServerConfig) -> int | None:
@@ -143,6 +216,8 @@ def copy_of(engine: EngineConfig, spec: ManagedServerConfig, *, context: int | N
         else:
             args[at] = f"--max-context={context}"
     copy = {k: engine.data[k] for k in ALLOWED_KEYS if k in engine.data}
+    if not copy.get("sampling") and engine.sampling:
+        copy["sampling"] = dict(engine.sampling)
     return {**copy, "model_name": spec.served_name, "args": args, "host": "127.0.0.1", "port": port,
             "cwd": str(_root(spec)), "log": str(log_path(config_dir, port))}
 
