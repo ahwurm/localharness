@@ -1,6 +1,8 @@
 """The list represents a sensed Strata install on the Flash-Next file's one entry and offers Strata once when the llama.cpp plan is refused or slow."""
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import typer
@@ -8,7 +10,7 @@ from typer.testing import CliRunner
 
 from localharness.cli import model_cmd, model_ops
 from localharness.cli.app import app
-from localharness.provider import autosense, speed_stats
+from localharness.provider import autosense, lifecycle, model_library, server, speed_stats
 from tests.unit.strata_fixture import CONFIG_NAME, flash_next, strata_tree
 from tests.unit.test_plan_entries import SERVING, entries_of
 from tests.unit.test_serve_cmd import GIB, PRIMARY, PRIMARY_URL, llama_peer, serve_world
@@ -248,3 +250,70 @@ def test_an_escape_byte_in_a_record_name_is_shown_escaped_in_the_suffix_line(tmp
 
     assert not any("\x1b" in line for line in lines)
     assert any("bad\\x1b[2Jname" in line and line.endswith(" · Strata available") for line in lines)
+
+
+def lines_in_a_world_without_the_family(tmp_path, monkeypatch, *, with_install: bool) -> list[str]:
+    world, shard1 = flash_world(tmp_path, monkeypatch)
+    renamed = shard1.rename(shard1.with_name("flash-next.gguf"))
+    world.edit_config(lambda c: c["extra_endpoints"][0]["lifecycle"].update(model=str(renamed)))
+    world.rerecord()
+    if with_install:
+        install(world, renamed)
+    entries = entries_of(world, SERVING)
+    assert entries.strata == () and dict(entries.offers) == {}
+    return model_ops.entry_lines(entries)
+
+
+def test_a_world_without_the_family_lists_the_same_with_or_without_an_install(tmp_path, monkeypatch):
+    (tmp_path / "bare").mkdir()
+    bare = lines_in_a_world_without_the_family(tmp_path / "bare", monkeypatch, with_install=False)
+    kept = lines_in_a_world_without_the_family(tmp_path, monkeypatch, with_install=True)
+
+    assert kept == bare and kept[:3] == ["Models:", "▸ llama.cpp · 127.0.0.1:8080", f"  1. {PRIMARY}  (serving)  ● [active]"]
+    assert not any("Strata" in line for line in kept)
+
+
+def test_the_suffix_goes_when_the_install_does(tmp_path, monkeypatch):
+    world, shard1 = flash_world(tmp_path, monkeypatch)
+    engine = install(world, shard1)
+
+    assert line_of(entries_of(world, SERVING)).endswith(" · Strata available")
+    shutil.rmtree(engine)
+    gone = entries_of(world, SERVING)
+
+    assert not line_of(gone).endswith(" · Strata available") and gone.strata == ()
+    assert dict(gone.offers) == {NAME: "experts in RAM"}
+
+
+def test_building_the_list_with_an_install_writes_nothing_takes_no_lock_and_runs_nothing(tmp_path, monkeypatch):
+    world, shard1 = flash_world(tmp_path, monkeypatch)
+    install(world, shard1)
+
+    def forbidden(*args, **kw):
+        raise AssertionError("the list ran or locked something")
+
+    for target in ("start_server", "stop_server"):
+        monkeypatch.setattr(server, target, forbidden)
+    for target in ("launch_lock", "launch_lock_sync"):
+        monkeypatch.setattr(lifecycle, target, forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    before = {str(p): (p.stat().st_mtime_ns, p.stat().st_size) for p in sorted(world.g.rglob("*")) if p.is_file()}
+
+    entries = entries_of(world, SERVING)
+
+    assert entries.strata
+    assert {str(p): (p.stat().st_mtime_ns, p.stat().st_size) for p in sorted(world.g.rglob("*")) if p.is_file()} == before
+
+
+def test_a_listing_senses_the_install_every_time(tmp_path, monkeypatch):
+    world, shard1 = flash_world(tmp_path, monkeypatch)
+    install(world, shard1)
+    senses: list[int] = []
+    real = model_library.strata_install
+    monkeypatch.setattr(model_library, "strata_install", lambda *a, **kw: senses.append(1) or real(*a, **kw))
+
+    entries_of(world, SERVING)
+    entries_of(world, SERVING)
+
+    assert len(senses) == 2
