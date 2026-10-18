@@ -1357,6 +1357,7 @@ async def wait_ready(
     expect: procfs.LaunchIdentity | None = None,
     unit_poll: "Callable[[], Awaitable[str | None]] | None" = None,
     ready: "Callable[[httpx.AsyncClient, str, dict[str, str]], Awaitable[list[str] | None]] | None" = None,
+    engine_log: Path | None = None,
 ) -> list[str]:
     """Poll {base_url}/models until the server answers; return served model ids.
 
@@ -1387,6 +1388,8 @@ async def wait_ready(
 
     `ready` replaces the `/models` GET: awaited each poll, a list of ids ends the wait, None keeps
     polling, and a connection error reads as still loading.
+
+    `engine_log` is a second log a death or a timeout quotes after serve.log's tail.
     """
     label = _row(runtime).name
     start = time.monotonic()
@@ -1401,7 +1404,7 @@ async def wait_ready(
             if unit_poll is None and config_dir is not None and server_pid(config_dir) is None:
                 raise RuntimeError(
                     f"{label} exited during startup. Log tail:\n"
-                    + _tail_block(config_dir, f"{label} exited during startup", api_key)
+                    + _tail_block(config_dir, f"{label} exited during startup", api_key, engine_log)
                 )
             if unit_poll is None and config_dir is not None and expect is not None:
                 live = procfs.read_launch(
@@ -1429,7 +1432,7 @@ async def wait_ready(
             if on_poll is not None:
                 on_poll(time.monotonic() - start)
             await asyncio.sleep(poll_seconds)
-    tail = (f" Log tail:\n{_tail_block(config_dir, f'{label} not ready after {timeout_seconds:.0f}s', api_key)}"
+    tail = (f" Log tail:\n{_tail_block(config_dir, f'{label} not ready after {timeout_seconds:.0f}s', api_key, engine_log)}"
             if config_dir is not None else "")
     raise TimeoutError(f"{label} not ready after {timeout_seconds:.0f}s.{tail}")
 
@@ -1457,17 +1460,22 @@ def log_reference(config_dir: Path, what: str) -> str:
     return ref
 
 
-def scrubbed_tail(config_dir: Path, *, secrets: Iterable[Any] = (), lines: int = 15) -> str:
+def scrubbed_tail(config_dir: Path, *, secrets: Iterable[Any] = (), lines: int = 15, engine_log: Path | None = None) -> str:
     """The log's tail as an error may quote it: `Bearer` tokens, llama-server's `api_keys:` line, the
-    key(s) in `secrets` and URL credentials all masked (D-22, SEC-04). The only reader of `log_tail`."""
+    key(s) in `secrets` and URL credentials all masked (D-22, SEC-04), then `engine_log`'s tail the same way.
+    The only reader of `log_tail`."""
     held = [raw for raw in map(_raw_key, secrets) if raw]
-    return strip_url_credentials(
-        redact.scrub(log_tail(config_dir, lines), held, patterns=redact.LOGGED_KEY_PATTERNS))
+
+    def scrubbed(log: Path | None) -> str:
+        return strip_url_credentials(
+            redact.scrub(log_tail(config_dir, lines, log=log), held, patterns=redact.LOGGED_KEY_PATTERNS))
+
+    return scrubbed(None) if engine_log is None else f"{scrubbed(None)}\n--- engine log ---\n{scrubbed(engine_log)}"
 
 
-def _tail_block(config_dir: Path, what: str, api_key: Any = None) -> str:
+def _tail_block(config_dir: Path, what: str, api_key: Any = None, engine_log: Path | None = None) -> str:
     """The scrubbed tail followed by `(see log <path>, ref <id>)`, for an error about `what`."""
-    tail = scrubbed_tail(config_dir, secrets=(api_key,))
+    tail = scrubbed_tail(config_dir, secrets=(api_key,), engine_log=engine_log)
     ref = log_reference(config_dir, what)
     return tail + "\n" + LOG_REF_LINE.format(path=log_path(config_dir), ref=ref)
 
@@ -1479,8 +1487,8 @@ LOG_TAIL_BYTES = 64 * 1024
 """Most bytes `log_tail` reads from the end of serve.log; fifteen lines of server output fit many times."""
 
 
-def log_tail(config_dir: Path, lines: int = 15) -> str:
-    """The raw last `lines` of serve.log. Read ONLY by `scrubbed_tail` (a structural test pins it): no
+def log_tail(config_dir: Path, lines: int = 15, *, log: Path | None = None) -> str:
+    """The raw last `lines` of serve.log, or of `log`. Read ONLY by `scrubbed_tail` (a structural test pins it): no
     message quotes it as it is. The `=== ref <id>: … ===` lines `log_reference` appends are bookkeeping
     for the reader of the file, not server output, so they are left out; a log holding nothing else
     reads "(no log)".
@@ -1490,11 +1498,11 @@ def log_tail(config_dir: Path, lines: int = 15) -> str:
     blocking, and only its last `LOG_TAIL_BYTES` are read. A log that cannot be read that way reads
     "(no log)"."""
     try:
-        dir_fd = private_files.open_private_dir(server_dir(config_dir), create=False)
+        dir_fd = private_files.open_private_dir(server_dir(config_dir) if log is None else log.parent, create=False)
     except OSError:
         return "(no log)"
     try:
-        with os.fdopen(private_files.open_regular(LOG_NAME, dir_fd=dir_fd), "rb") as fh:
+        with os.fdopen(private_files.open_regular(LOG_NAME if log is None else log.name, dir_fd=dir_fd), "rb") as fh:
             size = os.fstat(fh.fileno()).st_size
             cut = size > LOG_TAIL_BYTES
             if cut:

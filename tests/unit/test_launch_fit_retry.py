@@ -520,7 +520,7 @@ _REF_LINE = r"\(see log {tmp}/vllm/serve\.log, ref [0-9a-f]{{8}}\)"
 
 async def test_wait_ready_names_the_runtime_that_died(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "server_pid", lambda config_dir: None)
-    monkeypatch.setattr(server, "log_tail", lambda config_dir, lines=15: "the tail")
+    monkeypatch.setattr(server, "log_tail", lambda config_dir, lines=15, log=None: "the tail")
     with pytest.raises(RuntimeError) as named:
         await _REAL_WAIT_READY(BASE, config_dir=tmp_path, runtime="llamacpp")
     assert re.fullmatch(r"llama\.cpp exited during startup\. Log tail:\nthe tail\n" + _REF_LINE.format(tmp=tmp_path),
@@ -533,7 +533,7 @@ async def test_wait_ready_names_the_runtime_that_died(tmp_path, monkeypatch):
 
 async def test_wait_ready_names_the_runtime_that_timed_out(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "server_pid", lambda config_dir: 1)
-    monkeypatch.setattr(server, "log_tail", lambda config_dir, lines=15: "the tail")
+    monkeypatch.setattr(server, "log_tail", lambda config_dir, lines=15, log=None: "the tail")
     with pytest.raises(TimeoutError, match=r"^llama\.cpp not ready after 0s"):
         await _REAL_WAIT_READY(BASE, config_dir=tmp_path, timeout_seconds=0, runtime="llamacpp")
     with pytest.raises(TimeoutError, match=r"^vLLM not ready after 0s"):
