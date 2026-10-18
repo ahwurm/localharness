@@ -992,6 +992,7 @@ class PlanEntry:
     setup: Any = None
     others: tuple[str, ...] = ()
     strata: bool = False
+    twins: tuple[ServingRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1046,7 +1047,14 @@ class Entries:
         if found is None:
             return None
         entry, numbered = found
-        return entry if numbered else (entry.refusal or f"{entry.name} cannot be switched to now")
+        if not numbered:
+            return entry.refusal or f"{entry.name} cannot be switched to now"
+        twin = next((t for t in entry.twins if arg in (t.name, t.served)), None)
+        if twin is None:
+            return entry
+        rest = tuple(t for t in entry.twins if t is not twin)
+        return replace(entry, name=twin.name, record=twin, endpoint=twin.peer, others=(entry.name, *(t.name for t in rest)),
+                       twins=(entry.record, *rest), window=None, where=None, refusal=None, rate=None, strata=False)
 
 
 def _runtime_label(provider_type: Any) -> str:
@@ -1318,7 +1326,7 @@ def plan_entries(
         entry = PlanEntry(
             record.name, "cold", record.spec.runtime, window, where, refusal, record, record.peer,
             rate=rate(record.provider_type, record.served), path=path,
-            others=tuple(r.name for r in twins if r is not record))
+            others=tuple(r.name for r in twins if r is not record), twins=tuple(r for r in twins if r is not record))
         (refused if refusal is not None else cold).append(entry)
     taken = {*(r.name for r in records), *(r.served for r in records), *shown}
     for e in _setup_entries(harness, library, taken, config_dir=config_dir, memory=memory, floor=floor, unit=unit):
