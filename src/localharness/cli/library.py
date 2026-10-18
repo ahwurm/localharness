@@ -78,6 +78,7 @@ PEERS_NOT_WRITTEN_LINE = "The other {n} models were not written to overrides.yam
 LATER_LINE = "Later: just run localharness start — it brings back your last choice."
 LATER_MODEL_CLAUSE = " /model {name} switches in a session."
 BULLET = "• {name} ({clause}) ← {path} · {size} · first seen {date}"
+STRATA_BULLET = "• {name} (Strata{projector}) ← {path} · {engine_dir} · {config}"
 DECLINED_TAG = " (declined earlier)"
 NEW_ONE_QUESTION = "New model {name} — set it up?"
 NEW_MANY_QUESTION = "{n} new models — set them up?"
@@ -156,6 +157,13 @@ def _recorded(server: dict, peers: list) -> tuple[set[str], set[str], set[int]]:
     return models, names, ports
 
 
+def _model_launches(server: dict, peers: list) -> set[tuple[str, bool]]:
+    """Each recorded model's realpath with whether an engine config launches it: a llama.cpp and a Strata record may share a file."""
+    lives = [p.get("lifecycle") for p in peers if isinstance(p, dict)]
+    return {(os.path.realpath(os.path.expanduser(str(r["model"]))), r.get("engine_config") is not None)
+            for r in (server, *lives) if isinstance(r, dict) and r.get("model")}
+
+
 class PeerFragment:
     """The peers an append adds, as a `mutate` over the overlay: what it wrote and the audit triples of that."""
 
@@ -173,11 +181,13 @@ class PeerFragment:
         server = {**(config_raw.get("server") or {}), **(overlay.get("server") or {})}
         self.copied = workspace.copy_peer_list(overlay, config_raw)
         listed = overlay["extra_endpoints"]
-        models, names, ports = _recorded(server, listed)
+        _, names, ports = _recorded(server, listed)
+        models = _model_launches(server, listed)
         for peer in self.peers:
             life = peer.lifecycle
             real = os.path.realpath(os.path.expanduser(life.model)) if life is not None and life.model else None
-            if real in models:
+            launch = (real, life is not None and life.engine_config is not None)
+            if real is not None and launch in models:
                 continue
             name = unique_preset_name(peer.name, names)
             port = _port_of(peer.base_url) if life is None else life.port
@@ -196,7 +206,7 @@ class PeerFragment:
             record = _record_dicts_of(None, [peer.model_copy(update=update)])[1][0]
             listed.append(record)
             self.written.append(record)
-            models |= {real} if real else set()
+            models |= {launch} if real else set()
             names.add(name)
             ports |= {port} if port is not None else set()
             self.audit.extend(audit_entries(f"extra_endpoints.{name}.lifecycle.", record.get("lifecycle") or {}))
@@ -656,9 +666,27 @@ def _peers(chosen: Sequence[model_library.Shown], names: dict[str, str], *, star
 
 def setup_bullet(config_path: Path, s: model_library.Shown) -> str:
     """The record line the person is shown before the question."""
+    from localharness.cli.model_ops import StrataPreset
+
     global_dir = global_config_dir(config_path)
+    if isinstance(s, StrataPreset):
+        spec = s.record.spec
+        return STRATA_BULLET.format(
+            name=visible_text(unique_preset_name(s.name, recorded_names_ports(global_dir)[0])),
+            projector=f", +{visible_text(os.path.basename(spec.mmproj))}" if spec.mmproj else "",
+            path=shown_path(spec.model), engine_dir=shown_path(s.engine_dir), config=visible_text(s.config))
     name = unique_preset_name(_label(s), recorded_names_ports(global_dir)[0])
     return _bullet_lines([s], {s.real: name}, managed_server.vllm_binary(global_dir))[0]
+
+
+def strata_peer(preset, *, port: int) -> EndpointRef:
+    """A launchable Strata peer for a preset: its install, its config, the shards and projector of the record it copies."""
+    spec = preset.record.spec
+    return EndpointRef(
+        name=preset.name, base_url=f"http://127.0.0.1:{port}/v1", provider_type="strata", gpu=True,
+        lifecycle=ManagedServerConfig(
+            runtime="strata", engine_dir=shown_path(preset.engine_dir), engine_config=preset.config,
+            model=str(spec.model), mmproj=spec.mmproj, served_name=preset.name, port=port, gpu=True))
 
 
 def ask_set_up(name: str, *, person: bool) -> interview.Answer:
@@ -690,6 +718,24 @@ def set_up(config_path: Path, real: str) -> SetUp:
     if not peers or (written := append_peers(config_path, peers, adopt=True, say=lines.append)) is None:
         return SetUp(None, (*lines, NOT_WRITTEN_LINE))
     _save_library(found, model_library.library_path(global_dir), dropped=[real])
+    return SetUp(written[0]["name"], (*lines, SET_UP_LINE.format(name=visible_text(written[0]["name"]))))
+
+
+def set_up_entry(config_path: Path, setup) -> SetUp:
+    """Set up what a list entry carries: a Strata preset beside the file's llama.cpp record, else the file or snapshot."""
+    from localharness.cli.model_ops import StrataPreset
+
+    if not isinstance(setup, StrataPreset):
+        return set_up(config_path, setup.real)
+    global_dir = global_config_dir(config_path)
+    install = model_library.strata_install(model_library.strata_roots(_machine_autosense(config_path)), {setup.real})
+    if install is None or install.engine_dir != setup.engine_dir or (setup.config, setup.real) not in install.configs:
+        return SetUp(None, (SETUP_GONE_LINE.format(path=shown_path(setup.real)),))
+    taken_ports = recorded_names_ports(global_dir)[1]
+    lines: list[str] = []
+    if not (free := model_library.free_ports(PRIMARY_PORT + 1, 1, taken=taken_ports)) or (
+            written := append_peers(config_path, [strata_peer(setup, port=free[0])], adopt=True, say=lines.append)) is None:
+        return SetUp(None, (*lines, NOT_WRITTEN_LINE))
     return SetUp(written[0]["name"], (*lines, SET_UP_LINE.format(name=visible_text(written[0]["name"]))))
 
 
