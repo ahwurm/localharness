@@ -1349,6 +1349,7 @@ def not_offered_reason(sentence: str, name: str) -> str:
 
 
 STRATA_AVAILABLE = " · Strata available"
+STRATA_OFFER = "Strata is built for this model; localharness doctor shows how to install it beside your shards."
 
 
 def entry_lines(entries: Entries) -> list[str]:
@@ -1391,6 +1392,31 @@ def foreign_lines(entries: Entries, config_dir: Any) -> list[str]:
     except OSError:
         pass
     return [] if entries.foreign is None else [entries.foreign]
+
+
+def flash_next_record(record: ServingRecord) -> bool:
+    """True when the record launches a file of the Flash-Next family."""
+    from localharness.provider import model_library
+
+    return record.spec is not None and model_library.flash_next_quant(_model_file(record.spec)) is not None
+
+
+def offer_lines(entries: Entries, arg: str, config_dir: Any) -> list[str]:
+    """The Strata offer when the entry ``arg`` addresses has one whose reason changed, which this records as printed."""
+    from localharness.provider import speed_stats
+
+    found = entries.find(arg)
+    reason = entries.offers.get(found[0].name) if found is not None else None
+    if reason is None:
+        return []
+    ledger = speed_stats.default_speed_stats_path(config_dir)
+    if not speed_stats.strata_offer_changed(ledger, found[0].name, reason):
+        return []
+    try:
+        speed_stats.record_strata_offer(ledger, found[0].name, reason)
+    except OSError:
+        pass
+    return [STRATA_OFFER]
 
 
 def listing(harness: Any, **kw: Any) -> tuple[Entries, list[str]]:

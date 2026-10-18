@@ -81,6 +81,7 @@ def test_experts_in_ram_without_an_install_offers_strata_once_after_the_pick(tmp
     assert model_ops.offer_lines(entries, NAME, world.g) == [model_ops.STRATA_OFFER]
     assert model_ops.offer_lines(entries, NAME, world.g) == []
     assert not speed_stats.strata_offer_changed(ledger_of(world), NAME, "experts in RAM")
+    assert speed_stats.all_median_tps(ledger_of(world)) == {} and speed_stats.model_paths(ledger_of(world)) == set()
 
 
 def test_a_refused_plan_offers_strata_and_a_changed_reason_offers_it_again(tmp_path, monkeypatch):
