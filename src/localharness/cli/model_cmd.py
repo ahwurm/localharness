@@ -432,7 +432,7 @@ def _set_up_entry(entry, loader) -> Optional[str]:
         _refuse_autostart(elsewhere)
     if answer.cancelled or answer.keys != ("set-up",):
         return None
-    done = library.set_up(cfg, entry.setup.real)
+    done = library.set_up_entry(cfg, entry.setup)
     for line in done.lines:
         (console if done.name else err_console).print(line, markup=False, soft_wrap=True)
     if done.name is None:
