@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -215,3 +217,79 @@ async def test_cached_repos_never_reach_the_listing(tmp_path, monkeypatch):
 
     out = channel.messages[-1]
     assert "(downloaded" not in out and "(cold on" not in out and "cached-repo" not in out
+
+
+def _offering(monkeypatch, reason: str = "experts in RAM") -> None:
+    real = model_ops.plan_entries
+    monkeypatch.setattr(
+        model_ops, "plan_entries", lambda *a, **kw: dataclasses.replace(real(*a, **kw), offers={"flash": reason}))
+
+
+@pytest.mark.asyncio
+async def test_a_cold_peer_launch_that_ends_says_the_strata_offer_after_its_lines_once(tmp_path, monkeypatch):
+    _, repl, channel, _ = _session(tmp_path)
+    _offering(monkeypatch)
+    stage = []
+
+    async def fake_swap(incumbent, target, *, reporter, **kw):
+        await reporter.line("Flash cannot run here: too big. qwen keeps serving.")
+        stage.append("swap")
+        return lifecycle.SwapOutcome(None, None, None, RuntimeError("too big"), "refused")
+
+    monkeypatch.setattr(lifecycle, "swap", fake_swap)
+
+    await asyncio.wait_for(repl._handle_slash("/model 2"), 5)
+    await asyncio.wait_for(repl._handle_slash("/model 2"), 5)
+
+    assert channel.messages.count(model_ops.STRATA_OFFER) == 1
+    assert channel.messages[channel.messages.index(model_ops.STRATA_OFFER) - 1].startswith("Flash cannot run here")
+    assert stage == ["swap", "swap"]
+
+
+@pytest.mark.asyncio
+async def test_a_cold_peer_launch_that_lands_says_the_strata_offer_after_the_switched_line(tmp_path, monkeypatch):
+    _, repl, channel, _ = _session(tmp_path)
+    _offering(monkeypatch)
+
+    async def fake_swap(incumbent, target, **kw):
+        return lifecycle.SwapOutcome(SimpleNamespace(served_models=["flash"]), None, None, None, None)
+
+    monkeypatch.setattr(lifecycle, "swap", fake_swap)
+
+    await asyncio.wait_for(repl._handle_slash("/model 2"), 5)
+
+    assert channel.messages[-2].startswith("Switched to flash") and channel.messages[-1] == model_ops.STRATA_OFFER
+
+
+@pytest.mark.asyncio
+async def test_a_refused_entry_picked_by_name_says_its_sentence_then_the_offer(tmp_path, monkeypatch):
+    _, repl, channel, _ = _session(tmp_path)
+    real = model_ops.plan_entries
+    refusal = "flash cannot run here: it fits only a 9,216-token window here"
+
+    def refused(*a, **kw):
+        entries = real(*a, **kw)
+        (entry,) = entries.numbered()[1:]
+        return dataclasses.replace(
+            entries, groups=entries.groups[:1], not_offered=(dataclasses.replace(entry, refusal=refusal),),
+            offers={"flash": "refused"})
+
+    monkeypatch.setattr(model_ops, "plan_entries", refused)
+
+    await repl._handle_slash("/model flash")
+
+    assert channel.messages[-2:] == [refusal, model_ops.STRATA_OFFER]
+
+
+@pytest.mark.asyncio
+async def test_no_offer_for_an_entry_without_one(tmp_path, monkeypatch):
+    _, repl, channel, _ = _session(tmp_path)
+
+    async def fake_swap(incumbent, target, **kw):
+        return lifecycle.SwapOutcome(None, None, None, RuntimeError("stop here"), "launch")
+
+    monkeypatch.setattr(lifecycle, "swap", fake_swap)
+
+    await asyncio.wait_for(repl._handle_slash("/model 2"), 5)
+
+    assert model_ops.STRATA_OFFER not in channel.messages
