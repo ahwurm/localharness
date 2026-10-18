@@ -338,6 +338,11 @@ def _swap_floor(machine_trust: MachineTrust, config_dir: Path) -> int | None:
     return lifecycle.raised_floor(live, lifecycle.cached_floor(config_dir))
 
 
+def _say(lines: list[str]) -> None:
+    for line in lines:
+        console.print(line, markup=False, soft_wrap=True)
+
+
 def _swap_now(
     harness, machine_trust: MachineTrust, serving: model_ops.Serving, *, config_dir: Path, unit
 ) -> None:
@@ -678,7 +683,7 @@ def model(
     choices = live
     current = provider.default_model
 
-    def _entries() -> tuple[model_ops.Entries, list[str]]:
+    def _plan_kw() -> dict:
         cfg = loader._config_dir
         recorded = model_ops.trust_as_recorded(cfg)
         others = tuple(r for r in model_ops.serving_records(harness)
@@ -686,9 +691,17 @@ def model(
         sensed = asyncio.run(model_ops.sense_serving(harness, others)).ids if others else {}
         probed = {model_ops._norm_url(url): ids for url, ids in sensed.items()}
         probed[model_ops._norm_url(provider.base_url)] = tuple(live) if reachable else None
-        return model_ops.listing(
-            harness, live=probed, config_dir=cfg, trust=recorded, floor=_swap_floor(recorded, cfg),
-            unit=_own_unit(cfg))
+        return dict(live=probed, config_dir=cfg, trust=recorded, floor=_swap_floor(recorded, cfg), unit=_own_unit(cfg))
+
+    def _entries() -> tuple[model_ops.Entries, list[str]]:
+        return model_ops.listing(harness, **_plan_kw())
+
+    def _offer(record):
+        """The Strata offer for a Flash-Next ``record``, planned before a launch makes its entry live."""
+        if not model_ops.flash_next_record(record):
+            return lambda: []
+        entries = model_ops.plan_entries(harness, **_plan_kw())
+        return lambda: model_ops.offer_lines(entries, record.name, loader._config_dir)
 
     # --- List --- #
     if name is None:
@@ -754,9 +767,12 @@ def model(
         target = name
     if (setup_entry is None and target is None and isinstance(serving, model_ops.ServingRefusal)
             and serving.kind == "unknown"):
-        found = _entries()[0].pick(name)
+        listed = _entries()[0]
+        found = listed.pick(name)
         if isinstance(found, str):
             err_console.print("[bold red]Error:[/bold red] " + escape(found), soft_wrap=True)
+            for line in model_ops.offer_lines(listed, name, loader._config_dir):
+                err_console.print(line, markup=False, soft_wrap=True)
             raise typer.Exit(2)
         if found is not None and found.kind == "setup":
             setup_entry = found
@@ -781,7 +797,13 @@ def model(
     if isinstance(serving, model_ops.Serving):
         if (will_launch and serving.record.spec is not None
                 and not model_ops.record_withheld(machine_trust, serving.record)):
-            _swap_now(harness, machine_trust, serving, config_dir=loader._config_dir, unit=unit)
+            offer = _offer(serving.record)
+            try:
+                _swap_now(harness, machine_trust, serving, config_dir=loader._config_dir, unit=unit)
+            except typer.Exit:
+                _say(offer())
+                raise
+            _say(offer())
             return
         _select_preset(
             harness, serving.record, current, loader, _audit_dir, _ws, machine_trust, unit=unit)

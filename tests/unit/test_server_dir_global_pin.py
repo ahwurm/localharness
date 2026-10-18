@@ -149,8 +149,9 @@ def test_repl_lifecycle_sites_name_the_global_pin():
     # + 1 from `_set_up_and_switch`, which writes and adopts one peer in the global dir after a person's yes.
     # + 1 from `_first_build_note`, which reads the speed ledger under the global dir for the launch line (read-only).
     # + 1 from the `/model` list, which records the foreign-unit sentence it printed in the speed ledger.
+    # + 1 from `_strata_offer`, which records the Strata offer it printed in the same ledger.
     # None of them starts or stops a server.
-    assert text.count("self._server_config_dir") == 18, _where(text, "self._server_config_dir")
+    assert text.count("self._server_config_dir") == 19, _where(text, "self._server_config_dir")
     # assignment + the property's own two reads on one line + 6 deliberately-untouched uses,
     # + 1 from phase 41's `_audit_base_dir` property, which reads `self._config_dir` as its
     # FALLBACK when the session has no workspace layer, + 1 from Phase 2's `_announce_window`,

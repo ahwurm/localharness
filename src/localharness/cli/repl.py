@@ -186,6 +186,7 @@ _FRAMEWORK_LABELS = {
     "vllm": "vLLM",
     "ollama": "Ollama",
     "llamacpp": "llama.cpp",
+    "strata": "Strata",
     "lmstudio": "LM Studio",
     "unknown": "server",
 }
@@ -1869,6 +1870,13 @@ class OrchestratorREPL:
                                           current=(llm.config.base_url, llm.config.model))
         return entries, live, malformed
 
+    async def _strata_offer(self, entries: Any, arg: str) -> None:
+        """Say the Strata offer for the entry ``arg`` names, when it has one that changed."""
+        from localharness.cli import model_ops
+
+        for line in await asyncio.to_thread(model_ops.offer_lines, entries, arg, self._server_config_dir):
+            await self._send_info(line)
+
     async def _set_up_and_switch(self, entry: Any) -> None:
         """Ask the person at this machine once; on yes write and adopt the entry's peer, then switch to it as to any cold peer."""
         from localharness.agent.gate_types import PermissionRequest
@@ -1948,6 +1956,7 @@ class OrchestratorREPL:
         entry = entries.pick(arg)
         if isinstance(entry, str):
             await self._send_info(entry)
+            await self._strata_offer(entries, arg)
             return
         if entry is None:
             typed = Path(arg).expanduser()
@@ -2100,6 +2109,7 @@ class OrchestratorREPL:
                     if box_note is not None:
                         box_note(None)
             if outcome.error is not None:
+                await self._strata_offer(entries, arg)
                 return  # the reporter already said why, redacted
             live_ep = outcome.live
             served = live_ep.served_models[0] if live_ep.served_models else target
@@ -2123,6 +2133,7 @@ class OrchestratorREPL:
                 + (f" {rate}." if rate else "")
                 + (SAVED_DEFAULT_NOTE if saved else ""), colorize=True,
             )
+            await self._strata_offer(entries, arg)
             return
 
         gguf = RUNTIMES[managed.runtime].gguf
