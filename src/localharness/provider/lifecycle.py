@@ -342,7 +342,7 @@ def record_identity(spec: ManagedServerConfig) -> LaunchIdentity | None:
         return dataclasses.replace(
             identity, argv_contains=identity.argv_contains + tokens,
             argv_one_of=((f"127.0.0.1:{spec.port}:8000", f"{spec.port}:8000"),))
-    if row.gguf and "engine_config" not in row.record_fields:
+    if row.gguf and row.path_binary is not None:
         if spec.served_name is not None:
             tokens = ("-a", spec.served_name)
         else:

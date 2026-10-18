@@ -323,6 +323,12 @@ async def health_ready(client: httpx.AsyncClient, base_url: str, headers: dict[s
     return [m["id"] for m in data if isinstance(m, dict) and "id" in m] if isinstance(data, list) else None
 
 
+def identity(spec: ManagedServerConfig, config_dir: Path) -> LaunchIdentity:
+    """The launch identity plus this port's copy path: the engine child and another port's launch fail it."""
+    base = StrataStrategy().launch_identity(spec)
+    return dataclasses.replace(base, argv_contains=(*base.argv_contains, str(copy_path(config_dir, spec.port))))
+
+
 class StrataStrategy:
     plans_launch = True
 
@@ -394,7 +400,7 @@ class StrataStrategy:
 
     async def stop(self, spec: ManagedServerConfig, config_dir: Path) -> None:
         await asyncio.to_thread(
-            server.stop_server, config_dir, launch="binary", expect=self.launch_identity(spec))
+            server.stop_server, config_dir, launch="binary", expect=identity(spec, config_dir), parent_first=True)
 
     def liveness(self, spec: ManagedServerConfig, config_dir: Path) -> lifecycle.Liveness:
         pid = server.server_pid(config_dir)
