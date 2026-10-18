@@ -991,6 +991,17 @@ class PlanEntry:
     path: str | None = None
     setup: Any = None
     others: tuple[str, ...] = ()
+    strata: bool = False
+
+
+@dataclass(frozen=True)
+class StrataPreset:
+    """What setting a Flash-Next file up as a Strata record needs: the install, the config naming the file, the record or set-up it came from."""
+    name: str
+    engine_dir: Path
+    config: str
+    record: ServingRecord
+    real: str
 
 
 @dataclass(frozen=True)
@@ -1002,29 +1013,40 @@ class EntryGroup:
 
 @dataclass(frozen=True)
 class Entries:
-    """The list: groups in display order, the entries said with their reason, notes, and the foreign-unit sentence with its (unit, served) key when the unit holds the primary's port (the sentence only when it changed since it was last printed)."""
+    """The list: groups in display order, the entries said with their reason, notes, and the foreign-unit sentence with its (unit, served) key when the unit holds the primary's port (the sentence only when it changed since it was last printed).
+    ``strata`` are the unlisted ``-strata`` set-ups an install makes pickable; ``offers`` maps a Flash-Next entry with no Strata to why it would hear of it."""
     groups: tuple[EntryGroup, ...]
     not_offered: tuple[PlanEntry, ...] = ()
     notes: tuple[str, ...] = ()
     foreign: str | None = None
     foreign_key: tuple[str, str] | None = None
+    strata: tuple[PlanEntry, ...] = ()
+    offers: Mapping[str, str] = MappingProxyType({})
 
     def numbered(self) -> tuple[PlanEntry, ...]:
         return tuple(e for g in self.groups if g.numbered for e in g.entries)
 
-    def pick(self, arg: str) -> "PlanEntry | str | None":
-        """A decimal is that numbered entry; a name is the entry it names, or, when that entry is not numbered, the sentence saying why it cannot be picked."""
+    def find(self, arg: str) -> "tuple[PlanEntry, bool] | None":
+        """The entry a number or name addresses, with whether it is numbered."""
         if arg.isascii() and arg.isdigit():
             shown = self.numbered()
-            return shown[int(arg) - 1] if 1 <= int(arg) <= len(shown) else None
+            return (shown[int(arg) - 1], True) if 1 <= int(arg) <= len(shown) else None
         every = [(e, g.numbered) for g in self.groups for e in g.entries] + [(e, False) for e in self.not_offered]
         for entry, numbered in every:
             names = {entry.name, *entry.others}
             if entry.record is not None:
                 names |= {entry.record.name, entry.record.served}
             if arg in names:
-                return entry if numbered else (entry.refusal or f"{entry.name} cannot be switched to now")
-        return None
+                return entry, numbered
+        return next(((e, True) for e in self.strata if e.name == arg), None)
+
+    def pick(self, arg: str) -> "PlanEntry | str | None":
+        """A decimal is that numbered entry; a name is the entry it names, or, when that entry is not numbered, the sentence saying why it cannot be picked."""
+        found = self.find(arg)
+        if found is None:
+            return None
+        entry, numbered = found
+        return entry if numbered else (entry.refusal or f"{entry.name} cannot be switched to now")
 
 
 def _runtime_label(provider_type: Any) -> str:
@@ -1144,6 +1166,61 @@ def _setup_entries(harness: Any, listed: Any, taken: set[str], *, config_dir: An
     return entries
 
 
+def _is_strata(spec: Any) -> bool:
+    return "engine_config" in RUNTIMES[spec.runtime].record_fields
+
+
+def _file_of(e: PlanEntry) -> str | None:
+    return e.path or getattr(e.setup, "real", None)
+
+
+def _strata_source(e: PlanEntry, name: str) -> ServingRecord:
+    """The record a Strata preset copies its model and projector from: the entry's own, else one made from the file it would set up."""
+    if e.record is not None:
+        return e.record
+    from localharness.cli import library
+    from localharness.config.models import ManagedServerConfig
+
+    s = e.setup
+    port = library.PRIMARY_PORT + 1
+    spec = ManagedServerConfig(runtime="llamacpp", model=str(s.path), mmproj=str(s.model.mmproj) if s.model.mmproj else None,
+                               served_name=name, port=port, gpu=True)
+    return ServingRecord(name, name, f"http://127.0.0.1:{port}/v1", "llamacpp", None, spec, f"setup.{name}")
+
+
+def _strata_pass(entries: list[PlanEntry], *, auto: Any, has_strata: set[str], taken: set[str],
+                 offer: bool) -> tuple[list[PlanEntry], tuple[PlanEntry, ...], dict[str, str]]:
+    """Marks the Flash-Next entries an install names, makes their ``-strata`` set-ups, and says why each other one would hear of Strata."""
+    from localharness.provider import model_library
+    from localharness.provider.gguf_header import unique_preset_name
+
+    files = {e.name: f for e in entries if (f := _file_of(e)) is not None}
+    flash = {n: f for n, f in files.items() if f not in has_strata and model_library.flash_next_quant(f) is not None}
+    if not flash:
+        return entries, (), {}
+    install = model_library.strata_install(model_library.strata_roots(auto), set(files.values())) if auto is not None else None
+    configs: dict[str, str] = {}
+    for config, real in install.configs if install is not None else ():
+        configs.setdefault(real, config)
+    out, strata, offers = [], [], {}
+    for e in entries:
+        file = flash.get(e.name)
+        if file is None:
+            out.append(e)
+        elif file in configs:
+            name = unique_preset_name(f"{e.name}-strata", taken)
+            taken.add(name)
+            preset = StrataPreset(name, install.engine_dir, configs[file], _strata_source(e, name), file)
+            strata.append(PlanEntry(name, "setup", "strata", setup=preset))
+            out.append(replace(e, strata=True))
+        else:
+            out.append(e)
+            reason = "refused" if e.refusal else e.where
+            if offer and reason in ("refused", "experts in RAM"):
+                offers[e.name] = reason
+    return out, tuple(strata), offers
+
+
 def plan_entries(
     harness: Any, *, live: Mapping[str, "tuple[str, ...] | None"], config_dir: Any, trust: Any,
     floor: int | None, library: Any = None, memory: Any = _UNSET, unit: Any = None,
@@ -1246,6 +1323,10 @@ def plan_entries(
     taken = {*(r.name for r in records), *(r.served for r in records), *shown}
     for e in _setup_entries(harness, library, taken, config_dir=config_dir, memory=memory, floor=floor, unit=unit):
         (refused if e.refusal is not None else cold).append(e)
+    has_strata = {_model_file(r.spec) for r in records if r.spec is not None and _is_strata(r.spec)}
+    marked, strata, offers = _strata_pass(
+        [*cold, *refused], auto=auto, has_strata=has_strata, taken=taken, offer=foreign is None)
+    cold, refused = [e for e in marked if e.refusal is None], [e for e in marked if e.refusal is not None]
     unit_sentence = key = None
     if foreign is not None and foreign.unit:
         ids = live.get(_norm_url(provider.base_url))
@@ -1258,13 +1339,16 @@ def plan_entries(
     elif cold:
         groups.append(EntryGroup("this box can launch", tuple(cold), True))
     changed = key is not None and speed_stats.foreign_unit_changed(ledger, *key)
-    return Entries(tuple(groups), tuple(refused), tuple(notes), unit_sentence if changed else None, key)
+    return Entries(tuple(groups), tuple(refused), tuple(notes), unit_sentence if changed else None, key, strata, MappingProxyType(offers))
 
 
 def not_offered_reason(sentence: str, name: str) -> str:
     """The reason in a refusal sentence: without the leading name and ``cannot run here:``, up to the first `` — ``, no final period."""
     text = sentence.removeprefix(f"{name} ").removeprefix("cannot run here: ")
     return text.split(" — ")[0].rstrip(".")
+
+
+STRATA_AVAILABLE = " · Strata available"
 
 
 def entry_lines(entries: Entries) -> list[str]:
@@ -1282,6 +1366,7 @@ def entry_lines(entries: Entries) -> list[str]:
                 detail += " · experts in RAM" if e.where == "experts in RAM" else ""
                 detail += f" · {e.window:,}" if e.window is not None else ""
                 detail += " (not set up)" if e.kind == "setup" else ""
+                detail += STRATA_AVAILABLE if e.strata else ""
             if group.numbered:
                 n += 1
                 lead = f"  {n}. "
@@ -1289,7 +1374,8 @@ def entry_lines(entries: Entries) -> list[str]:
                 lead = "     "
             lines.append(f"{lead}{vt(e.name)}  {detail}" + (f"  [{e.rate}]" if e.rate else ""))
     for e in sorted(entries.not_offered, key=lambda e: e.name):
-        lines.append(f"  not offered: {vt(e.name)} — {vt(not_offered_reason(e.refusal or '', e.name))}")
+        lines.append(f"  not offered: {vt(e.name)} — {vt(not_offered_reason(e.refusal or '', e.name))}"
+                     + (STRATA_AVAILABLE if e.strata else ""))
     lines.extend(f"  · {vt(note)}" for note in entries.notes)
     return lines
 
