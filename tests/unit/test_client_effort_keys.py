@@ -126,9 +126,11 @@ def make(mode: str = "native", provider_type: str | None = "llamacpp", server: S
 def test_effort_budget_key_table_is_the_spec_table():
     assert EFFORT_BUDGET_KEY == {
         "llamacpp": "reasoning_budget_tokens", "vllm": None, "ollama": None,
-        "lmstudio": None, "unknown": None, None: None,
+        "lmstudio": None, "strata": None, "unknown": None, None: None,
     }
-    assert EFFORT_KEYS == frozenset({"chat_template_kwargs", "reasoning_budget_tokens"})
+    assert EFFORT_KEYS == frozenset(
+        {"chat_template_kwargs", "reasoning_budget_tokens", "reasoning_effort"}
+    )
 
 
 @pytest.mark.parametrize("ptype", PROVIDERS)

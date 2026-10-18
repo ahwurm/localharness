@@ -1293,6 +1293,7 @@ class AgentLoop:
         self._llm_takes_disable_thinking = _accepts_kwarg(
             getattr(llm, "stream_complete", None), "disable_thinking"
         )
+        self._llm_takes_effort = _accepts_kwarg(getattr(llm, "stream_complete", None), "effort")
         # Armed for the rest of the current turn after a reasoning cut or an empty reply at the
         # served window: every later request of the turn carries disable_thinking. Reset at every
         # turn start, so a cut in one turn never silences thinking in the next.
@@ -2183,6 +2184,8 @@ class AgentLoop:
                 and not self._skip_budget()
             ):
                 _cap_kwargs["reasoning_budget"] = effort_budget
+            if self._effort is not None and self._llm_takes_effort:
+                _cap_kwargs["effort"] = self._effort
             if (
                 (self._effort == "off" or self._thinking_off_next)
                 and self._llm_takes_disable_thinking
