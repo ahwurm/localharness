@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 
+from localharness.config import trust
 from localharness.config.models import ManagedServerConfig
 from tests.unit.gguf_support import load_fixture, write_recorded, write_sparse
 
@@ -46,3 +47,7 @@ def strata_record(engine_dir: Path, model: Path, mmproj: Path, **over) -> Manage
     return ManagedServerConfig(
         runtime="strata", engine_dir=str(engine_dir), engine_config=CONFIG_NAME, model=str(model),
         mmproj=str(mmproj), served_name="swift-1.5-iq3_xxs", port=8083, gpu=True, **over)
+
+
+def confirm_machine(global_dir: Path) -> None:
+    trust.record_machine(global_dir, trust.machine_snapshot(global_dir))

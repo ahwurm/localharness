@@ -17,11 +17,12 @@ from typing import Any
 
 import httpx
 
+from localharness.config import trust
 from localharness.config.models import ManagedServerConfig
 from localharness.core import private_files
 from localharness.provider import autosense as _auto
 from localharness.provider import gguf_header
-from localharness.provider import lifecycle, server, tuning
+from localharness.provider import lifecycle, model_library, server, tuning
 from localharness.provider.procfs import LaunchIdentity
 from localharness.provider.runtimes import RUNTIMES
 from localharness.provider.tuning import MODEL_CONFIG_CAP
@@ -36,6 +37,8 @@ ALLOWED_FLAGS = (
 NATIVE_MISMATCH = ("{name}'s Strata config serves another file than its model: path — "
                    "re-run Strata's setup with --gguf-dir, or fix the record.")
 CONFIG_REFUSAL = "{name}'s Strata config {what} — the harness launches Strata only with the keys, flags and paths it checks."
+UNCONFIRMED = "{name} cannot run here: its record has changes you have not confirmed"
+NOT_AN_INSTALL = "{name} cannot run here: its Strata install at {engine_dir} no longer passes the owner and mode checks."
 COPY_DELIMITER = "STRATA_COPY"
 DATA_DIR_NAME = "Strata-data"
 EFFORT_VALUES = ("none", "low", "medium", "high")
@@ -87,8 +90,8 @@ def is_flag(token: str) -> bool:
     return False
 
 
-def _shown(text: str) -> str:
-    return "".join(c for c in text if c.isprintable())[:60]
+def _shown(text: str, cap: int = 60) -> str:
+    return "".join(c for c in text if c.isprintable())[:cap]
 
 
 def _value(args: list[str], flag: str) -> str | None:
@@ -199,6 +202,27 @@ def sense(spec: ManagedServerConfig) -> tuple[EngineConfig | None, str | None]:
     if offences:
         return refuse("; ".join(offences))
     return EngineConfig(raw, data, hashlib.sha256(raw).hexdigest(), _header_sampling(spec)), None
+
+
+def verify_recorded(config_dir: Path, spec: ManagedServerConfig, peer: str | None, engine: EngineConfig) -> str | None:
+    """The refusal sentence unless the install passes its checks and its code and config bytes are the recorded ones."""
+    name = _auto._label(spec)
+    known = {os.path.realpath(os.path.expanduser(str(spec.model)))}
+    install = model_library.strata_install((_root(spec),), known)
+    if install is None or str(spec.engine_config) not in dict(install.configs):
+        return NOT_AN_INSTALL.format(name=name, engine_dir=_shown(str(spec.engine_dir), 200))
+    recorded = trust.recorded_machine(config_dir)
+    if recorded is None:
+        return UNCONFIRMED.format(name=name)
+    prefix = "server." if peer is None else f"extra_endpoints.{peer}.lifecycle."
+    held = {(e.get("kind"), e.get("name"), e.get("sha256")) for e in recorded["entries"]}
+    code = [(e["kind"], e["name"], e.get("sha256")) for e in trust.strata_entries(
+        config_dir, "", prefix, {"engine_dir": spec.engine_dir, "engine_config": spec.engine_config})
+        if e["name"] == prefix + "strata_code"]
+    if code and all(entry[2] and entry in held for entry in code) and (
+            trust.LAUNCH_KIND, prefix + "engine_config", engine.sha256) in held:
+        return None
+    return UNCONFIRMED.format(name=name)
 
 
 def launch_context(plan: "lifecycle.LaunchPlan | None", spec: ManagedServerConfig) -> int | None:
@@ -333,6 +357,9 @@ class StrataStrategy:
             cmd = server.serve_command(
                 spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
                 context=None, cache_ram=None, config_copy=str(copy_file))
+        unconfirmed = await asyncio.to_thread(verify_recorded, config_dir, spec, peer, engine)
+        if unconfirmed is not None:
+            raise server.LaunchRefused(unconfirmed)
         lifecycle._say_plan(on_plan, plan)
         copy = copy_of(engine, spec, context=launch_context(plan, spec), port=spec.port, config_dir=config_dir)
         try:

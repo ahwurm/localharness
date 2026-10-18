@@ -16,20 +16,26 @@ from localharness.provider import autosense, lifecycle, procfs, server, strata
 from localharness.provider.autosense import FreeMemory
 from tests.unit.launch_support import popen  # noqa: F401
 from tests.unit.procfs_support import fake_proc  # noqa: F401
-from tests.unit.strata_fixture import flash_next, strata_config, strata_record, strata_tree
+from tests.unit.strata_fixture import CONFIG_NAME, confirm_machine, flash_next, strata_config, strata_record, strata_tree
+from tests.unit.trust_support import write_yaml
 
 BASE = "http://127.0.0.1:8083/v1"
 SERVED = "swift-1.5-iq3_xxs"
 
 
 class World:
-    def __init__(self, tmp_path: Path, monkeypatch, started: list, config: Callable[[Path], dict] | None = None):
+    def __init__(self, tmp_path: Path, monkeypatch, started: list, config: Callable[[Path], dict] | None = None, peer: str | None = None):
         shard, projector = flash_next(tmp_path)
         self.shard, self.projector = shard, projector
         self.engine = strata_tree(tmp_path, config=config(shard) if config else None, model=shard)
         self.config_dir = tmp_path / "cfg"
         self.config_dir.mkdir()
         self.spec = strata_record(self.engine, shard, projector)
+        self.peer = peer
+        life = {"runtime": "strata", "engine_dir": str(self.engine), "engine_config": CONFIG_NAME, "model": str(shard)}
+        write_yaml(self.config_dir / ("overrides.yaml" if peer else "config.yaml"), {
+            "extra_endpoints": [{"name": peer, "base_url": BASE, "lifecycle": life}]} if peer else {"server": life})
+        confirm_machine(self.config_dir)
         self.health = {"loaded": True, "service": "strata", "max_context": 65536}
         self.models = {"data": [{"id": SERVED, "meta": {"n_ctx": 65536}}]}
         self.requests: list[str] = []
@@ -43,7 +49,7 @@ class World:
         monkeypatch.setattr(server, "server_pid", lambda config_dir: 4242 if started else None)
 
     async def activate(self, **kw):
-        return await strata.StrataStrategy().activate(self.spec, self.config_dir, BASE, **kw)
+        return await strata.StrataStrategy().activate(self.spec, self.config_dir, BASE, peer=self.peer, **kw)
 
     @property
     def copy(self) -> dict:
@@ -52,7 +58,7 @@ class World:
 
 @pytest.fixture
 def make_world(tmp_path, monkeypatch, popen):  # noqa: F811
-    return lambda config=None: World(tmp_path, monkeypatch, popen, config)
+    return lambda config=None, **kw: World(tmp_path, monkeypatch, popen, config, **kw)
 
 
 @pytest.fixture
