@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -479,12 +480,27 @@ EFFORT_BUDGET_KEY: dict[str | None, str | None] = {
     "vllm": None,
     "ollama": None,
     "lmstudio": None,
+    "strata": None,
     "unknown": None,
     None: None,
 }
 
-# The two extra_body keys a server may reject (and the rejection set may therefore hold).
-EFFORT_KEYS: frozenset[str] = frozenset({"chat_template_kwargs", "reasoning_budget_tokens"})
+# The request field a runtime takes the effort LEVEL in (a prompt instruction, not a token cap), or None.
+EFFORT_LEVEL_KEY: dict[str | None, str | None] = {
+    "strata": "reasoning_effort",
+    "llamacpp": None,
+    "vllm": None,
+    "ollama": None,
+    "lmstudio": None,
+    "unknown": None,
+    None: None,
+}
+STRATA_EFFORT = MappingProxyType({"off": "none", "low": "low", "high": "high", "max": "high"})
+
+# The extra_body keys a server may reject (and the rejection set may therefore hold).
+EFFORT_KEYS: frozenset[str] = frozenset(
+    {"chat_template_kwargs", "reasoning_budget_tokens", "reasoning_effort"}
+)
 
 
 def _presence_penalty_kwarg(value: float | None) -> dict[str, float]:
@@ -1089,6 +1105,7 @@ class LLMClient:
         presence_penalty: float | None = None,
         *,
         reasoning_budget: int | None = None,
+        effort: str | None = None,
     ) -> tuple[Any, Any]:
         """Single-turn completion. Routes to native or XML based on tool_call_mode.
 
@@ -1120,18 +1137,21 @@ class LLMClient:
         EFFORT_BUDGET_KEY names a field (llama.cpp) it rides extra_body and the server enforces;
         elsewhere it is not sent and a streamed call is cut client-side by
         ProviderReasoningBudgetError. None = no budget (nothing is sent).
+
+        effort: the /effort level; sent only under the runtime's EFFORT_LEVEL_KEY (Strata's
+        `reasoning_effort`, an instruction to the model, not a cap).
         """
         if self.config.tool_call_mode == "native":
             return await self._complete_native(messages, tools, stream,
                                                disable_thinking=disable_thinking, gen_timeout=gen_timeout,
                                         max_tokens=max_tokens,
                                         presence_penalty=presence_penalty,
-                                        reasoning_budget=reasoning_budget)
+                                        reasoning_budget=reasoning_budget, effort=effort)
         return await self._complete_xml(messages, tools, stream,
                                         disable_thinking=disable_thinking, gen_timeout=gen_timeout,
                                         max_tokens=max_tokens,
                                         presence_penalty=presence_penalty,
-                                        reasoning_budget=reasoning_budget)
+                                        reasoning_budget=reasoning_budget, effort=effort)
 
     async def stream_complete(
         self,
@@ -1144,6 +1164,7 @@ class LLMClient:
         presence_penalty: float | None = None,
         *,
         reasoning_budget: int | None = None,
+        effort: str | None = None,
     ) -> tuple[Any, Any]:
         """Streaming completion with per-token callback. Returns (message, usage).
 
@@ -1155,13 +1176,13 @@ class LLMClient:
                 messages, tools, stream=True, on_token=on_token,
                 disable_thinking=disable_thinking, gen_timeout=gen_timeout,
                                         max_tokens=max_tokens, presence_penalty=presence_penalty,
-                reasoning_budget=reasoning_budget,
+                reasoning_budget=reasoning_budget, effort=effort,
             )
         return await self._complete_xml(messages, tools, stream=True,
                                         disable_thinking=disable_thinking, gen_timeout=gen_timeout,
                                         max_tokens=max_tokens,
                                         presence_penalty=presence_penalty,
-                                        reasoning_budget=reasoning_budget)
+                                        reasoning_budget=reasoning_budget, effort=effort)
 
     async def _complete_native(
         self,
@@ -1174,6 +1195,7 @@ class LLMClient:
         max_tokens: int | None = None,
         presence_penalty: float | None = None,
         reasoning_budget: int | None = None,
+        effort: str | None = None,
     ) -> tuple[Any, Any]:
         """Call OpenAI-compat API with tool_calls parameter. Returns (message, usage).
 
@@ -1186,7 +1208,7 @@ class LLMClient:
         as the budget allows, and a client disconnect aborts engine-side generation.
         """
         kwargs, name_unmap = self._native_kwargs(
-            messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget)
+            messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget, effort)
         cut = self._reasoning_cut_chars(reasoning_budget)   # None where the server enforces (D-21)
         try:
             async with _inference_gate(self.config):
@@ -1210,7 +1232,7 @@ class LLMClient:
                 self._tools_param_rejected = True   # sticky, per-server: don't re-eat it every turn
                 log.warning("Server rejected native `tools` param (400) — retrying once without it")
                 kwargs, name_unmap = self._native_kwargs(
-                    messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget)  # sticky → omitted
+                    messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget, effort)  # sticky → omitted
                 try:
                     async with _inference_gate(self.config):
                         return await self._consume_bounded(
@@ -1224,7 +1246,7 @@ class LLMClient:
 
             def build() -> tuple[dict[str, Any], dict[str, str] | None]:
                 return self._native_kwargs(
-                    messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget)
+                    messages, tools, disable_thinking, max_tokens, presence_penalty, reasoning_budget, effort)
 
             async def send(built: tuple[dict[str, Any], dict[str, str] | None]) -> tuple[Any, Any]:
                 retry_kwargs, retry_unmap = built
@@ -1245,6 +1267,7 @@ class LLMClient:
         max_tokens: int | None = None,
         presence_penalty: float | None = None,
         reasoning_budget: int | None = None,
+        effort: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, str] | None]:
         """Build native-mode request kwargs, HONORING the per-server sticky rejections so a param a
         prior turn 400'd on is never re-sent (mirrors _complete_xml's `not self._tools_param_rejected`
@@ -1269,16 +1292,17 @@ class LLMClient:
             kwargs["tools"], name_unmap = _tools_to_api_format(tools)
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences
-        if (eb := self._extra_body(disable_thinking, reasoning_budget)) is not None:
+        if (eb := self._extra_body(disable_thinking, reasoning_budget, effort)) is not None:
             kwargs["extra_body"] = eb
         return kwargs, name_unmap
 
     def _extra_body(
-        self, disable_thinking: bool, reasoning_budget: int | None
+        self, disable_thinking: bool, reasoning_budget: int | None, effort: str | None = None
     ) -> dict[str, Any] | None:
         """The one assembler of the request's effort `extra_body` (all three request paths): the
         thinking-off flag unless the server rejected it, and the runtime's budget field when the
-        runtime has one, the server has not rejected it and a budget was asked for. One merged dict,
+        runtime has one, the server has not rejected it and a budget was asked for, and the effort level
+        under the runtime's level key (EFFORT_LEVEL_KEY). One merged dict,
         or None — no `extra_body` key at all — when nothing applies (the request is then
         byte-identical to a call that set neither)."""
         body: dict[str, Any] = {}
@@ -1287,6 +1311,9 @@ class LLMClient:
         key = EFFORT_BUDGET_KEY.get(self.config.provider_type)
         if reasoning_budget is not None and key and key not in self._rejected_effort_keys:
             body[key] = reasoning_budget
+        level_key = EFFORT_LEVEL_KEY.get(self.config.provider_type)
+        if effort in STRATA_EFFORT and level_key and level_key not in self._rejected_effort_keys:
+            body[level_key] = STRATA_EFFORT[effort]
         return body or None
 
     def _note_effort_accepted(self, kwargs: dict[str, Any]) -> None:
@@ -1375,12 +1402,13 @@ class LLMClient:
         return result
 
     def _rebuild_extra_body(
-        self, kwargs: dict[str, Any], disable_thinking: bool, reasoning_budget: int | None
+        self, kwargs: dict[str, Any], disable_thinking: bool, reasoning_budget: int | None,
+        effort: str | None = None,
     ) -> dict[str, Any]:
         """A copy of an XML request's kwargs with `extra_body` re-assembled from the CURRENT
         rejection set (everything else — messages, tools, caps — exactly as first sent)."""
         rebuilt = {k: v for k, v in kwargs.items() if k != "extra_body"}
-        if (eb := self._extra_body(disable_thinking, reasoning_budget)) is not None:
+        if (eb := self._extra_body(disable_thinking, reasoning_budget, effort)) is not None:
             rebuilt["extra_body"] = eb
         return rebuilt
 
@@ -1751,6 +1779,7 @@ class LLMClient:
         max_tokens: int | None = None,
         presence_penalty: float | None = None,
         reasoning_budget: int | None = None,
+        effort: str | None = None,
     ) -> tuple[Any, Any]:
         """Send tools via API for chat-template injection AND fold the XML tool syntax into the
         system prompt, then parse tool calls from text.
@@ -1779,7 +1808,7 @@ class LLMClient:
             kwargs["tools"], name_unmap = _tools_to_api_format(tools)
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences
-        if (eb := self._extra_body(disable_thinking, reasoning_budget)) is not None:
+        if (eb := self._extra_body(disable_thinking, reasoning_budget, effort)) is not None:
             kwargs["extra_body"] = eb
         cut = self._reasoning_cut_chars(reasoning_budget)   # None where the server enforces (D-21)
         try:
@@ -1810,7 +1839,7 @@ class LLMClient:
 
                 return await self._retry_without(
                     keys,
-                    lambda: self._rebuild_extra_body(kwargs, disable_thinking, reasoning_budget),
+                    lambda: self._rebuild_extra_body(kwargs, disable_thinking, reasoning_budget, effort),
                     send, exc,
                 )
             # D-32 (2) and (4): today's tools fallback, which records no effort key.
@@ -1824,7 +1853,7 @@ class LLMClient:
                 injected_messages, tools, stream,
                 disable_thinking=disable_thinking, gen_timeout=gen_timeout,
                                         max_tokens=max_tokens, presence_penalty=presence_penalty,
-                reasoning_budget=reasoning_budget,
+                reasoning_budget=reasoning_budget, effort=effort,
             )
         except Exception as exc:
             raise self._wrap_error(exc) from exc
@@ -1839,6 +1868,7 @@ class LLMClient:
         max_tokens: int | None = None,
         presence_penalty: float | None = None,
         reasoning_budget: int | None = None,
+        effort: str | None = None,
     ) -> tuple[Any, Any]:
         """Legacy fallback: retry without the `tools` param, tool schemas carried purely via the
         system-prompt XML injection (a no-op if `messages` already carries it — see
@@ -1856,7 +1886,7 @@ class LLMClient:
         }
         if self.config.stop_sequences:
             kwargs["stop"] = self.config.stop_sequences
-        if (eb := self._extra_body(disable_thinking, reasoning_budget)) is not None:
+        if (eb := self._extra_body(disable_thinking, reasoning_budget, effort)) is not None:
             kwargs["extra_body"] = eb
         cut = self._reasoning_cut_chars(reasoning_budget)   # None where the server enforces (D-21)
         try:
@@ -1884,7 +1914,7 @@ class LLMClient:
 
             return await self._retry_without(
                 keys,
-                lambda: self._rebuild_extra_body(kwargs, disable_thinking, reasoning_budget),
+                lambda: self._rebuild_extra_body(kwargs, disable_thinking, reasoning_budget, effort),
                 send, exc,
             )
         except Exception as exc:
