@@ -8,6 +8,8 @@ import json
 import os
 import re
 import shlex
+import shutil
+import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -226,10 +228,33 @@ def copy_text(copy: Mapping[str, Any]) -> str:
     return json.dumps(copy, sort_keys=True, indent=2) + "\n"
 
 
+def _own_log(fd: int, directory: Path, name: str) -> None:
+    try:
+        mode = os.lstat(name, dir_fd=fd).st_mode
+    except FileNotFoundError:
+        mode = stat.S_IFREG
+    if stat.S_ISDIR(mode):
+        shutil.rmtree(directory / name)
+    elif not stat.S_ISREG(mode):
+        os.unlink(name, dir_fd=fd)
+    with open(name, "ab", opener=private_files.nofollow_opener(fd)) as fh:
+        os.fchmod(fh.fileno(), private_files.PRIVATE_FILE_MODE)
+
+
 def write_copy(config_dir: Path, port: int, copy: Mapping[str, Any]) -> Path:
+    """The copy and an empty log, both 0600 in a 0700 directory; a planted link is replaced, never followed."""
     path = copy_path(config_dir, port)
+    path.parent.parent.mkdir(parents=True, exist_ok=True)
     server._own_directory(path.parent)
-    private_files.atomic_write_text(path, copy_text(copy))
+    fd = private_files.open_private_dir(path.parent, create=False)
+    try:
+        for name in os.listdir(fd):
+            if name.startswith(f".{path.name}."):
+                os.unlink(name, dir_fd=fd)
+        private_files.atomic_write_text(path.name, copy_text(copy), dir_fd=fd)
+        _own_log(fd, path.parent, log_path(config_dir, port).name)
+    finally:
+        os.close(fd)
     return path
 
 
