@@ -283,7 +283,7 @@ def test_two_records_on_one_file_are_one_entry_shown_as_the_first_in_config_orde
 
     cold = entries.groups[1].entries
     assert [(e.name, e.others) for e in cold] == [("x", ("x-strata",))]
-    assert entries.pick("x") is cold[0] and entries.pick("x-strata") is cold[0]
+    assert entries.pick("x").record.name == "x" and entries.pick("x-strata").record.name == "x-strata"
 
 
 def test_the_record_last_served_is_the_one_shown(tmp_path, monkeypatch):

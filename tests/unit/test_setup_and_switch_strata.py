@@ -10,15 +10,15 @@ from localharness.agent.gate_types import Decision
 from localharness.cli import interview, model_cmd, workspace
 from localharness.config import trust
 from localharness.config.loader import ConfigLoader
-from localharness.provider import autosense, lifecycle
+from localharness.provider import autosense, lifecycle, speed_stats
 from localharness.provider.autosense import FreeMemory
 from tests.unit.interview_support import scripted
-from tests.unit.strata_fixture import CONFIG_NAME, PROJECTOR
+from tests.unit.strata_fixture import CONFIG_NAME, PROJECTOR, flash_next, strata_tree
 from tests.unit.test_launch_paths_repl import _liveness_not_launched, _no_machine_probes  # noqa: F401 — autouse
-from tests.unit.test_plan_entries import SERVING, entries_of
+from tests.unit.test_plan_entries import SERVING, entries_of, twin_files
 from tests.unit.test_plan_entries_strata import NAME, fake_live, flash_world, install, invoke, swapping
 from tests.unit.test_repl_model_cmd import _xrepl
-from tests.unit.test_serve_cmd import GIB, PRIMARY, PRIMARY_URL
+from tests.unit.test_serve_cmd import GIB, PRIMARY, PRIMARY_URL, llama_peer, serve_world
 from tests.unit.test_setup_and_switch import terminal
 
 STRATA = f"{NAME}-strata"
@@ -177,7 +177,7 @@ def swaps(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_repl_asks_through_the_channel_writes_the_strata_peer_and_switches(box, session, swaps):
+async def test_the_repl_asks_through_the_channel_writes_the_strata_peer_and_launches_it(box, session, swaps):
     harness, repl, channel = session
     answering(channel, "allow_once")
 
@@ -188,7 +188,8 @@ async def test_the_repl_asks_through_the_channel_writes_the_strata_peer_and_swit
     assert request.tool_params == {"model": STRATA}
     assert any(m.startswith(f"• {STRATA} (Strata, +{PROJECTOR}) ← {box.shard}") for m in channel.messages)
     assert STRATA in [ep.name for ep in harness.extra_endpoints]
-    assert len(swaps) == 1
+    [target] = swaps
+    assert (target.spec.runtime, target.spec.model, target.spec.port) == ("strata", str(box.shard), 8083)
     assert uncovered(box) == []
 
 
@@ -230,3 +231,86 @@ async def test_an_install_gone_since_the_listing_is_not_launched_by_the_repl(box
 
     assert "is gone — nothing set up" in channel.messages[-1] and swaps == []
     assert state(box) == box.before
+
+
+def pair_world(tmp_path, monkeypatch, kind: str):
+    """A file with two records: ``llamacpp`` (two llama.cpp names) or ``strata`` (a llama.cpp record and a Strata one); the two names in config order."""
+    pin_box(monkeypatch)
+    if kind == "llamacpp":
+        world = serve_world(tmp_path, monkeypatch, peers=twin_files(tmp_path))
+        return world, ("x", "x-strata")
+    shard1, _ = flash_next(tmp_path)
+    engine = strata_tree(tmp_path / "engine", model=shard1)
+    llama = llama_peer(NAME, 8082)
+    llama["lifecycle"].update(model=str(shard1), mmproj=str(shard1.parent / PROJECTOR))
+    strata = {"name": STRATA, "base_url": STRATA_URL, "provider_type": "strata", "gpu": True,
+              "lifecycle": {"runtime": "strata", "engine_dir": str(engine), "engine_config": CONFIG_NAME,
+                            "model": str(shard1), "served_name": STRATA, "port": 8083, "gpu": True}}
+    return serve_world(tmp_path, monkeypatch, peers=[llama, strata]), (NAME, STRATA)
+
+
+PAIRS = pytest.mark.parametrize("kind", ["llamacpp", "strata"])
+
+
+def cold_of(world, **kw):
+    entries = entries_of(world, {PRIMARY_URL: (PRIMARY,)}, **kw)
+    return [e for group in entries.groups for e in group.entries if e.kind == "cold"] + [
+        e for e in entries.not_offered if e.kind == "cold"]
+
+
+@PAIRS
+def test_every_record_on_a_file_is_picked_by_its_own_name(tmp_path, monkeypatch, kind):
+    world, (first, second) = pair_world(tmp_path, monkeypatch, kind)
+    entries = entries_of(world, {PRIMARY_URL: (PRIMARY,)})
+
+    picks = {name: entries.pick(name) for name in (first, second)}
+
+    assert {name: (e.record.name, e.name) for name, e in picks.items()} == {first: (first, first), second: (second, second)}
+    assert picks[first].others == (second,) and picks[second].others == (first,)
+
+
+@PAIRS
+def test_the_cli_launches_the_record_a_name_names(tmp_path, monkeypatch, kind):
+    world, names = pair_world(tmp_path, monkeypatch, kind)
+    fake_live(monkeypatch)
+    seen = swapping(monkeypatch)
+
+    for name in names:
+        assert invoke(world, name).exit_code == 0
+
+    assert seen == list(names)
+
+
+@PAIRS
+@pytest.mark.asyncio
+async def test_the_repl_launches_the_record_a_name_names(tmp_path, monkeypatch, kind):
+    world, names = pair_world(tmp_path, monkeypatch, kind)
+    fake_live(monkeypatch)
+    targets = []
+
+    async def fake_swap(incumbent, target, **kw):
+        targets.append(target.peer)
+        return lifecycle.SwapOutcome(None, None, None, RuntimeError("stop here"), "launch")
+
+    monkeypatch.setattr(lifecycle, "swap", fake_swap)
+    harness = ConfigLoader(config_dir=world.g, local_config_dir=None).load_harness()
+    repl, channel, agent, _ = _xrepl(world.g, harness, {PRIMARY_URL: [PRIMARY], PEER_URL: "unreachable", STRATA_URL: "unreachable"})
+    agent._llm.config.base_url, agent._llm.config.model = PRIMARY_URL, PRIMARY
+    agent._llm.config.provider_type = "llamacpp"
+
+    for name in names:
+        await repl._handle_slash(f"/model {name}")
+
+    assert targets == list(names)
+
+
+@PAIRS
+def test_the_first_in_config_order_is_shown_until_the_person_lands_on_the_other(tmp_path, monkeypatch, kind):
+    world, (first, second) = pair_world(tmp_path, monkeypatch, kind)
+
+    [before] = cold_of(world)
+    speed_stats.record_last_served(speed_stats.default_speed_stats_path(world.g), second)
+    [after] = cold_of(world)
+
+    assert (before.name, before.others) == (first, (second,))
+    assert (after.name, after.others) == (second, (first,))
