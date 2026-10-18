@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 from localharness.agent.context import WindowProbe
 from localharness.cli import doctor_cmd
 from localharness.cli.app import app
-from tests.unit.strata_fixture import flash_next
+from tests.unit.strata_fixture import CONFIG_NAME, flash_next, strata_tree
 from tests.unit.test_doctor_cmd import (  # noqa: F401  (autouse fixtures, imported for their effect)
     _models_resp,
     _route_the_window_probe,
@@ -77,3 +77,33 @@ def test_a_known_flash_next_file_and_no_install_prints_the_clone_and_setup_comma
            "--context 65536 --vision no --no-browser" in result.output
     out = result.output
     assert out.index("LLM endpoint reachable") < out.index("Strata:") < out.index("Config directory writable")
+
+
+def test_a_sensed_install_names_its_directory_and_each_config_with_the_file_it_serves(tmp_path, monkeypatch, mock_httpx):
+    world, models = _world(tmp_path, monkeypatch)
+    strata_tree(world.home / "src", model=models / SHARD1)
+
+    assert _rows(_doctor(world)) == [f"Strata: ~/src/Strata · {CONFIG_NAME} serves {SHARD1}"]
+
+
+def test_no_flash_next_file_and_no_install_prints_no_strata_row(tmp_path, monkeypatch, mock_httpx):
+    world = serve_world(tmp_path, monkeypatch)
+
+    result = _doctor(world)
+
+    assert "Strata:" not in result.output
+    assert "LLM endpoint reachable" in result.output
+
+
+def test_a_model_directory_with_a_space_is_quoted(tmp_path, monkeypatch, mock_httpx):
+    world, _ = _world(tmp_path, monkeypatch, "models/my models")
+
+    assert _rows(_doctor(world)) == [
+        "Strata: not installed — " + COMMAND.format(gguf_dir="~/'models/my models'")]
+
+
+def test_a_directory_name_cannot_inject_into_the_command(tmp_path, monkeypatch, mock_httpx):
+    world, _ = _world(tmp_path, monkeypatch, "models/a;touch x")
+
+    assert _rows(_doctor(world)) == [
+        "Strata: not installed — " + COMMAND.format(gguf_dir="~/'models/a;touch x'")]
