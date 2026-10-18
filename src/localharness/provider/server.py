@@ -1210,8 +1210,11 @@ def _launch_refusal(
     return NOT_A_LAUNCH_LINE.format(pid=pid, exe=exe, pidfile=pid_path(config_dir)), None
 
 
-def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float = 30.0, *, expect: procfs.LaunchIdentity | None) -> bool:
-    """SIGTERM the process group, SIGKILL on timeout. Docker: also stop by name.
+def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float = 30.0, *,
+                expect: procfs.LaunchIdentity | None, parent_first: bool = False) -> bool:
+    """SIGTERM the process group (the parent alone with `parent_first`), SIGKILL the group on timeout. Docker: also stop by name.
+
+    The pid is re-proven from `/proc` before the SIGKILL as before the SIGTERM; a mismatch raises and kills nothing.
 
     `expect` is required (D-27): nothing is signalled unless the pidfile's live process matches it
     (`procfs.identity_mismatch`); `expect=None` never authorises a signal. A mismatch raises
@@ -1233,7 +1236,7 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
             # the grace loop and the SIGKILL re-check must keep meaning, so its start time is adopted.
             start = verified.start_time
         try:
-            os.killpg(pid, signal.SIGTERM)  # start_new_session=True → pid == pgid
+            (os.kill if parent_first else os.killpg)(pid, signal.SIGTERM)  # start_new_session=True → pid == pgid
         except (ProcessLookupError, PermissionError):
             pass
         deadline = time.monotonic() + timeout_seconds
@@ -1241,6 +1244,9 @@ def stop_server(config_dir: Path, launch: str = "binary", timeout_seconds: float
             time.sleep(0.2)
         if _alive(pid, **_start_kw(start)):
             if _same_process(pid, start):  # the pid may have been reused during the grace
+                refusal, _ = _launch_refusal(config_dir, pid, expect, start)
+                if refusal is not None:
+                    raise RuntimeError(refusal)
                 try:
                     os.killpg(pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):

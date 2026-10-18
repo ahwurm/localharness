@@ -1,14 +1,19 @@
 """A Strata launch runs only what the machine record confirmed, is recognised by its proven process and stops parent-first."""
 from __future__ import annotations
 
+import asyncio
 import json
+import signal
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from localharness.config import trust
-from localharness.provider import server, strata
+from localharness.provider import lifecycle, procfs, server, strata
 from tests.unit.launch_support import popen  # noqa: F401
-from tests.unit.strata_fixture import CONFIG_NAME
+from tests.unit.strata_fixture import CONFIG_NAME, strata_record
+from tests.unit.test_stop_server_expect import PID, START, llama_spec, record, refusal_line, stat_line, write_pidfile
 from tests.unit.test_strata_activate import SENSED, SERVED, make_world, sensing  # noqa: F401
 
 PEER = "strata-peer"
@@ -83,3 +88,173 @@ async def test_the_planned_launch_is_checked_the_same_way(make_world, popen, sen
     with pytest.raises(server.LaunchRefused) as refused:
         await world.activate(autosense=SENSED)
     assert str(refused.value) == UNCONFIRMED and popen == []
+
+
+# ------------------------------------------------------------------------------- identity and stop
+
+CFG = Path("/cfg")
+SPEC = strata_record(Path("/e/Strata"), Path("/m/a.gguf"), Path("/m/p.gguf"))
+PYTHON = "/usr/bin/python3.12"
+ENGINE = "/e/Strata/engine/strata"
+
+
+def strata_proc(cfg: Path, port: int = 8083, **over):
+    return record(exe=PYTHON, argv=tuple(strata.argv(SPEC, config_copy=str(strata.copy_path(cfg, port)))), **over)
+
+
+def mismatch(rec) -> str | None:
+    return procfs.identity_mismatch(rec, strata.identity(SPEC, CFG))
+
+
+def test_the_venv_python_launch_with_this_ports_copy_is_the_identity():
+    assert mismatch(strata_proc(CFG)) is None
+
+
+@pytest.mark.parametrize("rec", [
+    record(exe=ENGINE, argv=(ENGINE, "--serve"), sid=PID + 1),
+    record(exe=ENGINE, argv=(ENGINE, "--serve")),
+    record(exe="/usr/bin/bash", argv=("bash",)),
+])
+def test_the_engine_child_and_other_processes_are_not_the_identity(rec):
+    assert mismatch(rec) is not None
+
+
+def test_another_ports_copy_is_not_this_identity():
+    other = SPEC.model_copy(update={"port": 8084})
+    rec = record(exe=PYTHON, argv=tuple(strata.argv(other, config_copy=str(strata.copy_path(CFG, 8084)))))
+    assert mismatch(rec) is not None
+
+
+def test_a_strata_identity_adds_no_llamacpp_token_and_a_llamacpp_one_still_does():
+    assert not {"-a", "-m"} & set(lifecycle.record_identity(SPEC).argv_contains)
+    named = llama_spec().model_copy(update={"served_name": "alias"})
+    assert lifecycle.record_identity(named).argv_contains[-2:] == ("-a", "alias")
+
+
+def test_own_launch_finds_a_verified_strata_launch(tmp_path, monkeypatch):
+    write_pidfile(tmp_path, f"{PID} {START} 8083")
+    monkeypatch.setattr(procfs, "_stat_bytes", lambda pid: stat_line(pid, START))
+    monkeypatch.setattr(procfs, "read_process", lambda pid, **kw: strata_proc(tmp_path))
+    found = lifecycle.own_launch(tmp_path, [SPEC])
+    assert found is not None and found.pid == PID
+
+
+class Calls:
+    """Everything the stop under test could do, in order: `/proc` reads and signals."""
+
+    def __init__(self) -> None:
+        self.log: list[tuple] = []
+        self.clock = 0.0
+        self.killed = False
+        self.read = None
+        self.alive = lambda: not self.killed
+
+    @property
+    def signals(self) -> list[tuple]:
+        return [c for c in self.log if c[0] != "proof"]
+
+    @property
+    def proven_before_each_signal(self) -> bool:
+        return all(self.log[i - 1] == ("proof",) for i, c in enumerate(self.log) if c[0] != "proof")
+
+
+@pytest.fixture
+def proc(monkeypatch):
+    calls = Calls()
+
+    def read(pid, **kw):
+        calls.log.append(("proof",))
+        return calls.read
+
+    def kill(pid, sig):
+        if sig:
+            calls.log.append(("kill", pid, sig))
+
+    def killpg(pid, sig):
+        calls.log.append(("killpg", pid, sig))
+        calls.killed = sig == signal.SIGKILL
+
+    def sleep(seconds):
+        calls.clock += seconds
+
+    monkeypatch.setattr(procfs, "read_process", read)
+    monkeypatch.setattr(server, "_read_proc_stat", lambda pid: stat_line(pid, START))
+    monkeypatch.setattr(server.os, "kill", kill)
+    monkeypatch.setattr(server.os, "killpg", killpg)
+    monkeypatch.setattr(server, "_alive", lambda pid, start=None: calls.alive())
+    monkeypatch.setattr(server, "_is_zombie", lambda pid: False)
+    monkeypatch.setattr(server, "time", SimpleNamespace(monotonic=lambda: calls.clock, sleep=sleep))
+    return calls
+
+
+@pytest.fixture
+def live(tmp_path, proc):
+    """A pidfile naming a verified Strata launch of port 8083 under `tmp_path`."""
+    proc.read = strata_proc(tmp_path)
+    return write_pidfile(tmp_path, f"{PID} {START} 8083")
+
+
+async def stop_strata(config_dir: Path) -> None:
+    await strata.StrataStrategy().stop(SPEC, config_dir)
+
+
+async def test_a_parent_that_exits_on_its_sigterm_gets_that_one_signal_and_nothing_else(tmp_path, proc, live):
+    polls = iter([True, True])
+    proc.alive = lambda: next(polls, False)
+    await stop_strata(tmp_path)
+    assert proc.signals == [("kill", PID, signal.SIGTERM)] and proc.proven_before_each_signal
+    assert not live.exists()
+
+
+async def test_a_parent_alive_through_the_grace_is_reproven_and_the_group_killed_after_it(tmp_path, proc, live):
+    await stop_strata(tmp_path)
+    assert proc.signals == [("kill", PID, signal.SIGTERM), ("killpg", PID, signal.SIGKILL)]
+    assert proc.proven_before_each_signal and proc.clock >= 30.0
+
+
+async def test_a_parent_that_became_another_process_in_the_grace_is_not_killed_and_the_stop_raises(
+        tmp_path, proc, live, monkeypatch):
+    after_term = server.os.kill
+
+    def change_then_kill(pid, sig):
+        after_term(pid, sig)
+        if sig == signal.SIGTERM:
+            proc.read = record(exe=ENGINE, argv=(ENGINE,))
+
+    monkeypatch.setattr(server.os, "kill", change_then_kill)
+    proc.alive = lambda: True
+    with pytest.raises(RuntimeError, match="which is not a harness launch"):
+        await stop_strata(tmp_path)
+    assert proc.signals == [("kill", PID, signal.SIGTERM)] and live.exists()
+
+
+async def test_a_parent_gone_one_poll_before_the_grace_ends_gets_no_sigkill(tmp_path, proc, live):
+    proc.alive = lambda: proc.clock < 29.0
+    await stop_strata(tmp_path)
+    assert proc.signals == [("kill", PID, signal.SIGTERM)]
+
+
+async def test_no_pidfile_and_a_pid_that_is_not_the_recorded_process_signal_nothing(tmp_path, proc, monkeypatch):
+    stop = lambda: asyncio.to_thread(  # noqa: E731
+        server.stop_server, tmp_path, expect=strata.identity(SPEC, tmp_path), parent_first=True)
+    assert await stop() is False
+    write_pidfile(tmp_path, f"{PID} {START} 8083")
+    monkeypatch.setattr(server, "_read_proc_stat", lambda pid: stat_line(pid, START + 1))
+    assert await stop() is False
+    assert proc.log == []
+
+
+async def test_a_pidfile_planted_to_name_an_unrelated_process_is_never_signalled(tmp_path, proc, live):
+    proc.read = record(exe="/usr/bin/bash", argv=("bash",))
+    with pytest.raises(RuntimeError) as refused:
+        await stop_strata(tmp_path)
+    assert str(refused.value) == refusal_line(tmp_path, "bash")
+    assert proc.signals == [] and live.exists()
+
+
+async def test_a_llamacpp_stop_still_signals_the_group_first_and_reproves_before_the_sigkill(tmp_path, proc):
+    proc.read = record()
+    write_pidfile(tmp_path)
+    await lifecycle.SpawnedProcessStrategy().stop(llama_spec(), tmp_path)
+    assert proc.signals == [("killpg", PID, signal.SIGTERM), ("killpg", PID, signal.SIGKILL)]
+    assert proc.proven_before_each_signal
