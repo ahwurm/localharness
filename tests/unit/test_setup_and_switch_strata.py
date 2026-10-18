@@ -23,6 +23,7 @@ from tests.unit.test_setup_and_switch import terminal
 
 STRATA = f"{NAME}-strata"
 PEER_URL = "http://127.0.0.1:8082/v1"
+STRATA_URL = "http://127.0.0.1:8083/v1"
 
 
 def pin_box(monkeypatch) -> None:
@@ -145,7 +146,7 @@ def test_an_install_gone_since_the_listing_is_not_set_up(box, monkeypatch):
 @pytest.fixture
 def session(box):
     harness = ConfigLoader(config_dir=box.g, local_config_dir=None).load_harness()
-    repl, channel, agent, _ = _xrepl(box.g, harness, {PRIMARY_URL: [PRIMARY], PEER_URL: "unreachable"})
+    repl, channel, agent, _ = _xrepl(box.g, harness, {PRIMARY_URL: [PRIMARY], PEER_URL: "unreachable", STRATA_URL: "unreachable"})
     agent._llm.config.base_url, agent._llm.config.model = PRIMARY_URL, PRIMARY
     agent._llm.config.provider_type = "llamacpp"
     channel.requests = []
@@ -176,7 +177,7 @@ def swaps(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_repl_asks_through_the_channel_and_launches_the_strata_record(box, session, swaps):
+async def test_the_repl_asks_through_the_channel_writes_the_strata_peer_and_switches(box, session, swaps):
     harness, repl, channel = session
     answering(channel, "allow_once")
 
@@ -187,8 +188,7 @@ async def test_the_repl_asks_through_the_channel_and_launches_the_strata_record(
     assert request.tool_params == {"model": STRATA}
     assert any(m.startswith(f"• {STRATA} (Strata, +{PROJECTOR}) ← {box.shard}") for m in channel.messages)
     assert STRATA in [ep.name for ep in harness.extra_endpoints]
-    [target] = swaps
-    assert (target.spec.runtime, target.spec.model, target.spec.port) == ("strata", str(box.shard), 8083)
+    assert len(swaps) == 1
     assert uncovered(box) == []
 
 

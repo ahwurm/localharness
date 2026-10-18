@@ -1895,7 +1895,7 @@ class OrchestratorREPL:
             reason=library.SETUP_SWITCH_QUESTION, display=f"{bullet}\n{library.SETUP_SWITCH_QUESTION}"))
         if not answer.allowed:
             return
-        done = await asyncio.to_thread(library.set_up, cfg, entry.setup.real)
+        done = await asyncio.to_thread(library.set_up_entry, cfg, entry.setup)
         for line in done.lines:
             await self._send_info(line)
         if done.name is None:
