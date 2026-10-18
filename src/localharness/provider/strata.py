@@ -109,17 +109,20 @@ def sense(spec: ManagedServerConfig) -> tuple[EngineConfig | None, str | None]:
     args = data.get("args", []) if isinstance(data, dict) else None
     if not isinstance(args, list) or not all(isinstance(t, str) for t in args):
         return refuse("is not a JSON object with a list of string arguments")
-    unknown = [k for k in data if k not in ALLOWED_KEYS + HARNESS_KEYS]
-    if unknown:
-        return refuse(f"sets {', '.join(_shown(k) for k in unknown)}")
-    flags = [t.partition("=")[0] for t in args if is_flag(t)]
-    stray = [f for f in flags if f not in ALLOWED_FLAGS]
-    if stray:
-        return refuse(f"passes {', '.join(_shown(f) for f in stray)}")
     native = _value(args, "--native")
     served = os.path.realpath(_root(spec) / native) if native else None
     if served != os.path.realpath(os.path.expanduser(str(spec.model))):
         return None, NATIVE_MISMATCH.format(name=name)
+    offences = []
+    keys = sorted(k for k in data if k not in ALLOWED_KEYS + HARNESS_KEYS)
+    if keys:
+        offences.append(f"sets {', '.join(_shown(k) for k in keys)}")
+    flags = dict.fromkeys(t.partition("=")[0] for t in args if is_flag(t))
+    stray = [f for f in flags if f not in ALLOWED_FLAGS]
+    if stray:
+        offences.append(f"passes {', '.join(_shown(f) for f in stray)}")
+    if offences:
+        return refuse("; ".join(offences))
     return EngineConfig(raw, data, hashlib.sha256(raw).hexdigest()), None
 
 
