@@ -24,14 +24,15 @@ from localharness.provider.gguf_header import (
     unique_preset_name,
     walk_ggufs,
 )
-from localharness.config.models import EndpointRef, ManagedServerConfig
+from localharness.config.models import AutosenseConfig, EndpointRef, ManagedServerConfig
 from localharness.config.overlay import overlay_lock
 from localharness.core.private_files import NotRegularFile, atomic_write_text, open_regular
 from localharness.provider import procfs
 from localharness.provider.tuning import MODEL_CONFIG_CAP
 
 __all__ = ["LIBRARY_FILE", "LIBRARY_VERSION", "LIBRARY_CAP", "Entry", "Library", "Shown", "Found", "Checkpoint",
-           "library_path", "scan", "peers_for", "free_ports", "checkpoints", "snapshots", "snapshot_of"]
+           "library_path", "scan", "peers_for", "free_ports", "checkpoints", "snapshots", "snapshot_of",
+           "StrataInstall", "strata_roots", "strata_install", "flash_next_quant"]
 
 LIBRARY_FILE = "model-library.json"
 LIBRARY_VERSION = 1
@@ -42,6 +43,9 @@ _TEXT_GENERATION = ("ForCausalLM", "ForConditionalGeneration")
 _EMBEDDING_FILES = ("modules.json", "config_sentence_transformers.json")
 _UNLOADED = "its snapshot holds an entry the harness does not load"
 _NO_WEIGHTS = "its snapshot holds no safetensors weights of a text-generation model"
+SWIFT_SHARD = re.compile(
+    r"Swift-Qwen3\.8-Flash-Next-GSQ-RCO-(?P<quant>[A-Za-z0-9_]+)-0000[12]-of-00002\.gguf")
+_FLASH_NEXT_ARCHITECTURE = "qwen4exp"
 
 
 def _repo_ok(repo: object) -> bool:
@@ -427,3 +431,85 @@ def peers_for(models: Sequence[DiscoveredModel], *, start: int, taken_names: Col
                 served_name=name, port=port, gpu=True),
         ))
     return peers
+
+
+@dataclass(frozen=True)
+class StrataInstall:
+    """A sensed Strata install: its directory and, in name order, each config file with the realpath its `--native` names."""
+
+    engine_dir: Path
+    configs: tuple[tuple[str, str], ...]
+
+
+def strata_roots(autosense: AutosenseConfig) -> tuple[Path, ...]:
+    if autosense.strata_dir:
+        return (Path(os.path.expanduser(autosense.strata_dir)),)
+    return tuple(Path(os.path.expanduser(p)) for p in ("~/Strata", "~/src/Strata"))
+
+
+def _private(st: os.stat_result) -> bool:
+    return st.st_uid == os.getuid() and not st.st_mode & 0o022
+
+
+def _lstat_ok(path: Path | str, kind: Callable[[int], bool], *, executable: bool = False) -> bool:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return kind(st.st_mode) and _private(st) and (not executable or bool(st.st_mode & stat.S_IXUSR))
+
+
+def _interpreter_ok(path: Path) -> bool:
+    """A regular executable, or a link whose target is a regular executable owned by the user or root and closed to group and world."""
+    try:
+        is_link = stat.S_ISLNK(os.lstat(path).st_mode)
+        target = os.stat(path) if is_link else None
+    except OSError:
+        return False
+    if target is None:
+        return _lstat_ok(path, stat.S_ISREG, executable=True)
+    return (stat.S_ISREG(target.st_mode) and target.st_uid in (0, os.getuid())
+            and not target.st_mode & 0o022 and bool(target.st_mode & 0o111))
+
+
+def _native_of(root: Path, config: Path) -> str | None:
+    args = (_json_object(config) or {}).get("args")
+    if not isinstance(args, list) or "--native" not in args:
+        return None
+    i = args.index("--native")
+    value = args[i + 1] if i + 1 < len(args) else None
+    return os.path.realpath(os.path.join(root, os.path.expanduser(value))) if isinstance(value, str) and value else None
+
+
+def _install_at(root: Path, known: Collection[str]) -> StrataInstall | None:
+    tree = (_lstat_ok(root, stat.S_ISDIR)
+            and all(_lstat_ok(root / d, stat.S_ISDIR) for d in ("serve", "engine", ".venv", ".venv/bin"))
+            and _lstat_ok(root / "serve" / "server.py", stat.S_ISREG)
+            and _lstat_ok(root / "engine" / "strata", stat.S_ISREG, executable=True)
+            and _interpreter_ok(root / ".venv" / "bin" / "python"))
+    if not tree:
+        return None
+    try:
+        names = sorted(e.name for e in os.scandir(root) if e.name.startswith("strata-") and e.name.endswith(".json"))
+    except OSError:
+        return None
+    configs = tuple((n, real) for n in names if _lstat_ok(root / n, stat.S_ISREG)
+                    and (real := _native_of(root, root / n)) in known)
+    return StrataInstall(root, configs) if configs else None
+
+
+def strata_install(roots: Iterable[Path], known: Collection[str]) -> StrataInstall | None:
+    """The first root that is an install: owned and closed by mode, regular files, a config naming a known file. Nothing in it runs."""
+    return next(filter(None, (_install_at(r, known) for r in roots)), None)
+
+
+def flash_next_quant(path: str | os.PathLike[str]) -> str | None:
+    """The quant of a Swift Flash-Next shard whose header says qwen4exp, else None."""
+    match = SWIFT_SHARD.fullmatch(os.path.basename(path))
+    if match is None:
+        return None
+    try:
+        arch = gguf_header.read_header(path, {"general.architecture"}).get("general.architecture")
+    except (OSError, GgufHeaderError):
+        return None
+    return match["quant"] if arch == _FLASH_NEXT_ARCHITECTURE else None

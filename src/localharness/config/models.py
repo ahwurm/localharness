@@ -2636,6 +2636,17 @@ class AutosenseConfig(BaseModel):
     draft_p_min: float = Field(default=0.6, ge=0.0, le=1.0, description=(
         "--spec-draft-p-min for a derived draft-mtp (llama.cpp's own default is 0.0)."))
 
+    strata_dir: Optional[str] = Field(default=None, description=(
+        "The Strata install the harness may launch (a program the harness runs); unset means "
+        "~/Strata, else ~/src/Strata. Machine-level only."))
+
+    @field_validator("strata_dir")
+    @classmethod
+    def _strata_dir_clean(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and (not v.strip() or "\x00" in v or "\n" in v or "\r" in v):
+            raise ValueError("strata_dir must be a non-empty single line with no NUL byte")
+        return v
+
     @field_validator("kv_cache_type")
     @classmethod
     def _kv_cache_type_known(cls, v: str) -> str:
