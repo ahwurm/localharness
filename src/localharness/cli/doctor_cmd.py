@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import functools
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -556,6 +557,33 @@ def _tuning_rows(cfg_path: Path, harness: HarnessConfig) -> list[str]:
     return rows
 
 
+STRATA_COMMAND = ("git clone https://github.com/Niko1221/Strata ~/src/Strata && cd ~/src/Strata && ./setup.sh --yes --no-start "
+                  "--family swift --model {quant} --gguf-dir {gguf_dir} --context 65536 --vision no --no-browser")
+STRATA_ABSENT_ROW = "Strata: not installed — {command}"
+STRATA_FOUND_ROW = "Strata: {engine_dir} · {configs}"
+
+
+def _strata_row(cfg_path: Path, harness: HarnessConfig) -> str | None:
+    """The `Strata:` row: the install's configs, or the command to run when a Flash-Next file is known and none is sensed. Runs nothing."""
+    from localharness.cli import library, model_ops
+    from localharness.cli.workspace import shown_path, visible_text
+    from localharness.provider.model_library import flash_next_quant, strata_install, strata_roots
+
+    real = os.path.realpath
+    known = tuple(dict.fromkeys(
+        [real(r.spec.model) for r in model_ops.serving_records(harness) if r.spec is not None and r.spec.model]
+        + [s.real for s in library.listing(cfg_path).shown if s.model is not None]))
+    if install := strata_install(strata_roots(harness.autosense), known):
+        configs = "; ".join(f"{visible_text(name)} serves {visible_text(os.path.basename(file))}" for name, file in install.configs)
+        return STRATA_FOUND_ROW.format(engine_dir=shown_path(install.engine_dir), configs=configs)
+    file = next((f for f in known if flash_next_quant(f)), None)
+    if file is None:
+        return None
+    shown = shown_path(os.path.dirname(file))
+    gguf_dir = "~/" + shlex.quote(shown[2:]) if shown.startswith("~/") else shlex.quote(shown)
+    return STRATA_ABSENT_ROW.format(command=STRATA_COMMAND.format(quant=flash_next_quant(file), gguf_dir=gguf_dir))
+
+
 SAMPLING_SET_ROW = "Sampling: temperature {temp} from {rung} (the model's own is {own} — unset {rung} to use it)"
 SAMPLING_SET_PLAIN_ROW = "Sampling: temperature {temp} from {rung}"
 SAMPLING_OWN_ROW = "Sampling: the model's own (temperature {own})"
@@ -1039,8 +1067,9 @@ def doctor(
         console.print(f"  (skipped: no valid config)")
 
     if harness is not None:
-        for row in _tuning_rows(cfg_path, harness):
-            console.print(f"{_INFO}  " + escape(row), soft_wrap=True)
+        for row in (*_tuning_rows(cfg_path, harness), _strata_row(cfg_path, harness)):
+            if row is not None:
+                console.print(f"{_INFO}  " + escape(row), soft_wrap=True)
         from localharness.cli import autostart
         for row in (_sampling_row(harness, loader, root_agent, server_default),
                     autostart.doctor_row(cfg_path), _models_row(cfg_path)):
