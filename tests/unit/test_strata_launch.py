@@ -7,14 +7,16 @@ import signal
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
+from localharness.agent import context as agent_context
 from localharness.config import trust
 from localharness.provider import lifecycle, procfs, server, strata
 from tests.unit.launch_support import popen  # noqa: F401
 from tests.unit.strata_fixture import CONFIG_NAME, strata_record
 from tests.unit.test_stop_server_expect import PID, START, llama_spec, record, refusal_line, stat_line, write_pidfile
-from tests.unit.test_strata_activate import SENSED, SERVED, make_world, sensing  # noqa: F401
+from tests.unit.test_strata_activate import BASE, SENSED, SERVED, make_world, sensing  # noqa: F401
 
 PEER = "strata-peer"
 UNCONFIRMED = strata.UNCONFIRMED.format(name=SERVED)
@@ -258,3 +260,86 @@ async def test_a_llamacpp_stop_still_signals_the_group_first_and_reproves_before
     await lifecycle.SpawnedProcessStrategy().stop(llama_spec(), tmp_path)
     assert proc.signals == [("killpg", PID, signal.SIGTERM), ("killpg", PID, signal.SIGKILL)]
     assert proc.proven_before_each_signal
+
+
+# ------------------------------------------------------------------------------- readiness, window, logs, environment
+
+KEY = "sk-held-0123456789abcdef"
+BLOCKED = ("STRATA_SKIP_SHA256", "STRATA_PREBUILT_URL", "STRATA_SOURCE", "STRATA_EXECV", "HF_ENDPOINT")
+
+
+def answers(*steps):
+    """A transport answering each request from the next step: an exception is raised, a (path, body) pair served."""
+    queue = list(steps)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        step = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(step, Exception):
+            raise step
+        return httpx.Response(200, json=step[request.url.path])
+
+    return httpx.MockTransport(handler)
+
+
+async def test_readiness_waits_through_a_refused_connection_and_loaded_false(monkeypatch):
+    loading = {"/health": {"loaded": False, "service": "strata"}}
+    ready = {"/health": {"loaded": True, "service": "strata"}, "/v1/models": {"data": [{"id": SERVED}]}}
+    monkeypatch.setattr(server, "_TRANSPORT", answers(httpx.ConnectError("refused"), httpx.ConnectError("refused"), loading, ready))
+    polls: list[float] = []
+    served = await server.wait_ready(BASE, poll_seconds=0, runtime="strata", ready=strata.health_ready, on_poll=polls.append)
+    assert served == [SERVED] and len(polls) == 3
+
+
+async def test_a_health_answer_from_another_service_keeps_the_wait_going(monkeypatch):
+    other = {"/health": {"loaded": True, "service": "other"}}
+    monkeypatch.setattr(server, "_TRANSPORT", answers(other))
+    with pytest.raises(TimeoutError):
+        await server.wait_ready(BASE, poll_seconds=0.01, timeout_seconds=0.05, runtime="strata", ready=strata.health_ready)
+
+
+def private_log(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o600)
+
+
+async def test_a_parent_that_died_during_startup_shows_both_logs_with_the_key_and_bearer_masked(tmp_path):
+    private_log(server.log_path(tmp_path), f"server line\nAuthorization: Bearer abc.def.ghi\nkey {KEY}\n")
+    private_log(strata.log_path(tmp_path, 8083), f"engine line\ntoken {KEY} Bearer xyz.uvw.rst\n")
+    with pytest.raises(RuntimeError) as died:
+        await server.wait_ready(
+            BASE, config_dir=tmp_path, runtime="strata", api_key=KEY, engine_log=strata.log_path(tmp_path, 8083))
+    text = str(died.value)
+    assert text.startswith("Strata exited during startup. Log tail:") and "server line" in text and "engine line" in text
+    assert KEY not in text and "abc.def.ghi" not in text and "xyz.uvw.rst" not in text
+
+
+def test_the_engine_tail_is_read_by_name_inside_its_own_private_directory(tmp_path):
+    assert server.scrubbed_tail(tmp_path, engine_log=strata.log_path(tmp_path, 8083)).endswith("(no log)")
+    private_log(strata.log_path(tmp_path, 8083), "engine says\n")
+    link = tmp_path / "strata" / "8084.log"
+    link.symlink_to(tmp_path / "elsewhere")
+    assert "engine says" in server.scrubbed_tail(tmp_path, engine_log=strata.log_path(tmp_path, 8083))
+    assert server.scrubbed_tail(tmp_path, engine_log=link).endswith("(no log)")
+
+
+def test_the_window_falls_back_to_health_max_context_when_the_model_list_has_no_n_ctx(monkeypatch):
+    bodies = {"/v1/models": {"data": [{"id": SERVED}]}, "/health": {"max_context": 65536}}
+    monkeypatch.setattr(
+        httpx, "get", lambda url, **kw: httpx.Response(200, json=bodies["/" + url.split("/", 3)[3]]))
+    assert agent_context._probe_strata("http://127.0.0.1:8083/v1", SERVED, {}).served == 65536
+
+
+async def test_the_child_environment_drops_the_escape_hatches_and_carries_the_held_key_on_neither_argv_nor_the_log(
+        make_world, popen, monkeypatch, tmp_path):  # noqa: F811
+    for name in BLOCKED:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("STRATA_API_KEY", "old")
+    world = make_world()
+    live = await world.activate(autosense=None, api_key=KEY)
+    env, cmd = popen[0]["env"], popen[0]["cmd"]
+    assert not set(BLOCKED) & set(env) and env["STRATA_API_KEY"] == KEY
+    assert set(live.dropped_env) == {*BLOCKED, "STRATA_API_KEY"}
+    assert KEY not in " ".join(cmd) and "--api-key" not in cmd and "--open" not in cmd
+    assert KEY not in server.log_path(world.config_dir).read_text("utf-8")

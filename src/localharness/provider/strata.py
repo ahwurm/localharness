@@ -378,7 +378,8 @@ class StrataStrategy:
             **server.key_kwargs(api_key))
         served = await server.wait_ready(
             base_url, config_dir=config_dir, timeout_seconds=min(timeout_seconds, READY_SECONDS), on_poll=on_poll,
-            runtime=spec.runtime, ready=health_ready, **server.key_kwargs(api_key))
+            runtime=spec.runtime, ready=health_ready, engine_log=log_path(config_dir, spec.port),
+            **server.key_kwargs(api_key))
         report = plan.report if plan is not None else None
         if report is not None:
             from localharness.agent.context import probe_window
