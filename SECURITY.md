@@ -595,9 +595,9 @@ next start on a terminal and a touch does not. The model keys are an entry kind 
 harness also derives flags at launch from the model file and the machine's `autosense` settings:
 `kv_cache_type`, `draft_mtp` and `draft_p_min` pick among closed values; `-c`, `--cache-ram`,
 `--max-model-len` and `--fit-ctx` are numbers computed from the model file's header and tensor table,
-the checkpoint's `config.json` and the machine's memory, and so is a Strata retry's
-halved `--max-context` (the config's window halved), all bounded by the trained window and the harness
-floor. Those settings and the derived flags are not part of the record, and a record field set to a
+the checkpoint's `config.json` and the machine's memory, bounded by the trained window and the harness
+floor; a Strata retry's halved `--max-context` is the config's own window halved, bounded by that
+window and the floor. Those settings and the derived flags are not part of the record, and a record field set to a
 value pins it. A model you switch yourself with `/model` on a terminal
 (or in Zed), or with `localharness model` typed at a terminal, is re-recorded as you set it and
 asks nothing; one switched from a remote channel, or by a command the agent ran in the shell
@@ -1376,7 +1376,8 @@ launch the harness expects, so a process id since reused by another program is n
 
 A launch that keeps a model's experts in RAM (llama.cpp placing them there, or Strata) is priced
 against `/proc/meminfo`: the experts must fit in `MemAvailable` beside the system's reserve
-(`autosense.unified_reserve_ratio` of `MemTotal`, and at least 10 GB for Strata). A `/proc/meminfo`
+(`autosense.unified_reserve_ratio` of `MemTotal`, and at least 10 GB for Strata, its own headroom
+rule). A `/proc/meminfo`
 that cannot be read refuses both launches rather than assuming room, and free VRAM that cannot be
 read leaves the window not computed, as before.
 
@@ -1386,40 +1387,57 @@ cache holds runs the files in that cache, so the harness walks every entry of th
 an entry that is neither a regular file, a folder nor such a link, makes the snapshot unlisted.
 `config.json` and `tokenizer_config.json` are read under a size cap with `json.loads` only, and an
 `auto_map` in either makes the checkpoint `not offered: needs trust_remote_code`; the harness never
-passes `--trust-remote-code`. The launch puts the verified snapshot's directory on the command line,
+passes `--trust-remote-code`, and vLLM without it refuses custom code, which covers the one case the
+cap leaves unseen: an `auto_map` in a file over the cap is not read. The launch puts the verified snapshot's directory on the command line,
 not the repo id, with `HF_HUB_OFFLINE=1`. A repo id the cache does not hold launches by its id as
 before; a cache that cannot be read, or a cached repo that is no loadable vLLM checkpoint, is a
 refusal, never an unverified launch by repo id.
 
-**Strata.** Strata (`runtime: strata`, `provider_type: strata`) is a third-party engine, a Python
+**Strata.** The harness runs `<engine_dir>/.venv/bin/python serve/server.py`, which starts
+`engine/strata`. Strata (`runtime: strata`, `provider_type: strata`) is a third-party engine, a Python
 server over a C++/CUDA engine, set up by its own installer, which the harness never runs: the
 installer can use privilege escalation and fetches its engine from the project's `latest` release,
-so `localharness doctor` prints the command for you to run yourself. The harness launches it only
-from a record you confirmed, on 127.0.0.1 only (`bind_all` and `extra_args` are refused for it).
-At every listing and every launch `engine_dir` is checked again, and nothing in it runs to decide
-that: the directory, its `serve`, `engine`, `.venv` and `.venv/bin` folders and its config files are
-owned by you and not group- or world-writable; `serve/server.py` and `engine/strata` are regular
-files, owned and closed the same way; and `.venv/bin/python` is either a regular
-file or a symlink whose target is a regular executable owned by the user or root and not group- or
-world-writable (a venv's interpreter is a link to the system's). `serve/server.py`, `engine/strata`
-and the config file must still hash to the recorded values (see "What the record holds of a
-launch"). Strata is not pointed at the config in its install: it is handed a copy in the protected
-`strata/` folder of the config directory, built from the recorded bytes through an allowlist of
-keys, flags and paths (under the install, Strata's data folder beside it, or the model's folder),
-and any other key or flag, or a path outside those, refuses the launch and names it. The server
-gets the key only as `STRATA_API_KEY` in its environment, never on its command line;
-`STRATA_SKIP_SHA256`, `STRATA_PREBUILT_URL`, `STRATA_SOURCE`, `STRATA_EXECV` and `HF_ENDPOINT` are
+and `localharness doctor` prints its command (a `git clone`, then `./setup.sh --yes …`) for you to
+read and run yourself. Strata's API has had no outside audit, so the harness launches it only from a
+record you confirmed, on 127.0.0.1 only; `bind_all`, `extra_args` and `env` are refused for it.
+
+What is checked: at every listing and every launch `engine_dir` is checked again, and nothing in it
+runs to decide that. The directory, its `serve`, `engine`, `.venv` and `.venv/bin` folders and its
+config files are owned by you and not group- or world-writable; `serve/server.py` and `engine/strata`
+are regular files, owned and closed the same way; and `.venv/bin/python` is either a regular file or
+a symlink whose target is a regular executable owned by the user or root and not group- or
+world-writable (a venv's interpreter is a link to the system's).
+
+What is hashed: `serve/server.py`, `engine/strata` and the config file must still hash to the
+recorded values (see "What the record holds of a launch"), at the launch and again before the one
+retry after a load death.
+
+What the copy allows: Strata is not pointed at the config in its install but at a copy in the
+protected `strata/` folder of the config directory, built from the recorded bytes through an
+allowlist of keys, flags and paths (under the install, Strata's data folder beside it, or the
+model's folder). Any other key or flag, a repeated `--max-context`, `--native` or `--kv`, a URL, or a
+path outside those refuses the launch and names it. The copy's `sampling` is filled from the model
+file's header when the config sets none.
+
+What the environment loses: the server gets the key only as `STRATA_API_KEY`, never on its command
+line; `STRATA_SKIP_SHA256`, `STRATA_PREBUILT_URL`, `STRATA_SOURCE`, `STRATA_EXECV` and `HF_ENDPOINT` are
 dropped from the environment it inherits; and nothing of Strata is put on the harness's `PATH`.
 
-**What this does NOT cover for Strata.** The rest of its tree, its `serve.*` modules, its venv's
-site-packages and `~/.config/strata/settings.json`, runs unfingerprinted, so a writer into a
-user-owned install who leaves the hashed files alone is not asked about, and one who keeps a hashed
-file's size, inode and modification time is not re-hashed. Its installer takes the engine release
-from `latest` and checks it only against a size and SHA-256 published by the same origin: integrity
-against transport, not origin. Swift's shards are not hash-checked by Strata, and the record
-fingerprints the model's path, not its bytes, as for llama.cpp. The copy's `log` path is made
-owner-only by the harness just before the launch; a same-user process that swaps it between that
-check and Strata's open is a race the harness does not close.
+**What this does NOT cover for Strata.** Its tree outside the two hashed files runs unfingerprinted:
+its `serve.*` modules, its venv's site-packages, `~/.config/strata/settings.json` and, when
+`.venv/bin/python` is a link, the target it points to, which sits outside the install and is checked
+for owner and mode only. A writer into a user-owned install who leaves the hashed files alone is
+not asked about, and one who keeps a hashed file's size, inode and modification time is not re-hashed.
+The model's bytes and the other files the config names (`--pack`, `--ple-gguf`, `--expert-profile`)
+are fingerprinted by path, not content, as for llama.cpp, and the header values that fill `sampling`
+are not validated. Swift's shards are not hash-checked by Strata, and its installer takes the engine
+release from `latest` and checks it only against a size and SHA-256 published by the same origin:
+integrity against transport, not origin. The harness checks the copy and its paths, and makes the
+copy's `log` path owner-only, as it writes them; a same-user process, such as code the agent ran,
+that rewrites the copy, swaps a link in the model folder or swaps the `log` path before Strata
+opens it is not stopped, and neither is one that swaps a hashed file between the hash check and the
+exec. If the install lives where other users can write, or you edit its files, keep it in a folder
+only you can write to, and treat the hashed files as the check and the rest as trusted.
 
 **What this does NOT cover.** As vLLM's source reads, its key guards the `/v1/` routes only, so
 its `/tokenize` answers without a key, and the harness's token counter and doctor's tokenizer
@@ -1527,8 +1545,9 @@ the other model keys, so a changed parser or speculation setting asks at the nex
 `start`. The flags the harness derives itself are not part of the record: `kv_cache_type`,
 `draft_mtp` and `draft_p_min` pick among closed values, while `-c`, `--cache-ram`, `--max-model-len`
 and `--fit-ctx` are numbers computed from the model file's header and tensor table, the checkpoint's
-`config.json` and the machine's memory, as is a Strata retry's halved `--max-context`, bounded by the
-trained window and the harness floor, and a record field set to a value pins each. The floor is built
+`config.json` and the machine's memory, bounded by the trained window and the harness floor, and a
+record field set to a value pins each; a Strata retry's halved `--max-context` is the config's own
+window halved, bounded by that window and the floor. The floor is built
 on the reply reserve, so it never lowers it, and its cache, `server-floor.json`, only raises the live
 figure: a planted or stale value can refuse a launch you see, never let a smaller window through.
 A hostile tensor table can mis-price within those bounds. The reader caps counts, names and dimensions
@@ -1536,7 +1555,7 @@ and refuses offsets that run backwards or leave the file, and names chosen to sh
 held to cross-checks (attention layers against `block_count` and the attention interval, experts only
 with `expert_count`, the input tables at most half the file). What remains is one optimistic `-c` for
 the person's own file: an OOM or a spilled layer at load, which the one halved retry and the
-floor-bounded backstop end, never an escalation.
+harness floor end, never an escalation.
 
 ### Autostart: the harness's own user unit
 
