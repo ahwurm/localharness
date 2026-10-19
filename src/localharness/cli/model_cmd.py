@@ -27,7 +27,7 @@ from localharness.config import session_presence, trust
 from localharness.config.loader import ConfigLoader
 from localharness.config.paths import global_config_dir, resolve_config_dir
 from localharness.provider import lifecycle, procfs, server, speed_stats, strata, tuning
-from localharness.provider.runtimes import RUNTIMES
+from localharness.provider.runtimes import RUNTIMES, has_engine_config
 from localharness.provider.units import read_target
 
 console = Console()
@@ -458,11 +458,11 @@ def _script_text(record, harness, cfg: Path, keyed: bool, decision, *, memory, f
     plan = lifecycle.plan_launch(
         spec, sensed, decision, autosense=harness.autosense, api_key_held=keyed, floor=lifecycle.cached_floor(cfg))
     key_placeholder = "provider.api_key" if peer is None else f"extra_endpoints.{peer.name}.api_key"
-    if "engine_config" in RUNTIMES[spec.runtime].record_fields:
+    if has_engine_config(spec.runtime):
         copy = strata.copy_of(
             sensed.engine, spec, context=strata.launch_context(plan, spec), port=spec.port, config_dir=cfg)
         return strata.render_script(
-            plan, spec, strata.copy_text(copy), strata.copy_path(cfg, spec.port), name=record.name,
+            plan, spec, copy, strata.copy_path(cfg, spec.port), name=record.name,
             version=resolved_version(), key_placeholder=key_placeholder, visible=visible_text, function=function)
     return tuning.render_script(
         plan, spec, name=record.name, version=resolved_version(), visible=visible_text, function=function,

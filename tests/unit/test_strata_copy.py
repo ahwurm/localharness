@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 
 import pytest
@@ -15,7 +16,7 @@ from tests.unit.test_strata_activate import SENSED, SERVED, make_world, sensing,
 
 
 def refusal(what: str) -> str:
-    return strata.CONFIG_REFUSAL.format(name=SERVED, what=what)
+    return strata.CONFIG_REFUSAL.format(name=SERVED, what=what, engine_config=CONFIG_NAME)
 
 
 @pytest.mark.parametrize("planned", [False, True])
@@ -120,13 +121,31 @@ def test_a_value_of_the_wrong_type_refuses_naming_its_key(tmp_path, over, named)
 
 
 @pytest.mark.parametrize("extra", [("--max-context", "65k"), ("--max-context=1e3",), ("--max-context",),
-                                   ("--max-context", "²")])
+                                   ("--max-context", "²"), ("--max-context", "1234567890"),
+                                   ("--max-context", "9" * 30)])
 def test_a_max_context_that_is_not_decimal_digits_refuses_naming_the_flag(tmp_path, extra):
     spec, _ = build(tmp_path, args=[])
     config = strata_config(spec.model)
     config["args"] = [t for t in config["args"] if t not in ("--max-context", "65536")] + list(extra)
     (tmp_path / "Strata" / CONFIG_NAME).write_text(json.dumps(config), "utf-8")
     assert strata.sense(spec)[1] == refusal("has a bad value for --max-context")
+
+
+@pytest.mark.parametrize("flag,extra", [
+    ("--max-context", ("--max-context", "4096")), ("--max-context", ("--max-context=4096",)),
+    ("--native", ("--native", "other.gguf")), ("--kv", ("--kv", "q8_0", "--kv", "f16"))])
+def test_a_repeated_max_context_native_or_kv_is_refused_naming_it(tmp_path, flag, extra):
+    (_, why), *_ = sensed(tmp_path, extra=extra)
+    assert why == refusal(f"repeats {flag}")
+
+
+@pytest.mark.parametrize("token", ["https://host/x", "file:///etc/passwd", "s3:/bucket/x"])
+def test_a_path_argument_with_a_url_scheme_is_outside_even_when_its_tail_would_sit_in_the_install(tmp_path, token):
+    assert sensed(tmp_path, extra=("--pack", token))[0][1] == refusal(OUTSIDE.format(token))
+
+
+def test_inside_is_false_when_the_paths_cannot_be_compared():
+    assert strata.inside("relative/x", ("/abs",)) is False
 
 
 def test_the_levels_counts_and_numbers_that_are_allowed_pass(tmp_path):
@@ -142,10 +161,10 @@ def test_a_single_dash_flag_is_named_and_a_negative_number_is_a_value(tmp_path):
 
 def test_everything_wrong_is_one_sentence_in_a_fixed_order(tmp_path):
     (_, why), *_ = sensed(
-        tmp_path, extra=("-x", "--pack", "/z", "--max-context", "no"), gpu=True, env={}, cors_origins=[])
+        tmp_path, extra=("-x", "--pack", "/z"), gpu=True, env={}, cors_origins=[])
     assert why == refusal(
         "sets cors_origins, env; passes -x; names /z outside the Strata install, its data and the model folder; "
-        "has a bad value for gpu, --max-context")
+        "has a bad value for gpu")
 
 
 def test_the_header_fills_sampling_when_the_config_has_none(tmp_path):
@@ -231,6 +250,18 @@ def test_a_symlink_planted_at_the_log_is_replaced_by_a_private_regular_file(tmp_
     log = strata.log_path(tmp_path, 8083)
     assert log.is_file() and not log.is_symlink() and stat.S_IMODE(log.stat().st_mode) == 0o600
     assert victim.read_text("utf-8") == "keep"
+
+
+def test_a_hard_link_planted_at_the_log_is_replaced_and_its_other_name_untouched(tmp_path):
+    directory = tmp_path / "strata"
+    directory.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("keep", "utf-8")
+    os.link(victim, directory / "8083.log")
+    strata.write_copy(tmp_path, 8083, COPY)
+    log = strata.log_path(tmp_path, 8083)
+    assert log.stat().st_nlink == 1 and log.read_text("utf-8") == ""
+    assert victim.read_text("utf-8") == "keep" and stat.S_IMODE(log.stat().st_mode) == 0o600
 
 
 def test_a_directory_planted_at_the_log_is_replaced_and_an_existing_log_keeps_its_bytes(tmp_path):

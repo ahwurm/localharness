@@ -155,7 +155,7 @@ def test_a_config_with_no_window_and_no_record_context_is_refused_and_a_record_c
     spec = _spec(tmp_path, lambda shard: strata_config(shard, args=["--native", str(shard)]))
     assert _refusal(spec, tmp_path) == (
         NAME + "'s Strata config sets no --max-context — re-run Strata's setup with --context, "
-        "or set context: on the record.")
+        f"or set `context:` on {NAME}'s record.")
     assert _plan(spec.model_copy(update={"context": 32768}), tmp_path).report.asked == 32768
 
 
@@ -237,6 +237,21 @@ async def test_the_copy_of_the_retry_differs_from_the_first_only_in_the_window(w
     first, second = deaths.copies
     assert {**first, "args": None} == {**second, "args": None}
     assert [(a, b) for a, b in zip(first["args"], second["args"], strict=True) if a != b] == [("65536", "32768")]
+
+
+async def test_a_file_changed_between_the_first_death_and_the_relaunch_is_refused_and_nothing_restarts(
+        world, sensing, popen, monkeypatch):
+    Deaths(world, monkeypatch, popen, death(), [NAME])
+    stopped = server.stop_server
+
+    def stop_then_change(*args, **kw):
+        stopped(*args, **kw)
+        (world.engine / "serve" / "server.py").write_text("print('changed')\n", encoding="utf-8")
+
+    monkeypatch.setattr(server, "stop_server", stop_then_change)
+    with pytest.raises(server.LaunchRefused) as refused:
+        await world.activate(autosense=SENSED)
+    assert str(refused.value) == strata.UNCONFIRMED.format(name=NAME) and len(popen) == 1
 
 
 @pytest.mark.parametrize("floor,launches", [(32768, 2), (32769, 1)])

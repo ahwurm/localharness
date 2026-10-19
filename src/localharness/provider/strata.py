@@ -35,16 +35,21 @@ ALLOWED_FLAGS = (
     "--pack", "--native", "--ple-gguf", "--expert-profile", "--expert-cache", "--prefill", "--spec",
     "--spec-min-p", "--mtp", "--max-context", "--kv", "--kv-resident", "--vram-reserve-mib", "--mmap-experts",
     "--resident-experts", "--resident-budget-gib")
-NATIVE_MISMATCH = ("{name}'s Strata config serves another file than its model: path — "
+NATIVE_MISMATCH = ("{name}'s Strata config serves another file than its `model:` path — "
                    "re-run Strata's setup with --gguf-dir, or fix the record.")
-CONFIG_REFUSAL = "{name}'s Strata config {what} — the harness launches Strata only with the keys, flags and paths it checks."
-UNCONFIRMED = "{name} cannot run here: its record has changes you have not confirmed"
+CONFIG_REFUSAL = ("{name}'s Strata config {what} — fix {engine_config} (or re-run Strata's setup); "
+                  "the harness launches Strata only with the keys, flags and paths it allows.")
+UNCONFIRMED = "{name} cannot run here: its record has changes you have not confirmed — run localharness start on a terminal."
 NOT_AN_INSTALL = "{name} cannot run here: its Strata install at {engine_dir} no longer passes the owner and mode checks."
 STRATA_HEADROOM = 10 * 10**9
 STRATA_TWICE = "Strata could not load {name} twice; its low-RAM setup (setup.sh --low-ram) or the llama.cpp preset may."
 NO_WINDOW = ("{name}'s Strata config sets no --max-context — re-run Strata's setup with --context, "
-             "or set context: on the record.")
+             "or set `context:` on {name}'s record.")
 COPY_DELIMITER = "STRATA_COPY"
+VENV_PYTHON = ".venv/bin/python"
+SERVE_PY = "serve/server.py"
+SINGLE_FLAGS = ("--max-context", "--native", "--kv")
+SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 DATA_DIR_NAME = "Strata-data"
 EFFORT_VALUES = ("none", "low", "medium", "high")
 SAMPLING_KEYS = (
@@ -57,11 +62,11 @@ def _root(spec: ManagedServerConfig) -> Path:
 
 
 def interpreter(spec: ManagedServerConfig) -> str:
-    return str(_root(spec) / ".venv" / "bin" / "python")
+    return str(_root(spec) / VENV_PYTHON)
 
 
 def serve_py(spec: ManagedServerConfig) -> str:
-    return str(_root(spec) / "serve" / "server.py")
+    return str(_root(spec) / SERVE_PY)
 
 
 def copy_path(config_dir: Path, port: int) -> Path:
@@ -116,7 +121,10 @@ def roots(spec: ManagedServerConfig) -> tuple[str, ...]:
 
 
 def inside(path: str, allowed: tuple[str, ...]) -> bool:
-    return any(os.path.commonpath([path, root]) == root for root in allowed)
+    try:
+        return any(os.path.commonpath([path, root]) == root for root in allowed)
+    except ValueError:
+        return False
 
 
 def _number(token: str) -> bool:
@@ -131,7 +139,7 @@ def _paths(args: list[str], spec: ManagedServerConfig) -> list[str]:
     values = [t.partition("=")[2] if is_flag(t) else t for t in args]
     like = [v for v in values if (("/" in v or v[:1] in ("~", ".")) and not _number(v))]
     allowed = roots(spec)
-    return [v for v in like if not inside(os.path.realpath(_root(spec) / os.path.expanduser(v)), allowed)]
+    return [v for v in like if SCHEME.match(v) or not inside(os.path.realpath(_root(spec) / os.path.expanduser(v)), allowed)]
 
 
 def _max_contexts(args: list[str]) -> list[str | None]:
@@ -151,7 +159,7 @@ def _bad_keys(data: Mapping[str, Any], args: list[str]) -> list[str]:
         "sampling": lambda v: isinstance(v, dict) and all(
             isinstance(x, (int, float, str)) and not isinstance(x, bool) for x in v.values())}
     bad = [k for k in sorted(checks) if k in data and not checks[k](data[k])]
-    if any(v is None or not re.fullmatch(r"[0-9]+", v) for v in _max_contexts(args)):
+    if any(v is None or not re.fullmatch(r"[0-9]{1,9}", v) for v in _max_contexts(args)):
         bad.append("--max-context")
     return bad
 
@@ -170,7 +178,7 @@ def sense(spec: ManagedServerConfig) -> tuple[EngineConfig | None, str | None]:
     name = _auto._label(spec)
 
     def refuse(what: str) -> tuple[None, str]:
-        return None, CONFIG_REFUSAL.format(name=name, what=what)
+        return None, CONFIG_REFUSAL.format(name=name, what=what, engine_config=_shown(str(spec.engine_config), 120))
 
     try:
         with os.fdopen(private_files.open_regular(_root(spec) / str(spec.engine_config)), "rb") as fh:
@@ -186,6 +194,9 @@ def sense(spec: ManagedServerConfig) -> tuple[EngineConfig | None, str | None]:
     args = data.get("args", []) if isinstance(data, dict) else None
     if not isinstance(args, list) or not all(isinstance(t, str) for t in args):
         return refuse("is not a JSON object with a list of string arguments")
+    repeated = [f for f in SINGLE_FLAGS if sum(t.partition("=")[0] == f for t in args) > 1]
+    if repeated:
+        return refuse(f"repeats {', '.join(repeated)}")
     native = _value(args, "--native")
     served = os.path.realpath(_root(spec) / native) if native else None
     if served != os.path.realpath(os.path.expanduser(str(spec.model))):
@@ -303,12 +314,13 @@ def copy_text(copy: Mapping[str, Any]) -> str:
 
 def _own_log(fd: int, directory: Path, name: str) -> None:
     try:
-        mode = os.lstat(name, dir_fd=fd).st_mode
+        found = os.lstat(name, dir_fd=fd)
+        mode, links = found.st_mode, found.st_nlink
     except FileNotFoundError:
-        mode = stat.S_IFREG
+        mode, links = stat.S_IFREG, 1
     if stat.S_ISDIR(mode):
         shutil.rmtree(directory / name)
-    elif not stat.S_ISREG(mode):
+    elif not stat.S_ISREG(mode) or links > 1:
         os.unlink(name, dir_fd=fd)
     with open(name, "ab", opener=private_files.nofollow_opener(fd)) as fh:
         os.fchmod(fh.fileno(), private_files.PRIVATE_FILE_MODE)
@@ -332,26 +344,28 @@ def write_copy(config_dir: Path, port: int, copy: Mapping[str, Any]) -> Path:
 
 
 def render_script(
-    plan: Any, spec: ManagedServerConfig, copy_text: str, copy_file: Path, *, name: str, version: str,
+    plan: Any, spec: ManagedServerConfig, copy: Mapping[str, Any], copy_file: Path, *, name: str, version: str,
     key_placeholder: str, visible: Callable[[str], str], function: str | None = None,
 ) -> str:
     """The launch as POSIX sh: write the copy through a quoted here-document, then exec the venv python; no key value."""
-    window = _value(json.loads(copy_text).get("args", []), "--max-context")
-    clauses = ([f"window: {window} (--max-context)"] if window else []) + [
+    window = _value(copy.get("args", []), "--max-context")
+    clauses = ([f"window: {int(window):,} (--max-context)"] if window else []) + [
         f"environment: {tuning.SCRUBBED_SHOWN[spec.runtime]} dropped"]
-    head = [f"# {name} — the launch `localharness start` / `/model` runs ({version})", "# " + "; ".join(clauses)]
+    head = [f"# {name} — the launch `localharness start` / `/model` runs ({version})", "# " + "; ".join(clauses),
+            f"# writes {copy_file}, the file localharness start uses for this port — stop the managed server first"]
     key_env = RUNTIMES[spec.runtime].key_env
     if key_env in plan.env_names:
         head.append(f"# {key_env}=<{key_placeholder}>")
     quote = lambda tok: visible(shlex.quote(tok))  # noqa: E731
     head = [visible(line) for line in head]
-    head += [f"mkdir -p {quote(str(copy_file.parent))}", f"cat > {quote(str(copy_file))} <<'{COPY_DELIMITER}'"]
-    run = " ".join(map(quote, [".venv/bin/python", "serve/server.py", *plan.argv[2:]]))
-    tail = f"cd {quote(str(_root(spec)))} && exec {run}"
-    document = [*copy_text.removesuffix("\n").split("\n"), COPY_DELIMITER]
+    head += [f"mkdir -p -m 700 {quote(str(copy_file.parent))}", f"cat > {quote(str(copy_file))} <<'{COPY_DELIMITER}'"]
+    run = " ".join(map(quote, [VENV_PYTHON, SERVE_PY, *plan.argv[2:]]))
+    tail = [f"chmod 600 {quote(str(copy_file))}", f"cd {quote(str(_root(spec)))} && exec {run}"]
+    document = [*copy_text(copy).removesuffix("\n").split("\n"), COPY_DELIMITER]
     if function is None:
-        return "\n".join([*head, *document, tail])
-    return "\n".join([f"{function}() {{", "  (", *(f"    {line}" for line in head), *document, f"    {tail}", "  )", "}"])
+        return "\n".join([*head, *document, *tail])
+    return "\n".join([f"{function}() {{", "  (", *(f"    {line}" for line in head), *document,
+                      *(f"    {line}" for line in tail), "  )", "}"])
 
 
 async def health_ready(client: httpx.AsyncClient, base_url: str, headers: dict[str, str]) -> list[str] | None:
@@ -412,9 +426,13 @@ class StrataStrategy:
             cmd = server.serve_command(
                 spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok,
                 context=None, cache_ram=None, config_copy=str(copy_file))
-        unconfirmed = await asyncio.to_thread(verify_recorded, config_dir, spec, peer, engine)
-        if unconfirmed is not None:
-            raise server.LaunchRefused(unconfirmed)
+
+        async def confirmed() -> None:
+            unconfirmed = await asyncio.to_thread(verify_recorded, config_dir, spec, peer, engine)
+            if unconfirmed is not None:
+                raise server.LaunchRefused(unconfirmed)
+
+        await confirmed()
 
         async def prepare(chosen: "lifecycle.LaunchPlan | None") -> None:
             copy = copy_of(engine, spec, context=launch_context(chosen, spec), port=spec.port, config_dir=config_dir)
@@ -436,10 +454,6 @@ class StrataStrategy:
                 runtime=spec.runtime, ready=health_ready, engine_log=log_path(config_dir, spec.port),
                 **server.key_kwargs(api_key))
 
-        def stop() -> Any:
-            return asyncio.to_thread(
-                server.stop_server, config_dir, launch="binary", expect=identity(spec, config_dir), parent_first=True)
-
         lifecycle._say_plan(on_plan, plan)
         await prepare(plan)
         pid, dropped = launch(cmd)
@@ -452,9 +466,10 @@ class StrataStrategy:
             if retry is None:
                 raise
             try:
-                await stop()
+                await self.stop(spec, config_dir)
             except RuntimeError:
                 raise died from None
+            await confirmed()
             lifecycle._say_plan(on_plan, retry)
             await prepare(retry)
             pid, dropped = launch(list(retry.argv))
@@ -462,7 +477,7 @@ class StrataStrategy:
                 served = await ready()
             except RuntimeError as second:
                 with contextlib.suppress(RuntimeError):
-                    await stop()
+                    await self.stop(spec, config_dir)
                 raise RuntimeError(STRATA_TWICE.format(name=_escaped(spec)) + "\n" + str(second)) from None
             plan = retry
         report = plan.report if plan is not None else None

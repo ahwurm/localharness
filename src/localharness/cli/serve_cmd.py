@@ -51,7 +51,7 @@ from localharness.cli.workspace import decide_machine_trust, visible_text
 from localharness.config import trust
 from localharness.config.loader import ConfigLoader
 from localharness.provider import lifecycle, procfs, server, strata, units
-from localharness.provider.runtimes import RUNTIMES
+from localharness.provider.runtimes import RUNTIMES, has_engine_config
 
 err_console = Console(stderr=True)
 
@@ -113,17 +113,13 @@ def _planned_argv(spec: Any, config_dir: Path, autosense: Any, decision: Any, *,
         return list(plan.argv), plan, sensed
     argv = server.serve_command(
         spec, keyed=keyed, loopback=decision.loopback, key_file_ok=decision.key_file_ok, context=None, cache_ram=None,
-        config_copy=str(strata.copy_path(config_dir, spec.port)) if _is_strata(spec) else None)
+        config_copy=str(strata.copy_path(config_dir, spec.port)) if has_engine_config(spec.runtime) else None)
     return argv, None, None
-
-
-def _is_strata(spec: Any) -> bool:
-    return "engine_config" in RUNTIMES[spec.runtime].record_fields
 
 
 def _strata_engine(spec: Any, sensed: "lifecycle.Sensed | None") -> "strata.EngineConfig | None":
     """The Strata config the launch was sensed from (None for any other runtime); a refusal raises LaunchRefused."""
-    if not _is_strata(spec):
+    if not has_engine_config(spec.runtime):
         return None
     if sensed is not None:
         return sensed.engine

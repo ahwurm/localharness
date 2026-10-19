@@ -78,6 +78,10 @@ def test_a_strata_record_with_extra_args_is_refused():
     assert "bind_all and extra_args do not apply" in _refusal(extra_args=["--x"])
 
 
+def test_a_strata_record_with_env_is_refused():
+    assert "env is llama.cpp-only" in _refusal(env={"LLAMA_ARG_THREADS": "1"})
+
+
 @pytest.mark.parametrize("missing,said", [
     (("engine_dir",), "engine_dir"), (("engine_config",), "engine_config"), (("served_name",), "served_name"),
     (("engine_dir", "served_name"), "engine_dir and served_name"),

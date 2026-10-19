@@ -82,7 +82,7 @@ async def test_a_strata_record_launches_through_its_row_end_to_end(world, popen,
 
 GIB = 2**30
 SENSED = AutosenseConfig()
-MISMATCH = (f"{SERVED}'s Strata config serves another file than its model: path — "
+MISMATCH = (f"{SERVED}'s Strata config serves another file than its `model:` path — "
             "re-run Strata's setup with --gguf-dir, or fix the record.")
 
 
@@ -206,11 +206,11 @@ def _plan(world, *, keyed=False):
 def _script(world, *, keyed=False, function=None, plan=None, spec=None):
     sensed, planned = _plan(world, keyed=keyed)
     spec = spec or world.spec
-    copy = strata.copy_text(strata.copy_of(
-        sensed.engine, spec, context=strata.launch_context(planned, spec), port=spec.port, config_dir=world.config_dir))
+    copy = strata.copy_of(
+        sensed.engine, spec, context=strata.launch_context(planned, spec), port=spec.port, config_dir=world.config_dir)
     return strata.render_script(
         plan or planned, spec, copy, strata.copy_path(world.config_dir, spec.port), name="swift", version="0.19.1",
-        key_placeholder="key", visible=lambda text: text, function=function), copy
+        key_placeholder="key", visible=lambda text: text, function=function), strata.copy_text(copy)
 
 
 def _heredoc(script: str) -> str:
@@ -224,10 +224,13 @@ def test_the_script_writes_the_copy_then_execs_the_venv_python_from_the_engine_d
     lines = script.split("\n")
     copy_file = strata.copy_path(world.config_dir, 8083)
     assert lines[0].startswith("# swift — ") and lines[0].endswith("(0.19.1)")
-    assert lines[1] == ("# window: 65536 (--max-context); environment: "
+    assert lines[1] == ("# window: 65,536 (--max-context); environment: "
                         "STRATA_API_KEY/STRATA_SKIP_SHA256/STRATA_PREBUILT_URL/STRATA_SOURCE/STRATA_EXECV/HF_ENDPOINT dropped")
-    assert lines[2] == "# STRATA_API_KEY=<key>"
-    assert lines[3:5] == [f"mkdir -p {copy_file.parent}", f"cat > {copy_file} <<'STRATA_COPY'"]
+    assert lines[2] == (f"# writes {copy_file}, the file localharness start uses for this port — "
+                        "stop the managed server first")
+    assert lines[3] == "# STRATA_API_KEY=<key>"
+    assert lines[4:6] == [f"mkdir -p -m 700 {copy_file.parent}", f"cat > {copy_file} <<'STRATA_COPY'"]
+    assert lines[-2] == f"chmod 600 {copy_file}"
     assert lines[-1] == (f"cd {world.engine} && exec .venv/bin/python serve/server.py --engine strata "
                          f"--config {copy_file} --port 8083 --host 127.0.0.1")
     assert _heredoc(script) == copy
@@ -268,3 +271,4 @@ def test_a_function_wraps_the_body_and_leaves_the_here_document_at_column_zero(w
     assert lines[:2] == ["serve_swift() {", "  ("] and lines[-2:] == ["  )", "}"]
     assert _heredoc(script) == copy and strata.COPY_DELIMITER in lines
     assert lines[-3].startswith(f"    cd {world.engine} && exec")
+    assert lines[-4].startswith("    chmod 600 ")

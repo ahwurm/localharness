@@ -22,7 +22,7 @@ from localharness.config.loader import ConfigLoader
 from localharness.config.migrate import BACKUP_PREFIX, BACKUP_STAMP_FORMAT
 from localharness.config.models import HarnessConfig
 from localharness.config.paths import resolve_config_dir
-from localharness.provider.runtimes import RUNTIMES
+from localharness.provider.runtimes import RUNTIMES, has_engine_config
 
 console = Console()
 
@@ -464,14 +464,14 @@ def _window_part(plan) -> str | None:
         return None
     row = RUNTIMES[report.runtime]
     if report.mode == "fit":
-        flag = "--max-model-len" if row.checkpoint else "--max-context" if "engine_config" in row.record_fields else "-c"
+        flag = "--max-model-len" if row.checkpoint else "--max-context" if has_engine_config(report.runtime) else "-c"
         return f"{flag} {report.asked} (fit)"
     if report.mode == "not-computed":
         return "-c not computed"
     if report.mode == "fit-by-server":
         return "-c left to llama-server --fit"
     if report.mode == "record":
-        return f"{'--max-context' if 'engine_config' in row.record_fields else '-c'} {report.asked} (the record)"
+        return f"{'--max-context' if has_engine_config(report.runtime) else '-c'} {report.asked} (the record)"
     return "-c from extra_args"
 
 
