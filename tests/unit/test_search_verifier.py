@@ -13,8 +13,8 @@ from localharness.agent.permissions import PermissionEvaluator
 from localharness.config.models import ChildrenBudgetConfig
 from localharness.agent import subagent
 from localharness.agent.subagent import (
-    SEARCH_VERIFIER_TOOLS,
     build_search_verifier_config,
+    builtin_toolset,
     dispatch_search_verifier_subagent,
     format_verifier_flag,
     write_verification_ledger,
@@ -115,7 +115,7 @@ def test_search_verifier_config_is_leaf_budget():
 async def test_search_verifier_registry_is_web_only_no_agent():
     base = ToolRegistry()
     await register_builtin_tools(base)
-    child = ToolRegistry.from_allowed(SEARCH_VERIFIER_TOOLS, base_registry=base)
+    child = ToolRegistry.from_allowed(builtin_toolset("search-verifier", base), base_registry=base)
     assert set(child._tools["global"].keys()) == {"web_search", "web_fetch", "web_page_query"}
     assert child.has("agent") is False  # the verifier is a leaf — it can never delegate
 

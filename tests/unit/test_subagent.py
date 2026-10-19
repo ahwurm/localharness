@@ -465,20 +465,148 @@ async def test_runner_without_loader_keeps_old_refusal():
         await runner("youtube-summarizer", "x")
 
 
-def test_resolve_target_toolset_never_loads_root():
+async def test_resolve_target_toolset_never_loads_root():
     """Phase 33.1: the grant-target-safety toolset resolver (subagent.py:309) must never
     call load_agent for the root name 'orchestrator' — the root is not a delegation child.
     Returns [] (unknown-to-the-gate) AND the loader is provably never invoked."""
     from localharness.agent.subagent import _resolve_target_toolset
+    from tests.unit.test_capabilities import _builtin_registry
 
+    base = await _builtin_registry()
     loaded: list[str] = []
 
     def _spy_load(name: str):  # pragma: no cover - asserted never called
         loaded.append(name)
         raise AssertionError("load_agent must not be called for the root name")
 
-    assert _resolve_target_toolset("orchestrator", load_agent=_spy_load) == []
+    assert _resolve_target_toolset("orchestrator", _spy_load, base) == []
     assert loaded == []
+
+
+STATIC_ROLES = {"explore": ["read", "glob", "grep"], "cruncher": ["tool_result_get", "chunk"],
+                "chunk-summarizer": ["tool_result_get"]}
+WEB_ROLES = ("web-researcher", "search-verifier")
+THREE = ["web_search", "web_fetch", "web_page_query"]
+
+
+async def _web_base(monkeypatch, *tools, **kw):
+    from tests.unit.test_capabilities import _builtin_registry, bundle_fakeweb
+    bundle_fakeweb(monkeypatch)
+    base = await _builtin_registry()
+    for tool in tools:
+        await base.register(tool, **kw)
+    return base
+
+
+async def test_builtin_toolset_with_builtins_only_is_todays_lists():
+    from localharness.agent.subagent import builtin_toolset
+    from tests.unit.test_capabilities import _builtin_registry
+
+    base = await _builtin_registry()
+    assert [builtin_toolset(n, base) for n in WEB_ROLES] == [THREE, THREE]
+    for name, today in STATIC_ROLES.items():
+        assert builtin_toolset(name, base) == today
+    assert builtin_toolset("nope", base) is None and builtin_toolset("", base) is None
+    builtin_toolset("explore", base).append("bash_exec")
+    builtin_toolset("web-researcher", base).append("bash_exec")
+    assert builtin_toolset("explore", base) == STATIC_ROLES["explore"]
+    assert builtin_toolset("web-researcher", base) == THREE
+
+
+async def test_builtin_toolset_over_an_empty_registry():
+    from localharness.agent.subagent import builtin_toolset
+    from localharness.tools.registry import ToolRegistry
+
+    assert [builtin_toolset(n, ToolRegistry()) for n in WEB_ROLES] == [THREE, THREE]
+    assert builtin_toolset("nope", ToolRegistry()) is None
+
+
+async def test_a_bundled_web_tool_joins_both_web_roles_in_registration_order(monkeypatch):
+    from localharness.agent.subagent import builtin_toolset
+    from tests.unit.test_capabilities import _FakeWebTool
+
+    base = await _web_base(monkeypatch)
+    for name in ("fake_b", "fake_a"):
+        await base.register(_FakeWebTool(name), source_plugin="fakeweb")
+    for role in WEB_ROLES:
+        assert builtin_toolset(role, base) == [*THREE, "fake_b", "fake_a"] == builtin_toolset(role, base)
+    assert builtin_toolset("explore", base) == STATIC_ROLES["explore"]
+
+
+async def test_a_bundled_tool_already_named_in_the_static_list_is_not_added_twice(monkeypatch):
+    from localharness.agent.subagent import builtin_toolset
+    from localharness.tools.registry import ToolRegistry
+    from tests.unit.test_capabilities import _FakeWebTool, bundle_fakeweb
+
+    bundle_fakeweb(monkeypatch)
+    base = ToolRegistry()
+    await base.register(_FakeWebTool("web_fetch"), source_plugin="fakeweb")
+    assert builtin_toolset("web-researcher", base) == THREE
+
+
+@pytest.mark.parametrize("source,declared,wrapped", [
+    ("acme", {}, True),
+    ("FakeWeb", {}, True),
+    ("fakeweb", {"ingest": "none"}, True),
+    ("fakeweb", {"group": "fs.read"}, True),
+    (None, {}, False),
+])
+async def test_a_web_tool_that_is_not_bundled_and_web_and_untrusted_stays_out(monkeypatch, source, declared, wrapped):
+    from localharness.agent.subagent import builtin_toolset
+    from localharness.tools.registry import ToolRegistry
+    from tests.unit.test_capabilities import _FakeWebTool
+
+    base = await _web_base(monkeypatch)
+    await base.register(_FakeWebTool(**declared), **({"source_plugin": source} if wrapped else {}))
+    for role in WEB_ROLES:
+        names = builtin_toolset(role, base)
+        assert names == THREE
+        ToolRegistry.from_allowed(names, base_registry=base)
+
+
+async def test_a_host_dangerous_web_tool_stays_out_with_one_warning_and_the_child_builds(monkeypatch, caplog):
+    import logging
+
+    from localharness.agent import subagent
+    from localharness.tools.registry import ToolRegistry
+    from tests.unit.test_capabilities import _FakeWebTool
+
+    subagent._warn_host_dangerous.cache_clear()
+    base = await _web_base(monkeypatch, _FakeWebTool("risky_web", host="dangerous"), source_plugin="fakeweb")
+    with caplog.at_level(logging.WARNING, logger="localharness.agent.subagent"):
+        for role in (*WEB_ROLES, *WEB_ROLES):
+            names = subagent.builtin_toolset(role, base)
+            assert names == THREE
+            ToolRegistry.from_allowed(names, base_registry=base)
+    assert len([r for r in caplog.records if "risky_web" in r.getMessage()]) == 1
+
+
+async def test_the_role_floor_prices_the_tools_the_role_holds(monkeypatch):
+    from localharness.agent import subagent
+    from tests.unit.test_capabilities import _FakeWebTool
+
+    seen: dict[str, int] = {}
+
+    def _floor(cfg, schemas, **_):
+        seen[cfg.name] = len(schemas)
+        return 1
+
+    monkeypatch.setattr(subagent, "role_floor", _floor)
+    base = await _web_base(monkeypatch)
+    subagent.builtin_role_floors(base, None, None, None)
+    assert seen == {"explore": 3, "web-researcher": 3, "search-verifier": 3}
+    await base.register(_FakeWebTool(), source_plugin="fakeweb")
+    subagent.builtin_role_floors(base, None, None, None)
+    assert seen == {"explore": 3, "web-researcher": 4, "search-verifier": 4}
+
+
+async def test_the_grant_target_gate_resolves_a_bundled_web_tool_for_a_web_role(monkeypatch):
+    from localharness.agent.subagent import _resolve_target_toolset
+    from tests.unit.test_capabilities import _FakeWebTool
+
+    base = await _web_base(monkeypatch, _FakeWebTool(), source_plugin="fakeweb")
+    assert _resolve_target_toolset("search-verifier", None, base) == [*THREE, "fake_web"]
+    assert _resolve_target_toolset("explore", None, base) == STATIC_ROLES["explore"]
 
 
 def test_prepend_toolset_states_capabilities():
@@ -492,24 +620,6 @@ def test_prepend_toolset_states_capabilities():
 # ---------------------------------------------------------------------------
 # default-roster security invariant (v0.5.3)
 # ---------------------------------------------------------------------------
-
-async def test_builtin_roster_has_no_host_dangerous_agents():
-    """v0.5.3 invariant: every default-roster builtin is quarantined or read-only.
-    bash/write/edit-holding specialist roles (data-analyst, frontend-designer) were demoted
-    to opt-in examples/agents/ configs (quality investigation 2026-07-03) — a default agent
-    must never put granted or ingested bytes one call from a host action. Judged by each tool's
-    declared `host`, resolved through a registry holding every builtin."""
-    import localharness.agent.subagent as subagent
-    from localharness.tools.capabilities import is_host_dangerous
-    from tests.unit.test_capabilities import _builtin_registry
-
-    reg = await _builtin_registry()
-    for name, tools in subagent._BUILTIN_TOOLSETS.items():
-        schemas = [reg.schema_of(t) for t in tools]
-        assert None not in schemas, f"default builtin '{name}' names an unregistered tool: {tools}"
-        assert not any(is_host_dangerous(s) for s in schemas), \
-            f"default builtin '{name}' holds host-dangerous tools"
-
 
 def test_role_prompt_examples_use_placeholders_not_concrete_tickers():
     """Small models parrot concrete examples verbatim (qwen3-4b kospi receipts 2026-07-17:

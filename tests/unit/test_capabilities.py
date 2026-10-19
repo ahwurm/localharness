@@ -13,6 +13,8 @@ import pytest
 
 from localharness.agent.context import ContentStore
 from localharness.config.models import ToolConfig
+from localharness.plugins import builtin as plugins_builtin
+from localharness.plugins.api import Plugin, PluginManifest
 from localharness.tools.base import ToolResult, ToolSchema
 from localharness.tools.builtin import register_builtin_tools
 from localharness.tools.capabilities import (
@@ -247,17 +249,44 @@ async def test_root_without_strip_is_caught_by_chokepoint_fail_closed():
 
 # --- Sanity: every built-in subagent toolset stays clean ------------------
 
-@pytest.mark.asyncio
-async def test_builtin_subagent_toolsets_clean():
-    # Iterate the dispatch table itself so every default builtin — current and future —
-    # is checked; v0.5.3 demoted the bash-holding specialists to examples/agents/.
-    from localharness.agent.subagent import _BUILTIN_TOOLSETS
+class _FakeWebTool:
+    def __init__(self, name: str = "fake_web", **declared) -> None:
+        self._name = name
+        self._declared = {"group": "web", "gate_family": "network", "ingest": "untrusted",
+                          "host": "safe", "result_origin": "untrusted", **declared}
 
+    def info(self) -> ToolSchema:
+        return ToolSchema(name=self._name, description="d", parameters={}, **self._declared)
+
+    async def run(self, **kwargs) -> ToolResult:  # pragma: no cover - never dispatched here
+        return ToolResult(output="")
+
+
+class FakeWebPlugin(Plugin):
+    manifest = PluginManifest(name="fakeweb", version="0.1.0", kind="tools")
+
+
+def bundle_fakeweb(monkeypatch) -> None:
+    monkeypatch.setattr(plugins_builtin, "BUILTIN_PLUGINS", (*plugins_builtin.BUILTIN_PLUGINS, FakeWebPlugin))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_bundled_web", [False, True])
+async def test_every_builtin_toolset_is_clean(monkeypatch, with_bundled_web):
+    import localharness.agent.subagent as subagent
+    from localharness.tools.capabilities import is_host_dangerous
+
+    bundle_fakeweb(monkeypatch)
     reg = await _builtin_registry()
-    for name, toolset in _BUILTIN_TOOLSETS.items():
+    if with_bundled_web:
+        await reg.register(_FakeWebTool(), source_plugin="fakeweb")
+    for name in [*subagent._STATIC_TOOLSETS, *subagent._WEB_ROLES]:
+        toolset = subagent.builtin_toolset(name, reg)
         schemas = [reg.schema_of(n) for n in toolset]
         assert None not in schemas, f"'{name}' names a tool no builtin declares: {toolset}"
-        assert_no_coresidence(schemas, agent_id=name)  # must not raise
+        assert not any(is_host_dangerous(s) for s in schemas), f"'{name}' holds a host-dangerous tool"
+        assert_no_coresidence(schemas, agent_id=name)
+    assert ("fake_web" in subagent.builtin_toolset("web-researcher", reg)) is with_bundled_web
 
 
 # --- Display is pinned to the declarations, and only display ---------------
