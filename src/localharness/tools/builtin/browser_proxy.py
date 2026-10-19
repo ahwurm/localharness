@@ -29,6 +29,7 @@ class Proxy:
     username: str
     password: str = field(repr=False)
     refused: deque[str] = field(default_factory=lambda: deque(maxlen=64))
+    refusals: int = 0
     upstream: str | None = field(default=None, repr=False)
     _server: asyncio.Server | None = field(default=None, repr=False)
     _writers: set[asyncio.StreamWriter] = field(default_factory=set, repr=False)
@@ -138,6 +139,7 @@ async def _one(proxy: Proxy, reader: asyncio.StreamReader, writer: asyncio.Strea
         hop = await netguard.check(f"https://{authority}/", allow_private=False)
     except netguard.Refused:
         proxy.refused.append(f"{authority} not public")
+        proxy.refusals += 1
         return await _reply(writer, "403 Forbidden", keep=True)
     chain = proxy.upstream or hop.proxy
     try:

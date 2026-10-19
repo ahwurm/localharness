@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import logging
 import os
 import re
 import shutil
@@ -40,6 +41,7 @@ _SLICE = """n => {
   return [t.length > n, s];
 }"""
 _API: Any = None  # the tests' stand-in for playwright.async_api
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -51,7 +53,7 @@ class Rendered:
 
 
 class RenderError(Exception):
-    """`kind` is unavailable, timeout, file or failed."""
+    """`kind` is unavailable, timeout, file, not_public (`detail` is the host) or failed."""
 
     def __init__(self, kind: str, detail: str = ""):
         super().__init__(kind, detail)
@@ -195,7 +197,8 @@ class BrowserRuntime:
                 self._idle = asyncio.get_running_loop().call_later(self._idle_s, self._start_idle_close)
 
     async def _render(self, browser, url: str) -> Rendered:
-        api = self._api
+        api, proxy = self._api, self._proxy
+        refusals = proxy.refusals
         context = await browser.new_context(
             accept_downloads=False, service_workers="block", java_script_enabled=True, bypass_csp=False,
             ignore_https_errors=False, user_agent=self._ua)
@@ -214,7 +217,10 @@ class BrowserRuntime:
         except api.Error as e:
             if "Download is starting" in str(e):
                 raise RenderError("file") from None
-            raise RenderError("failed", _first_line(e)) from None
+            log.info("browser_fetch navigation failed: %s", _first_line(e)[:200])
+            if proxy.refusals > refusals:
+                raise RenderError("not_public", proxy.refused[-1].removesuffix(" not public").rpartition(":")[0]) from None
+            raise RenderError("failed") from None
         finally:
             with contextlib.suppress(Exception):
                 await context.close()
@@ -257,7 +263,7 @@ _NOT_PUBLIC = ("browser_fetch: {host} is not a public address; browser_fetch rea
                "Do not retry this host; use the search snippet or another source.")
 _NO_RETRY = "Do not retry this URL; use the search snippet or another source."
 _HTTP_FAILED = f"browser_fetch failed: HTTP {{status}}. {_NO_RETRY}"
-_FAILED = f"browser_fetch failed: {{detail}}. {_NO_RETRY}"
+_FAILED = f"browser_fetch failed: the page could not be loaded. {_NO_RETRY}"
 _TIMED_OUT = f"browser_fetch: the page did not finish loading in {NAV_TIMEOUT_S} s. Do not retry; use the search snippet."
 _FILE = "browser_fetch: that URL is a file, not a page. Use the search snippet, or find an HTML version."
 _EMPTY = ("[rendered text is under 80 characters — the page is empty or blocking the browser; do NOT retry. "
@@ -295,8 +301,8 @@ class BrowserFetchTool(Tool):
         try:
             page = await self._runtime.render(url)
         except RenderError as e:
-            return self.err({"timeout": _TIMED_OUT, "file": _FILE, "unavailable": _NOT_AVAILABLE.format(reason=e.detail)}
-                            .get(e.kind) or _FAILED.format(detail=e.detail))
+            return self.err({"timeout": _TIMED_OUT, "file": _FILE, "unavailable": _NOT_AVAILABLE.format(reason=e.detail),
+                             "not_public": _NOT_PUBLIC.format(host=e.detail)}.get(e.kind) or _FAILED)
         if page.status >= 400:
             return self.err(_HTTP_FAILED.format(status=page.status))
         if len(page.text.strip()) < 80:
