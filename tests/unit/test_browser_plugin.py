@@ -654,12 +654,12 @@ async def test_the_private_allowlist_is_not_honoured_by_the_browser(fetch, world
 
 
 @pytest.mark.parametrize("url, line", [
-    ("https://user:pw@example.com/", "refused: a URL with a user name or password in it is not fetched"),
-    ("https://", "refused: the URL names no host"),
-    ("https://address.example/", "refused: could not resolve address.example"),
-    ("https://[address]/", "refused: 'https://[address]/' is not a valid URL"),
+    ("https://user:pw@example.com/", "refused: a URL with a user name or password in it is not fetched " + RETRY),
+    ("https://", "refused: the URL names no host " + RETRY),
+    ("https://address.example/", "refused: could not resolve address.example " + RETRY),
+    ("https://[address]/", "refused: 'https://[address]/' is not a valid URL " + RETRY),
 ])
-async def test_any_other_refusal_answers_netguards_own_line_whatever_words_the_url_holds(fetch, world, monkeypatch, url, line):
+async def test_any_other_refusal_answers_netguards_own_line_and_the_one_action_whatever_words_the_url_holds(fetch, world, monkeypatch, url, line):
     monkeypatch.setattr("localharness.tools.builtin.netguard._resolve", lambda h, p: _fail())
     await refused(fetch[0], world, url, line)
 
