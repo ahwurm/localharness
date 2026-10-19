@@ -70,6 +70,14 @@ class Refused(Exception):
     """A URL web_fetch will not fetch; str() is the one line the model reads."""
 
 
+class NotPublic(Refused):
+    """An address verdict; `host` is the name that was judged."""
+
+    def __init__(self, message: str, host: str) -> None:
+        super().__init__(message)
+        self.host = host
+
+
 def _never(ip) -> bool:
     """Refused even when allowlisted: multicast, unspecified and reserved addresses. IPv4-mapped and
     NAT64 forms are judged by the IPv4 address they carry, and ::1 is loopback (allowlistable like
@@ -167,10 +175,10 @@ async def check(raw: "str | httpx.URL", *, allow_private: bool = True) -> Hop:
         ip = ipaddress.ip_address(addr.split("%", 1)[0])
         who = f"{host} is" if ip == literal else f"{host} resolves to {ip}, which is"
         if _never(ip):
-            raise Refused(f"refused: {who} a multicast, unspecified or reserved address")
+            raise NotPublic(f"refused: {who} a multicast, unspecified or reserved address", host)
         if not is_public(ip) and not (allow_private and _allowed(host, ip)):
-            raise Refused(f"refused: {who} not a public address — add it to org.web_fetch_allow_private "
-                          "in your machine config to fetch it")
+            raise NotPublic(f"refused: {who} not a public address — add it to org.web_fetch_allow_private "
+                            "in your machine config to fetch it", host)
         checked.append(ip)
     return Hop(url=url, pinned=tuple(url.copy_with(host=str(ip)) for ip in dict.fromkeys(checked)),
                host_header=url.netloc.decode("ascii"), sni=host, proxy=_env_proxy(url))
