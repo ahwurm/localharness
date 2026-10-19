@@ -136,7 +136,7 @@ def _env_proxy(url: httpx.URL) -> Optional[str]:
     return proxy if "://" in proxy else f"http://{proxy}"  # httpx's own reading of a bare host:port
 
 
-async def check(raw: "str | httpx.URL") -> Hop:
+async def check(raw: "str | httpx.URL", *, allow_private: bool = True) -> Hop:
     """Decide whether web_fetch may fetch `raw` and return the request pinned to what was checked.
     Raises Refused (one line for the model) otherwise; nothing is requested before this returns."""
     try:
@@ -168,7 +168,7 @@ async def check(raw: "str | httpx.URL") -> Hop:
         who = f"{host} is" if ip == literal else f"{host} resolves to {ip}, which is"
         if _never(ip):
             raise Refused(f"refused: {who} a multicast, unspecified or reserved address")
-        if not is_public(ip) and not _allowed(host, ip):
+        if not is_public(ip) and not (allow_private and _allowed(host, ip)):
             raise Refused(f"refused: {who} not a public address — add it to org.web_fetch_allow_private "
                           "in your machine config to fetch it")
         checked.append(ip)

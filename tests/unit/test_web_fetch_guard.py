@@ -258,8 +258,8 @@ async def test_allow_private_false_refuses_an_allowlisted_name(monkeypatch):
 
 
 async def test_never_addresses_are_refused_with_either_setting():
-    netguard.set_private_allowlist(["224.0.0.0/4", "0.0.0.0/8"])
-    for raw in ("http://224.0.0.1/", "http://0.0.0.1/"):
+    netguard.set_private_allowlist(["224.0.0.0/4", "0.0.0.0/8", "240.0.0.0/4"])
+    for raw in ("http://224.0.0.1/", "http://0.0.0.0/", "http://240.0.0.1/"):
         for kwargs in ({}, {"allow_private": False}):
             with pytest.raises(netguard.Refused, match="multicast, unspecified or reserved"):
                 await netguard.check(raw, **kwargs)
