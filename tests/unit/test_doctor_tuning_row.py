@@ -27,6 +27,7 @@ from tests.unit.test_doctor_cmd import (  # noqa: F401  (autouse fixtures, impor
     _route_the_window_probe,
     _stub_token_counter,
 )
+from tests.unit.test_plan_entries_strata import flash_world, install, strata_peer
 from tests.unit.test_serve_cmd import attach_peer, docker_peer, llama_peer, ollama_peer, serve_world
 from tests.unit.test_tuning_derive import FLASH_NEXT
 
@@ -292,3 +293,16 @@ def test_a_verified_launch_of_the_harnesss_own_lends_the_row_the_memory_it_holds
 
     fitted = _fitted(world, memory=autosense.FreeMemory(35 * GIB, 48 * GIB, "nvidia-smi"))
     assert _rows(_doctor(world)) == [f"Tuning: swift — kv q8_0 · mtp (1 layer) · -c {fitted} (fit){UNREAD}"]
+
+
+def test_a_strata_record_plans_through_strata_and_names_its_window(tmp_path, monkeypatch, mock_httpx):
+    world, shard1 = flash_world(tmp_path, monkeypatch)
+    install(world, shard1)
+    world.edit_config(lambda d: d["extra_endpoints"].append(strata_peer(world, shard1)))
+    world.rerecord()
+
+    rows = _rows(_doctor(world))
+
+    [strata_row] = [row for row in rows if row.startswith("Tuning: flash-next-strata")]
+    assert strata_row.startswith("Tuning: flash-next-strata — nothing derived · --max-context 65536 (fit) · dense ")
+    assert "experts 40.0 GiB in RAM" in strata_row and "-c " not in strata_row
