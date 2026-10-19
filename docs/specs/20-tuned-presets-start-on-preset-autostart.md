@@ -207,7 +207,7 @@ join `LAUNCH_MODEL_KEYS` (a `None` yields no entry); `pending_preset` joins `HAR
 
 ```
 sense_launch(spec, config_dir, autosense, *, unit) -> Sensed      # the I/O, once; writes nothing
-plan_launch(spec, sensed, decision, *, autosense, api_key_held) -> LaunchPlan   # pure; owns the retry choice
+plan_launch(spec, sensed, decision, *, autosense, api_key_held, floor) -> LaunchPlan   # pure; owns the retry choice
 LaunchPlan.retry() -> LaunchPlan                                   # pure, from the same Sensed
 confirm_launch(config_dir, record_key, *, plan: LaunchPlan | None, marker: Marker | None,
                live: LiveEndpoint, process: ProcRecord, unit: UnitRuntimeState | None,
@@ -219,8 +219,9 @@ line uses); `process` is the verified `ProcRecord` whose argv decides `dropped`;
 `InvocationID` and `NRestarts`; `context_length` comes from `Sensed` when called from a plan and from the
 bounded header reader when called from a marker.
 
-`sense_launch` reads the header (`FIT_KEYS` + `nextn_predict_layers`, `expert_count`), free memory,
-`/proc/meminfo`, the weights size, `config.json` (vLLM), the ledger's remembered retry and the boot marker
+`sense_launch` reads the header (`FIT_KEYS` + `nextn_predict_layers`, `expert_count`), the tensor table's
+split of it (`Sensed.split`: the dense bytes, the experts, the input tables and the KV layers, spec 22 §7.1),
+free memory, `/proc/meminfo`, the weights size, `config.json` (vLLM), the ledger's remembered retry and the boot marker
 (§9.3) — all through `open_regular` under caps. `plan_launch` fits, derives, builds the `serve_command`
 keywords, the environment **names**, the `config_ini_home` path, the report and `tuned`, and **alone
 decides** whether the retry shape applies (§6.4). `activate` senses, plans, **prepares** the `config.ini`
@@ -293,8 +294,10 @@ A hit emits the pair plus `--enable-auto-tool-choice`; no hit derives nothing; `
 ### 6.4 The retry: chosen in one place, confirmed in one place, remembered
 
 A launch that dies before readiness with **any** derived keyword is stopped (verified) and relaunched
-**once** as `plan.retry()` (derived `spec_type` dropped, derived `-c` halved from the same sensed fit),
-then given up with the log tail. The launch line's derived clause: `mtp off, -c 57344 (retried: the full
+**once** as `plan.retry()` (derived `spec_type` dropped, derived `-c` halved from the same sensed fit, to
+no less than the harness floor and not at all when the half is under it; spec 22 §7.2),
+then given up with the log tail. Strata halves the `--max-context` its config sets, on the same terms, and never a
+record's `context` (spec 22 §11.2). The launch line's derived clause: `mtp off, -c 57344 (retried: the full
 shape died) · server.speculative: off keeps the full window`. KV-only launches are not retried; record and
 `extra_args` values are never touched.
 
@@ -424,8 +427,11 @@ beyond the gated `on`.
 - **Nothing answers** → launch the selected record after the liveness test; `persist_landed` after success.
 
 **The swap**: `lifecycle.swap(incumbent: Heavy | None, target: Heavy, *, config_dir, autosense, unit,
-reporter: SwapReporter) -> SwapOutcome`, lifted from `repl.py:2080–2160` with `_restore_incumbent` and
-`_safe_stop`. `Heavy(spec, base_url, peer, launch_kw)` is built by the caller (provider imports no `cli`)
+reporter: SwapReporter, floor) -> SwapOutcome`, lifted from `repl.py:2080–2160` with `_restore_incumbent` and
+`_safe_stop`. The target is sensed and planned **before** `free_accelerator`, against the memory the swap will
+have, so a plan under the harness floor is a refusal that stops nothing and names the incumbent that keeps
+serving (spec 22 §8.3); after the launch, a served window below the floor is a failed launch, and the failure
+branch stops the target and restores the incumbent. `Heavy(spec, base_url, peer, launch_kw)` is built by the caller (provider imports no `cli`)
 with the spec object itself. `SwapReporter`: `freed()`, `launched(live)`, `restored(spec)`, `line(text)`.
 **Cancellation**: after the incumbent was freed, `swap` stops the half-started target (verified), calls
 `freed()`, rolls `unit-target` back to the incumbent, runs no restore. Under the harness's unit, a
